@@ -17,7 +17,6 @@ import type { ExtensionContext, ExtensionAPI } from "@gsd/pi-coding-agent";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { gsdProjectionRoot, legacyMilestonesDir, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "./paths.js";
 import { resolveMilestoneValidationVerdict } from "./milestone-validation-verdict.js";
-import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
 import { hasPendingMilestoneSubjectiveUat } from "./milestone-subjective-uat-domain-operation.js";
 import { parseUnitId } from "./unit-id.js";
 import {
@@ -568,7 +567,7 @@ async function runValidateMilestonePostCheck(
 
   const verdict = await resolveMilestoneValidationVerdict(s.basePath, mid);
   if (!verdict) {
-    if (isMilestoneLifecycleAdopted(mid) && hasPendingMilestoneSubjectiveUat(mid)) {
+    if (hasPendingMilestoneSubjectiveUat(mid)) {
       await persistMilestoneValidationGate(
         "manual-attention",
         "manual-attention",
@@ -591,12 +590,11 @@ async function runValidateMilestonePostCheck(
     );
   }
   if (verdict === "needs-attention") {
-    const canonicalValidation = isMilestoneLifecycleAdopted(mid);
     // A needs-attention verdict is a legitimate, stable outcome — not a
     // technical failure. Canonical validation gets one bounded re-validation
     // (the evidence may be stale); when the verdict recurs, pause for human
     // review instead of retrying until the liveness backstop wedges.
-    if (canonicalValidation && readUnitBudget(s.unclaimedUnitBudgets, validationBudget) < 1) {
+    if (readUnitBudget(s.unclaimedUnitBudgets, validationBudget) < 1) {
       await persistMilestoneValidationGate(
         "retry",
         "verification",
@@ -618,9 +616,7 @@ async function runValidateMilestonePostCheck(
         `validate-milestone: pausing — verdict=needs-attention for ${mid}.`,
         `Review details with /gsd status.`,
         `After fixing the issue, run /gsd validate-milestone.`,
-        canonicalValidation
-          ? `Canonical validation cannot be overridden with /gsd verdict; re-validate with current evidence.`
-          : `To accept the finding, run /gsd verdict pass --rationale "why this is okay".`,
+        `Canonical validation cannot be overridden; re-validate with current evidence.`,
         `To defer it, run /gsd park ${mid}.`,
         "",
       ].join("\n"),
@@ -666,39 +662,16 @@ async function runValidateMilestonePostCheck(
     return "continue";
   }
 
-  if (isMilestoneLifecycleAdopted(mid)) {
-    await persistMilestoneValidationGate(
-      "retry",
-      "verification",
-      "canonical remediation remains agent-owned until remediation work is queued",
-      `No incomplete slices found for ${mid} while verdict=needs-remediation`,
-      mid,
-    );
-    return setToolFailureRetry(
-      `Milestone ${mid} needs remediation. Call gsd_reassess_roadmap to add remediation slices, then re-run validation.`,
-    );
-  }
-
-  ctx.ui.notify(
-    `Milestone ${mid} validation returned verdict=needs-remediation but no remediation slices were added. Pausing for human review.`,
-    "error",
-  );
-  process.stderr.write(
-    `validate-milestone: pausing — verdict=needs-remediation with no incomplete slices for ${mid}. ` +
-      `The agent must call gsd_reassess_roadmap to add remediation slices before re-validation.\n`,
-  );
   await persistMilestoneValidationGate(
-    "manual-attention",
-    "manual-attention",
-    "needs-remediation verdict without queued remediation slices",
+    "retry",
+    "verification",
+    "canonical remediation remains agent-owned until remediation work is queued",
     `No incomplete slices found for ${mid} while verdict=needs-remediation`,
     mid,
   );
-  await pauseAuto(ctx, pi, "machine_fixable", {
-    message: `Milestone ${mid} validation needs remediation but no remediation slices were added.`,
-    category: "unknown",
-  });
-  return "pause";
+  return setToolFailureRetry(
+    `Milestone ${mid} needs remediation. Call gsd_reassess_roadmap to add remediation slices, then re-run validation.`,
+  );
 }
 
 /**
