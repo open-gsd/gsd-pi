@@ -13,7 +13,8 @@ process.env.GSD_WORKFLOW_EXECUTORS_MODULE = fileURLToPath(
   new URL("../tools/workflow-tool-executors.ts", import.meta.url),
 );
 
-import { _getAdapter, closeDatabase, openDatabase } from "../mcp-bridge.ts";
+import { _getAdapter, closeDatabase } from "../mcp-bridge.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { registerWorkflowTools } from "../../../../../packages/mcp-server/src/workflow-tools.ts";
 
@@ -30,10 +31,29 @@ interface RegisteredTool {
   handler: (args: Record<string, unknown>, extra?: RequestExtra) => Promise<Record<string, unknown>>;
 }
 
+/**
+ * The one operation the setup commits: the open after the one that created
+ * the project database cuts it over, before any tool runs. Every planning
+ * test starts from this post-cutover ledger.
+ */
+function cutoverOperation(): Record<string, unknown> {
+  return {
+    operation_type: "authority.cutover",
+    idempotency_key: "open/authority-cutover/0",
+    expected_revision: 0,
+    resulting_revision: 1,
+  };
+}
+
 function makeBase(): string {
   const base = join(tmpdir(), `gsd-planning-invocation-mcp-${randomUUID()}`);
   mkdirSync(join(base, ".gsd", "phases", "01-identity"), { recursive: true });
-  openDatabase(join(base, ".gsd", "gsd.db"));
+  // The project database is cut over the way production does before a tool
+  // runs: the open that creates it does not cut it over, and the next open
+  // does. A planning call then starts from the post-cutover Authority Epoch.
+  assert.equal(openWorkflowDatabase(base).reason, "created-empty");
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
   return base;
 }
 
@@ -113,12 +133,15 @@ test("MCP canonical and alias planning calls replay one explicit private request
 
     assert.deepEqual(replay, first, "canonical and alias retries must preserve the public MCP result");
     assert.deepEqual(Object.keys(first).sort(), ["content", "structuredContent"]);
-    assert.deepEqual(operations(), [{
-      operation_type: "workflow.milestone.plan",
-      idempotency_key: "mcp:gsd_plan_milestone:planning-retry-42",
-      expected_revision: 0,
-      resulting_revision: 1,
-    }]);
+    assert.deepEqual(operations(), [
+      cutoverOperation(),
+      {
+        operation_type: "workflow.milestone.plan",
+        idempotency_key: "mcp:gsd_plan_milestone:planning-retry-42",
+        expected_revision: 1,
+        resulting_revision: 2,
+      },
+    ]);
   } finally {
     cleanup(base);
   }
@@ -145,12 +168,15 @@ test("MCP canonical and alias planning calls replay one Claude Code tool identit
     });
 
     assert.deepEqual(replay, first, "Claude Code transport retries must preserve the public MCP result");
-    assert.deepEqual(operations(), [{
-      operation_type: "workflow.milestone.plan",
-      idempotency_key: "mcp:gsd_plan_milestone:transport:claude-code:toolu_planning_retry_42",
-      expected_revision: 0,
-      resulting_revision: 1,
-    }]);
+    assert.deepEqual(operations(), [
+      cutoverOperation(),
+      {
+        operation_type: "workflow.milestone.plan",
+        idempotency_key: "mcp:gsd_plan_milestone:transport:claude-code:toolu_planning_retry_42",
+        expected_revision: 1,
+        resulting_revision: 2,
+      },
+    ]);
   } finally {
     cleanup(base);
   }
@@ -170,7 +196,7 @@ test("MCP planning without explicit private request identity fails before mutati
 
     assert.equal(result["isError"], true);
     assert.match(JSON.stringify(result), /requires replay-stable private request metadata/i);
-    assert.deepEqual(operations(), []);
+    assert.deepEqual(operations(), [cutoverOperation()], "the tool must not commit any operation");
   } finally {
     cleanup(base);
   }
@@ -194,7 +220,7 @@ test("MCP planning rejects malformed explicit identity instead of falling back t
       assert.equal(result["isError"], true);
       assert.match(JSON.stringify(result), /requires replay-stable private request metadata/i);
     }
-    assert.deepEqual(operations(), []);
+    assert.deepEqual(operations(), [cutoverOperation()], "the tool must not commit any operation");
   } finally {
     cleanup(base);
   }
@@ -216,7 +242,7 @@ test("MCP planning reserves the Claude transport identity namespace", async () =
 
     assert.equal(result["isError"], true);
     assert.match(JSON.stringify(result), /reserved.*Claude Code transport identity/i);
-    assert.deepEqual(operations(), []);
+    assert.deepEqual(operations(), [cutoverOperation()], "the tool must not commit any operation");
   } finally {
     cleanup(base);
   }
@@ -240,7 +266,15 @@ test("MCP planning rejects changed payload under the same explicit private reque
 
     assert.equal(conflict["isError"], true);
     assert.match(JSON.stringify(conflict), /idempotency conflict/i);
-    assert.equal(operations().length, 1);
+    assert.deepEqual(operations(), [
+      cutoverOperation(),
+      {
+        operation_type: "workflow.milestone.plan",
+        idempotency_key: "mcp:gsd_plan_milestone:planning-conflict",
+        expected_revision: 1,
+        resulting_revision: 2,
+      },
+    ], "the rejected retry must not commit a second plan");
   } finally {
     cleanup(base);
   }
@@ -266,7 +300,15 @@ test("MCP planning rejects changed payload under the same Claude Code tool ident
 
     assert.equal(conflict["isError"], true);
     assert.match(JSON.stringify(conflict), /idempotency conflict/i);
-    assert.equal(operations().length, 1);
+    assert.deepEqual(operations(), [
+      cutoverOperation(),
+      {
+        operation_type: "workflow.milestone.plan",
+        idempotency_key: "mcp:gsd_plan_milestone:transport:claude-code:toolu_planning_conflict",
+        expected_revision: 1,
+        resulting_revision: 2,
+      },
+    ], "the rejected retry must not commit a second plan");
   } finally {
     cleanup(base);
   }

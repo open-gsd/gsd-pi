@@ -7,7 +7,16 @@ import { tmpdir } from "node:os"
 import test from "node:test"
 
 import { appendCapture, loadActionableCaptures, loadAllCaptures } from "../resources/extensions/gsd/captures.ts"
-import { closeDatabase, insertMilestone, openDatabase } from "../resources/extensions/gsd/gsd-db.ts"
+import { openWorkflowDatabase } from "../resources/extensions/gsd/db-workspace.ts"
+import {
+  _getAdapter,
+  closeDatabase,
+  executeDomainOperation,
+  openDatabase,
+  readDomainOperationFence,
+} from "../resources/extensions/gsd/gsd-db.ts"
+import { adoptOrTransitionLifecycle } from "../resources/extensions/gsd/db/writers/lifecycle-commands.ts"
+import { registerMilestones } from "../resources/extensions/gsd/milestone-registration.ts"
 import { collectCapturesData, resolveCaptureAction } from "../web/captures-service.ts"
 
 function useRepoAsPackageRoot(t: { after: (fn: () => void) => void }): void {
@@ -79,9 +88,31 @@ test("resolveCaptureAction records the dispatch milestone, not an earlier milest
   useRepoAsPackageRoot(t)
   mkdirSync(join(base, ".gsd"), { recursive: true })
 
-  openDatabase(join(base, ".gsd", "gsd.db"))
-  insertMilestone({ id: "M001", title: "Blocked", status: "active", depends_on: ["M002"] })
-  insertMilestone({ id: "M002", title: "Dispatch", status: "active" })
+  // Seed the project the way production holds it: the open after the one that
+  // created the database cuts it over, and the milestones are written through
+  // the Domain Operation layer so every hierarchy row has its lifecycle row.
+  // M002 is the milestone dispatch runs under; M001 waits on it.
+  assert.equal(openWorkflowDatabase(base).reason, "created-empty")
+  closeDatabase()
+  assert.equal(openWorkflowDatabase(base).ok, true)
+  assert.deepEqual(registerMilestones([{ id: "M001", title: "Blocked" }, { id: "M002", title: "Dispatch" }], "test"), ["M001", "M002"])
+  _getAdapter()!.exec(`UPDATE milestones SET depends_on = '["M002"]' WHERE id = 'M001'`)
+  const fence = readDomainOperationFence()
+  executeDomainOperation({
+    operationType: "test.start-milestone",
+    idempotencyKey: "captures-service/start-milestone",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M002", lifecycleStatus: "in_progress" })
+    return {
+      events: [{ eventType: "test.milestone-started", entityType: "milestone", entityId: "M002", payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: "test/start-milestone", projectionKind: "test", rendererVersion: "1" }],
+    }
+  })
   const id = appendCapture(base, "Fix the dialog width")
   closeDatabase()
 
