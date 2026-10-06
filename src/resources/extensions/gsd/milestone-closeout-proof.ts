@@ -27,8 +27,6 @@ export type CloseoutProofResult =
 export interface CloseoutProofOptions {
   refreshFromDisk?: boolean;
   allowOpenMilestone?: boolean;
-  /** Evaluate without the consistency gate's own writes. */
-  readOnly?: boolean;
   /** Root of the tree the milestone ran in; the consistency gate reads it. */
   artifactBasePath?: string;
   implementationEvidence?: {
@@ -78,7 +76,6 @@ export function proveMilestoneCloseout(
   const consistency = checkCloseoutConsistencyGate(milestoneId, {
     refreshFromDisk: options.refreshFromDisk,
     allowOpenMilestone: options.allowOpenMilestone,
-    readOnly: options.readOnly,
     artifactBasePath: options.artifactBasePath,
   });
   if (!consistency.ok) return fromConsistencyResult(consistency);

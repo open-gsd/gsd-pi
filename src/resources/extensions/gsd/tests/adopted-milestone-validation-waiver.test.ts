@@ -413,7 +413,6 @@ test("forged legacy PASS cannot authorize adopted closeout recovery", () => {
 
   const result = checkCloseoutConsistencyGate("M001", {
     allowOpenMilestone: true,
-    allowPassThroughValidation: true,
     artifactBasePath: basePath,
   });
 

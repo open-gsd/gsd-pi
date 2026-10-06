@@ -24,13 +24,22 @@ import {
   insertMilestone,
   isDbAvailable,
   openDatabase,
-  updateMilestoneStatus,
   upsertMilestonePlanning,
 } from "../gsd-db.ts";
+import { applyStatusTransition } from "../db/writers/status.js";
 import { migrateHierarchyToDb } from "./helpers/md-importer.ts";
 import { executeSummarySave } from "../tools/workflow-tool-executors.ts";
 
 type CanonicalMilestoneStatus = "ready" | "completed";
+
+// The exported milestone wrapper is gone; the guard contract is the shared
+// generic writer itself.
+const updateMilestoneStatus = (
+  milestoneId: string,
+  status: string,
+  completedAt?: string | null,
+  preserveCompletion?: boolean,
+): void => applyStatusTransition({ entity: "milestone", milestoneId, status, completedAt, preserveCompletion });
 
 function makeBase(prefix: string): string {
   const base = mkdtempSync(join(tmpdir(), prefix));

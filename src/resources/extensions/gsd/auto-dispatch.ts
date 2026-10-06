@@ -21,11 +21,8 @@ import { getRewriteCount, loadActiveOverrides, recordRewriteAttempt, resolveAllO
 import { getUatBrowserToolSupportError, type UatType } from "./uat-policy.js";
 import {
   isDbAvailable,
-  getMilestoneSlices,
   getPendingGatesForTurn,
   markPendingGatesOmittedForTurn,
-  insertAssessment,
-  transaction,
   getSliceRunUatAssessment,
   hasSavedArtifact,
   hasUnitRecoveryBlock,
@@ -37,7 +34,6 @@ import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/run
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
 
 import {
-  resolveMilestonePath,
   resolveSliceFile,
   resolveSlicePath,
   relSliceFile,
@@ -102,15 +98,12 @@ import {
 } from "./project-setup-facts.js";
 import { annotateBackgroundable } from "./delegation-policy.js";
 import { invalidateAllCaches } from "./cache.js";
-import { insertMilestoneValidationGates } from "./milestone-validation-gates.js";
 import { nativeHasChanges, nativeIsRepo, _resetHasChangesCache } from "./native-git-bridge.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
-import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 import {
   captureMilestoneVerificationSourceRevision,
 } from "./verification-source-integrity.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
-import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
 import { readUnitBudget } from "./db/unit-dispatch-budgets.js";
 import { hasStoredPreExecutionRetry, readStoredCommitRepairRetry } from "./db/unit-dispatch-retries.js";
 import {
@@ -1489,114 +1482,38 @@ export const DISPATCH_RULES: DispatchRule[] = [
   {
     name: "validating-milestone → validate-milestone",
     match: async (ctx) => {
-      const { state, mid, midTitle, basePath, prefs, session, preview } = ctx;
+      const { state, mid, midTitle, basePath, prefs, preview } = ctx;
       if (state.phase !== "validating-milestone") return null;
-
-      const adoptedMilestone = isMilestoneLifecycleAdopted(mid);
-
-      // Adopted validation reads canonical evidence. Legacy validation needs
-      // every slice closed in the DB; a missing SUMMARY file does not block it.
-      if (!adoptedMilestone) {
-        const openSlices = findOpenSlices(mid);
-        if (openSlices.length > 0) {
-          return {
-            action: "stop",
-            reason: `Cannot validate milestone ${mid}: slices ${openSlices.join(", ")} are not closed in the database.`,
-            level: "error",
-          };
-        }
-      }
 
       // #4781 phase 2: trivial-scope milestones skip the dedicated validate
       // unit — complete-milestone's own verification steps (3/4/5 in the
       // closer prompt) are sufficient proof for contained deliverables.
       const trivialVariant = await getMilestonePipelineVariant(mid) === "trivial";
 
-      // Adopted skips commit a canonical Waiver; legacy skips retain their
-      // compatibility PASS assessment and projection.
       if (prefs?.phases?.skip_milestone_validation || trivialVariant) {
         const skipReason = trivialVariant ? "trivial-scope" : "preference";
-        if (adoptedMilestone) {
-          // Preview: skip the waiver commit but keep the downstream guarded
-          // dispatch decision identical.
-          if (!preview) {
-            const waiver = recordAdoptedMilestoneValidationWaiver(
-              basePath,
-              mid,
-              skipReason,
-              prefs,
-            );
-            if (!waiver.ok) {
-              return {
-                action: "stop",
-                reason: `Cannot waive milestone validation for ${mid}: ${waiver.error}`,
-                level: "warning",
-              };
-            }
+        // Preview: skip the waiver commit but keep the downstream guarded
+        // dispatch decision identical.
+        if (!preview) {
+          const waiver = recordAdoptedMilestoneValidationWaiver(
+            basePath,
+            mid,
+            skipReason,
+            prefs,
+          );
+          if (!waiver.ok) {
+            return {
+              action: "stop",
+              reason: `Cannot waive milestone validation for ${mid}: ${waiver.error}`,
+              level: "warning",
+            };
           }
-          const { evaluateGuardedCompleteMilestoneDispatch } = await import("./milestone-closeout.js");
-          // Preview suppressed the waiver write above; tell the guarded
-          // evaluation to treat the would-be waiver as recorded so the
-          // returned decision equals the real turn's (#2230).
-          return evaluateGuardedCompleteMilestoneDispatch(ctx, { assumeValidationWaived: preview });
         }
-        const artifactBasePath = resolveArtifactBasePath(basePath, mid, session);
-        const projectRoot = resolveWorktreeProjectRoot(basePath, session?.originalBasePath);
-        // Use relMilestoneFile for the layout-aware filename:
-        //   legacy   → milestones/M001/M001-VALIDATION.md
-        //   flat-phase → phases/01-slug/01-VALIDATION.md
-        // When the milestone dir is only in the project root (worktree has none),
-        // write to the project root so the artifact lands in the canonical location.
-        let writeBase = projectRoot;
-        if (resolveMilestonePath(artifactBasePath, mid) != null) writeBase = artifactBasePath;
-        const validationPath = join(writeBase, relMilestoneFile(writeBase, mid, "VALIDATION"));
-        const skipSource = trivialVariant
-          ? "trivial-scope pipeline variant"
-          : "`skip_milestone_validation` preference";
-        const skipValidationReason = skipReason;
-        const content = [
-          "---",
-          "verdict: pass",
-          "skip_validation: true",
-          `skip_validation_reason: ${skipValidationReason}`,
-          "remediation_round: 0",
-          "---",
-          "",
-          "# Milestone Validation (skipped)",
-          "",
-          `Milestone validation was skipped via ${skipSource}.`,
-        ].join("\n");
-        // Preview shares the skip decision; the VALIDATION projection and the
-        // DB-backed pass rows are dispatch effects and are not persisted.
-        if (preview) return { action: "skip" };
-        // DB-backed state derivation keys off assessments, so the next loop
-        // iteration advances to completing-milestone instead of re-entering
-        // validating-milestone. The file is rendered from the committed row,
-        // by the renderer that the validate tool and the full rebuild use.
-        transaction(() => {
-          insertAssessment({
-            path: validationPath,
-            milestoneId: mid,
-            sliceId: null,
-            taskId: null,
-            status: "pass",
-            scope: "milestone-validation",
-            fullContent: content,
-          });
-          const gateSliceId = getMilestoneSlices(mid)[0]?.id;
-          if (gateSliceId) {
-            insertMilestoneValidationGates(
-              mid,
-              gateSliceId,
-              "pass",
-              new Date().toISOString(),
-            );
-          }
-        });
-        const { renderMilestoneValidation } = await import("./markdown-renderer.js");
-        renderMilestoneValidation(writeBase, mid);
-        invalidateAllCaches();
-        return { action: "skip" };
+        const { evaluateGuardedCompleteMilestoneDispatch } = await import("./milestone-closeout.js");
+        // Preview suppressed the waiver write above; tell the guarded
+        // evaluation to treat the would-be waiver as recorded so the
+        // returned decision equals the real turn's (#2230).
+        return evaluateGuardedCompleteMilestoneDispatch(ctx, { assumeValidationWaived: preview });
       }
       return {
         action: "dispatch",

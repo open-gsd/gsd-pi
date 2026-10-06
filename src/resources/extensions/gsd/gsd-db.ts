@@ -914,23 +914,6 @@ export function setMilestoneQueueOrder(order: string[]): void {
   });
 }
 
-/**
- * Update a milestone's status in the database.
- *
- * The generic writer only updates adopted milestones whose legacy status stays
- * aligned with the canonical lifecycle; it never reopens a closed milestone
- * (gsd_milestone_reopen) and refuses rows without a canonical lifecycle row
- * (run /gsd db adopt).
- */
-export function updateMilestoneStatus(milestoneId: string, status: string, completedAt?: string | null, preserveCompletion?: boolean): void {
-  applyStatusTransition({ entity: "milestone", milestoneId, status, completedAt, preserveCompletion });
-}
-
-
-
-
-
-
 // ─── Lightweight Query Variants (hot-path optimized) ─────────────────────
 
 

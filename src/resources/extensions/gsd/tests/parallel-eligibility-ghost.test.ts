@@ -21,7 +21,6 @@ import {
   insertMilestone,
   insertSlice,
   insertTask,
-  updateMilestoneStatus,
 } from "../gsd-db.ts";
 import { registerMilestones } from "../milestone-registration.ts";
 

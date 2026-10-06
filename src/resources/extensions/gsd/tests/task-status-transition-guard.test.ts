@@ -18,12 +18,21 @@ import {
   insertTask,
   openDatabase,
   readDomainOperationFence,
-  updateMilestoneStatus,
   updateSliceStatus,
   updateTaskStatus,
 } from "../gsd-db.ts";
+import { applyStatusTransition } from "../db/writers/status.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import type { DomainOperationContext } from "../db/domain-operation.ts";
+
+// The exported milestone wrapper is gone; the guard contract is the shared
+// generic writer itself.
+const updateMilestoneStatus = (
+  milestoneId: string,
+  status: string,
+  completedAt?: string | null,
+  preserveCompletion?: boolean,
+): void => applyStatusTransition({ entity: "milestone", milestoneId, status, completedAt, preserveCompletion });
 
 const tempDirs = new Set<string>();
 let fixtureSequence = 0;

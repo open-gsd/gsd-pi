@@ -785,13 +785,12 @@ test("after the Cutover the closeout consistency gate follows the lifecycle rows
       allowOpenMilestone,
       assumeValidationWaived: true,
       artifactBasePath: base,
-      readOnly: true,
     });
     return result.ok ? "ok" : result.reason;
   };
   const answers = () => [gate("M001", false), gate("M001", true), gate("M002", true)];
 
-  // The legacy rows: M001 is closed and its Task T01 is open. M002 is open and has no Slice.
+  // The lifecycle rows: M001 is closed and its Task T01 is open. M002 is open and has no Slice.
   assert.deepEqual(answers(), ["task-open", "task-open", "slice-missing"]);
 
   cutOver();

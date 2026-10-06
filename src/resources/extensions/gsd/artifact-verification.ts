@@ -344,7 +344,6 @@ export function verifyExpectedArtifact(
     if (unitType === "complete-milestone") {
       const closeoutProof = proveMilestoneCloseout(mid, {
         refreshFromDisk: !options.readOnly,
-        readOnly: options.readOnly,
         artifactBasePath: resolveArtifactVerificationBase(unitId, base),
         implementationEvidence: {
           basePath: base,

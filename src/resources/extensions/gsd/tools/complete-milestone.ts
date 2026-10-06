@@ -5,33 +5,23 @@
 /**
  * complete-milestone handler — the core operation behind gsd_complete_milestone.
  *
- * Adopted Milestones validate canonical closeout evidence and complete through
- * one Domain Operation before rendering the durable summary projection.
- * Unadopted imports retain the legacy assessment and hierarchy guards.
+ * Milestones validate canonical closeout evidence and complete through one
+ * Domain Operation before rendering the durable summary projection.
  */
 
 import { existsSync } from "node:fs";
 
-import {
-  transaction,
-  getMilestone,
-  getLatestAssessmentByScope,
-  updateMilestoneStatus,
-} from "../gsd-db.js";
-import { readMilestone, readMilestoneSlices, readSliceTasks } from "../db/lifecycle-read.js";
+import { getMilestone } from "../gsd-db.js";
+import { readMilestone } from "../db/lifecycle-read.js";
 import { clearPathCache, resolveMilestoneFile, targetMilestoneFile } from "../paths.js";
 import { resolveCanonicalMilestoneRoot } from "../worktree-manager.js";
-import { isDeferredStatus } from "../status-guards.js";
 import { saveFile, clearParseCache, loadFile } from "../files.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import { invalidateStateCache } from "../state.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
-import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.js";
-import { appendEvent } from "../workflow-events.js";
-import { logWarning, logError } from "../workflow-logger.js";
+import { logWarning } from "../workflow-logger.js";
 import {
-  isMilestoneLifecycleAdopted,
   readMilestoneCloseoutAuthorization,
   readMilestoneLifecycleStatus,
 } from "../db/milestone-closeout-readiness.js";
@@ -221,192 +211,114 @@ export async function handleCompleteMilestone(
   if (!params.title || typeof params.title !== "string" || params.title.trim() === "") {
     return { error: "title is required and must be a non-empty string" };
   }
+  if (!invocation) {
+    return { error: "milestone completion requires canonical invocation identity" };
+  }
 
   const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, params.milestoneId);
-  const adoptedLifecycle = isMilestoneLifecycleAdopted(params.milestoneId);
 
-  // Legacy imports retain the caller gate. Adopted Milestones derive readiness
-  // only from the current canonical database receipt inside milestone.complete.
-  if (!adoptedLifecycle && params.verificationPassed !== true) {
-    return { error: "verification did not pass — milestone completion blocked. verificationPassed must be explicitly set to true after all verification steps succeed" };
-  }
-
-  let currentSourceRevision: string | undefined;
-  if (adoptedLifecycle) {
-    const replaySourceRevision = invocation
-      ? readMilestoneCompletionReplaySourceRevision(invocation.idempotencyKey)
-      : null;
-    if (replaySourceRevision) {
-      currentSourceRevision = replaySourceRevision;
-    } else {
-      const targets = resolveVerificationRepositoryTargets(
-        artifactBasePath,
-        loadEffectiveGSDPreferences()?.preferences,
-        null,
-        null,
-      );
-      if (targets.missingRepositoryIds.length > 0) {
-        return {
-          error: `verification source repositories are missing: ${targets.missingRepositoryIds.join(", ")}`,
-        };
-      }
-      const source = captureVerificationSourceSnapshot(targets.repositories.map((repository) => ({
-        id: repository.id,
-        cwd: repository.root,
-      })));
-      if (!source.ok) return { error: source.error };
-      currentSourceRevision = source.snapshot.aggregateRevision;
-    }
-  }
-
-  // ── Guards + DB writes inside a single transaction (prevents TOCTOU) ───
-  let completedAt = new Date().toISOString();
-  let guardError: string | null = null;
-  let alreadyComplete = false;
-  let canonicalReceipt: MilestoneCompletionReceipt | undefined;
-
-  if (adoptedLifecycle) {
-    if (!invocation) {
-      return { error: "adopted Milestone completion requires canonical invocation identity" };
-    }
-    try {
-      const authorization = readMilestoneCloseoutAuthorization({
-        milestoneId: params.milestoneId,
-        sourceRevision: currentSourceRevision!,
-      });
-      if (authorization.authorized) {
-        closeQualityGatesFromEvidence(params.milestoneId, {
-          milestoneValidationPassed: authorization.kind === "validated",
-          milestoneValidationAuthorization: authorization,
-        });
-      }
-      const audit = {
-        ...(params.actorName ? { actorName: params.actorName } : {}),
-        ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
+  const replaySourceRevision = readMilestoneCompletionReplaySourceRevision(invocation.idempotencyKey);
+  let currentSourceRevision: string;
+  if (replaySourceRevision) {
+    currentSourceRevision = replaySourceRevision;
+  } else {
+    const targets = resolveVerificationRepositoryTargets(
+      artifactBasePath,
+      loadEffectiveGSDPreferences()?.preferences,
+      null,
+      null,
+    );
+    if (targets.missingRepositoryIds.length > 0) {
+      return {
+        error: `verification source repositories are missing: ${targets.missingRepositoryIds.join(", ")}`,
       };
-      const lifecycleStatus = readMilestoneLifecycleStatus(params.milestoneId);
-      // The effects come from the tree this closeout proves. A call from the
-      // project root still closes out the live milestone worktree, so its
-      // merge stays required.
-      const effects = lifecycleStatus === "ready" || lifecycleStatus === "in_progress"
-        ? milestoneCloseoutEffects(artifactBasePath, params.milestoneId)
-        : [];
-      // A live plan that waits for an effect the Milestone no longer needs
-      // (the branch was merged and deleted by hand, or the work now runs on
-      // the integration branch) is superseded by a plan with the current
-      // effects, so it does not block completion forever.
-      if (effects.length > 0 || hasPendingCloseoutEffect(params.milestoneId)) {
-        const plan = prepareCloseout({
-          invocation: { ...invocation, idempotencyKey: `${invocation.idempotencyKey}/closeout.prepare` },
-          milestoneId: params.milestoneId,
-          sourceRevision: currentSourceRevision!,
-          closeout: completionCloseout(params),
-          audit,
-          effects,
-        });
-        const pending = pendingRequiredCloseoutEffects(plan);
-        if (pending.length > 0) {
-          invalidateStateCache();
-          return {
-            milestoneId: params.milestoneId,
-            summaryPath: milestoneSummaryPath(artifactBasePath, params.milestoneId),
-            pendingCloseoutEffects: pending.map((effect) => effect.effectKind),
-          };
-        }
-      }
-      canonicalReceipt = completeMilestone({
-        invocation,
+    }
+    const source = captureVerificationSourceSnapshot(targets.repositories.map((repository) => ({
+      id: repository.id,
+      cwd: repository.root,
+    })));
+    if (!source.ok) return { error: source.error };
+    currentSourceRevision = source.snapshot.aggregateRevision;
+  }
+
+  // ── Guards + canonical write inside one Domain Operation ────────────────
+  let completedAt = new Date().toISOString();
+  let alreadyComplete = false;
+  let canonicalReceipt: MilestoneCompletionReceipt;
+
+  try {
+    const authorization = readMilestoneCloseoutAuthorization({
+      milestoneId: params.milestoneId,
+      sourceRevision: currentSourceRevision,
+    });
+    if (authorization.authorized) {
+      closeQualityGatesFromEvidence(params.milestoneId, {
+        milestoneValidationPassed: authorization.kind === "validated",
+        milestoneValidationAuthorization: authorization,
+      });
+    }
+    const audit = {
+      ...(params.actorName ? { actorName: params.actorName } : {}),
+      ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
+    };
+    const lifecycleStatus = readMilestoneLifecycleStatus(params.milestoneId);
+    // The effects come from the tree this closeout proves. A call from the
+    // project root still closes out the live milestone worktree, so its
+    // merge stays required.
+    const effects = lifecycleStatus === "ready" || lifecycleStatus === "in_progress"
+      ? milestoneCloseoutEffects(artifactBasePath, params.milestoneId)
+      : [];
+    // A live plan that waits for an effect the Milestone no longer needs
+    // (the branch was merged and deleted by hand, or the work now runs on
+    // the integration branch) is superseded by a plan with the current
+    // effects, so it does not block completion forever.
+    if (effects.length > 0 || hasPendingCloseoutEffect(params.milestoneId)) {
+      const plan = prepareCloseout({
+        invocation: { ...invocation, idempotencyKey: `${invocation.idempotencyKey}/closeout.prepare` },
         milestoneId: params.milestoneId,
-        sourceRevision: currentSourceRevision!,
+        sourceRevision: currentSourceRevision,
         closeout: completionCloseout(params),
         audit,
+        effects,
       });
-      completedAt = canonicalReceipt.completedAt;
-      alreadyComplete = canonicalReceipt.status === "replayed";
-    } catch (error) {
-      return { error: error instanceof Error ? error.message : String(error) };
+      const pending = pendingRequiredCloseoutEffects(plan);
+      if (pending.length > 0) {
+        invalidateStateCache();
+        return {
+          milestoneId: params.milestoneId,
+          summaryPath: milestoneSummaryPath(artifactBasePath, params.milestoneId),
+          pendingCloseoutEffects: pending.map((effect) => effect.effectKind),
+        };
+      }
     }
-  } else {
-    // Legacy completion keeps its guards, but the generic status writer now
-    // refuses rows without a canonical lifecycle row, so an unadopted closeout
-    // surfaces the loud adoption error instead of writing.
-    try {
-      transaction(() => {
-        if (isMilestoneLifecycleAdopted(params.milestoneId)) {
-          guardError = `Refusing legacy completion for adopted Milestone ${params.milestoneId}`;
-          return;
-        }
-        // State machine preconditions (inside txn for atomicity)
-        const milestone = readMilestone(params.milestoneId);
-        if (!milestone) {
-          guardError = `milestone not found: ${params.milestoneId}`;
-          return;
-        }
-        if (milestone.closed) {
-          alreadyComplete = true;
-          return;
-        }
-
-        const validation = getLatestAssessmentByScope(params.milestoneId, "milestone-validation");
-        if (validation?.status !== "pass") {
-          guardError =
-            `Refusing to complete ${params.milestoneId}: latest milestone-validation verdict is ` +
-            `"${validation?.status ?? "absent"}". Only verdict=pass permits closeout.`;
-          return;
-        }
-
-        // Verify all slices are complete
-        const slices = readMilestoneSlices(params.milestoneId);
-        if (slices.length === 0) {
-          guardError = `no slices found for milestone ${params.milestoneId}`;
-          return;
-        }
-
-        const incompleteSlices = slices.filter(s => !s.done);
-        if (incompleteSlices.length > 0) {
-          const incompleteIds = incompleteSlices.map(s => `${s.id} (status: ${s.status})`).join(", ");
-          guardError = `incomplete slices: ${incompleteIds}`;
-          return;
-        }
-
-        // Deep check: verify all tasks in all slices are complete
-        for (const slice of slices) {
-          if (isDeferredStatus(slice.status)) continue;
-          const tasks = readSliceTasks(params.milestoneId, slice.id);
-          const incompleteTasks = tasks.filter(t => !t.done);
-          if (incompleteTasks.length > 0) {
-            const ids = incompleteTasks.map(t => `${t.id} (status: ${t.status})`).join(", ");
-            guardError = `slice ${slice.id} has incomplete tasks: ${ids}`;
-            return;
-          }
-        }
-
-        // All guards passed — perform write
-        updateMilestoneStatus(params.milestoneId, 'complete', completedAt);
-      });
-    } catch (legacyWriteError) {
-      return { error: legacyWriteError instanceof Error ? legacyWriteError.message : String(legacyWriteError) };
-    }
+    canonicalReceipt = completeMilestone({
+      invocation,
+      milestoneId: params.milestoneId,
+      sourceRevision: currentSourceRevision,
+      closeout: completionCloseout(params),
+      audit,
+    });
+    completedAt = canonicalReceipt.completedAt;
+    alreadyComplete = canonicalReceipt.status === "replayed";
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
   }
 
-  if (guardError) {
-    return { error: guardError };
-  }
-
-  // ── Filesystem operations (outside transaction) ─────────────────────────
+  // ── Filesystem operations (outside the Domain Operation) ────────────────
   const summaryMd = renderMilestoneSummaryMarkdown(
     params.milestoneId,
     completedAt,
-    canonicalReceipt?.closeout ?? completionCloseout(params),
+    canonicalReceipt.closeout,
   );
 
   const summaryPath = milestoneSummaryPath(artifactBasePath, params.milestoneId);
 
-  const isCurrent = canonicalReceipt
-    ? () => isCurrentMilestoneCompletionOperation(canonicalReceipt.operationId, params.milestoneId)
-    : () => true;
+  const isCurrent = () => isCurrentMilestoneCompletionOperation(
+    canonicalReceipt.operationId,
+    params.milestoneId,
+  );
 
-  if (canonicalReceipt && !canonicalReceipt.isCurrent) {
+  if (!canonicalReceipt.isCurrent) {
     return {
       milestoneId: params.milestoneId,
       summaryPath,
@@ -422,11 +334,11 @@ export async function handleCompleteMilestone(
 
   await projectionInterleaveForTest?.();
 
-  // Legacy re-dispatch preserves an existing hand-authored SUMMARY. Adopted
-  // Milestones deterministically project the durable completion closeout.
+  // The SUMMARY is a projection of the durable completion closeout: it is
+  // always (re)rendered from the committed row.
   let projectionStale = false;
   let superseded = !isCurrent();
-  if (!superseded && (canonicalReceipt || !existsSync(summaryPath))) {
+  if (!superseded) {
     try {
       await saveFile(summaryPath, summaryMd);
       if (!isCurrent()) {
@@ -452,15 +364,15 @@ export async function handleCompleteMilestone(
   clearPathCache();
   clearParseCache();
 
-  // ── Post-mutation hook: projections, manifest, event log ───────────────
+  // ── Post-mutation hook: projections, manifest ───────────────────────────
   // Separate try/catch per step so a projection failure doesn't prevent
-  // the event log entry (critical for worktree reconciliation).
+  // the manifest flush.
   try {
     if (!superseded) {
       const flushed = await flushWorkflowProjections(
         artifactBasePath,
         { milestoneId: params.milestoneId },
-        canonicalReceipt ? { operationId: canonicalReceipt.operationId, isCurrent } : undefined,
+        { operationId: canonicalReceipt.operationId, isCurrent },
       );
       projectionStale ||= flushed.stale;
       if (!flushed.stale && existsSync(summaryPath)) projectionStale = false;
@@ -477,33 +389,11 @@ export async function handleCompleteMilestone(
       logWarning("tool", `complete-milestone manifest warning: ${(mfErr as Error).message}`);
     }
   }
-  if (!canonicalReceipt) {
-    try {
-      if (!alreadyComplete) {
-        const eventAt = new Date().toISOString();
-        appendEvent(artifactBasePath, {
-          cmd: "complete-milestone",
-          params: { milestoneId: params.milestoneId },
-          ts: eventAt,
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
-        // Drift detection reads the completion from the database, never from the file ledger.
-        recordLegacyMilestoneEvents(
-          [{ kind: "completed", milestoneId: params.milestoneId, occurredAt: eventAt }],
-          "agent",
-        );
-      }
-    } catch (eventErr) {
-      logError("tool", `complete-milestone event log FAILED — completion invisible to reconciliation`, { error: (eventErr as Error).message });
-    }
-  }
 
   const current = isCurrent();
   superseded ||= !current;
   projectionStale ||= superseded;
-  if (canonicalReceipt && superseded) {
+  if (superseded) {
     try {
       await repairSupersededSummary(
         artifactBasePath,
@@ -524,12 +414,10 @@ export async function handleCompleteMilestone(
     summaryPath,
     ...(projectionStale ? { stale: true } : {}),
     ...(alreadyComplete ? { alreadyComplete: true } : {}),
-    ...(canonicalReceipt ? {
-      operationId: canonicalReceipt.operationId,
-      resultingRevision: canonicalReceipt.resultingRevision,
-      replayed: canonicalReceipt.status === "replayed",
-      current,
-      ...(superseded ? { superseded: true } : {}),
-    } : {}),
+    operationId: canonicalReceipt.operationId,
+    resultingRevision: canonicalReceipt.resultingRevision,
+    replayed: canonicalReceipt.status === "replayed",
+    current,
+    ...(superseded ? { superseded: true } : {}),
   };
 }
