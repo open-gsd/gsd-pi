@@ -32,24 +32,26 @@ Receipt.**
 
 - **Task.** The auto loop prepares the Task Closeout Plan while the Task's
   Attempt is settled succeeded at the verify stage, then commits, then
-  records the receipt, then publishes. Publication
-  (`task.completion.publish`) appends the Kernel `closeout` and `settled`
-  stages only with the plan and its receipt; a refused or failed commit
-  leaves the Task unpublished with its Attempt settled, and the existing
-  git-commit repair retry (`unit_dispatch_retries`, #2618) repairs it. After
-  this change the special case "a Task is already closed when its commit is
-  refused" does not exist.
+  records the receipt, then publishes. `task.completion.publish` refuses
+  while the plan's source-commit effect has no Settlement Receipt — the
+  Kernel `closeout` and `settled` stages never run for a Task whose commit
+  has not settled — so a refused or failed commit leaves the Task unpublished
+  with its Attempt settled, and the existing git-commit repair retry
+  (`unit_dispatch_retries`, #2618) repairs it. After this change the special
+  case "a Task is already closed when its commit is refused" does not exist.
 - **Git with nothing to commit** settles the effect as `recognized` with the
   current commit as its external reference, the same as the recognized merge.
 - **Slice.** A Slice has no Attempt and no Slice Attempt is invented. The
   Slice Closeout Plan is the `slice.completed` fact itself: it cites the
   tested source set hash that `slice.completed` already stores (#2616) and
-  the Settlement Receipts of its Tasks. `slice.complete` requires every Task
-  of the Slice to be published — a Task completed through the verified
-  pipeline carries its source-commit receipt; a Task without one refuses the
-  Slice completion. The schema keeps `workflow_closeout_plans.attempt_id NOT
-  NULL`, so a Slice stores no plan row: no table rebuild and no schema
-  version step (the #2621 no-rebuild rule).
+  the Settlement Receipts of its Tasks. `slice.complete` refuses while a Task
+  of the Slice carries an unsettled source-commit effect: every verified Task
+  of the Slice must be published with its receipt. A Task whose commit is not
+  GSD's to make carries no plan and does not block, and a Task an Import
+  Application or the lifecycle backfill attests as legacy stays exempt. The
+  schema keeps `workflow_closeout_plans.attempt_id NOT NULL`, so a Slice
+  stores no plan row: no table rebuild and no schema version step (the #2621
+  no-rebuild rule).
 - **When the commit is not GSD's to make** — isolation `none` on the user's
   own working tree, or the turn git action is not `commit`
   (`git.auto_commit: false`, snapshot or status-only mode) — the effect is
@@ -86,11 +88,11 @@ silently discarding a publishable success would hide work.
   `postUnitPostVerification` runs after the receipt-covered commit, so its
   diff base is the committed head; for adopted Tasks the audit window narrows
   to the projection renders, which are gitignored.
-- `slice.complete` refuses while a Task of the Slice lacks its receipt. A
-  Task an Import Application or the lifecycle backfill attests as legacy
-  (`isLegacyAdoptedCompletion`) stays exempt, the same grandfathering the
-  Technical Verdict gate already applies; blocker-accepted and cancelled
-  Tasks are terminal without publication and need no receipt.
+- `slice.complete` refuses while a Task of the Slice carries an unsettled
+  source-commit effect. A Task an Import Application or the lifecycle backfill
+  attests as legacy (`isLegacyAdoptedCompletion`) stays exempt, the same
+  grandfathering the Technical Verdict gate already applies; blocker-accepted
+  and cancelled Tasks are terminal without publication and need no receipt.
 - Existing plan machinery is reused, not forked: `workflow_closeout_plans`,
   `workflow_closeout_effects` and `workflow_settlement_receipts` rows keyed
   by the Task's lifecycle, with `task.closeout.prepare` and

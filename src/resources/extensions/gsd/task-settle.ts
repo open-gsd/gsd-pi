@@ -38,6 +38,10 @@ import { queryJournal } from "./journal.js";
 import { TASK_LIFECYCLE_PROJECTION_KIND } from "./projection-identity.js";
 import { publishVerifiedTaskCompletion } from "./task-completion-compatibility-adapter.js";
 import {
+  TASK_SOURCE_COMMIT_EFFECT,
+  readTaskCloseoutPlan,
+} from "./task-closeout.js";
+import {
   readLatestTaskAttempt,
   settleTaskAttempt,
 } from "./task-execution-domain-operation.js";
@@ -485,6 +489,12 @@ function applyLifecycleReconcile(
  * pipeline. Returns null unless every structural predicate holds; evidence
  * gates (passing verdict, source parity, UAT closure) stay inside publication
  * and fail apply closed when unsatisfied.
+ *
+ * ADR-050: a stranded success whose Closeout Plan source commit has no
+ * Settlement Receipt cannot publish here — the Task is not committed. The
+ * sanctioned exit is `/gsd auto`, which prepares, commits, records the
+ * receipt and publishes; a refused commit is repaired by the stored
+ * git-commit retry.
  */
 function planDurableSuccessPublication(task: TaskSettleTask): TaskPublicationPlanRow | null {
   const state = readTaskLifecycleState(task);
@@ -498,6 +508,16 @@ function planDurableSuccessPublication(task: TaskSettleTask): TaskPublicationPla
   const route = readTaskRecoveryRoute(latest.attemptId);
   if (route && route.recoveryOwner === "agent" && route.action === "abort" && !route.resumeAuthorized) {
     return null;
+  }
+  const commitEffect = readTaskCloseoutPlan(task)?.effects
+    .find((effect) => effect.effectKind === TASK_SOURCE_COMMIT_EFFECT);
+  if (commitEffect && !commitEffect.receipt) {
+    throw new Error(
+      `gsd_task_settle: the Closeout Plan of ${unitId(task)} has no Settlement Receipt for its ` +
+      "source commit — the Task is not committed and cannot publish here. Re-enter `/gsd auto`: " +
+      "it commits the Task source, records the receipt and publishes; a refused commit is " +
+      "repaired by the stored git-commit retry.",
+    );
   }
   const verdict = readTaskTechnicalVerdict(latest.attemptId);
   return {

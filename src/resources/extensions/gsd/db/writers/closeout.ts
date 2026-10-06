@@ -13,8 +13,22 @@ import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 export const CLOSEOUT_PREPARE_OPERATION = "milestone.closeout.prepare";
 export const CLOSEOUT_SETTLE_EFFECT_OPERATION = "milestone.closeout.settle_effect";
+/** The Task Closeout Plan (ADR-050): its source commit is effect ordinal 1. */
+export const TASK_CLOSEOUT_PREPARE_OPERATION = "task.closeout.prepare";
+export const TASK_CLOSEOUT_SETTLE_EFFECT_OPERATION = "task.closeout.settle_effect";
+/** The kind of the Closeout Effect that commits a Task's source (ADR-050). */
+export const TASK_SOURCE_COMMIT_EFFECT = "task-source-commit";
 /** The only operation type the schema lets insert an Attempt that is already settled. */
 export const WAIVED_VALIDATION_ATTEMPT_OPERATION = "attempt.settle";
+
+const CLOSEOUT_PREPARE_OPERATIONS = new Set([
+  CLOSEOUT_PREPARE_OPERATION,
+  TASK_CLOSEOUT_PREPARE_OPERATION,
+]);
+const CLOSEOUT_SETTLE_EFFECT_OPERATIONS = new Set([
+  CLOSEOUT_SETTLE_EFFECT_OPERATION,
+  TASK_CLOSEOUT_SETTLE_EFFECT_OPERATION,
+]);
 
 export interface CloseoutEffectInput {
   /** One effect per kind in a plan; the kind is also the idempotency key. */
@@ -107,6 +121,60 @@ function planHead(milestoneId: string): PlanHeadRow | undefined {
         WHERE successor.supersedes_closeout_plan_id = plan.closeout_plan_id
       )
   `).get({ ":milestone_id": milestoneId }) as unknown as PlanHeadRow | undefined;
+}
+
+interface LifecyclePlanHeadRow extends PlanHeadRow {
+  milestone_id: string;
+}
+
+/** The plan head of one lifecycle, whatever item kind it belongs to. */
+function lifecyclePlanHead(projectId: string, lifecycleId: string): LifecyclePlanHeadRow | undefined {
+  return getDb().prepare(`
+    SELECT plan.closeout_plan_id, plan.lifecycle_id, lifecycle.lifecycle_status,
+           plan.attempt_id, plan.operation_id, plan.readiness_basis_hash,
+           plan.prepared_at, plan.project_revision,
+           lifecycle.last_project_revision AS lifecycle_revision,
+           lifecycle.milestone_id
+    FROM workflow_closeout_plans plan
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = plan.lifecycle_id
+     AND lifecycle.project_id = plan.project_id
+    WHERE lifecycle.project_id = :project_id
+      AND lifecycle.lifecycle_id = :lifecycle_id
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_closeout_plans successor
+        WHERE successor.supersedes_closeout_plan_id = plan.closeout_plan_id
+      )
+  `).get({ ":project_id": projectId, ":lifecycle_id": lifecycleId }) as
+    unknown as LifecyclePlanHeadRow | undefined;
+}
+
+/**
+ * The Closeout Plan that speaks for one lifecycle now (ADR-050), whatever
+ * item kind the lifecycle belongs to. The same head rule as
+ * `readMilestoneCloseoutPlan` applies: a plan prepared before the last
+ * lifecycle transition of an open item is history.
+ */
+export function readLifecycleCloseoutPlan(
+  projectId: string,
+  lifecycleId: string,
+): CloseoutPlan | null {
+  const head = lifecyclePlanHead(projectId, lifecycleId);
+  if (!head) return null;
+  if (head.lifecycle_status !== "completed" && head.project_revision <= head.lifecycle_revision) {
+    return null;
+  }
+  return {
+    closeoutPlanId: head.closeout_plan_id,
+    milestoneId: head.milestone_id,
+    lifecycleId: head.lifecycle_id,
+    lifecycleStatus: head.lifecycle_status,
+    attemptId: head.attempt_id,
+    operationId: head.operation_id,
+    readinessBasisHash: head.readiness_basis_hash,
+    preparedAt: head.prepared_at,
+    effects: planEffects(head.closeout_plan_id),
+  };
 }
 
 function planEffects(closeoutPlanId: string): CloseoutEffect[] {
@@ -304,7 +372,7 @@ export function insertCloseoutPlan(
     preparedAt: string;
   },
 ): string {
-  if (requireActiveDomainOperationContext(context) !== CLOSEOUT_PREPARE_OPERATION) {
+  if (!CLOSEOUT_PREPARE_OPERATIONS.has(requireActiveDomainOperationContext(context))) {
     throw new Error(`Closeout Plan requires a ${CLOSEOUT_PREPARE_OPERATION} Domain Operation`);
   }
   const closeoutPlanId = randomUUID();
@@ -371,7 +439,7 @@ export function insertSettlementReceipt(
     settledAt: string;
   },
 ): string {
-  if (requireActiveDomainOperationContext(context) !== CLOSEOUT_SETTLE_EFFECT_OPERATION) {
+  if (!CLOSEOUT_SETTLE_EFFECT_OPERATIONS.has(requireActiveDomainOperationContext(context))) {
     throw new Error(`Settlement Receipt requires a ${CLOSEOUT_SETTLE_EFFECT_OPERATION} Domain Operation`);
   }
   const settlementReceiptId = randomUUID();

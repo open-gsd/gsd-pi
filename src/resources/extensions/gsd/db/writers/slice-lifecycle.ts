@@ -17,6 +17,10 @@ import {
 import { compareLifecycleShadow, normalizeLegacyLifecycleStatus } from "../lifecycle-shadow-comparison.js";
 import { terminalizeTaskExecutionDispatch } from "./task-execution.js";
 import { ensurePendingSliceQ8, invalidateSliceEvidence, type InvalidatedEvidence } from "./slice-companion-state.js";
+import {
+  TASK_SOURCE_COMMIT_EFFECT,
+  readLifecycleCloseoutPlan,
+} from "./closeout.js";
 
 interface SliceIdentity {
   milestoneId: string;
@@ -613,6 +617,30 @@ function isLegacyAdoptedCompletion(lifecycleId: string): boolean {
   `).get({ ":lifecycle_id": lifecycleId }));
 }
 
+/**
+ * ADR-050: `slice.complete` cites the Settlement Receipt of each verified
+ * Task's source commit. A Task whose Closeout Plan carries an unsettled
+ * source-commit effect refuses the Slice completion — its Slice keeps citing
+ * the tested source set hash the `slice.completed` fact stores, but the Task
+ * is not committed. A Task whose commit is not GSD's to make carries no plan,
+ * the same carve-out publication follows, and legacy-attested completions
+ * (import or backfill provenance) carry no receipt by construction.
+ */
+function requireTaskSourceCommitReceipt(
+  projectId: string,
+  lifecycleId: string,
+  taskId: string,
+): void {
+  const commitEffect = readLifecycleCloseoutPlan(projectId, lifecycleId)?.effects
+    .find((effect) => effect.effectKind === TASK_SOURCE_COMMIT_EFFECT);
+  if (!commitEffect || commitEffect.receipt) return;
+  throw new SliceLifecycleValidationError(
+    `Task ${taskId} has no Settlement Receipt for its Closeout Plan source commit — the Task is ` +
+    "not committed and its Slice cannot complete. Run /gsd auto: it commits the Task source, " +
+    "records the receipt and publishes the Task, then complete the Slice again.",
+  );
+}
+
 function hasCurrentCancellationAuthorization(lifecycleId: string, completedAt: string): boolean {
   return Boolean(getDb().prepare(`
     SELECT 1
@@ -747,6 +775,9 @@ export function completeSliceHierarchy(
     if (legacyStatus === "completed" && state.lifecycleStatus === "completed") {
       const proof = currentCompletionProof(lifecycleId, taskId);
       if (proof) {
+        // ADR-050: the Slice cites the receipt of each verified Task's source
+        // commit; a Task without its receipt refuses the completion.
+        requireTaskSourceCommitReceipt(context.projectId, lifecycleId, taskId);
         proofs.push(proof);
       } else if (!isLegacyAdoptedCompletion(lifecycleId)) {
         throw new SliceLifecycleValidationError(`Task ${taskId} lacks current passing Technical Verdict and verification evidence`);
