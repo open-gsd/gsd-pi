@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -10,6 +10,7 @@ const AUTO_DASHBOARD_MAX_BUFFER = 1024 * 1024;
 const TEST_AUTO_DASHBOARD_MODULE_ENV = "GSD_WEB_TEST_AUTO_DASHBOARD_MODULE";
 const TEST_AUTO_DASHBOARD_FALLBACK_ENV = "GSD_WEB_TEST_USE_FALLBACK_AUTO_DASHBOARD";
 const AUTO_DASHBOARD_MODULE_ENV = "GSD_AUTO_DASHBOARD_MODULE";
+const AUTO_DASHBOARD_BRIDGE_MODULE_ENV = "GSD_AUTO_DASHBOARD_BRIDGE_MODULE";
 
 export interface AutoDashboardServiceOptions {
   execPath?: string;
@@ -42,64 +43,6 @@ export function collectTestOnlyFallbackAutoDashboardData(): AutoDashboardData {
   return fallbackAutoDashboardData();
 }
 
-/**
- * Check if a PID is alive by sending signal 0.
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Reconcile subprocess auto dashboard data with on-disk session state.
- *
- * The subprocess always starts with fresh module state (s.active === false),
- * so it can never report active/paused correctly. We check:
- *   1. .gsd/auto.lock — if present and its PID is alive, auto IS running.
- *   2. .gsd/runtime/paused-session.json — if present, auto IS paused.
- *
- * See #2705.
- */
-function reconcileWithDiskState(
-  data: AutoDashboardData,
-  projectCwd: string,
-  checkExists: (path: string) => boolean,
-): AutoDashboardData {
-  // If the subprocess already reports active or paused, trust it.
-  if (data.active || data.paused) return data;
-
-  // Check for paused-session.json first (paused takes precedence).
-  const pausedPath = join(projectCwd, ".gsd", "runtime", "paused-session.json");
-  if (checkExists(pausedPath)) {
-    try {
-      // Validate the file is readable JSON (not corrupt).
-      JSON.parse(readFileSync(pausedPath, "utf-8"));
-      return { ...data, paused: true };
-    } catch {
-      // Corrupt or unreadable — ignore.
-    }
-  }
-
-  // Check for session lock with a live PID.
-  const lockPath = join(projectCwd, ".gsd", "auto.lock");
-  if (checkExists(lockPath)) {
-    try {
-      const lockData = JSON.parse(readFileSync(lockPath, "utf-8")) as { pid?: number };
-      if (typeof lockData.pid === "number" && isPidAlive(lockData.pid)) {
-        return { ...data, active: true };
-      }
-    } catch {
-      // Corrupt or unreadable — ignore.
-    }
-  }
-
-  return data;
-}
-
 export async function collectAuthoritativeAutoDashboardData(
   packageRoot: string,
   options: AutoDashboardServiceOptions = {},
@@ -124,11 +67,29 @@ export async function collectAuthoritativeAutoDashboardData(
   if (moduleResolution.useCompiledJs && !checkExists(autoModulePath)) {
     throw new Error(`authoritative auto dashboard provider not found; checked=${autoModulePath}`);
   }
+  const bridgeModulePath = resolveSubprocessModule(
+    packageRoot,
+    "resources/extensions/gsd/mcp-bridge.ts",
+    checkExists,
+  ).modulePath;
 
+  // The subprocess starts with fresh session state, so its own answer is
+  // always inactive (#2705). The run state is read from the project database:
+  // an open pause, else an active worker row whose process runs now. The run
+  // state is part of the web boot payload, so a database that cannot be opened
+  // reads as inactive; the reason goes to stderr unless no database exists.
   const script = [
     'const { pathToFileURL } = await import("node:url");',
     `const mod = await import(pathToFileURL(process.env.${AUTO_DASHBOARD_MODULE_ENV}).href);`,
     'const result = await mod.getAutoDashboardData();',
+    'const projectCwd = process.env.GSD_WEB_PROJECT_CWD;',
+    'if (projectCwd && !result.active && !result.paused) {',
+    `const bridge = await import(pathToFileURL(process.env.${AUTO_DASHBOARD_BRIDGE_MODULE_ENV}).href);`,
+    'const opened = bridge.openExistingWorkflowDatabase(projectCwd);',
+    'if (!opened.ok && opened.reason !== "missing-database" && opened.reason !== "missing-gsd-dir") process.stderr.write(`auto dashboard: project database unavailable: ${opened.error?.message ?? opened.reason}\\n`);',
+    'if (opened.ok && bridge.readStoredPausedSession()) result.paused = true;',
+    'else if (opened.ok && bridge.hasLiveAutoWorkerForProject(projectCwd)) result.active = true;',
+    '}',
     'process.stdout.write(JSON.stringify(result));',
   ].join(" ");
 
@@ -151,6 +112,7 @@ export async function collectAuthoritativeAutoDashboardData(
         env: {
           ...env,
           [AUTO_DASHBOARD_MODULE_ENV]: autoModulePath,
+          [AUTO_DASHBOARD_BRIDGE_MODULE_ENV]: bridgeModulePath,
         },
         maxBuffer: AUTO_DASHBOARD_MAX_BUFFER,
         windowsHide: true,
@@ -160,14 +122,10 @@ export async function collectAuthoritativeAutoDashboardData(
           reject(new Error(`authoritative auto dashboard subprocess failed: ${stderr || error.message}`));
           return;
         }
+        if (stderr) process.stderr.write(stderr);
 
         try {
-          const parsed = JSON.parse(stdout) as AutoDashboardData;
-          const projectCwd = env.GSD_WEB_PROJECT_CWD || "";
-          const reconciled = projectCwd
-            ? reconcileWithDiskState(parsed, projectCwd, checkExists)
-            : parsed;
-          resolveResult(reconciled);
+          resolveResult(JSON.parse(stdout) as AutoDashboardData);
         } catch (parseError) {
           reject(
             new Error(

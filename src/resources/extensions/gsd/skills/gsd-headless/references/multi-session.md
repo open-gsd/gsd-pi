@@ -4,12 +4,11 @@ How to run and monitor multiple concurrent GSD sessions.
 
 ## Architecture
 
-GSD uses **file-based IPC** — no sockets or ports. All coordination happens through JSON files in `.gsd/parallel/`.
+GSD uses no sockets or ports. Worker status is a JSON file in `.gsd/parallel/`. Worker commands are `command_queue` rows in the project database (`.gsd/gsd.db`).
 
 ```
 .gsd/parallel/
 ├── M001.status.json    # Worker heartbeat + state
-├── M001.signal.json    # Coordinator → worker commands (ephemeral)
 ├── M002.status.json
 ├── M003.status.json
 └── ...
@@ -49,19 +48,13 @@ Written atomically (`.tmp` + rename) by each worker at `.gsd/parallel/<milestone
 
 **States:** `running`, `paused`, `stopped`, `error`
 
-## Signal Files
+## Worker Commands
 
-Coordinator writes to `.gsd/parallel/<milestoneId>.signal.json`. Worker consumes and deletes on next dispatch cycle.
+`pause`, `resume` and `stop` are `command_queue` rows in the project database, targeted at the worker's milestone. The coordinator writes them (`/gsd parallel pause|resume|stop`) and the worker takes the oldest pending row between units.
 
-```json
-{
-  "signal": "pause",
-  "sentAt": 1710000020000,
-  "from": "coordinator"
-}
-```
+An external orchestrator stops a worker with `SIGTERM`.
 
-**Signals:** `pause`, `resume`, `stop`, `rebase`
+**Deprecated:** a signal file `.gsd/parallel/<milestoneId>.signal.json` with `{"signal":"pause"}` (or `resume`, `stop`) is still accepted for compatibility. Between units, the worker writes its command as a `command_queue` row, removes the file, and logs a deprecation warning. The file is input only; the worker acts on the row. A file that the worker did not take before its session ended is removed and does not reach the next worker of the milestone.
 
 ## Spawning Workers
 
@@ -99,17 +92,11 @@ done
 
 ## Sending Commands
 
-```bash
-# Pause a worker
-send_signal() {
-  local MID=$1 SIGNAL=$2
-  echo "{\"signal\":\"$SIGNAL\",\"sentAt\":$(date +%s000),\"from\":\"coordinator\"}" \
-    > ".gsd/parallel/${MID}.signal.json"
-}
+Pause and resume are coordinator commands: use `/gsd parallel pause [MID]` and `/gsd parallel resume [MID]`. To stop a worker from an external orchestrator, send `SIGTERM` to its process:
 
-send_signal M001 pause
-send_signal M002 stop
-send_signal M003 resume
+```bash
+# Stop a worker you spawned
+kill -TERM "$WORKER_PID"
 ```
 
 ## Budget Enforcement
@@ -122,8 +109,7 @@ CEILING=50.00
 if (( $(echo "$TOTAL > $CEILING" | bc -l) )); then
   echo "Budget exceeded ($TOTAL > $CEILING) — stopping all"
   for f in .gsd/parallel/*.status.json; do
-    MID=$(jq -r '.milestoneId' "$f")
-    send_signal "$MID" stop
+    kill -TERM "$(jq -r '.pid' "$f")"
   done
 fi
 ```

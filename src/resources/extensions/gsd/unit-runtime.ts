@@ -13,9 +13,9 @@ import { join } from "node:path";
 import { atomicWriteSync } from "./atomic-write.js";
 import { gsdRoot, normalizeRealPath } from "./paths.js";
 import { parseUnitId } from "./unit-id.js";
-import { getTask, isDbAvailable } from "./gsd-db.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { readTask } from "./db/lifecycle-read.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
-import { isClosedStatus } from "./status-guards.js";
 import {
   deleteUnitRuntimeRow,
   listUnitRuntimeRows,
@@ -385,8 +385,7 @@ export function inspectExecuteTaskDurability(unitId: string): ExecuteTaskRecover
   let dbComplete = false;
   if (isDbAvailable()) {
     refreshWorkflowDatabaseFromDisk();
-    const task = getTask(mid, sid, tid);
-    dbComplete = !!task && isClosedStatus(task.status);
+    dbComplete = readTask(mid, sid, tid)?.done === true;
   }
 
   return { dbComplete };

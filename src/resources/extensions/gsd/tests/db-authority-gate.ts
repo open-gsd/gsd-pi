@@ -67,10 +67,13 @@ export function deleteProjections(base: string): void {
 /**
  * Overwrite every managed projection with content that contradicts the
  * database: every checkbox is flipped and every status word is inverted. Adds
- * the root files that older code read as state.
+ * the root files that older code read as state. Quarantine copies are the
+ * user's preserved bytes, not live projections, so they are never poisoned.
  */
 export function poisonProjections(base: string): void {
+  const quarantine = `${sep}quarantine${sep}`;
   for (const path of managedFiles(base)) {
+    if (path.includes(quarantine)) continue;
     const flipped = fs.readFileSync(path, "utf-8")
       .replace(/\[( |x)\]/gi, (_match, mark: string) => (mark === " " ? "[x]" : "[ ]"))
       .replace(/\b(complete|completed|done|pending|active)\b/gi, (word) =>

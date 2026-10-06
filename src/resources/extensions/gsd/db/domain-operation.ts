@@ -946,8 +946,17 @@ function requireMatchingImportForwardRepair(
 
 // Revision fencing: each transport session keeps, per project, the revision
 // that its last read tool returned. The next operation of that session must
-// still see that revision. A session with no read uses the current revision.
+// still see that revision, or a later one reached only through
+// NON_INTERFERING_OPERATION_TYPES. A session with no read uses the current
+// revision.
 const sessionReadRevisions = new Map<string, number>();
+
+// Operation types that change no state a session read: a session whose read
+// is older than only these operations is not stale.
+const NON_INTERFERING_OPERATION_TYPES: readonly string[] = [
+  "conversation.question.ask",
+  "conversation.question.answer",
+];
 const toolSession = new AsyncLocalStorage<string>();
 
 /** Run one tool call of a transport session. */
@@ -1043,7 +1052,19 @@ function executeDomainOperationCore(
 
     const readKey = sessionReadKey(authority.project_id);
     const readRevision = readKey === undefined ? undefined : sessionReadRevisions.get(readKey);
-    if (readRevision !== undefined && readRevision !== authority.revision) {
+    if (
+      readRevision !== undefined && readRevision !== authority.revision &&
+      (readRevision > authority.revision || db.prepare(`
+        SELECT 1 FROM workflow_operations
+        WHERE project_id = :project_id AND resulting_revision > :read_revision
+          AND operation_type NOT IN (SELECT value FROM json_each(:non_interfering))
+        LIMIT 1
+      `).get({
+        ":project_id": authority.project_id,
+        ":read_revision": readRevision,
+        ":non_interfering": JSON.stringify(NON_INTERFERING_OPERATION_TYPES),
+      }) !== undefined)
+    ) {
       throw new GSDError(
         GSD_REVISION_CONFLICT,
         `stale view: the project changed after this session last read it (read at revision ${readRevision}, ` +

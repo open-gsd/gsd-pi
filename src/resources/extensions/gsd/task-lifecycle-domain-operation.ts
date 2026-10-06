@@ -35,6 +35,10 @@ import type { ExecutionInvocation } from "./execution-invocation.js";
 import { ensurePendingSliceQ8 } from "./db/writers/slice-companion-state.js";
 import { deleteVerificationEvidence } from "./gsd-db.js";
 import { recordTaskRequirementDisposition } from "./task-recovery-domain-operation.js";
+import {
+  TASK_SOURCE_COMMIT_EFFECT,
+  readLifecycleCloseoutPlan,
+} from "./db/writers/closeout.js";
 
 export interface TaskLifecycleIdentity {
   milestoneId: string;
@@ -404,6 +408,13 @@ function loadReceipt(
  * closing the Kernel head (`route -> closeout -> settled`) so the next claim is
  * a fresh Attempt and no guard advertises a resume the lifecycle can no longer
  * satisfy.
+ *
+ * ADR-050: the `closeout` and `settled` stages of a succeeded Attempt mean a
+ * Closeout Plan settled — voiding such a head is refused while its
+ * source-commit effect has no Settlement Receipt, because silently discarding
+ * a publishable success would hide work. A dead lineage (an interrupted or
+ * failed Attempt — the cancelled-then-reopened Task) has no closeout to lie
+ * about and consumes its head as before.
  */
 function voidStaleRouteHead(
   context: Readonly<DomainOperationContext>,
@@ -420,6 +431,27 @@ function voidStaleRouteHead(
   `).get({ ":project_id": context.projectId, ":lifecycle_id": lifecycleId }) as
     { kernel_checkpoint_id: string; attempt_id: string; next_stage: string } | undefined;
   if (head?.next_stage !== "route") return;
+  const attemptOutcome = getDb().prepare(`
+    SELECT result.outcome
+    FROM workflow_execution_attempts attempt
+    JOIN workflow_attempt_results result
+      ON result.attempt_id = attempt.attempt_id
+     AND result.project_id = attempt.project_id
+     AND result.lifecycle_id = attempt.lifecycle_id
+    WHERE attempt.attempt_id = :attempt_id
+  `).get({ ":attempt_id": head.attempt_id }) as Record<string, unknown> | undefined;
+  if (String(attemptOutcome?.["outcome"] ?? "") === "succeeded") {
+    const plan = readLifecycleCloseoutPlan(context.projectId, lifecycleId);
+    const commitEffect = plan?.effects
+      .find((effect) => effect.effectKind === TASK_SOURCE_COMMIT_EFFECT);
+    if (!commitEffect?.receipt) {
+      throw new Error(
+        "Task reopen cannot void a route head whose Attempt succeeded without the Settlement " +
+        "Receipt of its Closeout Plan source commit; run `/gsd auto` to commit and publish the " +
+        "Task instead of discarding the verified work.",
+      );
+    }
+  }
   const closeout = appendKernelCheckpoint(context, {
     lifecycleId,
     attemptId: head.attempt_id,

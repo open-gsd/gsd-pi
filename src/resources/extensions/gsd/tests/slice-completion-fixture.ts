@@ -188,7 +188,7 @@ function publishCompletedTask(identity: SliceIdentity, taskId: string, runId: st
       endedAt: "2026-07-14T00:01:01.000Z",
       exitCode: 0,
       observation: "passed",
-      durableOutputRef: `db://${fixtureKey}/verification`,
+      durableOutputRef: `db://host-verification/${claim.attemptId}`,
       environment: { runner: "node-test", fixture: "slice-completion" },
     },
   });

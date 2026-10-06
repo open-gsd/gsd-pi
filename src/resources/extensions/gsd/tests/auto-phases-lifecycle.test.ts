@@ -10,15 +10,13 @@ import { tmpdir } from "node:os";
 import { resolveDispatchRecoveryAttempts } from "../auto/unit-phase.ts";
 import { runFinalize } from "../auto/finalize.ts";
 import { AutoSession } from "../auto/session.ts";
-import { hashVerificationFailureContext } from "../auto/verification-retry-policy.ts";
+import { setVerificationRetry } from "../auto/verification-retry-state.ts";
 import { readUnitRuntimeRecord, writeUnitRuntimeRecord } from "../unit-runtime.ts";
 import { captureRootDirtySnapshot } from "../root-write-leak-guard.ts";
 import { emitJournalEvent as emitJournalEventFn, type JournalEntry } from "../journal.ts";
 import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
-import { registerAutoWorker } from "../db/auto-workers.ts";
-import { claimMilestoneLease } from "../db/milestone-leases.ts";
-import { recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { readStoredUnitRetry, storeUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 
 function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
@@ -44,7 +42,7 @@ test("resolveDispatchRecoveryAttempts preserves cross-session recovery attempts 
 
 test("resolveDispatchRecoveryAttempts resets after recovery ran in the current session", () => {
   const recoveryCounts = new Map<string, number>([
-    ["execute-task/M001/S01/T01", 1],
+    ["timeout-recovery:execute-task/M001/S01/T01", 1],
   ]);
 
   assert.equal(
@@ -291,6 +289,12 @@ test("runFinalize still pauses a non-Task verification retry with a repeated fai
     rmSync(base, { recursive: true, force: true });
   });
 
+  // The dispatch before this one ended with the same failure. The history is
+  // on the dispatch rows, so a new session (a restart) finds the duplicate.
+  const project = openProjectWithDispatch(t, "complete-slice", "M001/S01");
+  storeUnitRetry("complete-slice", { unitId: "M001/S01", failureContext: "npm test failed", attempt: 1 });
+  project.claimNextDispatch();
+
   const s = new AutoSession();
   s.basePath = base;
   s.currentUnit = {
@@ -298,10 +302,6 @@ test("runFinalize still pauses a non-Task verification retry with a repeated fai
     id: "M001/S01",
     startedAt: 1,
   };
-  s.verificationRetryFailureHashes.set(
-    "complete-slice:M001/S01",
-    hashVerificationFailureContext("npm test failed"),
-  );
   let pauseCalls = 0;
 
   const result = await runFinalizeWithDeps(s, {
@@ -309,17 +309,44 @@ test("runFinalize still pauses a non-Task verification retry with a repeated fai
       pauseCalls++;
     },
     runPostUnitVerification: async () => {
-      s.pendingVerificationRetry = {
+      setVerificationRetry(s, "complete-slice", {
         unitId: "M001/S01",
         failureContext: "npm test failed",
         attempt: 2,
-      };
+      });
       return "retry";
     },
   });
 
   assert.deepEqual(result, { action: "break", reason: "duplicate-failure-context" });
   assert.equal(pauseCalls, 1);
+  assert.equal(
+    readStoredUnitRetry("complete-slice", "M001/S01"),
+    null,
+    "the pause gives the unit to a person, so its stored retry is released",
+  );
+});
+
+test("runFinalize retries a non-Task unit when the failure differs from the stored one", async (t) => {
+  const project = openProjectWithDispatch(t, "complete-slice", "M001/S01");
+  storeUnitRetry("complete-slice", { unitId: "M001/S01", failureContext: "npm test failed", attempt: 1 });
+  project.claimNextDispatch();
+  skipRetryDelay(t);
+
+  const s = new AutoSession();
+  s.basePath = project.base;
+  s.currentUnit = { type: "complete-slice", id: "M001/S01", startedAt: 1 };
+  const retry = { unitId: "M001/S01", failureContext: "npm run lint failed", attempt: 2 };
+
+  const result = await runFinalizeWithDeps(s, {
+    runPostUnitVerification: async () => {
+      setVerificationRetry(s, "complete-slice", retry);
+      return "retry";
+    },
+  });
+
+  assert.deepEqual(result, { action: "continue" });
+  assert.deepEqual(readStoredUnitRetry("complete-slice", "M001/S01"), retry);
 });
 
 test("runFinalize keeps an execute-task deferred git-commit remediation retry agent-owned across repeated failure signatures", async (t) => {
@@ -334,6 +361,18 @@ test("runFinalize keeps an execute-task deferred git-commit remediation retry ag
     rmSync(base, { recursive: true, force: true });
   });
 
+  const signature = "git-commit:1:blocked by test hook";
+  const retry = {
+    unitId: "M001/S01/T01",
+    failureContext: "Git commit failed after task verification. blocked by test hook",
+    signature,
+    attempt: 1,
+  };
+  // The dispatch before this one stored the same signature.
+  const project = openProjectWithDispatch(t, "execute-task", "M001/S01/T01");
+  storeUnitRetry("execute-task", retry);
+  project.claimNextDispatch();
+
   const s = new AutoSession();
   s.basePath = base;
   s.currentUnit = {
@@ -341,11 +380,6 @@ test("runFinalize keeps an execute-task deferred git-commit remediation retry ag
     id: "M001/S01/T01",
     startedAt: 1,
   };
-  const signature = "git-commit:1:blocked by test hook";
-  s.verificationRetryFailureHashes.set(
-    "execute-task:M001/S01/T01",
-    hashVerificationFailureContext(signature),
-  );
   let pauseCalls = 0;
   const journalEvents: Array<{ eventType: string; data: Record<string, unknown> }> = [];
   const originalSetTimeout = globalThis.setTimeout;
@@ -363,23 +397,17 @@ test("runFinalize keeps an execute-task deferred git-commit remediation retry ag
       journalEvents.push(event);
     },
     postUnitPostVerification: async () => {
-      s.pendingVerificationRetry = {
-        unitId: "M001/S01/T01",
-        failureContext: "Git commit failed after task verification. blocked by test hook",
-        signature,
-        attempt: 1,
-      };
+      setVerificationRetry(s, "execute-task", retry);
       return "retry";
     },
   });
 
   assert.deepEqual(result, { action: "continue" });
   assert.equal(pauseCalls, 0, "git-commit remediation retries are bounded by their own cap, not the legacy duplicate-signature breaker");
-  assert.equal(s.pendingVerificationRetryDispatch?.unitType, "execute-task");
-  assert.equal(
-    s.pendingVerificationRetryDispatch?.unitId,
-    "M001/S01/T01",
-    "remediation re-dispatch must target the same published task with its failure context",
+  assert.deepEqual(
+    readStoredUnitRetry("execute-task", "M001/S01/T01"),
+    retry,
+    "the stored retry stays, so the dispatch rules select the same published task with its failure context",
   );
   // #2119: the durable retry must be journaled as verification-retry, not the
   // misleading pre-execution-retry label.
@@ -402,6 +430,14 @@ test("runFinalize still pauses a non-task post-verification retry with a repeate
     rmSync(base, { recursive: true, force: true });
   });
 
+  const project = openProjectWithDispatch(t, "plan-slice", "M001/S01");
+  storeUnitRetry("plan-slice", {
+    unitId: "M001/S01",
+    failureContext: "pre-execution check: missing UAT section",
+    attempt: 1,
+  });
+  project.claimNextDispatch();
+
   const s = new AutoSession();
   s.basePath = base;
   s.currentUnit = {
@@ -409,10 +445,6 @@ test("runFinalize still pauses a non-task post-verification retry with a repeate
     id: "M001/S01",
     startedAt: 1,
   };
-  s.verificationRetryFailureHashes.set(
-    "plan-slice:M001/S01",
-    hashVerificationFailureContext("pre-execution check: missing UAT section"),
-  );
   let pauseCalls = 0;
   const journalEvents: Array<{ eventType: string; data: Record<string, unknown> }> = [];
 
@@ -424,11 +456,11 @@ test("runFinalize still pauses a non-task post-verification retry with a repeate
       journalEvents.push(event);
     },
     postUnitPostVerification: async () => {
-      s.pendingVerificationRetry = {
+      setVerificationRetry(s, "plan-slice", {
         unitId: "M001/S01",
         failureContext: "pre-execution check: missing UAT section",
         attempt: 2,
-      };
+      });
       return "retry";
     },
   });
@@ -442,8 +474,16 @@ test("runFinalize still pauses a non-task post-verification retry with a repeate
   assert.equal(retryEvents[0]?.data.attempt, 2);
 });
 
-/** A project database with a claimed plan-slice dispatch row for M001/S01. */
-function openProjectWithPlanSliceDispatch(t: { after(cb: () => void): void }): string {
+/**
+ * A project database with a claimed dispatch row for the unit.
+ * `claimNextDispatch` ends that dispatch and claims the next one for the unit,
+ * as a retry of the unit does.
+ */
+function openProjectWithDispatch(
+  t: { after(cb: () => void): void },
+  unitType: string,
+  unitId: string,
+): { base: string; claimNextDispatch(): void } {
   const base = mkdtempSync(join(tmpdir(), "gsd-finalize-stored-retry-"));
   t.after(() => {
     try { closeDatabase(); } catch { /* noop */ }
@@ -453,20 +493,13 @@ function openProjectWithPlanSliceDispatch(t: { after(cb: () => void): void }): s
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Test", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
-  const workerId = registerAutoWorker({ projectRootRealpath: base });
-  const lease = claimMilestoneLease(workerId, "M001");
-  if (!lease.ok) throw new Error("expected test lease");
-  const claim = recordDispatchClaim({
-    traceId: "trace",
-    workerId,
-    milestoneLeaseToken: lease.token,
-    milestoneId: "M001",
-    sliceId: "S01",
-    unitType: "plan-slice",
-    unitId: "M001/S01",
-  });
-  if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
-  return base;
+  const dispatch = claimTestDispatch(base, { milestoneId: "M001", sliceId: "S01", unitType, unitId });
+  return { base, claimNextDispatch: () => dispatch.claimNext() };
+}
+
+/** A project database with a claimed plan-slice dispatch row for M001/S01. */
+function openProjectWithPlanSliceDispatch(t: { after(cb: () => void): void }): string {
+  return openProjectWithDispatch(t, "plan-slice", "M001/S01").base;
 }
 
 /** Run the retry delay of the retry policy with no wait. */
@@ -485,7 +518,7 @@ const PLANNER_RETRY = {
   attempt: 1,
 };
 
-test("runFinalize keeps no session snapshot for a planner retry stored on the dispatch row", async (t) => {
+test("runFinalize keeps a planner retry on the dispatch row for the dispatch rules", async (t) => {
   const s = new AutoSession();
   s.basePath = openProjectWithPlanSliceDispatch(t);
   s.currentUnit = { type: "plan-slice", id: "M001/S01", startedAt: 1 };
@@ -501,46 +534,16 @@ test("runFinalize keeps no session snapshot for a planner retry stored on the di
   });
 
   assert.deepEqual(result, { action: "continue" });
-  assert.equal(
-    s.pendingVerificationRetryDispatch,
-    null,
-    "the dispatch rules select a stored retry from the database, not from a session snapshot",
-  );
   assert.deepEqual(readStoredUnitRetry("plan-slice", "M001/S01"), PLANNER_RETRY);
 });
 
-test("runFinalize replays a planner retry with no dispatch row from the session snapshot", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-finalize-unclaimed-retry-"));
-  t.after(() => {
-    rmSync(base, { recursive: true, force: true });
-  });
-  const s = new AutoSession();
-  s.basePath = base;
-  s.currentUnit = { type: "plan-slice", id: "M001/S01", startedAt: 1 };
-  skipRetryDelay(t);
-
-  const result = await runFinalizeWithDeps(s, {
-    emitJournalEvent() {},
-    postUnitPostVerification: async () => {
-      s.pendingVerificationRetry = PLANNER_RETRY;
-      storeUnitRetry("plan-slice", PLANNER_RETRY);
-      return "retry";
-    },
-  });
-
-  assert.deepEqual(result, { action: "continue" });
-  assert.equal(s.pendingVerificationRetryDispatch?.unitType, "plan-slice");
-  assert.equal(s.pendingVerificationRetryDispatch?.unitId, "M001/S01");
-});
-
 test("a retry-policy pause releases the planner retry stored on the dispatch row", async (t) => {
+  const project = openProjectWithDispatch(t, "plan-slice", "M001/S01");
+  storeUnitRetry("plan-slice", PLANNER_RETRY);
+  project.claimNextDispatch();
   const s = new AutoSession();
-  s.basePath = openProjectWithPlanSliceDispatch(t);
+  s.basePath = project.base;
   s.currentUnit = { type: "plan-slice", id: "M001/S01", startedAt: 1 };
-  s.verificationRetryFailureHashes.set(
-    "plan-slice:M001/S01",
-    hashVerificationFailureContext(PLANNER_RETRY.failureContext),
-  );
 
   const result = await runFinalizeWithDeps(s, {
     emitJournalEvent() {},
@@ -1094,11 +1097,6 @@ test("runFinalize re-runs finalize/publication only when an artifact retry hits 
   assert.equal(gateRuns, 1, "the verification gate must re-run in the same finalize pass");
   assert.equal(publishCalls, 1, "publication must run from the existing verified artifact");
   assert.equal(s.pendingVerificationRetry, null, "the consumed retry marker must not linger");
-  assert.equal(
-    s.pendingVerificationRetryDispatch,
-    null,
-    "no unit re-dispatch may be enqueued for a verified Attempt",
-  );
   assert.ok(
     journalEvents.some((event) => event.eventType === "artifact-verification-retry"),
     "the spurious artifact retry stays journaled for forensics",
@@ -1188,5 +1186,5 @@ test("runFinalize still re-dispatches a git-commit remediation retry for a verif
 
   assert.deepEqual(result, { action: "continue" }, "git-commit remediation keeps its re-dispatch path");
   assert.equal(gateRuns, 0, "the gate must not run instead of the remediation re-dispatch");
-  assert.equal(s.pendingVerificationRetryDispatch?.unitId, "M001/S01/T01");
+  assert.equal(s.pendingVerificationRetry?.unitId, "M001/S01/T01");
 });

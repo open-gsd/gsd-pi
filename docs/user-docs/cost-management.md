@@ -12,7 +12,7 @@ Every unit's metrics are captured automatically:
 - **Tool calls** — number of tool invocations
 - **Message counts** — assistant and user messages
 
-Data is stored in `.gsd/metrics.json` and survives across sessions.
+Data is stored in the project database (`unit_metrics` rows) and in `.gsd/metrics.json`, and survives across sessions. The budget ceiling reads the spend from the database, so a deleted or pruned `metrics.json` does not reset it. Unit runs that only `metrics.json` holds (from an older release) are not counted. When a budget ceiling is set, auto mode shows a warning with the uncounted amount one time per session, and `/gsd doctor` reports them. Run `/gsd doctor --fix` to import them so the budget ceiling counts them. Until then, MCP `gsd_history` and the web history panel show the `metrics.json` units only when the database holds no unit rows, and label the result as a projection fallback. A parallel worker counts only the units of its own Milestone (or Slice) since its start against the budget ceiling; the coordinator owns the total across workers.
 
 ### Viewing Costs
 

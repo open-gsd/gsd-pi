@@ -1,18 +1,17 @@
 // GSD Extension - File Parsing and I/O
-// Parsers for roadmap, plan, summary, and continue files.
+// Parsers for roadmap, plan, and summary files.
 // Used by state derivation and the status widget.
 // Pure functions, zero Pi dependencies - uses only Node built-ins.
 
 import { promises as fs } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWriteAsync } from './atomic-write.js';
-import { resolveMilestoneFile, relMilestoneFile } from './paths.js';
-import { milestoneIdSort, findMilestoneIds } from './milestone-ids.js';
+import { resolveMilestoneFile } from './paths.js';
+import { milestoneIdSort } from './milestone-ids.js';
 
 import type {
   TaskPlanFile, TaskPlanFrontmatter,
   Summary, SummaryFrontmatter, SummaryRequires, FileModified,
-  Continue, ContinueFrontmatter, ContinueStatus,
   RequirementCounts,
   TaskIO,
   SecretsManifest, SecretsManifestEntry, SecretsManifestEntryStatus,
@@ -380,106 +379,6 @@ function _parseSummaryImpl(content: string): Summary {
   return { frontmatter, title, oneLiner, whatHappened, deviations, filesModified, followUps, knownLimitations };
 }
 
-// ─── Continue Parser ───────────────────────────────────────────────────────
-
-export function parseContinue(content: string): Continue {
-  return cachedParse(content, 'continue', _parseContinueImpl);
-}
-
-function _parseContinueImpl(content: string): Continue {
-  const [fmLines, body] = splitFrontmatter(content);
-
-  const fm = fmLines ? parseFrontmatterMap(fmLines) : {};
-  const frontmatter: ContinueFrontmatter = {
-    milestone: (fm.milestone as string) || '',
-    slice: (fm.slice as string) || '',
-    task: (fm.task as string) || '',
-    step: typeof fm.step === 'string' ? parseInt(fm.step) : (fm.step as number) || 0,
-    totalSteps: typeof fm.total_steps === 'string' ? parseInt(fm.total_steps) : (fm.total_steps as number) ||
-      (typeof fm.totalSteps === 'string' ? parseInt(fm.totalSteps) : (fm.totalSteps as number) || 0),
-    status: ((fm.status as string) || 'in_progress') as ContinueStatus,
-    savedAt: (fm.saved_at as string) || (fm.savedAt as string) || '',
-  };
-
-  const completedWork = extractSection(body, 'Completed Work') || '';
-  const remainingWork = extractSection(body, 'Remaining Work') || '';
-  const decisions = extractSection(body, 'Decisions Made') || '';
-  const context = extractSection(body, 'Context') || '';
-  const nextAction = extractSection(body, 'Next Action') || '';
-
-  return { frontmatter, completedWork, remainingWork, decisions, context, nextAction };
-}
-
-// ─── Continue Formatter ────────────────────────────────────────────────────
-
-function formatFrontmatter(data: Record<string, unknown>): string {
-  const lines: string[] = ['---'];
-
-  for (const [key, value] of Object.entries(data)) {
-    if (value === undefined || value === null) continue;
-
-    if (Array.isArray(value)) {
-      if (value.length === 0) {
-        lines.push(`${key}: []`);
-      } else if (typeof value[0] === 'object' && value[0] !== null) {
-        lines.push(`${key}:`);
-        for (const obj of value) {
-          const entries = Object.entries(obj as Record<string, unknown>);
-          if (entries.length > 0) {
-            lines.push(`  - ${entries[0][0]}: ${entries[0][1]}`);
-            for (let i = 1; i < entries.length; i++) {
-              lines.push(`    ${entries[i][0]}: ${entries[i][1]}`);
-            }
-          }
-        }
-      } else {
-        lines.push(`${key}:`);
-        for (const item of value) {
-          lines.push(`  - ${item}`);
-        }
-      }
-    } else {
-      lines.push(`${key}: ${value}`);
-    }
-  }
-
-  lines.push('---');
-  return lines.join('\n');
-}
-
-export function formatContinue(cont: Continue): string {
-  const fm = cont.frontmatter;
-  const fmData: Record<string, unknown> = {
-    milestone: fm.milestone,
-    slice: fm.slice,
-    task: fm.task,
-    step: fm.step,
-    total_steps: fm.totalSteps,
-    status: fm.status,
-    saved_at: fm.savedAt,
-  };
-
-  const lines: string[] = [];
-  lines.push(formatFrontmatter(fmData));
-  lines.push('');
-  lines.push('## Completed Work');
-  lines.push(cont.completedWork);
-  lines.push('');
-  lines.push('## Remaining Work');
-  lines.push(cont.remainingWork);
-  lines.push('');
-  lines.push('## Decisions Made');
-  lines.push(cont.decisions);
-  lines.push('');
-  lines.push('## Context');
-  lines.push(cont.context);
-  lines.push('');
-  lines.push('## Next Action');
-  lines.push(cont.nextAction);
-
-  return lines.join('\n');
-}
-
 // ─── File I/O ──────────────────────────────────────────────────────────────
 
 /**
@@ -623,50 +522,6 @@ export function countMustHavesMentionedInSummary(
   return count;
 }
 
-// ─── Task Plan IO Extractor ────────────────────────────────────────────────
-
-/**
- * Extract input and output file paths from a task plan's `## Inputs` and
- * `## Expected Output` sections. Looks for backtick-wrapped file paths on
- * each line (e.g. `` `src/foo.ts` ``).
- *
- * Returns empty arrays for missing/empty sections — callers should treat
- * tasks with no IO as ambiguous (sequential fallback trigger).
- */
-export function parseTaskPlanIO(content: string): { inputFiles: string[]; outputFiles: string[] } {
-  const backtickPathRegex = /`([^`]+)`/g;
-
-  function extractPaths(sectionText: string | null): string[] {
-    if (!sectionText) return [];
-    const paths: string[] = [];
-    for (const line of sectionText.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      let match: RegExpExecArray | null;
-      backtickPathRegex.lastIndex = 0;
-      while ((match = backtickPathRegex.exec(trimmed)) !== null) {
-        const candidate = normalizePlannedFileReference(match[1]);
-        // Filter out things that look like code tokens rather than file paths
-        // (e.g. `true`, `false`, `npm run test`). A file path has at least one
-        // dot or slash.
-        if (candidate.includes("/") || candidate.includes("\\") || candidate.includes(".")) {
-          paths.push(candidate);
-        }
-      }
-    }
-    return paths;
-  }
-
-  const [, body] = splitFrontmatter(content);
-  const inputSection = extractSection(body, "Inputs");
-  const outputSection = extractSection(body, "Expected Output");
-
-  return {
-    inputFiles: extractPaths(inputSection),
-    outputFiles: extractPaths(outputSection),
-  };
-}
-
 // ─── UAT Type Extractor ────────────────────────────────────────────────────
 
 /** Match a value against the recognised UAT type keywords (leading-keyword-only). */
@@ -724,25 +579,6 @@ export function parseContextDependsOn(content: string | null): string[] {
   const raw = fm['depends_on'];
   if (!Array.isArray(raw) || raw.length === 0) return [];
   return (raw as string[]).map(s => String(s).trim()).filter(Boolean);
-}
-
-/**
- * Inline the prior milestone's SUMMARY.md as context for the current milestone's planning prompt.
- * Returns null when: (1) `mid` is the first milestone, (2) prior milestone has no SUMMARY file.
- *
- * Uses the shared findMilestoneIds to scan the milestones directory.
- */
-export async function inlinePriorMilestoneSummary(mid: string, base: string): Promise<string | null> {
-  const sorted = findMilestoneIds(base);
-  if (sorted.length === 0) return null;
-  const idx = sorted.indexOf(mid);
-  if (idx <= 0) return null;
-  const prevMid = sorted[idx - 1];
-  const absPath = resolveMilestoneFile(base, prevMid, "SUMMARY");
-  const relPath = relMilestoneFile(base, prevMid, "SUMMARY");
-  const content = absPath ? await loadFile(absPath) : null;
-  if (!content) return null;
-  return `### Prior Milestone Summary\nSource: \`${relPath}\`\n\n${content.trim()}`;
 }
 
 // ─── Manifest Status ──────────────────────────────────────────────────────

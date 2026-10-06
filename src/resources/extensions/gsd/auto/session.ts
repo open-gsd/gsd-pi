@@ -139,7 +139,6 @@ export class AutoSession {
   // ── Dispatch counters ────────────────────────────────────────────────────
   readonly unitDispatchCount = new Map<string, number>();
   readonly unitLifetimeDispatches = new Map<string, number>();
-  readonly unitRecoveryCount = new Map<string, number>();
 
   // ── Timers ───────────────────────────────────────────────────────────────
   unitTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -171,6 +170,8 @@ export class AutoSession {
   autoModeStartThinkingLevel: ThinkingLevelSnapshot | null = null;
   originalThinkingLevel: ThinkingLevelSnapshot | null = null;
   lastBudgetAlertLevel: BudgetAlertLevel = 0;
+  /** True after the budget guard looked for metrics.json spend that the database does not hold. */
+  uncountedLedgerSpendNotified = false;
 
   // ── Recovery ─────────────────────────────────────────────────────────────
   pendingCrashRecovery: string | null = null;
@@ -188,9 +189,12 @@ export class AutoSession {
    * journal, the dispatch ledger, and the operator.
    */
   lastSafetyBlockRecovery: { recoveryActionId?: string; resumeInstruction: string } | null = null;
+  /**
+   * Verification retry counts of custom-engine steps; each count is stored on
+   * the step's custom_workflow_steps row (verify_retries). A dev-engine unit
+   * keeps its count on its dispatch row (budget kind `verification`).
+   */
   readonly verificationRetryCount = new Map<string, number>();
-  readonly verificationRetryFailureHashes = new Map<string, string>();
-  readonly exhaustedVerificationUnits = new Set<string>();
   /**
    * Budget counts for units that run with no unit_dispatches row (custom-engine
    * steps, no database). A unit with a dispatch row keeps its counts on that
@@ -198,8 +202,8 @@ export class AutoSession {
    */
   readonly unclaimedUnitBudgets = new Map<string, number>();
   pausedSessionFile: string | null = null;
-  pausedUnitType: string | null = null;
-  pausedUnitId: string | null = null;
+  /** The dispatch row the open pause links to (auto_pauses.dispatch_id). */
+  pausedDispatchId: number | null = null;
   resourceVersionOnStart: string | null = null;
 
   // ── Tool invocation errors (#2883) ──────────────────────────────────
@@ -261,7 +265,6 @@ export class AutoSession {
   // ── Orchestration seam ───────────────────────────────────────────────────
   orchestration: AutoOrchestrationModule | null = null;
   pendingOrchestrationDispatch: PendingOrchestrationDispatch | null = null;
-  pendingVerificationRetryDispatch: PendingOrchestrationDispatch | null = null;
 
   // ── Loop promise state ──────────────────────────────────────────────────
   // Per-unit resolve function and session-switch guard live at module level
@@ -359,7 +362,6 @@ export class AutoSession {
     // Dispatch
     this.unitDispatchCount.clear();
     this.unitLifetimeDispatches.clear();
-    this.unitRecoveryCount.clear();
 
     // Unit
     this.clearCurrentUnit();
@@ -380,6 +382,7 @@ export class AutoSession {
     this.autoModeStartThinkingLevel = null;
     this.originalThinkingLevel = null;
     this.lastBudgetAlertLevel = 0;
+    this.uncountedLedgerSpendNotified = false;
 
     // Recovery
     this.pendingCrashRecovery = null;
@@ -387,12 +390,9 @@ export class AutoSession {
     this.lastTaskRecoveryAbortId = null;
     this.lastSafetyBlockRecovery = null;
     this.verificationRetryCount.clear();
-    this.verificationRetryFailureHashes.clear();
-    this.exhaustedVerificationUnits.clear();
     this.unclaimedUnitBudgets.clear();
     this.pausedSessionFile = null;
-    this.pausedUnitType = null;
-    this.pausedUnitId = null;
+    this.pausedDispatchId = null;
     this.resourceVersionOnStart = null;
 
     // Metrics
@@ -423,7 +423,6 @@ export class AutoSession {
     // Orchestration seam
     this.orchestration = null;
     this.pendingOrchestrationDispatch = null;
-    this.pendingVerificationRetryDispatch = null;
 
     // Loop promise state lives in auto-loop.ts module scope
   }

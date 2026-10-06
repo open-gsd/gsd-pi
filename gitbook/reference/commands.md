@@ -32,7 +32,7 @@
 | `/gsd update` | Update GSD to the latest version |
 | `/gsd knowledge` | Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild. |
 | `/gsd fast` | Toggle service tier for supported models |
-| `/gsd rate` | Rate last unit's model tier (over/ok/under) |
+| `/gsd rate` | Rate last unit's model tier (over/ok/under) or reset the routing history |
 | `/gsd changelog` | Show release notes |
 | `/gsd logs` | Browse activity and debug logs |
 | `/gsd remote` | Control remote auto-mode |
@@ -52,7 +52,7 @@
 | `/gsd setup` | Global setup status |
 | `/gsd skill-health` | Skill lifecycle dashboard |
 | `/gsd hooks` | Show configured hooks |
-| `/gsd migrate` | Migrate v1 `.planning` to DB-backed `.gsd` with backup and audit |
+| `/gsd migrate` | Preview a v1 `.planning` migration to DB-backed `.gsd`; apply it with `--preview=<sha256>` |
 | `/gsd recover` | See the [authoritative commands reference](../../docs/user-docs/commands.md) for the evidence-bound Preview, verified Import Application, and recovery contract |
 | `/gsd rebuild markdown` | Rebuild markdown projections from the canonical database; stale completion projections are quarantined, not imported |
 | `/gsd codebase [generate\|update\|stats]` | Manage `.gsd/CODEBASE.md`; parent workspaces include declared child repositories under repo-labeled sections |

@@ -4,6 +4,7 @@ import { parseUnitId } from "./unit-id.js";
 import { isDbAvailable } from "./gsd-db.js";
 import { readMilestone, readMilestones, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
+import { sliceAwaitsUatVerdict } from "./uat-dispatch.js";
 
 const SLICE_DISPATCH_TYPES = new Set([
   "research-slice",
@@ -14,7 +15,7 @@ const SLICE_DISPATCH_TYPES = new Set([
 ]);
 
 export function getPriorSliceCompletionBlocker(
-  _base: string,
+  base: string,
   _mainBranch: string,
   unitType: string,
   unitId: string,
@@ -72,6 +73,11 @@ export function getPriorSliceCompletionBlocker(
       return `Cannot dispatch ${unitType} ${unitId}: slice ${targetMid}/${targetSid} is missing from the workflow DB.`;
     }
 
+    // complete-slice starts no new work on the dependency, and its dispatch
+    // rule comes before run-uat. A UAT hold on it would stop auto-mode with no
+    // unit to dispatch, so the hold applies only to the other slice units.
+    const holdsForUat = unitType !== "complete-slice";
+
     if (targetSlice.depends.length > 0) {
       const sliceMap = new Map(slices.map((slice) => [slice.id, slice]));
       for (const depId of targetSlice.depends) {
@@ -81,6 +87,9 @@ export function getPriorSliceCompletionBlocker(
         }
         if (!dependency.satisfiesDependents) {
           return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} is not complete.`;
+        }
+        if (holdsForUat && sliceAwaitsUatVerdict(base, targetMid, depId)) {
+          return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} has no UAT verdict.`;
         }
       }
     } else {
@@ -106,6 +115,12 @@ export function getPriorSliceCompletionBlocker(
         .find((slice) => !slice.done && !reverseDependents.has(slice.id));
       if (incomplete) {
         return `Cannot dispatch ${unitType} ${unitId}: earlier slice ${targetMid}/${incomplete.id} is not complete.`;
+      }
+      const awaitsUat = holdsForUat && slices
+        .slice(0, targetIndex)
+        .find((slice) => !reverseDependents.has(slice.id) && sliceAwaitsUatVerdict(base, targetMid, slice.id));
+      if (awaitsUat) {
+        return `Cannot dispatch ${unitType} ${unitId}: earlier slice ${targetMid}/${awaitsUat.id} has no UAT verdict.`;
       }
     }
   }

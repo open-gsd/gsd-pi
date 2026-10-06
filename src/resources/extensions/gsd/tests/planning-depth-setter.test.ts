@@ -37,7 +37,7 @@ test("Deep mode: setPlanningDepth creates PREFERENCES.md when missing", (t) => {
   assert.ok(existsSync(path), "PREFERENCES.md must be created");
   const { frontmatter } = readFrontmatter(path);
   assert.strictEqual(frontmatter.planning_depth, "deep");
-  assert.strictEqual(frontmatter.workflow_prefs_captured, true);
+  assert.strictEqual("workflow_prefs_captured" in frontmatter, false, "the stage marker is a database fact, not a frontmatter key");
   assert.strictEqual(frontmatter.commit_policy, "per-task");
   assert.strictEqual(frontmatter.branch_model, "single");
   assert.strictEqual(frontmatter.uat_dispatch, true);
@@ -97,7 +97,6 @@ test("Deep mode: setPlanningDepth preserves explicit workflow preference values"
   setPlanningDepth(base, "deep");
 
   const { frontmatter } = readFrontmatter(join(base, ".gsd", "PREFERENCES.md"));
-  assert.strictEqual(frontmatter.workflow_prefs_captured, true);
   assert.strictEqual(frontmatter.commit_policy, "manual");
   assert.strictEqual(frontmatter.branch_model, "per-milestone-worktree");
   assert.strictEqual(frontmatter.uat_dispatch, false);

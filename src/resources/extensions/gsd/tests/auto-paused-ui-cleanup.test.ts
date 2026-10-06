@@ -16,6 +16,7 @@ import {
   stopAuto,
 } from "../auto.ts";
 import { autoSession } from "../auto-runtime-state.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
 import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.ts";
@@ -268,11 +269,10 @@ test("cleanupAfterLoopExit preserves completionStopInProgress even when preserve
 test("pauseAuto preserves artifact retry counts across pause/resume", async () => {
   const base = mkdtempSync(join(tmpdir(), "gsd-pause-retry-count-"));
   const previousCwd = process.cwd();
-  const retryKey = "execute-task:M001/S01/T01";
 
   autoSession.reset();
   autoSession.active = true;
-  autoSession.verificationRetryCount.set(retryKey, 2);
+  useUnitBudget(autoSession, "execute-task", "M001/S01/T01", 2);
   autoSession.pendingVerificationRetry = {
     unitId: "M001/S01/T01",
     failureContext: "Missing expected artifact (attempt 2/3).",
@@ -281,11 +281,11 @@ test("pauseAuto preserves artifact retry counts across pause/resume", async () =
 
   try {
     process.chdir(base);
-    await pauseAuto();
+    await pauseAuto(undefined, undefined, "user_request");
 
     assert.equal(autoSession.paused, true);
     assert.equal(autoSession.pendingVerificationRetry, null);
-    assert.equal(autoSession.verificationRetryCount.get(retryKey), 2);
+    assert.equal(usedUnitBudget(autoSession, "execute-task", "M001/S01/T01"), 2);
   } finally {
     autoSession.reset();
     process.chdir(previousCwd);
@@ -308,7 +308,7 @@ test("pauseAuto marks active worker as stopping and clears workerId", async () =
     autoSession.workerId = workerId;
     process.chdir(base);
 
-    await pauseAuto();
+    await pauseAuto(undefined, undefined, "user_request");
 
     assert.equal(autoSession.workerId, null);
     assert.equal(getAutoWorker(workerId)?.status, "stopping");
@@ -348,7 +348,7 @@ test("pauseAuto preserves worker lease across transient provider auto-resume pau
     autoSession.milestoneLeaseToken = lease.token;
     process.chdir(base);
 
-    await pauseAuto(undefined, undefined, {
+    await pauseAuto(undefined, undefined, "external_dependency", {
       message: "Provider error: socket closed",
       category: "provider",
       isTransient: true,
@@ -436,7 +436,7 @@ test("pauseAuto preserves worker lease while a unit execution is in flight, lett
   // Watchdog shape (#2429): idle / hard-timeout pauses carry no errorContext,
   // but the unit is still executing. Dropping the lease here would fence the
   // in-flight Attempt's settlement out of the DB (LEASE_FENCING_LOST).
-  await pauseAuto();
+  await pauseAuto(undefined, undefined, "user_request");
 
   assert.equal(autoSession.paused, true);
   assert.equal(autoSession.workerId, workerId);
@@ -498,7 +498,7 @@ test("pauseAuto releases the milestone lease when no unit execution is in flight
   autoSession.workerId = workerId;
   autoSession.milestoneLeaseToken = lease.token;
 
-  await pauseAuto();
+  await pauseAuto(undefined, undefined, "user_request");
 
   assert.equal(autoSession.paused, true);
   assert.equal(autoSession.workerId, null);
@@ -570,7 +570,7 @@ test("settlement of an Attempt claimed before a lease-dropping pause hits the fe
   autoSession.workerId = workerId;
   autoSession.milestoneLeaseToken = lease.token;
 
-  await pauseAuto();
+  await pauseAuto(undefined, undefined, "user_request");
 
   assert.equal(getMilestoneLease("M001")?.status, "released");
 
@@ -616,7 +616,7 @@ test("pauseAuto records the expected worktree path when paused from project root
     autoSession.originalBasePath = base;
     autoSession.currentMilestoneId = "M001";
 
-    await pauseAuto();
+    await pauseAuto(undefined, undefined, "user_request");
 
     const meta = readPausedSessionMetadata(base);
     assert.ok(meta);

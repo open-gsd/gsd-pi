@@ -218,7 +218,7 @@ test('exhausted plan-slice timeout recovery pauses without fabricating completio
       basePath: base,
       verbose: false,
       currentUnitStartedAt: startedAt,
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     },
   );
 

@@ -10,7 +10,16 @@ If you have projects with `.planning` directories from Git Ship Done v1 (now con
 
 # Or specify a path
 /gsd migrate ~/projects/my-old-project
+
+# Apply the exact Preview that the first run printed
+/gsd migrate --preview=sha256:<hash> ~/projects/my-old-project
+
+# The same two steps with no TUI (CI, scripts); the output goes to stderr
+gsd headless migrate
+gsd headless migrate --preview=sha256:<hash>
 ```
+
+The first run writes no projection, no backup and no database record. It prints the Import Preview with its hash and the command that applies it. The first run leaves the project directory as it was: a target with no database gets its Preview from an empty database in the temporary directory of the operating system, and that database is removed. The project stays a v1 project, and `/gsd` still offers the migration. The second run applies the migration only when the Preview still has the approved hash. When the source or the database changed, it applies nothing and prints the current Preview command. Neither run needs an interactive menu.
 
 ## What Gets Migrated
 
@@ -26,10 +35,10 @@ The migration tool:
 - Preserves completion state (`[x]` phases stay done, summaries carry over)
 - Consolidates research files into the new structure and archives the full legacy `.planning` source under `.gsd/migration/legacy/`
 - Records `.gsd/migration/MIGRATION.md` and `.gsd/migration/manifest.json` audit artifacts
-- Shows a preview before writing anything, including requirement status totals (validated, active, deferred, out of scope) and legacy-input counts (milestone phase dirs, decision files, seed files)
-- Optionally runs a read-only review of the output for quality assurance
+- Shows a preview before writing anything, including requirement status totals (validated, active, deferred, out of scope) and legacy-input counts (milestone phase dirs, decision files, seed files), followed by the exact Import Preview and its hash
+- In the interactive TUI, optionally runs a read-only review of the output for quality assurance
 
-If migration reports a Forward Repair overlap, review each target and rerun the exact `--forward-choice` command it prints. The evidence-bound flags preserve later canonical work unless you explicitly choose the displayed backup value.
+If migration reports a Forward Repair overlap, review each target and rerun the exact `--preview` and `--forward-choice` command it prints. The evidence-bound flags preserve later canonical work unless you explicitly choose the displayed backup value.
 
 ## Supported Formats
 
@@ -67,7 +76,7 @@ If an existing project has legacy markdown artifacts that you explicitly want to
 
 `/gsd recover` fingerprints the legacy source and current database and prints an exact Preview hash. Re-run it with `--preview=<sha256>` to create and independently verify a retained backup, apply that unchanged preview through one atomic Import Application, and assess the safe next action. It updates only modeled preview targets; database rows absent from markdown are not cleared. The command prints the Application ID and retained backup path.
 
-The Preview reads `.gsd/phases`, `.gsd/milestones` and the root files `DECISIONS.md`, `REQUIREMENTS.md`, `KNOWLEDGE.md`, `PROJECT.md` and `QUEUE.md`. Decisions, requirements and the `KNOWLEDGE.md` Rule, Pattern and Lesson rows are imported as database records. The import never writes file text over a database knowledge row: the Preview reports a file row with different content as a conflict and keeps the database row. The Preview lists under `Not imported` each source that it only preserves, for example `PROJECT.md` and a milestone `CONTEXT.md`. Such a file stays on disk and gets no database row. The Preview lists under `Diagnoses` each part of `KNOWLEDGE.md` that it does not import.
+The Preview reads `.gsd/phases`, `.gsd/milestones` and the root files `DECISIONS.md`, `REQUIREMENTS.md`, `KNOWLEDGE.md`, `PROJECT.md` and `QUEUE.md`. Decisions, requirements and the `KNOWLEDGE.md` Rule, Pattern and Lesson rows are imported as database records. The text of a milestone `CONTEXT.md` and a milestone `RESEARCH.md` is imported as the artifact record that the discussion and the research save; the Preview shows a create when the database has no record. A record that `/gsd migrate` stored for the same document is that record; the import creates no second one. The import does not write file text over a database knowledge row or over a milestone `CONTEXT.md` or `RESEARCH.md` record unless you choose it: the Preview reports a file row or a file with different content as a conflict, keeps the database row, and shows a `--choice=<id>.use-file` option for it (a K, P or L id, or an id such as `M001-CONTEXT`). Re-run with that option to seal a new Preview that updates the database row with the file text, then approve the new Preview hash with the same option. A row whose database record was forgotten has no such option. The Preview lists under `Not imported` each source that it only preserves, for example `PROJECT.md` and a milestone `CONTEXT-DRAFT.md`. Such a file stays on disk and gets no database row. The Preview lists under `Diagnoses` each part of `KNOWLEDGE.md` that it does not import.
 
 When the Preview has an item that needs a decision, `/gsd recover` applies nothing and lists each item. An item that you can decide shows a `--choice=<diagnosis-id>.preserved` option, which keeps that source preserved and not imported; other items need a fix in the source markdown. Re-run with the shown `--choice` options to seal a new Preview, then approve the new Preview hash. A `--choice` value that is not valid is rejected before the import is applied. One such item is a milestone, slice or task whose status in the markdown disagrees with the status that the database records for it (`status-change-contradicts-lifecycle`). The import does not change that status: keep the database row with the shown `--choice` option, or change the status with the workflow command and re-run.
 

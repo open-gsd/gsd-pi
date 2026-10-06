@@ -246,7 +246,7 @@ phases:
 
 ### `reactive_execution`
 
-Automatic parallel task dispatch inside a slice. Reactive execution is enabled by default and only dispatches when task-plan IO annotations produce a non-ambiguous graph with enough ready, non-conflicting tasks.
+Automatic parallel task dispatch inside a slice. Reactive execution is enabled by default and only dispatches when the planned inputs and expected output on the task rows produce a non-ambiguous graph with enough ready, non-conflicting tasks. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch.
 
 ```yaml
 reactive_execution:

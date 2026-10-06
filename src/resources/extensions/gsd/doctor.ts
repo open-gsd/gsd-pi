@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { _getAdapter, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
-import { isInactiveStatus } from "./status-guards.js";
+import { _getAdapter, isDbAvailable } from "./gsd-db.js";
+import { readMilestoneSlices } from "./db/lifecycle-read.js";
 import {
   openExistingWorkflowDatabase,
   openWorkflowDatabaseIsolated,
@@ -136,8 +136,7 @@ export async function selectDoctorScope(basePath: string, requestedScope?: strin
   // Slice rows decide: a milestone with no slice rows is not planned, and a
   // rendered ROADMAP file is not read.
   for (const milestone of state.registry) {
-    const dbSlices = getMilestoneSlices(milestone.id);
-    if (dbSlices.some(s => !isInactiveStatus(s.status))) return milestone.id;
+    if (readMilestoneSlices(milestone.id).some(s => !s.done)) return milestone.id;
   }
 
   return state.registry[0]?.id;

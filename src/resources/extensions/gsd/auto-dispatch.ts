@@ -22,19 +22,18 @@ import { getUatBrowserToolSupportError, type UatType } from "./uat-policy.js";
 import {
   isDbAvailable,
   getMilestoneSlices,
-  getClosedSliceIds,
   getPendingGatesForTurn,
   markPendingGatesOmittedForTurn,
-  getMilestone,
   insertAssessment,
   transaction,
   getSliceRunUatAssessment,
   hasSavedArtifact,
   hasUnitRecoveryBlock,
 } from "./gsd-db.js";
-import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
+import { readClosedSliceIds, readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
+import { readTaskLifecycleStatus } from "./task-execution-domain-operation.js";
+import { selectOpenRemediationTasks } from "./db/workflow-remediation-links.js";
 import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
-import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
 
 import {
@@ -112,7 +111,8 @@ import {
 } from "./verification-source-integrity.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
-import { readStoredUnitRetry } from "./db/unit-dispatch-retries.js";
+import { readUnitBudget } from "./db/unit-dispatch-budgets.js";
+import { hasStoredPreExecutionRetry, readStoredCommitRepairRetry } from "./db/unit-dispatch-retries.js";
 import {
   grantMilestoneValidationWaiver,
   type MilestoneValidationWaiverReason,
@@ -466,8 +466,8 @@ function withEffectiveDispatchMilestone(ctx: DispatchContext, effectiveMid: stri
  */
 export function findOpenSlices(mid: string): string[] {
   if (!isDbAvailable()) return [];
-  return getMilestoneSlices(mid)
-    .filter(s => !isInactiveStatus(s.status))
+  return readMilestoneSlices(mid)
+    .filter(s => !s.done)
     .map(s => s.id);
 }
 
@@ -615,6 +615,38 @@ export const DISPATCH_RULES: DispatchRule[] = [
           state.activeSlice,
           basePath,
           pendingOverrides,
+        ),
+      };
+    },
+  },
+  {
+    // ADR-048: the commit hook refused the changes of a task of this slice
+    // after the task closed (#2119), and the retry is stored on the task's
+    // dispatch row. State derivation does not select a closed task, so this
+    // rule sends the task back to the executor before the slice moves on. It
+    // reads the database only, so a restart selects the same unit as a live
+    // process.
+    name: "stored retry → execute-task (commit repair)",
+    match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
+      if (!state.activeSlice) return null;
+      const sid = state.activeSlice.id;
+      const retry = readStoredCommitRepairRetry(mid, sid);
+      const tid = retry ? parseUnitId(retry.unitId).task : undefined;
+      if (!retry || !tid) return null;
+      const terminalAbort = readExecuteTaskTerminalAbort(mid, sid, tid);
+      if (terminalAbort) return terminalAbort;
+      return {
+        action: "dispatch",
+        unitType: "execute-task",
+        unitId: retry.unitId,
+        prompt: await buildExecuteTaskPrompt(
+          mid,
+          sid,
+          state.activeSlice.title,
+          tid,
+          state.activeTask?.id === tid ? state.activeTask.title : tid,
+          basePath,
+          { sessionContextWindow, modelRegistry, sessionProvider },
         ),
       };
     },
@@ -942,7 +974,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       // Only pause if the slice has no saved CONTEXT row yet (discussion not done).
       if (hasSavedArtifact(mid, state.activeSlice.id, "CONTEXT")) return null; // discussion already done, proceed
 
-      const closedSliceIds = getClosedSliceIds(mid);
+      const closedSliceIds = readClosedSliceIds(mid);
       const justClosedSliceId = closedSliceIds[closedSliceIds.length - 1];
       let priorVerdictWarning = "";
       if (justClosedSliceId) {
@@ -1136,7 +1168,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       const sTitle = state.activeSlice.title;
       const unitId = `${mid}/${sid}`;
       const unitType = (["plan-slice", "refine-slice"] as const)
-        .find((type) => readStoredUnitRetry(type, unitId) !== null);
+        .find((type) => hasStoredPreExecutionRetry(type, unitId));
       if (!unitType) return null;
       const buildPrompt = unitType === "refine-slice" ? buildRefineSlicePrompt : buildPlanSlicePrompt;
       return {
@@ -1237,6 +1269,34 @@ export const DISPATCH_RULES: DispatchRule[] = [
     },
   },
   {
+    // ADR-046: a machine-fixable failure creates or reuses a linked Remediation
+    // Task. While a remediation link of the milestone has an open target Task,
+    // the kernel selects that Task before the ordinary state-derived unit: the
+    // failed item waits for the link's required outcome, and unrelated ready
+    // branches continue after it.
+    name: "executing → remediation-task (linked Remediation Task)",
+    match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
+      if (state.phase !== "executing") return null;
+      if (!isDbAvailable()) return null;
+      const remediation = selectOpenRemediationTasks(mid)[0];
+      if (!remediation) return null;
+      return {
+        action: "dispatch",
+        unitType: "execute-task",
+        unitId: `${remediation.milestoneId}/${remediation.sliceId}/${remediation.taskId}`,
+        prompt: await buildExecuteTaskPrompt(
+          remediation.milestoneId,
+          remediation.sliceId,
+          remediation.sliceTitle,
+          remediation.taskId,
+          remediation.taskTitle,
+          basePath,
+          { sessionContextWindow, modelRegistry, sessionProvider },
+        ),
+      };
+    },
+  },
+  {
     name: "executing → reactive-execute (parallel dispatch)",
     match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry, sessionProvider, preview }) => {
       if (state.phase !== "executing" || !state.activeTask) return null;
@@ -1287,7 +1347,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
 
         const taskIO = _reactiveGraphDeriveFn
           ? await _reactiveGraphDeriveFn(basePath, mid, sid)
-          : await loadSliceTaskIO(basePath, mid, sid);
+          : loadSliceTaskIO(mid, sid);
         if (taskIO.length < 2) return null; // single task, no point
 
         const graph = deriveTaskGraph(taskIO);
@@ -1317,6 +1377,13 @@ export const DISPATCH_RULES: DispatchRule[] = [
               new Set(),
             );
         if (selected.length <= 1) return null;
+
+        // A batch subagent holds no Attempt, and only the running Attempt of
+        // the host completes a Task that has a lifecycle row. Those Tasks run
+        // one at a time through execute-task.
+        if (selected.some((taskId) => readTaskLifecycleStatus({ milestoneId: mid, sliceId: sid, taskId }) !== null)) {
+          return null;
+        }
 
         // Log graph metrics for observability
         const metrics = graphMetrics(graph);
@@ -1391,36 +1458,11 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "executing → execute-task",
-    match: async ({ state, mid, basePath, session, sessionContextWindow, modelRegistry, sessionProvider }) => {
+    match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "executing") return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
       const sTitle = state.activeSlice!.title;
-      const retryUnitId = session?.pendingVerificationRetry?.unitId;
-      if (retryUnitId) {
-        const { milestone: retryMid, slice: retrySid, task: retryTid } = parseUnitId(retryUnitId);
-        if (retryMid === mid && retrySid === sid && retryTid) {
-          const retryAbort = readExecuteTaskTerminalAbort(retryMid, retrySid, retryTid);
-          if (retryAbort) return retryAbort;
-          const retryTitle = state.activeTask?.id === retryTid
-            ? state.activeTask.title
-            : retryTid;
-          return {
-            action: "dispatch",
-            unitType: "execute-task",
-            unitId: retryUnitId,
-            prompt: await buildExecuteTaskPrompt(
-              mid,
-              sid,
-              sTitle,
-              retryTid,
-              retryTitle,
-              basePath,
-              { sessionContextWindow, modelRegistry, sessionProvider },
-            ),
-          };
-        }
-      }
 
       if (!state.activeTask) return null;
       const tid = state.activeTask.id;
@@ -1576,8 +1618,8 @@ export const DISPATCH_RULES: DispatchRule[] = [
     match: async ({ state, mid, midTitle, basePath }) => {
       if (state.phase !== "complete") return null;
       if (mid && isDbAvailable()) {
-        const milestone = getMilestone(mid);
-        if (milestone && !isClosedStatus(milestone.status)) {
+        const milestone = readMilestone(mid);
+        if (milestone && !milestone.closed) {
           return {
             action: "dispatch",
             unitType: "complete-milestone",
@@ -1653,6 +1695,22 @@ function appendToolAffordanceToDispatch(
  * loop over DISPATCH_RULES for backward compatibility (tests that import
  * resolveDispatch directly without registry initialization).
  */
+/**
+ * ADR-048: a unit that used all its artifact verification retries holds the
+ * `exhausted` mark on its dispatch row. It is not dispatched again, also after
+ * a restart, until a reopen or a re-plan releases the mark.
+ */
+function isVerificationExhausted(ctx: DispatchContext, unitType: string, unitId: string): boolean {
+  return readUnitBudget(
+    ctx.session?.unclaimedUnitBudgets ?? new Map(),
+    { unitType, unitId, kind: "exhausted" },
+  ) > 0;
+}
+
+function verificationExhaustedReason(unitId: string): string {
+  return `Unit ${unitId} used all its verification retries. Reopen or re-plan it to run it again.`;
+}
+
 export async function resolveDispatch(
   ctx: DispatchContext,
 ): Promise<DispatchAction> {
@@ -1731,11 +1789,11 @@ export async function resolveDispatch(
     const action = annotateBackgroundable(await registry.evaluateDispatch(dispatchCtx));
     if (
       action.action === "dispatch" &&
-      dispatchCtx.session?.exhaustedVerificationUnits?.has(`${action.unitType}:${action.unitId}`)
+      isVerificationExhausted(dispatchCtx, action.unitType, action.unitId)
     ) {
       return {
         action: "stop",
-        reason: `Unit ${action.unitId} exhausted verification retries this session.`,
+        reason: verificationExhaustedReason(action.unitId),
         level: "error",
       };
     }
@@ -1752,11 +1810,11 @@ export async function resolveDispatch(
       const action = annotateBackgroundable(result);
       if (
         action.action === "dispatch" &&
-        dispatchCtx.session?.exhaustedVerificationUnits?.has(`${action.unitType}:${action.unitId}`)
+        isVerificationExhausted(dispatchCtx, action.unitType, action.unitId)
       ) {
         return {
           action: "stop",
-          reason: `Unit ${action.unitId} exhausted verification retries this session.`,
+          reason: verificationExhaustedReason(action.unitId),
           level: "error",
           matchedRule: rule.name,
         };

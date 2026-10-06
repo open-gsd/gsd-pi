@@ -18,7 +18,10 @@ import {
   isPauseNotice,
   isTerminalNotice,
 } from './resources/extensions/gsd/stop-notice.js'
+import { parseWorkflowOutcomeEvent } from './resources/extensions/gsd/workflow-outcome-event.js'
 import { canonicalToolName } from './resources/extensions/gsd/engine-hook-contract.js'
+
+export { parseWorkflowOutcomeEvent }
 
 // ---------------------------------------------------------------------------
 // Exit Code Constants

@@ -29,8 +29,7 @@ import { tmpdir } from "node:os";
 
 import { isCommand, handleCommand, type CommandSender } from "../commands.ts";
 import { closeDatabase, openDatabase } from "../../gsd/gsd-db.ts";
-import { setRuntimeKv } from "../../gsd/db/runtime-kv.ts";
-import { PAUSED_SESSION_KV_KEY } from "../../gsd/interrupted-session.ts";
+import { openAutoPause } from "../../gsd/db/writers/auto-pauses.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -136,7 +135,8 @@ test("/status reads the paused session from the DB, not paused-session.json", as
   assert.match(messages[0], /State: idle/);
   assert.doesNotMatch(messages[0], /M009/);
 
-  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
+  openAutoPause({
+    blockerKind: "user_request",
     milestoneId: "M001",
     unitType: "execute-task",
     unitId: "M001/S01/T01",

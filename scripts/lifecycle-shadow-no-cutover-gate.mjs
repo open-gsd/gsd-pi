@@ -30,11 +30,17 @@ const READ_INTERFACE_EPOCH_READER = "./queries.js#getProjectAuthorityRow";
 const READ_INTERFACE_ENTRIES = [
   "readMilestones",
   "readMilestone",
+  "readMilestoneDoneIn",
   "readMilestoneSlices",
+  "readClosedSliceIds",
+  "readSlice",
   "readSlicesByMilestoneIds",
   "readSliceTasks",
+  "readTask",
   "readMilestoneStatus",
   "readProgressCounts",
+  "readOpenBlockers",
+  "readOpenQuestions",
   "toMilestoneRead",
   "toSliceRead",
 ];
@@ -50,13 +56,26 @@ const READ_INTERFACE_LEGACY_READERS = [
   "./queries.js#getMilestoneStatusCounts",
   "./queries.js#getInFlightSliceCount",
 ];
+// The canonical blockers and questions have no legacy row: the interface
+// answers them from the canonical rows at every Authority Epoch.
+const READ_INTERFACE_CANONICAL_QUESTION_READERS = [
+  "./queries.js#getOpenBlockers",
+  "./queries.js#getOpenQuestions",
+];
+// The queued-shell inputs: CONTEXT artifact rows and Slice counts. The
+// lifecycle vocabulary has no word for queued, so the interface answers the
+// readiness class with a field built from them.
+const READ_INTERFACE_QUEUED_SHELL_READERS = [
+  "./queries.js#getContextArtifactMilestoneIds",
+  "./queries.js#getSliceCountsByMilestoneId",
+];
 
 const DECISION_IMPORT_POLICY = Object.freeze({
   eligibility: {
     required: new Set(["./state.js#deriveState"]),
     approved: new Set([
       "./state.js#deriveState",
-      "./guided-flow.js#findMilestoneIds",
+      "./state.js#isGhostMilestone",
       "./gsd-db.js#isDbAvailable",
       "./gsd-db.js#getMilestoneSlices",
       "./gsd-db.js#getTasksBySliceIds",
@@ -75,6 +94,9 @@ const DECISION_IMPORT_POLICY = Object.freeze({
       "./db/lifecycle-read.js#readMilestones",
       "./db/lifecycle-read.js#readMilestone",
       "./db/lifecycle-read.js#readMilestoneSlices",
+      // The UAT hold (ADR-046 gate G6). It reads the Slice through the read
+      // interface and the run-uat verdict row.
+      "./uat-dispatch.js#sliceAwaitsUatVerdict",
     ]),
   },
   resolver: {
@@ -118,6 +140,8 @@ const DECISION_IMPORT_POLICY = Object.freeze({
     approved: new Set([
       READ_INTERFACE_EPOCH_READER,
       ...READ_INTERFACE_LEGACY_READERS,
+      ...READ_INTERFACE_CANONICAL_QUESTION_READERS,
+      ...READ_INTERFACE_QUEUED_SHELL_READERS,
       "./engine.js#getDb",
       "./lifecycle-shadow-comparison.js#compareLifecycleShadow",
       "../status-guards.js#isClosedStatus",

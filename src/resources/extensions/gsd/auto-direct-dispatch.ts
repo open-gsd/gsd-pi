@@ -7,10 +7,13 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@gsd/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 
 import { deriveState } from "./state.js";
+import { heldProjectionChangesBeforeDispatch } from "./state-reconciliation.js";
 import { loadFile } from "./files.js";
-import { isDbAvailable, getClosedSliceIds } from "./gsd-db.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { readClosedSliceIds } from "./db/lifecycle-read.js";
 import {
   resolveSliceFile, relSliceFile,
 } from "./paths.js";
@@ -33,6 +36,8 @@ import { pauseAuto } from "./auto.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { getUnitWorkflowDispatchReadinessErrorForModel } from "./tool-contract.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
+import { kernelClaimUnit, kernelSettleUnitClaim, runInteractiveClaimTurn } from "./auto/lifecycle-kernel.js";
+import { normalizeRealPath } from "./paths.js";
 
 export function parseDirectDispatchPhase(raw: string): { phase: string; milestoneId?: string } {
   const tokens = raw.trim().split(/\s+/).filter(Boolean);
@@ -52,6 +57,14 @@ export async function dispatchDirectPhase(
   base: string,
   opts: { milestoneId?: string } = {},
 ): Promise<void> {
+  // A tracked projection changed by pull, merge, rebase or branch switch stops
+  // the dispatch until the user imports or discards it.
+  const heldProjectionChanges = await heldProjectionChangesBeforeDispatch(base);
+  if (heldProjectionChanges) {
+    ctx.ui.notify(heldProjectionChanges, "error");
+    return;
+  }
+
   const parsed = parseDirectDispatchPhase(phase);
   const state = await deriveState(base);
   const mid = opts.milestoneId ?? parsed.milestoneId ?? state.activeMilestone?.id;
@@ -97,7 +110,7 @@ export async function dispatchDirectPhase(
             `Slice ${sid} requires discussion before planning. Run /gsd discuss to discuss this slice, then /gsd auto to resume.`,
             "info",
           );
-          await pauseAuto(ctx, pi);
+          await pauseAuto(ctx, pi, "ambiguous_intent");
           return;
         }
 
@@ -201,7 +214,7 @@ export async function dispatchDirectPhase(
     case "reassess-roadmap": {
       // DB-authoritative read (ADR-017) — markdown projections are never
       // consulted for dispatch decisions. No DB rows means no completed slices.
-      const completedSliceIds = isDbAvailable() ? getClosedSliceIds(mid) : [];
+      const completedSliceIds = isDbAvailable() ? readClosedSliceIds(mid) : [];
       if (completedSliceIds.length === 0) {
         ctx.ui.notify("Cannot dispatch reassess-roadmap: no completed slices.", "warning");
         return;
@@ -229,7 +242,7 @@ export async function dispatchDirectPhase(
       // roadmap instead (#1693).
       // DB-authoritative read (ADR-017) — no markdown fallback for dispatch
       // decisions.
-      const uatCompletedSliceIds = isDbAvailable() ? getClosedSliceIds(mid) : [];
+      const uatCompletedSliceIds = isDbAvailable() ? readClosedSliceIds(mid) : [];
       if (uatCompletedSliceIds.length === 0) {
         ctx.ui.notify("Cannot dispatch run-uat: no completed slices.", "warning");
         return;
@@ -294,6 +307,26 @@ export async function dispatchDirectPhase(
     ctx.ui.notify("Session creation cancelled.", "warning");
     return;
   }
+
+  // The one-unit bound (ADR-048): the dispatched unit is claimed through the
+  // kernel — milestone lease and dispatch row — so the interactive work has a
+  // kernel record and makes an older interrupted `verify` row of the milestone
+  // history. A refusal names the live worker that holds the unit or milestone.
+  const [, claimSliceId = null, claimTaskId = null] = unitId.split("/");
+  const claim = kernelClaimUnit({
+    projectRoot: normalizeRealPath(dispatchBase),
+    milestoneId: mid,
+    sliceId: claimSliceId,
+    taskId: claimTaskId,
+    unitType,
+    unitId,
+    traceId: `dispatch-${randomUUID().slice(0, 8)}`,
+  });
+  if (claim.kind === "refused") {
+    ctx.ui.notify(`Cannot dispatch ${unitType} ${unitId}: ${claim.reason}.`, "warning");
+    return;
+  }
+
   // Inject the configured response language into the dispatched prompt content
   // — the new session's system prompt does not carry the preferences block, so
   // the language setting would otherwise never reach the unit (#1210).
@@ -301,8 +334,27 @@ export async function dispatchDirectPhase(
     loadEffectiveGSDPreferences(dispatchBase)?.preferences,
   );
   const dispatchContent = languageDirective ? `${languageDirective}\n\n${prompt}` : prompt;
-  pi.sendMessage(
-    { customType: "gsd-dispatch", content: dispatchContent, display: false },
-    { triggerTurn: true },
-  );
+  try {
+    // The turn runs under the claim's worker heartbeat and lease renewal, so a
+    // turn longer than the lease TTL cannot lose the claim to another
+    // session's stale-takeover while it runs (the one-unit bound).
+    const send = () =>
+      pi.sendMessage(
+        { customType: "gsd-dispatch", content: dispatchContent, display: false },
+        { triggerTurn: true },
+      );
+    if (claim.kind === "claimed") {
+      await runInteractiveClaimTurn(claim, send);
+    } else {
+      await send();
+    }
+  } catch (err) {
+    if (claim.kind === "claimed") {
+      kernelSettleUnitClaim(claim, "failed", err instanceof Error ? err.message : String(err));
+    }
+    throw err;
+  }
+  if (claim.kind === "claimed") {
+    kernelSettleUnitClaim(claim, "completed", "interactive-dispatch");
+  }
 }

@@ -25,7 +25,7 @@ Do these steps in order and act on what they say:
 4. If a slice is active and has one, read **`<NN>-<MM>-CONTEXT.md`** — Slice-specific decisions and constraints.
 5. If a slice is active, read its **`<NN>-<MM>-PLAN.md`** — Which tasks exist? Which are done?
 6. If `.gsd/CODEBASE.md` exists, skim it for fast structural orientation before broad code exploration.
-7. If a task was interrupted, check for **`continue.md`** in the active slice directory — Resume from there.
+7. If a task was interrupted, its Work Checkpoint is in the database. The task prompt shows it as "Resume State"; `<NN>-<MM>-CONTINUE.md` is its readable render — Resume from there.
 
 Then do the next action that the snapshot reports.
 
@@ -63,7 +63,7 @@ All artifacts live in `.gsd/` at the project root:
       01-01-RESEARCH.md                     # Optional: slice-level research
       01-01-SUMMARY.md                      # Slice summary (written on completion)
       01-01-UAT.md                          # Non-blocking human test script (written on completion)
-      01-01-CONTINUE.md                     # Ephemeral: resume point if interrupted
+      01-01-CONTINUE.md                     # Render of the latest Work Checkpoint (gsd_checkpoint_save)
 ```
 
 ---
@@ -312,7 +312,7 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 2. Read relevant summaries from prior tasks (for context on what's already built).
 3. Execute each step. Mark progress with `[DONE:n]` in responses.
 4. If you made an architectural, pattern, or library decision, append it to `.gsd/DECISIONS.md`.
-5. If interrupted or context is getting full, write `continue.md` (see below).
+5. If interrupted or context is getting full, save a Work Checkpoint (see "Continue-Here Protocol" below).
 
 ### Phase 5: Verify
 
@@ -438,45 +438,28 @@ key_decisions: []
 
 ## Continue-Here Protocol
 
-**When to write `continue.md`:**
+**When to save a Work Checkpoint (`gsd_checkpoint_save`):**
 
 - You're about to lose context (compaction, session end, Ctrl+C).
 - The current task isn't done yet.
 - You want to pause and come back later.
 
+The checkpoint is a database row. Do not write `continue.md`, `CONTINUE.md` or `HANDOFF.md`: `CONTINUE.md` is rendered from the row and is never read back.
+
 **What to capture:**
 
-```markdown
----
-milestone: M001
-slice: S01
-task: T02
-step: 3
-total_steps: 7
-saved_at: 2026-03-07T15:30:00Z
----
-
-## Completed Work
-- What's already done in this task and prior tasks in the slice.
-
-## Remaining Work
-- What steps remain, with enough detail to resume.
-
-## Decisions Made
-- Key decisions and WHY (so next session doesn't re-debate).
-
-## Context
-The "vibe" — what you were thinking, what's tricky, what to watch out for.
-
-## Next Action
-The EXACT first thing to do when resuming. Not vague. Specific.
-```
+- `milestoneId`, `sliceId`, `taskId` — the unit you are in. Pass `taskId` when a task is in progress.
+- `kind` — `pause` (you resume the same work) or `handoff` (another session picks it up).
+- `confirmedContext` — what is already done in this task, and key decisions and WHY (so the next session doesn't re-debate).
+- `unresolved` — what steps remain, with enough detail to resume; what is tricky; what not to do.
+- `evidence` — commands, files and results that support the confirmed context.
+- `nextAction` — the EXACT first thing to do when resuming. Not vague. Specific.
 
 **How to resume:**
 
-1. Read `continue.md`.
-2. Delete `continue.md` (it's consumed, not permanent).
-3. Pick up from "Next Action".
+1. Read the "Resume State" section of the task prompt (the head checkpoint of the task).
+2. Pick up from "Next action".
+3. If you stop again before the task is complete, save a new checkpoint. Checkpoints are never deleted; the newest one is the resume state.
 
 ---
 
@@ -511,7 +494,6 @@ guards.
 
 Other stale-file cleanup remains mechanical:
 
-- Continue file exists for completed task → delete continue file
 - State points to nonexistent slice/task → rebuild the STATE projection from the database
 
 ---
@@ -614,8 +596,8 @@ This methodology doc is generic. Project-specific guidance belongs in the milest
 ## Checklist for a Fresh Session
 
 1. Call `gsd_project_snapshot` — what's the next action?
-2. Check for `continue.md` in the active slice — is there interrupted work?
-3. If resuming: read `continue.md`, delete it, pick up from "Next Action".
+2. Check the "Resume State" of the task prompt (or the active slice's `CONTINUE.md` render) — is there interrupted work?
+3. If resuming: pick up from its "Next action".
 4. If starting fresh: read the active slice's `<NN>-<MM>-PLAN.md`, find the next incomplete task.
 5. If in a planning or research phase, read `.gsd/DECISIONS.md` — respect existing decisions.
 6. Read relevant summaries from prior tasks/slices for context.
@@ -623,12 +605,12 @@ This methodology doc is generic. Project-specific guidance belongs in the milest
 8. Verify the must-haves.
 9. Write the summary.
 10. Record completion through the GSD completion tool (`gsd_task_complete`, `gsd_slice_complete`), then advance.
-11. If context is getting full or you're done for now: write `continue.md` if mid-task. Between tasks nothing more is needed; the database holds the next action.
+11. If context is getting full or you're done for now: call `gsd_checkpoint_save` if mid-task. Between tasks nothing more is needed; the database holds the next action.
 
 ## When Context Gets Large
 
 If you sense context pressure (many files read, long execution, lots of tool output):
 
-1. **If mid-task:** Write `continue.md` with exact resume state. Tell the user: "Context is getting full. I've saved progress to continue.md. Start a new session and run `/gsd` to pick up where you left off, or `/gsd auto` to resume in auto-execution mode."
-2. **If between tasks:** No continue file needed — completed work is in the database, and the next session reads the next action with `gsd_project_snapshot`.
+1. **If mid-task:** Call `gsd_checkpoint_save` with exact resume state. Tell the user: "Context is getting full. I've saved a checkpoint. Start a new session and run `/gsd` to pick up where you left off, or `/gsd auto` to resume in auto-execution mode."
+2. **If between tasks:** No checkpoint needed — completed work is in the database, and the next session reads the next action with `gsd_project_snapshot`.
 3. **Don't fight it.** The whole system is designed for this. A fresh session with the right files loaded is better than a stale session with degraded reasoning.

@@ -26,7 +26,8 @@ import {
 import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { deriveStateFromDb, invalidateStateCache } from '../state.ts';
 import { handleRecover } from '../commands-maintenance.ts';
-import { generateDecisionsMd, generateRequirementsMd, saveDecisionToDb, saveRequirementToDb } from '../db-writer.ts';
+import { generateDecisionsMd, generateRequirementsMd, saveArtifactToDb, saveDecisionToDb, saveRequirementToDb } from '../db-writer.ts';
+import { hasSavedArtifact } from '../db/queries.ts';
 import { getAllDecisionsFromMemories } from '../context-store.ts';
 import { captureKnowledgeEntry } from '../knowledge-capture.ts';
 import { renderKnowledgeProjection } from '../knowledge-projection.ts';
@@ -905,6 +906,39 @@ describe('gsd-recover', async () => {
     }
   });
 
+  test('recover imports the milestone CONTEXT of a flat phase directory and no slice file', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'phases/09-team/09-ROADMAP.md', [
+      '# M009-rfuh2h: Team milestone',
+      '',
+      '- [ ] **S01: Recover generated artifacts** `risk:low` `depends:[]`',
+      '',
+    ].join('\n'));
+    writeFile(base, 'phases/09-team/09-CONTEXT.md', '# Team milestone context\n');
+    writeFile(base, 'phases/09-team/09-01-CONTEXT.md', '# Slice context\n');
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0);
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare('SELECT path, artifact_type, milestone_id, full_content FROM artifacts').all(),
+      [{
+        path: 'phases/09-team/09-CONTEXT.md',
+        artifact_type: 'CONTEXT',
+        milestone_id: 'M009-rfuh2h',
+        full_content: '# Team milestone context\n',
+      }],
+    );
+  });
+
   test('explicit slash recover commits one retained-backup Import Application without clearing authority', async () => {
     const base = createFixtureBase();
     try {
@@ -1486,12 +1520,16 @@ describe('gsd-recover', async () => {
     }
   });
 
-  test('recover on a lost database restores decisions and requirements and lists every source it does not import', async () => {
+  test('recover on a lost database restores decisions, requirements and milestone context text and lists every source it does not import', async () => {
     const base = createFixtureBase();
     try {
       // The projections a project keeps after its gsd.db is lost.
+      const context = '# M001 context\n\nWhy this milestone exists.\n';
+      const research = '# M001 research\n\nWhat the codebase does today.\n';
       writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
-      writeFile(base, 'milestones/M001/M001-CONTEXT.md', '# M001 context\n\nWhy this milestone exists.\n');
+      writeFile(base, 'milestones/M001/M001-CONTEXT.md', context);
+      writeFile(base, 'milestones/M001/M001-RESEARCH.md', research);
+      writeFile(base, 'milestones/M001/M001-CONTEXT-DRAFT.md', '# Draft\n');
       writeFile(base, 'DECISIONS.md', generateDecisionsMd([{
         seq: 1,
         id: 'D001',
@@ -1531,8 +1569,8 @@ describe('gsd-recover', async () => {
         preview.indexOf('Mappings:'),
       );
       assert.match(notImported, /\.gsd\/KNOWLEDGE\.md \(preserved\)/);
-      assert.match(notImported, /\.gsd\/milestones\/M001\/M001-CONTEXT\.md \(preserved\)/);
-      assert.doesNotMatch(notImported, /DECISIONS\.md|REQUIREMENTS\.md|M001-ROADMAP\.md/);
+      assert.match(notImported, /\.gsd\/milestones\/M001\/M001-CONTEXT-DRAFT\.md \(preserved\)/);
+      assert.doesNotMatch(notImported, /DECISIONS\.md|REQUIREMENTS\.md|M001-ROADMAP\.md|M001-CONTEXT\.md|M001-RESEARCH\.md/);
       const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
       assert.ok(approval, 'the Preview names the hash to approve');
 
@@ -1558,10 +1596,150 @@ describe('gsd-recover', async () => {
         }],
       );
       assert.ok(getMilestone('M001'));
+      assert.deepEqual(
+        _getAdapter()!.prepare(
+          'SELECT path, artifact_type, milestone_id, slice_id, task_id, full_content FROM artifacts ORDER BY path',
+        ).all(),
+        [
+          {
+            path: 'milestones/M001/M001-CONTEXT.md',
+            artifact_type: 'CONTEXT',
+            milestone_id: 'M001',
+            slice_id: null,
+            task_id: null,
+            full_content: context,
+          },
+          {
+            path: 'milestones/M001/M001-RESEARCH.md',
+            artifact_type: 'RESEARCH',
+            milestone_id: 'M001',
+            slice_id: null,
+            task_id: null,
+            full_content: research,
+          },
+        ],
+      );
+      // The dispatch rules read this row, not the file, to see a finished discussion.
+      assert.equal(hasSavedArtifact('M001', null, 'CONTEXT'), true);
     } finally {
       closeDatabase();
       cleanup(base);
     }
+  });
+
+  test('recover on a database in sync with a saved milestone CONTEXT changes no artifact row', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    insertMilestone({ id: 'M001', title: 'Recovery Test', status: 'active' });
+    // The real writer saves the row and renders the file from it.
+    await saveArtifactToDb({
+      path: 'milestones/M001/M001-CONTEXT.md',
+      artifact_type: 'CONTEXT',
+      content: '# M001 context\n\nSaved by the discussion.\n',
+      milestone_id: 'M001',
+    }, base);
+    const before = _getAdapter()!.prepare('SELECT * FROM artifacts').all();
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const preview = first.notes.at(-1)?.message ?? '';
+    assert.doesNotMatch(preview, /artifact:/, 'the Preview changes no artifact row');
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+    assert.ok(approval, 'no diagnosis blocks the Preview');
+
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, approval);
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+    assert.deepEqual(_getAdapter()!.prepare('SELECT * FROM artifacts').all(), before);
+  });
+
+  test('recover keeps the database row of a changed milestone CONTEXT.md and writes the file text only by explicit choice', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    insertMilestone({ id: 'M001', title: 'Recovery Test', status: 'active' });
+    await saveArtifactToDb({
+      path: 'milestones/M001/M001-CONTEXT.md',
+      artifact_type: 'CONTEXT',
+      content: '# M001 context\n\nSaved by the discussion.\n',
+      milestone_id: 'M001',
+    }, base);
+    const edited = '# M001 context\n\nEdited in the file.\n';
+    writeFile(base, 'milestones/M001/M001-CONTEXT.md', edited);
+    const content = () => _getAdapter()!.prepare(
+      "SELECT full_content FROM artifacts WHERE path = 'milestones/M001/M001-CONTEXT.md'",
+    ).get()?.['full_content'];
+
+    const saved = '# M001 context\n\nSaved by the discussion.\n';
+
+    // A plain Preview keeps the database row and names the choice.
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const preview = first.notes.at(-1)?.message ?? '';
+    assert.doesNotMatch(preview, /update artifact:/);
+    assert.match(preview, /"code":"artifact-row-conflict"/);
+    assert.match(preview, /To write the file text of M001-CONTEXT over its database row: --choice=M001-CONTEXT\.use-file/);
+
+    // A choice for a document that does not differ is refused.
+    const unused = makeCtx();
+    await handleRecover(unused.ctx, base, '--choice=M001-RESEARCH.use-file');
+    assert.equal(unused.notes.at(-1)?.kind, 'error', unused.notes.at(-1)?.message);
+    assert.match(unused.notes.at(-1)?.message ?? '', /does not differ from an active database row: M001-RESEARCH/);
+
+    // The choice seals a Preview that updates the row; the approval needs the choice again.
+    const chosen = makeCtx();
+    await handleRecover(chosen.ctx, base, '--choice=M001-CONTEXT.use-file');
+    const chosenPreview = chosen.notes.at(-1)?.message ?? '';
+    assert.match(chosenPreview, /update artifact:milestones\/M001\/M001-CONTEXT\.md/);
+    assert.equal(content(), saved, 'the Preview writes nothing');
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(chosenPreview)?.[0];
+    assert.ok(approval, 'no diagnosis blocks the Preview');
+
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, `${approval} --choice=M001-CONTEXT.use-file`);
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+    assert.equal(content(), edited);
+  });
+
+  test('recover applies a plain approval without the changed milestone CONTEXT.md text', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    insertMilestone({ id: 'M001', title: 'Recovery Test', status: 'active' });
+    const saved = '# M001 context\n\nSaved by the discussion.\n';
+    await saveArtifactToDb({
+      path: 'milestones/M001/M001-CONTEXT.md',
+      artifact_type: 'CONTEXT',
+      content: saved,
+      milestone_id: 'M001',
+    }, base);
+    writeFile(base, 'milestones/M001/M001-CONTEXT.md', '# M001 context\n\nEdited in the file.\n');
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(first.notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(approval, first.notes.at(-1)?.message);
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, approval);
+
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare('SELECT path, full_content FROM artifacts').all(),
+      [{ path: 'milestones/M001/M001-CONTEXT.md', full_content: saved }],
+    );
   });
 
   test('recover on a hand-written REQUIREMENTS.md imports wrapped values and ignores unknown lines', async () => {
@@ -2071,5 +2249,102 @@ describe('gsd-recover', async () => {
     const rendered = renderKnowledgeProjection(base).content;
     assert.ok(rendered.includes('| P001 | Retry with jitter |'));
     assert.ok(!rendered.includes('Retry with backoff'));
+  });
+
+  test('recover writes a conflicting KNOWLEDGE.md row over its database row only by explicit choice, and Forward Repair restores the database row', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const pattern = captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+    // A memory UPDATE changes the database row. KNOWLEDGE.md keeps the old text.
+    assert.equal(updateMemoryContent(pattern.memoryId, 'Retry with jitter'), true);
+    const databaseText = () => _getAdapter()!
+      .prepare('SELECT content FROM memories WHERE id = :id')
+      .get({ ':id': pattern.memoryId })?.['content'];
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const choice = /--choice=P001\.use-file/u.exec(first.notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(choice, 'the conflict report names the explicit choice');
+
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, choice);
+    const preview = second.notes.at(-1)?.message ?? '';
+    assert.match(preview, /update knowledge:P001 \(knowledge-row-mapped\)/u);
+    assert.doesNotMatch(preview, /knowledge-row-conflict/u);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+    assert.ok(approval);
+    assert.equal(databaseText(), 'Retry with jitter', 'a Preview changes nothing');
+
+    // The approved hash is the hash of the choice Preview: without the choice it applies nothing.
+    await handleRecover(makeCtx().ctx, base, approval);
+    assert.equal(databaseText(), 'Retry with jitter');
+
+    const third = makeCtx();
+    await handleRecover(third.ctx, base, `${choice} ${approval}`);
+    assert.equal(third.notes.at(-1)?.kind, 'success', third.notes.at(-1)?.message);
+    assert.equal(databaseText(), 'Retry with backoff', 'the chosen file text replaces the database row');
+
+    // Later accepted work closes the restore window, so the undo is a Forward Repair.
+    captureKnowledgeEntry(base, 'rule', 'Later rule', 'project');
+    const application = _getAdapter()!.prepare('SELECT operation_id FROM workflow_import_applications').get()!;
+    const repair = makeCtx();
+    await handleRecover(repair.ctx, base, `--application=${String(application['operation_id'])} --forward-repair`);
+    assert.match(repair.notes.at(-1)?.message ?? '', /Forward Repair: committed/u);
+    assert.equal(databaseText(), 'Retry with jitter', 'Forward Repair restores the database row of the backup');
+  });
+
+  test('recover refuses a knowledge row choice for a row that does not differ from its database row', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, '--choice=P001.use-file');
+
+    assert.equal(notes.at(-1)?.kind, 'error');
+    assert.match(notes.at(-1)?.message ?? '', /does not differ from an active database row: P001/u);
+    assert.equal(_getAdapter()!.prepare('SELECT COUNT(*) AS count FROM workflow_import_applications').get()?.['count'], 0);
+  });
+
+  test('recover refuses a knowledge row choice when it loads a retained Import Application', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const pattern = captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+    assert.equal(updateMemoryContent(pattern.memoryId, 'Retry with jitter'), true);
+    const databaseText = () => _getAdapter()!
+      .prepare('SELECT content FROM memories WHERE id = :id')
+      .get({ ':id': pattern.memoryId })?.['content'];
+
+    // The operator approves the plain conflict Preview first: the database row is kept.
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(first.notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(approval);
+    const applied = makeCtx();
+    await handleRecover(applied.ctx, base, approval);
+    assert.equal(applied.notes.at(-1)?.kind, 'success', applied.notes.at(-1)?.message);
+
+    for (const args of [
+      '--choice=P001.use-file',
+      `--application=${String(_getAdapter()!.prepare('SELECT operation_id FROM workflow_import_applications').get()!['operation_id'])} --choice=P001.use-file`,
+    ]) {
+      const { ctx, notes } = makeCtx();
+      await handleRecover(ctx, base, args);
+      assert.equal(notes.at(-1)?.kind, 'error', notes.at(-1)?.message);
+      assert.match(notes.at(-1)?.message ?? '', /row choice for P001 was not applied/u);
+      assert.equal(databaseText(), 'Retry with jitter');
+    }
   });
 });

@@ -105,7 +105,7 @@ function makeRecordingCtx() {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     });
 
     assert.equal(result, "recovered");
@@ -145,7 +145,7 @@ function makeRecordingCtx() {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     };
     const result = await recoverTimedOutUnit(ctx, pi, "execute-task", "M001/S01/T01", "idle", recoveryContext);
 
@@ -193,7 +193,7 @@ function makeRecordingCtx() {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     });
 
     assert.equal(result, "recovered", "invalid existing plan should enter steering recovery");
@@ -233,7 +233,7 @@ test("plan-milestone timeout recovery persists a blocker and pauses", async (t) 
     basePath: base,
     verbose: false,
     currentUnitStartedAt: Date.now(),
-    unitRecoveryCount: new Map(),
+    unclaimedUnitBudgets: new Map(),
   };
 
   assert.equal(await recoverTimedOutUnit(ctx, pi, "plan-milestone", "M001", "idle", recoveryContext), "recovered");
@@ -266,7 +266,7 @@ test("research-slice timeout recovery pauses and leaves the unit incomplete", as
     basePath: base,
     verbose: false,
     currentUnitStartedAt: Date.now(),
-    unitRecoveryCount: new Map(),
+    unclaimedUnitBudgets: new Map(),
   };
 
   assert.equal(await recoverTimedOutUnit(ctx, pi, "research-slice", "M001/S01", "idle", recoveryContext), "recovered");
@@ -353,7 +353,7 @@ test("research-slice timeout recovery pauses and leaves the unit incomplete", as
       basePath: base,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     };
 
     let crashed = false;

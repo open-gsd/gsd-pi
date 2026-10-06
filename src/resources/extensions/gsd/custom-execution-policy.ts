@@ -19,7 +19,6 @@ import {
   type CustomVerificationResult,
   type VerificationOutcome,
 } from "./custom-verification.js";
-import { readFrozenDefinition } from "./custom-workflow-engine.js";
 import { parseUnitId } from "./unit-id.js";
 
 export class CustomExecutionPolicy implements ExecutionPolicy {
@@ -51,7 +50,7 @@ export class CustomExecutionPolicy implements ExecutionPolicy {
   /**
    * Verify step output by dispatching to the step's configured verification policy.
    *
-   * Extracts the step ID from unitId (format: "<workflowName>/<stepId>")
+   * Extracts the step ID from unitId (format: "<name>/<timestamp>/<stepId>")
    * and calls runCustomVerification() which reads the frozen definition
    * to determine which policy to apply.
    */
@@ -69,12 +68,6 @@ export class CustomExecutionPolicy implements ExecutionPolicy {
     _context: { basePath: string },
   ): Promise<CustomVerificationResult> {
     return runCustomVerificationWithEvidence(this.runDir, this.stepId(unitId));
-  }
-
-  requiresHumanVerification(_unitType: string, unitId: string): boolean {
-    const stepId = this.stepId(unitId);
-    const step = readFrozenDefinition(this.runDir).steps.find((candidate) => candidate.id === stepId);
-    return step?.verify?.policy === "human-review";
   }
 
   /** Default recovery: retry the step. */

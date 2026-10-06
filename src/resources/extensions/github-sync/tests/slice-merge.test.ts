@@ -10,7 +10,14 @@ import {
   _setGhAvailableForTest,
   _setGhRateLimitOkForTest,
 } from "../cli.ts";
-import { _getAdapter, closeDatabase, insertMilestone, insertSlice, openDatabase } from "../../gsd/gsd-db.ts";
+import {
+  _getAdapter,
+  closeDatabase,
+  insertMilestone,
+  insertSlice,
+  insertTask,
+  openDatabase,
+} from "../../gsd/gsd-db.ts";
 import { clearGSDPreferencesCache } from "../../gsd/preferences.ts";
 
 // Slice PRs must merge with the strategy the project chose via the
@@ -165,6 +172,56 @@ describe("slice PR merge strategy (#2279)", () => {
     const log = (await runSliceMergeScenario(SLICE_PR_PREFERENCES)).join("\n");
 
     assert.match(log, /issue comment 42 /);
+    assert.match(log, /Summary from the database/);
+    assert.doesNotMatch(log, /Summary from the file/);
+  });
+
+  /** Seed prefs, a task issue mapping, the task row and a contradicting SUMMARY.md, then run the execute-task sync. */
+  async function runTaskCompleteScenario(taskStatus: string): Promise<string[]> {
+    writePreferences(["github:", "  enabled: true", "  repo: owner/repo"]);
+    writeFileSync(
+      join(tmpDir, ".gsd", "github-sync.json"),
+      JSON.stringify({
+        version: 1,
+        repo: "owner/repo",
+        milestones: {},
+        slices: {},
+        tasks: { "M001/S01/T01": { issueNumber: 7, lastSyncedAt: "2025-01-01T00:00:00Z", state: "open" } },
+      }),
+      "utf-8",
+    );
+    const taskDir = join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(join(taskDir, "T01-SUMMARY.md"), "# T01: Add the form\n\n**Summary from the file**\n");
+    assert.equal(openDatabase(join(tmpDir, ".gsd", "gsd.db")), true);
+    insertMilestone({ id: "M001", title: "Platform", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Foundation", status: "in_progress", sequence: 1 });
+    insertTask({
+      milestoneId: "M001",
+      sliceId: "S01",
+      id: "T01",
+      title: "Add the form",
+      status: taskStatus,
+      fullSummaryMd: ["---", "id: T01", "---", "", "# T01: Add the form", "", "**Summary from the database**", ""].join("\n"),
+    });
+
+    process.env.GSD_GH_LOG = ghLogPath;
+    await runGitHubSync(tmpDir, "execute-task", "M001/S01/T01");
+    return ghLines();
+  }
+
+  it("does not comment on the issue of a task that is not complete in the database", async () => {
+    // The SUMMARY projection exists, as after an execute-task unit that
+    // staged its result but did not pass host verification.
+    const lines = await runTaskCompleteScenario("pending");
+
+    assert.deepEqual(lines, [], `no gh call is expected, got: ${JSON.stringify(lines)}`);
+  });
+
+  it("posts the summary stored on the task row, not the SUMMARY.md file", async () => {
+    const log = (await runTaskCompleteScenario("complete")).join("\n");
+
+    assert.match(log, /issue comment 7 /);
     assert.match(log, /Summary from the database/);
     assert.doesNotMatch(log, /Summary from the file/);
   });

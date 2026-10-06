@@ -7,6 +7,7 @@
 // opens the project-root DB via the engine's openDatabase().
 import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { GSDError, GSD_STALE_STATE } from "../../errors.js";
 import { logError, logWarning } from "../../workflow-logger.js";
 import { getDbOrNull, openDatabase, transaction } from "../engine.js";
@@ -68,6 +69,8 @@ export interface ReconcileResult {
   conflicts: string[];
   /** Legacy status changes that the adoption of merged rows made (only after the Cutover). */
   adoptionStatusChanges: string[];
+  /** Every milestone, slice and task whose status the merge and the adoption set or change. */
+  statusChanges: string[];
   /** Set when the merge did not run or failed. The counts are then zero. */
   error?: string;
 }
@@ -94,12 +97,14 @@ class ReconcilePreviewRollback extends Error {
 
 /**
  * Merge the rows of a worktree-local gsd.db into the project DB.
- * With `preview`, returns the same counts and conflicts and changes no row.
+ * With `preview`, returns the same counts, conflicts and status changes and
+ * changes no row. With `confirmed`, the merge commits only when its result
+ * equals that preview; if not, nothing is written and `error` is set.
  */
 export function reconcileWorktreeDb(
   mainDbPath: string,
   worktreeDbPath: string,
-  options: { preview?: boolean } = {},
+  options: { preview?: boolean; confirmed?: ReconcileResult } = {},
 ): ReconcileResult {
   const zero: ReconcileResult = {
     decisions: 0,
@@ -118,6 +123,7 @@ export function reconcileWorktreeDb(
     milestone_commit_attributions: 0,
     conflicts: [],
     adoptionStatusChanges: [],
+    statusChanges: [],
   };
   if (!existsSync(worktreeDbPath)) return zero;
   // Guard: bail when both paths resolve to the same physical file.
@@ -226,9 +232,10 @@ export function reconcileWorktreeDb(
       const authorityDiverged = worktreeAuthorityIsAhead();
       const operationsDiverged = worktreeRowsMissingFromMain("workflow_operations");
       const lifecyclesDiverged = worktreeLifecycleIsAheadOrMismatched();
-      // Legacy writers can advance project_authority without recording a
-      // canonical operation. Treat authority as corroborating evidence only;
-      // blocking on it alone would reject valid pre-adoption worktrees.
+      // A worktree database from an older release can hold an authority
+      // revision that its legacy writers advanced with no canonical operation.
+      // Authority alone is corroborating evidence only; blocking on it would
+      // refuse the import of a valid pre-adoption worktree database.
       if (operationsDiverged || lifecyclesDiverged) {
         const divergentSurfaces = [
           authorityDiverged ? "authority" : null,
@@ -331,7 +338,18 @@ export function reconcileWorktreeDb(
         for (const row of reqConf) conflicts.push(`requirement ${(row as Record<string, unknown>)["id"]}: modified in both`);
       }
 
-      const merged: Omit<ReconcileResult, "conflicts" | "adoptionStatusChanges"> = {
+      function hierarchyStatuses(): Map<string, string> {
+        return new Map(adapter.prepare(`
+          SELECT 'milestone ' || id AS item, status FROM main.milestones
+          UNION ALL SELECT 'slice ' || milestone_id || '/' || id, status FROM main.slices
+          UNION ALL SELECT 'task ' || milestone_id || '/' || slice_id || '/' || id, status FROM main.tasks
+          ORDER BY 1
+        `).all().map((row) => [String(row["item"]), String(row["status"])]));
+      }
+      const statusesBefore = hierarchyStatuses();
+      let statusChanges: string[] = [];
+
+      const merged: Omit<ReconcileResult, "conflicts" | "adoptionStatusChanges" | "statusChanges"> = {
         decisions: 0,
         requirements: 0,
         artifacts: 0,
@@ -364,7 +382,8 @@ export function reconcileWorktreeDb(
 
       // One Domain Operation: the merge commits with a revision bump, and
       // the hierarchy rows it inserts get their lifecycle rows with it. A preview
-      // throws inside it, so the operation rolls back and writes nothing.
+      // throws after the adoption, so it reports every status change and the
+      // operation rolls back and writes nothing.
       const adoptionStatusChanges = mergeLegacyRowsWithAdoption("worktree-reconcile", () => transaction(() => {
         // Join the target decisions so we can prefer an existing main.source
         // when the worktree predates v16 — otherwise a write-through reconcile
@@ -746,11 +765,20 @@ export function reconcileWorktreeDb(
           `).run());
         }
 
-        if (options.preview) {
-          throw new ReconcilePreviewRollback({ ...merged, conflicts, adoptionStatusChanges: [] });
-        }
         return { ...merged };
-      }));
+      }), (adopted) => {
+        statusChanges = [...hierarchyStatuses()]
+          .filter(([item, status]) => statusesBefore.get(item) !== status)
+          .map(([item, status]) => {
+            const before = statusesBefore.get(item);
+            return `${item}: ${before === undefined ? "new row" : JSON.stringify(before)} -> ${JSON.stringify(status)}`;
+          });
+        const result = { ...merged, conflicts, adoptionStatusChanges: adopted, statusChanges };
+        if (options.preview) throw new ReconcilePreviewRollback(result);
+        if (options.confirmed && !isDeepStrictEqual(result, options.confirmed)) {
+          throw new Error("the import no longer equals the confirmed preview; nothing was imported");
+        }
+      });
       if (adoptionStatusChanges.length > 0) {
         logWarning(
           "db",
@@ -758,7 +786,7 @@ export function reconcileWorktreeDb(
             `to adopt them:\n  ${adoptionStatusChanges.join("\n  ")}`,
         );
       }
-      return { ...merged, conflicts, adoptionStatusChanges };
+      return { ...merged, conflicts, adoptionStatusChanges, statusChanges };
     } finally {
       try { adapter.exec("DETACH DATABASE wt"); } catch (e) { logWarning("db", `detach worktree DB failed: ${(e as Error).message}`); }
     }

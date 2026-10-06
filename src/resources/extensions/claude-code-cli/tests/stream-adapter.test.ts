@@ -5675,6 +5675,17 @@ describe("stream-adapter — projection write guard", () => {
 		});
 	}
 
+	test("denies writes to the root renders OVERRIDES.md and QUEUE-ORDER.json and names the owner", async () => {
+		const overrides = await preToolUse("Edit", {
+			file_path: "/tmp/project/.gsd/OVERRIDES.md", old_string: "a", new_string: "b",
+		});
+		const queueOrder = await preToolUse("Bash", { command: "echo '[]' > .gsd/QUEUE-ORDER.json" });
+		assert.equal(overrides.hookSpecificOutput?.permissionDecision, "deny");
+		assert.match(overrides.hookSpecificOutput?.permissionDecisionReason ?? "", /\/gsd steer/);
+		assert.equal(queueOrder.hookSpecificOutput?.permissionDecision, "deny");
+		assert.match(queueOrder.hookSpecificOutput?.permissionDecisionReason ?? "", /gsd_milestone_reorder/);
+	});
+
 	test("denies a write to STATE.md", async () => {
 		const decision = await preToolUse("Write", { file_path: "/tmp/project/.gsd/STATE.md", content: "x" });
 		assert.equal(decision.hookSpecificOutput?.permissionDecision, "deny");

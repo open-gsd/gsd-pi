@@ -9,7 +9,7 @@
 // the `task.reopened` Domain Operation event; it stays pending until a new
 // Attempt is claimed for the Task, so the first re-dispatch shows it.
 
-import { getDb } from "./db/engine.js";
+import { getLatestPendingReopenEventRow } from "./db/lifecycle-queries.js";
 
 /**
  * The markdown block for a reopen diagnosis that no Attempt has answered yet,
@@ -19,33 +19,7 @@ import { getDb } from "./db/engine.js";
 export function readPendingReopenReason(
   milestoneId: string, sliceId: string, taskId: string,
 ): { injectionBlock: string } | null {
-  const row = getDb().prepare(`
-    SELECT event.payload_json
-    FROM workflow_domain_events event
-    WHERE event.event_type = 'task.reopened'
-      AND event.entity_type = 'task'
-      AND event.entity_id = :entity_id
-      AND NOT EXISTS (
-        SELECT 1
-        FROM workflow_item_lifecycles lifecycle
-        JOIN workflow_execution_attempts attempt
-          ON attempt.lifecycle_id = lifecycle.lifecycle_id
-         AND attempt.project_id = lifecycle.project_id
-        WHERE lifecycle.item_kind = 'task'
-          AND lifecycle.project_id = event.project_id
-          AND lifecycle.milestone_id = :milestone_id
-          AND lifecycle.slice_id = :slice_id
-          AND lifecycle.task_id = :task_id
-          AND attempt.claim_project_revision > event.project_revision
-      )
-    ORDER BY event.project_revision DESC
-    LIMIT 1
-  `).get({
-    ":entity_id": `${milestoneId}/${sliceId}/${taskId}`,
-    ":milestone_id": milestoneId,
-    ":slice_id": sliceId,
-    ":task_id": taskId,
-  }) as { payload_json: string } | undefined;
+  const row = getLatestPendingReopenEventRow(milestoneId, sliceId, taskId);
   if (!row) return null;
   const payload = JSON.parse(row.payload_json) as { reason?: unknown; injectReason?: unknown };
   if (payload.injectReason !== true || typeof payload.reason !== "string") return null;

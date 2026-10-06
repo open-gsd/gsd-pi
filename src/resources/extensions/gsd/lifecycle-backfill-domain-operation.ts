@@ -24,6 +24,8 @@ import { normalizeLegacyLifecycleStatus } from "./status-guards.js";
 /** The operation type closeout and reopen accept as legacy-attested cancellation authority. */
 const LIFECYCLE_BACKFILL_OPERATION_TYPE = "lifecycle.backfill";
 const LIFECYCLE_BACKFILLED_EVENT_TYPE = "lifecycle.backfilled";
+/** Event payload marker of a completion that the legacy source attests and no verification evidence proves. */
+const UNVERIFIED_LEGACY_EVIDENCE = "unverified-legacy";
 
 export type LifecycleBackfillRule =
   | "legacy-open"
@@ -64,6 +66,11 @@ export interface LifecycleBackfillPreview {
    * Each gets the one legacy-attested Waiver that closeout requires.
    */
   waiverRepairs: LifecycleWaiverRepair[];
+  /**
+   * Completions that an Import Application adopted. The import has no
+   * per-item event, so each gets its `unverified-legacy` evidence marker here.
+   */
+  unmarkedImportCompletions: LifecycleWaiverRepair[];
 }
 
 export interface LifecycleWaiverRepair {
@@ -80,6 +87,8 @@ export interface LifecycleBackfillResult {
   operationId: string;
   adopted: number;
   waivers: number;
+  /** Import-adopted completions that got their `unverified-legacy` evidence marker. */
+  evidenceMarkers: number;
   /**
    * Legacy completions without evidence: adopted as open work, or as
    * completed (unverified legacy) under a completed parent.
@@ -112,6 +121,8 @@ interface HierarchyRow {
   lifecycleId: string | null;
   /** Adopted as cancelled (state_version 0) with no active Waiver. */
   cancelledWithoutWaiver: boolean;
+  /** Adopted as completed (state_version 0) by an Import Application, with no evidence marker event. */
+  importCompletionWithoutMarker: boolean;
 }
 
 const TERMINAL = new Set(["completed", "cancelled", "blocker-accepted"]);
@@ -127,25 +138,38 @@ function loadHierarchy(): HierarchyRow[] {
      AND lifecycle.milestone_id = ${row}
      AND lifecycle.slice_id IS ${slice}
      AND lifecycle.task_id IS ${task}`;
-  const lifecycleColumns = `lifecycle.lifecycle_status, lifecycle.lifecycle_id,
+  const lifecycleColumns = (label: string) => `lifecycle.lifecycle_status, lifecycle.lifecycle_id,
            (lifecycle.lifecycle_status = 'cancelled' AND lifecycle.state_version = 0 AND NOT EXISTS (
              SELECT 1 FROM workflow_waivers waiver
              WHERE waiver.lifecycle_id = lifecycle.lifecycle_id AND waiver.waiver_status = 'active'
-           )) AS cancelled_without_waiver`;
+           )) AS cancelled_without_waiver,
+           (lifecycle.lifecycle_status = 'completed' AND lifecycle.state_version = 0 AND EXISTS (
+             SELECT 1 FROM workflow_operations operation
+             WHERE operation.operation_id = lifecycle.last_operation_id
+               AND operation.operation_type = 'import.apply'
+           ) AND NOT EXISTS (
+             SELECT 1 FROM workflow_domain_events event
+             WHERE event.project_id = lifecycle.project_id
+               AND event.entity_type = lifecycle.item_kind
+               AND event.entity_id = ${label}
+               AND event.event_type = '${LIFECYCLE_BACKFILLED_EVENT_TYPE}'
+               AND json_extract(event.payload_json, '$.lifecycleId') = lifecycle.lifecycle_id
+               AND json_extract(event.payload_json, '$.evidence') = '${UNVERIFIED_LEGACY_EVIDENCE}'
+           )) AS import_completion_without_marker`;
   const rows = getDb().prepare(`
     SELECT 'milestone' AS item_kind, milestone.id AS milestone_id, NULL AS slice_id, NULL AS task_id,
            milestone.status, milestone.completed_at, '' AS summary, '' AS verification,
-           ${lifecycleColumns}
+           ${lifecycleColumns("milestone.id")}
     FROM milestones milestone ${lifecycleJoin("milestone", "milestone.id", "NULL", "NULL")}
     UNION ALL
     SELECT 'slice', slice.milestone_id, slice.id, NULL,
            slice.status, slice.completed_at, slice.full_summary_md, '',
-           ${lifecycleColumns}
+           ${lifecycleColumns("slice.milestone_id || '/' || slice.id")}
     FROM slices slice ${lifecycleJoin("slice", "slice.milestone_id", "slice.id", "NULL")}
     UNION ALL
     SELECT 'task', task.milestone_id, task.slice_id, task.id,
            task.status, task.completed_at, task.full_summary_md, task.verification_result,
-           ${lifecycleColumns}
+           ${lifecycleColumns("task.milestone_id || '/' || task.slice_id || '/' || task.id")}
     FROM tasks task ${lifecycleJoin("task", "task.milestone_id", "task.slice_id", "task.id")}
   `).all() as Array<Record<string, unknown>>;
   return rows.map((row) => ({
@@ -160,6 +184,7 @@ function loadHierarchy(): HierarchyRow[] {
     lifecycleStatus: row["lifecycle_status"] === null ? null : String(row["lifecycle_status"]),
     lifecycleId: row["lifecycle_id"] === null ? null : String(row["lifecycle_id"]),
     cancelledWithoutWaiver: Number(row["cancelled_without_waiver"]) === 1,
+    importCompletionWithoutMarker: Number(row["import_completion_without_marker"]) === 1,
   }));
 }
 
@@ -183,7 +208,8 @@ function sliceKey(milestoneId: string, sliceId: string): string {
  * a legacy completion without evidence under such a parent stays completed
  * as unverified legacy, with a finding (owner decisions 2026-10-03). A
  * lifecycle row already adopted as cancelled with no active Waiver is listed
- * for its one legacy-attested Waiver.
+ * for its one legacy-attested Waiver, and a completion that an Import
+ * Application adopted is listed for its `unverified-legacy` evidence marker.
  * Pure read: writes nothing.
  */
 export function previewLifecycleBackfill(): LifecycleBackfillPreview {
@@ -314,7 +340,7 @@ export function previewLifecycleBackfill(): LifecycleBackfillPreview {
     const proven = row.completedAt !== null && slices.length > 0 && allTerminal(slices);
     classify(row, proven, "ready", false);
   }
-  const waiverRepairs = rows.filter((row) => row.cancelledWithoutWaiver).map((row) => ({
+  const adoptedRow = (row: HierarchyRow): LifecycleWaiverRepair => ({
     itemKind: row.itemKind,
     milestoneId: row.milestoneId,
     sliceId: row.sliceId,
@@ -322,8 +348,14 @@ export function previewLifecycleBackfill(): LifecycleBackfillPreview {
     rawStatus: row.status,
     completedAt: row.completedAt,
     lifecycleId: row.lifecycleId!,
-  }));
-  return { items, unknownStatuses, openUnderCompletedParent, waiverRepairs };
+  });
+  return {
+    items,
+    unknownStatuses,
+    openUnderCompletedParent,
+    waiverRepairs: rows.filter((row) => row.cancelledWithoutWaiver).map(adoptedRow),
+    unmarkedImportCompletions: rows.filter((row) => row.importCompletionWithoutMarker).map(adoptedRow),
+  };
 }
 
 function canonicalPath(path: string): string {
@@ -372,11 +404,13 @@ function projectLegacy(
  * Operation: one lifecycle row (state_version 0) and one event per item that
  * keeps the raw legacy status, completed_at and the rule used, plus one
  * legacy-attested Waiver per cancelled item. A lifecycle row already adopted
- * as cancelled with no active Waiver gets its Waiver and one event too.
+ * as cancelled with no active Waiver gets its Waiver and one event too. A
+ * completion that an Import Application adopted gets one event with the
+ * `unverified-legacy` evidence marker; its lifecycle row does not change.
  * Refuses on a worktree-local database, on any unknown raw status, and when
- * there is nothing to adopt and no Waiver to grant. The first open of a
- * pre-cutover project database runs it when it would change no legacy status
- * (authority-cutover-on-open.ts), and an open of a cut-over database runs it
+ * there is nothing to adopt, no Waiver to grant and no marker to store. The
+ * first open of a pre-cutover project database runs it by default when it
+ * would change no legacy status * (authority-cutover-on-open.ts), and an open of a cut-over database runs it
  * for the rows left with no lifecycle row; `/gsd db adopt --apply` runs it by
  * hand.
  */
@@ -390,15 +424,21 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
       }`,
     );
   }
-  if (preview.items.length === 0 && preview.waiverRepairs.length === 0) {
+  if (
+    preview.items.length === 0 && preview.waiverRepairs.length === 0 &&
+    preview.unmarkedImportCompletions.length === 0
+  ) {
     throw new LifecycleBackfillRefusedError(
-      "lifecycle backfill refused: every hierarchy row already has a lifecycle and every adopted cancellation has a Waiver",
+      "lifecycle backfill refused: every hierarchy row already has a lifecycle, every adopted cancellation has a Waiver " +
+        "and every imported completion has its evidence marker",
     );
   }
 
   const fence = readDomainOperationFence();
   const milestoneIds = [
-    ...new Set([...preview.items, ...preview.waiverRepairs].map((item) => item.milestoneId)),
+    ...new Set(
+      [...preview.items, ...preview.waiverRepairs, ...preview.unmarkedImportCompletions].map((item) => item.milestoneId),
+    ),
   ].sort();
   const report: AdoptionReport = { waivers: 0, findings: [], cancelledUnderCompletedParent: [] };
   const operation = executeDomainOperation({
@@ -408,7 +448,11 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: "operator",
     sourceTransport: "internal",
-    payload: { itemCount: preview.items.length, waiverRepairCount: preview.waiverRepairs.length },
+    payload: {
+      itemCount: preview.items.length,
+      waiverRepairCount: preview.waiverRepairs.length,
+      evidenceMarkerCount: preview.unmarkedImportCompletions.length,
+    },
   }, (context) => {
     const events: DomainOperationEventInput[] = preview.items.map((item) => adoptItem(context, item, report));
     for (const repair of preview.waiverRepairs) {
@@ -424,23 +468,15 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
         grantedByActorId: "lifecycle-backfill",
       });
       report.waivers++;
-      events.push({
-        eventType: LIFECYCLE_BACKFILLED_EVENT_TYPE,
-        entityType: repair.itemKind,
-        entityId: rowLabel(repair),
-        payload: {
-          lifecycleId: repair.lifecycleId,
-          rawStatus: repair.rawStatus,
-          completedAt: repair.completedAt,
-          lifecycleStatus: "cancelled",
-          rule,
-          evidence: null,
-          projectedLegacyStatus: null,
-          waiverId,
-          finding: null,
-        },
-        destinations: ["db"],
-      });
+      events.push(adoptedRowEvent(repair, { lifecycleStatus: "cancelled", rule, evidence: null, waiverId }));
+    }
+    for (const completion of preview.unmarkedImportCompletions) {
+      events.push(adoptedRowEvent(completion, {
+        lifecycleStatus: "completed",
+        rule: "import-adopted-completion",
+        evidence: UNVERIFIED_LEGACY_EVIDENCE,
+        waiverId: null,
+      }));
     }
     return {
       events,
@@ -454,7 +490,29 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
   return {
     operationId: operation.operationId,
     adopted: preview.items.length,
+    evidenceMarkers: preview.unmarkedImportCompletions.length,
     ...report,
+  };
+}
+
+/** The one event of a row that an earlier operation adopted: the lifecycle row does not change. */
+function adoptedRowEvent(
+  row: LifecycleWaiverRepair,
+  outcome: { lifecycleStatus: CanonicalLifecycleStatus; rule: string; evidence: string | null; waiverId: string | null },
+): DomainOperationEventInput {
+  return {
+    eventType: LIFECYCLE_BACKFILLED_EVENT_TYPE,
+    entityType: row.itemKind,
+    entityId: rowLabel(row),
+    payload: {
+      lifecycleId: row.lifecycleId,
+      rawStatus: row.rawStatus,
+      completedAt: row.completedAt,
+      ...outcome,
+      projectedLegacyStatus: null,
+      finding: null,
+    },
+    destinations: ["db"],
   };
 }
 
@@ -508,7 +566,7 @@ function adoptItem(
       lifecycleStatus: item.lifecycleStatus,
       rule: item.rule,
       evidence: item.rule === "legacy-complete-evidenced" || item.rule === "legacy-complete-under-completed-parent"
-        ? "unverified-legacy"
+        ? UNVERIFIED_LEGACY_EVIDENCE
         : null,
       projectedLegacyStatus: item.projectedLegacyStatus,
       waiverId,
@@ -539,8 +597,16 @@ function adoptItem(
  * comes back to the caller. An unknown raw status then refuses the merge, and
  * nothing is written: for an inserted row here, and for a row the database
  * already held at the commit (LifecycleCoverageRefusedError).
+ *
+ * `afterAdoption` runs inside the operation after its last row change and
+ * gets the legacy status changes of the adoption. A throw there rolls back the
+ * merge and the adoption.
  */
-export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJsonValue): string[] {
+export function mergeLegacyRowsWithAdoption(
+  source: string,
+  merge: () => DomainJsonValue,
+  afterAdoption?: (statusChanges: string[]) => void,
+): string[] {
   const fence = readDomainOperationFence();
   let statusChanges: string[] = [];
   executeDomainOperation({
@@ -556,6 +622,7 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
     const merged = merge();
     const adoption = adoptInsertedHierarchyRows(context, (row) => !before.has(row));
     statusChanges = adoption.statusChanges;
+    afterAdoption?.(statusChanges);
     return {
       events: [
         { eventType: "legacy.merged", entityType: "project", entityId: source, payload: merged, destinations: ["db"] },

@@ -123,31 +123,31 @@ done
 
 ### Multi-Session Orchestration
 
-GSD tracks concurrent workers via file-based IPC in `.gsd/parallel/`. See [references/multi-session.md](references/multi-session.md) for the full architecture.
+GSD tracks concurrent workers via status files in `.gsd/parallel/`. See [references/multi-session.md](references/multi-session.md) for the full architecture.
 
 **Quick overview:**
 
-Each worker spawns with `GSD_MILESTONE_LOCK=M00X` + its own git worktree. Workers write heartbeats to `.gsd/parallel/<milestoneId>.status.json`. The orchestrator enumerates all status files to get a dashboard of all workers, and sends commands via signal files.
+Each worker spawns with `GSD_MILESTONE_LOCK=M00X` + its own git worktree. Workers write heartbeats to `.gsd/parallel/<milestoneId>.status.json`. The orchestrator enumerates all status files to get a dashboard of all workers.
 
 ```bash
 # Spawn a worker for milestone M001 in its worktree
 GSD_MILESTONE_LOCK=M001 GSD_PARALLEL_WORKER=1 \
   gsd headless --json auto \
   --cwd .gsd/worktrees/M001 2>worker-M001.log &
+M001_PID=$!
 
 # Monitor all workers: read .gsd/parallel/*.status.json
 for f in .gsd/parallel/*.status.json; do
   jq '{mid: .milestoneId, state: .state, unit: .currentUnit.id, cost: .cost}' "$f"
 done
 
-# Send pause signal to M001
-echo '{"signal":"pause","sentAt":'$(date +%s000)',"from":"coordinator"}' \
-  > .gsd/parallel/M001.signal.json
+# Stop the M001 worker
+kill -TERM "$M001_PID"
 ```
 
 **Status file fields:** `milestoneId`, `pid`, `state` (running/paused/stopped/error), `currentUnit`, `completedUnits`, `cost`, `lastHeartbeat`, `startedAt`, `worktreePath`.
 
-**Signal commands:** `pause`, `resume`, `stop`, `rebase`.
+**Worker commands:** `pause`, `resume` and `stop` are `command_queue` rows in the project database. The coordinator writes them (`/gsd parallel pause|resume|stop`). An external orchestrator stops a worker with `SIGTERM`. A signal file `.gsd/parallel/<milestoneId>.signal.json` is still accepted for compatibility and is deprecated: the worker turns it into a `command_queue` row and removes the file.
 
 **Liveness detection:** PID alive check (`kill -0 $pid`) + heartbeat freshness (30s timeout). Stale sessions are auto-cleaned.
 

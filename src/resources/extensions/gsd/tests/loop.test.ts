@@ -15,7 +15,7 @@ function createInactiveSession(basePath: string) {
 		currentUnit: null,
 		currentMilestoneId: null,
 		verificationRetryCount: new Map(),
-		verificationRetryFailureHashes: new Map(),
+		unclaimedUnitBudgets: new Map(),
 		pendingVerificationRetry: null,
 	};
 }

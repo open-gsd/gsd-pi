@@ -12,7 +12,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { AutoSession } from "./session.js";
 import type { AutoTerminalOutcome } from "./contracts.js";
@@ -30,7 +30,8 @@ import {
 import { _clearCurrentResolve } from "./resolve.js";
 import { runGuards } from "./phases.js";
 import { runFinalize } from "./finalize.js";
-import { handlePendingHookOutcome, resolveVerificationFailureMarkerPath } from "../auto-post-unit.js";
+import { handlePendingHookOutcome } from "../auto-post-unit.js";
+import { readStoredCloseoutRefusal } from "../db/unit-dispatch-retries.js";
 import {
   resetSessionTimeoutState,
   restoreTaskHostVerificationContext,
@@ -49,10 +50,13 @@ import { resolveEngine } from "../engine-resolver.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   recordDispatchClaim,
+  recordRunDispatchClaim,
   markRunning as markDispatchRunning,
   markCompleted as markDispatchCompleted,
   markFailed as markDispatchFailed,
   getRecentForUnit as getRecentDispatchesForUnit,
+  setDispatchStage,
+  type DispatchStage,
 } from "../db/unit-dispatches.js";
 import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.js";
 import {
@@ -63,7 +67,6 @@ import {
 } from "../db/milestone-leases.js";
 import { heartbeatAutoWorker, isDeadLocalAutoWorker } from "../db/auto-workers.js";
 import { resolveUokFlags } from "../uok/flags.js";
-import { scheduleSidecarQueue } from "../uok/execution-graph.js";
 import { normalizeRealPath } from "../paths.js";
 import {
   decideCooldownRecovery,
@@ -78,11 +81,9 @@ import {
   decideWorkflowLoop,
   formatDispatchExceptionSummary,
   resolveUnitRequestTimestamp,
-  shouldUseCustomEnginePath,
 } from "./workflow-kernel.js";
 import {
   hydrateCustomStepVerifyRetryCount,
-  hydrateCustomVerifyRetryCounts,
   saveCustomStepVerifyRetryCount,
 } from "./custom-verify-retry-store.js";
 import {
@@ -92,14 +93,14 @@ import {
 import { abortActiveUnitTurn } from "./unit-turn-abort.js";
 import { emitOpenUnitEndForUnit } from "../crash-recovery.js";
 import { recordUnitEnd, writeUnitRuntimeRecord } from "../unit-runtime.js";
-import { ensureDispatchLease, openDispatchClaim } from "./workflow-dispatch-claim.js";
+import { ensureDispatchLease, openDispatchClaim, openRunDispatchClaim } from "./workflow-dispatch-claim.js";
 import { completeWorkflowIteration } from "./workflow-iteration-completion.js";
 import { createWorkflowJournalReporter } from "./workflow-journal-reporter.js";
 import { createWorkflowPhaseReporter } from "./workflow-phase-reporter.js";
 import { createWorkflowTurnReporter } from "./workflow-turn-reporter.js";
 import { validateWorkflowSessionLock } from "./workflow-session-lock.js";
-import { dequeueSidecarItem } from "./workflow-sidecar-queue.js";
-import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.js";
+import { kernelAdvance } from "./lifecycle-kernel.js";
+import { releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.js";
 import { maintainWorkerHeartbeat, runWithWorkerHeartbeat } from "./workflow-worker-heartbeat.js";
 import { gsdRoot } from "../paths.js";
@@ -112,13 +113,12 @@ import { handleCustomEngineDispatchOutcome } from "./workflow-custom-engine-disp
 import { buildCustomEngineIterationData } from "./workflow-custom-engine-iteration.js";
 import { handleCustomEngineVerifyRetry } from "./workflow-custom-engine-retry.js";
 import {
-  composeVerificationInputPayload,
-  handleCustomEngineTaskVerifyOutcome,
   handleCustomEngineVerifyPause,
   handleCustomEngineVerifyRetryOutcome,
-  type VerificationRead,
 } from "./workflow-custom-engine-verify-outcome.js";
+import type { VerificationOutcome } from "../custom-verification.js";
 import { customStepApprovalNotice } from "../custom-workflow-engine.js";
+import { customWorkflowRunId } from "../db/custom-workflow-runs.js";
 import { handleCustomEngineReconcile } from "./workflow-custom-engine-reconcile.js";
 import { handleCustomEngineReconcileOutcome } from "./workflow-custom-engine-reconcile-outcome.js";
 import { formatLeaseConflictNotice } from "./lease-conflict-notice.js";
@@ -129,12 +129,6 @@ import {
   publishVerifiedTaskExecution,
   runWithTaskExecutionAttempt,
 } from "./task-execution-cutover.js";
-import {
-  requestCustomTaskHumanReviewFromUi,
-  resolvePendingCustomTaskHumanReview,
-  runCustomEngineHostVerification,
-  type HostVerificationEvidence,
-} from "./custom-task-host-verification.js";
 import {
   claimTaskAttempt,
   interruptOrphanedTaskAttempts,
@@ -148,22 +142,19 @@ import {
   readTaskRecoveryRoute,
   recordFailureAndSelectRecovery,
 } from "../task-recovery-domain-operation.js";
-import {
-  readTerminalTaskRecoveryAbort,
-  verifyExpectedArtifact,
-} from "../artifact-verification.js";
-import { IS_DISPATCH_OWNER_DEAD, RECLAIM_DEAD_DISPATCH_OWNER } from "./unit-run.js";
+import { readTerminalTaskRecoveryAbort } from "../artifact-verification.js";
+import { IS_DISPATCH_OWNER_DEAD, IS_RUN_DISPATCH_OWNER_GONE, RECLAIM_DEAD_DISPATCH_OWNER } from "./unit-run.js";
 
 /**
- * Path of the `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED` marker
- * for the unit when one exists on disk — a deliberate closeout refusal
- * (#2046). Flagged on the finalize input so the kernel stops instead of
- * identical-input retrying. Unknown unit types resolve to no marker and keep
- * the retry default.
+ * The closeout refusal recorded on the unit's newest dispatch row, when one
+ * exists — a deliberate closeout refusal (#2046). Flagged on the finalize
+ * input so the kernel stops instead of identical-input retrying. The refusal
+ * is the dispatch row; the `*VERIFICATION-FAILED` report on disk is a render
+ * that the pre-verification ingest probes once. Unknown unit types have no
+ * refusal row and keep the retry default.
  */
-function resolvePresentVerificationFailureMarker(unitType: string, unitId: string, basePath: string): string | null {
-  const markerPath = resolveVerificationFailureMarkerPath(unitType, unitId, basePath);
-  return markerPath !== null && existsSync(markerPath) ? markerPath : null;
+function resolvePresentVerificationFailureMarker(unitType: string, unitId: string, _basePath: string): string | null {
+  return readStoredCloseoutRefusal(unitType, unitId);
 }
 
 function resolveCompletionStopFromState(
@@ -315,13 +306,6 @@ function logDispatchLeaseRecoveryFailed(details: {
   debugLog("autoLoop", {
     phase: "dispatch-lease-recovery-failed",
     ...details,
-  });
-}
-
-function logCustomVerifyRetryLoadFailure(err: unknown): void {
-  debugLog("autoLoop", {
-    phase: "load-custom-verify-retries-failed",
-    error: err instanceof Error ? err.message : String(err),
   });
 }
 
@@ -492,8 +476,8 @@ export async function autoLoop(
     }
   }
   let iteration = 0;
-  // Load persisted verification retry state so the exhausted-unit guard fires on restart (#651)
-  hydrateCustomVerifyRetryCounts(s, { logFailure: logCustomVerifyRetryLoadFailure });
+  // A custom workflow step keeps its verification retry count on its step row;
+  // the count is loaded when a retry needs it.
   const loopState: LoopState = {
     consecutiveFinalizeTimeouts: 0,
   };
@@ -523,7 +507,7 @@ export async function autoLoop(
       `Task recovery requires a verified repair before auto-mode can continue. ${reason}`,
       "warning",
     );
-    await deps.pauseAuto(ctx, pi, {
+    await deps.pauseAuto(ctx, pi, "machine_fixable", {
       message: reason,
       category: "unknown",
     });
@@ -627,6 +611,16 @@ export async function autoLoop(
     // queryable without parsing error_summary prose.
     const exitReasonForBreak = (breakReason: string): string | undefined =>
       breakReason === "unit-hard-timeout" ? "timeout" : undefined;
+    // The stage checkpoint on the dispatch row (ADR-048): a resume reads it to
+    // decide whether the unit still has execution to continue.
+    const checkpointStage = (stage: Exclude<DispatchStage, "execute">): void => {
+      if (dispatchId === null) return;
+      try {
+        setDispatchStage(dispatchId, stage);
+      } catch (err) {
+        logDispatchLedgerWriteFailure(err);
+      }
+    };
     const closeRun = async (
       outcome: IterationRunOutcome,
       reason: string,
@@ -666,7 +660,7 @@ export async function autoLoop(
         // orchestrator surfaced the concrete finalize-failure cause; pause with
         // it (plain /gsd auto resumes after the fix) instead of the generic
         // wedge stop.
-        await deps.pauseAuto(ctx, pi, { message: reason, category: "unknown" });
+        await deps.pauseAuto(ctx, pi, "machine_fixable", { message: reason, category: "unknown" });
         return reason;
       }
       return null;
@@ -818,21 +812,6 @@ export async function autoLoop(
         break;
       }
 
-      // ── Check sidecar queue before deriveState ──
-      // NOTE: Sidecar dequeue MUST run before validateWorkflowSessionLock so a
-      // queued item is popped (and the `sidecar-dequeue` journal event emitted)
-      // even when the session lock invalidates this iteration. Inverting this
-      // order silently drops queued items on lock-loss. Refs #5308.
-      const sidecarItem = await dequeueSidecarItem({
-        queue: listQueuedSidecarItems(),
-        executionGraphEnabled: uokFlags.executionGraph,
-        scheduleQueue: scheduleSidecarQueue,
-        warnSchedulingFailure: message => logWarning("dispatch", `sidecar queue scheduling failed: ${message}`),
-        logDequeue: payload => debugLog("autoLoop", { phase: "sidecar-dequeue", ...payload }),
-        emitDequeue: payload => journalReporter.emit("sidecar-dequeue", payload),
-      });
-      dequeuedSidecarId = sidecarItem?.id ?? null;
-
       const sessionLockOutcome = validateWorkflowSessionLock({
         active: s.active,
         iteration,
@@ -856,6 +835,20 @@ export async function autoLoop(
         break;
       }
 
+      // ── Lifecycle Kernel: select the next unit from database rows ──
+      // The selection runs after the session-lock check. A process that lost
+      // the lock selects nothing, so a queued sidecar row stays queued for the
+      // process that holds the lock (ADR-048).
+      const advanceResult = await kernelAdvance(s, {
+        executionGraphEnabled: uokFlags.executionGraph,
+        emitSidecarDequeue: payload => journalReporter.emit("sidecar-dequeue", payload),
+      });
+      const sidecarItem = advanceResult.kind === "sidecar" ? advanceResult.item : undefined;
+      // A unit that a killed process left in the verify stage. It does not run
+      // again: this iteration continues at the verification gate.
+      const stageContinuation = advanceResult.kind === "stage" ? advanceResult : undefined;
+      dequeuedSidecarId = sidecarItem?.id ?? null;
+
       const ic: IterationContext = {
         ctx,
         pi,
@@ -875,11 +868,7 @@ export async function autoLoop(
       //
       // GSD_ENGINE_BYPASS=1 skips the engine layer entirely — falls through
       // to the dev path below.
-      if (shouldUseCustomEnginePath({
-        activeEngineId: s.activeEngineId,
-        hasSidecarItem: Boolean(sidecarItem),
-        engineBypass: process.env.GSD_ENGINE_BYPASS === "1",
-      })) {
+      if (advanceResult.kind === "engine") {
         debugLog("autoLoop", { phase: "custom-engine-derive", iteration, engineId: s.activeEngineId });
 
         const { engine, policy } = resolveEngine({
@@ -959,7 +948,6 @@ export async function autoLoop(
         observedUnitType = customIterData.unitType;
         observedUnitId = customIterData.unitId;
 
-        let customDispatchId: number | null = null;
         let customDispatchSettled = false;
         // A custom workflow step keeps its retry count on the step row.
         const saveCustomEngineRetryCounts = (): void =>
@@ -992,53 +980,42 @@ export async function autoLoop(
           break;
         }
 
-        // ── Unit execution (shared with dev path) ──
         await enforceMinRequestInterval(s, prefs);
-        if (iterData.unitType === "execute-task") {
-          const lease = ensureDispatchLease(s, iterData.mid, {
-            claimMilestoneLease,
-            logLeaseRecovered: logDispatchLeaseRecovered,
-            logLeaseRecoveryFailed: logDispatchLeaseRecoveryFailed,
+
+        // ── Dispatch claim ──
+        // A workflow step is claimed as a unit_dispatches row (ADR-048), so a
+        // second session cannot run the step that this session runs.
+        // resolveEngine refused a session with no run directory.
+        const runId = customWorkflowRunId(s.activeRunDir!);
+        const claim = openRunDispatchClaim(s, flowId, turnId, iterData, runId, {
+          getRecentDispatchesForUnit,
+          recordDispatchClaim: recordRunDispatchClaim,
+          markDispatchRunning,
+          logClaimRejected: logDispatchClaimRejected,
+          logClaimFailed: logDispatchClaimFailed,
+          isDispatchOwnerDead: IS_RUN_DISPATCH_OWNER_GONE,
+          reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
+        });
+        if (claim.kind !== "opened") {
+          const msg = claim.kind === "skip"
+            ? `Workflow step ${iterData.unitId} is running in another session (worker ${claim.existingWorker ?? "unknown"}). Stop that session, then run /gsd workflow resume ${runId}.`
+            : `Workflow step ${iterData.unitId} could not be claimed: ${claim.reason}`;
+          ctx.ui.notify(msg, "error");
+          finishTurn("stopped", "execution", msg, "custom-engine-dispatch-claim");
+          finishIncompleteIteration({
+            status: "stopped",
+            reason: msg,
+            unitType: iterData.unitType,
+            unitId: iterData.unitId,
+            failureClass: "execution",
           });
-          if (lease.kind !== "ready") {
-            throw new Error(`Custom engine execute-task requires a canonical milestone lease: ${lease.reason}`);
-          }
-          const customClaimDeps = {
-            getRecentDispatchesForUnit,
-            recordDispatchClaim,
-            markDispatchRunning,
-            logClaimRejected: logDispatchClaimRejected,
-            logClaimFailed: logDispatchClaimFailed,
-            isDispatchOwnerDead: IS_DISPATCH_OWNER_DEAD,
-            reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
-          };
-          let claim = openDispatchClaim(s, flowId, turnId, iterData, customClaimDeps);
-          if (claim.kind === "skip" && claim.reason === "stale-lease") {
-            // #2443: the dispatch guard rejects a lease whose TTL lapsed
-            // during guards/request throttling (mirroring the attempt fencing
-            // trigger). The same live worker almost always still owns the
-            // milestone here, so force-reclaim once and retry, matching the
-            // recovery the inline loop path and claimUnitRun already perform.
-            // Only a genuine takeover by another live worker surfaces as the
-            // terminal conflict below.
-            const leaseRecovery = ensureDispatchLease(s, iterData.mid, {
-              claimMilestoneLease,
-              logLeaseRecovered: logDispatchLeaseRecovered,
-              logLeaseRecoveryFailed: logDispatchLeaseRecoveryFailed,
-            }, { forceReclaim: true });
-            if (leaseRecovery.kind === "ready") {
-              claim = openDispatchClaim(s, flowId, turnId, iterData, customClaimDeps);
-            }
-          }
-          if (claim.kind !== "opened") {
-            const reason = claim.kind === "skip" || claim.kind === "degraded"
-              ? claim.reason
-              : "dispatch claim degraded";
-            throw new Error(`Custom engine execute-task requires a canonical coordination dispatch: ${reason}`);
-          }
-          customDispatchId = claim.dispatchId;
-          dispatchId = customDispatchId;
+          await deferStopAuto(ctx, pi, msg);
+          break;
         }
+        const customDispatchId = claim.dispatchId;
+        dispatchId = customDispatchId;
+
+        // ── Unit execution (shared with dev path) ──
         let unitPhaseResult: UnitPhaseResult;
         try {
           s.unitExecutionInFlight = true;
@@ -1092,12 +1069,11 @@ export async function autoLoop(
               markFailed: markDispatchFailed,
               logWriteFailure: logDispatchLedgerWriteFailure,
             }, exitReasonForBreak(breakReason)));
-          if (customDispatchId !== null && !customDispatchSettled) {
+          if (!customDispatchSettled) {
             throw new Error(`Could not terminalize custom-engine dispatch ${customDispatchId} after unit break`);
           }
           dispatchSettled = customDispatchSettled;
           await closeRun("failed", breakReason, exitReasonForBreak(breakReason));
-          await pauseForTaskRecoveryAbort(breakReason);
           finishIncompleteIteration({
             status: "stopped",
             reason: breakReason,
@@ -1119,7 +1095,7 @@ export async function autoLoop(
               markFailed: markDispatchFailed,
               logWriteFailure: logDispatchLedgerWriteFailure,
             }));
-          if (customDispatchId !== null && !customDispatchSettled) {
+          if (!customDispatchSettled) {
             throw new Error(`Could not terminalize custom-engine dispatch ${customDispatchId} before unit retry`);
           }
           dispatchSettled = customDispatchSettled;
@@ -1139,129 +1115,23 @@ export async function autoLoop(
           continue;
         }
 
-        if (iterData.customEnginePreparation === "task-replan") {
-          const prepared = verifyExpectedArtifact(iterData.unitType, iterData.unitId, s.basePath);
-          phaseReporter.report("custom-engine", prepared ? "complete" : "retry", {
-            unitType: iterData.unitType,
-            unitId: iterData.unitId,
-            preparation: iterData.customEnginePreparation,
-          });
-          if (!prepared) {
-            finishIncompleteIteration({
-              status: "retry",
-              reason: "custom-engine-task-replan-not-durable",
-              retry: true,
-              unitType: iterData.unitType,
-              unitId: iterData.unitId,
-            });
-            finishTurn("retry", "verification", "custom-engine-task-replan-not-durable", "custom-engine-task-replan");
-            continue;
-          }
-          deps.clearUnitTimeout();
-          completeIteration();
-          finishTurn("completed", "none", undefined, null);
-          continue;
-        }
-
         // ── Verify first, then reconcile (only mark complete on pass) ──
+        checkpointStage("verify");
         debugLog("autoLoop", { phase: "custom-engine-verify", iteration, unitId: iterData.unitId });
-        let humanReviewPolicy = false;
-        try {
-          humanReviewPolicy = policy.requiresHumanVerification?.(iterData.unitType, iterData.unitId) === true;
-        } catch (error) {
-          debugLog("autoLoop", {
-            phase: "custom-engine-human-verification-policy-error",
-            unitType: iterData.unitType,
-            unitId: iterData.unitId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-        const hostVerification = deps.customEngineHostVerificationBoundary ?? runCustomEngineHostVerification;
-        // ADR-047 §3: the signature must hash every input this turn read, in read
-        // order. Host verification can decide without ever reaching the policy
-        // (stored verdict, recovery route, missing repository, source drift),
-        // after catching a policy error, or a second time once interactive human
-        // review resolved the blocker. Each read appends here and
-        // composeVerificationInputPayload orders them, so a later decisive read
-        // can never be shadowed by an earlier one (#1674).
-        const verificationReads: VerificationRead[] = [];
-        const verificationInput = {
-          unitType: iterData.unitType,
-          unitId: iterData.unitId,
-          basePath: s.basePath,
-          preferences: prefs,
-          humanReviewPolicy,
-          recordHostEvidence: (evidence: HostVerificationEvidence) => {
-            verificationReads.push({ source: "host", evidence });
-          },
-          verifyPolicy: async () => {
-            if (policy.verifyWithEvidence) {
-              const result = await policy.verifyWithEvidence(
-                customIterData.unitType,
-                customIterData.unitId,
-                { basePath: s.basePath },
-              );
-              verificationReads.push({ source: "policy", evidence: result.inputPayload });
-              return result.outcome;
-            }
-            const outcome = await policy.verify(customIterData.unitType, customIterData.unitId, { basePath: s.basePath });
-            verificationReads.push({ source: "policy", evidence: JSON.stringify({ outcome }) });
-            return outcome;
-          },
-        };
-        let verifyResult = await hostVerification(verificationInput);
-        if (verifyResult === "pause" &&
-            iterData.unitType === "execute-task" &&
-            ctx.hasUI) {
-          try {
-            if (!s.workerId) {
-              throw new Error("Human-review response requires the active worker identity");
-            }
-            const actorId = s.cmdCtx?.sessionManager?.getSessionId?.() ?? s.workerId;
-            const resolution = await resolvePendingCustomTaskHumanReview({
-              unitId: iterData.unitId,
-              responseIdentity: {
-                actorId,
-                workerId: s.workerId,
-                traceId: flowId,
-                turnId,
-              },
-              requestReview: input => requestCustomTaskHumanReviewFromUi(ctx.ui, input),
-            });
-            if (resolution === "resolved" || resolution === "dismissed") {
-              verifyResult = await hostVerification(verificationInput);
-            }
-          } catch (error) {
-            debugLog("autoLoop", {
-              phase: "custom-engine-human-review-response-error",
-              unitType: iterData.unitType,
-              unitId: iterData.unitId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-        const verificationInputPayload = composeVerificationInputPayload({
-          outcome: verifyResult,
-          reads: verificationReads,
-        });
-        if (iterData.unitType === "execute-task" && (verifyResult === "retry" || verifyResult === "abort")) {
-          const verifyFlow = handleCustomEngineTaskVerifyOutcome({
-            outcome: verifyResult,
-            inputPayload: verificationInputPayload,
-            finishTurn,
-          });
-          const reason = verifyResult === "abort"
-            ? "custom-engine-task-verify-abort"
-            : "custom-engine-task-verify-retry";
-          finishIncompleteIteration({
-            status: verifyResult === "abort" ? "stopped" : "retry",
-            reason,
-            unitType: iterData.unitType,
-            unitId: iterData.unitId,
-            failureClass: "verification",
-          });
-          if (verifyFlow.action === "break") break;
-          continue;
+        // ADR-047 §3: the signature of this turn hashes what the policy read.
+        let verifyResult: VerificationOutcome;
+        let verificationInputPayload: string;
+        if (policy.verifyWithEvidence) {
+          const result = await policy.verifyWithEvidence(
+            customIterData.unitType,
+            customIterData.unitId,
+            { basePath: s.basePath },
+          );
+          verifyResult = result.outcome;
+          verificationInputPayload = result.inputPayload;
+        } else {
+          verifyResult = await policy.verify(customIterData.unitType, customIterData.unitId, { basePath: s.basePath });
+          verificationInputPayload = JSON.stringify({ outcome: verifyResult });
         }
         if (verifyResult === "pause") {
           const verifyFlow = await handleCustomEngineVerifyPause({
@@ -1269,7 +1139,7 @@ export async function autoLoop(
             unitId: iterData.unitId,
             inputPayload: verificationInputPayload,
             deps: {
-              pauseAuto: () => deps.pauseAuto(ctx, pi),
+              pauseAuto: () => deps.pauseAuto(ctx, pi, "subjective_uat"),
               stopAuto: reason => deferStopAuto(ctx, pi, reason),
               reportPause: details => phaseReporter.report("custom-engine", "pause", details),
               finishTurn,
@@ -1312,7 +1182,7 @@ export async function autoLoop(
             outcome: retryOutcome,
             inputPayload: verificationInputPayload,
             deps: {
-              pauseAuto: () => deps.pauseAuto(ctx, pi),
+              pauseAuto: () => deps.pauseAuto(ctx, pi, "machine_fixable"),
               stopAuto: reason => deferStopAuto(ctx, pi, reason),
               reportPause: details => phaseReporter.report("custom-engine", "pause", details),
               finishTurn,
@@ -1335,33 +1205,6 @@ export async function autoLoop(
             unitId: iterData.unitId,
           });
           continue;
-        }
-
-        if (iterData.unitType === "execute-task") {
-          try {
-            await (deps.taskPublicationBoundary ?? publishVerifiedTaskExecution)({
-              unitType: iterData.unitType,
-              unitId: iterData.unitId,
-              workerId: s.workerId,
-              traceId: flowId,
-              turnId,
-              basePath: s.basePath,
-            }, VERIFIED_TASK_PUBLICATION_DEPS);
-          } catch (publishErr) {
-            const publishReason = publishErr instanceof Error ? publishErr.message : String(publishErr);
-            await closeRun("failed", publishReason);
-            ctx.ui.notify(publishReason, "error");
-            finishIncompleteIteration({
-              status: "stopped",
-              reason: publishReason,
-              unitType: iterData.unitType,
-              unitId: iterData.unitId,
-              failureClass: "closeout",
-            });
-            finishTurn("stopped", "closeout", publishReason, "task-publication-failed");
-            await deferStopAuto(ctx, pi, publishReason);
-            break;
-          }
         }
 
         await closeRun("completed", "custom-engine-iteration-complete");
@@ -1390,7 +1233,7 @@ export async function autoLoop(
           unitId: iterData.unitId,
           deps: {
             stopAuto: reason => deferStopAuto(ctx, pi, reason),
-            pauseAuto: () => deps.pauseAuto(ctx, pi),
+            pauseAuto: () => deps.pauseAuto(ctx, pi, "machine_fixable"),
             report: (action, details) => phaseReporter.report("custom-engine", action, details),
             finishTurn,
           },
@@ -1420,21 +1263,9 @@ export async function autoLoop(
         continue;
       }
 
-      if (!sidecarItem) {
-        const orchestration = s.orchestration;
-        if (orchestration) {
-          const existingPendingDispatch = s.pendingOrchestrationDispatch;
-          let orchestrationResult = existingPendingDispatch
-            ? {
-                kind: "advanced" as const,
-                unit: {
-                  unitType: existingPendingDispatch.unitType,
-                  unitId: existingPendingDispatch.unitId,
-                },
-                stateSnapshot: existingPendingDispatch.state,
-                dispatchId: existingPendingDispatch.dispatchId ?? 0,
-              }
-            : await orchestration.advance();
+      if (advanceResult.kind !== "sidecar" && advanceResult.kind !== "stage") {
+        if (advanceResult.kind !== "unavailable") {
+          const orchestrationResult = advanceResult;
 
           if (
             orchestrationResult.kind === "skipped" &&
@@ -1466,7 +1297,7 @@ export async function autoLoop(
                 ].join("\n")
               : orchestrationResult.reason;
             if (orchestrationResult.action === "pause") {
-              await deps.pauseAuto(ctx, pi, {
+              await deps.pauseAuto(ctx, pi, "machine_fixable", {
                 message: blockMessage,
                 category: "unknown",
               }, {
@@ -1615,7 +1446,7 @@ export async function autoLoop(
 
           if (orchestrationResult.kind === "error") {
             s.pendingOrchestrationDispatch = null;
-            await deps.pauseAuto(ctx, pi, {
+            await deps.pauseAuto(ctx, pi, "machine_fixable", {
               message: orchestrationResult.reason,
               category: "unknown",
             });
@@ -1772,7 +1603,7 @@ export async function autoLoop(
           }
         } else {
           s.pendingOrchestrationDispatch = null;
-          await deps.pauseAuto(ctx, pi, {
+          await deps.pauseAuto(ctx, pi, "machine_fixable", {
             message: ORCHESTRATION_MISSING_REASON,
             category: "unknown",
           });
@@ -1786,7 +1617,9 @@ export async function autoLoop(
         }
       } else {
         iterData = await buildSidecarIterationData({
-          sidecarItem,
+          sidecarItem: advanceResult.kind === "sidecar"
+            ? advanceResult.item
+            : { unitType: advanceResult.unit.unitType, unitId: advanceResult.unit.unitId, prompt: "" },
           basePath: s.basePath,
           canonicalProjectRoot: s.canonicalProjectRoot,
           deriveState: deps.deriveState,
@@ -1797,10 +1630,10 @@ export async function autoLoop(
         });
         observedUnitType = iterData.unitType;
         observedUnitId = iterData.unitId;
-        phaseReporter.report("dispatch", "sidecar", {
+        phaseReporter.report("dispatch", advanceResult.kind, {
           unitType: iterData.unitType,
           unitId: iterData.unitId,
-          sidecarKind: sidecarItem.kind,
+          ...(advanceResult.kind === "sidecar" ? { sidecarKind: advanceResult.item.kind } : {}),
         });
       }
 
@@ -1928,6 +1761,9 @@ export async function autoLoop(
       }
       dispatchId = dispatchDecision.dispatchId;
       }
+      // The new dispatch row of a continued unit starts where the row of the
+      // killed process stopped.
+      if (stageContinuation) checkpointStage(stageContinuation.stage);
 
       let unitPhaseResult: UnitPhaseResult;
       try {
@@ -1950,7 +1786,9 @@ export async function autoLoop(
                 dispatchSettled = true;
               },
             },
-            () => runUnitPhase(ic, unitIterData, loopState, sidecarItem),
+            stageContinuation
+              ? async () => ({ action: "next" as const, data: {} })
+              : () => runUnitPhase(ic, unitIterData, loopState, sidecarItem),
             TASK_EXECUTION_CUTOVER_DEPS,
           ),
         );
@@ -1968,14 +1806,14 @@ export async function autoLoop(
               logWriteFailure: logDispatchLedgerWriteFailure,
             },
           ));
-        // #2127: the dispatch selector returns pendingVerificationRetry's unit
-        // unconditionally, and a pre-claim failure (e.g. "Task Attempt claim
-        // must activate exactly one matching coordination dispatch") escapes
-        // the cutover boundary without consuming the marker. Leaving it armed
-        // makes every iteration reselect the same unit. Discard the retry and
-        // pause loudly instead.
+        // #2127: the dispatch rules select the unit of a stored retry, and a
+        // pre-claim failure (e.g. "Task Attempt claim must activate exactly
+        // one matching coordination dispatch") escapes the cutover boundary
+        // without releasing it. Leaving it stored makes every iteration
+        // reselect the same unit. Discard the retry and pause loudly instead.
         if (s.pendingVerificationRetry?.unitId === iterData.unitId) {
           s.pendingVerificationRetry = null;
+          releaseUnitRetry(iterData.unitType, iterData.unitId);
           const retryFailure = formatDispatchExceptionSummary({ error: err });
           const retryPauseMessage =
             `Verification retry for ${iterData.unitType} ${iterData.unitId} failed before the unit started: ${retryFailure} ` +
@@ -1988,7 +1826,7 @@ export async function autoLoop(
             unitId: iterData.unitId,
             failureClass: "execution",
           });
-          await deps.pauseAuto(ctx, pi, {
+          await deps.pauseAuto(ctx, pi, "machine_fixable", {
             message: retryPauseMessage,
             category: "unknown",
           });
@@ -2007,9 +1845,11 @@ export async function autoLoop(
       });
       if (
         unitPhaseResult.action === "next" &&
-        iterData.unitType === "execute-task" &&
         !s.currentUnit &&
-        isTaskExecutionReadyForHostVerification(iterData.unitType, iterData.unitId)
+        (stageContinuation || (
+          iterData.unitType === "execute-task" &&
+          isTaskExecutionReadyForHostVerification(iterData.unitType, iterData.unitId)
+        ))
       ) {
         restoreTaskHostVerificationContext(ic, iterData.unitType, iterData.unitId);
       }
@@ -2072,7 +1912,7 @@ export async function autoLoop(
               turnId,
               basePath: s.basePath,
             }, VERIFIED_TASK_PUBLICATION_DEPS);
-          }),
+          }, () => checkpointStage("verify"), stageContinuation?.stage),
         );
       } catch (err) {
         const error = formatDispatchExceptionSummary({ error: err });
@@ -2106,6 +1946,7 @@ export async function autoLoop(
           : finalizeResult.action === "continue"
             ? "retry"
             : "stopped";
+      if (finalizeStatus === "completed") checkpointStage("route");
       journalReporter.emit("post-unit-finalize-end", {
         iteration,
         unitType: iterData.unitType,
@@ -2154,7 +1995,7 @@ export async function autoLoop(
           // The unit deliberately declined closeout: stopping here must be
           // legible to the operator, not a silent exit after a "retry" report.
           ctx.ui.notify(
-            `${iterData.unitType} ${iterData.unitId} declined closeout${refusalMarkerPath ? ` (see ${relative(s.basePath, refusalMarkerPath)})` : ""}. Stopping instead of retrying — an identical-input retry cannot change a refusal.`,
+            `${iterData.unitType} ${iterData.unitId} declined closeout${refusalMarkerPath ? ` (see ${refusalMarkerPath})` : ""}. Stopping instead of retrying — an identical-input retry cannot change a refusal.`,
             "error",
           );
         }
@@ -2192,6 +2033,7 @@ export async function autoLoop(
         continue;
       }
 
+      if (finalizeStatus === "completed") checkpointStage("closeout");
       await closeRun("completed", "iteration-complete");
       completeIteration();
       finishTurn("completed", "none", undefined, null);
@@ -2249,7 +2091,7 @@ export async function autoLoop(
         // typed error already names the unit (#4959).
         observedUnitType = loopErr.unitType;
         observedUnitId = loopErr.unitId;
-        await deps.pauseAuto(ctx, pi);
+        await deps.pauseAuto(ctx, pi, "user_limit");
         finishTurn(policyDecision.turnStatus, policyDecision.failureClass, msg, "model-policy-dispatch");
         // Do NOT increment consecutiveErrors — the failure is configuration,
         // not a transient runtime fault.

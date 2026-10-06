@@ -6,14 +6,25 @@
 // the same unit; the newest row of the unit that holds the kind is the count,
 // and a reset writes 0 on the newest row.
 //
-// A unit that runs with no dispatch row (custom-engine steps, no database) has
+// A unit that runs with no dispatch row (no database) has
 // no durable identity. Its count stays in the caller's `unclaimed` map and
 // lasts for the process only.
+//
+// The `exhausted` kind is a mark, not a count: it is above 0 when the unit used
+// all its artifact verification retries. The dispatch rules do not dispatch a
+// unit that holds the mark. A reopen or a re-plan of the unit releases it.
 
 import { _getAdapter, isDbAvailable } from "../gsd-db.js";
-import { setDispatchBudgetUsed } from "./unit-dispatches.js";
+import { resetDispatchBudgetsInScope, setDispatchBudgetUsed } from "./unit-dispatches.js";
 
-export type UnitBudgetKind = "zero-tool" | "tool-unavailable" | "pre-exec";
+export type UnitBudgetKind =
+  | "zero-tool"
+  | "tool-unavailable"
+  | "pre-exec"
+  | "verification"
+  | "git-commit"
+  | "timeout-recovery"
+  | "exhausted";
 
 export interface UnitBudgetRef {
   unitType: string;
@@ -76,4 +87,12 @@ export function spendUnitBudget(unclaimed: Map<string, number>, ref: UnitBudgetR
 /** Give the unit a full budget again. */
 export function resetUnitBudget(unclaimed: Map<string, number>, ref: UnitBudgetRef): void {
   if (readUnitBudget(unclaimed, ref) > 0) writeUnitBudget(unclaimed, ref, 0);
+}
+
+/**
+ * Release the `exhausted` mark of the unit and of every unit below it. A
+ * reopen or a re-plan calls this, so the units can be dispatched again.
+ */
+export function releaseExhaustedUnits(scopeUnitId: string): void {
+  if (isDbAvailable()) resetDispatchBudgetsInScope(scopeUnitId, "exhausted");
 }

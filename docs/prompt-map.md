@@ -196,7 +196,7 @@ guided-resume-task  (if task was interrupted)
 |--------|---------|-----------------|
 | `execute-task.md` | Execute a single task. Inlines full context stack. | `memory_query`, `gsd_task_complete` |
 | `reactive-execute.md` | Dispatch all ready tasks in parallel subagents. When batch tasks are still not closed and have no Attempt Result after retries, records a recovery block and writes a diagnostic slice blocker; task lifecycle still follows DB Attempt/recovery authority, not summary-file presence. | `subagent` × N |
-| `guided-resume-task.md` | Resume interrupted task. Reads `{{sliceId}}-CONTINUE.md` for continuation context. | `gsd_task_complete` |
+| `guided-resume-task.md` | Resume interrupted task. The saved Work Checkpoint row of the task is inlined as `{{resumeState}}`. | `gsd_task_complete`, `gsd_checkpoint_save` |
 | `quick-task.md` | Lightweight task outside milestone structure. No DB tools. | writes `{{summaryPath}}` directly |
 
 ### 5e. Quality Gates
@@ -247,7 +247,7 @@ complete-milestone
 | `replan-slice.md` | Replan after a blocker discovered mid-slice. Preserves completed Tasks; every updated Task declares execution-compatible `requiredWorkflowTools`. | `gsd_replan_slice` |
 | `replan-task.md` | Replace one pending Task plan for a durable recovery action. Declares execution-compatible `requiredWorkflowTools` before a replacement Attempt can be claimed. | `gsd_replan_task` |
 | `rethink.md` | Reorder, park, unpark, skip, or discard milestones, and change dependencies. | `gsd_skip_slice`, `gsd_milestone_reorder`, `gsd_milestone_park`, `gsd_milestone_unpark`, `gsd_milestone_discard`, `gsd_milestone_set_dependencies`; `QUEUE-ORDER.json` and `PARKED.md` are rendered from the DB |
-| `worktree-merge.md` | Merge a worktree branch into a target branch from the main tree. Managed `.gsd` projections are not hand-merged; they are rendered again with `/gsd rebuild markdown`. | git merge (main tree CWD) |
+| `worktree-merge.md` | Merge a worktree branch into a target branch from the main tree. Managed `.gsd` projections are not hand-merged; GSD renders them again from the database after the merge commit. | git merge (main tree CWD) |
 | `reassess-roadmap.md` | *(see Completion Flow above)* | — |
 | `rewrite-docs.md` | Apply active steer overrides (database rows, rendered to OVERRIDES.md) across all plans. Planning files are not edited; they are rendered from the DB. | `gsd_plan_task`, `gsd_plan_slice`, `gsd_decision_save`, `gsd_requirement_update`, `gsd_summary_save(PROJECT)` |
 | `review-migration.md` | Audit `.planning → .gsd` migration correctness. | `deriveState` |
@@ -348,7 +348,7 @@ gsd.db (derived GSDState)
 
 ```
 execute-task  ──[interrupted]──► guided-resume-task
-                                    reads {{sliceId}}-CONTINUE.md
+                                    gets the Work Checkpoint row as {{resumeState}}
 
 execute-task  ──[blocker]──────► replan-slice
                                     rewrites incomplete tasks only
@@ -438,7 +438,7 @@ projection-delivery contracts are owned by the
 
 ## 10. Dispatch Rule Priority Order
 
-`auto-dispatch.ts` evaluates 28 rules top-to-bottom, first match wins. Source of
+`auto-dispatch.ts` evaluates 29 rules top-to-bottom, first match wins. Source of
 truth is the `DISPATCH_RULES` array in `auto-dispatch.ts`; the canary test
 `tests/dispatch-rule-coverage.test.ts` pins the count.
 
@@ -447,32 +447,33 @@ Priority  Rule                                          Fires When
 ────────  ────────────────────────────────────────────  ─────────────────────────
  1        escalating-task → pause-for-escalation        a task escalation is awaiting user review
  2        rewrite-docs (override gate)                  active override rows in the database
- 3        summarizing → complete-slice                  slice in 'summarizing' phase
- 4        run-uat (post-completion)                     slice complete, stored UAT spec, no run-uat verdict row
- 5        reassess-roadmap (post-completion)            slice closed, no roadmap assessment row
- 6        needs-discussion → discuss-milestone          milestone explicitly flagged for discussion
- 7        deep: workflow-preferences                    deep mode + workflow preferences fact not recorded (in-process, no unit)
- 8        deep: discuss-project                         deep mode + no valid PROJECT artifact row
- 9        deep: discuss-requirements                    deep mode + no valid REQUIREMENTS artifact row
-10        deep: research-project                        deep mode + recorded decision is `research`, files missing
-11        pre-planning (no context) → discuss-milestone active milestone, no saved CONTEXT row
-12        pre-planning (no research) → research-mile…   CONTEXT saved, no saved RESEARCH row
-13        pre-planning (has research) → plan-milestone  CONTEXT + RESEARCH saved, no slice rows
-14        planning (require_slice_discussion) → pause   slice has no saved CONTEXT row (#3454)
-15        planning (multi slices need research) → par…  slices planned, saved slice RESEARCH missing × ≥2
-16        planning (no research) → research-slice       single slice has no saved RESEARCH row
-17        refining → refine-slice                       slice is sketch, needs expansion
-18        planning → plan-slice                         slice has no task rows
-19        stored retry → plan-slice / refine-slice      the pre-execution check refused the slice plan and the retry is stored on the planner's dispatch row
-20        evaluating-gates → gate-evaluate              gates pending evaluation
-21        replanning-slice → replan-slice               slice in 'replanning' phase
-22        executing → replan-task recovery              pending Task recovery action for the active task
-23        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no recorded reactive block
-24        executing → execute-task (render plan)        slice PLAN file missing — render it from the DB, then fall through
-25        executing → execute-task                      1–2 tasks ready (sequential mode)
-26        validating-milestone → validate-milestone     all slices closed, not yet validated
-27        completing-milestone → complete-milestone     validated, not yet completed
-28        complete → stop                               nothing left to do
+ 3        stored retry → execute-task (commit repair)   the commit hook refused the changes of a closed task and the retry is stored on the task's dispatch row
+ 4        summarizing → complete-slice                  slice in 'summarizing' phase
+ 5        run-uat (post-completion)                     slice complete, stored UAT spec, no run-uat verdict row
+ 6        reassess-roadmap (post-completion)            slice closed, no roadmap assessment row
+ 7        needs-discussion → discuss-milestone          milestone explicitly flagged for discussion
+ 8        deep: workflow-preferences                    deep mode + workflow preferences fact not recorded (in-process, no unit)
+ 9        deep: discuss-project                         deep mode + no valid PROJECT artifact row
+10        deep: discuss-requirements                    deep mode + no valid REQUIREMENTS artifact row
+11        deep: research-project                        deep mode + recorded decision is `research`, files missing
+12        pre-planning (no context) → discuss-milestone active milestone, no saved CONTEXT row
+13        pre-planning (no research) → research-mile…   CONTEXT saved, no saved RESEARCH row
+14        pre-planning (has research) → plan-milestone  CONTEXT + RESEARCH saved, no slice rows
+15        planning (require_slice_discussion) → pause   slice has no saved CONTEXT row (#3454)
+16        planning (multi slices need research) → par…  slices planned, saved slice RESEARCH missing × ≥2
+17        planning (no research) → research-slice       single slice has no saved RESEARCH row
+18        refining → refine-slice                       slice is sketch, needs expansion
+19        planning → plan-slice                         slice has no task rows
+20        stored retry → plan-slice / refine-slice      the pre-execution check refused the slice plan and the retry is stored on the planner's dispatch row
+21        evaluating-gates → gate-evaluate              gates pending evaluation
+22        replanning-slice → replan-slice               slice in 'replanning' phase
+23        executing → replan-task recovery              pending Task recovery action for the active task
+24        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no recorded reactive block, no selected task with a lifecycle row
+25        executing → execute-task (render plan)        slice PLAN file missing — render it from the DB, then fall through
+26        executing → execute-task                      1–2 tasks ready (sequential mode)
+27        validating-milestone → validate-milestone     all slices closed, not yet validated
+28        completing-milestone → complete-milestone     validated, not yet completed
+29        complete → stop                               nothing left to do
 ```
 
 ---

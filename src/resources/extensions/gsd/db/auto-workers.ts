@@ -56,11 +56,17 @@ export interface AutoWorkerRow {
  */
 export function registerAutoWorker(opts: {
   projectRootRealpath: string;
+  /**
+   * Worker id prefix. Auto-mode loops register "auto" workers; a caller that
+   * dispatches one unit outside the loop (the kernel's interactive claim)
+   * registers under its own prefix so the two never read as the same kind.
+   */
+  prefix?: string;
 }): string {
   if (!isDbAvailable()) {
     throw new Error("registerAutoWorker: DB unavailable");
   }
-  const workerId = `auto-${hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`;
+  const workerId = `${opts.prefix ?? "auto"}-${hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
 
   transaction(() => {
@@ -256,6 +262,18 @@ export function isAutoWorkerLive(workerId: string): boolean {
   if (!Number.isFinite(heartbeatAt)) return false;
   if (heartbeatAt < Date.now() - HEARTBEAT_TTL_SECONDS * 1000) return false;
   return isWorkerProcessAlive(worker);
+}
+
+/**
+ * Whether an active worker row of this project belongs to a process that runs
+ * now. The heartbeat age is not checked: a long unit does not refresh it.
+ */
+export function hasLiveAutoWorkerForProject(projectRoot: string): boolean {
+  const root = normalizeRealPath(projectRoot);
+  return getAllAutoWorkers().some((worker) =>
+    worker.status === "active"
+    && normalizeRealPath(worker.project_root_realpath) === root
+    && isWorkerProcessAlive(worker));
 }
 
 /**

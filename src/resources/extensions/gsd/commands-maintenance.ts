@@ -10,8 +10,9 @@ import {
   mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync,
   rmdirSync, rmSync, unlinkSync, writeFileSync, constants as fsConstants,
 } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { deriveState } from "./state.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { nativeBranchList, nativeDetectMainBranch, nativeBranchListMerged, nativeBranchDelete, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
@@ -30,6 +31,7 @@ import {
   openWorkflowDatabase,
   prepareVerifiedRecoverApplication,
   resolvePreparedVerifiedRecoverApplication,
+  startEmptyWorkflowDatabase,
   type PreparedVerifiedRecoverApplication,
 } from "./db-workspace.js";
 import {
@@ -39,6 +41,7 @@ import {
 import {
   formatLegacyImportForwardRepairChoice,
   parseLegacyImportForwardRepairChoices,
+  parseLegacyImportKnowledgeFileRowChoices,
   parseLegacyImportPreviewChoices,
 } from "./legacy-import-forward-repair-choice-token.js";
 import { LEGACY_IMPORT_RESTORE_ASSESSMENT_CONSENT_SCHEMA_VERSION, type LegacyImportRestoreAssessmentConsent } from "./legacy-import-restore-assessment.js";
@@ -89,7 +92,8 @@ export async function handleCleanupBranches(ctx: ExtensionCommandContext, basePa
   let deletedStaleMilestones = 0;
   try {
     const { listWorktrees } = await import("./worktree-manager.js");
-    const { isDbAvailable, getMilestone } = await import("./gsd-db.js");
+    const { isDbAvailable } = await import("./gsd-db.js");
+    const { readMilestone } = await import("./db/lifecycle-read.js");
 
     const attachedBranches = new Set(
       listWorktrees(basePath).map((wt) => wt.branch),
@@ -100,9 +104,7 @@ export async function handleCleanupBranches(ctx: ExtensionCommandContext, basePa
       const milestoneId = branch.replace(/^milestone\//, "");
 
       if (!isDbAvailable()) continue;
-      const dbRow = getMilestone(milestoneId);
-      if (!dbRow) continue;
-      if (dbRow.status !== "complete" && dbRow.status !== "done") continue;
+      if (!readMilestone(milestoneId)?.done) continue;
       // Milestone is complete per DB — proceed to delete branch
       try {
         nativeBranchDelete(basePath, branch, true);
@@ -791,13 +793,25 @@ export async function handleRecover(
     let application = applicationId
       ? loadVerifiedRecoverApplication(applicationId)
       : loadRetainedVerifiedRecoverApplication();
+    const knowledgeFileRows = parseLegacyImportKnowledgeFileRowChoices(args);
+    if (application && knowledgeFileRows.length > 0) {
+      // A loaded Application is already applied: the choice would write nothing.
+      throw new Error(
+        `the KNOWLEDGE.md row choice for ${knowledgeFileRows.join(", ")} was not applied: `
+        + `Import Application ${application.receipt.operationId} is loaded, and a row choice needs a new Preview. `
+        + "No database changes made.",
+      );
+    }
     if (!application) {
       // Reviewed --choice tokens resolve 'requires-user' diagnoses and seal a
-      // new Preview; its hash is the one the operator approves.
+      // new Preview; its hash is the one the operator approves. A knowledge
+      // row choice makes the Preview write that KNOWLEDGE.md row over its
+      // differing database row.
       const previewChoices = parseLegacyImportPreviewChoices(args);
+      const created = prepareVerifiedRecoverApplication(basePath, knowledgeFileRows);
       const prepared = previewChoices.length === 0
-        ? prepareVerifiedRecoverApplication(basePath)
-        : resolvePreparedVerifiedRecoverApplication(prepareVerifiedRecoverApplication(basePath), previewChoices);
+        ? created
+        : resolvePreparedVerifiedRecoverApplication(created, previewChoices);
       const unresolved = formatUnresolvedRecoverDiagnoses(prepared);
       if (unresolved) {
         ctx.ui.notify(
@@ -1792,10 +1806,40 @@ export function handleDbBind(ctx: ExtensionCommandContext, basePath: string): vo
 }
 
 /**
+ * `gsd db start-empty` — Start from an empty database on purpose, although
+ * `.gsd` holds projections that this database did not produce (a re-clone of
+ * tracked `.gsd`). The choice is stored in the database, so every later open
+ * admits it. No file is moved or deleted.
+ */
+export function handleDbStartEmpty(ctx: ExtensionCommandContext, basePath: string): void {
+  const result = startEmptyWorkflowDatabase(basePath);
+  if (!result) {
+    ctx.ui.notify(
+      "gsd db start-empty: GSD does not refuse this project for a missing or empty database, so no choice was stored.",
+      "info",
+    );
+    return;
+  }
+  if (!result.ok) {
+    ctx.ui.notify(`gsd db start-empty: ${result.error?.message ?? result.reason}`, "error");
+    return;
+  }
+  ctx.ui.notify(
+    `gsd db start-empty: ${result.location.projectDb} now starts without the earlier workflow history. ` +
+    "No file in .gsd was changed. A milestone directory that the database does not know still stops " +
+    "dispatch until you delete it, rename it, or import it with /gsd recover.",
+    "info",
+  );
+}
+
+/**
  * `gsd db adopt` — preview, and with `--apply` run, the lifecycle.backfill
  * Domain Operation that adopts every milestone, slice and task row with no
- * lifecycle row. `--apply` first writes a verified backup beside the database
+ * lifecycle row, and stores the evidence marker of each imported completion.
+ * `--apply` first writes a verified backup beside the database
  * so `/gsd db restore-backup` can roll the change back.
+ * Evidence markers alone never close the Restore Window of an import: while
+ * it is open and no other work is pending, the command writes nothing.
  */
 export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: string, args = ""): Promise<void> {
   const { isAutoActive } = await import("./auto.js");
@@ -1822,10 +1866,26 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
       );
       return;
     }
-    if (preview.items.length === 0 && preview.waiverRepairs.length === 0) {
+    if (
+      preview.items.length === 0 && preview.waiverRepairs.length === 0 &&
+      preview.unmarkedImportCompletions.length === 0
+    ) {
       ctx.ui.notify(
         "gsd db adopt: every milestone, slice and task already has a lifecycle row, " +
-          "and every adopted cancellation has a Waiver.",
+          "every adopted cancellation has a Waiver, and every imported completion has its evidence marker.",
+        "info",
+      );
+      return;
+    }
+    const { importRestoreWindowIsOpen } = await import("./authority-cutover-on-open.js");
+    const { readDomainOperationFence } = await import("./db/writers/lifecycle-commands.js");
+    const restoreWindowOpen = importRestoreWindowIsOpen(readDomainOperationFence());
+    if (restoreWindowOpen && preview.items.length === 0 && preview.waiverRepairs.length === 0) {
+      ctx.ui.notify(
+        `gsd db adopt: ${preview.unmarkedImportCompletions.length} imported completion(s) have no ` +
+          "unverified-legacy evidence marker yet. The markers wait until the Restore Window of the import closes: " +
+          "nothing was written, and the import can still be restored. " +
+          "The next accepted work closes the Restore Window; run /gsd db adopt --apply after it.",
         "info",
       );
       return;
@@ -1835,6 +1895,9 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
     if (preview.waiverRepairs.length > 0) {
       byRule.set("adopted-cancelled-without-waiver", preview.waiverRepairs.length);
     }
+    if (preview.unmarkedImportCompletions.length > 0) {
+      byRule.set("import-adopted-completion", preview.unmarkedImportCompletions.length);
+    }
     const summary = [...byRule].map(([rule, count]) => `  ${rule}: ${count}`).join("\n") +
       (preview.openUnderCompletedParent.length > 0
         ? `\nOpen work under a completed parent, adopted as cancelled:\n${
@@ -1843,9 +1906,14 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
         : "");
     if (!/(^|\s)--apply(\s|$)/.test(args)) {
       ctx.ui.notify(
-        `gsd db adopt: ${preview.items.length} row(s) would be adopted and ` +
-          `${preview.waiverRepairs.length} adopted cancellation(s) would get a Waiver:\n${summary}\n` +
-          "Run /gsd db adopt --apply to adopt them in one operation (a verified backup is written first).",
+        `gsd db adopt: ${preview.items.length} row(s) would be adopted, ` +
+          `${preview.waiverRepairs.length} adopted cancellation(s) would get a Waiver and ` +
+          `${preview.unmarkedImportCompletions.length} imported completion(s) would get the ` +
+          `unverified-legacy evidence marker:\n${summary}\n` +
+          "Run /gsd db adopt --apply to adopt them in one operation (a verified backup is written first)." +
+          (restoreWindowOpen
+            ? "\nThe Restore Window of the last import is still open. --apply closes it: after that, the import cannot be restored."
+            : ""),
         "info",
       );
       return;
@@ -1858,7 +1926,7 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
     const result = applyLifecycleBackfill(basePath);
     ctx.ui.notify(
       `gsd db adopt: adopted ${result.adopted} row(s) in operation ${result.operationId} ` +
-        `(${result.waivers} legacy-attested Waiver(s)).\n${summary}` +
+        `(${result.waivers} legacy-attested Waiver(s), ${result.evidenceMarkers} unverified-legacy evidence marker(s)).\n${summary}` +
         (result.findings.length > 0 ? `\nCompletion without evidence:\n  ${result.findings.join("\n  ")}` : "") +
         "\nA verified backup was written beside the database; /gsd db restore-backup lists it.",
       "info",
@@ -1868,6 +1936,229 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
   } finally {
     if (!wasOpen) closeWorkflowDatabase();
   }
+}
+
+function formatPrunedBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Whether `resolved` stays inside the resolved quarantine root `realRoot`
+ * (the root itself included: an entry sits in it, so its location can be it). */
+function resolvesInsideQuarantine(realRoot: string, resolved: string): boolean {
+  const relPath = relative(realRoot, resolved);
+  return relPath !== ".." && !relPath.startsWith(`..${sep}`) && !isAbsolute(relPath);
+}
+
+/** A prune candidate: a real quarantined file, or a symlink (the link itself,
+ * never its target). */
+interface QuarantinePruneCandidate {
+  path: string;
+  size: number;
+  isLink: boolean;
+}
+
+/**
+ * Walk the quarantine root without ever following a symlink.
+ * `readdirSync(root, { recursive: true })` descends into symlinked
+ * directories, so a planted link made files OUTSIDE the quarantine show up as
+ * copies — and get deleted through the link path. This walk lstats every
+ * entry instead: a symlink is listed only as the link itself (its target is
+ * never resolved for traversal), only real directories are descended into,
+ * and every candidate must additionally resolve strictly inside
+ * `realpath(root)` (belt and braces against a directory swapped for a link
+ * mid-walk).
+ */
+function collectQuarantinePruneCandidates(
+  root: string,
+  realRoot: string,
+): { candidates: QuarantinePruneCandidate[]; dirs: string[] } {
+  const candidates: QuarantinePruneCandidate[] = [];
+  const dirs: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // Unreadable: nothing inside is listed, so nothing inside is deleted.
+    }
+    for (const entry of entries) {
+      const entryPath = join(dir, entry.name);
+      let stat: Stats;
+      try {
+        stat = lstatSync(entryPath);
+      } catch {
+        continue; // Vanished between readdir and lstat: nothing to list.
+      }
+      if (stat.isSymbolicLink()) {
+        // Containment is checked on the link's location (its parent
+        // directory), never through the link: the target may legitimately sit
+        // outside and is not touched — only the link is a candidate.
+        try {
+          if (resolvesInsideQuarantine(realRoot, realpathSync(dirname(entryPath)))) {
+            candidates.push({ path: entryPath, size: stat.size, isLink: true });
+          }
+        } catch (err) {
+          // Not listed, so not deleted — but never silently.
+          logWarning("command", `prune-quarantine: kept the link ${entryPath} — its quarantine location could not be verified: ${(err as Error).message}`);
+        }
+        continue;
+      }
+      if (stat.isFile()) {
+        try {
+          if (resolvesInsideQuarantine(realRoot, realpathSync(entryPath))) {
+            candidates.push({ path: entryPath, size: stat.size, isLink: false });
+          }
+        } catch (err) {
+          // Not listed, so not deleted — but never silently.
+          logWarning("command", `prune-quarantine: kept ${entryPath} — it could not be verified inside the quarantine: ${(err as Error).message}`);
+        }
+        continue;
+      }
+      if (stat.isDirectory()) {
+        try {
+          if (!resolvesInsideQuarantine(realRoot, realpathSync(entryPath))) continue;
+        } catch {
+          continue;
+        }
+        dirs.push(entryPath);
+        walk(entryPath);
+      }
+    }
+  };
+  walk(root);
+  return { candidates, dirs };
+}
+
+/**
+ * Deletion-time re-check for a candidate: refuse when the entry changed kind
+ * (a file turned into a link or the reverse) or no longer resolves inside the
+ * quarantine root. A candidate that vanished is not refused — the unlink
+ * below reports it, so nothing disappears silently.
+ */
+function quarantineCandidateEscapes(candidate: QuarantinePruneCandidate, realRoot: string): boolean {
+  let stat: Stats;
+  try {
+    stat = lstatSync(candidate.path);
+  } catch {
+    return false;
+  }
+  if (stat.isSymbolicLink() !== candidate.isLink) return true;
+  try {
+    const resolved = candidate.isLink
+      ? realpathSync(dirname(candidate.path))
+      : realpathSync(candidate.path);
+    return !resolvesInsideQuarantine(realRoot, resolved);
+  } catch {
+    return true; // Unresolvable: refuse rather than delete along a bogus path.
+  }
+}
+
+/**
+ * `gsd db prune-quarantine` — list, and with `--apply` delete, the quarantined
+ * copies of projection files that were changed outside GSD
+ * (`.gsd/quarantine/projections/`). The database is authoritative and has
+ * already rendered over every copy, but a copy still holds the user's edited
+ * bytes, so deletion is destructive: the default run lists only, `--apply`
+ * deletes. Only that folder is touched — never a live projection, never the
+ * database, and never the other quarantine folders (restore keepsakes,
+ * manual-review milestones, migration control publications). The walk never
+ * follows symlinks: a planted link is unlinked as a link (or kept and
+ * reported when the unlink fails), and whatever it points at is never
+ * traversed, listed, or deleted.
+ */
+export async function handleDbPruneQuarantine(ctx: ExtensionCommandContext, basePath: string, args = ""): Promise<void> {
+  const { isAutoActive } = await import("./auto.js");
+  if (isAutoActive()) {
+    ctx.ui.notify("gsd db prune-quarantine: stop auto-mode first with /gsd stop.", "error");
+    return;
+  }
+  const { gsdProjectionRoot, normalizeRealPath } = await import("./paths.js");
+  const { withProjectionMutationSync } = await import("./database-maintenance-fence.js");
+  const root = join(gsdProjectionRoot(basePath), "quarantine", "projections");
+  // Lexical display path: a symlink candidate must be shown as the link's
+  // place in the quarantine, not resolved to whatever it points at.
+  const rel = (path: string) => relative(normalizeRealPath(basePath), path).split(sep).join("/");
+  if (!existsSync(root)) {
+    ctx.ui.notify("gsd db prune-quarantine: no quarantined projection copies — nothing to prune.", "info");
+    return;
+  }
+  const realRoot = realpathSync(root);
+
+  const { candidates: files } = collectQuarantinePruneCandidates(root, realRoot);
+  if (files.length === 0) {
+    ctx.ui.notify("gsd db prune-quarantine: no quarantined projection copies — nothing to prune.", "info");
+    return;
+  }
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+
+  if (!/(^|\s)--apply(\s|$)/.test(args)) {
+    ctx.ui.notify(
+      [
+        `gsd db prune-quarantine: ${files.length} quarantined projection copy(ies), ${formatPrunedBytes(totalBytes)}:`,
+        ...files.map((file) => `  ${rel(file.path)}`),
+        "Each copy holds projection bytes that were changed outside GSD; the database already rendered over them.",
+        "Run /gsd db prune-quarantine --apply to delete them. Deletion cannot be undone.",
+      ].join("\n"),
+      "info",
+    );
+    return;
+  }
+
+  // The same fence as the quarantine write, so a projection mutation cannot
+  // interleave with the prune.
+  const claimPath = join(gsdProjectionRoot(basePath), "gsd.db");
+  const failures: string[] = [];
+  let freedCount = 0;
+  let freedBytes = 0;
+  withProjectionMutationSync(claimPath, () => {
+    for (const file of files) {
+      // Belt and braces at deletion time: a candidate that no longer resolves
+      // inside the quarantine is kept and reported, never deleted.
+      if (quarantineCandidateEscapes(file, realRoot)) {
+        failures.push(`  ${rel(file.path)}: kept — it resolves outside the quarantine root`);
+        continue;
+      }
+      try {
+        unlinkSync(file.path);
+        freedCount += 1;
+        freedBytes += file.size;
+      } catch (err) {
+        failures.push(`  ${rel(file.path)}: ${(err as Error).message}`);
+      }
+    }
+    // Remove the emptied stamp directories (deepest first); the folder is
+    // recreated on demand. A directory that still holds content stays, and
+    // rmdir never runs through a symlinked path: only a real directory that
+    // still resolves inside the quarantine is removed.
+    const { dirs } = collectQuarantinePruneCandidates(root, realRoot);
+    for (const dir of [...dirs.sort((a, b) => b.length - a.length), root]) {
+      try {
+        const stat = lstatSync(dir);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+        if (dir !== root && !resolvesInsideQuarantine(realRoot, realpathSync(dir))) continue;
+        rmdirSync(dir);
+      } catch (err) {
+        // Not empty (a deletion failed above) or already gone: say so.
+        logWarning("command", `prune-quarantine: the quarantine directory ${dir} could not be removed: ${(err as Error).message}`);
+      }
+    }
+  });
+
+  if (failures.length > 0) {
+    ctx.ui.notify(
+      `gsd db prune-quarantine: deleted ${freedCount} of ${files.length} copies (${formatPrunedBytes(freedBytes)} freed); ` +
+        `${failures.length} could not be deleted:\n${failures.join("\n")}`,
+      "error",
+    );
+    return;
+  }
+  ctx.ui.notify(
+    `gsd db prune-quarantine: deleted ${freedCount} quarantined projection copy(ies), ${formatPrunedBytes(freedBytes)} freed. ` +
+      "Live projections and the database were not touched.",
+    "info",
+  );
 }
 
 /**

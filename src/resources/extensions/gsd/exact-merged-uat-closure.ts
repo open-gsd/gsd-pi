@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { getDb } from "./db/engine.js";
 import type { TaskTechnicalVerdictSnapshot } from "./task-verification-domain-operation.js";
-import { execRunSucceeded } from "./db/writers/exec-runs.js";
+import { execRunSucceeded, type ExecRunRow } from "./db/writers/exec-runs.js";
 import { readExecRunOfRef } from "./uat-run.js";
 
 export interface ExactMergedUatClosureInput {
@@ -139,7 +139,7 @@ function requireExactMergeBinding(
   input: ExactMergedUatClosureInput,
   dossier: ClosureDossier,
   row: VerificationEvidenceRow,
-): Record<string, unknown> {
+): void {
   if (row.command_or_tool !== "gsd_uat_exec" || row.observation !== "passed" ||
       row.source_revision !== input.verdict.testedSourceRevision) {
     throw new Error("Verified Task publication requires passing gsd_uat_exec evidence for the tested source");
@@ -167,13 +167,12 @@ function requireExactMergeBinding(
   ])) {
     throw new Error("Verified Task publication exact-merged source must be clean");
   }
-  return environment;
 }
 
 function requireUatExecEvidence(
   input: ExactMergedUatClosureInput,
   row: VerificationEvidenceRow,
-): string {
+): ExecRunRow {
   // The host exec_runs row is the record of the run, not `.gsd/exec/*.meta.json`.
   const run = readExecRunOfRef(input.basePath, row.durable_output_ref);
   if (!run || run.kind !== "uat_exec" ||
@@ -182,73 +181,39 @@ function requireUatExecEvidence(
       !execRunSucceeded(run)) {
     throw new Error("Verified Task publication requires successful typed gsd_uat_exec evidence");
   }
-  return run.id;
+  return run;
 }
 
-function requireCanonicalUatReceipt(
-  input: ExactMergedUatClosureInput,
-  environment: Record<string, unknown>,
-  evidenceId: string,
-): void {
-  const assessment = getDb().prepare(`
-    SELECT full_content
-    FROM assessments
-    WHERE milestone_id = :milestone_id
-      AND slice_id = :slice_id
-      AND scope = 'run-uat'
-      AND lower(status) = 'pass'
-    ORDER BY created_at DESC, path DESC
-    LIMIT 1
-  `).get({
-    ":milestone_id": input.task.milestoneId,
-    ":slice_id": input.task.sliceId,
-  }) as Record<string, unknown> | undefined;
-  const content = assessment ? String(assessment["full_content"] ?? "") : "";
-  const requiredValues = [
-    `gsd_uat_exec:${evidenceId}`,
-    requiredEnvironmentString(environment, "localMergeCommit"),
-    requiredEnvironmentString(environment, "sourceContentRevision"),
-    requiredEnvironmentString(environment, "dossierHash"),
-    requiredEnvironmentString(environment, "capstoneEvidenceHash"),
-  ];
-  if (!content || requiredValues.some((value) => !content.includes(value))) {
-    throw new Error("Verified Task publication requires a matching database-backed exact-merged UAT assessment");
-  }
-  const runId = /^runId:\s*(\S+)\s*$/m.exec(content)?.[1];
-  if (!runId) {
-    throw new Error("Verified Task publication requires an identified exact-merged UAT run");
-  }
-  const gate = getDb().prepare(`
+/**
+ * The exec run must belong to a saved passing run-uat run of the slice, and
+ * the slice UAT gate must pass. The rows decide this: the run-uat run of the
+ * exec run (`attempt_ref`) is the `turn_id` of the saved gate run. The text of
+ * the ASSESSMENT is not read.
+ */
+function requireCanonicalUatReceipt(input: ExactMergedUatClosureInput, run: ExecRunRow): void {
+  const receipt = getDb().prepare(`
     SELECT 1 AS present
-    FROM quality_gates
-    WHERE milestone_id = :milestone_id
-      AND slice_id = :slice_id
-      AND gate_id = 'UAT'
-      AND task_id = ''
-      AND status = 'complete'
-      AND verdict = 'pass'
+    FROM gate_runs saved
+    JOIN quality_gates gate
+      ON gate.milestone_id = saved.milestone_id
+     AND gate.slice_id = saved.slice_id
+     AND gate.gate_id = 'UAT'
+     AND gate.task_id = ''
+     AND gate.status = 'complete'
+     AND gate.verdict = 'pass'
+    WHERE saved.turn_id = :run_id
+      AND saved.milestone_id = :milestone_id
+      AND saved.slice_id = :slice_id
+      AND saved.gate_id = 'UAT'
+      AND saved.gate_type = 'uat'
+      AND saved.unit_type = 'run-uat'
+      AND saved.outcome = 'pass'
   `).get({
+    ":run_id": run.attempt_ref,
     ":milestone_id": input.task.milestoneId,
     ":slice_id": input.task.sliceId,
   });
-  const run = getDb().prepare(`
-    SELECT findings
-    FROM gate_runs
-    WHERE turn_id = :run_id
-      AND milestone_id = :milestone_id
-      AND slice_id = :slice_id
-      AND gate_id = 'UAT'
-      AND gate_type = 'uat'
-      AND unit_type = 'run-uat'
-      AND outcome = 'pass'
-    ORDER BY id DESC
-    LIMIT 1
-  `).get({
-    ":run_id": runId,
-    ":milestone_id": input.task.milestoneId,
-    ":slice_id": input.task.sliceId,
-  }) as Record<string, unknown> | undefined;
-  if (!gate || String(run?.["findings"] ?? "") !== content) {
+  if (!receipt) {
     throw new Error("Verified Task publication requires a passing canonical exact-merged UAT gate receipt");
   }
 }
@@ -257,7 +222,6 @@ export function requireExactMergedUatClosureEvidence(input: ExactMergedUatClosur
   const dossier = readClosureDossier(input);
   if (!dossier) return;
   const row = readVerificationEvidence(input.verdict);
-  const environment = requireExactMergeBinding(input, dossier, row);
-  const evidenceId = requireUatExecEvidence(input, row);
-  requireCanonicalUatReceipt(input, environment, evidenceId);
+  requireExactMergeBinding(input, dossier, row);
+  requireCanonicalUatReceipt(input, requireUatExecEvidence(input, row));
 }

@@ -81,7 +81,7 @@ function makeHarness(): Harness {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: 0,
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     }),
     pauseAuto: async () => {},
   };

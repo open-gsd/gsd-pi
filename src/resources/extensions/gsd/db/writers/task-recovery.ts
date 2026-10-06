@@ -423,6 +423,7 @@ export function appendRecoveryWorkCheckpoint(
     "task.recovery.resume",
     "task.reopen",
     "task.cancel",
+    "checkpoint.save",
   ]);
   const scopeKey = normalizedKey(input.scopeKey, "scopeKey");
   const head = getDb().prepare(`

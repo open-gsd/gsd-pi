@@ -28,25 +28,6 @@ test("#2007 bug 1: MAX_ARTIFACT_VERIFICATION_RETRIES constant is defined", () =>
   assert.equal(MAX_ARTIFACT_VERIFICATION_RETRIES, 3);
 });
 
-test("#2007 bug 1: retry state keeps attempt separate from failure context", () => {
-  const s = new AutoSession();
-  const retryKey = "execute-task:M001/S01/T01";
-  const failureContext = "Missing expected artifact";
-
-  for (let attempt = 1; attempt <= MAX_ARTIFACT_VERIFICATION_RETRIES; attempt++) {
-    s.verificationRetryCount.set(retryKey, attempt);
-    s.pendingVerificationRetry = {
-      unitId: "M001/S01/T01",
-      failureContext,
-      attempt,
-    };
-
-    assert.equal(s.verificationRetryCount.get(retryKey), attempt);
-    assert.equal(s.pendingVerificationRetry.attempt, attempt);
-    assert.equal(s.pendingVerificationRetry.failureContext, failureContext);
-  }
-});
-
 test("#2007 bug 2: pendingVerificationRetry state is available for dispatch regression coverage", () => {
   const s = new AutoSession();
   s.pendingVerificationRetry = {
@@ -75,36 +56,9 @@ test("#2007 fix does not introduce a new dead constant (STATE_REBUILD_MIN_INTERV
   assert.equal("STATE_REBUILD_MIN_INTERVAL_MS" in AutoSession, false);
 });
 
-// ─── Behavioral: retry counter is cleared on success ─────────────────────────
-
-test("#2007 verificationRetryCount is cleared on artifact verification success", () => {
-  const s = new AutoSession();
-  const retryKey = "execute-task:M001/S01/T01";
-  s.verificationRetryCount.set(retryKey, MAX_ARTIFACT_VERIFICATION_RETRIES);
-
-  s.verificationRetryCount.delete(retryKey);
-
-  assert.equal(s.verificationRetryCount.get(retryKey), undefined);
-});
-
-// ─── AutoSession.verificationRetryCount Map behavior ─────────────────────────
-
-test("AutoSession.verificationRetryCount tracks attempts per retry key", () => {
-  const s = new AutoSession();
-  const key = "execute-task:M01/S01/T01";
-
-  assert.equal(s.verificationRetryCount.get(key), undefined);
-
-  s.verificationRetryCount.set(key, 1);
-  assert.equal(s.verificationRetryCount.get(key), 1);
-
-  s.verificationRetryCount.set(key, 2);
-  assert.equal(s.verificationRetryCount.get(key), 2);
-
-  // Simulate the success-clear path
-  s.verificationRetryCount.delete(key);
-  assert.equal(s.verificationRetryCount.get(key), undefined);
-});
+// The retry count of a dev-engine unit is on its dispatch row (budget kind
+// `verification`); complete-slice-reopen-handoff.test.ts proves the cap through
+// postUnitPreVerification. This map holds only custom-engine counts.
 
 test("AutoSession.verificationRetryCount is cleared on session reset", () => {
   const s = new AutoSession();
@@ -114,17 +68,4 @@ test("AutoSession.verificationRetryCount is cleared on session reset", () => {
   s.reset();
 
   assert.equal(s.verificationRetryCount.size, 0);
-});
-
-test("AutoSession.verificationRetryCount independence across retry keys", () => {
-  // Critical: if retries for unit A fail twice and unit A then succeeds, the
-  // counter for A should be cleared but B's counter must remain untouched.
-  const s = new AutoSession();
-  s.verificationRetryCount.set("execute-task:M01/S01/T01", 2);
-  s.verificationRetryCount.set("execute-task:M01/S01/T02", 1);
-
-  s.verificationRetryCount.delete("execute-task:M01/S01/T01");
-
-  assert.equal(s.verificationRetryCount.get("execute-task:M01/S01/T01"), undefined);
-  assert.equal(s.verificationRetryCount.get("execute-task:M01/S01/T02"), 1);
 });

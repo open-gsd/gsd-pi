@@ -8,7 +8,6 @@ import {
   isDbAvailable,
   getSlice,
   getSliceTasks,
-  getTask,
   getPendingGatesForTurn,
   getReplanHistory,
   getRoadmapAssessmentForSlice,
@@ -16,11 +15,10 @@ import {
   hasSavedArtifact,
   hasUnitRecoveryBlock,
 } from "./gsd-db.js";
-import { readMilestoneSlices } from "./db/lifecycle-read.js";
+import { readMilestoneSlices, readSlice, readTask } from "./db/lifecycle-read.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning } from "./workflow-logger.js";
-import { isClosedStatus } from "./status-guards.js";
 import { clearPathCache } from "./paths.js";
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -170,7 +168,7 @@ function missingUnitResult(
     case "run-uat":
       return getSliceRunUatAssessment(mid, sid)?.status ? null : "no run-uat verdict row for the slice";
     case "complete-slice": {
-      const status = getSlice(mid, sid)?.status;
+      const status = readSlice(mid, sid)?.status;
       return status === "complete" ? null : `the slice row is ${status ? `"${status}"` : "missing"}, not "complete"`;
     }
     default:
@@ -263,7 +261,7 @@ export function verifyExpectedArtifact(
     // A batch Task is settled when its row is closed or its latest Attempt has
     // a Result. A task SUMMARY file is a projection and is not read.
     return batchIds.every((tid) =>
-      isClosedStatus(getTask(mid, sid, tid)?.status ?? "") ||
+      readTask(mid, sid, tid)?.done === true ||
       readExecuteTaskArtifactReadiness(mid, sid, tid) !== null,
     );
   }

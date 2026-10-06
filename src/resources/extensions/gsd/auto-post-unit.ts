@@ -55,8 +55,8 @@ import { regenerateIfMissing } from "./workflow-projections.js";
 import { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
 import { normalizeWorktreePathForCompare } from "./worktree-root.js";
-import { isDbAvailable, getTask, getSlice, getMilestone, getMilestoneSlices, _getAdapter, getVerificationEvidence, hasRoadmapAssessmentSince, getReplanHistory } from "./gsd-db.js";
-import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
+import { isDbAvailable, getTask, getSlice, getMilestone, _getAdapter, getVerificationEvidence, hasRoadmapAssessmentSince, getReplanHistory } from "./gsd-db.js";
+import { readMilestoneSlices, readSlice, readSliceTasks, readTask } from "./db/lifecycle-read.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { reopenTask } from "./task-lifecycle-domain-operation.js";
 import { getWorkflowDatabasePath, refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
@@ -80,6 +80,7 @@ import {
   runMilestoneCloseoutGitHub,
 } from "./milestone-closeout.js";
 import type { AutoSession, SidecarItem } from "./auto/session.js";
+import type { PauseAutoFn } from "./auto/loop-deps.js";
 import { hasHeldQuickTask } from "./db/unit-dispatch-sidecars.js";
 import {
   enqueueSidecarItem,
@@ -99,14 +100,12 @@ import { validateContent } from "./safety/content-validator.js";
 import { resolveSafetyHarnessConfig } from "./safety/safety-harness.js";
 import { resolveExpectedArtifactPath as resolveArtifactForContent } from "./auto-artifact-paths.js";
 import { getIsolationMode, loadEffectiveGSDPreferences, type GSDPreferences } from "./preferences.js";
-import { getSliceTasks } from "./gsd-db.js";
 import { runPreExecutionChecks, type PreExecutionResult } from "./pre-execution-checks.js";
 import { writePreExecutionEvidence, type PreExecutionCheckJSON } from "./verification-evidence.js";
 import { ensureCodebaseMapFresh } from "./codebase-generator.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { UokGateRunner } from "./uok/gate-runner.js";
 import { writeTurnGitTransaction } from "./uok/gitops.js";
-import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { detectAbandonMilestone } from "./abandon-detect.js";
 import { getPendingGate } from "./bootstrap/write-gate.js";
 import { isDeterministicPolicyError, isToolInvocationError, isToolUnavailableError } from "./auto-tool-tracking.js";
@@ -115,10 +114,13 @@ import {
   finalizeProjectResearchTimeout,
 } from "./project-research-policy.js";
 import { validateArtifact } from "./schemas/validate.js";
-import { verificationRetryKey } from "./auto/verification-retry-policy.js";
-import { saveCustomVerifyRetryCounts } from "./auto/custom-verify-retry-store.js";
-import { resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
-import { releaseUnitRetry, storeUnitRetry } from "./db/unit-dispatch-retries.js";
+import {
+  clearVerificationRetry,
+  setVerificationRetry,
+  verificationBudget,
+} from "./auto/verification-retry-state.js";
+import { readUnitBudget, resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
+import { readStoredUnitRetry, releaseCommitRepairRetry, releaseUnitRetry, storeCloseoutRefusal } from "./db/unit-dispatch-retries.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -169,7 +171,7 @@ const _worktreeProjection = new WorktreeStateProjection();
 
 /** Maximum verification retry attempts before escalating to blocker placeholder (#2653). */
 const MAX_VERIFICATION_RETRIES = 3;
-const MAX_GIT_COMMIT_REMEDIATION_RETRIES = 2;
+export const MAX_GIT_COMMIT_REMEDIATION_RETRIES = 2;
 /** Keep failure toasts short while still showing concrete examples. */
 const MAX_NOTIFICATION_DETAILS = 3;
 const NOTIFICATION_BULLET = "•";
@@ -212,7 +214,7 @@ export function resolveCloseoutGitAction(
 
 function hasIncompleteMilestoneSlice(milestoneId: string): boolean {
   if (!isDbAvailable()) return false;
-  return getMilestoneSlices(milestoneId).some((slice) => !isInactiveStatus(slice.status));
+  return readMilestoneSlices(milestoneId).some((slice) => !slice.done);
 }
 
 /**
@@ -362,10 +364,6 @@ function persistGitActionFailure(basePath: string, action: TurnGitActionMode, me
   return logPath;
 }
 
-function gitCommitRemediationRetryKey(unitType: string, unitId: string): string {
-  return `git-commit:${verificationRetryKey(unitType, unitId)}`;
-}
-
 /**
  * Shared by the legacy artifact ladder and the durable-authority branch so both
  * pause sites emit byte-identical messaging (#2883/#2131).
@@ -489,7 +487,7 @@ export async function handlePendingHookOutcome(
       (s.currentUnit ? `(detected on completion of ${s.currentUnit.type} ${s.currentUnit.id}):` : "(detected on resume):") +
       `${verdict}${artifact} ${gateBlock.reason}. Run /gsd status to inspect, then /gsd auto after recovery.`;
     ctx.ui.notify(message, "warning");
-    await pauseAuto(ctx, pi);
+    await pauseAuto(ctx, pi, "machine_fixable");
     return "stopped";
   }
   return null;
@@ -520,43 +518,29 @@ async function prepareHookRetry(
     if (!retryKey) {
       throw new Error(`Hook retry Task ${mid}/${sid}/${tid} has no canonical completion identity`);
     }
-    const db = _getAdapter();
-    if (!db) {
+    if (!_getAdapter()) {
       throw new Error(`Hook retry Task ${mid}/${sid}/${tid} cannot be prepared: database unavailable`);
     }
-    const task = getTask(mid, sid, tid);
+    // The status label of the read interface: after the Cutover it names the
+    // lifecycle status, so a legacy row that disagrees does not answer.
+    const task = readTask(mid, sid, tid);
     if (!task) throw new Error(`Hook retry Task ${mid}/${sid}/${tid} is missing`);
-    const lifecycle = db.prepare(`
-      SELECT lifecycle_status, last_operation_id
-      FROM workflow_item_lifecycles
-      WHERE item_kind = 'task'
-        AND milestone_id = :milestone_id
-        AND slice_id = :slice_id
-        AND task_id = :task_id
-    `).get({
-      ":milestone_id": mid,
-      ":slice_id": sid,
-      ":task_id": tid,
-    });
-    const preparedOperation = db.prepare(`
-      SELECT operation_id
-      FROM workflow_operations
-      WHERE idempotency_key = :idempotency_key
-    `).get({ ":idempotency_key": retryKey });
+    const lifecycle = getTaskLifecycleHead(mid, sid, tid);
+    const preparedOperationId = getOperationIdByIdempotencyKey(retryKey);
     const alreadyPrepared = task.status === "pending"
-      && lifecycle?.["lifecycle_status"] === "ready"
-      && typeof preparedOperation?.["operation_id"] === "string"
-      && lifecycle["last_operation_id"] === preparedOperation["operation_id"];
+      && lifecycle?.lifecycle_status === "ready"
+      && preparedOperationId !== null
+      && lifecycle.last_operation_id === preparedOperationId;
     let reviewedCompletionIsCurrent = false;
     let currentCompletionIdentityIsKnown = false;
     if (trigger.completionOperationId) {
       currentCompletionIdentityIsKnown = task.status === "complete"
-        && lifecycle?.["lifecycle_status"] === "completed"
-        && typeof lifecycle["last_operation_id"] === "string"
-        && lifecycle["last_operation_id"].length > 0;
+        && lifecycle?.lifecycle_status === "completed"
+        && typeof lifecycle?.last_operation_id === "string"
+        && lifecycle.last_operation_id.length > 0;
       reviewedCompletionIsCurrent = task.status === "complete"
-        && lifecycle?.["lifecycle_status"] === "completed"
-        && lifecycle["last_operation_id"] === trigger.completionOperationId;
+        && lifecycle?.lifecycle_status === "completed"
+        && lifecycle.last_operation_id === trigger.completionOperationId;
     } else if (trigger.legacyCompletedAt) {
       currentCompletionIdentityIsKnown = task.status === "complete"
         && !lifecycle
@@ -621,7 +605,7 @@ export function resolveVerificationFailureMarkerPath(
   }
 }
 
-async function buildTaskCommitContextForUnit(
+export async function buildTaskCommitContextForUnit(
   basePath: string,
   unitId: string,
 ): Promise<TaskCommitContext | undefined> {
@@ -816,7 +800,7 @@ function runExecuteTaskFileChangeSafety(
 
   try {
     const sliceTaskRows = isDbAvailable()
-      ? getSliceTasks(sMid, sSid).filter((t) => isClosedStatus(t.status) || t.id === sTid)
+      ? readSliceTasks(sMid, sSid).filter((t) => t.done || t.id === sTid)
       : [];
 
     if (sliceTaskRows.length > 0) {
@@ -871,9 +855,11 @@ import {
   type AutoOutcomeSurfaceSnapshot,
 } from "./auto-dashboard.js";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { getOperationIdByIdempotencyKey, getTaskLifecycleHead } from "./db/lifecycle-queries.js";
 import { basename, join, relative } from "node:path";
 import { _resetHasChangesCache } from "./native-git-bridge.js";
 import { autoCommitCurrentBranch } from "./worktree.js";
+import { isTaskSourceCommitSettled } from "./auto/task-source-commit.js";
 
 // ─── Rogue File Detection ──────────────────────────────────────────────────
 
@@ -916,7 +902,7 @@ export function detectRogueFileWrites(
     const summaryPath = resolveTaskArtifactPath(basePath, mid, sid, tid, "SUMMARY");
     if (!summaryPath || !existsSync(summaryPath)) return [];
 
-    const dbRow = getTask(mid, sid, tid);
+    const dbRow = readTask(mid, sid, tid);
     if (!dbRow || dbRow.status !== "complete") {
       rogues.push({ path: summaryPath, unitType, unitId });
     }
@@ -926,7 +912,7 @@ export function detectRogueFileWrites(
     const summaryPath = resolveSliceFile(basePath, mid, sid, "SUMMARY");
     if (!summaryPath || !existsSync(summaryPath)) return [];
 
-    const dbRow = getSlice(mid, sid);
+    const dbRow = readSlice(mid, sid);
     if (!dbRow || dbRow.status !== "complete") {
       rogues.push({ path: summaryPath, unitType, unitId });
     }
@@ -1114,7 +1100,7 @@ export interface PostUnitContext {
   buildSnapshotOpts: (unitType: string, unitId: string) => CloseoutOptions & Record<string, unknown>;
   lockBase: () => string;
   stopAuto: (ctx?: ExtensionContext, pi?: ExtensionAPI, reason?: string) => Promise<void>;
-  pauseAuto: (ctx?: ExtensionContext, pi?: ExtensionAPI) => Promise<void>;
+  pauseAuto: PauseAutoFn;
   updateProgressWidget: (ctx: ExtensionContext, unitType: string, unitId: string, state: import("./types.js").GSDState) => void;
 }
 
@@ -1245,8 +1231,7 @@ async function repairCompleteSliceRoadmapProjection(
   const { milestone: mid, slice: sid } = parseUnitId(unitId);
   if (!mid || !sid) return false;
 
-  const slice = getSlice(mid, sid);
-  if (!slice || !isClosedStatus(slice.status)) return false;
+  if (!readSlice(mid, sid)?.closed) return false;
 
   const artifactBase = resolveCanonicalMilestoneRoot(basePath, mid);
 
@@ -1309,6 +1294,43 @@ export async function autoCommitUnit(
     ctx?.ui.notify(`Auto-commit failed: ${String(e).split("\n")[0]}`, "warning");
     return null;
   }
+}
+
+/** The git-commit repair of the task used all its attempts: release its stored retry and pause. */
+async function pauseExhaustedCommitRepair(
+  pctx: PostUnitContext,
+  unit: NonNullable<AutoSession["currentUnit"]>,
+  turnAction: string,
+  detail: string,
+): Promise<void> {
+  const { s, ctx, pi, pauseAuto } = pctx;
+  s.pendingVerificationRetry = null;
+  resetUnitBudget(s.unclaimedUnitBudgets, { unitType: unit.type, unitId: unit.id, kind: "git-commit" });
+  releaseUnitRetry(unit.type, unit.id);
+  ctx.ui.notify(
+    `Git ${turnAction} failed after ${MAX_GIT_COMMIT_REMEDIATION_RETRIES} remediation attempts: ${detail}. Pausing auto-mode.`,
+    "error",
+  );
+  await pauseAuto(ctx, pi, "machine_fixable");
+}
+
+/**
+ * A soft git failure keeps a stored git-commit repair retry, and that retry
+ * selects the closed task again. So a soft failure in a repair run counts
+ * against the git-commit budget. True when the budget is used up and auto-mode
+ * is paused.
+ */
+async function softGitFailureEndsCommitRepair(
+  pctx: PostUnitContext,
+  unit: NonNullable<AutoSession["currentUnit"]>,
+  turnAction: string,
+  detail: string,
+): Promise<boolean> {
+  if (!readStoredUnitRetry(unit.type, unit.id)?.signature?.startsWith("git-commit:")) return false;
+  const used = spendUnitBudget(pctx.s.unclaimedUnitBudgets, { unitType: unit.type, unitId: unit.id, kind: "git-commit" });
+  if (used <= MAX_GIT_COMMIT_REMEDIATION_RETRIES) return false;
+  await pauseExhaustedCommitRepair(pctx, unit, turnAction, detail);
+  return true;
 }
 
 /**
@@ -1483,11 +1505,13 @@ async function runCloseoutGitAction(
           gitResult.failureClass === "hook-content" &&
           !hasPartialCommits
         ) {
-          const retryKey = gitCommitRemediationRetryKey(unit.type, unit.id);
-          const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
+          // ADR-048: the count and the retry are on the task's dispatch row. The
+          // task is closed, so a restart selects it again from the stored retry.
+          const gitCommitBudget = { unitType: unit.type, unitId: unit.id, kind: "git-commit" } as const;
+          const attempt = readUnitBudget(s.unclaimedUnitBudgets, gitCommitBudget) + 1;
           if (attempt <= MAX_GIT_COMMIT_REMEDIATION_RETRIES) {
-            s.verificationRetryCount.set(retryKey, attempt);
-            s.pendingVerificationRetry = {
+            spendUnitBudget(s.unclaimedUnitBudgets, gitCommitBudget);
+            setVerificationRetry(s, unit.type, {
               unitId: unit.id,
               failureContext:
                 "Git commit failed after task verification. The commit hook rejected the staged task changes; " +
@@ -1495,7 +1519,7 @@ async function runCloseoutGitAction(
                 fullError,
               signature: `git-commit:${attempt}:${fullError}`,
               attempt,
-            };
+            });
             ctx.ui.notify(
               `Git ${turnAction} failed: ${fullError.split("\n")[0]}. Retrying task remediation (attempt ${attempt}/${MAX_GIT_COMMIT_REMEDIATION_RETRIES}).`,
               "warning",
@@ -1511,27 +1535,30 @@ async function runCloseoutGitAction(
             return "retry";
           }
 
-          s.pendingVerificationRetry = null;
-          s.verificationRetryCount.delete(retryKey);
-          ctx.ui.notify(
-            `Git ${turnAction} failed after ${MAX_GIT_COMMIT_REMEDIATION_RETRIES} remediation attempts: ${fullError.split("\n")[0]} (full details: ${failureLogPath}). Pausing auto-mode.`,
-            "error",
+          await pauseExhaustedCommitRepair(
+            pctx,
+            unit,
+            turnAction,
+            `${fullError.split("\n")[0]} (full details: ${failureLogPath})`,
           );
-          await pauseAuto(ctx, pi);
           return "dispatched";
         }
         if (opts?.softFailure && gitResult.failureClass === "transient") {
           ctx.ui.notify(failureMsg, "warning");
+          const detail = `${fullError.split("\n")[0]} (full details: ${failureLogPath})`;
+          if (await softGitFailureEndsCommitRepair(pctx, unit, turnAction, detail)) return "dispatched";
           return "continue";
         }
         ctx.ui.notify(failureMsg, "error");
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       }
 
       s.lastGitActionStatus = "ok";
-      s.verificationRetryCount.delete(gitCommitRemediationRetryKey(unit.type, unit.id));
-      s.verificationRetryFailureHashes.delete(verificationRetryKey(unit.type, unit.id));
+      // Release only what the git action owns. This step runs before the
+      // checks of a planner, so a stored pre-execution retry must stay.
+      resetUnitBudget(s.unclaimedUnitBudgets, { unitType: unit.type, unitId: unit.id, kind: "git-commit" });
+      releaseCommitRepairRetry(unit.type, unit.id);
 
       if (turnAction === "commit" && gitResult.commitMessage) {
         ctx.ui.notify(formatPostUnitStatusCard("✓ Commit", gitResult.commitMessage.split("\n")[0]), "info");
@@ -1546,10 +1573,11 @@ async function runCloseoutGitAction(
     debugLog("postUnit", { phase: "git-action", error: message, action: turnAction });
     ctx.ui.notify(`Git ${turnAction} failed: ${message.split("\n")[0]}`, opts?.softFailure ? "warning" : "error");
     if (opts?.softFailure) {
+      if (await softGitFailureEndsCommitRepair(pctx, unit, turnAction, message.split("\n")[0])) return "dispatched";
       return "continue";
     }
     if (uokFlags.gitops) {
-      await pauseAuto(ctx, pi);
+      await pauseAuto(ctx, pi, "machine_fixable");
       return "dispatched";
     }
   }
@@ -1576,7 +1604,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
   // ── Parallel worker signal check ──
   const milestoneLock = process.env.GSD_MILESTONE_LOCK;
   if (milestoneLock) {
-    const signal = consumeSignal(s.basePath, milestoneLock);
+    const signal = consumeSignal(milestoneLock, s.basePath);
     if (signal) {
       if (signal.signal === "stop") {
         await stopAuto(ctx, pi);
@@ -1592,7 +1620,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         // Wait for the coordinator to resume (or stop) us instead. If no resumer
         // lifts the pause within the window, degrade to in-process serialization
         // and continue the dispatch loop rather than halting the run forever.
-        const resumeOutcome = await awaitWorkerResume(s.basePath, milestoneLock);
+        const resumeOutcome = await awaitWorkerResume(milestoneLock, { basePath: s.basePath });
         if (resumeOutcome === "stop") {
           await stopAuto(ctx, pi);
           return "dispatched";
@@ -1987,7 +2015,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
                   if (gitActionResult === "dispatched") {
                     return "evidence-xref-blocked";
                   }
-                  await pauseAuto(ctx, pi);
+                  await pauseAuto(ctx, pi, "machine_fixable");
                   return "evidence-xref-blocked";
                 }
               }
@@ -2045,10 +2073,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
     if (s.currentUnit.type === "execute-task") {
       const worktreeIntegrityFailure = diagnoseWorktreeIntegrityFailure(verificationBasePath);
       if (worktreeIntegrityFailure) {
-        const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
-        s.pendingVerificationRetry = null;
-        s.verificationRetryCount.delete(retryKey);
-        s.verificationRetryFailureHashes.delete(retryKey);
+        clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
         debugLog("postUnit", {
           phase: "worktree-integrity-failure-unverified-artifact",
           unitType: s.currentUnit.type,
@@ -2059,7 +2084,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           `${worktreeIntegrityFailure} Retry ${s.currentUnit.id} after repair.`,
           "error",
         );
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       }
     }
@@ -2180,14 +2205,11 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       }
 
       if (!triggerArtifactVerified && s.currentUnit.type === "research-project") {
-        const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
         const outcome = finalizeProjectResearchTimeout(
           verificationBasePath,
           "Project research unit ended before all required dimensions produced durable files.",
         );
-        s.pendingVerificationRetry = null;
-        s.verificationRetryCount.delete(retryKey);
-        s.verificationRetryFailureHashes.delete(retryKey);
+        clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
         triggerArtifactVerified = verifyExpectedArtifact(s.currentUnit.type, s.currentUnit.id, verificationBasePath);
         if (triggerArtifactVerified) {
           invalidateAllCaches();
@@ -2260,27 +2282,22 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           debugLog("postUnit", { phase: "tool-invocation-error-pause", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: invocationError });
           ctx.ui.notify(toolInvocationPauseMessage(s.currentUnit.type, invocationError), "error");
           s.lastToolInvocationError = null;
-          await pauseAuto(ctx, pi);
+          await pauseAuto(ctx, pi, "machine_fixable");
           return "dispatched";
         }
-        const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
         if (s.pendingVerificationRetry?.unitId === s.currentUnit.id) {
           s.pendingVerificationRetry = null;
         }
+        // The durable authority decides the next run, so the stored retry of
+        // the last run does not reach it.
+        releaseUnitRetry(s.currentUnit.type, s.currentUnit.id);
         s.lastToolInvocationError = null;
-        // Deliberately keep verificationRetryCount / verificationRetryFailureHashes:
-        // the host verification gate's auto-fix counter shares this key and must
-        // stay attempt-independent (per unit + failure). Deleting it here reset
+        // Deliberately keep the verification retry count: the host verification
+        // gate's auto-fix counter is the same budget and must stay
+        // attempt-independent (per unit + failure). Resetting it here reset
         // the bound to "attempt 1/2" on every new Attempt, so exhaustion was
-        // never visibly reached (#1971). The gate clears both itself on
+        // never visibly reached (#1971). The gate resets it itself on
         // pass/pause/abort.
-        s.exhaustedVerificationUnits.delete(retryKey);
-        saveCustomVerifyRetryCounts(s, {
-          logFailure: err => debugLog("postUnit", {
-            phase: "save-verify-retries-failed",
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        });
         debugLog("postUnit", {
           phase: "task-artifact-recovery-deferred-to-durable-authority",
           unitType: s.currentUnit.type,
@@ -2297,7 +2314,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           "info",
         );
         s.lastToolInvocationError = null;
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "ambiguous_intent");
         return "dispatched";
       } else if (!triggerArtifactVerified && getPendingGate(verificationBasePath)) {
         const pendingGateId = getPendingGate(verificationBasePath);
@@ -2312,16 +2329,13 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           "info",
         );
         s.lastToolInvocationError = null;
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "ambiguous_intent");
         return "dispatched";
       } else if (!triggerArtifactVerified && s.lastToolInvocationError && isDeterministicPolicyError(s.lastToolInvocationError)) {
-        const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
         debugLog("postUnit", { phase: "deterministic-policy-error-placeholder", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: s.lastToolInvocationError });
         const reason = `Deterministic policy rejection for ${s.currentUnit.type} "${s.currentUnit.id}": ${s.lastToolInvocationError}. Retrying cannot resolve this gate — recording a fail-closed blocker.`;
         s.lastToolInvocationError = null;
-        s.pendingVerificationRetry = null;
-        s.verificationRetryCount.delete(retryKey);
-        s.verificationRetryFailureHashes.delete(retryKey);
+        clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
         // #2510: the write returns null when the artifact path is unresolvable
         // or the recovery gate row was not written — in that case no block is
         // recorded, so the UI must not claim a blocker was recorded.
@@ -2334,14 +2348,11 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         );
         // The unit recorded no result, so it is not complete. Pause for every
         // unit type: a blocker file never lets the pipeline advance.
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       } else if (!triggerArtifactVerified && diagnoseWorktreeIntegrityFailure(verificationBasePath)) {
-        const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
         const worktreeFailure = diagnoseWorktreeIntegrityFailure(verificationBasePath)!;
-        s.pendingVerificationRetry = null;
-        s.verificationRetryCount.delete(retryKey);
-        s.verificationRetryFailureHashes.delete(retryKey);
+        clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
         debugLog("postUnit", {
           phase: "worktree-integrity-failure",
           unitType: s.currentUnit.type,
@@ -2352,13 +2363,10 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           `${worktreeFailure} Retry ${s.currentUnit.id} after repair.`,
           "error",
         );
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       } else if (!triggerArtifactVerified && completeSliceHandedBackToExecution(s)) {
-        const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
-        s.pendingVerificationRetry = null;
-        s.verificationRetryCount.delete(retryKey);
-        s.verificationRetryFailureHashes.delete(retryKey);
+        clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
         debugLog("postUnit", {
           phase: "artifact-verify-complete-slice-handoff",
           unitType: s.currentUnit.type,
@@ -2376,7 +2384,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           `Artifact missing for ${s.currentUnit.type} ${s.currentUnit.id} — workflow DB is unavailable, so the unit cannot be verified. Auto-mode is paused; resume with /gsd auto once the DB opens.${dbSkipDiag ? ` Expected: ${dbSkipDiag}` : ""}`,
           "error",
         );
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       } else if (!triggerArtifactVerified) {
         if (s.lastToolInvocationError && isToolUnavailableError(s.lastToolInvocationError)) {
@@ -2402,7 +2410,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               "error",
             );
             s.lastToolInvocationError = null;
-            await pauseAuto(ctx, pi);
+            await pauseAuto(ctx, pi, "machine_fixable");
             return "dispatched";
           }
           // Exponential backoff starting at 10s (10s, 20s, 40s capped at 45s). MCP server
@@ -2424,18 +2432,24 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           debugLog("postUnit", { phase: "tool-invocation-error-pause", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: s.lastToolInvocationError });
           ctx.ui.notify(errMsg, "error");
           s.lastToolInvocationError = null;
-          await pauseAuto(ctx, pi);
+          await pauseAuto(ctx, pi, isUserSkip ? "user_request" : "machine_fixable");
           return "dispatched";
         }
 
         const hasExpectedArtifact = resolveExpectedArtifactPath(s.currentUnit.type, s.currentUnit.id, verificationBasePath) !== null;
         if (hasExpectedArtifact) {
-          const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
+          const verificationBudgetRef = verificationBudget(s.currentUnit.type, s.currentUnit.id);
           const verificationFailureMarker = resolveVerificationFailureMarkerPath(s.currentUnit.type, s.currentUnit.id, s.basePath);
           if (verificationFailureMarker && existsSync(verificationFailureMarker)) {
-            s.pendingVerificationRetry = null;
-            s.verificationRetryCount.delete(retryKey);
-            s.verificationRetryFailureHashes.delete(retryKey);
+            // The report on disk is the agent's refusal channel; this probe is
+            // the one ingest. The refusal a decision reads is the dispatch
+            // row, stored after the retry state clears so it survives.
+            clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
+            storeCloseoutRefusal(
+              s.currentUnit.type,
+              s.currentUnit.id,
+              relative(s.basePath, verificationFailureMarker),
+            );
             debugLog("postUnit", {
               phase: "artifact-verify-failure-marker-detected",
               unitType: s.currentUnit.type,
@@ -2446,7 +2460,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               `${s.currentUnit.type} ${s.currentUnit.id} declined closeout (see ${relative(s.basePath, verificationFailureMarker)}). Pausing for human review.`,
               "error",
             );
-            await pauseAuto(ctx, pi);
+            await pauseAuto(ctx, pi, "machine_fixable");
             return "dispatched";
           }
           const prefs = loadEffectiveGSDPreferences(s.canonicalProjectRoot)?.preferences;
@@ -2456,14 +2470,12 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               : DEFAULT_PER_UNIT_COST_CAP_USD;
           const { unitCostUsd, rollingAvgUsd } = getCurrentUnitCostStats(s.currentUnit.id);
           if (unitCostUsd >= perUnitCapUsd) {
-            s.pendingVerificationRetry = null;
-            s.verificationRetryCount.delete(retryKey);
-            s.verificationRetryFailureHashes.delete(retryKey);
+            clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
             ctx.ui.notify(
               `Unit ${s.currentUnit.id} hit per-unit cap $${perUnitCapUsd.toFixed(2)} — pausing auto-mode.`,
               "error",
             );
-            await pauseAuto(ctx, pi);
+            await pauseAuto(ctx, pi, "user_limit");
             return "dispatched";
           }
           if (getUnitCostSpikeAction(unitCostUsd, rollingAvgUsd, resolveUnitCostSpikeMultiplier(prefs)) === "pause") {
@@ -2475,9 +2487,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               prefs,
             );
             if (advancedPastUnit) {
-              s.pendingVerificationRetry = null;
-              s.verificationRetryCount.delete(retryKey);
-              s.verificationRetryFailureHashes.delete(retryKey);
+              clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
               debugLog("postUnit", {
                 phase: "artifact-cost-spike-continue-after-advance",
                 unitType: s.currentUnit.type,
@@ -2499,14 +2509,12 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               rollingAvgUsd,
             );
             if (parallelBlocker) {
-              s.pendingVerificationRetry = null;
-              s.verificationRetryCount.delete(retryKey);
-              s.verificationRetryFailureHashes.delete(retryKey);
+              clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
               ctx.ui.notify(
                 `Unit ${s.currentUnit.id} cost spike detected (${unitCostUsd.toFixed(2)} vs avg ${rollingAvgUsd.toFixed(2)}) — wrote parallel blocker and pausing auto-mode.`,
                 "error",
               );
-              await pauseAuto(ctx, pi);
+              await pauseAuto(ctx, pi, "user_limit");
               return "dispatched";
             }
             ctx.ui.notify(
@@ -2514,7 +2522,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               "warning",
             );
           }
-          const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
+          const attempt = readUnitBudget(s.unclaimedUnitBudgets, verificationBudgetRef) + 1;
           // A missing durable save receipt names the artifact and the owning
           // save tool (#1761 O-4); everything else keeps the artifact ladder.
           const failureDetails = durableReceiptFailure ?? describeArtifactVerificationFailure(
@@ -2531,9 +2539,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
                 failureDetails,
               );
               if (recovery) {
-                s.pendingVerificationRetry = null;
-                s.verificationRetryCount.delete(retryKey);
-                s.verificationRetryFailureHashes.delete(retryKey);
+                clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
                 invalidateAllCaches();
                 debugLog("postUnit", {
                   phase: "reactive-execute-blocker-recovery",
@@ -2550,23 +2556,25 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
                 return "continue";
               }
             }
-            s.exhaustedVerificationUnits.add(retryKey);
-            saveCustomVerifyRetryCounts(s, { logFailure: err => debugLog("postUnit", { phase: "save-verify-retries-failed", error: err instanceof Error ? err.message : String(err) }) });
+            // ADR-048: the mark is on the dispatch row, so a restart does not
+            // dispatch the unit again. A reopen or a re-plan releases it, and
+            // the unit then starts with a full retry count.
+            spendUnitBudget(s.unclaimedUnitBudgets, { ...verificationBudgetRef, kind: "exhausted" });
+            clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
             debugLog("postUnit", { phase: "artifact-verify-exhausted", unitType: s.currentUnit.type, unitId: s.currentUnit.id, attempt });
             ctx.ui.notify(
               `${failureDetails} Pausing auto-mode after ${MAX_ARTIFACT_VERIFICATION_RETRIES} retries.`,
               "error",
             );
-            await pauseAuto(ctx, pi);
+            await pauseAuto(ctx, pi, "machine_fixable");
             return "dispatched";
           }
-          s.verificationRetryCount.set(retryKey, attempt);
-          saveCustomVerifyRetryCounts(s, { logFailure: err => debugLog("postUnit", { phase: "save-verify-retries-failed", error: err instanceof Error ? err.message : String(err) }) });
-          s.pendingVerificationRetry = {
+          spendUnitBudget(s.unclaimedUnitBudgets, verificationBudgetRef);
+          setVerificationRetry(s, s.currentUnit.type, {
             unitId: s.currentUnit.id,
             failureContext: failureDetails,
             attempt,
-          };
+          });
           debugLog("postUnit", { phase: "artifact-verify-retry", unitType: s.currentUnit.type, unitId: s.currentUnit.id, attempt });
           ctx.ui.notify(
             `${failureDetails} Retrying (attempt ${attempt}/${MAX_ARTIFACT_VERIFICATION_RETRIES}).`,
@@ -2579,7 +2587,6 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       // Verification succeeded — clear the retry counter so a future failure
       // of the same unit gets a full retry budget instead of the stale count.
       if (triggerArtifactVerified) {
-        const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
         if (s.pendingVerificationRetry?.unitId === s.currentUnit.id) {
           s.pendingVerificationRetry = null;
         }
@@ -2590,17 +2597,19 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         });
         // For a DB-backed execute-task, artifact readiness only proves the
         // Attempt staged a Result at the verify stage — the host verification
-        // gate has not run yet. Its auto-fix retry counter shares this key and
-        // must stay attempt-independent (per unit + failure): every
+        // gate has not run yet. Its auto-fix retry counter is the same budget
+        // and must stay attempt-independent (per unit + failure): every
         // gsd_task_complete creates a NEW Attempt, so clearing here reset the
         // bound to "attempt 1/2" on each retry and exhaustion was never
         // visibly reached (#1971). The gate clears both on pass/pause/abort.
         if (!isDurableVerificationTask(s.currentUnit.type)) {
-          s.verificationRetryCount.delete(retryKey);
-          s.verificationRetryFailureHashes.delete(retryKey);
+          clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
         }
-        s.exhaustedVerificationUnits.delete(retryKey);
-        saveCustomVerifyRetryCounts(s, { logFailure: err => debugLog("postUnit", { phase: "save-verify-retries-failed", error: err instanceof Error ? err.message : String(err) }) });
+        resetUnitBudget(s.unclaimedUnitBudgets, {
+          unitType: s.currentUnit.type,
+          unitId: s.currentUnit.id,
+          kind: "exhausted",
+        });
 
         if (s.currentUnit.type === "complete-milestone") {
           const { milestone: mid } = parseUnitId(s.currentUnit.id);
@@ -2614,7 +2623,13 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
     }
   }
 
-  if (s.currentUnit && !s.currentUnit.type.startsWith("hook/")) {
+  // An execute-task Task is complete only after host verification publishes
+  // it, so its GitHub sync runs in postUnitPostVerification.
+  if (
+    s.currentUnit &&
+    !s.currentUnit.type.startsWith("hook/") &&
+    !shouldDeferCloseoutGitAction(s.currentUnit.type)
+  ) {
     await runPostUnitGitHubSyncIfNeeded(s.basePath, s.currentUnit);
   }
 
@@ -2640,7 +2655,13 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
   if (s.currentUnit) {
     if (shouldDeferCloseoutGitAction(s.currentUnit.type)) {
       const headBeforeCloseout = readCommittedHeadSha(s.basePath);
-      const gitActionResult = await runCloseoutGitAction(pctx, s.currentUnit, { softFailure: true });
+      // ADR-050: a Task whose source commit settled before publication
+      // (Closeout Effect ordinal 1, receipt recorded) skips the legacy
+      // post-publication commit; the recapture, audit and sync below still
+      // run against the committed tree.
+      const gitActionResult = isTaskSourceCommitSettled(s.basePath, s.currentUnit.id)
+        ? "continue"
+        : await runCloseoutGitAction(pctx, s.currentUnit, { softFailure: true });
       if (gitActionResult === "dispatched") {
         return "stopped";
       }
@@ -2671,6 +2692,9 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
       } catch (e) {
         debugLog("postUnit", { phase: "safety-file-change", error: String(e) });
       }
+      // The Task is verified, published and committed: the sync reads the
+      // complete task row.
+      await runPostUnitGitHubSyncIfNeeded(s.basePath, s.currentUnit);
     }
 
     try {
@@ -2730,7 +2754,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         `Post-unit hook ${hookFailure.hookName} failed for ${hookFailure.unitId}: ${hookFailure.reason}. Pausing auto-mode.`,
         "warning",
       );
-      await pauseAuto(ctx, pi);
+      await pauseAuto(ctx, pi, "machine_fixable");
       return "stopped";
     }
 
@@ -2755,7 +2779,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
           "warning",
         );
         debugLog("postUnit", { phase: "fast-stop", captureId: stopCapture.id });
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "user_request");
         return "stopped";
       }
     } catch (e) {
@@ -2801,7 +2825,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         }
 
         // Get tasks for this slice from DB
-        const tasks = getSliceTasks(mid, sid);
+        const tasks = readSliceTasks(mid, sid);
         if (tasks.length === 0) {
           debugLog("postUnitPostVerification", {
             phase: "pre-execution-checks",
@@ -2902,7 +2926,9 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
             return "pause";
           }
 
-          s.pendingVerificationRetry = {
+          // ADR-048: the retry is also on the planner's dispatch row, so a
+          // restart sends the slice back to the planner with these findings.
+          setVerificationRetry(s, currentUnit.type, {
             unitId: currentUnit.id,
             failureContext: formatPreExecutionRetryContext({
               unitType: currentUnit.type,
@@ -2911,11 +2937,10 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
               checks,
               evidencePath,
             }),
+            // The dispatch rules select the planner by this signature.
+            signature: `pre-execution:${attempt}`,
             attempt,
-          };
-          // ADR-048: the retry is also on the planner's dispatch row, so a
-          // restart sends the slice back to the planner with these findings.
-          storeUnitRetry(currentUnit.type, s.pendingVerificationRetry);
+          });
           ctx.ui.notify(
             `${heading}\n${details}${suffix}${evidenceNote}\nRetrying planning with this failure context.`,
             "warning",
@@ -3028,7 +3053,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         pausing: true,
         reason: "pre-execution repair exhausted or checker errored",
       });
-      await pauseAuto(ctx, pi);
+      await pauseAuto(ctx, pi, "machine_fixable");
       return "stopped";
     }
   }

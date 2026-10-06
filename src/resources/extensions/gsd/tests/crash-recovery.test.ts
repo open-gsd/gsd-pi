@@ -31,6 +31,7 @@ import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { insertSlice, insertTask } from "../gsd-db.ts";
 import { setRuntimeKv } from "../db/runtime-kv.ts";
+import { openAutoPause } from "../db/writers/auto-pauses.ts";
 import { normalizeRealPath } from "../paths.ts";
 import type { GSDState } from "../types.ts";
 import { _synthesizePausedSessionRecoveryForTest } from "../auto.ts";
@@ -181,9 +182,8 @@ function writePausedSession(
   unitType?: string,
   unitId?: string,
 ): void {
-  // Phase C pt 2: paused-session.json migrated to runtime_kv
-  // (global scope, key PAUSED_SESSION_KV_KEY).
-  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
+  openAutoPause({
+    blockerKind: "user_request",
     milestoneId,
     originalBasePath: base,
     stepMode,
@@ -310,8 +310,7 @@ test("readPausedSessionMetadata preserves unitType and unitId through round-trip
 test("readPausedSessionMetadata handles legacy metadata without unitType/unitId", () => {
   const base = makeTmpBase();
   try {
-    // Phase C pt 2: write directly to runtime_kv (simulates older payload
-    // missing the now-canonical unitType/unitId fields).
+    // A pause that an older build stored in runtime_kv, with no unitType/unitId.
     setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
       milestoneId: "M001",
       originalBasePath: base,
@@ -328,7 +327,7 @@ test("readPausedSessionMetadata handles legacy metadata without unitType/unitId"
 test("readPausedSessionMetadata drops stale discuss-milestone pseudo PROJECT metadata", () => {
   const base = makeTmpBase();
   try {
-    // Phase C pt 2: write directly to runtime_kv (the file location is gone)
+    // A pause that an older build stored in runtime_kv.
     setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
       milestoneId: null,
       originalBasePath: base,

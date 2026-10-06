@@ -13,10 +13,10 @@ import { existsSync } from "node:fs";
 import { isAutoActive } from "./auto.js";
 import { deriveState } from "./state.js";
 import { gsdRoot } from "./paths.js";
-import { findMilestoneIds } from "./milestone-ids.js";
+import { readListedMilestoneIds, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { loadQueueOrder, validateQueueOrder } from "./queue-order.js";
 import { getParkedReason } from "./milestone-actions.js";
-import { getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
+import { isDbAvailable } from "./gsd-db.js";
 import { buildExistingMilestonesContext } from "./guided-flow-queue.js";
 import { loadPrompt } from "./prompt-loader.js";
 import { isGsdGitignored } from "./gitignore.js";
@@ -44,7 +44,7 @@ export async function handleRethink(
   ctx.ui.notify("Building project snapshot for rethink...", "info");
 
   const state = await deriveState(basePath);
-  const milestoneIds = findMilestoneIds(basePath);
+  const milestoneIds = readListedMilestoneIds();
 
   if (milestoneIds.length === 0) {
     ctx.ui.notify("No milestones exist yet. Nothing to rethink.", "warning");
@@ -110,8 +110,10 @@ function buildRethinkData(
     const deps = entry?.dependsOn?.length ? entry.dependsOn.join(", ") : "—";
 
     let sliceInfo = "—";
+    // The Slices come from the read interface: after the Cutover the status
+    // label follows the lifecycle rows, so the counts follow them too.
     if (dbAvailable && status !== "complete") {
-      const slices = getMilestoneSlices(mid);
+      const slices = readMilestoneSlices(mid);
       if (slices.length > 0) {
         const done = slices.filter(s => s.status === "complete" || s.status === "done").length;
         const skipped = slices.filter(s => s.status === "skipped").length;

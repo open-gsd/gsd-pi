@@ -42,6 +42,7 @@ import { invalidateAllCaches } from "../cache.ts";
 import {
   openDatabase,
   closeDatabase,
+  insertArtifact,
   insertGateRow,
   insertMilestone,
   upsertMilestonePlanning,
@@ -50,6 +51,7 @@ import {
   saveReworkBrief,
 } from "../gsd-db.ts";
 import { clearGSDPreferencesCache, getProjectGSDPreferencesPath } from "../preferences.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 // ─── Pure composer tests ──────────────────────────────────────────────────
 
@@ -605,6 +607,7 @@ function writeArtifacts(base: string): void {
     join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md"),
     "---\nid: S01\nparent: M001\n---\n# S01 Summary\n**One-liner**\n\n## What Happened\nDone.\n",
   );
+  saveMilestoneFilesAsArtifacts(base);
 }
 
 test("#4782 phase 2: buildReassessRoadmapPrompt emits composer-shaped context with manifest-declared artifacts", async (t) => {
@@ -693,6 +696,7 @@ test("execute-task prompt resolves an inline slice task without a standalone tas
       "",
     ].join("\n"),
   );
+  saveMilestoneFilesAsArtifacts(base);
 
   const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T02", "Inline task", base);
 
@@ -703,7 +707,7 @@ test("execute-task prompt resolves an inline slice task without a standalone tas
   assert.doesNotMatch(prompt, /tasks\/T02-PLAN\.md/);
 });
 
-test("execute-task prompt prefers durable inline task planning state when no task file exists", async (t) => {
+test("execute-task prompt prefers durable inline task planning state when no task plan row is saved", async (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
   invalidateAllCaches();
@@ -734,6 +738,37 @@ test("execute-task prompt prefers durable inline task planning state when no tas
   assert.doesNotMatch(prompt, /Task plan not found at dispatch time/);
 });
 
+test("execute-task prompt names the projection path as the source when the task plan row is saved, with the text of the carrier", async (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+  invalidateAllCaches();
+
+  seed(base, "M001");
+  insertTask({
+    id: "T02",
+    sliceId: "S01",
+    milestoneId: "M001",
+    title: "Durable task",
+    status: "pending",
+    planning: { fullPlanMd: "# T02: Durable task\n\nCARRIER-PLAN-TEXT\n" },
+  });
+  insertArtifact({
+    path: "milestones/M001/slices/S01/tasks/T02-PLAN.md",
+    artifact_type: "PLAN",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: "T02",
+    full_content: "# T02: Durable task\n\nARTIFACT-ROW-PLAN-TEXT\n",
+  });
+
+  const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T02", "Durable task", base);
+
+  assert.match(prompt, /Source: `\.gsd\/milestones\/M001\/slices\/S01\/tasks\/T02-PLAN\.md`/);
+  assert.doesNotMatch(prompt, /durable task planning state/);
+  assert.match(prompt, /CARRIER-PLAN-TEXT/);
+  assert.doesNotMatch(prompt, /ARTIFACT-ROW-PLAN-TEXT/);
+});
+
 test("reactive execute-task dispatch resolves inline slice task plans", async (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
@@ -754,6 +789,7 @@ test("reactive execute-task dispatch resolves inline slice task plans", async (t
       "",
     ].join("\n"),
   );
+  saveMilestoneFilesAsArtifacts(base);
 
   const prompt = await buildReactiveExecutePrompt(
     "M001",
@@ -824,13 +860,18 @@ test("execute-task recovery context gives repair, remediation, and replan distin
   assert.ok(!executeContract?.requiredWorkflowTools.includes("gsd_replan_task"));
 });
 
-test("execute-task prompt omits on-demand slice research when the artifact is absent", async (t) => {
+test("execute-task prompt omits on-demand slice research when no RESEARCH row is saved", async (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
   invalidateAllCaches();
 
   seed(base, "M001");
   writeArtifacts(base);
+  // A RESEARCH file with no artifact row is not research.
+  writeFileSync(
+    join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-RESEARCH.md"),
+    "# S01 Research\n",
+  );
 
   const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T01", "Task", base);
 
@@ -849,6 +890,7 @@ test("execute-task prompt surfaces on-demand slice research when the artifact ex
     join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-RESEARCH.md"),
     "# S01 Research\n",
   );
+  saveMilestoneFilesAsArtifacts(base);
 
   const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T01", "Task", base);
 

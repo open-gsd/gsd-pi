@@ -190,6 +190,18 @@ What shipped:
   `/gsd recover` imports the file's Rule, Pattern and Lesson rows through an
   Import Preview, which also lists the content it does not import. Knowledge
   readers read the database, not the file.
+- Prompt builders take ROADMAP, CONTEXT, RESEARCH, PLAN and SUMMARY text of a
+  Milestone, Slice or Task from the database, not from the projection files.
+  A file with no database content is not prompt narrative. The Milestone list of
+  a command or a prompt comes from the Milestone rows; a milestone directory
+  with no row is not a Milestone. The directories are scanned only for id
+  reservation and for doctor and drift checks.
+  `docs/dev/state-db-cutover-milestone-decision.md` lists the readers, the
+  prompt inputs that are still read from files, and the order of the two
+  database sources (the Slice or Task row, then the artifact row).
+- A SUMMARY is prompt narrative only while its Slice or Task is done. A
+  CONTEXT-DRAFT is a discussion seed only while the Milestone has no saved
+  CONTEXT.
 - Steer overrides (`/gsd steer`) are `override.*` events of Domain Operations.
   OVERRIDES.md is a one-way render of them: dispatch, prompts and artifact
   verification read only the database. A file block that no database override
@@ -228,7 +240,10 @@ What shipped:
   an evidence row, and a step completes only from a row that passed or carries
   a waiver rationale. A `human-review` or `prompt-verify` step pauses the run
   until `/gsd workflow approve <name>/<timestamp> <step>` records the decision
-  of the operator as such a row. The verification retry count of a step is on
+  of the operator as such a row. A step that auto-mode runs is claimed as a
+  `unit_dispatches` row with the unit id `<name>/<timestamp>/<stepId>`: a second
+  session cannot run it, and takes it over only when the worker that claimed
+  it is dead, stopped or crashed. The verification retry count of a step is on
   its step row, written by a `custom_workflow.step.retry` Domain Operation. A
   run directory from an older release has no rows: the engine imports it to
   rows before its first read, and an import that is refused (an unknown step
@@ -251,10 +266,29 @@ canonical lifecycle rows and Waivers when the Authority Epoch of the Project
 is above 0, and from legacy rows at epoch 0. The epoch advances on the first
 open of an existing database (see above), so public status responses,
 dispatch, and dependency decisions read canonical rows after that open, and
-legacy rows before it or with the opt-out. `gate:lifecycle-shadow-no-cutover` pins
-both epochs. Other decision sites still read legacy rows directly, also on a
-Project that is cut over, until they are routed through the interface. The
-decision document lists both groups.
+legacy rows before it or with the opt-out (`GSD_AUTHORITY_CUTOVER=0`).
+`gate:lifecycle-shadow-no-cutover` pins
+both epochs. Since 2026-10-04 the dispatch, eligibility, queue, closeout,
+recovery, post-unit and verification sites, the preconditions of the planning
+and completion commands, the discard operation, the hook retry of a Task, the
+stale-branch cleanup, the parallel merge order, the drift checks that block
+dispatch, the default doctor scope, the doctor checks that decide from a
+status and the prompt builders that choose prompt content read through the
+interface. These sites still read legacy rows directly: three legacy-only
+paths that are deleted with the legacy path (the write guard of a staged Task
+completion, the escalations from before the database stored them, and the
+legacy Milestone reopen). The checks that
+compare a projection file with the rows that its renderer reads (ROADMAP
+drift, stale render, the checkbox and missing-ROADMAP checks of doctor) read
+legacy rows, as the renderers do. They run in the Projection Worker or in
+doctor, they do not block dispatch, and they move to the lifecycle rows with
+the renderers. The sites that only render or display a status stay on legacy
+rows. No decision site reads legacy rows any more: the unrouted
+decision-site list of the decision document is empty, and the automatic
+Cutover is the default. The read cutover must not be declared complete while
+a decision site still reads legacy rows, and the automatic Cutover must not
+become the default before that.
+The decision document names each site of the groups.
 The decision, the
 Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
 are recorded in
@@ -330,7 +364,7 @@ are recorded in
 
 - **Auto-mode Liveness Backstop**: the DB-persisted, interleaving-blind adjudicator for non-advancing auto-mode outcomes. It trips on the second identical guard/target/input hash, refuses re-entry until explicit `--resume-wedge` acknowledgment, and never repairs workflow state itself. It supersedes the deleted Dispatch History module and Rule 1 detector; see `docs/dev/ADR-047-auto-mode-liveness-backstop.md`.
 - **Consent Question**: a question put to the user whose lifecycle (classification → pause gating → answer validation → cancellation) is owned by the Consent Question module (`consent-question.ts`). Kinds: `gate | consent | decision | informational`; **fail policy is a property of the kind** (informational is the only fail-open kind). Empty/missing `selected` on any fail-closed kind evaluates to `waiting` — never `answered` (#528). Pause promotion is classification-based, not unit-type-allowlist-based (#682). Gate kinds delegate structural validation to the consent-verdict leaf (`consent-verdict.ts`), the single verdict engine shared with the write gate. See `docs/dev/ADR-039-consent-question-module.md`.
-- **Write-Gate State Adapter**: the seam (`WriteGateStateAdapter`) over write-gate state's two writers. Host adapter: in-memory + reconcile-on-read (verifications grow-only union; disk wins for pending/queue-phase; verified wins over pending). Child adapter: write-through, always-fresh read; selected via the child-spawn env. Snapshot writes are unconditional read-merge-write and carry a `writer` provenance tag (diagnostic only; the original epoch counter was write-only and removed); deferred approval gates are keyed per basePath. See `docs/dev/ADR-040-write-gate-two-adapter-seam.md`.
+- **Write-Gate State Adapter**: the seam (`WriteGateStateAdapter`) over write-gate state's two writers, the extension host and the workflow MCP child. Write-gate state is rows of the project database (`write_gate_state`); both processes read them through one reader (`loadWriteGateSnapshot`) and change them in one write transaction. The adapters differ only in `setPending`: the host does not arm a verified gate (verified wins over pending), the child arms and revokes the verification; the child adapter is selected via the child-spawn env. Rows carry a `writer` provenance tag (diagnostic only); deferred approval gates are keyed per basePath in the host. A verified gate survives a restart and a resumed session. See `docs/dev/ADR-040-write-gate-two-adapter-seam.md` and `docs/db-map.md`.
 - **Engine Hook Contract**: the typed declaration (`engine-hook-contract.ts`) of which tool lifecycle hooks fire on every engine (`tool_execution_start/end` — universal) versus native-only (`tool_call`/`tool_result` — skipped by the external engine's `externalResult` short-circuit). Also the normalizer seam: `canonicalToolName` (MCP prefix strip) vs `canonicalWorkflowToolName` (strip + workflow alias resolution). Cross-engine enforcement must ride universal hooks. See `docs/dev/ADR-041-engine-hook-contract.md`.
 - **Agent Turn**: one full agent response cycle — from the user's prompt through every tool round until `agent_end`. Distinct from a single tool round (one batch of tool calls and results) and from a multi-turn user task that spans several Agent Turns. The Tool Call Loop Guard's per-tool counters reset at Agent Turn boundaries.
 - **Tool Call Loop Guard**: native-engine protection against runaway tool repetition within one Agent Turn. Two independent checks: an identical-args streak (same tool + same arguments repeated) and a per-tool-name cap regardless of arguments. A blocked call returns a model-facing error without executing the tool. Distinct from Recovery Classification's `tool-unavailable` retry path, which handles missing workflow tools rather than repetition.
@@ -438,7 +472,7 @@ Dispatch remains responsible for selecting the next Unit from reconciled state. 
 
 - Consent questions deepen behind the **Consent Question module**: per-kind fail policy at one policy point (`evaluateAskUserQuestionsRound`), classification-based pause promotion, unified cancellation. `user-input-boundary.ts` is gone; importers use `consent-question.ts` directly. See `docs/dev/ADR-039-consent-question-module.md`.
 
-- Write-gate state goes through the **Write-Gate State Adapter** seam (host reconcile-on-read / child write-through, read-merge-write snapshot persistence, per-basePath deferred gates). No file locking; temp+rename atomicity and the persistence opt-out are preserved. See `docs/dev/ADR-040-write-gate-two-adapter-seam.md`.
+- Write-gate state goes through the **Write-Gate State Adapter** seam (database rows, one reader for host and child, per-basePath deferred gates). No snapshot file and no file lock: SQLite's write transaction serializes the two writers. See `docs/dev/ADR-040-write-gate-two-adapter-seam.md`.
 
 - Tool-hook guarantees are declared once in the **Engine Hook Contract**; decision reads of markdown projections are banned from dispatch/gate/completion paths (structural test `tests/parsers-legacy-importers.test.ts`; zero-importer / file-absence invariant after T020). Open follow-up from the contract work: nine `tool_call`-only guards have no universal-hook mirror and are silently dead under external engines — see ADR-041's consequences for the list. See `docs/dev/ADR-041-engine-hook-contract.md`.
 

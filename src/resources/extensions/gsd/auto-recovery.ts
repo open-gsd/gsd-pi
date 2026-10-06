@@ -21,7 +21,6 @@ import {
   insertGateRun,
   getMilestone,
   immediateTransaction,
-  getCompletedMilestoneTaskFileHints,
   getMilestoneCommitAttributionShas,
   recordMilestoneCommitAttribution,
 } from "./gsd-db.js";
@@ -30,7 +29,7 @@ import { invalidateStateCache, isValidationTerminal } from "./state.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning, logError } from "./workflow-logger.js";
 import { readIntegrationBranch } from "./git-service.js";
-import { isClosedStatus } from "./status-guards.js";
+import { readMilestone } from "./db/lifecycle-read.js";
 import {
   resolveSlicePath,
   resolveSliceFile,
@@ -272,7 +271,7 @@ export function refreshRecoveryDbForArtifact(
       if (isMilestoneLifecycleAdopted(mid)) {
         return adoptedMilestoneRecoveryResult(mid, milestone.status);
       }
-      return isClosedStatus(milestone.status) ? { ok: true } : null;
+      return readMilestone(mid)?.closed ? { ok: true } : null;
     });
     if (observedResult) return observedResult;
 

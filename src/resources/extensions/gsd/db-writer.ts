@@ -25,7 +25,12 @@ import { createWorkspace, scopeMilestone } from './workspace.js';
 import { createMemory } from './memory-store.js';
 import { synthesizeDecisionMemoryContent } from './memory-backfill.js';
 import { executeRecordDomainOperation } from './record-domain-operation.js';
+import {
+  buildStatementImpactRows,
+  insertDecisionStatementImpacts,
+} from './db/writers/decision-statement-impacts.js';
 import { internalPlanningInvocation, type PlanningInvocation } from './planning-invocation.js';
+import { loadWriteGateSnapshot, shouldBlockRootArtifactSaveInSnapshot } from './bootstrap/write-gate.js';
 
 // ─── Freeform Detection ───────────────────────────────────────────────────
 
@@ -49,6 +54,29 @@ export function isDecisionsTableFormat(content: string): boolean {
 }
 
 /**
+ * Derive each decision's amends target from the stored supersede
+ * (superseded_by on the replaced row) — never by parsing '(amends D###)' file
+ * text. The DECISIONS.md render re-emits the target as the cell suffix the
+ * markdown parsers understand, so a rendered register round-trips.
+ */
+export function decisionsWithAmendsTargets(decisions: Decision[]): Decision[] {
+  const amends = new Map<string, string>();
+  for (const d of decisions) {
+    if (d.superseded_by) amends.set(d.superseded_by, d.id);
+  }
+  return decisions.map((d) => ({ ...d, amends: amends.get(d.id) ?? null }));
+}
+
+/** The Decision cell: stored text plus the '(amends D###)' suffix when the
+ * stored supersede carries a target the text does not already name. */
+function decisionCellText(d: Decision): string {
+  if (!d.amends) return d.decision;
+  const named = new RegExp(`\\(amends\\s+${d.amends}\\)`, "i");
+  if (named.test(d.decision)) return d.decision;
+  return `${d.decision} (amends ${d.amends})`;
+}
+
+/**
  * Generate a minimal decisions table section (header + rows) for appending
  * to a freeform DECISIONS.md file.
  */
@@ -67,7 +95,7 @@ function generateDecisionsAppendBlock(decisions: Decision[]): string {
       d.id,
       d.when_context,
       d.scope,
-      d.decision,
+      decisionCellText(d),
       d.choice,
       d.rationale,
       d.revisable,
@@ -108,7 +136,7 @@ export function generateDecisionsMd(decisions: Decision[]): string {
       d.id,
       d.when_context,
       d.scope,
-      d.decision,
+      decisionCellText(d),
       d.choice,
       d.rationale,
       d.revisable,
@@ -346,6 +374,21 @@ export interface SaveRequirementFields {
 }
 
 /**
+ * A requirement write changes REQUIREMENTS.md, so it waits for a pending
+ * discussion gate. The check is here, in the writer both transports call, so
+ * the native tool and the workflow MCP tool enforce the same rule.
+ */
+function assertRequirementsWriteAllowed(basePath: string): void {
+  const guard = shouldBlockRootArtifactSaveInSnapshot(loadWriteGateSnapshot(basePath), 'REQUIREMENTS');
+  if (guard.block) throw new RootArtifactWriteBlockedError(guard.reason ?? 'requirements write blocked');
+}
+
+/** The write gate refused a root artifact write. Tool handlers report `code` as the error. */
+export class RootArtifactWriteBlockedError extends Error {
+  readonly code = 'root_artifact_write_blocked';
+}
+
+/**
  * Save a new requirement through the requirement.save Domain Operation and
  * regenerate REQUIREMENTS.md. The ID is allocated inside the operation, so a
  * replay with the same idempotency key returns the original ID and writes
@@ -358,6 +401,7 @@ export async function saveRequirementToDb(
   basePath: string,
   invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<{ id: string }> {
+  assertRequirementsWriteAllowed(basePath);
   try {
     const db = await import('./gsd-db.js');
 
@@ -452,7 +496,7 @@ export async function readDecisionsProjectionIntent(
   basePath: string,
 ): Promise<DecisionsProjectionIntent | null> {
   const { getAllDecisionsFromMemories } = await import('./context-store.js');
-  const allDecisions: Decision[] = getAllDecisionsFromMemories();
+  const allDecisions: Decision[] = decisionsWithAmendsTargets(getAllDecisionsFromMemories());
   const path = resolveGsdRootFile(basePath, 'DECISIONS');
   const existingContent = existsSync(path) ? readFileSync(path, 'utf-8') : null;
   if (allDecisions.length === 0 && existingContent === null) return null;
@@ -560,6 +604,11 @@ export interface SaveDecisionFields {
   source?: string;
   /** ID of the active decision that this decision replaces (e.g. "D003"). */
   supersedes?: string;
+  /**
+   * Optional statement impacts written by the same decision.save Domain
+   * Operation, keyed on the saved D### id. Empty/omitted writes no rows.
+   */
+  impacts?: import('./db/writers/decision-statement-impacts.js').DecisionStatementImpactInput[];
 }
 
 /**
@@ -663,7 +712,7 @@ export async function saveDecisionToDb(
       eventType: 'decision.saved',
       entityType: 'decision',
       projectionKeys: ['decisions'],
-      mutate: () => {
+      mutate: (context) => {
         const decisionId = nextDecisionIdAcrossSurfaces(adapter);
         if (normalized.supersedes) {
           supersedeActiveDecision(db, normalized.supersedes, decisionId);
@@ -671,7 +720,24 @@ export async function saveDecisionToDb(
         if (!persistDecisionToMemory(decisionId, normalized)) {
           throw new Error(`Unable to persist decision ${decisionId}`);
         }
-        return { entityId: decisionId, result: { decisionId } };
+        const impactRows = buildStatementImpactRows(decisionId, normalized.impacts, normalized.supersedes);
+        insertDecisionStatementImpacts(context, impactRows);
+        return {
+          entityId: decisionId,
+          result: {
+            decisionId,
+            impacts: impactRows.map((row) => ({
+              decision_id: row.decision_id,
+              impact_ordinal: row.impact_ordinal,
+              impact_kind: row.impact_kind,
+              milestone_id: row.milestone_id,
+              slice_id: row.slice_id,
+              task_id: row.task_id,
+              target_scope: row.target_scope,
+              payload: row.payload,
+            })),
+          },
+        };
       },
     });
 
@@ -680,7 +746,7 @@ export async function saveDecisionToDb(
     // (memory-backfill.ts) absorbs the historical chain and drift-heals
     // superseded_by on every session start.
     const { getAllDecisionsFromMemories } = await import('./context-store.js');
-    const allDecisions: Decision[] = getAllDecisionsFromMemories();
+    const allDecisions: Decision[] = decisionsWithAmendsTargets(getAllDecisionsFromMemories());
 
     const filePath = resolveGsdRootFile(basePath, 'DECISIONS');
 
@@ -767,6 +833,7 @@ export async function updateRequirementInDb(
   basePath: string,
   invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<void> {
+  assertRequirementsWriteAllowed(basePath);
   try {
     const db = await import('./gsd-db.js');
 

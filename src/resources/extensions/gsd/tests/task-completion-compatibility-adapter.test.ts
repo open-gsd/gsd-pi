@@ -39,6 +39,7 @@ import {
 } from "../task-execution-domain-operation.js";
 import { reopenTask } from "../task-lifecycle-domain-operation.js";
 import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
+import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 import {
   recordFailureAndSelectRecovery,
   resumeTaskRecovery,
@@ -228,9 +229,18 @@ function activateExactMergedClosure(basePath: string): string {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: basePath, encoding: "utf8" }).trim();
 }
 
-function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeCommit: string): void {
+/**
+ * Record the exact-merged evidence of the Task: a successful gsd_uat_exec run,
+ * the saved passing run-uat run `savedRunId`, and the host verdict that cites
+ * the exec run. The exec run is recorded in run-uat attempt 1.
+ */
+function recordExactMergedUatVerdict(
+  basePath: string,
+  attemptId: string,
+  mergeCommit: string,
+  savedRunId = "uat:M001:S01:attempt-1",
+): void {
   const evidenceId = "exact-merged-uat";
-  const runId = "uat:M001:S01:attempt-2";
   const source = captureVerificationSourceSnapshot([{ id: "project", cwd: basePath }]);
   assert.equal(source.ok, true, source.ok ? undefined : source.error);
   const environment = {
@@ -240,15 +250,9 @@ function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeC
     localMergeCommit: mergeCommit,
     sourceContentRevision: source.snapshot.aggregateRevision,
   };
+  // ASSESSMENT text that names every value. The text decides nothing.
   const assessment = [
-    "---",
-    "sliceId: S01",
-    "uatType: runtime-executable",
-    "verdict: PASS",
-    "attempt: 2",
-    `runId: ${runId}`,
-    "---",
-    "",
+    `runId: ${savedRunId}`,
     `gsd_uat_exec:${evidenceId}`,
     mergeCommit,
     source.snapshot.aggregateRevision,
@@ -298,9 +302,9 @@ function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeC
     ) VALUES (
       'uat:M001:S01', :run_id, 'UAT', 'uat', 'run-uat', 'run-uat:M001/S01',
       'M001', 'S01', 'pass', 'none', 'Exact-merged UAT passed.',
-      :findings, 2, 2, 0, '2026-07-12T00:03:00.000Z'
+      :findings, 1, 1, 0, '2026-07-12T00:03:00.000Z'
     )
-  `).run({ ":run_id": runId, ":findings": assessment });
+  `).run({ ":run_id": savedRunId, ":findings": assessment });
   recordTaskTechnicalVerdict({
     invocation: invocation(`pi:exact-merged-verification:${attemptId}`),
     attemptId,
@@ -934,6 +938,32 @@ test("#2417: doctor reports a settled succeeded verify-stage Attempt on a non-te
   assert.match(stranded[0].message, new RegExp(attemptId));
 });
 
+test("after the Cutover doctor reports a stranded succeeded Attempt of a Task that only the legacy row closes", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+  // Only the legacy row closes the Task. Its lifecycle row stays open.
+  db().exec("UPDATE tasks SET status = 'complete' WHERE id = 'T01'");
+  const adopted = new Set(
+    db().prepare("SELECT item_kind FROM workflow_item_lifecycles").all().map((item) => item["item_kind"]),
+  );
+  seedLifecycles("stranded-attempt", [
+    { itemKind: "milestone" as const, milestoneId: "M001", lifecycleStatus: "ready" as const },
+    { itemKind: "slice" as const, milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" as const },
+  ].filter((lifecycle) => !adopted.has(lifecycle.itemKind)));
+  const stranded = async () => {
+    const issues: DoctorIssue[] = [];
+    await checkEngineHealth(basePath, issues, []);
+    return issues.filter((issue) => issue.code === "unpublished_succeeded_attempt").map((issue) => issue.unitId);
+  };
+
+  assert.deepEqual(await stranded(), [], "before the Cutover the legacy row answers that the Task is terminal");
+
+  cutOver();
+
+  assert.deepEqual(await stranded(), ["M001/S01/T01"]);
+});
+
 test("#1677: inside a worktree the classifier falls back to the project-root copy", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath } = createFixture();
@@ -1272,6 +1302,36 @@ test("#2427: an abandoned staged SUMMARY with genuinely different DB intent stil
   );
 });
 
+test("after the Cutover the abandoned staged SUMMARY repair takes the in-progress Task from the lifecycle row", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  interruptedRetryFixture(basePath, attemptId);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  // Only the lifecycle row says that the Task is in progress.
+  db().exec("UPDATE tasks SET status = 'pending' WHERE id = 'T01'");
+  seedLifecycles("abandoned-staged-summary", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+  ]);
+
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+    "before the Cutover the legacy row answers that the Task is pending",
+  );
+
+  cutOver();
+
+  assert.equal(describeArtifactDbDriftBlocker(drift, { basePath, state }), null);
+  await repairArtifactDbDrift(drift, { basePath, state });
+  assert.equal(existsSync(staged.summaryPath), false, "the repair moves the abandoned projection to quarantine");
+});
+
 test("staging normalizes a pending legacy Task and clears its stale completion timestamp", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath } = createFixture();
@@ -1486,6 +1546,23 @@ test("exact-merged UAT evidence authorizes dossier task publication", async () =
   assert.equal(published.status, "committed");
   assert.equal(taskState().status, "complete");
   assert.equal(row("SELECT lifecycle_status FROM workflow_item_lifecycles").lifecycle_status, "completed");
+});
+
+test("an exec run outside the saved passing UAT run does not authorize dossier task publication", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const mergeCommit = activateExactMergedClosure(basePath);
+  await stageTaskCompletion(stageInput(basePath));
+  // The ASSESSMENT text names the exec run, the merge commit and the hashes,
+  // but the saved passing run is another run than the one the exec run is in.
+  recordExactMergedUatVerdict(basePath, attemptId, mergeCommit, "uat:M001:S01:attempt-2");
+
+  await assert.rejects(
+    publishVerifiedTaskCompletion(publishInput(basePath, attemptId)),
+    /passing canonical exact-merged UAT gate receipt/,
+  );
+
+  assert.equal(taskState().status, "in_progress");
 });
 
 test("verified publication atomically closes only its task gates from durable Attempt evidence", async () => {
@@ -2008,8 +2085,8 @@ test("#2348: the legacy refusal still records the escalation question for a reco
     `), {
       question_text: "Should execution pause for the hard blocker?",
       question_status: "open",
-      escalation_pending: 1,
-    }, "the escalation question must survive the projection refusal");
+      escalation_pending: 0,
+    }, "the escalation question must survive the projection refusal, and it is the pause: the task flag is not written");
     assert.equal(
       Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY'").count),
       0,

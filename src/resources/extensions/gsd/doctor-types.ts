@@ -86,7 +86,6 @@ export type DoctorIssueCode =
   // Engine health checks (Phase 4)
   | "db_orphaned_task"
   | "db_orphaned_slice"
-  | "db_done_task_no_summary"
   | "artifact_file_missing"
   | "artifact_user_content_missing"
   | "artifact_db_status_divergence"
@@ -119,6 +118,8 @@ export type DoctorIssueCode =
   | "capture_file_entry_unimported"
   // BACKLOG.md item that the database does not hold
   | "backlog_file_item_unimported"
+  // metrics.json unit runs that the database does not hold
+  | "metrics_ledger_units_unimported"
   // event-log.jsonl milestone reopen or completion that the database does not hold
   | "legacy_milestone_event_unimported"
   | "escalation_legacy_response_unapplied"

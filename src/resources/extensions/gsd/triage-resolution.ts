@@ -4,7 +4,7 @@
  * Provides resolution executors for each capture classification type:
  *
  * - inject: appends a new task to the current slice plan
- * - replan: writes REPLAN-TRIGGER.md so next dispatchNextUnit enters replanning-slice
+ * - replan: stamps the slice's replan trigger in the database so next dispatchNextUnit enters replanning-slice
  * - defer/note: query helpers for loading deferred/replan captures
  *
  * Also provides detectFileOverlap() for surfacing downstream impact on quick tasks.
@@ -13,7 +13,9 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { atomicWriteSync } from "./atomic-write.js";
 import { join } from "node:path";
-import { createRequire } from "node:module";
+import { executeDomainOperation } from "./db/domain-operation.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { getSlice, setSliceReplanTriggeredAt } from "./gsd-db.js";
 import { gsdRoot, milestonesDir, legacyMilestonesDir, resolveMilestonePath } from "./paths.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import type { Classification, CaptureEntry } from "./captures.js";
@@ -78,9 +80,48 @@ export function executeInject(
 }
 
 /**
- * Trigger replanning by writing a REPLAN-TRIGGER.md marker file.
- * The existing state.ts derivation detects this and sets phase to "replanning-slice".
- * Returns true if the trigger was written successfully.
+ * Stamp the slice's replan trigger in one slice.replan.trigger Domain
+ * Operation and return the stored timestamp. A replay for the same capture
+ * writes nothing. Throws when no database is open or the slice has no row.
+ */
+function recordReplanTrigger(mid: string, sid: string, captureId: string): string {
+  const idempotencyKey = `slice.replan.trigger:${mid}/${sid}:${captureId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  executeDomainOperation({
+    operationType: "slice.replan.trigger",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "system",
+    sourceTransport: "internal",
+    payload: { milestoneId: mid, sliceId: sid, captureId },
+  }, () => {
+    if (!setSliceReplanTriggeredAt(mid, sid, new Date().toISOString())) {
+      throw new Error(`replan trigger requires a slice row for ${mid}/${sid}`);
+    }
+    return {
+      events: [{
+        eventType: "slice.replan.triggered",
+        entityType: "slice",
+        entityId: `${mid}/${sid}`,
+        payload: { captureId },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `replan-trigger/${mid}/${sid}`.toLowerCase(),
+        projectionKind: "state",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  return getSlice(mid, sid)!.replan_triggered_at!;
+}
+
+/**
+ * Trigger replanning. The slice's replan trigger in the database is the
+ * trigger: the state derivation reads it and sets phase to "replanning-slice".
+ * REPLAN-TRIGGER.md is a render of that row for the user.
+ * Returns true if the trigger was stored.
  */
 export function executeReplan(
   basePath: string,
@@ -88,40 +129,30 @@ export function executeReplan(
   sid: string,
   capture: CaptureEntry,
 ): boolean {
+  let triggeredAt: string;
   try {
-    const triggerPath = join(
+    triggeredAt = recordReplanTrigger(mid, sid, capture.id);
+  } catch {
+    return false;
+  }
+  try {
+    atomicWriteSync(join(
       basePath, ".gsd", "milestones", mid, "slices", sid, `${sid}-REPLAN-TRIGGER.md`,
-    );
-    const ts = new Date().toISOString();
-    const content = [
+    ), [
       `# Replan Trigger`,
       ``,
       `**Source:** Capture ${capture.id}`,
       `**Capture:** ${capture.text}`,
       `**Rationale:** ${capture.rationale ?? "User-initiated replan via capture triage"}`,
-      `**Triggered:** ${ts}`,
+      `**Triggered:** ${triggeredAt}`,
       ``,
-      `This file was created by the triage pipeline. The next dispatch cycle`,
-      `will detect it and enter the replanning-slice phase.`,
-    ].join("\n");
-
-    atomicWriteSync(triggerPath, content, "utf-8");
-
-    // Also write replan_triggered_at column for DB-backed detection
-    try {
-      const req = createRequire(import.meta.url);
-      const { isDbAvailable, setSliceReplanTriggeredAt } = req("./gsd-db.js");
-      if (isDbAvailable()) {
-        setSliceReplanTriggeredAt(mid, sid, ts);
-      }
-    } catch {
-      // DB write is best-effort — disk file is the primary trigger for fallback path
-    }
-
-    return true;
+      `This file is a render of the replan trigger in the database. The next`,
+      `dispatch cycle reads the database and enters the replanning-slice phase.`,
+    ].join("\n"), "utf-8");
   } catch {
-    return false;
+    // The file is a render. The database row is the trigger.
   }
+  return true;
 }
 
 // ─── File Overlap Detection ───────────────────────────────────────────────────
@@ -317,7 +348,7 @@ export interface TriageExecutionResult {
  * quick-task) but haven't been executed yet, then:
  *
  * - inject: calls executeInject() to add a task to the current slice plan
- * - replan: calls executeReplan() to write the REPLAN-TRIGGER.md marker
+ * - replan: calls executeReplan() to stamp the slice's replan trigger
  * - quick-task: collects for dispatch (caller handles dispatching quick-task units)
  *
  * Each capture is marked as executed after its resolution action succeeds,

@@ -730,10 +730,40 @@ const KNOWLEDGE_ROW_CONFLICT_MESSAGE = "A KNOWLEDGE.md table row is not imported
 
 /**
  * The loss report for a KNOWLEDGE.md row that the database row with its id
- * wins over. The database content is never lost to file text, so the Preview
- * plans no change for the row and says that the file row is lost: a forgotten
- * id stays forgotten, and an active row with other content is kept.
+ * wins over. The database content is never lost to file text without the
+ * explicit choice of the operator (`knowledgeFileRows`), so the Preview plans
+ * no change for the row and says that the file row is lost: a forgotten id
+ * stays forgotten, and an active row with other content is kept.
  */
+/** The reason code of a milestone CONTEXT or RESEARCH file candidate. */
+const MILESTONE_NARRATIVE_REASON = "milestone-narrative-artifact";
+
+/** The id that names a milestone CONTEXT or RESEARCH document in a `--choice=<id>.use-file` option. */
+export function legacyImportNarrativeFileRowId(normalized: LegacyImportValue): string {
+  const row = normalized as JsonRecord;
+  return `${String(row["milestone_id"])}-${String(row["artifact_type"])}`;
+}
+
+/**
+ * The loss report for a milestone CONTEXT or RESEARCH file whose text differs
+ * from its database artifact row. As for a KNOWLEDGE.md row, the database row
+ * is kept unless the operator chose the file text explicitly.
+ */
+function narrativeRowConflict(
+  candidate: LegacyImportInterpretationCandidate,
+): { diagnosis: LegacyImportPreviewDiagnosis; resolution: LegacyImportPreviewResolution } {
+  const diagnosisValue = {
+    code: "artifact-row-conflict",
+    severity: "warning" as const,
+    source_id: candidate.raw.source_id,
+    locator: candidate.raw.locator,
+    raw_value: candidate.raw.value,
+    message: `${legacyImportNarrativeFileRowId(candidate.normalized)} file text is not imported into the database: the database artifact row ${candidate.target.key} has different text. The database row is kept.`,
+  };
+  const diagnosis = { diagnosis_id: hashLegacyImportValue(diagnosisValue), ...diagnosisValue };
+  return { diagnosis, resolution: { diagnosis_id: diagnosis.diagnosis_id, disposition: "preserved" } };
+}
+
 function knowledgeRowLoss(
   candidate: LegacyImportInterpretationCandidate,
   forgotten: boolean,
@@ -1148,9 +1178,16 @@ function derivedCounts(
   };
 }
 
+/**
+ * `knowledgeFileRows` holds the ids that the operator chose explicitly: a
+ * knowledge id (K/P/L###) or a milestone document id (M###-CONTEXT,
+ * M###-RESEARCH). For these, the file text replaces a differing active
+ * database row as an `update` change. A forgotten knowledge id stays forgotten.
+ */
 export function classifyLegacyImportChanges(
   baseInput: LegacyImportBaseSnapshot,
   interpretationInput: LegacyImportInterpretation,
+  knowledgeFileRows: ReadonlySet<string> = new Set(),
 ): LegacyImportClassification {
   const base = structuredClone(baseInput);
   const interpretation = structuredClone(interpretationInput);
@@ -1174,6 +1211,23 @@ export function classifyLegacyImportChanges(
     }
     rowSets.push(complete);
     completeSetsByRowSet.set(complete.row_set, rowSets);
+  }
+
+  // One document has one artifact row. /gsd migrate stored a milestone CONTEXT
+  // or RESEARCH row under the '.gsd/'-prefixed path, so the file targets that
+  // row when the database has no row at the gsd_summary_save path.
+  const artifactPaths = new Set(base.rows
+    .filter((row) => row.row_set === "artifacts")
+    .map((row) => String(row.value["path"])));
+  for (const candidate of interpretation.candidates) {
+    const stored = `.gsd/${candidate.target.key}`;
+    if (
+      candidate.reason_code !== MILESTONE_NARRATIVE_REASON
+      || artifactPaths.has(candidate.target.key)
+      || !artifactPaths.has(stored)
+    ) continue;
+    (candidate.target as { key: string }).key = stored;
+    (candidate.normalized as JsonRecord)["path"] = stored;
   }
 
   const rows = buildBaseRows(base);
@@ -1309,9 +1363,23 @@ export function classifyLegacyImportChanges(
     if (
       address.rowSet === "knowledge_memories"
       && current !== undefined
-      && (forgottenKnowledge.has(key) || !valuesMatch(address.rowSet, current, patch))
+      && (
+        forgottenKnowledge.has(key)
+        || (!valuesMatch(address.rowSet, current, patch) && !knowledgeFileRows.has(candidate.target.key))
+      )
     ) {
       const loss = knowledgeRowLoss(candidate, forgottenKnowledge.has(key));
+      diagnoses.push(loss.diagnosis);
+      resolutions.push(loss.resolution);
+      continue;
+    }
+    if (
+      candidate.reason_code === MILESTONE_NARRATIVE_REASON
+      && current !== undefined
+      && !valuesMatch(address.rowSet, current, { full_content: patch["full_content"] })
+      && !knowledgeFileRows.has(legacyImportNarrativeFileRowId(candidate.normalized))
+    ) {
+      const loss = narrativeRowConflict(candidate);
       diagnoses.push(loss.diagnosis);
       resolutions.push(loss.resolution);
       continue;

@@ -20,11 +20,10 @@ import {
   resolveSlicePath,
   resolveTasksDir,
   dirIsMetaOnlyLegacyMilestone,
-  normalizeRealPath,
 } from "./paths.js";
 import { milestoneIdToPhaseNum } from "./layout-policy.js";
 import { parseUnitId } from "./unit-id.js";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 
 function resolveMilestoneArtifactPath(
@@ -329,40 +328,4 @@ export function diagnoseExpectedArtifact(
     default:
       return null;
   }
-}
-
-export interface SliceResearchLocation {
-  /** Absolute path when research exists; null when missing. */
-  absolutePath: string | null;
-  /** Prompt-friendly relative path when research exists. */
-  relativePath: string | null;
-}
-
-/**
- * Resolve slice RESEARCH with worktree projection first, then canonical
- * project-root path, for prompts that inline the rendered file. Dispatch and
- * verification read the saved RESEARCH artifact row, not this file.
- */
-export function resolveSliceResearchLocation(
-  basePath: string,
-  mid: string,
-  sid: string,
-): SliceResearchLocation {
-  const projectedFile = resolveSliceFile(basePath, mid, sid, "RESEARCH");
-  if (projectedFile) {
-    return {
-      absolutePath: projectedFile,
-      relativePath: relSliceFile(basePath, mid, sid, "RESEARCH"),
-    };
-  }
-
-  const canonicalPath = resolveExpectedArtifactPath("research-slice", `${mid}/${sid}`, basePath);
-  if (canonicalPath && existsSync(canonicalPath)) {
-    return {
-      absolutePath: canonicalPath,
-      relativePath: relative(normalizeRealPath(basePath), canonicalPath),
-    };
-  }
-
-  return { absolutePath: null, relativePath: null };
 }

@@ -16,6 +16,7 @@ import {
   insertSlice,
   insertTask,
 } from "../gsd-db.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-completeslice-composer-"));
@@ -89,6 +90,7 @@ test("#4782 phase 3: buildCompleteSlicePrompt composes roadmap → plan → task
   seed(base, "M001");
   writeArtifacts(base);
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildCompleteSlicePrompt("M001", "Composer Test", "S01", "First", base);
 
   // Context wrapper present
@@ -134,6 +136,7 @@ test("#4782 phase 3: buildCompleteSlicePrompt handles missing task summaries gra
     "# S01 Plan\n",
   );
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildCompleteSlicePrompt("M001", "Composer Test", "S01", "First", base);
 
   // Still succeeds — prior-task-summaries resolver returns null when dir is empty
@@ -177,6 +180,7 @@ test("#4925 review: KNOWLEDGE splices BEFORE templates when no task summaries ex
     "## Topics\n\n### First-slice notes\n\nNotes that should be inlined.\n",
   );
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildCompleteSlicePrompt("M001", "Composer Test", "S01", "First", base);
 
   // Sanity: the splice path actually fired.

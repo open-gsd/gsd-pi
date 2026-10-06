@@ -31,7 +31,7 @@ import {
   legacyImportBaseSnapshotAtVersion,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
-import { classifyLegacyImportChanges } from "./legacy-import-preview-classifier.js";
+import { classifyLegacyImportChanges, legacyImportNarrativeFileRowId } from "./legacy-import-preview-classifier.js";
 import { composeLegacyImportInterpretation } from "./legacy-import-preview-composition.js";
 import {
   collectLegacyImportDatabaseTargetEvidence,
@@ -364,6 +364,7 @@ function approvalBase(base: LegacyImportBaseSnapshot): Readonly<Record<string, L
 function createLegacyImportPreviewInternal(
   input: LegacyImportPreviewCreateInput,
   hooks: LegacyImportPreviewTestHooks,
+  knowledgeFileRows: readonly string[] = [],
 ): LegacyImportPreviewArtifact {
   const capture = captureLegacyImportSourceSet({ roots: input.roots });
   hooks.afterSourceCapture?.(capture);
@@ -396,7 +397,7 @@ function createLegacyImportPreviewInternal(
       ? {}
       : { bundledDefinitionNames: input.bundledDefinitionNames }),
   });
-  const classification = classifyLegacyImportChanges(base, interpretation);
+  const classification = classifyLegacyImportChanges(base, interpretation, new Set(knowledgeFileRows));
   hooks.afterClassification?.();
   revalidateLegacyImportSourceSet(capture);
   hooks.afterSourceRevalidation?.();
@@ -433,10 +434,30 @@ function createLegacyImportPreviewInternal(
   });
 }
 
+/**
+ * `knowledgeFileRows` names the KNOWLEDGE.md rows (K/P/L###) whose file text
+ * replaces a differing active database row. Without this explicit choice the
+ * database row is kept and the Preview reports a knowledge-row-conflict.
+ */
 export function createLegacyImportPreview(
   input: LegacyImportPreviewCreateInput,
+  knowledgeFileRows: readonly string[] = [],
 ): LegacyImportPreviewArtifact {
-  return createLegacyImportPreviewInternal(input, {});
+  return createLegacyImportPreviewInternal(input, {}, knowledgeFileRows);
+}
+
+/**
+ * The ids whose file text a sealed Preview writes over the database row: a
+ * KNOWLEDGE.md row (K/P/L###) or a milestone CONTEXT or RESEARCH document.
+ */
+export function legacyImportKnowledgeFileRows(artifact: LegacyImportPreviewArtifact): string[] {
+  return artifact.preview.changes.flatMap((change) => {
+    if (change.action !== "update") return [];
+    if (change.target.kind === "knowledge") return [change.target.key];
+    return change.reason_code === "milestone-narrative-artifact"
+      ? [legacyImportNarrativeFileRowId(change.normalized)]
+      : [];
+  });
 }
 
 /** Test-only timing hooks for public-boundary race sabotage. */
@@ -737,7 +758,9 @@ export function revalidateLegacyImportPreview(
   expected: LegacyImportPreviewArtifact,
 ): LegacyImportPreviewArtifact {
   validateExpectedPreview(expected);
-  const created = createLegacyImportPreview(input);
+  // An update of a knowledge row exists only by the explicit choice of the
+  // file text, so the approved Preview names the chosen rows.
+  const created = createLegacyImportPreview(input, legacyImportKnowledgeFileRows(expected));
   const createdResolutions = new Map(created.preview.resolutions.map((resolution) => (
     [resolution.diagnosis_id, resolution] as const
   )));

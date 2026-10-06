@@ -778,20 +778,13 @@ export async function loadVisualizerData(basePath: string): Promise<VisualizerDa
           state.activeMilestone?.id === mid &&
           state.activeSlice?.id === s.id;
 
-        const tasks: VisualizerTask[] = [];
-
-        if (isActiveSlice) {
-          const dbTasks = getSliceTasks(mid, s.id);
-          for (const t of dbTasks) {
-            tasks.push({
-              id: t.id,
-              title: t.title,
-              done: t.status === 'complete' || t.status === 'done',
-              active: state.activeTask?.id === t.id,
-              estimate: t.estimate || undefined,
-            });
-          }
-        }
+        const tasks: VisualizerTask[] = getSliceTasks(mid, s.id).map(t => ({
+          id: t.id,
+          title: t.title,
+          done: t.status === 'complete' || t.status === 'done',
+          active: isActiveSlice && state.activeTask?.id === t.id,
+          estimate: t.estimate || undefined,
+        }));
 
         slices.push({
           id: s.id,

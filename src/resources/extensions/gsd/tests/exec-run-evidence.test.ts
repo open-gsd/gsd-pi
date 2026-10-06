@@ -4,16 +4,18 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { closeDatabase, insertGateRun, openDatabase } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, insertGateRun, openDatabase } from "../gsd-db.ts";
 import { runExecSandbox } from "../exec-sandbox.ts";
 import { readExecRun } from "../db/writers/exec-runs.ts";
 import { executeGsdExec, executeUatExec } from "../tools/exec-tool.ts";
 import { buildRunUatPresentationForType } from "../tool-presentation-plan.ts";
 import { prepareUatRun, type UatEvidenceRef, type UatResultSaveParams } from "../uat-run.ts";
+import { captureMilestoneVerificationSourceRevision } from "../verification-source-integrity.ts";
 
 let base: string;
 
@@ -75,6 +77,24 @@ function saveUatAttempt(sliceId: string, attempt: number): void {
   });
 }
 
+/** Make the project a git repository with one committed source file. */
+function commitSource(content: string): void {
+  if (!existsSync(join(base, ".git"))) {
+    execFileSync("git", ["init", "-q"], { cwd: base });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base });
+    execFileSync("git", ["config", "user.name", "Test User"], { cwd: base });
+  }
+  writeFileSync(join(base, "source.txt"), content);
+  execFileSync("git", ["add", "source.txt"], { cwd: base });
+  execFileSync("git", ["commit", "-qm", "source"], { cwd: base });
+}
+
+function currentSourceRevision(): string {
+  const source = captureMilestoneVerificationSourceRevision(base, undefined);
+  if (!source.ok) assert.fail(source.error);
+  return source.sourceRevision;
+}
+
 describe("host exec runs are database rows", () => {
   test("gsd_exec stores the run, and the row resolves after .gsd/exec is deleted", async () => {
     const result = await executeGsdExec({ script: "printf ok" }, { baseDir: base, preferences: null });
@@ -124,6 +144,69 @@ describe("host exec runs are database rows", () => {
     saveUatAttempt("S01", 1);
 
     assert.equal(readExecRun(await uatExec("S01", "printf ok"))?.attempt_ref, "uat:M001:S01:attempt-2");
+  });
+});
+
+describe("UAT runs are bound to the source revision", () => {
+  test("gsd_uat_exec stores the source revision of the run; gsd_exec stores none", async () => {
+    commitSource("one\n");
+    const first = readExecRun(await uatExec("S01", "printf ok"));
+    assert.equal(first?.source_revision, currentSourceRevision());
+
+    commitSource("two\n");
+    const second = readExecRun(await uatExec("S01", "printf ok"));
+    assert.equal(second?.source_revision, currentSourceRevision());
+    assert.notEqual(second?.source_revision, first?.source_revision);
+
+    const plain = await executeGsdExec({ script: "printf ok" }, { baseDir: base, preferences: null });
+    assert.equal(readExecRun(String(plain.details?.id))?.source_revision, null);
+  });
+
+  test("a run in a project with no readable source is stored with no source revision", async () => {
+    const run = readExecRun(await uatExec("S01", "printf ok"));
+    assert.equal(run?.exit_code, 0);
+    assert.equal(run?.source_revision, null);
+  });
+
+  test("a database created before the source revision column gets the column on open", async () => {
+    _getAdapter()!.exec("ALTER TABLE exec_runs DROP COLUMN source_revision");
+    closeDatabase();
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    commitSource("one\n");
+
+    assert.equal(readExecRun(await uatExec("S01", "printf ok"))?.source_revision, currentSourceRevision());
+  });
+
+  test("the prepared UAT result carries the source revision it was saved for", async () => {
+    commitSource("one\n");
+    const id = await uatExec("S01", "printf ok");
+
+    const result = prepareUatRun(base, uatResult("S01", [{ kind: "gsd_uat_exec", ref: id }]));
+
+    if (!result.ok) assert.fail(result.error.message);
+    assert.equal(result.run.sourceRevision, currentSourceRevision());
+  });
+
+  test("previousAttemptId must name a saved run-uat run of the slice", async () => {
+    const first = await uatExec("S01", "printf ok");
+    const unsaved = prepareUatRun(base, {
+      ...uatResult("S01", [{ kind: "gsd_uat_exec", ref: first }]),
+      previousAttemptId: "uat:M001:S01:attempt-1",
+    });
+    assert.equal(unsaved.ok, false);
+    if (unsaved.ok) return;
+    assert.equal(unsaved.error.code, "invalid_previous_attempt");
+
+    saveUatAttempt("S01", 1);
+    saveUatAttempt("S02", 1);
+    const retry = await uatExec("S01", "printf ok");
+    const cite = (previousAttemptId: string) => prepareUatRun(base, {
+      ...uatResult("S01", [{ kind: "gsd_uat_exec", ref: retry }]),
+      previousAttemptId,
+    });
+
+    assert.equal(cite("uat:M001:S02:attempt-1").ok, false, "a run of another slice is not a prior attempt");
+    assert.equal(cite("uat:M001:S01:attempt-1").ok, true);
   });
 });
 

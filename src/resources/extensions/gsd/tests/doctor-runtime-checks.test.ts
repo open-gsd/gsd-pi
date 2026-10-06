@@ -16,7 +16,6 @@ import {
   openDatabase,
   setMilestoneQueueOrder,
 } from "../gsd-db.ts";
-import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.ts";
 import {
   getUatRetryAttempts,
   incrementUatRetryAttempts,
@@ -24,10 +23,8 @@ import {
   writeHookStateJson,
 } from "../db/writers/runtime-control.ts";
 import { hookStateScope } from "../rule-registry.ts";
-import {
-  PAUSED_SESSION_KV_KEY,
-  type PausedSessionMetadata,
-} from "../interrupted-session.ts";
+import { readPausedSessionMetadata } from "../interrupted-session.ts";
+import { openAutoPause } from "../db/writers/auto-pauses.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 
 function runGit(cwd: string, args: string[]): void {
@@ -142,10 +139,11 @@ test("doctor reports and repairs a paused session superseded by the active miles
   insertMilestone({ id: pausedMilestoneId, title: "Superseded milestone", status: "active" });
   insertMilestone({ id: activeMilestoneId, title: "Current milestone", status: "active" });
   setMilestoneQueueOrder([activeMilestoneId, pausedMilestoneId]);
-  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
+  openAutoPause({
+    blockerKind: "user_request",
     milestoneId: pausedMilestoneId,
     originalBasePath: dir,
-  } satisfies PausedSessionMetadata);
+  });
   invalidateAllCaches();
 
   const issues: DoctorIssue[] = [];
@@ -159,8 +157,8 @@ test("doctor reports and repairs a paused session superseded by the active miles
   assert.match(issue.message, new RegExp(pausedMilestoneId));
   assert.match(issue.message, new RegExp(activeMilestoneId));
   assert.ok(
-    getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY),
-    "read-only doctor preserves paused-session metadata",
+    readPausedSessionMetadata(dir),
+    "read-only doctor preserves the pause row",
   );
 
   const fixIssues: DoctorIssue[] = [];
@@ -171,17 +169,18 @@ test("doctor reports and repairs a paused session superseded by the active miles
     (code) => code === "stale_paused_session",
   );
 
-  assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), null);
+  assert.equal(readPausedSessionMetadata(dir), null);
   assert.ok(
     fixesApplied.some((fix) => fix.includes(`cleared stale paused session for ${pausedMilestoneId}`)),
   );
   assert.equal(fixIssues.some((candidate) => candidate.code === "stale_paused_session"), false);
 
-  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
+  openAutoPause({
+    blockerKind: "user_request",
     activeEngineId: "custom-workflow",
     milestoneId: pausedMilestoneId,
     originalBasePath: dir,
-  } satisfies PausedSessionMetadata);
+  });
   const customWorkflowIssues: DoctorIssue[] = [];
   await checkRuntimeHealth(
     dir,
@@ -194,7 +193,7 @@ test("doctor reports and repairs a paused session superseded by the active miles
     false,
     "doctor leaves custom-workflow pause metadata to its dedicated resume path",
   );
-  assert.ok(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY));
+  assert.ok(readPausedSessionMetadata(dir));
 });
 
 test("doctor ignores a leftover completed-units.json file", async (t) => {

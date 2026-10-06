@@ -14,7 +14,7 @@ import {
 } from "../auto/custom-verify-retry-store.ts";
 import { handleCustomEngineVerifyRetry } from "../auto/workflow-custom-engine-retry.ts";
 import { runCustomVerificationWithEvidence } from "../custom-verification.ts";
-import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
+import { CustomWorkflowEngine, stepIdOfUnit } from "../custom-workflow-engine.ts";
 import {
   customWorkflowRunId,
   getCustomWorkflowRun,
@@ -75,9 +75,10 @@ describe("custom workflow runs in the database", () => {
     return engine.resolveDispatch(await engine.deriveState(base), { basePath: base });
   }
 
-  function dispatchedUnit(action: EngineDispatchAction): string {
+  /** The step that the action dispatches. */
+  function dispatchedStep(action: EngineDispatchAction): string {
     assert.equal(action.action, "dispatch");
-    return action.action === "dispatch" ? action.step.unitId : "";
+    return action.action === "dispatch" ? stepIdOfUnit(action.step.unitId) : "";
   }
 
   /** Verify the step, then mark it complete, as the auto loop does. */
@@ -94,7 +95,7 @@ describe("custom workflow runs in the database", () => {
   test("an edited or deleted GRAPH.yaml does not change the next step and is rendered again", async () => {
     const runDir = createRun(base, "pipeline");
     const engine = new CustomWorkflowEngine(runDir);
-    assert.equal(dispatchedUnit(await dispatch(engine)), "pipeline/draft");
+    assert.equal(dispatchedStep(await dispatch(engine)), "draft");
     await complete(engine, runDir, "draft");
 
     // A hand edit that claims every step is complete.
@@ -102,12 +103,12 @@ describe("custom workflow runs in the database", () => {
     writeGraph(runDir, { ...edited, steps: edited.steps.map((step) => ({ ...step, status: "complete" as const })) });
 
     assert.equal((await engine.deriveState(base)).isComplete, false);
-    assert.equal(dispatchedUnit(await dispatch(engine)), "pipeline/review");
+    assert.equal(dispatchedStep(await dispatch(engine)), "review");
     assert.deepEqual(statuses(readGraph(runDir)), { draft: "complete", review: "active", publish: "pending" });
 
     rmSync(join(runDir, "GRAPH.yaml"));
     rmSync(join(runDir, "DEFINITION.yaml"));
-    assert.equal(dispatchedUnit(await dispatch(engine)), "pipeline/review");
+    assert.equal(dispatchedStep(await dispatch(engine)), "review");
     assert.deepEqual(statuses(readGraph(runDir)), { draft: "complete", review: "active", publish: "pending" });
     assert.equal(existsSync(join(runDir, "DEFINITION.yaml")), true);
     assert.equal(listRuns(base)[0]?.steps.completed, 1);
@@ -235,6 +236,16 @@ describe("custom workflow runs in the database", () => {
       waiverRationale: null,
     });
     assert.deepEqual(statuses(readGraph(runDir)), { scan: "complete", judge: "complete" });
+    // The decision and the completion are one operation of the operator: a
+    // process that dies cannot leave an approved step active.
+    const approvals = _getAdapter()!.prepare(
+      `SELECT event.event_type, operation.actor_type
+       FROM workflow_domain_events event
+       JOIN workflow_operations operation ON operation.operation_id = event.operation_id
+       WHERE event.event_type IN ('custom_workflow.step.approve', 'custom_workflow.step.complete')
+         AND json_extract(event.payload_json, '$.stepId') = 'judge'`,
+    ).all().map((row) => ({ ...row }));
+    assert.deepEqual(approvals, [{ event_type: "custom_workflow.step.approve", actor_type: "user" }]);
     // A decided step does not wait for a second decision.
     await assert.rejects(engine.approveStep("judge"), /verification result is pass/);
   });
@@ -245,14 +256,14 @@ describe("custom workflow runs in the database", () => {
     const engine = new CustomWorkflowEngine(runDir);
     await dispatch(engine);
     await complete(engine, runDir, "draft");
-    assert.equal(dispatchedUnit(await dispatch(engine)), "pipeline/review");
+    assert.equal(dispatchedStep(await dispatch(engine)), "review");
     // The process dies while review runs. Nothing is paused; only the rows remain.
     rmSync(join(runDir, "GRAPH.yaml"));
 
     const resumedDir = openRunForResume(base, runId);
 
     assert.equal(resumedDir, runDir);
-    assert.equal(dispatchedUnit(await dispatch(new CustomWorkflowEngine(resumedDir))), "pipeline/review");
+    assert.equal(dispatchedStep(await dispatch(new CustomWorkflowEngine(resumedDir))), "review");
     assert.throws(() => openRunForResume(base, "pipeline/2000-01-01T00-00-00"), /no such run/);
     assert.throws(() => openRunForResume(base, "../pipeline"), /<name>\/<timestamp>/);
   });
@@ -290,7 +301,7 @@ describe("custom workflow runs in the database", () => {
     // The rows are the state now: the file is not read again.
     rmSync(join(runDir, "GRAPH.yaml"));
     const engine = new CustomWorkflowEngine(runDir);
-    assert.equal(dispatchedUnit(await dispatch(engine)), "legacy/b");
+    assert.equal(dispatchedStep(await dispatch(engine)), "b");
     assert.deepEqual(statuses(readGraph(runDir)), { a: "complete", b: "active" });
   });
 
@@ -325,7 +336,7 @@ describe("custom workflow runs in the database", () => {
     // From here the files are renders: a deleted or edited file changes nothing.
     rmSync(join(runDir, "DEFINITION.yaml"));
     writeGraph(runDir, { ...fileGraph, steps: fileGraph.steps.map((step) => ({ ...step, status: "complete" as const })) });
-    assert.equal(dispatchedUnit(await dispatch(engine)), "legacy/a");
+    assert.equal(dispatchedStep(await dispatch(engine)), "a");
     assert.equal(runCustomVerificationWithEvidence(runDir, "a").outcome, "continue");
     await engine.reconcile(await engine.deriveState(base), {
       unitType: "custom-step",
@@ -333,7 +344,7 @@ describe("custom workflow runs in the database", () => {
       startedAt: 0,
       finishedAt: 1,
     });
-    assert.equal(dispatchedUnit(await dispatch(engine)), "legacy/b");
+    assert.equal(dispatchedStep(await dispatch(engine)), "b");
     assert.deepEqual(statuses(readGraph(runDir)), { a: "complete", b: "active" });
     assert.deepEqual(statuses(readCustomWorkflowGraph(getCustomWorkflowRun(runId)!)), { a: "complete", b: "active" });
   });

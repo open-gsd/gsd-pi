@@ -7,7 +7,6 @@
 import { createHash } from "node:crypto";
 
 import { getDbOrNull, readTransaction } from "./engine.js";
-import { isClosedStatus } from "../status-guards.js";
 import { getGateIdsForTurn, type OwnerTurn } from "../gate-registry.js";
 import type { Decision, Requirement, GateRow, GateScope } from "../types.js";
 import {
@@ -28,7 +27,14 @@ import {
 import { rowToGate } from "../db-gate-rows.js";
 import { rowToArtifact, rowToMilestone, type ArtifactRow, type MilestoneRow } from "../db-milestone-artifact-rows.js";
 import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "../db-task-slice-rows.js";
-import { DISCARDED_MILESTONE_STATUS_SQL, TASK_HAS_ESCALATION_SQL, TASK_HAS_OPEN_ESCALATION_SQL, TERMINAL_STATUS_SQL } from "./sql-constants.js";
+import {
+  DISCARDED_MILESTONE_STATUS_SQL,
+  TASK_ESCALATION_OVERRIDE_CLAIMED_EVENT,
+  TASK_ESCALATION_RESOLVED_EVENT,
+  TASK_HAS_ESCALATION_SQL,
+  TASK_HAS_OPEN_ESCALATION_SQL,
+  TERMINAL_STATUS_SQL,
+} from "./sql-constants.js";
 import {
   compareLifecycleShadow,
   normalizeCanonicalLifecycleStatus,
@@ -41,25 +47,6 @@ import {
   type LifecycleShadowObservationSnapshot,
 } from "../lifecycle-shadow-observation.js";
 
-
-function parseStringArrayColumn(raw: unknown): string[] {
-  if (Array.isArray(raw)) return raw.filter((entry): entry is string => typeof entry === "string");
-  if (typeof raw !== "string") return [];
-  const trimmed = raw.trim();
-  if (!trimmed) return [];
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) return parsed.filter((entry): entry is string => typeof entry === "string");
-    if (typeof parsed === "string") return [parsed];
-  } catch {
-    return trimmed.split(",");
-  }
-  return [];
-}
-
-function normalizeRepoPath(file: string): string {
-  return file.trim().replace(/\\/g, "/").replace(/^\.\/+/, "");
-}
 
 export interface HierarchyCompletionCounts {
   milestones: number;
@@ -758,48 +745,57 @@ export function getSliceTasks(milestoneId: string, sliceId: string): TaskRow[] {
   return rows.map(rowToTask);
 }
 
-export function getCompletedMilestoneTaskFileHints(milestoneId: string): string[] {
-  if (!getDbOrNull()!) return [];
-  const rows = getDbOrNull()!.prepare(
-    `SELECT files, key_files
-     FROM tasks
-     WHERE milestone_id = :mid AND status IN ('complete', 'done')`,
-  ).all({ ":mid": milestoneId }) as Array<Record<string, unknown>>;
-
-  const hints = new Set<string>();
-  for (const row of rows) {
-    for (const raw of [row["files"], row["key_files"]]) {
-      for (const file of parseStringArrayColumn(raw)) {
-        const normalized = normalizeRepoPath(file);
-        if (normalized) hints.add(normalized);
-      }
-    }
-  }
-  return [...hints];
-}
-
-/** Find the most recent resolved-but-unapplied escalation override in a slice. */
+/**
+ * Find the most recent resolved-but-unapplied escalation override in a slice.
+ * `resolveOperationId` is the operation that recorded the user's response.
+ */
 export function findUnappliedEscalationOverride(
   milestoneId: string, sliceId: string,
-): { taskId: string } | null {
+): { taskId: string; resolveOperationId: string } | null {
   if (!getDbOrNull()!) return null;
-  // The pending override is an answered escalation question that no prompt has
-  // claimed. An open question is not claimable: the user has not responded, so
-  // a claim would lose the override (#ADR-011 Phase 2 peer-review Bug 2).
+  // The pending override is the latest response to a Task's escalation that
+  // has no claim event. An older build recorded the claim in
+  // escalation_override_applied_at, so a stamp that is not older than the
+  // response is also a claim. An open question is not claimable: the user has not
+  // responded, so a claim would lose the override (#ADR-011 Phase 2
+  // peer-review Bug 2).
   const row = getDbOrNull()!.prepare(
-    `SELECT id
+    `SELECT tasks.id, resolved.operation_id
        FROM tasks
-      WHERE milestone_id = :mid AND slice_id = :sid
+       CROSS JOIN project_authority authority
+       JOIN workflow_domain_events resolved
+         ON resolved.project_id = authority.project_id
+        AND resolved.entity_type = 'task'
+        AND resolved.entity_id = tasks.milestone_id || '/' || tasks.slice_id || '/' || tasks.id
+        AND resolved.event_type = '${TASK_ESCALATION_RESOLVED_EVENT}'
+      WHERE tasks.milestone_id = :mid AND tasks.slice_id = :sid
         AND ${TASK_HAS_ESCALATION_SQL}
         AND NOT ${TASK_HAS_OPEN_ESCALATION_SQL}
-        AND escalation_override_applied_at IS NULL
-      ORDER BY sequence DESC, id DESC
+        AND (tasks.escalation_override_applied_at IS NULL
+          OR tasks.escalation_override_applied_at < resolved.created_at)
+        AND NOT EXISTS (
+          SELECT 1 FROM workflow_domain_events later
+          WHERE later.project_id = resolved.project_id
+            AND later.entity_type = 'task'
+            AND later.entity_id = resolved.entity_id
+            AND later.event_type = resolved.event_type
+            AND later.project_revision > resolved.project_revision
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM workflow_domain_events claimed
+          WHERE claimed.project_id = resolved.project_id
+            AND claimed.entity_type = 'task'
+            AND claimed.entity_id = resolved.entity_id
+            AND claimed.event_type = '${TASK_ESCALATION_OVERRIDE_CLAIMED_EVENT}'
+            AND json_extract(claimed.payload_json, '$.resolveOperationId') = resolved.operation_id
+        )
+      ORDER BY tasks.sequence DESC, tasks.id DESC
       LIMIT 1`,
   ).get({ ":mid": milestoneId, ":sid": sliceId }) as
-    | { id: string }
+    | { id: string; operation_id: string }
     | undefined;
   if (!row) return null;
-  return { taskId: row.id };
+  return { taskId: row.id, resolveOperationId: row.operation_id };
 }
 
 /**
@@ -950,10 +946,44 @@ export function getLatestUatAttempt(milestoneId: string, sliceId: string): numbe
   return Number(row?.["attempt"] ?? 0);
 }
 
+/** True when `runId` is a saved run-uat run of the slice. */
+export function isSavedUatRun(milestoneId: string, sliceId: string, runId: string): boolean {
+  const row = getDbOrNull()?.prepare(`
+    SELECT 1 AS present
+    FROM gate_runs
+    WHERE gate_id = 'UAT'
+      AND gate_type = 'uat'
+      AND unit_type = 'run-uat'
+      AND milestone_id = :milestone_id
+      AND slice_id = :slice_id
+      AND turn_id = :run_id
+  `).get({ ":milestone_id": milestoneId, ":slice_id": sliceId, ":run_id": runId });
+  return row !== undefined;
+}
+
 export function getMilestoneSlices(milestoneId: string): SliceRow[] {
   if (!getDbOrNull()!) return [];
   const rows = getDbOrNull()!.prepare("SELECT * FROM slices WHERE milestone_id = :mid ORDER BY sequence, id").all({ ":mid": milestoneId });
   return rows.map(rowToSlice);
+}
+
+/** The ids of the Milestones that have a CONTEXT artifact row (a saved context). */
+export function getContextArtifactMilestoneIds(): Set<string> {
+  if (!getDbOrNull()) return new Set();
+  const rows = getDbOrNull()!.prepare(
+    "SELECT DISTINCT milestone_id FROM artifacts" +
+    " WHERE artifact_type = 'CONTEXT' AND slice_id IS NULL AND task_id IS NULL AND milestone_id IS NOT NULL",
+  ).all();
+  return new Set(rows.map((row) => String(row["milestone_id"])));
+}
+
+/** The number of Slices of every Milestone that has them. */
+export function getSliceCountsByMilestoneId(): Map<string, number> {
+  if (!getDbOrNull()) return new Map();
+  const rows = getDbOrNull()!.prepare(
+    "SELECT milestone_id, COUNT(*) AS count FROM slices GROUP BY milestone_id",
+  ).all();
+  return new Map(rows.map((row) => [String(row["milestone_id"]), Number(row["count"])]));
 }
 
 export interface ParallelMonitorSliceProgress {
@@ -1212,17 +1242,6 @@ export function getProgressHierarchyDetails(): ProgressHierarchyDetails {
   };
 }
 
-/**
- * Ids of slices closed per the canonical status vocabulary (ADR-017), in
- * milestone order, for the "which slices produced closeout artifacts?"
- * decision-path read. A deferred slice is not closed: it never ran.
- */
-export function getClosedSliceIds(milestoneId: string): string[] {
-  return getMilestoneSlices(milestoneId)
-    .filter((s) => isClosedStatus(s.status))
-    .map((s) => s.id);
-}
-
 export function getArtifact(path: string): ArtifactRow | null {
   if (!getDbOrNull()!) return null;
   const row = getDbOrNull()!.prepare("SELECT * FROM artifacts WHERE path = :path").get({ ":path": path });
@@ -1254,6 +1273,24 @@ export function getSliceScopedArtifacts(milestoneId: string, sliceId: string): A
     "SELECT * FROM artifacts WHERE milestone_id = :mid AND slice_id = :sid AND task_id IS NULL ORDER BY path",
   ).all({ ":mid": milestoneId, ":sid": sliceId });
   return rows.map(rowToArtifact);
+}
+
+/**
+ * The saved artifact row of this type, with content, for a Milestone (sliceId
+ * and taskId null), a Slice (taskId null) or a Task. The newest row answers
+ * when a scope has more than one. Null when there is none.
+ */
+export function getScopedArtifact(
+  milestoneId: string, sliceId: string | null, taskId: string | null, artifactType: string,
+): ArtifactRow | null {
+  if (!getDbOrNull()!) return null;
+  const row = getDbOrNull()!.prepare(
+    `SELECT * FROM artifacts
+      WHERE milestone_id = :mid AND slice_id IS :sid AND task_id IS :tid
+        AND artifact_type = :type AND TRIM(full_content) <> ''
+      ORDER BY imported_at DESC, path LIMIT 1`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId, ":type": artifactType });
+  return row ? rowToArtifact(row) : null;
 }
 
 /**

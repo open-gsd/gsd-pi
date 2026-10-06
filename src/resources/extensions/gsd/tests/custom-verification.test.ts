@@ -453,30 +453,4 @@ describe("CustomExecutionPolicy.verify() integration", () => {
     });
     assert.equal(result, "pause");
   });
-
-  it("proves human verification ownership only for human-review policy", async () => {
-    const { CustomExecutionPolicy } = await import("../custom-execution-policy.ts");
-    const runDir = makeTempRun(makeDef([
-      {
-        id: "human",
-        name: "Human review",
-        prompt: "Review output",
-        requires: [],
-        produces: [],
-        verify: { policy: "human-review" },
-      },
-      {
-        id: "agent",
-        name: "Agent check",
-        prompt: "Check output",
-        requires: [],
-        produces: ["output.md"],
-        verify: { policy: "content-heuristic" },
-      },
-    ]));
-    const policy = new CustomExecutionPolicy(runDir);
-
-    assert.equal(policy.requiresHumanVerification("execute-task", "M001/S01/human"), true);
-    assert.equal(policy.requiresHumanVerification("execute-task", "M001/S01/agent"), false);
-  });
 });

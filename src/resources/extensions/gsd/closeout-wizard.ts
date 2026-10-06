@@ -11,11 +11,10 @@ import type { GSDState } from "./types.js";
 import { setAutoOutcomeWidget } from "./auto-dashboard.js";
 import { invalidateAllCaches } from "./cache.js";
 import { isDbAvailable } from "./db/engine.js";
-import { getMilestone } from "./db/queries.js";
+import { readMilestone } from "./db/lifecycle-read.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { mergeCompletedMilestone } from "./parallel-merge.js";
 import { cleanupQuickBranch, detectStrandedQuickBranch, type StrandedQuickBranch } from "./quick.js";
-import { isClosedStatus } from "./status-guards.js";
 import {
   findUnmergedCompletedMilestones,
   type UnmergedMilestoneBlocker,
@@ -88,9 +87,8 @@ function listMilestoneBranchIds(basePath: string): string[] {
  */
 function isStrandedMilestoneId(milestoneId: string): boolean {
   if (!isDbAvailable()) return true;
-  const row = getMilestone(milestoneId);
-  if (!row) return true;
-  return isClosedStatus(row.status);
+  const row = readMilestone(milestoneId);
+  return !row || row.closed;
 }
 
 /** Surface stranded milestone git residue when closeout guards did not classify it. */

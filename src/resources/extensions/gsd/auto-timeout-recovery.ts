@@ -26,12 +26,14 @@ import { getInFlightToolCount } from "./auto-tool-tracking.js";
 import { parseUnitId } from "./unit-id.js";
 import { readLatestTaskAttempt } from "./task-execution-domain-operation.js";
 import { isDbAvailable } from "./gsd-db.js";
+import { resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
 
 export interface RecoveryContext {
   basePath: string;
   verbose: boolean;
   currentUnitStartedAt: number;
-  unitRecoveryCount: Map<string, number>;
+  /** Budget counts of units with no dispatch row (db/unit-dispatch-budgets.ts). */
+  unclaimedUnitBudgets: Map<string, number>;
 }
 
 export async function recoverTimedOutUnit(
@@ -49,15 +51,16 @@ export async function recoverTimedOutUnit(
   // Each advance branch calls `bumpAndResolveSynthetic` to bump+resolve
   // atomically. Search for that helper to find all supersede sites.
 
-  const { basePath, verbose, currentUnitStartedAt, unitRecoveryCount } = rctx;
+  const { basePath, verbose, currentUnitStartedAt, unclaimedUnitBudgets } = rctx;
 
   const runtime = readUnitRuntimeRecord(basePath, unitType, unitId);
   const recoveryAttempts = runtime?.recoveryAttempts ?? 0;
   const maxRecoveryAttempts = reason === "idle" ? 2 : 1;
 
-  const recoveryKey = `${unitType}/${unitId}`;
-  const attemptNumber = (unitRecoveryCount.get(recoveryKey) ?? 0) + 1;
-  unitRecoveryCount.set(recoveryKey, attemptNumber);
+  // ADR-048: the count is on the unit's dispatch row, so a restart keeps the
+  // backoff of the last process.
+  const recoveryBudget = { unitType, unitId, kind: "timeout-recovery" } as const;
+  const attemptNumber = spendUnitBudget(unclaimedUnitBudgets, recoveryBudget);
 
   if (attemptNumber > 1) {
     // Exponential backoff: 2^(n-1) seconds, capped at 30s
@@ -91,7 +94,7 @@ export async function recoverTimedOutUnit(
         `${reason === "idle" ? "Idle" : "Timeout"} recovery: ${unitType} ${unitId} already completed. Continuing auto-mode. (attempt ${attemptNumber})`,
         "info",
       );
-      unitRecoveryCount.delete(recoveryKey);
+      resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
       bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
       return "recovered";
     }
@@ -169,7 +172,7 @@ export async function recoverTimedOutUnit(
         `${unitType} ${unitId} ended after ${maxRecoveryAttempts} recovery attempts (${diagnostic}). Diagnostic artifacts were written; durable Task recovery will decide the next action. (attempt ${attemptNumber})`,
         "warning",
       );
-      unitRecoveryCount.delete(recoveryKey);
+      resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
       bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
       return "recovered";
     }
@@ -206,7 +209,7 @@ export async function recoverTimedOutUnit(
         ? `Project research ${reason} timeout: wrote blocker files for missing dimensions and advancing with partial research.`
         : `Project research ${reason} timeout: wrote PROJECT-RESEARCH-BLOCKER.md and stopping fail-closed.`;
     ctx.ui.notify(message, outcome.kind === "global-blocker" ? "error" : "warning");
-    unitRecoveryCount.delete(recoveryKey);
+    resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
     bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
     return "recovered";
   }
@@ -221,7 +224,7 @@ export async function recoverTimedOutUnit(
       `${reason === "idle" ? "Idle" : "Timeout"} recovery: ${unitType} ${unitId} durable outcome verified. Advancing. (attempt ${attemptNumber})`,
       "info",
     );
-    unitRecoveryCount.delete(recoveryKey);
+    resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
     bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
     return "recovered";
   }
@@ -348,7 +351,7 @@ export async function recoverTimedOutUnit(
         "error",
       );
     }
-    unitRecoveryCount.delete(recoveryKey);
+    resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
     bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
     return fallsBack ? "recovered" : "paused";
   }

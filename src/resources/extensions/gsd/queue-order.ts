@@ -16,16 +16,14 @@ import { milestoneIdSort } from "./milestone-ids.js";
 import { loadJsonFileOrNull, saveJsonFile } from "./json-persistence.js";
 import {
   executeDomainOperation,
-  getAllMilestones,
-  getMilestone,
   isDbAvailable,
   setMilestoneQueueOrder,
   upsertMilestonePlanning,
 } from "./gsd-db.js";
+import { readMilestone, readMilestones } from "./db/lifecycle-read.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import type { DomainOperationRequest } from "./db/domain-operation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
-import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -94,8 +92,8 @@ export function renderQueueOrderFromDb(basePath: string): string {
 }
 
 function queueOrderFromDb(): string[] {
-  return getAllMilestones()
-    .filter((milestone) => (milestone.sequence ?? 0) > 0 && !isDiscardedMilestoneStatus(milestone.status))
+  return readMilestones()
+    .filter((milestone) => (milestone.sequence ?? 0) > 0 && !milestone.discarded)
     .map((milestone) => milestone.id);
 }
 
@@ -114,7 +112,9 @@ function queueOperationRequest(
   return {
     operationType,
     idempotencyKey: invocation?.idempotencyKey ?? `command/${commandKey}/${fence.revision}`,
-    expectedRevision: fence.revision,
+    // The caller's revision is a precondition of the first send only. A retry
+    // can carry a newer revision, so a replay uses the recorded one.
+    expectedRevision: fence.replay ? fence.revision : invocation?.expectedRevision ?? fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: invocation?.actorType ?? "operator",
     ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),
@@ -129,8 +129,8 @@ function queueOperationRequest(
 function loadDependencyGraph(): { depsMap: Map<string, string[]>; closedIds: Set<string> } {
   const depsMap = new Map<string, string[]>();
   const closedIds = new Set<string>();
-  for (const milestone of getAllMilestones()) {
-    if (isClosedStatus(milestone.status)) closedIds.add(milestone.id);
+  for (const milestone of readMilestones()) {
+    if (milestone.closed) closedIds.add(milestone.id);
     else if (milestone.depends_on.length > 0) depsMap.set(milestone.id, milestone.depends_on);
   }
   return { depsMap, closedIds };
@@ -168,7 +168,7 @@ export function reorderMilestones(
     if (new Set(order).size !== order.length) throw new Error("queue order repeats a milestone id");
     const { depsMap, closedIds } = loadDependencyGraph();
     for (const id of order) {
-      if (!getMilestone(id)) throw new Error(`milestone ${id} does not exist`);
+      if (!readMilestone(id)) throw new Error(`milestone ${id} does not exist`);
       if (closedIds.has(id)) throw new Error(`milestone ${id} is closed and has no place in the queue`);
     }
     for (const edge of depsToRemove) {
@@ -179,9 +179,9 @@ export function reorderMilestones(
     const listed = new Set(order);
     const outsideQueue = new Set(closedIds);
     const effectiveOrder = [...order];
-    for (const milestone of getAllMilestones()) {
+    for (const milestone of readMilestones()) {
       if (listed.has(milestone.id) || closedIds.has(milestone.id)) continue;
-      if (milestone.status === "parked") outsideQueue.add(milestone.id);
+      if (milestone.parked) outsideQueue.add(milestone.id);
       else effectiveOrder.push(milestone.id);
     }
     const violation = validateQueueOrder(effectiveOrder, depsMap, outsideQueue)
@@ -190,7 +190,7 @@ export function reorderMilestones(
 
     setMilestoneQueueOrder(effectiveOrder);
     for (const edge of depsToRemove) {
-      const milestone = getMilestone(edge.milestone);
+      const milestone = readMilestone(edge.milestone);
       if (!milestone) throw new Error(`milestone ${edge.milestone} does not exist`);
       upsertMilestonePlanning(edge.milestone, { depends_on: milestone.depends_on.filter((dep) => dep !== edge.dep) });
     }
@@ -211,10 +211,10 @@ export function reorderMilestones(
   });
   const committedOrder = queueOrderFromDb();
   renderQueueOrder(basePath, committedOrder);
-  const milestones = getAllMilestones();
+  const milestones = readMilestones();
   const knownIds = new Set(milestones.map((milestone) => milestone.id));
   const warnings = milestones
-    .filter((milestone) => !isClosedStatus(milestone.status))
+    .filter((milestone) => !milestone.closed)
     .flatMap((milestone) => milestone.depends_on
       .filter((dep) => !knownIds.has(dep))
       .map((dep) => `${milestone.id} depends on ${dep}, but ${dep} does not exist.`));
@@ -242,17 +242,17 @@ export function setMilestoneDependencies(
     invocation,
   );
   executeDomainOperation(request, () => {
-    const milestone = getMilestone(milestoneId);
+    const milestone = readMilestone(milestoneId);
     if (!milestone) throw new Error(`milestone ${milestoneId} does not exist`);
-    if (isClosedStatus(milestone.status)) {
+    if (milestone.closed) {
       throw new Error(`milestone ${milestoneId} is closed (${milestone.status}); its dependencies cannot change`);
     }
     if (new Set(dependsOn).size !== dependsOn.length) throw new Error("depends_on repeats a milestone id");
     for (const depId of dependsOn) {
       if (depId === milestoneId) throw new Error(`milestone ${milestoneId} cannot depend on itself`);
-      const dep = getMilestone(depId);
+      const dep = readMilestone(depId);
       if (!dep) throw new Error(`depends_on references unknown milestone: ${depId}`);
-      if (isDiscardedMilestoneStatus(dep.status)) {
+      if (dep.discarded) {
         throw new Error(`depends_on milestone ${depId} was discarded and can never be complete`);
       }
     }

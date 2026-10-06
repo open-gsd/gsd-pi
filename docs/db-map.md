@@ -262,6 +262,7 @@ FOREIGN KEY milestone_id → milestones(id)
 
 - Index: `idx_slices_active` (milestone_id, status)
 - Status values: `pending`, `in_progress`, `complete`, `skipped` (legacy/imported `done` and `closed` are treated as closed aliases by `status-guards.ts`)
+- `replan_triggered_at` is the replan trigger that the state derivation reads. A capture that asks for a replan stamps it in one `slice.replan.trigger` Domain Operation (`triage-resolution.ts`). `S##-REPLAN-TRIGGER.md` is a render of the column; nothing reads the file.
 
 ---
 
@@ -306,6 +307,7 @@ FOREIGN KEY (milestone_id, slice_id) → slices(milestone_id, id)
 
 - Indexes: `idx_tasks_active` (milestone_id, slice_id, status), `idx_tasks_escalation_pending`
 - Status values: `pending`, `in_progress`, `complete`, `skipped`, `blocked` (legacy/imported `done` and `closed` are treated as complete aliases; `insertTask` stamps `completed_at` for `complete`/`done`/`closed`, but not `skipped`)
+- The `escalation_*` columns hold only an escalation from before the database stored escalations as Open Questions. A new escalation does not set them: its open question is the pause, and the `task.escalation.override_claimed` event (the `task.escalation.override.claim` Domain Operation) records that a prompt received the response. A non-null `escalation_override_applied_at` that is not older than the response is a claim from a build before that event, and it also counts as delivered; no build writes the column now. The columns are still read for a Task that has no escalation question, so that a pre-database pause or response is not lost. They are not retired.
 
 ---
 
@@ -736,7 +738,7 @@ result_json  TEXT
 ```
 
 - Index: `idx_command_queue_pending` (target_worker, claimed_at)
-- No code produces or claims rows in this table at present; the unused `db/command-queue.ts` module was deleted.
+- `db/command-queue.ts` writes and takes the rows. The parallel coordinator queues `pause`, `resume` and `stop` with `target_worker` set to the milestone ID of the worker (`session-status-io.ts` `sendSignal`). The worker takes the oldest pending row at each unit boundary (`consumeSignal`); a poll with no pending row is a plain read, and the take sets `claimed_at`, `claimed_by` and `completed_at` in one write. When a parallel session ends, its pending rows are completed so that they do not reach the next worker of the milestone. A deprecated `.gsd/parallel/<MID>.signal.json` file is input only: the worker queues its command as a row and removes the file.
 
 ---
 
@@ -746,12 +748,21 @@ result_json  TEXT
 non-versioned schema features required on every database open. It registers
 the ADR-047 liveness feature, the ADR-048
 [`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned),
-[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) and
-[`unit_dispatch_retries`](#unit_dispatch_retries-non-versioned) features,
+[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned),
+[`unit_dispatch_retries`](#unit_dispatch_retries-non-versioned) and
+[`unit_dispatch_stages`](#unit_dispatch_stages-non-versioned) features,
+the [`auto_pauses`](#auto_pauses-non-versioned) feature,
 the runtime-control feature, the
 [`milestone_integration_branches`](#milestone_integration_branches-non-versioned)
+feature, the
+[custom workflow run](#custom-workflow-run-tables-non-versioned) feature, the
+[`unit_metrics`](#unit_metrics-non-versioned) feature, the
+[`project_milestone_sequence`](#project_milestone_sequence-non-versioned),
+the
+[`remote_question_prompts`](#remote_question_prompts-non-versioned)
 feature and the
-[custom workflow run](#custom-workflow-run-tables-non-versioned) feature below;
+[`workflow_decision_statement_impacts`](#workflow_decision_statement_impacts-non-versioned)
+feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
 required objects trigger guarded startup maintenance without changing
@@ -764,7 +775,7 @@ detected repair of the liveness feature.
 
 ```
 dispatch_id  INTEGER NOT NULL
-kind         TEXT NOT NULL      ← 'zero-tool' | 'tool-unavailable' | 'pre-exec'
+kind         TEXT NOT NULL      ← 'zero-tool' | 'tool-unavailable' | 'pre-exec' | 'verification' | 'git-commit' | 'timeout-recovery' | 'exhausted'
 used         INTEGER NOT NULL CHECK (used >= 0)
 updated_at   TEXT NOT NULL
 PRIMARY KEY (dispatch_id, kind)
@@ -773,6 +784,7 @@ FOREIGN KEY dispatch_id → unit_dispatches(id)
 
 - DDL owner: `db-unit-dispatch-budget-schema.ts`. Access: `db/unit-dispatch-budgets.ts`.
 - Count and release rules: see the 2026-10-03 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+- `exhausted` is a mark: a unit that holds it is not dispatched until a reopen or a re-plan releases it. See the third 2026-10-04 amendment in ADR-048.
 
 ---
 
@@ -806,11 +818,103 @@ dispatch_id      INTEGER PRIMARY KEY   ← the dispatch whose close-out decided 
 failure_context  TEXT NOT NULL         ← the text the next run of the unit gets in its prompt
 attempt          INTEGER NOT NULL CHECK (attempt >= 1)
 created_at       TEXT NOT NULL
+signature        TEXT                  ← what the duplicate-failure check compares; 'pre-execution:…' and 'git-commit:…' rows are selected by a dispatch rule
 FOREIGN KEY dispatch_id → unit_dispatches(id)
 ```
 
 - DDL owner: `db-unit-dispatch-retry-schema.ts`. Access: `db/unit-dispatch-retries.ts`.
-- Store, read and release rules: see the second 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+- Store, read and release rules: see the second and third 2026-10-04 amendments in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### `unit_metrics` (non-versioned)
+
+```
+unit_type     TEXT NOT NULL
+unit_id       TEXT NOT NULL
+started_at    INTEGER NOT NULL      ← ms; with unit_type and unit_id it identifies one unit run
+finished_at   INTEGER NOT NULL      ← ms
+cost          REAL NOT NULL CHECK (cost >= 0)   ← USD; the budget ceiling sums this column
+metrics_json  TEXT NOT NULL         ← the full unit record (tokens, model, tool calls, ...)
+PRIMARY KEY (unit_type, unit_id, started_at)
+```
+
+- DDL owner: `db-unit-metrics-schema.ts`. Reads: `db/unit-metrics.ts`. Write: `db/writers/unit-metrics.ts`.
+- Written by `snapshotUnitMetrics` and `snapshotUnitMetricsByScope` (`metrics.ts`) together with `.gsd/metrics.json`. A second snapshot of the same run replaces the row.
+- Read by the budget ceiling guard (`auto/phases.ts`), the budget pressure of dynamic model routing (`auto-model-selection.ts`), MCP `gsd_history` and the web history panel. `.gsd/metrics.json` stays the telemetry file of the TUI dashboards; it does not decide the budget.
+- A row is telemetry: it is not a Domain Operation and does not change the project revision. `unit_metrics` is an exempt runtime/telemetry table, like `gate_runs` and the exec runs: one writer module (`db/writers/unit-metrics.ts`) writes it directly.
+- A parallel worker (`GSD_PARALLEL_WORKER`) counts only its own units against the budget ceiling: rows with `started_at` at or after its session start and with a `unit_id` in its lock scope (`GSD_MILESTONE_LOCK`, or `GSD_MILESTONE_LOCK`/`GSD_SLICE_LOCK`). The coordinator owns the total across workers.
+- When the table has no rows and `.gsd/metrics.json` holds units, MCP `gsd_history` and the web history panel return the ledger units with `readMetadata: { source: "projection", authority: "projection-fallback" }`. They do the same when the database is missing.
+- Units that only `.gsd/metrics.json` holds (written by an older release) are not counted. When a budget ceiling is set, the budget guard warns the operator with the uncounted amount one time per auto session. `/gsd doctor` reports them (`metrics_ledger_units_unimported`) and `/gsd doctor --fix` imports them.
+
+---
+
+#### `unit_dispatch_stages` (non-versioned)
+
+```
+dispatch_id  INTEGER PRIMARY KEY   ← the dispatch whose unit left the execute stage
+stage        TEXT NOT NULL         ← 'verify' | 'route' | 'closeout'; no row means 'execute'
+updated_at   TEXT NOT NULL
+FOREIGN KEY dispatch_id → unit_dispatches(id)
+```
+
+- DDL owner: `db-unit-dispatch-stage-schema.ts`. Access: `db/unit-dispatches.ts` (`setDispatchStage`, `getDispatchStage`, `isDispatchExecutionOpen`).
+- Write and read rules: see the third 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### `auto_pauses` (non-versioned)
+
+```
+id                  INTEGER PRIMARY KEY AUTOINCREMENT
+scope               TEXT NOT NULL      ← the worker: '<milestone lock of a parallel worker>/<slice lock>'
+blocker_kind        TEXT NOT NULL      ← the seven human blocker kinds | 'user_request' | 'machine_fixable'
+dispatch_id         INTEGER            ← the unit that was active; NULL when no unit with a dispatch row was active
+milestone_id        TEXT
+unit_type           TEXT
+unit_id             TEXT
+worktree_path       TEXT
+original_base_path  TEXT
+step_mode           INTEGER NOT NULL   ← 0 | 1
+session_file        TEXT
+active_engine_id    TEXT
+active_run_dir      TEXT               ← the run of a custom-engine pause
+auto_start_time     INTEGER
+milestone_lock      TEXT
+pause_reason        TEXT
+paused_at           TEXT NOT NULL
+closed_at           TEXT               ← NULL while the pause is open
+FOREIGN KEY dispatch_id → unit_dispatches(id)
+```
+
+- Index: `idx_auto_pauses_open_scope` UNIQUE (scope) WHERE closed_at IS NULL — one open pause for each worker scope.
+- DDL owner: `db-auto-pause-schema.ts`. Access: `db/writers/auto-pauses.ts`.
+- This row replaces the `paused_session` key in `runtime_kv`. Rules: see the third 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### `remote_question_prompts` (non-versioned)
+
+```
+id                TEXT PRIMARY KEY
+channel           TEXT NOT NULL      ← 'slack' | 'discord' | 'telegram'
+status            TEXT NOT NULL      ← 'pending' | 'answered' | 'timed_out' | 'failed' | 'cancelled'
+questions_json    TEXT NOT NULL      ← the questions that were asked
+ref_json          TEXT               ← the message in the channel; NULL until the prompt is sent
+response_json     TEXT               ← the answer of the user
+context_source    TEXT
+created_at        INTEGER NOT NULL   ← epoch milliseconds, as are the other times
+updated_at        INTEGER NOT NULL
+timeout_at        INTEGER NOT NULL
+poll_interval_ms  INTEGER NOT NULL
+last_poll_at      INTEGER
+last_error        TEXT
+```
+
+- DDL owner: `db-remote-question-prompt-schema.ts`. Access: `db/writers/remote-question-prompts.ts`, used by `remote-questions/store.ts`.
+- One row for each question prompt sent to a remote channel. It is delivery state of a transport, written outside Domain Operations. It replaces the `~/.gsd/runtime/remote-questions/<id>.json` files; nothing writes or reads those files now.
+- A prompt is not resumed: each ask sends a new message and writes a new row, also when a `pending` row has the same questions.
+- With no project database open, a prompt is not stored. A row write that fails is logged and not thrown, so the answer still reaches the caller.
 
 ---
 
@@ -885,6 +989,69 @@ PRIMARY KEY (milestone_id, slice_id)
 
 - Deleted by `slice.reopen` and `milestone.reopen`, so a redone slice gets a new budget.
 
+##### `write_gate_state`
+
+Discussion write-gate state: verified depth milestones, verified approval
+gates, the pending gate and the queue phase. `db-write-gate-schema.ts` owns the
+DDL. `db/writers/write-gate.ts` is the only reader and writer, and
+`bootstrap/write-gate.ts` is its only caller. The extension host and the
+workflow MCP child read the same rows; every change is one write transaction.
+These are enforcement rows, written outside Domain Operations.
+
+```
+gate_kind  TEXT NOT NULL   ← depth_verified | approval_verified | pending | queue_phase
+gate_id    TEXT NOT NULL   ← milestone id (depth_verified), gate question id (approval_verified, pending), 'active' (queue_phase)
+writer     TEXT NOT NULL   ← host | child (diagnostic)
+updated_at TEXT NOT NULL
+PRIMARY KEY (gate_kind, gate_id)
+```
+
+- At most one `pending` row. A verified gate is never also pending.
+- A session start and a resumed session delete the `pending` row and the
+  `queue_phase` row, and keep the verified rows. `/clear`, `/new` and the
+  discuss→auto handoff delete every row.
+- The latest answer to a gate question wins. A decline deletes the verified
+  rows of that gate and leaves the gate `pending`.
+- No file copy. `.gsd/runtime/write-gate-state.json` (older builds) is not read.
+- A gate call opens the existing project database when it is not the open one,
+  in the extension host and in the workflow MCP child. It never creates a
+  database.
+- A project database that exists and does not open fails closed for the gated
+  writes only (milestone CONTEXT, PROJECT, REQUIREMENTS and requirement
+  writes): they are refused with the open error and its remedy. Every other
+  tool runs. A gate write records nothing and logs a warning.
+- Only a project with no database keeps the gate in process memory. The first
+  gate call after the database exists moves that state into the rows.
+
+##### `discussion_handoffs`
+
+The pending discuss-to-auto handoff: one row per project root while a guided
+discussion waits to start auto-mode. It replaces the session-only pending
+auto-start map as the durable record, and the agent-written
+`.gsd/DISCUSSION-MANIFEST.json` gate file, which is no longer read or written.
+
+```
+base_path    TEXT PRIMARY KEY   ← project root that the discussion was dispatched from
+milestone_id TEXT NOT NULL      ← primary milestone of the discussion
+step         INTEGER            ← 1 | 0; NULL when the caller did not set the flag
+start_auto   INTEGER            ← 1 | 0; NULL when the caller did not set the flag
+session_id   TEXT               ← the conversation that holds the interview
+created_at   INTEGER NOT NULL   ← discussion start (epoch ms)
+```
+
+- Written by `setPendingAutoStart` (`pending-auto-start.ts`) when a discussion
+  is dispatched. The in-memory map holds the same entry bound to the live
+  session handles.
+- After a restart, `/gsd` binds the row to the current command
+  (`restorePendingAutoStart`) when `session_id` is the current conversation. A
+  row of another conversation is deleted.
+- Deleted when the handoff is accepted and auto-mode starts, and when the
+  pending entry is cleared: a stale discussion, `/clear` or `/new`, or a ready
+  signal that was rejected too many times.
+- The handoff gate reads rows only: each milestone that the discussion
+  registered needs a CONTEXT or CONTEXT-DRAFT `artifacts` row, a planned slice,
+  or a milestone-scope Work Checkpoint (the record of "queue it for later").
+
 ##### `exec_runs`
 
 One row for each `gsd_exec` / `gsd_uat_exec` command the host ran. Evidence
@@ -909,6 +1076,7 @@ milestone_id TEXT               ← uat_exec only
 slice_id     TEXT               ← uat_exec only
 check_id     TEXT               ← uat_exec only
 attempt_ref  TEXT               ← the Attempt the run belongs to, or NULL
+source_revision TEXT            ← uat_exec only: project source revision when the run was recorded
 ```
 
 - Index: `idx_exec_runs_attempt` on `(attempt_ref)`
@@ -924,6 +1092,11 @@ attempt_ref  TEXT               ← the Attempt the run belongs to, or NULL
 - Host verification accepts the agent's claimed task evidence only when each
   claimed command names a run of the Attempt under verification that ended with
   exit 0.
+- `source_revision` is the verification source revision of the project when a
+  `uat_exec` run was recorded. It is NULL for an `exec` run (reading it hashes
+  every source file) and when the source cannot be read, for example outside a
+  git repository. `gsd_uat_result_save` stores the revision it was saved for in
+  its operation result and in the `attempt-N.json` record.
 
 ---
 
@@ -938,7 +1111,9 @@ updated_at         TEXT NOT NULL
 ```
 
 - DDL owner: `db-integration-branch-schema.ts`. Reader and writer: `db/writers/milestone-integration-branch.ts`.
-- This is a git coordination row, written outside Domain Operations.
+- The row is workflow state. Only the `milestone.integration_branch.record`
+  Domain Operation writes it, with a `milestone.integration_branch.recorded`
+  event. Nothing is written when no database is open.
 - The row is the merge target. `<MID>-META.json` is a rendered copy; it is read
   only when the milestone has no row or no database is open.
 
@@ -990,12 +1165,34 @@ custom_workflow_step_verifications
 - DDL owner: `db-custom-workflow-schema.ts`. Reader: `db/custom-workflow-runs.ts`. Writer: `db/writers/custom-workflow-runs.ts`.
 - These are workflow-state rows: every write is a `custom_workflow.*` Domain
   Operation (`run.create`, `run.import`, `step.activate`, `step.expand`,
-  `step.complete`, `step.verify`, `step.retry`).
+  `step.complete`, `step.verify`, `step.approve`, `step.retry`).
+- A step that auto-mode runs also has a `unit_dispatches` row: `unit_type`
+  `custom-step`, `unit_id` `<run_id>/<step_id>`, `milestone_id` the run id and
+  `milestone_lease_token` 0 (a run has no milestone lease).
 - `GRAPH.yaml`, `DEFINITION.yaml` and `PARAMS.json` in the run directory are
   renders of these rows, written by the Projection Worker
   (`custom-workflow-run` projection kind).
 - Authority, approval and import rules: see
   [ADR-046](dev/ADR-046-database-authoritative-workflow-lifecycle.md).
+
+---
+
+#### `project_milestone_sequence` (non-versioned)
+
+The Milestone Sequence of the PROJECT artifact. One row per milestone line.
+
+```
+milestone_id TEXT PRIMARY KEY      ← the id as the sequence line writes it
+position     INTEGER NOT NULL      ← 0-based order of the line in the sequence
+```
+
+- DDL owner: `db-project-milestone-sequence-schema.ts`. Reader and writers: `db/writers/project-milestone-sequence.ts`.
+- Writer: the `artifact.save` Domain Operation of `gsd_summary_save(PROJECT)` replaces all rows in the
+  transaction that stores the PROJECT artifact row. A line that leaves the sequence leaves the table.
+- Backfill: when startup maintenance creates the table and the table is empty, the rows are filled once from
+  the stored `PROJECT.md` artifact row.
+- Reader: `deriveState` promotes a content-less queued milestone only when it has a row here. The text of
+  PROJECT.md is not parsed for that decision, on disk or in the artifact row.
 
 ---
 
@@ -1070,6 +1267,9 @@ FOREIGN KEY project_id → project_authority(project_id)
 - `(project_id, idempotency_key)` and `(project_id, resulting_revision)` are
   unique. The composite operation/project/result revision/result epoch key binds
   emitted events to the exact recorded operation result.
+- A `project.start_empty` row is the stored `/gsd db start-empty` choice: the
+  open admits a database with no milestone rows beside projections it did not
+  produce; see ADR-046, "One database per bound checkout".
 - Index: `idx_workflow_operations_created` (project_id, created_at, operation_id)
 
 #### `workflow_domain_events`
@@ -1584,6 +1784,38 @@ PRIMARY KEY (decision_id, lifecycle_id)
   `invalidate` require a `revalidate` dependency. Updates and deletes fail.
 - Index: `idx_workflow_decision_impacts_lifecycle` (lifecycle_id, effect)
 
+#### `workflow_decision_statement_impacts` (non-versioned)
+
+```
+decision_id              TEXT NOT NULL    ← D### of the statement decision (gsd_decision_save)
+impact_ordinal           INTEGER NOT NULL ← 1-based order within the saving call
+impact_kind              TEXT NOT NULL    ← 'revalidates' | 'supersedes' | 'blocks'
+milestone_id             TEXT
+slice_id                 TEXT             ← requires milestone_id
+task_id                  TEXT             ← requires milestone_id and slice_id
+target_scope             TEXT             ← free scope text; for 'supersedes' the D### amended
+payload                  TEXT NOT NULL
+created_at               TEXT NOT NULL
+created_operation_id     TEXT NOT NULL
+created_project_revision INTEGER NOT NULL
+PRIMARY KEY (decision_id, impact_ordinal)
+```
+
+- Impacts of a statement decision. A `gsd_decision_save` decision is a
+  statement with a free-text scope — no Open Question, no interaction, no
+  Answer — so the conversation-domain `workflow_decision_impacts` table (which
+  requires an accepted Answer from the same operation) cannot hold them.
+  Added 2026-10-05 (P19g); the conversation tables and their triggers are
+  unchanged.
+- Written only by the `decision.save` Domain Operation. Updates and deletes
+  fail. `impacts` is optional on the tool: omitted or empty writes no rows. A
+  superseding save also writes one `supersedes` row whose scope is the amended
+  D### (`idx_workflow_statement_impact_supersedes` allows one per decision).
+- Reads: `gsd_decision_get` / `gsd_decision_list` return the rows of a
+  decision, and the DECISIONS.md render re-emits the supersede as the
+  `(amends D###)` cell suffix derived from the stored supersede, never by
+  parsing file text.
+
 #### `workflow_work_checkpoints`
 
 ```
@@ -1608,6 +1840,28 @@ authority_epoch        INTEGER NOT NULL
   head for the same project, scope, and lifecycle with the next sequence and
   causally newer provenance. Updates and deletes fail.
 - Index: `idx_workflow_checkpoints_scope` (project_id, scope_key, sequence)
+- Two scope chains exist. The `task:` chain belongs to task recovery
+  (`gsd_task_recovery_resume`). The `continue:<milestone>[/<slice>[/<task>]]`
+  chain is the resume state: the `checkpoint.save` Domain Operation
+  (`work-checkpoint.ts`) appends to it for `gsd_checkpoint_save` (`pause` or
+  `handoff`) and for the pause checkpoint that session compaction saves for the
+  active task.
+- The head of a `continue:` chain selects the resume path: the Resume State of
+  the execute-task and guided-resume-task prompts, the Resume choice of `/gsd`,
+  and the handoff of `/gsd resume-work`. `CONTINUE.md` is a one-way render of
+  the row (`renderWorkCheckpoint`); no reader takes resume state from
+  `CONTINUE.md`, `continue.md` or `HANDOFF.md`, and the write intercept refuses
+  an agent write to a `CONTINUE.md` under `.gsd/milestones` or `.gsd/phases`.
+- `/gsd resume-work` reads the head of one item only: the active task, else the
+  active slice, else the active milestone. It does not use the checkpoint of
+  another item. The head is shown only while its item is not `completed` or
+  `cancelled` and the work of the item did not change after the save. A later
+  domain event of the same item with a type in `WORK_CHANGE_EVENT_TYPES`
+  (`work-checkpoint.ts`: planned, replanned, completed, cancelled, discarded,
+  reopened) or a later `artifact.saved` event in the scope of the item
+  supersedes it. Attempt, verification, recovery and dispatch events do not. A
+  superseded row is hidden, not deleted. The other readers do not apply this
+  filter.
 
 Index `idx_workflow_questions_open` supports open-Question lookup by project,
 lifecycle, and status.
@@ -1844,6 +2098,14 @@ authority_epoch          INTEGER NOT NULL
   `sha256:` value with 64 hexadecimal digits, and `environment_json` must be a
   non-empty JSON object. Command/tool, working directory, source revision, and
   durable output reference must all be non-empty.
+- A host Task verdict (`attempt.verify`) is refused when its
+  `durable_output_ref` does not resolve. A `db://<kind>/<attemptId>` reference
+  must name the Attempt under verification; it resolves to this evidence row.
+  Any other reference must be the id of an `exec_runs` row.
+- The evidence row of a host verification run stores the record of each host
+  check in `environment_json.checks`: command, exit code, duration, verdict and
+  the bounded stdout/stderr of a failed check. `T##-VERIFY.json` is a copy of
+  that record for people; no code reads it.
 - Index: `idx_workflow_evidence_verdict` (verdict_id, evidence_id)
 
 #### `workflow_human_acceptances`
@@ -2152,8 +2414,16 @@ project_revision            INTEGER NOT NULL
 authority_epoch             INTEGER NOT NULL
 ```
 
-- A plan requires a causally prior succeeded, settled Attempt. One immutable
+- A plan requires a causally prior settled Attempt of its lifecycle. The
+  Attempt must have succeeded, or the lifecycle must hold a causally prior
+  active `milestone-validation` Waiver that has not expired. One immutable
   lineage exists per lifecycle; its head is current.
+- Plan Attempt trigger (non-versioned,
+  `db-projection-import-kernel-closeout-foundation-schema.ts`):
+  `ensureCloseoutPlanAttemptTrigger` creates
+  `trg_workflow_closeout_plan_attempt` on every open that does not find it
+  with the Waiver branch, and replaces a trigger without that branch. The
+  startup-repair check (`hasCloseoutPlanAttemptTrigger`) starts that open.
 - Supersession preserves project/lifecycle and may retain the Attempt or name a
   later Attempt in the same lifecycle. There is no mutable plan status.
 - Tested-source and readiness-basis hashes must use lowercase `sha256:` format;
@@ -2375,7 +2645,10 @@ or worktree-merge input.
 
 `reconcileWorktreeDb` runs only from the explicit `/worktree import-db` command;
 no merge, teardown, or projection path calls it. Its `preview` option returns
-the row counts and conflicts and changes no row. It merges the legacy
+the row counts, the conflicts and every hierarchy status change (also the
+changes of the lifecycle adoption) and changes no row. Its `confirmed` option
+commits the merge only when the result equals that preview. The command takes a
+snapshot of the project database before the merge. It merges the legacy
 correctness rows of a worktree-local `gsd.db` into the main DB, including hierarchy, requirements, artifacts, memories, replan history,
 assessments, quality gates, slice dependencies, verification evidence, gate
 runs, and milestone commit attributions. Runtime-only/audit substrates such as
@@ -2424,7 +2697,7 @@ error names the row and `/gsd db adopt`.
 | `gsd_task_complete` | project_authority, workflow operations/lifecycles, current Attempt/Result/verdict/evidence, tasks, slices, rework briefs/findings | project_authority, workflow operations/events/outbox/Projection Work, Attempt Result/checkpoints, Technical Verdict evidence/publication, tasks, verification evidence, rework findings | S##-T##-SUMMARY.md; toggles checkbox in NN-MM-PLAN.md after commit; reads legacy T##-SUMMARY.md |
 | `gsd_slice_complete` | project_authority, workflow operations/lifecycles, Tasks and their Attempts/Results/verdict evidence, milestones, slices, quality_gates | project_authority, workflow operations/events/outbox/Projection Work, Milestone/Slice lifecycles, milestones, slices, quality_gates, gate_runs | S##-SUMMARY.md, S##-UAT.md; toggles checkpoint in ROADMAP.md after commit |
 | `gsd_uat_result_save` | project_authority, workflow_operations, slices, artifacts, gate_runs (the highest UAT `attempt` of the Slice gives the next attempt number), exec_runs (each cited `gsd_exec` / `gsd_uat_exec` evidence ref) | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, artifacts, assessments, quality_gates, gate_runs (one `uat-result.save` operation) | S##-ASSESSMENT.md; UAT attempt JSON, both written after commit. A replay writes the attempt JSON again from the stored result |
-| `gsd_complete_milestone` | project_authority, workflow operations/lifecycles, current validation Attempt/Result/verdict/evidence, Waivers, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, Milestone lifecycle, milestones. For a Milestone with a milestone branch and a succeeded validation Attempt, the tool writes workflow_closeout_plans and workflow_closeout_effects and leaves the Milestone open; the host writes workflow_settlement_receipts and completes the Milestone after the merge | M##-SUMMARY.md projection after commit |
+| `gsd_complete_milestone` | project_authority, workflow operations/lifecycles, current validation Attempt/Result/verdict/evidence, Waivers, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, Milestone lifecycle, milestones. For an adopted Milestone with a milestone branch, validated or closed out on a validation Waiver, the tool writes workflow_closeout_plans and workflow_closeout_effects and leaves the Milestone open; the host writes workflow_settlement_receipts and completes the Milestone after the merge. For a waived Milestone the plan cites the newest settled validation Attempt; when validation never ran, the tool first writes one workflow_execution_attempts row and one workflow_attempt_results row (outcome `interrupted`, failure class `validation-waived`) in an `attempt.settle` operation with a `milestone.validation.attempt_waived` event | M##-SUMMARY.md projection after commit |
 | `gsd_validate_milestone` | project_authority, Milestone lifecycle, planned verification classes, current criteria/verdict/evidence, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, validation Attempts/Results, acceptance criteria, Technical Verdicts/evidence, assessments, quality_gates, gate_runs | VALIDATION.md projection after commit |
 | `gsd_prepare_milestone_subjective_uat` | project_authority, Milestone lifecycle, current acceptance criteria, open questions, interactions, and validation events | project_authority, workflow operations/events/outbox/Projection Work, acceptance criteria, open questions, interactions, and interaction options | — |
 | `/gsd uat-answer` (host command, no model tool; writes only from the terminal UI, not from an RPC or headless session) | project_authority, Milestone lifecycle, current subjective criterion, open question, interaction/options, validation events, and Human Acceptance | project_authority, workflow operations/events/outbox/Projection Work, Answers, Human Acceptance, and open-question/interactions status | — |
@@ -2435,6 +2708,7 @@ error names the row and `/gsd db adopt`.
 | `gsd_skip_slice` | project_authority, workflow operations/lifecycles, slices, tasks, running Attempts and dispatches | project_authority, workflow operations/events/outbox/Projection Work, Slice/Task lifecycles, Slice-scoped Waiver, workflow execution Attempts, immutable Attempt Results, Kernel checkpoints, slices, tasks, dispatches | readable state projections after commit |
 | `gsd_task_reopen` | tasks, slices, milestones | tasks | deletes S##-T##-SUMMARY.md and legacy T##-SUMMARY.md |
 | `gsd_task_recovery_resume` | project_authority, workflow_operations, workflow_item_lifecycles, workflow_execution_attempts, workflow_failure_observations, workflow_recovery_actions, workflow_blockers, workflow_domain_events, workflow_work_checkpoints | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_work_checkpoints | — |
+| `gsd_checkpoint_save` | project_authority, workflow_operations, workflow_item_lifecycles, workflow_work_checkpoints | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_work_checkpoints (one `checkpoint.save` operation) | CONTINUE.md of the slice or milestone (render of the head checkpoint) |
 | `gsd_slice_reopen` | project_authority, workflow operations/lifecycles, workflow_waivers, slices, tasks, immutable execution history | project_authority, workflow operations/events/outbox/Projection Work, Slice/Task lifecycles, workflow_waivers, slices, tasks, quality_gates; removes the stale evidence of the Slice (verification_evidence, run-uat assessments and their artifacts, the UAT gate, uat_retry_counters), keeps the removed rows in the reopen event payload, and sets `attempt_ref` of its `uat_exec` exec_runs to NULL | repairs/removes Slice, UAT, Task SUMMARY, PLAN, ROADMAP, and STATE projections after commit |
 | `gsd_milestone_reopen` | project_authority, workflow operations/lifecycles, Waivers and Requirement Dispositions, milestones, slices, tasks, active Attempts, dependent Milestones | project_authority, workflow operations/events/outbox/Projection Work, Milestone/Slice/Task lifecycles, Waiver dispositions, milestones, slices, tasks, quality_gates; removes the milestone-validation assessment and, for each reopened Slice, the same stale evidence as `gsd_slice_reopen`, and keeps the removed rows in the reopen event payload | fenced removal or repair of Milestone, Slice, UAT, Task, PLAN, ROADMAP, and STATE projections after commit |
 | `gsd_milestone_park`, `gsd_milestone_unpark` | project_authority, workflow operations/lifecycles, milestones | project_authority, workflow operations/events/Projection Work, Milestone lifecycle, milestones.status | PARKED.md rendered or removed after commit; STATE.md |
@@ -2501,6 +2775,8 @@ Task-bearing calls to `gsd_plan_slice`, `gsd_plan_task`, `gsd_replan_slice`, and
 `gsd_rework_brief_save` persists structured findings for a task. MCP callers may omit `projectDir`; the server defaults it to the current project/worktree root. Required fields are `milestoneId`, `sliceId`, `taskId`, and non-empty `findings`. Each finding requires `findingId`, `severity` (`blocking` or `advisory`), `description`, `requiredFix`, and `verificationCommands`; optional fields are `status`, `evidence`, and `decisionRef`.
 
 `gsd_task_complete` treats the task summary and slice plan projection as retryable delivery work after authoritative completion commits. In flat-phase layout it writes `S##-T##-SUMMARY.md` at the phase root so duplicate task IDs in different slices cannot collide; readers still accept legacy flat `T##-SUMMARY.md` summaries. If writing the task summary or re-rendering `NN-MM-PLAN.md` fails after the database transaction commits, the tool returns a visible projection error while leaving the committed task completion, Attempt Result, verification evidence, and lifecycle state intact for projection repair on retry. It also rejects completion when the task has pending blocking rework findings. To complete such a task, the caller must include `reworkResolution` entries with `findingId`, `status: "resolved"`, and non-empty `evidence`, or `status: "deferred-with-override"` with non-empty `evidence` and a `decisionRef`.
+
+`gsd_checkpoint_save` saves a `pause` or `handoff` Work Checkpoint for a milestone, slice, or task that has a lifecycle row; a unit with no lifecycle row is refused and nothing is written. Required fields are `milestoneId`, `kind`, `confirmedContext`, and `nextAction`; `sliceId`, `taskId`, `unresolved`, and `evidence` are optional, and `taskId` needs `sliceId`. The row extends the `continue:` chain of the work item and is the resume state. The tool then renders `CONTINUE.md`; when the render fails the tool still succeeds and reports that the row is the resume state.
 
 `gsd_task_recovery_resume` appends a correction Work Checkpoint and `task.recovery.resumed` event for the exact current agent-owned abort or remediation after receiving a nonblank repair summary and non-empty structured evidence. The predecessor Attempt, its Result, the Recovery Action, and recovery budget remain unchanged. The event authorizes only the immediate lineage successor Attempt; stale or duplicate actions, open blockers, and actions superseded by a later Attempt fail closed.
 

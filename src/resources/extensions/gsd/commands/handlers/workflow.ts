@@ -548,7 +548,7 @@ async function handleCustomWorkflow(
       ctx.ui.notify("Auto-mode is not active.", "warning");
       return true;
     }
-    await pauseAuto(ctx, pi);
+    await pauseAuto(ctx, pi, "user_request");
     ctx.ui.notify("Custom workflow paused.", "info");
     return true;
   }

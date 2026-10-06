@@ -85,6 +85,7 @@ async function loadExtensionModules() {
   if (typeof formatLegacyImportForwardRepairChoice !== 'function'
     || typeof parseLegacyImportForwardRepairChoices !== 'function'
     || typeof choiceTokenModule.parseLegacyImportPreviewChoices !== 'function'
+    || typeof choiceTokenModule.parseLegacyImportKnowledgeFileRowChoices !== 'function'
     || typeof workspaceModule.resolvePreparedVerifiedRecoverApplication !== 'function'
     || typeof workspaceModule.formatUnresolvedRecoverDiagnoses !== 'function') {
     throw new Error('selected GSD extensions do not support recovery choice tokens; synchronize the extension bundle')
@@ -107,6 +108,9 @@ async function loadExtensionModules() {
     parseLegacyImportPreviewChoices: choiceTokenModule.parseLegacyImportPreviewChoices as (
       args: string,
     ) => PreviewResolutionChoice[],
+    parseLegacyImportKnowledgeFileRowChoices: choiceTokenModule.parseLegacyImportKnowledgeFileRowChoices as (
+      args: string,
+    ) => string[],
     resolvePreparedVerifiedRecoverApplication: workspaceModule.resolvePreparedVerifiedRecoverApplication as (
       prepared: PreparedVerifiedRecoverApplication,
       choices: readonly PreviewResolutionChoice[],
@@ -146,6 +150,7 @@ interface RecoveryAssessment {
 
 type PrepareVerifiedRecoverApplication = (
   basePath: string,
+  knowledgeFileRows?: readonly string[],
 ) => PreparedVerifiedRecoverApplication | Promise<PreparedVerifiedRecoverApplication>
 
 type ApplyPreparedVerifiedRecoverApplication = (
@@ -257,13 +262,24 @@ export async function handleRecover(
     const retained = applicationId
       ? modules.loadVerifiedRecoverApplication(applicationId)
       : modules.loadRetainedVerifiedRecoverApplication()
+    const knowledgeFileRows = modules.parseLegacyImportKnowledgeFileRowChoices(args.join(' '))
     if (retained) {
+      if (knowledgeFileRows.length > 0) {
+        // A loaded Application is already applied: the choice would write nothing.
+        throw new Error(
+          `the KNOWLEDGE.md row choice for ${knowledgeFileRows.join(', ')} was not applied: `
+            + `Import Application ${retained.receipt.operationId} is loaded, and a row choice needs a new Preview; `
+            + 'no database changes made',
+        )
+      }
       application = retained
     } else {
       // Reviewed --choice tokens resolve 'requires-user' diagnoses and seal a
-      // new Preview; its hash is the one the caller approves.
+      // new Preview; its hash is the one the caller approves. A knowledge row
+      // choice makes the Preview write that KNOWLEDGE.md row over its
+      // differing database row.
       const previewChoices = modules.parseLegacyImportPreviewChoices(args.join(' '))
-      let prepared = await modules.prepareVerifiedRecoverApplication(basePath)
+      let prepared = await modules.prepareVerifiedRecoverApplication(basePath, knowledgeFileRows)
       if (previewChoices.length > 0) {
         prepared = modules.resolvePreparedVerifiedRecoverApplication(prepared, previewChoices)
       }

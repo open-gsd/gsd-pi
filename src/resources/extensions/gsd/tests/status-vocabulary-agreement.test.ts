@@ -13,12 +13,12 @@ import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import {
   _getAdapter,
   closeDatabase,
-  getMilestoneSlices,
   insertArtifact,
   insertMilestone,
   insertSlice,
   openDatabase,
 } from "../gsd-db.ts";
+import { readMilestoneSlices } from "../db/lifecycle-read.ts";
 import { getEligibleSlicesFromRows } from "../slice-parallel-eligibility.ts";
 import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
 import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.ts";
@@ -81,7 +81,7 @@ for (const [status, closed] of RAW_STATUS_TABLE) {
     assert.equal(blocker === null, closed, `dispatch guard: ${blocker}`);
 
     assert.deepEqual(
-      getEligibleSlicesFromRows(getMilestoneSlices("M001")).map((slice) => slice.id),
+      getEligibleSlicesFromRows(readMilestoneSlices("M001")).map((slice) => slice.id),
       [closed ? "S02" : "S01"],
       "slice-parallel eligibility",
     );

@@ -19,7 +19,7 @@ You are running the GSD **spec-phase** workflow — clarify WHAT a milestone/sli
 
 4. **Resolve ambiguity.** For each high-ambiguity item: in `--auto`, infer and flag; otherwise ask one targeted question at a time to resolve it. Update the spec with the resolved language.
 
-5. **Write the SPEC** to the milestone/slice artifact in `.gsd/`. Recommend `/gsd discuss-phase` (deeper discussion) or `/gsd plan-phase` (the spec is clear enough to plan).
+5. **Save the SPEC with `gsd_summary_save`** (`artifact_type: "SPEC"`, plus `milestone_id` and `slice_id` when the spec is slice-scoped): the tool computes the artifact path and renders `.gsd/`. Do not write the SPEC file directly. Recommend `/gsd discuss-phase` (deeper discussion) or `/gsd plan-phase` (the spec is clear enough to plan).
 
 ## Success criteria
 

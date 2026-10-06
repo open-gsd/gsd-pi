@@ -1,6 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Single-writer layer for the runtime-control tables — the unit
-// runtime record, the post-unit hook state and the run-uat retry counter.
+// runtime record, the post-unit hook state, the run-uat retry counter and the
+// pending discuss-to-auto handoff.
 //
 // These are coordination rows (see db-runtime-control-schema.ts). Every reader
 // returns "no row" when no database is open; every writer needs an open one.
@@ -171,5 +172,50 @@ export function deleteUatRetryCounter(milestoneId: string, sliceId: string): voi
     getDb().prepare(
       `DELETE FROM uat_retry_counters WHERE milestone_id = :milestone_id AND slice_id = :slice_id`,
     ).run({ ":milestone_id": milestoneId, ":slice_id": sliceId });
+  });
+}
+
+export interface DiscussionHandoffRow {
+  /** Project root that the discussion was dispatched from. */
+  base_path: string;
+  milestone_id: string;
+  /** 1 or 0; NULL when the caller did not set the flag. */
+  step: number | null;
+  start_auto: number | null;
+  /** The conversation that holds the interview. */
+  session_id: string | null;
+  created_at: number;
+}
+
+export function readDiscussionHandoffRow(basePath: string): DiscussionHandoffRow | null {
+  if (!isDbAvailable()) return null;
+  const row = _getAdapter()!.prepare(
+    `SELECT * FROM discussion_handoffs WHERE base_path = :base_path`,
+  ).get({ ":base_path": basePath });
+  return (row as unknown as DiscussionHandoffRow | undefined) ?? null;
+}
+
+export function writeDiscussionHandoffRow(row: DiscussionHandoffRow): void {
+  transaction(() => {
+    getDb().prepare(
+      `INSERT OR REPLACE INTO discussion_handoffs (base_path, milestone_id, step, start_auto, session_id, created_at)
+       VALUES (:base_path, :milestone_id, :step, :start_auto, :session_id, :created_at)`,
+    ).run({
+      ":base_path": row.base_path,
+      ":milestone_id": row.milestone_id,
+      ":step": row.step,
+      ":start_auto": row.start_auto,
+      ":session_id": row.session_id,
+      ":created_at": row.created_at,
+    });
+  });
+}
+
+/** Delete the handoff row of one project root, or of every root when none is given. */
+export function deleteDiscussionHandoffRows(basePath?: string): void {
+  if (!isDbAvailable()) return;
+  transaction(() => {
+    if (basePath === undefined) getDb().prepare(`DELETE FROM discussion_handoffs`).run();
+    else getDb().prepare(`DELETE FROM discussion_handoffs WHERE base_path = :base_path`).run({ ":base_path": basePath });
   });
 }

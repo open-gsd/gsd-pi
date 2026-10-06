@@ -7,7 +7,7 @@
   "base_authority_epoch": 0,
   "base_database_schema_version": 51,
   "source_set_hash": "sha256:45ebecc543741bfcf6047eb6c194bac2ca0647746acf687474025bc5441d6f11",
-  "change_set_hash": "sha256:341b929c4c062281ea9eb7544e017463475f4d552f6bab24cc224411b8f2b532",
+  "change_set_hash": "sha256:7166518fb8a05b4bf3f8304be1ce10774148e64ecd76f590d0d3f4928ee951da",
   "counts": {
     "create": 5,
     "update": 0,
@@ -97,7 +97,7 @@
         "id": "D002",
         "when_context": "M002",
         "scope": "storage",
-        "decision": "Refine persistence (amends D001)",
+        "decision": "Refine persistence",
         "choice": "WAL mode",
         "rationale": "Safe concurrent reads",
         "revisable": "Yes",

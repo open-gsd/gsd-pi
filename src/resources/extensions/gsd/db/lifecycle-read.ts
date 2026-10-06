@@ -1,30 +1,41 @@
 // Project/App: gsd-pi
 // File Purpose: The read interface for status, phase, dispatch-eligibility
-// and dependency decisions (ADR-046). deriveState, the dispatch guard, the
-// milestone guard of resolveDispatch, the status response, progress and the
-// project snapshot ask their status questions here.
+// and dependency decisions (ADR-046). deriveState, the dispatch guard,
+// resolveDispatch, the already-closed dispatch check, the queue commands, the
+// auto start and stop completion checks, the closeout, recovery, post-unit and
+// verification checks, the preconditions of the planning and completion
+// commands, the status response, progress, the project snapshot and the
+// dashboards ask their status questions here. It also answers which
+// Milestones exist (`readListedMilestoneIds`).
 // The project Authority Epoch chooses the read source, in `cutoverHasRun`
 // only: canonical lifecycle rows and Waivers after the Cutover, legacy status
 // rows (D005) before it. The choice is per Project, never per item.
-// Other decision sites still read legacy rows directly and apply the status
-// vocabulary themselves; docs/dev/state-db-cutover-milestone-decision.md
+// The sites that only render or display a status, and the legacy-only paths,
+// still read legacy rows directly; docs/dev/state-db-cutover-milestone-decision.md
 // (D012) lists them.
 
+import type { DbAdapter } from "../db-adapter.js";
 import { getDb } from "./engine.js";
 import { compareLifecycleShadow } from "./lifecycle-shadow-comparison.js";
 import {
   getAllMilestones,
+  getContextArtifactMilestoneIds,
   getHierarchyCompletionCounts,
   getInFlightSliceCount,
   getMilestone,
   getMilestoneSlices,
   getMilestoneStatusCounts,
+  getOpenBlockers,
+  getOpenQuestions,
   getProjectAuthorityRow,
+  getSliceCountsByMilestoneId,
   getSliceStatusSummary,
   getSliceTaskCounts,
   getSliceTasks,
   getSlicesByMilestoneIds,
   type MilestoneStatusCounts,
+  type OpenBlockerRow,
+  type OpenQuestionRow,
 } from "./queries.js";
 import {
   isClosedStatus,
@@ -51,11 +62,24 @@ export interface MilestoneRead extends MilestoneRow {
    * vocabulary; null when the legacy status is not in the map.
    */
   readonly lifecycleStatus: string | null;
+  /**
+   * A queued shell: the Milestone row is ready and no planning is behind it —
+   * no CONTEXT artifact row and no Slice rows. The lifecycle vocabulary has no
+   * word for queued, so this field answers the readiness class directly:
+   * after the Cutover the lifecycle status `ready` decides, before it the
+   * legacy status `queued` does.
+   */
+  readonly queuedShell: boolean;
 }
 
 export interface SliceRead extends SliceRow {
   /** Needs no further work: closed, or deferred by a decision. */
   readonly done: boolean;
+  /**
+   * Closed: complete or cancelled. Before the Cutover a deferred Slice is not
+   * closed (the legacy rule). After the Cutover this is `done`.
+   */
+  readonly closed: boolean;
   /**
    * Releases the Slices that depend on it. Before the Cutover this is `done`.
    * After the Cutover a cancelled Slice releases them only with an active
@@ -73,10 +97,13 @@ export interface TaskRead extends TaskRow {
  * The one place that chooses the read source. An Authority Epoch above 0 means
  * the Cutover has run: every answer of this module then comes from the
  * canonical lifecycle rows. Before that every answer comes from the legacy
- * status rows.
+ * status rows. `db` is a connection other than the open one.
  */
-function cutoverHasRun(): boolean {
-  return (getProjectAuthorityRow()?.authorityEpoch ?? 0) > 0;
+function cutoverHasRun(db?: DbAdapter): boolean {
+  const authorityEpoch = db
+    ? db.prepare("SELECT authority_epoch FROM project_authority WHERE singleton = 1").get()?.["authority_epoch"]
+    : getProjectAuthorityRow()?.authorityEpoch;
+  return Number(authorityEpoch ?? 0) > 0;
 }
 
 type ItemKind = "milestone" | "slice" | "task";
@@ -103,9 +130,14 @@ const HIERARCHY_SQL = {
  * The lifecycle of every row of one hierarchy table, keyed by item path
  * (`M001`, `M001/S01`, `M001/S01/T01`). Read only after the Cutover.
  */
-function readLifecycleItems(kind: ItemKind, milestoneId?: string, sliceId?: string): LifecycleItems {
+function readLifecycleItems(
+  kind: ItemKind,
+  milestoneId?: string,
+  sliceId?: string,
+  db: DbAdapter = getDb(),
+): LifecycleItems {
   const sql = HIERARCHY_SQL[kind];
-  const rows = getDb().prepare(`
+  const rows = db.prepare(`
     SELECT ${sql.milestone} AS milestone_id, ${sql.slice} AS slice_id, ${sql.task} AS task_id,
            hierarchy.status AS legacy_status, lifecycle.lifecycle_status,
            EXISTS (
@@ -180,7 +212,34 @@ function isCancelled(item: LifecycleItem | undefined): boolean {
   return item?.lifecycleStatus === "cancelled";
 }
 
-function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null): MilestoneRead {
+/**
+ * The queued-shell inputs of one read: which read source answers, which
+ * Milestones have a CONTEXT artifact row, and how many Slices each has.
+ */
+interface ShellContext {
+  cutover: boolean;
+  contextIds: Set<string>;
+  sliceCounts: Map<string, number>;
+}
+
+function readShellContext(cutover: boolean): ShellContext {
+  return {
+    cutover,
+    contextIds: getContextArtifactMilestoneIds(),
+    sliceCounts: getSliceCountsByMilestoneId(),
+  };
+}
+
+function isQueuedShell(row: MilestoneRow, item: LifecycleItem | undefined, shell: ShellContext): boolean {
+  const ready = shell.cutover
+    ? item?.lifecycleStatus === "ready"
+    : row.status === "queued";
+  return ready
+    && !shell.contextIds.has(row.id)
+    && (shell.sliceCounts.get(row.id) ?? 0) === 0;
+}
+
+function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null, shell: ShellContext): MilestoneRead {
   if (items) {
     const item = items.get(row.id);
     const done = isComplete(item);
@@ -193,6 +252,7 @@ function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null): Miles
       parked: item?.lifecycleStatus === "paused",
       discarded,
       lifecycleStatus: item?.lifecycleStatus ?? "pending",
+      queuedShell: isQueuedShell(row, item, shell),
     };
   }
   const closed = isClosedStatus(row.status);
@@ -204,6 +264,7 @@ function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null): Miles
     parked: row.status === "parked",
     discarded,
     lifecycleStatus: normalizeLegacyLifecycleStatus(row.status),
+    queuedShell: isQueuedShell(row, undefined, shell),
   };
 }
 
@@ -216,29 +277,63 @@ function toSliceRead(row: SliceRow, items: LifecycleItems | null): SliceRead {
       ...row,
       status: statusLabel("slice", item),
       done: complete || cancelled,
+      closed: complete || cancelled,
       satisfiesDependents: complete || (cancelled && item?.waived === true),
     };
   }
   const done = isInactiveStatus(row.status);
-  return { ...row, done, satisfiesDependents: done };
+  return { ...row, done, closed: isClosedStatus(row.status), satisfiesDependents: done };
 }
 
 /** Every Milestone in workflow order (sequence, then id). Includes discarded tombstones. */
 export function readMilestones(): MilestoneRead[] {
-  const items = cutoverHasRun() ? readLifecycleItems("milestone") : null;
-  return getAllMilestones().map((row) => toMilestoneRead(row, items));
+  const cutover = cutoverHasRun();
+  const items = cutover ? readLifecycleItems("milestone") : null;
+  const shell = readShellContext(cutover);
+  return getAllMilestones().map((row) => toMilestoneRead(row, items, shell));
+}
+
+/**
+ * The ids of the listed Milestones in workflow order. This is the Milestone
+ * universe for every reader that decides or reports: no milestone directory
+ * is scanned. A discarded Milestone is a tombstone and is not listed.
+ */
+export function readListedMilestoneIds(): string[] {
+  return readMilestones().filter((milestone) => !milestone.discarded).map((milestone) => milestone.id);
 }
 
 export function readMilestone(milestoneId: string): MilestoneRead | null {
   const row = getMilestone(milestoneId);
   if (!row) return null;
-  return toMilestoneRead(row, cutoverHasRun() ? readLifecycleItems("milestone", milestoneId) : null);
+  const cutover = cutoverHasRun();
+  return toMilestoneRead(row, cutover ? readLifecycleItems("milestone", milestoneId) : null, readShellContext(cutover));
+}
+
+/**
+ * Whether the Milestone is done in the project database behind `db`, a
+ * connection other than the open one (the parallel merge reads the project
+ * database this way). The same answer as `readMilestone(...).done`.
+ */
+export function readMilestoneDoneIn(db: DbAdapter, milestoneId: string): boolean {
+  const status = db.prepare("SELECT status FROM milestones WHERE id = :id").get({ ":id": milestoneId })?.["status"];
+  if (typeof status !== "string") return false;
+  if (cutoverHasRun(db)) return isComplete(readLifecycleItems("milestone", milestoneId, undefined, db).get(milestoneId));
+  return isClosedStatus(status) && !isDiscardedMilestoneStatus(status);
 }
 
 /** The Slices of one Milestone in workflow order (sequence, then id). */
 export function readMilestoneSlices(milestoneId: string): SliceRead[] {
   const items = cutoverHasRun() ? readLifecycleItems("slice", milestoneId) : null;
   return getMilestoneSlices(milestoneId).map((row) => toSliceRead(row, items));
+}
+
+/** The ids of the closed Slices of one Milestone, in workflow order. */
+export function readClosedSliceIds(milestoneId: string): string[] {
+  return readMilestoneSlices(milestoneId).filter((slice) => slice.closed).map((slice) => slice.id);
+}
+
+export function readSlice(milestoneId: string, sliceId: string): SliceRead | null {
+  return readMilestoneSlices(milestoneId).find((slice) => slice.id === sliceId) ?? null;
 }
 
 /** `readMilestoneSlices` for many Milestones in one query. A Milestone with no Slice has no entry. */
@@ -258,6 +353,10 @@ export function readSliceTasks(milestoneId: string, sliceId: string): TaskRead[]
     const item = items.get(`${milestoneId}/${sliceId}/${row.id}`);
     return { ...row, status: statusLabel("task", item), done: isComplete(item) || isCancelled(item) };
   });
+}
+
+export function readTask(milestoneId: string, sliceId: string, taskId: string): TaskRead | null {
+  return readSliceTasks(milestoneId, sliceId).find((task) => task.id === taskId) ?? null;
 }
 
 export interface MilestoneStatusRead {
@@ -328,6 +427,23 @@ function readLifecycleProgressCounts(): ProgressCounts {
     else tasks.pending++;
   }
   return { milestones, slices, tasks };
+}
+
+export type { OpenBlockerRow, OpenQuestionRow } from "./queries.js";
+
+/**
+ * The open canonical blockers, oldest first. Canonical storage has no legacy
+ * row, so the Authority Epoch does not choose a source for this question: the
+ * answer is the same before and after the Cutover. Display readers outside
+ * recovery ask it here (the project snapshot), not at their own SQL.
+ */
+export function readOpenBlockers(): OpenBlockerRow[] {
+  return getOpenBlockers();
+}
+
+/** The open canonical questions, creation order. Answered like `readOpenBlockers`. */
+export function readOpenQuestions(): OpenQuestionRow[] {
+  return getOpenQuestions();
 }
 
 /**

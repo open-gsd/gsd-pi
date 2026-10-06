@@ -183,7 +183,7 @@ Generate manually with `/gsd export --html`, or for all milestones with `/gsd ex
 
 ### Reactive task execution
 
-Reactive task execution is enabled by default. GSD derives a dependency graph from IO annotations in task plans and, when at least three ready tasks are available by default, dispatches non-conflicting tasks in parallel via subagents.
+Reactive task execution is enabled by default. GSD derives a dependency graph from the planned inputs and expected output on the task rows in the database and, when at least three ready tasks are available by default, dispatches non-conflicting tasks in parallel via subagents. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch; it runs through the sequential executor.
 
 ```yaml
 reactive_execution:

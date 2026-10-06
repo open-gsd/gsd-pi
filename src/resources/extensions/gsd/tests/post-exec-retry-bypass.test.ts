@@ -20,6 +20,9 @@ import {
   type VerificationContext,
 } from "../auto-verification.ts";
 import { AutoSession } from "../auto/session.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
 import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, getTaskVerificationEvidence, _getAdapter } from "../gsd-db.ts";
 import { readExecRun, recordExecRun } from "../db/writers/exec-runs.ts";
 import { invalidateAllCaches } from "../cache.ts";
@@ -74,7 +77,6 @@ function makeMockSession(basePath: string, currentUnit?: { type: string; id: str
   const s = new AutoSession();
   s.basePath = basePath;
   s.active = true;
-  // verificationRetryCount is readonly but initialized as an empty Map in AutoSession
   s.pendingVerificationRetry = null;
   if (currentUnit) {
     s.currentUnit = {
@@ -559,7 +561,7 @@ describe("Post-execution blocking failure retry bypass", () => {
     createBasicTask();
     const ctx = makeMockCtx();
     const pi = makeMockPi();
-    const pauseAutoMock = mock.fn(async (_ctx?: unknown, _pi?: unknown, _errorContext?: { message: string }) => {});
+    const pauseAutoMock = mock.fn(async (_ctx?: unknown, _pi?: unknown, _blockerKind?: unknown, _errorContext?: { message: string }) => {});
     const s = makeMockSession(tempDir, { type: "execute-task", id: "M001/S01/T01" });
     const vctx = makeVerificationContext(s, ctx, pi);
     const recordTaskTechnicalVerdict = mock.fn(() => verdictReceipt("fail"));
@@ -587,10 +589,10 @@ describe("Post-execution blocking failure retry bypass", () => {
 
     assert.equal(result, "pause");
     assert.equal(pauseAutoMock.mock.callCount(), 1);
-    assert.match(pauseAutoMock.mock.calls[0]?.arguments[2]?.message ?? "", /shell could not parse/i);
+    assert.match(pauseAutoMock.mock.calls[0]?.arguments[3]?.message ?? "", /shell could not parse/i);
     assert.equal(recordTaskTechnicalVerdict.mock.callCount(), 0);
     assert.equal(routeTaskFailure.mock.callCount(), 0);
-    assert.equal(s.verificationRetryCount.has("execute-task:M001/S01/T01"), false);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 0);
     assert.equal(s.pendingVerificationRetry, null);
   });
 
@@ -743,7 +745,7 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.equal(routed.length, 1);
     assert.equal(routed[0]?.classification.failureKind, "verification-drift");
     assert.equal(routed[0]?.resultId, "result-test");
-    assert.equal(s.verificationRetryCount.get("execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 1);
     assert.equal(pauseAutoMock.mock.callCount(), 0);
   });
 
@@ -895,7 +897,7 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.equal(routeTaskFailure.mock.calls[0]?.arguments[0].resultId, "result-exact");
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.equal(existsSync(commandMarker), false);
-    assert.equal(s.verificationRetryCount.get("execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 1);
   });
 
   test("re-reading one stored failure does not consume another repair attempt", async () => {
@@ -931,7 +933,7 @@ describe("Post-execution blocking failure retry bypass", () => {
 
     assert.equal(await runPostUnitVerification(vctx, pauseAutoMock), "retry");
     assert.equal(await runPostUnitVerification(vctx, pauseAutoMock), "retry");
-    assert.equal(s.verificationRetryCount.get("execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 1);
     assert.equal(s.pendingVerificationRetry?.attempt, 1);
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.equal(routeTaskFailure.mock.callCount(), 2);
@@ -1106,14 +1108,14 @@ describe("Post-execution blocking failure retry bypass", () => {
     const s = makeMockSession(tempDir, { type: "execute-task", id: "M001/S01/T01" });
     
     // Pre-set some retry state
-    s.verificationRetryCount.set("execute-task:M001/S01/T01", 2);
+    useUnitBudget(s, "execute-task", "M001/S01/T01", 2);
 
     const vctx = makeVerificationContext(s, ctx, pi);
     const result = await runPostUnitVerification(vctx, pauseAutoMock);
 
     // On success, retry count should be cleared
     assert.equal(result, "continue");
-    assert.equal(s.verificationRetryCount.has("execute-task:M001/S01/T01"), false);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 0);
   });
 
   test("cost spike during verification retry is warning telemetry, not the pause reason", async () => {
@@ -1416,6 +1418,61 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.notEqual(outcome.lifecycleStatus, "completed");
   });
 
+  test("the output of a failed host check resolves from the database after the VERIFY file and .gsd/exec are deleted", async () => {
+    writeFileSync(join(tempDir, "fail.js"), "console.error('boom-marker'); process.exit(3);\n");
+    createBasicTask("node fail.js");
+
+    const outcome = await verifyCanonicalTask();
+    assert.equal(outcome.verdict, "fail");
+    rmSync(join(tempDir, ".gsd", "milestones"), { recursive: true, force: true });
+    rmSync(join(tempDir, ".gsd", "exec"), { recursive: true, force: true });
+
+    const row = _getAdapter()!.prepare(`
+      SELECT attempt_id, observation, environment_json
+      FROM workflow_verification_evidence
+      WHERE durable_output_ref = :durable_output_ref
+    `).get({ ":durable_output_ref": `db://host-verification/${outcome.attemptId}` }) as
+      { attempt_id: string; observation: string; environment_json: string };
+    assert.equal(row.attempt_id, outcome.attemptId);
+    assert.equal(row.observation, "failed");
+    const checks = JSON.parse(row.environment_json).checks as
+      Array<{ command: string; exitCode: number; verdict: string; stderrExcerpt: string }>;
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0].command, "node fail.js");
+    assert.equal(checks[0].exitCode, 3);
+    assert.equal(checks[0].verdict, "fail");
+    assert.match(checks[0].stderrExcerpt, /boom-marker/);
+  });
+
+  test("a host verdict is refused when its evidence reference does not resolve", async () => {
+    createBasicTask();
+    const attemptId = createCanonicalSucceededTaskAttempt();
+    const record = (durableOutputRef: string) => recordTaskTechnicalVerdict({
+      invocation: internalExecutionInvocation(`fixture/unresolved-ref/${durableOutputRef}`),
+      attemptId,
+      testedSourceRevision: currentSourceRevision(),
+      verdict: "pass",
+      rationale: "All host-owned technical verification checks passed.",
+      evidence: {
+        evidenceClass: "command",
+        commandOrTool: "echo pass",
+        workingDirectory: tempDir,
+        startedAt: "2026-07-13T00:00:00.000Z",
+        endedAt: "2026-07-13T00:00:01.000Z",
+        exitCode: 0,
+        observation: "passed",
+        durableOutputRef,
+        environment: { node: process.version },
+      },
+    });
+
+    assert.throws(() => record("db://host-verification/another-attempt"), /does not name Attempt/);
+    assert.throws(() => record("exec-run-never-recorded"), /names no host-recorded exec run/);
+    assert.equal(readTaskTechnicalVerdict(attemptId), null);
+
+    assert.equal(record(`db://host-verification/${attemptId}`).status, "committed");
+  });
+
   test("a browser-facing task with no host check gets an inconclusive verdict, not a pass", async () => {
     createTaskWithoutVerify();
     writeFileSync(join(tempDir, "index.html"), "<!doctype html><button>Import</button>", "utf-8");
@@ -1620,13 +1677,56 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.equal(result, "retry");
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.equal(s.pendingVerificationRetry?.unitId, "M001/S01/T01");
-    assert.equal(s.verificationRetryCount.get("execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 1);
 
     const evidencePath = join(tempDir, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-VERIFY.json");
     const evidence = JSON.parse(readFileSync(evidencePath, "utf-8"));
     assert.equal(evidence.passed, false);
     assert.equal(evidence.retryAttempt, 1);
     assert.equal(evidence.maxRetries, 2);
+  });
+
+  test("a failed host verification survives a restart: context and count are on the dispatch row", async () => {
+    createFailingVerifyTask("complete");
+    writePreferences({
+      enhanced_verification: true,
+      enhanced_verification_post: false,
+      verification_auto_fix: true,
+      verification_max_retries: 2,
+    });
+    const dispatch = claimTestDispatch(tempDir, {
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      unitType: "execute-task",
+      unitId: "M001/S01/T01",
+    });
+    const pauseAutoMock = mock.fn(async () => {});
+    const unit = { type: "execute-task", id: "M001/S01/T01" };
+
+    const first = makeMockSession(tempDir, unit);
+    assert.equal(
+      await runPostUnitVerification(makeVerificationContext(first, makeMockCtx(), makeMockPi()), pauseAutoMock),
+      "retry",
+    );
+
+    // The process is killed. The next one has a new session.
+    const restarted = makeMockSession(tempDir, unit);
+    const stored = readStoredUnitRetry("execute-task", "M001/S01/T01");
+    assert.equal(stored?.attempt, 1);
+    assert.equal(stored?.failureContext, first.pendingVerificationRetry?.failureContext);
+    assert.equal(usedUnitBudget(restarted, "execute-task", "M001/S01/T01"), 1);
+
+    dispatch.claimNext();
+    assert.equal(
+      await runPostUnitVerification(makeVerificationContext(restarted, makeMockCtx(), makeMockPi()), pauseAutoMock),
+      "retry",
+    );
+    assert.equal(
+      readStoredUnitRetry("execute-task", "M001/S01/T01")?.attempt,
+      2,
+      "the count goes on from the last process, it does not start again",
+    );
   });
 });
 

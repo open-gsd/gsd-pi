@@ -11,6 +11,7 @@ export {
   noop as executeReplanSlice,
   noop as executeReplanTask,
   noop as executeReworkBriefSave,
+  noop as executeCheckpointSave,
   noop as executeSliceComplete,
   noop as executeCompleteMilestone,
   noop as executeValidateMilestone,

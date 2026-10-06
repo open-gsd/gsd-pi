@@ -21,8 +21,6 @@ import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.j
 import { hasPendingMilestoneSubjectiveUat } from "./milestone-subjective-uat-domain-operation.js";
 import { parseUnitId } from "./unit-id.js";
 import {
-  getMilestoneSlices,
-  getSliceTasks,
   getTask,
   getTaskVerificationEvidence,
   hasRoadmapAssessmentSince,
@@ -32,7 +30,7 @@ import type { TaskRow } from "./db-task-slice-rows.js";
 import { formatEscalationForDisplay, readTaskEscalation } from "./escalation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import type { GSDPreferences } from "./preferences-types.js";
-import { isInactiveStatus } from "./status-guards.js";
+import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import {
   runVerificationGate,
   runVerificationGateForTargets,
@@ -44,16 +42,21 @@ import {
   hostRecordedTaskEvidence,
 } from "./verification-gate.js";
 import type { VerificationTarget, TaskVerificationEvidence } from "./verification-gate.js";
-import { writeVerificationJSON, type PostExecutionCheckJSON, type EvidenceJSON } from "./verification-evidence.js";
+import { evidenceChecks, writeVerificationJSON, type PostExecutionCheckJSON, type EvidenceJSON } from "./verification-evidence.js";
 import { logWarning } from "./workflow-logger.js";
 import { runPostExecutionChecks, type PostExecutionResult } from "./post-execution-checks.js";
 import type { AutoSession } from "./auto/session.js";
-import type { ErrorContext } from "./auto/types.js";
+import type { PauseAutoFn } from "./auto/loop-deps.js";
 import type { VerificationResult as VerificationGateResult } from "./types.js";
 import { join } from "node:path";
 import { resolveUokFlags } from "./uok/flags.js";
 import { UokGateRunner } from "./uok/gate-runner.js";
-import { verificationRetryKey } from "./auto/verification-retry-policy.js";
+import {
+  clearVerificationRetry,
+  setVerificationRetry,
+  verificationBudget,
+} from "./auto/verification-retry-state.js";
+import { readUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
 import { decideVerificationVerdict, describeHostVerificationRationale } from "./verification-verdict.js";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
 import type { SliceRow } from "./db-task-slice-rows.js";
@@ -61,6 +64,7 @@ import { getSlice } from "./gsd-db.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { formatPostUnitStatusCard } from "./auto-status-message.js";
+import type { DomainJsonValue } from "./db/domain-operation.js";
 import { execRunSucceeded, listExecRunsOfAttempt } from "./db/writers/exec-runs.js";
 import {
   isTaskAttemptAwaitingVerification,
@@ -109,7 +113,6 @@ export interface VerificationContext {
 }
 
 export type VerificationResult = "continue" | "retry" | "pause" | "abort";
-type PauseAutoFn = (ctx?: ExtensionContext, pi?: ExtensionAPI, errorContext?: ErrorContext) => Promise<void>;
 
 interface VerificationEvidenceLocation {
   dir: string;
@@ -175,18 +178,13 @@ function verificationFailureSummary(
 
 function recordDurableVerificationRetry(
   session: AutoSession,
-  retryKey: string,
   failureContext: string,
 ): VerificationResult {
-  if (!session.currentUnit) throw new Error("Task verification retry requires a current unit");
-  if (session.pendingVerificationRetry?.unitId === session.currentUnit.id) return "retry";
-  const attempt = (session.verificationRetryCount.get(retryKey) ?? 0) + 1;
-  session.verificationRetryCount.set(retryKey, attempt);
-  session.pendingVerificationRetry = {
-    unitId: session.currentUnit.id,
-    failureContext,
-    attempt,
-  };
+  const unit = session.currentUnit;
+  if (!unit) throw new Error("Task verification retry requires a current unit");
+  if (session.pendingVerificationRetry?.unitId === unit.id) return "retry";
+  const attempt = spendUnitBudget(session.unclaimedUnitBudgets, verificationBudget(unit.type, unit.id));
+  setVerificationRetry(session, unit.type, { unitId: unit.id, failureContext, attempt });
   return "retry";
 }
 
@@ -231,6 +229,9 @@ function recordHostTechnicalVerdict(input: {
         node: process.version,
         platform: process.platform,
         discoverySource: input.result.discoverySource,
+        // The output of each host check, so durableOutputRef resolves from the
+        // database and not from T##-VERIFY.json (ADR-046).
+        checks: evidenceChecks(input.result) as unknown as DomainJsonValue[],
         targetSourceRevisions,
         sourceRevisionAfter: input.sourceAfter?.aggregateRevision ?? "unavailable",
         sourceIntegrity: input.sourceError ?? "stable",
@@ -541,21 +542,19 @@ async function runValidateMilestonePostCheck(
   const { milestone: mid } = parseUnitId(s.currentUnit.id);
   if (!mid) return "continue";
 
-  const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
+  const validationUnit = s.currentUnit;
+  const validationBudget = verificationBudget(validationUnit.type, validationUnit.id);
   const clearValidationRetry = (): void => {
-    s.pendingVerificationRetry = null;
-    s.verificationRetryCount.delete(retryKey);
-    s.verificationRetryFailureHashes.delete(retryKey);
+    clearVerificationRetry(s, validationUnit.type, validationUnit.id);
   };
 
   const setToolFailureRetry = (message: string): VerificationResult => {
-    const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
-    s.verificationRetryCount.set(retryKey, attempt);
-    s.pendingVerificationRetry = {
-      unitId: s.currentUnit!.id,
+    const attempt = spendUnitBudget(s.unclaimedUnitBudgets, validationBudget);
+    setVerificationRetry(s, validationUnit.type, {
+      unitId: validationUnit.id,
       failureContext: message,
       attempt,
-    };
+    });
     return "retry";
   };
 
@@ -577,7 +576,7 @@ async function runValidateMilestonePostCheck(
         `Milestone ${mid} has an open subjective UAT question`,
         mid,
       );
-      await pauseAuto(ctx, pi, {
+      await pauseAuto(ctx, pi, "subjective_uat", {
         message: `Milestone ${mid} is waiting for a genuine subjective UAT decision. Answer it with /gsd uat-answer.`,
         category: "unknown",
       });
@@ -597,7 +596,7 @@ async function runValidateMilestonePostCheck(
     // technical failure. Canonical validation gets one bounded re-validation
     // (the evidence may be stale); when the verdict recurs, pause for human
     // review instead of retrying until the liveness backstop wedges.
-    if (canonicalValidation && (s.verificationRetryCount.get(retryKey) ?? 0) < 1) {
+    if (canonicalValidation && readUnitBudget(s.unclaimedUnitBudgets, validationBudget) < 1) {
       await persistMilestoneValidationGate(
         "retry",
         "verification",
@@ -633,7 +632,7 @@ async function runValidateMilestonePostCheck(
       `Milestone ${mid} validation returned needs-attention`,
       mid,
     );
-    await pauseAuto(ctx, pi, {
+    await pauseAuto(ctx, pi, "machine_fixable", {
       message: `Milestone ${mid} validation needs attention.`,
       category: "unknown",
     });
@@ -695,7 +694,7 @@ async function runValidateMilestonePostCheck(
     `No incomplete slices found for ${mid} while verdict=needs-remediation`,
     mid,
   );
-  await pauseAuto(ctx, pi, {
+  await pauseAuto(ctx, pi, "machine_fixable", {
     message: `Milestone ${mid} validation needs remediation but no remediation slices were added.`,
     category: "unknown",
   });
@@ -711,9 +710,9 @@ async function countIncompleteSlices(_basePath: string, milestoneId: string): Pr
   // DB-authoritative (ADR-017): no markdown fallback. DB unavailable or no
   // rows means "unknown" — do not pause.
   if (!isDbAvailable()) return 1;
-  const slices = getMilestoneSlices(milestoneId);
+  const slices = readMilestoneSlices(milestoneId);
   if (slices.length === 0) return 1;
-  return slices.filter((slice) => !isInactiveStatus(slice.status)).length;
+  return slices.filter((slice) => !slice.done).length;
 }
 
 type BlockerDiscoveredAttempt = VerificationAttemptSnapshot & {
@@ -823,7 +822,7 @@ export async function runPostUnitVerification(
       // it through, so throwing here wedged auto-mode into the ADR-047
       // liveness backstop with no in-engine exit. Pause with the escalation
       // surfaced instead; the operator resolves and resumes with /gsd auto.
-      await pauseAuto(ctx, pi, {
+      await pauseAuto(ctx, pi, "ambiguous_intent", {
         message: describeBlockerPause(mid, sid, tid, latestAttempt),
         category: "unknown",
       });
@@ -863,18 +862,15 @@ export async function runPostUnitVerification(
       typeof prefs?.verification_max_retries === "number"
         ? prefs.verification_max_retries
         : 2;
-    const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
+    const hostVerificationBudget = verificationBudget(s.currentUnit.type, s.currentUnit.id);
 
     if (replayedRecovery === "abort") {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       return "abort";
     }
     if (replayedRecovery === "retry") {
       return recordDurableVerificationRetry(
         s,
-        retryKey,
         `Stored host verification verdict is ${replayedVerdict?.verdict}`,
       );
     }
@@ -920,9 +916,7 @@ export async function runPostUnitVerification(
         replayedVerdict.testedSourceRevision.startsWith("sha256:") &&
         sourceBeforeResult.snapshot.aggregateRevision === replayedVerdict.testedSourceRevision
       ) {
-        s.verificationRetryCount.delete(retryKey);
-        s.verificationRetryFailureHashes.delete(retryKey);
-        s.pendingVerificationRetry = null;
+        clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
         return "continue";
       }
       const failureContext = sourceBeforeResult.ok
@@ -951,7 +945,7 @@ export async function runPostUnitVerification(
         }),
       }, "verification-drift", recordAbort);
       if (recovery === "abort") return "abort";
-      return recordDurableVerificationRetry(s, retryKey, failureContext);
+      return recordDurableVerificationRetry(s, failureContext);
     }
     let result: VerificationGateResult;
     if (unresolvedExplicitTargets) {
@@ -1036,13 +1030,11 @@ export async function runPostUnitVerification(
     }
 
     if (verdict.reason === "execution-fault") {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       const message = `Verification gate execution fault: ${verdict.failureContext}`;
       ctx.ui.notify(message, "error");
       process.stderr.write(`verification-gate: pausing — ${verdict.failureContext}\n`);
-      await pauseAuto(ctx, pi, {
+      await pauseAuto(ctx, pi, "machine_fixable", {
         message,
         category: "unknown",
       });
@@ -1123,7 +1115,7 @@ export async function runPostUnitVerification(
     }
 
     // Write verification evidence JSON
-    const attempt = s.verificationRetryCount.get(retryKey) ?? 0;
+    const attempt = readUnitBudget(s.unclaimedUnitBudgets, hostVerificationBudget);
     // ── Post-execution checks (run after main verification passes for execute-task units) ──
     let postExecChecks: PostExecutionCheckJSON[] | undefined;
     let postExecBlockingFailure = false;
@@ -1140,7 +1132,7 @@ export async function runPostUnitVerification(
           // Reuse the already-loaded task row for post-execution checks.
           if (taskRow && taskRow.key_files && taskRow.key_files.length > 0) {
             // Get all tasks in the slice
-            const allTasks = getSliceTasks(mid, sid);
+            const allTasks = readSliceTasks(mid, sid);
             // Filter to prior completed tasks (status = 'complete' or 'done', before current task)
             const priorTasks = allTasks.filter(
               (t: TaskRow) =>
@@ -1439,26 +1431,20 @@ export async function runPostUnitVerification(
 
     // ── Auto-fix retry logic ──
     if (unrunnablePause) {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       process.stderr.write(
         `${verdict.failureContext}. Install the command or update the verify command, then resume.\n`,
       );
-      await pauseAuto(ctx, pi, {
+      await pauseAuto(ctx, pi, "machine_fixable", {
         message: verdict.failureContext,
         category: "unknown",
       });
       return "pause";
     } else if (hostTechnicalPassed) {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       return "continue";
     } else if (durableRecovery === "abort") {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       return "abort";
     } else if (durableRecovery === "retry") {
       if (s.pendingVerificationRetry?.unitId === s.currentUnit.id) return "retry";
@@ -1472,13 +1458,13 @@ export async function runPostUnitVerification(
       const nextAttempt = attempt + 1;
       const failureContext = postExecFailureSummary || verdict.failureContext || formatFailureContext(result);
       const failureSignature = formatFailureSignature(result);
-      s.verificationRetryCount.set(retryKey, nextAttempt);
-      s.pendingVerificationRetry = {
+      spendUnitBudget(s.unclaimedUnitBudgets, hostVerificationBudget);
+      setVerificationRetry(s, s.currentUnit.type, {
         unitId: s.currentUnit.id,
         failureContext,
         ...(failureSignature ? { signature: failureSignature } : {}),
         attempt: nextAttempt,
-      };
+      });
       const failedCmds = result.checks
         .filter((c) => c.exitCode !== 0)
         .map((c) => c.command);
@@ -1519,8 +1505,7 @@ export async function runPostUnitVerification(
         }),
       }, storedVerdict.supersedesVerdictId ? "verification-drift" : "verification-failed", recordAbort);
       if (recovery === "abort") return "abort";
-      const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
-      return recordDurableVerificationRetry(s, retryKey, message);
+      return recordDurableVerificationRetry(s, message);
     }
     const recorded = recordHostTechnicalVerdict({
       context: vctx,
@@ -1562,8 +1547,7 @@ export async function runPostUnitVerification(
       }),
     }, "verification-failed", recordAbort);
     if (recovery === "abort") return "abort";
-    const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
-    return recordDurableVerificationRetry(s, retryKey, message);
+    return recordDurableVerificationRetry(s, message);
   }
 }
 

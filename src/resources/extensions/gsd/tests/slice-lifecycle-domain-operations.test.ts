@@ -11,11 +11,11 @@ import {
   _getAdapter,
   closeDatabase,
   executeDomainOperation,
-  getClosedSliceIds,
   openDatabase,
   readDomainOperationFence,
 } from "../gsd-db.ts";
 import type { DomainOperationContext } from "../db/domain-operation.ts";
+import { readClosedSliceIds } from "../db/lifecycle-read.ts";
 import {
   adoptOrTransitionLifecycle,
   type CanonicalLifecycleStatus,
@@ -372,7 +372,7 @@ test("slice.cancel records the dependency-bypass decision in one replay-safe Sli
 
   const committed = cancelSlice(input);
   assert.deepEqual(
-    getClosedSliceIds("M001"),
+    readClosedSliceIds("M001"),
     ["S01"],
     "legacy dependency selection treats the cancelled Slice as satisfied",
   );

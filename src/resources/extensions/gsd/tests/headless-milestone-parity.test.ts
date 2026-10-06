@@ -45,7 +45,10 @@ describe("headless milestone bootstrap — parity with interactive flow", () => 
 
     // Match only the actual dispatchWorkflow call — comments in the body
     // may mention "plan-milestone" as part of the fix rationale.
-    const dispatchMatches = [...fnBody.matchAll(/dispatchWorkflow\([\s\S]*?,\s*"([^"]+)"\s*,\s*\{\s*basePath\s*\}\s*\)/g)];
+    // The options object opens with `basePath`; since the Lifecycle Kernel
+    // one-unit bound it may also carry a `claim` wrapper, so the match stops
+    // at the basePath property instead of the object's closing brace.
+    const dispatchMatches = [...fnBody.matchAll(/dispatchWorkflow\([\s\S]*?,\s*"([^"]+)"\s*,\s*\{\s*basePath\b/g)];
     assert.strictEqual(
       dispatchMatches.length,
       1,
@@ -106,7 +109,6 @@ describe("headless milestone bootstrap — parity with interactive flow", () => 
       "PROJECT artifact",
       "REQUIREMENTS artifact",
       "`gsd_plan_milestone`",
-      "`.gsd/DISCUSSION-MANIFEST.json`",
     ]) {
       const escaped = artifact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       assert.ok(
@@ -114,10 +116,6 @@ describe("headless milestone bootstrap — parity with interactive flow", () => 
         `multi-milestone pre-condition must include a checkbox referencing ${artifact}`,
       );
     }
-    assert.ok(
-      /gates_completed === total/.test(multiSection),
-      "multi-milestone pre-condition must still enforce gates_completed === total",
-    );
     assert.ok(/Next steps:/.test(multiSection), "multi-milestone handoff must include next steps");
     assert.ok(/\/gsd auto/.test(multiSection), "multi-milestone handoff must mention /gsd auto");
     assert.ok(/\/gsd status/.test(multiSection), "multi-milestone handoff must mention /gsd status");

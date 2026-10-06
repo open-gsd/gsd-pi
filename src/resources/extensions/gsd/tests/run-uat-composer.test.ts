@@ -18,6 +18,7 @@ import {
   insertSlice,
   insertArtifact,
 } from "../gsd-db.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-runuat-composer-"));
@@ -91,6 +92,7 @@ test("#4782 phase 3: buildRunUatPrompt inlines UAT and keeps summary/project con
   );
 
   const uatContent = "# S01 UAT\n\n- Check X\n- Check Y\n  (fresh in-memory snapshot)\n";
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildRunUatPrompt("M001", "S01", uatRel, uatContent, base);
 
   // Context wrapper present
@@ -140,6 +142,7 @@ test("#4782 phase 3: buildRunUatPrompt omits optional slice summary when file is
   writeFileSync(join(base, uatRel), "# S01 UAT\n");
   // No SUMMARY.md written — composer should skip the slice-summary key.
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildRunUatPrompt("M001", "S01", uatRel, "# S01 UAT\n", base);
 
   // UAT still present

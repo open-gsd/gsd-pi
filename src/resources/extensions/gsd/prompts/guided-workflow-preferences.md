@@ -39,10 +39,9 @@ Apply the defaults:
    - top-level `uat_dispatch: true`
    - top-level `research: skip`
    - nested `models.executor_class: balanced`
-3. Also set top-level `workflow_prefs_captured: true` — this is the single explicit marker the dispatch layer uses to know the wizard has run.
-4. Write `{{workingDirectory}}/.gsd/PREFERENCES.md` back with the merged frontmatter and the original body preserved unchanged. Frontmatter delimiters are exactly `---` on their own lines.
-5. Print a concise summary in chat: each key on its own line, format `key: value`. Include `commit_policy`, `branch_model`, `uat_dispatch`, `models.executor_class`, and `research`.
-6. Say exactly: `"Workflow preferences saved."` — nothing else.
+3. Write `{{workingDirectory}}/.gsd/PREFERENCES.md` back with the merged frontmatter and the original body preserved unchanged. Frontmatter delimiters are exactly `---` on their own lines.
+4. Print a concise summary in chat: each key on its own line, format `key: value`. Include `commit_policy`, `branch_model`, `uat_dispatch`, `models.executor_class`, and `research`.
+5. Say exactly: `"Workflow preferences saved."` — nothing else.
 
 Do NOT write to `.gsd/config.json`; runtime preferences load from `PREFERENCES.md`.
 
@@ -52,5 +51,5 @@ Do NOT write to `.gsd/config.json`; runtime preferences load from `PREFERENCES.m
 
 - Do NOT ask any questions. Defaults only, write file, done.
 - Do NOT call `ask_user_questions`, `AskUserQuestion`, or any other interactive user-input tool in this stage.
-- Do NOT change any keys other than the frontmatter keys specified plus `workflow_prefs_captured`. The research decision is recorded in the database by `gsd_research_decision_save`, NOT in `phases.skip_research`.
+- Do NOT change any keys other than the frontmatter keys specified. The research decision is recorded in the database by `gsd_research_decision_save`, NOT in `phases.skip_research`.
 - Preserve existing explicit values for `commit_policy`, `branch_model`, `uat_dispatch`, and `models.executor_class`; only fill missing values with defaults.

@@ -25,6 +25,7 @@ import { worktreeOwnDbPath } from "../auto-worktree-cleanup.ts";
 import { assertMilestoneDbReadyForMerge } from "../auto-worktree-merge-db-ready.ts";
 import { setActiveWorkspace } from "../auto-worktree-session-registry.ts";
 import { teardownAutoWorktree } from "../auto-worktree-teardown.ts";
+import { registerHooks } from "../bootstrap/register-hooks.ts";
 import {
   generateRequirementsMd,
   readDecisionsProjectionIntent,
@@ -224,24 +225,59 @@ test("the explicit import previews without a row change, then merges the rows an
   const authorityBefore = projectAuthority();
 
   let previewedMilestones = 0;
+  let previewedStatusChanges: string[] = [];
   const cancelled = await importWorktreeLocalDb(mainDb, wtDb, async (preview) => {
     previewedMilestones = preview.milestones;
+    previewedStatusChanges = preview.statusChanges;
     return false;
   });
   assert.equal(cancelled, "cancelled");
   assert.equal(previewedMilestones, 1, "the preview counts the row that would change");
+  assert.deepEqual(previewedStatusChanges, ['milestone M001: "active" -> "complete"'], "the preview names each status change");
   assert.deepEqual(projectMilestoneRows(), before, "a preview and a cancel change no project row");
   assert.deepEqual(projectAuthority(), authorityBefore, "a preview records no Domain Operation and no revision");
   assert.equal(existsSync(wtDb), true);
 
-  assert.equal(await importWorktreeLocalDb(mainDb, wtDb, async () => true), "imported");
-  assert.notDeepEqual(projectAuthority(), authorityBefore, "the import is a Domain Operation with a revision");
+  const imported = await importWorktreeLocalDb(mainDb, wtDb, async () => true);
+  assert.ok(typeof imported === "object", "the import ran");
+  assert.deepEqual(projectAuthority(), {
+    revision: (authorityBefore as { revision: number }).revision + 1,
+    operations: (authorityBefore as { operations: number }).operations + 1,
+  }, "the import is one Domain Operation with one revision");
+  assert.ok(
+    Number(_getAdapter()!.prepare("SELECT COUNT(*) AS n FROM workflow_projection_work").get()?.["n"]) > 0,
+    "the import records Projection Work",
+  );
   const [row] = projectMilestoneRows() as Array<{ title: string; status: string }>;
   assert.equal(row!.title, "Worktree title");
   assert.equal(row!.status, "complete");
   assert.equal(existsSync(wtDb), false, "the imported file no longer blocks a merge");
   assert.equal(existsSync(`${wtDb}.imported`), true, "the imported file is kept");
   assert.equal(await importWorktreeLocalDb(mainDb, wtDb, async () => true), "absent");
+
+  // The backup is the project database before the import.
+  closeDatabase();
+  assert.equal(openDatabase(imported.backupPath), true);
+  assert.deepEqual(projectMilestoneRows(), before);
+});
+
+test("the explicit import writes nothing when the project database changed after the preview", async (t) => {
+  const { wt, mainDb } = makeWorktreeProject(t);
+  const wtDb = seedWorktreeLocalDb(mainDb, wt);
+
+  await assert.rejects(
+    importWorktreeLocalDb(mainDb, wtDb, async () => {
+      // Another session changes the project row while the operator reads the preview.
+      _getAdapter()!.prepare("UPDATE milestones SET status = 'queued' WHERE id = 'M001'").run();
+      return true;
+    }),
+    /no longer equals the confirmed preview; nothing was imported/,
+  );
+
+  const [row] = projectMilestoneRows() as Array<{ title: string; status: string }>;
+  assert.equal(row!.title, "Project title", "no worktree value is written");
+  assert.equal(row!.status, "queued");
+  assert.equal(existsSync(wtDb), true, "the worktree database stays for the next import");
 });
 
 function git(args: string[], cwd: string): string {
@@ -347,4 +383,52 @@ test("the manual worktree merge stops on a worktree-local gsd.db with the import
     `the stop names the explicit import: ${JSON.stringify(notices)}`,
   );
   assert.deepEqual(projectMilestoneRows(), before);
+});
+
+/** The agent_end handlers of the real hook registration. */
+function agentEndHooks(): () => Promise<void> {
+  const handlers: Array<(event: unknown, ctx: unknown) => Promise<unknown>> = [];
+  registerHooks({
+    on: (name: string, handler: (event: unknown, ctx: unknown) => Promise<unknown>) => {
+      if (name === "agent_end") handlers.push(handler);
+    },
+  } as never, []);
+  const ctx = { ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} } };
+  return async () => {
+    for (const handler of handlers) await handler({ messages: [] }, ctx);
+  };
+}
+
+test("the LLM-guided manual worktree merge renders the project-root projections after its commit", async (t) => {
+  const { base, wt } = makeManualWorktreeProject(t);
+  // Both sides change README.md, so the deterministic merge is in conflict.
+  writeFileSync(join(wt, "README.md"), "# worktree\n");
+  git(["commit", "-am", "docs: worktree readme"], wt);
+  writeFileSync(join(base, "README.md"), "# main\n");
+  git(["commit", "-am", "docs: main readme"], base);
+  const agentEnd = agentEndHooks();
+
+  const { ctx, notices } = manualMergeContext();
+  const sent: unknown[] = [];
+  await handleWorktreeCommand("merge feature", ctx, { sendMessage: (message: unknown) => sent.push(message) } as never, "worktree");
+  assert.equal(sent.length, 1, `the merge goes to the LLM helper: ${JSON.stringify(notices)}`);
+
+  // The agent ends a turn before it merges (it asks the operator first).
+  await agentEnd();
+  assert.match(
+    readFileSync(resolveMilestoneFile(base, "M001", "ROADMAP")!, "utf-8"),
+    /File slice/,
+    "nothing is rendered before the merge commit",
+  );
+
+  // The agent merges and commits.
+  assert.throws(() => git(["merge", "--squash", git(["rev-parse", "--abbrev-ref", "HEAD"], wt)], base));
+  git(["checkout", "--theirs", "--", "README.md"], base);
+  git(["add", "README.md"], base);
+  git(["commit", "-m", "merge(worktree/feature): feature"], base);
+  await agentEnd();
+
+  const roadmap = readFileSync(resolveMilestoneFile(base, "M001", "ROADMAP")!, "utf-8");
+  assert.match(roadmap, /Database slice/, "the root ROADMAP is the database render after the LLM merge");
+  assert.doesNotMatch(roadmap, /File slice/);
 });

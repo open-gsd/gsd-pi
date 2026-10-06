@@ -65,7 +65,7 @@ export function teardownAutoWorktree(
 
     // Mirror cleanup steps from mergeMilestoneToMain abort path:
 
-    // 1. Remove transient state files (STATE.md, auto.lock, .gsd/{MID}-META.json).
+    // 1. Remove the transient state file (.gsd/{MID}-META.json).
     //    Non-fatal — must not block teardown.
     try {
       clearProjectRootStateFiles(originalBasePath, milestoneId);

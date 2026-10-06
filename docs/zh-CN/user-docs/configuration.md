@@ -294,7 +294,7 @@ phases:
 
 ### `reactive_execution`
 
-控制一个 slice 内部的自动并行 task 派发。该功能默认开启；只有当 task plan 的 IO 注解能生成不含歧义的依赖图，并且存在足够的 ready、互不冲突 tasks 时才会真正派发。
+控制一个 slice 内部的自动并行 task 派发。该功能默认开启；只有当 task 行中计划的输入和预期输出能生成不含歧义的依赖图，并且存在足够的 ready、互不冲突 tasks 时才会真正派发。
 
 ```yaml
 reactive_execution:

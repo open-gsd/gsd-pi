@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify } from "yaml";
 
-import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
+import { CustomWorkflowEngine, stepIdOfUnit } from "../custom-workflow-engine.ts";
 import { runCustomVerificationWithEvidence } from "../custom-verification.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import {
@@ -152,7 +152,7 @@ describe("iterate expansion — basic", () => {
     // Should dispatch the first instance step
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "iter-wf/iter-step--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "iter-step--001");
       assert.equal(result.step.prompt, "Process Alpha");
     }
 
@@ -200,7 +200,7 @@ describe("iterate expansion — full dispatch→reconcile sequence", () => {
     let result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "seq-wf/fan--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--001");
       assert.equal(result.step.prompt, "Handle One");
     }
 
@@ -209,7 +209,7 @@ describe("iterate expansion — full dispatch→reconcile sequence", () => {
     result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "seq-wf/fan--002");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--002");
       assert.equal(result.step.prompt, "Handle Two");
     }
 
@@ -218,7 +218,7 @@ describe("iterate expansion — full dispatch→reconcile sequence", () => {
     result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "seq-wf/fan--003");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--003");
       assert.equal(result.step.prompt, "Handle Three");
     }
 
@@ -269,7 +269,7 @@ describe("iterate expansion — downstream blocking", () => {
     let result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "block-wf/fan--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--001");
     }
 
     // Verify downstream dep was rewritten: merge now depends on fan--001, fan--002
@@ -284,7 +284,7 @@ describe("iterate expansion — downstream blocking", () => {
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
       // Should get fan--002, not merge
-      assert.equal(result.step.unitId, "block-wf/fan--002");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--002");
     }
 
     // Complete instance 2 — now merge should be dispatchable
@@ -292,7 +292,7 @@ describe("iterate expansion — downstream blocking", () => {
     result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "block-wf/merge");
+      assert.equal(stepIdOfUnit(result.step.unitId), "merge");
       assert.equal(result.step.prompt, "Merge all results");
     }
 
@@ -354,7 +354,7 @@ describe("iterate expansion — zero matches", () => {
     // Let's check what actually happened:
     if (result.action === "dispatch") {
       // The re-query found "after" step (since its deps were rewritten to [])
-      assert.equal(result.step.unitId, "zero-wf/after");
+      assert.equal(stepIdOfUnit(result.step.unitId), "after");
     } else {
       // The engine returned stop for zero instances
       assert.equal(result.action, "stop");
@@ -424,7 +424,7 @@ describe("iterate expansion — idempotency", () => {
     let result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "idem-wf/fan--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--001");
     }
 
     // Second dispatch without reconciling: should return the same instance
@@ -433,7 +433,7 @@ describe("iterate expansion — idempotency", () => {
     result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "idem-wf/fan--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--001");
     }
 
     // Verify no double-expansion: still only 2 instances

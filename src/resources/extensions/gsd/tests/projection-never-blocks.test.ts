@@ -93,6 +93,54 @@ test("G2: poisoned projections before dispatch are rendered again and never stop
   assert.equal(after[statePath], control[statePath], "STATE.md is back to the database render");
 });
 
+test("G2 multi-dispatch: poison before every dispatch, the run still finishes clean every round", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  assert.deepEqual((await rebuildMarkdownProjectionsFromDb(base)).errors, []);
+  const control = liveProjections(base);
+  const tablesBefore = snapshotWorkflowTables();
+  const statePath = Object.keys(control).find((path) => path.endsWith(`${sep}STATE.md`))!;
+  const gsdRoot = join(Object.keys(control)[0]!.split(`${sep}.gsd${sep}`)[0]!, ".gsd");
+
+  // The poisoned bytes of the first round stay the reference for every round.
+  poisonProjections(base);
+  const poisonedOnce = liveProjections(base);
+  const changed = Object.keys(control)
+    .filter((path) => path !== statePath && poisonedOnce[path] !== control[path]);
+  assert.ok(changed.length >= 3, "the fixture poisons the projections");
+  const copiesByRound = new Map(changed.map((path) => [path, [] as string[]]));
+
+  for (const round of [1, 2, 3]) {
+    if (round > 1) poisonProjections(base);
+    const poisoned = liveProjections(base);
+    // The real pre-dispatch sequence that runs before every dispatch.
+    const observation = await preserveProjectionChangesBeforeDispatch(base);
+    const reconciled = await reconcileBeforeDispatch(base);
+    const drift = await repairProjectionDrift(base);
+
+    assert.deepEqual(observation.held, [], `round ${round}: no dispatch stops on a held file`);
+    assert.deepEqual(observation.errors, [], `round ${round}: the run finishes`);
+    assert.deepEqual(drift.errors, [], `round ${round}: the run finishes`);
+    assert.deepEqual(reconciled.blockers, [], `round ${round}: no dispatch stops`);
+    assert.deepEqual(snapshotWorkflowTables(), tablesBefore, `round ${round}: the DB snapshot equals the control run`);
+
+    const after = liveProjections(base);
+    const notice = describePreservedProjectionChanges(base, observation.preserved);
+    for (const path of changed) {
+      const rel = relative(gsdRoot, path).split(sep).join("/");
+      assert.equal(after[path], control[path], `round ${round}: ${rel} is back to the database render`);
+      assert.deepEqual(
+        quarantineCopies(base, rel),
+        [...copiesByRound.get(path)!, poisoned[path]],
+        `round ${round}: ${rel} has one quarantine copy for this dispatch`,
+      );
+      copiesByRound.set(path, quarantineCopies(base, rel));
+      assert.equal(notice.split(`.gsd/${rel} -> `).length, 2, `round ${round}: ${rel} is in the user notice once`);
+    }
+    assert.equal(after[statePath], control[statePath], `round ${round}: STATE.md is back to the database render`);
+  }
+});
+
 test("drift repair renders again a task summary that is older than the database", async () => {
   fixture = await createWorkflowAuthorityFixture();
   const base = fixture.root;

@@ -15,11 +15,11 @@ import { renderStateProjection } from "./workflow-projections.js";
 import { loadQueueOrder, renderQueueOrder } from "./queue-order.js";
 import {
   executeDomainOperation,
-  getMilestone,
   isDbAvailable,
   projectCanonicalStatusToLegacy,
 } from "./gsd-db.js";
-import { getDb } from "./db/engine.js";
+import { readMilestone, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
+import { getDiscardRows } from "./db/lifecycle-queries.js";
 import type { DomainOperationContext } from "./db/domain-operation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import {
@@ -31,7 +31,7 @@ import {
 import { removeWorktree } from "./worktree-manager.js";
 import { logWarning } from "./workflow-logger.js";
 import { isAutoActive } from "./auto-runtime-state.js";
-import { adoptionLifecycleStatus, isClosedStatus } from "./status-guards.js";
+import { adoptionLifecycleStatus } from "./status-guards.js";
 import { removeManagedProjectionTreeExactSync } from "./managed-projection-history.js";
 import { GSDError, GSD_STALE_STATE } from "./errors.js";
 import { readMilestoneParkRecord, renderMilestoneParkedMarker } from "./milestone-park-projection.js";
@@ -169,11 +169,11 @@ export async function parkMilestone(
 ): Promise<boolean> {
   if (!options.fromAutoLoop) assertNotAutoActive("park milestone");
   assertDbAvailable("parkMilestone", milestoneId);
-  const milestone = getMilestone(milestoneId);
+  const milestone = readMilestone(milestoneId);
   // Do not park a closed milestone — it would corrupt depends_on satisfaction.
   if (
     !isReplay(options.invocation) &&
-    (!milestone || milestone.status === "parked" || isClosedStatus(milestone.status))
+    (!milestone || milestone.parked || milestone.closed)
   ) return false;
 
   try {
@@ -208,7 +208,7 @@ export async function unparkMilestone(
 ): Promise<boolean> {
   assertNotAutoActive("unpark milestone");
   assertDbAvailable("unparkMilestone", milestoneId);
-  if (!isReplay(invocation) && getMilestone(milestoneId)?.status !== "parked") return false;
+  if (!isReplay(invocation) && !readMilestone(milestoneId)?.parked) return false;
 
   try {
     runMilestoneOperation("unpark", milestoneId, { parked: false }, (context) =>
@@ -224,33 +224,19 @@ export async function unparkMilestone(
 
 // ─── Discard ───────────────────────────────────────────────────────────────
 
-interface DiscardRow {
-  slice_id: string | null;
-  task_id: string | null;
-  status: string;
-  lifecycle_status: string | null;
-}
+/** Every hierarchy row the discard of one Milestone cancels (the read lives in db/lifecycle-queries.ts). */
+const loadDiscardRows = getDiscardRows;
 
-function loadDiscardRows(milestoneId: string): DiscardRow[] {
-  const lifecycleJoin = (kind: string, slice: string, task: string) => `
-    LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = '${kind}'
-     AND lifecycle.milestone_id = :milestone_id
-     AND lifecycle.slice_id IS ${slice}
-     AND lifecycle.task_id IS ${task}`;
-  return getDb().prepare(`
-    SELECT task.slice_id, task.id AS task_id, task.status, lifecycle.lifecycle_status
-    FROM tasks task ${lifecycleJoin("task", "task.slice_id", "task.id")}
-    WHERE task.milestone_id = :milestone_id
-    UNION ALL
-    SELECT slice.id, NULL, slice.status, lifecycle.lifecycle_status
-    FROM slices slice ${lifecycleJoin("slice", "slice.id", "NULL")}
-    WHERE slice.milestone_id = :milestone_id
-    UNION ALL
-    SELECT NULL, NULL, milestone.status, lifecycle.lifecycle_status
-    FROM milestones milestone ${lifecycleJoin("milestone", "NULL", "NULL")}
-    WHERE milestone.id = :milestone_id
-  `).all({ ":milestone_id": milestoneId }) as unknown as DiscardRow[];
+/** The Slices (`S01`) and Tasks (`S01/T01`) of the milestone that the read interface answers as closed. */
+function readClosedDiscardItems(milestoneId: string): Set<string> {
+  const closed = new Set<string>();
+  for (const slice of readMilestoneSlices(milestoneId)) {
+    if (slice.closed) closed.add(slice.id);
+    for (const task of readSliceTasks(milestoneId, slice.id)) {
+      if (task.done) closed.add(`${slice.id}/${task.id}`);
+    }
+  }
+  return closed;
 }
 
 /**
@@ -268,10 +254,10 @@ function cancelMilestoneHierarchy(
   if (rows.some((row) => row.lifecycle_status === "in_progress" && row.task_id !== null)) {
     throw new Error(`${milestoneId} has running task work; settle it first with /gsd task settle`);
   }
+  const closed = readClosedDiscardItems(milestoneId);
   let milestoneLifecycleId = "";
   for (const row of rows) {
-    if (isClosedStatus(row.status) && row.task_id !== null) continue;
-    if (isClosedStatus(row.status) && row.slice_id !== null) continue;
+    if (row.slice_id !== null && closed.has(row.task_id !== null ? `${row.slice_id}/${row.task_id}` : row.slice_id)) continue;
     const identity = row.task_id !== null
       ? { itemKind: "task" as const, milestoneId, sliceId: row.slice_id!, taskId: row.task_id }
       : row.slice_id !== null
@@ -305,8 +291,9 @@ function cancelMilestoneHierarchy(
  * removed as projection cleanup. Returns false when the milestone is not in
  * the database. Throws when the milestone is complete or the write fails.
  *
- * The slash command records the Waiver as granted by the user. A tool call
- * comes from the agent, so its Waiver is granted by policy, like a slice skip.
+ * The operator grants the Waiver as the user, from the slash command or from a
+ * typed host command. A tool call comes from the agent, so its Waiver is
+ * granted by policy, like a slice skip.
  */
 export async function discardMilestone(
   basePath: string,
@@ -315,16 +302,16 @@ export async function discardMilestone(
 ): Promise<boolean> {
   assertNotAutoActive("discard milestone");
   assertDbAvailable("discardMilestone", milestoneId);
-  const milestone = getMilestone(milestoneId);
+  const milestone = readMilestone(milestoneId);
   if (!milestone) return false;
-  if (!isReplay(options.invocation) && isClosedStatus(milestone.status)) {
+  if (!isReplay(options.invocation) && milestone.closed) {
     throw new Error(`${milestoneId} is already closed (${milestone.status}) and cannot be discarded`);
   }
 
   const reason = options.reason ?? "Discarded by user";
-  const grantedBy = options.invocation
-    ? { grantedByActorType: "policy" as const, grantedByActorId: options.invocation.actorId ?? null }
-    : { grantedByActorType: "user" as const, grantedByActorId: "gsd-cli-operator" };
+  const grantedBy = !options.invocation || options.invocation.actorType === "operator"
+    ? { grantedByActorType: "user" as const, grantedByActorId: options.invocation?.actorId ?? "gsd-cli-operator" }
+    : { grantedByActorType: "policy" as const, grantedByActorId: options.invocation.actorId ?? null };
   runMilestoneOperation("discard", milestoneId, { reason }, (context) =>
     cancelMilestoneHierarchy(context, milestoneId, reason, grantedBy), options.invocation);
 
@@ -354,7 +341,7 @@ export async function discardMilestone(
 
 /** Whether the database records the milestone as parked. */
 export function isParked(milestoneId: string): boolean {
-  return isDbAvailable() && getMilestone(milestoneId)?.status === "parked";
+  return isDbAvailable() && readMilestone(milestoneId)?.parked === true;
 }
 
 /** The reason recorded by the park Domain Operation, or null. */

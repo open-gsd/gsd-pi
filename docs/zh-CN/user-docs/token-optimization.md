@@ -168,7 +168,7 @@ Tasks 会通过分析 task plan 来分类：
 
 ## 自适应学习（Routing History）
 
-GSD 会随着时间推移记录每个 tier 分配的成功 / 失败情况，并据此调整未来的分类。它默认自动生效，并持久化在 `.gsd/routing-history.json` 中。
+GSD 会随着时间推移记录每个 tier 分配的成功 / 失败情况，并据此调整未来的分类。它默认自动生效，并持久化在项目数据库（`.gsd/gsd.db`）中。
 
 ### 工作方式
 
@@ -191,12 +191,10 @@ GSD 会随着时间推移记录每个 tier 分配的成功 / 失败情况，并�
 
 ### 数据管理
 
-```bash
-# Routing history 按项目存储
-.gsd/routing-history.json
+Routing history 按项目存储在项目数据库（`.gsd/gsd.db`）中。旧版本留下的 `.gsd/routing-history.json` 文件不再被读取。
 
-# 清空历史以重置自适应学习
-# （通过 routing-history 模块 API 完成）
+```
+/gsd rate reset   # 清空历史以重置自适应学习
 ```
 
 反馈数组最多保留 200 条。每个 pattern 的结果统计使用 50 条滚动窗口，以防陈旧数据长期主导判断。
@@ -269,7 +267,7 @@ PREFERENCES.md
        │    ├─ task plan 分析（steps、files、signals）
        │    ├─ unit type 默认值
        │    ├─ budget pressure 调整
-       │    ├─ 从 routing-history.json 做自适应学习
+       │    ├─ 从 routing history 做自适应学习
        │    └─ capability scoring（当 `capability_routing: true` 时）
        │         └─ 7 维 model profile × task requirement vectors
        └─ context_management

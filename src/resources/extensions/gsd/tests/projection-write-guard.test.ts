@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 import { registerHooks } from "../bootstrap/register-hooks.ts";
 import { resetToolCallLoopGuard } from "../bootstrap/tool-call-loop-guard.ts";
-import { markDepthVerified, resetWriteGateState } from "../bootstrap/write-gate.ts";
+import { markDepthVerified, clearDiscussionFlowState } from "../bootstrap/write-gate.ts";
 
 type Handler = (event: any, ctx?: any) => Promise<any> | any;
 type Block = { block?: boolean; reason?: string } | undefined;
@@ -20,7 +20,7 @@ const ctx = { cwd: BASE, ui: { notify: () => undefined } } as any;
 // M001 has passed the depth question, so its CONTEXT write reaches the projection guard.
 markDepthVerified("M001", BASE);
 after(() => {
-  resetWriteGateState(BASE);
+  clearDiscussionFlowState(BASE);
   rmSync(BASE, { recursive: true, force: true });
 });
 
@@ -47,11 +47,16 @@ async function guard(toolName: string, input: Record<string, unknown>): Promise<
 // Each managed projection kind, in both layouts, with the tool that owns it.
 const PROJECTIONS: Array<[path: string, tool: RegExp]> = [
   [".gsd/PROJECT.md", /gsd_summary_save/],
+  [".gsd/PROJECT-DRAFT.md", /artifact_type "PROJECT-DRAFT"/],
   [".gsd/REQUIREMENTS.md", /gsd_requirement_save/],
+  [".gsd/REQUIREMENTS-DRAFT.md", /artifact_type "REQUIREMENTS-DRAFT"/],
   [".gsd/DECISIONS.md", /gsd_decision_save/],
   [".gsd/KNOWLEDGE.md", /capture_thought/],
   [".gsd/CAPTURES.md", /gsd_capture_resolve/],
   [".gsd/QUEUE.md", /gsd_milestone_reorder/],
+  [".gsd/QUEUE-ORDER.json", /gsd_milestone_reorder/],
+  [".gsd/OVERRIDES.md", /\/gsd steer/],
+  [".gsd/BACKLOG.md", /\/gsd backlog/],
   [".gsd/milestones/M001/slices/S01/S01-REPLAN.md", /gsd_replan_slice/],
   [".gsd/ROADMAP.md", /gsd_plan_milestone/],
   [".gsd/milestones/M001/M001-ROADMAP.md", /gsd_plan_milestone/],
@@ -65,6 +70,8 @@ const PROJECTIONS: Array<[path: string, tool: RegExp]> = [
   [".gsd/milestones/M001/slices/S01/S01-UAT.md", /gsd_slice_complete/],
   [".gsd/milestones/M001/slices/S01/S01-ASSESSMENT.md", /gsd_uat_result_save/],
   [".gsd/milestones/M001/slices/S01/S01-UI-SPEC.md", /gsd_summary_save/],
+  [".gsd/milestones/M001/M001-SPEC.md", /gsd_summary_save/],
+  [".gsd/milestones/M001/slices/S01/S01-AI-SPEC.md", /gsd_summary_save/],
   [".gsd/milestones/M001/slices/S01/tasks/T01-PLAN.md", /gsd_plan_task/],
   [".gsd/milestones/M001/slices/S01/tasks/T01-SUMMARY.md", /gsd_task_complete/],
   [".gsd/phases/01-auth/01-CONTEXT.md", /gsd_summary_save/],

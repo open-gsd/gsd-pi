@@ -14,19 +14,20 @@ import {
 } from "./command-feedback.js";
 import { setQueuePhaseActive } from "./index.js";
 import { loadFile } from "./files.js";
+import { milestoneNarrative } from "./auto-prompts.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
 import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
 import {
-  gsdRoot, resolveMilestoneFile, resolveSliceFile,
+  gsdRoot, resolveSliceFile,
   resolveGsdRootFile, relGsdRootFile, relSliceFile,
-  relMilestoneFile,
 } from "./paths.js";
 import { existsSync } from "node:fs";
 import { nativeAddPaths, nativeCommit } from "./native-git-bridge.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { loadQueueOrder, sortByQueueOrder, reorderMilestones } from "./queue-order.js";
 import { findMilestoneIds, nextMilestoneId } from "./milestone-ids.js";
+import { readListedMilestoneIds } from "./db/lifecycle-read.js";
 import { isFutureMilestoneStatus } from "./status-guards.js";
 import { renderStateProjection } from "./workflow-projections.js";
 
@@ -64,7 +65,7 @@ export async function showQueue(
   }
 
   const state = await deriveState(basePath);
-  const milestoneIds = findMilestoneIds(basePath);
+  const milestoneIds = readListedMilestoneIds();
 
   if (milestoneIds.length === 0) {
     ctx.ui.notify("No milestones exist yet. Run /gsd to create the first one.", "warning");
@@ -178,17 +179,15 @@ export async function showQueueAdd(
   basePath: string,
   state: Awaited<ReturnType<typeof deriveState>>,
 ): Promise<void> {
-  const milestoneIds = findMilestoneIds(basePath);
-
   // ── Build existing milestones context for the prompt ────────────────
-  const existingContext = await buildExistingMilestonesContext(basePath, milestoneIds, state);
+  const existingContext = await buildExistingMilestonesContext(basePath, readListedMilestoneIds(), state);
 
   // ── Determine next milestone ID ─────────────────────────────────────
   // Note: the LLM will use the gsd_milestone_generate_id tool to get IDs
   // at creation time, but we still mention the next ID in the preamble
   // for context about where the sequence is.
   const uniqueEnabled = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
-  const nextId = nextMilestoneId(milestoneIds, uniqueEnabled);
+  const nextId = nextMilestoneId(findMilestoneIds(basePath), uniqueEnabled);
 
   // ── Build preamble ──────────────────────────────────────────────────
   const activePart = state.activeMilestone
@@ -277,39 +276,25 @@ export async function buildExistingMilestonesContext(
     const parts: string[] = [];
     parts.push(`### ${mid}: ${title}\n**Status:** ${status}`);
 
-    // Include context file — this is the primary content for understanding scope
-    const contextFile = resolveMilestoneFile(basePath, mid, "CONTEXT");
-    if (contextFile) {
-      const content = await loadFile(contextFile);
-      if (content) {
-        parts.push(
-          `\n**Context:**\n${summarizeArtifactForQueue(content, relMilestoneFile(basePath, mid, "CONTEXT"))}`,
-        );
-      }
+    // Include the saved context — this is the primary content for understanding scope.
+    // Narrative comes from artifact rows, never from the projection files.
+    const context = milestoneNarrative(basePath, mid, "CONTEXT");
+    if (context.content) {
+      parts.push(`\n**Context:**\n${summarizeArtifactForQueue(context.content, context.relPath)}`);
     } else {
-      // No full CONTEXT.md — check for CONTEXT-DRAFT.md (draft seed from prior discussion)
-      const draftFile = resolveMilestoneFile(basePath, mid, "CONTEXT-DRAFT");
-      if (draftFile) {
-        const draftContent = await loadFile(draftFile);
-        if (draftContent) {
-          parts.push(
-            `\n**Draft context available:**\n${summarizeArtifactForQueue(draftContent, relMilestoneFile(basePath, mid, "CONTEXT-DRAFT"))}`,
-          );
-        }
+      // No full CONTEXT — check for a CONTEXT-DRAFT (draft seed from prior discussion)
+      const draft = milestoneNarrative(basePath, mid, "CONTEXT-DRAFT");
+      if (draft.content) {
+        parts.push(`\n**Draft context available:**\n${summarizeArtifactForQueue(draft.content, draft.relPath)}`);
       }
     }
 
     // For active/pending/parked milestones, include the roadmap if it exists
     // (shows what's planned but not yet built)
     if (status === "active" || isFutureMilestoneStatus(status) || status === "parked") {
-      const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
-      if (roadmapFile) {
-        const content = await loadFile(roadmapFile);
-        if (content) {
-          parts.push(
-            `\n**Roadmap:**\n${summarizeArtifactForQueue(content, relMilestoneFile(basePath, mid, "ROADMAP"))}`,
-          );
-        }
+      const roadmap = milestoneNarrative(basePath, mid, "ROADMAP");
+      if (roadmap.content) {
+        parts.push(`\n**Roadmap:**\n${summarizeArtifactForQueue(roadmap.content, roadmap.relPath)}`);
       }
     }
 

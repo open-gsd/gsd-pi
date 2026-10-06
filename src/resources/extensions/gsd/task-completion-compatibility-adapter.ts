@@ -40,6 +40,10 @@ import {
   resolveVerificationRepositoryTargets,
 } from "./verification-source-integrity.js";
 import { renderSummaryContent } from "./workflow-projections.js";
+import {
+  TASK_SOURCE_COMMIT_EFFECT,
+  readTaskCloseoutPlan,
+} from "./task-closeout.js";
 
 export interface TaskCompletionIdentity {
   milestoneId: string;
@@ -592,6 +596,26 @@ function taskQualityGateContent(attempt: AttemptRow): TaskQualityGateContent {
   };
 }
 
+/**
+ * The receipt gate of a Task publication (ADR-050): when the Task carries a
+ * Closeout Plan whose source commit is its required effect, publication runs
+ * only with the effect's Settlement Receipt. A refused or failed commit
+ * leaves the Task unpublished with its Attempt settled; the git-commit repair
+ * retry (#2618) repairs it. A Task whose commit is not GSD's to make (the
+ * effect is not in the plan, or there is no plan) publishes without it.
+ */
+export function refuseUnsettledTaskSourceCommit(task: TaskCompletionIdentity): void {
+  const commitEffect = readTaskCloseoutPlan(task)?.effects
+    .find((effect) => effect.effectKind === TASK_SOURCE_COMMIT_EFFECT);
+  if (!commitEffect || commitEffect.receipt) return;
+  throw new Error(
+    `Verified Task publication refused: the Closeout Plan of ${task.milestoneId}/${task.sliceId}/` +
+    `${task.taskId} has no Settlement Receipt for its source commit. The Task stays unpublished with ` +
+    "its Attempt settled; commit the Task source and publish again (the auto loop commits before " +
+    "publication; a refused commit is repaired by the stored git-commit retry).",
+  );
+}
+
 function publishCanonicalCompletion(
   input: PublishVerifiedTaskCompletionInput,
 ): "committed" | "replayed" {
@@ -747,6 +771,9 @@ function readoptReadyLifecycleShadowForPublication(input: PublishVerifiedTaskCom
 export async function publishVerifiedTaskCompletion(
   input: PublishVerifiedTaskCompletionInput,
 ): Promise<PublishedTaskCompletionReceipt> {
+  // ADR-050: the receipt gate runs before any mutation — a refused commit
+  // must not spend the ready→in_progress re-adoption or the source capture.
+  refuseUnsettledTaskSourceCommit(input.task);
   requireCurrentVerifiedSource(input);
   readoptReadyLifecycleShadowForPublication(input);
   const status = publishCanonicalCompletion(input);

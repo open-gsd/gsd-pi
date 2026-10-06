@@ -6,19 +6,17 @@ import { dirname, join } from "node:path";
 
 import {
   getLatestAssessmentByScope,
-  getMilestone,
-  getMilestoneSlices,
   getPendingGates,
-  getSliceTasks,
   insertAssessment,
   isDbAvailable,
   transaction,
 } from "./gsd-db.js";
+import { readMilestone, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import {
   getWorkflowDatabasePath,
   refreshWorkflowDatabaseFromDisk,
 } from "./db-workspace.js";
-import { isClosedStatus, isDeferredStatus } from "./status-guards.js";
+import { isDeferredStatus } from "./status-guards.js";
 import {
   closeQualityGatesFromEvidence,
   inspectQualityGatesFromEvidence,
@@ -179,12 +177,12 @@ function artifactBasePathFromDb(): string | undefined {
 
 /** Every slice and every task of the milestone is closed in the DB. No SUMMARY file is read. */
 function allSlicesAndTasksClosed(milestoneId: string): boolean {
-  const slices = getMilestoneSlices(milestoneId);
+  const slices = readMilestoneSlices(milestoneId);
   if (slices.length === 0) return false;
 
   return slices.every((slice) =>
-    isClosedStatus(slice.status) &&
-    getSliceTasks(milestoneId, slice.id).every((task) => isClosedStatus(task.status)));
+    slice.closed &&
+    readSliceTasks(milestoneId, slice.id).every((task) => task.done));
 }
 
 function renderCloseoutPassThroughValidation(milestoneId: string): string {
@@ -228,7 +226,7 @@ function recordCloseoutPassThroughValidationIfReady(
       scope: "milestone-validation",
       fullContent: content,
     });
-    const gateSliceId = getMilestoneSlices(milestoneId)[0]?.id;
+    const gateSliceId = readMilestoneSlices(milestoneId)[0]?.id;
     if (gateSliceId) {
       insertMilestoneValidationGates(
         milestoneId,
@@ -264,7 +262,7 @@ export function checkCloseoutConsistencyGate(
     );
   }
 
-  const milestone = getMilestone(milestoneId);
+  const milestone = readMilestone(milestoneId);
   if (!milestone) {
     return blocked(
       "milestone-missing",
@@ -274,7 +272,7 @@ export function checkCloseoutConsistencyGate(
   // An open Milestone with a Closeout Plan is prepared: its completion
   // requirements are proven and it completes when the host settles the plan.
   if (
-    !isClosedStatus(milestone.status) &&
+    !milestone.closed &&
     !options.allowOpenMilestone &&
     !isMilestoneCloseoutPrepared(milestoneId)
   ) {
@@ -285,7 +283,7 @@ export function checkCloseoutConsistencyGate(
   }
 
   const adoptedMilestone = isMilestoneLifecycleAdopted(milestoneId);
-  const validationRequired = adoptedMilestone || milestone.status !== "skipped";
+  const validationRequired = adoptedMilestone || !milestone.discarded;
   let validation = validationRequired && !adoptedMilestone
     ? getLatestAssessmentByScope(milestoneId, "milestone-validation")
     : null;
@@ -407,8 +405,8 @@ export function checkCloseoutConsistencyGate(
     }
   }
 
-  const slices = getMilestoneSlices(milestoneId);
-  if (slices.length === 0 && milestone.status !== "skipped") {
+  const slices = readMilestoneSlices(milestoneId);
+  if (slices.length === 0 && !milestone.discarded) {
     return blocked(
       "slice-missing",
       `Closeout consistency blocked for ${milestoneId}: no slices exist in canonical DB.`,
@@ -436,7 +434,7 @@ export function checkCloseoutConsistencyGate(
 
   for (const slice of slices) {
     if (isDeferredStatus(slice.status)) continue;
-    if (!isClosedStatus(slice.status)) {
+    if (!slice.closed) {
       return blocked(
         "slice-open",
         `Closeout consistency blocked for ${milestoneId}: slice ${slice.id} status is "${slice.status}".`,
@@ -444,9 +442,9 @@ export function checkCloseoutConsistencyGate(
     }
 
     const taskStatusById = new Map<string, string>();
-    for (const task of getSliceTasks(milestoneId, slice.id)) {
+    for (const task of readSliceTasks(milestoneId, slice.id)) {
       taskStatusById.set(task.id, task.status);
-      if (!isClosedStatus(task.status)) {
+      if (!task.done) {
         return blocked(
           "task-open",
           `Closeout consistency blocked for ${milestoneId}: task ${slice.id}/${task.id} status is "${task.status}".`,

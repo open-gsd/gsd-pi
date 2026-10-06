@@ -45,7 +45,7 @@ export const RPC_COMMAND_TYPES = [
 	"subscribe",
 ] as const;
 
-export const RPC_V2_EVENT_TYPES = ["execution_complete", "cost_update"] as const;
+export const RPC_V2_EVENT_TYPES = ["execution_complete", "cost_update", "workflow_outcome"] as const;
 
 export const RPC_EXTENSION_UI_METHODS = [
 	"select",
@@ -114,6 +114,13 @@ export interface ProjectProgress {
 	tasks: { total: number; done: number; pending: number };
 	requirements: { active: number; validated: number; deferred: number; outOfScope: number } | null;
 	blockers: string[];
+	/**
+	 * The open canonical blocker rows at the revision of this read — the same
+	 * rows `ProjectSnapshot.blockers` returns, so the two outputs can give
+	 * equal blockers at one revision. Absent in a projection read and in a
+	 * producer older than the field.
+	 */
+	blockerRows?: ProjectSnapshotBlocker[];
 	nextAction: string;
 	milestoneDetails?: Array<{
 		id: string;
@@ -215,11 +222,18 @@ export interface ProjectSnapshot {
 /**
  * A workflow mutation that a host sends as a typed command, not as
  * slash-command text. It runs the same executor as the workflow tool of the
- * same name.
+ * same name. `capture_register` and `override_register` have no workflow
+ * tool: they run the Domain Operation of `/gsd capture` and `/gsd steer`,
+ * with the operator as the actor.
  */
 export type WorkflowCommandRequest =
 	| { name: "milestone_park"; args: { milestoneId: string; reason: string } }
-	| { name: "milestone_unpark"; args: { milestoneId: string } };
+	| { name: "milestone_unpark"; args: { milestoneId: string } }
+	| { name: "milestone_discard"; args: { milestoneId: string; reason: string } }
+	| { name: "milestone_reorder"; args: { order: string[] } }
+	| { name: "milestone_set_dependencies"; args: { milestoneId: string; dependsOn: string[] } }
+	| { name: "capture_register"; args: { text: string } }
+	| { name: "override_register"; args: { change: string } };
 
 export interface WorkflowCommandIdentity {
 	/**
@@ -393,7 +407,65 @@ export interface RpcCostUpdateEvent {
 	};
 }
 
-export type RpcV2Event = RpcExecutionCompleteEvent | RpcCostUpdateEvent;
+/**
+ * The typed outcome of a GSD workflow run (ADR-046). The extension emits it
+ * when auto-mode stops or pauses, so hosts derive the run's terminal state
+ * from the event instead of matching notification text; the text classifiers
+ * stay as a fallback for runs of an older extension.
+ *
+ * Exit codes keep their meaning: completed → 0, error and timeout → 1,
+ * blocked → 10, cancelled → 11.
+ */
+export type WorkflowOutcomeStatus = "completed" | "error" | "timeout" | "blocked" | "cancelled";
+
+export interface RpcWorkflowOutcomeEvent {
+	type: "workflow_outcome";
+	status: WorkflowOutcomeStatus;
+	/** The standardized exit code the status maps to. */
+	exitCode: 0 | 1 | 10 | 11;
+	/** Human-readable reason, when the run ended with one. */
+	reason?: string;
+	/** The unit that was active when the run ended, when one was. */
+	unitType?: string;
+	unitId?: string;
+}
+
+export type RpcV2Event = RpcExecutionCompleteEvent | RpcCostUpdateEvent | RpcWorkflowOutcomeEvent;
+
+/** The custom message type that carries the typed outcome on the event stream. */
+export const WORKFLOW_OUTCOME_CUSTOM_TYPE = "gsd-workflow-outcome" as const;
+
+/**
+ * Read the typed outcome a GSD extension reported on a custom message. Returns
+ * null for every other message or for a payload that does not match the
+ * contract, so a host falls back to the notification-text classifiers.
+ */
+export function parseWorkflowOutcomeCustomMessage(event: {
+	type: string;
+	message?: { customType?: unknown; content?: unknown };
+}): RpcWorkflowOutcomeEvent | null {
+	if (event.type !== "message_end") return null;
+	if (!event.message || event.message.customType !== WORKFLOW_OUTCOME_CUSTOM_TYPE) return null;
+	try {
+		const parsed = JSON.parse(String(event.message.content ?? "")) as Record<string, unknown>;
+		if (parsed["type"] !== "workflow_outcome") return null;
+		const status = parsed["status"];
+		const exitCode = parsed["exitCode"];
+		if (typeof status !== "string") return null;
+		if (exitCode !== 0 && exitCode !== 1 && exitCode !== 10 && exitCode !== 11) return null;
+		const outcome: RpcWorkflowOutcomeEvent = {
+			type: "workflow_outcome",
+			status: status as WorkflowOutcomeStatus,
+			exitCode: exitCode as 0 | 1 | 10 | 11,
+		};
+		if (typeof parsed["reason"] === "string") outcome.reason = parsed["reason"] as string;
+		if (typeof parsed["unitType"] === "string") outcome.unitType = parsed["unitType"] as string;
+		if (typeof parsed["unitId"] === "string") outcome.unitId = parsed["unitId"] as string;
+		return outcome;
+	} catch {
+		return null;
+	}
+}
 
 /** Agent event — a loosely typed record from the RPC event stream. */
 export interface SdkAgentEvent {

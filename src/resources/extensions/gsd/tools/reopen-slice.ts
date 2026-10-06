@@ -23,8 +23,8 @@
 import {
   getSliceRunUatAssessment,
   getSliceTasks,
-  getDb,
 } from "../gsd-db.js";
+import { getMilestoneCanonicalLifecycleStatus } from "../db/lifecycle-queries.js";
 import {
   isCurrentSliceReopenOperation,
   reopenSlice,
@@ -35,6 +35,7 @@ import { isMilestoneLifecycleAdopted } from "../db/milestone-closeout-readiness.
 import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import { invalidateStateCache } from "../state.js";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { renderPlanCheckboxes } from "../markdown-renderer.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
@@ -88,17 +89,7 @@ export function _setReopenSliceCleanupInterleaveForTest(hook: (() => void) | nul
  */
 function milestoneCanonicalTerminal(milestoneId: string): boolean {
   try {
-    const row = getDb().prepare(`
-      SELECT lifecycle.lifecycle_status AS status
-      FROM milestones milestone
-      LEFT JOIN workflow_item_lifecycles lifecycle
-        ON lifecycle.project_id = (SELECT project_id FROM project_authority WHERE singleton = 1)
-       AND lifecycle.item_kind = 'milestone'
-       AND lifecycle.milestone_id = milestone.id
-       AND lifecycle.slice_id IS NULL
-      WHERE milestone.id = :milestone_id
-    `).get({ ":milestone_id": milestoneId }) as Record<string, unknown> | undefined;
-    const status = row?.["status"];
+    const status = getMilestoneCanonicalLifecycleStatus(milestoneId);
     return status === "completed" || status === "cancelled";
   } catch {
     return false;
@@ -178,6 +169,9 @@ export async function handleReopenSlice(
     if (!(error instanceof SliceLifecycleValidationError)) throw error;
     return { error: error.message };
   }
+
+  // A reopened unit gets its verification retries again (ADR-048).
+  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}`);
 
   // ── Invalidate caches ────────────────────────────────────────────────────
   invalidateStateCache();

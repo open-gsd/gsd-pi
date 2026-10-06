@@ -1,14 +1,13 @@
 import { clearParseCache } from "../files.js";
 import { assertVerifyIsShellCheckable, validateVerificationCommand } from "../verification-gate.js";
 import { normalizeVerifyCommandForVenv } from "../python-resolver.js";
-import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
+import { readSlice, readTask } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import {
   adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
-  getSlice,
-  getTask,
   insertGateRow,
   insertTask,
   setSliceSketchFlag,
@@ -263,11 +262,11 @@ export async function handlePlanTask(
         { itemKind: "task", milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
       ],
       mutate(context) {
-        const parentSlice = getSlice(params.milestoneId, params.sliceId);
+        const parentSlice = readSlice(params.milestoneId, params.sliceId);
         if (!parentSlice) {
           throw new PlanningGuardError(`missing parent slice: ${params.milestoneId}/${params.sliceId}`);
         }
-        if (isClosedStatus(parentSlice.status)) {
+        if (parentSlice.closed) {
           throw new PlanningGuardError(`cannot plan task in a closed slice: ${params.sliceId} (status: ${parentSlice.status})`);
         }
         const parentLifecycle = adoptLifecycleIfMissing(context, {
@@ -282,8 +281,8 @@ export async function handlePlanTask(
           );
         }
 
-        const existingTask = getTask(params.milestoneId, params.sliceId, params.taskId);
-        if (existingTask && isClosedStatus(existingTask.status)) {
+        const existingTask = readTask(params.milestoneId, params.sliceId, params.taskId);
+        if (existingTask?.done) {
           throw new PlanningGuardError(`cannot re-plan task ${params.taskId}: it is already complete — use gsd_task_reopen first`);
         }
         let existingLifecycle: ReturnType<typeof adoptLifecycleIfMissing> | null = null;

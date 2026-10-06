@@ -12,9 +12,9 @@ import type { PostflightResult, PreflightResult } from "../clean-root-preflight.
 import { MergeConflictError } from "../git-service.js";
 import { findUnmergedCompletedMilestones } from "../unmerged-milestone-guard.js";
 import { getIsolationMode } from "../preferences.js";
-import { isDbAvailable, getMilestone } from "../gsd-db.js";
+import { isDbAvailable } from "../gsd-db.js";
+import { readMilestone } from "../db/lifecycle-read.js";
 import { refreshWorkflowDatabaseFromDisk } from "../db-workspace.js";
-import { isClosedStatus } from "../status-guards.js";
 import { gsdRoot } from "../paths.js";
 import { atomicWriteSync } from "../atomic-write.js";
 import { logWarning, logError } from "../workflow-logger.js";
@@ -151,7 +151,7 @@ export async function _runMilestoneMergeWithStashRestore(
       // "stopped" surface.
       const conflictReason = `Merge conflict on milestone ${milestoneId}: ${mergeError.conflictedFiles.join(", ")}. Resolve conflicts manually and run /gsd auto to resume.`;
       ctx.ui.notify(conflictReason, "error");
-      await deps.pauseAuto(ctx, pi, {
+      await deps.pauseAuto(ctx, pi, "machine_fixable", {
         message: conflictReason,
         category: "unknown",
       });
@@ -171,7 +171,7 @@ export async function _runMilestoneMergeWithStashRestore(
     // resumable and stopAuto's teardown does not re-run the failed merge.
     const mergeFailReason = `Merge error on milestone ${milestoneId}: ${mergeError instanceof Error ? mergeError.message : String(mergeError)}. Resolve and run /gsd auto to resume.`;
     ctx.ui.notify(mergeFailReason, "error");
-    await deps.pauseAuto(ctx, pi, {
+    await deps.pauseAuto(ctx, pi, "machine_fixable", {
       message: mergeFailReason,
       category: "unknown",
     });
@@ -247,7 +247,7 @@ export async function shouldSkipTerminalMilestoneCloseout(
     }
   }
   const milestoneAlreadyClosedOut = isDbAvailable()
-    && isClosedStatus(getMilestone(closeoutMilestoneId)?.status ?? "")
+    && readMilestone(closeoutMilestoneId)?.closed === true
     && !closeoutMergePending;
   if (milestoneAlreadyClosedOut) {
     return { skip: true, milestoneId: closeoutMilestoneId };

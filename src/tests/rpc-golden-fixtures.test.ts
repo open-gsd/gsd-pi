@@ -74,14 +74,18 @@ test("RPC golden bash response uses canonical BashResult wire shape", () => {
   assert.equal(bashResponse.data.truncated, false);
 });
 
-test("RPC golden events cover completion and cost telemetry", () => {
+test("RPC golden events cover completion, cost telemetry and the typed outcome", () => {
   const eventTypes = new Set(rpcGoldenEvents.map(event => event.type));
   const completeEvent = rpcGoldenEvents.find(event => event.type === "execution_complete");
   const costEvent = rpcGoldenEvents.find(event => event.type === "cost_update");
+  const outcomeEvent = rpcGoldenEvents.find(event => event.type === "workflow_outcome");
 
-  assert.deepEqual(eventTypes, new Set(["execution_complete", "cost_update"]));
+  assert.deepEqual(eventTypes, new Set(["execution_complete", "cost_update", "workflow_outcome"]));
   assert.equal(completeEvent?.status, "completed");
   assert.equal(costEvent?.tokens.total, undefined);
   assert.equal(costEvent?.tokens.input, 1000);
   assert.equal(costEvent?.cumulativeCost, 0.05);
+  assert.equal(outcomeEvent?.status, "blocked");
+  assert.equal(outcomeEvent?.exitCode, 10);
+  assert.equal(outcomeEvent?.reason, "Validation failed for milestone M001");
 });

@@ -14,7 +14,10 @@ import { readUnitHarnessAbort } from "../unit-runtime.ts";
 
 type Handler = (event: any, ctx?: any) => Promise<any> | any;
 
-function makeHookHarness(): {
+// agent_end reads the write gate, and that read opens the project database of
+// `cwd`. A test that asserts on database rows after agent_end passes its own
+// base, so a database in the process working directory cannot replace its own.
+function makeHookHarness(cwd: string = process.cwd()): {
   emitToolCall: (toolName: string, input: Record<string, unknown>) => Promise<any>;
   emitToolResult: (event: Record<string, unknown>) => Promise<void>;
   emitToolExecutionEnd: (event: Record<string, unknown>) => Promise<void>;
@@ -29,7 +32,7 @@ function makeHookHarness(): {
     },
   };
   const ctx = {
-    cwd: process.cwd(),
+    cwd,
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
   };
   let callId = 0;
@@ -576,7 +579,7 @@ test("register-hooks preserves a turn-abort and does not overwrite it with a sub
     rmSync(base, { recursive: true, force: true });
   });
 
-  const { emitAgentEnd, emitToolExecutionEnd } = makeHookHarness();
+  const { emitAgentEnd, emitToolExecutionEnd } = makeHookHarness(base);
   await emitAgentEnd({
     messages: [{ role: "assistant", stopReason: "aborted", errorMessage: "context truncated" }],
   });
@@ -685,7 +688,7 @@ test("register-hooks only records agent_end turn aborts for aborted or error sto
     rmSync(base, { recursive: true, force: true });
   });
 
-  const { emitAgentEnd } = makeHookHarness();
+  const { emitAgentEnd } = makeHookHarness(base);
   await emitAgentEnd({
     abortOrigin: "auto-context",
     messages: [{ stopReason: "stop" }],

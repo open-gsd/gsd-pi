@@ -92,7 +92,7 @@ Once the user has explicitly confirmed, run all commands from `{{mainTreePath}}`
    - For a conflict in a managed `.gsd` projection, take either side with git (`git checkout --theirs -- <path>` or `--ours`, then `git add <path>`). Do not edit the file.
 5. Commit with message: `merge(worktree/{{worktreeName}}): <summary of what was merged>`
 6. Report what was merged
-7. If a managed `.gsd` projection was in the merge, tell the user to run `/gsd rebuild markdown` to render the files again from the database. A real content change to a roadmap, plan, decision or requirement goes through the workflow tools, not a file edit.
+7. GSD renders the managed `.gsd` projections again from the database after your merge commit. Do not render or edit them. A real content change to a roadmap, plan, decision or requirement goes through the workflow tools, not a file edit.
 
 ### Step 5: Cleanup Prompt
 

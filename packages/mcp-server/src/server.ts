@@ -26,21 +26,32 @@ import { isRemoteConfigured, tryRemoteQuestions } from './remote-questions.js';
 import type { RemoteToolResult } from './remote-questions.js';
 import { readProgress } from './readers/state.js';
 import { readRoadmap } from './readers/roadmap.js';
-import { readHistory } from './readers/metrics.js';
+import { historyResultFromDatabase, readHistory } from './readers/metrics.js';
 import { capturesResultFromDatabase, readCaptures } from './readers/captures.js';
 import { knowledgeResultFromMarkdown, readKnowledge } from './readers/knowledge.js';
-import { buildGraph, writeGraph, writeSnapshot, graphStatus, graphQuery, graphDiff } from './readers/graph.js';
+import {
+  buildGraph,
+  writeGraph,
+  writeSnapshot,
+  graphStatus,
+  graphQuery,
+  graphDiff,
+  type GraphDatabaseSource,
+} from './readers/graph.js';
 import { resolveGsdRoot, findMilestoneIds, resolveMilestoneFile } from './readers/paths.js';
 import { runDoctorLite } from './readers/doctor-lite.js';
 import {
   hasWorkflowToolBridgeConfiguration,
   readProjectProgressViaBridge,
   readCapturesViaBridge,
+  readHistoryViaBridge,
   readProjectQueryViaBridge,
   readRoadmapViaBridge,
   readKnowledgeViaBridge,
   runDoctorViaBridge,
   registerWorkflowTools,
+  runSerializedWorkflowOperation,
+  resolvePersistedBlockerViaBridge,
   validateProjectDir,
   warmWorkflowToolBridges,
 } from './workflow-tools.js';
@@ -275,6 +286,25 @@ function normalizeQuery(query: string | undefined): QueryCategory {
   const key = (query ?? 'all').trim().toLowerCase();
   if (key in QUERY_FIELDS) return key as QueryCategory;
   return 'all';
+}
+
+/**
+ * The node source of a `gsd_graph` build from the workflow database, or
+ * undefined when the GSD runtime or the database is not available. The build
+ * then parses the .gsd/ projections and the result is labelled a projection
+ * fallback.
+ */
+async function readGraphDatabaseSource(projectDir: string): Promise<GraphDatabaseSource | undefined> {
+  if (!hasWorkflowToolBridgeConfiguration()) return undefined;
+  const roadmap = await readRoadmapViaBridge(projectDir) as Pick<GraphDatabaseSource, 'milestones'> | null;
+  if (roadmap === null) return undefined;
+  const query = await readProjectQueryViaBridge(projectDir, QUERY_FIELDS.state);
+  const knowledge = await readKnowledgeViaBridge(projectDir);
+  return {
+    state: typeof query?.state === 'string' ? query.state : '',
+    knowledge: knowledge ?? '',
+    milestones: roadmap.milestones,
+  };
 }
 
 /**
@@ -727,11 +757,15 @@ async function recordAskUserQuestionsPendingGate(
   if (!writeGate) return;
 
   const basePath = askUserQuestionsWriteGateBasePath(deps);
-  for (const question of questions) {
-    if (writeGate.isGateQuestionId(question.id)) {
-      writeGate.setPendingGate(question.id, basePath);
+  // Gate state is rows of the project database, so the write runs in the
+  // workflow queue like every other database use.
+  await runSerializedWorkflowOperation(async () => {
+    for (const question of questions) {
+      if (writeGate.isGateQuestionId(question.id)) {
+        writeGate.setPendingGate(question.id, basePath);
+      }
     }
-  }
+  });
 }
 
 async function recordAskUserQuestionsGateResult(
@@ -743,24 +777,27 @@ async function recordAskUserQuestionsGateResult(
   if (!writeGate) return;
 
   const basePath = askUserQuestionsWriteGateBasePath(deps);
-  if (writeGate.applyAskUserQuestionsGateResult) {
-    writeGate.applyAskUserQuestionsGateResult({
-      basePath,
-      questions: structured.questions,
-      details: structured,
-    });
-    return;
-  }
+  const response = structured.response;
+  await runSerializedWorkflowOperation(async () => {
+    if (writeGate.applyAskUserQuestionsGateResult) {
+      writeGate.applyAskUserQuestionsGateResult({
+        basePath,
+        questions: structured.questions,
+        details: structured,
+      });
+      return;
+    }
 
-  for (const question of structured.questions) {
-    if (!writeGate.isGateQuestionId(question.id)) continue;
-    const selected = structured.response.answers[question.id]?.selected;
-    if (!writeGate.isDepthConfirmationAnswer(selected, question.options)) continue;
+    for (const question of structured.questions) {
+      if (!writeGate.isGateQuestionId(question.id)) continue;
+      const selected = response.answers[question.id]?.selected;
+      if (!writeGate.isDepthConfirmationAnswer(selected, question.options)) continue;
 
-    writeGate.markApprovalGateVerified(question.id, basePath);
-    writeGate.markDepthVerified(writeGate.extractDepthVerificationMilestoneId(question.id), basePath);
-    writeGate.clearPendingGate(basePath);
-  }
+      writeGate.markApprovalGateVerified(question.id, basePath);
+      writeGate.markDepthVerified(writeGate.extractDepthVerificationMilestoneId(question.id), basePath);
+      writeGate.clearPendingGate(basePath);
+    }
+  });
 }
 
 /**
@@ -1356,18 +1393,41 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   // gsd_resolve_blocker — resolve a pending blocker
   // -----------------------------------------------------------------------
+  //
+  // Two kinds of blocker:
+  //   1. A UI request that a live session waits on. It exists only while the
+  //      session's child process runs, so it is answered through the session.
+  //   2. An open escalation question in the project database. It is a row, so
+  //      it is resolved from the database and needs no session (it works after
+  //      a server restart).
+  // -----------------------------------------------------------------------
   server.tool(
     'gsd_resolve_blocker',
-    'Resolve a pending blocker in a GSD session by sending a response to the UI request.',
+    'Resolve a pending blocker. With sessionId: answer the UI request that the session waits on. With projectDir: resolve the open escalation stored in the project database (this works after a server restart); sessionId is then not used. For an escalation the response is "<choice> [rationale]"; choice is an option id, "accept" (the recommendation), or "reject-blocker".',
     {
-      sessionId: z.string().describe('Session ID returned from gsd_execute'),
+      sessionId: z.string().optional().describe('Session ID returned from gsd_execute'),
+      projectDir: z.string().optional().describe('Absolute path to the project directory. Resolves the open escalation in the project database.'),
+      questionId: z.string().optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open.'),
       response: z.string().describe('Response to send for the pending blocker'),
     },
-    async (args: Record<string, unknown>) => {
-      const { sessionId, response } = args as { sessionId: string; response: string };
+    async (args: Record<string, unknown>, extra?: McpToolExtra) => {
+      const { sessionId, projectDir, questionId, response } = args as {
+        sessionId?: string; projectDir?: string; questionId?: string; response: string;
+      };
       try {
-        await sessionManager.resolveBlocker(sessionId, response);
-        return jsonContent({ resolved: true });
+        if (!projectDir) {
+          if (!sessionId) return errorContent('Either sessionId or projectDir must be provided');
+          if (!sessionManager.getSession(sessionId)) {
+            return errorContent(`Session not found: ${sessionId}. Pass projectDir to resolve a blocker that the project database holds.`);
+          }
+          await sessionManager.resolveBlocker(sessionId, response);
+          return jsonContent({ resolved: true });
+        }
+        const result = await resolvePersistedBlockerViaBridge(validateProjectDir(projectDir), response, questionId, extra);
+        if (result.status !== 'resolved' && result.status !== 'rejected-to-blocker') {
+          return errorContent(result.message);
+        }
+        return jsonContent({ resolved: true, source: 'database', ...result });
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }
@@ -1466,7 +1526,7 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_history',
-    'Get execution history with cost, token usage, model, and duration per unit. Returns totals across all units. No session required.',
+    'Get execution history with cost, token usage, model, and duration per unit. Returns totals across all units. No session required — reads the workflow database when the GSD runtime is available. When the database is not available or holds no unit rows, reads .gsd/metrics.json (the result then carries readMetadata { source: projection, authority: projection-fallback }).',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
       limit: z.number().optional().describe('Max entries to return (most recent first). Default: all.'),
@@ -1474,7 +1534,15 @@ export async function createMcpServer(
     async (args: Record<string, unknown>) => {
       const { projectDir, limit } = args as { projectDir: string; limit?: number };
       try {
-        return jsonContent(readHistory(validateProjectDir(projectDir), limit));
+        const dir = validateProjectDir(projectDir);
+        const fromFile = readHistory(dir, limit);
+        if (hasWorkflowToolBridgeConfiguration()) {
+          const fromDb = await readHistoryViaBridge(dir);
+          if (fromDb !== null && (fromDb.length > 0 || fromFile.totals.units === 0)) {
+            return jsonContent(historyResultFromDatabase(fromDb, limit));
+          }
+        }
+        return jsonContent(fromFile);
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }
@@ -1559,7 +1627,8 @@ export async function createMcpServer(
   // gsd_graph — knowledge graph for GSD projects
   //
   // Modes:
-  //   build   Parse .gsd/ artifacts and write graph.json atomically.
+  //   build   Build the graph from the workflow database (.gsd/ projections
+  //           when it is not available) and write graph.json atomically.
   //   query   Search the graph for nodes matching a term (BFS, budget-trimmed).
   //   status  Check whether graph.json exists and whether it is stale (>24h).
   //   diff    Compare graph.json with the last build snapshot.
@@ -1570,8 +1639,11 @@ export async function createMcpServer(
       'Manage the GSD project knowledge graph. No session required.',
       '',
       'Modes:',
-      '  build   Parse .gsd/ artifacts (STATE.md, milestone ROADMAPs, slice PLANs,',
-      '          KNOWLEDGE.md) and write .gsd/graphs/graph.json atomically.',
+      '  build   Build the graph and write .gsd/graphs/graph.json atomically. Milestone,',
+      '          slice, task, state and knowledge nodes come from the workflow database',
+      '          when the GSD runtime is available, from the .gsd/ projections (STATE.md,',
+      '          milestone ROADMAPs, slice PLANs, KNOWLEDGE.md) otherwise. The result',
+      '          carries readMetadata provenance.',
       '  query   Search graph nodes by term (BFS from seed matches, budget-trimmed).',
       '          Returns matching nodes and reachable edges within the token budget.',
       '  status  Show whether graph.json exists, its age, node/edge counts, and',
@@ -1606,13 +1678,17 @@ export async function createMcpServer(
             if (snapshot) {
               await writeSnapshot(gsdRoot).catch(() => { /* best-effort */ });
             }
-            const graph = await buildGraph(projectDir);
+            const database = await readGraphDatabaseSource(projectDir);
+            const graph = await buildGraph(projectDir, database);
             await writeGraph(gsdRoot, graph);
             return jsonContent({
               built: true,
               nodeCount: graph.nodes.length,
               edgeCount: graph.edges.length,
               builtAt: graph.builtAt,
+              readMetadata: database
+                ? { source: 'database', authority: 'db-authoritative' }
+                : { source: 'projection', authority: 'projection-fallback' },
             });
           }
 

@@ -1,4 +1,4 @@
-// gsd-pi + Unit budget tests: retry budgets live on the unit_dispatches row (ADR-048)
+// gsd-pi + Unit budget and retry tests: both live on the unit_dispatches row (ADR-048)
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  _getAdapter,
   openDatabase,
   closeDatabase,
   insertMilestone,
@@ -22,6 +23,14 @@ import {
   spendUnitBudget,
   type UnitBudgetRef,
 } from "../db/unit-dispatch-budgets.ts";
+
+import {
+  readPreviousUnitRetry,
+  readStoredUnitRetry,
+  releaseUnitRetry,
+  releaseVerificationRetry,
+  storeUnitRetry,
+} from "../db/unit-dispatch-retries.ts";
 
 const PLAN_SLICE_PRE_EXEC: UnitBudgetRef = { unitType: "plan-slice", unitId: "M001/S01", kind: "pre-exec" };
 
@@ -142,4 +151,70 @@ test("a unit with no dispatch row keeps its budget for the process only", (t) =>
 
   resetUnitBudget(beforeKill.unclaimedUnitBudgets, PLAN_SLICE_PRE_EXEC);
   assert.equal(readUnitBudget(beforeKill.unclaimedUnitBudgets, PLAN_SLICE_PRE_EXEC), 0);
+});
+
+// ─── Stored retries ──────────────────────────────────────────────────────────
+
+const ARTIFACT_RETRY = { unitId: "M001/S01", failureContext: "the plan artifact is missing", attempt: 1 };
+const PRE_EXECUTION_RETRY = {
+  unitId: "M001/S01",
+  failureContext: "task T01 reads a file that no task creates",
+  signature: "pre-execution:1",
+  attempt: 1,
+};
+
+test("the retry before the stored one is the one an earlier dispatch of the unit stored", (t) => {
+  const project = openProject(t);
+  const firstDispatch = project.claim("plan-slice");
+  storeUnitRetry("plan-slice", ARTIFACT_RETRY);
+  assert.equal(readPreviousUnitRetry("plan-slice", "M001/S01"), null, "the first failure has no failure before it");
+
+  markFailed(firstDispatch, { errorSummary: "artifact missing" });
+  project.claim("plan-slice");
+  assert.deepEqual(
+    readPreviousUnitRetry("plan-slice", "M001/S01"),
+    ARTIFACT_RETRY,
+    "the new dispatch has stored nothing yet, and the last failure is already the one before it",
+  );
+
+  const second = { ...ARTIFACT_RETRY, failureContext: "the plan has no tasks", attempt: 2 };
+  storeUnitRetry("plan-slice", second);
+
+  closeDatabase();
+  openDatabase(project.dbPath);
+  assert.deepEqual(readStoredUnitRetry("plan-slice", "M001/S01"), second);
+  assert.deepEqual(readPreviousUnitRetry("plan-slice", "M001/S01"), ARTIFACT_RETRY);
+});
+
+test("a verification gate releases its own retries and keeps a pre-execution retry", (t) => {
+  const project = openProject(t);
+  const firstDispatch = project.claim("plan-slice");
+  storeUnitRetry("plan-slice", PRE_EXECUTION_RETRY);
+  markFailed(firstDispatch, { errorSummary: "plan refused" });
+  project.claim("plan-slice");
+  storeUnitRetry("plan-slice", ARTIFACT_RETRY);
+
+  releaseVerificationRetry("plan-slice", "M001/S01");
+  assert.deepEqual(
+    readStoredUnitRetry("plan-slice", "M001/S01"),
+    PRE_EXECUTION_RETRY,
+    "the plan is still refused, so the planner must still be selected after a restart",
+  );
+
+  releaseUnitRetry("plan-slice", "M001/S01");
+  assert.equal(readStoredUnitRetry("plan-slice", "M001/S01"), null);
+});
+
+test("a database that got the retry table before the signature column gets the column on open", (t) => {
+  const project = openProject(t);
+  project.claim("plan-slice");
+  storeUnitRetry("plan-slice", ARTIFACT_RETRY);
+  _getAdapter()!.exec("ALTER TABLE unit_dispatch_retries DROP COLUMN signature");
+
+  closeDatabase();
+  openDatabase(project.dbPath);
+
+  assert.deepEqual(readStoredUnitRetry("plan-slice", "M001/S01"), ARTIFACT_RETRY, "the stored retry is kept");
+  storeUnitRetry("plan-slice", PRE_EXECUTION_RETRY);
+  assert.deepEqual(readStoredUnitRetry("plan-slice", "M001/S01"), PRE_EXECUTION_RETRY);
 });

@@ -22,6 +22,13 @@ export interface MilestoneReadiness {
 
 export interface MilestoneReadinessInput {
   status?: string | null;
+  /**
+   * The canonical queued-shell answer of the read interface: the Milestone
+   * lifecycle row is ready with no CONTEXT artifact row and no Slice rows.
+   * Absent for a reader that does not ask the read interface; such a reader
+   * falls back to the legacy `queued` status label.
+   */
+  queuedShell?: boolean;
   hasContext?: boolean;
   hasDraftContext?: boolean;
   hasSummary?: boolean;
@@ -40,7 +47,13 @@ export function classifyMilestoneReadiness(input: MilestoneReadinessInput): Mile
     return { kind: "terminal", hasContext, hasDraftContext, hasExecutablePlan };
   }
 
-  if (status === "queued" && !hasContext && sliceCount === 0) {
+  // The queued shell. The canonical field of the read interface decides when
+  // it answers; the lifecycle vocabulary has no word for queued, so the
+  // legacy label decides only for a reader with no canonical answer.
+  const queuedShell = (input.queuedShell === true || (input.queuedShell === undefined && status === "queued"))
+    && !hasContext
+    && sliceCount === 0;
+  if (queuedShell) {
     return { kind: "queued-shell", hasContext, hasDraftContext, hasExecutablePlan };
   }
 
@@ -83,6 +96,8 @@ export interface ActiveMilestoneCandidate {
   id: string;
   status: string;
   dependsOn: readonly string[];
+  /** The canonical queued-shell answer of the read interface, when the candidate comes from it. */
+  queuedShell?: boolean;
   /** Complete. Only a done Milestone satisfies its dependents. */
   done: boolean;
   parked: boolean;

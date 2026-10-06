@@ -8,9 +8,11 @@ import { noteRenderedProjectionFile } from "./compat/compat-marker.js";
 import { getDbOrNull } from "./db/engine.js";
 import type { DomainJsonValue } from "./db/domain-operation.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import type { ExecutionInvocation } from "./execution-invocation.js";
 import type { Override } from "./files.js";
 import { executeDomainOperation, isDbAvailable } from "./gsd-db.js";
 import { resolveGsdRootFile } from "./paths.js";
+import { deriveState } from "./state.js";
 import { logWarning } from "./workflow-logger.js";
 
 interface OverrideEvent {
@@ -25,16 +27,19 @@ function runOverrideOperation(
   operationType: string,
   payload: DomainJsonValue,
   events: (revision: number) => OverrideEvent[],
+  invocation?: ExecutionInvocation,
 ): void {
   if (!isDbAvailable()) throw new Error(`${operationType} requires the GSD database`);
-  const fence = readDomainOperationFence();
+  const fence = readDomainOperationFence(invocation?.idempotencyKey);
   executeDomainOperation({
     operationType,
-    idempotencyKey: `${operationType}/${fence.revision}`,
-    expectedRevision: fence.revision,
+    idempotencyKey: invocation?.idempotencyKey ?? `${operationType}/${fence.revision}`,
+    // The caller's revision is a precondition of the first send only. A retry
+    // can carry a newer revision, so a replay uses the recorded one.
+    expectedRevision: fence.replay ? fence.revision : invocation?.expectedRevision ?? fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: "operator",
-    sourceTransport: "internal",
+    actorType: invocation?.actorType ?? "operator",
+    sourceTransport: invocation?.sourceTransport ?? "internal",
     payload,
   }, (context) => ({
     events: events(context.resultingRevision).map((event) => ({
@@ -178,11 +183,32 @@ export function renderOverridesProjection(basePath: string): void {
   noteRenderedProjectionFile(path, content);
 }
 
-/** /gsd steer: record one override in an override.register Domain Operation. */
-export function registerOverride(basePath: string, change: string, appliedAt: string): void {
-  runOverrideOperation(basePath, "override.register", { change, appliedAt }, (revision) => [
+/**
+ * Record one override in an override.register Domain Operation. `appliedAt`
+ * (the active unit) is in the event only: a retry of the command can see a
+ * later unit, and the replay-checked request must not change.
+ */
+export function registerOverride(
+  basePath: string,
+  change: string,
+  appliedAt: string,
+  invocation?: ExecutionInvocation,
+): void {
+  runOverrideOperation(basePath, "override.register", { change }, (revision) => [
     { eventType: "override.registered", entityId: `override-${revision}`, payload: { change, appliedAt } },
-  ]);
+  ], invocation);
+}
+
+/** /gsd steer and the `override_register` workflow command: record one override at the active unit of the project. */
+export async function registerSteerOverride(
+  basePath: string,
+  change: string,
+  invocation?: ExecutionInvocation,
+): Promise<void> {
+  const state = await deriveState(basePath);
+  const appliedAt = [state.activeMilestone, state.activeSlice, state.activeTask]
+    .map((ref) => ref?.id ?? "none").join("/");
+  registerOverride(basePath, change, appliedAt, invocation);
 }
 
 /** Resolve every active override in one override.resolve Domain Operation. No-op when none is active. */

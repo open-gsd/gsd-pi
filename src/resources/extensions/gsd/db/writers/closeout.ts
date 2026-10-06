@@ -13,6 +13,22 @@ import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 export const CLOSEOUT_PREPARE_OPERATION = "milestone.closeout.prepare";
 export const CLOSEOUT_SETTLE_EFFECT_OPERATION = "milestone.closeout.settle_effect";
+/** The Task Closeout Plan (ADR-050): its source commit is effect ordinal 1. */
+export const TASK_CLOSEOUT_PREPARE_OPERATION = "task.closeout.prepare";
+export const TASK_CLOSEOUT_SETTLE_EFFECT_OPERATION = "task.closeout.settle_effect";
+/** The kind of the Closeout Effect that commits a Task's source (ADR-050). */
+export const TASK_SOURCE_COMMIT_EFFECT = "task-source-commit";
+/** The only operation type the schema lets insert an Attempt that is already settled. */
+export const WAIVED_VALIDATION_ATTEMPT_OPERATION = "attempt.settle";
+
+const CLOSEOUT_PREPARE_OPERATIONS = new Set([
+  CLOSEOUT_PREPARE_OPERATION,
+  TASK_CLOSEOUT_PREPARE_OPERATION,
+]);
+const CLOSEOUT_SETTLE_EFFECT_OPERATIONS = new Set([
+  CLOSEOUT_SETTLE_EFFECT_OPERATION,
+  TASK_CLOSEOUT_SETTLE_EFFECT_OPERATION,
+]);
 
 export interface CloseoutEffectInput {
   /** One effect per kind in a plan; the kind is also the idempotency key. */
@@ -105,6 +121,74 @@ function planHead(milestoneId: string): PlanHeadRow | undefined {
         WHERE successor.supersedes_closeout_plan_id = plan.closeout_plan_id
       )
   `).get({ ":milestone_id": milestoneId }) as unknown as PlanHeadRow | undefined;
+}
+
+interface LifecyclePlanHeadRow extends PlanHeadRow {
+  milestone_id: string;
+}
+
+/** The plan head of one lifecycle, whatever item kind it belongs to. */
+function lifecyclePlanHead(projectId: string, lifecycleId: string): LifecyclePlanHeadRow | undefined {
+  return getDb().prepare(`
+    SELECT plan.closeout_plan_id, plan.lifecycle_id, lifecycle.lifecycle_status,
+           plan.attempt_id, plan.operation_id, plan.readiness_basis_hash,
+           plan.prepared_at, plan.project_revision,
+           lifecycle.last_project_revision AS lifecycle_revision,
+           lifecycle.milestone_id
+    FROM workflow_closeout_plans plan
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = plan.lifecycle_id
+     AND lifecycle.project_id = plan.project_id
+    WHERE lifecycle.project_id = :project_id
+      AND lifecycle.lifecycle_id = :lifecycle_id
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_closeout_plans successor
+        WHERE successor.supersedes_closeout_plan_id = plan.closeout_plan_id
+      )
+    ORDER BY plan.project_revision DESC
+  `).get({ ":project_id": projectId, ":lifecycle_id": lifecycleId }) as
+    unknown as LifecyclePlanHeadRow | undefined;
+}
+
+/**
+ * The closeout plan the lifecycle's next plan must supersede, or null when the
+ * lifecycle has no plan yet. Unlike `readLifecycleCloseoutPlan` this names the
+ * unsuperseded head even when the head rule reads it as history, so a new
+ * plan always replaces it and one lifecycle never carries two live plans.
+ */
+export function readLifecycleCloseoutPlanHeadId(
+  projectId: string,
+  lifecycleId: string,
+): string | null {
+  return lifecyclePlanHead(projectId, lifecycleId)?.closeout_plan_id ?? null;
+}
+
+/**
+ * The Closeout Plan that speaks for one lifecycle now (ADR-050), whatever
+ * item kind the lifecycle belongs to. The same head rule as
+ * `readMilestoneCloseoutPlan` applies: a plan prepared before the last
+ * lifecycle transition of an open item is history.
+ */
+export function readLifecycleCloseoutPlan(
+  projectId: string,
+  lifecycleId: string,
+): CloseoutPlan | null {
+  const head = lifecyclePlanHead(projectId, lifecycleId);
+  if (!head) return null;
+  if (head.lifecycle_status !== "completed" && head.project_revision <= head.lifecycle_revision) {
+    return null;
+  }
+  return {
+    closeoutPlanId: head.closeout_plan_id,
+    milestoneId: head.milestone_id,
+    lifecycleId: head.lifecycle_id,
+    lifecycleStatus: head.lifecycle_status,
+    attemptId: head.attempt_id,
+    operationId: head.operation_id,
+    readinessBasisHash: head.readiness_basis_hash,
+    preparedAt: head.prepared_at,
+    effects: planEffects(head.closeout_plan_id),
+  };
 }
 
 function planEffects(closeoutPlanId: string): CloseoutEffect[] {
@@ -208,8 +292,12 @@ export function readUnsettledEffectsBehind(
       .some((effect) => effect.effectKind === effectKind && !effect.receipt));
 }
 
-/** The settled, succeeded Attempt a Closeout Plan must cite, newest first. */
-export function readCloseoutAttemptId(milestoneId: string): string | null {
+/**
+ * The settled Attempt a Closeout Plan must cite, newest first. The Attempt
+ * must have succeeded, unless the Milestone closes out on a validation Waiver:
+ * then the newest settled Attempt of any outcome is the one the Waiver covers.
+ */
+export function readCloseoutAttemptId(milestoneId: string, waived = false): string | null {
   const row = getDb().prepare(`
     SELECT attempt.attempt_id
     FROM workflow_execution_attempts attempt
@@ -221,16 +309,69 @@ export function readCloseoutAttemptId(milestoneId: string): string | null {
      AND authority.singleton = 1
     JOIN workflow_attempt_results result
       ON result.attempt_id = attempt.attempt_id
-     AND result.outcome = 'succeeded'
     WHERE lifecycle.item_kind = 'milestone'
       AND lifecycle.milestone_id = :milestone_id
       AND lifecycle.slice_id IS NULL
       AND lifecycle.task_id IS NULL
       AND attempt.attempt_state = 'settled'
+      AND (:waived = 1 OR result.outcome = 'succeeded')
     ORDER BY attempt.attempt_number DESC
     LIMIT 1
-  `).get({ ":milestone_id": milestoneId });
+  `).get({ ":milestone_id": milestoneId, ":waived": waived ? 1 : 0 });
   return typeof row?.["attempt_id"] === "string" ? row["attempt_id"] : null;
+}
+
+/**
+ * Record the validation Attempt of a Milestone whose validation was waived
+ * before it ran: the first Attempt of the lifecycle, settled as interrupted
+ * by the Waiver. The Closeout Plan of the Milestone cites it.
+ */
+export function insertWaivedValidationAttempt(
+  context: Readonly<DomainOperationContext>,
+  input: { lifecycleId: string; waiverId: string; settledAt: string },
+): string {
+  if (requireActiveDomainOperationContext(context) !== WAIVED_VALIDATION_ATTEMPT_OPERATION) {
+    throw new Error(`Waived validation Attempt requires a ${WAIVED_VALIDATION_ATTEMPT_OPERATION} Domain Operation`);
+  }
+  const attemptId = randomUUID();
+  const provenance = {
+    ":attempt_id": attemptId,
+    ":project_id": context.projectId,
+    ":lifecycle_id": input.lifecycleId,
+    ":settled_at": input.settledAt,
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  };
+  getDb().prepare(`
+    INSERT INTO workflow_execution_attempts (
+      attempt_id, project_id, lifecycle_id, attempt_number, retry_of_attempt_id,
+      attempt_state, claimed_at, ended_at, settle_outcome,
+      claim_operation_id, claim_project_revision, claim_authority_epoch,
+      settle_operation_id, settle_project_revision, settle_authority_epoch
+    ) VALUES (
+      :attempt_id, :project_id, :lifecycle_id, 1, NULL,
+      'settled', :settled_at, :settled_at, 'interrupted',
+      :operation_id, :project_revision, :authority_epoch,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run(provenance);
+  getDb().prepare(`
+    INSERT INTO workflow_attempt_results (
+      result_id, project_id, lifecycle_id, attempt_id, outcome,
+      failure_class, summary, output_json, created_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      :result_id, :project_id, :lifecycle_id, :attempt_id, 'interrupted',
+      'validation-waived', 'Milestone validation was waived before it ran.', :output_json, :settled_at,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run({
+    ...provenance,
+    ":result_id": randomUUID(),
+    ":output_json": canonicalDomainJson({ waiverId: input.waiverId }),
+  });
+  return attemptId;
 }
 
 export function insertCloseoutPlan(
@@ -243,9 +384,16 @@ export function insertCloseoutPlan(
     readinessBasisHash: string;
     effects: CloseoutEffectInput[];
     preparedAt: string;
+    /**
+     * The plan this one replaces. The Milestone path omits it and anchors to
+     * the Milestone head; a lifecycle-scoped caller (the Task Closeout Plan)
+     * passes its own lifecycle head so a re-prepare on a new Attempt
+     * supersedes the stale plan instead of racing it.
+     */
+    supersedesCloseoutPlanId?: string | null;
   },
 ): string {
-  if (requireActiveDomainOperationContext(context) !== CLOSEOUT_PREPARE_OPERATION) {
+  if (!CLOSEOUT_PREPARE_OPERATIONS.has(requireActiveDomainOperationContext(context))) {
     throw new Error(`Closeout Plan requires a ${CLOSEOUT_PREPARE_OPERATION} Domain Operation`);
   }
   const closeoutPlanId = randomUUID();
@@ -272,7 +420,9 @@ export function insertCloseoutPlan(
     ":attempt_id": input.attemptId,
     ":tested_source_set_hash": input.testedSourceSetHash,
     ":readiness_basis_hash": input.readinessBasisHash,
-    ":supersedes_closeout_plan_id": planHead(input.milestoneId)?.closeout_plan_id ?? null,
+    ":supersedes_closeout_plan_id": input.supersedesCloseoutPlanId !== undefined
+      ? input.supersedesCloseoutPlanId
+      : planHead(input.milestoneId)?.closeout_plan_id ?? null,
     ":prepared_at": input.preparedAt,
   });
   input.effects.forEach((effect, index) => {
@@ -312,7 +462,7 @@ export function insertSettlementReceipt(
     settledAt: string;
   },
 ): string {
-  if (requireActiveDomainOperationContext(context) !== CLOSEOUT_SETTLE_EFFECT_OPERATION) {
+  if (!CLOSEOUT_SETTLE_EFFECT_OPERATIONS.has(requireActiveDomainOperationContext(context))) {
     throw new Error(`Settlement Receipt requires a ${CLOSEOUT_SETTLE_EFFECT_OPERATION} Domain Operation`);
   }
   const settlementReceiptId = randomUUID();

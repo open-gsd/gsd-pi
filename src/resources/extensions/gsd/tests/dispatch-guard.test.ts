@@ -3,8 +3,18 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { resolveDispatch } from "../auto-dispatch.ts";
+import { invalidateAllCaches } from "../cache.ts";
 import { getPriorSliceCompletionBlocker } from "../dispatch-guard.ts";
-import { openDatabase, closeDatabase, insertMilestone, insertSlice } from "../gsd-db.ts";
+import {
+  openDatabase,
+  closeDatabase,
+  insertAssessment,
+  insertMilestone,
+  insertSlice,
+  setSliceUatMd,
+} from "../gsd-db.ts";
+import { checkNeedsRunUat } from "../uat-dispatch.ts";
 
 /** Helper: create temp dir and open an in-dir DB for dispatch-guard tests */
 function setupRepo(): string {
@@ -490,3 +500,130 @@ test("dispatch guard skips cross-milestone check when GSD_MILESTONE_LOCK is set 
     "Cannot dispatch execute-task M012/S02/T01: dependency slice M012/S01 is not complete.",
   );
 });
+
+// ─── G6: UAT evidence before dependency unlock ────────────────────────────
+
+const RUNTIME_UAT = ["# S01 UAT", "", "## UAT Type", "- UAT mode: runtime-executable"].join("\n");
+const ARTIFACT_UAT = ["# S01 UAT", "", "## UAT Type", "- UAT mode: artifact-driven"].join("\n");
+
+function writeProjectPreferences(repo: string, uatDispatch: boolean): void {
+  writeFileSync(join(repo, ".gsd", "PREFERENCES.md"), `---\nuat_dispatch: ${uatDispatch}\n---\n`);
+  invalidateAllCaches();
+}
+
+function saveUatVerdict(status: string): void {
+  insertAssessment({
+    path: ".gsd/milestones/M001/slices/S01/S01-ASSESSMENT.md",
+    milestoneId: "M001",
+    sliceId: "S01",
+    status,
+    scope: "run-uat",
+    fullContent: `verdict: ${status.toUpperCase()}`,
+  });
+}
+
+test("a dependent slice stays blocked until its dependency has a UAT verdict (G6)", async (t) => {
+  const repo = setupRepo();
+  t.after(() => teardownRepo(repo));
+  writeProjectPreferences(repo, false);
+
+  insertMilestone({ id: "M001", title: "Test" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Runtime", status: "complete", depends: [], sequence: 1 });
+  insertSlice({ id: "S02", milestoneId: "M001", title: "Dependent", status: "pending", depends: ["S01"], sequence: 2 });
+  setSliceUatMd("M001", "S01", RUNTIME_UAT);
+
+  assert.equal(
+    getPriorSliceCompletionBlocker(repo, "main", "execute-task", "M001/S02/T01"),
+    "Cannot dispatch execute-task M001/S02/T01: dependency slice M001/S01 has no UAT verdict.",
+  );
+  // The blocked slice is not stuck: the run-uat rule has a UAT run to dispatch for S01.
+  assert.deepEqual(
+    await checkNeedsRunUat(repo, "M001", { uat_dispatch: false }),
+    { sliceId: "S01", uatType: "runtime-executable" },
+  );
+
+  saveUatVerdict("pass");
+
+  assert.equal(getPriorSliceCompletionBlocker(repo, "main", "execute-task", "M001/S02/T01"), null);
+});
+
+test("a later slice in positional order stays blocked until the earlier slice has a UAT verdict (G6)", (t) => {
+  const repo = setupRepo();
+  t.after(() => teardownRepo(repo));
+  writeProjectPreferences(repo, false);
+
+  insertMilestone({ id: "M001", title: "Test" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Runtime", status: "complete", depends: [], sequence: 1 });
+  insertSlice({ id: "S02", milestoneId: "M001", title: "Next", status: "pending", depends: [], sequence: 2 });
+  setSliceUatMd("M001", "S01", RUNTIME_UAT);
+
+  assert.equal(
+    getPriorSliceCompletionBlocker(repo, "main", "plan-slice", "M001/S02"),
+    "Cannot dispatch plan-slice M001/S02: earlier slice M001/S01 has no UAT verdict.",
+  );
+
+  // A saved verdict releases the next slice. Milestone closeout judges whether it is acceptable.
+  saveUatVerdict("fail");
+
+  assert.equal(getPriorSliceCompletionBlocker(repo, "main", "plan-slice", "M001/S02"), null);
+});
+
+test("a slice whose UAT is not dispatched releases its dependents; uat_dispatch makes it hold them (G6)", (t) => {
+  const repo = setupRepo();
+  t.after(() => teardownRepo(repo));
+  writeProjectPreferences(repo, false);
+
+  insertMilestone({ id: "M001", title: "Test" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Artifact", status: "complete", depends: [], sequence: 1 });
+  insertSlice({ id: "S02", milestoneId: "M001", title: "Dependent", status: "pending", depends: ["S01"], sequence: 2 });
+  setSliceUatMd("M001", "S01", ARTIFACT_UAT);
+
+  assert.equal(getPriorSliceCompletionBlocker(repo, "main", "plan-slice", "M001/S02"), null);
+
+  writeProjectPreferences(repo, true);
+
+  assert.equal(
+    getPriorSliceCompletionBlocker(repo, "main", "plan-slice", "M001/S02"),
+    "Cannot dispatch plan-slice M001/S02: dependency slice M001/S01 has no UAT verdict.",
+  );
+});
+
+for (const depends of [["S01"], []]) {
+  const order = depends.length > 0 ? "a dependency" : "an earlier slice";
+  test(`a summarizing slice gets a dispatchable unit while ${order} awaits its UAT verdict (G6)`, async (t) => {
+    const repo = setupRepo();
+    t.after(() => teardownRepo(repo));
+    writeProjectPreferences(repo, false);
+
+    insertMilestone({ id: "M001", title: "Test", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Runtime", status: "complete", depends: [], sequence: 1 });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Summarizing", status: "in_progress", depends, sequence: 2 });
+    setSliceUatMd("M001", "S01", RUNTIME_UAT);
+
+    // The same two steps as the auto loop: the rule table picks the unit, then the guard judges it.
+    const action = await resolveDispatch({
+      basePath: repo,
+      mid: "M001",
+      midTitle: "Test",
+      state: {
+        activeMilestone: { id: "M001", title: "Test" },
+        activeSlice: { id: "S02", title: "Summarizing" },
+        activeTask: null,
+        phase: "summarizing",
+        recentDecisions: [],
+        blockers: [],
+        nextAction: "",
+        registry: [],
+      },
+      prefs: { uat_dispatch: false },
+    });
+
+    assert.ok(action.action === "dispatch", `expected a unit, got ${action.action}`);
+    assert.equal(getPriorSliceCompletionBlocker(repo, "main", action.unitType, action.unitId), null);
+    // The hold stays on new work for the slice.
+    assert.match(
+      getPriorSliceCompletionBlocker(repo, "main", "execute-task", "M001/S02/T01") ?? "",
+      /M001\/S01 has no UAT verdict\.$/,
+    );
+  });
+}

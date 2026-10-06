@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { appendCapture, markCaptureResolved, markCaptureExecuted, loadAllCaptures, loadActionableCaptures } from "../captures.ts";
-import { closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, getSlice, insertMilestone, insertSlice, isDbAvailable, openDatabase } from "../gsd-db.ts";
 // Import only the functions that don't depend on @gsd/pi-coding-agent
 // (triage-ui.ts imports next-action-ui.ts which imports the unavailable package)
 import { executeInject, executeReplan, detectFileOverlap, loadDeferredCaptures, loadReplanCaptures, buildQuickTaskPrompt, executeTriageResolutions, ensureDeferMilestoneDir } from "../triage-resolution.ts";
@@ -27,6 +27,19 @@ function makeTempDir(prefix: string): string {
 afterEach(() => {
   if (isDbAvailable()) closeDatabase();
 });
+
+/** The slice row that holds the replan trigger. */
+function seedSliceRow(mid: string, sid: string): void {
+  insertMilestone({ id: mid, title: "Test", status: "active" });
+  insertSlice({ id: sid, milestoneId: mid, title: "Slice" });
+}
+
+function replanTriggerOperations(): number {
+  const row = _getAdapter()!.prepare(
+    "SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'slice.replan.trigger'",
+  ).get();
+  return Number(row?.["count"]);
+}
 
 function setupPlanFile(tmp: string, mid: string, sid: string, content: string): string {
   const planDir = join(tmp, ".gsd", "milestones", mid, "slices", sid);
@@ -113,29 +126,58 @@ test("resolution: executeInject returns null when plan doesn't exist", () => {
 
 // ─── executeReplan ────────────────────────────────────────────────────────────
 
-test("resolution: executeReplan writes REPLAN-TRIGGER.md", () => {
+test("resolution: executeReplan stores the replan trigger in the database and renders REPLAN-TRIGGER.md from it", (t) => {
   const tmp = makeTempDir("res-replan");
-  try {
-    setupPlanFile(tmp, "M001", "S01", SAMPLE_PLAN);
-    const captureId = appendCapture(tmp, "approach is wrong, need different strategy");
-    const captures = loadAllCaptures(tmp);
-    const capture = captures[0];
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  setupPlanFile(tmp, "M001", "S01", SAMPLE_PLAN);
+  seedSliceRow("M001", "S01");
+  appendCapture(tmp, "approach is wrong, need different strategy");
+  const capture = loadAllCaptures(tmp)[0];
 
-    const result = executeReplan(tmp, "M001", "S01", capture);
-    assert.strictEqual(result, true);
+  assert.strictEqual(executeReplan(tmp, "M001", "S01", capture), true);
 
-    const triggerPath = join(
-      tmp, ".gsd", "milestones", "M001", "slices", "S01", "S01-REPLAN-TRIGGER.md",
-    );
-    assert.ok(existsSync(triggerPath), "trigger file should exist");
+  const triggeredAt = getSlice("M001", "S01")?.replan_triggered_at;
+  assert.ok(triggeredAt, "the slice row holds the replan trigger");
+  assert.strictEqual(replanTriggerOperations(), 1, "the trigger is written by one Domain Operation");
 
-    const content = readFileSync(triggerPath, "utf-8");
-    assert.ok(content.includes(capture.id), "should include capture ID");
-    assert.ok(content.includes(capture.text), "should include capture text");
-    assert.ok(content.includes("# Replan Trigger"), "should have header");
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
+  const triggerPath = join(
+    tmp, ".gsd", "milestones", "M001", "slices", "S01", "S01-REPLAN-TRIGGER.md",
+  );
+  const content = readFileSync(triggerPath, "utf-8");
+  assert.ok(content.includes(capture.id), "should include capture ID");
+  assert.ok(content.includes(capture.text), "should include capture text");
+  assert.ok(content.includes("# Replan Trigger"), "should have header");
+  assert.ok(content.includes(`**Triggered:** ${triggeredAt}`), "the file shows the stored timestamp");
+
+  // A retry for the same capture writes nothing, and renders the file again.
+  rmSync(triggerPath);
+  assert.strictEqual(executeReplan(tmp, "M001", "S01", capture), true);
+  assert.strictEqual(replanTriggerOperations(), 1);
+  assert.strictEqual(getSlice("M001", "S01")?.replan_triggered_at, triggeredAt);
+  assert.ok(readFileSync(triggerPath, "utf-8").includes(`**Triggered:** ${triggeredAt}`));
+});
+
+test("resolution: executeReplan fails and writes no file when the slice has no database row", (t) => {
+  const tmp = makeTempDir("res-replan-no-row");
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  setupPlanFile(tmp, "M001", "S01", SAMPLE_PLAN);
+  const id = appendCapture(tmp, "approach is wrong");
+  markCaptureResolved(tmp, id, "replan", "replan triggered", "wrong approach");
+
+  const result = executeTriageResolutions(tmp, "M001", "S01");
+
+  assert.strictEqual(result.replanned, 0, "a trigger that is not stored is not a replan");
+  assert.strictEqual(replanTriggerOperations(), 0);
+  assert.strictEqual(
+    existsSync(join(tmp, ".gsd", "milestones", "M001", "slices", "S01", "S01-REPLAN-TRIGGER.md")),
+    false,
+    "no file is written without the database trigger",
+  );
+  assert.deepStrictEqual(
+    loadActionableCaptures(tmp).map((capture) => capture.id),
+    [id],
+    "the capture stays actionable for a retry",
+  );
 });
 
 // ─── detectFileOverlap ───────────────────────────────────────────────────────
@@ -380,6 +422,7 @@ test("resolution: executeTriageResolutions executes replan captures", () => {
   const tmp = makeTempDir("res-exec-replan");
   try {
     setupPlanFile(tmp, "M001", "S01", SAMPLE_PLAN);
+    seedSliceRow("M001", "S01");
     const id = appendCapture(tmp, "approach is wrong");
     markCaptureResolved(tmp, id, "replan", "replan triggered", "wrong approach");
 
@@ -388,6 +431,7 @@ test("resolution: executeTriageResolutions executes replan captures", () => {
     assert.strictEqual(result.injected, 0);
     assert.strictEqual(result.replanned, 1, "should trigger 1 replan");
     assert.strictEqual(result.quickTasks.length, 0);
+    assert.ok(getSlice("M001", "S01")?.replan_triggered_at, "the slice row holds the replan trigger");
 
     // Verify trigger file was written
     const triggerPath = join(

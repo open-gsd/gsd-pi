@@ -4,13 +4,13 @@
 import { execFileSync } from "node:child_process";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import {
-  getCompletedMilestoneTaskFileHints,
   getMilestone,
   getMilestoneCommitAttributionShas,
   getTask,
   isDbAvailable,
   recordMilestoneCommitAttribution,
 } from "./gsd-db.js";
+import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import { readIntegrationBranch } from "./git-service.js";
 import { logWarning } from "./workflow-logger.js";
 
@@ -282,6 +282,14 @@ function getChangedFilesFromAttributedMilestoneCommits(
   }
 }
 
+/** The files and key files of the completed Tasks of the Milestone, as the read interface answers. */
+function completedTaskFileHints(milestoneId: string): string[] {
+  return readMilestoneSlices(milestoneId)
+    .flatMap((slice) => readSliceTasks(milestoneId, slice.id))
+    .filter((task) => task.status === "complete" || task.status === "done")
+    .flatMap((task) => [...task.files, ...task.key_files]);
+}
+
 function backfillChangedFilesFromUntaggedMilestoneCommits(
   basePath: string,
   milestoneId: string,
@@ -291,7 +299,7 @@ function backfillChangedFilesFromUntaggedMilestoneCommits(
     const milestoneStartedAt = milestone?.created_at ? Math.floor(Date.parse(milestone.created_at) / 1000) * 1000 : NaN;
     if (!Number.isFinite(milestoneStartedAt)) return { ok: true, matched: false, files: [] };
 
-    const taskFileHints = getCompletedMilestoneTaskFileHints(milestoneId);
+    const taskFileHints = completedTaskFileHints(milestoneId);
     if (taskFileHints.length === 0) return { ok: true, matched: false, files: [] };
 
     const hintSet = new Set(taskFileHints.map(normalizeRepoPath).filter(Boolean));

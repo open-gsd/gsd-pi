@@ -91,7 +91,7 @@ test("timeout recovery finalizes only a canonically succeeded Task Attempt", asy
       basePath,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     },
   );
 
@@ -136,7 +136,7 @@ test("exhausted task timeout recovery writes diagnostics outside the SUMMARY pro
       basePath,
       verbose: false,
       currentUnitStartedAt: startedAt,
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     },
   );
 
@@ -205,7 +205,7 @@ test("timeout recovery record and steering follow the database when PLAN and STA
       "execute-task",
       `M001/S01/${taskId}`,
       "idle",
-      { basePath, verbose: false, currentUnitStartedAt: startedAt, unitRecoveryCount: new Map() },
+      { basePath, verbose: false, currentUnitStartedAt: startedAt, unclaimedUnitBudgets: new Map() },
     );
     assert.equal(result, "recovered");
     assert.equal(messages.length, 1, "an unsettled Attempt gets one steering message");

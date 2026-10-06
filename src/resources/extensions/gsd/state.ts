@@ -64,7 +64,7 @@ export function isGhostMilestone(basePath: string, mid: string): boolean {
   // phantom from gsd_milestone_generate_id that was never planned (#3645).
   // The rows decide; a projection file on disk is not read.
   if (isDbAvailable()) {
-    const dbRow = getMilestone(mid);
+    const dbRow = readMilestone(mid);
     if (dbRow) {
       if (dbRow.status === 'queued') {
         return !hasSavedArtifact(mid, null, "CONTEXT")

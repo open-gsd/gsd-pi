@@ -71,7 +71,7 @@ For `execute-task` units, the classifier analyzes the task plan:
 
 ## Adaptive learning
 
-The routing history (`.gsd/routing-history.json`) tracks success/failure per tier per unit type. If a tier's failure rate exceeds 20%, future classifications are bumped up.
+The routing history (stored in the project database) tracks success/failure per tier per unit type. If a tier's failure rate exceeds 20%, future classifications are bumped up.
 
 User feedback (`/gsd rate`) is weighted 2x vs automatic outcomes.
 

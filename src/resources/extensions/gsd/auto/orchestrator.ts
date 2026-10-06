@@ -50,7 +50,7 @@ import {
   resolveProjectRoot,
   resolveWorktreeProjectRoot,
 } from "../worktree.js";
-import { getDispatchAuthorityBlocker, getPriorSliceCompletionBlocker } from "../dispatch-guard.js";
+import { getPriorSliceCompletionBlocker } from "../dispatch-guard.js";
 import { GitServiceImpl } from "../git-service.js";
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import { WorktreeLifecycle } from "../worktree-lifecycle.js";
@@ -104,6 +104,7 @@ import {
   getDispatchById,
 } from "../db/unit-dispatches.js";
 import { claimMilestoneLease } from "../db/milestone-leases.js";
+import { readStoredUnitRetry, releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { isAutoWorkerLive } from "../db/auto-workers.js";
 import type { IterationRunOutcome } from "./iteration-run.js";
 import {
@@ -310,45 +311,6 @@ export async function decideOrchestratorDispatch(
         ? "true"
         : "false");
 
-  // Only replay a milestone-scoped verification retry when a milestone is
-  // active. Pre-PR (#712 fix), `!active` returned null before reaching this
-  // block, so the retry was preserved for a future tick. The new
-  // pre-planning + deep-pending fall-through must keep that contract:
-  // otherwise a stale execute-task / complete-slice / complete-milestone
-  // retry whose target milestone has since been parked would preempt
-  // project-level deep rules like `discuss-project`.
-  const pendingRetry = session?.pendingVerificationRetryDispatch;
-  if (session && pendingRetry && active) {
-    const authorityBlocker = getDispatchAuthorityBlocker(pendingRetry.unitType, pendingRetry.unitId);
-    if (authorityBlocker) {
-      return { kind: "blocked", reason: authorityBlocker, action: "stop", guardId: "dispatch-authority" };
-    }
-    const alreadyClosedReason = getDispatchAlreadyClosedReason(
-      pendingRetry.unitType,
-      pendingRetry.unitId,
-    );
-    if (
-      alreadyClosedReason &&
-      !shouldBypassAlreadyClosedForVerificationRetry(
-        pendingRetry.unitType,
-        pendingRetry.unitId,
-        session.pendingVerificationRetry,
-      )
-    ) {
-      session.pendingOrchestrationDispatch = null;
-      session.pendingVerificationRetry = null;
-      return { kind: "skipped", reason: alreadyClosedReason, code: "already-closed" };
-    }
-    session.pendingVerificationRetryDispatch = null;
-    session.pendingOrchestrationDispatch = pendingRetry;
-    return {
-      unitType: pendingRetry.unitType,
-      unitId: pendingRetry.unitId,
-      reason: "verification-retry",
-      preconditions: [],
-    };
-  }
-
   const action = await resolveDispatch({
     basePath: activeDispatchBasePath,
     mid: dispatchMid,
@@ -389,13 +351,17 @@ export async function decideOrchestratorDispatch(
     !shouldBypassAlreadyClosedForVerificationRetry(
       action.unitType,
       action.unitId,
-      session?.pendingVerificationRetry,
+      // ADR-048: the retry is on the unit's dispatch row, so a restart reads
+      // the same decision as a live process.
+      readStoredUnitRetry(action.unitType, action.unitId),
     )
   ) {
     if (session) {
       session.pendingOrchestrationDispatch = null;
       session.pendingVerificationRetry = null;
     }
+    // A closed unit does not run again, so its stored retry is released.
+    releaseUnitRetry(action.unitType, action.unitId);
     return { kind: "skipped", reason: alreadyClosedReason, code: "already-closed" };
   }
   if (session) {

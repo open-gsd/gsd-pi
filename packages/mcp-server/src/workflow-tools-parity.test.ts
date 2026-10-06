@@ -688,6 +688,56 @@ describe("ADR-008 parity: shared workflow write tools native vs MCP", () => {
     );
     assert.deepEqual(decisionSupersededBy(), { D001: "D002", D002: null });
   });
+
+  it("a pending discussion gate blocks gsd_requirement_save on native and MCP; the answer unblocks both", async (t) => {
+    const REQUIREMENTS_GATE = "depth_verification_requirements_confirm";
+    const requirementArgs = (description: string) => ({
+      class: "core-capability",
+      description,
+      why: "Lock one requirements gate for both transports",
+      source: "M001",
+    });
+    const resultText = (result: unknown) =>
+      (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+    const requirementCount = () =>
+      Number(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM requirements").get()?.["count"]);
+
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    // Another process asked the requirements approval question: the pending
+    // gate is a row of the project database, and no process has it open.
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    _getAdapter()!.prepare(
+      "INSERT INTO write_gate_state (gate_kind, gate_id, writer, updated_at) VALUES ('pending', ?, 'child', ?)",
+    ).run(REQUIREMENTS_GATE, new Date().toISOString());
+    closeDatabase();
+
+    const server = makeMockServer();
+    registerWorkflowTools(server as Parameters<typeof registerWorkflowTools>[0]);
+    const mcpTool = server.tools.find((entry) => entry.name === "gsd_requirement_save");
+    assert.ok(mcpTool);
+    const saveNative = (description: string, toolCallId: string) =>
+      runNativeDbTool(base, "gsd_requirement_save", requirementArgs(description), toolCallId);
+    const saveMcp = (description: string, key: string) => mcpTool.handler(
+      { projectDir: base, ...requirementArgs(description) },
+      { _meta: { "io.opengsd/idempotency-key": key } },
+    );
+
+    assert.match(resultText(await saveNative("Saved over native", "gated-native")), /has not been confirmed by the user/);
+    const mcpBlocked = await saveMcp("Saved over MCP", "gated-mcp");
+    assert.equal((mcpBlocked as { isError?: boolean }).isError, true);
+    assert.match(resultText(mcpBlocked), /has not been confirmed by the user/);
+    assert.equal(requirementCount(), 0, "neither transport wrote a requirement while the gate was pending");
+
+    // The user confirms. The other process records the answer in the same rows.
+    _getAdapter()!.prepare(
+      "UPDATE write_gate_state SET gate_kind = 'approval_verified' WHERE gate_kind = 'pending'",
+    ).run();
+
+    assert.match(resultText(await saveNative("Saved over native", "confirmed-native")), /^Saved requirement R001$/);
+    assert.match(resultText(await saveMcp("Saved over MCP", "confirmed-mcp")), /^Saved requirement R002$/);
+    assert.equal(requirementCount(), 2);
+  });
 });
 
 const SLICE_LIFECYCLE_CASES = [
@@ -1102,6 +1152,17 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
         requiredFix: "Rename the helper",
         verificationCommands: ["npm test"],
       }],
+    },
+    passesWith: null,
+  },
+  {
+    tool: "gsd_checkpoint_save",
+    args: {
+      milestoneId: "M001",
+      sliceId: "S02",
+      kind: "handoff",
+      confirmedContext: "Parity checkpoint context",
+      nextAction: "Run the parity suite",
     },
     passesWith: null,
   },

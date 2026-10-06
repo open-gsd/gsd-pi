@@ -42,8 +42,8 @@ git commit -m "chore: enable GSD team workflow"
 
 Committed markdown enters your database only through an explicit import:
 
-- **Fresh clone.** A clone that has tracked `.gsd/` milestone markdown and no database, or an empty one, is refused with `authority-missing` in auto, guided, headless, and MCP writes. Run `/gsd recover` to review the Import Preview and apply it. GSD never starts an empty database beside existing milestone projections on its own.
-- **Pull, merge, rebase, or branch switch.** When a tracked projection changes outside GSD, auto mode stops before the next dispatch with one "Projection files changed outside GSD" message. Choose one:
+- **Fresh clone.** A clone that has tracked `.gsd/` milestone markdown and no database, or an empty one, is refused with `authority-missing` in auto, guided, headless, and MCP writes. The same applies to a clone that has only a tracked `PROJECT.md`, `DECISIONS.md`, or `REQUIREMENTS.md` and a database with no workflow rows. Run `/gsd recover` to review the Import Preview and apply it. GSD never starts an empty database beside these projections on its own. To start without the earlier history on purpose, run `/gsd db start-empty`: the choice is stored in the database, and no file is changed. A milestone directory that the database does not know still stops dispatch until you delete it, rename it, or import it.
+- **Pull, merge, rebase, or branch switch.** When a tracked projection changes outside GSD, auto mode, guided flow, and `/gsd dispatch` stop before the next dispatch with one "Projection files changed outside GSD" message. Choose one:
   - keep the change: review it, then run `/gsd recover` to import it through Import Preview;
   - discard the change: run `/gsd rebuild markdown`. The changed bytes are kept under `.gsd/quarantine/`.
 

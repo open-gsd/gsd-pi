@@ -1,5 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Fail-closed reconciliation guards for DB/artifact and slice-id drift.
+// Which Milestone, Slice or Task is closed comes from the read interface
+// (db/lifecycle-read.ts): the same answer as dispatch.
 
 import {
   existsSync,
@@ -14,11 +16,16 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import {
   _getAdapter,
   clearTaskSummaryProjectionState,
-  getAllMilestones,
   getMilestoneSlices,
-  getSliceTasks,
   isDbAvailable,
 } from "../../gsd-db.js";
+import {
+  readMilestone,
+  readMilestoneSlices,
+  readMilestones,
+  readSliceTasks,
+  readTask,
+} from "../../db/lifecycle-read.js";
 import { clearParseCache } from "../../files.js";
 import {
   clearPathCache,
@@ -31,6 +38,7 @@ import { isClosedStatus } from "../../status-guards.js";
 import { findMilestoneIds } from "../../milestone-ids.js";
 import { removeProjectionTreeSync } from "../../atomic-write.js";
 import { invalidateStateCache } from "../../state.js";
+import { hasTaskExecutionOrReopenHistory } from "../../db/lifecycle-queries.js";
 import type { GSDState } from "../../types.js";
 import {
   completedEventCoversDispatch,
@@ -154,39 +162,7 @@ function taskHasExecutionOrReopenHistory(
   taskId: string,
 ): boolean {
   if (!isDbAvailable()) return false;
-  const row = _getAdapter()!.prepare(`
-    SELECT 1 AS present
-    FROM workflow_item_lifecycles lifecycle
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-      AND (
-        EXISTS (
-          SELECT 1 FROM workflow_execution_attempts attempt
-          WHERE attempt.lifecycle_id = lifecycle.lifecycle_id
-            AND attempt.project_id = lifecycle.project_id
-        )
-        OR (
-          lifecycle.lifecycle_status = 'ready'
-          AND EXISTS (
-            SELECT 1 FROM workflow_domain_events reopened
-            WHERE reopened.project_id = lifecycle.project_id
-              AND reopened.operation_id = lifecycle.last_operation_id
-              AND reopened.event_type = 'task.reopened'
-              AND reopened.entity_type = 'task'
-              AND reopened.entity_id = :entity_id
-          )
-        )
-      )
-    LIMIT 1
-  `).get({
-    ":milestone_id": milestoneId,
-    ":slice_id": sliceId,
-    ":task_id": taskId,
-    ":entity_id": `${milestoneId}/${sliceId}/${taskId}`,
-  });
-  return row !== undefined;
+  return hasTaskExecutionOrReopenHistory(milestoneId, sliceId, taskId);
 }
 
 function isAbandonedStagedTaskSummary(
@@ -194,8 +170,7 @@ function isAbandonedStagedTaskSummary(
   basePath: string,
 ): boolean {
   if (!record.sliceId || !record.taskId || record.artifactType !== "SUMMARY") return false;
-  const task = getSliceTasks(record.milestoneId, record.sliceId)
-    .find((candidate) => candidate.id === record.taskId);
+  const task = readTask(record.milestoneId, record.sliceId, record.taskId);
   if (task?.status !== "in_progress") return false;
   const attempt = readLatestTaskAttempt({
     milestoneId: record.milestoneId,
@@ -275,19 +250,19 @@ function detectArtifactDbStatusDriftForMilestone(
   basePath: string,
   milestoneId: string,
 ): ArtifactDbStatusDivergenceDrift[] {
-  const milestone = getAllMilestones().find((m) => m.id === milestoneId);
-  if (!milestone || isClosedStatus(milestone.status)) return [];
+  const milestone = readMilestone(milestoneId);
+  if (!milestone || milestone.closed) return [];
 
   const latestReopen = latestExplicitReopenAt(milestoneId);
   const artifacts = safeListArtifactRows(milestoneId).filter((row) =>
     isAfter(row.imported_at, latestReopen),
   );
-  const bySlice = new Map(getMilestoneSlices(milestoneId).map((slice) => [slice.id, slice]));
+  const bySlice = new Map(readMilestoneSlices(milestoneId).map((slice) => [slice.id, slice]));
   const drifts: ArtifactDbStatusDivergenceDrift[] = [];
   const seen = new Set<string>();
 
   for (const slice of bySlice.values()) {
-    if (!isClosedStatus(slice.status)) {
+    if (!slice.closed) {
       const diskSummary = resolveSliceFile(basePath, milestoneId, slice.id, "SUMMARY");
       if (diskSummary && existsSync(diskSummary)) {
         addUniqueDrift(drifts, seen, {
@@ -302,7 +277,7 @@ function detectArtifactDbStatusDriftForMilestone(
       }
     }
 
-    const tasks = getSliceTasks(milestoneId, slice.id);
+    const tasks = readSliceTasks(milestoneId, slice.id);
     const taskById = new Map(tasks.map((task) => [task.id, task]));
     const summaryRows = artifacts.filter(
       (row) =>
@@ -341,7 +316,7 @@ function detectArtifactDbStatusDriftForMilestone(
         }
         continue;
       }
-      if (isClosedStatus(task.status)) continue;
+      if (task.done) continue;
       // A missing-file row on a task that ran before (#1771), or whose current
       // lifecycle head is an explicit reopen (#1983), is dead bookkeeping.
       // An unproven row stays a blocker (ADR-017/#414).
@@ -381,7 +356,7 @@ function detectArtifactDbStatusDriftForMilestone(
     }
 
     for (const task of tasks) {
-      if (isClosedStatus(task.status)) continue;
+      if (task.done) continue;
       if (currentStagedTaskIds.has(task.id)) continue;
       const diskTaskSummary = resolveTaskFile(
         basePath,
@@ -407,7 +382,7 @@ function detectArtifactDbStatusDriftForMilestone(
   for (const row of artifacts) {
     if (row.artifact_type !== "SUMMARY" || !row.slice_id || row.task_id) continue;
     const slice = bySlice.get(row.slice_id);
-    if (!slice || isClosedStatus(slice.status)) continue;
+    if (!slice || slice.closed) continue;
     addUniqueDrift(drifts, seen, {
       kind: "artifact-db-status-divergence",
       milestoneId,
@@ -635,8 +610,8 @@ function computeArtifactDbDrift(
     return resolved;
   };
 
-  for (const milestone of getAllMilestones()) {
-    if (isClosedStatus(milestone.status)) continue;
+  for (const milestone of readMilestones()) {
+    if (milestone.closed) continue;
 
     // #2398: a completed `complete-milestone` dispatch row alone is not proof
     // the milestone was ever completed — a closeout whose attempts all fail

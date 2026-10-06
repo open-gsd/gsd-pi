@@ -34,18 +34,28 @@ database — a rendered view, not a record.
   remain outside its supported parsing. Regression cases live in
   `src/resources/extensions/gsd/tests/block-db-writes.test.ts`.
   The same module refuses a direct Write, Edit or shell write to a managed
-  projection that has a save tool (PROJECT, REQUIREMENTS, DECISIONS,
-  KNOWLEDGE, QUEUE, ROADMAP, PLAN, REPLAN, SUMMARY, VALIDATION, ASSESSMENT,
-  UAT, CONTEXT, CONTEXT-DRAFT, RESEARCH, UI-SPEC, PARKED) and names that tool.
-  It covers only the paths the renderers own: the root kinds at the `.gsd`
+  projection that has a save tool (root renders: PROJECT, PROJECT-DRAFT,
+  REQUIREMENTS, REQUIREMENTS-DRAFT, DECISIONS, KNOWLEDGE, CAPTURES, QUEUE,
+  QUEUE-ORDER.json, OVERRIDES.md, BACKLOG.md, ROADMAP; hierarchy kinds below
+  `.gsd/milestones` and `.gsd/phases`: ROADMAP, PLAN, REPLAN, SUMMARY,
+  VALIDATION, ASSESSMENT, UAT, CONTEXT, CONTEXT-DRAFT, RESEARCH, UI-SPEC,
+  AI-SPEC, SPEC, PARKED, CONTINUE) and names that tool
+  (`/gsd steer` for OVERRIDES.md: the user registers the override; `/gsd
+  backlog` for BACKLOG.md: the user manages the items). It covers
+  only the paths the renderers own: the root kinds at the `.gsd`
   root and the other kinds below `.gsd/milestones` and `.gsd/phases`. A file
   with such a name in another directory (for example a `/gsd milestone-summary`
   report in `.gsd/summaries`) is a document the agent writes directly.
   The shell check sees only a path written with its `.gsd` directory. The
-  guard runs on the native engine and, through a PreToolUse hook, on
-  claude-code-cli; cursor-cli has no pre-execution hook. A managed file with
-  no save tool yet (LEARNINGS, SECRETS, VERIFICATION-FAILED, CONTINUE) stays
-  writable. Cases live in `tests/projection-write-guard.test.ts`.
+  guard runs on the native engine (the planning tools policy consults the
+  same block list, so a planning unit cannot allow a guarded write) and,
+  through a PreToolUse hook, on claude-code-cli. cursor-agent pre-executes
+  its tools and its protocol has no pre-execution hook, so a block is not
+  possible there; the cursor adapter instead marks an executed write to a
+  managed projection as a refused tool result naming the save tool
+  (detect-and-report). A managed file with no save tool yet (LEARNINGS,
+  SECRETS, VERIFICATION-FAILED) stays writable. Cases live in
+  `tests/projection-write-guard.test.ts`.
 - **Readers MUST NOT treat projections as authority.** Reading a projection is
   legitimate for display, for external integrations that only need a snapshot,
   and for drift detection (which compares projection against DB *by design*).
@@ -72,7 +82,7 @@ No startup, database-open, state-derivation, dispatch, reconciliation,
 | `*-CONTEXT.md`, `*-ROADMAP.md` | The discuss handoff registered the CONTEXT file as an artifact, and a file on disk made the handoff ready | Removed. No path registers the file. The `discuss` and `discuss-headless` prompts save CONTEXT through `gsd_summary_save`. `checkAutoStartAfterDiscuss` in `discussion-handoff.ts` accepts a handoff only on database rows: a CONTEXT artifact row, or slices (a planned milestone needs no CONTEXT row). A file with no such row is refused, and the notice names `gsd_summary_save` or `gsd_plan_milestone`. |
 | `state-manifest.json` | Blocked a STATE.md render and proved a milestone row | Removed. |
 | `event-log.jsonl` | Fallback source for reopen and completion timestamps (`milestone-reopen-events.ts`) | Removed. Drift detection and doctor read milestone reopen and completion events from `workflow_domain_events` only. The unadopted reopen and complete tool branches record a `milestone.legacy_reopened` or `milestone.legacy_completed` event. An event that only the file or the milestone archive holds is reported by `/gsd doctor` (`legacy_milestone_event_unimported`) and imported by `/gsd doctor --fix`. The file is still appended by the tools as an audit trail; it is not rendered from the database yet. |
-| `KNOWLEDGE.md` | Patterns and Lessons copied into memories at session start (`bootstrap/system-context.ts`) | Removed. Session start never imports the file. File rows with no database row stay in the render and in the readers until `/gsd recover` imports them through an Import Preview. The Preview lists every Rule, Pattern and Lesson row with a K, P or L id as a mapping and every other part of the file as not imported. A row with a memory id (`MEM###`) is not imported: it is an info report when an active database memory has that id and the same content, a conflict when the content is different, and a warning when no active memory has that id, because the next render removes it. A row whose database row was forgotten is listed as not imported: the next render removes it from the file. A row whose database row has different content is listed as a conflict: the import never writes file text over a database row, so the database row is kept and the next render replaces the file row. |
+| `KNOWLEDGE.md` | Patterns and Lessons copied into memories at session start (`bootstrap/system-context.ts`) | Removed. Session start never imports the file. File rows with no database row stay in the render and in the readers until `/gsd recover` imports them through an Import Preview. The Preview lists every Rule, Pattern and Lesson row with a K, P or L id as a mapping and every other part of the file as not imported. A row with a memory id (`MEM###`) is not imported: it is an info report when an active database memory has that id and the same content, a conflict when the content is different, and a warning when no active memory has that id, because the next render removes it. A row whose database row was forgotten is listed as not imported: the next render removes it from the file. A row whose database row has different content is listed as a conflict and the database row is kept, so the next render replaces the file row. The file text replaces the database row only by an explicit `--choice=<K|P|L id>.use-file` in a new sealed Preview, and Forward Repair can restore the earlier database row. |
 
 ## 2. Frozen format inventory
 
@@ -164,6 +174,16 @@ Frozen: file names, directory shapes, both layouts, section ordering, heading
 text, checkbox and badge syntax, and the trailing-newline byte stream of every
 file above. Any change beyond appending the §3 stamp is out of scope for this
 milestone.
+
+### 2.4 Not a projection: `.gsd/extensions/`
+
+`.gsd/extensions/` is an operator input directory, not a projection. The
+ecosystem loader (`src/resources/extensions/gsd/ecosystem/loader.ts`) loads
+the `.js` and `.ts` files in it as extensions, and only when the project is
+trusted. No renderer writes the directory, no reader takes workflow state from
+it, and a rebuild leaves it unchanged, so the rules of §1 and the freeze do
+not apply to it. An extension reads workflow state through
+`GSDExtensionAPI.getProjectSnapshot()`, which answers from the database.
 
 ## 3. The additive state-version stamp
 
@@ -258,7 +278,7 @@ repo:
 
 | Surface | What it reads | Evidence |
 |---|---|---|
-| `@opengsd/mcp-server` | Raw `.gsd/STATE.md` contents returned to MCP clients; milestone `SUMMARY` **existence** as a completion signal; `.gsd/` artifact parsing (STATE.md, milestone ROADMAPs, slice PLANs) in its graph build | `packages/mcp-server/src/server.ts:278`, `:308`, `:1486` |
+| `@opengsd/mcp-server` | Raw `.gsd/STATE.md` contents returned to MCP clients; milestone `SUMMARY` **existence** as a completion signal; `.gsd/` artifact parsing (STATE.md, milestone ROADMAPs, slice PLANs) in its graph build when the workflow database is not available (the build is database-first otherwise) | `packages/mcp-server/src/server.ts:278`, `:308`, `:1486` |
 | `integrations/hermes` (Python) | Requires `.gsd/` with `STATE.md` present; an absent/empty `STATE.md` is documented as the cause of an empty snapshot | `integrations/hermes/docs/setup.md:35`, `:235`; fixture `integrations/hermes/tests/fixtures/minimal-project/.gsd/STATE.md` |
 
 Because the format is frozen and the stamp is ignore-safe, none of these

@@ -9,6 +9,7 @@ import { DEFAULT_COMMAND_TIMEOUT_MS } from "../constants.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { describeHostVerificationRationale } from "../verification-verdict.ts";
 import { cleanup, makeTempRepo } from "./test-utils.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
 
 function createVerificationContext(currentUnit: { type: string; id: string } | null) {
 	return {
@@ -50,16 +51,15 @@ test("missing host command pauses without recording an auto-fix retry (#1943)", 
 	let paused = false;
 	let recordedVerdict = false;
 	let routedFailure = false;
-	const retryKey = "execute-task:M001/S01/T01";
 	const session = {
 		basePath: process.cwd(),
 		canonicalProjectRoot: process.cwd(),
 		currentUnit: { type: "execute-task", id: "M001/S01/T01" },
 		lastTaskRecoveryAbortId: null,
 		pendingVerificationRetry: { unitId: "stale", failureContext: "stale", attempt: 1 },
-		verificationRetryCount: new Map([[retryKey, 1]]),
-		verificationRetryFailureHashes: new Map([[retryKey, "stale"]]),
+		unclaimedUnitBudgets: new Map<string, number>(),
 	};
+	useUnitBudget(session, "execute-task", "M001/S01/T01", 1);
 	const result = await runPostUnitVerification({
 		s: session,
 		ctx: { ui: { notify() {} } },
@@ -104,8 +104,7 @@ test("missing host command pauses without recording an auto-fix retry (#1943)", 
 	assert.equal(paused, true);
 	assert.equal(recordedVerdict, false);
 	assert.equal(routedFailure, false);
-	assert.equal(session.verificationRetryCount.has(retryKey), false);
-	assert.equal(session.verificationRetryFailureHashes.has(retryKey), false);
+	assert.equal(usedUnitBudget(session, "execute-task", "M001/S01/T01"), 0);
 	assert.equal(session.pendingVerificationRetry, null);
 });
 
@@ -232,8 +231,7 @@ test("blocker-discovered completion pauses with the blocker surfaced instead of 
 		currentUnit: { type: "execute-task", id: "M001/S01/T01" },
 		lastTaskRecoveryAbortId: null,
 		pendingVerificationRetry: null,
-		verificationRetryCount: new Map<string, number>(),
-		verificationRetryFailureHashes: new Map<string, string>(),
+		unclaimedUnitBudgets: new Map<string, number>(),
 	};
 	const result = await runPostUnitVerification({
 		s: session,
@@ -262,7 +260,7 @@ test("blocker-discovered completion pauses with the blocker surfaced instead of 
 				throw new Error("must not reroute a blocker attempt through task recovery");
 			},
 		},
-	} as never, async (_ctx, _pi, errorContext) => {
+	} as never, async (_ctx, _pi, _blockerKind, errorContext) => {
 		paused = true;
 		pauseMessage = errorContext?.message;
 	});
@@ -295,8 +293,7 @@ test("non-blocker failed attempt still throws at the verify gate (#2148)", async
 			currentUnit: { type: "execute-task", id: "M001/S01/T01" },
 			lastTaskRecoveryAbortId: null,
 			pendingVerificationRetry: null,
-			verificationRetryCount: new Map<string, number>(),
-			verificationRetryFailureHashes: new Map<string, string>(),
+			unclaimedUnitBudgets: new Map<string, number>(),
 		},
 		ctx: { ui: { notify() {} } },
 		pi: {},
@@ -333,8 +330,7 @@ test("identical gate failures count 1/2, then 2/2, then exhaust into a durable a
 		currentUnit: { type: "execute-task", id: "M001/S01/T01" },
 		lastTaskRecoveryAbortId: null as string | null,
 		pendingVerificationRetry: null as { unitId: string } | null,
-		verificationRetryCount: new Map<string, number>(),
-		verificationRetryFailureHashes: new Map<string, string>(),
+		unclaimedUnitBudgets: new Map<string, number>(),
 	};
 	const taskAuthority = {
 		readLatestTaskAttempt: () => ({
@@ -403,6 +399,6 @@ test("identical gate failures count 1/2, then 2/2, then exhaust into a durable a
 	attemptNumber = 3;
 	assert.equal(await runGate(), "abort", "the exhausted durable budget must surface as abort");
 	assert.equal(session.lastTaskRecoveryAbortId, "ra-3");
-	assert.equal(session.verificationRetryCount.size, 0, "abort clears the per-unit retry counter");
+	assert.equal(usedUnitBudget(session, "execute-task", "M001/S01/T01"), 0, "abort clears the per-unit retry counter");
 	assert.equal(paused, false, "the gate defers the pause to the finalize abort path");
 });

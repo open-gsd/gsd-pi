@@ -41,7 +41,7 @@ function recoveryContext(base: string, startedAt: number): RecoveryContext {
     basePath: base,
     verbose: false,
     currentUnitStartedAt: startedAt,
-    unitRecoveryCount: new Map(),
+    unclaimedUnitBudgets: new Map(),
   };
 }
 

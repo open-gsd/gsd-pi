@@ -7,7 +7,7 @@
  * without explicit dependencies use sequential ordering as an implicit constraint.
  */
 
-import { isInactiveStatus } from "./status-guards.js";
+import type { SliceRead } from "./db/lifecycle-read.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -75,16 +75,16 @@ export function getEligibleSlices(
 }
 
 /**
- * Eligibility straight from slice rows. `done` comes from the shared slice
- * predicate, so a skipped, cancelled, or deferred slice satisfies ordering
- * and dependencies exactly as it does in deriveState.
+ * Eligibility from the Slices of the read interface (`readMilestoneSlices`).
+ * The interface decides which Slice needs no further work and which Slice
+ * releases its dependents, so this answer agrees with deriveState and the
+ * dispatch guard before and after the Cutover.
  */
 export function getEligibleSlicesFromRows(
-  rows: ReadonlyArray<{ id: string; status: string; depends?: string[] }>,
+  rows: ReadonlyArray<Pick<SliceRead, "id" | "done" | "satisfiesDependents" | "depends">>,
 ): EligibleSlice[] {
-  const doneIds = new Set(rows.filter(row => isInactiveStatus(row.status)).map(row => row.id));
   return getEligibleSlices(
-    rows.map(row => ({ id: row.id, done: doneIds.has(row.id), depends: row.depends ?? [] })),
-    doneIds,
+    rows.map(row => ({ id: row.id, done: row.done, depends: row.depends })),
+    new Set(rows.filter(row => row.satisfiesDependents).map(row => row.id)),
   );
 }

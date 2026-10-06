@@ -43,14 +43,14 @@ import { isBlockedStopReason, stopNoticeKind } from "../stop-notice.js";
 import { mapStatusToExitCode } from "../../../../headless-events.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease, getMilestoneLease, milestoneLeaseTtlSeconds } from "../db/milestone-leases.js";
-import { getLatestForUnit, recordDispatchClaim, markCanceled } from "../db/unit-dispatches.js";
+import { getDispatchStage, getLatestForUnit, isDispatchExecutionOpen, recordDispatchClaim, markCanceled, setDispatchStage } from "../db/unit-dispatches.js";
+import { clearStaleWorkerLock } from "../crash-recovery.js";
 import { setRuntimeKv, getRuntimeKv } from "../db/runtime-kv.js";
 import { SourceObservationStore } from "../source-observations.js";
 import { autoCommitCurrentBranch } from "../worktree.js";
 import {
   claimTaskAttempt,
   readLatestTaskAttempt,
-  settleTaskAttempt,
 } from "../task-execution-domain-operation.js";
 import { stageTaskCompletion } from "../task-completion-compatibility-adapter.js";
 import {
@@ -58,14 +58,6 @@ import {
   runWithTaskExecutionAttempt,
 } from "../auto/task-execution-cutover.js";
 import { CustomWorkflowEngine } from "../custom-workflow-engine.js";
-import { CustomExecutionPolicy } from "../custom-execution-policy.js";
-import { executeDomainOperation } from "../db/domain-operation.js";
-import {
-  adoptOrTransitionLifecycle,
-  readDomainOperationFence,
-} from "../db/writers/lifecycle-commands.js";
-import { recordFailureAndSelectRecovery } from "../task-recovery-domain-operation.js";
-import { handleReplanTask } from "../tools/replan-task.js";
 import { appendCapture, markCaptureResolved } from "../captures.js";
 import { autoSession } from "../auto-runtime-state.js";
 import { readUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.js";
@@ -1740,7 +1732,7 @@ function makeMockDeps(
       message: "restored",
     }),
     getLedger: () => null,
-    getProjectTotals: () => ({ cost: 0 }),
+    getBudgetSpend: () => 0,
     formatCost: (c: number) => `$${c.toFixed(2)}`,
     getBudgetAlertLevel: () => 0,
     getNewBudgetAlertLevel: () => 0,
@@ -1837,13 +1829,10 @@ function makeLoopSession(overrides?: Partial<Record<string, unknown>>) {
     lastBaselineCharCount: undefined,
     lastBudgetAlertLevel: 0,
     pendingVerificationRetry: null,
-    pendingVerificationRetryDispatch: null,
     pendingCrashRecovery: null,
-    verificationRetryFailureHashes: new Map<string, string>(),
     autoModeStartModel: null,
     unitDispatchCount: new Map<string, number>(),
     unitLifetimeDispatches: new Map<string, number>(),
-    unitRecoveryCount: new Map<string, number>(),
     verificationRetryCount: new Map<string, number>(),
     unclaimedUnitBudgets: new Map<string, number>(),
     gitService: null,
@@ -1990,7 +1979,7 @@ test("a verification retry whose dispatch fails pre-claim is cleared and auto-mo
         "Task Attempt claim must activate exactly one matching coordination dispatch",
       );
     },
-    pauseAuto: async (_ctx, _pi, errorContext) => {
+    pauseAuto: async (_ctx, _pi, _blockerKind, errorContext) => {
       pauseContexts.push(errorContext as { message?: string } | undefined);
     },
   });
@@ -2158,7 +2147,7 @@ test("autoLoop pauses visibly when Auto Orchestration Module is not wired", asyn
   let pauseContext: unknown;
 
   const deps = makeMockDeps({
-    pauseAuto: async (_ctx, _pi, errorContext) => {
+    pauseAuto: async (_ctx, _pi, _blockerKind, errorContext) => {
       pauseContext = errorContext;
       deps.callLog.push("pauseAuto");
     },
@@ -2212,9 +2201,7 @@ test("autoLoop exits on terminal complete state", async (t) => {
   );
 });
 
-test("custom-engine replan recovery completes preparation without verifying or reconciling the workflow step", async (t) => {
-  _resetPendingResolve();
-  let reconcileCalls = 0;
+test("a custom workflow step that breaks or retries terminalizes its dispatch", async (t) => {
   t.mock.method(CustomWorkflowEngine.prototype, "deriveState", async () => ({
     phase: "executing",
     isComplete: false,
@@ -2222,307 +2209,33 @@ test("custom-engine replan recovery completes preparation without verifying or r
     blockedSteps: [],
     completedSteps: [],
   }) as any);
+  const unitId = "wf/2026-01-01T00-00-00/step-1";
   t.mock.method(CustomWorkflowEngine.prototype, "resolveDispatch", async () => ({
     action: "dispatch",
-    step: {
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "execute the invalid custom-engine Task plan",
-    },
-  }) as any);
-  t.mock.method(CustomWorkflowEngine.prototype, "reconcile", async () => {
-    reconcileCalls += 1;
-    return { outcome: "continue" } as any;
-  });
-
-  const basePath = realpathSync(makeLoopTestBase("gsd-custom-task-replan-"));
-  const taskDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-  mkdirSync(taskDir, { recursive: true });
-  writeFileSync(join(taskDir, "T01-PLAN.md"), "# Invalid Task plan\n");
-
-  try {
-    openDatabase(join(basePath, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
-    insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task One", status: "pending" });
-    const workerId = registerAutoWorker({ projectRootRealpath: basePath });
-    const lease = claimMilestoneLease(workerId, "M001");
-    assert.equal(lease.ok, true);
-    if (!lease.ok) return;
-
-    const lifecycleFence = readDomainOperationFence();
-    executeDomainOperation({
-      operationType: "test.task.ready",
-      idempotencyKey: "test/custom-replan/task-ready",
-      expectedRevision: lifecycleFence.revision,
-      expectedAuthorityEpoch: lifecycleFence.authorityEpoch,
-      actorType: "test",
-      sourceTransport: "test",
-      payload: { taskId: "T01" },
-    }, (context) => {
-      adoptOrTransitionLifecycle(context, {
-        itemKind: "task",
-        milestoneId: "M001",
-        sliceId: "S01",
-        taskId: "T01",
-        lifecycleStatus: "ready",
-      });
-      return {
-        events: [{
-          eventType: "test.task.ready",
-          entityType: "task",
-          entityId: "M001/S01/T01",
-          payload: { taskId: "T01" },
-          destinations: ["test"],
-        }],
-        projections: [{
-          projectionKey: "test/m001/s01/t01",
-          projectionKind: "test",
-          rendererVersion: "1",
-        }],
-      };
-    });
-    const dispatch = recordDispatchClaim({
-      traceId: "seed-custom-replan",
-      workerId,
-      milestoneLeaseToken: lease.token,
-      milestoneId: "M001",
-      sliceId: "S01",
-      taskId: "T01",
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-    });
-    assert.equal(dispatch.ok, true);
-    if (!dispatch.ok) return;
-    const attempt = claimTaskAttempt({
-      invocation: {
-        idempotencyKey: "test/custom-replan/claim",
-        sourceTransport: "internal",
-        actorType: "test",
-      },
-      task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
-      workerId,
-      milestoneLeaseToken: lease.token,
-      coordinationDispatchId: dispatch.dispatchId,
-    });
-    const settled = settleTaskAttempt({
-      invocation: {
-        idempotencyKey: "test/custom-replan/settle",
-        sourceTransport: "internal",
-        actorType: "test",
-      },
-      attemptId: attempt.attemptId,
-      outcome: "failed",
-      failureClass: "plan-invalid",
-      summary: "The custom Task plan is invalid",
-      output: { failedCheck: "planning-boundary" },
-    });
-    recordFailureAndSelectRecovery({
-      invocation: {
-        idempotencyKey: "test/custom-replan/route",
-        sourceTransport: "internal",
-        actorType: "test",
-      },
-      attemptId: attempt.attemptId,
-      resultId: settled.resultId,
-      owner: "agent",
-      classification: { failureKind: "plan-invalid" },
-      summary: "The custom Task plan is invalid",
-      evidence: { failedCheck: "planning-boundary" },
-      rationale: "Replace the invalid plan before implementation.",
-    });
-    markCanceled(dispatch.dispatchId, "seeded routed recovery");
-
-    const ctx = makeMockCtx();
-    ctx.ui.setStatus = () => {};
-    ctx.ui.setWidget = () => {};
-    const pi = makeMockPi();
-    const s = makeLoopSession({
-      activeEngineId: "custom",
-      activeRunDir: basePath,
-      basePath,
-      originalBasePath: basePath,
-      canonicalProjectRoot: basePath,
-      workerId,
-      milestoneLeaseToken: lease.token,
-    });
-    let hostVerificationCalls = 0;
-    let observedUnitType: string | undefined;
-    const deps = makeMockDeps({
-      isDbAvailable: () => true,
-      taskExecutionBoundary: async (input) => {
-        observedUnitType = input.unitType;
-        const replanned = await handleReplanTask({
-          milestoneId: "M001",
-          sliceId: "S01",
-          taskId: "T01",
-          title: "Task One",
-          description: "Use the replacement custom-engine plan.",
-          estimate: "1h",
-          files: ["src/task.ts"],
-          verify: "pnpm test",
-          inputs: ["planning-boundary"],
-          expectedOutput: ["durable replacement"],
-          triggerReason: "custom-engine durable recovery",
-        }, basePath, {
-          idempotencyKey: "test/custom-replan/replace",
-          sourceTransport: "internal",
-          actorType: "test",
-        });
-        assert.ok(!("error" in replanned));
-        s.active = false;
-        return { action: "next", data: {} };
-      },
-      customEngineHostVerificationBoundary: async () => {
-        hostVerificationCalls += 1;
-        return "continue";
-      },
-    });
-
-    await rawAutoLoop(ctx, pi, s, deps);
-
-    assert.equal(observedUnitType, "replan-task");
-    assert.equal(hostVerificationCalls, 0, "planning preparation must not run the custom step verifier");
-    assert.equal(reconcileCalls, 0, "planning preparation must not complete the custom workflow step");
-    assert.equal(readLatestTaskAttempt({
-      milestoneId: "M001",
-      sliceId: "S01",
-      taskId: "T01",
-    })?.attemptNumber, 1, "planning preparation must not claim a replacement Attempt");
-  } finally {
-    closeDatabase();
-    rmSync(basePath, { recursive: true, force: true });
-  }
-});
-
-test("custom-engine Task verification bypasses legacy retry counters and aborts without pausing", async (t) => {
-  _resetPendingResolve();
-  let humanPolicyReadThrows = false;
-  t.mock.method(CustomWorkflowEngine.prototype, "deriveState", async () => ({
-    phase: "executing",
-    isComplete: false,
-    readySteps: [],
-    blockedSteps: [],
-    completedSteps: [],
-  }) as any);
-  t.mock.method(CustomWorkflowEngine.prototype, "resolveDispatch", async () => ({
-    action: "dispatch",
-    step: {
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "execute the Task",
-    },
-  }) as any);
-  t.mock.method(CustomExecutionPolicy.prototype, "requiresHumanVerification", () => {
-    if (humanPolicyReadThrows) throw new Error("frozen definition unavailable");
-    return true;
-  });
-
-  for (const outcome of ["retry", "abort"] as const) {
-    humanPolicyReadThrows = outcome === "abort";
-    const basePath = realpathSync(makeLoopTestBase(`gsd-custom-task-verify-${outcome}-`));
-    mkdirSync(join(basePath, ".gsd"), { recursive: true });
-    try {
-      openDatabase(join(basePath, ".gsd", "gsd.db"));
-      insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
-      insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
-      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task One", status: "pending" });
-      const workerId = registerAutoWorker({ projectRootRealpath: basePath });
-      const lease = claimMilestoneLease(workerId, "M001");
-      assert.equal(lease.ok, true);
-      if (!lease.ok) return;
-
-      const ctx = makeMockCtx();
-      ctx.ui.setStatus = () => {};
-      ctx.ui.setWidget = () => {};
-      const pi = makeMockPi();
-      const s = makeLoopSession({
-        activeEngineId: "custom",
-        activeRunDir: basePath,
-        basePath,
-        originalBasePath: basePath,
-        canonicalProjectRoot: basePath,
-        workerId,
-        milestoneLeaseToken: lease.token,
-      });
-      let pauseCalls = 0;
-      let publicationCalls = 0;
-      let observedHumanReviewPolicy: boolean | undefined;
-      const deps = makeMockDeps({
-        isDbAvailable: () => true,
-        taskExecutionBoundary: async (input) => {
-          input.markCanonicalDispatchSettled();
-          return { action: "next", data: {} };
-        },
-        customEngineHostVerificationBoundary: async (input) => {
-          observedHumanReviewPolicy = input.humanReviewPolicy;
-          if (outcome === "retry") s.active = false;
-          return outcome;
-        },
-        taskPublicationBoundary: async () => { publicationCalls++; },
-        pauseAuto: async () => { pauseCalls++; },
-      });
-
-      await rawAutoLoop(ctx, pi, s, deps);
-
-      assert.equal(observedHumanReviewPolicy, outcome === "retry", "human ownership read failures must enter Task verification as agent-owned");
-      assert.equal(s.verificationRetryCount.size, 0, `${outcome} must not consume the legacy retry budget`);
-      assert.equal(pauseCalls, 0, `${outcome} must not invent a human pause`);
-      assert.equal(publicationCalls, 0, `${outcome} must not publish an unverified Task`);
-    } finally {
-      closeDatabase();
-      rmSync(basePath, { recursive: true, force: true });
-    }
-  }
-});
-
-test("custom-engine recovery break and retry terminalize their dispatch", async (t) => {
-  t.mock.method(CustomWorkflowEngine.prototype, "deriveState", async () => ({
-    phase: "executing",
-    isComplete: false,
-    readySteps: [],
-    blockedSteps: [],
-    completedSteps: [],
-  }) as any);
-  t.mock.method(CustomWorkflowEngine.prototype, "resolveDispatch", async () => ({
-    action: "dispatch",
-    step: {
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "execute the Task",
-    },
+    step: { unitType: "custom-step", unitId, prompt: "run the step" },
   }) as any);
 
   for (const { action, reason } of [
-    { action: "break", reason: "task-recovery-abort" },
-    { action: "retry", reason: "task-recovery-abort" },
     { action: "break", reason: "unit-hard-timeout" },
+    { action: "retry", reason: "unit-retry" },
   ] as const) {
     _resetPendingResolve();
-    const basePath = realpathSync(makeLoopTestBase(`gsd-custom-task-recovery-${action}-`));
-    mkdirSync(join(basePath, ".gsd"), { recursive: true });
+    const basePath = realpathSync(makeLoopTestBase(`gsd-custom-step-${action}-`));
+    const runDir = join(basePath, ".gsd", "workflow-runs", "wf", "2026-01-01T00-00-00");
+    mkdirSync(runDir, { recursive: true });
     try {
       openDatabase(join(basePath, ".gsd", "gsd.db"));
-      insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
-      insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
-      insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task One", status: "pending" });
-      const workerId = registerAutoWorker({ projectRootRealpath: basePath });
-      const lease = claimMilestoneLease(workerId, "M001");
-      assert.equal(lease.ok, true);
-      if (!lease.ok) return;
-
       const ctx = makeMockCtx();
       ctx.ui.setStatus = () => {};
       ctx.ui.setWidget = () => {};
       const pi = makeMockPi();
       const s = makeLoopSession({
         activeEngineId: "custom",
-        activeRunDir: basePath,
+        activeRunDir: runDir,
         basePath,
         originalBasePath: basePath,
         canonicalProjectRoot: basePath,
-        workerId,
-        milestoneLeaseToken: lease.token,
+        workerId: registerAutoWorker({ projectRootRealpath: basePath }),
       });
       let releaseCalls = 0;
       s.orchestration = {
@@ -2530,40 +2243,29 @@ test("custom-engine recovery break and retry terminalize their dispatch", async 
         retryActiveUnit: async () => { releaseCalls++; },
         abandonActiveUnit: async () => { releaseCalls++; },
       };
-      let dispatchStatusAtPause: string | undefined;
-      let releaseCallsAtPause: number | undefined;
+      let dispatchAtUnit: ReturnType<typeof getLatestForUnit> | undefined;
       const deps = makeMockDeps({
         isDbAvailable: () => true,
         taskExecutionBoundary: async () => {
+          dispatchAtUnit = getLatestForUnit(unitId);
           if (action === "retry") s.active = false;
           return { action, reason };
-        },
-        pauseAuto: async () => {
-          dispatchStatusAtPause = getLatestForUnit("M001/S01/T01")?.status;
-          releaseCallsAtPause = releaseCalls;
         },
       });
 
       await rawAutoLoop(ctx, pi, s, deps);
 
+      assert.equal(dispatchAtUnit?.status, "running", "the step is claimed before its unit runs");
+      assert.equal(dispatchAtUnit?.worker_id, s.workerId);
+      assert.equal(dispatchAtUnit?.milestone_id, "wf/2026-01-01T00-00-00", "the run id is the scope of the claim");
       assert.equal(
-        getLatestForUnit("M001/S01/T01")?.status,
+        getLatestForUnit(unitId)?.status,
         "failed",
         `${action} must not leave an active dispatch that blocks a later resume`,
       );
       if (reason === "unit-hard-timeout") {
-        assert.equal(getLatestForUnit("M001/S01/T01")?.exit_reason, "timeout");
+        assert.equal(getLatestForUnit(unitId)?.exit_reason, "timeout");
       }
-      assert.equal(
-        dispatchStatusAtPause,
-        action === "break" && reason === "task-recovery-abort" ? "failed" : undefined,
-        "a terminal recovery abort must settle its dispatch before pausing",
-      );
-      assert.equal(
-        releaseCallsAtPause,
-        action === "break" && reason === "task-recovery-abort" ? 1 : undefined,
-        "a terminal recovery abort must release its active unit before pausing",
-      );
       assert.equal(releaseCalls, 1);
       assert.equal(pi.calls.length, 0, `${action} must exit before invoking the agent`);
     } finally {
@@ -2696,7 +2398,7 @@ test("autoLoop pauses with the finalize cause at the retry closeout when orchest
       stopReasons.push(reason);
       s.active = false;
     },
-    pauseAuto: async (_ctx, _pi, errorContext) => {
+    pauseAuto: async (_ctx, _pi, _blockerKind, errorContext) => {
       pauseReasons.push(errorContext?.message);
       s.active = false;
     },
@@ -2715,7 +2417,7 @@ test("autoLoop pauses with the finalize cause at the retry closeout when orchest
   t.diagnostic(JSON.stringify({ scenario: "loop retry closeout", pauseReasons, iterationEnd, headlessExitCode: mapStatusToExitCode(iterationEnd?.data?.status) }));
 });
 
-test("custom-engine recovery fails loudly when dispatch terminalization cannot be confirmed", async (t) => {
+test("a custom workflow step fails loudly when its dispatch cannot be terminalized", async (t) => {
   t.mock.method(CustomWorkflowEngine.prototype, "deriveState", async () => ({
     phase: "executing",
     isComplete: false,
@@ -2726,24 +2428,18 @@ test("custom-engine recovery fails loudly when dispatch terminalization cannot b
   t.mock.method(CustomWorkflowEngine.prototype, "resolveDispatch", async () => ({
     action: "dispatch",
     step: {
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "execute the Task",
+      unitType: "custom-step",
+      unitId: "wf/2026-01-01T00-00-00/step-1",
+      prompt: "run the step",
     },
   }) as any);
 
   _resetPendingResolve();
-  const basePath = realpathSync(makeLoopTestBase("gsd-custom-task-terminalization-failure-"));
-  mkdirSync(join(basePath, ".gsd"), { recursive: true });
+  const basePath = realpathSync(makeLoopTestBase("gsd-custom-step-terminalization-failure-"));
+  const runDir = join(basePath, ".gsd", "workflow-runs", "wf", "2026-01-01T00-00-00");
+  mkdirSync(runDir, { recursive: true });
   try {
     openDatabase(join(basePath, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
-    insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task One", status: "pending" });
-    const workerId = registerAutoWorker({ projectRootRealpath: basePath });
-    const lease = claimMilestoneLease(workerId, "M001");
-    assert.equal(lease.ok, true);
-    if (!lease.ok) return;
 
     const notifications: string[] = [];
     const ctx = makeMockCtx();
@@ -2752,19 +2448,18 @@ test("custom-engine recovery fails loudly when dispatch terminalization cannot b
     ctx.ui.setWidget = () => {};
     const s = makeLoopSession({
       activeEngineId: "custom",
-      activeRunDir: basePath,
+      activeRunDir: runDir,
       basePath,
       originalBasePath: basePath,
       canonicalProjectRoot: basePath,
-      workerId,
-      milestoneLeaseToken: lease.token,
+      workerId: registerAutoWorker({ projectRootRealpath: basePath }),
     });
     const deps = makeMockDeps({
       isDbAvailable: () => true,
       taskExecutionBoundary: async () => {
         s.active = false;
         closeDatabase();
-        return { action: "break", reason: "task-recovery-abort" };
+        return { action: "break", reason: "unit-hard-timeout" };
       },
     });
 
@@ -3291,11 +2986,12 @@ test("autoLoop passes structured session-lock failure details to the handler", a
   );
 });
 
-// Regression for #5308: the iteration prelude must dequeue sidecar items
-// (popping the queue and emitting the `sidecar-dequeue` journal event) BEFORE
-// validateSessionLock + break-on-invalid. Inverting that order silently drops
-// queued sidecar work on lock-loss. Covers first-iteration and mid-session.
-test("autoLoop dequeues sidecar item before session-lock break (first iteration, #5308)", async (t) => {
+// The Lifecycle Kernel selects a queued sidecar row after the session-lock
+// check (ADR-048). A process that lost the lock runs nothing, so the row stays
+// queued for the process that holds the lock. #5308 was the in-memory queue:
+// that queue died with the process, so it was popped and journaled first.
+// Covers first-iteration and mid-session.
+test("autoLoop leaves a queued sidecar row for the lock holder on session-lock loss (first iteration)", async (t) => {
   _resetPendingResolve();
 
   const ctx = makeMockCtx();
@@ -3330,21 +3026,21 @@ test("autoLoop dequeues sidecar item before session-lock break (first iteration,
 
   assert.equal(
     listQueuedSidecarItems().length,
-    0,
-    "sidecar item must be popped on lock-loss iteration (pre-#5308 ordering)",
+    1,
+    "the sidecar row stays queued when this process lost the session lock",
   );
   assert.ok(
-    journalEvents.includes("sidecar-dequeue"),
-    "sidecar-dequeue journal event must be emitted before session-lock break",
+    !journalEvents.includes("sidecar-dequeue"),
+    "a process that lost the lock selects no sidecar row",
   );
   assert.ok(
     deps.callLog.includes("handleLostSessionLock"),
-    "session lock handler must still fire after sidecar dequeue",
+    "session lock handler must fire",
   );
   assert.ok(!deps.callLog.includes("deriveState"), "lock loss should stop before deriving state");
 });
 
-test("autoLoop dequeues sidecar item before session-lock break (mid-session, #5308)", async (t) => {
+test("autoLoop leaves a queued sidecar row for the lock holder on session-lock loss (mid-session)", async (t) => {
   _resetPendingResolve();
 
   const ctx = makeMockCtx();
@@ -3397,12 +3093,12 @@ test("autoLoop dequeues sidecar item before session-lock break (mid-session, #53
   assert.ok(lockCheckCount >= 2, "lock validator must run on iteration 2");
   assert.equal(
     listQueuedSidecarItems().length,
-    0,
-    "queued sidecar item must be popped on the lock-loss iteration",
+    1,
+    "the sidecar row stays queued on the lock-loss iteration",
   );
   assert.ok(
-    journalEvents.includes("sidecar-dequeue"),
-    "sidecar-dequeue journal event must be emitted before session-lock break",
+    !journalEvents.includes("sidecar-dequeue"),
+    "a process that lost the lock selects no sidecar row",
   );
   assert.ok(
     deps.callLog.includes("handleLostSessionLock"),
@@ -4441,6 +4137,7 @@ test("autoLoop pauses a machine-terminal verification abort with a terminal noti
       pauseAuto: async (
         _ctx?: unknown,
         _pi?: unknown,
+        _blockerKind?: unknown,
         errorContext?: { message?: string },
       ) => {
         // Production pauseAuto notifies the errorContext message itself.
@@ -4552,7 +4249,7 @@ test("autoLoop pauses a predecessor task-recovery abort before any agent turn", 
           throw new Error("all-attempt terminal abort guard must run before the latest-route fallback");
         },
       }),
-    pauseAuto: async (_ctx, _pi, errorContext) => {
+    pauseAuto: async (_ctx, _pi, _blockerKind, errorContext) => {
       pauseReason = errorContext?.message;
       s.active = false;
     },
@@ -6164,9 +5861,6 @@ test("runUnitPhase remembers aborted milestone closeout for same-unit resume", a
 
   assert.equal(result.action, "break");
   assert.equal((result as any).reason, "unit-aborted-pause");
-  assert.equal(s.pendingVerificationRetryDispatch?.unitType, "complete-milestone");
-  assert.equal(s.pendingVerificationRetryDispatch?.unitId, "M004");
-  assert.equal(s.pendingVerificationRetryDispatch?.prompt, "complete milestone prompt");
   assert.equal(runtime?.phase, "paused");
   assert.equal(runtime?.lastProgressKind, "unit-aborted-pause");
 });
@@ -8177,4 +7871,215 @@ test("#2385: the adjacent unit-retry guard still trips on unchanged payloads", a
     rig.stopReasons.some((reason) => /liveness backstop tripped: unit-retry/.test(reason ?? "")),
     "the unit-retry wedge must surface as the blocked stop reason",
   );
+});
+
+/**
+ * Run one unit through autoLoop with a claimed dispatch row. Returns the id of
+ * the row and the stage a restarted process reads when the process is killed
+ * in each phase.
+ */
+async function runUnitWithDispatchRow(
+  t: TestContext,
+  unit: { unitType: string; unitId: string },
+  overrides: Parameters<typeof makeMockDeps>[0] = {},
+): Promise<{ dispatchId: number; stageAt: Record<string, string> }> {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  ctx.ui.setStatus = () => {};
+  const pi = makeMockPi();
+  const s = makeLoopSession({ currentMilestoneId: "M001" });
+  openLoopDatabase(t, s);
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Test Task", status: "pending" });
+  const workerId = registerAutoWorker({ projectRootRealpath: s.basePath });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const [, sliceId = null, taskId = null] = unit.unitId.split("/");
+  const claim = recordDispatchClaim({
+    traceId: "flow-stage-checkpoint",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId,
+    taskId,
+    unitType: unit.unitType,
+    unitId: unit.unitId,
+  });
+  if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+  const dispatchId = claim.dispatchId;
+
+  const stageAt: Record<string, string> = {};
+  let advanceCalls = 0;
+  s.orchestration = {
+    start: async () => ({ kind: "stopped" as const, reason: "unused" }),
+    advance: async () => {
+      advanceCalls++;
+      if (advanceCalls > 1) {
+        s.active = false;
+        return { kind: "stopped" as const, reason: "test wind-down" };
+      }
+      return {
+        kind: "advanced" as const,
+        unit,
+        stateSnapshot: {
+          phase: taskId ? "executing" : "planning",
+          activeMilestone: { id: "M001", title: "Test Milestone", status: "active" },
+          activeSlice: { id: "S01", title: "Test Slice" },
+          activeTask: taskId ? { id: taskId, title: "Test Task" } : null,
+          registry: [{ id: "M001", status: "active" }],
+          blockers: [],
+        } as any,
+        dispatchId,
+      };
+    },
+    settle: async () => {},
+    completeActiveUnit: async () => {},
+    retryActiveUnit: async () => {},
+    abandonActiveUnit: async () => {},
+    resume: async () => ({ kind: "stopped" as const, reason: "unused" }),
+    stop: async (reason: string) => ({ kind: "stopped" as const, reason }),
+    getStatus: () => ({ phase: "running" as const, transitionCount: advanceCalls }),
+  } satisfies AutoOrchestrationModule;
+  const deps = makeMockDeps({
+    taskExecutionBoundary: async () => {
+      stageAt.execute = getDispatchStage(dispatchId);
+      return { action: "next" as const, data: {} };
+    },
+    postUnitPreVerification: async () => {
+      stageAt.preVerification = getDispatchStage(dispatchId);
+      return "continue" as const;
+    },
+    runPostUnitVerification: async () => {
+      stageAt.verification = getDispatchStage(dispatchId);
+      return "continue" as const;
+    },
+    ...overrides,
+  });
+
+  await autoLoop(ctx, pi, s, deps);
+
+  return { dispatchId, stageAt };
+}
+
+test("autoLoop stores the stage of the unit on its dispatch row", async (t) => {
+  const { dispatchId, stageAt } = await runUnitWithDispatchRow(t, { unitType: "plan-slice", unitId: "M001/S01" });
+
+  assert.deepEqual(stageAt, { execute: "execute", preVerification: "execute", verification: "verify" });
+  assert.equal(getDispatchStage(dispatchId), "closeout", "a completed iteration reached the closeout stage");
+});
+
+test("a pause in pre-verification for unfinished work leaves the unit in the execute stage", async (t) => {
+  // The per-unit cost cap: pre-verification pauses and the unit did not finish its work.
+  const { dispatchId } = await runUnitWithDispatchRow(t, { unitType: "execute-task", unitId: "M001/S01/T01" }, {
+    postUnitPreVerification: async (postUnitCtx) => {
+      await postUnitCtx.pauseAuto(postUnitCtx.ctx, postUnitCtx.pi, "user_limit");
+      return "dispatched" as const;
+    },
+  });
+
+  assert.equal(getDispatchStage(dispatchId), "execute");
+  assert.equal(isDispatchExecutionOpen(dispatchId), true, "the resume replays the tool calls of the unit");
+});
+
+test("a pause in verification after pre-verification passed leaves the unit in the verify stage", async (t) => {
+  const { dispatchId } = await runUnitWithDispatchRow(t, { unitType: "execute-task", unitId: "M001/S01/T01" }, {
+    runPostUnitVerification: async (vctx, pauseAuto) => {
+      await pauseAuto(vctx.ctx, vctx.pi, "machine_fixable");
+      return "pause" as const;
+    },
+  });
+
+  assert.equal(getDispatchStage(dispatchId), "verify");
+  assert.equal(isDispatchExecutionOpen(dispatchId), false, "the resume does not replay");
+});
+
+test("restart after a kill in the verify stage continues the unit at verification with its stored budget", async (t) => {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  ctx.ui.setStatus = () => {};
+  const pi = makeMockPi();
+  const s = makeLoopSession({ currentMilestoneId: "M001" });
+  openLoopDatabase(t, s);
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
+  const unit = { unitType: "plan-slice", unitId: "M001/S01" };
+  const budget = { ...unit, kind: "zero-tool" } as const;
+
+  // The process that was killed: it ran the planner, spent one retry of a
+  // budget, passed pre-verification, and died in the verification gate.
+  const deadWorkerId = registerAutoWorker({ projectRootRealpath: s.basePath });
+  const deadLease = claimMilestoneLease(deadWorkerId, "M001");
+  if (!deadLease.ok) throw new Error("expected test lease");
+  const killed = recordDispatchClaim({
+    traceId: "flow-killed",
+    workerId: deadWorkerId,
+    milestoneLeaseToken: deadLease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: unit.unitType,
+    unitId: unit.unitId,
+  });
+  if (!killed.ok) throw new Error(`expected dispatch claim: ${killed.error}`);
+  spendUnitBudget(new Map(), budget);
+  setDispatchStage(killed.dispatchId, "verify");
+  _getAdapter()!.prepare(
+    "UPDATE workers SET pid = 99999, last_heartbeat_at = '1970-01-01T00:00:00.000Z' WHERE worker_id = :worker_id",
+  ).run({ ":worker_id": deadWorkerId });
+
+  // The next start: the crash sweep cancels the row, and a new worker runs the loop.
+  clearStaleWorkerLock(s.basePath);
+  const workerId = registerAutoWorker({ projectRootRealpath: s.basePath });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease for the restarted worker");
+  (s as any).workerId = workerId;
+  (s as any).milestoneLeaseToken = lease.token;
+
+  const phases: string[] = [];
+  s.orchestration = {
+    start: async () => ({ kind: "stopped" as const, reason: "unused" }),
+    advance: async () => {
+      phases.push("select-from-state");
+      s.active = false;
+      return { kind: "stopped" as const, reason: "test wind-down" };
+    },
+    settle: async () => {},
+    completeActiveUnit: async () => {},
+    retryActiveUnit: async () => {},
+    abandonActiveUnit: async () => {},
+    resume: async () => ({ kind: "stopped" as const, reason: "unused" }),
+    stop: async (reason: string) => ({ kind: "stopped" as const, reason }),
+    getStatus: () => ({ phase: "running" as const, transitionCount: 0 }),
+  } satisfies AutoOrchestrationModule;
+  const deps = makeMockDeps({
+    postUnitPreVerification: async () => {
+      phases.push("pre-verification");
+      return "continue" as const;
+    },
+    runPostUnitVerification: async (vctx) => {
+      phases.push(`verification:${vctx.s.currentUnit?.type} ${vctx.s.currentUnit?.id}`);
+      return "continue" as const;
+    },
+    postUnitPostVerification: async () => {
+      phases.push("post-verification");
+      return "continue" as const;
+    },
+  });
+
+  await autoLoop(ctx, pi, s, deps);
+
+  assert.deepEqual(
+    phases,
+    ["verification:plan-slice M001/S01", "post-verification", "select-from-state"],
+    "the unit continues at the verification gate; pre-verification passed before the kill",
+  );
+  assert.equal(pi.calls.length, 0, "the planner does not run again");
+  const continued = getLatestForUnit(unit.unitId)!;
+  assert.notEqual(continued.id, killed.dispatchId, "the continuation is a new dispatch row");
+  assert.equal(continued.status, "completed");
+  assert.equal(continued.attempt_n, 2);
+  assert.equal(getDispatchStage(continued.id), "closeout");
+  assert.equal(readUnitBudget(new Map(), budget), 1, "the budget the killed process spent is still spent");
 });

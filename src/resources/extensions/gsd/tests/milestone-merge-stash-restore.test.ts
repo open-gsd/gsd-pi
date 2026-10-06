@@ -190,6 +190,7 @@ function buildIc(opts: {
     pauseAuto: async (
       _c?: unknown,
       _p?: unknown,
+      _blockerKind?: unknown,
       errorContext?: { message: string },
     ) => {
       log.pauseAutoCalls.push(errorContext?.message);

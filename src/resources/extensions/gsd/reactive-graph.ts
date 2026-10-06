@@ -5,17 +5,15 @@
  * which tasks are currently ready for parallel dispatch. Used by the
  * reactive-execute dispatch path (ADR-004).
  *
- * Graph derivation and resolution functions are pure (no filesystem access).
- * The `loadSliceTaskIO` loader at the bottom is the only async/IO function.
+ * Graph derivation and resolution functions are pure. The `loadSliceTaskIO`
+ * loader at the bottom reads the task rows of the database. No function here
+ * reads a file.
  */
 
 import type { TaskIO, DerivedTaskNode } from "./types.js";
-import { loadFile, parseTaskPlanIO } from "./files.js";
-import { isDbAvailable, getSliceTasks } from "./gsd-db.js";
-import { isClosedStatus } from "./status-guards.js";
-import { logWarning } from "./workflow-logger.js";
-import { resolveTasksDir, resolveTaskFiles } from "./paths.js";
-import { join } from "node:path";
+import { normalizePlannedFileReference } from "./files.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { readSliceTasks } from "./db/lifecycle-read.js";
 
 // ─── Graph Construction ───────────────────────────────────────────────────
 
@@ -189,93 +187,30 @@ export function graphMetrics(graph: DerivedTaskNode[]): {
   };
 }
 
-// ─── IO Loader (async, filesystem) ────────────────────────────────────────
+// ─── IO Loader (database) ─────────────────────────────────────────────────
+
+/** The planned file references of a task row that name a file path. */
+function plannedFilePaths(references: string[]): string[] {
+  return references
+    .map(normalizePlannedFileReference)
+    // A file path has at least one dot or slash; `true` or `None` is not one.
+    .filter((path) => path.includes("/") || path.includes("\\") || path.includes("."));
+}
 
 /**
- * Load TaskIO for all tasks in a slice by reading the slice plan (for done
- * status and task IDs) and individual task plan files (for IO sections).
+ * Load TaskIO for all tasks in a slice from the task rows: the planned inputs,
+ * and the planned expected output (the planned files when a task names no
+ * expected output). PLAN files are projections and are not read.
  *
- * Returns [] when the slice plan or tasks directory doesn't exist.
+ * Returns [] when no database is open or the slice has no task rows.
  */
-export async function loadSliceTaskIO(
-  basePath: string,
-  mid: string,
-  sid: string,
-): Promise<TaskIO[]> {
-  const { resolveSliceFile } = await import("./paths.js");
-  const slicePlanPath = resolveSliceFile(basePath, mid, sid, "PLAN");
-  const planContent = slicePlanPath ? await loadFile(slicePlanPath) : null;
-  if (!planContent) return [];
-
-  // DB primary path — get task entries
-  let taskEntries: { id: string; title: string; done: boolean }[] | null = null;
-  try {
-    if (isDbAvailable()) {
-      const tasks = getSliceTasks(mid, sid);
-      if (tasks.length > 0) {
-        taskEntries = tasks.map(t => ({
-          id: t.id,
-          title: t.title,
-          done: isClosedStatus(t.status),
-        }));
-      }
-    }
-  } catch { /* fall through */ }
-
-  if (!taskEntries) {
-    // The DB is the single source of truth (ADR-017): with no task rows for
-    // this slice there is no graph to derive. Warn so the empty result is
-    // visible in logs instead of silently parsing the PLAN.md projection.
-    logWarning(
-      "projection",
-      `reactive-graph: DB unavailable or no task rows for ${mid}/${sid}; deriving an empty graph`,
-    );
-    return [];
-  }
-
-  const tDir = resolveTasksDir(basePath, mid, sid);
-  if (!tDir) return [];
-
-  const results: TaskIO[] = [];
-
-  for (const taskEntry of taskEntries) {
-    const planFiles = resolveTaskFiles(tDir, "PLAN");
-    const taskFileName = planFiles.find((f) =>
-      f.toUpperCase().startsWith(taskEntry.id.toUpperCase() + "-"),
-    );
-    if (!taskFileName) {
-      // Task plan file missing — include with empty IO (will trigger ambiguous)
-      results.push({
-        id: taskEntry.id,
-        title: taskEntry.title,
-        inputFiles: [],
-        outputFiles: [],
-        done: taskEntry.done,
-      });
-      continue;
-    }
-
-    const taskContent = await loadFile(join(tDir, taskFileName));
-    if (!taskContent) {
-      results.push({
-        id: taskEntry.id,
-        title: taskEntry.title,
-        inputFiles: [],
-        outputFiles: [],
-        done: taskEntry.done,
-      });
-      continue;
-    }
-
-    const io = parseTaskPlanIO(taskContent);
-    results.push({
-      id: taskEntry.id,
-      title: taskEntry.title,
-      inputFiles: io.inputFiles,
-      outputFiles: io.outputFiles,
-      done: taskEntry.done,
-    });
-  }
-
-  return results;
+export function loadSliceTaskIO(mid: string, sid: string): TaskIO[] {
+  if (!isDbAvailable()) return [];
+  return readSliceTasks(mid, sid).map((task) => ({
+    id: task.id,
+    title: task.title,
+    inputFiles: plannedFilePaths(task.inputs),
+    outputFiles: plannedFilePaths(task.expected_output.length > 0 ? task.expected_output : task.files),
+    done: task.done,
+  }));
 }

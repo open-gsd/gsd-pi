@@ -14,10 +14,9 @@ import {
   listActionableEscalations,
   listAllEscalations,
 } from "../../escalation.js";
-import { saveDecisionToDb } from "../../db-writer.js";
+import { recordEscalationDecision } from "../../escalation-resolution.js";
 import { loadEffectiveGSDPreferences } from "../../preferences.js";
 import { renderStateProjection } from "../../workflow-projections.js";
-import { emitUokAuditEvent, buildAuditEnvelope } from "../../uok/audit.js";
 
 function helpMessage(): string {
   return [
@@ -172,34 +171,9 @@ export async function handleEscalateCommand(
     // Persist the user's choice as a decision (only for resolved, not reject-blocker).
     if (result.status === "resolved") {
       try {
-        const art = readTaskEscalation(milestoneId, row.slice_id, taskId);
-        const scope = `${milestoneId}/${row.slice_id}/${taskId}`;
-        const decisionText = art?.question ?? `escalation on ${taskId}`;
-        const choiceLabel = choice === "accept"
-          ? `${art?.recommendation ?? "accepted"} (recommended)`
-          : (result.chosenOption?.label ?? choice);
-        const { id: decisionId } = await saveDecisionToDb({
-          scope,
-          decision: decisionText,
-          choice: choiceLabel,
-          rationale: rationale || result.chosenOption?.tradeoffs || "User-resolved escalation.",
-          made_by: "human",
-          source: "escalation",
-          when_context: `ADR-011 escalation resolved ${new Date().toISOString()}`,
-        }, basePath);
-
-        emitUokAuditEvent(basePath, buildAuditEnvelope({
-          traceId: `escalation:${milestoneId}:${row.slice_id}:${taskId}`,
-          category: "gate",
-          type: "escalation-decision-persisted",
-          payload: {
-            milestoneId,
-            sliceId: row.slice_id,
-            taskId,
-            decisionId,
-            choice,
-          },
-        }));
+        const decisionId = await recordEscalationDecision(
+          basePath, { milestoneId, sliceId: row.slice_id, taskId }, choice, rationale, result.chosenOption,
+        );
 
         ctx.ui.notify(
           `${result.message}\nDecision recorded as ${decisionId}. Run /gsd auto to continue.`,

@@ -13,9 +13,14 @@ import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
 import { gsdRoot, resolveTasksDir, resolveTaskFile, buildTaskFileName } from "./paths.js";
 import { sendDesktopNotification } from "./notifications.js";
-import { getDb, getTask, getSlice, getSliceTasks, getMilestone, isDbAvailable } from "./gsd-db.js";
+import { getDb, getTask, getSlice, getSliceTasks, isDbAvailable } from "./gsd-db.js";
+import { readMilestone, readSlice, readTask } from "./db/lifecycle-read.js";
+import {
+  getLifecycleLastOperationId,
+  getSliceReopenOperationRow,
+  getUndoTaskStateRow,
+} from "./db/lifecycle-queries.js";
 import { openExistingWorkflowDatabase } from "./db-workspace.js";
-import { isClosedStatus } from "./status-guards.js";
 import { renderPlanCheckboxes } from "./markdown-renderer.js";
 import { renderStateProjection } from "./workflow-projections.js";
 import { reopenTask } from "./task-lifecycle-domain-operation.js";
@@ -37,34 +42,15 @@ interface UndoTaskState {
 
 function readUndoTaskState(mid: string, sid: string, tid: string): UndoTaskState {
   const entityId = `${mid}/${sid}/${tid}`;
-  const row = getDb().prepare(`
-    SELECT task.status AS legacy_status,
-           task.completed_at,
-           lifecycle.lifecycle_id,
-           lifecycle.lifecycle_status,
-           lifecycle.last_operation_id AS lifecycle_operation_id
-    FROM tasks task
-    LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'task'
-     AND lifecycle.milestone_id = task.milestone_id
-     AND lifecycle.slice_id = task.slice_id
-     AND lifecycle.task_id = task.id
-    WHERE task.milestone_id = :milestone_id
-      AND task.slice_id = :slice_id
-      AND task.id = :task_id
-  `).get({
-    ":milestone_id": mid,
-    ":slice_id": sid,
-    ":task_id": tid,
-  }) as Record<string, unknown> | undefined;
+  const row = getUndoTaskStateRow(mid, sid, tid);
   if (!row) throw new Error(`Task ${entityId} not found in database.`);
   return {
-    legacyStatus: String(row["legacy_status"]),
-    completedAt: row["completed_at"] ? String(row["completed_at"]) : null,
-    lifecycleId: row["lifecycle_id"] ? String(row["lifecycle_id"]) : null,
-    lifecycleStatus: row["lifecycle_status"] ? String(row["lifecycle_status"]) : null,
-    lifecycleOperationId: row["lifecycle_operation_id"]
-      ? String(row["lifecycle_operation_id"])
+    legacyStatus: String(row.legacy_status),
+    completedAt: row.completed_at ? String(row.completed_at) : null,
+    lifecycleId: row.lifecycle_id ? String(row.lifecycle_id) : null,
+    lifecycleStatus: row.lifecycle_status ? String(row.lifecycle_status) : null,
+    lifecycleOperationId: row.lifecycle_operation_id
+      ? String(row.lifecycle_operation_id)
       : null,
   };
 }
@@ -86,37 +72,21 @@ function undoTaskIdempotencyKey(mid: string, sid: string, tid: string, state: Un
 }
 
 function resolveResetSliceIdempotencyKey(mid: string, sid: string, status: string, completedAt: string | null): string {
-  const lifecycle = getDb().prepare(`
-    SELECT lifecycle.lifecycle_status, lifecycle.last_operation_id,
-           operation.operation_type, operation.idempotency_key, event.payload_json
-    FROM workflow_item_lifecycles lifecycle
-    LEFT JOIN workflow_operations operation
-      ON operation.operation_id = lifecycle.last_operation_id
-    LEFT JOIN workflow_domain_events event
-      ON event.operation_id = operation.operation_id
-     AND event.event_type = 'slice.reopened'
-    WHERE lifecycle.item_kind = 'slice'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id IS NULL
-  `).get({
-    ":milestone_id": mid,
-    ":slice_id": sid,
-  }) as Record<string, unknown> | undefined;
+  const lifecycle = getSliceReopenOperationRow(mid, sid);
   if (
-    lifecycle?.["lifecycle_status"] === "ready"
-    && lifecycle["operation_type"] === "slice.reopen"
-    && isCurrentSliceReopenOperation(String(lifecycle["last_operation_id"]), {
+    lifecycle?.lifecycle_status === "ready"
+    && lifecycle.operation_type === "slice.reopen"
+    && isCurrentSliceReopenOperation(String(lifecycle.last_operation_id), {
       milestoneId: mid,
       sliceId: sid,
     })
   ) {
-    const payload = JSON.parse(String(lifecycle["payload_json"])) as Record<string, unknown>;
+    const payload = JSON.parse(String(lifecycle.payload_json)) as Record<string, unknown>;
     if (payload["reason"] === RESET_SLICE_REOPEN_REASON) {
-      return String(lifecycle["idempotency_key"]);
+      return String(lifecycle.idempotency_key);
     }
   }
-  const terminalIdentity = lifecycle?.["last_operation_id"] ?? completedAt ?? `legacy:${status}`;
+  const terminalIdentity = lifecycle?.last_operation_id ?? completedAt ?? `legacy:${status}`;
   const digest = createHash("sha256").update(`${mid}/${sid}\n${terminalIdentity}`).digest("hex");
   return `internal:undo:slice.reopen:${digest}`;
 }
@@ -278,15 +248,6 @@ function undoReopenKey(kind: string, entityId: string, terminalIdentity: string)
   return `internal:undo:${kind}.reopen:${digest}`;
 }
 
-function lifecycleLastOperation(itemKind: "slice" | "milestone", mid: string, sid: string | null): string | null {
-  const row = getDb().prepare(`
-    SELECT last_operation_id FROM workflow_item_lifecycles
-    WHERE item_kind = :item_kind AND milestone_id = :milestone_id
-      AND slice_id IS :slice_id AND task_id IS NULL
-  `).get({ ":item_kind": itemKind, ":milestone_id": mid, ":slice_id": sid }) as Record<string, unknown> | undefined;
-  return row?.["last_operation_id"] ? String(row["last_operation_id"]) : null;
-}
-
 /** Reopen the last completed Unit in the DB, then revert its commits. */
 export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitResult> {
   const dbError = openUndoDatabase(basePath);
@@ -298,9 +259,9 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
   const results: string[] = [`Undone: ${label}`];
 
   if (UNDO_TASK_UNIT_TYPES.has(unit.unitType) && sid && tid) {
-    const task = getTask(mid, sid, tid);
+    const task = readTask(mid, sid, tid);
     if (!task) return { success: false, message: `Cannot undo ${label}: task not found in database.` };
-    if (!isClosedStatus(task.status)) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    if (!task.done) return { success: false, message: `Nothing to undo — ${label} is already open.` };
     let summaryDeleted: boolean;
     try {
       summaryDeleted = await reopenTaskAndRefresh(basePath, mid, sid, tid);
@@ -310,10 +271,10 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
     results.push(`  - Reopened task ${mid}/${sid}/${tid} in the database`);
     if (summaryDeleted) results.push("  - Deleted task summary file");
   } else if (unit.unitType === "complete-slice" && sid) {
-    const slice = getSlice(mid, sid);
+    const slice = readSlice(mid, sid);
     if (!slice) return { success: false, message: `Cannot undo ${label}: slice not found in database.` };
-    if (!isClosedStatus(slice.status)) return { success: false, message: `Nothing to undo — ${label} is already open.` };
-    const terminal = lifecycleLastOperation("slice", mid, sid) ?? slice.completed_at ?? `legacy:${slice.status}`;
+    if (!slice.closed) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    const terminal = getLifecycleLastOperationId("slice", mid, sid) ?? slice.completed_at ?? `legacy:${slice.status}`;
     const result = await executeSliceReopen(
       { milestoneId: mid, sliceId: sid, reason: UNDO_UNIT_REOPEN_REASON },
       basePath,
@@ -324,10 +285,10 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
     }
     results.push(`  - Reopened slice ${mid}/${sid} in the database`);
   } else if (unit.unitType === "complete-milestone") {
-    const milestone = getMilestone(mid);
+    const milestone = readMilestone(mid);
     if (!milestone) return { success: false, message: `Cannot undo ${label}: milestone not found in database.` };
-    if (!isClosedStatus(milestone.status)) return { success: false, message: `Nothing to undo — ${label} is already open.` };
-    const terminal = lifecycleLastOperation("milestone", mid, null) ?? milestone.completed_at ?? `legacy:${milestone.status}`;
+    if (!milestone.closed) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    const terminal = getLifecycleLastOperationId("milestone", mid, null) ?? milestone.completed_at ?? `legacy:${milestone.status}`;
     // Undo reverses only the complete-milestone Unit: slices, tasks and their
     // summaries stay complete.
     const result = await executeMilestoneReopen(

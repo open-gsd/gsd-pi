@@ -8,8 +8,15 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { resolveDispatch } from "../auto-dispatch.ts";
 import { postUnitPreVerification } from "../auto-post-unit.ts";
+import { deriveState } from "../state.ts";
 import { AutoSession } from "../auto/session.ts";
+import { MAX_ARTIFACT_VERIFICATION_RETRIES } from "../auto-post-unit.ts";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.ts";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import {
   decideVerificationRetry,
   hashVerificationFailureContext,
@@ -67,13 +74,12 @@ afterEach(() => {
 });
 
 const opts = { skipSettleDelay: true, skipWorktreeSync: true };
-const retryKey = "complete-slice:M001/S01";
 
 test("complete-slice that left an open Task continues instead of artifact-retrying", async () => {
   base = makeTempRepo("gsd-complete-slice-reopen-");
   seedSlice(base, { T01: "pending", T02: "complete" });
   const s = completeSliceSession(base);
-  s.verificationRetryCount.set(retryKey, 2);
+  useUnitBudget(s, "complete-slice", "M001/S01", 2);
   s.pendingVerificationRetry = {
     unitId: "M001/S01",
     failureContext: "Missing expected artifact (attempt 2/3).",
@@ -85,7 +91,7 @@ test("complete-slice that left an open Task continues instead of artifact-retryi
 
   assert.equal(result, "continue");
   assert.equal(s.pendingVerificationRetry, null);
-  assert.equal(s.verificationRetryCount.has(retryKey), false);
+  assert.equal(usedUnitBudget(s, "complete-slice", "M001/S01"), 0);
   assert.ok(
     notifications.some((message) => message.includes("handed off via reopen/replan")),
     `expected handoff notification, got: ${notifications.join("\n")}`,
@@ -96,14 +102,14 @@ test("complete-slice with a replan row recorded during the unit continues", asyn
   base = makeTempRepo("gsd-complete-slice-replan-");
   seedSlice(base, { T01: "complete" });
   const s = completeSliceSession(base, Date.now() - 1_000);
-  s.verificationRetryCount.set(retryKey, 1);
+  useUnitBudget(s, "complete-slice", "M001/S01", 1);
   insertReplanHistory({ milestoneId: "M001", sliceId: "S01", summary: "Closeout found missing work." });
 
   const notifications: string[] = [];
   const result = await postUnitPreVerification(makePostUnitContext(base, s, notifications), opts);
 
   assert.equal(result, "continue");
-  assert.equal(s.verificationRetryCount.has(retryKey), false);
+  assert.equal(usedUnitBudget(s, "complete-slice", "M001/S01"), 0);
   assert.ok(
     notifications.some((message) => message.includes("handed off via reopen/replan")),
     `expected handoff notification, got: ${notifications.join("\n")}`,
@@ -218,4 +224,93 @@ test("artifact retry context stays stable across attempts while notifications sh
     notifications.some((message) => message.includes("Retrying (attempt 2/3).")),
     `expected second attempt notification, got: ${notifications.join("\n")}`,
   );
+});
+
+test("a failed artifact verification survives a restart: context, count and exhaustion are on the dispatch row", async () => {
+  base = makeTempRepo("gsd-artifact-retry-restart-");
+  seedSlice(base, { T01: "complete" });
+  const dispatch = claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "complete-slice",
+    unitId: "M001/S01",
+  });
+
+  // Every run is a new process: a new session that holds nothing about the unit.
+  for (let attempt = 1; attempt <= MAX_ARTIFACT_VERIFICATION_RETRIES; attempt++) {
+    const s = completeSliceSession(base);
+    assert.equal(await postUnitPreVerification(makePostUnitContext(base, s, []), opts), "retry");
+
+    const restarted = completeSliceSession(base);
+    const stored = readStoredUnitRetry("complete-slice", "M001/S01");
+    assert.equal(stored?.attempt, attempt, "the count goes on from the last process, it does not start again");
+    assert.equal(stored?.failureContext, s.pendingVerificationRetry?.failureContext);
+    assert.equal(usedUnitBudget(restarted, "complete-slice", "M001/S01"), attempt);
+    assert.equal(usedUnitBudget(restarted, "complete-slice", "M001/S01", "exhausted"), 0);
+    dispatch.claimNext();
+  }
+
+  let paused = false;
+  const last = completeSliceSession(base);
+  const result = await postUnitPreVerification(
+    { ...makePostUnitContext(base, last, []), pauseAuto: async () => { paused = true; } },
+    opts,
+  );
+
+  assert.equal(result, "dispatched");
+  assert.equal(paused, true);
+  assert.equal(
+    usedUnitBudget(completeSliceSession(base), "complete-slice", "M001/S01", "exhausted"),
+    1,
+    "a restarted process must see that the unit used all its retries",
+  );
+  assert.equal(
+    readStoredUnitRetry("complete-slice", "M001/S01"),
+    null,
+    "the pause releases the stored retries, so a later run does not get the old failure context",
+  );
+
+  // A person re-plans the slice. The unit runs again and its artifact is missing again.
+  releaseExhaustedUnits("M001/S01");
+  dispatch.claimNext();
+  const notifications: string[] = [];
+  const replanned = completeSliceSession(base);
+  assert.equal(await postUnitPreVerification(makePostUnitContext(base, replanned, notifications), opts), "retry");
+  assert.equal(readStoredUnitRetry("complete-slice", "M001/S01")?.attempt, 1, "the count starts again at 1");
+  assert.ok(
+    notifications.some((message) => message.includes("Retrying (attempt 1/3).")),
+    `expected a first-attempt notification, got: ${notifications.join("\n")}`,
+  );
+});
+
+test("a restart after a failed artifact verification selects the same unit again from state", async () => {
+  base = makeTempRepo("gsd-artifact-retry-reselect-");
+  seedSlice(base, { T01: "complete" });
+  claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "complete-slice",
+    unitId: "M001/S01",
+  });
+  const s = completeSliceSession(base);
+  assert.equal(await postUnitPreVerification(makePostUnitContext(base, s, []), opts), "retry");
+
+  // The restart: a new session, and the next unit comes from the database.
+  invalidateAllCaches();
+  const restarted = new AutoSession();
+  restarted.basePath = base;
+  const state = await deriveState(base);
+  const next = await resolveDispatch({
+    basePath: base,
+    mid: "M001",
+    midTitle: "Milestone",
+    state,
+    prefs: undefined,
+    session: restarted,
+  });
+
+  assert.equal(next.action, "dispatch");
+  assert.equal(next.action === "dispatch" && next.unitType, "complete-slice");
+  assert.equal(next.action === "dispatch" && next.unitId, "M001/S01");
+  assert.ok(readStoredUnitRetry("complete-slice", "M001/S01"), "the failure context of the next run is on the dispatch row");
 });

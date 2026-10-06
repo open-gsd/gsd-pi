@@ -270,6 +270,15 @@ closeout, a UAT-scoped non-passing verdict is also redispatched so closeout can
 recover with fresh UAT evidence; roadmap and backfill assessments do not
 suppress that UAT run.
 
+A completed slice whose UAT must run does not release the slices that depend on
+it until a run-uat verdict is saved. Until then GSD dispatches `run-uat` for
+that slice and refuses to dispatch new work (research, planning, task
+execution) for a dependent slice ("dependency slice ... has no UAT verdict").
+A dependent slice whose tasks are already done is still completed first; the
+`run-uat` unit comes after that. A slice whose UAT is not dispatched
+(artifact-driven UAT with `uat_dispatch` off) releases its dependents when it
+completes.
+
 Artifact verification retries are capped at 3 attempts. If the result is still missing after those retries, GSD pauses auto mode with the "Artifact verification failed..." error instead of relying on loop detection or an unbounded dispatch counter.
 
 A unit that records no result is never treated as complete. When timeout recovery exhausts its attempts, or a tool rejects the unit with a deterministic policy error that a retry cannot fix, GSD pauses auto mode for every unit type. It records a manual-attention recovery block in the database (a task keeps its Attempt and recovery records instead) and writes a `-RECOVERY-BLOCKER.md` diagnostic sidecar next to the expected artifact. The sidecar never has the name of the unit's artifact, so it cannot pass for the result. The one exception is the aggregate parallel slice-research unit after timeout recovery: GSD records the block and falls back to per-slice research.
@@ -523,7 +532,9 @@ When enabled, auto-mode automatically selects cheaper models for simple units (s
 
 ## Reactive Task Execution
 
-Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from the IO annotations in task plans. When at least three ready tasks can be considered safely, tasks that do not conflict (no shared file reads/writes) are dispatched in parallel via subagents, while dependent tasks wait for their predecessors to complete.
+Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from the planned inputs and expected output of each task. GSD reads them from the task rows in the database, not from PLAN files. When at least three ready tasks can be considered safely, tasks that do not conflict (no shared file reads/writes) are dispatched in parallel via subagents, while dependent tasks wait for their predecessors to complete.
+
+A task that has a lifecycle row is not put in a parallel batch. Every task that `gsd_plan_slice` plans has one. Only the running Attempt of the host can complete such a task, and a batch subagent has no Attempt, so these tasks run one at a time through the sequential executor.
 
 ```yaml
 reactive_execution:

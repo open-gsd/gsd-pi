@@ -1012,6 +1012,7 @@ test("active replacement intent prevents worktree reconciliation from mutating m
     milestone_commit_attributions: 0,
     conflicts: [],
     adoptionStatusChanges: [],
+    statusChanges: [],
   });
   assert.equal(getDecisionById("D002"), null);
   assert.deepEqual(

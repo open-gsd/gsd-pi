@@ -44,7 +44,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "undo", desc: "Revert last completed unit" },
   { cmd: "undo-task", desc: "Reset a specific task's completion state (DB + markdown)" },
   { cmd: "reset-slice", desc: "Reset a slice and all its tasks (DB + markdown)" },
-  { cmd: "rate", desc: "Rate last unit's model tier (over/ok/under) — improves adaptive routing" },
+  { cmd: "rate", desc: "Rate last unit's model tier (over/ok/under) or reset the routing history — improves adaptive routing" },
   { cmd: "skip", desc: "Prevent a unit from auto-mode dispatch" },
   { cmd: "report", desc: "Generate all HTML reports and open the reports index" },
   { cmd: "export", desc: "Alias for /gsd report" },
@@ -73,7 +73,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "init", desc: "Project init wizard — detect, configure, bootstrap .gsd/" },
   { cmd: "setup", desc: "Configuration hub: status + sub-routes (llm, model, search, remote, keys, prefs, onboarding)" },
   { cmd: "onboarding", desc: "Re-run the setup wizard  [--resume|--reset|--step <name>]" },
-  { cmd: "migrate", desc: "Migrate a v1 .planning directory to DB-backed .gsd with backup + audit" },
+  { cmd: "migrate", desc: "Preview a v1 .planning migration to DB-backed .gsd; apply it with --preview=<hash>" },
   { cmd: "remote", desc: "Control remote auto-mode" },
   { cmd: "steer", desc: "Hard-steer plan documents during execution" },
   { cmd: "inspect", desc: "Show SQLite DB diagnostics" },
@@ -250,8 +250,10 @@ const NESTED_COMPLETIONS: CompletionMap = {
   ],
   db: [
     { cmd: "bind", desc: "Make this checkout the one the project database belongs to (after a move or re-clone)" },
+    { cmd: "start-empty", desc: "Start from an empty database on purpose, beside projections from an earlier database (a re-clone)" },
     { cmd: "adopt", desc: "Preview, or with --apply run, the one-time lifecycle backfill of every unadopted row" },
     { cmd: "restore-backup", desc: "List or restore a verified pre-migration database backup (destructive; requires --consent)" },
+    { cmd: "prune-quarantine", desc: "List, or with --apply delete, quarantined copies of projections changed outside GSD (destructive; requires --apply)" },
   ],
   task: [
     { cmd: "settle <M001/S01/T01> --reason \"...\"", desc: "Dry-run: show the running Attempt that would be settled" },

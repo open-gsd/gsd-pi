@@ -5,39 +5,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  handleCustomEngineTaskVerifyOutcome,
   handleCustomEngineVerifyPause,
   handleCustomEngineVerifyRetryOutcome,
   type HandleCustomEngineVerifyOutcomeDeps,
 } from "../auto/workflow-custom-engine-verify-outcome.ts";
-
-test("Task verification abort is machine-terminal without a pause", () => {
-  const calls: unknown[] = [];
-
-  const flow = handleCustomEngineTaskVerifyOutcome({
-    outcome: "abort",
-    inputPayload: "abort evidence",
-    finishTurn: (status, failureClass, error, guardId, inputPayload) =>
-      calls.push([status, failureClass, error, guardId, inputPayload]),
-  });
-
-  assert.deepEqual(flow, { action: "break" });
-  assert.deepEqual(calls, [["stopped", "verification", "custom-engine-task-verify-abort", "custom-engine-task-verify", "abort evidence"]]);
-});
-
-test("Task verification retry directly re-enters the loop", () => {
-  const calls: unknown[] = [];
-
-  const flow = handleCustomEngineTaskVerifyOutcome({
-    outcome: "retry",
-    inputPayload: "retry evidence",
-    finishTurn: (status, failureClass, error, guardId, inputPayload) =>
-      calls.push([status, failureClass, error, guardId, inputPayload]),
-  });
-
-  assert.deepEqual(flow, { action: "continue" });
-  assert.deepEqual(calls, [["retry", "verification", "custom-engine-task-verify-retry", "custom-engine-task-verify", "retry evidence"]]);
-});
 
 function makeDeps(): {
   deps: HandleCustomEngineVerifyOutcomeDeps;

@@ -20,7 +20,7 @@ import {
 import { logError, logWarning } from "./workflow-logger.js";
 
 /** True while the operation head is an Import Application: its Restore Window is still open. */
-function importRestoreWindowIsOpen(fence: { projectId: string; revision: number }): boolean {
+export function importRestoreWindowIsOpen(fence: { projectId: string; revision: number }): boolean {
   const head = getDb().prepare(`
     SELECT operation_type FROM workflow_operations
     WHERE project_id = :project_id AND resulting_revision = :revision
@@ -61,7 +61,10 @@ function backfillAndCutOver(basePath: string): void {
   }
   requireCoordinationIdle();
   backupDatabaseBeforeMigration(getDb(), getDbPath(), SCHEMA_VERSION, { existsSync, copyFileSync, logWarning });
-  if (preview.items.length > 0 || preview.waiverRepairs.length > 0) {
+  if (
+    preview.items.length > 0 || preview.waiverRepairs.length > 0 ||
+    preview.unmarkedImportCompletions.length > 0
+  ) {
     const { findings } = applyLifecycleBackfill(basePath);
     if (findings.length > 0) {
       logWarning("db", `Lifecycle backfill adopted ${findings.length} row(s) with a finding:\n  ${findings.join("\n  ")}`);

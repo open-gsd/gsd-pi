@@ -630,8 +630,8 @@ Then run `/gsd doctor` to refresh projections and `/gsd auto` to restart from cu
 
 If adaptive model routing is producing bad results, clear the routing history:
 
-```bash
-rm .gsd/routing-history.json
+```
+/gsd rate reset
 ```
 
 ### Refresh rendered state

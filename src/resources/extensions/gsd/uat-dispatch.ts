@@ -6,7 +6,8 @@ import {
   getSliceRunUatAssessment,
   getSliceScopedArtifacts,
 } from "./gsd-db.js";
-import type { GSDPreferences } from "./preferences.js";
+import { readMilestoneSlices, readSlice } from "./db/lifecycle-read.js";
+import { loadEffectiveGSDPreferences, type GSDPreferences } from "./preferences.js";
 import {
   classifyUatContentForRun,
   shouldDispatchUatForContent,
@@ -32,6 +33,21 @@ export function readSliceUatSpec(milestoneId: string, sliceId: string): string {
   return getSlice(milestoneId, sliceId)?.full_uat_md
     || getSliceScopedArtifacts(milestoneId, sliceId).find((row) => row.artifact_type === "UAT")?.full_content
     || "";
+}
+
+/**
+ * True when a completed slice still waits for its UAT: the run-uat rule
+ * dispatches a UAT run for it and no run-uat verdict is saved. Such a slice
+ * does not release the slices that depend on it (ADR-046 gate G6). The
+ * conditions are those of the run-uat dispatch. The dispatch guard does not
+ * hold complete-slice, the one slice unit whose rule comes before run-uat, so
+ * the run-uat rule comes before the rule of every unit the guard holds.
+ */
+export function sliceAwaitsUatVerdict(basePath: string, milestoneId: string, sliceId: string): boolean {
+  if (readSlice(milestoneId, sliceId)?.status !== "complete") return false;
+  const uatContent = readSliceUatSpec(milestoneId, sliceId);
+  if (!uatContent || getSliceRunUatAssessment(milestoneId, sliceId)?.status) return false;
+  return shouldDispatchUatForContent(uatContent, loadEffectiveGSDPreferences(basePath)?.preferences);
 }
 
 /**
@@ -108,10 +124,10 @@ async function resolveCandidateRunUatDispatch(
 async function getDbCompletedSliceCandidates(
   milestoneId: string,
 ): Promise<UatDispatchCandidate[] | null> {
-  const { isDbAvailable, getMilestoneSlices } = await import("./gsd-db.js");
+  const { isDbAvailable } = await import("./gsd-db.js");
   if (!isDbAvailable()) return null;
 
-  const slices = getMilestoneSlices(milestoneId);
+  const slices = readMilestoneSlices(milestoneId);
   // No DB slice rows for this milestone: the DB has no authoritative view, so
   // return null to let the caller defer to the roadmap fallback.
   if (slices.length === 0) return null;

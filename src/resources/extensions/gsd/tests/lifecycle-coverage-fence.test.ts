@@ -360,6 +360,38 @@ test("after the cutover a worktree database merge applies the status changes of 
   );
 });
 
+test("after the cutover the preview of a worktree database merge reports every status change of the merge and changes no row", () => {
+  const mainDb = openAdoptedProject();
+  const worktreeDb = worktreeCopy(mainDb, () => {
+    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Unproven", status: "complete" });
+    insertSlice({ milestoneId: "M001", id: "S02", title: "Skipped slice", status: "skipped", sequence: 2 });
+    insertTask({ milestoneId: "M001", sliceId: "S02", id: "T01", title: "Open task", status: "pending" });
+  });
+  advanceAuthorityEpoch();
+  const before = authority();
+
+  const preview = reconcileWorktreeDb(mainDb, worktreeDb, { preview: true });
+
+  assert.deepEqual([...preview.adoptionStatusChanges].sort(), [
+    'task M001/S01/T02 "complete" -> "pending" (legacy-complete-unproven)',
+    'task M001/S02/T01 "pending" -> "skipped" (cancelled-with-parent)',
+  ]);
+  assert.deepEqual(preview.statusChanges, [
+    'slice M001/S02: new row -> "skipped"',
+    'task M001/S01/T02: new row -> "pending"',
+    'task M001/S02/T01: new row -> "skipped"',
+  ]);
+  assert.deepEqual(authority(), before, "a preview records no operation");
+  assert.equal(getTask("M001", "S01", "T02"), null, "a preview changes no row");
+
+  assert.deepEqual(
+    reconcileWorktreeDb(mainDb, worktreeDb, { confirmed: preview }),
+    preview,
+    "the merge makes the changes of the confirmed preview and no other change",
+  );
+  assert.deepEqual(taskState("S01", "T02"), { status: "pending", lifecycle: "ready" });
+});
+
 test("after the cutover a worktree database merge refuses an unknown status and names the row and the fix", () => {
   const mainDb = openAdoptedProject();
   const worktreeDb = worktreeCopy(mainDb, () => {

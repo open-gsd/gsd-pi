@@ -16,6 +16,19 @@ export function parseLegacyImportPreviewChoices(args: string): LegacyImportPrevi
   }));
 }
 
+// A file row choice names one KNOWLEDGE.md row (K/P/L###) or one milestone
+// CONTEXT or RESEARCH document (M###-CONTEXT) whose file text replaces the
+// differing database row.
+const KNOWLEDGE_FILE_ROW_CHOICE_PATTERN = /(?:^|\s)--choice=([KPL]\d+|M\d+(?:-[a-z0-9]+)?-(?:CONTEXT|RESEARCH))\.use-file(?=\s|$)/gu;
+
+export function formatLegacyImportKnowledgeFileRowChoice(knowledgeId: string): string {
+  return `--choice=${knowledgeId}.use-file`;
+}
+
+export function parseLegacyImportKnowledgeFileRowChoices(args: string): string[] {
+  return [...new Set([...args.matchAll(KNOWLEDGE_FILE_ROW_CHOICE_PATTERN)].map((match) => match[1]!))];
+}
+
 export function formatLegacyImportForwardRepairChoice(
   choice: Pick<LegacyImportForwardRepairChoice, "instructionIndex" | "targetKind" | "targetKey" | "reviewHash">,
   decision: LegacyImportForwardRepairChoice["decision"],
@@ -61,7 +74,13 @@ export function parseLegacyImportForwardRepairChoices(args: string): LegacyImpor
     identities.add(identity);
     choices.push(choice);
   }
-  if (args.replace(pattern, " ").replace(PREVIEW_CHOICE_PATTERN, " ").includes("--choice=")) {
+  if (
+    args
+      .replace(pattern, " ")
+      .replace(PREVIEW_CHOICE_PATTERN, " ")
+      .replace(KNOWLEDGE_FILE_ROW_CHOICE_PATTERN, " ")
+      .includes("--choice=")
+  ) {
     throw new Error("recover Forward Repair choice token is invalid");
   }
   return choices;

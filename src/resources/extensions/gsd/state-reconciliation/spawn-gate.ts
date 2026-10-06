@@ -11,6 +11,7 @@ import {
   ReconciliationFailedError,
   type ReconciliationDeps,
 } from "./index.js";
+import { preserveProjectionEvidence } from "../projection-observation.js";
 import {
   describeHeldProjectionChanges,
   describePreservedProjectionChanges,
@@ -85,5 +86,23 @@ export async function reconcileBeforeSpawn(
       return { ok: false, reason: err.message };
     }
     throw err;
+  }
+}
+
+/**
+ * Read-only form of the pre-dispatch hold, for a dispatch that does not run
+ * reconciliation (guided flow and /gsd dispatch). Returns the "changed outside
+ * GSD" reason when a changed git-tracked projection must stop the dispatch,
+ * else null. Nothing is moved or rendered, so a hand edit of an untracked
+ * projection stays as it is.
+ */
+export async function heldProjectionChangesBeforeDispatch(basePath: string): Promise<string | null> {
+  try {
+    const { held } = await preserveProjectionEvidence(basePath, [], true, true);
+    return held.length > 0 ? describeHeldProjectionChanges(basePath, held) : null;
+  } catch (error) {
+    // Projection files are not workflow state: report the failure and go on.
+    logWarning("reconcile", `Projection observation failed: ${(error as Error).message}`);
+    return null;
   }
 }

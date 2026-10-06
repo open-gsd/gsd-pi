@@ -84,8 +84,8 @@ Each row = one prompt file. Columns show which DB tables it touches and how.
 
 | Prompt | DB Reads | DB Writes | Disk Artifact Written |
 |--------|----------|-----------|----------------------|
-| `discuss` / `guided-discuss-milestone` | milestones, artifacts | artifacts (CONTEXT), milestones.depends_on via `gsd_milestone_set_dependencies` | M##-CONTEXT.md |
-| `discuss-headless` | milestones, artifacts | milestones, slices, decisions, artifacts | M##-CONTEXT.md, DECISIONS.md |
+| `discuss` / `guided-discuss-milestone` | milestones, artifacts | artifacts (CONTEXT), milestones.depends_on via `gsd_milestone_set_dependencies`, workflow_work_checkpoints via `gsd_checkpoint_save` for a queued milestone (`discuss` only) | M##-CONTEXT.md |
+| `discuss-headless` | milestones, artifacts | milestones, slices, decisions, artifacts, workflow_work_checkpoints via `gsd_checkpoint_save` for a queued milestone | M##-CONTEXT.md, DECISIONS.md |
 | `research-milestone` | milestones, artifacts | artifacts (RESEARCH) | M##-RESEARCH.md |
 | `plan-milestone` | project_authority, workflow_operations, workflow_item_lifecycles, milestones, slices | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, milestones (UPDATE planning), slices (INSERT), optional single-slice metadata via `gsd_plan_slice`, optional single-slice tasks via `gsd_plan_task`, decisions | ROADMAP.md; NN-MM-PLAN.md with embedded tasks for single-slice fast path |
 | `queue` | milestones | milestones (INSERT queued), artifacts (CONTEXT), milestones.depends_on via `gsd_milestone_set_dependencies` | PROJECT.md, QUEUE.md |
@@ -106,8 +106,8 @@ The task-bearing planning payloads use camel-case `requiredWorkflowTools` on `gs
 
 | Prompt | DB Reads | DB Writes | Disk Artifact Written |
 |--------|----------|-----------|----------------------|
-| `execute-task` | Task lifecycle, current Attempt/Result/verdict evidence, slices, milestones, memories, quality gates | invokes evidence-backed Task publication; see the [database map](./db-map.md), plus memory hit counts | S##-T##-SUMMARY.md and NN-MM-PLAN.md projections after commit; legacy T##-SUMMARY.md readable |
-| `guided-resume-task` | Task lifecycle, current Attempt/Result/verdict evidence, slices | invokes evidence-backed Task publication; see the [database map](./db-map.md) | S##-T##-SUMMARY.md projection after commit; legacy T##-SUMMARY.md readable |
+| `execute-task` | Task lifecycle, current Attempt/Result/verdict evidence, the head Work Checkpoint of the task (`workflow_work_checkpoints`), slices, milestones, memories, quality gates | invokes evidence-backed Task publication; see the [database map](./db-map.md), plus memory hit counts | S##-T##-SUMMARY.md and NN-MM-PLAN.md projections after commit; legacy T##-SUMMARY.md readable |
+| `guided-resume-task` | Task lifecycle, current Attempt/Result/verdict evidence, the head Work Checkpoint of the task (`workflow_work_checkpoints`), slices | invokes evidence-backed Task publication; see the [database map](./db-map.md) | S##-T##-SUMMARY.md projection after commit; legacy T##-SUMMARY.md readable |
 | `reactive-execute` | tasks | tasks via N× execute-task subagents; retry-cap exhaustion records a recovery block (`gate_runs`) and does not derive completion/skipped state from summaries | S##-T##-SUMMARY.md × N; S##-REACTIVE-BLOCKER.md diagnostic when batch tasks are still open with no Attempt Result after retries |
 | `quick-task` | — | — (no DB; writes summaryPath directly) | {{summaryPath}} |
 
@@ -188,6 +188,7 @@ S##-CONTEXT present AND
 slices WHERE is_sketch = 1                         → refine-slice
 
 tasks WHERE status='pending' AND count ≥ 3 AND no recorded reactive recovery block
+  AND no selected task has a lifecycle row (IO read from tasks.inputs / expected_output / files)
                                                        → reactive-execute (parallel)
 
 tasks WHERE status='pending' AND count < 3         → execute-task (sequential)
@@ -287,10 +288,10 @@ user cancels
   └─► worker polls: SELECT FROM cancellation_requests WHERE status='pending'
   └─► UPDATE cancellation_requests SET status='acked', acked_worker_id, acked_at
 
-command broadcast
-  └─► INSERT INTO command_queue (target_worker=NULL, command, args_json)  ← NULL = all workers
-  └─► INSERT INTO command_queue (target_worker='w-123', command, args_json) ← targeted
-  └─► worker claims with BEGIN IMMEDIATE so read-then-write claim races serialize under WAL
+parallel pause / resume / stop (details: db-map.md, `command_queue`)
+  └─► INSERT INTO command_queue (target_worker='<milestone ID>', command)
+  └─► worker takes the oldest pending row at a unit boundary; the take runs in
+      BEGIN IMMEDIATE so read-then-write claim races serialize under WAL
 
 unit completes
   └─► UPDATE unit_dispatches SET status='done'|'failed', ended_at, exit_reason, error_summary

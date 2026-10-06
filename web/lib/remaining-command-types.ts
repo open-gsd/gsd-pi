@@ -74,6 +74,8 @@ export interface HistoryData {
   byPhase: HistoryPhaseAggregate[]
   bySlice: HistorySliceAggregate[]
   byModel: HistoryModelAggregate[]
+  /** Set only when the units come from .gsd/metrics.json: the database is missing or holds no unit rows. */
+  readMetadata?: ProjectProgressReadMetadata
 }
 
 // ─── Inspect (mirrors commands.ts InspectData) ───────────────────────────────

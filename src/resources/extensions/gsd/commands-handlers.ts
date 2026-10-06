@@ -15,7 +15,7 @@ import { deriveState } from "./state.js";
 import { gsdRoot, resolveGsdPathContract } from "./paths.js";
 import { gsdHome } from "./gsd-home.js";
 import { appendCapture, hasPendingCaptures, loadPendingCaptures } from "./captures.js";
-import { registerOverride } from "./overrides.js";
+import { registerSteerOverride } from "./overrides.js";
 import {
   formatDoctorIssuesForPrompt,
   formatDoctorReport,
@@ -458,15 +458,10 @@ export async function handleTriage(ctx: ExtensionCommandContext, pi: ExtensionAP
 
 export async function handleSteer(change: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
   const basePath = currentDirectoryRoot();
-  const state = await deriveState(basePath);
-  const mid = state.activeMilestone?.id ?? "none";
-  const sid = state.activeSlice?.id ?? "none";
-  const tid = state.activeTask?.id ?? "none";
-  const appliedAt = `${mid}/${sid}/${tid}`;
 
   // The override is a database row shared by the project root and every
   // worktree; OVERRIDES.md is its render.
-  registerOverride(basePath, change, appliedAt);
+  await registerSteerOverride(basePath, change);
 
   const overrideLoc = "`.gsd/OVERRIDES.md`";
 

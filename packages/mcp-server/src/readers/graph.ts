@@ -4,10 +4,12 @@
 /**
  * Knowledge Graph for GSD projects.
  *
- * Parses .gsd/ artifacts (STATE.md, milestone ROADMAPs, slice PLANs,
- * KNOWLEDGE.md) into a graph of nodes and edges. Parse errors in any
- * single artifact are caught and never propagate — the artifact is skipped
- * and the rest of the graph is returned.
+ * Builds a graph of nodes and edges. With a database source (ADR-046) the
+ * milestone, slice, task, state and knowledge nodes come from database rows,
+ * and only the LEARNINGS text is read from files. Without one, the .gsd/
+ * projections (STATE.md, milestone ROADMAPs, slice PLANs, KNOWLEDGE.md) are
+ * parsed. Parse errors in any single artifact are caught and never propagate
+ * — the artifact is skipped and the rest of the graph is returned.
  *
  * writeGraph() is atomic: writes to graph.tmp.json then renames to graph.json.
  */
@@ -65,6 +67,21 @@ export interface KnowledgeGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
   builtAt: string;
+}
+
+/**
+ * The node source of a database-backed build: the database reads of the
+ * runtime bridge. `state` and `knowledge` keep the markdown shape of
+ * STATE.md and KNOWLEDGE.md, but the text is built from database rows.
+ */
+export interface GraphDatabaseSource {
+  state: string;
+  knowledge: string;
+  milestones: Array<{
+    id: string;
+    title: string;
+    slices: Array<{ id: string; title: string; tasks: Array<{ id: string; title: string }> }>;
+  }>;
 }
 
 export interface GraphStatusResult {
@@ -132,7 +149,11 @@ function parseStateFile(gsdRoot: string, nodes: GraphNode[], _edges: GraphEdge[]
   } catch {
     return;
   }
+  addStateNodes(content, nodes, 'STATE.md');
+}
 
+/** Active milestone and phase nodes from STATE text. `sourceFile` is absent for text built from the database. */
+function addStateNodes(content: string, nodes: GraphNode[], sourceFile?: string): void {
   // Extract active milestone
   const activeMilestoneMatch = content.match(/\*\*Active Milestone:\*\*\s+([A-Z]\d+(?:-[a-z0-9]{6})?):\s+(.+)/i);
   if (activeMilestoneMatch) {
@@ -145,7 +166,7 @@ function parseStateFile(gsdRoot: string, nodes: GraphNode[], _edges: GraphEdge[]
         type: 'milestone',
         description: `Active milestone: ${milestoneId}`,
         confidence: 'EXTRACTED',
-        sourceFile: 'STATE.md',
+        sourceFile,
       });
     }
   }
@@ -159,7 +180,7 @@ function parseStateFile(gsdRoot: string, nodes: GraphNode[], _edges: GraphEdge[]
       label: `Phase: ${phase}`,
       type: 'concept',
       confidence: 'EXTRACTED',
-      sourceFile: 'STATE.md',
+      sourceFile,
     });
   }
 }
@@ -177,7 +198,11 @@ function parseKnowledgeFile(gsdRoot: string, nodes: GraphNode[], _edges: GraphEd
   } catch {
     return;
   }
+  addKnowledgeNodes(content, nodes, 'KNOWLEDGE.md');
+}
 
+/** Rule, pattern and lesson nodes from KNOWLEDGE text. `sourceFile` is absent for text built from the database. */
+function addKnowledgeNodes(content: string, nodes: GraphNode[], sourceFile?: string): void {
   // Parse Rules table
   const rulesMatch = content.match(/## Rules\s*\n([\s\S]*?)(?=\n## |$)/i);
   if (rulesMatch) {
@@ -194,7 +219,7 @@ function parseKnowledgeFile(gsdRoot: string, nodes: GraphNode[], _edges: GraphEd
         type: 'rule',
         description: cells[2] ?? '',
         confidence: 'EXTRACTED',
-        sourceFile: 'KNOWLEDGE.md',
+        sourceFile,
       });
     }
   }
@@ -215,7 +240,7 @@ function parseKnowledgeFile(gsdRoot: string, nodes: GraphNode[], _edges: GraphEd
         type: 'pattern',
         description: cells[1] ?? '',
         confidence: 'EXTRACTED',
-        sourceFile: 'KNOWLEDGE.md',
+        sourceFile,
       });
     }
   }
@@ -236,7 +261,7 @@ function parseKnowledgeFile(gsdRoot: string, nodes: GraphNode[], _edges: GraphEd
         type: 'lesson',
         description: cells[1] ?? '',
         confidence: 'EXTRACTED',
-        sourceFile: 'KNOWLEDGE.md',
+        sourceFile,
       });
     }
   }
@@ -395,6 +420,36 @@ function parseTasksFromPlan(
   }
 }
 
+/**
+ * Milestone, slice and task nodes from database rows. No ROADMAP or PLAN file
+ * is read, so a deleted or stale projection does not change the nodes.
+ */
+function addDatabaseHierarchy(
+  milestones: GraphDatabaseSource['milestones'],
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+): void {
+  for (const milestone of milestones) {
+    const milestoneNodeId = `milestone:${milestone.id}`;
+    nodes.push({
+      id: milestoneNodeId,
+      label: milestone.title === milestone.id ? milestone.id : `${milestone.id}: ${milestone.title}`,
+      type: 'milestone',
+      confidence: 'EXTRACTED',
+    });
+    for (const slice of milestone.slices) {
+      const sliceNodeId = `slice:${milestone.id}:${slice.id}`;
+      nodes.push({ id: sliceNodeId, label: `${slice.id}: ${slice.title}`, type: 'slice', confidence: 'EXTRACTED' });
+      edges.push({ from: milestoneNodeId, to: sliceNodeId, type: 'contains', confidence: 'EXTRACTED' });
+      for (const task of slice.tasks) {
+        const taskNodeId = `task:${milestone.id}:${slice.id}:${task.id}`;
+        nodes.push({ id: taskNodeId, label: `${task.id}: ${task.title}`, type: 'task', confidence: 'EXTRACTED' });
+        edges.push({ from: sliceNodeId, to: taskNodeId, type: 'contains', confidence: 'EXTRACTED' });
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // LEARNINGS.md parser
 // ---------------------------------------------------------------------------
@@ -405,9 +460,12 @@ function parseTasksFromPlan(
  * Surprises are mapped to the 'lesson' NodeType (no distinct type exists).
  * Parse errors per file are caught — the file is skipped, never rethrows.
  */
-function parseLearningsFiles(gsdRoot: string, nodes: GraphNode[], edges: GraphEdge[]): void {
-  const milestoneIds = findMilestoneIds(gsdRoot);
-
+function parseLearningsFiles(
+  gsdRoot: string,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  milestoneIds: string[] = findMilestoneIds(gsdRoot),
+): void {
   for (const milestoneId of milestoneIds) {
     try {
       parseSingleLearningsFile(gsdRoot, milestoneId, nodes, edges);
@@ -543,24 +601,33 @@ function parseLearningsSection(
 // ---------------------------------------------------------------------------
 
 /**
- * Build a KnowledgeGraph by parsing all .gsd/ artifacts.
+ * Build a KnowledgeGraph. With `database`, the nodes come from database rows
+ * and only LEARNINGS files of database milestones are read. Without it, all
+ * .gsd/ artifacts are parsed (the projection fallback).
  *
  * Parse errors in any single artifact are caught — the artifact is skipped
  * and never causes buildGraph() to throw.
  */
-export async function buildGraph(projectDir: string): Promise<KnowledgeGraph> {
+export async function buildGraph(projectDir: string, database?: GraphDatabaseSource): Promise<KnowledgeGraph> {
   const gsdRoot = resolveGsdRoot(resolve(projectDir));
 
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
 
   // Each parser is wrapped so a crash in one never stops others
-  const parsers: Array<(g: string, n: GraphNode[], e: GraphEdge[]) => void> = [
-    parseStateFile,
-    parseKnowledgeFile,
-    parseMilestoneFiles,
-    parseLearningsFiles,
-  ];
+  const parsers: Array<(g: string, n: GraphNode[], e: GraphEdge[]) => void> = database
+    ? [
+        function databaseState(_g, n) { addStateNodes(database.state, n); },
+        function databaseKnowledge(_g, n) { addKnowledgeNodes(database.knowledge, n); },
+        function databaseHierarchy(_g, n, e) { addDatabaseHierarchy(database.milestones, n, e); },
+        function learningsFiles(g, n, e) { parseLearningsFiles(g, n, e, database.milestones.map((m) => m.id)); },
+      ]
+    : [
+        parseStateFile,
+        parseKnowledgeFile,
+        parseMilestoneFiles,
+        parseLearningsFiles,
+      ];
 
   for (const parser of parsers) {
     try {

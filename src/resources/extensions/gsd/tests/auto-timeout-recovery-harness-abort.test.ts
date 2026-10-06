@@ -44,7 +44,7 @@ test("timeout recovery retry clears stale harness abort for the same unit run", 
         basePath: base,
         verbose: false,
         currentUnitStartedAt: startedAt,
-        unitRecoveryCount: new Map(),
+        unclaimedUnitBudgets: new Map(),
       },
     );
 

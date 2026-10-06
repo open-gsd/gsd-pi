@@ -8,7 +8,7 @@
  * All errors are caught internally — sync failures never block execution.
  */
 
-import { loadFile, parseSummary } from "../gsd/files.js";
+import { parseSummary } from "../gsd/files.js";
 import {
   getMilestone,
   getMilestoneSlices,
@@ -17,9 +17,8 @@ import {
   isDbAvailable,
 } from "../gsd/gsd-db.js";
 import { openExistingWorkflowDatabase } from "../gsd/db-workspace.js";
-import { readMilestones, readMilestoneSlices } from "../gsd/db/lifecycle-read.js";
+import { readMilestones, readMilestoneSlices, readSliceTasks } from "../gsd/db/lifecycle-read.js";
 import { normalizeLegacyLifecycleStatus } from "../gsd/status-guards.js";
-import { resolveTaskFile } from "../gsd/paths.js";
 import { debugLog } from "../gsd/debug-logger.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 
@@ -450,23 +449,30 @@ async function syncTaskComplete(
   const taskRecord = getTaskRecord(mapping, mid, sid, tid);
   if (!taskRecord || taskRecord.state === "closed") return;
 
-  // Load task summary
+  // The database decides whether the Task is complete. An execute-task unit
+  // whose Task is not complete there (its verification failed or has not run)
+  // posts nothing.
+  ensureSyncDb(basePath);
+  const task = isDbAvailable() ? readSliceTasks(mid, sid).find((t) => t.id === tid) : undefined;
+  if (!task || normalizeLegacyLifecycleStatus(task.status) !== "completed") {
+    debugLog("github-sync", { skip: "task is not complete in the database", mid, sid, tid });
+    return;
+  }
+
+  // Post the task summary. The summary is the one stored on the task row; the
+  // SUMMARY.md projection is not read.
   let commentOk = true;
-  const summaryPath = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
-  if (summaryPath) {
-    const content = await loadFile(summaryPath);
-    if (content) {
-      const summary = parseSummary(content);
-      const comment = formatSummaryComment({
-        oneLiner: summary.oneLiner,
-        body: summary.whatHappened,
-        frontmatter: summary.frontmatter as unknown as Record<string, unknown>,
-      });
-      const commentResult = ghAddComment(basePath, mapping.repo, taskRecord.issueNumber, comment);
-      commentOk = commentResult.ok;
-      if (!commentResult.ok) {
-        debugLog("github-sync", { phase: "task-comment-failed", mid, sid, tid, error: commentResult.error });
-      }
+  if (task.full_summary_md) {
+    const summary = parseSummary(task.full_summary_md);
+    const comment = formatSummaryComment({
+      oneLiner: summary.oneLiner,
+      body: summary.whatHappened,
+      frontmatter: summary.frontmatter as unknown as Record<string, unknown>,
+    });
+    const commentResult = ghAddComment(basePath, mapping.repo, taskRecord.issueNumber, comment);
+    commentOk = commentResult.ok;
+    if (!commentResult.ok) {
+      debugLog("github-sync", { phase: "task-comment-failed", mid, sid, tid, error: commentResult.error });
     }
   }
 

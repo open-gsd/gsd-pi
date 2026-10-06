@@ -158,7 +158,7 @@ function completeTaskWithEvidence(taskId: string): void {
       endedAt: "2026-07-14T00:01:01.000Z",
       exitCode: 0,
       observation: "passed",
-      durableOutputRef: `db://fixture/${taskId}/verification`,
+      durableOutputRef: `db://host-verification/${claim.attemptId}`,
       environment: { runner: "node-test", fixture: "slice-reopen" },
     },
   });

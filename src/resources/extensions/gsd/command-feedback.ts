@@ -156,20 +156,6 @@ export function notifyInitNeedsInteractiveMenu(
   });
 }
 
-/** /gsd migrate confirmation step. */
-export function notifyMigrateNeedsInteractiveMenu(
-  ctx: ExtensionCommandContext,
-  reason: string,
-): void {
-  notifyPickerCommandNeedsInteractiveMenu(ctx, {
-    command: "/gsd migrate",
-    reason,
-    hints: [
-      "Run /gsd migrate from the GSD TUI to review the preview and confirm the write",
-    ],
-  });
-}
-
 /** /gsd forensics when input or opt-in picker is required. */
 export function notifyForensicsNeedsInteractiveMenu(
   ctx: ExtensionCommandContext,

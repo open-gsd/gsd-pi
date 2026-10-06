@@ -275,7 +275,7 @@ pi.on("before_model_select", async (event) => {
 
 ### 自适应学习
 
-路由历史（`.gsd/routing-history.json`）会按 unit type 和 tier 记录成功 / 失败情况。如果某种模式下某个 tier 的失败率超过 20%，未来相似分类会自动上调一个 tier。用户反馈（`over` / `under` / `ok`）的权重是自动结果的 2 倍。
+路由历史（存储在项目数据库中）会按 unit type 和 tier 记录成功 / 失败情况。如果某种模式下某个 tier 的失败率超过 20%，未来相似分类会自动上调一个 tier。用户反馈（`over` / `under` / `ok`）的权重是自动结果的 2 倍。
 
 ## 与 Token Profile 的关系
 

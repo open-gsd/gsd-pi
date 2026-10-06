@@ -9,13 +9,16 @@ import { tmpdir } from "node:os";
 
 import { diagnoseExpectedArtifact } from "../auto-recovery.ts";
 import { recoverTimedOutUnit, type RecoveryContext } from "../auto-timeout-recovery.ts";
+import { resolveDispatchRecoveryAttempts } from "../auto/unit-phase.ts";
+import { closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 
 function recoveryContext(base: string, startedAt: number): RecoveryContext {
   return {
     basePath: base,
     verbose: false,
     currentUnitStartedAt: startedAt,
-    unitRecoveryCount: new Map(),
+    unclaimedUnitBudgets: new Map(),
   };
 }
 
@@ -69,6 +72,31 @@ test("validate-milestone recovery steers to gsd_validate_milestone instead of wr
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("a timeout recovery survives a restart: the count is on the dispatch row", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-validate-timeout-restart-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  claimTestDispatch(base, { milestoneId: "M001", unitType: "validate-milestone", unitId: "M001" });
+  const harness = recordingHarness();
+  const beforeKill = recoveryContext(base, Date.now());
+
+  assert.equal(
+    await recoverTimedOutUnit(harness.ctx, harness.pi, "validate-milestone", "M001", "idle", beforeKill),
+    "recovered",
+  );
+
+  assert.equal(beforeKill.unclaimedUnitBudgets.size, 0, "a claimed unit keeps nothing in session memory");
+  // A new process has an empty session map. The next dispatch of the unit must
+  // still see that a recovery ran, as it does in the process that ran it.
+  assert.equal(resolveDispatchRecoveryAttempts(new Map(), "validate-milestone", "M001"), 0);
+  assert.equal(resolveDispatchRecoveryAttempts(new Map(), "validate-milestone", "M002"), undefined);
 });
 
 test("research-slice recovery names the save tool instead of telling the agent to write the file", async (t) => {

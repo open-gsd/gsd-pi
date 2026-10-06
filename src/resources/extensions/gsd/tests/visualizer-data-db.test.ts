@@ -54,6 +54,11 @@ for (const [name, damage] of [
       })),
       [{ id: "M001", title: "Authority Fixture", status: "active", slices: [["S01", true], ["S02", false]] }],
     );
+    // Every slice lists its tasks, not only the active slice (S02).
+    assert.deepEqual(
+      data.milestones[0].slices.map((slice) => slice.tasks.map((task) => [task.id, task.title, task.done, task.active])),
+      [[["T01", "Completed task", true, false]], [["T01", "Ready task", false, true]]],
+    );
     assert.deepEqual(
       data.changelog.entries.map((entry) => [entry.sliceId, entry.oneLiner, entry.completedAt]),
       [["S01", "Summary from the database", "2026-07-10T00:00:00.000Z"]],

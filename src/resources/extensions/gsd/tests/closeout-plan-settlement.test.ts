@@ -25,6 +25,7 @@ import { withCommandCwd } from "../commands/context.ts";
 import { handleOpsCommand } from "../commands/handlers/ops.ts";
 import type { DomainOperationContext } from "../db/domain-operation.ts";
 import { readMilestoneLifecycleStatus } from "../db/milestone-closeout-readiness.ts";
+import { closeoutHash, insertCloseoutPlan } from "../db/writers/closeout.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 import { clearParseCache } from "../files.ts";
@@ -50,6 +51,7 @@ import {
   reopenMilestone,
 } from "../milestone-lifecycle-domain-operation.ts";
 import { runMilestoneCloseoutGitHub } from "../milestone-closeout.ts";
+import { grantMilestoneValidationWaiver } from "../milestone-validation-waiver-domain-operation.ts";
 import { evaluateAllCompleteSettlement } from "../milestone-settlement.ts";
 import { _clearGsdRootCache, clearPathCache } from "../paths.ts";
 import { publishMilestone } from "../publication.ts";
@@ -129,8 +131,58 @@ function sourceRevision(basePath: string): string {
   return source.snapshot.aggregateRevision;
 }
 
-/** An adopted, validated Milestone M001 whose only Slice and Task are complete. */
-async function validatedMilestone(): Promise<{ basePath: string; sourceRevision: string }> {
+/** What the database holds about the validation of M001 before its closeout. */
+type ValidationFixture = "passed" | "failed" | "waived" | "failed-then-waived";
+
+async function recordValidation(basePath: string, validation: ValidationFixture): Promise<void> {
+  if (validation !== "waived") {
+    const passed = validation === "passed";
+    const validated = await handleValidateMilestone({
+      milestoneId: "M001",
+      verdict: passed ? "pass" : "needs-remediation",
+      remediationRound: passed ? 0 : 1,
+      successCriteriaChecklist: passed ? "- [x] Complete" : "- [ ] Regression remains",
+      sliceDeliveryAudit: "| S01 | delivered |",
+      crossSliceIntegration: passed ? "Passed" : "Failed",
+      requirementCoverage: "Covered",
+      verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+      verdictRationale: passed ? "All current database evidence passes." : "A regression was found.",
+      ...(passed ? {} : { remediationPlan: "Repair and revalidate." }),
+    }, basePath, { invocation: invocation("fixture/validate"), skipBrowserEvidenceGate: true });
+    assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
+  }
+  if (validation === "waived" || validation === "failed-then-waived") {
+    grantMilestoneValidationWaiver({
+      invocation: invocation("fixture/waive"),
+      milestoneId: "M001",
+      testedSourceRevision: sourceRevision(basePath),
+      reason: "preference",
+      policyId: "milestone-validation-waiver",
+      policyVersion: "1",
+    });
+  }
+}
+
+/** The Attempts of the Milestone M001 lifecycle, oldest first. */
+function milestoneAttempts(): Array<{ attemptId: string; outcome: string; failureClass: string }> {
+  return _getAdapter()!.prepare(`
+    SELECT attempt.attempt_id, result.outcome, result.failure_class
+    FROM workflow_execution_attempts attempt
+    JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = attempt.lifecycle_id
+    JOIN workflow_attempt_results result ON result.attempt_id = attempt.attempt_id
+    WHERE lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = 'M001'
+    ORDER BY attempt.attempt_number
+  `).all().map((row) => ({
+    attemptId: String(row["attempt_id"]),
+    outcome: String(row["outcome"]),
+    failureClass: String(row["failure_class"]),
+  }));
+}
+
+/** An adopted Milestone M001 whose only Slice and Task are complete, validated unless told otherwise. */
+async function validatedMilestone(
+  validation: ValidationFixture = "passed",
+): Promise<{ basePath: string; sourceRevision: string }> {
   const basePath = realpathSync(mkdtempSync(join(tmpdir(), "gsd-closeout-plan-")));
   tempDirs.add(basePath);
   mkdirSync(join(basePath, ".gsd", "milestones", "M001"), { recursive: true });
@@ -157,18 +209,7 @@ async function validatedMilestone(): Promise<{ basePath: string; sourceRevision:
       itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed",
     });
   });
-  const validated = await handleValidateMilestone({
-    milestoneId: "M001",
-    verdict: "pass",
-    remediationRound: 0,
-    successCriteriaChecklist: "- [x] Complete",
-    sliceDeliveryAudit: "| S01 | delivered |",
-    crossSliceIntegration: "Passed",
-    requirementCoverage: "Covered",
-    verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
-    verdictRationale: "All current database evidence passes.",
-  }, basePath, { invocation: invocation("fixture/validate"), skipBrowserEvidenceGate: true });
-  assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
+  await recordValidation(basePath, validation);
   return { basePath, sourceRevision: sourceRevision(basePath) };
 }
 
@@ -349,10 +390,15 @@ function mergeEffectReceipt() {
 }
 
 /**
- * M001 runs in its own worktree on `milestone/M001` and is validated there.
- * M002 depends on M001. `autoPush` adds a remote the push can be pointed at.
+ * M001 runs in its own worktree on `milestone/M001` and is validated there
+ * unless told otherwise. M002 depends on M001. `autoPush` adds a remote the
+ * push can be pointed at.
  */
-async function milestoneInWorktree(options: { autoPush?: boolean; githubSync?: boolean } = {}): Promise<{
+async function milestoneInWorktree(options: {
+  autoPush?: boolean;
+  githubSync?: boolean;
+  validation?: ValidationFixture;
+} = {}): Promise<{
   repo: string;
   worktree: string;
   remote: string;
@@ -426,18 +472,7 @@ async function milestoneInWorktree(options: { autoPush?: boolean; githubSync?: b
       itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed",
     });
   });
-  const validated = await handleValidateMilestone({
-    milestoneId: "M001",
-    verdict: "pass",
-    remediationRound: 0,
-    successCriteriaChecklist: "- [x] Complete",
-    sliceDeliveryAudit: "| S01 | delivered |",
-    crossSliceIntegration: "Passed",
-    requirementCoverage: "Covered",
-    verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
-    verdictRationale: "All current database evidence passes.",
-  }, worktree, { invocation: invocation("fixture/validate"), skipBrowserEvidenceGate: true });
-  assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
+  await recordValidation(worktree, options.validation ?? "passed");
 
   process.chdir(worktree);
   const prepared = await handleCompleteMilestone(completionParams, worktree, invocation("tool/complete"));
@@ -486,6 +521,136 @@ test("a merge conflict leaves the Milestone open and its dependent locked", asyn
   const state = await deriveState(repo);
   assert.equal(state.activeMilestone?.id, "M001");
   assert.notEqual(state.registry.find((entry) => entry.id === "M002")?.status, "active");
+});
+
+// ─── A Milestone closed out on a validation Waiver ───────────────────────────
+
+test("a Milestone waived before validation ran stays open until the merge settles", async () => {
+  const { repo } = await milestoneInWorktree({ validation: "waived" });
+  assert.equal(getMilestone("M001")?.status, "active");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+  // The plan cites the Attempt the Waiver settled: validation never ran.
+  const attempts = milestoneAttempts();
+  assert.deepEqual(
+    attempts.map((attempt) => [attempt.outcome, attempt.failureClass]),
+    [["interrupted", "validation-waived"]],
+  );
+  assert.equal(readMilestoneCloseoutPlan("M001")?.attemptId, attempts[0]!.attemptId);
+
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(git(["show", "main:feature.txt"], repo), "milestone work");
+  assert.equal(mergeEffectReceipt()?.outcome, "performed");
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
+});
+
+test("a merge conflict leaves a waived Milestone open and its dependent locked", async () => {
+  const { repo, worktree } = await milestoneInWorktree({ validation: "waived" });
+  commitOnMain(repo, "conflicting change on main\n");
+
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), MergeConflictError);
+
+  assert.equal(mergeEffectReceipt(), null);
+  assert.equal(getMilestone("M001")?.status, "active");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+  assert.equal(existsSync(worktree), true);
+  invalidateStateCache();
+  const state = await deriveState(repo);
+  assert.notEqual(state.registry.find((entry) => entry.id === "M002")?.status, "active");
+});
+
+test("a Milestone waived after a failed validation closes out on the Attempt of that validation", async () => {
+  const { repo } = await milestoneInWorktree({ validation: "failed-then-waived" });
+  const attempts = milestoneAttempts();
+  assert.equal(attempts.length, 1);
+  assert.notEqual(attempts[0]!.outcome, "succeeded");
+  assert.notEqual(attempts[0]!.failureClass, "validation-waived");
+  assert.equal(readMilestoneCloseoutPlan("M001")?.attemptId, attempts[0]!.attemptId);
+  assert.equal(getMilestone("M001")?.status, "active");
+
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(mergeEffectReceipt()?.outcome, "performed");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
+});
+
+test("preparing a waived Milestone again keeps one Attempt and one plan", async () => {
+  const fixture = await validatedMilestone("waived");
+
+  const plan = prepare(fixture.sourceRevision, "closeout/prepare");
+  const again = prepare(fixture.sourceRevision, "closeout/prepare-retry");
+
+  assert.equal(again.closeoutPlanId, plan.closeoutPlanId);
+  assert.equal(milestoneAttempts().length, 1);
+  assert.equal(count("workflow_closeout_plans"), 1);
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+});
+
+test("a plan on a failed validation Attempt is refused when the Milestone has no Waiver", async () => {
+  const fixture = await validatedMilestone("failed");
+  const lifecycleId = String(_getAdapter()!.prepare(
+    "SELECT lifecycle_id FROM workflow_item_lifecycles WHERE item_kind = 'milestone' AND milestone_id = 'M001'",
+  ).get()?.["lifecycle_id"]);
+  const fence = readDomainOperationFence();
+
+  assert.throws(() => executeDomainOperation({
+    operationType: "milestone.closeout.prepare",
+    idempotencyKey: "closeout/prepare-unwaived",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { milestoneId: "M001" },
+  }, (context) => {
+    insertCloseoutPlan(context, {
+      milestoneId: "M001",
+      lifecycleId,
+      attemptId: milestoneAttempts()[0]!.attemptId,
+      testedSourceSetHash: closeoutHash(fixture.sourceRevision),
+      readinessBasisHash: closeoutHash("unwaived"),
+      effects: [MERGE_EFFECT],
+      preparedAt: new Date().toISOString(),
+    });
+    return {
+      events: [{
+        eventType: "milestone.closeout.prepared",
+        entityType: "milestone",
+        entityId: "M001",
+        payload: { milestoneId: "M001" },
+        destinations: ["test"],
+      }],
+      projections: [{ projectionKey: "test/closeout-unwaived", projectionKind: "test", rendererVersion: "1" }],
+    };
+  }), /closeout plan requires a causally prior settled attempt/);
+  assert.equal(count("workflow_closeout_plans"), 0);
+});
+
+test("a database that holds the plan trigger of an earlier release accepts a waived plan once it is opened again", async () => {
+  const fixture = await validatedMilestone("waived");
+  // The trigger as it was before a Waiver could stand in for a succeeded Attempt.
+  _getAdapter()!.exec(`
+    DROP TRIGGER trg_workflow_closeout_plan_attempt;
+    CREATE TRIGGER trg_workflow_closeout_plan_attempt
+    BEFORE INSERT ON workflow_closeout_plans
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM workflow_execution_attempts attempt
+      JOIN workflow_attempt_results result ON result.attempt_id = attempt.attempt_id
+      WHERE attempt.attempt_id = NEW.attempt_id
+        AND attempt.attempt_state = 'settled'
+        AND result.outcome = 'succeeded'
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'closeout plan requires a causally prior settled attempt');
+    END;
+  `);
+  closeDatabase();
+  assert.equal(openDatabase(join(fixture.basePath, ".gsd", "gsd.db")), true);
+
+  const plan = prepare(fixture.sourceRevision, "closeout/prepare");
+
+  assert.deepEqual(pendingRequiredCloseoutEffects(plan).map((effect) => effect.effectKind), ["milestone-merge"]);
 });
 
 /** GitHub sync is on and every close call to GitHub is counted. */
@@ -1012,6 +1177,32 @@ test("the interactive closeout notice says a prepared Milestone is not complete 
 
   assert.equal(result.gitVerdict, "milestone-branch");
   assert.match(notices[0] ?? "", /closeout is prepared on milestone\/M001.*\/gsd dispatch complete-milestone M001/);
+});
+
+test("each change of the integration branch is one Domain Operation that names the branch it replaced", async () => {
+  const { basePath } = await validatedMilestone();
+  const revision = readDomainOperationFence().revision;
+
+  writeIntegrationBranch(basePath, "M001", "release");
+  writeIntegrationBranch(basePath, "M001", "release");
+  writeIntegrationBranch(basePath, "M001", "main");
+  writeIntegrationBranch(basePath, "M001", "release");
+
+  const recorded = _getAdapter()!.prepare(`
+    SELECT event.payload_json
+    FROM workflow_domain_events event
+    JOIN workflow_operations operation ON operation.operation_id = event.operation_id
+    WHERE operation.operation_type = 'milestone.integration_branch.record'
+      AND event.event_type = 'milestone.integration_branch.recorded'
+    ORDER BY event.project_revision
+  `).all().map((row) => JSON.parse(String(row["payload_json"])));
+  assert.deepEqual(recorded, [
+    { milestoneId: "M001", integrationBranch: "release", previous: null },
+    { milestoneId: "M001", integrationBranch: "main", previous: "release" },
+    { milestoneId: "M001", integrationBranch: "release", previous: "main" },
+  ]);
+  assert.equal(readDomainOperationFence().revision, revision + 3);
+  assert.equal(readIntegrationBranch(basePath, "M001"), "release");
 });
 
 test("deleting META.json does not change the branch the Milestone merges to", async () => {

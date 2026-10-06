@@ -98,6 +98,14 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		auditEvent: "workflow.rework_brief.save",
 	},
 	{
+		canonicalName: "gsd_checkpoint_save",
+		aliases: [],
+		schemaId: "workflow.checkpoint.save",
+		executorId: "executeCheckpointSave",
+		writePolicy: "write",
+		auditEvent: "workflow.checkpoint.save",
+	},
+	{
 		canonicalName: "gsd_slice_complete",
 		aliases: ["gsd_complete_slice"],
 		schemaId: "workflow.slice.complete",
@@ -152,6 +160,14 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		executorId: "executeSaveGateResult",
 		writePolicy: "write",
 		auditEvent: "workflow.gate.save_result",
+	},
+	{
+		canonicalName: "gsd_hook_verdict_save",
+		aliases: [],
+		schemaId: "workflow.hook_verdict.save",
+		executorId: "executeHookVerdictSave",
+		writePolicy: "write",
+		auditEvent: "workflow.hook_verdict.save",
 	},
 	{
 		canonicalName: "gsd_uat_result_save",

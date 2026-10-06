@@ -8,6 +8,7 @@ import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@gsd/pi-coding-agent";
 
 import { runInToolSession } from "../db/domain-operation.js";
+import { getRecoveryActionMilestoneId } from "../db/lifecycle-queries.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   getWorkflowDatabaseStatus,
@@ -94,15 +95,7 @@ function recoveryActionMilestoneId(projectRoot: string, recoveryActionId: string
   const database = openWorkflowDatabaseIsolated(resolveProjectRootDbPath(projectRoot));
   if (!database) return null;
   try {
-    const row = database.prepare(`
-      SELECT lifecycle.milestone_id
-      FROM workflow_recovery_actions action
-      JOIN workflow_item_lifecycles lifecycle
-        ON lifecycle.project_id = action.project_id
-       AND lifecycle.lifecycle_id = action.lifecycle_id
-      WHERE action.recovery_action_id = :recovery_action_id
-    `).get({ ":recovery_action_id": recoveryActionId });
-    return typeof row?.["milestone_id"] === "string" ? row["milestone_id"] : null;
+    return getRecoveryActionMilestoneId(database, recoveryActionId);
   } catch {
     return null;
   } finally {

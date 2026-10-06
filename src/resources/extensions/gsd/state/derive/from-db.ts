@@ -11,13 +11,12 @@
 // resolveMilestoneValidationVerdict) still reads the legacy assessment (D005).
 
 import type { ActiveRef, GSDState, MilestoneRegistryEntry, Phase } from '../../types.js';
-import { parseProject } from '../../schemas/parsers.js';
 import {
   queryDecisions,
   queryDecisionsFromMemories,
 } from '../../context-store.js';
 import {
-  getArtifact,
+  getDb,
   getMilestoneScopedArtifacts,
   getPlanMilestoneRecoveryBlock,
   getPendingGateCountForTurn,
@@ -33,6 +32,7 @@ import {
   type SliceRead,
   type TaskRead,
 } from '../../db/lifecycle-read.js';
+import { readProjectMilestoneSequence } from '../../db/writers/project-milestone-sequence.js';
 import {
   readinessNeedsDiscussion,
   selectActiveMilestone,
@@ -142,24 +142,17 @@ function loadRecentDecisionsFromDb(): string[] {
   );
 }
 
-// The IDs the user actually committed to as their roadmap, read from the
-// PROJECT.md artifact stored in the DB. A content-less queued milestone that
-// appears here is a real, not-yet-planned roadmap stage (e.g. the first
-// milestone right after deep-project setup) and is safe to promote to active.
-// A content-less queued row that is NOT listed here is a phantom left by
-// gsd_milestone_generate_id that was never made part of the roadmap (#1524)
-// and must not be promoted. Returns an empty set when the PROJECT artifact is
-// absent or unparsable, which keeps phantom-only repos out of the promotion
-// path. Disk PROJECT.md is a projection and is never opened here.
+// The IDs the user actually committed to as their roadmap: the Milestone
+// Sequence rows that the save of the PROJECT artifact stores. A content-less
+// queued milestone that appears here is a real, not-yet-planned roadmap stage
+// (e.g. the first milestone right after deep-project setup) and is safe to
+// promote to active. A content-less queued row that is NOT listed here is a
+// phantom left by gsd_milestone_generate_id that was never made part of the
+// roadmap (#1524) and must not be promoted. No row keeps phantom-only repos
+// out of the promotion path. PROJECT.md text is not parsed here, on disk or
+// in the artifact row.
 function loadProjectSequenceIds(): Set<string> {
-  const project = getArtifact("PROJECT.md");
-  if (!project?.full_content) return new Set<string>();
-  try {
-    return new Set(parseProject(project.full_content).milestones.map((m) => m.id));
-  } catch (e) {
-    logWarning('state', `failed to parse PROJECT.md milestone sequence: ${(e as Error).message}`);
-    return new Set<string>();
-  }
+  return new Set(readProjectMilestoneSequence(getDb()));
 }
 
 async function buildRegistryAndFindActive(
@@ -183,6 +176,7 @@ async function buildRegistryAndFindActive(
       id: m.id,
       status: m.status,
       dependsOn: m.depends_on,
+      queuedShell: m.queuedShell,
       done,
       parked,
       sliceCount: slicesByMilestone.get(m.id)?.length ?? 0,

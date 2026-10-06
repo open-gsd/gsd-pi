@@ -9,10 +9,10 @@ import {
   getActiveRequirements,
   getAllMilestones,
   getArtifact,
+  getDb,
   getMilestone,
   getMilestoneLifecycleShadowSnapshot,
   getSlice,
-  getTask,
   getUnresolvedBlockingReworkFindingsForTask,
   insertAssessment,
   insertAuditEvent,
@@ -49,7 +49,8 @@ import {
   registerMilestoneRows,
   type MilestoneRegistration,
 } from "../milestone-registration.js";
-import { readMilestoneStatus } from "../db/lifecycle-read.js";
+import { readMilestoneStatus, readTask } from "../db/lifecycle-read.js";
+import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
 import { isClosedStatus } from "../status-guards.js";
 import { GATE_REGISTRY } from "../gate-registry.js";
@@ -108,6 +109,7 @@ import type { ReplanTaskParams } from "./replan-task.js";
 import { handleReplanTask } from "./replan-task.js";
 import type { ReworkBriefSaveParams } from "./rework-brief.js";
 import { handleReworkBriefSave } from "./rework-brief.js";
+import { saveWorkCheckpoint, type SaveWorkCheckpointParams } from "../work-checkpoint.js";
 import type { ReopenMilestoneParams } from "./reopen-milestone.js";
 import { handleReopenMilestone } from "./reopen-milestone.js";
 import type { ReopenSliceParams } from "./reopen-slice.js";
@@ -128,10 +130,12 @@ import { logError, logWarning } from "../workflow-logger.js";
 import { invalidateStateCache } from "../state.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { renderStateProjection } from "../workflow-projections.js";
-import { loadEffectiveGSDPreferences } from "../preferences.js";
+import { loadEffectiveGSDPreferences, resolvePostUnitHooks } from "../preferences.js";
+import { parseUnitId } from "../unit-id.js";
+import { upsertHookGateVerdict } from "../db/writers/hook-verdicts.js";
 import { parseProject } from "../schemas/parsers.js";
 import { autoSession, getAutoRuntimeSnapshot, isAutoActive } from "../auto-runtime-state.js";
-import { renderPlanCheckboxes, renderPlanFromDb, writeTaskSummaryProjection } from "../markdown-renderer.js";
+import { renderPlanCheckboxes, renderPlanFromDb, renderWorkCheckpoint, writeTaskSummaryProjection } from "../markdown-renderer.js";
 import { readUnitHarnessAbort, type UnitHarnessAbortRecord } from "../unit-runtime.js";
 import {
   prepareUatRun,
@@ -166,6 +170,8 @@ export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = [
   "SUMMARY",
   "RESEARCH",
   "UI-SPEC",
+  "AI-SPEC",
+  "SPEC",
   "CONTEXT",
   "ASSESSMENT",
   "CONTEXT-DRAFT",
@@ -599,7 +605,7 @@ export async function executeSummarySave(
       details: {
         operation: "save_summary",
         error: "root_artifact_write_blocked",
-        displayReason: "Approval confirmation required before saving final project setup artifacts.",
+        displayReason: rootArtifactGuard.displayReason ?? "Approval confirmation required before saving final project setup artifacts.",
       },
       isError: true,
     };
@@ -616,7 +622,7 @@ export async function executeSummarySave(
       details: {
         operation: "save_summary",
         error: "context_write_blocked",
-        displayReason: "Depth check required before writing milestone context.",
+        displayReason: contextGuard.displayReason ?? "Depth check required before writing milestone context.",
       },
       isError: true,
     };
@@ -846,9 +852,14 @@ export async function executeSummarySave(
                 }
                 // Rebuild after registration: a line for a milestone that had no row
                 // before this save must stay in the sequence.
-                insertRow(milestoneSequenceSelfHealed
+                const rebuiltContent = milestoneSequenceSelfHealed
                   ? rebuildMilestoneSequenceSection(contentToSave, milestoneSequenceRows())
-                  : undefined);
+                  : undefined;
+                insertRow(rebuiltContent);
+                // The sequence rows follow the stored PROJECT document in this transaction.
+                if (params.artifact_type === "PROJECT") {
+                  replaceProjectMilestoneSequence(getDb(), rebuiltContent ?? contentToSave);
+                }
                 return {
                   entityId: relativePath,
                   result: { path: relativePath, artifactType: params.artifact_type },
@@ -1058,8 +1069,7 @@ export async function executeTaskComplete(
         // error-trace anomalies for a task that actually completed, so when the
         // task is already closed in current DB state, unwind the duplicate as an
         // idempotent success pointing at the existing summary instead (#1569).
-        const existingTask = getTask(params.milestoneId, params.sliceId, params.taskId);
-        if (existingTask && isClosedStatus(existingTask.status)) {
+        if (readTask(params.milestoneId, params.sliceId, params.taskId)?.done) {
           const summaryPath = resolveTaskSummaryPath(
             basePath,
             params.milestoneId,
@@ -2280,6 +2290,8 @@ type UatResultSaved = {
   attemptRecord: string;
   runId: string;
   worktreeRoot: string;
+  /** Project source revision the result was saved for; null when it cannot be read. */
+  sourceRevision: string | null;
   browserToolsPresented: boolean;
   recommendedNextUnit: string | null;
   manualValidationPath?: string;
@@ -2351,6 +2363,7 @@ export async function executeUatResultSave(
       attemptRecord: renderUatAttemptRecord(run),
       runId: run.runId,
       worktreeRoot: run.worktreeRoot,
+      sourceRevision: run.sourceRevision,
       browserToolsPresented: run.browserToolsPresented,
       recommendedNextUnit: run.params.verdict === "PASS" ? null : "reactive-execute",
       ...(run.hasHuman
@@ -2673,6 +2686,53 @@ export async function executeReplanTask(
   }
 }
 
+/**
+ * Save a Work Checkpoint row for a milestone, slice or task, then render its
+ * CONTINUE file. The row is the resume state; a failed render is retried by
+ * the Projection Work that the operation enqueued.
+ */
+export async function executeCheckpointSave(
+  params: SaveWorkCheckpointParams,
+  basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
+): Promise<ToolExecutionResult> {
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) {
+    return {
+      content: [{ type: "text", text: "Error: GSD database is not available. Cannot save the checkpoint." }],
+      details: { operation: "checkpoint_save", error: "db_unavailable" },
+      isError: true,
+    };
+  }
+  try {
+    const saved = saveWorkCheckpoint(params, invocation);
+    const entity = [saved.milestoneId, saved.sliceId, saved.taskId].filter(Boolean).join("/");
+    let stale = false;
+    try {
+      await renderWorkCheckpoint(basePath, saved.milestoneId, saved.sliceId ?? undefined);
+    } catch (err) {
+      stale = true;
+      logWarning("tool", `gsd_checkpoint_save render failed: ${(err as Error).message}`);
+    }
+    return {
+      content: [{
+        type: "text",
+        text: `Saved ${params.kind} checkpoint ${saved.sequence} for ${entity}.` +
+          (stale ? " CONTINUE.md is not rendered yet; the database row is the resume state." : ""),
+      }],
+      details: { operation: "checkpoint_save", ...saved, ...(stale ? { stale: true } : {}) },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `checkpoint_save tool failed: ${msg}`, { tool: "gsd_checkpoint_save", error: String(err) });
+    return {
+      content: [{ type: "text", text: `Error saving checkpoint: ${msg}` }],
+      details: { operation: "checkpoint_save", error: msg },
+      isError: true,
+    };
+  }
+}
+
 export async function executeReworkBriefSave(
   params: ReworkBriefSaveExecutorParams,
   basePath: string = process.cwd(),
@@ -2870,4 +2930,101 @@ export async function executeMilestoneStatus(
       isError: true,
     };
   }
+}
+
+/** The verdict a post-unit hook gate records for its trigger unit (P18d). */
+export interface HookVerdictSaveParams {
+  hookName: string;
+  unitId: string;
+  verdict: string;
+  rationale: string;
+}
+
+/** The verdict vocabulary of a post-unit hook gate. */
+const HOOK_VERDICT_SAVE_VALUES = ["pass", "advisory", "needs-rework", "needs-remediation", "needs-attention"] as const;
+
+/**
+ * Save the verdict of a post-unit hook gate. The verdict is a database row
+ * (owner default: the gate outcome arrives as a tool call); the hook's
+ * artifact file is a render for the operator and decides nothing. The rule
+ * registry reads the row through db/hook-verdicts.ts.
+ */
+export async function executeHookVerdictSave(
+  params: HookVerdictSaveParams,
+  basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
+): Promise<ToolExecutionResult> {
+  const harnessAbort = blockIfHarnessAbortedUnit("hook_verdict_save", basePath);
+  if (harnessAbort) return harnessAbort;
+
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) return errorResult("hook_verdict_save", "GSD database is not available.", "db_unavailable");
+
+  const configuredHook = resolvePostUnitHooks(basePath).find(hook => hook.name === params.hookName);
+  if (!configuredHook) {
+    return errorResult(
+      "hook_verdict_save",
+      `Unknown hook "${params.hookName}". It must be a configured post_unit_hooks entry.`,
+      "unknown_hook",
+    );
+  }
+  if (!HOOK_VERDICT_SAVE_VALUES.includes(params.verdict as typeof HOOK_VERDICT_SAVE_VALUES[number])) {
+    return errorResult(
+      "hook_verdict_save",
+      `Invalid verdict "${params.verdict}". Must be one of: ${HOOK_VERDICT_SAVE_VALUES.join(", ")}`,
+      "invalid_verdict",
+    );
+  }
+  const rationale = params.rationale?.trim();
+  if (!rationale) {
+    return errorResult("hook_verdict_save", "A rationale is required.", "missing_rationale");
+  }
+  const { milestone, slice } = parseUnitId(params.unitId);
+  if (!milestone) {
+    return errorResult(
+      "hook_verdict_save",
+      `Invalid unitId "${params.unitId}". Expected a GSD unit id such as M001/S01/T01.`,
+      "invalid_unit_id",
+    );
+  }
+
+  try {
+    executeRecordDomainOperation({
+      operationType: "hook-verdict.save",
+      invocation,
+      payload: { ...params, rationale },
+      eventType: "hook-verdict.saved",
+      entityType: "hook-gate",
+      projectionKeys: [slice ? `planning/${milestone}/${slice}`.toLowerCase() : `planning/${milestone}`.toLowerCase()],
+      mutate: () => {
+        upsertHookGateVerdict({
+          hookName: params.hookName,
+          unitId: params.unitId,
+          milestoneId: milestone,
+          sliceId: slice ?? null,
+          taskId: parseUnitId(params.unitId).task ?? null,
+          verdict: params.verdict,
+          rationale,
+        });
+        return {
+          entityId: `${params.hookName}/${params.unitId}`,
+          result: { hookName: params.hookName, unitId: params.unitId, verdict: params.verdict },
+        };
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `gsd_hook_verdict_save database write failed: ${msg}`, { tool: "gsd_hook_verdict_save", error: String(err) });
+    return errorResult("hook_verdict_save", `Error saving hook verdict: ${msg}`, msg);
+  }
+
+  return {
+    content: [{ type: "text", text: `Hook ${params.hookName} verdict saved for ${params.unitId}: verdict=${params.verdict}` }],
+    details: {
+      operation: "hook_verdict_save",
+      hookName: params.hookName,
+      unitId: params.unitId,
+      verdict: params.verdict,
+    },
+  };
 }

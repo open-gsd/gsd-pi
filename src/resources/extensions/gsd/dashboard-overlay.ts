@@ -10,9 +10,9 @@
 import type { Theme } from "@gsd/pi-coding-agent";
 import { truncateToWidth, visibleWidth, matchesKey, Key } from "@gsd/pi-tui";
 import { deriveState } from "./state.js";
-import { loadFile } from "./files.js";
-import { isDbAvailable, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
-import { resolveMilestoneFile, resolveSliceFile } from "./paths.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
+import { resolveSliceFile } from "./paths.js";
 import { getAutoDashboardData } from "./auto.js";
 import type { AutoDashboardData } from "./auto-dashboard.js";
 import { getAutoRuntimeSnapshot } from "./auto-runtime-state.js";
@@ -254,13 +254,12 @@ export class GSDDashboardOverlay {
         },
       };
 
-      const roadmapFile = resolveMilestoneFile(base, mid, "ROADMAP");
-      const roadmapContent = roadmapFile ? await loadFile(roadmapFile) : null;
-      // Normalize slices from DB
+      // Slices and tasks, and which of them are done, come from the read
+      // interface (db/lifecycle-read.ts): the same answer as dispatch and progress.
       type NormSlice = { id: string; done: boolean; title: string; risk: string };
       let normSlices: NormSlice[] = [];
       if (isDbAvailable()) {
-        normSlices = getMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete", title: s.title, risk: s.risk || "medium" }));
+        normSlices = readMilestoneSlices(mid).map(s => ({ id: s.id, done: s.done, title: s.title, risk: s.risk || "medium" }));
       }
 
       for (const s of normSlices) {
@@ -276,16 +275,16 @@ export class GSDDashboardOverlay {
           if (sliceView.active) {
             // Normalize tasks from DB
             if (isDbAvailable()) {
-              const dbTasks = getSliceTasks(mid, s.id);
+              const dbTasks = readSliceTasks(mid, s.id);
               sliceView.taskProgress = {
-                done: dbTasks.filter(t => t.status === "complete" || t.status === "done").length,
+                done: dbTasks.filter(t => t.done).length,
                 total: dbTasks.length,
               };
               for (const t of dbTasks) {
                 sliceView.tasks.push({
                   id: t.id,
                   title: t.title,
-                  done: t.status === "complete" || t.status === "done",
+                  done: t.done,
                   active: state.activeTask?.id === t.id,
                 });
               }

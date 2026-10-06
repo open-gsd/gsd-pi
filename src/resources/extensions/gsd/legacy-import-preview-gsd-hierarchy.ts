@@ -1,6 +1,8 @@
 // Project/App: gsd-pi
 // File Purpose: Pure hierarchy interpretation for captured legacy .gsd projections.
 
+import { createHash } from "node:crypto";
+
 import { compareText } from "./legacy-import-utils.js";
 
 import type { LegacyImportValue } from "./legacy-import-contract.js";
@@ -235,6 +237,36 @@ function preserveHeading(
     span,
     "preserve",
   );
+}
+
+/**
+ * Map a Milestone CONTEXT or RESEARCH file to its `artifacts` row: the row
+ * that gsd_summary_save stores. The key is the path under .gsd and the content
+ * is the file text. Returns false for every other file.
+ */
+function emitMilestoneNarrative(
+  file: SourceFile,
+  milestoneId: string,
+  parserId: string,
+  candidates: PendingCandidate[],
+): boolean {
+  const segments = file.entry.logical_path.split("/");
+  const artifactType = segments.length === 4
+    ? /^(?:\d+|M\d+(?:-[a-z0-9]+)?)-(CONTEXT|RESEARCH)\.md$/u.exec(segments[3])?.[1]
+    : undefined;
+  if (artifactType === undefined) return false;
+  file.parserId = parserId;
+  const path = segments.slice(1).join("/");
+  addCandidate(candidates, file, { kind: "artifact", key: path }, {
+    path,
+    artifact_type: artifactType,
+    milestone_id: milestoneId,
+    slice_id: null,
+    task_id: null,
+    full_content: file.text,
+    content_hash: createHash("sha256").update(file.bytes).digest("hex"),
+  }, "milestone-narrative-artifact", { start: 0, end: file.bytes.length });
+  return true;
 }
 
 function roadmapSlices(file: SourceFile): SliceClaim[] {
@@ -801,6 +833,8 @@ function interpretFlatArtifact(
     });
     return;
   }
+  const claim = claimsByDirectory.get(directorySegment(path, "flat"));
+  if (claim !== undefined && emitMilestoneNarrative(file, claim.canonicalId, "gsd-flat-hierarchy", candidates)) return;
   preserveHeading(
     file,
     candidates,
@@ -1094,11 +1128,13 @@ function interpretNested(
       continue;
     }
     if (!file.entry.logical_path.includes("/slices/")) {
+      const milestoneId = claimsByDirectory.get(milestoneDirectory)!.canonicalId;
+      if (emitMilestoneNarrative(file, milestoneId, "gsd-nested-hierarchy", candidates)) continue;
       preserveHeading(
         file,
         candidates,
         "nested-milestone-artifact-preserved",
-        { milestone_id: claimsByDirectory.get(milestoneDirectory)!.canonicalId },
+        { milestone_id: milestoneId },
       );
       continue;
     }

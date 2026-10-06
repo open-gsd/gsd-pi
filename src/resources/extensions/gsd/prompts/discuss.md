@@ -320,24 +320,13 @@ Each full/draft context must let a future agent understand intent, constraints, 
 
 #### Milestone Gate Tracking (MANDATORY for multi-milestone)
 
-After EVERY Phase 3 gate decision, immediately write/update `.gsd/DISCUSSION-MANIFEST.json` with cumulative state. The system validates it before auto-mode; incomplete gates block start.
+Every Phase 3 gate decision is a database row. Record it immediately after the decision, not at the end:
 
-```json
-{
-  "primary": "M001",
-  "milestones": {
-    "M001": { "gate": "discussed", "context": "full" },
-    "M002": { "gate": "discussed", "context": "full" },
-    "M003": { "gate": "queued",    "context": "none" }
-  },
-  "total": 3,
-  "gates_completed": 3
-}
-```
+- **"Discuss now"** — the `gsd_summary_save` call with `artifact_type: "CONTEXT"` is the record.
+- **"Write draft for later"** — the `gsd_summary_save` call with `artifact_type: "CONTEXT-DRAFT"` is the record.
+- **"Just queue it"** — call `gsd_checkpoint_save` with that milestone's `milestoneId`, `kind: "handoff"`, `confirmedContext` (what is known about the milestone and that it is queued without discussion), and `nextAction` (for example "Discuss M003 from scratch before planning").
 
-Write this file AFTER each gate decision, not just at the end. Update `gates_completed` incrementally. Auto-start is blocked if `gates_completed < total`.
-
-For single-milestone projects, do NOT write this file.
+The system reads these rows before auto-mode: auto-start is blocked while a milestone of this discussion has no record. Do NOT write `.gsd/DISCUSSION-MANIFEST.json`; it is not read.
 
 #### Phase 4: Finalize
 
@@ -351,7 +340,7 @@ Before emitting the ready phrase, verify in the CURRENT turn that you have:
 - [ ] Persisted requirements and called `gsd_summary_save` for the REQUIREMENTS artifact (Phase 1)
 - [ ] Called `gsd_summary_save` for the primary-milestone CONTEXT artifact (Phase 2)
 - [ ] Called `gsd_plan_milestone` for the primary milestone (Phase 2)
-- [ ] Written `.gsd/DISCUSSION-MANIFEST.json` with `gates_completed === total` (Phase 3)
+- [ ] Recorded a readiness decision for every remaining milestone: CONTEXT, CONTEXT-DRAFT, or `gsd_checkpoint_save` (Phase 3)
 
 If ANY box is unchecked, **STOP**. Do NOT emit the ready phrase. Emit the missing tool calls in this same turn. The system detects missing artifacts and will reject premature ready signals — you will be asked again and retries are capped.
 

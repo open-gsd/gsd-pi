@@ -6,6 +6,8 @@ export {
 } from "./bootstrap/write-gate.js";
 export { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 export { openExistingWorkflowDatabase } from "./db-workspace.js";
+export { hasLiveAutoWorkerForProject } from "./db/auto-workers.js";
+export { readStoredPausedSession } from "./interrupted-session.js";
 export { readProgressFromDb, readProjectProgressFromDb } from "./state/progress-from-db.js";
 export { readProjectSnapshotFromDb } from "./state/project-snapshot.js";
 export {
@@ -15,6 +17,8 @@ export {
 } from "./state/external-reads-from-db.js";
 export { readKnowledgeMarkdown } from "./knowledge-projection.js";
 export { loadActionableCaptures, loadAllCaptures, resolveCapture } from "./captures.js";
+export { listUnitMetrics } from "./db/unit-metrics.js";
+export { aggregateByModel, aggregateByPhase, aggregateBySlice, getProjectTotals, loadLedgerFromDisk } from "./metrics.js";
 export {
   _getAdapter,
   checkpointDatabase,
@@ -39,3 +43,4 @@ export {
   updateRequirementInDb,
 } from "./db-writer.js";
 export { queryJournal } from "./journal.js";
+export { resolvePendingEscalation } from "./escalation-resolution.js";

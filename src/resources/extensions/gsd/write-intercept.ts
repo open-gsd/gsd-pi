@@ -124,16 +124,21 @@ type ProjectionSaveTool = { name: RegExp; tool: string };
  * Managed projection kinds that have a save tool, keyed by file name: first
  * the kinds the renderers write at the .gsd root, then the kinds they write
  * below .gsd/milestones and .gsd/phases.
- * A managed file with no entry here (LEARNINGS, SECRETS, CONTINUE, ...) has no
+ * A managed file with no entry here (LEARNINGS, SECRETS, ...) has no
  * save tool yet, so it stays writable: a refusal must name a real tool.
  */
 const ROOT_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /^PROJECT\.md$/i, tool: 'gsd_summary_save with artifact_type "PROJECT"' },
+  { name: /^PROJECT-DRAFT\.md$/i, tool: 'gsd_summary_save with artifact_type "PROJECT-DRAFT"' },
   { name: /^REQUIREMENTS\.md$/i, tool: "gsd_requirement_save or gsd_requirement_update" },
+  { name: /^REQUIREMENTS-DRAFT\.md$/i, tool: 'gsd_summary_save with artifact_type "REQUIREMENTS-DRAFT"' },
   { name: /^DECISIONS\.md$/i, tool: "gsd_decision_save" },
   { name: /^KNOWLEDGE\.md$/i, tool: "capture_thought" },
   { name: /^CAPTURES\.md$/i, tool: "/gsd capture (new capture), gsd_capture_resolve or gsd_capture_complete" },
   { name: /^QUEUE\.md$/i, tool: "gsd_milestone_reorder, gsd_milestone_park or gsd_milestone_discard" },
+  { name: /^QUEUE-ORDER\.json$/i, tool: "gsd_milestone_reorder" },
+  { name: /^OVERRIDES\.md$/i, tool: "/gsd steer (the user registers the override)" },
+  { name: /^BACKLOG\.md$/i, tool: "/gsd backlog (the user manages the items)" },
   { name: /^ROADMAP\.md$/i, tool: "gsd_plan_milestone or gsd_reassess_roadmap" },
 ];
 
@@ -149,7 +154,11 @@ const HIERARCHY_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /-CONTEXT-DRAFT\.md$/i, tool: 'gsd_summary_save with artifact_type "CONTEXT-DRAFT"' },
   { name: /-RESEARCH\.md$/i, tool: 'gsd_summary_save with artifact_type "RESEARCH"' },
   { name: /-UI-SPEC\.md$/i, tool: 'gsd_summary_save with artifact_type "UI-SPEC"' },
+  { name: /-AI-SPEC\.md$/i, tool: 'gsd_summary_save with artifact_type "AI-SPEC"' },
+  // After -UI-SPEC and -AI-SPEC: the plain suffix also matches their file names.
+  { name: /-SPEC\.md$/i, tool: 'gsd_summary_save with artifact_type "SPEC"' },
   { name: /-PARKED\.md$/i, tool: "gsd_milestone_park or gsd_milestone_unpark" },
+  { name: /(^|-)CONTINUE\.md$/i, tool: "gsd_checkpoint_save" },
 ];
 
 /** The save tool for a managed projection path, or null when the path is not one. */
@@ -169,6 +178,19 @@ function projectionSaveTool(filePath: string): string | null {
     : top === "milestones" || top === "phases" ? HIERARCHY_PROJECTION_SAVE_TOOLS : [];
   const name = logical[logical.length - 1];
   return kinds.find((kind) => kind.name.test(name))?.tool ?? null;
+}
+
+/**
+ * The save tool that renders a managed projection file NAME, or null when the
+ * name is not a managed projection kind. Shared with the prompt lint
+ * (tests/prompt-projection-lint.test.ts) so the lint and the write guard read
+ * one block list.
+ */
+export function managedProjectionSaveToolByName(fileName: string): string | null {
+  const name = fileName.replaceAll("\\", "/").split("/").pop() ?? fileName;
+  return ROOT_PROJECTION_SAVE_TOOLS.find((kind) => kind.name.test(name))?.tool
+    ?? HIERARCHY_PROJECTION_SAVE_TOOLS.find((kind) => kind.name.test(name))?.tool
+    ?? null;
 }
 
 function projectionWriteError(filePath: string, tool: string): string {

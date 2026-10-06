@@ -160,7 +160,7 @@ Recovery classification treats deterministic policy, tool-schema, stale-worker, 
 
 ## Reactive Task Execution
 
-Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from task-plan IO annotations. With default settings, it only attempts a reactive batch when at least three ready tasks are available and the graph is non-ambiguous. Non-conflicting tasks are dispatched in parallel via subagents; dependent tasks wait for their predecessors.
+Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from the planned inputs and expected output on the task rows in the database. With default settings, it only attempts a reactive batch when at least three ready tasks are available and the graph is non-ambiguous. Non-conflicting tasks are dispatched in parallel via subagents; dependent tasks wait for their predecessors. A task that has a lifecycle row is not put in a parallel batch; see the authoritative [Reactive Task Execution guide](../../docs/user-docs/auto-mode.md#reactive-task-execution).
 
 ```yaml
 reactive_execution:
