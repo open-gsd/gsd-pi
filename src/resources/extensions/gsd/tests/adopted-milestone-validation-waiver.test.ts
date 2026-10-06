@@ -756,7 +756,7 @@ test("adopted validation without invocation identity fails before any write", as
   }, basePath);
 
   assert.deepEqual(result, {
-    error: "adopted Milestone validation requires canonical invocation identity",
+    error: "milestone validation requires canonical invocation identity",
   });
   assert.equal(row(`SELECT COUNT(*) AS count FROM assessments`).count, 0);
   assert.equal(row(`SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'milestone.validate'`).count, 0);

@@ -700,82 +700,6 @@ test("executeSummarySave mirrors milestone artifacts into the active worktree pr
   }
 });
 
-test("executeTaskComplete coerces string verificationEvidence entries", async () => {
-  const base = makeTmpBase();
-  try {
-    openTestDb(base);
-    seedLegacyTask();
-    const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(planDir, { recursive: true });
-    writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
-
-    const result = await inProjectDir(base, () => executeTaskComplete({
-      milestoneId: "M001",
-      sliceId: "S01",
-      taskId: "T01",
-      oneLiner: "Completed task",
-      narrative: "Did the work",
-      verification: "npm test",
-      verificationEvidence: ["npm test"],
-    }, base));
-
-    assert.equal(result.details.operation, "complete_task");
-    assert.equal(result.details.taskId, "T01");
-
-    const db = _getAdapter();
-    assert.ok(db, "DB should be open");
-    const rows = db!.prepare(
-      "SELECT command, exit_code, verdict, duration_ms FROM verification_evidence WHERE milestone_id = ? AND slice_id = ? AND task_id = ?",
-    ).all("M001", "S01", "T01") as Array<Record<string, unknown>>;
-
-    assert.equal(rows.length, 1, "one coerced verification evidence row should be inserted");
-    assert.equal(rows[0]["command"], "npm test");
-    assert.equal(rows[0]["exit_code"], -1);
-    assert.match(String(rows[0]["verdict"]), /coerced from string/);
-
-    const summaryPath = String(result.details.summaryPath);
-    assert.ok(existsSync(summaryPath), "task summary should be written to disk");
-  } finally {
-    closeDatabase();
-    cleanup(base);
-  }
-});
-
-test("executeTaskComplete derives missing verification from evidence", async () => {
-  const base = makeTmpBase();
-  try {
-    openTestDb(base);
-    seedLegacyTask();
-    const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(planDir, { recursive: true });
-    writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
-
-    const result = await inProjectDir(base, () => executeTaskComplete({
-      milestoneId: "M001",
-      sliceId: "S01",
-      taskId: "T01",
-      oneLiner: "Completed task",
-      narrative: "Did the work",
-      verificationEvidence: [
-        { command: "npm test", exitCode: 0, verdict: "pass", durationMs: 1234 },
-      ],
-    }, base));
-
-    assert.equal(result.details.operation, "complete_task");
-    const db = _getAdapter();
-    assert.ok(db, "DB should be open");
-    const row = db!.prepare(
-      "SELECT verification_result FROM tasks WHERE milestone_id = ? AND slice_id = ? AND id = ?",
-    ).get("M001", "S01", "T01") as Record<string, unknown> | undefined;
-
-    assert.match(String(row?.verification_result), /Verification evidence recorded/);
-    assert.match(String(row?.verification_result), /`npm test` exited 0 \(pass\)/);
-  } finally {
-    closeDatabase();
-    cleanup(base);
-  }
-});
-
 test("executeTaskComplete treats a malformed duplicate for an already-complete task as idempotent", async () => {
   const base = makeTmpBase();
   try {
@@ -784,16 +708,13 @@ test("executeTaskComplete treats a malformed duplicate for an already-complete t
     const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     mkdirSync(planDir, { recursive: true });
     writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
-
-    const first = await inProjectDir(base, () => executeTaskComplete({
-      milestoneId: "M001",
-      sliceId: "S01",
-      taskId: "T01",
-      oneLiner: "Completed task",
-      narrative: "Did the work",
-      verification: "npm test",
-    }, base));
-    assert.ok(!first.isError, "the well-formed call should complete the task");
+    // The task is already complete through the durable pipeline (stamped).
+    _getAdapter()!.prepare(`
+      UPDATE tasks SET status = 'complete', completed_at = :now,
+        one_liner = 'Completed task', narrative = 'Did the work',
+        verification_result = 'npm test'
+      WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+    `).run({ ":now": new Date().toISOString() });
 
     // Parallel duplicate from the same turn: no verification, no evidence, no
     // blocker. Must not trip the fail-closed guard now that the task is closed.
@@ -808,7 +729,6 @@ test("executeTaskComplete treats a malformed duplicate for an already-complete t
     assert.ok(!duplicate.isError, "duplicate completion should not be an error");
     assert.equal(duplicate.details.error, undefined);
     assert.equal(duplicate.details.duplicate, true);
-    assert.equal(duplicate.details.summaryPath, first.details.summaryPath);
   } finally {
     closeDatabase();
     cleanup(base);
@@ -853,7 +773,11 @@ test("executeTaskComplete rejects an escalation on a Task without a canonical li
   }, base));
 
   assert.equal(result.isError, true);
-  assert.match(String(result.content[0]?.text), /escalation requires a canonical Task lifecycle for M001\/S01\/T01/);
+  assert.match(
+    String(result.content[0]?.text),
+    /Canonical Task completion lifecycle is missing for M001\/S01\/T01/,
+    "the completion authority refuses before any escalation is recorded",
+  );
 
   const db = _getAdapter();
   assert.ok(db, "DB should be open");
@@ -862,60 +786,6 @@ test("executeTaskComplete rejects an escalation on a Task without a canonical li
   ).get("M001", "S01", "T01") as Record<string, unknown> | undefined;
   assert.equal(row?.count, 0, "the rejected escalation must not complete the task");
   assert.equal(existsSync(join(planDir, "tasks", "T01-ESCALATION.json")), false);
-});
-
-test("executeTaskComplete surfaces stale readable status and duplicate repair metadata", async (t) => {
-  const base = makeTmpBase();
-  t.after(() => {
-    closeDatabase();
-    cleanup(base);
-  });
-
-  openTestDb(base);
-  seedLegacyTask();
-  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), [
-    "---",
-    "version: 1",
-    "phases:",
-    "  mid_execution_escalation: true",
-    "---",
-  ].join("\n"));
-  const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-  mkdirSync(planDir, { recursive: true });
-  writeFileSync(
-    join(planDir, "S01-PLAN.md"),
-    "# S01\n\n- [ ] **T01: Ordinary** `est:5m`\n- [ ] **T02: Escalated** `est:5m`\n",
-  );
-
-  const roadmapPath = join(base, ".gsd", "ROADMAP.md");
-  mkdirSync(roadmapPath);
-  const ordinaryParams = {
-    milestoneId: "M001",
-    sliceId: "S01",
-    taskId: "T01",
-    oneLiner: "Completed ordinary task",
-    narrative: "Did the ordinary work.",
-    verification: "Focused test passed.",
-  };
-  const ordinary = await inProjectDir(base, () => executeTaskComplete(ordinaryParams, base));
-
-  assert.equal(ordinary.isError, undefined);
-  assert.equal(ordinary.details.stale, true);
-  assert.match(String(ordinary.content[0]?.text), /readable status update is pending repair/i);
-
-  // The obstruction gate refuses to journal a write over the foreign ROADMAP.md
-  // directory, so the retry converges once the obstruction is cleared
-  // externally — and provably left no unbound recovery evidence behind.
-  discardProjectionEvidence(base);
-  rmSync(roadmapPath, { recursive: true });
-  removeProjectionFileSync(String(ordinary.details.summaryPath));
-  const repaired = await inProjectDir(base, () => executeTaskComplete(ordinaryParams, base));
-
-  assert.equal(repaired.isError, undefined);
-  assert.equal(repaired.details.duplicate, true);
-  assert.equal(repaired.details.stale, undefined);
-  assert.doesNotMatch(String(repaired.content[0]?.text), /pending repair/i);
-  assert.equal(existsSync(roadmapPath), true, "same-task retry must repair the readable roadmap");
 });
 
 test("executeTaskComplete returns a tool error when verification cannot be derived", async () => {
