@@ -43,9 +43,7 @@ import {
   getMilestone,
   getSliceTasks,
   getMilestoneSlices,
-  updateTaskStatus,
-  updateSliceStatus,
-  updateMilestoneStatus,
+  _getAdapter,
   insertAssessment,
   insertReplanHistory,
   getReplanHistory,
@@ -348,7 +346,11 @@ describe("state derivation failures", () => {
     const state1 = await deriveState(base);
     assert.equal(state1.phase, "executing");
 
-    updateTaskStatus("M001", "S01", "T01", "complete", new Date().toISOString());
+    // Fixture stamp on the unadopted epoch-0 hierarchy: raw SQL, because the
+    // generic status writer refuses rows without a canonical lifecycle row.
+    _getAdapter()!.prepare(
+      "UPDATE tasks SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+    ).run({ ":completed_at": new Date().toISOString() });
 
     invalidateStateCache();
     const state3 = await deriveState(base);
@@ -478,7 +480,9 @@ describe("transition boundary failures", () => {
 
     // Now write the full CONTEXT (simulates discussion completion)
     writeFileSync(join(mDir, "M001-CONTEXT.md"), "# M001: Resolved\n\n## Purpose\nDone.\n");
-    updateMilestoneStatus("M001", "active");
+    // Fixture stamp on the unadopted milestone: the generic status writer
+    // refuses rows without a canonical lifecycle row.
+    _getAdapter()!.prepare("UPDATE milestones SET status = 'active' WHERE id = 'M001'").run();
 
     invalidateAllCaches();
     const state2 = await deriveState(base);

@@ -371,7 +371,9 @@ test("a partially adopted closed milestone is refused by reopen until the backfi
     { milestoneId: "M001" }, base, internalExecutionInvocation("test/backfill/reopen-partial"),
   );
   assert.ok("error" in refused);
-  assert.match(refused.error, /partially adopted Milestone M001; run \/gsd db adopt --apply/);
+  // The legacy reopen branch is gone: any unadopted row in the closure — here
+  // the partially adopted milestone — refuses with the generic adoption error.
+  assert.match(refused.error, /Milestone M001 has no canonical lifecycle row; the legacy reopen path was removed/);
 
   assert.equal(applyLifecycleBackfill(base).adopted, 2);
   const reopened = await handleReopenMilestone(

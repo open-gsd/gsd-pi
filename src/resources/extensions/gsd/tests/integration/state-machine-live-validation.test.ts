@@ -41,8 +41,6 @@ import {
   getMilestone,
   getSliceTasks,
   getMilestoneSlices,
-  updateTaskStatus,
-  updateSliceStatus,
   updateMilestoneStatus,
 } from "../../gsd-db.ts";
 
@@ -58,9 +56,11 @@ import {
   handleReopenSlice as handleReopenSliceWithInvocation,
 } from "../../tools/reopen-slice.ts";
 import { handleReopenMilestone } from "../../tools/reopen-milestone.ts";
+import { handleValidateMilestone } from "../../tools/validate-milestone.ts";
 import { internalExecutionInvocation } from "../../execution-invocation.ts";
 import { seedSliceCompletionAuthority } from "../slice-completion-fixture.ts";
 import { seedPrerequisiteCompletionEvidence } from "../workflow-authority-fixture.ts";
+import { seedLifecycles } from "../helpers/authority-cutover.ts";
 import { claimTaskAttempt } from "../../task-execution-domain-operation.ts";
 import { recordTaskTechnicalVerdict } from "../../task-verification-domain-operation.ts";
 import { publishVerifiedTaskCompletion } from "../../task-completion-compatibility-adapter.ts";
@@ -468,6 +468,15 @@ describe("state-machine-live-validation", () => {
 
     test("step 8: complete milestone M001 — full lifecycle done", async () => {
       base = createFullFixture();
+      // The adopted closeout authorizes against the source it proves: seed a
+      // fixture commit before the database opens.
+      writeFileSync(join(base, ".gitignore"), ".gsd/\n");
+      execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: base });
+      execFileSync("git", ["add", ".gitignore"], { cwd: base });
+      execFileSync("git", ["commit", "-m", "fixture"], { cwd: base, stdio: "ignore" });
+
       openDatabase(join(base, ".gsd", "gsd.db"));
       insertMilestone({ id: "M001", title: "Live Validation", status: "active" });
       insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
@@ -475,9 +484,40 @@ describe("state-machine-live-validation", () => {
       insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Impl", status: "complete" });
       insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Test", status: "complete" });
       insertTask({ id: "T01", sliceId: "S02", milestoneId: "M001", title: "Impl", status: "complete" });
-      insertPassingMilestoneValidation("M001");
+      // Adopt the completed hierarchy so the closeout runs the canonical
+      // Milestone completion Domain Operation — the generic status writer
+      // refuses unadopted rows, so the legacy closeout cannot land anymore.
+      seedLifecycles("state-machine-live-validation/step-8", [
+        { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+        { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+        { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "completed" },
+        { itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed" },
+        { itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T02", lifecycleStatus: "completed" },
+        { itemKind: "task", milestoneId: "M001", sliceId: "S02", taskId: "T01", lifecycleStatus: "completed" },
+      ]);
+      // An adopted closeout authorizes from the canonical validation receipt,
+      // not the legacy milestone-validation assessment.
+      const validation = await handleValidateMilestone({
+        milestoneId: "M001",
+        verdict: "pass",
+        remediationRound: 0,
+        successCriteriaChecklist: "- [x] All edge cases handled",
+        sliceDeliveryAudit: "| S01 | delivered |\n| S02 | delivered |",
+        crossSliceIntegration: "Passed",
+        requirementCoverage: "Covered",
+        verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+        verdictRationale: "All current database evidence passes.",
+      }, base, {
+        invocation: internalExecutionInvocation("test/state-machine/validate-milestone/step-8"),
+        skipBrowserEvidenceGate: true,
+      });
+      assert.ok(!("error" in validation), `validation: ${"error" in validation ? validation.error : ""}`);
 
-      const result = await handleCompleteMilestone(makeMilestoneParams("M001") as any, base);
+      const result = await handleCompleteMilestone(
+        makeMilestoneParams("M001") as any,
+        base,
+        internalExecutionInvocation("test/state-machine/complete-milestone/step-8"),
+      );
       assert.ok(!("error" in result), `expected success, got: ${JSON.stringify(result)}`);
 
       const milestone = getMilestone("M001");
@@ -776,18 +816,25 @@ describe("state-machine-live-validation", () => {
       base = createFullFixture();
       openDatabase(join(base, ".gsd", "gsd.db"));
       insertMilestone({ id: "M001", title: "Done", status: "complete" });
+      // Adopt the closed milestone so the write reaches the generic writer's
+      // closed-row guard — the canonical lifecycle operation owns every
+      // adopted reopen.
+      seedLifecycles("state-machine-live-validation/reopen-guard", [
+        { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "completed" },
+      ]);
 
       const milestone = getMilestone("M001");
       assert.ok(isClosedStatus(milestone!.status), "milestone is closed");
 
       assert.throws(
         () => updateMilestoneStatus("M001", "active", null),
-        /use gsd_milestone_reopen for an explicit reopen/,
+        /Cannot change adopted Milestone M001 legacy status to active; canonical lifecycle is completed\. Use the canonical lifecycle operation\./,
       );
 
       const result = await handleReopenMilestone(
         { milestoneId: "M001", reason: "regression surfaced after closure" },
         base,
+        reopenInvocation(),
       );
       assert.ok(!("error" in result), `unexpected reopen error: ${"error" in result ? result.error : ""}`);
       const reopened = getMilestone("M001");
@@ -849,15 +896,21 @@ describe("state-machine-live-validation", () => {
       const stateBefore = await deriveStateFromDb(base);
       assert.equal(stateBefore.phase, "executing", `before: expected executing, got ${stateBefore.phase}`);
 
-      // Complete T01
-      updateTaskStatus("M001", "S01", "T01", "complete", new Date().toISOString());
+      // Complete T01. Fixture stamps on the unadopted epoch-0 hierarchy: raw
+      // SQL, because the generic status writer refuses rows without a
+      // canonical lifecycle row.
+      _getAdapter()!.prepare(
+        "UPDATE tasks SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+      ).run({ ":completed_at": new Date().toISOString() });
       invalidateStateCache();
       const stateAfterT01 = await deriveStateFromDb(base);
       // Still executing — T02 is pending
       assert.equal(stateAfterT01.phase, "executing", `after T01: expected executing, got ${stateAfterT01.phase}`);
 
       // Complete T02
-      updateTaskStatus("M001", "S01", "T02", "complete", new Date().toISOString());
+      _getAdapter()!.prepare(
+        "UPDATE tasks SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T02'",
+      ).run({ ":completed_at": new Date().toISOString() });
       invalidateStateCache();
       const stateAfterT02 = await deriveStateFromDb(base);
       // All tasks done → summarizing

@@ -45,8 +45,6 @@ import {
   getTask,
   getSliceTasks,
   getSlice,
-  updateTaskStatus,
-  updateSliceStatus,
   transaction,
   isDbAvailable,
   _getAdapter,
@@ -454,15 +452,21 @@ test("recovery: DB loss → migrateFromMarkdown restores state, stale render det
 
     // ── Stale render detection (R013) ────────────────────────────────
     // Mutate a task status in DB to create a stale condition
-    // (DB says pending but plan checkbox says [x])
-    updateTaskStatus("M001", "S01", "T01", "pending", new Date().toISOString());
+    // (DB says pending but plan checkbox says [x]). Fixture stamp on the
+    // unadopted epoch-0 hierarchy: raw SQL, because the generic status writer
+    // refuses rows without a canonical lifecycle row.
+    _getAdapter()!.prepare(
+      "UPDATE tasks SET status = 'pending', completed_at = NULL WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+    ).run();
     invalidateAllCaches();
 
     const staleEntries = detectStaleRenders(base);
     assert.ok(staleEntries.length > 0, "Should detect stale renders after DB mutation");
 
     // Restore the task status for the recovery test
-    updateTaskStatus("M001", "S01", "T01", "complete", new Date().toISOString());
+    _getAdapter()!.prepare(
+      "UPDATE tasks SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+    ).run({ ":completed_at": new Date().toISOString() });
 
     // ── DB deletion + recovery (R010) ────────────────────────────────
     closeDatabase();

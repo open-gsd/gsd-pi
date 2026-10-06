@@ -62,6 +62,7 @@ import {
   insertMilestone,
   insertSlice,
   insertTask,
+  _getAdapter,
 } from "../../gsd-db.ts";
 import {
   deriveState,
@@ -590,9 +591,12 @@ describe("state consistency under DB mutations", () => {
     const s1 = await deriveStateFromDb(base);
     states.push(s1.phase);
 
-    // pending → complete
-    const { updateTaskStatus } = await import("../../gsd-db.ts");
-    updateTaskStatus("M001", "S01", "T01", "complete", new Date().toISOString());
+    // pending → complete. Fixture stamp on the unadopted epoch-0 hierarchy:
+    // raw SQL, because the generic status writer refuses rows without a
+    // canonical lifecycle row.
+    _getAdapter()!.prepare(
+      "UPDATE tasks SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+    ).run({ ":completed_at": new Date().toISOString() });
     invalidateAllCaches();
     const s2 = await deriveStateFromDb(base);
     states.push(s2.phase);
@@ -618,9 +622,11 @@ describe("state consistency under DB mutations", () => {
     const s1 = await deriveStateFromDb(base);
     assert.equal(s1.phase, "validating-milestone");
 
-    // Mark milestone complete directly
-    const { updateMilestoneStatus } = await import("../../gsd-db.ts");
-    updateMilestoneStatus("M001", "complete", new Date().toISOString());
+    // Mark milestone complete directly. Fixture stamp on the unadopted
+    // milestone: the generic status writer refuses it.
+    _getAdapter()!.prepare(
+      "UPDATE milestones SET status = 'complete', completed_at = :completed_at WHERE id = 'M001'",
+    ).run({ ":completed_at": new Date().toISOString() });
     // Write SUMMARY to make it truly complete
     writeFileSync(
       join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"),
