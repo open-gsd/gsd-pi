@@ -1304,8 +1304,11 @@ test("after the Cutover plan-milestone takes the closed milestone and its depend
   assert.match(errorOf(await plan("M006", ["M003"])) ?? "", /depends_on milestone M003 was discarded/);
   assert.match(errorOf(await plan("M006", ["M002"])) ?? "", /depends_on milestone M002 is not yet complete/);
   // M004 is legacy complete and canonical pending: the precondition accepts
-  // it, and the status writer then refuses the rows that disagree.
-  assert.match(errorOf(await plan("M004", [])) ?? "", /canonical and legacy status mismatch \(canonical=pending, legacy=complete\)/);
+  // it, and the plan's status projection refuses the rows that disagree.
+  assert.match(
+    errorOf(await plan("M004", [])) ?? "",
+    /Cannot project Milestone M004 legacy status active; canonical lifecycle is pending/,
+  );
   // M001 is legacy active and canonical completed.
   assert.equal(errorOf(await plan("M006", ["M001"])), undefined);
   assert.equal(readSlice("M006", "S01")?.title, "First slice");

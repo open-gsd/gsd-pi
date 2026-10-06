@@ -11,6 +11,7 @@ import {
   insertSlice,
   normalizeCanonicalLifecycleStatus,
   normalizeLegacyLifecycleStatus,
+  projectCanonicalStatusToLegacy,
   upsertMilestonePlanning,
   upsertSlicePlanning,
 } from "./gsd-db.js";
@@ -160,9 +161,13 @@ function writePlanRows(params: PersistMilestonePlanParams): void {
     depends_on: params.dependsOn ?? [],
   });
 
+  // No `status` here: insertMilestone above already writes the create-time
+  // status, and a re-plan changes the plan, not the Milestone lifecycle
+  // projection (same rule as the slices below). The generic status writer
+  // refuses rows without a canonical lifecycle row, so a re-plan of a fresh
+  // milestone must not funnel a status through it.
   upsertMilestonePlanning(params.milestoneId, {
     title: params.title,
-    status: params.status ?? "active",
     depends_on: params.dependsOn ?? [],
     vision: params.vision,
     successCriteria: params.successCriteria,
@@ -261,6 +266,14 @@ function persistPlanOperation(
       if (guardError) throw new PlanningGuardError(guardError);
       writePlanRows(params);
       adoptPlanLifecycles(context, params);
+      // The plan's status promotion is a canonical-backed projection: the
+      // generic status writer refuses rows without a canonical lifecycle row,
+      // so a disagreeing legacy shadow fails the operation here instead.
+      projectCanonicalStatusToLegacy(context, {
+        entity: "milestone",
+        milestoneId: params.milestoneId,
+        status: params.status ?? "active",
+      });
     },
   });
 }

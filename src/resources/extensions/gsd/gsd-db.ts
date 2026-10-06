@@ -77,8 +77,6 @@ export * from "./legacy-import-restore-assessment.js";
 export * from "./legacy-import-live-restore.js";
 // Query Module (read-only seam) — extracted from the single-writer file.
 export * from "./db/queries.js";
-// Domain Write Operations (Hierarchy Status Cascades).
-export * from "./db/writers/cascades.js";
 
 export type { ArtifactRow, MilestoneRow } from "./db-milestone-artifact-rows.js";
 export type { ActiveTaskSummary, IdStatusSummary, TaskStatusCounts } from "./db-lightweight-query-rows.js";
@@ -919,10 +917,10 @@ export function setMilestoneQueueOrder(order: string[]): void {
 /**
  * Update a milestone's status in the database.
  *
- * Generic status updates may close unadopted milestones, park/unpark open
- * milestones, or advance planned milestones. Adopted milestones close through
- * the canonical operation. Closed milestones reopen through
- * gsd_milestone_reopen.
+ * The generic writer only updates adopted milestones whose legacy status stays
+ * aligned with the canonical lifecycle; it never reopens a closed milestone
+ * (gsd_milestone_reopen) and refuses rows without a canonical lifecycle row
+ * (run /gsd db adopt).
  */
 export function updateMilestoneStatus(milestoneId: string, status: string, completedAt?: string | null, preserveCompletion?: boolean): void {
   applyStatusTransition({ entity: "milestone", milestoneId, status, completedAt, preserveCompletion });
