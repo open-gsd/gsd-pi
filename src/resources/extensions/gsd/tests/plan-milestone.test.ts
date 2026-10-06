@@ -23,6 +23,8 @@ import { handlePlanMilestone as handlePlanMilestoneWithInvocation } from '../too
 import { internalPlanningInvocation } from '../planning-invocation.ts';
 import { parseProjectionRoadmap as parseRoadmap } from '../schemas/parsers.ts';
 import { canonicalPhaseDirName } from '../paths.ts';
+import { readMilestone } from '../db/lifecycle-read.ts';
+import { readMilestoneLifecycleStatus } from '../db/milestone-closeout-readiness.ts';
 import { assertWorkerRendersStaleProjection } from './projection-render-failure-gate.ts';
 
 function expectedRoadmapPath(base: string, title: string, milestoneId = 'M001'): string {
@@ -384,26 +386,35 @@ test('plan-milestone re-plan preserves in-progress status and updates slice fiel
   }
 });
 
-test('handlePlanMilestone promotes pre-existing queued milestone to active (#3022)', async () => {
+test('handlePlanMilestone adopts a pre-existing queued milestone into the open lifecycle (#3022)', async () => {
   const base = makeTmpBase();
   const dbPath = join(base, '.gsd', 'gsd.db');
   openDatabase(dbPath);
 
   try {
     // Simulate ensureMilestoneDbRow: pre-create row with status "queued"
-    // (this is what gsd_milestone_generate_id does)
+    // (this is what gsd_milestone_generate_id does). Epoch-0 import shape:
+    // a raw hierarchy stamp with no canonical lifecycle row yet.
     insertMilestone({ id: 'M001', status: 'queued' });
 
     const before = getMilestone('M001');
     assert.equal(before?.status, 'queued', 'pre-condition: milestone should start as queued');
 
-    // Now plan the milestone — status should be promoted to "active"
+    // Now plan the milestone. The planning Domain Operation adopts the
+    // reservation into the open (ready) lifecycle — the promotion that
+    // replaces the old legacy queued→active rewrite. The legacy row keeps
+    // its epoch-0 raw stamp: the aligned shadow is never rewritten, the
+    // lifecycle row owns the state.
     const result = await handlePlanMilestone(validParams(), base);
     assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
 
     const after = getMilestone('M001');
-    assert.equal(after?.status, 'active', 'milestone status should be promoted from queued to active');
     assert.equal(after?.title, 'DB-backed planning', 'milestone title should be set');
+    assert.equal(after?.status, 'queued', 'the legacy label keeps its epoch-0 raw stamp');
+    assert.equal(readMilestoneLifecycleStatus('M001'), 'ready',
+      'planning must adopt the queued reservation into the open (ready) lifecycle');
+    assert.equal(readMilestone('M001')?.queuedShell, false,
+      'a planned milestone is no longer a queued shell (#3022)');
   } finally {
     cleanup(base);
   }
@@ -429,7 +440,11 @@ test('handlePlanMilestone updates depends_on when a queued milestone row already
 
     const after = getMilestone('M002');
     assert.deepEqual(after?.depends_on, ['M001'], 'depends_on should be updated from planning params');
-    assert.equal(after?.status, 'active', 'queued milestone should still be promoted to active');
+    assert.equal(after?.status, 'queued', 'the legacy label keeps its epoch-0 raw stamp');
+    assert.equal(readMilestoneLifecycleStatus('M002'), 'ready',
+      'planning must adopt the queued reservation into the open (ready) lifecycle');
+    assert.equal(readMilestone('M002')?.queuedShell, false,
+      'a planned milestone is no longer a queued shell (#3022)');
   } finally {
     cleanup(base);
   }

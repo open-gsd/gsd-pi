@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, readFileSync, existsSync, symlinkSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, relative } from "node:path";
 import { hostname, tmpdir } from "node:os";
@@ -10,6 +10,7 @@ import {
   openDatabase,
   closeDatabase,
   _getAdapter,
+  executeDomainOperation,
   getArtifact,
   getAssessment,
   getSlice,
@@ -18,10 +19,13 @@ import {
   insertMilestone,
   insertSlice,
   insertTask,
+  readDomainOperationFence,
   setSliceSummaryMd,
   upsertRequirement,
   getAllMilestones,
 } from "../gsd-db.ts";
+import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import { handleValidateMilestone } from "../tools/validate-milestone.ts";
 import { renderAllFromDb } from "../markdown-renderer.ts";
 import { getAutoWorker, markWorkerCrashed, markWorkerStopping, registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease, getMilestoneLease, refreshMilestoneLease, releaseMilestoneLease } from "../db/milestone-leases.ts";
@@ -230,6 +234,91 @@ function seedSlice(milestoneId: string, sliceId: string, status: string): void {
   db.prepare(
     "INSERT OR REPLACE INTO slices (milestone_id, id, title, status, created_at) VALUES (?, ?, ?, ?, ?)",
   ).run(milestoneId, sliceId, `Slice ${sliceId}`, status, new Date().toISOString());
+}
+
+let adoptedCloseoutSequence = 0;
+
+/**
+ * Seed M003 as an adopted, fully-complete milestone with a recorded pass
+ * validation. The canonical closeout refuses unadopted milestones and reads
+ * its authorization from the milestone.validate Domain Operation receipt, so
+ * the completion success paths need a real adoption and receipt — raw
+ * assessment rows on epoch-0 hierarchy stamps only reach the refusal.
+ */
+async function seedAdoptedCompletedMilestone(base: string): Promise<void> {
+  const db = _getAdapter();
+  if (!db) throw new Error("DB not open");
+  // The closeout captures a verification source snapshot from the project
+  // repository, so the fixture base must be a committed git repository.
+  writeFileSync(join(base, "source.ts"), "export const fixture = 'complete-milestone';\n");
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: base });
+  execFileSync("git", ["add", "source.ts"], { cwd: base });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: base, stdio: "ignore" });
+
+  mkdirSync(join(base, ".gsd", "milestones", "M003"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", "M003", "M003-CONTEXT.md"), "# M003\n");
+  seedMilestone("M003", "Milestone Three");
+  seedSlice("M003", "S03", "complete");
+  db.prepare(
+    "INSERT OR REPLACE INTO tasks (milestone_id, slice_id, id, title, status) VALUES (?, ?, ?, ?, ?)",
+  ).run("M003", "S03", "T03", "Task T03", "complete");
+
+  // Adopt the epoch-0 hierarchy rows through one fixture Domain Operation —
+  // the honest shape of a planned, executed milestone.
+  const sequence = ++adoptedCloseoutSequence;
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.fixture.adopt-closeout",
+    idempotencyKey: `test/workflow-executors/adopt-closeout/${sequence}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { milestoneId: "M003" },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M003", lifecycleStatus: "ready" });
+    adoptOrTransitionLifecycle(context, { itemKind: "slice", milestoneId: "M003", sliceId: "S03", lifecycleStatus: "completed" });
+    adoptOrTransitionLifecycle(context, { itemKind: "task", milestoneId: "M003", sliceId: "S03", taskId: "T03", lifecycleStatus: "completed" });
+    return {
+      events: [{
+        eventType: "test.fixture.adopted",
+        entityType: "milestone",
+        entityId: "M003",
+        payload: { milestoneId: "M003" },
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: `test/adopt-closeout/${sequence}`,
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+
+  const validation = await handleValidateMilestone({
+    milestoneId: "M003",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Works",
+    sliceDeliveryAudit: "| Slice | Result |\n| --- | --- |\n| S03 | pass |",
+    crossSliceIntegration: "No cross-slice issues.",
+    requirementCoverage: "All requirements covered.",
+    verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+    verdictRationale: "Everything passed.",
+  }, base, {
+    invocation: {
+      idempotencyKey: `test/workflow-executors/validate-closeout/${sequence}`,
+      sourceTransport: "pi-tool",
+      actorType: "agent",
+      actorId: "workflow-executors-fixture",
+      traceId: `trace/workflow-executors/${sequence}`,
+      turnId: `turn/workflow-executors/${sequence}`,
+    },
+    skipBrowserEvidenceGate: true,
+  });
+  assert.ok(!("error" in validation), `validation fixture failed: ${"error" in validation ? validation.error : ""}`);
 }
 
 /** Record a gsd_exec / gsd_uat_exec run as the host does when the command ends. */
@@ -2930,20 +3019,8 @@ test("executeCompleteMilestone sanitizes raw params and writes milestone summary
   const base = makeTmpBase();
   try {
     openTestDb(base);
-    seedMilestone("M003", "Milestone Three");
-    seedSlice("M003", "S03", "complete");
     writeRoadmap(base, "M003", ["S03"]);
-    const db = _getAdapter();
-    db!.prepare(
-      "INSERT OR REPLACE INTO tasks (milestone_id, slice_id, id, title, status) VALUES (?, ?, ?, ?, ?)",
-    ).run("M003", "S03", "T03", "Task T03", "complete");
-    insertAssessment({
-      path: join(".gsd", "milestones", "M003", "M003-VALIDATION.md"),
-      milestoneId: "M003",
-      status: "pass",
-      scope: "milestone-validation",
-      fullContent: "---\nverdict: pass\nremediation_round: 0\n---\n\n# Validation\nValidated.",
-    });
+    await seedAdoptedCompletedMilestone(base);
 
     const rawParams = {
       milestoneId: "M003",
@@ -3006,18 +3083,8 @@ test("executeCompleteMilestone recovers a managed summary projection failure", a
     cleanup(base);
   });
   openTestDb(base);
-  seedMilestone("M003", "Milestone Three");
-  seedSlice("M003", "S03", "complete");
-  _getAdapter()!.prepare(
-    "INSERT OR REPLACE INTO tasks (milestone_id, slice_id, id, title, status) VALUES (?, ?, ?, ?, ?)",
-  ).run("M003", "S03", "T03", "Task T03", "complete");
-  insertAssessment({
-    path: join(".gsd", "milestones", "M003", "M003-VALIDATION.md"),
-    milestoneId: "M003",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "---\nverdict: pass\nremediation_round: 0\n---\n\n# Validation\nValidated.",
-  });
+  writeRoadmap(base, "M003", ["S03"]);
+  await seedAdoptedCompletedMilestone(base);
   const summaryPath = targetMilestoneFile(base, "M003", "SUMMARY", "Milestone Three");
   let summaryWriteBlocked = false;
   t.after(() => _setManagedProjectionApplyFaultForTest(null));
@@ -3050,18 +3117,8 @@ test("executeCompleteMilestone surfaces stale readable status while a managed su
     cleanup(base);
   });
   openTestDb(base);
-  seedMilestone("M003", "Milestone Three");
-  seedSlice("M003", "S03", "complete");
-  _getAdapter()!.prepare(
-    "INSERT OR REPLACE INTO tasks (milestone_id, slice_id, id, title, status) VALUES (?, ?, ?, ?, ?)",
-  ).run("M003", "S03", "T03", "Task T03", "complete");
-  insertAssessment({
-    path: join(".gsd", "milestones", "M003", "M003-VALIDATION.md"),
-    milestoneId: "M003",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "---\nverdict: pass\nremediation_round: 0\n---\n\n# Validation\nValidated.",
-  });
+  writeRoadmap(base, "M003", ["S03"]);
+  await seedAdoptedCompletedMilestone(base);
   const summaryPath = targetMilestoneFile(base, "M003", "SUMMARY", "Milestone Three");
   // Managed projection writes go through the native journal boundary, not
   // fsPromises.rename, so obstructing the rename seam no longer obstructs the
