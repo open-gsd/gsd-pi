@@ -153,7 +153,6 @@ function seedContextModeFixture(base: string): void {
   insertMilestone({ id: "M001", title: "Context Mode", status: "active", depends_on: [] });
   upsertMilestonePlanning("M001", {
     title: "Context Mode",
-    status: "active",
     vision: "Verify the bundled context-mode contract",
     successCriteria: ["Prompt, tool, and persisted evidence surfaces agree"],
     keyRisks: [],
