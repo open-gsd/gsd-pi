@@ -253,6 +253,7 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "start-empty", desc: "Start from an empty database on purpose, beside projections from an earlier database (a re-clone)" },
     { cmd: "adopt", desc: "Preview, or with --apply run, the one-time lifecycle backfill of every unadopted row" },
     { cmd: "restore-backup", desc: "List or restore a verified pre-migration database backup (destructive; requires --consent)" },
+    { cmd: "prune-quarantine", desc: "List, or with --apply delete, quarantined copies of projections changed outside GSD (destructive; requires --apply)" },
   ],
   task: [
     { cmd: "settle <M001/S01/T01> --reason \"...\"", desc: "Dry-run: show the running Attempt that would be settled" },

@@ -11,7 +11,7 @@ import {
   rmdirSync, rmSync, unlinkSync, writeFileSync, constants as fsConstants,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { deriveState } from "./state.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { nativeBranchList, nativeDetectMainBranch, nativeBranchListMerged, nativeBranchDelete, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
@@ -1935,6 +1935,108 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
   } finally {
     if (!wasOpen) closeWorkflowDatabase();
   }
+}
+
+function formatPrunedBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * `gsd db prune-quarantine` — list, and with `--apply` delete, the quarantined
+ * copies of projection files that were changed outside GSD
+ * (`.gsd/quarantine/projections/`). The database is authoritative and has
+ * already rendered over every copy, but a copy still holds the user's edited
+ * bytes, so deletion is destructive: the default run lists only, `--apply`
+ * deletes. Only that folder is touched — never a live projection, never the
+ * database, and never the other quarantine folders (restore keepsakes,
+ * manual-review milestones, migration control publications).
+ */
+export async function handleDbPruneQuarantine(ctx: ExtensionCommandContext, basePath: string, args = ""): Promise<void> {
+  const { isAutoActive } = await import("./auto.js");
+  if (isAutoActive()) {
+    ctx.ui.notify("gsd db prune-quarantine: stop auto-mode first with /gsd stop.", "error");
+    return;
+  }
+  const { gsdProjectionRoot, normalizeRealPath } = await import("./paths.js");
+  const { withProjectionMutationSync } = await import("./database-maintenance-fence.js");
+  const root = join(gsdProjectionRoot(basePath), "quarantine", "projections");
+  const rel = (path: string) => relative(normalizeRealPath(basePath), normalizeRealPath(path)).split(sep).join("/");
+  if (!existsSync(root)) {
+    ctx.ui.notify("gsd db prune-quarantine: no quarantined projection copies — nothing to prune.", "info");
+    return;
+  }
+
+  const files: Array<{ path: string; size: number }> = [];
+  for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    const path = join(entry.parentPath, entry.name);
+    files.push({ path, size: lstatSync(path).size });
+  }
+  if (files.length === 0) {
+    ctx.ui.notify("gsd db prune-quarantine: no quarantined projection copies — nothing to prune.", "info");
+    return;
+  }
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+
+  if (!/(^|\s)--apply(\s|$)/.test(args)) {
+    ctx.ui.notify(
+      [
+        `gsd db prune-quarantine: ${files.length} quarantined projection copy(ies), ${formatPrunedBytes(totalBytes)}:`,
+        ...files.map((file) => `  ${rel(file.path)}`),
+        "Each copy holds projection bytes that were changed outside GSD; the database already rendered over them.",
+        "Run /gsd db prune-quarantine --apply to delete them. Deletion cannot be undone.",
+      ].join("\n"),
+      "info",
+    );
+    return;
+  }
+
+  // The same fence as the quarantine write, so a projection mutation cannot
+  // interleave with the prune.
+  const claimPath = join(gsdProjectionRoot(basePath), "gsd.db");
+  const failures: string[] = [];
+  let freedCount = 0;
+  let freedBytes = 0;
+  withProjectionMutationSync(claimPath, () => {
+    for (const file of files) {
+      try {
+        unlinkSync(file.path);
+        freedCount += 1;
+        freedBytes += file.size;
+      } catch (err) {
+        failures.push(`  ${rel(file.path)}: ${(err as Error).message}`);
+      }
+    }
+    // Remove the emptied stamp directories (deepest first); the folder is
+    // recreated on demand. A directory that still holds content stays.
+    const dirs = readdirSync(root, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(entry.parentPath, entry.name))
+      .sort((a, b) => b.length - a.length);
+    for (const dir of [...dirs, root]) {
+      try {
+        rmdirSync(dir);
+      } catch {
+        // Not empty (a deletion failed above) or already gone.
+      }
+    }
+  });
+
+  if (failures.length > 0) {
+    ctx.ui.notify(
+      `gsd db prune-quarantine: deleted ${freedCount} of ${files.length} copies (${formatPrunedBytes(freedBytes)} freed); ` +
+        `${failures.length} could not be deleted:\n${failures.join("\n")}`,
+      "error",
+    );
+    return;
+  }
+  ctx.ui.notify(
+    `gsd db prune-quarantine: deleted ${freedCount} quarantined projection copy(ies), ${formatPrunedBytes(freedBytes)} freed. ` +
+      "Live projections and the database were not touched.",
+    "info",
+  );
 }
 
 /**
