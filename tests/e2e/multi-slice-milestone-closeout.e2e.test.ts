@@ -438,6 +438,13 @@ describe("multi-slice milestone closeout e2e (fake LLM)", () => {
 		);
 		assert.equal(
 			scalar(
+				db,
+				"SELECT COUNT(*) AS value FROM quality_gates WHERE milestone_id = :mid AND scope = 'milestone' AND task_id = '' AND status = 'complete' AND verdict = 'pass'",
+				{ mid: "M001" },
+			),
+			"4",
+		);
+
 		// P35: the closeout wrote canonical authority rows, not just legacy projections.
 		assert.equal(
 			scalar(db, "SELECT COUNT(*) AS value FROM workflow_item_lifecycles l JOIN project_authority a ON a.project_id = l.project_id AND a.singleton = 1 WHERE l.item_kind = 'milestone' AND l.milestone_id = :mid AND l.lifecycle_status = 'completed'", { mid: "M001" }),
@@ -450,12 +457,6 @@ describe("multi-slice milestone closeout e2e (fake LLM)", () => {
 		assert.equal(
 			scalar(db, "SELECT COUNT(*) AS value FROM workflow_operations WHERE operation_type = 'milestone.validate'"),
 			"1",
-		);
-				db,
-				"SELECT COUNT(*) AS value FROM quality_gates WHERE milestone_id = :mid AND scope = 'milestone' AND task_id = '' AND status = 'complete' AND verdict = 'pass'",
-				{ mid: "M001" },
-			),
-			"4",
 		);
 	});
 });
