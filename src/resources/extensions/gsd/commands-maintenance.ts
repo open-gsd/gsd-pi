@@ -1999,8 +1999,9 @@ function collectQuarantinePruneCandidates(
           if (resolvesInsideQuarantine(realRoot, realpathSync(dirname(entryPath)))) {
             candidates.push({ path: entryPath, size: stat.size, isLink: true });
           }
-        } catch {
-          // Unresolvable location: not listed, so not deleted.
+        } catch (err) {
+          // Not listed, so not deleted — but never silently.
+          logWarning("command", `prune-quarantine: kept the link ${entryPath} — its quarantine location could not be verified: ${(err as Error).message}`);
         }
         continue;
       }
@@ -2009,8 +2010,9 @@ function collectQuarantinePruneCandidates(
           if (resolvesInsideQuarantine(realRoot, realpathSync(entryPath))) {
             candidates.push({ path: entryPath, size: stat.size, isLink: false });
           }
-        } catch {
-          // Unresolvable (e.g. raced away): not listed, so not deleted.
+        } catch (err) {
+          // Not listed, so not deleted — but never silently.
+          logWarning("command", `prune-quarantine: kept ${entryPath} — it could not be verified inside the quarantine: ${(err as Error).message}`);
         }
         continue;
       }
@@ -2137,8 +2139,9 @@ export async function handleDbPruneQuarantine(ctx: ExtensionCommandContext, base
         if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
         if (dir !== root && !resolvesInsideQuarantine(realRoot, realpathSync(dir))) continue;
         rmdirSync(dir);
-      } catch {
-        // Not empty (a deletion failed above) or already gone.
+      } catch (err) {
+        // Not empty (a deletion failed above) or already gone: say so.
+        logWarning("command", `prune-quarantine: the quarantine directory ${dir} could not be removed: ${(err as Error).message}`);
       }
     }
   });

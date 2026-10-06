@@ -28,6 +28,7 @@ import { handleDbPruneQuarantine } from "../commands-maintenance.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 import { quarantineProjectionEvidence } from "../projection-observation.ts";
 import { invalidateStateCache } from "../state.ts";
+import { _resetLogs, peekLogs } from "../workflow-logger.ts";
 
 const tempDirs = new Set<string>();
 
@@ -198,6 +199,7 @@ test("prune-quarantine --apply reports a copy it cannot delete and keeps it", as
 
   try {
     const { ctx, notes } = makeCtx();
+    _resetLogs();
     await handleDbPruneQuarantine(ctx, base, "--apply");
 
     assert.equal(notes.length, 1);
@@ -208,6 +210,12 @@ test("prune-quarantine --apply reports a copy it cannot delete and keeps it", as
     const leftovers = (readdirSync(join(base, ".gsd", "quarantine", "projections"), { recursive: true }) as string[])
       .filter((entry) => !entry.split("/")[0]!.startsWith("stubborn"));
     assert.deepEqual(leftovers, [], "the emptied stamp directories are removed");
+    // The stamp directories left holding the undeletable copy cannot be
+    // removed either; the prune logs that instead of swallowing it.
+    const pruneWarnings = peekLogs().filter(
+      (entry) => entry.severity === "warn" && entry.message.includes("could not be removed"),
+    );
+    assert.ok(pruneWarnings.length > 0, "a directory that could not be removed is logged");
   } finally {
     chmodSync(runDir, 0o700);
   }
