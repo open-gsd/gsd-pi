@@ -12,12 +12,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
+  _getAdapter,
   openDatabase,
   closeDatabase,
   getAllMilestones,
   getMilestoneSlices,
-  updateSliceStatus,
-  updateMilestoneStatus,
 } from '../gsd-db.ts';
 import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { describe, test, afterEach } from 'node:test';
@@ -29,6 +28,15 @@ afterEach(() => {
   for (const d of tmpDirs) { try { rmSync(d, { recursive: true, force: true }); } catch { /* */ } }
   tmpDirs.length = 0;
 });
+
+// Fixture stamp on the unadopted epoch-0 import: raw SQL, because the generic
+// status writer refuses rows with no canonical lifecycle row.
+function stampFixtureCompletion(table: 'slices' | 'milestones', id: string, completedAt: string): void {
+  const where = table === 'slices' ? "milestone_id = 'M001' AND id = :id" : "id = :id";
+  _getAdapter()!.prepare(
+    `UPDATE ${table} SET status = 'complete', completed_at = :completed_at WHERE ${where}`,
+  ).run({ ':completed_at': completedAt, ':id': id });
+}
 
 function createFixtureBase(): string {
   const base = mkdtempSync(join(tmpdir(), 'gsd-preserve-completion-'));
@@ -69,8 +77,10 @@ describe('migrateHierarchyToDb: re-import preserves existing completion timestam
     migrateHierarchyToDb(base);
 
     // Simulate the durable completion timestamps the real run wrote hours apart.
-    updateSliceStatus('M001', 'S01', 'complete', REAL_S01);
-    updateSliceStatus('M001', 'S02', 'complete', REAL_S02);
+    // Raw SQL: the fixture milestone is unadopted, so the generic status writer
+    // refuses it (rows with no canonical lifecycle row).
+    stampFixtureCompletion('slices', 'S01', REAL_S01);
+    stampFixtureCompletion('slices', 'S02', REAL_S02);
 
     // A second full re-import (the class of event that bit the reporter).
     migrateHierarchyToDb(base);
@@ -89,7 +99,7 @@ describe('migrateHierarchyToDb: re-import preserves existing completion timestam
     openDatabase(join(base, '.gsd', 'gsd.db'));
     migrateHierarchyToDb(base);
 
-    updateMilestoneStatus('M001', 'complete', REAL_M001);
+    stampFixtureCompletion('milestones', 'M001', REAL_M001);
 
     migrateHierarchyToDb(base);
 

@@ -221,7 +221,7 @@ test("sanctioned projection requires the active operation to own the canonical t
   `).get(), { lifecycle_status: "cancelled", last_operation_id: result.operationId });
 });
 
-test("a lifecycle row from another project does not guard the current project's generic writer", () => {
+test("a lifecycle row from another project does not adopt the current project's rows", () => {
   fixture();
   db().exec("PRAGMA foreign_keys = OFF");
   db().prepare(`
@@ -237,7 +237,12 @@ test("a lifecycle row from another project does not guard the current project's 
   `).run();
   db().exec("PRAGMA foreign_keys = ON");
 
-  updateTaskStatus("M001", "S01", "T01", "pending");
+  // For this project the row has no canonical lifecycle, so the generic
+  // writer refuses it — the foreign row must not satisfy the guard.
+  assert.throws(() => updateTaskStatus("M001", "S01", "T01", "pending"), /no canonical lifecycle row/);
+  assert.equal(getTask("M001", "S01", "T01")?.status, "active");
+  // The upsert is equally project-scoped: the foreign row does not preserve
+  // this row's status, so the incoming plan value lands (epoch-0 import shape).
   insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Updated", status: "complete" });
 
   assert.equal(getTask("M001", "S01", "T01")?.status, "complete");

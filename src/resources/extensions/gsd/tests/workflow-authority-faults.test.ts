@@ -13,7 +13,6 @@ import {
   getTask,
   insertSlice,
   insertTask,
-  updateTaskStatus,
 } from "../gsd-db.js";
 import { relSliceFile } from "../paths.js";
 import {
@@ -96,7 +95,9 @@ function handleCompleteSlice(
 
 function seedCompletionBoundary(): void {
   seedPrerequisiteCompletionEvidence();
-  updateTaskStatus("M001", "S02", "T01", "complete", "2026-07-11T00:00:00.000Z");
+  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare("UPDATE tasks SET status = 'complete', completed_at = :ts WHERE milestone_id = 'M001' AND slice_id = 'S02' AND id = 'T01'").run({ ":ts": "2026-07-11T00:00:00.000Z" });
   seedSliceCompletionAuthority({
     milestoneId: "M001",
     sliceId: "S02",

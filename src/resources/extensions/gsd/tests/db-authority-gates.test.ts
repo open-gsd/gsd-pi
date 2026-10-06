@@ -282,8 +282,14 @@ describe("G4: the write fence used by the per-tool gates", () => {
       };
     });
     const fenceAfterOperation = [...fence.violations];
+    // The task row is adopted with its aligned canonical status so the generic
+    // writer's own guards pass and the write reaches the fenced SQL below.
+    seedLifecycle(
+      { itemKind: "task", milestoneId: "M001", sliceId: "S02", taskId: "T01", lifecycleStatus: "ready" },
+      "fence-t01",
+    );
     assert.throws(
-      () => updateTaskStatus("M001", "S02", "T01", "complete"),
+      () => updateTaskStatus("M001", "S02", "T01", "in_progress"),
       /write to workflow table "tasks" outside a Domain Operation/,
     );
     const refused = /write to workflow table "tasks" outside a Domain Operation/;
@@ -445,8 +451,13 @@ describe("G8: zero legacy counters", () => {
       "decision reads hit no counted legacy path",
     );
 
-    // updateTaskStatus is a legacy-only status writer: no Domain Operation, no lifecycle row.
-    updateTaskStatus("M001", "S02", "T01", "complete");
+    // The generic status writer refuses rows without a canonical lifecycle row
+    // (the fixture rows are unadopted) — and either way no telemetry counter is
+    // wired for a raw status write (P36).
+    assert.throws(
+      () => updateTaskStatus("M001", "S02", "T01", "complete"),
+      /no canonical lifecycle row/,
+    );
     expectedFail("P36", () =>
       assert.ok(Object.values(getLegacyTelemetry()).some((count) => count > 0)));
   });

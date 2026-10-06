@@ -13,16 +13,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import {
+  _getAdapter,
   openDatabase,
   closeDatabase,
   insertMilestone,
   insertSlice,
   insertTask,
   insertAssessment,
-  updateSliceStatus,
   getMilestone,
 } from '../gsd-db.ts';
-import { completedEventCoversDispatch } from '../milestone-reopen-events.ts';
 import {
   handleCompleteMilestone,
   type CompleteMilestoneParams,
@@ -105,8 +104,11 @@ function seedCompletedMilestone(opts: {
     status: opts.taskStatus ?? 'complete',
     title: 'Task One',
   });
-  // Mark the slice complete (insertSlice defaults to pending).
-  updateSliceStatus('M001', 'S01', opts.sliceStatus ?? 'complete', new Date().toISOString());
+  // Mark the slice complete (insertSlice defaults to pending). Raw SQL: the
+  // fixture milestone is unadopted, so the generic status writer refuses it.
+  _getAdapter()!.prepare(
+    "UPDATE slices SET status = :status, completed_at = :completed_at WHERE milestone_id = 'M001' AND id = 'S01'",
+  ).run({ ":status": opts.sliceStatus ?? 'complete', ":completed_at": new Date().toISOString() });
 
   if (opts.validationVerdict !== null && opts.validationVerdict !== undefined) {
     insertAssessment({
@@ -140,10 +142,10 @@ function makeValidParams(): CompleteMilestoneParams {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// complete-milestone: handler happy path
+// complete-milestone: unadopted closeout refusal
 // ═══════════════════════════════════════════════════════════════════════════
 
-console.log('\n=== complete-milestone: handler happy path ===');
+console.log('\n=== complete-milestone: handler refuses an unadopted closeout ===');
 {
   const dbPath = tempDbPath();
   openDatabase(dbPath);
@@ -153,35 +155,20 @@ console.log('\n=== complete-milestone: handler happy path ===');
 
   const result = await handleCompleteMilestone(makeValidParams(), basePath);
 
-  assertTrue(!('error' in result), 'handler should succeed on a fully-complete, validated milestone');
-  if (!('error' in result)) {
-    assertEq(result.milestoneId, 'M001', 'result milestoneId');
-    assertTrue(result.summaryPath.endsWith('M001-SUMMARY.md'), 'summaryPath should end with M001-SUMMARY.md');
-    assertTrue(result.alreadyComplete !== true, 'first completion should not be flagged alreadyComplete');
-
-    // (a) DB status flipped to complete with completed_at set.
-    const m = getMilestone('M001');
-    assertTrue(m !== null, 'milestone should exist after completion');
-    assertEq(m!.status, 'complete', 'milestone status should be complete in DB');
-    assertTrue(m!.completed_at !== null && m!.completed_at !== '', 'completed_at should be set');
-
-    // (b) SUMMARY.md rendered with frontmatter + sections.
-    assertTrue(fs.existsSync(result.summaryPath), 'summary file should exist on disk');
-    const summary = fs.readFileSync(result.summaryPath, 'utf-8');
-    assertMatch(summary, /^---\n/, 'summary should start with YAML frontmatter');
-    assertMatch(summary, /id: M001/, 'summary frontmatter should contain id: M001');
-    assertMatch(summary, /status: complete/, 'summary frontmatter should mark status complete');
-    assertMatch(summary, /# M001: Test Milestone/, 'summary should have H1 with stripped title');
-    assertMatch(summary, /## Success Criteria Results/, 'summary should have Success Criteria section');
-    assertMatch(summary, /All success criteria met\./, 'summary should inline successCriteriaResults');
-    assertMatch(summary, /## Definition of Done Results/, 'summary should have DoD section');
-
-    // (c) A complete-milestone event was appended exactly once.
-    assertEq(countCompleteMilestoneEvents(basePath), 1, 'exactly one complete-milestone event should be recorded');
-
-    // (d) The completion event is in the database; drift detection does not read the file ledger.
-    assertTrue(completedEventCoversDispatch('M001', m!.completed_at), 'completion event should be recorded in the database');
+  // The generic status writer refuses rows without a canonical lifecycle row,
+  // so even a fully-validated unadopted closeout is refused: adopt the project
+  // with /gsd db adopt, then complete.
+  assertTrue('error' in result, 'an unadopted closeout must be refused');
+  if ('error' in result) {
+    assertMatch(result.error, /Milestone M001 has no canonical lifecycle row/, 'error should name the row');
+    assertMatch(result.error, /\/gsd db adopt/, 'error should point at adoption');
   }
+
+  // Nothing was written: the milestone stays active, no SUMMARY, no event.
+  assertEq(getMilestone('M001')!.status, 'active', 'refused closeout must not flip the status');
+  assertEq(countCompleteMilestoneEvents(basePath), 0, 'refused closeout must not append an event');
+  const summaryPath = path.join(basePath, '.gsd', 'milestones', 'M001', 'M001-SUMMARY.md');
+  assertTrue(!fs.existsSync(summaryPath), 'refused closeout must not render a SUMMARY');
 
   cleanupDir(basePath);
   cleanup(dbPath);
@@ -320,7 +307,7 @@ console.log('\n=== complete-milestone: incomplete slices block closeout ===');
 // complete-milestone: deferred slices are inactive for closeout
 // ═══════════════════════════════════════════════════════════════════════════
 
-console.log('\n=== complete-milestone: deferred slices do not block closeout ===');
+console.log('\n=== complete-milestone: deferred slices do not change the unadopted refusal ===');
 {
   const dbPath = tempDbPath();
   openDatabase(dbPath);
@@ -337,8 +324,11 @@ console.log('\n=== complete-milestone: deferred slices do not block closeout ===
 
   const result = await handleCompleteMilestone(makeValidParams(), basePath);
 
-  assertTrue(!('error' in result), 'deferred slice should not block milestone completion');
-  assertEq(getMilestone('M001')!.status, 'complete', 'milestone should complete with deferred inactive slice');
+  // Deferred slices still pass the closeout guards, but the unadopted write
+  // itself is refused.
+  assertTrue('error' in result, 'an unadopted closeout must be refused even with deferred slices');
+  if ('error' in result) assertMatch(result.error, /no canonical lifecycle row/, 'error should be the adoption refusal');
+  assertEq(getMilestone('M001')!.status, 'active', 'milestone should stay active');
 
   cleanupDir(basePath);
   cleanup(dbPath);
@@ -371,7 +361,7 @@ console.log('\n=== complete-milestone: deep task check blocks closeout ===');
 // complete-milestone: idempotent re-completion (alreadyComplete)
 // ═══════════════════════════════════════════════════════════════════════════
 
-console.log('\n=== complete-milestone: idempotent re-completion ===');
+console.log('\n=== complete-milestone: refused completion is retryable ===');
 {
   const dbPath = tempDbPath();
   openDatabase(dbPath);
@@ -379,26 +369,24 @@ console.log('\n=== complete-milestone: idempotent re-completion ===');
   seedCompletedMilestone({ basePath, validationVerdict: 'pass' });
 
   const r1 = await handleCompleteMilestone(makeValidParams(), basePath);
-  assertTrue(!('error' in r1), 'first completion should succeed');
+  assertTrue('error' in r1, 'first completion of an unadopted milestone is refused');
 
   const r2 = await handleCompleteMilestone(makeValidParams(), basePath);
-  assertTrue(!('error' in r2), 'second completion should be a non-error no-op');
-  if (!('error' in r2)) {
-    assertEq(r2.alreadyComplete, true, 'second completion should be flagged alreadyComplete');
-  }
+  assertTrue('error' in r2, 'the retry is refused identically');
+  if ('error' in r2) assertMatch(r2.error, /no canonical lifecycle row/, 'the refusal is stable');
 
-  // No duplicate completion event was appended on the retry.
-  assertEq(countCompleteMilestoneEvents(basePath), 1, 'retry must not append a duplicate complete-milestone event');
+  // No completion event was appended by either attempt.
+  assertEq(countCompleteMilestoneEvents(basePath), 0, 'refusals must not append completion events');
 
   cleanupDir(basePath);
   cleanup(dbPath);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// complete-milestone: existing SUMMARY.md is not overwritten (#4598)
+// complete-milestone: refusal leaves an existing SUMMARY.md untouched (#4598)
 // ═══════════════════════════════════════════════════════════════════════════
 
-console.log('\n=== complete-milestone: existing SUMMARY.md preserved (#4598) ===');
+console.log('\n=== complete-milestone: refusal leaves an existing SUMMARY.md untouched (#4598) ===');
 {
   const dbPath = tempDbPath();
   openDatabase(dbPath);
@@ -411,15 +399,14 @@ console.log('\n=== complete-milestone: existing SUMMARY.md preserved (#4598) ===
   fs.writeFileSync(summaryPath, sentinel, 'utf-8');
 
   const result = await handleCompleteMilestone(makeValidParams(), basePath);
-  assertTrue(!('error' in result), 'completion should still succeed when SUMMARY.md already exists');
-  if (!('error' in result)) {
+  assertTrue('error' in result, 'an unadopted closeout must be refused');
+  if ('error' in result) {
     assertEq(
       fs.readFileSync(summaryPath, 'utf-8'),
       sentinel,
-      'existing SUMMARY.md must be preserved, not overwritten by the mechanical renderer',
+      'refusal must not touch the existing SUMMARY.md',
     );
-    // DB completion still happened.
-    assertEq(getMilestone('M001')!.status, 'complete', 'milestone should still be marked complete in DB');
+    assertEq(getMilestone('M001')!.status, 'active', 'milestone must stay active');
   }
 
   cleanupDir(basePath);
@@ -448,23 +435,18 @@ console.log('\n=== complete-milestone: flat-phase legacy-named SUMMARY.md preser
   fs.writeFileSync(summaryPath, sentinel, 'utf-8');
 
   const result = await handleCompleteMilestone(makeValidParams(), basePath);
-  assertTrue(!('error' in result), 'completion should still succeed when flat-phase compatibility SUMMARY.md exists');
-  if (!('error' in result)) {
-    assertEq(
-      result.summaryPath,
-      fs.realpathSync(summaryPath),
-      'completion should report the preserved existing SUMMARY path',
-    );
+  assertTrue('error' in result, 'an unadopted closeout must be refused even with a compatibility SUMMARY');
+  if ('error' in result) {
     assertEq(
       fs.readFileSync(summaryPath, 'utf-8'),
       sentinel,
-      'flat-phase compatibility SUMMARY.md must be preserved, not hidden by a canonical rewrite',
+      'refusal must preserve the flat-phase compatibility SUMMARY.md',
     );
     assertTrue(
       !fs.existsSync(canonicalSummaryPath),
-      'completion must not create a canonical sibling over an existing compatibility summary',
+      'refusal must not create a canonical sibling summary',
     );
-    assertEq(getMilestone('M001')!.status, 'complete', 'milestone should still be marked complete in DB');
+    assertEq(getMilestone('M001')!.status, 'active', 'milestone must stay active');
   }
 
   cleanupDir(basePath);

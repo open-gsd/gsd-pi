@@ -14,7 +14,7 @@ import {
   insertSlice,
   insertTask,
   openDatabase,
-  updateSliceStatus,
+  _getAdapter,
 } from "../gsd-db.ts";
 import { clearParseCache } from "../files.ts";
 import { clearPathCache } from "../paths.ts";
@@ -199,7 +199,11 @@ test("complete-milestone writes SUMMARY under the active worktree projection", a
   const { projectRoot, worktreeRoot } = makeFixture(t);
   seedMilestoneAndSlice();
   insertTask({ id: "T01", sliceId: SID, milestoneId: MID, status: "complete", title: "Task" });
-  updateSliceStatus(MID, SID, "complete", new Date().toISOString());
+  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare(
+    "UPDATE slices SET status = 'complete', completed_at = :ts WHERE milestone_id = :mid AND id = :sid",
+  ).run({ ":ts": new Date().toISOString(), ":mid": MID, ":sid": SID });
   insertAssessment({
     path: join(worktreeRoot, ".gsd", "milestones", MID, "M001-VALIDATION.md"),
     milestoneId: MID,
@@ -218,10 +222,12 @@ test("complete-milestone writes SUMMARY under the active worktree projection", a
     verificationPassed: true,
   }, worktreeRoot);
 
-  assert.ok(!("error" in result), "complete-milestone should succeed");
+  // The unadopted closeout is refused: the generic status writer refuses rows
+  // without a canonical lifecycle row, so nothing is projected anywhere.
+  assert.ok("error" in result, "an unadopted closeout must be refused");
+  if ("error" in result) assert.match(result.error, /no canonical lifecycle row/);
   const expected = join(worktreeRoot, ".gsd", "milestones", MID, "M001-SUMMARY.md");
   const projectProjection = join(projectRoot, ".gsd", "milestones", MID, "M001-SUMMARY.md");
-  assert.equal(result.summaryPath, expected);
-  assert.equal(existsSync(expected), true);
+  assert.equal(existsSync(expected), false);
   assert.equal(existsSync(projectProjection), false);
 });

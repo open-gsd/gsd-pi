@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { clearPathCache } from "../../../src/resources/extensions/gsd/paths.ts";
-import { _getAdapter, closeDatabase, insertMilestone, openDatabase, updateTaskStatus } from "../../../src/resources/extensions/gsd/gsd-db.ts";
+import { _getAdapter, closeDatabase, insertMilestone, openDatabase } from "../../../src/resources/extensions/gsd/gsd-db.ts";
 import { claimTaskAttempt } from "../../../src/resources/extensions/gsd/task-execution-domain-operation.ts";
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
 import { discardMilestone, parkMilestone, unparkMilestone } from "../../../src/resources/extensions/gsd/milestone-actions.ts";
@@ -311,7 +311,9 @@ describe("STATE.md render after workflow commands and rebuild", () => {
     await assertRendersState(base, "unpark", async () => assert.equal(await unparkMilestone(base, "M001"), true));
     insertMilestone({ id: "M002", title: "Discarded milestone", status: "queued" });
     await assertRendersState(base, "discard", async () => assert.equal(await discardMilestone(base, "M002"), true));
-    updateTaskStatus("M001", "S02", "T01", "complete");
+    // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+    // writer refuses rows without a canonical lifecycle row.
+    _getAdapter()!.prepare("UPDATE tasks SET status = 'complete' WHERE milestone_id = 'M001' AND slice_id = 'S02' AND id = 'T01'").run();
     await assertRendersState(base, "undo-task", () => handleUndoTask("M001/S02/T01 --force", ctx, {} as Parameters<typeof handleUndoTask>[2], base));
   });
 
@@ -340,7 +342,9 @@ describe("STATE.md render after workflow commands and rebuild", () => {
   it("/gsd undo --force renders STATE.md", async (t) => {
     const fixture = await openFixture(t);
     const base = fixture.root;
-    updateTaskStatus("M001", "S02", "T01", "complete");
+    // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+    // writer refuses rows without a canonical lifecycle row.
+    _getAdapter()!.prepare("UPDATE tasks SET status = 'complete' WHERE milestone_id = 'M001' AND slice_id = 'S02' AND id = 'T01'").run();
     // Undo selects the last completed Unit from the unit_dispatches ledger.
     const db = _getAdapter();
     assert.ok(db, "fixture database must be open");

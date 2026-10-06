@@ -19,7 +19,6 @@ import {
   insertArtifact,
   insertGateRow,
   saveGateResult,
-  updateTaskStatus,
 } from '../gsd-db.ts';
 import {
   LIVENESS_TRIP_THRESHOLD,
@@ -308,7 +307,11 @@ test('ADR-047: completed-no-advance — target-row hash is stable until a target
   assert.equal(record().tripped, false);
   assert.equal(record().tripped, true);
 
-  updateTaskStatus('M001', 'S01', 'T01', 'complete');
+  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET status = 'complete', completed_at = :ts WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+  ).run({ ":ts": new Date().toISOString() });
   const afterAdvance = readTargetSnapshot('execute-task', 'M001/S01/T01');
   assert.notEqual(afterAdvance, atDispatch, 'a moved target row changes the hash');
 });
@@ -632,7 +635,11 @@ test('#2159: step-mode ack acknowledges a resolved completed-no-advance wedge', 
   if (!tripped.tripped) return;
 
   // The unit later completed — the target row moved past the wedge input.
-  updateTaskStatus('M001', 'S01', 'T01', 'complete');
+  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET status = 'complete', completed_at = :ts WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+  ).run({ ":ts": new Date().toISOString() });
 
   const ack = await acknowledgeWedgeStepMode(SCOPE, tripped.wedge.wedgeId);
   assert.equal(ack.ok, true, 'a resolved wedge must be acknowledgeable without entering auto-mode');
@@ -732,7 +739,11 @@ test('#2159: garbageCollectResolvedWedges auto-acks a stale completed-no-advance
   assert.equal(tripped.tripped, true);
   if (!tripped.tripped) return;
 
-  updateTaskStatus('M001', 'S01', 'T01', 'complete');
+  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET status = 'complete', completed_at = :ts WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+  ).run({ ":ts": new Date().toISOString() });
   const gc = await garbageCollectResolvedWedges(SCOPE, async (wedge) => recheckCompletedNoAdvanceWedge(wedge));
   assert.equal(gc.ok, true);
   if (!gc.ok) return;

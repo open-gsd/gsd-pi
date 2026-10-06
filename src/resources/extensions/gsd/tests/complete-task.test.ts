@@ -10,7 +10,6 @@ import {
   insertMilestone,
   insertSlice,
   insertTask,
-  updateTaskStatus,
   getTask,
   getSlice,
   getMilestone,
@@ -19,8 +18,6 @@ import {
   insertGateRow,
   getGateResults,
   saveReworkBrief,
-  updateMilestoneStatus,
-  updateSliceStatus,
   SCHEMA_VERSION,
 } from '../gsd-db.ts';
 import { handleCompleteTask } from '../tools/complete-task.ts';
@@ -244,8 +241,11 @@ console.log('\n=== complete-task: accessor CRUD ===');
   assertEq(sliceTasks.length, 1, 'getSliceTasks should return 1 task');
   assertEq(sliceTasks[0].id, 'T01', 'getSliceTasks first task id');
 
-  // updateTaskStatus preserves allowed closed-to-closed transitions.
-  updateTaskStatus('M001', 'S01', 'T01', 'skipped', new Date().toISOString());
+  // Allowed closed-to-closed status stamp. Raw SQL: the fixture milestone is
+  // unadopted, so the generic status writer refuses it.
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET status = 'skipped', completed_at = :completed_at WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+  ).run({ ":completed_at": new Date().toISOString() });
   const updatedTask = getTask('M001', 'S01', 'T01');
   assertEq(updatedTask!.status, 'skipped', 'task status should be updated to skipped');
   assertTrue(updatedTask!.completed_at !== null, 'completed_at should be set after status update');
@@ -1045,8 +1045,11 @@ console.log('\n=== complete-task: rejects completion in a closed milestone ===')
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
-  // Close the milestone after seeding.
-  updateMilestoneStatus('M001', 'complete', new Date().toISOString());
+  // Close the milestone after seeding. Raw SQL: the fixture milestone is
+  // unadopted, so the generic status writer refuses it.
+  _getAdapter()!.prepare(
+    "UPDATE milestones SET status = 'complete', completed_at = :completed_at WHERE id = 'M001'",
+  ).run({ ":completed_at": new Date().toISOString() });
 
   const result = await handleCompleteTask(makeValidParams(), basePath);
   assertTrue('error' in result, 'should reject task completion in a closed milestone');
@@ -1068,7 +1071,11 @@ console.log('\n=== complete-task: rejects completion in a closed slice ===');
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
-  updateSliceStatus('M001', 'S01', 'complete', new Date().toISOString());
+  // Close the slice after seeding. Raw SQL: the fixture milestone is
+  // unadopted, so the generic status writer refuses it.
+  _getAdapter()!.prepare(
+    "UPDATE slices SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND id = 'S01'",
+  ).run({ ":completed_at": new Date().toISOString() });
 
   const result = await handleCompleteTask(makeValidParams(), basePath);
   assertTrue('error' in result, 'should reject task completion in a closed slice');

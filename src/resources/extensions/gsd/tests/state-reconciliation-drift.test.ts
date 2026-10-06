@@ -26,8 +26,6 @@ import {
   getSlice,
   getSliceTasks,
   setSliceSummaryMd,
-  updateSliceStatus,
-  updateTaskStatus,
 } from "../gsd-db.ts";
 import { clearParseCache } from "../files.ts";
 import { clearPathCache } from "../paths.ts";
@@ -1700,8 +1698,10 @@ test("P16: a SUMMARY file does not backfill a null completed_at through reconcil
   insertMilestone({ id: "M001", title: "Test", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [], demo: "", sequence: 1 });
   insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
-  updateTaskStatus("M001", "S01", "T01", "complete", undefined);
-  updateSliceStatus("M001", "S01", "complete", undefined);
+  // Fixture stamps on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows with no canonical lifecycle row.
+  _getAdapter()!.prepare("UPDATE tasks SET status = 'complete' WHERE milestone_id = 'M001' AND id = 'T01'").run();
+  _getAdapter()!.prepare("UPDATE slices SET status = 'complete' WHERE milestone_id = 'M001' AND id = 'S01'").run();
   writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "# T01 Summary\n");
   writeFileSync(join(tasksDir, "01-01-SUMMARY.md"), "# S01 Summary\n");
 

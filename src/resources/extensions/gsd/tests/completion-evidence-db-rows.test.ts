@@ -38,15 +38,32 @@ import {
   openDatabase,
   setSliceSketchFlag,
   setSliceUatMd,
-  updateMilestoneStatus,
-  updateSliceStatus,
-  updateTaskStatus,
 } from "../gsd-db.ts";
 import type { GSDPreferences } from "../preferences.ts";
 import type { GSDState } from "../types.ts";
 
 const MID = "M001";
 const SID = "S01";
+
+// Fixture stamps on the unadopted epoch-0 hierarchy: raw SQL, because the
+// generic status writer refuses rows without a canonical lifecycle row.
+function stampFixtureComplete(entity: "milestone" | "slice" | "task", ids: {
+  sliceId?: string; taskId?: string;
+}): void {
+  const completedAt = new Date().toISOString();
+  if (entity === "milestone") {
+    _getAdapter()!.prepare("UPDATE milestones SET status = 'complete', completed_at = :ts WHERE id = :id")
+      .run({ ":ts": completedAt, ":id": MID });
+    return;
+  }
+  if (entity === "slice") {
+    _getAdapter()!.prepare("UPDATE slices SET status = 'complete', completed_at = :ts WHERE milestone_id = :mid AND id = :id")
+      .run({ ":ts": completedAt, ":mid": MID, ":id": ids.sliceId ?? SID });
+    return;
+  }
+  _getAdapter()!.prepare("UPDATE tasks SET status = 'complete', completed_at = :ts WHERE milestone_id = :mid AND slice_id = :sid AND id = :id")
+    .run({ ":ts": completedAt, ":mid": MID, ":sid": ids.sliceId ?? SID, ":id": ids.taskId });
+}
 
 let base: string;
 
@@ -205,7 +222,7 @@ const UNIT_CASES: UnitCase[] = [
     unitType: "complete-slice",
     unitId: `${MID}/${SID}`,
     setup: () => insertSlice({ id: SID, milestoneId: MID, title: "Slice", status: "active" }),
-    recordResult: () => updateSliceStatus(MID, SID, "complete", new Date().toISOString()),
+    recordResult: () => stampFixtureComplete("slice", {}),
     writeProjections: () => {
       writeFile(join(sliceDir(), `${SID}-SUMMARY.md`), ["# Slice summary", "", "Done."]);
       writeFile(join(sliceDir(), `${SID}-UAT.md`), ["# UAT", "", "Checks."]);
@@ -220,8 +237,8 @@ const UNIT_CASES: UnitCase[] = [
       insertTask({ id: "T02", sliceId: SID, milestoneId: MID, title: "Second task", status: "pending" });
     },
     recordResult: () => {
-      updateTaskStatus(MID, SID, "T01", "complete", new Date().toISOString());
-      updateTaskStatus(MID, SID, "T02", "complete", new Date().toISOString());
+      stampFixtureComplete("task", { taskId: "T01" });
+      stampFixtureComplete("task", { taskId: "T02" });
     },
     writeProjections: () => {
       writeFile(join(sliceDir(), "tasks", "T01-SUMMARY.md"), ["---", "id: T01", "---", "# T01: Done"]);
@@ -256,7 +273,7 @@ describe("verifyExpectedArtifact reads DB rows only", () => {
       scope: "milestone-validation",
       fullContent: "---\nverdict: pass\n---\n",
     });
-    updateMilestoneStatus(MID, "complete", new Date().toISOString());
+    stampFixtureComplete("milestone", {});
 
     assert.equal(verifyExpectedArtifact("complete-milestone", MID, base), true);
   });
@@ -340,7 +357,7 @@ describe("/gsd start cleanup of stale runtime records is read-only", () => {
 
   test("an unproven milestone gets no assessment, gate run or VALIDATION file, and keeps its record", () => {
     insertSlice({ id: SID, milestoneId: MID, title: "Slice", status: "complete" });
-    updateMilestoneStatus(MID, "complete", new Date().toISOString());
+    stampFixtureComplete("milestone", {});
     staleCompleteMilestoneRecord();
 
     const { cleared } = _selfHealRuntimeRecordsForTest(base, notifyCtx);
@@ -371,7 +388,7 @@ describe("/gsd start cleanup of stale runtime records is read-only", () => {
       scope: "milestone-validation",
       fullContent: "---\nverdict: pass\n---\n",
     });
-    updateMilestoneStatus(MID, "complete", new Date().toISOString());
+    stampFixtureComplete("milestone", {});
     staleCompleteMilestoneRecord();
 
     const { cleared } = _selfHealRuntimeRecordsForTest(base, notifyCtx);
@@ -435,7 +452,7 @@ describe("a heading in a projection file closes no quality gate", () => {
       scope: "milestone-validation",
       fullContent: "---\nverdict: pass\n---\n",
     });
-    updateMilestoneStatus(MID, "complete", new Date().toISOString());
+    stampFixtureComplete("milestone", {});
 
     const result = checkCloseoutConsistencyGate(MID);
 

@@ -21,7 +21,7 @@ import {
   insertSlice,
   insertTask,
   getSliceTasks,
-  updateTaskStatus,
+  _getAdapter,
   adoptOrTransitionLifecycle,
   executeDomainOperation,
   readDomainOperationFence,
@@ -530,8 +530,9 @@ describe('derive-state-db', async () => {
       });
       // Also update file on disk (cachedLoadFile may read from disk for some paths)
       writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', updatedPlan);
-      // Update task status in DB so DB-path also sees completion (#2631 fix)
-      updateTaskStatus('M001', 'S01', 'T01', 'complete');
+      // Update task status in DB so DB-path also sees completion (#2631 fix).
+      // Raw SQL: the fixture is unadopted, so the generic status writer refuses it.
+      _getAdapter()!.prepare("UPDATE tasks SET status = 'complete' WHERE milestone_id = 'M001' AND id = 'T01'").run();
 
       // Without invalidation, should return cached result (T01 still active)
       const state2 = await deriveState(base);

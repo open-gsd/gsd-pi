@@ -2162,7 +2162,9 @@ test('── markdown-renderer: renderRoadmapFromDb renders milestone with visio
     // upsertMilestonePlanning sets the vision; insertMilestone leaves it "".
     // Simulate a planned-but-not-yet-sliced milestone via the planning upsert.
     const { upsertMilestonePlanning } = await import('../gsd-db.ts');
-    upsertMilestonePlanning('M017', { vision: 'A slice-less milestone', title: 'Visionary', status: 'active', depends_on: [] });
+    // No status here: insertMilestone already wrote it, and the planning
+    // status write is a canonical-backed projection now.
+    upsertMilestonePlanning('M017', { vision: 'A slice-less milestone', title: 'Visionary', depends_on: [] });
     scaffoldDirs(tmpDir, 'M017', []);
 
     const result = await renderRoadmapFromDb(tmpDir, 'M017');

@@ -18,8 +18,6 @@ import {
   insertSlice,
   insertTask,
   transaction,
-  updateMilestoneStatus,
-  updateSliceStatus,
   getMilestoneSlices,
   getSliceTasks,
   _getAdapter,
@@ -799,7 +797,17 @@ export function migrateHierarchyToDb(
       // #1291: preserve an existing completion timestamp so a re-import backfills
       // only rows that lack one, never re-stamping an already-complete milestone
       // with the current import time. Same guard as the task path below.
-      updateMilestoneStatus(milestoneId, milestoneStatus, importCompletionTimestamp(summaryPath), true);
+      // Raw SQL: this backfill runs pre-adoption by definition (guarded by
+      // `!milestoneAdopted` above), and the generic status writer now refuses
+      // rows without a canonical lifecycle row.
+      _getAdapter()!.prepare(`
+        UPDATE milestones SET status = :status, completed_at = COALESCE(completed_at, :completed_at)
+        WHERE id = :id
+      `).run({
+        ":status": milestoneStatus,
+        ":completed_at": importCompletionTimestamp(summaryPath),
+        ":id": milestoneId,
+      });
     }
     counts.milestones++;
 
@@ -859,13 +867,16 @@ export function migrateHierarchyToDb(
         // #1291: preserve an existing completion timestamp so a re-import backfills
         // only slices that lack one, never re-stamping an already-complete slice
         // with the current import time. Same guard as the task path below.
-        updateSliceStatus(
-          milestoneId,
-          sliceEntry.id,
-          sliceStatus,
-          importCompletionTimestamp(sliceSummary),
-          true,
-        );
+        // Raw SQL: pre-adoption import backfill (see the milestone note above).
+        _getAdapter()!.prepare(`
+          UPDATE slices SET status = :status, completed_at = COALESCE(completed_at, :completed_at)
+          WHERE milestone_id = :milestone_id AND id = :id
+        `).run({
+          ":status": sliceStatus,
+          ":completed_at": importCompletionTimestamp(sliceSummary),
+          ":milestone_id": milestoneId,
+          ":id": sliceEntry.id,
+        });
       }
       counts.slices++;
 
@@ -1015,13 +1026,15 @@ export function migrateHierarchyToDb(
           if (_getAdapter()) {
             // #1291: preserve an existing completion timestamp — this consistency
             // upgrade sets a completion time only when the row lacks one.
-            updateSliceStatus(
-              milestoneId,
-              sliceEntry.id,
-              'complete',
-              importCompletionTimestamp(sliceSummaryPath),
-              true,
-            );
+            // Raw SQL: pre-adoption import backfill (see the milestone note above).
+            _getAdapter()!.prepare(`
+              UPDATE slices SET status = 'complete', completed_at = COALESCE(completed_at, :completed_at)
+              WHERE milestone_id = :milestone_id AND id = :id
+            `).run({
+              ":completed_at": importCompletionTimestamp(sliceSummaryPath),
+              ":milestone_id": milestoneId,
+              ":id": sliceEntry.id,
+            });
             process.stderr.write(
               `gsd-migrate: ${milestoneId}/${sliceEntry.id} all tasks + slice summary complete — upgrading slice to complete\n`,
             );

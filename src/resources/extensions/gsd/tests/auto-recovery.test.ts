@@ -10,7 +10,7 @@ import { createRequire } from "node:module";
 
 import { verifyExpectedArtifact, hasImplementationArtifacts, resolveExpectedArtifactPath, diagnoseExpectedArtifact, diagnoseWorktreeIntegrityFailure, buildLoopRemediationSteps, writeBlockerPlaceholder, refreshRecoveryDbForArtifact, writeReactiveExecuteBlocker } from "../auto-recovery.ts";
 import { resolveMilestoneFile } from "../paths.ts";
-import { _getAdapter, openDatabase, closeDatabase, insertArtifact, insertMilestone, insertSlice, insertGateRow, insertTask, insertAssessment, getMilestone, getMilestoneCommitAttributionShas, getPlanMilestoneRecoveryBlock, getTask, getSlice, saveGateResult, updateMilestoneStatus } from "../gsd-db.ts";
+import { _getAdapter, openDatabase, closeDatabase, insertArtifact, insertMilestone, insertSlice, insertGateRow, insertTask, insertAssessment, getMilestone, getMilestoneCommitAttributionShas, getPlanMilestoneRecoveryBlock, getTask, getSlice, saveGateResult, projectCanonicalStatusToLegacy } from "../gsd-db.ts";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
 import { recordFailureAndSelectRecovery } from "../task-recovery-domain-operation.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
@@ -191,12 +191,18 @@ function completeAdoptedMilestoneReceipt(receiptShape: "full" | "projection-only
     sourceTransport: "test",
     payload: { milestoneId: "M001" },
   }, (context) => {
-    updateMilestoneStatus("M001", "complete", completedAt);
     const lifecycle = adoptOrTransitionLifecycle(context, {
       itemKind: "milestone",
       milestoneId: "M001",
       lifecycleStatus: "completed",
       adoptedFromStatus: "completed",
+    });
+    // Project the legacy completion from the canonical row this operation wrote.
+    projectCanonicalStatusToLegacy(context, {
+      entity: "milestone",
+      milestoneId: "M001",
+      status: "complete",
+      completedAt,
     });
     return {
       events: [{

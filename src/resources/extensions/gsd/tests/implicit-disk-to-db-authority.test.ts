@@ -15,8 +15,6 @@ import {
   insertMilestone,
   insertSlice,
   setMilestoneQueueOrder,
-  updateSliceStatus,
-  updateTaskStatus,
 } from "../gsd-db.ts";
 import { renderAllFromDb } from "../markdown-renderer.ts";
 import { relMilestoneFile, relSliceFile, relTaskFile } from "../paths.ts";
@@ -131,8 +129,10 @@ const CONTRADICTIONS: Contradiction[] = [
     artifact: "ASSESSMENT",
     // Every slice closed, so dispatch reaches milestone validation.
     seed: () => {
-      updateTaskStatus("M001", "S02", "T01", "complete");
-      updateSliceStatus("M001", "S02", "complete");
+      // Fixture stamps on the unadopted milestone: raw SQL, the generic
+      // status writer refuses rows without a canonical lifecycle row.
+      _getAdapter()!.prepare("UPDATE tasks SET status = 'complete' WHERE milestone_id = 'M001' AND slice_id = 'S02' AND id = 'T01'").run();
+      _getAdapter()!.prepare("UPDATE slices SET status = 'complete' WHERE milestone_id = 'M001' AND id = 'S02'").run();
     },
     // S01 has an ASSESSMENT that no gsd_uat_result_save call produced; S02 has none.
     contradict: (base) => {

@@ -9,14 +9,13 @@ import { afterEach, test } from "node:test";
 
 import type { DomainJsonValue } from "../db/domain-operation.ts";
 import {
-  _getAdapter,
   closeDatabase,
   executeDomainOperation,
   insertArtifact,
   insertMilestone,
   openDatabase,
   readDomainOperationFence,
-  updateMilestoneStatus,
+  _getAdapter,
 } from "../gsd-db.ts";
 import { latestExplicitReopenAt } from "../milestone-reopen-events.ts";
 import { renderAllFromDb } from "../markdown-renderer.ts";
@@ -37,7 +36,11 @@ function makeBase(status: string, completedAt: string | null = null): string {
   mkdirSync(join(basePath, ".gsd"), { recursive: true });
   assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
   insertMilestone({ id: "M001", title: "Durable Closeout", status: "active" });
-  updateMilestoneStatus("M001", status, completedAt);
+  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare(
+    "UPDATE milestones SET status = :status, completed_at = :completed_at WHERE id = 'M001'",
+  ).run({ ":status": status, ":completed_at": completedAt });
   return basePath;
 }
 

@@ -9,12 +9,11 @@ import {
   insertMilestone,
   insertSlice,
   insertTask,
+  _getAdapter,
   getTask,
   getSlice,
   getMilestone,
   getSliceTasks,
-  updateTaskStatus,
-  updateSliceStatus,
 } from "../gsd-db.ts";
 import { isClosedStatus } from "../status-guards.ts";
 
@@ -114,25 +113,32 @@ describe("completion-hierarchy-guards", () => {
     assert.ok(wouldDoubleComplete, "guard fires: task is already closed");
   });
 
-  // ─── Test 6: updateSliceStatus rollback loses original status (M11) ─────
-  test("updateSliceStatus rollback goes to 'pending' not original status (M11)", () => {
+  // ─── Test 6: slice status rollback loses original status (M11) ──────────
+  test("slice status rollback goes to 'pending' not original status (M11)", () => {
     insertMilestone({ id: "M001" });
     // Insert with an explicit non-pending status to simulate an in-progress slice
     insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
 
-    // Manually advance to "in_progress" equivalent via updateSliceStatus
-    updateSliceStatus("M001", "S01", "in_progress");
+    // Raw SQL stamps on the unadopted slice: the generic status writer refuses
+    // rows without a canonical lifecycle row, and the M11 point is that the row
+    // itself stores no status history.
+    const stamp = (status: string) => _getAdapter()!.prepare(
+      "UPDATE slices SET status = :status WHERE milestone_id = 'M001' AND id = 'S01'",
+    ).run({ ":status": status });
+
+    // Manually advance to "in_progress" equivalent
+    stamp("in_progress");
     const afterProgress = getSlice("M001", "S01");
     assert.equal(afterProgress!.status, "in_progress", "slice is in_progress after update");
 
     // Simulate completion
-    updateSliceStatus("M001", "S01", "complete", new Date().toISOString());
+    stamp("complete");
     const afterComplete = getSlice("M001", "S01");
     assert.equal(afterComplete!.status, "complete", "slice is complete after completion");
 
     // Simulate rollback — the DB only stores current status, not history.
     // Rolling back means setting to "pending" — the original "in_progress" is lost.
-    updateSliceStatus("M001", "S01", "pending");
+    stamp("pending");
     const afterRollback = getSlice("M001", "S01");
     assert.equal(
       afterRollback!.status,

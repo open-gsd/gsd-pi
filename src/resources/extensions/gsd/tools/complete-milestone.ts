@@ -326,59 +326,68 @@ export async function handleCompleteMilestone(
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
     }
-  } else transaction(() => {
-    if (isMilestoneLifecycleAdopted(params.milestoneId)) {
-      guardError = `Refusing legacy completion for adopted Milestone ${params.milestoneId}`;
-      return;
-    }
-    // State machine preconditions (inside txn for atomicity)
-    const milestone = readMilestone(params.milestoneId);
-    if (!milestone) {
-      guardError = `milestone not found: ${params.milestoneId}`;
-      return;
-    }
-    if (milestone.closed) {
-      alreadyComplete = true;
-      return;
-    }
+  } else {
+    // Legacy completion keeps its guards, but the generic status writer now
+    // refuses rows without a canonical lifecycle row, so an unadopted closeout
+    // surfaces the loud adoption error instead of writing.
+    try {
+      transaction(() => {
+        if (isMilestoneLifecycleAdopted(params.milestoneId)) {
+          guardError = `Refusing legacy completion for adopted Milestone ${params.milestoneId}`;
+          return;
+        }
+        // State machine preconditions (inside txn for atomicity)
+        const milestone = readMilestone(params.milestoneId);
+        if (!milestone) {
+          guardError = `milestone not found: ${params.milestoneId}`;
+          return;
+        }
+        if (milestone.closed) {
+          alreadyComplete = true;
+          return;
+        }
 
-    const validation = getLatestAssessmentByScope(params.milestoneId, "milestone-validation");
-    if (validation?.status !== "pass") {
-      guardError =
-        `Refusing to complete ${params.milestoneId}: latest milestone-validation verdict is ` +
-        `"${validation?.status ?? "absent"}". Only verdict=pass permits closeout.`;
-      return;
-    }
+        const validation = getLatestAssessmentByScope(params.milestoneId, "milestone-validation");
+        if (validation?.status !== "pass") {
+          guardError =
+            `Refusing to complete ${params.milestoneId}: latest milestone-validation verdict is ` +
+            `"${validation?.status ?? "absent"}". Only verdict=pass permits closeout.`;
+          return;
+        }
 
-    // Verify all slices are complete
-    const slices = readMilestoneSlices(params.milestoneId);
-    if (slices.length === 0) {
-      guardError = `no slices found for milestone ${params.milestoneId}`;
-      return;
-    }
+        // Verify all slices are complete
+        const slices = readMilestoneSlices(params.milestoneId);
+        if (slices.length === 0) {
+          guardError = `no slices found for milestone ${params.milestoneId}`;
+          return;
+        }
 
-    const incompleteSlices = slices.filter(s => !s.done);
-    if (incompleteSlices.length > 0) {
-      const incompleteIds = incompleteSlices.map(s => `${s.id} (status: ${s.status})`).join(", ");
-      guardError = `incomplete slices: ${incompleteIds}`;
-      return;
-    }
+        const incompleteSlices = slices.filter(s => !s.done);
+        if (incompleteSlices.length > 0) {
+          const incompleteIds = incompleteSlices.map(s => `${s.id} (status: ${s.status})`).join(", ");
+          guardError = `incomplete slices: ${incompleteIds}`;
+          return;
+        }
 
-    // Deep check: verify all tasks in all slices are complete
-    for (const slice of slices) {
-      if (isDeferredStatus(slice.status)) continue;
-      const tasks = readSliceTasks(params.milestoneId, slice.id);
-      const incompleteTasks = tasks.filter(t => !t.done);
-      if (incompleteTasks.length > 0) {
-        const ids = incompleteTasks.map(t => `${t.id} (status: ${t.status})`).join(", ");
-        guardError = `slice ${slice.id} has incomplete tasks: ${ids}`;
-        return;
-      }
-    }
+        // Deep check: verify all tasks in all slices are complete
+        for (const slice of slices) {
+          if (isDeferredStatus(slice.status)) continue;
+          const tasks = readSliceTasks(params.milestoneId, slice.id);
+          const incompleteTasks = tasks.filter(t => !t.done);
+          if (incompleteTasks.length > 0) {
+            const ids = incompleteTasks.map(t => `${t.id} (status: ${t.status})`).join(", ");
+            guardError = `slice ${slice.id} has incomplete tasks: ${ids}`;
+            return;
+          }
+        }
 
-    // All guards passed — perform write
-    updateMilestoneStatus(params.milestoneId, 'complete', completedAt);
-  });
+        // All guards passed — perform write
+        updateMilestoneStatus(params.milestoneId, 'complete', completedAt);
+      });
+    } catch (legacyWriteError) {
+      return { error: legacyWriteError instanceof Error ? legacyWriteError.message : String(legacyWriteError) };
+    }
+  }
 
   if (guardError) {
     return { error: guardError };

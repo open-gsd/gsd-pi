@@ -14,7 +14,6 @@ import {
   getSlice,
   openDatabase,
   _getAdapter,
-  updateSliceStatus,
 } from "../gsd-db.ts";
 import { migrateHierarchyToDb, milestoneIdsFromEntities } from "./helpers/md-importer.ts";
 
@@ -91,7 +90,9 @@ function seedTwoMilestonesWithReopenedB(base: string): void {
   migrateHierarchyToDb(base);
   assert.equal(getSlice("M001", "S01")?.status, "complete");
   assert.equal(getSlice("M002", "S01")?.status, "complete");
-  updateSliceStatus("M002", "S01", "pending");
+  // Fixture stamp for the reopened out-of-scope slice: raw SQL, the generic
+  // status writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare("UPDATE slices SET status = 'pending', completed_at = NULL WHERE milestone_id = 'M002' AND id = 'S01'").run();
   assert.equal(getSlice("M002", "S01")?.status, "pending", "precondition: B/S01 reopened");
 }
 
@@ -108,7 +109,9 @@ function seedTwoMilestonesWithReopenedBTask(base: string): void {
   migrateHierarchyToDb(base);
   assert.equal(getSlice("M002", "S01")?.status, "complete");
   assert.equal(taskStatus("M002"), "complete");
-  updateSliceStatus("M002", "S01", "pending");
+  // Fixture stamp for the reopened out-of-scope slice: raw SQL, the generic
+  // status writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare("UPDATE slices SET status = 'pending', completed_at = NULL WHERE milestone_id = 'M002' AND id = 'S01'").run();
   // Fixture-only bypass: reproduce a legacy reopened row without asking the
   // guarded generic status writer to perform a forbidden closed→open change.
   _getAdapter()!.prepare(`

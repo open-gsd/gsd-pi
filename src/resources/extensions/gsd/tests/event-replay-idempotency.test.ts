@@ -12,7 +12,13 @@ import {
   updateTaskStatus,
   insertVerificationEvidence,
   upsertDecision,
+  executeDomainOperation,
+  readDomainOperationFence,
+  _getAdapter,
 } from "../gsd-db.ts";
+import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import type { DomainOperationContext } from "../db/domain-operation.ts";
+import type { CanonicalLifecycleStatus } from "../status-guards.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -28,6 +34,35 @@ function setupDb(): void {
   insertTask({ id: TID, sliceId: SID, milestoneId: MID, title: "Test Task" });
 }
 
+let adoptSequence = 0;
+
+/**
+ * The generic status writer only updates adopted rows whose legacy status
+ * agrees with the canonical one: adopt the replay fixture and align its shadow.
+ */
+function adoptTask(canonicalTaskStatus: CanonicalLifecycleStatus, legacyStatus: string): void {
+  _getAdapter()!.prepare("UPDATE tasks SET status = :status WHERE milestone_id = :mid AND id = :tid")
+    .run({ ":status": legacyStatus, ":mid": MID, ":tid": TID });
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.fixture.adopt-replay-task",
+    idempotencyKey: `test/fixture/replay-adopt/${++adoptSequence}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { milestoneId: MID },
+  }, (context: Readonly<DomainOperationContext>) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: MID, lifecycleStatus: "in_progress" });
+    adoptOrTransitionLifecycle(context, { itemKind: "slice", milestoneId: MID, sliceId: SID, lifecycleStatus: "in_progress" });
+    adoptOrTransitionLifecycle(context, { itemKind: "task", milestoneId: MID, sliceId: SID, taskId: TID, lifecycleStatus: canonicalTaskStatus });
+    return {
+      events: [{ eventType: "test.fixture.adopted", entityType: "task", entityId: `${MID}/${SID}/${TID}`, payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: `test/adopted/replay/${adoptSequence}`, projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("event-replay-idempotency", () => {
@@ -40,6 +75,7 @@ describe("event-replay-idempotency", () => {
   });
 
   test("updateTaskStatus is idempotent for complete_task replay", () => {
+    adoptTask("completed", "done");
     // Simulates replaying a complete_task event twice (e.g. crash recovery)
     updateTaskStatus(MID, SID, TID, "done", TS);
     updateTaskStatus(MID, SID, TID, "done", TS);
@@ -50,6 +86,7 @@ describe("event-replay-idempotency", () => {
   });
 
   test("updateTaskStatus is idempotent for start_task replay", () => {
+    adoptTask("in_progress", "in-progress");
     // Simulates replaying a start_task event twice
     updateTaskStatus(MID, SID, TID, "in-progress");
     updateTaskStatus(MID, SID, TID, "in-progress");
@@ -60,6 +97,7 @@ describe("event-replay-idempotency", () => {
   });
 
   test("updateTaskStatus for report_blocker does not set blocker_discovered flag (M4)", () => {
+    adoptTask("paused", "blocked");
     // M4 finding: report_blocker replay only calls updateTaskStatus("blocked").
     // The blocker_discovered column is NOT set during replay — this is a known
     // lossy replay: status is recovered but the blocker flag is not.

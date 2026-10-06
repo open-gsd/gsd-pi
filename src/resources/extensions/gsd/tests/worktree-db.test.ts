@@ -27,8 +27,6 @@ import {
   getDecisionById,
   getRequirementById,
   getVerificationEvidence,
-  updateSliceStatus,
-  updateTaskStatus,
   _getAdapter,
   reconcileWorktreeDb,
 } from "../gsd-db.ts";
@@ -428,8 +426,14 @@ test("reconcileWorktreeDb does not downgrade completed slices or tasks", (t) => 
   copyWorktreeDb(mainDb, wtDb);
 
   openDatabase(mainDb);
-  updateSliceStatus(ids.milestoneId, ids.sliceId, "complete", completedAt);
-  updateTaskStatus(ids.milestoneId, ids.sliceId, ids.taskId, "complete", completedAt);
+  // Fixture stamps on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare(
+    "UPDATE slices SET status = 'complete', completed_at = :ts WHERE milestone_id = :mid AND id = :sid",
+  ).run({ ":ts": completedAt, ":mid": ids.milestoneId, ":sid": ids.sliceId });
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET status = 'complete', completed_at = :ts WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid",
+  ).run({ ":ts": completedAt, ":mid": ids.milestoneId, ":sid": ids.sliceId, ":tid": ids.taskId });
   closeDatabase();
 
   openDatabase(wtDb);
