@@ -162,6 +162,14 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		auditEvent: "workflow.gate.save_result",
 	},
 	{
+		canonicalName: "gsd_hook_verdict_save",
+		aliases: [],
+		schemaId: "workflow.hook_verdict.save",
+		executorId: "executeHookVerdictSave",
+		writePolicy: "write",
+		auditEvent: "workflow.hook_verdict.save",
+	},
+	{
 		canonicalName: "gsd_uat_result_save",
 		aliases: [],
 		schemaId: "workflow.uat.result.save",
