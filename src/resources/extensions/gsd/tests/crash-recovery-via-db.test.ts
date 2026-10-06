@@ -9,7 +9,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -50,6 +51,27 @@ function makeBase(): string {
 function cleanup(base: string): void {
   try { closeDatabase(); } catch { /* noop */ }
   try { rmSync(base, { recursive: true, force: true }); } catch { /* noop */ }
+}
+
+/**
+ * Return a PID that is genuinely dead on this machine: spawn a controlled
+ * subprocess, observe its exit, and use its PID. We verify with the real
+ * isLockProcessAlive() so the fixture never assumes an arbitrary high PID is
+ * unused (#2441 review): a hardcoded PID like 99999 may be live on some host.
+ */
+function makeDeadPid(): number {
+  const child = spawnSync(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  const pid = child.pid;
+  assert.ok(pid && pid > 0, "spawned a fixture child process");
+  const lock: import("../crash-recovery.ts").LockData = {
+    pid,
+    startedAt: new Date().toISOString(),
+    unitType: "execute-task",
+    unitId: "fixture/dead-pid",
+    unitStartedAt: new Date().toISOString(),
+  };
+  assert.equal(isLockProcessAlive(lock), false, `fixture pid ${pid} must be dead after exit`);
+  return pid;
 }
 
 /** Force a worker's last_heartbeat_at into the past so the stale-detector picks it up. */
@@ -690,13 +712,13 @@ test("clearLock settles a stale worker's orphaned running Attempt before releasi
   assert.equal(leaseRow?.status, "released");
 });
 
-test("clearLock settles attempts and releases the lease on a legacy-lock PID match", (t) => {
-  // Regression coverage for the legacy-lock PID path (Copilot review on
-  // #2441): when the worker row is NOT stale-detected (live pid, fresh
-  // heartbeat) but a legacy auto.lock file names that worker's pid,
-  // clearLock() must still settle the worker's orphaned running Attempt
-  // before force-releasing its milestone lease — the earlier test only
-  // reaches the findStaleWorkerForProject branch.
+test("clearLock leaves a live legacy-lock holder's worker, Attempt, and lease intact", (t) => {
+  // Safety contract for the live-PID guard (#2532/#2537): a legacy auto.lock
+  // that names a *live* process is not evidence of an orphaned Attempt. The
+  // worker must stay active, its running Attempt must keep running, and its
+  // milestone lease must stay held. An earlier version of this test asserted
+  // the opposite (cleanup of a live holder) and so tested the exact behavior
+  // the upstream guard was added to prevent.
   const base = makeBase();
   t.after(() => cleanup(base));
   openDatabase(join(base, ".gsd", "gsd.db"));
@@ -723,7 +745,7 @@ test("clearLock settles attempts and releases the lease on a legacy-lock PID mat
   const fence = readDomainOperationFence();
   executeDomainOperation({
     operationType: "test.task.ready",
-    idempotencyKey: "fixture/crash-recovery/legacy-lock-task-ready",
+    idempotencyKey: "fixture/crash-recovery/live-legacy-lock-task-ready",
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: "test",
@@ -746,7 +768,7 @@ test("clearLock settles attempts and releases the lease on a legacy-lock PID mat
         destinations: ["test"],
       }],
       projections: [{
-        projectionKey: "test/m001/s01/t02/legacy-lock",
+        projectionKey: "test/m001/s01/t02/live-legacy-lock",
         projectionKind: "test",
         rendererVersion: "1",
       }],
@@ -754,7 +776,7 @@ test("clearLock settles attempts and releases the lease on a legacy-lock PID mat
   });
   const attempt = claimTaskAttempt({
     invocation: {
-      idempotencyKey: "fixture/crash-recovery/legacy-lock-attempt-claim",
+      idempotencyKey: "fixture/crash-recovery/live-legacy-lock-attempt-claim",
       sourceTransport: "internal",
       actorType: "agent",
       actorId: workerId,
@@ -765,10 +787,8 @@ test("clearLock settles attempts and releases the lease on a legacy-lock PID mat
     coordinationDispatchId: claim.dispatchId,
   });
 
-  // Keep the worker alive-looking — live pid (the test runner's parent) and a
-  // fresh heartbeat — so findStaleWorkerForProject() does NOT flag it and the
-  // stale-worker branch is skipped. The legacy lock file names the same pid,
-  // which is what routes clearLock() into the legacy-lock PID branch.
+  // Live pid (the test runner's parent) + fresh heartbeat: the worker is not
+  // stale and the legacy lock names that same live pid, exercising the guard.
   setWorkerPid(workerId, process.ppid);
   writeFileSync(
     join(base, ".gsd", "auto.lock"),
@@ -787,12 +807,11 @@ test("clearLock settles attempts and releases the lease on a legacy-lock PID mat
     null,
     "live worker is not stale-detected before clearLock",
   );
-  assert.equal(readCrashLock(base)?.pid, process.ppid, "legacy lock file is in play");
 
   clearLock(base);
 
-  assert.equal(getAutoWorker(workerId)?.status, "stopping");
-  const legacyAttemptRow = _getAdapter()!.prepare(`
+  assert.equal(getAutoWorker(workerId)?.status, "active");
+  const liveAttemptRow = _getAdapter()!.prepare(`
     SELECT attempt.attempt_state, attempt.settle_outcome
     FROM workflow_execution_attempts attempt
     WHERE attempt.attempt_id = :attempt_id
@@ -800,11 +819,214 @@ test("clearLock settles attempts and releases the lease on a legacy-lock PID mat
     attempt_state: string;
     settle_outcome: string | null;
   } | undefined;
-  assert.deepEqual(legacyAttemptRow, { attempt_state: "settled", settle_outcome: "interrupted" });
-  const legacyLeaseRow = _getAdapter()!.prepare(
-    `SELECT status FROM milestone_leases WHERE fencing_token = :ft`,
-  ).get({ ":ft": lease.token }) as { status: string } | undefined;
-  assert.equal(legacyLeaseRow?.status, "released");
+  assert.deepEqual(liveAttemptRow, { attempt_state: "running", settle_outcome: null });
+  const liveLeaseRow = _getAdapter()!.prepare(
+    `SELECT status, worker_id FROM milestone_leases WHERE fencing_token = :ft`,
+  ).get({ ":ft": lease.token }) as { status: string; worker_id: string } | undefined;
+  assert.equal(liveLeaseRow?.status, "held");
+  assert.equal(liveLeaseRow?.worker_id, workerId);
+});
+
+test("clearLock settles and releases every worker row matching a dead legacy-lock PID", (t) => {
+  // Real legacy fallback (Copilot review on #2441): the legacy auto.lock names
+  // a genuinely dead PID. Multiple worker rows can share that PID and project
+  // root across repeated sessions; clearLock() must clean up ALL of them (not
+  // just the oldest .find() match), while a separate live worker on a different
+  // milestone keeps its running Attempt and held lease untouched.
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "T1", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "S1", status: "active" });
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Task A", status: "pending" });
+  insertMilestone({ id: "M002", title: "T2", status: "active" });
+  insertSlice({ id: "S02", milestoneId: "M002", title: "S2", status: "active" });
+  insertTask({ id: "T03", sliceId: "S02", milestoneId: "M002", title: "Task B", status: "pending" });
+  const projectRoot = normalizeRealPath(base);
+  const deadPid = makeDeadPid();
+
+  // Helper: register a worker, then drive it to a running Task Attempt + held
+  // lease on the given milestone/task via the real production APIs.
+  function buildRunningWorker(opts: {
+    milestoneId: string;
+    sliceId: string;
+    taskId: string;
+    keyPrefix: string;
+  }) {
+    const workerId = registerAutoWorker({ projectRootRealpath: projectRoot });
+    const lease = claimMilestoneLease(workerId, opts.milestoneId);
+    assert.equal(lease.ok, true, `lease claimed for ${opts.keyPrefix}`);
+    if (!lease.ok) throw new Error("unreachable");
+    const claim = recordDispatchClaim({
+      traceId: `${opts.keyPrefix}-trace`,
+      workerId,
+      milestoneLeaseToken: lease.token,
+      milestoneId: opts.milestoneId,
+      sliceId: opts.sliceId,
+      taskId: opts.taskId,
+      unitType: "execute-task",
+      unitId: `${opts.milestoneId}/${opts.sliceId}/${opts.taskId}`,
+    });
+    assert.equal(claim.ok, true, `dispatch claimed for ${opts.keyPrefix}`);
+    if (!claim.ok) throw new Error("unreachable");
+    const fence = readDomainOperationFence();
+    executeDomainOperation({
+      operationType: "test.task.ready",
+      idempotencyKey: `fixture/crash-recovery/${opts.keyPrefix}-task-ready`,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: "test",
+      sourceTransport: "test",
+      payload: { taskId: opts.taskId },
+    }, (context) => {
+      adoptOrTransitionLifecycle(context, {
+        itemKind: "task",
+        milestoneId: opts.milestoneId,
+        sliceId: opts.sliceId,
+        taskId: opts.taskId,
+        lifecycleStatus: "ready",
+      });
+      return {
+        events: [{
+          eventType: "test.task.ready",
+          entityType: "task",
+          entityId: `${opts.milestoneId}/${opts.sliceId}/${opts.taskId}`,
+          payload: { taskId: opts.taskId },
+          destinations: ["test"],
+        }],
+        projections: [{
+          projectionKey: `test/${opts.keyPrefix}`,
+          projectionKind: "test",
+          rendererVersion: "1",
+        }],
+      };
+    });
+    const attempt = claimTaskAttempt({
+      invocation: {
+        idempotencyKey: `fixture/crash-recovery/${opts.keyPrefix}-attempt-claim`,
+        sourceTransport: "internal",
+        actorType: "agent",
+        actorId: workerId,
+      },
+      task: { milestoneId: opts.milestoneId, sliceId: opts.sliceId, taskId: opts.taskId },
+      workerId,
+      milestoneLeaseToken: lease.token,
+      coordinationDispatchId: claim.dispatchId,
+    });
+    return { workerId, lease, attempt };
+  }
+
+  // Row 1 (oldest): a historical worker sharing the dead PID, already retired
+  // (stopping) with no live Attempt or lease — the row a bare .find() would
+  // wrongly select first.
+  const historicalWorkerId = registerAutoWorker({ projectRootRealpath: projectRoot });
+  setWorkerPid(historicalWorkerId, deadPid);
+  markWorkerStopping(historicalWorkerId);
+
+  // Row 2 (newer): the real dead holder — same dead PID, status active, with a
+  // running Attempt and held lease on M001.
+  const deadHolder = buildRunningWorker({
+    milestoneId: "M001", sliceId: "S01", taskId: "T02", keyPrefix: "dead-holder",
+  });
+  setWorkerPid(deadHolder.workerId, deadPid);
+
+  // Row 3 (newest): a live sentinel on M002 with its own running Attempt and
+  // held lease. Its pid stays the test process's own (alive) so it must not be
+  // touched by the dead-PID cleanup.
+  const sentinel = buildRunningWorker({
+    milestoneId: "M002", sliceId: "S02", taskId: "T03", keyPrefix: "live-sentinel",
+  });
+
+  // Force a deterministic started_at ordering (oldest -> newest) instead of
+  // relying on millisecond timing between register calls.
+  _getAdapter()!.prepare(
+    `UPDATE workers SET started_at = :ts WHERE worker_id = :w`,
+  ).run({ ":ts": "2026-01-01T00:00:00.000Z", ":w": historicalWorkerId });
+  _getAdapter()!.prepare(
+    `UPDATE workers SET started_at = :ts WHERE worker_id = :w`,
+  ).run({ ":ts": "2026-01-02T00:00:00.000Z", ":w": deadHolder.workerId });
+  _getAdapter()!.prepare(
+    `UPDATE workers SET started_at = :ts WHERE worker_id = :w`,
+  ).run({ ":ts": "2026-01-03T00:00:00.000Z", ":w": sentinel.workerId });
+
+  // The legacy lock names the dead PID. The dead holder must not be
+  // stale-detected first (fresh heartbeat, and the newest row is the live
+  // sentinel), which is what routes clearLock() into the legacy-PID branch.
+  writeFileSync(
+    join(base, ".gsd", "auto.lock"),
+    JSON.stringify({
+      pid: deadPid,
+      startedAt: new Date().toISOString(),
+      unitType: "execute-task",
+      unitId: "M001/S01/T02",
+      unitStartedAt: new Date().toISOString(),
+      sessionFile: null,
+    }),
+  );
+
+  assert.equal(
+    findStaleWorkerForProject(projectRoot),
+    null,
+    "no row is stale-detected before clearLock (live sentinel is newest, heartbeats fresh)",
+  );
+  assert.equal(
+    isLockProcessAlive({
+      pid: deadPid,
+      startedAt: new Date().toISOString(),
+      unitType: "execute-task",
+      unitId: "M001/S01/T02",
+      unitStartedAt: new Date().toISOString(),
+    }),
+    false,
+    "legacy lock pid is genuinely dead",
+  );
+
+  clearLock(base);
+
+  // Both rows sharing the dead PID are cleaned up (not just the oldest).
+  assert.equal(getAutoWorker(historicalWorkerId)?.status, "stopping");
+  assert.equal(getAutoWorker(deadHolder.workerId)?.status, "stopping");
+
+  // The real dead holder's Attempt is settled + interrupted, its lease released.
+  const deadAttemptRow = _getAdapter()!.prepare(`
+    SELECT attempt.attempt_state, attempt.settle_outcome
+    FROM workflow_execution_attempts attempt
+    WHERE attempt.attempt_id = :attempt_id
+  `).get({ ":attempt_id": deadHolder.attempt.attemptId }) as {
+    attempt_state: string;
+    settle_outcome: string | null;
+  } | undefined;
+  assert.deepEqual(deadAttemptRow, { attempt_state: "settled", settle_outcome: "interrupted" });
+  const deadLeaseRow = _getAdapter()!.prepare(
+    `SELECT status FROM milestone_leases WHERE milestone_id = :mid`,
+  ).get({ ":mid": "M001" }) as { status: string } | undefined;
+  assert.equal(deadLeaseRow?.status, "released");
+
+  // The live sentinel is untouched: still active, Attempt still running, lease
+  // still held with the same worker_id and fencing token.
+  assert.equal(getAutoWorker(sentinel.workerId)?.status, "active");
+  const sentinelAttemptRow = _getAdapter()!.prepare(`
+    SELECT attempt.attempt_state, attempt.settle_outcome
+    FROM workflow_execution_attempts attempt
+    WHERE attempt.attempt_id = :attempt_id
+  `).get({ ":attempt_id": sentinel.attempt.attemptId }) as {
+    attempt_state: string;
+    settle_outcome: string | null;
+  } | undefined;
+  assert.deepEqual(sentinelAttemptRow, { attempt_state: "running", settle_outcome: null });
+  const sentinelLeaseRow = _getAdapter()!.prepare(
+    `SELECT status, worker_id, fencing_token FROM milestone_leases WHERE milestone_id = :mid`,
+  ).get({ ":mid": "M002" }) as {
+    status: string;
+    worker_id: string;
+    fencing_token: number;
+  } | undefined;
+  assert.equal(sentinelLeaseRow?.status, "held");
+  assert.equal(sentinelLeaseRow?.worker_id, sentinel.workerId);
+  assert.equal(sentinelLeaseRow?.fencing_token, sentinel.lease.token);
+
+  // The legacy lock file itself is removed.
+  assert.equal(existsSync(join(base, ".gsd", "auto.lock")), false);
 });
 
 test("clearLock marks stale worker stopping and releases held milestone lease", (t) => {
