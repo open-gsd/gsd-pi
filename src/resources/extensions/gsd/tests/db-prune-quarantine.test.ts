@@ -11,12 +11,14 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +33,23 @@ const tempDirs = new Set<string>();
 
 afterEach(() => {
   closeDatabase();
+  // A test may have locked a directory to force a deletion failure; restore
+  // write permission on every real directory (never through a link) so the
+  // temp trees delete on all platforms.
+  for (const dir of tempDirs) {
+    const stack = [dir];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      try {
+        chmodSync(current, 0o700);
+        for (const entry of readdirSync(current, { withFileTypes: true })) {
+          if (entry.isDirectory() && !entry.isSymbolicLink()) stack.push(join(current, entry.name));
+        }
+      } catch {
+        // Best effort: the tree may already be gone.
+      }
+    }
+  }
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   tempDirs.clear();
   invalidateStateCache();
@@ -91,6 +110,29 @@ function keepsideFiles(base: string): Array<{ path: string; bytes: string }> {
     writeFileSync(path, "# kept\n");
   }
   return keeps.map((path) => ({ path, bytes: readFileSync(path, "utf-8") }));
+}
+
+/** An outside temp directory holding a file the prune must never touch. */
+function outsideWithPrecious(): { outside: string; precious: string; bytes: string } {
+  const outside = mkdtempSync(join(tmpdir(), "gsd-prune-escape-outside-"));
+  tempDirs.add(outside);
+  const precious = join(outside, "precious.ts");
+  writeFileSync(precious, "export const precious = true;\n");
+  return { outside, precious, bytes: readFileSync(precious, "utf-8") };
+}
+
+/** Plant a symlink under the quarantine root pointing outside the project. */
+function plantQuarantineLink(
+  base: string,
+  name: string,
+  target: string,
+  type: "dir" | "file" | "junction",
+): string {
+  const stampDir = join(base, ".gsd", "quarantine", "projections", "20260101T00-00-00-000Z");
+  mkdirSync(stampDir, { recursive: true });
+  const link = join(stampDir, name);
+  symlinkSync(target, link, type);
+  return link;
 }
 
 test("prune-quarantine without --apply lists the copies and deletes nothing", async () => {
@@ -199,4 +241,88 @@ test("prune-quarantine deletes nothing but files and reports the missing root", 
   assert.match(notes[0]!.message, /no quarantined projection copies — nothing to prune/);
   assert.deepEqual(quarantineCopyPaths(base), []);
   assert.equal(statSync(join(base, ".gsd", "quarantine", "projections")).isDirectory(), true, "the skeleton is left for the next prune");
+});
+
+test("prune-quarantine unlinks a planted directory symlink but never touches its outside target", async () => {
+  const base = makeProject();
+  const keeps = keepsideFiles(base);
+  quarantineHandEdit(base, "ROADMAP-draft.md", "# Hand edit A\n");
+  const { outside, precious, bytes } = outsideWithPrecious();
+  const escape = plantQuarantineLink(
+    base,
+    "escape",
+    outside,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+
+  const preview = makeCtx();
+  await handleDbPruneQuarantine(preview.ctx, base, "");
+  assert.equal(preview.notes.length, 1);
+  assert.equal(preview.notes[0]!.kind, "info");
+  assert.match(preview.notes[0]!.message, /2 quarantined projection cop/, "the real copy and the link itself are listed");
+  assert.ok(preview.notes[0]!.message.includes("escape"), "the link is listed at its quarantine path");
+  assert.ok(!preview.notes[0]!.message.includes("precious.ts"), "nothing from outside the quarantine is listed");
+
+  const apply = makeCtx();
+  await handleDbPruneQuarantine(apply.ctx, base, "--apply");
+  assert.equal(apply.notes.length, 1);
+  assert.equal(apply.notes[0]!.kind, "info");
+  assert.match(apply.notes[0]!.message, /deleted 2 quarantined projection cop/);
+  assert.throws(() => lstatSync(escape), /ENOENT/, "the link itself was unlinked");
+  assert.equal(readFileSync(precious, "utf-8"), bytes, "the outside file survives byte-identical");
+  assert.deepEqual(readdirSync(outside), ["precious.ts"], "nothing outside was deleted");
+  assert.equal(existsSync(join(base, ".gsd", "quarantine", "projections")), false, "the emptied quarantine is removed");
+  for (const keep of keeps) assert.equal(readFileSync(keep.path, "utf-8"), keep.bytes);
+});
+
+test("prune-quarantine keeps and reports a planted link it cannot unlink; the outside target survives", async (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("root ignores directory write permissions");
+    return;
+  }
+  const base = makeProject();
+  quarantineHandEdit(base, "ROADMAP-draft.md", "# Hand edit A\n");
+  const { outside, precious, bytes } = outsideWithPrecious();
+  const escape = plantQuarantineLink(
+    base,
+    "escape",
+    outside,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  // The link's parent forbids deletion, so unlinking the link must fail.
+  const stampDir = dirname(escape);
+  chmodSync(stampDir, 0o500);
+
+  try {
+    const { ctx, notes } = makeCtx();
+    await handleDbPruneQuarantine(ctx, base, "--apply");
+
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0]!.kind, "error");
+    assert.match(notes[0]!.message, /deleted 1 of 2 copies/);
+    assert.match(notes[0]!.message, /could not be deleted/);
+    assert.match(notes[0]!.message, /escape/);
+    assert.equal(lstatSync(escape).isSymbolicLink(), true, "the link is kept");
+    assert.equal(readFileSync(precious, "utf-8"), bytes, "the outside target survives untouched");
+  } finally {
+    chmodSync(stampDir, 0o700);
+  }
+  assert.equal(milestoneRows().length, 1, "the database rows are untouched");
+});
+
+test("prune-quarantine removes a file symlink but never its outside target", async () => {
+  const base = makeProject();
+  quarantineHandEdit(base, "ROADMAP-draft.md", "# Hand edit A\n");
+  const { outside, precious, bytes } = outsideWithPrecious();
+  const decoy = plantQuarantineLink(base, "decoy.md", precious, "file");
+
+  const { ctx, notes } = makeCtx();
+  await handleDbPruneQuarantine(ctx, base, "--apply");
+
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0]!.kind, "info");
+  assert.match(notes[0]!.message, /deleted 2 quarantined projection cop/);
+  assert.throws(() => lstatSync(decoy), /ENOENT/, "the link itself was removed");
+  assert.equal(readFileSync(precious, "utf-8"), bytes, "the outside target survives byte-identical");
+  assert.deepEqual(readdirSync(outside), ["precious.ts"]);
 });

@@ -10,8 +10,9 @@ import {
   mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync,
   rmdirSync, rmSync, unlinkSync, writeFileSync, constants as fsConstants,
 } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { deriveState } from "./state.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { nativeBranchList, nativeDetectMainBranch, nativeBranchListMerged, nativeBranchDelete, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
@@ -1943,6 +1944,115 @@ function formatPrunedBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Whether `resolved` stays inside the resolved quarantine root `realRoot`
+ * (the root itself included: an entry sits in it, so its location can be it). */
+function resolvesInsideQuarantine(realRoot: string, resolved: string): boolean {
+  const relPath = relative(realRoot, resolved);
+  return relPath !== ".." && !relPath.startsWith(`..${sep}`) && !isAbsolute(relPath);
+}
+
+/** A prune candidate: a real quarantined file, or a symlink (the link itself,
+ * never its target). */
+interface QuarantinePruneCandidate {
+  path: string;
+  size: number;
+  isLink: boolean;
+}
+
+/**
+ * Walk the quarantine root without ever following a symlink.
+ * `readdirSync(root, { recursive: true })` descends into symlinked
+ * directories, so a planted link made files OUTSIDE the quarantine show up as
+ * copies — and get deleted through the link path. This walk lstats every
+ * entry instead: a symlink is listed only as the link itself (its target is
+ * never resolved for traversal), only real directories are descended into,
+ * and every candidate must additionally resolve strictly inside
+ * `realpath(root)` (belt and braces against a directory swapped for a link
+ * mid-walk).
+ */
+function collectQuarantinePruneCandidates(
+  root: string,
+  realRoot: string,
+): { candidates: QuarantinePruneCandidate[]; dirs: string[] } {
+  const candidates: QuarantinePruneCandidate[] = [];
+  const dirs: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // Unreadable: nothing inside is listed, so nothing inside is deleted.
+    }
+    for (const entry of entries) {
+      const entryPath = join(dir, entry.name);
+      let stat: Stats;
+      try {
+        stat = lstatSync(entryPath);
+      } catch {
+        continue; // Vanished between readdir and lstat: nothing to list.
+      }
+      if (stat.isSymbolicLink()) {
+        // Containment is checked on the link's location (its parent
+        // directory), never through the link: the target may legitimately sit
+        // outside and is not touched — only the link is a candidate.
+        try {
+          if (resolvesInsideQuarantine(realRoot, realpathSync(dirname(entryPath)))) {
+            candidates.push({ path: entryPath, size: stat.size, isLink: true });
+          }
+        } catch {
+          // Unresolvable location: not listed, so not deleted.
+        }
+        continue;
+      }
+      if (stat.isFile()) {
+        try {
+          if (resolvesInsideQuarantine(realRoot, realpathSync(entryPath))) {
+            candidates.push({ path: entryPath, size: stat.size, isLink: false });
+          }
+        } catch {
+          // Unresolvable (e.g. raced away): not listed, so not deleted.
+        }
+        continue;
+      }
+      if (stat.isDirectory()) {
+        try {
+          if (!resolvesInsideQuarantine(realRoot, realpathSync(entryPath))) continue;
+        } catch {
+          continue;
+        }
+        dirs.push(entryPath);
+        walk(entryPath);
+      }
+    }
+  };
+  walk(root);
+  return { candidates, dirs };
+}
+
+/**
+ * Deletion-time re-check for a candidate: refuse when the entry changed kind
+ * (a file turned into a link or the reverse) or no longer resolves inside the
+ * quarantine root. A candidate that vanished is not refused — the unlink
+ * below reports it, so nothing disappears silently.
+ */
+function quarantineCandidateEscapes(candidate: QuarantinePruneCandidate, realRoot: string): boolean {
+  let stat: Stats;
+  try {
+    stat = lstatSync(candidate.path);
+  } catch {
+    return false;
+  }
+  if (stat.isSymbolicLink() !== candidate.isLink) return true;
+  try {
+    const resolved = candidate.isLink
+      ? realpathSync(dirname(candidate.path))
+      : realpathSync(candidate.path);
+    return !resolvesInsideQuarantine(realRoot, resolved);
+  } catch {
+    return true; // Unresolvable: refuse rather than delete along a bogus path.
+  }
+}
+
 /**
  * `gsd db prune-quarantine` — list, and with `--apply` delete, the quarantined
  * copies of projection files that were changed outside GSD
@@ -1951,7 +2061,10 @@ function formatPrunedBytes(bytes: number): string {
  * bytes, so deletion is destructive: the default run lists only, `--apply`
  * deletes. Only that folder is touched — never a live projection, never the
  * database, and never the other quarantine folders (restore keepsakes,
- * manual-review milestones, migration control publications).
+ * manual-review milestones, migration control publications). The walk never
+ * follows symlinks: a planted link is unlinked as a link (or kept and
+ * reported when the unlink fails), and whatever it points at is never
+ * traversed, listed, or deleted.
  */
 export async function handleDbPruneQuarantine(ctx: ExtensionCommandContext, basePath: string, args = ""): Promise<void> {
   const { isAutoActive } = await import("./auto.js");
@@ -1962,18 +2075,16 @@ export async function handleDbPruneQuarantine(ctx: ExtensionCommandContext, base
   const { gsdProjectionRoot, normalizeRealPath } = await import("./paths.js");
   const { withProjectionMutationSync } = await import("./database-maintenance-fence.js");
   const root = join(gsdProjectionRoot(basePath), "quarantine", "projections");
-  const rel = (path: string) => relative(normalizeRealPath(basePath), normalizeRealPath(path)).split(sep).join("/");
+  // Lexical display path: a symlink candidate must be shown as the link's
+  // place in the quarantine, not resolved to whatever it points at.
+  const rel = (path: string) => relative(normalizeRealPath(basePath), path).split(sep).join("/");
   if (!existsSync(root)) {
     ctx.ui.notify("gsd db prune-quarantine: no quarantined projection copies — nothing to prune.", "info");
     return;
   }
+  const realRoot = realpathSync(root);
 
-  const files: Array<{ path: string; size: number }> = [];
-  for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
-    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-    const path = join(entry.parentPath, entry.name);
-    files.push({ path, size: lstatSync(path).size });
-  }
+  const { candidates: files } = collectQuarantinePruneCandidates(root, realRoot);
   if (files.length === 0) {
     ctx.ui.notify("gsd db prune-quarantine: no quarantined projection copies — nothing to prune.", "info");
     return;
@@ -2001,6 +2112,12 @@ export async function handleDbPruneQuarantine(ctx: ExtensionCommandContext, base
   let freedBytes = 0;
   withProjectionMutationSync(claimPath, () => {
     for (const file of files) {
+      // Belt and braces at deletion time: a candidate that no longer resolves
+      // inside the quarantine is kept and reported, never deleted.
+      if (quarantineCandidateEscapes(file, realRoot)) {
+        failures.push(`  ${rel(file.path)}: kept — it resolves outside the quarantine root`);
+        continue;
+      }
       try {
         unlinkSync(file.path);
         freedCount += 1;
@@ -2010,13 +2127,15 @@ export async function handleDbPruneQuarantine(ctx: ExtensionCommandContext, base
       }
     }
     // Remove the emptied stamp directories (deepest first); the folder is
-    // recreated on demand. A directory that still holds content stays.
-    const dirs = readdirSync(root, { recursive: true, withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => join(entry.parentPath, entry.name))
-      .sort((a, b) => b.length - a.length);
-    for (const dir of [...dirs, root]) {
+    // recreated on demand. A directory that still holds content stays, and
+    // rmdir never runs through a symlinked path: only a real directory that
+    // still resolves inside the quarantine is removed.
+    const { dirs } = collectQuarantinePruneCandidates(root, realRoot);
+    for (const dir of [...dirs.sort((a, b) => b.length - a.length), root]) {
       try {
+        const stat = lstatSync(dir);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+        if (dir !== root && !resolvesInsideQuarantine(realRoot, realpathSync(dir))) continue;
         rmdirSync(dir);
       } catch {
         // Not empty (a deletion failed above) or already gone.
