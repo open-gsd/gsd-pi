@@ -145,8 +145,22 @@ function lifecyclePlanHead(projectId: string, lifecycleId: string): LifecyclePla
         SELECT 1 FROM workflow_closeout_plans successor
         WHERE successor.supersedes_closeout_plan_id = plan.closeout_plan_id
       )
+    ORDER BY plan.project_revision DESC
   `).get({ ":project_id": projectId, ":lifecycle_id": lifecycleId }) as
     unknown as LifecyclePlanHeadRow | undefined;
+}
+
+/**
+ * The closeout plan the lifecycle's next plan must supersede, or null when the
+ * lifecycle has no plan yet. Unlike `readLifecycleCloseoutPlan` this names the
+ * unsuperseded head even when the head rule reads it as history, so a new
+ * plan always replaces it and one lifecycle never carries two live plans.
+ */
+export function readLifecycleCloseoutPlanHeadId(
+  projectId: string,
+  lifecycleId: string,
+): string | null {
+  return lifecyclePlanHead(projectId, lifecycleId)?.closeout_plan_id ?? null;
 }
 
 /**
@@ -370,6 +384,13 @@ export function insertCloseoutPlan(
     readinessBasisHash: string;
     effects: CloseoutEffectInput[];
     preparedAt: string;
+    /**
+     * The plan this one replaces. The Milestone path omits it and anchors to
+     * the Milestone head; a lifecycle-scoped caller (the Task Closeout Plan)
+     * passes its own lifecycle head so a re-prepare on a new Attempt
+     * supersedes the stale plan instead of racing it.
+     */
+    supersedesCloseoutPlanId?: string | null;
   },
 ): string {
   if (!CLOSEOUT_PREPARE_OPERATIONS.has(requireActiveDomainOperationContext(context))) {
@@ -399,7 +420,9 @@ export function insertCloseoutPlan(
     ":attempt_id": input.attemptId,
     ":tested_source_set_hash": input.testedSourceSetHash,
     ":readiness_basis_hash": input.readinessBasisHash,
-    ":supersedes_closeout_plan_id": planHead(input.milestoneId)?.closeout_plan_id ?? null,
+    ":supersedes_closeout_plan_id": input.supersedesCloseoutPlanId !== undefined
+      ? input.supersedesCloseoutPlanId
+      : planHead(input.milestoneId)?.closeout_plan_id ?? null,
     ":prepared_at": input.preparedAt,
   });
   input.effects.forEach((effect, index) => {

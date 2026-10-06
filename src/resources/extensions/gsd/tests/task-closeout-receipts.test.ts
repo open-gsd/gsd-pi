@@ -35,7 +35,10 @@ import {
   adoptOrTransitionLifecycle,
   appendKernelCheckpoint,
 } from "../db/writers/lifecycle-commands.ts";
-import { TASK_SOURCE_COMMIT_EFFECT } from "../db/writers/closeout.ts";
+import {
+  closeoutHash,
+  TASK_SOURCE_COMMIT_EFFECT,
+} from "../db/writers/closeout.ts";
 import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.ts";
 import {
   claimTaskAttempt,
@@ -556,6 +559,111 @@ test("the repair run commits, records the receipt, and publishes the Task", asyn
     null,
     "the settled commit released the repair retry",
   );
+});
+
+test("a repair run's new Attempt supersedes the stale plan and carries the receipt", async () => {
+  isolateHome("repair-attempt-2");
+  const { basePath, attemptId: attempt1Id } = createTaskFixture("repair-attempt-2");
+  installRefusingHook(basePath);
+
+  // Attempt 1 settles at verify and prepares its Closeout Plan; the commit is
+  // refused, so the Task stays unpublished with its repair retry stored.
+  const refusal = await runTaskFinalize(basePath, emptyDeps());
+  assert.deepEqual(refusal, { action: "continue" }, "the refused commit re-dispatches the unit");
+  const stalePlan = readTaskCloseoutPlan(TASK);
+  assert.ok(stalePlan, "attempt 1 prepared its Closeout Plan");
+  assert.equal(stalePlan?.attemptId, attempt1Id, "the stale plan cites attempt 1");
+
+  // The repair re-dispatch mints attempt 2 of the same lifecycle (the stored
+  // git-commit retry repairs the refusal), settles it, and the host verdict
+  // cites the tested revision of the repair run.
+  db().prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      'trace-3', 'turn-3', 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed', 2, '2026-07-15T00:10:00.000Z'
+    )
+  `).run();
+  const repairDispatch = Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id);
+  const attempt2 = claimTaskAttempt({
+    invocation: invocation("repair-attempt-2/claim"),
+    task: TASK,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: repairDispatch,
+    retryOfAttemptId: attempt1Id,
+  });
+  assert.equal(attempt2.attemptNumber, 2, "the repair claims the next Attempt of the lifecycle");
+  stageTaskCompletion({
+    invocation: invocation("repair-attempt-2/stage"),
+    basePath,
+    task: TASK,
+    completion: {
+      oneLiner: "Implemented the receipt seam on the repair run",
+      narrative: "The executor produced a candidate result for host verification on attempt 2.",
+      verification: "Agent reported node --test passed; host verification is still required.",
+      deviations: "None.",
+      knownIssues: "None.",
+      keyFiles: ["source.ts"],
+      keyDecisions: [],
+      blockerDiscovered: false,
+      verificationEvidence: [{
+        command: "node --test",
+        exitCode: 0,
+        verdict: "pass",
+        durationMs: 10,
+      }],
+    },
+  });
+  const attempt2Revision = recordPassingHostVerdict(basePath, attempt2.attemptId);
+
+  // The repair run settles the commit and publishes through attempt 2.
+  removeRefusingHook(basePath);
+  const deps = emptyDeps();
+  const result = await runTaskFinalize(basePath, deps);
+
+  assert.equal(deps.publishCalls, 1, "the repair run published the Task");
+  assert.deepEqual(result, { action: "next", data: undefined }, "the repair run completed the unit");
+  const livePlans = db().prepare(`
+    SELECT COUNT(*) AS count
+    FROM workflow_closeout_plans plan
+    WHERE NOT EXISTS (
+      SELECT 1 FROM workflow_closeout_plans successor
+      WHERE successor.supersedes_closeout_plan_id = plan.closeout_plan_id
+    )
+  `).get() as Record<string, unknown>;
+  assert.equal(Number(livePlans["count"]), 1, "one live plan speaks for the Task lifecycle");
+  const plan = readTaskCloseoutPlan(TASK);
+  assert.ok(plan, "the live plan reads back");
+  assert.equal(plan?.attemptId, attempt2.attemptId, "the live plan cites attempt 2");
+  assert.equal(
+    plan?.readinessBasisHash,
+    closeoutHash({
+      kind: "task-technical-verdict",
+      attemptId: attempt2.attemptId,
+      testedSourceRevision: attempt2Revision,
+    }),
+    "the live plan's hashes cite attempt 2's tested revision",
+  );
+  const supersededBy = db().prepare(`
+    SELECT successor.closeout_plan_id, successor.attempt_id
+    FROM workflow_closeout_plans successor
+    WHERE successor.supersedes_closeout_plan_id = ?
+  `).get(stalePlan?.closeoutPlanId) as Record<string, unknown> | undefined;
+  assert.ok(supersededBy, "the stale plan carries its supersession");
+  assert.equal(
+    String(supersededBy?.["closeout_plan_id"]),
+    plan?.closeoutPlanId,
+    "the stale plan is superseded by the attempt-2 plan",
+  );
+  const receipt = settledTaskSourceCommitReceipt(TASK);
+  assert.ok(receipt, "the receipt landed on the live plan");
+  assert.equal(receipt?.outcome, "performed", "the repair commit performed the effect");
+  assert.equal(taskLifecycleStatus(TASK), "completed", "the Task published on attempt 2");
 });
 
 test("a kill between the commit and its receipt restarts into a recognized receipt, never a second commit", async () => {

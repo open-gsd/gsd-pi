@@ -20,6 +20,7 @@ import {
   insertCloseoutPlan,
   insertSettlementReceipt,
   readLifecycleCloseoutPlan,
+  readLifecycleCloseoutPlanHeadId,
   type CloseoutEffectInput,
   type CloseoutPlan,
   type CloseoutSettlementReceipt,
@@ -209,6 +210,14 @@ export function prepareTaskCloseout(input: {
       readinessBasisHash,
       effects,
       preparedAt: new Date().toISOString(),
+      // Supersede this lifecycle's current plan, whatever Attempt cited it: a
+      // re-prepare on a new Attempt (the #2618 repair path) replaces the stale
+      // plan in the same operation, so one Task lifecycle never carries two
+      // live plans and the receipt lands on the plan that speaks now.
+      supersedesCloseoutPlanId: readLifecycleCloseoutPlanHeadId(
+        lifecycle.projectId,
+        lifecycle.lifecycleId,
+      ),
     });
     return {
       events: [{
