@@ -8,23 +8,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
+import { _getAdapter, closeDatabase, executeDomainOperation, insertMilestone, insertSlice, insertTask, openDatabase, readDomainOperationFence } from "../gsd-db.ts";
+import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import { internalExecutionInvocation } from "../execution-invocation.ts";
 import { clearParseCache } from "../files.ts";
-import {
-  _getAdapter,
-  closeDatabase,
-  getMilestone,
-  getSlice,
-  getTask,
-  insertMilestone,
-  insertSlice,
-  insertTask,
-  openDatabase,
-  reopenMilestoneCascade,
-} from "../gsd-db.ts";
-import { latestExplicitReopenAt } from "../milestone-reopen-events.ts";
 import { clearPathCache, targetTaskFile } from "../paths.ts";
 import { isClosedStatus } from "../status-guards.ts";
 import { handleReopenMilestone } from "../tools/reopen-milestone.ts";
+import type { DomainOperationContext } from "../db/domain-operation.ts";
 
 const COMPLETED_AT = "2026-08-06T12:00:00.000Z";
 const SUMMARY_BODY = "Completed work from August 6. Do not delete.\n";
@@ -35,7 +26,28 @@ function db() {
   return adapter;
 }
 
-function seedClosedMilestone(): { base: string; summaryPath: string } {
+function adoptTerminalMilestoneFixture(): void {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.fixture.adopt-terminal-milestone",
+    idempotencyKey: "test/fixture/adopt-terminal/M001",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { milestoneId: "M001" },
+  }, (context: Readonly<DomainOperationContext>) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "completed" });
+    adoptOrTransitionLifecycle(context, { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" });
+    adoptOrTransitionLifecycle(context, { itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed" });
+    return {
+      events: [{ eventType: "test.fixture.adopted", entityType: "milestone", entityId: "M001", payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: "test/adopted-terminal/m001", projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+}
+
+function seedClosedAdoptedMilestone(): { base: string; summaryPath: string } {
   const base = mkdtempSync(join(tmpdir(), "gsd-milestone-reopen-keep-completed-"));
   mkdirSync(join(base, ".gsd"), { recursive: true });
   assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
@@ -54,6 +66,7 @@ function seedClosedMilestone(): { base: string; summaryPath: string } {
     UPDATE slices SET completed_at = '${COMPLETED_AT}' WHERE milestone_id = 'M001' AND id = 'S01';
     UPDATE tasks SET completed_at = '${COMPLETED_AT}' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01';
   `);
+  adoptTerminalMilestoneFixture();
   const summaryPath = targetTaskFile(base, "M001", "S01", "T01", "SUMMARY", "Partial reopen");
   mkdirSync(dirname(summaryPath), { recursive: true });
   writeFileSync(summaryPath, SUMMARY_BODY);
@@ -67,50 +80,25 @@ function cleanup(base: string): void {
   rmSync(base, { recursive: true, force: true });
 }
 
-test("keepCompleted cascade unlocks the milestone without resetting completed tasks", (t) => {
-  const { base } = seedClosedMilestone();
-  t.after(() => cleanup(base));
-
-  const outcome = reopenMilestoneCascade("M001", true);
-  assert.deepEqual(outcome, { ok: true, slicesReset: 0, tasksReset: 0 });
-
-  const milestone = getMilestone("M001");
-  assert.ok(milestone);
-  assert.equal(isClosedStatus(milestone.status), false);
-  assert.equal(milestone.completed_at, null);
-
-  const task = getTask("M001", "S01", "T01");
-  assert.ok(task);
-  assert.equal(task.status, "complete");
-  assert.equal(task.completed_at, COMPLETED_AT);
-
-  const slice = getSlice("M001", "S01");
-  assert.ok(slice);
-  assert.equal(slice.status, "complete");
-  assert.equal(slice.completed_at, COMPLETED_AT);
-});
-
 test("keepCompleted handler preserves task completed_at and SUMMARY files", async (t) => {
-  const { base, summaryPath } = seedClosedMilestone();
+  const { base, summaryPath } = seedClosedAdoptedMilestone();
   t.after(() => cleanup(base));
 
   const result = await handleReopenMilestone({
     milestoneId: "M001",
     reason: "Add one more slice without discarding finished work.",
     keepCompleted: true,
-  }, base);
+  }, base, internalExecutionInvocation("test/reopen-keep-completed/kept"));
 
   assert.ok(!("error" in result), `reopen failed: ${"error" in result ? result.error : ""}`);
   assert.equal(result.slicesReset, 0);
   assert.equal(result.tasksReset, 0);
 
-  const milestone = getMilestone("M001");
-  assert.ok(milestone);
+  const milestone = db().prepare("SELECT status, completed_at FROM milestones WHERE id = 'M001'").get() as { status: string; completed_at: string | null };
   assert.equal(isClosedStatus(milestone.status), false);
   assert.equal(milestone.completed_at, null);
 
-  const task = getTask("M001", "S01", "T01");
-  assert.ok(task);
+  const task = db().prepare("SELECT status, completed_at FROM tasks WHERE id = 'T01'").get() as { status: string; completed_at: string | null };
   assert.equal(task.status, "complete");
   assert.equal(task.completed_at, COMPLETED_AT);
   assert.equal(existsSync(summaryPath), true, summaryPath);
@@ -119,25 +107,49 @@ test("keepCompleted handler preserves task completed_at and SUMMARY files", asyn
     readFileSync(summaryPath, "utf8").startsWith(SUMMARY_BODY),
     "SUMMARY keeps the stored summary",
   );
-  assert.ok(latestExplicitReopenAt("M001"), "the unadopted reopen records its event in the database");
+  const reopenOperations = db().prepare(
+    "SELECT COUNT(*) AS n FROM workflow_operations WHERE operation_type = 'milestone.reopen'",
+  ).get() as { n: number };
+  assert.equal(reopenOperations.n, 1, "the reopen commits one milestone.reopen Domain Operation");
 });
 
 test("omitted keepCompleted still resets completed tasks and deletes SUMMARYs", async (t) => {
-  const { base, summaryPath } = seedClosedMilestone();
+  const { base, summaryPath } = seedClosedAdoptedMilestone();
   t.after(() => cleanup(base));
 
   const result = await handleReopenMilestone({
     milestoneId: "M001",
     reason: "Full redo remains the default.",
-  }, base);
+  }, base, internalExecutionInvocation("test/reopen-keep-completed/reset"));
 
   assert.ok(!("error" in result), `reopen failed: ${"error" in result ? result.error : ""}`);
   assert.equal(result.slicesReset, 1);
   assert.equal(result.tasksReset, 1);
 
-  const task = getTask("M001", "S01", "T01");
-  assert.ok(task);
+  const task = db().prepare("SELECT status, completed_at FROM tasks WHERE id = 'T01'").get() as { status: string; completed_at: string | null };
   assert.equal(task.status, "pending");
   assert.equal(task.completed_at, null);
   assert.equal(existsSync(summaryPath), false, summaryPath);
+});
+
+test("reopen refuses a milestone without a canonical lifecycle row", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-milestone-reopen-unadopted-"));
+  t.after(() => {
+    clearPathCache();
+    clearParseCache();
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: "M001", title: "Legacy import", status: "complete" });
+
+  const result = await handleReopenMilestone({
+    milestoneId: "M001",
+    reason: "Legacy reopen attempt",
+  }, base, internalExecutionInvocation("test/reopen-keep-completed/unadopted"));
+
+  assert.ok("error" in result && result.error, "expected the loud adoption error");
+  assert.match(result.error, /no canonical lifecycle row/);
+  assert.match(result.error, /\/gsd db adopt/);
 });

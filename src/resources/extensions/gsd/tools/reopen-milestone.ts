@@ -3,9 +3,10 @@
 /**
  * Core operation behind gsd_milestone_reopen.
  *
- * Reopens an adopted terminal Milestone hierarchy atomically while preserving
- * immutable history, then removes readable closeout projections under the
- * operation fence. Unadopted imports retain the legacy cascade.
+ * Reopens a terminal Milestone hierarchy atomically while preserving immutable
+ * history, then removes readable closeout projections under the operation
+ * fence. Milestones without a canonical lifecycle row are refused: adopt the
+ * project with /gsd db adopt, then reopen.
  */
 
 import {
@@ -13,7 +14,6 @@ import {
   getMilestoneSlices,
   getSliceRunUatAssessment,
   getSliceTasks,
-  reopenMilestoneCascade,
 } from "../gsd-db.js";
 import {
   isCurrentMilestoneReopenOperation,
@@ -26,8 +26,6 @@ import { invalidateStateCache } from "../state.js";
 import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
-import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.js";
-import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
 import { debugLog } from "../debug-logger.js";
 import { join } from "node:path";
@@ -92,83 +90,67 @@ export async function handleReopenMilestone(
   if (!params.milestoneId || typeof params.milestoneId !== "string" || params.milestoneId.trim() === "") {
     return { error: "milestoneId is required and must be a non-empty string" };
   }
+  if (!isMilestoneLifecycleAdopted(params.milestoneId)) {
+    return {
+      error: `Milestone ${params.milestoneId} has no canonical lifecycle row; the legacy reopen path was removed. ` +
+        "Adopt the project with /gsd db adopt, then retry.",
+    };
+  }
 
-  const adoptedLifecycle = isMilestoneLifecycleAdopted(params.milestoneId);
-  let canonicalReceipt: MilestoneReopenReceipt | undefined;
+  let canonicalReceipt: MilestoneReopenReceipt;
   let slicesResetCount = 0;
   let tasksResetCount = 0;
   // The canonical reopen deletes each run-uat verdict; its ASSESSMENT file goes with it.
   const slicesWithUatVerdict = new Set(
-    adoptedLifecycle
-      ? getMilestoneSlices(params.milestoneId)
-        .filter((slice) => getSliceRunUatAssessment(params.milestoneId, slice.id) !== null)
-        .map((slice) => slice.id)
-      : [],
+    getMilestoneSlices(params.milestoneId)
+      .filter((slice) => getSliceRunUatAssessment(params.milestoneId, slice.id) !== null)
+      .map((slice) => slice.id),
   );
-  if (adoptedLifecycle) {
-    if (!invocation) {
-      return { error: "adopted Milestone reopen requires canonical invocation identity" };
-    }
-    // Converge drifted descendants (legacy terminal while their canonical row
-    // stayed `ready`) before the reopen's terminal-parity checks (#2440). The
-    // evidence gate is unchanged: unverifiable drift fails the reopen here,
-    // listed, instead of aborting inside the Domain Operation. A replayed
-    // invocation skips the repair — its stored receipt must be returned as-is,
-    // not preceded by fresh mutations against newer state.
-    if (!readDomainOperationFence(invocation.idempotencyKey).replay) {
-      try {
-        const shadowRepair = repairMilestoneShadowsForReopen({
-          invocation,
-          milestoneId: params.milestoneId,
-        });
-        if (shadowRepair.unresolved.length > 0) {
-          return {
-            error: `Milestone ${params.milestoneId} has unresolved canonical lifecycle shadows: ${shadowRepair.unresolved.join(", ")}`,
-          };
-        }
-        if (shadowRepair.repaired.length > 0) {
-          logWarning(
-            "db",
-            `Repaired ${shadowRepair.repaired.length} evidence-backed lifecycle shadow(s) before reopening Milestone ${params.milestoneId}`,
-          );
-        }
-      } catch (error) {
-        return { error: error instanceof Error ? error.message : String(error) };
-      }
-    }
+  if (!invocation) {
+    return { error: "adopted Milestone reopen requires canonical invocation identity" };
+  }
+  // Converge drifted descendants (legacy terminal while their canonical row
+  // stayed `ready`) before the reopen's terminal-parity checks (#2440). The
+  // evidence gate is unchanged: unverifiable drift fails the reopen here,
+  // listed, instead of aborting inside the Domain Operation. A replayed
+  // invocation skips the repair — its stored receipt must be returned as-is,
+  // not preceded by fresh mutations against newer state.
+  if (!readDomainOperationFence(invocation.idempotencyKey).replay) {
     try {
-      canonicalReceipt = reopenMilestone({
+      const shadowRepair = repairMilestoneShadowsForReopen({
         invocation,
         milestoneId: params.milestoneId,
-        reason: params.reason?.trim() || "Full Milestone redo requested",
-        keepCompleted: params.keepCompleted === true,
-        audit: {
-          ...(params.actorName ? { actorName: params.actorName } : {}),
-          ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
-        },
       });
-      slicesResetCount = canonicalReceipt.slicesReset;
-      tasksResetCount = canonicalReceipt.tasksReset;
+      if (shadowRepair.unresolved.length > 0) {
+        return {
+          error: `Milestone ${params.milestoneId} has unresolved canonical lifecycle shadows: ${shadowRepair.unresolved.join(", ")}`,
+        };
+      }
+      if (shadowRepair.repaired.length > 0) {
+        logWarning(
+          "db",
+          `Repaired ${shadowRepair.repaired.length} evidence-backed lifecycle shadow(s) before reopening Milestone ${params.milestoneId}`,
+        );
+      }
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
     }
-  } else {
-    const outcome = reopenMilestoneCascade(params.milestoneId, params.keepCompleted === true);
-    if (!outcome.ok) {
-      switch (outcome.reason) {
-        case "milestone-not-found":
-          return { error: `milestone not found: ${params.milestoneId}` };
-        case "canonical-authority-present":
-          return {
-            error: `refusing legacy reopen for partially adopted Milestone ${params.milestoneId}; ` +
-              "run /gsd db adopt --apply to adopt every lifecycle row, then reopen",
-          };
-        case "milestone-not-closed":
-          return { error: `milestone ${params.milestoneId} is not closed (status: ${outcome.status}) — nothing to reopen` };
-      }
-    }
-    slicesResetCount = outcome.slicesReset;
-    tasksResetCount = outcome.tasksReset;
+  }
+  try {
+    canonicalReceipt = reopenMilestone({
+      invocation,
+      milestoneId: params.milestoneId,
+      reason: params.reason?.trim() || "Full Milestone redo requested",
+      keepCompleted: params.keepCompleted === true,
+      audit: {
+        ...(params.actorName ? { actorName: params.actorName } : {}),
+        ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
+      },
+    });
+    slicesResetCount = canonicalReceipt.slicesReset;
+    tasksResetCount = canonicalReceipt.tasksReset;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
   }
 
   // A reopened unit gets its verification retries again (ADR-048).
@@ -179,13 +161,11 @@ export async function handleReopenMilestone(
 
   // A historical replay must not remove files rendered by a newer operation.
   // T04 makes each individual cleanup delivery operation-fenced.
-  const shouldProjectReopen = canonicalReceipt?.isCurrent !== false;
+  const shouldProjectReopen = canonicalReceipt.isCurrent !== false;
   let projectionStale = false;
   let superseded = !shouldProjectReopen;
-  const operationId = canonicalReceipt?.operationId ?? `legacy-${params.milestoneId}`;
-  const isCurrent = canonicalReceipt
-    ? () => isCurrentMilestoneReopenOperation(operationId, params.milestoneId)
-    : () => true;
+  const operationId = canonicalReceipt.operationId;
+  const isCurrent = () => isCurrentMilestoneReopenOperation(operationId, params.milestoneId);
 
   // ── Clean up stale filesystem artifacts (M12 fix) ────────────────────────
   // Keep readable projections consistent with the reopened database hierarchy.
@@ -205,7 +185,7 @@ export async function handleReopenMilestone(
       };
 
       // The canonical reopen deletes the validation verdict; its VALIDATION file goes with it.
-      const milestoneSummaries = new Set(["SUMMARY", ...(adoptedLifecycle ? ["VALIDATION"] : [])].flatMap((suffix) => [
+      const milestoneSummaries = new Set(["SUMMARY", "VALIDATION"].flatMap((suffix) => [
         resolveMilestoneFile(basePath, params.milestoneId, suffix),
         targetMilestoneFile(basePath, params.milestoneId, suffix, milestoneTitle),
         ...(milestoneDir ? [join(milestoneDir, `${params.milestoneId}-${suffix}.md`)] : []),
@@ -283,9 +263,9 @@ export async function handleReopenMilestone(
         milestoneId: params.milestoneId,
         slicesReset: slicesResetCount,
         tasksReset: tasksResetCount,
-        operationId: canonicalReceipt?.operationId,
-        resultingRevision: canonicalReceipt?.resultingRevision,
-        duplicate: canonicalReceipt?.status === "replayed",
+        operationId: canonicalReceipt.operationId,
+        resultingRevision: canonicalReceipt.resultingRevision,
+        duplicate: canonicalReceipt.status === "replayed",
         current: false,
         superseded: true,
       };
@@ -294,32 +274,11 @@ export async function handleReopenMilestone(
       const flushed = await flushWorkflowProjections(
         basePath,
         { milestoneId: params.milestoneId },
-        canonicalReceipt ? { operationId, isCurrent } : undefined,
+        { operationId, isCurrent },
       );
       projectionStale ||= flushed.stale;
       superseded ||= flushed.superseded;
       if (!superseded && isCurrent()) await writeManifestAndFlush(basePath);
-      if (!canonicalReceipt) {
-        const reopenedAt = new Date().toISOString();
-        appendEvent(basePath, {
-          cmd: "reopen-milestone",
-          params: {
-            milestoneId: params.milestoneId,
-            reason: params.reason ?? null,
-            slicesReset: slicesResetCount,
-            tasksReset: tasksResetCount,
-          },
-          ts: reopenedAt,
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
-        // Drift detection reads the reopen from the database, never from the file ledger.
-        recordLegacyMilestoneEvents(
-          [{ kind: "reopened", milestoneId: params.milestoneId, occurredAt: reopenedAt }],
-          "agent",
-        );
-      }
     }
   } catch (hookErr) {
     projectionStale = true;
@@ -334,12 +293,10 @@ export async function handleReopenMilestone(
     milestoneId: params.milestoneId,
     slicesReset: slicesResetCount,
     tasksReset: tasksResetCount,
-    ...(canonicalReceipt ? {
-      operationId: canonicalReceipt.operationId,
-      resultingRevision: canonicalReceipt.resultingRevision,
-      duplicate: canonicalReceipt.status === "replayed",
-      current,
-    } : {}),
+    operationId: canonicalReceipt.operationId,
+    resultingRevision: canonicalReceipt.resultingRevision,
+    duplicate: canonicalReceipt.status === "replayed",
+    current,
     ...(projectionStale ? { stale: true } : {}),
     ...(superseded ? { superseded: true } : {}),
   };
