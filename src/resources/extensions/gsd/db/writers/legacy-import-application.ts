@@ -25,6 +25,7 @@ import {
 } from "../../legacy-import-application-plan.js";
 import { compareText } from "../../legacy-import-utils.js";
 import { LEGACY_IMPORT_TARGET_ADAPTERS } from "../../legacy-import-preview-classifier-targets.js";
+import { replaceProjectMilestoneSequence } from "./project-milestone-sequence.js";
 import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
@@ -978,6 +979,35 @@ function seedQualityGate(
   return resultFor(instruction, 1, affected);
 }
 
+/** The PROJECT document artifact row, under any root directory. */
+const PROJECT_ARTIFACT_PATH = /(?:^|\/)PROJECT\.md$/u;
+
+/**
+ * The Milestone Sequence rows follow the stored PROJECT artifact row inside the
+ * same Application transaction (ADR-046): an Import Application that
+ * establishes or rewrites the PROJECT row replaces the rows from the stored
+ * document, and a delete of the row leaves no rows, so a stale row cannot
+ * mis-promote a phantom Milestone after the cutover. No repair: the rows are
+ * exactly what the stored document commits to.
+ */
+function refreshProjectMilestoneSequence(instructions: readonly LegacyImportApplicationPlanInstruction[]): void {
+  const projectPaths = new Set<string>();
+  for (const instruction of instructions) {
+    if (instruction.targetKind !== "artifact") continue;
+    if (instruction.action !== "create" && instruction.action !== "update" && instruction.action !== "delete") continue;
+    if (!PROJECT_ARTIFACT_PATH.test(instruction.targetKey)) continue;
+    projectPaths.add(String(instruction.identity["path"]));
+  }
+  for (const path of projectPaths) {
+    const row = getDb().prepare("SELECT full_content FROM artifacts WHERE path = :path").get({ ":path": path });
+    if (typeof row?.["full_content"] === "string") {
+      replaceProjectMilestoneSequence(getDb(), row["full_content"]);
+    } else {
+      getDb().prepare("DELETE FROM project_milestone_sequence").run();
+    }
+  }
+}
+
 export function applyLegacyImportApplicationPlan(
   context: Readonly<DomainOperationContext>,
   plan: LegacyImportApplicationPlan,
@@ -1012,6 +1042,7 @@ export function applyLegacyImportApplicationPlan(
       instructionResults.push(resultFor(instruction, 0, 0));
     }
   }
+  refreshProjectMilestoneSequence(snapshot.instructions);
   requireRetainedSliceDependencyIntegrity(snapshot.instructions);
   return Object.freeze({ instructionResults: Object.freeze(instructionResults) });
 }
