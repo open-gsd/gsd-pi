@@ -194,6 +194,31 @@ test("the first open of an old project database backs it up, adopts every row an
   assert.deepEqual(backupFiles(base), backups);
 });
 
+test("with GSD_AUTHORITY_CUTOVER=1 the open of an old project database still cuts over", () => {
+  const base = createProject();
+  insertMilestone({ id: "M001", title: "Old", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending" });
+
+  setAuthorityCutoverFlag("1");
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
+
+  const after = durableSnapshot() as {
+    authority: Array<{ revision: number; authority_epoch: number }>;
+    lifecycles: unknown[];
+  };
+  assert.deepEqual(
+    after.authority.map((row) => row.authority_epoch),
+    [1],
+  );
+  assert.ok(after.lifecycles.length > 0, "the backfill adopted the hierarchy rows");
+  assert.ok(backupFiles(base).length > 0, "a verified backup was written first");
+
+  setAuthorityCutoverFlag(undefined);
+  closeDatabase();
+});
+
 test("with GSD_AUTHORITY_CUTOVER=0 the open of an old project database changes nothing", () => {
   const base = createProject();
   insertMilestone({ id: "M001", title: "Old", status: "active" });
