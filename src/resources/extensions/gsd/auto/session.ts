@@ -190,9 +190,9 @@ export class AutoSession {
    */
   lastSafetyBlockRecovery: { recoveryActionId?: string; resumeInstruction: string } | null = null;
   /**
-   * Verification retry counts of custom-engine steps, saved in
-   * custom-verify-retries.json. A dev-engine unit keeps its count on its
-   * dispatch row (budget kind `verification`).
+   * Verification retry counts of custom-engine steps; each count is stored on
+   * the step's custom_workflow_steps row (verify_retries). A dev-engine unit
+   * keeps its count on its dispatch row (budget kind `verification`).
    */
   readonly verificationRetryCount = new Map<string, number>();
   /**

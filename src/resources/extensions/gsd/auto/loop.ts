@@ -83,7 +83,6 @@ import {
 } from "./workflow-kernel.js";
 import {
   hydrateCustomStepVerifyRetryCount,
-  hydrateCustomVerifyRetryCounts,
   saveCustomStepVerifyRetryCount,
 } from "./custom-verify-retry-store.js";
 import {
@@ -309,13 +308,6 @@ function logDispatchLeaseRecoveryFailed(details: {
   });
 }
 
-function logCustomVerifyRetryLoadFailure(err: unknown): void {
-  debugLog("autoLoop", {
-    phase: "load-custom-verify-retries-failed",
-    error: err instanceof Error ? err.message : String(err),
-  });
-}
-
 function leaseConflictNotice(
   iterData: IterationData,
   reason: string,
@@ -483,8 +475,8 @@ export async function autoLoop(
     }
   }
   let iteration = 0;
-  // Load the persisted verification retry counts of custom-engine steps.
-  hydrateCustomVerifyRetryCounts(s, { logFailure: logCustomVerifyRetryLoadFailure });
+  // A custom workflow step keeps its verification retry count on its step row;
+  // the count is loaded when a retry needs it.
   const loopState: LoopState = {
     consecutiveFinalizeTimeouts: 0,
   };
