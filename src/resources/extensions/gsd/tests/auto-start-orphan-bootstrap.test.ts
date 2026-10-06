@@ -18,10 +18,15 @@ import {
 import type { InterruptedSessionAssessment } from "../interrupted-session.ts";
 import { saveContextArtifact } from "./helpers/saved-context.ts";
 import {
+  _getAdapter,
+  adoptOrTransitionLifecycle,
   closeDatabase,
+  executeDomainOperation,
   insertMilestone,
   openDatabase,
+  readDomainOperationFence,
 } from "../gsd-db.ts";
+import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.ts";
 import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 
 function runGit(base: string, args: string[]): string {
@@ -30,6 +35,46 @@ function runGit(base: string, args: string[]): string {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+/**
+ * Mint the lifecycle row of an in-flight milestone through the adoption
+ * helper: the auto run's claim stands behind it. Without the claim, the
+ * cutover on the first open adopts the legacy `active` row as `ready`, and
+ * the read interface answers a queued shell for a content-less `ready`
+ * milestone, so bootstrap finds no active milestone.
+ */
+function adoptInFlightMilestone(milestoneId: string): void {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.adopt",
+    idempotencyKey: `test/adopt-in-flight/${milestoneId}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { milestoneId },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "milestone",
+      milestoneId,
+      lifecycleStatus: "in_progress",
+    });
+    return {
+      events: [{
+        eventType: "test.adopted",
+        entityType: "milestone",
+        entityId: milestoneId,
+        payload: { milestoneId },
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: `test/adopt-in-flight/${milestoneId}`.toLowerCase(),
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
 }
 
 function makeRepoWithUnmergedCompletedMilestone(): string {
@@ -87,6 +132,7 @@ function makeRepoWithStrandedActiveMilestone(options: { deepPlanning?: boolean }
 
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Active milestone", status: "active" });
+  adoptInFlightMilestone("M001");
   closeDatabase();
 
   return base;
@@ -122,7 +168,17 @@ function makeRepoWithMultipleStrandedMilestones(): string {
 
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Active milestone", status: "active" });
+  adoptInFlightMilestone("M001");
   insertMilestone({ id: "M002", title: "Pending milestone", status: "pending" });
+  // The roadmap sequence of the saved PROJECT artifact: M002 is a real
+  // stage, so the read interface promotes the queued shell that the backfill
+  // adopts from the content-less legacy `pending` row.
+  replaceProjectMilestoneSequence(_getAdapter()!, [
+    "## Milestone Sequence",
+    "",
+    "- [ ] M001: Active milestone — in flight",
+    "- [ ] M002: Pending milestone — next",
+  ].join("\n"));
   closeDatabase();
 
   return base;
@@ -197,6 +253,7 @@ function makeRepoWithActiveMismatchAndStrandedTarget(): string {
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Incorrect active milestone", status: "active" });
   insertMilestone({ id: "M002", title: "Target stranded milestone", status: "active" });
+  adoptInFlightMilestone("M002");
   closeDatabase();
 
   return base;
