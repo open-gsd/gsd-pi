@@ -456,6 +456,19 @@ export async function runFinalize(
               unitId: iterData.unitId,
               attempt,
             });
+            // #2119: the durable git-commit repair retry is journaled as a
+            // verification-retry, never a pre-execution-retry.
+            deps.emitJournalEvent({
+              ts: new Date().toISOString(),
+              flowId: ic.flowId,
+              seq: ic.nextSeq(),
+              eventType: "verification-retry",
+              data: {
+                unitType: iterData.unitType,
+                unitId: iterData.unitId,
+                attempt,
+              },
+            });
             const retryPolicyResult = await applyVerificationRetryPolicy(
               ic,
               iterData.unitType,
