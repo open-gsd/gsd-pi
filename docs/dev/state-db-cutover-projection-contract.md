@@ -62,9 +62,23 @@ database — a rendered view, not a record.
   Deriving lifecycle decisions — dispatch eligibility, status, completion —
   from a parsed projection is not.
 - **Drift heals by re-render, never by import.** A projection that disagrees
-  with the DB is repaired by re-rendering from the DB
-  (`renderAllFromDb` in `src/resources/extensions/gsd/markdown-renderer.ts`),
-  not by parsing the file back into state.
+  with the DB is repaired by re-rendering from the database, not by parsing
+  the file back into state. The full render is `renderEveryProjection` in
+  `src/resources/extensions/gsd/projection-worker.ts`: the `renderAllFromDb`
+  sweep (`src/resources/extensions/gsd/markdown-renderer.ts`) covers every
+  milestone hierarchy file, the root `ROADMAP.md` and `QUEUE.md`
+  (`workflow-projections.ts`), `REQUIREMENTS.md`, `DECISIONS.md`, `PROJECT.md`
+  and the root drafts (`db-writer.ts`), the PARKED markers
+  (`milestone-park-projection.ts`) and the `.planning/` projections, and the
+  same function adds `STATE.md` (`renderStateProjection`),
+  `KNOWLEDGE.md` (`knowledge-projection.ts`), `OVERRIDES.md` (`overrides.ts`),
+  `CAPTURES.md` (`captures.ts`) and `BACKLOG.md` (`backlog.ts`).
+  `/gsd rebuild markdown` (`rebuildMarkdownProjectionsFromDb`) runs it.
+  `QUEUE-ORDER.json` renders from `milestones.sequence` through the
+  `queue-order` Projection Work kind (`renderQueueOrderFromDb` in
+  `queue-order.ts`). A file with no DB source (`CODEBASE.md`,
+  `.gsd/extensions/`) is not healed: nothing re-renders it. No repair path
+  parses a projection back into state.
 
 ### Implicit disk ingress
 
@@ -103,6 +117,20 @@ physically live outside the repository.
 `OVERRIDES.md`, `KNOWLEDGE.md`, `CODEBASE.md`. Legacy all-lowercase filenames
 (`state.md`, `project.md`, …) remain recognized on read. `RUNTIME.md` is
 resolved alongside them.
+
+Six of the eight are DB-backed projections. Two are not, and no renderer
+treats them as state:
+
+- `OVERRIDES.md`, `KNOWLEDGE.md` — projections. Their sources are the
+  `override.*` events of `workflow_domain_events` (`renderOverridesProjection`
+  in `overrides.ts`) and the memory rows (`renderKnowledgeProjection` in
+  `knowledge-projection.ts`). A file block the database does not hold stays
+  in the render untouched (a doctor import bridge, see §3.6).
+- `CODEBASE.md` — **not a projection.** It is a generated codebase map
+  (`writeCodebaseMap` in `codebase-generator.ts`, plain
+  `atomicWriteSync`); no database table holds it and no repair re-renders
+  it. It is inventoried here because it sits at the projection root and the
+  write guard names it, not because it is DB-derived.
 
 `STATE.md` is rendered by `renderStateProjection()` in
 `workflow-projections.ts` (derived state → `atomicWriteSync`), **not** by the
@@ -146,27 +174,65 @@ zero-padded plan number derived from the slice id (`planFileName`,
 checkboxes inside the slice PLAN; only non-PLAN task artifacts get their own
 file.
 
-Render entry points (all route through the single `writeAndStore` seam in
-`markdown-renderer.ts`): `renderRoadmapFromDb`, `renderPlanFromDb`,
-`renderTaskPlanFromDb`, `renderMilestoneArtifactsFromDb`,
-`renderMilestoneSummary`, `renderSliceArtifactsFromDb`, `renderSliceSummary`,
-`renderTaskSummary`, `renderReplanFromDb`, `renderRoadmapAssessmentFromDb`, and
-the sweep `renderAllFromDb`.
+#### Writer seams
 
-The sweep also renders the files that carry no stamp (§3.4): root `ROADMAP.md`,
-`QUEUE.md`, `REQUIREMENTS.md`, `DECISIONS.md`, the root narrative artifacts
-(`PROJECT.md` and the root drafts), and the milestone VALIDATION file from its
-assessment row. Each of these writes records a marker baseline, and a write is
-skipped when the file and its baseline already hold the content. REPLAN, the
-ROADMAP-ASSESSMENT and VALIDATION are rendered from their structured source
-(the replan event, the assessment row) by the same function in the tool and in
-the sweep.
+There are three write seams, not one. Which seam a file's writers use decides
+whether it is stamped (§3.4).
 
-Every task-summary producer routes through `writeTaskSummaryProjection`, which
-owns layout-aware placement and delegates stamping, disk persistence, artifact
-lineage, compatibility-marker updates, and cache invalidation to
-`writeAndStore`. A lineage-write failure is surfaced to the caller; the disk
-copy remains a non-authoritative projection for reconciliation evidence.
+1. **`writeAndStore`** (`markdown-renderer.ts`) — DB row plus stamped file
+   plus artifact lineage plus marker baseline, atomically. The stamped
+   renderers are `renderPlanFromDb`, `renderTaskPlanFromDb`,
+   `renderRoadmapFromDb`, `renderMilestoneArtifactsFromDb`,
+   `renderMilestoneSummary`, `renderSliceArtifactsFromDb`,
+   `renderSliceSummary` (the slice `SUMMARY` and `UAT` files),
+   `renderTaskSummary`, `renderReplanFromDb`, and
+   `renderRoadmapAssessmentFromDb`. Every task-summary producer routes
+   through `writeTaskSummaryProjection`, which owns layout-aware placement
+   and delegates stamping, disk persistence, artifact lineage,
+   compatibility-marker updates, and cache invalidation to `writeAndStore`.
+   A lineage-write failure is surfaced to the caller; the disk copy remains
+   a non-authoritative projection for reconciliation evidence.
+2. **`writeProjectionFile` / `writeProjectionFileSync`**
+   (`compat/compat-marker.ts`) — the shared write rule: nothing is written
+   when the file and its marker baseline already hold the content; otherwise
+   the file is written and its baseline is recorded. Stamping is the
+   caller's choice here: `renderWorkCheckpoint` (the `CONTINUE` files)
+   passes content through `stampProjectionContent`, so `CONTINUE` is
+   stamped even though it does not use `writeAndStore`; every other user of
+   this seam writes unstamped. Users: `regenerateDecisionsMarkdown`,
+   `regenerateRequirementsMarkdown`, `regenerateRootArtifactsMarkdown`
+   (`PROJECT.md`, `PROJECT-DRAFT.md`, `REQUIREMENTS-DRAFT.md`) and
+   `saveArtifactToDbForWorkspace` (a `gsd_summary_save` artifact such as a
+   `CONTEXT` file: the row commits first, the file follows it) in
+   `db-writer.ts`; the root `ROADMAP.md` and `QUEUE.md` via
+   `writeRootProjection` in `workflow-projections.ts`; `renderKnowledgeProjection`;
+   `renderMilestoneValidation` (the milestone `VALIDATION` file, rendered
+   from the `milestone-validation` assessment row; every writer of the file
+   and the full rebuild call it).
+3. **Direct `atomicWriteSync`** — no stamp, no marker baseline; some writers
+   record the render in the marker via `noteRenderedProjectionFile` for the
+   external-edit observer only. `renderStateProjection` (`STATE.md`),
+   `renderMilestoneParkedMarker` (`PARKED`),
+   `renderOverridesProjection` (`OVERRIDES.md`),
+   `renderCapturesProjection` (`CAPTURES.md`),
+   `renderBacklogProjection` (`BACKLOG.md`),
+   `writeCodebaseMap` (`CODEBASE.md`), and `renderQueueOrder`
+   (`QUEUE-ORDER.json`, via `saveJsonFile`). The completion tools also write
+   through a plain atomic write (`saveFile` in `files.ts`): the milestone
+   `SUMMARY` (`complete-milestone.ts`) and the slice `SUMMARY` and `UAT`
+   (`complete-slice.ts`) are written there when their closeout commits, and
+   re-rendered stamped by the sweep's `renderMilestoneSummary` /
+   `renderSliceSummary`. The `.planning/` projections are written by
+   `writePlanningDirectory` (`migrate/planning-writer.ts`), which records
+   per-file SHAs via `applyPlanningProjectionWrites`.
+
+A file may therefore be written stamped by one writer and unstamped by
+another (slice `SUMMARY`/`UAT`, milestone `SUMMARY`). A reader must treat a
+missing stamp as normal on every file (§3.4); it must never treat the
+presence of a stamp as an integrity boundary for a file that has an
+unstamped writer. REPLAN, the ROADMAP-ASSESSMENT and VALIDATION are rendered
+from their structured source (the replan event, the assessment row) by the
+same function in the tool and in the sweep.
 
 ### 2.3 What the freeze covers
 
@@ -222,20 +288,32 @@ reader that wants to compare content must strip it first
 
 ### 3.4 What is not stamped
 
-`STATE.md`, root `ROADMAP.md` and `QUEUE.md` (rendered by
-`workflow-projections.ts`), `DECISIONS.md`, `REQUIREMENTS.md`, `PROJECT.md` and
-the root drafts (written by the db-writer), `KNOWLEDGE.md`
-(`knowledge-projection.ts`), the milestone VALIDATION file
-(`renderMilestoneValidation`), and `.planning/` projections (planning-writer)
-do not go through `writeAndStore` and carry no stamp. A reader must therefore
+Every file with a writer that does not route through `writeAndStore` carries
+no stamp (or can carry none, when a stamped and an unstamped writer share a
+file). That set is: `STATE.md`, the root `ROADMAP.md` and `QUEUE.md`
+(`workflow-projections.ts`), `DECISIONS.md`, `REQUIREMENTS.md`, `PROJECT.md`
+and the root drafts (`db-writer.ts`), `KNOWLEDGE.md`
+(`knowledge-projection.ts`), the milestone `VALIDATION` file
+(`renderMilestoneValidation`), `PARKED` (`milestone-park-projection.ts`),
+`OVERRIDES.md` (`overrides.ts`), `CAPTURES.md` (`captures.ts`),
+`BACKLOG.md` (`backlog.ts`), `QUEUE-ORDER.json` (`queue-order.ts`),
+`CODEBASE.md` (`codebase-generator.ts`), the `.planning/` projections
+(planning-writer), and — from their completion-time writers — the milestone
+`SUMMARY` and the slice `SUMMARY` and `UAT` files (`saveFile` in
+`complete-milestone.ts` / `complete-slice.ts`). A reader must therefore
 treat "no stamp" as normal, never as evidence of tampering or staleness.
 
-Stamped or not, every one of these files except `STATE.md` and the
-`.planning/` projections is written by one rule, `writeProjectionFile` in
-`compat/compat-marker.ts`, which `writeAndStore` also uses: nothing is written
-when the file and its marker baseline already hold the content; otherwise the
-file is written and its baseline is recorded. `STATE.md` is overwritten on
-every render and has no baseline.
+Only two stamped files do not go through `writeAndStore`: the `CONTINUE`
+checkpoint files (`renderWorkCheckpoint` stamps explicitly through
+`writeProjectionFile`). Stamped or not, most of the unstamped files above
+(except `STATE.md`, `PARKED`, `OVERRIDES.md`, `CAPTURES.md`, `BACKLOG.md`,
+`QUEUE-ORDER.json`, `CODEBASE.md` and the `.planning/` projections) are
+written by the one rule, `writeProjectionFile` in `compat/compat-marker.ts`,
+which `writeAndStore` also uses: nothing is written when the file and its
+marker baseline already hold the content; otherwise the file is written and
+its baseline is recorded. `STATE.md` is overwritten on every render and has
+no baseline; the direct-`atomicWriteSync` writers record a
+`noteRenderedProjectionFile` render note only.
 
 ### 3.5 How drift detection uses it
 
@@ -249,6 +327,35 @@ equals the DB's current revision/authority epoch is fresh without a content
 parse; an unstamped or mismatched projection falls back to the existing content
 comparison. Verdicts and reasons are byte-identical for equivalent states
 either way.
+
+### 3.6 Declared non-authority runtime stores and import bridges
+
+Not every file under `.gsd/` is a projection. These runtime stores are
+written directly (append or rewrite, outside every seam in §2.2), hold state
+the workflow database does not model, and are **declared non-authority**:
+no dispatch, derivation or lifecycle decision reads workflow state from
+them. The format freeze (§2) does not apply to them.
+
+| Store | Files | Writers / readers |
+|---|---|---|
+| Notifications | `.gsd/notifications.jsonl` | `notification-store.ts` (append, mark-all-read/clear rewrite, own lock file); unread counts feed stop notices |
+| Doctor history | `.gsd/doctor-history.jsonl` | `doctor-history.ts`, appended on every `/gsd doctor` run |
+| Activity log | `.gsd/activity/<seq>-<unit>-<id>.jsonl` | `activity-log.ts`; input for `undo.ts` and the forensics views |
+| Execution history | `.gsd/exec/*.meta.json` | `exec-history.ts`; read by `tools/exec-search-tool.ts` and compaction snapshots |
+| Exports and reports | `.gsd/export-*.json` / `.md`, `.gsd/reports/` | `export.ts` (`writeReportSnapshot`), `src/web/export-service.ts` |
+| Metrics ledger | `.gsd/metrics.json` | `export.ts` reads it from disk (`loadLedgerFromDisk`) |
+
+Two legacy **import bridges** also read `.gsd/` files into the database.
+They run only behind an explicit operator command and are the only paths
+that turn file bytes into DB rows: the Import Preview/Application family
+(`legacy-import-*.ts`, including `/gsd doctor --fix` and `/gsd recover`)
+and the `/gsd migrate` import (`migrate/execution.ts`, whose hierarchy
+upserts land through the pre-adoption `ELSE` arms in `gsd-db.ts`). The
+file-only override and capture blocks that the database does not hold stay
+in their rendered files and are imported only by `/gsd doctor --fix`
+(`importFileOverrides` in `overrides.ts`, `importFileCaptures` in
+`captures.ts`). Every increment of these bridges is counted by a
+`legacy.*` telemetry counter (see `legacy-telemetry.ts` and the G8 gate).
 
 ## 4. This layer is a de facto public API
 
@@ -274,12 +381,24 @@ Consequences, binding for this milestone:
 ## 5. Known external reader surfaces
 
 Known does not mean complete (§4). These are the surfaces observable from this
-repo:
+repo. "Decision-bearing" means the read feeds a decision (dispatch,
+completion, routing); "display-only" means the bytes reach a human or a
+client payload without steering GSD. Every reader below is a **fallback**:
+when the workflow database is available it answers first, and the
+projection read is labelled `readMetadata { source: projection, authority:
+projection-fallback }`.
 
-| Surface | What it reads | Evidence |
-|---|---|---|
-| `@opengsd/mcp-server` | Raw `.gsd/STATE.md` contents returned to MCP clients; milestone `SUMMARY` **existence** as a completion signal; `.gsd/` artifact parsing (STATE.md, milestone ROADMAPs, slice PLANs) in its graph build when the workflow database is not available (the build is database-first otherwise) | `packages/mcp-server/src/server.ts:278`, `:308`, `:1486` |
-| `integrations/hermes` (Python) | Requires `.gsd/` with `STATE.md` present; an absent/empty `STATE.md` is documented as the cause of an empty snapshot | `integrations/hermes/docs/setup.md:35`, `:235`; fixture `integrations/hermes/tests/fixtures/minimal-project/.gsd/STATE.md` |
+| Surface | What it reads | Decision-bearing | Evidence |
+|---|---|---|---|
+| `@opengsd/mcp-server` `gsd_query` fallback | Raw `STATE.md`, `PROJECT.md`, `REQUIREMENTS.md` contents; milestone `SUMMARY` **existence** (`hasSummary`) in the milestones listing | `hasSummary` yes (clients use it as a completion signal); document bodies display-only | `packages/mcp-server/src/server.ts:334`, `:342`, `:350`, `:361` (fallback block at `:330`) |
+| `@opengsd/mcp-server` graph build fallback | Parses `.gsd/` projections (STATE.md, milestone ROADMAPs, slice PLANs, KNOWLEDGE.md) when the workflow database is not available | Yes (the graph drives client navigation) | `packages/mcp-server/src/server.ts:297` (`readGraphDatabaseSource`), `packages/mcp-server/src/readers/graph.ts` |
+| `@opengsd/mcp-server` roadmap/history/captures/knowledge tools | File fallbacks `readRoadmap`, `readHistory`, `readCaptures`, `readKnowledge` when the DB bridge is unavailable | Display-only (labelled projection-fallback) | `packages/mcp-server/src/server.ts:1517`, `:1538`, `:1595`, `:1619` |
+| `@opengsd/mcp-server` `gsd_query` tool description | Tells clients the tool "reads the workflow database … `.gsd/` projections otherwise" | — | `packages/mcp-server/src/server.ts:1372` |
+| `@opengsd/mcp-server` progress reader | Parses `STATE.md` fields and the milestone registry; derives from the filesystem when the file is missing | Yes (`readProgress` reports active refs) | `packages/mcp-server/src/readers/state.ts:171`-`:205` |
+| `@opengsd/mcp-server` doctor-lite | `STATE.md` **existence** check when the DB is unavailable | Yes (drives the "run /gsd status" repair advice) | `packages/mcp-server/src/readers/doctor-lite.ts:63`-`:73` |
+| Welcome screen fallback | Raw `STATE.md` read when the DB has no bound milestone | Display-only (banner text) | `src/welcome-screen.ts:97` |
+| Web project discovery | Parses `STATE.md` for active milestone/slice/phase when the DB cannot be read | Yes (selects the active project context) | `src/web/project-discovery-service.ts:138` |
+| `integrations/hermes` (Python) | Requires `.gsd/` with `STATE.md` present; an absent/empty `STATE.md` is documented as the cause of an empty snapshot | Yes (its `read progress` depends on it) | `integrations/hermes/docs/setup.md:35`, `:235`; fixture `integrations/hermes/tests/fixtures/minimal-project/.gsd/STATE.md` |
 
 Because the format is frozen and the stamp is ignore-safe, none of these
 readers can break at the moment DB authority flips.
