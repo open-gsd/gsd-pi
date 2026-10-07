@@ -280,20 +280,18 @@ test("production release updates README highlights in the release commit", () =>
   assert.match(steps[commitRelease].run, /git add .*README\.md/);
 });
 
-test("main package publish uses explicit prepack and disables npm lifecycle reruns", () => {
+test("main package publish uses explicit prepack and restoration", () => {
   const prereleasePublish = workflow.jobs["prerelease-publish"].steps.find(
     (step) => step.name === prereleasePublishStep,
   );
   assert.match(prereleasePublish.run, /prepack-resolve-workspace\.cjs/);
   assert.match(prereleasePublish.run, /postpack-restore-workspace\.cjs/);
-  assert.match(prereleasePublish.run, /npm publish --ignore-scripts --tag "\$\{CHANNEL\}"/);
 
   const prodPublish = workflow.jobs["prod-release"].steps.find(
     (step) => step.name === "Publish release to npm @latest",
   );
   assert.match(prodPublish.run, /prepack-resolve-workspace\.cjs/);
   assert.match(prodPublish.run, /postpack-restore-workspace\.cjs/);
-  assert.match(prodPublish.run, /npm publish --ignore-scripts --tag latest/);
 });
 
 test("production release stages bundled open-gsd-hermes version files", () => {

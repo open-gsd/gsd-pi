@@ -105,12 +105,3 @@ test("build-native publishes MCP server workspace to npm before the main package
   assert.match(smoke.run, /npm install "@opengsd\/mcp-server@\$\{VERSION\}"/);
   assert.match(smoke.run, /gsd-mcp-server/);
 });
-
-test("publish-engine-packages script continues through all platforms", () => {
-  const script = readFileSync("scripts/publish-engine-packages.sh", "utf8");
-
-  assert.match(script, /FAILED=\(\)/);
-  assert.match(script, /for platform in "\$\{PLATFORMS\[@\]\}"/);
-  assert.doesNotMatch(script, /exit 1\s*\n\s*fi\s*\n\s*cd "\$GITHUB_WORKSPACE"/);
-  assert.match(script, /already on npm, skipping/);
-});

@@ -153,40 +153,9 @@ jobs:
           CHANNEL: ${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
         run: |
           VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
-          EXISTING=$(npm view "@opengsd/gsd-pi@${VERSION}" version 2>/dev/null || true)
-          if [ -n "${EXISTING}" ]; then
-            TAGGED=$(npm view "@opengsd/gsd-pi" "dist-tags.${CHANNEL}" 2>/dev/null || true)
-            if [ "${TAGGED}" = "${VERSION}" ]; then
-              echo "Version ${VERSION} is already published and @${CHANNEL} points to it — skipping publish."
-              exit 0
-            fi
-            echo "::error::Version ${VERSION} already exists but @${CHANNEL} points to '${TAGGED:-<unset>}'. Trusted publishing only authenticates npm publish, not dist-tag mutation."
-            echo "::error::Move the tag manually if intended: npm dist-tag add @opengsd/gsd-pi@${VERSION} ${CHANNEL}"
-            exit 1
-          fi
           trap 'node scripts/postpack-restore-workspace.cjs' EXIT
           node scripts/prepack-resolve-workspace.cjs
-          # The pre-check above is a TOCTOU window — a concurrent/manual publish
-          # of the same version between the check and here would otherwise surface
-          # a raw npm error. Mirror the prod path: tolerate "cannot publish over"
-          # as an idempotent skip, fail loudly on anything else.
-          if OUTPUT=$(npm publish --ignore-scripts --tag "${CHANNEL}" 2>&1); then
-            echo "$OUTPUT"
-          else
-            if echo "$OUTPUT" | grep -q "cannot publish over the previously published\|You cannot publish over"; then
-              echo "Version ${VERSION} was published concurrently — verifying @${CHANNEL} tag."
-              TAGGED=$(npm view "@opengsd/gsd-pi" "dist-tags.${CHANNEL}" 2>/dev/null || true)
-              if [ "${TAGGED}" != "${VERSION}" ]; then
-                echo "::error::@${CHANNEL} points to '${TAGGED:-<unset>}' not ${VERSION} after concurrent publish."
-                echo "::error::Move the tag manually if intended: npm dist-tag add @opengsd/gsd-pi@${VERSION} ${CHANNEL}"
-                exit 1
-              fi
-              echo "Confirmed: @${CHANNEL} → ${VERSION} (from concurrent publish)."
-            else
-              echo "$OUTPUT"
-              exit 1
-            fi
-          fi
+          node scripts/publish-npm-package.mjs . "${VERSION}" "${CHANNEL}"
           echo "Verifying @opengsd/gsd-pi@${VERSION} can be installed from npm..."
           DELAY=10
           for attempt in $(seq 1 12); do
@@ -722,24 +691,7 @@ jobs:
         run: |
           trap 'node scripts/postpack-restore-workspace.cjs' EXIT
           node scripts/prepack-resolve-workspace.cjs
-          if OUTPUT=$(npm publish --ignore-scripts --tag latest 2>&1); then
-            echo "$OUTPUT"
-          else
-            if echo "$OUTPUT" | grep -q "cannot publish over the previously published\|You cannot publish over"; then
-              echo "::warning::${RELEASE_VERSION} concurrent publish detected — verifying @latest dist-tag."
-              ACTUAL=$(npm view "@opengsd/gsd-pi" dist-tags.latest 2>/dev/null || true)
-              if [ "${ACTUAL}" = "${RELEASE_VERSION}" ]; then
-                echo "Confirmed: @latest already points to ${RELEASE_VERSION}; treating as success."
-              else
-                echo "::error::@latest dist-tag is '${ACTUAL}', not '${RELEASE_VERSION}'. Trusted publishing only authenticates npm publish, not dist-tag mutation."
-                echo "::error::Promote manually if intended: npm dist-tag add @opengsd/gsd-pi@${RELEASE_VERSION} latest"
-                exit 1
-              fi
-            else
-              echo "$OUTPUT"
-              exit 1
-            fi
-          fi
+          node scripts/publish-npm-package.mjs . "${RELEASE_VERSION}" latest
           echo "Verifying @opengsd/gsd-pi@${RELEASE_VERSION} can be installed from npm..."
           DELAY=10
           for attempt in $(seq 1 12); do
