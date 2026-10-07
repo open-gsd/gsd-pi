@@ -7,7 +7,8 @@ import test from 'node:test';
 import YAML from 'yaml';
 
 const workflow = YAML.parse(readFileSync('.github/workflows/npm-publish.yml', 'utf8'));
-for (const job of ['prod-release', 'prerelease-publish']) {
+const nativeWorkflow = YAML.parse(readFileSync('.github/workflows/build-native.yml', 'utf8'));
+for (const job of ['prod-release', 'prerelease-publish', 'native-bootstrap']) {
   test(`${job} rejects a registry artifact with the same version and tag but different bytes`, (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'release-workflow-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -28,10 +29,13 @@ if (args[0] === 'view') {
   console.log(JSON.stringify([{ filename: 'package.tgz', name: '@opengsd/gsd-pi', version: '1.2.3' }]));
 } else if (args[0] !== 'install') process.exit(2);
 `, { mode: 0o755 });
-    const step = workflow.jobs[job].steps.find(s => s.name?.startsWith(job === 'prod-release' ? 'Publish release to npm' : 'Publish @'));
-    const result = spawnSync('bash', ['-e', '-c', step.run], {
+    const step = job === 'native-bootstrap'
+      ? nativeWorkflow.jobs.publish.steps.find(s => s.name === 'Publish main package')
+      : workflow.jobs[job].steps.find(s => s.name?.startsWith(job === 'prod-release' ? 'Publish release to npm' : 'Publish @'));
+    const run = step.run.replaceAll('${{ steps.version-check.outputs.tag_flag }}', '--tag latest');
+    const result = spawnSync('bash', ['-e', '-c', run], {
       cwd: dir, encoding: 'utf8', timeout: 10000,
-      env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, RELEASE_VERSION: '1.2.3', CHANNEL: 'dev' },
+      env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, RELEASE_VERSION: '1.2.3', CHANNEL: 'dev', PUBLISH_TAG: 'latest' },
     });
     assert.notEqual(result.status, 0, `stale publication was accepted:\n${result.stdout}\n${result.stderr}`);
     assert.match(result.stderr + result.stdout, /identity mismatch/i);
