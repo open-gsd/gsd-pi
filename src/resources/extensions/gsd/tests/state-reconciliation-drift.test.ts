@@ -1928,6 +1928,16 @@ test("slice-level reopen exemption: an orphaned slice SUMMARY artifact row does 
     task_id: null,
     full_content: "# S15 Summary\n\nStale after reopen.\n",
   });
+  // Production ordering: the artifact row is written when the slice completes
+  // and the slice.reopened event comes later. insertArtifact stamps
+  // imported_at with wall-clock now, so backdate the row to before the
+  // reopen event seeded below — only rows that predate the latest reopen are
+  // dead bookkeeping (PR #2674 review).
+  const adapter0 = _getAdapter();
+  assert.ok(adapter0, "DB must be open before backdating the artifact row");
+  adapter0.prepare(
+    `UPDATE artifacts SET imported_at = :imported_at WHERE slice_id = 'S15' AND task_id IS NULL`,
+  ).run({ ":imported_at": "2026-10-06T14:00:00.000Z" });
   // No file written to disk — the reopen quarantined it — and no reopen
   // history recorded yet: this must still be reported as real drift.
 
@@ -1975,7 +1985,22 @@ test("slice-level reopen exemption: an orphaned slice SUMMARY artifact row does 
   assert.equal(
     driftsAfter.filter((d) => d.kind === "artifact-db-status-divergence" && d.sliceId === "S15" && !("taskId" in d && d.taskId)).length,
     0,
-    "with reopen history and no file on disk, the orphaned slice SUMMARY row must be exempted as dead bookkeeping",
+    "with reopen history and no file on disk, the pre-reopen orphaned slice SUMMARY row must be exempted as dead bookkeeping",
+  );
+
+  // PR #2674 review regression: a row imported AFTER the latest reopen with
+  // no file on disk (for example a post-reopen gsd_summary_save whose
+  // projection write failed) is a genuine divergence, not reopen bookkeeping,
+  // and must be flagged again.
+  adapter.prepare(
+    `UPDATE artifacts SET imported_at = :imported_at WHERE slice_id = 'S15' AND task_id IS NULL`,
+  ).run({ ":imported_at": "2026-10-06T15:00:00.000Z" });
+  const statePostReopen = makeState({ activeMilestone: { id: "M001", title: "Milestone" } });
+  const driftsPostReopen = detectArtifactDbDrift(statePostReopen, { basePath: base, state: statePostReopen });
+  assert.equal(
+    driftsPostReopen.filter((d) => d.kind === "artifact-db-status-divergence" && d.sliceId === "S15" && !("taskId" in d && d.taskId)).length,
+    1,
+    "a slice SUMMARY row imported after the latest reopen with no file on disk must be flagged as genuine divergence",
   );
 });
 

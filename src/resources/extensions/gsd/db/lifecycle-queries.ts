@@ -653,24 +653,28 @@ export function hasTaskExecutionOrReopenHistory(
 }
 
 /**
- * state-reconciliation/drift/artifact-db.ts — whether a Slice's current
- * lifecycle head is an explicit reopen. Mirrors
- * hasTaskExecutionOrReopenHistory's reopen branch at the slice level: a
- * completed-then-reopened slice keeps its orphaned SUMMARY artifact row (the
- * reopen clears slices.full_summary_md and quarantines the file but does not
- * delete the artifacts row), and that row must not wedge the reopened
- * slice's re-execution.
+ * state-reconciliation/drift/artifact-db.ts — the occurred-at of a Slice's
+ * newest explicit reopen, or null when the slice was never reopened. The
+ * temporal tie matters: a completed-then-reopened slice keeps its orphaned
+ * SUMMARY artifact row (the reopen clears slices.full_summary_md and
+ * quarantines the file but does not delete the artifacts row), and that row
+ * must not wedge the reopened slice's re-execution — but only rows that
+ * PREDATE the latest reopen are such dead bookkeeping. A row imported after
+ * the latest reopen with no file on disk is a genuine divergence (for
+ * example a post-reopen gsd_summary_save whose projection write failed) and
+ * must stay flaggable.
  */
-export function hasSliceReopenHistory(milestoneId: string, sliceId: string): boolean {
+export function latestSliceReopenAt(milestoneId: string, sliceId: string): string | null {
   const row = getDb().prepare(`
-    SELECT 1 AS present
-    FROM workflow_domain_events reopened
-    WHERE reopened.event_type = 'slice.reopened'
-      AND reopened.entity_type = 'slice'
-      AND reopened.entity_id = :entity_id
+    SELECT COALESCE(json_extract(payload_json, '$.occurredAt'), created_at) AS occurred_at
+    FROM workflow_domain_events
+    WHERE event_type = 'slice.reopened'
+      AND entity_type = 'slice'
+      AND entity_id = :entity_id
+    ORDER BY project_revision DESC, event_index DESC
     LIMIT 1
   `).get({ ":entity_id": `${milestoneId}/${sliceId}` });
-  return row !== undefined;
+  return row ? String(row["occurred_at"]) : null;
 }
 
 /**
