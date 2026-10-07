@@ -118,7 +118,7 @@ physically live outside the repository.
 (`state.md`, `project.md`, …) remain recognized on read. `RUNTIME.md` is
 resolved alongside them.
 
-Six of the eight are DB-backed projections. Two are not, and no renderer
+Seven of the eight have DB sources behind their render, and one does not projections. Two are not, and no renderer
 treats them as state:
 
 - `OVERRIDES.md`, `KNOWLEDGE.md` — projections. Their sources are the

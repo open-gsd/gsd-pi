@@ -133,7 +133,6 @@ export function importFileOverrides(basePath: string, overrides: readonly FileOv
       throw new Error(`OVERRIDES.md override ${timestamp} has unknown scope "${scope}"`);
     }
   }
-  if (overrides.length === 0) return;
   const timestamps = overrides.map((override) => override.timestamp);
   runOverrideOperation(basePath, "override.import", { timestamps }, (revision) =>
     overrides.flatMap(({ timestamp, change, scope, appliedAt }, index) => {

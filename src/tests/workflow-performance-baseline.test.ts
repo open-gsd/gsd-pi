@@ -2,7 +2,7 @@
 // File Purpose: Runs the ADR-046 performance baseline (Migration step 8)
 // against the committed baseline file: p50/p95 of deriveState, one Domain
 // Operation commit and a projection drain, measured on the fixed corpus, may
-// not exceed twice the recorded values. Also pins the comparison logic.
+// not exceed three times the recorded values. Also pins the comparison logic.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
