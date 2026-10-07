@@ -83,6 +83,12 @@ export function buildE2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessE
 	if (process.env.GSD_NATIVE_PREFER_LOCAL === "1") {
 		base.GSD_NATIVE_PREFER_LOCAL = "1";
 	}
+	// The G8 legacy-counter gate rides on the e2e runs: when the outer gate
+	// sets the telemetry file, each spawned CLI merges its counters into it.
+	// It is evidence plumbing, never user configuration.
+	if (process.env.GSD_LEGACY_TELEMETRY_FILE) {
+		base.GSD_LEGACY_TELEMETRY_FILE = process.env.GSD_LEGACY_TELEMETRY_FILE;
+	}
 	// Force non-interactive — every e2e test runs in CI by default.
 	base.GSD_NON_INTERACTIVE = "1";
 	// Keep TMPDIR canonical for the child too.

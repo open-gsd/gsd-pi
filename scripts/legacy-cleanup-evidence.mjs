@@ -6,8 +6,10 @@
 import { spawn } from "node:child_process";
 
 import {
+  collectDeletedSymbolProof,
   evaluateLegacyCleanupGate,
   loadTelemetryEvidence,
+  renderDeletedSymbolProofSummary,
   renderLegacyCleanupGateSummary,
 } from "./legacy-cleanup-gate.mjs";
 import { collectLegacyStatePathProof, renderLegacyStatePathProofSummary } from "./legacy-state-path-proof.mjs";
@@ -98,7 +100,8 @@ export async function collectLegacyCleanupEvidence(opts) {
   // Fail closed: the report must have been written by the commands above.
   const report = await loadTelemetryEvidence(opts.file, { notBeforeMs: runStartMs });
   const proof = await collectLegacyStatePathProof({ root: opts.proofRoot ?? process.cwd() });
-  return { ...evaluateLegacyCleanupGate(report, proof), proof };
+  const deletedProof = await collectDeletedSymbolProof({ root: opts.proofRoot ?? process.cwd() });
+  return { ...evaluateLegacyCleanupGate(report, proof, deletedProof), proof, deletedProof };
 }
 
 async function main() {
@@ -109,6 +112,7 @@ async function main() {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else {
       process.stdout.write(renderLegacyCleanupGateSummary(result));
+      process.stdout.write(renderDeletedSymbolProofSummary(result.deletedProof));
       process.stdout.write(renderLegacyStatePathProofSummary(result.proof));
     }
     process.exitCode = result.ok ? 0 : 2;

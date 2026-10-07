@@ -261,6 +261,17 @@ jobs:
           export GSD_SMOKE_BINARY
           pnpm run test:e2e
 
+      # Removal Gate G8 (ADR-046 Migration step 8): the four closeout e2e
+      # scenarios leave every cutover bridge counter at zero, the fake-LLM
+      # acceptance bed's bridge traffic stays declared and finite, and the
+      # deleted branch symbols stay deleted. The live-model bed is not part
+      # of CI; it rides to the owner.
+      - name: G8 legacy-counter gate (closeout e2e + acceptance bed)
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
+          GSD_SMOKE_BINARY: ${{ github.workspace }}/dist/loader.js
+        run: pnpm run gate:g8-legacy-counters
+
       - name: Run docker e2e suite
         if: needs.fast-gates.outputs.docker-changed == 'true'
         run: pnpm run test:e2e:docker

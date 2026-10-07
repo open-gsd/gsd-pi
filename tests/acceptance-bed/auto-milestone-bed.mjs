@@ -44,6 +44,11 @@ function bedEnv(extra = {}) {
 		if (k.startsWith("GSD_")) continue;
 		base[k] = v;
 	}
+	// The G8 legacy-counter gate rides on the bed: when set, the spawned CLI
+	// merges its counters into the gate's telemetry file.
+	if (process.env.GSD_LEGACY_TELEMETRY_FILE) {
+		base.GSD_LEGACY_TELEMETRY_FILE = process.env.GSD_LEGACY_TELEMETRY_FILE;
+	}
 	base.GSD_NON_INTERACTIVE = "1";
 	base.TMPDIR = canonicalTmpdir();
 	// Shared isolated HOME so gsd's resource sync (~/.gsd/agent/...) never

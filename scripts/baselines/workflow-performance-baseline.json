@@ -1,0 +1,17 @@
+{
+  "deriveState": {
+    "p50": 0.518,
+    "p95": 0.687,
+    "samples": 60
+  },
+  "domainOperationCommit": {
+    "p50": 21.173,
+    "p95": 26.434,
+    "samples": 40
+  },
+  "projectionDrain": {
+    "p50": 21.635,
+    "p95": 24.384,
+    "samples": 20
+  }
+}

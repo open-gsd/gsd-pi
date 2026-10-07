@@ -1,12 +1,16 @@
 // Project/App: gsd-pi
 // File Purpose: Checks persisted Phase 8 legacy telemetry plus the static
-// state-path proof before cleanup deletions. Fails closed: absent or stale
-// evidence blocks, it never counts as proof of zero usage.
+// state-path and deleted-symbol proofs before cleanup deletions. Fails
+// closed: absent or stale evidence blocks, it never counts as proof of zero
+// usage.
 
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
 
 import { collectLegacyStatePathProof, renderLegacyStatePathProofSummary } from "./legacy-state-path-proof.mjs";
 
+// Unrelated legacy surfaces (engine, alias, component format). Reported, not
+// gate input: they count paths outside the ADR-046 cutover.
 export const LEGACY_COUNTERS = [
   "legacy.workflowEngineUsed",
   "legacy.uokFallbackUsed",
@@ -14,6 +18,50 @@ export const LEGACY_COUNTERS = [
   "legacy.componentFormatUsed",
   "legacy.providerDefaultUsed",
 ];
+
+// The ADR-046 cutover bridges (legacy-telemetry.ts CUTOVER_COUNTERS). Gate
+// input: every counter must be present, finite, and zero in the closeout
+// evidence run. The acceptance bed is NOT part of this zero assertion: it
+// seeds its fixture through the recover import bridge by design, so its
+// evidence is held to the declared-and-finite bar instead.
+export const CUTOVER_COUNTERS = [
+  "legacy.importApplied",
+  "legacy.fileOverridesImported",
+  "legacy.fileCapturesImported",
+  "legacy.restoreExecuted",
+  "legacy.migrateImported",
+];
+
+// Legacy writes on the canonical path (legacy-telemetry.ts MIRROR_COUNTERS):
+// declared, reported, never zero-gated.
+export const MIRROR_COUNTERS = [
+  "legacy.legacyTaskStatusWrite",
+];
+
+// Branches the cutover deleted (wave 2, #2677, and earlier packages). They
+// have no counters because they do not exist; the proof that they stay gone
+// is structural: the symbols must grep to zero across code directories.
+export const DELETED_SYMBOLS = [
+  "gsd_verdict",
+  "skipBrowserEvidenceGate",
+  "allowPassThroughValidation",
+  "passThroughValidation",
+  "renderAssessmentFromDb",
+  "writeGsdProjection",
+];
+
+const DELETED_SYMBOL_SCAN_DIRS = ["src", "packages", "tests", "extensions", "scripts", "web"];
+const DELETED_SYMBOL_SKIP = new Set([
+  "node_modules", "dist", "dist-test", ".git", "coverage", ".turbo", "build",
+]);
+// The proof sees its own declaration and test sites as text matches. A
+// regression only matters in production code, so test files and the prover
+// scripts are out of scope.
+const DELETED_SYMBOL_SELF_FILES = new Set([
+  "legacy-cleanup-gate.mjs",
+  "g8-closeout-legacy-gate.mjs",
+  "legacy-cleanup-evidence.mjs",
+]);
 
 // Persisted telemetry older than this no longer describes the current tree.
 export const DEFAULT_MAX_TELEMETRY_AGE_MS = 24 * 60 * 60 * 1000;
@@ -102,12 +150,94 @@ export async function loadTelemetryEvidence(file, opts = {}) {
   return report;
 }
 
-export function evaluateLegacyCleanupGate(report, proof = null) {
+/**
+ * Structural proof that the deleted cutover branches stay deleted: every
+ * symbol in DELETED_SYMBOLS must appear zero times in the scanned code
+ * directories. Text scan, code files only; docs are history, not code.
+ */
+export async function collectDeletedSymbolProof({ root = process.cwd(), symbols = DELETED_SYMBOLS } = {}) {
+  const offenders = [];
+  let scannedFiles = 0;
+  const walk = async (dir) => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (DELETED_SYMBOL_SKIP.has(entry.name)) continue;
+        await walk(full);
+        continue;
+      }
+      if (!/\.(ts|tsx|mts|cts|mjs|cjs|js|jsx|vue|svelte)$/.test(entry.name)) continue;
+      if (DELETED_SYMBOL_SELF_FILES.has(entry.name)) continue;
+      if (/(^|[\\/])tests?([\\/]|$)/.test(full.slice(root.length)) || /\.test\./.test(entry.name)) continue;
+      let content;
+      try {
+        content = await readFile(full, "utf-8");
+      } catch {
+        continue;
+      }
+      scannedFiles += 1;
+      const lines = content.split("\n");
+      for (const symbol of symbols) {
+        lines.forEach((line, index) => {
+          if (line.includes(symbol)) offenders.push({ symbol, file: full, line: index + 1 });
+        });
+      }
+    }
+  };
+  for (const dir of DELETED_SYMBOL_SCAN_DIRS) {
+    await walk(join(root, dir));
+  }
+  return { ok: offenders.length === 0, scannedFiles, offenders };
+}
+
+export function renderDeletedSymbolProofSummary(proof) {
+  const lines = [
+    "Deleted-symbol proof:",
+    `- Scanned ${proof.scannedFiles} code files for ${DELETED_SYMBOLS.length} deleted symbols`,
+  ];
+  if (proof.offenders.length > 0) {
+    lines.push("Offenders (deleted branch is back):");
+    for (const offender of proof.offenders) {
+      lines.push(`- ${offender.symbol} at ${offender.file}:${offender.line}`);
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Lenient bar for evidence runs that legitimately enter a kept bridge (the
+ * acceptance bed seeds its fixture through the recover import): every cutover
+ * and mirror counter must be declared in the report and finite — declared, not
+ * zero. Anything non-finite or missing is a block.
+ */
+export function evaluateBridgeEvidenceDeclared(report) {
+  const counters = {};
+  const missing = [];
+  for (const counter of [...CUTOVER_COUNTERS, ...MIRROR_COUNTERS]) {
+    const value = report.counters[counter];
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      counters[counter] = 0;
+      missing.push(counter);
+      continue;
+    }
+    counters[counter] = value;
+  }
+  return { ok: missing.length === 0, counters, missing };
+}
+
+export function evaluateLegacyCleanupGate(report, proof = null, deletedSymbolProof = null) {
   const counters = {};
   const nonZero = [];
   const missing = [];
 
-  for (const counter of LEGACY_COUNTERS) {
+  // Gate input: the cutover counters. Absent, non-finite, or nonzero: block.
+  for (const counter of CUTOVER_COUNTERS) {
     const value = report.counters[counter];
     if (typeof value !== "number" || !Number.isFinite(value)) {
       counters[counter] = 0;
@@ -118,18 +248,34 @@ export function evaluateLegacyCleanupGate(report, proof = null) {
     if (value !== 0) nonZero.push({ counter, value });
   }
 
+  // Reported only: the five unrelated counters and the canonical-path mirror
+  // counters are not gate input. A mirror counter missing from the report is
+  // rendered as 0; only CUTOVER_COUNTERS gate on presence.
+  const unrelated = {};
+  for (const counter of [...LEGACY_COUNTERS, ...MIRROR_COUNTERS]) {
+    const value = report.counters[counter];
+    unrelated[counter] = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  }
+
   // A gate evaluated without a static proof is not proven clean.
   const proofMissing = proof === null || proof === undefined;
   const proofOffenders = proofMissing ? [] : (proof.offenders ?? []);
+  const deletedProofMissing = deletedSymbolProof === null || deletedSymbolProof === undefined;
+  const deletedProofOffenders = deletedProofMissing ? [] : (deletedSymbolProof.offenders ?? []);
 
   return {
-    ok: missing.length === 0 && nonZero.length === 0 && !proofMissing && proofOffenders.length === 0,
+    ok: missing.length === 0 && nonZero.length === 0
+      && !proofMissing && proofOffenders.length === 0
+      && !deletedProofMissing && deletedProofOffenders.length === 0,
     ts: report.ts,
     counters,
+    unrelated,
     missing,
     nonZero,
     proofMissing,
     proofOffenders,
+    deletedProofMissing,
+    deletedProofOffenders,
   };
 }
 
@@ -139,11 +285,16 @@ export function renderLegacyCleanupGateSummary(result) {
     `Snapshot: ${result.ts || "unknown"}`,
     `Status: ${result.ok ? "PASS" : "BLOCK"}`,
     "",
-    "Counters:",
+    "Cutover bridge counters (gate input, must be zero):",
   ];
 
-  for (const counter of LEGACY_COUNTERS) {
+  for (const counter of CUTOVER_COUNTERS) {
     lines.push(`- ${counter}: ${result.counters[counter] ?? 0}`);
+  }
+
+  lines.push("", "Unrelated legacy counters (reported, not gate input):");
+  for (const counter of LEGACY_COUNTERS) {
+    lines.push(`- ${counter}: ${result.unrelated?.[counter] ?? 0}`);
   }
 
   if (result.missing.length > 0) {
@@ -165,6 +316,15 @@ export function renderLegacyCleanupGateSummary(result) {
     }
   }
 
+  if (result.deletedProofMissing) {
+    lines.push("", "Deleted-symbol proof: NOT RUN (cannot prove the branches stay deleted)");
+  } else if (result.deletedProofOffenders.length > 0) {
+    lines.push("", "Deleted-symbol proof offenders:");
+    for (const offender of result.deletedProofOffenders) {
+      lines.push(`- ${offender.symbol} ${offender.file}:${offender.line}`);
+    }
+  }
+
   return `${lines.join("\n")}\n`;
 }
 
@@ -173,11 +333,13 @@ async function main() {
     const opts = parseArgs();
     const report = await loadTelemetryEvidence(opts.file, { maxAgeMs: opts.maxAgeMs });
     const proof = await collectLegacyStatePathProof({ root: process.cwd() });
-    const result = evaluateLegacyCleanupGate(report, proof);
+    const deletedProof = await collectDeletedSymbolProof({ root: process.cwd() });
+    const result = evaluateLegacyCleanupGate(report, proof, deletedProof);
     if (opts.json) {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else {
       process.stdout.write(renderLegacyCleanupGateSummary(result));
+      process.stdout.write(renderDeletedSymbolProofSummary(deletedProof));
       process.stdout.write(renderLegacyStatePathProofSummary(proof));
     }
     process.exitCode = result.ok ? 0 : 2;
