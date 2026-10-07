@@ -1,12 +1,11 @@
 // GSD Memory Ingest — turn raw content into memories
 //
-// Provides four entry points: ingestNote (inline text), ingestFile (local
-// path), ingestUrl (HTTP resource), and ingestArtifact (a named .gsd/ artifact
-// for a given milestone). Each one inserts a row into `memory_sources` and,
-// if an LLM call is available, fires the extractor against the content with
-// source-specific scope/tags.
+// Provides three entry points: ingestNote (inline text), ingestFile (local
+// path), and ingestUrl (HTTP resource). Each one inserts a row into
+// `memory_sources` and, if an LLM call is available, fires the extractor
+// against the content with source-specific scope/tags.
 //
-// All four functions are safe to call without an LLM — they still persist the
+// All three functions are safe to call without an LLM — they still persist the
 // source. This means ingestion is decoupled from extraction; a later
 // `/gsd memory rebuild` can re-extract from persisted sources.
 
@@ -17,7 +16,6 @@ import type { ExtensionContext } from "@gsd/pi-coding-agent";
 import { createMemorySource, type MemorySource, type MemorySourceKind } from "./memory-source-store.js";
 import { buildMemoryLLMCall, extractMemoriesFromTranscript } from "./memory-extractor.js";
 import type { MemoryAction } from "./memory-store.js";
-import { resolveMilestoneFile } from "./paths.js";
 import { logWarning } from "./workflow-logger.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -224,51 +222,6 @@ function stripHtml(html: string): string {
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-// ─── ingestArtifact ─────────────────────────────────────────────────────────
-
-/**
- * Ingest a named artifact from a milestone directory (e.g. LEARNINGS,
- * SUMMARY, CONTEXT). Resolves through `resolveMilestoneFile` so worktree
- * layouts are handled correctly.
- */
-export async function ingestArtifact(
-  basePath: string,
-  milestoneId: string,
-  artifactType: string,
-  ctx: ExtensionContext | null,
-  opts: IngestOptions = {},
-): Promise<IngestResult> {
-  const file = resolveMilestoneFile(basePath, milestoneId, artifactType);
-  if (!file || !existsSync(file)) {
-    throw new Error(`Artifact not found: ${milestoneId}-${artifactType}.md`);
-  }
-  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
-  const content = truncate(readFileSync(file, "utf-8"), maxBytes);
-  const title = `${milestoneId}-${artifactType}`;
-  const created = createMemorySource({
-    kind: "artifact",
-    uri: file,
-    title,
-    content,
-    scope: opts.scope,
-    tags: [...(opts.tags ?? []), milestoneId, artifactType.toLowerCase()],
-  });
-  if (!created) return { ...sourceCreateFailure("artifact"), uri: file, title };
-
-  const extracted = created.duplicate
-    ? []
-    : await maybeExtract(ctx, { kind: "artifact", id: created.id }, content, opts);
-
-  return {
-    sourceId: created.id,
-    duplicate: created.duplicate,
-    extracted,
-    kind: "artifact",
-    title,
-    uri: file,
-  };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
