@@ -350,6 +350,10 @@ jobs:
 
       - name: Typecheck extensions
         if: needs.fast-gates.outputs.portability-changed == 'true'
+        env:
+          # The extensions type graph OOMs Node's default heap on the Windows
+          # runner (observed on #2677: Ineffective mark-compacts ~33s into tsc).
+          NODE_OPTIONS: '--max-old-space-size=6144'
         run: pnpm run typecheck:extensions
 
       - name: Run package tests
