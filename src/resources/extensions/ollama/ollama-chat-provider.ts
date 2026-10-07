@@ -27,6 +27,7 @@ import {
 	type Usage,
 	EventStream,
 } from "@gsd/pi-ai";
+import { randomUUID } from "node:crypto";
 import { chat } from "./ollama-client.js";
 import type {
 	OllamaChatMessage,
@@ -50,6 +51,28 @@ function createStream(): AssistantMessageEventStream {
 	) as AssistantMessageEventStream;
 }
 
+/**
+ * Mint a unique nonce per provider response.
+ * Tool-call ids must be unique per invocation and stable across retries —
+ * piExecutionInvocation derives Domain Operation idempotency keys from them (#2685).
+ * Ollama's raw tool_calls carry no id, so we mint one: 24 hex chars (~92
+ * effective bits — UUID v4's version nibble sits inside the first 24) keeps
+ * the full id within the narrowest limits any cross-provider normalizer may
+ * apply: openai-completions truncates to 40 chars for provider "openai" and
+ * sanitizes pipe-containing ids to [A-Za-z0-9_-] — these ids already satisfy
+ * both, so they pass through every normalizer unchanged.
+ */
+export function mintResponseNonce(): string {
+	return randomUUID().replaceAll("-", "").slice(0, 24);
+}
+
+/**
+ * Mint a unique tool-call id given a response nonce and positional index.
+ */
+export function mintToolCallId(nonce: string, contentIndex: number): string {
+	return `ollama_tc_${nonce}_${contentIndex}`;
+}
+
 // ─── Stream handler ─────────────────────────────────────────────────────────
 
 export function streamOllamaChat(
@@ -61,6 +84,7 @@ export function streamOllamaChat(
 
 	(async () => {
 		const output = buildInitialOutput(model);
+		const responseNonce = mintResponseNonce();
 
 		try {
 			const request = buildRequest(model, context, options);
@@ -123,7 +147,7 @@ export function streamOllamaChat(
 					contentIndex++;
 					const toolCall: ToolCall = {
 						type: "toolCall",
-						id: `ollama_tc_${contentIndex}`,
+						id: mintToolCallId(responseNonce, contentIndex),
 						name: tc.function.name,
 						arguments: tc.function.arguments,
 					};
