@@ -19,6 +19,7 @@
 
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -65,6 +66,10 @@ import { isClosedStatus } from "../../status-guards.ts";
 
 // ── Cache invalidation ───────────────────────────────────────────────────
 import { invalidateAllCaches } from "../../cache.ts";
+
+// ── Canonical fixtures ───────────────────────────────────────────────────
+import { seedLifecycles } from "../helpers/authority-cutover.ts";
+import { seedCanonicalMilestoneValidation } from "../merge-ready-fixture.ts";
 
 // ── Dispatch ─────────────────────────────────────────────────────────────
 import {
@@ -273,6 +278,23 @@ function buildDispatchCtx(
     },
     prefs: undefined,
   };
+}
+
+/**
+ * A createFullFixture whose tree is a committed git repository, so the
+ * canonical validation receipts and waivers can bind to a source revision.
+ * .gsd/ stays untracked: the workflow DB's WAL churn must not dirty the tree
+ * the closeout preflight commits.
+ */
+function makeCanonicalDispatchFixture(): string {
+  const base = createFullFixture();
+  writeFileSync(join(base, ".gitignore"), ".gsd/\n");
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: base });
+  execFileSync("git", ["add", ".gitignore"], { cwd: base });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: base, stdio: "ignore" });
+  return base;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -884,29 +906,16 @@ describe("completion and verification failures", () => {
   });
 
   test("needs-remediation VALIDATION blocks milestone completion dispatch", async () => {
-    base = createFullFixture();
+    base = makeCanonicalDispatchFixture();
 
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "complete" });
-    // The milestone-validation row is the verdict; no VALIDATION.md is written.
-    insertAssessment({
-      path: "milestones/M001/M001-VALIDATION.md",
-      milestoneId: "M001",
-      status: "needs-remediation",
-      scope: "milestone-validation",
-      fullContent: [
-        "---",
-        "verdict: needs-remediation",
-        "remediation_round: 1",
-        "---",
-        "",
-        "# Validation",
-        "",
-        "Needs remediation work.",
-      ].join("\n"),
-    });
+    // A needs-remediation VALIDATION records as a canonical fail receipt; the
+    // completion guard reads the receipt, never the VALIDATION.md projection.
+    seedCanonicalMilestoneValidation(base, "M001", "fail");
+    openDatabase(join(base, ".gsd", "gsd.db"));
 
     const ctx = buildDispatchCtx(base, "M001", {
       phase: "completing-milestone",
@@ -915,32 +924,36 @@ describe("completion and verification failures", () => {
     });
 
     const result = await resolveDispatch(ctx);
-    assert.equal(result.action, "stop", "needs-remediation should block completion");
+    assert.equal(result.action, "stop", "a failed validation should block completion");
     assert.ok(
-      (result as any).reason?.includes("needs-remediation"),
-      "stop reason should mention needs-remediation",
+      (result as any).reason?.includes("verdict is fail"),
+      `stop reason should name the failed verdict, got: ${(result as any).reason}`,
     );
   });
 
-  test("open slices block milestone validation dispatch", async () => {
-    base = createFullFixture();
+  test("open slices block milestone completion dispatch", async () => {
+    base = makeCanonicalDispatchFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
-    // Open slice rows block validation. Slice SUMMARY files are not read.
+    // Open slice rows block closeout. Slice SUMMARY files are not read.
     insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "pending" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "pending" });
+    // The canonical record: adopted open authority and a passing receipt; the
+    // closeout gate still stops while a slice is open.
+    seedCanonicalMilestoneValidation(base, "M001", "pass");
+    openDatabase(join(base, ".gsd", "gsd.db"));
 
     const ctx = buildDispatchCtx(base, "M001", {
-      phase: "validating-milestone",
+      phase: "completing-milestone",
       activeSlice: null,
       activeTask: null,
     });
 
     const result = await resolveDispatch(ctx);
-    assert.equal(result.action, "stop", "open slices should block validation");
+    assert.equal(result.action, "stop", "open slices should block completion");
     assert.ok(
-      (result as any).reason?.includes("S01, S02 are not closed"),
-      "stop reason should name the open slices",
+      (result as any).reason?.includes('slice S01 status is "pending"'),
+      `stop reason should name the open slice, got: ${(result as any).reason}`,
     );
   });
 
@@ -1118,21 +1131,18 @@ describe("dispatch guard integration", () => {
     if (base) rmSync(base, { recursive: true, force: true });
   });
 
-  test("skip_milestone_validation preference writes pass-through VALIDATION", async () => {
-    base = createFullFixture();
+  test("skip_milestone_validation records a canonical waiver and dispatches completion", async () => {
+    base = makeCanonicalDispatchFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "complete" });
-    // Write slice SUMMARYs so the missing SUMMARY guard doesn't fire
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md"),
-      "# S01 Summary\nDone.\n",
-    );
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "slices", "S02", "S02-SUMMARY.md"),
-      "# S02 Summary\nDone.\n",
-    );
+    // The adopted skip path records a canonical waiver (no fabricated PASS).
+    seedLifecycles("state-machine-edge-cases/waiver", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "completed" },
+    ]);
 
     const ctx = buildDispatchCtx(base, "M001", {
       phase: "validating-milestone",
@@ -1142,14 +1152,18 @@ describe("dispatch guard integration", () => {
     ctx.prefs = { phases: { skip_milestone_validation: true } } as any;
 
     const result = await resolveDispatch(ctx);
-    assert.equal(result.action, "skip", "skip_milestone_validation should produce skip action");
+    assert.equal(result.action, "dispatch", "the waiver should continue through the completion guards");
+    assert.equal((result as any).unitType, "complete-milestone");
 
-    // Should have written a pass-through VALIDATION file
+    // The waiver replaces the legacy pass-through VALIDATION writer: the file
+    // is projected, but it never carries a fabricated pass verdict.
     const validationPath = join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
-    assert.ok(existsSync(validationPath), "VALIDATION file should be written");
-    const content = readFileSync(validationPath, "utf-8");
-    assert.ok(content.includes("verdict: pass"), "should contain pass verdict");
-    assert.ok(content.includes("`skip_milestone_validation` preference"), "should note it was skipped via the preference path (#4781)");
+    assert.ok(existsSync(validationPath), "waived VALIDATION file should be written");
+    assert.doesNotMatch(readFileSync(validationPath, "utf-8"), /verdict:\s*pass/i);
+    const waivers = _getAdapter()!.prepare(
+      "SELECT COUNT(*) AS count FROM workflow_waivers",
+    ).get() as Record<string, unknown>;
+    assert.equal(Number(waivers["count"]), 1, "the skip should record one canonical waiver");
   });
 
   test("replanning-slice with null activeSlice → stop (error)", async () => {

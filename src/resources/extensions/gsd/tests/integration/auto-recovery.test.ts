@@ -27,6 +27,7 @@ import {
   insertAssessment,
 } from "../../gsd-db.ts";
 import { renderPlanFromDb } from "../../markdown-renderer.ts";
+import { seedCanonicalMergeReadyMilestone } from "../merge-ready-fixture.ts";
 
 function makeTmpBase(): string {
   const base = join(tmpdir(), `gsd-test-${randomUUID()}`);
@@ -711,19 +712,13 @@ test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)",
   execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "feat: implementation"], { cwd: base, stdio: "ignore" });
 
-  // Closeout is DB-authoritative (ADR-017): the closeout proof must clear
-  // before implementation evidence is consulted. The #1703 invariant — real
-  // implementation files are honored — is unchanged; the fixture just had no DB.
+  // Closeout is DB-authoritative (ADR-017): the closeout proof reads canonical
+  // state only, so the fixture completes M001 through the canonical fixture —
+  // adopted hierarchy, a passing validation receipt bound to this tree, and a
+  // real milestone.complete operation. The #1703 invariant — real
+  // implementation files are honored — is unchanged.
+  seedCanonicalMergeReadyMilestone(base, "M001");
   openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-  insertAssessment({
-    path: "milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
 
   const result = verifyExpectedArtifact("complete-milestone", "M001", base);
   assert.equal(result, true, "complete-milestone should pass verification with implementation files");

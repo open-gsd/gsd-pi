@@ -9,6 +9,8 @@ import { join } from "node:path";
 
 const repoRoot = process.cwd();
 const db = await import("../../resources/extensions/gsd/gsd-db.ts");
+const lifecycleCommands = await import("../../resources/extensions/gsd/db/writers/lifecycle-commands.ts");
+const domainOperation = await import("../../resources/extensions/gsd/db/domain-operation.ts");
 const undoService = await import("../../web/undo-service.ts");
 
 test("web undo of complete-slice reopens the slice in the DB", async () => {
@@ -20,6 +22,41 @@ test("web undo of complete-slice reopens the slice in the DB", async () => {
     db.insertMilestone({ id: "M001", title: "Test", status: "active" });
     db.insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "complete", risk: "low", depends: [] });
     db.insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+    // The reopen is canonical-only: adopt the completed hierarchy so the
+    // legacy-complete rows are not unresolved lifecycle shadows.
+    const fence = lifecycleCommands.readDomainOperationFence();
+    domainOperation.executeDomainOperation({
+      operationType: "test.web-undo.adopt",
+      idempotencyKey: "test/web-undo/adopt",
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: "test",
+      sourceTransport: "test",
+      payload: {},
+    }, (context) => {
+      lifecycleCommands.adoptOrTransitionLifecycle(context, {
+        itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01",
+        lifecycleStatus: "completed", adoptedFromStatus: "completed",
+      });
+      lifecycleCommands.adoptOrTransitionLifecycle(context, {
+        itemKind: "slice", milestoneId: "M001", sliceId: "S01",
+        lifecycleStatus: "completed", adoptedFromStatus: "completed",
+      });
+      return {
+        events: [{
+          eventType: "test.web-undo.adopted",
+          entityType: "slice",
+          entityId: "M001/S01",
+          payload: {},
+          destinations: ["test"],
+        }],
+        projections: [{
+          projectionKey: "test/web-undo/adopt",
+          projectionKind: "test",
+          rendererVersion: "1",
+        }],
+      };
+    });
     const adapter = db._getAdapter();
     assert.ok(adapter);
     adapter.prepare(`

@@ -148,6 +148,10 @@ test("handleUndo complete-slice reopens the slice in the DB for a suffixed miles
     insertMilestone({ id: "M001-abc123", title: "Test", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001-abc123", title: "Test Slice", status: "complete", risk: "low", depends: [] });
     insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001-abc123", title: "First task", status: "complete" });
+    // The reopen is canonical-only: adopt the completed hierarchy so the
+    // legacy-complete rows are not unresolved lifecycle shadows.
+    adoptCompletedLifecycle({ itemKind: "task", milestoneId: "M001-abc123", sliceId: "S01", taskId: "T01" });
+    adoptCompletedLifecycle({ itemKind: "slice", milestoneId: "M001-abc123", sliceId: "S01" });
     recordCompletedDispatch({
       unitType: "complete-slice", unitId: "M001-abc123/S01",
       milestoneId: "M001-abc123", sliceId: "S01", endedAt: "2026-07-13T01:00:00.000Z",
@@ -788,6 +792,13 @@ function setupSliceFixture(base: string, secondTaskStatus = "complete"): void {
   insertSlice({ id: "S02", milestoneId: "M001", title: "Next Slice", status: "pending", risk: "low", depends: ["S01"] });
   insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First task", status: "complete" });
   insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Second task", status: secondTaskStatus });
+  // The reopen is canonical-only: adopt the terminal S01 hierarchy (leaves
+  // first) so its legacy-complete rows are not unresolved lifecycle shadows.
+  adoptCompletedLifecycle({ itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01" });
+  if (secondTaskStatus === "complete") {
+    adoptCompletedLifecycle({ itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T02" });
+  }
+  adoptCompletedLifecycle({ itemKind: "slice", milestoneId: "M001", sliceId: "S01" });
   invalidateAllCaches();
 }
 
@@ -914,7 +925,6 @@ test("handleResetSlice warns when readable projections remain stale", async () =
   const base = makeTempDir("gsd-reset-slice-stale-projection");
   try {
     setupSliceFixture(base);
-    adoptCompletedLifecycle({ itemKind: "slice", milestoneId: "M001", sliceId: "S01" });
     const summaryPath = join(base, ".gsd", "phases", "01-test", "01-01-SUMMARY.md");
     rmSync(summaryPath, { force: true });
     mkdirSync(summaryPath);
@@ -935,7 +945,6 @@ test("handleResetSlice atomically reopens an adopted canonical slice", async () 
   const base = makeTempDir("gsd-reset-slice-adopted");
   try {
     setupSliceFixture(base);
-    adoptCompletedLifecycle({ itemKind: "slice", milestoneId: "M001", sliceId: "S01" });
 
     const { notifications, ctx } = makeCtx();
     await handleResetSlice("M001/S01 --force", ctx, {} as any, base);
@@ -961,12 +970,6 @@ test("handleResetSlice validates every task before changing slice or task state"
   const base = makeTempDir("gsd-reset-slice-preflight");
   try {
     setupSliceFixture(base, "in_progress");
-    adoptCompletedLifecycle({
-      itemKind: "task",
-      milestoneId: "M001",
-      sliceId: "S01",
-      taskId: "T01",
-    });
     const { notifications, ctx } = makeCtx();
     await handleResetSlice("M001/S01 --force", ctx, {} as any, base);
 

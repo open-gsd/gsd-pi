@@ -23,6 +23,7 @@ import {
   getGateResults,
 } from "../gsd-db.ts";
 import { renderRoadmapContent } from "../workflow-projections.ts";
+import { seedLifecycles } from "./helpers/authority-cutover.ts";
 import type { MilestoneRow, SliceRow } from "../gsd-db.ts";
 import type { AutoSession } from "../auto/session.ts";
 
@@ -291,10 +292,36 @@ describe("#2945 Bug 4: validate-milestone must persist quality_gates records", (
     try { rmSync(basePath, { recursive: true, force: true }); } catch {}
   });
 
-  test("handleValidateMilestone persists quality_gates records in DB", async () => {
-    // Set up milestone with slices
+  // Canonical validation records only for an adopted Milestone, and it binds
+  // the receipt to a verification source snapshot of the project repository —
+  // so the fixture commits the hierarchy rows and adopts their lifecycles.
+  function seedAdoptedMilestone(key: string): void {
+    writeFileSync(join(basePath, "source.ts"), "export const fixture = 'validate-milestone';\n");
+    execFileSync("git", ["init"], { cwd: basePath, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: basePath });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: basePath });
+    execFileSync("git", ["add", "source.ts"], { cwd: basePath });
+    execFileSync("git", ["commit", "-m", "fixture"], { cwd: basePath, stdio: "ignore" });
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
+    seedLifecycles(`state-corruption-2945/${key}`, [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
+  }
+
+  function validationInvocation(key: string) {
+    return {
+      invocation: {
+        idempotencyKey: `state-corruption-2945/${key}`,
+        sourceTransport: "internal" as const,
+        actorType: "agent" as const,
+      },
+    };
+  }
+
+  test("handleValidateMilestone persists quality_gates records in DB", async () => {
+    seedAdoptedMilestone("persist-gates");
 
     const { handleValidateMilestone } = await import("../tools/validate-milestone.ts");
 
@@ -307,7 +334,7 @@ describe("#2945 Bug 4: validate-milestone must persist quality_gates records", (
       crossSliceIntegration: "Integration verified",
       requirementCoverage: "100% coverage",
       verdictRationale: "All checks pass",
-    }, basePath);
+    }, basePath, validationInvocation("persist-gates"));
 
     assert.ok(!("error" in result), `handler should succeed, got: ${JSON.stringify(result)}`);
 
@@ -325,8 +352,7 @@ describe("#2945 Bug 4: validate-milestone must persist quality_gates records", (
   });
 
   test("handleValidateMilestone records verdict correctly in quality_gates", async () => {
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
+    seedAdoptedMilestone("verdict-gates");
 
     const { handleValidateMilestone } = await import("../tools/validate-milestone.ts");
 
@@ -340,7 +366,7 @@ describe("#2945 Bug 4: validate-milestone must persist quality_gates records", (
       requirementCoverage: "50% coverage",
       verdictRationale: "Needs work",
       remediationPlan: "Fix S01",
-    }, basePath);
+    }, basePath, validationInvocation("verdict-gates"));
 
     const adapter = (await import("../gsd-db.ts"))._getAdapter()!;
     const gates = adapter.prepare(
