@@ -1,7 +1,12 @@
 import { homedir } from "node:os"
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from "node:fs"
 import { join, dirname } from "node:path"
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml"
+import {
+  getGlobalPreferencesPath,
+  parsePreferencesFrontmatter,
+  readGlobalPreferencesFile,
+  writeGlobalPreferencesFile,
+} from "../../../lib/gsd-preferences-file"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -83,10 +88,6 @@ function maskToken(token: string): string {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getPreferencesPath(): string {
-  return join(homedir(), ".gsd", "PREFERENCES.md")
-}
-
 function clamp(value: number | undefined, defaultVal: number, min: number, max: number): number {
   const v = typeof value === "number" && Number.isFinite(value) ? value : defaultVal
   return Math.max(min, Math.min(max, v))
@@ -94,40 +95,6 @@ function clamp(value: number | undefined, defaultVal: number, min: number, max: 
 
 function isValidChannel(ch: unknown): ch is RemoteChannel {
   return typeof ch === "string" && (VALID_CHANNELS as readonly string[]).includes(ch)
-}
-
-/**
- * Parse YAML frontmatter from a markdown file.
- * Uses the same indexOf-based approach as parsePreferencesMarkdown() in preferences.ts.
- */
-function parseFrontmatter(content: string): { data: Record<string, unknown>; body: string; hasFrontmatter: boolean } {
-  const startMarker = content.startsWith("---\r\n") ? "---\r\n" : "---\n"
-  if (!content.startsWith(startMarker)) {
-    return { data: {}, body: content, hasFrontmatter: false }
-  }
-  const searchStart = startMarker.length
-  const endIdx = content.indexOf("\n---", searchStart)
-  if (endIdx === -1) {
-    return { data: {}, body: content, hasFrontmatter: false }
-  }
-  const block = content.slice(searchStart, endIdx)
-  const afterFrontmatter = content.slice(endIdx + 4) // skip \n---
-
-  try {
-    const parsed = parseYaml(block.replace(/\r/g, ""))
-    const data = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {}
-    return { data, body: afterFrontmatter, hasFrontmatter: true }
-  } catch {
-    return { data: {}, body: content, hasFrontmatter: false }
-  }
-}
-
-/**
- * Write frontmatter data back to a markdown file, preserving the body content.
- */
-function writeFrontmatter(data: Record<string, unknown>, body: string): string {
-  const yamlStr = stringifyYaml(data, { lineWidth: 0 }).trimEnd()
-  return `---\n${yamlStr}\n---${body}`
 }
 
 interface RemoteQuestionsResponse {
@@ -147,9 +114,7 @@ interface RemoteQuestionsResponse {
 
 export async function GET(): Promise<Response> {
   try {
-    const prefsPath = getPreferencesPath()
-
-    if (!existsSync(prefsPath)) {
+    if (!existsSync(getGlobalPreferencesPath())) {
       const response: RemoteQuestionsResponse = {
         config: null,
         envVarSet: false,
@@ -162,8 +127,7 @@ export async function GET(): Promise<Response> {
       })
     }
 
-    const content = readFileSync(prefsPath, "utf-8")
-    const { data } = parseFrontmatter(content)
+    const { data } = readGlobalPreferencesFile()
     const rq = data.remote_questions as Record<string, unknown> | undefined
 
     if (!rq || typeof rq !== "object" || !rq.channel) {
@@ -264,13 +228,10 @@ export async function POST(request: Request): Promise<Response> {
     const pollIntervalSeconds = clamp(rawPoll as number | undefined, DEFAULT_POLL_INTERVAL_SECONDS, MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS)
 
     // Read current preferences
-    const prefsPath = getPreferencesPath()
     let data: Record<string, unknown> = {}
     let body2 = ""
-
-    if (existsSync(prefsPath)) {
-      const content = readFileSync(prefsPath, "utf-8")
-      const parsed = parseFrontmatter(content)
+    if (existsSync(getGlobalPreferencesPath())) {
+      const parsed = readGlobalPreferencesFile()
       data = parsed.data
       body2 = parsed.body
     }
@@ -283,12 +244,8 @@ export async function POST(request: Request): Promise<Response> {
       poll_interval_seconds: pollIntervalSeconds,
     }
 
-    // Write back
-    const dir = dirname(prefsPath)
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true })
-    }
-    writeFileSync(prefsPath, writeFrontmatter(data, body2), "utf-8")
+    // Write back (atomic through the shared preferences writer)
+    writeGlobalPreferencesFile(data, body2)
 
     return Response.json(
       {
@@ -310,17 +267,14 @@ export async function POST(request: Request): Promise<Response> {
 
 export async function DELETE(): Promise<Response> {
   try {
-    const prefsPath = getPreferencesPath()
-
-    if (!existsSync(prefsPath)) {
+    if (!existsSync(getGlobalPreferencesPath())) {
       return Response.json(
         { success: true },
         { headers: { "Cache-Control": "no-store" } },
       )
     }
 
-    const content = readFileSync(prefsPath, "utf-8")
-    const { data, body, hasFrontmatter } = parseFrontmatter(content)
+    const { data, body, hasFrontmatter } = readGlobalPreferencesFile()
 
     if (!hasFrontmatter || !data.remote_questions) {
       return Response.json(
@@ -330,7 +284,7 @@ export async function DELETE(): Promise<Response> {
     }
 
     delete data.remote_questions
-    writeFileSync(prefsPath, writeFrontmatter(data, body), "utf-8")
+    writeGlobalPreferencesFile(data, body)
 
     return Response.json(
       { success: true },
