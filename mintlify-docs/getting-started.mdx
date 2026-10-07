@@ -116,7 +116,7 @@ gsd
 /gsd queue      # queue the next milestone
 ```
 
-Both terminals read and write the same `.gsd/` files. Decisions in terminal 2 are picked up at the next phase boundary automatically.
+Both terminals share the project database (`.gsd/gsd.db`) — that database is what teams and terminals share. The `.gsd/` markdown files are rendered views of it: a command writes a row, and the files re-render. Decisions in terminal 2 are picked up at the next phase boundary automatically.
 
 ## Project structure
 

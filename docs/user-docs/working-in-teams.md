@@ -72,7 +72,7 @@ If you have an existing project with `.gsd/` blanket-ignored:
 
 Teams configured to track planning artifacts in git (i.e. with `mode: team` and `.gsd/phases/` not gitignored) can use a two-PR cycle to get plan approval before any code is written:
 
-1. **Plan PR** — developer runs `/gsd discuss` on `main`, which writes flat-phase planning artifacts to `.gsd/phases/<NN-slug>/` (phase files `<NN>-CONTEXT.md` and `<NN>-ROADMAP.md`) and updates the top-level `.gsd/REQUIREMENTS.md` and `.gsd/DECISIONS.md`. Legacy projects may still resolve to `.gsd/milestones/<MID>/<MID>-*.md` until migration. The developer commits these and opens a docs-only PR.
+1. **Plan PR** — developer runs `/gsd discuss` on `main`, which commits the plan to the project database and renders the flat-phase planning artifacts to `.gsd/phases/<NN-slug>/` (phase files `<NN>-CONTEXT.md` and `<NN>-ROADMAP.md`) plus the top-level `.gsd/REQUIREMENTS.md` and `.gsd/DECISIONS.md`; the rendered files are views of the database, and the PR carries those rendered views. Legacy projects may still resolve to `.gsd/milestones/<MID>/<MID>-*.md` until migration. The developer commits these and opens a docs-only PR.
 2. **Review** — the team reviews scope, risks, slice breakdown, and definition of done directly in GitHub. No code to review yet, just the plan.
 3. **Code PR** — after the plan PR is merged, the developer pulls `main`, imports the approved plan with `/gsd recover` (see [Importing Committed Planning Changes](#importing-committed-planning-changes)), and runs `/gsd auto`. GSD creates a worktree and executes against the imported plan. The result is a second PR with the actual implementation.
 

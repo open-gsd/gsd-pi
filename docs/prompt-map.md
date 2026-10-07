@@ -273,6 +273,11 @@ complete-milestone
 
 ### 6a. Sequential Chains
 
+"writes" below means: the unit commits rows through Domain Operations and the
+named files render from them (the writer matrix lives in
+`docs/dev/state-db-cutover-projection-contract.md`). The database is the
+authority; the file is the view.
+
 ```
 gsd.db (derived GSDState)
   └─► auto.ts
@@ -371,6 +376,12 @@ any prompt ─────[failure]──────► forensics / debug-diagn
 ---
 
 ## 7. Artifact Flow (What Each Phase Writes)
+
+Each phase commits database rows (Domain Operations, workflow rows, artifact
+rows) and the named `.gsd/` file is a projection rendered from those rows —
+the same file re-renders on rebuild. `.gsd/PREFERENCES.md` and `CODEBASE.md`
+are not workflow projections: PREFERENCES.md is operator preference frontmatter,
+CODEBASE.md a generated codebase map.
 
 ```
 Phase                   Artifact Written
