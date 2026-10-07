@@ -302,3 +302,12 @@ test("production release stages bundled open-gsd-hermes version files", () => {
   assert.match(commitRelease.run, /integrations\/hermes\/pyproject\.toml/);
   assert.match(commitRelease.run, /integrations\/hermes\/open_gsd_hermes\/gsd_client\.py/);
 });
+
+test("paid live-provider release tests require explicit opt-in", () => {
+  const input = workflow.on.workflow_dispatch.inputs.run_live_tests;
+  assert.equal(input.type, "boolean");
+  assert.equal(input.default, false);
+  const paidSteps = workflow.jobs["prod-release"].steps.filter(step => step.env?.GSD_LIVE_TESTS === "1");
+  assert.equal(paidSteps.length, 2);
+  for (const step of paidSteps) assert.equal(step.if, "${{ inputs.run_live_tests }}");
+});

@@ -20,6 +20,11 @@ on:
         description: "Branch or SHA for standalone prerelease publishes (defaults: dev -> main, next -> next; latest always uses main)"
         required: false
         default: ""
+      run_live_tests:
+        description: "Opt in to paid live-provider release tests"
+        required: false
+        default: false
+        type: boolean
       publish_auth:
         description: "npm auth fallback: token uses NPM_TOKEN for prerelease/native publishes; trusted uses OIDC (default)"
         required: false
@@ -426,6 +431,7 @@ jobs:
       - uses: ./.github/actions/cache-nextjs
 
       - name: Run live LLM tests (optional)
+        if: ${{ inputs.run_live_tests }}
         continue-on-error: true
         run: pnpm run test:live || echo "::warning::Live LLM tests failed - non-blocking, but worth investigating"
         env:
@@ -495,6 +501,7 @@ jobs:
         run: pnpm run build
 
       - name: Run live workflow LLM tests (optional)
+        if: ${{ inputs.run_live_tests }}
         continue-on-error: true
         run: |
           chmod +x dist/loader.js

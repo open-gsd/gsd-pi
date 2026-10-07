@@ -14,10 +14,14 @@ function fixture(t, options = {}) {
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@opengsd/test', version: '1.2.3' }));
   const calls = [];
   let views = 0;
+  let elapsed = 0;
+  const waits = [];
+  const logs = [];
   const metadata = { name: '@opengsd/test', version: '1.2.3', dist: { integrity }, 'dist-tags': { latest: '1.2.3' } };
   Object.assign(metadata, options.metadata);
-  const npm = (args) => {
+  const npm = (args, cwd, timeout) => {
     calls.push(args);
+    options.onCall?.(args, { elapsed, views, metadata, timeout, advance: ms => { elapsed += ms; } });
     if (args[0] === 'pack') {
       const destination = args[args.indexOf('--pack-destination') + 1];
       writeFileSync(join(destination, 'test-1.2.3.tgz'), args[1] === '@opengsd/test@1.2.3' ? (options.remoteBytes ?? bytes) : bytes);
@@ -36,7 +40,7 @@ function fixture(t, options = {}) {
     }
     throw new Error(`Unexpected npm command: ${args}`);
   };
-  return { calls, run: () => publishPackage({ directory: dir, version: '1.2.3', tag: 'latest', npm, wait: async () => {}, log: () => {} }) };
+  return { calls, waits, logs, run: () => publishPackage({ directory: dir, version: '1.2.3', tag: 'latest', npm, now: () => elapsed, verificationTimeoutMs: options.timeoutMs ?? 1_200_000, wait: async ms => { waits.push(ms); elapsed += ms; }, log: line => logs.push(line) }) };
 }
 
 test('same version and latest tag cannot conceal a different artifact', async (t) => {
@@ -146,4 +150,92 @@ test('real npm pack bytes remain identical across the fresh-publish and retry pa
   assert.equal(await publishPackage(options), 'published');
   assert.equal(await publishPackage(options), 'existing');
   assert.equal(publishes, 1);
+});
+
+const registryError = code => Object.assign(new Error(code), { stdout: JSON.stringify({ error: { code } }) });
+
+for (const kind of ['metadata', 'tarball', 'tag']) {
+  test(`${kind} propagation beyond ten minutes eventually verifies without republishing`, async t => {
+    const f = fixture(t, { fresh: true, onCall(args, { elapsed, views, metadata }) {
+      if (kind === 'metadata' && args[0] === 'view' && views > 0 && elapsed < 660_000) throw registryError('E404');
+      if (kind === 'tarball' && args[0] === 'pack' && args[1].startsWith('@') && elapsed < 660_000) throw registryError('E404');
+      if (kind === 'tag') metadata['dist-tags'].latest = elapsed < 660_000 ? '1.2.2' : '1.2.3';
+    } });
+    assert.equal(await f.run(), 'published');
+    assert.equal(f.calls.filter(a => a[0] === 'publish').length, 1);
+    assert.ok(f.waits.reduce((a,b) => a+b, 0) >= 660_000);
+    assert.ok(f.logs.some(line => /retry.*remaining/i.test(line)));
+  });
+}
+
+for (const kind of ['metadata', 'tarball', 'tag']) {
+  test(`${kind} propagation deadline is finite and never reports success`, async t => {
+    const f = fixture(t, { fresh: true, timeoutMs: 12_000, onCall(args, { views, metadata }) {
+      if (kind === 'metadata' && args[0] === 'view' && views > 0) throw registryError('E404');
+      if (kind === 'tarball' && args[0] === 'pack' && args[1].startsWith('@')) throw registryError('E503');
+      if (kind === 'tag') metadata['dist-tags'] = {};
+    } });
+    await assert.rejects(f.run(), /verification.*timed out/i);
+    assert.deepEqual(f.waits, [5000, 7000]);
+    assert.equal(f.calls.filter(a => a[0] === 'publish').length, 1);
+  });
+}
+
+for (const code of ['E429', 'E500', 'E503', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN']) {
+  test(`post-publication transient ${code} is retried`, async t => {
+    let failed = false;
+    const g = fixture(t, { fresh: true, onCall(args, { views }) {
+      if (args[0] === 'view' && views === 1 && !failed) { failed = true; throw registryError(code); }
+    } });
+    assert.equal(await g.run(), 'published');
+    assert.deepEqual(g.waits, [5000]);
+  });
+}
+
+for (const code of ['E401', 'E403', 'EINTEGRITY']) {
+  test(`post-publication ${code} is terminal`, async t => {
+    const f = fixture(t, { fresh: true, afterPublishError: registryError(code) });
+    await assert.rejects(f.run(), new RegExp(code));
+    assert.deepEqual(f.waits, []);
+  });
+}
+
+test('byte mismatch is terminal even while the requested tag is stale', async t => {
+  const f = fixture(t, { fresh: true, remoteBytes: Buffer.from('wrong bytes'), metadata: { 'dist-tags': {} } });
+  await assert.rejects(f.run(), /downloaded.*identity mismatch/i);
+  assert.deepEqual(f.waits, []);
+});
+
+test('existing identical artifact waits for tag visibility without publication', async t => {
+  const f = fixture(t, { onCall(args, { elapsed, metadata }) {
+    metadata['dist-tags'].latest = elapsed < 15_000 ? '1.2.2' : '1.2.3';
+  } });
+  assert.equal(await f.run(), 'existing');
+  assert.deepEqual(f.waits, [5000, 10000]);
+  assert.equal(f.calls.filter(a => a[0] === 'publish').length, 0);
+});
+
+for (const timeoutMs of [0, -1, NaN, Infinity]) {
+  test(`invalid verification deadline ${timeoutMs} fails before npm`, async t => {
+    const f = fixture(t, { timeoutMs });
+    await assert.rejects(f.run(), /timeout/i);
+    assert.equal(f.calls.length, 0);
+  });
+}
+
+test('slow verification calls share the deadline and receive the remaining budget', async t => {
+  const budgets = [];
+  const f = fixture(t, { fresh: true, timeoutMs: 12_000, onCall(args, { views, timeout, advance }) {
+    if (args[0] === 'view' && views > 0) { budgets.push(timeout); advance(8000); }
+    if (args[0] === 'pack' && args[1].startsWith('@')) { budgets.push(timeout); advance(4000); throw registryError('ETIMEDOUT'); }
+  } });
+  await assert.rejects(f.run(), /verification.*timed out/i);
+  assert.deepEqual(budgets, [12000, 4000]);
+  assert.deepEqual(f.waits, []);
+});
+
+test('post-publication missing integrity is terminal, not propagation', async t => {
+  const f = fixture(t, { fresh: true, metadata: { dist: {} } });
+  await assert.rejects(f.run(), /identity mismatch/i);
+  assert.deepEqual(f.waits, []);
 });
