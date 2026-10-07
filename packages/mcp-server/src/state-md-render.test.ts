@@ -21,7 +21,7 @@ import { discardMilestone, parkMilestone, unparkMilestone } from "../../../src/r
 import { handleUndo, handleUndoTask } from "../../../src/resources/extensions/gsd/undo.ts";
 import { handleQueueReorder } from "../../../src/resources/extensions/gsd/guided-flow-queue.ts";
 import { mergeCompletedMilestone } from "../../../src/resources/extensions/gsd/parallel-merge.ts";
-import { seedMergeReadyMilestone } from "../../../src/resources/extensions/gsd/tests/merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "../../../src/resources/extensions/gsd/tests/merge-ready-fixture.ts";
 import { handleEscalateCommand } from "../../../src/resources/extensions/gsd/commands/handlers/escalate.ts";
 import { withCommandCwd } from "../../../src/resources/extensions/gsd/commands/context.ts";
 import { buildEscalationArtifact, openTaskEscalation } from "../../../src/resources/extensions/gsd/escalation.ts";
@@ -97,6 +97,12 @@ function callTool(transport: Transport, base: string, name: string, args: Record
 
 async function openFixture(t: TestContext): Promise<WorkflowAuthorityFixture> {
   const fixture = await createWorkflowAuthorityFixture();
+  // The canonical validate records verification evidence against the project's
+  // source revision, so the fixture project must be a git repository.
+  execSync("git init -b main && git add -A && git -c user.email=fixture@test -c user.name=fixture commit -m fixture --allow-empty", {
+    cwd: fixture.root,
+    stdio: "ignore",
+  });
   seedPrerequisiteCompletionEvidence();
   t.after(() => fixture.cleanup());
   return fixture;
@@ -459,8 +465,10 @@ describe("STATE.md render after a parallel merge", () => {
     writeFileSync(join(repo, "merged.ts"), "export const merged = true;\n");
     run("git add .", repo);
     run("git commit -m feat", repo);
+    // The validation receipt must bind the milestone branch's tree: the merge
+    // body checks the branch out before the closeout gate re-captures the hash.
+    seedCanonicalMergeReadyMilestone(repo, "M010");
     run("git checkout main", repo);
-    seedMergeReadyMilestone(repo, "M010");
     assert.ok(openDatabase(join(repo, ".gsd", "gsd.db")), "merge test database must open");
     process.chdir(repo);
 
