@@ -9,6 +9,7 @@ import {
   type DomainOperationContext,
 } from "../domain-operation.js";
 import { getDb, isInTransaction } from "../engine.js";
+import { incrementLegacyTelemetry } from "../../legacy-telemetry.js";
 import { CURRENT_TASK_RECOVERY_CAUSAL_AUTHORITY_SQL } from "../sql-constants.js";
 import {
   isAllowedKernelStageTransition,
@@ -638,6 +639,9 @@ export function completeLegacyTaskForVerifiedAttempt(
   if (changes(result) !== 1) {
     throw new Error("Verified Task publication did not complete exactly one legacy Task");
   }
+  // The canonical lifecycle row carries the completion; this legacy tasks.status
+  // write only keeps the replan gate's legacy reads coherent. The G8 gate watches it.
+  incrementLegacyTelemetry("legacy.legacyTaskStatusWrite");
 }
 
 /**

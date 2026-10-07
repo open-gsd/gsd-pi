@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { withDatabaseMaintenanceOwner } from "../database-maintenance-fence.js";
 import { immediateTransaction, withDatabaseMaintenanceClaim } from "../db/engine.js";
 import { inspectLegacyImportApplicationEvidence } from "../legacy-import-application-evidence.js";
+import { incrementLegacyTelemetry } from "../legacy-telemetry.js";
 import {
   verifyLegacyImportApplicationResult,
   verifyLegacyImportApplicationTargets,
@@ -291,6 +292,9 @@ export async function importWrittenMigrationToDb(
   if (!opened) {
     throw new Error(`failed to open or create the GSD database at ${basePath}`);
   }
+  // The migrate import lands hierarchy rows through the pre-adoption upsert
+  // ELSE arms in gsd-db.ts; the G8 gate watches this bridge.
+  incrementLegacyTelemetry("legacy.migrateImported");
 
   const counts = applyVerifiedMigrationApplication(
     basePath,

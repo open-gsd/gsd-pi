@@ -47,6 +47,7 @@ import {
   type ImportDomainOperationRequest,
 } from "./db/domain-operation.js";
 import { getDb, readTransaction } from "./db/engine.js";
+import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 import {
   applyLegacyImportApplicationPlan,
   insertLegacyImportApplicationReceipt,
@@ -947,6 +948,8 @@ export function applyLegacyImport(input: unknown): LegacyImportApplicationReceip
   const snapshot = snapshotLegacyImportApplication(input);
   const existing = replayReceipt(snapshot);
   if (existing) return existing;
+  // A replay writes no rows, so only a fresh application counts as a bridge run.
+  incrementLegacyTelemetry("legacy.importApplied");
 
   const plan = compileLegacyImportApplicationPlan(snapshot.input.preview);
   requireDestructiveConsent(snapshot);

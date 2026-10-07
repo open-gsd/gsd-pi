@@ -2,6 +2,7 @@
 // File Purpose: Sole crash-convergent owner for an eligible live legacy-import database restore.
 
 import { deepFreeze } from "./legacy-import-utils.js";
+import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -1962,5 +1963,6 @@ export function _restoreLegacyImportLiveForTest(
 }
 
 export function restoreLegacyImportLive(value: unknown): LegacyImportLiveRestoreResult {
+  incrementLegacyTelemetry("legacy.restoreExecuted");
   return _restoreLegacyImportLiveForTest(value);
 }

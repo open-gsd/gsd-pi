@@ -11,6 +11,7 @@ import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import type { Override } from "./files.js";
 import { executeDomainOperation, isDbAvailable } from "./gsd-db.js";
+import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 import { resolveGsdRootFile } from "./paths.js";
 import { deriveState } from "./state.js";
 import { logWarning } from "./workflow-logger.js";
@@ -125,6 +126,8 @@ export function unimportedFileOverrides(basePath: string): FileOverride[] {
 
 /** doctor --fix: record file blocks as override events in one override.import Domain Operation. An unknown scope fails loud. */
 export function importFileOverrides(basePath: string, overrides: readonly FileOverride[]): void {
+  if (overrides.length === 0) return;
+  incrementLegacyTelemetry("legacy.fileOverridesImported");
   for (const { timestamp, scope } of overrides) {
     if (scope !== "active" && scope !== "resolved") {
       throw new Error(`OVERRIDES.md override ${timestamp} has unknown scope "${scope}"`);

@@ -12,6 +12,7 @@ import { getDbOrNull } from "./db/engine.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import { executeDomainOperation, isDbAvailable } from "./gsd-db.js";
+import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 import { gsdRoot } from "./paths.js";
 import { logWarning } from "./workflow-logger.js";
 import { deriveState } from "./state.js";
@@ -295,6 +296,7 @@ export function unimportedFileCaptures(basePath: string): CaptureEntry[] {
  */
 export function importFileCaptures(basePath: string, captures: readonly CaptureEntry[]): void {
   if (captures.length === 0) return;
+  incrementLegacyTelemetry("legacy.fileCapturesImported");
   runCaptureOperation(basePath, "capture.import", { captureIds: captures.map((capture) => capture.id) },
     () => captures.flatMap((capture) => {
       const events: CaptureEvent[] = [{
