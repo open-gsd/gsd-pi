@@ -18,7 +18,7 @@ import { createAutoWorktree } from "../auto-worktree-creation.ts";
 import { mergeMilestoneToMain } from "../auto-worktree-merge.ts";
 import { _resetServiceCache } from "../worktree.ts";
 import { _clearGsdRootCache } from "../paths.ts";
-import { seedMergeReadyMilestone } from "./merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 import { closeDatabase } from "../gsd-db.ts";
 
 // Isolate from user's global preferences (which may have git.main_branch set)
@@ -74,7 +74,6 @@ test("#2766: stash pop conflict on .gsd/ files is auto-resolved", () => {
   const repo = createTempRepo();
   try {
     const wtPath = createAutoWorktree(repo, "M300");
-    seedMergeReadyMilestone(repo, "M300");
 
     // Add a slice with real code on the milestone branch
     const normalizedPath = wtPath.replaceAll("\\", "/");
@@ -92,6 +91,10 @@ test("#2766: stash pop conflict on .gsd/ files is auto-resolved", () => {
 
     // Dirty .gsd/STATE.md in the main repo (stash will conflict on pop)
     writeFileSync(join(repo, ".gsd", "STATE.md"), "version: 2-main-dirty\n");
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M300", { sourceTree: wtPath });
 
     const roadmap = makeRoadmap("M300", "Stash pop conflict test", [
       { id: "S01", title: "Feature" },
@@ -129,7 +132,6 @@ test("stash pop conflict on a .gsd file that the merge deleted keeps the file on
     run('git commit -m "add notes"', repo);
 
     const wtPath = createAutoWorktree(repo, "M302");
-    seedMergeReadyMilestone(repo, "M302");
     writeFileSync(join(wtPath, "feature.ts"), "export const feature = true;\n");
     run("git rm .gsd/NOTES.md", wtPath);
     run("git add .", wtPath);
@@ -137,6 +139,10 @@ test("stash pop conflict on a .gsd file that the merge deleted keeps the file on
 
     // Dirty .gsd/NOTES.md in the main repo: the stash pop finds it deleted in HEAD.
     writeFileSync(join(repo, ".gsd", "NOTES.md"), "notes: 2-main-dirty\n");
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M302", { sourceTree: wtPath });
 
     mergeMilestoneToMain(repo, "M302", makeRoadmap("M302", "Deleted .gsd file", [{ id: "S01", title: "Feature" }]));
 
@@ -155,7 +161,6 @@ test("#2766: stash pop conflict on non-.gsd files preserves stash for manual res
   const repo = createTempRepo();
   try {
     const wtPath = createAutoWorktree(repo, "M301");
-    seedMergeReadyMilestone(repo, "M301");
 
     // Add a slice that modifies a file also dirty on main
     const normalizedPath = wtPath.replaceAll("\\", "/");
@@ -171,6 +176,10 @@ test("#2766: stash pop conflict on non-.gsd files preserves stash for manual res
     // Dirty README.md in the main repo — this will conflict on stash pop
     // and is NOT a .gsd/ file, so it should be left for manual resolution
     writeFileSync(join(repo, "README.md"), "# locally modified\n");
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M301", { sourceTree: wtPath });
 
     const roadmap = makeRoadmap("M301", "Non-gsd stash conflict", [
       { id: "S01", title: "Readme update" },
@@ -195,7 +204,6 @@ test("#4766: stash pop untracked already-exists collisions on .gsd files drop st
   const repo = createTempRepo();
   try {
     const wtPath = createAutoWorktree(repo, "M302");
-    seedMergeReadyMilestone(repo, "M302");
 
     const normalizedPath = wtPath.replaceAll("\\", "/");
     const worktreeName = normalizedPath.split("/").pop() || "M302";
@@ -220,6 +228,10 @@ test("#4766: stash pop untracked already-exists collisions on .gsd files drop st
     writeFileSync(join(wtArtifactDir, "M302-SUMMARY.md"), "summary from milestone branch\n");
     run("git add .gsd/milestones/M302/M302-SUMMARY.md", wtPath);
     run('git commit -m "add milestone artifact"', wtPath);
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M302", { sourceTree: wtPath });
 
     const roadmap = makeRoadmap("M302", "Stash pop already-exists regression", [
       { id: "S01", title: "Feature 302" },

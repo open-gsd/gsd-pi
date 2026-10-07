@@ -31,7 +31,7 @@ import { execSync } from "node:child_process";
 import { mergeMilestoneToMain } from "../../auto-worktree-merge.ts";
 import { closeDatabase } from "../../gsd-db.ts";
 import { MergeConflictError } from "../../git-service.ts";
-import { seedMergeReadyMilestone } from "../merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "../merge-ready-fixture.ts";
 
 function run(cmd: string, cwd: string): string {
   return execSync(cmd, {
@@ -98,7 +98,9 @@ describe("merge cwd restore (#2929)", () => {
     writeFileSync(join(repo, "README.md"), "# main version (diverged)\n");
     run("git add .", repo);
     run('git commit -m "main diverges README"', repo);
-    seedMergeReadyMilestone(repo, "M010");
+    // Branch mode: the merge guards read canonical closeout state bound to
+    // the project root tree.
+    seedCanonicalMergeReadyMilestone(repo, "M010");
 
     // cwd must be repo root (simulates parallel-merge calling from project root)
     process.chdir(repo);
@@ -135,18 +137,21 @@ describe("merge cwd restore (#2929)", () => {
     run('git commit -m "M010 work"', repo);
     run("git checkout main", repo);
 
-    // Simulate the parallel-mode state: cwd is on main with dirty files
-    // from another milestone (as if a prior merge's MergeConflictError
-    // left cwd on main and syncStateToProjectRoot wrote these files).
-    writeFileSync(join(repo, "dirty-from-m020.txt"), "should not be committed\n");
-
     // Set up roadmap so mergeMilestoneToMain can find milestone metadata
     mkdirSync(join(repo, ".gsd", "milestones", "M010"), { recursive: true });
     writeFileSync(
       join(repo, ".gsd", "milestones", "M010", "M010-ROADMAP.md"),
       makeRoadmap("M010", "First milestone"),
     );
-    seedMergeReadyMilestone(repo, "M010");
+    // The receipt must bind the committed tree only: the merge's
+    // authorization stash removes untracked files before the closeout gate
+    // re-captures the tree, so seeding happens before the dirty file exists.
+    seedCanonicalMergeReadyMilestone(repo, "M010");
+
+    // Simulate the parallel-mode state: cwd is on main with dirty files
+    // from another milestone (as if a prior merge's MergeConflictError
+    // left cwd on main and syncStateToProjectRoot wrote these files).
+    writeFileSync(join(repo, "dirty-from-m020.txt"), "should not be committed\n");
 
     process.chdir(repo);
 

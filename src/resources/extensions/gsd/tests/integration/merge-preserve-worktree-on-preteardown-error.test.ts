@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 
 import { GSDError } from "../../errors.js";
 import { mergeMilestoneToMain } from "../../auto-worktree-merge.ts";
-import { seedMergeReadyMilestone } from "../merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "../merge-ready-fixture.ts";
 
 function run(cmd: string, cwd: string): string {
   return execSync(cmd, {
@@ -55,11 +55,15 @@ test("mergeMilestoneToMain preserves milestone worktree when pre-teardown dirty 
 
   mkdirSync(join(repo, ".gsd", "milestones", milestoneId), { recursive: true });
   writeFileSync(join(repo, ".gsd", "milestones", milestoneId, `${milestoneId}-ROADMAP.md`), roadmap(milestoneId));
-  seedMergeReadyMilestone(repo, milestoneId);
   run(`git worktree add ${worktreePath} ${milestoneBranch}`, repo);
 
   mkdirSync(join(worktreePath, ".gsd", "activity"), { recursive: true });
   writeFileSync(join(worktreePath, ".gsd", "activity", "runtime.jsonl"), '{"runtime":true}\n');
+
+  // The merge guards read canonical closeout state bound to the tree the
+  // milestone ran in, so the receipt is recorded against the worktree
+  // (the dirty .gsd/ activity file is outside the captured source paths).
+  seedCanonicalMergeReadyMilestone(repo, milestoneId, { sourceTree: worktreePath });
 
   process.chdir(worktreePath);
 

@@ -27,7 +27,7 @@ import { mergeMilestoneToMain } from "../../auto-worktree-merge.ts";
 import { captureIntegrationBranch, getSliceBranchName } from "../../worktree.ts";
 import { writeIntegrationBranch, readIntegrationBranch } from "../../git-service.ts";
 import { nextMilestoneId, generateMilestoneSuffix } from "../../guided-flow.ts";
-import { seedMergeReadyMilestone } from "../merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "../merge-ready-fixture.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -199,7 +199,6 @@ describe('feature-branch-lifecycle-integration', async () => {
       const featureShaBeforeWorktree = headSha(repo, featureBranch);
 
       // ── Create the auto-worktree ──
-      seedMergeReadyMilestone(repo, milestoneId);
       const wtPath = createAutoWorktree(repo, milestoneId);
       tempDirs.push(wtPath);
       assert.ok(existsSync(wtPath), "worktree directory created");
@@ -241,6 +240,9 @@ describe('feature-branch-lifecycle-integration', async () => {
       ]);
 
       process.chdir(wtPath);
+      // The merge guards read canonical closeout state bound to the tree the
+      // milestone ran in, so the receipt is recorded against the final worktree.
+      seedCanonicalMergeReadyMilestone(repo, milestoneId, { sourceTree: wtPath });
       const result = mergeMilestoneToMain(repo, milestoneId, roadmap);
       process.chdir(savedCwd);
 
@@ -362,13 +364,15 @@ describe('feature-branch-lifecycle-integration', async () => {
       mkdirSync(join(repo, ".gsd", "milestones", mid1), { recursive: true });
       writeIntegrationBranch(repo, mid1, featureBranch);
 
-      seedMergeReadyMilestone(repo, mid1);
       const wt1 = createAutoWorktree(repo, mid1);
       tempDirs.push(wt1);
       addSliceToMilestone(wt1, mid1, "S01", "First milestone work", [
         { file: "m1-feature.ts", content: "export const m1 = true;\n", message: "feat: m1" },
       ]);
       process.chdir(wt1);
+      // The merge guards read canonical closeout state bound to the tree the
+      // milestone ran in, so the receipt is recorded against the final worktree.
+      seedCanonicalMergeReadyMilestone(repo, mid1, { sourceTree: wt1 });
       mergeMilestoneToMain(repo, mid1, makeRoadmap(mid1, "First", [{ id: "S01", title: "First milestone work" }]));
       process.chdir(savedCwd);
 
@@ -382,13 +386,13 @@ describe('feature-branch-lifecycle-integration', async () => {
       mkdirSync(join(repo, ".gsd", "milestones", mid2), { recursive: true });
       writeIntegrationBranch(repo, mid2, featureBranch);
 
-      seedMergeReadyMilestone(repo, mid2);
       const wt2 = createAutoWorktree(repo, mid2);
       tempDirs.push(wt2);
       addSliceToMilestone(wt2, mid2, "S01", "Second milestone work", [
         { file: "m2-feature.ts", content: "export const m2 = true;\n", message: "feat: m2" },
       ]);
       process.chdir(wt2);
+      seedCanonicalMergeReadyMilestone(repo, mid2, { sourceTree: wt2 });
       mergeMilestoneToMain(repo, mid2, makeRoadmap(mid2, "Second", [{ id: "S01", title: "Second milestone work" }]));
       process.chdir(savedCwd);
 

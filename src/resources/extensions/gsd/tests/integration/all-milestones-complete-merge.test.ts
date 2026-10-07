@@ -30,7 +30,7 @@ import { isInAutoWorktree } from "../../auto-worktree-entry.ts";
 import { mergeMilestoneToMain } from "../../auto-worktree-merge.ts";
 import { getAutoWorktreeOriginalBase } from "../../auto-worktree-session-registry.ts";
 import { closeDatabase } from "../../gsd-db.ts";
-import { seedMergeReadyMilestone } from "../merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "../merge-ready-fixture.ts";
 
 function run(command: string, cwd: string): string {
   return execSync(command, {
@@ -99,7 +99,6 @@ test("single milestone worktree is merged to main when all complete (#962)", (t)
   createMilestoneArtifacts(tempDir, "M001");
   run("git add .", tempDir);
   run('git commit -m "add milestone"', tempDir);
-  seedMergeReadyMilestone(tempDir, "M001");
 
   // Create worktree and simulate work
   const wt = createAutoWorktree(tempDir, "M001");
@@ -108,6 +107,10 @@ test("single milestone worktree is merged to main when all complete (#962)", (t)
   writeFileSync(join(wt, "feature.ts"), "export const feature = true;\n");
   run("git add .", wt);
   run('git commit -m "feat(M001): add feature"', wt);
+
+  // The merge guards read canonical closeout state bound to the tree the
+  // milestone ran in, so the receipt is recorded against the final worktree.
+  seedCanonicalMergeReadyMilestone(tempDir, "M001", { sourceTree: wt });
 
   // Simulate the fix: merge before stopping (what the "all complete" path now does)
   const roadmapPath = join(
@@ -167,7 +170,6 @@ test("last milestone worktree is merged when it's the final one (#962)", (t) => 
   createMilestoneArtifacts(tempDir, "M002");
   run("git add .", tempDir);
   run('git commit -m "add milestones"', tempDir);
-  seedMergeReadyMilestone(tempDir, "M001");
 
   // Complete M001 first (merge it)
   const wt1 = createAutoWorktree(tempDir, "M001");
@@ -178,10 +180,12 @@ test("last milestone worktree is merged when it's the final one (#962)", (t) => 
     join(tempDir, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
     "utf-8",
   );
+  // The merge guards read canonical closeout state bound to the tree the
+  // milestone ran in, so the receipt is recorded against the final worktree.
+  seedCanonicalMergeReadyMilestone(tempDir, "M001", { sourceTree: wt1 });
   mergeMilestoneToMain(tempDir, "M001", roadmap1);
 
   // Now complete M002 (the LAST milestone — this is the #962 scenario)
-  seedMergeReadyMilestone(tempDir, "M002");
   const wt2 = createAutoWorktree(tempDir, "M002");
   writeFileSync(join(wt2, "m002-work.ts"), "export const m002 = true;\n");
   run("git add .", wt2);
@@ -190,6 +194,7 @@ test("last milestone worktree is merged when it's the final one (#962)", (t) => 
     join(tempDir, ".gsd", "milestones", "M002", "M002-ROADMAP.md"),
     "utf-8",
   );
+  seedCanonicalMergeReadyMilestone(tempDir, "M002", { sourceTree: wt2 });
   mergeMilestoneToMain(tempDir, "M002", roadmap2);
 
   // Both features should now be on main

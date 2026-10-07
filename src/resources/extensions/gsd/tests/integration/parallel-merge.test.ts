@@ -47,7 +47,7 @@ import {
   insertSlice,
 } from "../../gsd-db.ts";
 import { resolveMilestoneFile } from "../../paths.ts";
-import { seedMergeReadyMilestone } from "../merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "../merge-ready-fixture.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -63,12 +63,24 @@ function createTempRepo(): string {
   writeFileSync(join(dir, "README.md"), "# test\n");
   // Mirror production: worktrees and the live SQLite files are never branch
   // content, so checkout cannot replace the canonical database inode.
-  writeFileSync(join(dir, ".gitignore"), ".gsd/worktrees/\n.gsd/gsd.db*\n");
+  writeFileSync(join(dir, ".gitignore"), ".gsd/worktrees/\n.gsd-worktrees/\n.gsd/gsd.db*\n");
   mkdirSync(join(dir, ".gsd"), { recursive: true });
   writeFileSync(join(dir, ".gsd", "STATE.md"), "# State\n");
   run("git add .", dir);
   run("git commit -m init", dir);
   return dir;
+}
+
+/**
+ * Register a real git worktree for an existing milestone branch, matching
+ * what a production worktree-isolation run puts on disk. mergeCompletedMilestone
+ * detects the registration and merges from the worktree.
+ */
+function createMilestoneWorktree(repo: string, mid: string): string {
+  const wt = join(repo, ".gsd-worktrees", mid);
+  mkdirSync(join(repo, ".gsd-worktrees"), { recursive: true });
+  run(`git worktree add "${wt}" milestone/${mid}`, repo);
+  return wt;
 }
 
 function makeWorker(overrides: Partial<WorkerInfo> = {}): WorkerInfo {
@@ -367,6 +379,15 @@ test("mergeCompletedMilestone — synthesizes roadmap from DB when projection is
     // torn-down worktrees that still leave `.gsd/worktrees/<MID>/`.
     mkdirSync(join(repo, ".gsd", "worktrees", "M010", ".gsd"), { recursive: true });
 
+    // Branch mode: the merge guards read canonical closeout state bound to
+    // the tree, and the merge body checks out the milestone branch first.
+    // The fixture adopts the slice rows above, so the synthesized roadmap
+    // still comes from the DB slices.
+    seedForBranchModeMerge(repo, "M010");
+    // The roadmap synthesis reads the open project DB; the fixture closes
+    // its own connection, so restore the test's open handle.
+    assert.equal(openDatabase(join(repo, ".gsd", "gsd.db")), true);
+
     process.chdir(repo);
     const result = await mergeCompletedMilestone(repo, "M010");
 
@@ -446,7 +467,9 @@ test("mergeCompletedMilestone — clean merge, session status cleaned up", async
     createMilestoneBranch(repo, "M010", [
       { name: "auth.ts", content: "export const auth = true;\n" },
     ]);
-    seedMergeReadyMilestone(repo, "M010");
+    // Branch mode: the merge guards read canonical closeout state bound to
+    // the tree, and the merge body checks out the milestone branch first.
+    seedForBranchModeMerge(repo, "M010");
 
     // Write session status to verify cleanup
     writeSessionStatus(repo, {
@@ -520,7 +543,7 @@ test("mergeCompletedMilestone — conflict returns structured error with file li
     writeFileSync(join(repo, "README.md"), "# main version (diverged)\n");
     run("git add .", repo);
     run('git commit -m "main changes README"', repo);
-    seedMergeReadyMilestone(repo, "M020");
+    seedForBranchModeMerge(repo, "M020");
 
     process.chdir(repo);
     const result = await mergeCompletedMilestone(repo, "M020");
@@ -548,7 +571,9 @@ test("mergeAllCompleted — merges in sequential order", async () => {
   const repo = createTempRepo();
 
   try {
-    setupBranchIsolation(repo);
+    // Worktree isolation to match the registered worktrees below: each
+    // milestone merges from its own worktree, the way production runs.
+    setupWorktreeIsolation(repo);
 
     // Roadmaps committed on main BEFORE branching — see "clean merge" test.
     setupRoadmap(repo, "M001", "Auth", ["S01: Auth module"]);
@@ -562,8 +587,13 @@ test("mergeAllCompleted — merges in sequential order", async () => {
     createMilestoneBranch(repo, "M002", [
       { name: "dashboard.ts", content: "export const dash = true;\n" },
     ]);
-    seedMergeReadyMilestone(repo, "M001");
-    seedMergeReadyMilestone(repo, "M002");
+    // Real registered worktrees (production's own isolation): each receipt
+    // binds the tree its milestone ran in, so main advancing between the two
+    // merges cannot stale the still-unmerged milestone's validation.
+    const wt1 = createMilestoneWorktree(repo, "M001");
+    const wt2 = createMilestoneWorktree(repo, "M002");
+    seedCanonicalMergeReadyMilestone(repo, "M001", { sourceTree: wt1 });
+    seedCanonicalMergeReadyMilestone(repo, "M002", { sourceTree: wt2 });
 
     const workers = [
       makeWorker({ milestoneId: "M002", startedAt: 100 }),
@@ -616,8 +646,8 @@ test("mergeAllCompleted — stops on first conflict, skips later milestones", as
     writeFileSync(join(repo, "README.md"), "# main diverged version\n");
     run("git add .", repo);
     run('git commit -m "main diverges README"', repo);
-    seedMergeReadyMilestone(repo, "M001");
-    seedMergeReadyMilestone(repo, "M002");
+    seedForBranchModeMerge(repo, "M001");
+    seedForBranchModeMerge(repo, "M002");
 
     const workers = [
       makeWorker({ milestoneId: "M001" }),
@@ -650,7 +680,9 @@ test("mergeAllCompleted — by-completion order respects startedAt", async () =>
   const repo = createTempRepo();
 
   try {
-    setupBranchIsolation(repo);
+    // Worktree isolation to match the registered worktrees below: each
+    // milestone merges from its own worktree, the way production runs.
+    setupWorktreeIsolation(repo);
 
     // Roadmaps committed on main BEFORE branching — see "clean merge" test.
     setupRoadmap(repo, "M001", "Auth", ["S01: Auth module"]);
@@ -664,8 +696,13 @@ test("mergeAllCompleted — by-completion order respects startedAt", async () =>
     createMilestoneBranch(repo, "M002", [
       { name: "feature.ts", content: "export const feature = true;\n" },
     ]);
-    seedMergeReadyMilestone(repo, "M001");
-    seedMergeReadyMilestone(repo, "M002");
+    // Real registered worktrees (production's own isolation): each receipt
+    // binds the tree its milestone ran in, so main advancing between the two
+    // merges cannot stale the still-unmerged milestone's validation.
+    const wt1 = createMilestoneWorktree(repo, "M001");
+    const wt2 = createMilestoneWorktree(repo, "M002");
+    seedCanonicalMergeReadyMilestone(repo, "M001", { sourceTree: wt1 });
+    seedCanonicalMergeReadyMilestone(repo, "M002", { sourceTree: wt2 });
 
     const workers = [
       makeWorker({ milestoneId: "M001", startedAt: 2000 }),
@@ -693,8 +730,22 @@ test("mergeAllCompleted — by-completion order respects startedAt", async () =>
 
 /** Set up canonical DB with a milestone marked complete and a worktree marker dir */
 function setupCanonicalDbWithWorktree(basePath: string, mid: string): void {
+  // The canonical fixture snapshots the tree for the validation receipt, so
+  // the directory must be a repository even when no merge follows.
+  run("git init", basePath);
   mkdirSync(join(basePath, ".gsd", "worktrees", mid), { recursive: true });
-  seedMergeReadyMilestone(basePath, mid);
+  seedCanonicalMergeReadyMilestone(basePath, mid);
+}
+
+/**
+ * Bind the validation receipt to the milestone branch's tree: the branch-mode
+ * merge body checks out milestone/<mid> before the closeout gate re-captures
+ * the tree, so that checkout's content is what the receipt must match.
+ */
+function seedForBranchModeMerge(repo: string, mid: string): void {
+  run(`git checkout milestone/${mid}`, repo);
+  seedCanonicalMergeReadyMilestone(repo, mid);
+  run("git checkout main", repo);
 }
 
 test("determineMergeOrder — finds milestones completed in canonical DB even when worker state is 'error' (#2812)", () => {
@@ -769,8 +820,13 @@ test("mergeAllCompleted — discovers DB-complete milestones when workers show e
       { name: "feature.ts", content: "export const feature = true;\n" },
     ]);
 
-    // Set up canonical DB showing M011 is complete
-    setupCanonicalDbWithWorktree(repo, "M011");
+    // Set up canonical DB showing M011 is complete. The receipt binds the
+    // milestone branch's tree: the branch-mode merge body checks out
+    // milestone/M011 before the closeout gate re-captures the tree.
+    run("git checkout milestone/M011", repo);
+    seedCanonicalMergeReadyMilestone(repo, "M011");
+    run("git checkout main", repo);
+    mkdirSync(join(repo, ".gsd", "worktrees", "M011"), { recursive: true });
 
     // Orchestrator thinks M011 is in error (stale state)
     const workers = [
