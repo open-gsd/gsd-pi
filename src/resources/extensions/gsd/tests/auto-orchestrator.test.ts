@@ -54,6 +54,7 @@ import { getDispatchById, recordDispatchClaim } from "../db/unit-dispatches.js";
 import { executeResearchDecisionSave } from "../tools/research-decision.js";
 import { readStoredUnitRetry, storeUnitRetry } from "../db/unit-dispatch-retries.js";
 import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.js";
 import { recordFailureAndSelectRecovery, resumeTaskRecovery } from "../task-recovery-domain-operation.js";
 import { internalExecutionInvocation, piExecutionInvocation } from "../execution-invocation.js";
@@ -713,12 +714,21 @@ test("advance() merges a completed milestone worktree before all-complete stop",
   const f = makeFixture({ complete: true, noTask: true });
   t.after(() => f.cleanup());
 
-  insertAssessment({
-    path: "milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
+  const worktreePath = join(f.base, ".gsd", "worktrees", "M001");
+  mkdirSync(join(f.base, ".gsd", "worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-b", "milestone/M001", worktreePath], { cwd: f.base, stdio: "ignore" });
+
+  // The settlement proof and the merge guard read canonical closeout state
+  // bound to the tree the milestone ran in. Q3's planned closure comes from
+  // the saved PLAN artifact row. The SUMMARY is a projection of the committed
+  // closeout and is rendered by the projection rebuild, never hand-written.
+  insertArtifact({
+    path: "milestones/M001/slices/S01/S01-PLAN.md",
+    artifact_type: "PLAN",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: null,
+    full_content: "# S01: Slice\n\n## Threat Surface\n\n- Reviewed, none.\n",
   });
   insertGateRow({
     milestoneId: "M001",
@@ -727,12 +737,9 @@ test("advance() merges a completed milestone worktree before all-complete stop",
     scope: "slice",
     status: "pending",
   });
+  seedCanonicalMergeReadyMilestone(f.base, "M001", { sourceTree: worktreePath });
+  openDatabase(join(f.base, ".gsd", "gsd.db"));
 
-  const worktreePath = join(f.base, ".gsd", "worktrees", "M001");
-  mkdirSync(join(f.base, ".gsd", "worktrees"), { recursive: true });
-  execFileSync("git", ["worktree", "add", "-b", "milestone/M001", worktreePath], { cwd: f.base, stdio: "ignore" });
-  mkdirSync(join(worktreePath, ".gsd", "milestones", "M001"), { recursive: true });
-  writeFileSync(join(worktreePath, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Milestone Summary\n");
   f.session.basePath = worktreePath;
   f.session.originalBasePath = f.base;
   f.session.currentMilestoneId = "M001";

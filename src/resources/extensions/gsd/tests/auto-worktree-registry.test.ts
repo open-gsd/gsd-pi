@@ -17,7 +17,7 @@ import {
   setActiveWorkspace,
 } from "../auto-worktree-session-registry.ts";
 import { teardownAutoWorktree } from "../auto-worktree-teardown.ts";
-import { seedMergeReadyMilestone } from "./merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 import { createWorkspace } from "../workspace.ts";
 import { closeDatabase } from "../gsd-db.ts";
 
@@ -192,7 +192,7 @@ describe("auto-worktree workspace registry", () => {
     assert.strictEqual(getActiveAutoWorktreeContext(foreignWorktree), null);
   });
 
-  test("mergeMilestoneToMain cleans up when milestone branch was already regular-merged", (t) => {
+  test("mergeMilestoneToMain cleans up when milestone branch was already regular-merged", async (t) => {
     const tempDir = createTempRepo(t);
     const msDir = join(tempDir, ".gsd", "milestones", "M003");
     mkdirSync(msDir, { recursive: true });
@@ -208,7 +208,9 @@ describe("auto-worktree workspace registry", () => {
 
     process.chdir(tempDir);
     git(["merge", "--no-ff", "milestone/M003", "-m", "merge M003"], tempDir);
-    seedMergeReadyMilestone(tempDir, "M003");
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the worktree.
+    seedCanonicalMergeReadyMilestone(tempDir, "M003", { sourceTree: wtDir });
 
     process.chdir(wtDir);
     const result = mergeMilestoneToMain(tempDir, "M003", "# M003\n- [x] **S01: Done**\n");
@@ -225,7 +227,7 @@ describe("auto-worktree workspace registry", () => {
     try { process.chdir(savedCwd); } catch { /* ignore */ }
   });
 
-  test("mergeMilestoneToMain cleans up already-merged milestone after main advances", (t) => {
+  test("mergeMilestoneToMain cleans up already-merged milestone after main advances", async (t) => {
     const tempDir = createTempRepo(t);
     const msDir = join(tempDir, ".gsd", "milestones", "M004");
     mkdirSync(msDir, { recursive: true });
@@ -244,7 +246,9 @@ describe("auto-worktree workspace registry", () => {
     writeFileSync(join(tempDir, "hotfix.txt"), "later main work\n");
     git(["add", "hotfix.txt"], tempDir);
     git(["commit", "-m", "fix: advance main"], tempDir);
-    seedMergeReadyMilestone(tempDir, "M004");
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the worktree.
+    seedCanonicalMergeReadyMilestone(tempDir, "M004", { sourceTree: wtDir });
 
     process.chdir(wtDir);
     const result = mergeMilestoneToMain(tempDir, "M004", "# M004\n- [x] **S01: Done**\n");

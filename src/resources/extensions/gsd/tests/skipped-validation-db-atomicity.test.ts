@@ -1,21 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { DISPATCH_RULES } from "../auto-dispatch.ts";
 import {
+  _getAdapter,
   closeDatabase,
   getArtifact,
   getAssessment,
-  getLatestAssessmentByScope,
   insertMilestone,
   insertSlice,
   openDatabase,
 } from "../gsd-db.ts";
+import { seedLifecycles } from "./helpers/authority-cutover.ts";
 
-test("skipped validation dispatch persists the validation file and DB assessment together", async () => {
+test("skipped validation dispatch persists the waiver receipt and its VALIDATION projection together", async () => {
   const basePath = mkdtempSync(join(tmpdir(), "gsd-skip-validation-"));
   const milestoneDir = join(basePath, ".gsd", "milestones", "M001");
   const sliceDir = join(milestoneDir, "slices", "S01");
@@ -25,6 +27,13 @@ test("skipped validation dispatch persists the validation file and DB assessment
   try {
     mkdirSync(sliceDir, { recursive: true });
     writeFileSync(join(sliceDir, "S01-SUMMARY.md"), "# S01 Summary\n", "utf-8");
+    // The canonical waiver binds to the fixture repo's source revision.
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: basePath, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: basePath, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: basePath, stdio: "ignore" });
+    writeFileSync(join(basePath, ".gitignore"), ".gsd/\n");
+    execFileSync("git", ["add", ".gitignore"], { cwd: basePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "fixture"], { cwd: basePath, stdio: "ignore" });
     openDatabase(join(basePath, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Validation", status: "active", depends_on: [] });
     insertSlice({
@@ -37,6 +46,10 @@ test("skipped validation dispatch persists the validation file and DB assessment
       demo: "",
       sequence: 1,
     });
+    seedLifecycles("skipped-validation-db-atomicity/adopt", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
 
     const action = await rule.match({
       state: { phase: "validating-milestone" },
@@ -46,12 +59,16 @@ test("skipped validation dispatch persists the validation file and DB assessment
       prefs: { phases: { skip_milestone_validation: true } },
     } as any);
 
-    assert.deepEqual(action, { action: "skip" });
+    // The canonical skip records the waiver and hands over to the guarded
+    // completion dispatch in the same decision.
+    assert.equal(action?.action, "dispatch");
+    assert.equal(action?.action === "dispatch" ? action.unitType : null, "complete-milestone");
     assert.equal(existsSync(join(milestoneDir, "M001-VALIDATION.md")), true);
-    assert.equal(
-      getLatestAssessmentByScope("M001", "milestone-validation")?.status,
-      "pass",
-    );
+    const waiver = _getAdapter()!.prepare(
+      "SELECT waiver_status, scope FROM workflow_waivers WHERE scope = 'milestone-validation'",
+    ).get() as { waiver_status: string; scope: string } | undefined;
+    assert.ok(waiver, "the canonical validation waiver row is persisted");
+    assert.equal(waiver.waiver_status, "active");
   } finally {
     closeDatabase();
     rmSync(basePath, { recursive: true, force: true });

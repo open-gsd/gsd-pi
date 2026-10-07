@@ -12,12 +12,12 @@ import { evaluateAllCompleteSettlement } from "../milestone-settlement.ts";
 import { resolveExpectedArtifactPath } from "../auto-artifact-paths.ts";
 import {
   closeDatabase,
-  insertAssessment,
   insertMilestone,
   insertSlice,
   insertTask,
   openDatabase,
 } from "../gsd-db.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 
 let base = "";
 
@@ -47,13 +47,6 @@ function seedClosedMilestone(root: string, worktree: string): void {
     status: "complete",
     verificationResult: "passed",
   });
-  insertAssessment({
-    path: ".gsd/milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass\n",
-  });
 
   const worktreeMilestoneDir = join(worktree, ".gsd", "milestones", "M001");
   mkdirSync(worktreeMilestoneDir, { recursive: true });
@@ -65,6 +58,11 @@ function seedClosedMilestone(root: string, worktree: string): void {
   assert.ok(summaryPath, "complete-milestone summary path should resolve");
   mkdirSync(dirname(summaryPath), { recursive: true });
   writeFileSync(summaryPath, "# Milestone One\n\nComplete.\n");
+
+  // The settlement proof reads canonical closeout state bound to the tree the
+  // milestone ran in, so the receipt is recorded against the worktree.
+  seedCanonicalMergeReadyMilestone(root, "M001", { sourceTree: worktree });
+  openDatabase(join(root, ".gsd", "gsd.db"));
 }
 
 afterEach(() => {

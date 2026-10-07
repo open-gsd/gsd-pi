@@ -42,7 +42,7 @@ import { createWorktree } from "../worktree-manager.ts";
 import { WorktreeStateProjection } from "../worktree-state-projection.ts";
 import { createWorkspace, scopeMilestone } from "../workspace.ts";
 import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
-import { seedMergeReadyMilestone } from "./merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 
 /** A project root with an open project database and a worktree at the canonical container path. */
 function makeWorktreeProject(t: TestContext): { base: string; wt: string; mainDb: string } {
@@ -201,10 +201,22 @@ test("a gsd.db in shared external state is not a worktree-local database and doe
   // the project `.gsd` does not link there (the #1852 divergence).
   const external = realpathSync(mkdtempSync(join(tmpdir(), "gsd-p28-external-")));
   t.after(() => rmSync(external, { recursive: true, force: true }));
-  seedMergeReadyMilestone(base, "M001");
+  // The canonical closeout gate binds its validation receipt to the milestone
+  // root's source revision, so the fixture is a git repository and the
+  // milestone root is a registered worktree of it.
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: base, stdio: "ignore" });
+  writeFileSync(join(base, ".gitkeep"), "");
+  execFileSync("git", ["add", ".gitkeep"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: base, stdio: "ignore" });
+  rmSync(wt, { recursive: true, force: true });
+  execFileSync("git", ["worktree", "add", "-b", "milestone/M001", wt, "main"], { cwd: base, stdio: "ignore" });
+  // The external state is linked before the receipt is recorded so the
+  // snapshot at validation time equals the snapshot at merge-check time.
   assert.equal(copyWorktreeDb(mainDb, join(external, "gsd.db")), true);
-  rmSync(join(wt, ".gsd"), { recursive: true });
   symlinkSync(external, join(wt, ".gsd"));
+  seedCanonicalMergeReadyMilestone(base, "M001", { sourceTree: wt });
 
   assert.equal(worktreeOwnDbPath(wt), null);
   assertMilestoneDbReadyForMerge({ milestoneId: "M001", projectRoot: base, worktreeCwd: wt });

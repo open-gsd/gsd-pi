@@ -1080,8 +1080,22 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
   renderPassesWith?: string;
   seed?: (base: string) => void;
   prepare?: (base: string) => Promise<unknown>;
+  /** The workflow operation type the tool itself commits. */
+  ownOperationType?: string;
+  /**
+   * Canonical operation types the tool may commit before its own: the
+   * evidence-gated forward shadow repair runs ahead of slice.complete when
+   * the fixture holds legacy-complete rows without lifecycle rows.
+   */
+  preOperationTypes?: readonly string[];
 }> = [
-  { tool: "gsd_slice_complete", args: SLICE_LIFECYCLE_CASES[0].args, passesWith: null },
+  {
+    tool: "gsd_slice_complete",
+    args: SLICE_LIFECYCLE_CASES[0].args,
+    passesWith: null,
+    ownOperationType: SLICE_LIFECYCLE_CASES[0].operationType,
+    preOperationTypes: ["lifecycle.shadow.repair"],
+  },
   {
     tool: "gsd_decision_save",
     args: { ...DECISION_SAVE_ARGS, when_context: "parity matrix", made_by: "agent" },
@@ -1248,18 +1262,48 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
           gateCase.seed?.(base);
           await gateCase.prepare?.(base);
           const before = operationCount();
+          const maxRevisionBefore = Number(_getAdapter()!.prepare(
+            "SELECT COALESCE(MAX(resulting_revision), 0) AS revision FROM workflow_operations",
+          ).get()?.revision);
           const fence = fenceWorkflowWrites();
           const first = await call(gateCase);
           const afterFirstCall = operationCount();
           const replay = await call(gateCase);
           fence.restore();
 
+          const committedTypes = (_getAdapter()!.prepare(
+            "SELECT operation_type FROM workflow_operations WHERE resulting_revision > :revision ORDER BY resulting_revision",
+          ).all({ ":revision": maxRevisionBefore }) as Array<{ operation_type: string }>).map(
+            (row) => row.operation_type,
+          );
+          const allowedTypes = new Set([
+            ...(gateCase.ownOperationType ? [gateCase.ownOperationType] : []),
+            ...(gateCase.preOperationTypes ?? []),
+          ]);
+
           const fenceGate = () =>
             assert.deepEqual(fence.violations, [], "no workflow-table write outside a Domain Operation");
           const gate = () => {
             if (gateCase.renderPassesWith) expectedFail(gateCase.renderPassesWith, fenceGate);
             else fenceGate();
-            assert.equal(afterFirstCall - before, 1, "one call commits one operation");
+            if (gateCase.ownOperationType) {
+              assert.deepEqual(
+                committedTypes.filter((type) => type === gateCase.ownOperationType),
+                [gateCase.ownOperationType],
+                "one call commits one own operation",
+              );
+              assert.ok(
+                committedTypes.every((type) => allowedTypes.has(type)),
+                `one call commits only its own operation and its canonical pre-repair, got: ${committedTypes.join(", ")}`,
+              );
+              assert.equal(
+                committedTypes.length,
+                1 + (gateCase.preOperationTypes?.length ?? 0),
+                "one call commits one operation per canonical stage",
+              );
+            } else {
+              assert.equal(committedTypes.length, 1, "one call commits one operation");
+            }
             assert.equal(operationCount() - afterFirstCall, 0, "a replay commits no operation");
             assert.ok(!(first as { isError?: boolean }).isError, "the call succeeds");
             assert.deepEqual(
