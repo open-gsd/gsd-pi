@@ -28,16 +28,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.20.1**
+Latest release: **v1.21.0**
 
-- **gsd:** Rebuild markdown skips projections whose write is already applied.
-- **gsd:** Reclaim milestone leases held by verifiably-dead local workers.
-- **gsd:** Journal and surface discarded scheduled wakeups on non-completed units.
-- **claude-code:** Shield gsd-core-owned skills from the interactive Skill surface.
-- **gsd:** Warn when gsd_plan_slice persists zero non-skipped tasks.
-- **mcp-server:** Resolve milestone projections on flat-phase-layout projects.
-- **claude-code:** Disallow Claude Code's native task tools under gsd-pi.
-- **gsd:** Uat_result_save rejects a PASS check citing failed uat_exec evidence.
+- **gsd:** Final removal gates, legacy counters, performance baseline and the truthful contract (#2681).
+- **gsd:** Run the Authority Epoch cutover on the first open by default (#2673).
+- **gsd:** Keep hook gate verdicts, closeout refusals and step retries in the database (#2662).
+- **gsd:** Add /gsd db prune-quarantine for preserved projection copies (#2663).
+- **gsd:** Require a source-commit receipt before a Task publishes or a Slice completes (#2660).
+- **gsd:** Store statement decision impacts and show the supersede in DECISIONS.md (#2657).
+- **gsd:** Finish the Lifecycle Kernel: interactive claims, remediation dispatch, typed outcome event, pause blocker rows (#2655).
+- **gsd:** Store an answered ask_user_questions round as Open Question, interaction and Answer rows (#2632).
 
 <!-- release-highlights:end -->
 
