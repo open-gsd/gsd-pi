@@ -532,6 +532,34 @@ test("a static Completions model stays disabled without live evidence but accept
   assert.equal(payload.reasoning_effort, "high");
 });
 
+test("unknown-only live endpoints do not enable static Completions effort compatibility", async () => {
+  for (const evidence of [
+    { supported_reasoning_efforts: ["high"] },
+    { capabilities: { supports: { reasoning_effort: true } } },
+  ]) {
+    const record = normalizedRecord("gpt-6-astra", {
+      supported_endpoints: ["/embeddings"],
+      ...evidence,
+    });
+    assert.equal(record.execution.api, "openai-completions");
+    assert.equal(record.execution.reasoningEffortCompatible, false);
+    const model = synthesizeCopilotOverlayEntry(record);
+    assertCompletionsModel(model);
+    assert.equal(model.compat?.supportsReasoningEffort, false);
+    assert.deepEqual(getSupportedThinkingLevels(model), []);
+    assert.equal((await captureCompletionsPayload(model, "high")).reasoning_effort, undefined);
+  }
+
+  const recognized = normalizedRecord("gpt-6-astra", {
+    supported_endpoints: ["/embeddings", "/chat/completions"],
+    supported_reasoning_efforts: ["high"],
+  });
+  assert.equal(recognized.execution.reasoningEffortCompatible, true);
+  const model = synthesizeCopilotOverlayEntry(recognized);
+  assertCompletionsModel(model);
+  assert.equal((await captureCompletionsPayload(model, "high")).reasoning_effort, "high");
+});
+
 test("static fallback preserves mapped aliases and explicitly disables unsupported levels", () => {
   const staticModel = getModels("github-copilot").find(
     (model) => model.reasoning

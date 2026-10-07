@@ -575,6 +575,7 @@ function normalizeGitHubCopilotModel(
     : undefined;
   const reasoningEffortCompatible = endpoints.api === "openai-completions"
     && endpoints.provenance.source === "provider-live"
+    && endpoints.supportedEndpoints.some((endpoint) => mapEndpointToApi(endpoint) === "openai-completions")
     && endpoints.conflicts.length === 0
     && liveReasoningEffortSupport !== false
     && !(liveReasoningLevels.present && liveReasoningLevels.levels.length === 0)
