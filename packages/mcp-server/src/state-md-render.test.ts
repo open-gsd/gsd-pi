@@ -98,8 +98,10 @@ function callTool(transport: Transport, base: string, name: string, args: Record
 async function openFixture(t: TestContext): Promise<WorkflowAuthorityFixture> {
   const fixture = await createWorkflowAuthorityFixture();
   // The canonical validate records verification evidence against the project's
-  // source revision, so the fixture project must be a git repository.
-  execSync("git init -b main && git add -A && git -c user.email=fixture@test -c user.name=fixture commit -m fixture --allow-empty", {
+  // source revision, so the fixture project must be a git repository. Pin LF:
+  // on Windows a later checkout would otherwise materialize CRLF and change
+  // the bytes the source-revision hash covers.
+  execSync("git init -b main && git config core.autocrlf false && git add -A && git -c user.email=fixture@test -c user.name=fixture commit -m fixture --allow-empty", {
     cwd: fixture.root,
     stdio: "ignore",
   });
@@ -455,6 +457,9 @@ describe("STATE.md render after a parallel merge", () => {
     run("git init -b main", repo);
     run("git config user.email test@test.com", repo);
     run("git config user.name Test", repo);
+    // Pin LF: the merge checks the milestone branch out before the closeout
+    // gate re-captures the source hash, and autocrlf would change the bytes.
+    run("git config core.autocrlf false", repo);
     mkdirSync(join(repo, ".gsd", "milestones", "M010"), { recursive: true });
     writeFileSync(join(repo, ".gitignore"), ".gsd/worktrees/\n.gsd/gsd.db*\n.gsd/STATE.md\n");
     writeFileSync(join(repo, ".gsd", "preferences.md"), "## Git\n- isolation: branch\n");

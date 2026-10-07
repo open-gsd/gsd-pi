@@ -303,6 +303,9 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # The source-revision hash fixtures compare working-tree bytes across
+          # checkouts; runner-default autocrlf would convert them on Windows.
+          git config --global core.autocrlf false
 
           git -c protocol.version=2 fetch --no-tags --prune --depth="$FETCH_DEPTH" origin \
             "+${GITHUB_SHA}:refs/checkout-ref"
