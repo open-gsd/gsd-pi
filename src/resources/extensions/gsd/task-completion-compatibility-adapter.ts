@@ -16,6 +16,7 @@ import {
   getTask,
   getSlice,
 } from "./gsd-db.js";
+import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 import { renderPlanCheckboxes, renderTaskSummary } from "./markdown-renderer.js";
 import { clearPathCache, resolveGsdPathContract, resolveTaskFile } from "./paths.js";
 import {
@@ -613,6 +614,9 @@ function publishCanonicalCompletion(
     }
 
     completeLegacyTaskForVerifiedAttempt(context, input.task);
+    // The legacy tasks.status mirror write above is part of the canonical
+    // publication path; the G8 gate watches it without zero-gating it.
+    incrementLegacyTelemetry("legacy.legacyTaskStatusWrite");
     closeTaskQualityGates(input.task, taskQualityGateContent(attempt));
 
     const entityId = `${input.task.milestoneId}/${input.task.sliceId}/${input.task.taskId}`;
