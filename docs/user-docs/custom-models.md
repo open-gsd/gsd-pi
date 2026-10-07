@@ -341,6 +341,10 @@ Remote-only Copilot models are classified before any write is attempted.
 
 Quarantined models are intentionally **not** written as placeholder entries with invented zero pricing, invented limits, or guessed protocols.
 
+Reasoning levels in a synthesized overlay are limited to the live effort metadata when present; an explicit empty or invalid list does not fall back to bundled levels. Otherwise, static aliases and unsupported-level markers are preserved only when the static transport compatibility allows them. OpenAI Completions effort is enabled only when live support matches the Completions transport; missing, contradictory, or mismatched evidence stays disabled. This is a local compatibility decision, not proof that a particular Copilot account or backend accepts every advertised effort.
+
+The normalizer accepts `supportedReasoningEfforts`, the snake-case effort-list fields, and `capabilities.supports.reasoning_effort` lists. Multiple declarations are intersected rather than combined. Legacy normalized records without the new reasoning metadata are quarantined during registration until a fresh sync. Registration remains insert-only: it does not replace bundled or user-defined models. Bundled Copilot Completions models with `supportsReasoningEffort: false` offer only `off`, because their adapter cannot transmit a selectable effort; an explicit custom compatibility override remains supported. Claude adaptive effort aliases and budget-based thinking remain unchanged.
+
 ### Provider-aware economics precedence
 
 Copilot economics resolve per provider + model identity. The precedence is:

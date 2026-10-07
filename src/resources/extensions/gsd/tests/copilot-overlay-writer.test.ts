@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import type { Api, Model } from "../../../../../packages/pi-ai/src/types.js";
 import { type CopilotModelRecord, sanitizeGitHubCopilotModels } from "../copilot-model-catalog.js";
 import {
   mergeIntoModelsCatalogOverlay,
@@ -52,6 +53,10 @@ function incompleteRecord(id: string, name = id, overrides: Record<string, unkno
   return record;
 }
 
+function assertCompletionsModel(model: Model<Api>): asserts model is Model<"openai-completions"> {
+  if (model.api !== "openai-completions") throw new Error(`Unexpected synthesized API: ${model.api}`);
+}
+
 test("synthesizeCopilotOverlayEntry produces a schema-valid entry from a complete live/static record", () => {
   const entry = synthesizeCopilotOverlayEntry(completeRecord("brand-new-model", "Brand New Model"));
 
@@ -71,6 +76,41 @@ test("synthesizeCopilotOverlayEntry produces a schema-valid entry from a complet
 test("synthesizeCopilotOverlayEntry falls back to id when name is blank", () => {
   const entry = synthesizeCopilotOverlayEntry(completeRecord("no-name-model", ""));
   assert.equal(entry.name, "no-name-model");
+});
+
+test("legacy normalized records are quarantined until reasoning metadata is refreshed", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-copilot-legacy-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const record = completeRecord("legacy-completions", "Legacy", {
+    supported_endpoints: ["/chat/completions"],
+  });
+  delete record.execution.reasoningLevelMap;
+  delete record.execution.reasoningEffortCompatible;
+  const legacy: CopilotModelRecord = JSON.parse(JSON.stringify(record));
+  assert.throws(() => synthesizeCopilotOverlayEntry(legacy), /refresh the Copilot catalog/);
+  const plan = registerCopilotModelsInOverlay(join(tmp, "models-catalog.json"), [legacy], []);
+  assert.deepEqual(plan.registeredIds, []);
+  assert.match(plan.quarantined[0].blockers.join("; "), /refresh the Copilot catalog/);
+});
+
+test("synthesizeCopilotOverlayEntry keeps only live efforts and enables their matching Completions wire field", () => {
+  const entry = synthesizeCopilotOverlayEntry(completeRecord("limited-completions-efforts", "Limited Completions Efforts", {
+    supported_endpoints: ["/chat/completions"],
+    supportedReasoningEfforts: ["low", "high"],
+    capabilities: { supports: { reasoning_effort: true } },
+  }));
+
+  assertCompletionsModel(entry);
+  assert.deepEqual(entry.thinkingLevelMap, {
+    off: null,
+    minimal: null,
+    low: "low",
+    medium: null,
+    high: "high",
+    xhigh: null,
+    max: null,
+  });
+  assert.equal(entry.compat?.supportsReasoningEffort, true);
 });
 
 test("mergeIntoModelsCatalogOverlay: starting from nothing produces a valid overlay with only github-copilot", () => {
