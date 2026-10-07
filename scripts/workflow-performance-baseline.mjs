@@ -5,13 +5,15 @@
 // database — deriveState, one Domain Operation commit (capture.register) and
 // a projection drain — and fails against the committed baseline in
 // scripts/baselines/workflow-performance-baseline.json when a measurement
-// regresses beyond twice the recorded value.
+// regresses beyond the declared tolerances.
 //
-// The 2x tolerance protects against algorithmic regressions (an accidental
+// The tolerances protect against algorithmic regressions (an accidental
 // N+1, a missing index, a full-file rewrite in a hot loop), not against
-// machine noise: it must absorb the difference between a developer laptop
-// and a slower CI runner. Regression means `measured > baseline * 2` on p50
-// or p95; being faster never fails.
+// machine noise: they must absorb the difference between a developer laptop
+// and a slower CI runner, and a gate run beside other test suites. Regression
+// means `measured > baseline * tolerance` on p50 or p95; being faster never
+// fails. See P50_TOLERANCE / P95_TOLERANCE below for the declared values and
+// the measurement behind them.
 //
 // Run: node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs
 //      --experimental-strip-types scripts/workflow-performance-baseline.mjs
@@ -35,7 +37,15 @@ const DERIVE_SAMPLES = 60;
 const OPERATION_SAMPLES = 40;
 const DRAIN_SAMPLES = 20;
 
-export const TOLERANCE = 2;
+// Tolerances protect against algorithmic regressions (an accidental N+1, a
+// missing index, a full-file rewrite in a hot loop), not against machine
+// noise. Both are 3x from measurement: on a quiet machine the three metrics
+// sit at ~0.6/21/22ms p50, and running the gate beside other test suites
+// doubled a p50 (43ms against a 21ms baseline) with no code change — so 2x
+// fails on contention, not on regressions. A real algorithmic regression (an
+// added N+1 or a quadratic pass) is far beyond 3x. Being faster never fails.
+export const P50_TOLERANCE = 3;
+export const P95_TOLERANCE = 3;
 
 function git(args, cwd) {
   execFileSync("git", args, { cwd, stdio: "ignore" });
@@ -191,11 +201,11 @@ export function compareAgainstBaseline(measured, baseline) {
       regressions.push(`${metric}: baseline has no recorded p50/p95 — regenerate with --update-baseline`);
       continue;
     }
-    if (sample.p50 > recorded.p50 * TOLERANCE) {
-      regressions.push(`${metric}.p50: ${sample.p50}ms > ${recorded.p50}ms x ${TOLERANCE}`);
+    if (sample.p50 > recorded.p50 * P50_TOLERANCE) {
+      regressions.push(`${metric}.p50: ${sample.p50}ms > ${recorded.p50}ms x ${P50_TOLERANCE}`);
     }
-    if (sample.p95 > recorded.p95 * TOLERANCE) {
-      regressions.push(`${metric}.p95: ${sample.p95}ms > ${recorded.p95}ms x ${TOLERANCE}`);
+    if (sample.p95 > recorded.p95 * P95_TOLERANCE) {
+      regressions.push(`${metric}.p95: ${sample.p95}ms > ${recorded.p95}ms x ${P95_TOLERANCE}`);
     }
   }
   return regressions;
@@ -219,7 +229,7 @@ async function main() {
   }
   const baseline = JSON.parse(readFileSync(BASELINE_FILE, "utf-8"));
   const regressions = compareAgainstBaseline(measured, baseline);
-  process.stdout.write(`performance baseline (tolerance ${TOLERANCE}x):\n${JSON.stringify(measured, null, 2)}\n`);
+  process.stdout.write(`performance baseline (tolerance p50 x${P50_TOLERANCE}, p95 x${P95_TOLERANCE}):\n${JSON.stringify(measured, null, 2)}\n`);
   if (regressions.length > 0) {
     process.stderr.write(`performance regressions vs ${BASELINE_FILE}:\n- ${regressions.join("\n- ")}\n`);
     process.exitCode = 2;

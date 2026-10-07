@@ -11,9 +11,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 const scriptModule = await import("../../scripts/workflow-performance-baseline.mjs");
-const { compareAgainstBaseline, TOLERANCE } = scriptModule as {
+const { compareAgainstBaseline, P50_TOLERANCE, P95_TOLERANCE } = scriptModule as {
   compareAgainstBaseline: (measured: Record<string, { p50: number; p95: number }>, baseline: Record<string, { p50: number; p95: number }>) => string[];
-  TOLERANCE: number;
+  P50_TOLERANCE: number;
+  P95_TOLERANCE: number;
 };
 
 const REPO_ROOT = process.cwd();
@@ -33,7 +34,7 @@ test("the committed performance baseline exists and is complete", () => {
   }
 });
 
-test("compareAgainstBaseline fails only beyond the declared tolerance", () => {
+test("compareAgainstBaseline fails only beyond the declared tolerances", () => {
   const baseline = {
     deriveState: { p50: 1, p95: 2 },
     domainOperationCommit: { p50: 10, p95: 20 },
@@ -41,10 +42,10 @@ test("compareAgainstBaseline fails only beyond the declared tolerance", () => {
   };
 
   const clean = compareAgainstBaseline(
-    { deriveState: { p50: 2, p95: 4 }, domainOperationCommit: { p50: 20, p95: 40 }, projectionDrain: { p50: 5, p95: 10 } },
+    { deriveState: { p50: 3, p95: 6 }, domainOperationCommit: { p50: 30, p95: 60 }, projectionDrain: { p50: 5, p95: 10 } },
     baseline,
   );
-  assert.deepEqual(clean, [], "values exactly at the tolerance are not regressions");
+  assert.deepEqual(clean, [], "values exactly at the tolerances are not regressions");
 
   const faster = compareAgainstBaseline(
     { deriveState: { p50: 0.1, p95: 0.2 }, domainOperationCommit: { p50: 1, p95: 2 }, projectionDrain: { p50: 1, p95: 2 } },
@@ -53,12 +54,20 @@ test("compareAgainstBaseline fails only beyond the declared tolerance", () => {
   assert.deepEqual(faster, [], "being faster never fails");
 
   const regressed = compareAgainstBaseline(
-    { deriveState: { p50: 1, p95: 2 }, domainOperationCommit: { p50: 21, p95: 20 }, projectionDrain: { p50: 10, p95: 41 } },
+    { deriveState: { p50: 1, p95: 2 }, domainOperationCommit: { p50: 31, p95: 20 }, projectionDrain: { p50: 10, p95: 61 } },
     baseline,
   );
-  assert.equal(regressed.length, 2, "p50 and p95 regressions beyond the tolerance both fail");
-  assert.match(regressed[0]!, /domainOperationCommit\.p50: 21ms > 10ms x 2/);
-  assert.match(regressed[1]!, /projectionDrain\.p95: 41ms > 20ms x 2/);
+  assert.equal(regressed.length, 2, "p50 and p95 regressions beyond the tolerances both fail");
+  assert.match(regressed[0]!, new RegExp(`domainOperationCommit\\.p50: 31ms > 10ms x ${P50_TOLERANCE}`));
+  assert.match(regressed[1]!, new RegExp(`projectionDrain\\.p95: 61ms > 20ms x ${P95_TOLERANCE}`));
+
+  // The tolerances absorb scheduler noise: a p50 or p95 between the baseline
+  // and the tolerance (contention can double a p50 with no code change) passes.
+  const noisyTail = compareAgainstBaseline(
+    { deriveState: { p50: 1, p95: 2 }, domainOperationCommit: { p50: 25, p95: 50 }, projectionDrain: { p50: 10, p95: 20 } },
+    baseline,
+  );
+  assert.deepEqual(noisyTail, [], "values within the tolerances are not regressions");
 
   const undeclared = compareAgainstBaseline(
     { deriveState: { p50: 1, p95: 2 } },
@@ -89,5 +98,5 @@ test("the measured corpus does not regress against the committed baseline", { ti
     result.status, 0,
     `performance baseline gate failed (${result.status}):\n${output.slice(-4000)}`,
   );
-  assert.match(output, new RegExp(`tolerance ${TOLERANCE}x`));
+  assert.match(output, new RegExp(`tolerance p50 x${P50_TOLERANCE}, p95 x${P95_TOLERANCE}`));
 });
