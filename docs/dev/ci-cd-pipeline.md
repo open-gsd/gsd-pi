@@ -280,3 +280,11 @@ platform package versions are synced by `npm run sync-platform-versions`.
 Old `-dev.` versions are removed weekly by `cleanup-dev-versions.yml` (30-day retention).
 
 Paid live-provider release tests are opt-in: dispatch **NPM Publish** with `run_live_tests=true` only when those calls are authorized. The default is false; deterministic release regression and acceptance checks still run.
+
+### Recover a dev artifact after registry validation
+
+If a successful upload outlives the verification deadline, do not republish the version. Once npm exposes it, `resume_prerelease_run` selects a separate verification-only path for `channel=latest`. It requires the original completed main workflow attempt, actual checkout and stamped version evidence, and current main at the same full source SHA. GitHub CLI cryptographically verifies the downloaded tarball's npm Sigstore provenance, certificate source/workflow/run identity, subject SHA-512, and signed invocation. Missing, ambiguous, or mismatched evidence fails closed.
+
+The recovered tarball and evidence are retained for 14 days. The normal prerelease tests install that exact tarball; production planning must still use the recovered source, and the production approval and source guards remain. No comparison against the lost original runner tarball is claimed. This path never calls the publication helper or changes its exact-byte retry contract.
+
+For a one-time continuation whose workflow code is on a reviewed branch, leave main at the authenticated application source and dispatch `npm-publish.yml` on that branch after its required CI passes. Do not merge the continuation branch before completing the pinned release. The `registry_verification_timeout_ms` input allows a bounded two-hour wait (7200000) for subsequent newly published packages undergoing npm validation; it never triggers another publication attempt. Paid provider tests remain opt-in.

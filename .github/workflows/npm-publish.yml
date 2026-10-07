@@ -20,6 +20,19 @@ on:
         description: "Branch or SHA for standalone prerelease publishes (defaults: dev -> main, next -> next; latest always uses main)"
         required: false
         default: ""
+      resume_prerelease_run:
+        description: "Verification-only recovery of a dev artifact from an original run on current main; never republishes"
+        required: false
+        default: ""
+        type: string
+      registry_verification_timeout_ms:
+        description: "Bounded wait for registry validation/visibility after a new publication"
+        required: false
+        default: "1200000"
+        type: choice
+        options:
+          - "1200000"
+          - "7200000"
       run_live_tests:
         description: "Opt in to paid live-provider release tests"
         required: false
@@ -49,9 +62,11 @@ env:
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
   NPM_CONFIG_LOGLEVEL: "error"
+  NPM_PUBLISH_VERIFY_TIMEOUT_MS: ${{ inputs.registry_verification_timeout_ms || '1200000' }}
 
 jobs:
   prerelease-publish:
+    if: ${{ !inputs.resume_prerelease_run }}
     name: Publish @${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
     # npm trusted publishing + provenance require GitHub-hosted runners (not Blacksmith).
     runs-on: ubuntu-latest
@@ -183,14 +198,60 @@ jobs:
           echo "::warning::Publish step succeeded but @opengsd/gsd-pi@${VERSION} was not installable from npm after retries."
           echo "::warning::Continuing to the dedicated prerelease-verify job, which performs the authoritative post-publish install and regression validation."
 
+  prerelease-resume:
+    name: Authenticate existing dev artifact
+    if: ${{ inputs.resume_prerelease_run }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.recover.outputs.version }}
+      source_sha: ${{ steps.recover.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Authenticate original publication without publishing
+        id: recover
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN: ${{ inputs.resume_prerelease_run }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          test "$CHANNEL" = latest
+          node scripts/verify-published-prerelease.mjs "$ORIGINAL_RUN" recovered-prerelease
+      - uses: actions/upload-artifact@v7
+        with:
+          name: recovered-prerelease
+          path: recovered-prerelease/
+          if-no-files-found: error
+          retention-days: 14
+
   prerelease-verify:
     name: Verify @${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }} package
-    needs: prerelease-publish
+    needs: [prerelease-publish, prerelease-resume]
+    if: ${{ always() && !cancelled() && (needs.prerelease-publish.result == 'success' || needs.prerelease-resume.result == 'success') }}
+    outputs:
+      source_sha: ${{ needs.prerelease-resume.outputs.source_sha }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.channel == 'latest' && 'main' || github.event.inputs.ref || (github.event.inputs.channel == 'next' && 'next' || 'main') }}
+
+      - name: Require the recovered source to remain current
+        if: ${{ inputs.resume_prerelease_run }}
+        env:
+          RECOVERED_SOURCE: ${{ needs.prerelease-resume.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$RECOVERED_SOURCE"
+
+      - uses: actions/download-artifact@v8
+        if: ${{ inputs.resume_prerelease_run }}
+        with:
+          name: recovered-prerelease
+          path: recovered-prerelease
 
       - name: Setup pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
@@ -205,9 +266,15 @@ jobs:
 
       - name: Install published @opengsd/gsd-pi@${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }} globally (with extended registry propagation retry)
         env:
-          PUBLISH_VERSION: ${{ needs.prerelease-publish.outputs.version }}
+          PUBLISH_VERSION: ${{ needs.prerelease-resume.outputs.version || needs.prerelease-publish.outputs.version }}
           CHANNEL: ${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
+          RESUME_RUN: ${{ inputs.resume_prerelease_run }}
         run: |
+          if [ -n "$RESUME_RUN" ]; then
+            (cd recovered-prerelease && sha512sum --check package.tgz.sha512)
+            npm install -g ./recovered-prerelease/package.tgz --prefer-online
+            exit 0
+          fi
           DELAY=10
           for i in $(seq 1 12); do
             CACHE=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gsd-npm-cache-XXXXXX")
@@ -255,7 +322,7 @@ jobs:
       - name: Warn on verify failure
         if: failure()
         env:
-          PUBLISH_VERSION: ${{ needs.prerelease-publish.outputs.version }}
+          PUBLISH_VERSION: ${{ needs.prerelease-resume.outputs.version || needs.prerelease-publish.outputs.version }}
           CHANNEL: ${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
         run: |
           echo "::error::Post-publish verification failed for @opengsd/gsd-pi@${PUBLISH_VERSION}."
@@ -264,7 +331,7 @@ jobs:
 
   prod-release-plan:
     name: Plan Production Release
-    if: ${{ github.event.inputs.channel == 'latest' }}
+    if: ${{ !cancelled() && !failure() && github.event.inputs.channel == 'latest' }}
     needs: prerelease-verify
     runs-on: ubuntu-latest
     outputs:
@@ -275,6 +342,12 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+
+      - name: Require production to use the recovered source
+        if: ${{ inputs.resume_prerelease_run }}
+        env:
+          RECOVERED_SOURCE: ${{ needs.prerelease-verify.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$RECOVERED_SOURCE"
 
       - name: Generate changelog and determine version
         id: release
@@ -297,7 +370,7 @@ jobs:
 
   prod-native-build:
     name: Build native ${{ matrix.platform }}
-    if: ${{ github.event.inputs.channel == 'latest' }}
+    if: ${{ !cancelled() && !failure() && github.event.inputs.channel == 'latest' }}
     needs: prod-release-plan
     strategy:
       fail-fast: false
@@ -382,7 +455,7 @@ jobs:
 
   prod-release:
     name: Production Release
-    if: ${{ github.event.inputs.channel == 'latest' }}
+    if: ${{ !cancelled() && !failure() && github.event.inputs.channel == 'latest' }}
     needs:
       - prod-release-plan
       - prod-native-build

@@ -11,7 +11,7 @@ const workflow = YAML.parse(
 );
 const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
 
-const latestCondition = "${{ github.event.inputs.channel == 'latest' }}";
+const latestCondition = "${{ !cancelled() && !failure() && github.event.inputs.channel == 'latest' }}";
 const prereleaseChannel =
   "${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}";
 const prereleaseRef =
