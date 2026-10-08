@@ -362,6 +362,17 @@ jobs:
         # tests already use. GSD_NATIVE_PREFER_LOCAL loads gsd_engine.dev.node.
         run: pnpm run build:native:test
 
+      - name: Build package JS prerequisites for Windows runtime imports
+        if: needs.fast-gates.outputs.portability-changed == 'true'
+        # Test transpilation does not populate workspace dist/ entrypoints.
+        # These TS-only builds are required before @gsd/native/file-identity
+        # imports can run; a Rust addon alone is not the package's JS surface.
+        run: |
+          pnpm --filter @opengsd/contracts run build
+          pnpm --filter @opengsd/rpc-client run build
+          pnpm --filter @gsd/native run build
+          pnpm --filter @opengsd/mcp-server run build
+
       - name: Typecheck extensions
         if: needs.fast-gates.outputs.portability-changed == 'true'
         env:

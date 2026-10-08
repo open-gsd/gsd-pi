@@ -197,7 +197,7 @@ function writeMcpRegistry(
   }
 
   try {
-    renameSync(tempPath, registryPath);
+    renameRegistrySnapshotWithRetry(tempPath, registryPath);
   } catch (err) {
     try {
       rmSync(tempPath, { force: true });
@@ -206,6 +206,33 @@ function writeMcpRegistry(
       // original rename error below.
     }
     throw err;
+  }
+}
+
+/**
+ * Windows can temporarily refuse replacement while a reader or scanner holds
+ * the destination. Retry only the atomic rename, never unlink/truncate/copy the
+ * previous snapshot. Ten attempts, at most 450ms of synchronous backoff, keep
+ * genuine permission errors bounded and preserve the final original error.
+ */
+function renameRegistrySnapshotWithRetry(tempPath: string, registryPath: string): void {
+  let waitState: Int32Array | undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(tempPath, registryPath);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (
+        process.platform !== 'win32' ||
+        attempt >= 9 ||
+        (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY')
+      ) {
+        throw err;
+      }
+      waitState ??= new Int32Array(new SharedArrayBuffer(4));
+      Atomics.wait(waitState, 0, 0, 10 * (attempt + 1));
+    }
   }
 }
 
