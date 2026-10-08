@@ -38,6 +38,7 @@ import {
   settleTaskAttempt,
 } from "../task-execution-domain-operation.js";
 import { reopenTask } from "../task-lifecycle-domain-operation.js";
+import { executeTaskReopen } from "../tools/workflow-tool-executors.js";
 import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
 import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 import {
@@ -798,6 +799,89 @@ test("#1983: an unreopened pending Task SUMMARY with no Attempt lineage stays fa
     { doctorDivergence: false, reconciliationDivergence: true },
     "doctor ignores absent artifact files, while reconciliation keeps unproven rows fail-closed",
   );
+});
+
+function taskSummaryArtifactRows(): number {
+  return Number(row(`
+    SELECT COUNT(*) AS count FROM artifacts
+    WHERE artifact_type = 'SUMMARY' AND milestone_id = 'M001' AND slice_id = 'S01' AND task_id = 'T01'
+  `).count);
+}
+
+test("a Task reopened after verified publication keeps no SUMMARY that claims completion", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  recordPassingHostVerdict(basePath, attemptId);
+  await publishVerifiedTaskCompletion(publishInput(basePath, attemptId));
+  assert.equal(taskState().status, "complete");
+  assert.equal(taskSummaryArtifactRows(), 1, "the real completion path records the Task SUMMARY artifact row");
+
+  const reopened = await executeTaskReopen(
+    { ...TASK, reason: "slice closeout found a regression" },
+    basePath,
+    invocation("task-completion/reopen-published"),
+  );
+  assert.notEqual(reopened.isError, true, JSON.stringify(reopened.content));
+
+  assert.equal(taskState().status, "pending");
+  assert.equal(taskSummaryArtifactRows(), 0, "the SUMMARY artifact row of the voided completion is removed");
+  assert.equal(existsSync(staged.summaryPath), false, "the SUMMARY projection of the voided completion is gone");
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "a reopened Task must be dispatchable",
+  );
+  const reopenPayload = JSON.parse(String(row(`
+    SELECT payload_json FROM workflow_domain_events WHERE event_type = 'task.reopened'
+  `).payload_json)) as { invalidatedEvidence: { artifacts: Array<{ path: string; full_content: string }> } };
+  assert.deepEqual(
+    reopenPayload.invalidatedEvidence.artifacts.map((artifact) => artifact.path),
+    ["phases/01-test/S01-T01-SUMMARY.md"],
+    "the reopen event keeps the removed SUMMARY row",
+  );
+  assert.match(reopenPayload.invalidatedEvidence.artifacts[0]!.full_content, /Implemented the compatibility seam/);
+});
+
+test("a Task reopened inside a milestone worktree is not artifact/DB drift at the project root", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, planPath, attemptId } = createFixture();
+  writeFileSync(join(basePath, ".git", "info", "exclude"), ".gsd-worktrees/\n");
+  const worktreePath = join(basePath, ".gsd-worktrees", "M001");
+  const worktreePhaseDir = join(worktreePath, ".gsd", "phases", "01-test");
+  mkdirSync(worktreePhaseDir, { recursive: true });
+  writeFileSync(join(worktreePhaseDir, "01-01-PLAN.md"), readFileSync(planPath, "utf8"));
+  await stageTaskCompletion(stageInput(worktreePath));
+  recordPassingHostVerdict(basePath, attemptId);
+  const published = await publishVerifiedTaskCompletion(publishInput(worktreePath, attemptId));
+  const { resolveTaskFile } = await import("../paths.js");
+  const rootSummary = resolveTaskFile(basePath, "M001", "S01", "T01", "SUMMARY");
+  assert.ok(rootSummary, "publication writes the project-root SUMMARY");
+  assert.equal(existsSync(published.summaryPath), true, "publication writes the worktree SUMMARY");
+
+  // The complete-slice unit runs in the milestone worktree and reopens there.
+  const reopened = await executeTaskReopen(
+    { ...TASK, reason: "slice closeout found a regression" },
+    worktreePath,
+    invocation("task-completion/reopen-published-worktree"),
+  );
+  assert.notEqual(reopened.isError, true, JSON.stringify(reopened.content));
+  assert.equal(taskState().status, "pending");
+
+  // The next /gsd auto runs the pre-dispatch drift guard at the project root.
+  clearPathCache();
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "the reopened Task must be dispatchable from the project root",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(worktreePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "the reopened Task must be dispatchable from the milestone worktree",
+  );
+  assert.equal(existsSync(published.summaryPath), false, "the worktree SUMMARY is removed");
+  assert.equal(existsSync(rootSummary), false, "the project-root SUMMARY is removed");
 });
 
 test("#1763: staging from a milestone worktree dual-writes the SUMMARY to the project root", async () => {

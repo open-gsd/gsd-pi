@@ -32,7 +32,7 @@ import {
 } from "./db/writers/task-recovery.js";
 import { terminalizeTaskExecutionDispatch } from "./db/writers/task-execution.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
-import { ensurePendingSliceQ8 } from "./db/writers/slice-companion-state.js";
+import { ensurePendingSliceQ8, removeInvalidatedRows } from "./db/writers/slice-companion-state.js";
 import { deleteVerificationEvidence } from "./gsd-db.js";
 import { recordTaskRequirementDisposition } from "./task-recovery-domain-operation.js";
 import {
@@ -507,6 +507,13 @@ export function reopenTask(input: {
     reopenLegacyTaskState(context, input.task);
     revokeTaskCancellationWaivers(context, lifecycle.lifecycleId, input.task, reason);
     deleteVerificationEvidence(state.milestoneId, state.sliceId, state.taskId);
+    // The SUMMARY row claims a completion that this reopen voids. Left in
+    // place it reads as artifact/DB drift and pauses the next dispatch. The
+    // row moves to the event payload, so its content is not lost.
+    const invalidatedEvidence = removeInvalidatedRows([[
+      "artifacts",
+      "artifact_type = 'SUMMARY' AND milestone_id = :milestone_id AND slice_id = :slice_id AND task_id = :task_id",
+    ]], { ":milestone_id": state.milestoneId, ":slice_id": state.sliceId, ":task_id": state.taskId });
     ensurePendingSliceQ8(context, input.task);
     const checkpoint = appendRecoveryWorkCheckpoint(context, {
       lifecycleId: lifecycle.lifecycleId,
@@ -526,6 +533,7 @@ export function reopenTask(input: {
       workCheckpointId: checkpoint.checkpointId,
       reason,
       ...inject,
+      invalidatedEvidence,
       shadow: shadowPayload(shadow),
     });
   });

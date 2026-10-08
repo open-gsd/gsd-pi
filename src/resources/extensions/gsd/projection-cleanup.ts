@@ -15,7 +15,7 @@ import {
   writeCompatMarker,
 } from "./compat/compat-marker.js";
 import { deleteArtifactByPath, getArtifact } from "./gsd-db.js";
-import { gsdProjectionRoot, gsdRoot } from "./paths.js";
+import { gsdProjectionRoot, gsdRoot, resolveGsdPathContract } from "./paths.js";
 import { withProjectionMutationSync } from "./database-maintenance-fence.js";
 import { recordManagedProjectionFile } from "./managed-projection-history.js";
 import { removeProjectionFileSync } from "./atomic-write.js";
@@ -43,6 +43,15 @@ function restoreTombstone(tombstonePath: string, artifactPath: string): void {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+}
+
+/**
+ * The roots whose readable projections a reopen removes. Completion renders
+ * at the project root and, in a milestone worktree, at the worktree too
+ * (#1763), and the next dispatch runs its drift guard at the project root.
+ */
+export function reopenProjectionRoots(basePath: string): string[] {
+  return [...new Set([basePath, resolveGsdPathContract(basePath).projectRoot])];
 }
 
 export function removeProjectionIfCurrent(input: OperationFencedProjectionCleanupInput): boolean {

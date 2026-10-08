@@ -66,9 +66,10 @@ export function removeInvalidatedRows(
 
 /**
  * A reopened Slice is done again, so every proof of the earlier work is stale:
- * the agent's claimed Task evidence, the run-uat verdict with its ASSESSMENT
- * artifact, the UAT gate, the run-uat retry count, and UAT exec runs not yet
- * saved in a result. Remove them so the redo is judged on new evidence only.
+ * the agent's claimed Task evidence, the SUMMARY artifacts of the Slice and its
+ * Tasks, the run-uat verdict with its ASSESSMENT artifact, the UAT gate, the
+ * run-uat retry count, and UAT exec runs not yet saved in a result. Remove
+ * them so the redo is judged on new evidence only.
  * The removed rows are returned for the reopen event payload: the redo does
  * not read them, and the database does not lose them.
  */
@@ -84,7 +85,9 @@ export function invalidateSliceEvidence(
   const ofSlice = "milestone_id = :milestone_id AND slice_id = :slice_id";
   const removed = removeInvalidatedRows([
     ["verification_evidence", ofSlice],
-    ["artifacts", `'.gsd/' || path IN (SELECT path FROM assessments WHERE ${ofSlice} AND scope = 'run-uat')`],
+    // A SUMMARY row of the Slice or of its Tasks claims the completion that the
+    // reopen voids: left in place it reads as artifact/DB drift.
+    ["artifacts", `(${ofSlice} AND artifact_type = 'SUMMARY') OR '.gsd/' || path IN (SELECT path FROM assessments WHERE ${ofSlice} AND scope = 'run-uat')`],
     ["assessments", `${ofSlice} AND scope = 'run-uat'`],
     ["quality_gates", `${ofSlice} AND gate_id = 'UAT'`],
     ["uat_retry_counters", ofSlice],
