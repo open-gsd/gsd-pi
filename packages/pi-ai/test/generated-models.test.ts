@@ -198,12 +198,50 @@ describe("models.generated.ts", () => {
 		const model = MODELS["github-copilot"]["gpt-6-astra"];
 		expect(model).toMatchObject({
 			id: "gpt-6-astra",
-			api: "openai-completions",
+			api: "openai-responses",
 			provider: "github-copilot",
-			contextWindow: 1_050_000,
+			contextWindow: 400_000,
 			maxTokens: 128_000,
 			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 		});
+	});
+
+	test("maps Copilot's responses-only models to the Responses API with served limits", () => {
+		// Live Copilot /models catalog (verified 2026-10-07): these models list
+		// supported_endpoints without /chat/completions. A bundled
+		// openai-completions entry hard-400s every dispatch with
+		// "unsupported_api_for_model", and the completions-only compat block
+		// (supportsReasoningEffort:false) must not survive the api correction.
+		const copilot = MODELS["github-copilot"];
+		const gpt6Ids = ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"] as const;
+		const grokIds = ["grok-4.5", "grok-4.6", "grok-4.7"] as const;
+		for (const id of [...gpt6Ids, ...grokIds]) {
+			const model = copilot[id];
+			expect(model, id).toBeDefined();
+			expect(model.api, id).toBe("openai-responses");
+			expect(model.compat, id).toBeUndefined();
+		}
+
+		// Copilot serves a smaller window than the platform-native one models.dev
+		// reports (gpt-6 family: 400k, not 1.05M; grok-4.x: 328k, not 500k).
+		for (const id of gpt6Ids) {
+			expect(copilot[id].contextWindow, id).toBe(400_000);
+			expect(copilot[id].maxTokens, id).toBe(128_000);
+		}
+		for (const id of grokIds) {
+			expect(copilot[id].contextWindow, id).toBe(328_000);
+			expect(copilot[id].maxTokens, id).toBe(128_000);
+		}
+
+		// Reasoning-effort metadata mirrors the gpt-5 family pattern: the gpt-6
+		// ladder supports xhigh and max; the grok-4.x ladder only needs the
+		// minimal -> low alias (live ladders: low/medium/high[/xhigh], no "none").
+		for (const id of gpt6Ids) {
+			expect(copilot[id].thinkingLevelMap, id).toMatchObject({ off: null, minimal: "low", xhigh: "xhigh", max: "max" });
+		}
+		for (const id of grokIds) {
+			expect(copilot[id].thinkingLevelMap, id).toMatchObject({ minimal: "low" });
+		}
 	});
 
 	test("includes GPT-6 Astra for OpenAI Codex (#2250)", () => {
