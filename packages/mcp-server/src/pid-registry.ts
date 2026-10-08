@@ -131,7 +131,15 @@ function writeMcpRegistry(registry: McpInstanceRegistry, registryPath = REGISTRY
   mkdirSync(dir, { recursive: true });
   const tempPath = join(dir, `.${randomUUID()}.mcp-instances.json.tmp`);
   try {
-    writeFileSync(tempPath, JSON.stringify(registry, null, 2), 'utf8');
+    // 'wx' (O_CREAT|O_EXCL|O_WRONLY) refuses to follow a pre-existing path —
+    // including a symlink — at tempPath, and mode 0o600 keeps the registry
+    // (PIDs + project directory paths) private to the current user on
+    // shared/multi-user filesystems, matching env-writer.ts's convention.
+    writeFileSync(tempPath, JSON.stringify(registry, null, 2), {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    });
     renameSync(tempPath, registryPath);
   } catch (err) {
     try {
