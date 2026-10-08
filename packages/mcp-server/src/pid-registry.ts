@@ -6,11 +6,13 @@
 import { execFileSync } from 'node:child_process';
 import {
   readFileSync,
-  writeFileSync,
   mkdirSync,
   renameSync,
   realpathSync,
   rmSync,
+  openSync,
+  writeSync,
+  closeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -30,6 +32,14 @@ export interface RegisterMcpInstanceOptions {
   getProcessCwd?: (pid: number) => string | null;
   getProcessStartTime?: (pid: number) => number | null;
   waitForExit?: () => void;
+  /**
+   * Test-only seam: overrides the random temp-file name segment normally
+   * derived from randomUUID(). Lets tests force a genuine name collision at
+   * writeMcpRegistry's temp path against a real pre-existing foreign file,
+   * to prove that invocation never deletes a file it did not create (the
+   * EEXIST-from-openSync('wx') branch). Not used in production.
+   */
+  tempFileNameForTest?: string;
 }
 
 /**
@@ -126,27 +136,74 @@ export function readMcpRegistry(registryPath = REGISTRY_PATH): McpInstanceRegist
 // POSIX and Windows), then rename it over the target. If any step fails, the
 // original registry file is left untouched and the temp file is cleaned up —
 // the original error is rethrown unmasked.
-function writeMcpRegistry(registry: McpInstanceRegistry, registryPath = REGISTRY_PATH): void {
+function writeMcpRegistry(
+  registry: McpInstanceRegistry,
+  registryPath = REGISTRY_PATH,
+  tempFileNameForTest?: string,
+): void {
   const dir = dirname(registryPath);
   mkdirSync(dir, { recursive: true });
-  const tempPath = join(dir, `.${randomUUID()}.mcp-instances.json.tmp`);
+  const tempPath = join(dir, tempFileNameForTest ?? `.${randomUUID()}.mcp-instances.json.tmp`);
+
+  // 'wx' (O_CREAT|O_EXCL|O_WRONLY) refuses to follow a pre-existing path —
+  // including a symlink — at tempPath, and mode 0o600 keeps the registry
+  // (PIDs + project directory paths) private to the current user on
+  // shared/multi-user filesystems, matching env-writer.ts's convention.
+  //
+  // Open exclusively first and only mark tempPath as "owned by this
+  // invocation" once that open call has actually returned a live fd — a
+  // UUID collision (or a foreign file placed at the same path by something
+  // else) makes the open fail with EEXIST, and that failure must NOT trigger
+  // cleanup of a file this invocation never created. Only an fd obtained by
+  // *this* openSync call authorizes removing tempPath afterwards.
+  let fd: number;
   try {
-    // 'wx' (O_CREAT|O_EXCL|O_WRONLY) refuses to follow a pre-existing path —
-    // including a symlink — at tempPath, and mode 0o600 keeps the registry
-    // (PIDs + project directory paths) private to the current user on
-    // shared/multi-user filesystems, matching env-writer.ts's convention.
-    writeFileSync(tempPath, JSON.stringify(registry, null, 2), {
-      encoding: 'utf8',
-      flag: 'wx',
-      mode: 0o600,
-    });
+    fd = openSync(tempPath, 'wx', 0o600);
+  } catch (err) {
+    // Never created tempPath — nothing to clean up, and no write/rename was
+    // attempted against the real registry. Propagate the original error.
+    throw err;
+  }
+
+  // From here on, this invocation owns tempPath: any failure must clean up
+  // exactly (and only) the file it created.
+  try {
+    writeSync(fd, Buffer.from(JSON.stringify(registry, null, 2), 'utf8'));
+  } catch (err) {
+    try {
+      closeSync(fd);
+    } catch {
+      // Best-effort — do not let a close failure mask the write error below.
+    }
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Best-effort cleanup only — do not let a cleanup failure mask the
+      // original write error below.
+    }
+    throw err;
+  }
+
+  try {
+    closeSync(fd);
+  } catch (err) {
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Best-effort cleanup only — do not let a cleanup failure mask the
+      // original close error below.
+    }
+    throw err;
+  }
+
+  try {
     renameSync(tempPath, registryPath);
   } catch (err) {
     try {
       rmSync(tempPath, { force: true });
     } catch {
       // Best-effort cleanup only — do not let a cleanup failure mask the
-      // original write/rename error below.
+      // original rename error below.
     }
     throw err;
   }
@@ -670,7 +727,7 @@ export function registerMcpInstance(
     projectDir: key,
     startedAt: new Date().toISOString(),
   };
-  writeMcpRegistry(registry, registryPath);
+  writeMcpRegistry(registry, registryPath, options.tempFileNameForTest);
   return true;
 }
 

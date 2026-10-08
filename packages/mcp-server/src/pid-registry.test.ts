@@ -10,6 +10,7 @@ import {
   existsSync,
   statSync,
   symlinkSync,
+  chmodSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -984,7 +985,13 @@ describe('writeMcpRegistry atomicity', () => {
     const child = spawn(process.execPath, ['--input-type=module', '--eval', writerCode], {
       stdio: ['ignore', 'ignore', 'ignore'],
     });
-    const exited = new Promise<void>((resolveExit) => child.once('exit', () => resolveExit()));
+    let spawnError: Error | null = null;
+    child.once('error', (err) => {
+      spawnError = err;
+    });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) => {
+      child.once('exit', (code, signal) => resolveExit({ code, signal }));
+    });
 
     let parseFailures = 0;
     let successfulReads = 0;
@@ -1004,7 +1011,16 @@ describe('writeMcpRegistry atomicity', () => {
       }
       if (child.exitCode !== null) break;
     }
-    await exited;
+    const { code, signal } = await exited;
+
+    // A spawn error, non-zero exit, or abnormal termination signal means the
+    // writer never completed its full workload — successfulReads being
+    // positive in that case would only prove a *partial* run was readable,
+    // not that the writer finished. Fail closed instead of trusting reads
+    // alone.
+    assert.equal(spawnError, null, `writer process failed to spawn: ${String(spawnError)}`);
+    assert.equal(signal, null, `writer process was terminated by signal ${String(signal)}`);
+    assert.equal(code, 0, `writer process exited with non-zero code ${String(code)}`);
 
     assert.equal(
       parseFailures,
@@ -1021,60 +1037,146 @@ describe('writeMcpRegistry atomicity', () => {
   });
 
   test('a failed write leaves the original registry intact and removes the temp file', () => {
-    // Simulate a rename/write failure by pointing the registry path at a
-    // directory that cannot be created as a file (registryPath itself is a
-    // directory, so writeFileSync/renameSync onto it fails with EISDIR). The
-    // original registry (written via a plain file, not through the module)
-    // must survive untouched, the error must propagate unmasked, and no stray
-    // temp file should remain in the parent directory.
+    // Regression for review comment: the previous version pointed the failing
+    // write at a *different* path (blockedPath) while asserting against
+    // registryPath — an operation the failure never touched, so it could not
+    // detect loss or truncation of the live registry at all. Inject the
+    // failure directly against the SAME seeded registryPath by revoking write
+    // permission on its containing directory: writeMcpRegistry derives its
+    // temp file from `dirname(registryPath)`, so openSync('wx') for that temp
+    // file fails with EACCES in-place, and the original file at registryPath
+    // is never touched by a successful rename.
     const originalEntry = { pid: 555555, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
-    writeFileSync(registryPath, JSON.stringify({ [tmp]: originalEntry }));
+    const originalBytes = JSON.stringify({ [tmp]: originalEntry });
+    writeFileSync(registryPath, originalBytes);
 
-    const blockedPath = join(tmp, 'blocked-registry-dir');
-    mkdirSync(blockedPath);
+    chmodSync(tmp, 0o500);
+    try {
+      assert.throws(
+        () => registerMcpInstance(tmp, registryPath, { kill: () => {}, getProcessCommand: () => null }),
+        /EACCES|EPERM/,
+        'expected the write failure to propagate unmasked',
+      );
+    } finally {
+      // Restore so afterEach's rmSync(tmp, { recursive: true }) can clean up.
+      chmodSync(tmp, 0o700);
+    }
 
-    assert.throws(() => registerMcpInstance(tmp, blockedPath, { kill: () => {}, getProcessCommand: () => null }));
-
-    // Original registry file (a different path) is untouched.
+    // The seeded registry file — the SAME path the failing write targeted —
+    // retains its exact original bytes: no truncation, no empty file, no
+    // partial write.
+    assert.equal(readFileSync(registryPath, 'utf8'), originalBytes);
     assert.deepEqual(readMcpRegistry(registryPath)[tmp], originalEntry);
 
-    // No leaked temp file in the registry's own directory.
+    // No leaked temp file owned by this invocation remains in the registry's
+    // own directory.
     const leaked = readdirSync(tmp).filter((f) => f.includes('.mcp-instances.json.tmp'));
     assert.deepEqual(leaked, [], `expected no leaked temp files, found: ${leaked.join(', ')}`);
   });
 
-  test('the registry file is written with owner-only permissions (0o600)', () => {
-    // The registry holds PIDs and absolute project directory paths. It must
-    // not be group/world-readable on shared/multi-user filesystems — mirrors
-    // env-writer.ts's 0o600 convention for the same reason.
-    registerMcpInstance(tmp, registryPath, { kill: () => {}, getProcessCommand: () => null });
-    const mode = statSync(registryPath).mode & 0o777;
-    assert.equal(mode, 0o600, `expected mode 0o600, got ${mode.toString(8)}`);
-  });
+  test('EEXIST from a pre-existing foreign temp file is never deleted by this invocation (collision safety through the real writer)', () => {
+    // Regression for review comment: the previous collision test only drove
+    // writeFileSync('wx') directly and never exercised writeMcpRegistry's own
+    // cleanup branch. Use the tempFileNameForTest seam to force a genuine
+    // name collision at the exact path writeMcpRegistry will derive, seeded
+    // with a foreign file this invocation never created. openSync('wx') must
+    // fail with EEXIST, the error must propagate unmasked, and — the actual
+    // bug under test — the foreign file must survive untouched because this
+    // invocation's openSync call never returned a valid fd for it.
+    const collisionName = '.collision-fixed-name.mcp-instances.json.tmp';
+    const collisionPath = join(tmp, collisionName);
+    const foreignBytes = 'not owned by this invocation';
+    writeFileSync(collisionPath, foreignBytes);
 
-  test('a pre-existing symlink at the temp-file path is not followed (collision safety)', () => {
-    // writeMcpRegistry derives tempPath from a fresh randomUUID() each call,
-    // so a real collision at that path is not realistically reachable in
-    // practice — randomUUID() is not mockable from outside the module
-    // (it's imported directly from node:crypto, not via a seam). What *is*
-    // directly testable and load-bearing is the write flag itself: writing
-    // with flag 'wx' (used by writeMcpRegistry) must refuse to follow a
-    // pre-existing symlink at the target path rather than writing through it
-    // — this is the actual mechanism that would protect the real temp path
-    // if a collision (or a future weakening of the write flag back to 'w')
-    // ever put a symlink there.
-    const evilTarget = join(tmp, 'evil-target');
-    writeFileSync(evilTarget, 'not a registry');
-    const collisionPath = join(tmp, 'collision.tmp');
-    symlinkSync(evilTarget, collisionPath);
+    const originalEntry = { pid: 333333, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
+    const originalBytes = JSON.stringify({ [tmp]: originalEntry });
+    writeFileSync(registryPath, originalBytes);
 
     assert.throws(
-      () => writeFileSync(collisionPath, 'attempted overwrite', { flag: 'wx', mode: 0o600 }),
+      () => registerMcpInstance(tmp, registryPath, {
+        kill: () => {},
+        getProcessCommand: () => null,
+        tempFileNameForTest: collisionName,
+      }),
       /EEXIST/,
     );
 
-    // The symlink's target must be untouched — the write must never have
-    // followed it.
-    assert.equal(readFileSync(evilTarget, 'utf8'), 'not a registry');
+    // The foreign file at the colliding path is untouched — this invocation
+    // never created it, so it must never be cleaned up.
+    assert.equal(readFileSync(collisionPath, 'utf8'), foreignBytes);
+    // The live registry is also untouched — no partial publish occurred.
+    assert.equal(readFileSync(registryPath, 'utf8'), originalBytes);
   });
+
+  test(
+    'the registry file is written with owner-only permissions (0o600)',
+    { skip: process.platform === 'win32' ? 'Windows has no POSIX owner/group/other permission bits; statSync synthesizes them' : false },
+    () => {
+      // The registry holds PIDs and absolute project directory paths. It must
+      // not be group/world-readable on shared/multi-user filesystems — mirrors
+      // env-writer.ts's 0o600 convention for the same reason. This assertion
+      // is POSIX-only: Node does not implement separate owner/group/other bits
+      // on Windows, so statSync().mode there is synthesized and this check
+      // does not apply.
+      registerMcpInstance(tmp, registryPath, { kill: () => {}, getProcessCommand: () => null });
+      const mode = statSync(registryPath).mode & 0o777;
+      assert.equal(mode, 0o600, `expected mode 0o600, got ${mode.toString(8)}`);
+    },
+  );
+
+  function canCreateSymlinks(): boolean {
+    const probeTarget = join(tmp, '.symlink-capability-target');
+    const probeLink = join(tmp, '.symlink-capability-probe');
+    try {
+      writeFileSync(probeTarget, 'probe');
+      symlinkSync(probeTarget, probeLink);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      try {
+        rmSync(probeLink, { force: true });
+      } catch {
+        // ignore
+      }
+      try {
+        rmSync(probeTarget, { force: true });
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  test(
+    'a pre-existing symlink at the temp-file path is not followed (collision safety)',
+    { skip: !canCreateSymlinks() ? 'symlink creation unavailable on this host (e.g. Windows without Developer Mode/admin privileges)' : false },
+    () => {
+      // writeMcpRegistry derives tempPath from a fresh randomUUID() each call,
+      // so a real collision at that path is not realistically reachable in
+      // practice — randomUUID() is not mockable from outside the module
+      // (it's imported directly from node:crypto, not via a seam). What *is*
+      // directly testable and load-bearing is the write flag itself: writing
+      // with flag 'wx' (used by writeMcpRegistry) must refuse to follow a
+      // pre-existing symlink at the target path rather than writing through it
+      // — this is the actual mechanism that would protect the real temp path
+      // if a collision (or a future weakening of the write flag back to 'w')
+      // ever put a symlink there. Symlink creation can fail with EPERM on
+      // Windows hosts lacking symlink privileges/Developer Mode, so capability
+      // is probed first and the test is skipped (not failed) when unavailable.
+      const evilTarget = join(tmp, 'evil-target');
+      writeFileSync(evilTarget, 'not a registry');
+      const collisionPath = join(tmp, 'collision.tmp');
+      symlinkSync(evilTarget, collisionPath);
+
+      assert.throws(
+        () => writeFileSync(collisionPath, 'attempted overwrite', { flag: 'wx', mode: 0o600 }),
+        /EEXIST/,
+      );
+
+      // The symlink's target must be untouched — the write must never have
+      // followed it.
+      assert.equal(readFileSync(evilTarget, 'utf8'), 'not a registry');
+    },
+  );
 });
+
