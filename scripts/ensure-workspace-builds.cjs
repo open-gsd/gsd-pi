@@ -4,7 +4,8 @@
  *
  * Checks whether workspace packages have been compiled (dist/ exists with
  * index.js) and that the build is not stale (no src/ file newer than dist/).
- * If any are missing or stale, runs the build for those packages.
+ * If any are missing or stale, runs the build for those packages. Then rebuilds
+ * dist/resources when src/resources is newer.
  *
  * Invoked by the dev-CLI preflight (scripts/dev-cli-helpers.mjs) so that running
  * the local CLI in a fresh clone produces a working runtime without a manual
@@ -18,21 +19,21 @@
  */
 const { existsSync, statSync, readdirSync } = require('fs')
 const { resolve, join } = require('path')
-const { execSync } = require('child_process')
+const { execFileSync, execSync } = require('child_process')
 
 /**
  * Returns the most recent mtime (ms) of any .ts file under dir, recursively.
- * Returns 0 if no .ts files found.
+ * Returns 0 if no .ts files found. Pass isSource to count other files.
  */
-function newestSrcMtime(dir) {
+function newestSrcMtime(dir, isSource = (name) => name.endsWith('.ts')) {
   if (!existsSync(dir)) return 0
   let newest = 0
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.name === 'node_modules') continue
     const full = join(dir, entry.name)
     if (entry.isDirectory()) {
-      newest = Math.max(newest, newestSrcMtime(full))
-    } else if (entry.isFile() && entry.name.endsWith('.ts')) {
+      newest = Math.max(newest, newestSrcMtime(full, isSource))
+    } else if (entry.isFile() && isSource(entry.name)) {
       newest = Math.max(newest, statSync(full).mtimeMs)
     }
   }
@@ -79,6 +80,29 @@ function detectStalePackages(root, packages) {
     }
   }
   return stale
+}
+
+/**
+ * Detects a dist/resources that is older than src/resources.
+ *
+ * The resource loader prefers dist/resources over src/resources, so a stale
+ * copy makes the dev CLI run old extension code under a current version banner.
+ *
+ * No dist/resources is not stale: the loader then reads src/resources. As in
+ * detectStalePackages, timestamps are only trusted in a development clone.
+ *
+ * @param {string} root  Project root directory
+ * @returns {boolean}
+ */
+function isDistResourcesStale(root) {
+  const distResources = join(root, 'dist', 'resources')
+  if (!existsSync(distResources) || !existsSync(join(root, '.git'))) return false
+  // copy-resources writes this file last, so a rebuild that did not finish has none.
+  const fingerprint = join(distResources, '.managed-resources-content-hash')
+  if (!existsSync(fingerprint)) return true
+  // ponytail: every file counts (prompts and templates are copied too), so an
+  // edited test file also starts one rebuild. Add a filter if that hurts.
+  return newestSrcMtime(join(root, 'src', 'resources'), () => true) > statSync(fingerprint).mtimeMs
 }
 
 if (require.main === module) {
@@ -129,9 +153,9 @@ if (require.main === module) {
 
   const stale = detectStalePackages(root, WORKSPACE_PACKAGES)
 
-  if (stale.length === 0) process.exit(0)
-
-  process.stderr.write(`  Building ${stale.length} workspace package(s) with stale or missing dist/: ${stale.join(', ')}\n`)
+  if (stale.length > 0) {
+    process.stderr.write(`  Building ${stale.length} workspace package(s) with stale or missing dist/: ${stale.join(', ')}\n`)
+  }
 
   for (const pkg of stale) {
     const pkgDir = join(packagesDir, pkg)
@@ -148,6 +172,19 @@ if (require.main === module) {
       // Non-fatal — the user can run `pnpm run build` manually
     }
   }
+
+  // After the packages: the resources compile reads their built types.
+  if (isDistResourcesStale(root)) {
+    process.stderr.write('  Rebuilding dist/resources (src/resources is newer)\n')
+    try {
+      // Same as `pnpm run copy-resources`. It removes dist/resources first, so
+      // a failed rebuild leaves the loader on src/resources, not on old code.
+      execFileSync(process.execPath, [join(__dirname, 'copy-resources.cjs')], { cwd: root, stdio: 'pipe' })
+      process.stderr.write('  ✓ dist/resources\n')
+    } catch (err) {
+      process.stderr.write(`  ✗ dist/resources rebuild failed: ${err.message}\n  Run \`pnpm run copy-resources\` to see the errors.\n`)
+    }
+  }
 }
 
-module.exports = { newestSrcMtime, detectStalePackages }
+module.exports = { newestSrcMtime, detectStalePackages, isDistResourcesStale }
