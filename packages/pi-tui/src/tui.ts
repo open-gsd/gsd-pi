@@ -629,7 +629,7 @@ export class TUI extends Container {
 			return;
 		}
 		// xterm cell-size query: CSI 16 t → reply CSI 6 ; height ; width t.
-		this.terminal.write("\x1b[16t");
+		if (!this.writeStartupQuery("\x1b[16t")) return;
 		// iTerm2 does NOT answer CSI 16t — its only cell-size mechanism is the
 		// proprietary OSC 1337 ; ReportCellSize query → reply
 		// OSC 1337 ; ReportCellSize=height;width[;scale] ST. Without this, pi falls
@@ -638,7 +638,25 @@ export class TUI extends Container {
 		// handled by parseCellSizeResponse; sending both queries is harmless on
 		// terminals that ignore one of them.
 		if (caps.images === "iterm2") {
-			this.terminal.write("\x1b]1337;ReportCellSize\x07");
+			this.writeStartupQuery("\x1b]1337;ReportCellSize\x07");
+		}
+	}
+
+	/**
+	 * Startup capability probes are TUI-owned writes. A detached terminal can
+	 * close between terminal.start() and these probes, so handle only the same
+	 * closed-output errors as the render loop; unrelated failures remain fatal.
+	 */
+	private writeStartupQuery(data: string): boolean {
+		try {
+			this.terminal.write(data);
+			return true;
+		} catch (err) {
+			if (isStdoutClosedError(err)) {
+				this.notifyOutputClosed();
+				return false;
+			}
+			throw err;
 		}
 	}
 
