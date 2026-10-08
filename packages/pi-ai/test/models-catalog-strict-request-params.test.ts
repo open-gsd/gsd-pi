@@ -60,6 +60,38 @@ describe("strictRequestParams catalog parity (#2500)", () => {
 		}
 	});
 
+	it("marks Opus 5.5 and Fable 5.1 strict with thinkingOffMode omit, Sonnet 5.5 strict with between_tools, Fable 5 omit only", () => {
+		const expected: Array<[string, string, boolean, "between_tools" | "omit"]> = [
+			["anthropic", "claude-sonnet-5-5", true, "between_tools"],
+			["anthropic-vertex", "claude-sonnet-5-5", true, "between_tools"],
+			["anthropic", "claude-opus-5-5", true, "omit"],
+			["anthropic-vertex", "claude-opus-5-5", true, "omit"],
+			["anthropic", "claude-fable-5-1", true, "omit"],
+			["vercel-ai-gateway", "anthropic/claude-opus-5.5", true, "omit"],
+			["cloudflare-ai-gateway", "claude-fable-5.1", true, "omit"],
+			// Fable 5 cannot disable thinking but accepts forced tool choice.
+			["anthropic", "claude-fable-5", false, "omit"],
+			["anthropic-vertex", "claude-fable-5", false, "omit"],
+		];
+		for (const [provider, id, strict, mode] of expected) {
+			const entry = (MODELS as Record<string, Record<string, { compat?: { strictRequestParams?: boolean; thinkingOffMode?: string } }>>)[provider]?.[id];
+			expect(entry?.compat?.thinkingOffMode, `${provider}/${id}`).toBe(mode);
+			expect(entry?.compat?.strictRequestParams === true, `${provider}/${id} strict`).toBe(strict);
+		}
+	});
+
+	it("carries thinkingOffMode identically in the JSON and TS catalogs", () => {
+		const raw = JSON.parse(
+			readFileSync(join(packageRoot, "src", "models.generated.json"), "utf8"),
+		) as Record<string, Record<string, { compat?: { thinkingOffMode?: string } }>>;
+		for (const [provider, models] of Object.entries(raw)) {
+			for (const [key, entry] of Object.entries(models)) {
+				const tsEntry = (MODELS as Record<string, Record<string, { compat?: { thinkingOffMode?: string } }>>)[provider]?.[key];
+				expect(tsEntry?.compat?.thinkingOffMode, `${provider}/${key}`).toBe(entry.compat?.thinkingOffMode);
+			}
+		}
+	});
+
 	it("marks claude-sonnet-5-5 on the anthropic provider", () => {
 		const entry = MODELS.anthropic?.["claude-sonnet-5-5"] as
 			| { compat?: { strictRequestParams?: boolean } }

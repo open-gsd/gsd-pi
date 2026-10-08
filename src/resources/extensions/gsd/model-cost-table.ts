@@ -404,6 +404,7 @@ export const BUNDLED_COST_TABLE: ModelCostEntry[] = [
   { id: "claude-opus-4-8", inputPer1k: 0.005, outputPer1k: 0.025, updatedAt: "2026-05-28" },
   { id: "claude-opus-5", inputPer1k: 0.005, outputPer1k: 0.025, updatedAt: "2026-08-12" },
   { id: "claude-opus-5-5", inputPer1k: 0.004, outputPer1k: 0.020, updatedAt: "2026-09-22" },
+  { id: "claude-fable-5-1", inputPer1k: 0.010, outputPer1k: 0.050, updatedAt: "2026-10-02" },
   { id: "claude-fable-5", inputPer1k: 0.010, outputPer1k: 0.050, updatedAt: "2026-06-09" },
   { id: "claude-sonnet-4-6", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2025-03-15" },
   { id: "claude-sonnet-5", inputPer1k: 0.002, outputPer1k: 0.010, updatedAt: "2026-10-01" },
@@ -462,15 +463,31 @@ export const BUNDLED_COST_TABLE: ModelCostEntry[] = [
 
 /**
  * Lookup cost for a model ID. Returns undefined if not found.
+ *
+ * Strips provider (`openrouter/`) and Bedrock (`us.anthropic.`) prefixes,
+ * maps dotted Claude ids (`claude-sonnet-5.5`, GitHub Copilot) to the hyphen
+ * form, and prefers the longest matching prefix so `claude-opus-5-5-fast`
+ * resolves to the Opus 5.5 row, not Opus 5. Variants without their own row
+ * (`-fast`, Bedrock geo +10%) get the base list price, which is close enough
+ * for routing comparisons but not billing.
  */
 export function lookupModelCost(modelId: string): ModelCostEntry | undefined {
-  const bareId = modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;
-  return BUNDLED_COST_TABLE.find(e => e.id === bareId)
-    ?? BUNDLED_COST_TABLE.find(e =>
-      bareId.startsWith(`${e.id}-`) ||
-      bareId.startsWith(`${e.id}:`) ||
-      bareId.startsWith(`${e.id}@`)
-    );
+  let bareId = modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;
+  const bedrockClaude = bareId.indexOf("anthropic.claude-");
+  if (bedrockClaude >= 0) bareId = bareId.slice(bedrockClaude + "anthropic.".length);
+  return findCostEntry(bareId)
+    ?? (bareId.startsWith("claude-") && bareId.includes(".") ? findCostEntry(bareId.replace(/\./g, "-")) : undefined);
+}
+
+function findCostEntry(bareId: string): ModelCostEntry | undefined {
+  const exact = BUNDLED_COST_TABLE.find(e => e.id === bareId);
+  if (exact) return exact;
+  let best: ModelCostEntry | undefined;
+  for (const entry of BUNDLED_COST_TABLE) {
+    const isPrefix = bareId.startsWith(`${entry.id}-`) || bareId.startsWith(`${entry.id}:`) || bareId.startsWith(`${entry.id}@`);
+    if (isPrefix && (!best || entry.id.length > best.id.length)) best = entry;
+  }
+  return best;
 }
 
 /**

@@ -98,7 +98,7 @@ export interface AgentSpec {
 	/** Path to the system prompt file (relative to component dir). */
 	systemPrompt: string;
 
-	/** Model override (e.g., "claude-sonnet-4-6"). */
+	/** Model override (e.g., "claude-sonnet-5-5"). */
 	model?: string;
 
 	/** Fallback models to try if primary fails. */

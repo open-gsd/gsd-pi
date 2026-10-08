@@ -29,8 +29,8 @@ dynamic_routing:
   enabled: true
   tier_models:
     light: claude-haiku-4-5
-    standard: claude-sonnet-4-6
-    heavy: claude-opus-4-6
+    standard: claude-sonnet-5-5
+    heavy: claude-opus-5-5
   escalate_on_failure: true    # bump tier on task failure
   budget_pressure: true        # auto-downgrade near budget ceiling
   cross_provider: true         # consider models from other providers
@@ -79,9 +79,10 @@ User feedback (`/gsd rate`) is weighted 2x vs automatic outcomes.
 
 | Model | Input (per M) | Output (per M) |
 |-------|-------|--------|
-| claude-haiku-4-5 | $0.80 | $4.00 |
-| claude-sonnet-4-6 | $3.00 | $15.00 |
-| claude-opus-4-6 | $15.00 | $75.00 |
+| claude-haiku-4-5 | $1.00 | $5.00 |
+| claude-sonnet-5-5 | $2.00 | $10.00 |
+| claude-opus-5-5 | $4.00 | $20.00 |
+| claude-fable-5-1 | $10.00 | $50.00 |
 | gpt-4o-mini | $0.15 | $0.60 |
 | gpt-4o | $2.50 | $10.00 |
 | gemini-2.0-flash | $0.10 | $0.40 |

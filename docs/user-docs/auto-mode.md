@@ -550,7 +550,7 @@ reactive_execution:
   enabled: true              # explicit opt-in threshold: 2 ready tasks
   max_parallel: 4            # default: 2, allowed range: 1-8
   isolation_mode: same-tree  # currently the only supported isolation mode
-  subagent_model: claude-sonnet-4-6
+  subagent_model: claude-sonnet-5-5
 ```
 
 The implementation lives in `reactive-graph.ts` (graph derivation, ready-set resolution, conflict/deadlock detection) with integration into `auto-dispatch.ts` and `auto-prompts.ts`.

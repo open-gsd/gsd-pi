@@ -667,10 +667,10 @@ interface ProviderConfig {
 
 ```typescript
 interface ProviderModelConfig {
-  /** Model ID (e.g., "claude-sonnet-4-20250514"). */
+  /** Model ID (e.g., "claude-sonnet-5-5"). */
   id: string;
 
-  /** Display name (e.g., "Claude 4 Sonnet"). */
+  /** Display name (e.g., "Claude Sonnet 5.5"). */
   name: string;
 
   /** API type override for this specific model. */

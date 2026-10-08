@@ -1493,7 +1493,7 @@ export interface ProviderConfig {
 
 /** Configuration for a model within a provider. */
 export interface ProviderModelConfig {
-	/** Model ID (e.g., "claude-sonnet-4-20250514"). */
+	/** Model ID (e.g., "claude-sonnet-5-5"). */
 	id: string;
 	/** Display name (e.g., "Claude 4 Sonnet"). */
 	name: string;

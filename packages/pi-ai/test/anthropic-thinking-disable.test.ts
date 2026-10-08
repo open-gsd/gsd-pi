@@ -176,14 +176,50 @@ describe("Anthropic strict request params (Sonnet 5.5)", () => {
 	});
 });
 
+// Opus 5.5 and Fable 5.x cannot disable thinking at all ({type:"disabled"}
+// and between_tools both 400): "off" omits thinking and lowers the effort.
+describe("Anthropic strict request params (Opus 5.5 / Fable 5.x)", () => {
+	for (const [provider, id] of [
+		["anthropic", "claude-opus-5-5"],
+		["anthropic", "claude-fable-5-1"],
+		["anthropic", "claude-fable-5"],
+		["opencode", "claude-opus-5-5"],
+		["vercel-ai-gateway", "anthropic/claude-opus-5.5"],
+	] as const) {
+		it(`omits thinking and requests low effort for ${provider}/${id} when thinking is off`, async () => {
+			const payload = await capturePayload(
+				getModel(provider as "anthropic", id as "claude-opus-5-5") as Model<"anthropic-messages">,
+				{ temperature: 0 },
+			);
+
+			expect(payload.thinking).toBeUndefined();
+			expect(payload.output_config).toEqual({ effort: "low" });
+			expect(payload.temperature).toBeUndefined();
+		});
+	}
+
+	it("keeps adaptive thinking and the requested effort for Claude Opus 5.5 when reasoning is on", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-opus-5-5"), { reasoning: "high" });
+
+		expect(payload.thinking).toMatchObject({ type: "adaptive" });
+		expect(payload.output_config).toEqual({ effort: "high" });
+	});
+});
+
 // `tool_choice` only reaches buildParams through streamAnthropic's
 // AnthropicOptions (the simple path does not forward it), so these exercise
 // the request-building layer directly against a local HTTP server.
 describe("Anthropic strict request params tool_choice (#2500)", () => {
-	function createStrictModel(compat?: { strictRequestParams?: boolean }): Model<"anthropic-messages"> {
+	function createStrictModel(
+		compat?: {
+			strictRequestParams?: boolean;
+			thinkingOffMode?: "between_tools" | "omit";
+		},
+		id = "claude-sonnet-5-5",
+	): Model<"anthropic-messages"> {
 		return {
-			id: "claude-sonnet-5-5",
-			name: "Claude Sonnet 5.5",
+			id,
+			name: id,
 			api: "anthropic-messages",
 			provider: "test-anthropic",
 			baseUrl: "",
@@ -198,7 +234,7 @@ describe("Anthropic strict request params tool_choice (#2500)", () => {
 
 	async function captureRequest(
 		model: Model<"anthropic-messages">,
-		options: { toolChoice: "auto" | "any" | { type: "tool"; name: string } },
+		options: { toolChoice?: "auto" | "any" | { type: "tool"; name: string }; thinkingEnabled?: boolean },
 	): Promise<Record<string, unknown>> {
 		let capturedBody: Record<string, unknown> | undefined;
 		const server = createServer(async (request, response) => {
@@ -257,8 +293,42 @@ describe("Anthropic strict request params tool_choice (#2500)", () => {
 		expect(body.tool_choice).toEqual({ type: "auto" });
 	});
 
+	it("honors an explicit thinkingOffMode on custom strict models", async () => {
+		const omitted = await captureRequest(
+			createStrictModel({ strictRequestParams: true, thinkingOffMode: "omit" }),
+			{ thinkingEnabled: false },
+		);
+		expect(omitted.thinking).toBeUndefined();
+		expect(omitted.output_config).toEqual({ effort: "low" });
+
+		const defaulted = await captureRequest(createStrictModel({ strictRequestParams: true }), { thinkingEnabled: false });
+		expect(defaulted.thinking).toEqual({ type: "between_tools" });
+	});
+
 	it("keeps forced tool_choice for models without the strictRequestParams marker", async () => {
-		const body = await captureRequest(createStrictModel(), { toolChoice: "any" });
+		const body = await captureRequest(createStrictModel(undefined, "claude-sonnet-5"), { toolChoice: "any" });
+
+		expect(body.tool_choice).toEqual({ type: "any" });
+	});
+
+	it("applies id-based rules to custom models without catalog compat", async () => {
+		const sonnet = await captureRequest(createStrictModel(undefined, "claude-sonnet-5-5-20261001"), {
+			toolChoice: "any",
+			thinkingEnabled: false,
+		});
+		expect(sonnet.tool_choice).toBeUndefined();
+		expect(sonnet.thinking).toEqual({ type: "between_tools" });
+
+		const opus = await captureRequest(createStrictModel(undefined, "claude-opus-5-5"), { thinkingEnabled: false });
+		expect(opus.thinking).toBeUndefined();
+		expect(opus.output_config).toEqual({ effort: "low" });
+
+		const fable = await captureRequest(createStrictModel(undefined, "claude-fable-5"), { toolChoice: "any" });
+		expect(fable.tool_choice).toEqual({ type: "any" });
+	});
+
+	it("keeps forced tool_choice for omit-only models (Fable 5)", async () => {
+		const body = await captureRequest(createStrictModel({ thinkingOffMode: "omit" }), { toolChoice: "any" });
 
 		expect(body.tool_choice).toEqual({ type: "any" });
 	});

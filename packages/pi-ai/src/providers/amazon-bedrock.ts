@@ -46,6 +46,11 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import {
+	type ClaudeRequestConstraints,
+	getClaudeRequestConstraints,
+	rejectsSamplingParams,
+} from "./claude-request-constraints.js";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -185,15 +190,27 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			const client = new BedrockRuntimeClient(config);
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
+			const claudeConstraints = getBedrockClaudeConstraints(model);
 			let commandInput = {
 				modelId: model.id,
 				messages: convertMessages(context, model, cacheRetention),
 				system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
 				inferenceConfig: {
 					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
-					...(options.temperature !== undefined && { temperature: options.temperature }),
+					// Claude Sonnet/Opus 5.5 and Fable 5.x 400 on sampling params.
+					...(options.temperature !== undefined &&
+						!rejectsSamplingParams(claudeConstraints) && { temperature: options.temperature }),
 				},
-				toolConfig: convertToolConfig(context.tools, options.toolChoice),
+				// Strict-param models (all but Fable 5) also 400 on forced tool choice;
+				// "auto" keeps the tools usable.
+				toolConfig: convertToolConfig(
+					context.tools,
+					claudeConstraints?.strictRequestParams &&
+						options.toolChoice !== undefined &&
+						options.toolChoice !== "none"
+						? "auto"
+						: options.toolChoice,
+				),
 				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
 				...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
 			};
@@ -478,6 +495,16 @@ function getModelMatchCandidates(modelId: string, modelName?: string): string[] 
 	});
 }
 
+/** Constraints of strict-param Claude models, matched on id or display name (application inference profile ARNs carry no model id). */
+function getBedrockClaudeConstraints(model: Model<"bedrock-converse-stream">): ClaudeRequestConstraints | undefined {
+	if (!isAnthropicClaudeModel(model)) return undefined;
+	for (const candidate of getModelMatchCandidates(model.id, model.name)) {
+		const constraints = getClaudeRequestConstraints(candidate);
+		if (constraints) return constraints;
+	}
+	return undefined;
+}
+
 function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean {
 	const candidates = getModelMatchCandidates(modelId, modelName);
 	return candidates.some(
@@ -486,6 +513,7 @@ function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean 
 			s.includes("opus-4-7") ||
 			s.includes("opus-4-8") ||
 			s.includes("opus-5") ||
+			s.includes("fable-5") ||
 			s.includes("sonnet-5") ||
 			s.includes("sonnet-4-6"),
 	);
@@ -493,7 +521,14 @@ function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean 
 
 function supportsNativeXhighEffort(model: Model<"bedrock-converse-stream">): boolean {
 	const candidates = getModelMatchCandidates(model.id, model.name);
-	return candidates.some((s) => s.includes("opus-4-7") || s.includes("opus-4-8") || s.includes("opus-5"));
+	return candidates.some(
+		(s) =>
+			s.includes("opus-4-7") ||
+			s.includes("opus-4-8") ||
+			s.includes("opus-5") ||
+			s.includes("fable-5") ||
+			s.includes("sonnet-5"),
+	);
 }
 
 function mapThinkingLevelToEffort(
@@ -926,7 +961,16 @@ function buildAdditionalModelRequestFields(
 	model: Model<"bedrock-converse-stream">,
 	options: BedrockOptions,
 ): Record<string, any> | undefined {
-	if (!options.reasoning || !model.reasoning) {
+	if (!model.reasoning) {
+		return undefined;
+	}
+
+	if (!options.reasoning) {
+		// Strict-param Claude models reject {type: "disabled"}; express "off" as their
+		// lowest setting instead of leaving them at the adaptive default.
+		const thinkingOffMode = getBedrockClaudeConstraints(model)?.thinkingOffMode;
+		if (thinkingOffMode === "between_tools") return { thinking: { type: "between_tools" } };
+		if (thinkingOffMode === "omit") return { output_config: { effort: "low" } };
 		return undefined;
 	}
 

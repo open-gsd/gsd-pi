@@ -24,10 +24,10 @@ Preferences use YAML frontmatter in a markdown file:
 ---
 version: 1
 models:
-  research: claude-sonnet-4-6
-  planning: claude-opus-4-6
-  execution: claude-sonnet-4-6
-  completion: claude-sonnet-4-6
+  research: claude-sonnet-5-5
+  planning: claude-opus-5-5
+  execution: claude-sonnet-5-5
+  completion: claude-sonnet-5-5
 skill_discovery: suggest
 auto_supervisor:
   soft_timeout_minutes: 20
@@ -280,12 +280,12 @@ claude_code_mcp:
       allowed_servers:
         - google-search
       # gsd-workflow is allowed implicitly; no need to list it.
-    claude-sonnet-4-6:
+    claude-sonnet-5-5:
       blocked_servers:
         - analytics-noisy
 ```
 
-With this configuration, a Haiku-4-5 subagent sees only `gsd-workflow` and `google-search` regardless of how many servers `.mcp.json` defines; a Sonnet-4-6 session sees every discovered server except `analytics-noisy`. Other models match no prefix and are unaffected.
+With this configuration, a Haiku-4-5 subagent sees only `gsd-workflow` and `google-search` regardless of how many servers `.mcp.json` defines; a Sonnet-5-5 session sees every discovered server except `analytics-noisy`. Other models match no prefix and are unaffected.
 
 ## Environment Variables
 
@@ -405,22 +405,22 @@ Per-phase model selection. Each key accepts a model string or an object with fal
 
 ```yaml
 models:
-  research: claude-sonnet-4-6
+  research: claude-sonnet-5-5
   planning:
-    model: claude-opus-4-6
+    model: claude-opus-5-5
     fallbacks:
       - openrouter/z-ai/glm-5
-  execution: claude-sonnet-4-6
-  execution_simple: claude-haiku-4-5-20250414
-  completion: claude-sonnet-4-6
-  subagent: claude-sonnet-4-6
+  execution: claude-sonnet-5-5
+  execution_simple: claude-haiku-4-5
+  completion: claude-sonnet-5-5
+  subagent: claude-sonnet-5-5
 ```
 
 **Phases:** `research`, `planning`, `discuss`, `execution`, `execution_simple`, `completion`, `validation`, `subagent`, `uat`
 
 - `execution_simple` — used for tasks classified as "simple" by the [complexity router](./token-optimization.md#complexity-based-task-routing)
 - `subagent` — model for delegated subagent tasks (scout, researcher, worker)
-- Provider targeting: use `provider/model` format (e.g., `bedrock/claude-sonnet-4-6`) or the `provider` field in object format
+- Provider targeting: use `provider/model` format (e.g., `bedrock/claude-sonnet-5-5`) or the `provider` field in object format
 - Omit a key to use whatever model is currently active
 
 ### Custom Model Definitions (`models.json`)
@@ -460,7 +460,7 @@ For full documentation including provider configuration, model overrides, OpenAI
 ```yaml
 models:
   planning:
-    model: claude-opus-4-6
+    model: claude-opus-5-5
     fallbacks:
       - openrouter/z-ai/glm-5
       - openrouter/moonshotai/kimi-k2.5
@@ -606,7 +606,7 @@ Timeout thresholds for auto mode supervision:
 
 ```yaml
 auto_supervisor:
-  model: claude-sonnet-4-6    # optional: model for supervisor (defaults to active model)
+  model: claude-sonnet-5-5    # optional: model for supervisor (defaults to active model)
   soft_timeout_minutes: 20    # warn LLM to wrap up
   idle_timeout_minutes: 10    # detect stalls
   hard_timeout_minutes: 30    # pause auto mode
@@ -1064,7 +1064,7 @@ post_unit_hooks:
   - name: code-review
     after: [execute-task]
     prompt: "Review the code changes for quality and security issues."
-    model: claude-opus-4-6          # optional: model override
+    model: claude-opus-5-5          # optional: model override
     max_cycles: 1                   # max fires per trigger (1-10, default: 1)
     artifact: REVIEW.md             # optional: skip if this file exists
     retry_on: NEEDS-REWORK.md       # optional: re-run trigger unit if this file appears
@@ -1110,7 +1110,7 @@ pre_dispatch_hooks:
     action: replace
     prompt: "Execute the task using TDD methodology."
     unit_type: execute-task-tdd     # optional: override unit type label
-    model: claude-opus-4-6          # optional: model override
+    model: claude-opus-5-5          # optional: model override
 ```
 
 All pre-dispatch hooks support `enabled: true/false` to toggle without removing.
@@ -1205,8 +1205,8 @@ dynamic_routing:
   capability_routing: true          # score models by task capability
   tier_models:
     light: claude-haiku-4-5
-    standard: claude-sonnet-4-6
-    heavy: claude-opus-4-6
+    standard: claude-sonnet-5-5
+    heavy: claude-opus-5-5
   escalate_on_failure: true
   budget_pressure: true
   cross_provider: true
@@ -1298,12 +1298,12 @@ version: 1
 models:
   research: openrouter/deepseek/deepseek-r1
   planning:
-    model: claude-opus-4-6
+    model: claude-opus-5-5
     fallbacks:
       - openrouter/z-ai/glm-5
-  execution: claude-sonnet-4-6
-  execution_simple: claude-haiku-4-5-20250414
-  completion: claude-sonnet-4-6
+  execution: claude-sonnet-5-5
+  execution_simple: claude-haiku-4-5
+  completion: claude-sonnet-5-5
 
 # Token optimization
 token_profile: balanced

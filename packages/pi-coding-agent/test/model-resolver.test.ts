@@ -379,7 +379,11 @@ describe("default model selection", () => {
 	});
 
 	test("anthropic vertex default tracks current model", () => {
-		expect(defaultModelPerProvider["anthropic-vertex"]).toBe("claude-sonnet-4-6");
+		expect(defaultModelPerProvider["anthropic-vertex"]).toBe("claude-sonnet-5-5");
+	});
+
+	test("amazon bedrock default tracks current model", () => {
+		expect(defaultModelPerProvider["amazon-bedrock"]).toBe("us.anthropic.claude-opus-5-5");
 	});
 
 	test("zai, minimax, and cerebras defaults track current models", () => {

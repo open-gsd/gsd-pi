@@ -121,6 +121,20 @@ import {
 import { getSessionModelOverride } from "./session-model-override.js";
 import { setAutoActiveStatus } from "./auto-dashboard.js";
 
+const COPILOT_SONNET_4_FALLBACKS = ["claude-sonnet-4.6", "claude-sonnet-4.5", "claude-sonnet-4"];
+
+/**
+ * Nearest Copilot Sonnet ids to try, in order, when Copilot temporarily omits
+ * a preferred Sonnet 5.x from its live catalog. Undefined for other models.
+ */
+export function copilotSonnetFallbackChain(preferredIdLower: string): string[] | undefined {
+  if (preferredIdLower === "claude-sonnet-5.5" || preferredIdLower === "claude-sonnet-5-5") {
+    return ["claude-sonnet-5", ...COPILOT_SONNET_4_FALLBACKS];
+  }
+  if (preferredIdLower === "claude-sonnet-5") return [...COPILOT_SONNET_4_FALLBACKS];
+  return undefined;
+}
+
 export interface BootstrapDeps {
   shouldUseWorktreeIsolation: (basePath?: string) => boolean;
   registerSigtermHandler: (basePath: string) => void;
@@ -1031,12 +1045,15 @@ export async function bootstrapAutoSession(
       const isCopilotProvider = providerLower === "github-copilot" || providerLower === "copilot";
       const preferredIdLower = preferredModel.id.toLowerCase();
 
-      if (isCopilotProvider && preferredIdLower === "claude-sonnet-5") {
-        const copilotSonnetFallback = available.find((candidate) => {
+      const copilotFallbackIds = isCopilotProvider ? copilotSonnetFallbackChain(preferredIdLower) : undefined;
+      if (copilotFallbackIds) {
+        const copilotModels = available.filter((candidate) => {
           const candidateProvider = candidate.provider.toLowerCase();
-          if (candidateProvider !== "github-copilot" && candidateProvider !== "copilot") return false;
-          return ["claude-sonnet-4.6", "claude-sonnet-4.5", "claude-sonnet-4"].includes(candidate.id.toLowerCase());
+          return candidateProvider === "github-copilot" || candidateProvider === "copilot";
         });
+        const copilotSonnetFallback = copilotFallbackIds
+          .map((id) => copilotModels.find((candidate) => candidate.id.toLowerCase() === id))
+          .find((candidate) => candidate !== undefined);
 
         if (copilotSonnetFallback) {
           validatedPreferredModel = {

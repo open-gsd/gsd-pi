@@ -114,11 +114,11 @@ Diagnostics record the file path, scope (global/project), severity (error/warnin
 - `language`: preferred response language for all GSD interactions. Accepts any language name or code — `"Chinese"`, `"zh"`, `"German"`, `"de"`, `"日本語"`, etc. When set, GSD injects "Always respond in \<language\>" into every agent's system prompt, including after `/clear`. Quickest way to set it: `/gsd language <name>`. To clear: `/gsd language off`.
 
 - `models`: per-stage model selection (applies to both auto-mode and guided-flow dispatches). Keys: `research`, `planning`, `discuss`, `execution`, `execution_simple`, `completion`, `validation`, `subagent`, `uat`. Values can be:
-  - Simple string: `"claude-sonnet-4-6"` — single model, no fallbacks
-  - Provider-qualified string: `"bedrock/claude-sonnet-4-6"` — targets a specific provider when the same model ID exists across multiple providers
-  - Object with fallbacks: `{ model: "claude-opus-4-6", fallbacks: ["glm-5", "minimax-m2.5"] }` — tries fallbacks in order if primary fails
-  - Object with provider: `{ model: "claude-opus-4-6", provider: "bedrock" }` — explicit provider targeting in object format
-  - Object with thinking: `{ model: "claude-opus-4-6", thinking: "xhigh" }` — pins the reasoning effort for that phase (see `thinking` below)
+  - Simple string: `"claude-sonnet-5-5"` — single model, no fallbacks
+  - Provider-qualified string: `"bedrock/claude-sonnet-5-5"` — targets a specific provider when the same model ID exists across multiple providers
+  - Object with fallbacks: `{ model: "claude-opus-5-5", fallbacks: ["glm-5", "minimax-m2.5"] }` — tries fallbacks in order if primary fails
+  - Object with provider: `{ model: "claude-opus-5-5", provider: "bedrock" }` — explicit provider targeting in object format
+  - Object with thinking: `{ model: "claude-opus-5-5", thinking: "xhigh" }` — pins the reasoning effort for that phase (see `thinking` below)
   - Omit a key to use whatever model is currently active (except `discuss` and `validation` which fall back to `planning` when unset). Fallbacks are tried when model switching fails (provider unavailable, rate limited, etc.).
   - `discuss` — used for milestone/slice discussion (interactive context gathering). Falls back to `planning` if unset.
   - `validation` — used for gate evaluation, roadmap reassessment, milestone validation, and doc rewrites. Falls back to `planning` if unset.
@@ -488,8 +488,8 @@ always_use_skills:
   - debug-like-expert
 skill_discovery: suggest
 models:
-  planning: claude-opus-4-6
-  execution: claude-sonnet-4-6
+  planning: claude-opus-5-5
+  execution: claude-sonnet-5-5
 ---
 ```
 
@@ -503,10 +503,10 @@ Everything else uses defaults. No `prefer_skills: []`, no `avoid_skills: []`, no
 ---
 version: 1
 models:
-  research: claude-sonnet-4-6
-  planning: claude-opus-4-6
-  execution: claude-sonnet-4-6
-  completion: claude-sonnet-4-6
+  research: claude-sonnet-5-5
+  planning: claude-opus-5-5
+  execution: claude-sonnet-5-5
+  completion: claude-sonnet-5-5
 ---
 ```
 
@@ -523,7 +523,7 @@ models:
     fallbacks:
       - openrouter/minimax/minimax-m2.5
   planning:
-    model: claude-opus-4-6
+    model: claude-opus-5-5
     fallbacks:
       - openrouter/z-ai/glm-5
       - openrouter/moonshotai/kimi-k2.5
@@ -580,22 +580,22 @@ When a model fails to switch (provider unavailable, rate limited, credits exhaus
 
 ## Provider Targeting
 
-When the same model ID exists across multiple providers (e.g., `claude-sonnet-4-6` on both Anthropic and Bedrock), use the `provider/model` format or the `provider` field to target a specific one:
+When the same model ID exists across multiple providers (e.g., `claude-sonnet-5-5` on both Anthropic and Bedrock), use the `provider/model` format or the `provider` field to target a specific one:
 
 ```yaml
 ---
 version: 1
 models:
   # String format: provider/model
-  research: bedrock/claude-sonnet-4-6
-  planning: anthropic/claude-opus-4-6
+  research: bedrock/claude-sonnet-5-5
+  planning: anthropic/claude-opus-5-5
 
   # Object format: explicit provider field
   execution:
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5-5
     provider: bedrock
     fallbacks:
-      - anthropic/claude-sonnet-4-6
+      - anthropic/claude-sonnet-5-5
 ---
 ```
 
@@ -609,7 +609,7 @@ version: 1
 models:
   research: openrouter/deepseek/deepseek-r1 # $0.28/$0.42 per 1M tokens
   planning:
-    model: claude-opus-4-6 # $5/$25 — best for architecture
+    model: claude-opus-5-5 # $4/$20 — best for architecture
     fallbacks:
       - openrouter/z-ai/glm-5 # $1/$3.20 — strong alternative
   execution: openrouter/minimax/minimax-m2.5 # $0.30/$1.20 — cheapest quality
@@ -787,7 +787,7 @@ pre_dispatch_hooks:
       - execute-task
     action: replace
     prompt: "Implement the task using strict TDD. Write failing tests first, then implement, then refactor."
-    model: claude-opus-4-6
+    model: claude-opus-5-5
 ---
 ```
 
@@ -836,8 +836,8 @@ dynamic_routing:
   enabled: true
   tier_models:
     light: openrouter/minimax/minimax-m2.5
-    standard: claude-sonnet-4-6
-    heavy: claude-opus-4-6
+    standard: claude-sonnet-5-5
+    heavy: claude-opus-5-5
   escalate_on_failure: true
   budget_pressure: true
 ---

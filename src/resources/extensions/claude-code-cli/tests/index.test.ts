@@ -74,7 +74,7 @@ test("registers catalog-only Claude models (claude-fable-5-1) with zero cost and
 	assert.equal(fable51.contextWindow, 1_000_000);
 	assert.equal(fable51.maxTokens, 128_000);
 	assert.deepEqual(fable51.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-	assert.deepEqual(fable51.compat, { forceAdaptiveThinking: true });
+	assert.deepEqual(fable51.compat, { forceAdaptiveThinking: true, strictRequestParams: true, thinkingOffMode: "omit" });
 	assert.deepEqual(fable51.thinkingLevelMap, { xhigh: "xhigh" });
 });
 
@@ -170,6 +170,20 @@ test("buildClaudeCodeModelList: catalog strictRequestParams compat flows through
 		{ forceAdaptiveThinking: true, strictRequestParams: true },
 		"strictRequestParams must reach the registered model so the stream adapter can guard requests",
 	);
+});
+
+test("buildClaudeCodeModelList: curated Opus 5.5 and Fable 5 carry the thinking-off compat (#2500)", () => {
+	const merged = buildClaudeCodeModelList([]);
+	const expected = {
+		"claude-opus-5-5": { forceAdaptiveThinking: true, strictRequestParams: true, thinkingOffMode: "omit" },
+		// Fable 5 cannot disable thinking but still accepts forced tool choice.
+		"claude-fable-5": { forceAdaptiveThinking: true, thinkingOffMode: "omit" },
+	};
+	for (const [id, compat] of Object.entries(expected)) {
+		const model = merged.find((entry) => entry.id === id);
+		assert.ok(model, `${id} must be registered`);
+		assert.deepEqual(model.compat, compat, `${id} cannot disable thinking; the adapter needs thinkingOffMode omit`);
+	}
 });
 
 test("captures UI context before streamSimple, including when before_provider_request never fires (#2118)", () => {

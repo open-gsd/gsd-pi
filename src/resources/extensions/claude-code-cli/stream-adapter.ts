@@ -1935,7 +1935,11 @@ const ANTHROPIC_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
  * barrel lags behind monorepo source exports.
  */
 export interface ClaudeCodeModelMetadata {
-	compat?: { forceAdaptiveThinking?: boolean; strictRequestParams?: boolean } | undefined;
+	compat?: {
+		forceAdaptiveThinking?: boolean;
+		strictRequestParams?: boolean;
+		thinkingOffMode?: "between_tools" | "omit";
+	} | undefined;
 	thinkingLevelMap?: Partial<Record<string, string | null>> | undefined;
 }
 
@@ -2386,13 +2390,18 @@ export function buildSdkOptions(
 	// Bug B: SDK requires thinking:{type:"adaptive"} alongside effort for adaptive thinking to activate.
 	// Bug C: SDK requires thinking:{type:"disabled"} to actually stop adaptive thinking when reasoning is off;
 	//        omitting the field leaves the SDK in its adaptive default (or persisted session state).
-	// #2500: strict-param models (Sonnet 5.5) 400 on {type:"disabled"} — their off
-	//        switch is {type:"between_tools"}, flagged via catalog compat.
-	const strictRequestParams = modelMetadata?.compat?.strictRequestParams === true;
+	// #2500: strict-param models 400 on {type:"disabled"}, flagged via catalog
+	//        compat. Sonnet 5.5's off switch is {type:"between_tools"}; Opus 5.5
+	//        and Fable 5.x cannot disable thinking, so "off" stays adaptive at
+	//        the lowest effort (explicit, so persisted session state is overridden).
+	const thinkingOffMode = modelMetadata?.compat?.thinkingOffMode
+		?? (modelMetadata?.compat?.strictRequestParams === true ? "between_tools" : undefined);
+	const offEffort = supportsAdaptive && !effort && thinkingOffMode === "omit" ? "low" : undefined;
+	const sdkEffort = effort ?? offEffort;
 	const thinkingConfig = supportsAdaptive
-		? effort
+		? sdkEffort
 			? { thinking: { type: "adaptive" } }
-			: { thinking: { type: strictRequestParams ? "between_tools" : "disabled" } }
+			: { thinking: { type: thinkingOffMode === "between_tools" ? "between_tools" : "disabled" } }
 		: undefined;
 
 	// Interactive runs load user settings, so legacy gsd-core v1 skills installed
@@ -2434,7 +2443,7 @@ export function buildSdkOptions(
 			|| modelId.includes("fable.5")
 		) ? ["context-1m-2025-08-07"] : [],
 		...(thinkingConfig ?? {}),
-		...(effort ? { effort } : {}),
+		...(sdkEffort ? { effort: sdkEffort } : {}),
 		...sdkExtraOptions,
 		env: withClaudeCodePrintBgWaitCeiling(
 			isRecord(extraEnv) ? { ...process.env, ...extraEnv as NodeJS.ProcessEnv } : process.env,

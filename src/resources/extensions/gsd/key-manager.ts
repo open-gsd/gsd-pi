@@ -489,7 +489,7 @@ const TEST_ENDPOINTS: Record<string, { url: string; method?: string; headers?: (
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     }),
-    body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+    body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
   },
   openai: {
     url: "https://api.openai.com/v1/models",

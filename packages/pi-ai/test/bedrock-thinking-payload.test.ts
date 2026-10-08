@@ -235,3 +235,97 @@ describe("Application inference profile support", () => {
 		expect(payload.additionalModelRequestFields?.anthropic_beta).toEqual(["interleaved-thinking-2025-05-14"]);
 	});
 });
+
+// Sonnet 5.5, Opus 5.5 and Fable 5.x reject disabled thinking, sampling params
+// and forced tool choice with a 400 (#2500).
+describe("Bedrock strict-param Claude models", () => {
+	interface StrictPayload extends BedrockThinkingPayload {
+		inferenceConfig?: { temperature?: number };
+		toolConfig?: { toolChoice?: Record<string, unknown> };
+	}
+
+	async function captureRaw(model: Model<"bedrock-converse-stream">, options: BedrockOptions): Promise<StrictPayload> {
+		let captured: StrictPayload | undefined;
+		const s = streamBedrock(
+			model,
+			{
+				messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
+				tools: [{ name: "lookup", description: "Look up a value", parameters: { type: "object", properties: {} } as never }],
+			},
+			{
+				...options,
+				onPayload: (payload) => {
+					captured = payload as StrictPayload;
+					throw new PayloadCaptured();
+				},
+			},
+		);
+		for await (const event of s) {
+			if (event.type === "error") break;
+		}
+		if (!captured) throw new Error("Expected Bedrock payload to be captured before request abort");
+		return captured;
+	}
+
+	it("uses adaptive thinking for Claude Fable 5.1 when reasoning is enabled", async () => {
+		const payload = await capturePayload(getModel("amazon-bedrock", "global.anthropic.claude-fable-5-1"));
+
+		expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.additionalModelRequestFields?.anthropic_beta).toBeUndefined();
+	});
+
+	it("sends between_tools for Claude Sonnet 5.5 when thinking is off", async () => {
+		const payload = await captureRaw(getModel("amazon-bedrock", "us.anthropic.claude-sonnet-5-5"), {});
+
+		expect(payload.additionalModelRequestFields).toEqual({ thinking: { type: "between_tools" } });
+	});
+
+	it("requests low effort without thinking for Claude Opus 5.5 when thinking is off", async () => {
+		const payload = await captureRaw(getModel("amazon-bedrock", "us.anthropic.claude-opus-5-5"), {});
+
+		expect(payload.additionalModelRequestFields).toEqual({ output_config: { effort: "low" } });
+	});
+
+	it("leaves thinking-off untouched for Claude Sonnet 5", async () => {
+		const payload = await captureRaw(getModel("amazon-bedrock", "global.anthropic.claude-sonnet-5"), { temperature: 0 });
+
+		expect(payload.additionalModelRequestFields).toBeUndefined();
+		expect(payload.inferenceConfig?.temperature).toBe(0);
+	});
+
+	it("drops temperature and downgrades forced tool choice for Claude Opus 5.5", async () => {
+		const payload = await captureRaw(getModel("amazon-bedrock", "us.anthropic.claude-opus-5-5"), {
+			temperature: 0,
+			toolChoice: "any",
+		});
+
+		expect(payload.inferenceConfig?.temperature).toBeUndefined();
+		expect(payload.toolConfig?.toolChoice).toEqual({ auto: {} });
+	});
+
+	it("drops temperature but keeps forced tool choice for Claude Fable 5", async () => {
+		const payload = await captureRaw(getModel("amazon-bedrock", "us.anthropic.claude-fable-5"), {
+			temperature: 0,
+			toolChoice: "any",
+		});
+
+		expect(payload.inferenceConfig?.temperature).toBeUndefined();
+		expect(payload.toolConfig?.toolChoice).toEqual({ any: {} });
+		expect(payload.additionalModelRequestFields).toEqual({ output_config: { effort: "low" } });
+	});
+
+	it("matches strict-param models through the display name of an application inference profile", async () => {
+		const payload = await captureRaw(
+			{
+				...getModel("amazon-bedrock", "us.anthropic.claude-sonnet-5-5"),
+				id: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123",
+				name: "Claude Sonnet 5.5",
+			},
+			{ temperature: 0, toolChoice: { type: "tool", name: "lookup" } },
+		);
+
+		expect(payload.inferenceConfig?.temperature).toBeUndefined();
+		expect(payload.toolConfig?.toolChoice).toEqual({ auto: {} });
+		expect(payload.additionalModelRequestFields).toEqual({ thinking: { type: "between_tools" } });
+	});
+});

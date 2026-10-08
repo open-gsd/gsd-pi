@@ -339,11 +339,13 @@ Some Anthropic models require adaptive thinking (`thinking.type: "adaptive"` plu
       "compat": {
         "supportsEagerToolInputStreaming": false,
         "supportsLongCacheRetention": true,
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       },
       "models": [
         {
-          "id": "claude-opus-4-8",
+          "id": "claude-opus-5-5",
           "reasoning": true,
           "input": ["text", "image"]
         }
@@ -360,6 +362,8 @@ Some Anthropic models require adaptive thinking (`thinking.type: "adaptive"` plu
 | `sendSessionAffinityHeaders` | Whether to send `x-session-affinity` from the session id when caching is enabled. Default: auto-detected for known providers. |
 | `supportsCacheControlOnTools` | Whether the provider accepts Anthropic-style `cache_control` markers on tool definitions. Default: `true`. |
 | `forceAdaptiveThinking` | Whether to send adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`) for this model. Built-in adaptive models set this automatically. Default: `false`. |
+| `strictRequestParams` | Model rejects sampling params (`temperature`, `top_p`, `top_k`) and forced `tool_choice` (`any` / named tool); GSD drops them. Claude Sonnet 5.5, Opus 5.5 and Fable 5.1 set this automatically, and uncatalogued ids of those models are matched by name. Default: `false`. |
+| `thinkingOffMode` | How "thinking off" is sent to models that reject `thinking: {type: "disabled"}`: `"between_tools"` (Claude Sonnet 5.5) or `"omit"` (thinking cannot be disabled; send the lowest effort instead — Claude Opus 5.5, Fable 5 / 5.1). Default: `"between_tools"` when `strictRequestParams` is set. |
 
 ## OpenAI Compatibility
 

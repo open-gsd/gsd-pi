@@ -36,6 +36,7 @@ import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.js"
 import { sanitizeToolSchema } from "../utils/sanitize-tool-schema.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 
+import { getClaudeRequestConstraints } from "./claude-request-constraints.js";
 import { resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.js";
@@ -242,7 +243,7 @@ const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
 
 function getAnthropicCompat(
 	model: Model<"anthropic-messages">,
-): Required<Omit<AnthropicMessagesCompat, "forceAdaptiveThinking" | "strictRequestParams">> {
+): Required<Omit<AnthropicMessagesCompat, "forceAdaptiveThinking" | "strictRequestParams" | "thinkingOffMode">> {
 	// Auto-detect session affinity and cache control support from provider
 	const isFireworks = model.provider === "fireworks";
 	const isCloudflareAiGatewayAnthropic =
@@ -1000,6 +1001,29 @@ function createClient(
 	return { client, isOAuthToken: false };
 }
 
+/**
+ * Request-surface constraints for a Claude model (#2500). Catalog compat is
+ * authoritative when it sets either field; custom or uncatalogued ids
+ * (models.json proxies, dated snapshots) fall back to id-based rules.
+ */
+function resolveStrictRequestSurface(model: Model<"anthropic-messages">): {
+	strictRequestParams: boolean;
+	thinkingOffMode: "between_tools" | "omit" | undefined;
+} {
+	const compat = model.compat;
+	if (compat?.strictRequestParams !== undefined || compat?.thinkingOffMode !== undefined) {
+		return {
+			strictRequestParams: compat.strictRequestParams === true,
+			thinkingOffMode: compat.thinkingOffMode ?? (compat.strictRequestParams === true ? "between_tools" : undefined),
+		};
+	}
+	const constraints = getClaudeRequestConstraints(model.id) ?? getClaudeRequestConstraints(model.name);
+	return {
+		strictRequestParams: constraints?.strictRequestParams === true,
+		thinkingOffMode: constraints?.thinkingOffMode,
+	};
+}
+
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
@@ -1007,6 +1031,7 @@ function buildParams(
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+	const requestSurface = resolveStrictRequestSurface(model);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
 		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl),
@@ -1047,8 +1072,14 @@ function buildParams(
 	}
 
 	// Temperature is incompatible with extended thinking (adaptive or budget-based).
-	// Strict-param models (Sonnet 5.5, #2500) reject temperature outright.
-	if (options?.temperature !== undefined && !options?.thinkingEnabled && model.compat?.strictRequestParams !== true) {
+	// Strict-param models and models whose thinking cannot be turned off
+	// (#2500) reject temperature outright.
+	if (
+		options?.temperature !== undefined &&
+		!options?.thinkingEnabled &&
+		!requestSurface.strictRequestParams &&
+		requestSurface.thinkingOffMode !== "omit"
+	) {
 		params.temperature = options.temperature;
 	}
 
@@ -1090,12 +1121,19 @@ function buildParams(
 				};
 			}
 		} else if (options?.thinkingEnabled === false) {
-			// Strict-param models (Sonnet 5.5, #2500) 400 on {type: "disabled"};
-			// {type: "between_tools"} is their off switch. The SDK type union
-			// lags the API value, same as the xhigh effort workaround above.
-			params.thinking = model.compat?.strictRequestParams === true
-				? ({ type: "between_tools" } as unknown as NonNullable<MessageCreateParamsStreaming["thinking"]>)
-				: { type: "disabled" };
+			// Strict-param models (#2500) 400 on {type: "disabled"}. Sonnet 5.5
+			// turns thinking off with {type: "between_tools"} (the SDK type union
+			// lags the API value, same as the xhigh effort workaround above);
+			// Opus 5.5 and Fable 5.x cannot disable thinking, so omit it and ask
+			// for the lowest effort instead.
+			const thinkingOffMode = requestSurface.thinkingOffMode;
+			if (thinkingOffMode === "omit") {
+				params.output_config = { effort: "low" };
+			} else if (thinkingOffMode === "between_tools") {
+				params.thinking = { type: "between_tools" } as unknown as NonNullable<MessageCreateParamsStreaming["thinking"]>;
+			} else {
+				params.thinking = { type: "disabled" };
+			}
 		}
 	}
 
@@ -1107,12 +1145,12 @@ function buildParams(
 	}
 
 	if (options?.toolChoice) {
-		// Strict-param models (Sonnet 5.5, #2500) 400 on forced tool choice
+		// Strict-param models (#2500) 400 on forced tool choice
 		// ("any" / named tool); "auto" and "none" remain valid and pass through.
 		const isForcedToolChoice = typeof options.toolChoice === "string"
 			? options.toolChoice === "any"
 			: options.toolChoice.type === "tool";
-		const omitToolChoice = model.compat?.strictRequestParams === true && isForcedToolChoice;
+		const omitToolChoice = requestSurface.strictRequestParams && isForcedToolChoice;
 		if (!omitToolChoice) {
 			if (typeof options.toolChoice === "string") {
 				params.tool_choice = { type: options.toolChoice };

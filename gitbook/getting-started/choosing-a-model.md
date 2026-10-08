@@ -18,12 +18,12 @@ Different phases of work have different requirements. You can assign specific mo
 
 ```yaml
 models:
-  research: claude-sonnet-4-6        # scouting and research
-  planning: claude-opus-4-8          # architectural decisions
-  execution: claude-sonnet-4-6       # writing code
+  research: claude-sonnet-5-5        # scouting and research
+  planning: claude-opus-5-5          # architectural decisions
+  execution: claude-sonnet-5-5       # writing code
   execution_simple: claude-haiku-4-5 # simple tasks (docs, config)
-  completion: claude-sonnet-4-6      # summaries and wrap-up
-  subagent: claude-sonnet-4-6        # delegated sub-tasks
+  completion: claude-sonnet-5-5      # summaries and wrap-up
+  subagent: claude-sonnet-5-5        # delegated sub-tasks
 ```
 
 Omit a key to use whatever model is currently active for that phase.
@@ -35,7 +35,7 @@ If a model is unavailable (provider down, rate limited, credits exhausted), GSD 
 ```yaml
 models:
   planning:
-    model: claude-opus-4-8
+    model: claude-opus-5-5
     fallbacks:
       - openrouter/z-ai/glm-5
       - openrouter/moonshotai/kimi-k2.5

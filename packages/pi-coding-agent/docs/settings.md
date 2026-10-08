@@ -233,7 +233,7 @@ See [packages.md](packages.md) for package management details.
 ```json
 {
   "defaultProvider": "anthropic",
-  "defaultModel": "claude-sonnet-4-20250514",
+  "defaultModel": "claude-sonnet-5-5",
   "defaultThinkingLevel": "medium",
   "theme": "dark",
   "compaction": {

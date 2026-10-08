@@ -311,3 +311,21 @@ test("gpt-5.6 variants use published pricing", () => {
   assert.equal(luna.inputPer1k, 0.001);
   assert.equal(luna.outputPer1k, 0.006);
 });
+
+test("lookupModelCost maps dotted Claude ids (GitHub Copilot) to the hyphen form", () => {
+  assert.equal(lookupModelCost("github-copilot/claude-sonnet-5.5")?.id, "claude-sonnet-5-5");
+  assert.equal(lookupModelCost("claude-opus-5.5")?.id, "claude-opus-5-5");
+  assert.equal(lookupModelCost("anthropic/claude-fable-5.1")?.id, "claude-fable-5-1");
+});
+
+test("lookupModelCost prefers the longest matching prefix", () => {
+  assert.equal(lookupModelCost("claude-opus-5-5-fast")?.id, "claude-opus-5-5");
+  assert.equal(lookupModelCost("anthropic/claude-opus-5.5-fast")?.inputPer1k, 0.004);
+  assert.equal(lookupModelCost("claude-fable-5-1@20261001")?.id, "claude-fable-5-1");
+  assert.equal(lookupModelCost("claude-fable-5-20260601")?.id, "claude-fable-5");
+});
+
+test("lookupModelCost strips Bedrock inference-profile prefixes", () => {
+  assert.equal(lookupModelCost("us.anthropic.claude-sonnet-5-5")?.id, "claude-sonnet-5-5");
+  assert.equal(lookupModelCost("amazon-bedrock/global.anthropic.claude-opus-5-5")?.id, "claude-opus-5-5");
+});

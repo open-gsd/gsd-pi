@@ -111,6 +111,94 @@ describe("openai-completions tool_choice", () => {
 		expect(params.tools?.length ?? 0).toBeGreaterThan(0);
 	});
 
+	for (const [provider, id] of [
+		["github-copilot", "claude-sonnet-5.5"],
+		["github-copilot", "claude-opus-5.5"],
+		["openrouter", "anthropic/claude-fable-5.1"],
+	] as const) {
+		it(`downgrades forced tool choice and drops temperature for ${provider}/${id}`, async () => {
+			const model = getModel(provider as "github-copilot", id as "claude-sonnet-5.5")!;
+			const tools: Tool[] = [
+				{
+					name: "ping",
+					description: "Ping tool",
+					parameters: Type.Object({
+						ok: Type.Boolean(),
+					}),
+				},
+			];
+			let payload: unknown;
+
+			await streamSimple(
+				model,
+				{
+					messages: [{ role: "user", content: "Call ping with ok=true", timestamp: Date.now() }],
+					tools,
+				},
+				{
+					apiKey: "test",
+					temperature: 0,
+					toolChoice: "required",
+					onPayload: (params: unknown) => {
+						payload = params;
+					},
+				} as unknown as Parameters<typeof streamSimple>[2],
+			).result();
+
+			const params = (payload ?? mockState.lastParams) as { tool_choice?: string; temperature?: number };
+			expect(params.tool_choice).toBe("auto");
+			expect(params.temperature).toBeUndefined();
+		});
+	}
+
+	it("drops temperature but keeps forced tool choice for openrouter/anthropic/claude-fable-5", async () => {
+		const model = getModel("openrouter", "anthropic/claude-fable-5")!;
+		let payload: unknown;
+
+		await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Call ping with ok=true", timestamp: Date.now() }],
+				tools: [{ name: "ping", description: "Ping tool", parameters: Type.Object({ ok: Type.Boolean() }) }],
+			},
+			{
+				apiKey: "test",
+				temperature: 0,
+				toolChoice: "required",
+				onPayload: (params: unknown) => {
+					payload = params;
+				},
+			} as unknown as Parameters<typeof streamSimple>[2],
+		).result();
+
+		const params = (payload ?? mockState.lastParams) as { tool_choice?: string; temperature?: number };
+		expect(params.tool_choice).toBe("required");
+		expect(params.temperature).toBeUndefined();
+	});
+
+	it("omits OpenRouter reasoning-off for Claude models that cannot disable thinking", async () => {
+		for (const [id, expected] of [
+			["anthropic/claude-sonnet-5.5", undefined],
+			["anthropic/claude-fable-5", undefined],
+			["anthropic/claude-sonnet-5", { effort: "none" }],
+		] as const) {
+			const model = getModel("openrouter", id as "anthropic/claude-sonnet-5.5")!;
+			let payload: unknown;
+			await streamSimple(
+				model,
+				{ messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+				{
+					apiKey: "test",
+					onPayload: (params: unknown) => {
+						payload = params;
+					},
+				} as unknown as Parameters<typeof streamSimple>[2],
+			).result();
+			const params = (payload ?? mockState.lastParams) as { reasoning?: unknown };
+			expect(params.reasoning, id).toEqual(expected);
+		}
+	});
+
 	it("omits strict when compat disables strict mode", async () => {
 		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
 		const model = {

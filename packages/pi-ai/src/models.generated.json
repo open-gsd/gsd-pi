@@ -355,6 +355,52 @@
         "xhigh": "xhigh"
       }
     },
+    "us.anthropic.claude-sonnet-5-5": {
+      "id": "us.anthropic.claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5 (US)",
+      "api": "bedrock-converse-stream",
+      "provider": "amazon-bedrock",
+      "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.2,
+        "output": 11,
+        "cacheRead": 0.22,
+        "cacheWrite": 2.75
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
+    "eu.anthropic.claude-sonnet-5-5": {
+      "id": "eu.anthropic.claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5 (EU)",
+      "api": "bedrock-converse-stream",
+      "provider": "amazon-bedrock",
+      "baseUrl": "https://bedrock-runtime.eu-central-1.amazonaws.com",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.2,
+        "output": 11,
+        "cacheRead": 0.22,
+        "cacheWrite": 2.75
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
     "global.anthropic.claude-sonnet-5-5": {
       "id": "global.anthropic.claude-sonnet-5-5",
       "name": "Claude Sonnet 5.5 (Global)",
@@ -1667,8 +1713,8 @@
       "cost": {
         "input": 5.5,
         "output": 27.5,
-        "cacheRead": 0.5,
-        "cacheWrite": 6.25
+        "cacheRead": 0.55,
+        "cacheWrite": 6.875
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -2140,8 +2186,8 @@
       "cost": {
         "input": 5.5,
         "output": 27.5,
-        "cacheRead": 0.5,
-        "cacheWrite": 6.25
+        "cacheRead": 0.55,
+        "cacheWrite": 6.875
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -2788,8 +2834,8 @@
       "cost": {
         "input": 5.5,
         "output": 27.5,
-        "cacheRead": 0.5,
-        "cacheWrite": 6.25
+        "cacheRead": 0.55,
+        "cacheWrite": 6.875
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -3833,7 +3879,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-fable-5-1": {
@@ -3859,7 +3907,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-opus-4-5-20251101": {
@@ -3931,7 +3981,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "claude-opus-4-8": {
@@ -4099,7 +4151,8 @@
       },
       "compat": {
         "forceAdaptiveThinking": true,
-        "strictRequestParams": true
+        "strictRequestParams": true,
+        "thinkingOffMode": "between_tools"
       }
     },
     "claude-opus-4-7": {
@@ -4246,7 +4299,8 @@
       },
       "compat": {
         "forceAdaptiveThinking": true,
-        "strictRequestParams": true
+        "strictRequestParams": true,
+        "thinkingOffMode": "between_tools"
       }
     },
     "claude-opus-5-5": {
@@ -4272,7 +4326,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-opus-5": {
@@ -4433,7 +4489,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-fable-5": {
@@ -4459,7 +4517,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "claude-sonnet-4@20250514": {
@@ -6808,7 +6868,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-sonnet-4.5": {
@@ -6854,7 +6916,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "claude-sonnet-5": {
@@ -6929,7 +6993,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "gpt-5.4": {
@@ -12040,7 +12106,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-fable-5-1": {
@@ -12066,7 +12134,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "gemini-3.6-flash": {
@@ -12352,7 +12422,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "mimo-v2.6-flash-free": {
@@ -12911,7 +12983,8 @@
       },
       "compat": {
         "forceAdaptiveThinking": true,
-        "strictRequestParams": true
+        "strictRequestParams": true,
+        "thinkingOffMode": "between_tools"
       }
     },
     "qwen3.6-plus": {
@@ -25010,7 +25083,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "anthropic/claude-fable-5.1": {
@@ -25036,7 +25111,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "anthropic/claude-haiku-4.5": {
@@ -25278,7 +25355,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "anthropic/claude-opus-5.5-fast": {
@@ -25304,7 +25383,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "anthropic/claude-sonnet-4": {
@@ -25420,7 +25501,8 @@
       },
       "compat": {
         "forceAdaptiveThinking": true,
-        "strictRequestParams": true
+        "strictRequestParams": true,
+        "thinkingOffMode": "between_tools"
       }
     },
     "arcee-ai/trinity-large-thinking": {
