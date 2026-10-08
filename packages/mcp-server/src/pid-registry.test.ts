@@ -25,6 +25,15 @@ import {
   type McpInstanceEntry,
 } from './pid-registry.js';
 
+// Failed spawns may emit error without exit. Resolve both outcomes without an
+// early rejected promise, and use close so all child handles have finished.
+function waitForWriter(child: ReturnType<typeof spawn>) {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; error: Error | null }>((resolve) => {
+    child.once('error', (error) => resolve({ code: null, signal: null, error }));
+    child.once('close', (code, signal) => resolve({ code, signal, error: null }));
+  });
+}
+
 let tmp: string;
 let registryPath: string;
 
@@ -35,6 +44,22 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
+});
+
+test('writer completion settles when spawning fails without an exit event', async () => {
+  const child = spawn(join(tmp, 'nonexistent-writer'), [], { stdio: 'ignore' });
+  const result = await waitForWriter(child);
+  assert.ok(result.error);
+  assert.equal((result.error as NodeJS.ErrnoException).code, 'ENOENT');
+  assert.equal(result.code, null);
+});
+
+test('writer completion reports a failed workload exit instead of accepting it', async () => {
+  const child = spawn(process.execPath, ['-e', 'process.exit(7)'], { stdio: 'ignore' });
+  const result = await waitForWriter(child);
+  assert.equal(result.error, null);
+  assert.equal(result.signal, null);
+  assert.equal(result.code, 7);
 });
 
 // registerMcpInstance keys the registry by a normalized (forward-slash) project
@@ -985,13 +1010,7 @@ describe('writeMcpRegistry atomicity', () => {
     const child = spawn(process.execPath, ['--input-type=module', '--eval', writerCode], {
       stdio: ['ignore', 'ignore', 'ignore'],
     });
-    let spawnError: Error | null = null;
-    child.once('error', (err) => {
-      spawnError = err;
-    });
-    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) => {
-      child.once('exit', (code, signal) => resolveExit({ code, signal }));
-    });
+    const exited = waitForWriter(child);
 
     let parseFailures = 0;
     let successfulReads = 0;
@@ -1009,9 +1028,11 @@ describe('writeMcpRegistry atomicity', () => {
           }
         }
       }
-      if (child.exitCode !== null) break;
+      if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) break;
+      // Allow child close/error delivery while the reader observes publication.
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
-    const { code, signal } = await exited;
+    const { code, signal, error: spawnError } = await exited;
 
     // A spawn error, non-zero exit, or abnormal termination signal means the
     // writer never completed its full workload — successfulReads being
