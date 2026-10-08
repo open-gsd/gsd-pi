@@ -1,28 +1,28 @@
-import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
-  writeFileSync,
-  existsSync,
   statSync,
   symlinkSync,
-  chmodSync,
+  writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, test } from 'node:test';
 
 import {
+  type McpInstanceEntry,
   readMcpRegistry,
   registerMcpInstance,
   signalAutoLockPid,
   sweepProjectOrphanMcpServers,
   unregisterMcpInstance,
-  type McpInstanceEntry,
 } from './pid-registry.js';
 
 // Failed spawns may emit error without exit. Resolve both outcomes without an
@@ -1146,8 +1146,11 @@ describe('writeMcpRegistry atomicity', () => {
   );
 
   function canCreateSymlinks(): boolean {
-    const probeTarget = join(tmp, '.symlink-capability-target');
-    const probeLink = join(tmp, '.symlink-capability-probe');
+    // Skip options run during suite definition, before beforeEach initializes
+    // tmp. Own this probe's directory instead of borrowing the test fixture.
+    const probeDir = mkdtempSync(join(tmpdir(), 'mcp-pid-symlink-probe-'));
+    const probeTarget = join(probeDir, 'target');
+    const probeLink = join(probeDir, 'link');
     try {
       writeFileSync(probeTarget, 'probe');
       symlinkSync(probeTarget, probeLink);
@@ -1155,18 +1158,16 @@ describe('writeMcpRegistry atomicity', () => {
     } catch {
       return false;
     } finally {
-      try {
-        rmSync(probeLink, { force: true });
-      } catch {
-        // ignore
-      }
-      try {
-        rmSync(probeTarget, { force: true });
-      } catch {
-        // ignore
-      }
+      rmSync(probeDir, { recursive: true, force: true });
     }
   }
+
+  // Evaluate during suite registration, not in a callback where beforeEach
+  // would conceal the uninitialized-fixture defect.
+  const suiteTimeSymlinkCapability = canCreateSymlinks();
+  test('symlink capability can be evaluated before fixture hooks run', () => {
+    assert.equal(typeof suiteTimeSymlinkCapability, 'boolean');
+  });
 
   test(
     'a pre-existing symlink at the temp-file path is not followed (collision safety)',
