@@ -4,9 +4,17 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, renameSync, realpathSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  renameSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export interface McpInstanceEntry {
   pid: number;
@@ -108,9 +116,32 @@ export function readMcpRegistry(registryPath = REGISTRY_PATH): McpInstanceRegist
   }
 }
 
+// Writes the registry atomically: a concurrent reader must only ever observe
+// either the previous complete file or the new complete file, never a
+// partially-written one. writeFileSync(registryPath, ...) in place does not
+// guarantee this — it can truncate the existing file before the new bytes are
+// flushed, so a reader racing the write can see an empty or truncated payload
+// and fail to parse it (#2666). Write the new content to a unique temporary
+// file in the same directory (same filesystem, so renameSync is atomic on
+// POSIX and Windows), then rename it over the target. If any step fails, the
+// original registry file is left untouched and the temp file is cleaned up —
+// the original error is rethrown unmasked.
 function writeMcpRegistry(registry: McpInstanceRegistry, registryPath = REGISTRY_PATH): void {
-  mkdirSync(dirname(registryPath), { recursive: true });
-  writeFileSync(registryPath, JSON.stringify(registry, null, 2), 'utf8');
+  const dir = dirname(registryPath);
+  mkdirSync(dir, { recursive: true });
+  const tempPath = join(dir, `.${randomUUID()}.mcp-instances.json.tmp`);
+  try {
+    writeFileSync(tempPath, JSON.stringify(registry, null, 2), 'utf8');
+    renameSync(tempPath, registryPath);
+  } catch (err) {
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Best-effort cleanup only — do not let a cleanup failure mask the
+      // original write/rename error below.
+    }
+    throw err;
+  }
 }
 
 function defaultGetProcessCommand(pid: number): string | null {

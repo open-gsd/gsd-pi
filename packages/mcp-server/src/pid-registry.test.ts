@@ -1,8 +1,9 @@
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
 
 import {
   readMcpRegistry,
@@ -933,5 +934,102 @@ describe('signalAutoLockPid', () => {
     };
     const res = signalAutoLockPid(lock(7, new Date(recorded).toISOString()), '/tmp/project', opts);
     assert.deepEqual(res, { error: 'EPERM' });
+  });
+});
+
+describe('writeMcpRegistry atomicity (#2666)', () => {
+  // writeMcpRegistry is not exported — these tests drive it indirectly via
+  // registerMcpInstance/unregisterMcpInstance, which is the only way the
+  // module's public surface writes the registry file.
+
+  test('a concurrent reader never observes a truncated/invalid registry file during a write', async () => {
+    // Reproduces #2666: a reader racing an in-flight write of the registry
+    // file must only ever observe either the previous complete JSON payload
+    // or the new complete JSON payload — never a partially-flushed
+    // (truncated) one. Before the fix, writeMcpRegistry() called
+    // writeFileSync(registryPath, ...) directly, truncating the target file
+    // in place before the new bytes were fully written; a reader racing that
+    // write could observe a truncated byte sequence and fail to JSON.parse
+    // it. This asserts directly against raw readFileSync + JSON.parse (not
+    // readMcpRegistry(), which deliberately swallows and quarantines corrupt
+    // files as a forensics feature — that recovery path must not be
+    // triggered by an ordinary write race in the first place).
+    const writerCode = `
+      import { registerMcpInstance } from ${JSON.stringify(new URL('./pid-registry.js', import.meta.url).href)};
+      const registryPath = ${JSON.stringify(registryPath)};
+      const projectDir = ${JSON.stringify(tmp)};
+      // Every call rewrites the whole registry file via the module's
+      // internal writeMcpRegistry(). Registering many distinct large-keyed
+      // projects widens each write's byte count (and thus the race window)
+      // while keeping every write going through the real production path.
+      for (let i = 0; i < 400; i++) {
+        const fakeProjectDir = projectDir + '/sibling-' + 'x'.repeat(2_000) + '-' + i;
+        registerMcpInstance(fakeProjectDir, registryPath, {
+          kill: () => {},
+          getProcessCommand: () => null,
+        });
+      }
+      process.stdout.write('done\\n');
+    `;
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', writerCode], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    const exited = new Promise<void>((resolveExit) => child.once('exit', () => resolveExit()));
+
+    let parseFailures = 0;
+    let successfulReads = 0;
+    const firstFailureMessages: string[] = [];
+    const deadline = Date.now() + 4_000;
+    while (Date.now() < deadline) {
+      if (existsSync(registryPath)) {
+        try {
+          JSON.parse(readFileSync(registryPath, 'utf8'));
+          successfulReads++;
+        } catch (err) {
+          parseFailures++;
+          if (firstFailureMessages.length < 3) {
+            firstFailureMessages.push(err instanceof Error ? err.message : String(err));
+          }
+        }
+      }
+      if (child.exitCode !== null) break;
+    }
+    await exited;
+
+    assert.equal(
+      parseFailures,
+      0,
+      `expected zero parse failures from a concurrent reader, saw ${parseFailures} (successful reads: ${successfulReads}; sample errors: ${firstFailureMessages.join(' | ')})`,
+    );
+    assert.ok(successfulReads > 0, 'expected at least one successful concurrent read');
+
+    // readMcpRegistry()'s corrupt-file quarantine must never have fired —
+    // that would mean a reader using the public API observed and discarded a
+    // genuinely torn write.
+    const corruptBackups = readdirSync(tmp).filter((f) => f.includes('.corrupt-'));
+    assert.deepEqual(corruptBackups, [], `expected no corrupt-file quarantine backups, found: ${corruptBackups.join(', ')}`);
+  });
+
+  test('a failed write leaves the original registry intact and removes the temp file', () => {
+    // Simulate a rename/write failure by pointing the registry path at a
+    // directory that cannot be created as a file (registryPath itself is a
+    // directory, so writeFileSync/renameSync onto it fails with EISDIR). The
+    // original registry (written via a plain file, not through the module)
+    // must survive untouched, the error must propagate unmasked, and no stray
+    // temp file should remain in the parent directory.
+    const originalEntry = { pid: 555555, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
+    writeFileSync(registryPath, JSON.stringify({ [tmp]: originalEntry }));
+
+    const blockedPath = join(tmp, 'blocked-registry-dir');
+    mkdirSync(blockedPath);
+
+    assert.throws(() => registerMcpInstance(tmp, blockedPath, { kill: () => {}, getProcessCommand: () => null }));
+
+    // Original registry file (a different path) is untouched.
+    assert.deepEqual(readMcpRegistry(registryPath)[tmp], originalEntry);
+
+    // No leaked temp file in the registry's own directory.
+    const leaked = readdirSync(tmp).filter((f) => f.includes('.mcp-instances.json.tmp'));
+    assert.deepEqual(leaked, [], `expected no leaked temp files, found: ${leaked.join(', ')}`);
   });
 });
