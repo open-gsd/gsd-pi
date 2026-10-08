@@ -104,3 +104,52 @@ test("awaitWithCancellation rejects on mid-flight cancellation without an unhand
 	// settled the outer promise must not produce an unhandled rejection.
 	rejectOperation(new Error("late rpc failure"));
 });
+
+
+import * as payloadGuards from "../src/copilot-tools-guards.ts";
+import { LIFECYCLE_STATUSES, LIFECYCLE_STATUS_VERSION } from "../../packages/contracts/src/rpc.ts";
+import { progressFixture, snapshotFixture, blockerFixture, invalidProgressFixtures, invalidSnapshotFixtures, PRIVATE_SENTINEL } from "./project-context-fixtures.ts";
+
+for (const [kind, invalid] of [["Progress", invalidProgressFixtures()], ["Snapshot", invalidSnapshotFixtures()]] as const) {
+	for (const [name, value] of invalid) {
+		test(`native ${kind} guard rejects ${name} with fixed actionable error`, () => {
+			const guard = (payloadGuards as any)[`assertCanonicalProject${kind}`];
+			assert.equal(typeof guard, "function");
+			assert.throws(() => guard(value), (error: any) => {
+				assert.equal(error.message.includes(PRIVATE_SENTINEL), false);
+				assert.match(error.message, /restart|retry|update/i);
+				return true;
+			});
+		});
+	}
+}
+
+test("native progress guard preserves full optional contract and zero counters", () => {
+	const value = progressFixture();
+	value.activeMilestone = null;
+	value.requirements = { active: 0, validated: 0, deferred: 0, outOfScope: 0 };
+	value.blockerRows = [blockerFixture];
+	value.milestoneDetails = [{ id: "M1", title: "Milestone", status: "active", truncated: false, slices: [{ id: "S1", title: "Slice", status: "active", truncated: true, tasks: [{ id: "T1", title: "Task", status: "pending" }] }] }];
+	value.milestoneDetailsTruncated = false; value.milestoneDetailsTasksTruncated = true;
+	const before = JSON.stringify(value);
+	(payloadGuards as any).assertCanonicalProjectProgress(value);
+	assert.equal(JSON.stringify(value), before);
+});
+
+test("native snapshot guard accepts schema versions independently of lifecycle vocabulary", () => {
+	const value = snapshotFixture();
+	value.authority.schemaVersion = 987;
+	value.blockers = [blockerFixture]; value.blockersTruncated = false;
+	value.openQuestions = [{ questionId: "Q1", questionText: "Resolve", createdAt: "now" }]; value.openQuestionsTruncated = true;
+	value.lifecycleStatusVersion = LIFECYCLE_STATUS_VERSION;
+	for (const lifecycleStatus of [...LIFECYCLE_STATUSES, null]) {
+		value.milestones.items[0].lifecycleStatus = lifecycleStatus;
+		const before = JSON.stringify(value);
+		(payloadGuards as any).assertCanonicalProjectSnapshot(value);
+		assert.equal(JSON.stringify(value), before);
+	}
+});
+
+test("native snapshot guard accepts older producers without optional lifecycle or truncation flags", () => {
+	(payloadGuards as any).assertCanonicalProjectSnapshot(snapshotFixture());
+});
