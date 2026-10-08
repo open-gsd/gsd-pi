@@ -2582,7 +2582,7 @@ export async function pauseAuto(
   if (ctx) initHealthWidget(ctx);
   const pauseMessage = _errorContext?.message
     ? `${lifecycle.notifyPrefix}: ${_errorContext.message}`
-    : `${lifecycle.notifyPrefix} (Escape). Type to interact, or ${lifecycle.commands[0] ?? (s.stepMode ? "/gsd next" : "/gsd auto")} to resume.`;
+    : `${lifecycle.notifyPrefix}. Type to interact, or ${lifecycle.commands[0] ?? (s.stepMode ? "/gsd next" : "/gsd auto")} to resume.`;
   ctx?.ui.notify(
     pauseMessage,
     lifecycle.notifyLevel,
