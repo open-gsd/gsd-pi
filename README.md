@@ -28,16 +28,10 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.20.1**
+Latest release: **v1.21.1**
 
-- **gsd:** Rebuild markdown skips projections whose write is already applied.
-- **gsd:** Reclaim milestone leases held by verifiably-dead local workers.
-- **gsd:** Journal and surface discarded scheduled wakeups on non-completed units.
-- **claude-code:** Shield gsd-core-owned skills from the interactive Skill surface.
-- **gsd:** Warn when gsd_plan_slice persists zero non-skipped tasks.
-- **mcp-server:** Resolve milestone projections on flat-phase-layout projects.
-- **claude-code:** Disallow Claude Code's native task tools under gsd-pi.
-- **gsd:** Uat_result_save rejects a PASS check citing failed uat_exec evidence.
+- **release:** Wait for bounded npm registry propagation (#2688).
+- **release:** Verify npm artifact identity before accepting publication (#2686).
 
 <!-- release-highlights:end -->
 

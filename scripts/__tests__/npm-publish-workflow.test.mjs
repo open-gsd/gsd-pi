@@ -280,20 +280,18 @@ test("production release updates README highlights in the release commit", () =>
   assert.match(steps[commitRelease].run, /git add .*README\.md/);
 });
 
-test("main package publish uses explicit prepack and disables npm lifecycle reruns", () => {
+test("main package publish uses explicit prepack and restoration", () => {
   const prereleasePublish = workflow.jobs["prerelease-publish"].steps.find(
     (step) => step.name === prereleasePublishStep,
   );
   assert.match(prereleasePublish.run, /prepack-resolve-workspace\.cjs/);
   assert.match(prereleasePublish.run, /postpack-restore-workspace\.cjs/);
-  assert.match(prereleasePublish.run, /npm publish --ignore-scripts --tag "\$\{CHANNEL\}"/);
 
   const prodPublish = workflow.jobs["prod-release"].steps.find(
     (step) => step.name === "Publish release to npm @latest",
   );
   assert.match(prodPublish.run, /prepack-resolve-workspace\.cjs/);
   assert.match(prodPublish.run, /postpack-restore-workspace\.cjs/);
-  assert.match(prodPublish.run, /npm publish --ignore-scripts --tag latest/);
 });
 
 test("production release stages bundled open-gsd-hermes version files", () => {
@@ -303,4 +301,13 @@ test("production release stages bundled open-gsd-hermes version files", () => {
   assert.ok(commitRelease, "prod-release must create a release commit");
   assert.match(commitRelease.run, /integrations\/hermes\/pyproject\.toml/);
   assert.match(commitRelease.run, /integrations\/hermes\/open_gsd_hermes\/gsd_client\.py/);
+});
+
+test("paid live-provider release tests require explicit opt-in", () => {
+  const input = workflow.on.workflow_dispatch.inputs.run_live_tests;
+  assert.equal(input.type, "boolean");
+  assert.equal(input.default, false);
+  const paidSteps = workflow.jobs["prod-release"].steps.filter(step => step.env?.GSD_LIVE_TESTS === "1");
+  assert.equal(paidSteps.length, 2);
+  for (const step of paidSteps) assert.equal(step.if, "${{ inputs.run_live_tests }}");
 });

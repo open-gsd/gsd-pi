@@ -84,12 +84,12 @@ function collapseCarriageReturnFrames(text: string): string {
 	const lines = text.split("\n");
 	for (let i = 0; i < lines.length; i++) {
 		let line = lines[i];
-		let lastCr = line.lastIndexOf("\r");
-		if (lastCr < 0) continue;
-		while (lastCr === line.length - 1) {
-			line = line.slice(0, -1);
-			lastCr = line.lastIndexOf("\r");
-		}
+		if (!line.includes("\r")) continue;
+		// Strip trailing \r first. Loop on endsWith, not on lastIndexOf matching
+		// length - 1: once a CR-only line is emptied both are -1, which looped
+		// forever and froze the TUI on blank CRLF lines (#2636).
+		while (line.endsWith("\r")) line = line.slice(0, -1);
+		const lastCr = line.lastIndexOf("\r");
 		lines[i] = lastCr < 0 ? line : line.slice(lastCr + 1);
 	}
 	return lines.join("\n");

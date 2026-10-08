@@ -93,8 +93,8 @@ docker run --rm -v $(pwd):/workspace ghcr.io/open-gsd/gsd-pi:<version> --version
 
 - **Shallow clones** — downstream jobs use shallow checkout + shared build artifacts
 - **pnpm cache** — the prerelease publish, prerelease verify, and production release jobs in `npm-publish.yml` use `cache: pnpm` on `setup-node`, saving ~1-2 min per job on repeat runs
-- **Exponential backoff** — npm registry propagation waits use exponential backoff (10s → 20s → 40s → 60s cap in `npm-publish.yml`; 5s → 30s cap for native package verification) instead of fixed sleeps
-- **Concurrent-publish guard** — every `npm publish` step treats "cannot publish over the previously published version" as an idempotent skip, but only after re-reading the dist-tag; if the tag does not point at the expected version the job fails loudly
+- **Bounded propagation wait** — the shared publisher waits up to 20 minutes for transient metadata, tarball, or dist-tag visibility, with 5s exponential backoff capped at 30s and progress logs. `NPM_PUBLISH_VERIFY_TIMEOUT_MS` can configure the deadline. Each verification npm call is limited to the remaining budget (at most five minutes). Authentication errors, invalid identity metadata, integrity mismatches, and different downloaded bytes remain terminal. The loop never republishes.
+- **Artifact identity guard** — main, prerelease, workspace, and native packages are packed once with lifecycle scripts disabled and published from that exact tarball. `scripts/publish-npm-package.mjs` accepts an existing version or concurrent publish only when the requested dist-tag, registry SHA-512 integrity, and downloaded tarball bytes all match the intended artifact. Fresh publishes pass the same check. Registry errors are not treated as absence; missing or ambiguous integrity fails closed. `gitHead` and provenance source metadata are not substitutes for artifact identity. A rebuilt artifact that differs, even at the same source commit, requires a new release version.
 - **dist-tag mutation is not automated** — npm trusted publishing authenticates `npm publish`, not dist-tag moves. When a version already exists and the tag points elsewhere, the workflow stops and prints the manual escape hatch: `npm dist-tag add @opengsd/gsd-pi@<version> <channel>`
 - **Security hardening** — `${{ }}` expressions are passed through `env:` variables rather than interpolated directly into `run:` blocks, to prevent command injection vectors
 - **Merge-queue PR uses `RELEASE_PAT`** — `GITHUB_TOKEN` cannot create PRs on this repo. The GitHub Release is created after the tag and before that PR so a PR-create failure cannot leave npm published with no GitHub Release
@@ -229,7 +229,7 @@ Use this when any `@opengsd/engine-*` package is missing from npm (today: `@open
 5. **Then** configure trusted publishing on each package as described below.
 6. Re-run **NPM Publish** with the desired channel.
 
-The publish step skips packages already on npm and attempts all five platforms before failing, so one error does not leave the rest unpublished.
+The publish step reuses only byte-identical packages already on npm and attempts all five platforms before failing, so one error does not leave the rest unattempted. An identity mismatch blocks the release; do not move a tag to bless different bytes.
 
 #### Trusted publishing (after first publish)
 
@@ -278,3 +278,5 @@ The prerelease version stamp is produced by `npm run pipeline:version-stamp`;
 platform package versions are synced by `npm run sync-platform-versions`.
 
 Old `-dev.` versions are removed weekly by `cleanup-dev-versions.yml` (30-day retention).
+
+Paid live-provider release tests are opt-in: dispatch **NPM Publish** with `run_live_tests=true` only when those calls are authorized. The default is false; deterministic release regression and acceptance checks still run.
