@@ -1,9 +1,10 @@
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
+import { CURSOR_AGENT_PROVIDER_ID } from "./bridged-tools.js";
 import { CURSOR_AGENT_MODELS, resolveCursorAgentModels, type CursorAgentModel } from "./models.js";
 import { isCursorAgentBinaryPresent, isCursorAgentReady, readCursorAgentListModels } from "./readiness.js";
 import { streamViaCursorAgent } from "./stream-adapter.js";
 
-const PROVIDER_ID = "cursor-agent";
+const PROVIDER_ID = CURSOR_AGENT_PROVIDER_ID;
 
 function registerCursorProvider(pi: ExtensionAPI, models: CursorAgentModel[]): void {
 	pi.registerProvider(PROVIDER_ID, {
