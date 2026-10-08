@@ -625,16 +625,21 @@ export function getEligibleModels(
     if (match) return [match];
   }
 
+  // Token-profile defaults resolve tier models on every preferences load, also
+  // when dynamic routing is off. Unknown models keep their safe defaults there,
+  // but a "Dynamic routing does not recognize" line per model is noise.
+  const warnUnknown = Boolean(routingConfig.enabled);
+
   // 2. Auto-detect: filter by tier, sort cheapest first
   const tierMatches = availableModelIds
-    .filter(id => getModelTier(id) === tier)
+    .filter(id => getModelTier(id, warnUnknown) === tier)
     .sort((a, b) => {
-      const costA = getModelCost(a, availableModels);
-      const costB = getModelCost(b, availableModels);
+      const costA = getModelCost(a, availableModels, warnUnknown);
+      const costB = getModelCost(b, availableModels, warnUnknown);
       return costA - costB;
     });
 
-  const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId);
+  const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId, warnUnknown);
   if (!preferred) return tierMatches;
   return [preferred, ...tierMatches.filter(id => id !== preferred)];
 }
@@ -1032,7 +1037,7 @@ function findModelForTier(
   // Honor the preferred/session model only when it is itself a same-provider
   // (Anthropic/Claude) model. A non-Anthropic session model must not bypass
   // the cross_provider:false restriction.
-  const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId);
+  const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId, Boolean(routingConfig.enabled));
   if (preferred && sameProvider.includes(preferred)) return preferred;
 
   return sameProvider[0];
@@ -1134,18 +1139,19 @@ function findAvailableModelId(
   return availableModelIds.find(id => canonicalizeModelId(id) === preferredBare);
 }
 
-function modelSatisfiesTier(modelId: string, tier: ComplexityTier): boolean {
-  return tierOrdinal(getModelTier(modelId)) >= tierOrdinal(tier);
+function modelSatisfiesTier(modelId: string, tier: ComplexityTier, warnUnknown = true): boolean {
+  return tierOrdinal(getModelTier(modelId, warnUnknown)) >= tierOrdinal(tier);
 }
 
 function findPreferredModelForTier(
   tier: ComplexityTier,
   availableModelIds: string[],
   preferredModelId: string | undefined,
+  warnUnknown = true,
 ): string | undefined {
   const preferred = findAvailableModelId(preferredModelId, availableModelIds);
   if (!preferred) return undefined;
-  return modelSatisfiesTier(preferred, tier) ? preferred : undefined;
+  return modelSatisfiesTier(preferred, tier, warnUnknown) ? preferred : undefined;
 }
 
 /**
@@ -1162,13 +1168,13 @@ function isModelAvailable(modelId: string, availableModelIds: string[]): boolean
   return availableModelIds.some(id => canonicalizeModelId(id) === bare);
 }
 
-function getModelTier(modelId: string): ComplexityTier {
+function getModelTier(modelId: string, warnUnknown = true): ComplexityTier {
   // Normalize provider prefixes, casing, and separators before lookup.
   const bareId = canonicalizeModelId(modelId);
   if (MODEL_CAPABILITY_TIER[bareId]) return MODEL_CAPABILITY_TIER[bareId];
 
   // Unknown models are assumed standard (per D-15: avoids silently ignoring user config)
-  warnUnknownRoutingModel(modelId);
+  if (warnUnknown) warnUnknownRoutingModel(modelId);
   return "standard";
 }
 
@@ -1178,7 +1184,7 @@ function isKnownModel(modelId: string): boolean {
   return Boolean(bareId && MODEL_CAPABILITY_TIER[bareId]);
 }
 
-function getModelCost(modelId: string, availableModels?: Array<Model<Api>>): number {
+function getModelCost(modelId: string, availableModels?: Array<Model<Api>>, warnUnknown = true): number {
   const provider = modelProvider(modelId) ?? availableModels?.find((candidate) => sameProviderQualifiedModel(modelId, candidate))?.provider ?? "unknown";
   const bareId = canonicalizeModelId(modelId);
 
@@ -1247,7 +1253,7 @@ function getModelCost(modelId: string, availableModels?: Array<Model<Api>>): num
   }
 
   // Unknown cost — assume expensive to avoid routing to unknown cheap models
-  warnUnknownRoutingModel(modelId);
+  if (warnUnknown) warnUnknownRoutingModel(modelId);
   return 999;
 }
 

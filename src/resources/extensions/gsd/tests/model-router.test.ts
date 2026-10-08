@@ -1473,6 +1473,42 @@ describe("getModelTier unknown default", () => {
     assert.equal(warnings.length, 1, "unknown routing warnings should be deduplicated by canonical ID");
     assert.match(warnings[0] ?? "", /safe defaults.*standard tier.*neutral capabilities.*expensive cost/i);
   });
+
+  test("disabled routing resolves unknown models with safe defaults and no warning", (t) => {
+    // Token-profile defaults resolve a tier model on every preferences load,
+    // also when dynamic_routing.enabled is false. A provider with many
+    // unregistered models (cursor-agent) must not print one line per model.
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => warnings.push(message));
+    const unknownModels = [
+      "cursor-agent/quiet-unknown-a",
+      "cursor-agent/quiet-unknown-b",
+      "cursor-agent/quiet-unknown-c",
+    ];
+    const config: DynamicRoutingConfig = { enabled: false };
+
+    assert.equal(resolveModelForTier("standard", unknownModels, config), "cursor-agent/quiet-unknown-a");
+    assert.deepEqual(getEligibleModels("standard", unknownModels, config), unknownModels);
+    assert.deepEqual(getEligibleModels("light", unknownModels, config), []);
+    assert.equal(
+      resolveModelForTier("standard", unknownModels, { ...config, cross_provider: false }, undefined, unknownModels[1]),
+      "cursor-agent/quiet-unknown-b",
+    );
+    assert.deepEqual(warnings, []);
+  });
+
+  test("enabled routing reports the same unknown model one time", (t) => {
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => warnings.push(message));
+    const config: DynamicRoutingConfig = { enabled: true };
+
+    for (let call = 0; call < 3; call++) {
+      resolveModelForTier("standard", ["cursor-agent/loud-unknown-a"], config);
+    }
+
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /does not recognize model "cursor-agent\/loud-unknown-a"/);
+  });
 });
 
 // --- claude-sonnet-5 catalog regression (v1.12.0 gap) ---
