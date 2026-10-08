@@ -1057,7 +1057,9 @@ describe('writeMcpRegistry atomicity', () => {
     assert.deepEqual(corruptBackups, [], `expected no corrupt-file quarantine backups, found: ${corruptBackups.join(', ')}`);
   });
 
-  test('a failed write leaves the original registry intact and removes the temp file', () => {
+  test('a failed write leaves the original registry intact and removes the temp file', {
+    skip: process.platform === 'win32' ? 'POSIX directory write permissions are not enforced by Windows chmod' : false,
+  }, () => {
     // Regression for review comment: the previous version pointed the failing
     // write at a *different* path (blockedPath) while asserting against
     // registryPath — an operation the failure never touched, so it could not
@@ -1067,7 +1069,9 @@ describe('writeMcpRegistry atomicity', () => {
     // temp file from `dirname(registryPath)`, so openSync('wx') for that temp
     // file fails with EACCES in-place, and the original file at registryPath
     // is never touched by a successful rename.
-    const originalEntry = { pid: 555555, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
+    // An unverified foreign PID is refused before writing. Seed our own PID
+    // so this regression actually reaches the filesystem failure under test.
+    const originalEntry = { pid: process.pid, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
     const originalBytes = JSON.stringify({ [tmp]: originalEntry });
     writeFileSync(registryPath, originalBytes);
 
@@ -1109,7 +1113,9 @@ describe('writeMcpRegistry atomicity', () => {
     const foreignBytes = 'not owned by this invocation';
     writeFileSync(collisionPath, foreignBytes);
 
-    const originalEntry = { pid: 333333, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
+    // Keep the live registry owned by this process; otherwise refusal of an
+    // unverified foreign holder would bypass the intended O_EXCL collision.
+    const originalEntry = { pid: process.pid, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
     const originalBytes = JSON.stringify({ [tmp]: originalEntry });
     writeFileSync(registryPath, originalBytes);
 
