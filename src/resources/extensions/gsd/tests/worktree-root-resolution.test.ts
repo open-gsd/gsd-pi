@@ -83,3 +83,29 @@ test("init in a folder outside git acts on that folder, not on an ancestor .gsd"
   assert.equal(existsSync(join(child, ".git")), true, "git init runs in the workspace folder");
   assert.equal(existsSync(join(parent, ".git")), false, "git init does not touch the ancestor");
 });
+
+test("resolveProjectRoot keeps the nearest bootstrapped .gsd when the only git root is the home folder", (t) => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "gsd-root-home-git-")));
+  const home = join(tmp, "home");
+  const foo = join(home, "projects", "foo");
+  const src = join(foo, "src");
+  const other = join(home, "other");
+  const previousGsdHome = process.env.GSD_HOME;
+  t.after(() => {
+    if (previousGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = previousGsdHome;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  mkdirSync(join(home, ".gsd"), { recursive: true });
+  process.env.GSD_HOME = join(home, ".gsd");
+  execFileSync("git", ["init"], { cwd: home, stdio: "ignore" });
+  mkdirSync(join(foo, ".gsd"), { recursive: true });
+  writeFileSync(join(foo, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+  mkdirSync(src, { recursive: true });
+  mkdirSync(other, { recursive: true });
+
+  assert.equal(resolveProjectRoot(src), foo);
+  assert.equal(gsdRoot(src), join(foo, ".gsd"));
+  assert.equal(resolveProjectRoot(other), other, "the home folder is never adopted as a project root");
+});

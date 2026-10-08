@@ -167,7 +167,10 @@ function resolveProjectRootFromPath(path: string): string {
     // in a folder the user never opened.
     const gitRoot = resolveGitWorkingTreeRoot(path);
     if (!gitRoot) return path;
-    return resolveNearestBootstrappedGsdRoot(path) ?? gitRoot;
+    const nearest = resolveNearestBootstrappedGsdRoot(path);
+    if (nearest) return nearest;
+    const externalStateParent = normalizeWorktreePathForCompare(resolve(gsdHome(), ".."));
+    return normalizeWorktreePathForCompare(gitRoot) === externalStateParent ? path : gitRoot;
   }
 
   // Slice at the first `.gsd` boundary, but never past the worktree segment:
@@ -232,9 +235,9 @@ function resolveGitWorkingTreeRoot(path: string): string | null {
     const externalStateParent = normalizeWorktreePathForCompare(resolve(gsdHome(), ".."));
 
     for (let i = 0; i < 30; i++) {
-      if (normalizeWorktreePathForCompare(dir) === externalStateParent) return null;
       const gitPath = join(dir, ".git");
       if (existsSync(gitPath)) return dir;
+      if (normalizeWorktreePathForCompare(dir) === externalStateParent) return null;
 
       const parent = resolve(dir, "..");
       if (parent === dir) break;
