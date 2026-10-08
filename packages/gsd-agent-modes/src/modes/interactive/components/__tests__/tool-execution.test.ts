@@ -473,6 +473,31 @@ test("keeps CRLF line endings intact while collapsing frames", () => {
 	assert.match(rendered, /line two/);
 });
 
+// Lines made only of \r (blank CRLF lines, e.g. "a\r\n\r\nb" from SSH/RouterOS
+// output) used to spin collapseCarriageReturnFrames forever (#2636).
+test("renders blank CRLF lines without hanging", () => {
+	const rendered = renderTool(
+		"bash",
+		{ command: "ssh router print" },
+		{ content: [{ type: "text", text: "Flags: R\r\n\r\n 0 R ether1\r\n\r\r\nend" }], isError: false },
+	);
+
+	assert.match(rendered, /Flags: R/);
+	assert.match(rendered, /0 R ether1/);
+	assert.match(rendered, /end/);
+	assert.doesNotMatch(rendered, /\r/, "carriage returns must not reach the rendered output");
+});
+
+test("renders output that is only carriage returns without hanging", () => {
+	const rendered = renderTool(
+		"bash",
+		{ command: "cr-only" },
+		{ content: [{ type: "text", text: "\r" }], isError: false },
+	);
+
+	assert.doesNotMatch(rendered, /\r/);
+});
+
 test("caps raw output fallback for tools without a custom result renderer", () => {
 	const total = TOOL_TUI_EXPANDED_MAX_LINES + 40;
 	const output = Array.from({ length: total }, (_, index) => `raw-${index + 1}`).join("\n");
