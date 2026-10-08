@@ -84,6 +84,23 @@ const REGISTRY_PATH = join(
 // later has been recycled by a different process and must not be signalled.
 const STALE_PID_START_SKEW_MS = 60_000;
 
+// Every process-introspection helper below (`ps`/`lsof`/`pwdx` on POSIX,
+// `powershell.exe`/WMI-CIM on Windows) runs synchronously and blocks the
+// whole event loop until it returns. Without a bound, WMI/CIM enumeration,
+// AV/EDR interception, or a wedged shell can stall registerMcpInstance /
+// sweepProjectOrphanMcpServers indefinitely (observed as a 180s+ CI hang).
+// 5s is a generous bound even for the slowest observed path (the Windows
+// Add-Type/C# PEB-read query, measured at ~3.5s cold) while still failing
+// fast relative to a multi-minute wedge. killSignal is forced to SIGKILL —
+// a wedged WMI/CIM call inside powershell.exe is exactly the kind of stuck
+// in-kernel-wait that may not honor SIGTERM, so the default killSignal is
+// not strong enough to guarantee the timeout is actually enforced.
+const PROCESS_QUERY_TIMEOUT_MS = 5_000;
+const PROCESS_QUERY_EXEC_OPTIONS = {
+  timeout: PROCESS_QUERY_TIMEOUT_MS,
+  killSignal: 'SIGKILL' as const,
+};
+
 export function readMcpRegistry(registryPath = REGISTRY_PATH): McpInstanceRegistry {
   let raw: string;
   try {
@@ -249,7 +266,7 @@ function defaultGetProcessCommand(pid: number): string | null {
           '-Command',
           `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...PROCESS_QUERY_EXEC_OPTIONS },
       ).trim();
       return out || null;
     }
@@ -257,6 +274,7 @@ function defaultGetProcessCommand(pid: number): string | null {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     }).trim();
     return command || null;
   } catch {
@@ -275,7 +293,7 @@ function defaultGetProcessStartTime(pid: number): number | null {
           '-Command',
           `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { [int64](($p.CreationDate.ToUniversalTime() - [datetime]'1970-01-01T00:00:00Z').TotalMilliseconds) }`,
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...PROCESS_QUERY_EXEC_OPTIONS },
       ).trim();
       const ms = Number(out);
       return Number.isFinite(ms) && ms > 0 ? ms : null;
@@ -286,6 +304,7 @@ function defaultGetProcessStartTime(pid: number): number | null {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     }).trim();
     if (!lstart) return null;
     const ms = new Date(lstart).getTime();
@@ -333,7 +352,7 @@ public static class GsdProcCwd{
 }
 '@;Add-Type -TypeDefinition $t -ErrorAction Stop;[GsdProcCwd]::G($pid)`,
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...PROCESS_QUERY_EXEC_OPTIONS },
       ).trim();
       if (!out) return null;
       return normalizeProcessCwd(out);
@@ -347,6 +366,7 @@ public static class GsdProcCwd{
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     });
     const cwd = out.split('\n').find((line) => line.startsWith('n'))?.slice(1).trim();
     if (cwd) return cwd;
@@ -358,6 +378,7 @@ public static class GsdProcCwd{
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     }).trim();
     const match = /^\d+:\s+(.+)$/.exec(out);
     return match?.[1]?.trim() || null;
@@ -391,7 +412,7 @@ function defaultListProcesses(): McpProcessSnapshot[] {
           '-Command',
           'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress',
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...PROCESS_QUERY_EXEC_OPTIONS },
       ).trim();
       if (!out) return [];
       const parsed = JSON.parse(out) as unknown;
@@ -415,6 +436,7 @@ function defaultListProcesses(): McpProcessSnapshot[] {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     });
     return out.split('\n').flatMap((line) => {
       const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
