@@ -207,7 +207,7 @@ For `@dev` or `@next`, roll back the same way (`npm dist-tag add`) or re-run **N
 | Secret: `NPM_TOKEN` | Not required for trusted publishing; set for token-fallback bootstrap/manual native publishes (`publish_auth=token`) |
 | Secret: `RELEASE_PAT` | Prod release checkout, tag push, and the merge-queue version-bump PR when branch rules reject a direct push to `main`. `GITHUB_TOKEN` cannot create PRs on this repo. |
 | Secret: `ANTHROPIC_API_KEY` | Prod environment only (non-blocking live LLM tests) |
-| Secret: `OPENAI_API_KEY` | Prod environment only (non-blocking live LLM tests) |
+| Secret: `OPENAI_API_KEY` | Prod environment only (non-blocking provider round-trip step and blocking live workflow step) |
 | Secret: `DISCORD_CHANGELOG_WEBHOOK` | Optional — release announcement; the step tolerates a missing webhook |
 | GHCR | Enabled for the `open-gsd` org |
 

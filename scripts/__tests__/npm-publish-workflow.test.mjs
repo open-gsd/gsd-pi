@@ -200,6 +200,7 @@ test("production release runs optional live workflow test on the configured Open
   assert.match(step.run, /pnpm run test:live-workflow/);
   assert.equal(step.env.OPENAI_API_KEY, "${{ secrets.OPENAI_API_KEY }}");
   assert.equal(step.env.GSD_LIVE_TESTS, "1");
+  assert.equal(step.env.GSD_LIVE_WORKFLOW_REQUIRE_PASS, "1");
   assert.equal(step.env.GSD_LIVE_WORKFLOW_MODEL, "openai/gpt-5.4-mini");
 });
 
