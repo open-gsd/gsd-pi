@@ -1,14 +1,24 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const workflowPath = resolve(
-	dirname(fileURLToPath(import.meta.url)),
-	"../../.github/workflows/ci.yml",
-);
-const workflow = readFileSync(workflowPath, "utf8");
+// Source tests run under src/tests, while compiled tests run under dist-test/src/tests;
+// walk ancestors so this guard validates the repository workflow in both layouts.
+function findWorkflowPath(): string {
+	let directory = dirname(fileURLToPath(import.meta.url));
+	while (true) {
+		const candidate = resolve(directory, ".github/workflows/ci.yml");
+		if (existsSync(candidate)) return candidate;
+		const parent = dirname(directory);
+		if (parent === directory) break;
+		directory = parent;
+	}
+	throw new Error("Unable to locate .github/workflows/ci.yml from the test file");
+}
+
+const workflow = readFileSync(findWorkflowPath(), "utf8");
 
 function windowsPackageTestStep(): string {
 	const job = workflow.match(
