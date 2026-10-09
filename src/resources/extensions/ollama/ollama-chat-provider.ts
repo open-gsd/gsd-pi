@@ -28,6 +28,7 @@ import {
 	EventStream,
 } from "@gsd/pi-ai";
 import { chat } from "./ollama-client.js";
+import { randomUUID } from "node:crypto";
 import type {
 	OllamaChatMessage,
 	OllamaChatOptions,
@@ -69,6 +70,13 @@ export function streamOllamaChat(
 			const useThinkingParser = model.reasoning;
 			const thinkParser = useThinkingParser ? new ThinkingTagParser() : null;
 
+			// Ollama's raw tool_calls carry no id, so we mint one. It must be unique
+			// per response: GSD uses `pi:<tool>:<toolCallId>` as a Domain Operation
+			// idempotency key, and a per-response stream index recycles across
+			// responses/turns/crash resumes, colliding with committed operations.
+			// 24 hex chars (96 bits) keeps the full id within OpenAI's 40-char
+			// tool-call id limit even with the index suffix.
+			const responseNonce = randomUUID().replace(/-/g, "").slice(0, 24);
 			let contentIndex = -1;
 			let currentBlockType: "text" | "thinking" | null = null;
 
@@ -123,7 +131,7 @@ export function streamOllamaChat(
 					contentIndex++;
 					const toolCall: ToolCall = {
 						type: "toolCall",
-						id: `ollama_tc_${contentIndex}`,
+						id: `ollama_tc_${responseNonce}_${contentIndex}`,
 						name: tc.function.name,
 						arguments: tc.function.arguments,
 					};
