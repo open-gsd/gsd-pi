@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -12,6 +12,7 @@ process.env.GSD_WORKFLOW_EXECUTORS_MODULE = new URL(
 
 import { registerDbTools } from "../bootstrap/db-tools.ts";
 import { registerWorkflowTools } from "../../../../../packages/mcp-server/src/workflow-tools.ts";
+import { assertSnapshotResult, assertSuccessEnvelope } from "../../../../../scripts/mcp-host-smoke.mjs";
 import { createMemory } from "../memory-store.ts";
 import {
   closeDatabase,
@@ -719,4 +720,73 @@ test("canonical read parity: missing project_authority row classifies as db_unav
   } finally {
     cleanup([base]);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Composition with the production canonical smoke assertions (#2669): real
+// registered snapshot tool results feed the same assertions the MCP host
+// smoke probe enforces.
+// ---------------------------------------------------------------------------
+
+test("canonical read tools compose: valid registered snapshot passes the production smoke assertion", async (t) => {
+  const base = makeProjectBase("gsd-canonical-compose-valid");
+  t.after(() => cleanup([base]));
+  const mcp = makeMcpTools();
+
+  openDatabase(resolveProjectRootDbPath(base));
+  insertMilestone({ id: "M001", title: "Authority Fixture", status: "active" });
+
+  const result = await mcpTool(mcp, "gsd_project_snapshot").handler({ projectDir: base });
+  const snapshot = assertSnapshotResult(result as Parameters<typeof assertSnapshotResult>[0]);
+  assert.equal(snapshot.current.activeMilestone?.id, "M001");
+  assert.equal(snapshot.current.activeMilestone?.title, "Authority Fixture");
+  assert.ok(snapshot.authority.projectId.length > 0);
+});
+
+test("canonical read tools compose: a valid empty real DB passes with DB authority and no projection data", async (t) => {
+  const base = makeProjectBase("gsd-canonical-compose-empty");
+  writeFileSync(
+    join(base, ".gsd", "STATE.md"),
+    "# Project State\n\n**Active Milestone:** M999: Projection Only\n**Phase:** planning\n",
+  );
+  t.after(() => cleanup([base]));
+  const mcp = makeMcpTools();
+
+  openDatabase(resolveProjectRootDbPath(base));
+
+  const result = await mcpTool(mcp, "gsd_project_snapshot").handler({ projectDir: base });
+  const snapshot = assertSnapshotResult(result as Parameters<typeof assertSnapshotResult>[0]);
+  assert.equal(snapshot.current.activeMilestone, null, "empty DB must not surface STATE.md projection data");
+  assert.equal(snapshot.milestones.items.length, 0);
+});
+
+test("canonical read tools compose: missing DB and query failure envelopes reject canonical validation", async (t) => {
+  const missingBase = makeProjectBase("gsd-canonical-compose-missing");
+  const queryBase = makeProjectBase("gsd-canonical-compose-query-error");
+  t.after(() => cleanup([missingBase, queryBase]));
+  const mcp = makeMcpTools();
+
+  const missingResult = await mcpTool(mcp, "gsd_project_snapshot").handler({ projectDir: missingBase });
+    assert.equal(
+      (missingResult as { structuredContent?: { error?: string } }).structuredContent?.error,
+      "db_unavailable",
+    );
+    assert.throws(
+      () => assertSuccessEnvelope(missingResult as Parameters<typeof assertSuccessEnvelope>[0]),
+      /MCP error envelope|structured canonical error/,
+      "canonical smoke validation must reject the db_unavailable envelope",
+    );
+
+    openDatabase(resolveProjectRootDbPath(queryBase));
+    getDb().prepare("DROP TABLE milestones").run();
+    const queryResult = await mcpTool(mcp, "gsd_project_snapshot").handler({ projectDir: queryBase });
+    assert.equal(
+      (queryResult as { structuredContent?: { error?: string } }).structuredContent?.error,
+      "query_error",
+    );
+    assert.throws(
+      () => assertSuccessEnvelope(queryResult as Parameters<typeof assertSuccessEnvelope>[0]),
+      /MCP error envelope|structured canonical error/,
+      "canonical smoke validation must reject the query_error envelope",
+    );
 });

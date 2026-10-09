@@ -22,6 +22,22 @@ const progress = {
 	readMetadata: { source: "database", authority: "db-authoritative" },
 };
 
+const blocker = {
+	blockerId: "B001",
+	blockerKind: "escalation",
+	resolutionOwner: "user",
+	description: "Needs a product decision",
+	requestedAction: "Pick one of the two options",
+	openedAt: "2026-09-11T00:00:00.000Z",
+	openedProjectRevision: 41,
+};
+
+const openQuestion = {
+	questionId: "Q001",
+	questionText: "Ship with or without the flag?",
+	createdAt: "2026-09-11T00:00:00.000Z",
+};
+
 const snapshot = {
 	authority: { projectId: "project-1", schemaVersion: 1, revision: 42, authorityEpoch: 2 },
 	current: { activeMilestone: null, activeSlice: null, activeTask: null, phase: "execute", nextAction: "Continue" },
@@ -30,9 +46,9 @@ const snapshot = {
 		slices: { total: 0, done: 0, active: 0, pending: 0 },
 		tasks: { total: 0, done: 0, pending: 0 },
 	},
-	blockers: [],
+	blockers: [{ ...blocker }],
 	blockersTruncated: false,
-	openQuestions: [],
+	openQuestions: [{ ...openQuestion }],
 	openQuestionsTruncated: false,
 	verification: { assessments: { total: 0, pass: 0, fail: 0 }, evidence: { total: 0, passed: 0, failed: 0 } },
 		milestones: { items: [{ id: "M001", title: "Authority Fixture", status: "active", sequence: 1 }], truncated: false },
@@ -52,8 +68,8 @@ function reverseObjectKeys(value) {
 	return Object.fromEntries(Object.keys(value).reverse().map((key) => [key, reverseObjectKeys(value[key])]));
 }
 
-function expectFailure(fn, message) {
-	assert.throws(fn, (error) => error instanceof Error && error.message.includes(message));
+function expectFailure(fn, message, label) {
+	assert.throws(fn, (error) => error instanceof Error && error.message.includes(message), label ? `${label}: expected failure containing "${message}"` : undefined);
 }
 
 test("import exposes assertions without starting the MCP runtime", () => {
@@ -108,9 +124,90 @@ test("snapshot rejects invalid authority, operation, revision, truncation, and o
 	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, blockersTruncated: "no" }, { operation: "read_project_snapshot", revision: 42, snapshot })), "blockersTruncated");
 	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, capturedAt: "September 11, 2026" }, { operation: "read_project_snapshot", revision: 42, snapshot })), "ISO-8601");
 	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, capturedAt: "2026-02-30T00:00:00.000Z" }, { operation: "read_project_snapshot", revision: 42, snapshot })), "ISO-8601");
-	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, current: {} }, { operation: "read_project_snapshot", revision: 42, snapshot })), "current.activeMilestone");
-	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, milestones: { items: [null], truncated: false } }, { operation: "read_project_snapshot", revision: 42, snapshot })), "object items");
+	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, current: {} }, { operation: "read_project_snapshot", revision: 42, snapshot: { ...snapshot, current: {} } })), "current.activeMilestone");
+	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, milestones: { items: [null], truncated: false } }, { operation: "read_project_snapshot", revision: 42, snapshot: { ...snapshot, milestones: { items: [null], truncated: false } } })), "expected object, got null");
 	expectFailure(() => assertProgressResult(resultFor({ ...progress, milestones: {} })), "gsd_progress.milestones.total");
 	expectFailure(() => assertProgressResult(resultFor({ ...progress, blockers: [42] })), "string array");
 	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, milestones: { items: Array(51).fill({}), truncated: true } }, { operation: "read_project_snapshot", revision: 42, snapshot })), "output cap");
+});
+
+test("snapshot accepts current producer-shaped collection items with additive fields", () => {
+	const withAdditive = {
+		...snapshot,
+		blockers: [{ ...blocker, futureField: "ok" }],
+		openQuestions: [{ ...openQuestion, futureField: 7 }],
+		milestones: {
+			items: [{ ...snapshot.milestones.items[0], lifecycleStatus: "ready", futureField: true }],
+			truncated: false,
+		},
+	};
+	assert.doesNotThrow(() => assertSnapshotResult(resultFor(withAdditive, {
+		operation: "read_project_snapshot",
+		revision: 42,
+		snapshot: withAdditive,
+	})));
+});
+
+test("snapshot rejects malformed milestone items", () => {
+	const cases = [
+		["empty object", {}],
+		["missing title", { id: "M001", status: "active", sequence: 1 }],
+		["non-string title", { id: "M001", title: 7, status: "active", sequence: 1 }],
+		["missing status", { id: "M001", title: "M", sequence: 1 }],
+		["missing sequence", { id: "M001", title: "M", status: "active" }],
+		["negative sequence", { id: "M001", title: "M", status: "active", sequence: -1 }],
+		["non-integer sequence", { id: "M001", title: "M", status: "active", sequence: 1.5 }],
+		["unknown lifecycleStatus", { id: "M001", title: "M", status: "active", sequence: 1, lifecycleStatus: "archived" }],
+	];
+	for (const [label, item] of cases) {
+		const mutated = { ...snapshot, milestones: { items: [item], truncated: false } };
+		expectFailure(
+			() => assertSnapshotResult(resultFor(mutated, { operation: "read_project_snapshot", revision: 42, snapshot: mutated })),
+			"gsd_project_snapshot.milestones.items[0]",
+			`milestone mutation "${label}" must be rejected`,
+		);
+	}
+	const nullLifecycle = { ...snapshot, milestones: { items: [{ ...snapshot.milestones.items[0], lifecycleStatus: null }], truncated: false } };
+	assert.doesNotThrow(() => assertSnapshotResult(resultFor(nullLifecycle, { operation: "read_project_snapshot", revision: 42, snapshot: nullLifecycle })));
+	// Registration accepts untitled milestones (title defaults to ""), so an
+	// empty title is producer-shaped output, not a malformed item.
+	const untitled = { ...snapshot, milestones: { items: [{ id: "M002", title: "", status: "queued", sequence: 2 }], truncated: false } };
+	assert.doesNotThrow(() => assertSnapshotResult(resultFor(untitled, { operation: "read_project_snapshot", revision: 42, snapshot: untitled })));
+});
+
+test("snapshot rejects malformed blocker items", () => {
+	const cases = [
+		["empty object", {}],
+		["missing blockerId", { ...blocker, blockerId: undefined }],
+		["empty description", { ...blocker, description: "" }],
+		["missing requestedAction", { ...blocker, requestedAction: undefined }],
+		["malformed openedAt", { ...blocker, openedAt: "September 11, 2026" }],
+		["missing openedProjectRevision", { ...blocker, openedProjectRevision: undefined }],
+		["negative openedProjectRevision", { ...blocker, openedProjectRevision: -1 }],
+	];
+	for (const [label, item] of cases) {
+		const mutated = { ...snapshot, blockers: [item] };
+		expectFailure(
+			() => assertSnapshotResult(resultFor(mutated, { operation: "read_project_snapshot", revision: 42, snapshot: mutated })),
+			"gsd_project_snapshot.blockers[0]",
+			`blocker mutation "${label}" must be rejected`,
+		);
+	}
+});
+
+test("snapshot rejects malformed open-question items", () => {
+	const cases = [
+		["empty object", {}],
+		["missing questionId", { ...openQuestion, questionId: undefined }],
+		["empty questionText", { ...openQuestion, questionText: "" }],
+		["malformed createdAt", { ...openQuestion, createdAt: "2026-09-11" }],
+	];
+	for (const [label, item] of cases) {
+		const mutated = { ...snapshot, openQuestions: [item] };
+		expectFailure(
+			() => assertSnapshotResult(resultFor(mutated, { operation: "read_project_snapshot", revision: 42, snapshot: mutated })),
+			"gsd_project_snapshot.openQuestions[0]",
+			`open-question mutation "${label}" must be rejected`,
+		);
+	}
 });
