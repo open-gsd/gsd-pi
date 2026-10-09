@@ -176,7 +176,7 @@ export function recoveryRouteLever(route: TaskRecoveryRouteSnapshot): string {
  * to close. Shared by the running-attempt gate itself and by the legacy
  * projection refusal (#2348), so both surfaces name the same sanctioned exit.
  */
-function noRunningAttemptGateError(task: TaskCompletionIdentity): string {
+function noRunningAttemptGateError(task: TaskCompletionIdentity, lifecycleStatus: string): string {
   let neverClaimed = false;
   try {
     neverClaimed = readLatestTaskAttempt(task) === null;
@@ -186,6 +186,10 @@ function noRunningAttemptGateError(task: TaskCompletionIdentity): string {
   // With zero Attempts there is no checkpoint to resume and nothing for
   // gsd_task_settle to publish; only auto-mode dispatch claims one (#2697).
   if (neverClaimed) {
+    if (["completed", "cancelled", "blocker-accepted"].includes(lifecycleStatus)) {
+      return "Canonical Task completion has no running Attempt to close: the Task is already closed in the " +
+        `canonical lifecycle (${lifecycleStatus}) and no Attempt was ever claimed for it, so there is nothing to complete.`;
+    }
     return "Canonical Task completion has no running Attempt to close: no Attempt was ever claimed for this " +
       "Task, so gsd_task_settle cannot publish it either. Only auto-mode dispatch claims an Attempt. " +
       "Run `/gsd auto` (`/gsd next` for one unit; `gsd_execute` from an MCP host): the dispatched " +
@@ -236,6 +240,7 @@ export function resolveTaskCompletionAuthority(
 
   const lifecycle = getDb().prepare(`
     SELECT lifecycle.lifecycle_id,
+           lifecycle.lifecycle_status,
            EXISTS (
              SELECT 1 FROM workflow_execution_attempts attempt
              WHERE attempt.lifecycle_id = lifecycle.lifecycle_id
@@ -282,7 +287,7 @@ export function resolveTaskCompletionAuthority(
       latestAttemptRecoveryContext(task),
     );
   }
-  throw new Error(noRunningAttemptGateError(task));
+  throw new Error(noRunningAttemptGateError(task, String(lifecycle["lifecycle_status"])));
 }
 
 function runningAttemptId(task: TaskCompletionIdentity): string {
