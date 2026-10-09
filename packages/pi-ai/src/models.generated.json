@@ -14102,7 +14102,7 @@
     "grok-4.7": {
       "id": "grok-4.7",
       "name": "Grok 4.7",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -14116,7 +14116,7 @@
         "cacheRead": 0.5,
         "cacheWrite": 0
       },
-      "contextWindow": 500000,
+      "contextWindow": 328000,
       "maxTokens": 128000,
       "headers": {
         "User-Agent": "GitHubCopilotChat/0.35.0",
@@ -14124,10 +14124,8 @@
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
       },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
+      "thinkingLevelMap": {
+        "minimal": "low"
       }
     },
     "gpt-5.4-nano": {
@@ -14413,7 +14411,7 @@
     "gpt-6.1-sol": {
       "id": "gpt-6.1-sol",
       "name": "GPT-6.1 Sol",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -14427,7 +14425,7 @@
         "cacheRead": 0.1,
         "cacheWrite": 2.5
       },
-      "contextWindow": 1050000,
+      "contextWindow": 400000,
       "maxTokens": 128000,
       "headers": {
         "User-Agent": "GitHubCopilotChat/0.35.0",
@@ -14435,10 +14433,11 @@
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
       },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "xhigh": "xhigh",
+        "max": "max"
       }
     },
     "claude-haiku-4.5": {
@@ -14473,7 +14472,7 @@
     "gpt-6-astra": {
       "id": "gpt-6-astra",
       "name": "GPT-6 Astra",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -14487,7 +14486,7 @@
         "cacheRead": 1,
         "cacheWrite": 12.5
       },
-      "contextWindow": 1050000,
+      "contextWindow": 400000,
       "maxTokens": 128000,
       "headers": {
         "User-Agent": "GitHubCopilotChat/0.35.0",
@@ -14495,16 +14494,17 @@
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
       },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "xhigh": "xhigh",
+        "max": "max"
       }
     },
     "grok-4.5": {
       "id": "grok-4.5",
       "name": "Grok 4.5",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -14518,7 +14518,7 @@
         "cacheRead": 0.5,
         "cacheWrite": 0
       },
-      "contextWindow": 500000,
+      "contextWindow": 328000,
       "maxTokens": 128000,
       "headers": {
         "User-Agent": "GitHubCopilotChat/0.35.0",
@@ -14526,10 +14526,8 @@
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
       },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
+      "thinkingLevelMap": {
+        "minimal": "low"
       }
     },
     "claude-opus-5": {
@@ -14926,7 +14924,7 @@
     "gpt-6-luna": {
       "id": "gpt-6-luna",
       "name": "GPT-6 Luna",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -14940,7 +14938,7 @@
         "cacheRead": 0.01,
         "cacheWrite": 0.125
       },
-      "contextWindow": 1050000,
+      "contextWindow": 400000,
       "maxTokens": 128000,
       "headers": {
         "User-Agent": "GitHubCopilotChat/0.35.0",
@@ -14948,10 +14946,11 @@
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
       },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "xhigh": "xhigh",
+        "max": "max"
       }
     },
     "claude-opus-5.5": {
@@ -15056,7 +15055,7 @@
     "grok-4.6": {
       "id": "grok-4.6",
       "name": "Grok 4.6",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -15070,7 +15069,7 @@
         "cacheRead": 0.5,
         "cacheWrite": 0
       },
-      "contextWindow": 500000,
+      "contextWindow": 328000,
       "maxTokens": 128000,
       "headers": {
         "User-Agent": "GitHubCopilotChat/0.35.0",
@@ -15078,10 +15077,8 @@
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
       },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
+      "thinkingLevelMap": {
+        "minimal": "low"
       }
     },
     "gpt-5.6-sol": {
@@ -15119,7 +15116,7 @@
     "gpt-6-sol": {
       "id": "gpt-6-sol",
       "name": "GPT-6 Sol",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -15133,7 +15130,7 @@
         "cacheRead": 0.2,
         "cacheWrite": 2.5
       },
-      "contextWindow": 1050000,
+      "contextWindow": 400000,
       "maxTokens": 128000,
       "headers": {
         "User-Agent": "GitHubCopilotChat/0.35.0",
@@ -15141,10 +15138,11 @@
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
       },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "xhigh": "xhigh",
+        "max": "max"
       }
     },
     "mai-code-1.1-flash": {
