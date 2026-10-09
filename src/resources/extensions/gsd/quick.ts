@@ -17,7 +17,7 @@ import { gsdRoot } from "./paths.js";
 import { GitServiceImpl, runGit, taskBranchArgs } from "./git-service.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { nativeBranchExists, nativeDetectMainBranch, nativeDiffNumstat } from "./native-git-bridge.js";
-import { nativeHasStagedChanges } from "./native-git-bridge.js";
+import { nativeHasStagedChanges, nativeIsRepo } from "./native-git-bridge.js";
 import { resolveUokFlags } from "./uok/flags.js";
 
 interface QuickReturnState {
@@ -440,17 +440,33 @@ export async function handleQuick(
   const gitPrefs = loadEffectiveGSDPreferences()?.preferences?.git ?? {};
   const git = new GitServiceImpl(basePath, gitPrefs);
   const branchName = `gsd/quick/${taskNum}-${slug}`;
-  let originalBranch = git.getCurrentBranch();
-  let returnBranch = originalBranch;
 
   const { getIsolationMode } = await import("./preferences.js");
-  const usesBranch = getIsolationMode() !== "none" && isGitOpsEnabled();
+  const wantsBranch = getIsolationMode(basePath) !== "none" && isGitOpsEnabled();
+  const isRepo = nativeIsRepo(basePath);
+  if (wantsBranch && !isRepo) {
+    ctx.ui.notify(
+      "Branch isolation is enabled, but this directory is not a git repository. Working on the current branch. Run /gsd doctor to check your project setup.",
+      "warning",
+    );
+  }
+  const usesBranch = wantsBranch && isRepo;
+
+  // Probe once, guarded (#2678): getCurrentBranch throws outside a repository,
+  // and the old code called it unconditionally before the usesBranch check.
+  let originalBranch = "";
+  let returnBranch = "";
+  if (isRepo) {
+    try {
+      originalBranch = git.getCurrentBranch();
+      returnBranch = originalBranch;
+    } catch { /* keep "" — recorded as "(detached)" below */ }
+  }
 
   let branchCreated = false;
   if (usesBranch) {
     try {
-      const current = originalBranch;
-      if (current !== branchName) {
+      if (originalBranch !== branchName) {
         // Auto-commit any dirty state before switching
         try {
           if (isGitOpsEnabled()) {
@@ -458,7 +474,7 @@ export async function handleQuick(
           }
         } catch { /* nothing to commit — fine */ }
 
-        const branchArgs = taskBranchArgs(basePath, branchName, current, git.getMainBranch());
+        const branchArgs = taskBranchArgs(basePath, branchName, originalBranch, git.getMainBranch());
         const startPoint = branchArgs[3];
         // When the quick branch is redirected off a stale task branch, the
         // squash-merge on closeout must return to the same base — merging a
@@ -475,7 +491,9 @@ export async function handleQuick(
     }
   }
 
-  const actualBranch = branchCreated ? branchName : git.getCurrentBranch();
+  // Never re-run the call that failed inside the fallback (#2678):
+  // getCurrentBranch itself throws outside a repository.
+  const actualBranch = branchCreated ? branchName : (originalBranch || "(detached)");
   if (actualBranch === branchName && originalBranch !== branchName) {
     persistPendingReturn({
       basePath,
