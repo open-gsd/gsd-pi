@@ -41,6 +41,7 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"cloudflare-ai-gateway/claude-opus-5.5",
 	"cloudflare-ai-gateway/claude-sonnet-4.6",
 	"cloudflare-ai-gateway/claude-sonnet-5",
+	"cloudflare-ai-gateway/claude-sonnet-5.5",
 	"github-copilot/claude-opus-4.7",
 	"github-copilot/claude-opus-4.8",
 	"github-copilot/claude-sonnet-4.6",
