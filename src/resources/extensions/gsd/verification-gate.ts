@@ -844,6 +844,84 @@ function knownPrefixInvocationIsCommand(
   return true;
 }
 
+/** Executable script extensions for a repo-relative path's final segment. */
+const EXECUTABLE_PATH_SUFFIX_RE = /\.(?:sh|bash|zsh)$/;
+
+/**
+ * Repo-relative executable path such as `bin/rails`, `scripts/verify.sh` or
+ * `node_modules/.bin/vitest`. A bare relative path is as much an invocation as
+ * `./bin/rails`; without this, a binstub with two or more operands and no flag
+ * (`bin/rails test a_test.rb b_test.rb`) fell through to the prose rejection
+ * (#2664). Only extensionless program names and shell scripts count as
+ * runnable: a path whose final segment carries any other extension (`.md`,
+ * `.ts`, `.yml`, ...) names a file and keeps reading as prose.
+ */
+function isRelativeExecutablePath(token: string): boolean {
+  if (!/^[\w.-]+(?:\/[\w.@-]+)+$/.test(token)) return false;
+  const lastSegment = token.slice(token.lastIndexOf("/") + 1);
+  return !lastSegment.includes(".") || EXECUTABLE_PATH_SUFFIX_RE.test(lastSegment);
+}
+
+/**
+ * Is this first token positively anchored as something executable: a known
+ * command prefix, an absolute/`./`/`../` path, or a repo-relative executable
+ * path (#2664)?
+ */
+function isAnchoredCommandToken(token: string): boolean {
+  return KNOWN_COMMAND_PREFIXES.has(token)
+    || token.startsWith("/")
+    || token.startsWith("./")
+    || token.startsWith("../")
+    || isRelativeExecutablePath(token);
+}
+
+/**
+ * Index just past the shell word starting at `start`, where the word ends at
+ * the first UNQUOTED whitespace. Quoted sections may contain whitespace and
+ * adjacent quoted/unquoted fragments form one word (`"a"b`). Returns null
+ * when a quote never closes: the word is ambiguous shell input.
+ */
+function shellWordEnd(command: string, start: number): number | null {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = start; i < command.length; i += 1) {
+    const ch = command[i];
+    if (ch === "\\" && !inSingle) {
+      i += 1;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+    } else if (ch === "\"" && !inSingle) {
+      inDouble = !inDouble;
+    } else if (!inSingle && !inDouble && /\s/.test(ch)) {
+      return i;
+    }
+  }
+  return inSingle || inDouble ? null : command.length;
+}
+
+/**
+ * Peel leading `NAME=value` environment assignments (shell-word aware, so
+ * quoted values may contain whitespace) from a command string. Used by
+ * isLikelyCommand to judge the command an environment prefix anchors (#2664).
+ * An assignment whose value never terminates is left in place: the caller
+ * falls back to the legacy prose heuristics.
+ */
+function stripLeadingEnvAssignments(command: string): { stripped: boolean; remainder: string } {
+  let current = command.trim();
+  let stripped = false;
+  for (;;) {
+    const nameMatch = /^[A-Z_][A-Z0-9_]*=/.exec(current);
+    if (!nameMatch) break;
+    const wordEnd = shellWordEnd(current, nameMatch[0].length);
+    if (wordEnd === null) break;
+    current = current.slice(wordEnd).trim();
+    stripped = true;
+  }
+  return { stripped, remainder: current };
+}
+
 /**
  * Heuristic check: does this string look like an executable shell command
  * rather than a prose description?
@@ -853,10 +931,13 @@ function knownPrefixInvocationIsCommand(
  *
  * Heuristics (any true → command-like):
  *   1. First token is a known command prefix
- *   2. First token starts with `.` or `/` (path-like)
+ *   2. First token is path-like (`/`, `./`, `../`, or a repo-relative
+ *      executable path such as `bin/rails`, #2664)
  *   3. Any token starts with `-` (flag-like)
  *   4. First token contains no uppercase letters (commands are lowercase)
  *      AND first token does not end with a comma or colon (prose punctuation)
+ *   5. Leading `NAME=value` environment assignments are unwrapped and the
+ *      anchored command they prefix is judged instead (#2664)
  *
  * Heuristics (any true → prose-like):
  *   1. First token starts with an uppercase letter and the string has 4+ words
@@ -893,6 +974,23 @@ export function isLikelyCommand(cmd: string): boolean {
   // Numbered checklist / narrative prose (#1994).
   if (/^\d+[.)]\s/.test(trimmed)) return false;
 
+  // Leading `NAME=value` environment assignments are shell syntax, not prose
+  // (#2664): when they prefix an anchored command (known prefix or executable
+  // path) that itself reads as a command, accept. Shell-word aware, so
+  // multi-word quoted values like `RUBYOPT="-W:no-deprecated"` survive and an
+  // unterminated quoted value is never treated as a command prefix. Anything
+  // else falls through to the original heuristics, so env-prefixed acceptance
+  // is a strict superset of the legacy behavior (`CI=1 rspec --format
+  // progress` stays a command via flags; `STATUS=ok means done` stays prose).
+  const envStrip = stripLeadingEnvAssignments(effectiveTokens.join(" "));
+  if (envStrip.stripped) {
+    if (!envStrip.remainder) return false;
+    const commandToken = envStrip.remainder.split(/\s+/)[0] ?? "";
+    if (isAnchoredCommandToken(commandToken) && isLikelyCommand(envStrip.remainder)) {
+      return true;
+    }
+  }
+
   // Known command prefix → command, unless the rest reads as prose.
   if (KNOWN_COMMAND_PREFIXES.has(effectiveFirstToken)) {
     return knownPrefixInvocationIsCommand(effectiveTokens, proseTokens);
@@ -901,7 +999,7 @@ export function isLikelyCommand(cmd: string): boolean {
   // Path-like first token → command, unless the rest reads as prose.
   // "./out/report.txt exists and contains the summary" is a description of a
   // file, not an invocation of it.
-  if (effectiveFirstToken.startsWith("/") || effectiveFirstToken.startsWith("./") || effectiveFirstToken.startsWith("../")) {
+  if (isAnchoredCommandToken(effectiveFirstToken)) {
     return knownPrefixInvocationIsCommand(effectiveTokens, proseTokens);
   }
 

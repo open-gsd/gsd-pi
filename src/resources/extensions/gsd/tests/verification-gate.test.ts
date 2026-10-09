@@ -1603,6 +1603,71 @@ test("isLikelyCommand: CJK punctuation matrix is rejected unquoted (issue #2428)
   }
 });
 
+test("isLikelyCommand: repo-relative binstubs with several operands are commands (issue #2664)", () => {
+  // `bin/rails test a b` has no flag and `bin/rails` is neither a known prefix
+  // nor `./`-prefixed; it used to fall through to the prose rejection, which
+  // failed the plan-time check for every Rails task naming 2+ test files.
+  assert.equal(isLikelyCommand("bin/rails test test/models/a_test.rb test/models/b_test.rb"), true);
+  assert.equal(isLikelyCommand("bin/rails test test/models test/services test/controllers"), true);
+  assert.equal(isLikelyCommand("bin/rubocop app/services test/integration"), true);
+  assert.equal(isLikelyCommand("scripts/verify.sh one two three"), true);
+  assert.equal(isLikelyCommand("node_modules/.bin/vitest run tests/unit"), true);
+  assert.deepEqual(
+    validateVerificationCommand("bin/rails test test/a_test.rb test/b_test.rb"),
+    { ok: true },
+  );
+  assert.deepEqual(
+    validateVerificationCommand("RUN_SYSTEM_TESTS=1 bin/rails test test/system/a_test.rb"),
+    { ok: true },
+  );
+});
+
+test("isLikelyCommand: leading environment assignments prefix a command, not prose (issue #2664)", () => {
+  assert.equal(isLikelyCommand("RUN_SYSTEM_TESTS=1 bin/rails test test/system/a_test.rb test/system/b_test.rb"), true);
+  assert.equal(isLikelyCommand("RAILS_ENV=test A=1 bin/rails test test/a_test.rb test/b_test.rb test/c_test.rb"), true);
+  assert.equal(isLikelyCommand("CI=1 npm run test"), true);
+  assert.equal(isLikelyCommand("! RAILS_ENV=test bin/rails test test/a_test.rb"), true);
+  // Quote-aware values: a multi-word quoted assignment value does not break
+  // the command token out (regression pinned by codex review). The LABEL case
+  // isolates stripping: no token after the value starts with a flag, so the
+  // legacy flag heuristic cannot mask a broken parse.
+  assert.equal(isLikelyCommand('RUBYOPT="-W:no-deprecated -W:no-experimental" bin/rails test test/a_test.rb test/b_test.rb'), true);
+  assert.equal(isLikelyCommand('LABEL="integration smoke" bin/rails test test/a_test.rb test/b_test.rb'), true);
+  // Adjacent quoted/unquoted fragments form one assignment word.
+  assert.equal(isLikelyCommand('OPT="a"b bin/rails test test/a_test.rb test/b_test.rb'), true);
+  // An unterminated quoted value means the statement is one assignment and
+  // executes nothing — it must stay rejected (codex P2).
+  assert.equal(isLikelyCommand('LABEL=nightly" bin/rails test test/a.rb test/b.rb"'), false);
+  // Genuinely unclosed quotes (the scanner aborts stripping; legacy prose
+  // heuristics reject).
+  assert.equal(isLikelyCommand('LABEL="nightly bin/rails test test/a.rb'), false);
+  assert.equal(isLikelyCommand("LABEL='nightly bin/rails test test/a.rb"), false);
+  // An empty assignment value still prefixes a real command.
+  assert.equal(isLikelyCommand("FOO= bin/rails test test/a_test.rb test/b_test.rb"), true);
+  // Flag-backed recognition is unchanged when the prefixed command is not
+  // anchored or reads as prose (previously accepted via the flag heuristic).
+  assert.equal(isLikelyCommand("CI=1 rspec --format progress"), true);
+  assert.equal(isLikelyCommand("CI=1 dotnet test --no-restore"), true);
+  assert.equal(isLikelyCommand("CI=1 grep -q the README.md"), true);
+  // An assignment must prefix an anchored command or fall back to the prose
+  // heuristics; it never becomes a command by itself.
+  assert.equal(isLikelyCommand("STATUS=ok means done"), false);
+  assert.equal(isLikelyCommand("FOO=1 the build passes without errors"), false);
+  assert.equal(isLikelyCommand("FOO=1"), false);
+});
+
+test("isLikelyCommand: a repo-relative file path followed by prose stays prose (issue #2664)", () => {
+  // Document/data/source extensions name a file, not a program: the new
+  // relative-path branch must not make these runnable-looking.
+  assert.equal(isLikelyCommand("docs/spec.md exists and contains the summary table"), false);
+  assert.equal(isLikelyCommand("config/locales/bg.yml has no missing keys"), false);
+  assert.equal(isLikelyCommand("docs/report.txt should compile without errors"), false);
+  // Pin that the extension rule (not just the prose markers) keeps file paths
+  // prose: no marker words, 4+ word tail.
+  assert.equal(isLikelyCommand("docs/report.txt one two three"), false);
+  assert.equal(isLikelyCommand("src/app.ts compiles without errors"), false);
+});
+
 test("validateVerificationCommand allows exit-code echo diagnostic suffix", () => {
   assert.equal(validateVerificationCommand('python3 tools/check-status.py; echo "exit:$?"').ok, true);
   assert.equal(validateVerificationCommand("python3 tools/check-status.py; echo 'exit:$?'").ok, true);
