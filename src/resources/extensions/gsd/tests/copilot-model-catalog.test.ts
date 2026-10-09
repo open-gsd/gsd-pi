@@ -533,11 +533,14 @@ test("a static Completions model stays disabled without live evidence but accept
 });
 
 test("unknown-only live endpoints do not enable static Completions effort compatibility", async () => {
+  // gpt-6-astra is now statically Responses-routed (catalog fix 173645ec); use
+  // claude-opus-5, which is genuinely Completions-routed, to exercise the same
+  // unknown-live-endpoint-evidence scenario this fixture was written for.
   for (const evidence of [
     { supported_reasoning_efforts: ["high"] },
     { capabilities: { supports: { reasoning_effort: true } } },
   ]) {
-    const record = normalizedRecord("gpt-6-astra", {
+    const record = normalizedRecord("claude-opus-5", {
       supported_endpoints: ["/embeddings"],
       ...evidence,
     });
@@ -550,7 +553,7 @@ test("unknown-only live endpoints do not enable static Completions effort compat
     assert.equal((await captureCompletionsPayload(model, "high")).reasoning_effort, undefined);
   }
 
-  const recognized = normalizedRecord("gpt-6-astra", {
+  const recognized = normalizedRecord("claude-opus-5", {
     supported_endpoints: ["/embeddings", "/chat/completions"],
     supported_reasoning_efforts: ["high"],
   });
