@@ -168,6 +168,18 @@ export function isDeferredStatus(status: string): boolean {
 }
 
 /**
+ * Task statuses that mean the task will never run, so its task-scoped
+ * quality-gate rows can never be evaluated: "skipped" (the canonical status
+ * replan-slice projects onto removed "husk" tasks), the raw legacy alias
+ * "cancelled", and the operator closeout disposition "blocker-accepted"
+ * (#2202) — a blocker-accepted Task is terminal and never re-executes, so
+ * gates armed for it are unreachable and must not block closeout (#2687).
+ */
+export function isNeverWillRunTaskStatus(status: string | undefined): boolean {
+  return status === "skipped" || status === "cancelled" || status === "blocker-accepted";
+}
+
+/**
  * Returns true when a slice needs no further work: it is closed, or it was
  * deferred by a decision. Deferred is terminal in the read model (it maps to
  * canonical `cancelled`), so it does not block later slices or closeout. Every
