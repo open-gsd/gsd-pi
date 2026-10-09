@@ -2,7 +2,10 @@
 // File Purpose: Regression tests for npm publish workflow channel policy.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import YAML from "yaml";
 
@@ -193,12 +196,38 @@ test("production release runs optional live workflow test on the configured Open
   assert.ok(liveWorkflow < liveRegression, "live workflow should run before non-LLM live regression checks");
 
   const step = steps[liveWorkflow];
-  assert.equal(step["continue-on-error"], true);
   assert.match(step.run, /GSD_SMOKE_BINARY="\$\(pwd\)\/dist\/loader\.js"/);
   assert.match(step.run, /pnpm run test:live-workflow/);
   assert.equal(step.env.OPENAI_API_KEY, "${{ secrets.OPENAI_API_KEY }}");
   assert.equal(step.env.GSD_LIVE_TESTS, "1");
+  assert.equal(step.env.GSD_LIVE_WORKFLOW_REQUIRE_PASS, "1");
   assert.equal(step.env.GSD_LIVE_WORKFLOW_MODEL, "openai/gpt-5.4-mini");
+});
+
+test("a failed opt-in live workflow run fails the release step", () => {
+  const step = workflow.jobs["prod-release"].steps.find(
+    (candidate) => candidate.name === "Run live workflow LLM tests (optional)",
+  );
+  // Run the step script as the runner does, with a stub pnpm in place of the paid live run.
+  const runStep = (pnpmExitCode) => {
+    const dir = mkdtempSync(join(tmpdir(), "gsd-live-gate-"));
+    try {
+      mkdirSync(join(dir, "dist"));
+      writeFileSync(join(dir, "dist", "loader.js"), "");
+      mkdirSync(join(dir, "bin"));
+      writeFileSync(join(dir, "bin", "pnpm"), `#!/bin/sh\nexit ${pnpmExitCode}\n`, { mode: 0o755 });
+      return spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", step.run], {
+        cwd: dir,
+        env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}` },
+      }).status;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  assert.equal(runStep(0), 0, "a passing live workflow run must pass the step");
+  assert.notEqual(runStep(1), 0, "a failed live workflow run must fail the step");
+  assert.notEqual(step["continue-on-error"], true, "a failed live workflow run must block the release");
 });
 
 test("prerelease verification blocks release planning on the auto-mode acceptance bed", () => {

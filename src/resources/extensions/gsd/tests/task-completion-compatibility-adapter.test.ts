@@ -38,7 +38,7 @@ import {
   settleTaskAttempt,
 } from "../task-execution-domain-operation.js";
 import { reopenTask } from "../task-lifecycle-domain-operation.js";
-import { executeTaskReopen } from "../tools/workflow-tool-executors.js";
+import { executeSummarySave, executeTaskReopen } from "../tools/workflow-tool-executors.js";
 import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
 import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 import {
@@ -1414,6 +1414,104 @@ test("after the Cutover the abandoned staged SUMMARY repair takes the in-progres
   assert.equal(describeArtifactDbDriftBlocker(drift, { basePath, state }), null);
   await repairArtifactDbDrift(drift, { basePath, state });
   assert.equal(existsSync(staged.summaryPath), false, "the repair moves the abandoned projection to quarantine");
+});
+
+function quarantinedTaskSummaries(root: string): string[] {
+  const quarantineRoot = join(root, ".gsd", "quarantine", "projections");
+  if (!existsSync(quarantineRoot)) return [];
+  return readdirSync(quarantineRoot, { recursive: true })
+    .map(String)
+    .filter((path) => path.endsWith("T01-SUMMARY.md"));
+}
+
+test("#2714: a SUMMARY saved in a milestone worktree by an interrupted Attempt is quarantined at both roots", async () => {
+  const { basePath, planPath, attemptId } = createFixture();
+  // After the Cutover only the lifecycle row, which the Attempt claim wrote,
+  // says that the Task is in progress. No completion was staged.
+  db().exec("UPDATE tasks SET status = 'pending' WHERE id = 'T01'");
+  seedLifecycles("2714-worktree-summary", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+  ]);
+  cutOver();
+  writeFileSync(join(basePath, ".git", "info", "exclude"), ".gsd-worktrees/\n");
+  const worktreePath = join(basePath, ".gsd-worktrees", "M001");
+  const worktreePhaseDir = join(worktreePath, ".gsd", "phases", "01-test");
+  mkdirSync(worktreePhaseDir, { recursive: true });
+  writeFileSync(join(worktreePhaseDir, "01-01-PLAN.md"), readFileSync(planPath, "utf8"));
+
+  // The execute-task unit runs in the milestone worktree and saves its SUMMARY there.
+  const saved = await executeSummarySave(
+    {
+      milestone_id: "M001",
+      slice_id: "S01",
+      task_id: "T01",
+      artifact_type: "SUMMARY",
+      content: "# T01 Summary\n\nThe executor wrote this before the unit was stopped.\n",
+    },
+    worktreePath,
+    invocation("task-completion/2714-summary-save"),
+  );
+  assert.notEqual(saved.isError, true, JSON.stringify(saved.content));
+  const { resolveTaskFile } = await import("../paths.js");
+  const rootSummary = resolveTaskFile(basePath, "M001", "S01", "T01", "SUMMARY");
+  const worktreeSummary = resolveTaskFile(worktreePath, "M001", "S01", "T01", "SUMMARY");
+  assert.ok(rootSummary && existsSync(rootSummary), "the save writes the project-root SUMMARY");
+  assert.ok(worktreeSummary && existsSync(worktreeSummary), "the save copies the SUMMARY into the worktree");
+  assert.notEqual(worktreeSummary, rootSummary);
+  assert.equal(readFileSync(worktreeSummary, "utf8"), readFileSync(rootSummary, "utf8"));
+
+  // The unit is force-stopped before completion: its first Attempt settles without success.
+  settleTaskAttempt({
+    invocation: invocation("task-completion/2714-interrupted-settle"),
+    attemptId,
+    outcome: "interrupted",
+    failureClass: "stale-worker",
+    summary: "The unit was force-stopped",
+    output: { forceStopped: true },
+  });
+  assert.equal(taskSummaryArtifactRows(), 0, "settlement removes the SUMMARY artifact row");
+  assert.equal(existsSync(rootSummary), true, "settlement leaves the project-root file");
+  assert.equal(existsSync(worktreeSummary), true, "settlement leaves the worktree file");
+
+  // The pre-dispatch drift guard of auto-mode runs at the milestone worktree.
+  clearPathCache();
+  const state = reconciliationState();
+  const ctx = { basePath: worktreePath, state };
+  const drift = detectArtifactDbDrift(state, ctx).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.equal(drift.dbStatus, "in_progress", "the interrupted Task stays in progress");
+  assert.equal(
+    describeArtifactDbDriftBlocker(drift, ctx),
+    null,
+    "the abandoned worktree copy is auto-repairable",
+  );
+  await repairArtifactDbDrift(drift, ctx);
+
+  assert.equal(existsSync(worktreeSummary), false, "the worktree SUMMARY is moved away");
+  assert.equal(existsSync(rootSummary), false, "the project-root SUMMARY is moved away");
+  assert.equal(quarantinedTaskSummaries(worktreePath).length, 1, "the worktree copy is kept in quarantine");
+  assert.equal(quarantinedTaskSummaries(basePath).length, 1, "the project-root copy is kept in quarantine");
+  clearPathCache();
+  assert.deepEqual(
+    await taskSummaryDivergence(worktreePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "the Task must be dispatchable from the milestone worktree",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "the Task must be dispatchable from the project root",
+  );
+  assert.equal(taskSummaryArtifactRows(), 0, "the repair imports no SUMMARY row from the file");
+  assert.equal(taskState().full_summary_md, "", "the repair imports no summary text from the file");
+  assert.equal(
+    row(`SELECT lifecycle_status AS s FROM workflow_item_lifecycles WHERE item_kind = 'task' AND task_id = 'T01'`).s,
+    "in_progress",
+    "the repair does not complete the Task",
+  );
 });
 
 test("staging normalizes a pending legacy Task and clears its stale completion timestamp", async () => {

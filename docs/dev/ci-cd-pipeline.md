@@ -155,7 +155,7 @@ Content inside fenced code blocks (` ``` `) is excluded — patterns in code exa
 - **Native platform packages** (`npm run verify:native-platform-packages`) and **package validation** (`npm run validate-pack`)
 - **Live regression tests** (`npm run test:live-regression`) — against the installed prerelease binary, and again against the release build in `prod-release`
 - **Auto-mode acceptance bed** (`npm run test:auto-acceptance`) — a blocking `prerelease-verify` gate against the globally installed published binary; `channel=latest` must pass this gate on `@dev` before production release planning can begin
-- **Live LLM tests** (`npm run test:live`, `npm run test:live-workflow`) — `prod-release` only, `continue-on-error: true` (non-blocking warnings)
+- **Live LLM tests** — `prod-release` only, opt-in with `run_live_tests=true`. `npm run test:live` (provider round trips) is `continue-on-error: true` (non-blocking warnings). `npm run test:live-workflow` (a real agent through the built release) blocks the release when it fails; it runs before any production publish step
 - **Release verification** (`node scripts/verify-npm-release.mjs <version>`) — final gate confirming the main, engine, and workspace packages are all on npm at the release version before the tag is pushed
 
 ### Publishing a Prerelease (`@dev` / `@next`)
@@ -207,7 +207,7 @@ For `@dev` or `@next`, roll back the same way (`npm dist-tag add`) or re-run **N
 | Secret: `NPM_TOKEN` | Not required for trusted publishing; set for token-fallback bootstrap/manual native publishes (`publish_auth=token`) |
 | Secret: `RELEASE_PAT` | Prod release checkout, tag push, and the merge-queue version-bump PR when branch rules reject a direct push to `main`. `GITHUB_TOKEN` cannot create PRs on this repo. |
 | Secret: `ANTHROPIC_API_KEY` | Prod environment only (non-blocking live LLM tests) |
-| Secret: `OPENAI_API_KEY` | Prod environment only (non-blocking live LLM tests) |
+| Secret: `OPENAI_API_KEY` | Prod environment only (non-blocking provider round-trip step and blocking live workflow step) |
 | Secret: `DISCORD_CHANGELOG_WEBHOOK` | Optional — release announcement; the step tolerates a missing webhook |
 | GHCR | Enabled for the `open-gsd` org |
 

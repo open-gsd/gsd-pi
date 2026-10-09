@@ -1270,6 +1270,13 @@ test("after the Cutover a blocker report is refused by the canonical completion 
   // M002 and S01 are canonical ready. T01 is legacy pending and canonical
   // completed: still no running Attempt, still no legacy write path.
   assert.throws(report, /no running Attempt to close/);
+  // A closed Task without an Attempt is never dispatched, so the refusal names
+  // the closed state and does not send the caller to auto-mode.
+  assert.throws(report, (error: Error) => {
+    assert.match(error.message, /already closed in the canonical lifecycle \(completed\)/);
+    assert.doesNotMatch(error.message, /\/gsd auto|\/gsd next|gsd_execute/);
+    return true;
+  });
 });
 
 test("after the Cutover plan-milestone takes the closed milestone and its dependencies from the lifecycle rows", async () => {

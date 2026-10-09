@@ -15,8 +15,9 @@ This is the live counterpart to the other two test layers:
 These exist to answer one question the other layers can't: *does a real agent,
 given a real plan, actually execute through gsd's real gates to a correct,
 durable outcome?* They are slow and cost real tokens, so they never run in the
-default suite. Production release CI runs them as a non-blocking optional smoke
-against the configured live workflow model.
+default suite. Production release CI runs them only when the release is
+dispatched with `run_live_tests=true`; a failure then blocks the release before
+anything is published.
 
 Two scenarios:
 
@@ -67,6 +68,7 @@ node --experimental-strip-types tests/live-workflow/test-multi-slice-auto.ts
 | `GSD_LIVE_WORKFLOW_USE_HOME` | — | `1` forwards your real `HOME` so the child reads `~/.gsd/agent/auth.json` and prefs. Counts as a credential source. Off by default: the child normally gets an isolated, fresh home. |
 | `GSD_LIVE_WORKFLOW_TIMEOUT_MS` | `300000` (`next`) / `2400000` (`auto`) | Harness wall-clock budget. When explicitly set it also becomes the headless auto timeout; otherwise auto's overall product timeout stays disabled. |
 | `GSD_LIVE_WORKFLOW_RUNNER_TIMEOUT_MS` | — | Optional extra per-test deadline for `run.ts`. Unset = none; each scenario already kills its own gsd child at its budget. |
+| `GSD_LIVE_WORKFLOW_REQUIRE_PASS` | — | `1` makes `run.ts` exit 1 when no scenario passed (for example every scenario skipped because no credential was present). Release CI sets it so an all-skip run cannot pass the gate. Unset = skips still exit 0. |
 | `GSD_LIVE_WORKFLOW_OUTPUT` | `stream-json` | Output format. `stream-json` provides the authoritative terminal result; set `text` for a readable diagnostic transcript. |
 
 ## How it works
