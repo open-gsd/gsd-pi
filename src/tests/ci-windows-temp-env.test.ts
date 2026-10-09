@@ -15,7 +15,9 @@ function findWorkflowPath(): string {
 		if (parent === directory) break;
 		directory = parent;
 	}
-	throw new Error("Unable to locate .github/workflows/ci.yml from the test file");
+	throw new Error(
+		"Unable to locate .github/workflows/ci.yml from the test file",
+	);
 }
 
 const workflow = readFileSync(findWorkflowPath(), "utf8");
