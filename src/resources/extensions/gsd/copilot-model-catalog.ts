@@ -9,7 +9,7 @@
  */
 import { createHash } from "node:crypto";
 
-import { type Api, getModels, getSupportedThinkingLevels, type Model } from "@gsd/pi-ai";
+import { type Api, getModels, getSupportedThinkingLevels, type Model, type ModelThinkingLevel } from "@gsd/pi-ai";
 
 /** Copilot client-identity headers the /models endpoint's policy enforcement expects — mirrors COPILOT_HEADERS in packages/pi-ai/src/utils/oauth/github-copilot.ts. */
 const COPILOT_MODELS_REQUEST_HEADERS: Readonly<Record<string, string>> = Object.freeze({
@@ -68,6 +68,8 @@ export interface CopilotModelRecord {
     vision?: boolean;
     reasoning?: boolean;
     reasoningLevels: string[];
+    reasoningLevelMap?: NonNullable<Model<Api>["thinkingLevelMap"]>;
+    reasoningEffortCompatible?: boolean;
     contextWindow?: number;
     maxTokens?: number;
   };
@@ -138,6 +140,14 @@ export class CopilotCatalogFetchError extends Error {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const COPILOT_STATIC_MODELS = getModels("github-copilot") as Array<Model<Api>>;
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ModelThinkingLevel[];
+
+type CopilotThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+interface LiveReasoningLevels {
+  present: boolean;
+  levels: CopilotThinkingLevel[];
+}
 
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) {
@@ -220,6 +230,62 @@ function normalizeStringArray(value: unknown): string[] {
     .filter((entry): entry is string => !!entry);
 }
 
+function normalizeLiveReasoningLevels(record: Record<string, unknown>): LiveReasoningLevels {
+  const capabilities = toRecord(record.capabilities);
+  const supports = toRecord(capabilities?.supports);
+  const nested = supports?.reasoning_effort;
+  const values = [
+    record.reasoning_levels,
+    record.supported_reasoning_efforts,
+    record.supportedReasoningEfforts,
+    record.reasoning_efforts,
+    ...(typeof nested === "boolean" ? [] : [nested]),
+  ];
+  const present = values.some((value) => value !== undefined);
+  if (!present) return { present: false, levels: [] };
+  if (values.some((value) => value !== undefined && !Array.isArray(value))) {
+    return { present: true, levels: [] };
+  }
+
+  function toRecord(value: unknown): Record<string, unknown> | undefined {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined;
+  }
+
+  const candidates = values.filter(Array.isArray);
+  const supportedByCandidate = candidates.map((candidate) => {
+    if (candidate.some((entry) => typeof entry !== "string"
+      || !THINKING_LEVELS.some((level) => level === entry.trim().toLowerCase()))) {
+      return new Set<CopilotThinkingLevel>();
+    }
+    return new Set(normalizeStringArray(candidate).map((level) => level.toLowerCase() as CopilotThinkingLevel));
+  });
+  const sharedLevels = new Set(supportedByCandidate[0]);
+  for (const candidate of supportedByCandidate.slice(1)) {
+    for (const level of sharedLevels) {
+      if (!candidate.has(level)) sharedLevels.delete(level);
+    }
+  }
+
+  return {
+    present: true,
+    levels: THINKING_LEVELS.filter((level) => sharedLevels.has(level)),
+  };
+}
+
+function createThinkingLevelMap(
+  supportedLevels: readonly ModelThinkingLevel[],
+  sourceMap?: Model<Api>["thinkingLevelMap"],
+): NonNullable<Model<Api>["thinkingLevelMap"]> {
+  const supported = new Set(supportedLevels);
+  const map: NonNullable<Model<Api>["thinkingLevelMap"]> = {};
+  for (const level of THINKING_LEVELS) {
+    map[level] = supported.has(level) ? sourceMap?.[level] ?? level : null;
+  }
+  return map;
+}
+
 function buildProvenance(
   source: CopilotFieldSource,
   generatedAt?: string,
@@ -237,6 +303,14 @@ function findStaticCopilotModel(modelId: string): Model<Api> | undefined {
 }
 
 export { findStaticCopilotModel };
+
+function isOpenAICompletionsModel(model: Model<Api> | undefined): model is Model<"openai-completions"> {
+  return model?.api === "openai-completions";
+}
+
+function isAnthropicModel(model: Model<Api> | undefined): model is Model<"anthropic-messages"> {
+  return model?.api === "anthropic-messages";
+}
 
 function endpointsFromApi(api: Api): string[] {
   switch (api) {
@@ -483,19 +557,48 @@ function normalizeGitHubCopilotModel(
     record.tool_call
     ?? record.tool_calls
     ?? record.supports_tool_calls
-    ?? (record.capabilities && typeof record.capabilities === "object"
+    ?? (record.capabilities && typeof record.capabilities === "object" && !Array.isArray(record.capabilities)
       ? (record.capabilities as Record<string, unknown>).tool_calls
       : undefined),
   );
   const toolCalls = liveToolCalls;
   const liveReasoning = toBoolean(record.reasoning ?? record.thinking ?? record.supports_reasoning);
-  const liveReasoningLevels = [
-    ...normalizeStringArray(record.reasoning_levels),
-    ...normalizeStringArray(record.supported_reasoning_efforts),
-    ...normalizeStringArray(record.reasoning_efforts),
-  ];
-  const staticReasoningLevels = staticModel ? getSupportedThinkingLevels(staticModel) : [];
-  const reasoningLevels = liveReasoningLevels.length > 0 ? liveReasoningLevels : staticReasoningLevels;
+  const liveReasoningLevels = normalizeLiveReasoningLevels(record);
+  const capabilities = record.capabilities && typeof record.capabilities === "object" && !Array.isArray(record.capabilities)
+    ? record.capabilities as Record<string, unknown>
+    : undefined;
+  const capabilitySupports = capabilities?.supports && typeof capabilities.supports === "object" && !Array.isArray(capabilities.supports)
+    ? capabilities.supports as Record<string, unknown>
+    : undefined;
+  const liveReasoningEffortSupport = typeof capabilitySupports?.reasoning_effort === "boolean"
+    ? capabilitySupports.reasoning_effort
+    : undefined;
+  const reasoningEffortCompatible = endpoints.api === "openai-completions"
+    && endpoints.provenance.source === "provider-live"
+    && endpoints.supportedEndpoints.some((endpoint) => mapEndpointToApi(endpoint) === "openai-completions")
+    && endpoints.conflicts.length === 0
+    && liveReasoningEffortSupport !== false
+    && !(liveReasoningLevels.present && liveReasoningLevels.levels.length === 0)
+    && (liveReasoningEffortSupport === true || liveReasoningLevels.levels.length > 0);
+  const staticReasoningEffortCompatible = endpoints.api !== "openai-completions"
+    || (isOpenAICompletionsModel(staticModel) && staticModel.compat?.supportsReasoningEffort === true);
+  const staticReasoningLevels = staticModel && staticReasoningEffortCompatible
+    ? getSupportedThinkingLevels(staticModel)
+    : [];
+  const sourceMap = endpoints.api === "anthropic-messages"
+    ? { minimal: "low", ...(staticModel?.api === endpoints.api ? staticModel.thinkingLevelMap : {}) }
+    : staticModel?.api === endpoints.api ? staticModel?.thinkingLevelMap : undefined;
+  const staticReasoningLevelMap = staticReasoningEffortCompatible ? sourceMap : undefined;
+  const usableLiveReasoningLevels = (endpoints.api === "openai-completions" && !reasoningEffortCompatible)
+    || (endpoints.api === "anthropic-messages"
+      && (!isAnthropicModel(staticModel) || staticModel.compat?.forceAdaptiveThinking !== true))
+    ? []
+    : liveReasoningLevels.levels;
+  const reasoningLevelMap = createThinkingLevelMap(
+    liveReasoningLevels.present ? usableLiveReasoningLevels : staticReasoningLevels,
+    liveReasoningLevels.present ? sourceMap : staticReasoningLevelMap,
+  );
+  const reasoningLevels = THINKING_LEVELS.filter((level) => reasoningLevelMap[level] !== null);
   const reasoning = liveReasoning ?? staticModel?.reasoning;
   const liveVision = toBoolean(record.vision ?? record.multimodal);
   const modalities = record.modalities as Record<string, unknown> | undefined;
@@ -580,6 +683,8 @@ function normalizeGitHubCopilotModel(
       ...(vision !== undefined ? { vision } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
       reasoningLevels,
+      reasoningLevelMap,
+      reasoningEffortCompatible,
       ...(liveContextWindow ?? staticModel?.contextWindow ? { contextWindow: liveContextWindow ?? staticModel?.contextWindow } : {}),
       ...(liveMaxTokens ?? staticModel?.maxTokens ? { maxTokens: liveMaxTokens ?? staticModel?.maxTokens } : {}),
     },
@@ -600,7 +705,7 @@ function normalizeGitHubCopilotModel(
         ? buildProvenance("provider-live", generatedAt)
         : buildProvenance("unknown"),
       endpoints: endpoints.provenance,
-      reasoning: liveReasoning !== undefined || liveReasoningLevels.length > 0
+      reasoning: liveReasoning !== undefined || liveReasoningLevels.present
         ? buildProvenance("provider-live", generatedAt)
         : staticModel
           ? buildProvenance("provider-static")

@@ -4,6 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { getModels, getSupportedThinkingLevels } from "../../../../../packages/pi-ai/src/models.js";
+import { streamSimpleOpenAICompletions } from "../../../../../packages/pi-ai/src/providers/openai-completions.js";
+import type { Api, Model } from "../../../../../packages/pi-ai/src/types.js";
 import {
   applyLastKnownGood,
   computeCatalogRegistrationCandidates,
@@ -12,6 +15,7 @@ import {
   fetchGitHubCopilotModels,
   registerCopilotModelsInOverlay,
   sanitizeGitHubCopilotModels,
+  synthesizeCopilotOverlayEntry,
 } from "../copilot-overlay-writer.js";
 
 import {
@@ -24,7 +28,7 @@ import {
 } from "../copilot-model-catalog.js";
 
 function normalizedRecord(id: string, overrides: Record<string, unknown> = {}) {
-  return sanitizeGitHubCopilotModels({
+  const record = sanitizeGitHubCopilotModels({
     data: [
       {
         id,
@@ -38,7 +42,40 @@ function normalizedRecord(id: string, overrides: Record<string, unknown> = {}) {
         ...overrides,
       },
     ],
-  })[0]!;
+  })[0];
+  if (!record) throw new Error(`sanitizeGitHubCopilotModels returned no record for ${id}`);
+  return record;
+}
+
+function isCompletionsModel(model: Model<Api>): model is Model<"openai-completions"> {
+  return model.api === "openai-completions";
+}
+
+function assertCompletionsModel(model: Model<Api>): asserts model is Model<"openai-completions"> {
+  if (!isCompletionsModel(model)) throw new Error(`Unexpected synthesized API: ${model.api}`);
+}
+
+async function captureCompletionsPayload(
+  model: Model<"openai-completions">,
+  reasoning: "minimal" | "low" | "high" | "xhigh" | "max",
+): Promise<Record<string, unknown>> {
+  let payload: unknown;
+  const result = await streamSimpleOpenAICompletions(
+    model,
+    { systemPrompt: "", messages: [{ role: "user", content: "hello", timestamp: Date.now() }] },
+    {
+      apiKey: "test-key",
+      reasoning,
+      onPayload(value) {
+        payload = structuredClone(value);
+        throw new Error("COPILOT_TEST_PAYLOAD_CAPTURE");
+      },
+    },
+  ).result();
+
+  assert.ok(payload, result.errorMessage);
+  assert.match(result.errorMessage ?? "", /COPILOT_TEST_PAYLOAD_CAPTURE/);
+  return payload as Record<string, unknown>;
 }
 
 test("sanitizeGitHubCopilotModels parses the input_cost_per_token/output_cost_per_token per-token pricing shape", () => {
@@ -382,4 +419,221 @@ test("registerCopilotModelsInOverlay writes complete remote-only candidates into
 
   assert.deepEqual(plan.registeredIds, ["brand-new-complete"]);
   assert.deepEqual(plan.quarantined, []);
+});
+
+test("normalizes SDK effort aliases and nested transport support through a real Completions payload", async () => {
+  const record = normalizedRecord("live-completions-efforts", {
+    supported_endpoints: ["/chat/completions"],
+    supportedReasoningEfforts: ["low", "high"],
+    capabilities: { supports: { reasoning_effort: true } },
+  });
+
+  assert.deepEqual(record.execution.reasoningLevels, ["low", "high"]);
+  assert.equal(record.execution.reasoningEffortCompatible, true);
+
+  const model = synthesizeCopilotOverlayEntry(record);
+  assert.deepEqual(getSupportedThinkingLevels(model), ["low", "high"]);
+  assert.deepEqual(model.thinkingLevelMap, {
+    off: null,
+    minimal: null,
+    low: "low",
+    medium: null,
+    high: "high",
+    xhigh: null,
+    max: null,
+  });
+  assertCompletionsModel(model);
+  assert.equal(model.compat?.supportsReasoningEffort, true);
+
+  const payload = await captureCompletionsPayload(model, "xhigh");
+  assert.equal(payload.reasoning_effort, "high");
+});
+
+test("explicitly empty live efforts suppress static fallback and synthesized efforts", () => {
+  const staticModel = getModels("github-copilot").find(
+    (model) => model.thinkingLevelMap
+      && Object.entries(model.thinkingLevelMap).some(([level, mapped]) => mapped !== null && mapped !== level),
+  );
+  assert.ok(staticModel, "fixture requires a static Copilot model with a thinking-level alias");
+
+  const record = normalizedRecord(staticModel.id, { supported_reasoning_efforts: [] });
+  assert.deepEqual(record.execution.reasoningLevels, []);
+  assert.deepEqual(record.execution.reasoningLevelMap, {
+    off: null,
+    minimal: null,
+    low: null,
+    medium: null,
+    high: null,
+    xhigh: null,
+    max: null,
+  });
+  assert.equal(record.execution.reasoningEffortCompatible, false);
+
+  const malformed = normalizedRecord(staticModel.id, { supported_reasoning_efforts: "high" });
+  assert.deepEqual(malformed.execution.reasoningLevels, []);
+});
+
+test("conflicting live effort aliases are intersected instead of broadened", () => {
+  const record = normalizedRecord("conflicting-effort-aliases", {
+    supported_reasoning_efforts: ["low", "high"],
+    supportedReasoningEfforts: ["low", "xhigh"],
+  });
+
+  test("live levels preserve static aliases and do not invent Anthropic adaptive compatibility", () => {
+    const alias = synthesizeCopilotOverlayEntry(normalizedRecord("mai-code-1.1-flash", {
+      supportedReasoningEfforts: ["minimal", "low", "high", "xhigh"],
+    }));
+    assert.equal(alias.thinkingLevelMap?.minimal, "low");
+    assert.equal(alias.thinkingLevelMap?.xhigh, "high");
+
+    const unknown = synthesizeCopilotOverlayEntry(normalizedRecord("unknown-anthropic-efforts", {
+      supported_endpoints: ["/v1/messages"],
+      supportedReasoningEfforts: ["high", "xhigh"],
+    }));
+    assert.deepEqual(getSupportedThinkingLevels(unknown), []);
+    assert.equal(unknown.compat, undefined);
+  });
+
+  assert.deepEqual(record.execution.reasoningLevels, ["low"]);
+});
+
+test("a static Completions model stays disabled without live evidence but accepts matching live evidence", async () => {
+  const staticModel = getModels("github-copilot").find(
+    (model) => isCompletionsModel(model) && model.compat?.supportsReasoningEffort === false,
+  );
+  assert.ok(staticModel, "fixture requires a bundled Completions model with effort compatibility disabled");
+  assertCompletionsModel(staticModel);
+
+  const fallback = synthesizeCopilotOverlayEntry(normalizedRecord(staticModel.id, {
+    supported_endpoints: ["/chat/completions"],
+  }));
+  assertCompletionsModel(fallback);
+  assert.equal(fallback.compat?.supportsReasoningEffort, false);
+  assert.deepEqual(getSupportedThinkingLevels(fallback), []);
+  assert.deepEqual(fallback.thinkingLevelMap, {
+    off: null,
+    minimal: null,
+    low: null,
+    medium: null,
+    high: null,
+    xhigh: null,
+    max: null,
+  });
+
+  const live = synthesizeCopilotOverlayEntry(normalizedRecord(staticModel.id, {
+    supported_endpoints: ["/chat/completions"],
+    supported_reasoning_efforts: ["low", "high"],
+    capabilities: { supports: { reasoning_effort: true } },
+  }));
+  assertCompletionsModel(live);
+  assert.equal(live.compat?.supportsReasoningEffort, true);
+  assert.deepEqual(getSupportedThinkingLevels(live), ["low", "high"]);
+  const payload = await captureCompletionsPayload(live, "high");
+  assert.equal(payload.reasoning_effort, "high");
+});
+
+test("unknown-only live endpoints do not enable static Completions effort compatibility", async () => {
+  // gpt-6-astra is now statically Responses-routed (catalog fix 173645ec); use
+  // claude-opus-5, which is genuinely Completions-routed, to exercise the same
+  // unknown-live-endpoint-evidence scenario this fixture was written for.
+  for (const evidence of [
+    { supported_reasoning_efforts: ["high"] },
+    { capabilities: { supports: { reasoning_effort: true } } },
+  ]) {
+    const record = normalizedRecord("claude-opus-5", {
+      supported_endpoints: ["/embeddings"],
+      ...evidence,
+    });
+    assert.equal(record.execution.api, "openai-completions");
+    assert.equal(record.execution.reasoningEffortCompatible, false);
+    const model = synthesizeCopilotOverlayEntry(record);
+    assertCompletionsModel(model);
+    assert.equal(model.compat?.supportsReasoningEffort, false);
+    assert.deepEqual(getSupportedThinkingLevels(model), []);
+    assert.equal((await captureCompletionsPayload(model, "high")).reasoning_effort, undefined);
+  }
+
+  const recognized = normalizedRecord("claude-opus-5", {
+    supported_endpoints: ["/embeddings", "/chat/completions"],
+    supported_reasoning_efforts: ["high"],
+  });
+  assert.equal(recognized.execution.reasoningEffortCompatible, true);
+  const model = synthesizeCopilotOverlayEntry(recognized);
+  assertCompletionsModel(model);
+  assert.equal((await captureCompletionsPayload(model, "high")).reasoning_effort, "high");
+});
+
+test("static fallback preserves mapped aliases and explicitly disables unsupported levels", () => {
+  const staticModel = getModels("github-copilot").find(
+    (model) => model.reasoning
+      && model.thinkingLevelMap
+      && Object.entries(model.thinkingLevelMap).some(([level, mapped]) => mapped !== null && mapped !== level),
+  );
+  assert.ok(staticModel, "fixture requires a static Copilot model with a thinking-level alias");
+
+  const record = normalizedRecord(staticModel.id);
+  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+    const supported = getSupportedThinkingLevels(staticModel).includes(level);
+    assert.equal(
+      record.execution.reasoningLevelMap?.[level],
+      supported ? staticModel.thinkingLevelMap?.[level] ?? level : null,
+      `static fallback mapping for ${level}`,
+    );
+  }
+});
+
+test("nested effort lists are authoritative, including empty and conflicting declarations", async () => {
+  const record = normalizedRecord("diagnostic-nested-effort", {
+    supported_endpoints: ["/chat/completions"],
+    capabilities: { supports: { reasoning_effort: ["low", "high", "xhigh", "max"] } },
+  });
+  assert.deepEqual(record.execution.reasoningLevels, ["low", "high", "xhigh", "max"]);
+  const model = synthesizeCopilotOverlayEntry(record);
+  assertCompletionsModel(model);
+  for (const level of ["low", "high", "xhigh", "max"] as const) {
+    assert.equal((await captureCompletionsPayload(model, level)).reasoning_effort, level);
+  }
+
+  for (const nested of [[], "high", null, ["high", 1], ["low", "future-effort"]]) {
+    const empty = normalizedRecord("gpt-5.6-sol", {
+      capabilities: { supports: { reasoning_effort: nested } },
+    });
+    assert.deepEqual(empty.execution.reasoningLevels, []);
+  }
+  const conflicting = normalizedRecord("nested-top-level-conflict", {
+    supportedReasoningEfforts: ["low", "max"],
+    capabilities: { supports: { reasoning_effort: ["high", "max"] } },
+  });
+  assert.deepEqual(conflicting.execution.reasoningLevels, ["max"]);
+});
+
+test("unknown or conflicting Completions effort evidence fails closed at the production adapter", async () => {
+  for (const overrides of [
+    { supported_endpoints: ["/chat/completions"] },
+    {
+      supported_endpoints: ["/chat/completions"],
+      supported_reasoning_efforts: ["low", "high"],
+      capabilities: { supports: { reasoning_effort: false } },
+    },
+    {
+      supported_endpoints: ["/chat/completions"],
+      supported_reasoning_efforts: ["future-effort"],
+      capabilities: { supports: { reasoning_effort: true } },
+    },
+  ]) {
+    const model = synthesizeCopilotOverlayEntry(normalizedRecord("unknown-completions-efforts", overrides));
+    assertCompletionsModel(model);
+    assert.equal(model.compat?.supportsReasoningEffort, false);
+    assert.deepEqual(getSupportedThinkingLevels(model), []);
+    const payload = await captureCompletionsPayload(model, "high");
+    assert.equal(payload.reasoning_effort, undefined);
+  }
+
+  const responseModel = synthesizeCopilotOverlayEntry(normalizedRecord("responses-efforts", {
+    supported_endpoints: ["/responses"],
+    supported_reasoning_efforts: ["low", "high"],
+    capabilities: { supports: { reasoning_effort: true } },
+  }));
+  assert.equal(responseModel.api, "openai-responses");
+  assert.deepEqual(getSupportedThinkingLevels(responseModel), ["low", "high"]);
 });

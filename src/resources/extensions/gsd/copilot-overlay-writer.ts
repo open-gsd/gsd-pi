@@ -61,24 +61,28 @@ export const COPILOT_OVERLAY_HEADERS: Readonly<Record<string, string>> = Object.
 
 const COPILOT_OVERLAY_BASE_URL = "https://api.individual.githubcopilot.com";
 
+function isOpenAICompletionsModel(model: Model<Api> | undefined): model is Model<"openai-completions"> {
+  return model?.api === "openai-completions";
+}
+
 function toPerMillion(valuePer1k: number): number {
   return valuePer1k * 1000;
 }
 
 function apiSpecificCompat(record: CopilotModelRecord): Model<Api>["compat"] | undefined {
   const staticModel = findStaticCopilotModel(record.id);
-  if (staticModel?.compat) return staticModel.compat;
-
-  switch (record.execution.api) {
-    case "openai-completions":
-      return {
-        supportsStore: false,
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: false,
-      };
-    default:
-      return undefined;
+  if (record.execution.api === "openai-completions") {
+    const staticCompletionsCompat = isOpenAICompletionsModel(staticModel) ? staticModel.compat : undefined;
+    return {
+      ...(staticCompletionsCompat ?? {}),
+      supportsStore: staticCompletionsCompat?.supportsStore ?? false,
+      supportsDeveloperRole: staticCompletionsCompat?.supportsDeveloperRole ?? false,
+      supportsReasoningEffort: record.execution.reasoningEffortCompatible === true,
+    };
   }
+  if (staticModel && staticModel.api === record.execution.api && staticModel.compat) return staticModel.compat;
+
+  return undefined;
 }
 
 function isRegistrationPreviewDisabled(record: CopilotModelRecord): boolean {
@@ -105,6 +109,9 @@ function registrationBlockers(record: CopilotModelRecord): string[] {
   }
   if (!record.execution?.api) {
     blockers.push("missing authoritative runtime API/endpoint mapping");
+  }
+  if (!record.execution?.reasoningLevelMap || record.execution.reasoningEffortCompatible === undefined) {
+    blockers.push("missing normalized reasoning metadata; refresh the Copilot catalog");
   }
   if (record.execution?.toolCalls === false) {
     blockers.push("provider reports tool calling is unavailable");
@@ -148,7 +155,7 @@ export function synthesizeCopilotOverlayEntry(record: CopilotModelRecord): Model
   if (blockers.length > 0) {
     throw new Error(`Cannot synthesize overlay entry for ${record.registryId}: ${blockers.join("; ")}.`);
   }
-  const { api, reasoning, reasoningLevels, vision, contextWindow, maxTokens } = record.execution;
+  const { api, reasoning, reasoningLevelMap, vision, contextWindow, maxTokens } = record.execution;
   const { inputPer1k, outputPer1k, cacheReadPer1k, cacheWritePer1k, longContextTiers } = record.billing;
   if (
     !api
@@ -171,13 +178,7 @@ export function synthesizeCopilotOverlayEntry(record: CopilotModelRecord): Model
     provider: "github-copilot",
     baseUrl: COPILOT_OVERLAY_BASE_URL,
     reasoning,
-    ...(reasoningLevels.length > 0
-      ? {
-          thinkingLevelMap: Object.fromEntries(
-            reasoningLevels.map((level) => [level, level]),
-          ),
-        }
-      : {}),
+    thinkingLevelMap: reasoningLevelMap,
     input: vision ? ["text", "image"] : ["text"],
     cost: {
       input: toPerMillion(inputPer1k),
