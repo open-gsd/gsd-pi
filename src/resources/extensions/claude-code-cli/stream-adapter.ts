@@ -2001,6 +2001,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * Merge a caller-supplied SDK `hooks` config (arriving via `extraOptions`) with
+ * the adapter's own hook config (#2742). `extraOptions` is a pass-through
+ * channel, so a caller `hooks` key used to replace the whole key in the spread
+ * and silently unregister the native PreToolUse guards. Array entries are
+ * concatenated per event name, native entries first, so caller hooks compose
+ * with the built-in guards instead of removing them. Malformed caller values
+ * (the SDK types these as arrays) are ignored so the native guards survive
+ * every caller input.
+ */
+function mergeSdkHookConfigs(
+	native: Record<string, unknown>,
+	extra: unknown,
+): Record<string, unknown> {
+	if (!isRecord(extra)) return native;
+	const merged: Record<string, unknown> = { ...native };
+	for (const [event, extraEntries] of Object.entries(extra)) {
+		if (!Array.isArray(extraEntries)) continue;
+		const nativeEntries = merged[event];
+		merged[event] = Array.isArray(nativeEntries)
+			? [...nativeEntries, ...extraEntries]
+			: extraEntries;
+	}
+	return merged;
+}
+
 function isStringRecord(value: unknown): value is Record<string, string> {
 	return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
 }
@@ -2218,7 +2244,7 @@ export function buildSdkOptions(
 	extraOptions: Record<string, unknown> & { reasoning?: ThinkingLevel; gsdPhase?: string } = {},
 	modelMetadata?: ClaudeCodeModelMetadata,
 ): Record<string, unknown> {
-	const { reasoning, cwd, gsdPhase, env: extraEnv, stderr: extraStderr, ...sdkExtraOptions } = extraOptions;
+	const { reasoning, cwd, gsdPhase, env: extraEnv, stderr: extraStderr, hooks: extraHooks, ...sdkExtraOptions } = extraOptions;
 	const sdkCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
 	// Claude Code runs in the milestone worktree for file/shell work, but workflow MCP
 	// config (.mcp.json) and server discovery live at the project root.
@@ -2427,12 +2453,12 @@ export function buildSdkOptions(
 		systemPrompt: { type: "preset", preset: "claude_code" },
 		disallowedTools,
 		...(allowedTools.length > 0 ? { allowedTools } : {}),
-		hooks: {
+		hooks: mergeSdkHookConfigs({
 			PreToolUse: [
 				{ matcher: PROJECTION_WRITE_GUARD_MATCHER, hooks: [projectionWriteGuardHook] },
 				...(legacySkillGuardHook ? [{ matcher: "Skill", hooks: [legacySkillGuardHook] }] : []),
 			],
-		},
+		}, extraHooks),
 		...(sdkMcpServers ? { mcpServers: sdkMcpServers } : {}),
 		...(strictMcpConfig ? { strictMcpConfig: true } : {}),
 		betas: (

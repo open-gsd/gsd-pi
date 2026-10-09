@@ -53,6 +53,7 @@ import {
 	CLAUDE_CODE_INTERVIEW_FORM_TIMEOUT_MS,
 } from "../stream-adapter.ts";
 import { CLAUDE_CODE_MODELS } from "../models.ts";
+import { PROJECTION_WRITE_GUARD_MATCHER } from "../projection-write-guard.ts";
 import type { AssistantMessage, Context, Message } from "@gsd/pi-ai";
 import type { SDKUserMessage } from "../sdk-types.ts";
 import { _setAutoActiveForTest } from "../../gsd/auto.ts";
@@ -5905,6 +5906,79 @@ describe("stream-adapter — interactive legacy gsd-core skill guard (#2369)", (
 		pushEnv("GSD_CLAUDE_CODE_LEGACY_SKILL_FILTER", "0");
 		const options = buildInteractiveOptions();
 		assert.equal(hasSkillHook(options), false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #2742 — `extraOptions` is a pass-through channel, so a caller-supplied
+// `hooks` key used to replace the whole key and silently unregister the
+// native PreToolUse guards. Caller hooks must compose with them.
+// ---------------------------------------------------------------------------
+
+describe("stream-adapter — buildSdkOptions merges caller hooks with native guards", () => {
+	function preToolUseMatchers(options: Record<string, unknown>): (string | undefined)[] {
+		const hooks = options.hooks as { PreToolUse?: Array<{ matcher?: string }> } | undefined;
+		return (hooks?.PreToolUse ?? []).map((entry) => entry.matcher);
+	}
+
+	test("caller-supplied PreToolUse hooks compose with the native guards instead of replacing them", async () => {
+		const callerHook = async () => ({});
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+			hooks: { PreToolUse: [{ matcher: "WebFetch", hooks: [callerHook] }] },
+		});
+		const matchers = preToolUseMatchers(options);
+		assert.ok(matchers.includes(PROJECTION_WRITE_GUARD_MATCHER));
+		assert.ok(matchers.includes("Skill"));
+		assert.ok(matchers.includes("WebFetch"));
+		assert.equal(
+			matchers.indexOf(PROJECTION_WRITE_GUARD_MATCHER),
+			0,
+			"native guards come first (deny precedence is order-independent, but native entries stay primary)",
+		);
+		// The retained projection write guard still denies with caller hooks present.
+		const hooks = options.hooks as {
+			PreToolUse: Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<{ hookSpecificOutput?: { permissionDecision?: string } }>> }>;
+		};
+		const writeEntry = hooks.PreToolUse.find((entry) =>
+			new RegExp(`^(?:${entry.matcher})$`).test("Write"));
+		assert.ok(writeEntry, "expected the native projection write guard to survive the merge");
+		const decision = await writeEntry.hooks[0]({
+			hook_event_name: "PreToolUse",
+			tool_name: "Write",
+			tool_input: { file_path: "/tmp/project/.gsd/milestones/M001/M001-ROADMAP.md", content: "x" },
+			tool_use_id: "tu_merge_1",
+		});
+		assert.equal(decision.hookSpecificOutput?.permissionDecision, "deny");
+	});
+
+	test("caller hooks for other events keep the native PreToolUse guards", () => {
+		const callerHook = async () => ({});
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+			hooks: { PostToolUse: [{ matcher: "Bash", hooks: [callerHook] }] },
+		});
+		const hooks = options.hooks as Record<string, Array<{ matcher?: string }>>;
+		assert.ok(preToolUseMatchers(options).includes(PROJECTION_WRITE_GUARD_MATCHER));
+		assert.deepEqual(hooks.PostToolUse?.map((entry) => entry.matcher), ["Bash"]);
+	});
+
+	test("malformed caller hook values are ignored and keep the native guards", () => {
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+			hooks: { PreToolUse: {} as unknown as unknown[], PostToolUse: "nope" },
+		});
+		const hooks = options.hooks as Record<string, Array<{ matcher?: string }>>;
+		assert.ok(preToolUseMatchers(options).includes(PROJECTION_WRITE_GUARD_MATCHER));
+		assert.equal(Array.isArray(hooks.PreToolUse), true);
+		assert.ok(Array.isArray(hooks.PostToolUse) === false, "malformed event value must not land as a non-array");
+	});
+
+	test("no caller hooks leaves the native config untouched", () => {
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+		});
+		assert.ok(preToolUseMatchers(options).includes(PROJECTION_WRITE_GUARD_MATCHER));
 	});
 });
 
