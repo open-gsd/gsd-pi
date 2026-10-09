@@ -67,19 +67,34 @@ test("offline reasoning diagnostics preserve working paths and correct the chara
     const payload = await capture(streamSimpleOpenAIResponses, getModel("github-copilot", "mai-code-1.1-flash"), "xhigh");
     assert.equal((payload.reasoning as Record<string, unknown>).effort, "high");
   });
-  await t.test("Astra disabled effort controls clamp to off", async () => {
+  await t.test("gpt-6.1-sol remains Responses-routed and forwards effort", async () => {
+    const model = getModel("github-copilot", "gpt-6.1-sol");
+    assertModelApi(model, "openai-responses");
+    assert.deepEqual((await capture(streamSimpleOpenAIResponses, model, "xhigh")).reasoning, { effort: "xhigh", summary: "auto" });
+  });
+  await t.test("gpt-6-astra remains Responses-routed and forwards effort", async () => {
     const model = getModel("github-copilot", "gpt-6-astra");
+    assertModelApi(model, "openai-responses");
+    assert.deepEqual((await capture(streamSimpleOpenAIResponses, model, "xhigh")).reasoning, { effort: "xhigh", summary: "auto" });
+  });
+  await t.test("Opus (Completions) disabled effort controls clamp to off", async () => {
+    // gpt-6-astra and gpt-6.1-sol now route via Responses in the reviewed catalog (fork5);
+    // this fixture exercises the same Completions-disabled-effort behavior with a model
+    // that is actually dispatched through openai-completions (claude-opus-5).
+    const model = getModel("github-copilot", "claude-opus-5");
     assert.deepEqual(getSupportedThinkingLevels(model), ["off"]);
     assert.equal(clampThinkingLevel(model, "xhigh"), "off");
     assert.equal((await capture(streamSimpleOpenAICompletions, model, "xhigh")).reasoning_effort, undefined);
   });
-  await t.test("Sol disabled effort does not reach the wire", async () => {
+  await t.test("Sonnet (Completions) disabled effort does not reach the wire", async () => {
+    // Same rationale: claude-sonnet-5 is genuinely Completions-routed with reasoning
+    // effort disabled, replacing the stale gpt-6.1-sol fixture (now Responses-routed).
     for (const effort of ["low", "high"] as const) {
-      assert.equal((await capture(streamSimpleOpenAICompletions, getModel("github-copilot", "gpt-6.1-sol"), effort)).reasoning_effort, undefined);
+      assert.equal((await capture(streamSimpleOpenAICompletions, getModel("github-copilot", "claude-sonnet-5"), effort)).reasoning_effort, undefined);
     }
   });
   await t.test("explicit custom compatibility still transmits xhigh", async () => {
-    const model = getModel("github-copilot", "gpt-6-astra");
+    const model = getModel("github-copilot", "claude-opus-5");
     assert.equal((await capture(streamSimpleOpenAICompletions, {
       ...model, thinkingLevelMap: { xhigh: "xhigh" },
       compat: { ...model.compat, supportsReasoningEffort: true },
