@@ -16,8 +16,8 @@
 // The separate `.gsd/unit-claims.db` (unit-ownership.ts) is an intentionally
 // independent store and is excluded from this invariant.
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
-import { renamePhaseDirOnTitleChange } from "./phase-dir-rename.js";
+import { basename, dirname, join } from "node:path";
+import { canonicalPhaseDirExists, renamePhaseDirOnTitleChange } from "./phase-dir-rename.js";
 import type { Decision, Requirement, GateRow, GateId, GateScope, GateStatus, GateVerdict } from "./types.js";
 import { GSDError, GSD_STALE_STATE } from "./errors.js";
 import { getGateIdsForTurn, type OwnerTurn } from "./gate-registry.js";
@@ -343,6 +343,41 @@ export function insertMilestone(m: {
   return (result.changes ?? 0) > 0;
 }
 
+/**
+ * Base path for the post-title phase-dir rename. `dirname(dirname(dbPath))` is
+ * a project root only when the database lives directly under a `.gsd`
+ * directory. Under external state (`.gsd` → a per-project state directory) the
+ * resolved dbPath has a different parent, and the real checkout root is the
+ * binding recorded in `project_authority` at open (#2633). Falls back to the
+ * legacy derivation when no binding is readable.
+ */
+function resolvePhaseRenameBase(dbPath: string): string {
+  if (basename(dirname(dbPath)) === ".gsd") return dirname(dirname(dbPath));
+  try {
+    const row = getDbOrNull()!.prepare(
+      "SELECT project_root_realpath FROM project_authority WHERE singleton = 1",
+    ).get() as { project_root_realpath?: unknown } | undefined;
+    const bound = row?.project_root_realpath;
+    if (typeof bound === "string" && bound.trim()) return bound;
+  } catch {
+    // Unreadable/absent binding — keep the legacy derivation.
+  }
+  return dirname(dirname(dbPath));
+}
+
+/** True when the milestone has artifact rows under a phase directory. */
+function milestoneHasPhaseArtifactRows(milestoneId: string): boolean {
+  const phaseNumPrefix = String(milestoneIdToPhaseNum(milestoneId)).padStart(2, "0");
+  return getDbOrNull()!.prepare(
+    `SELECT 1 AS present FROM artifacts
+      WHERE milestone_id = :milestone_id
+        AND path LIKE :phase_prefix LIMIT 1`,
+  ).get({
+    ":milestone_id": milestoneId,
+    ":phase_prefix": `${LAYOUT_SEGMENTS.level1}/${phaseNumPrefix}-%/%`,
+  }) !== undefined;
+}
+
 export function upsertMilestonePlanning(milestoneId: string, planning: Partial<MilestonePlanningRecord> & { title?: string; status?: string; depends_on?: string[] }): void {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   const previousTitle = (getDbOrNull()!.prepare(
@@ -389,18 +424,36 @@ export function upsertMilestonePlanning(milestoneId: string, planning: Partial<M
       ":requirement_coverage": planning.requirementCoverage ?? null,
       ":boundary_map_markdown": planning.boundaryMapMarkdown ?? null,
     });
-    const finalTitle = planning.title?.trim();
-    if (finalTitle) reconcileMilestonePhaseArtifactPaths(milestoneId, finalTitle);
   });
+  // Rename first, reconcile rows only when disk agrees (#2633): rewriting the
+  // rows while the rename silently no-ops (external state, missing dir) left
+  // the DB pointing at a directory that does not exist. A pathless database
+  // (`:memory:`) has no disk to agree with — keep the unconditional row
+  // reconcile it always had.
   const finalTitle = planning.title?.trim();
   const dbPath = getDbPath();
-  if (finalTitle && dbPath && dbPath !== ":memory:") {
-    try {
-      renamePhaseDirOnTitleChange(dirname(dirname(dbPath)), milestoneId, previousTitle, finalTitle);
-    } catch (error) {
-      logWarning("db", `phase dir rename after title update failed: ${(error as Error).message}`);
-    }
+  if (!finalTitle) return;
+  if (!dbPath || dbPath === ":memory:") {
+    transaction(() => reconcileMilestonePhaseArtifactPaths(milestoneId, finalTitle));
+    return;
   }
+  let diskAgrees = false;
+  try {
+    const base = resolvePhaseRenameBase(dbPath);
+    diskAgrees = renamePhaseDirOnTitleChange(base, milestoneId, previousTitle, finalTitle)
+      || canonicalPhaseDirExists(base, milestoneId, finalTitle);
+  } catch (error) {
+    logWarning("db", `phase dir rename after title update failed: ${(error as Error).message}`);
+  }
+  if (!diskAgrees) {
+    if (milestoneHasPhaseArtifactRows(milestoneId)) {
+      logWarning("db", `phase dir for ${milestoneId} was not renamed to its canonical name; artifact rows left at their on-disk paths`);
+    }
+    return;
+  }
+  // Outside the rename's try/catch: a reconciliation failure must propagate,
+  // not surface as a warned-and-ignored rename miss.
+  transaction(() => reconcileMilestonePhaseArtifactPaths(milestoneId, finalTitle));
 }
 
 export function insertSlice(s: {
