@@ -24,6 +24,7 @@ import { closeoutUnit, type CloseoutOptions } from "./auto-unit-closeout.js";
 import { saveActivityLog } from "./activity-log.js";
 import { recoverTimedOutUnit, type RecoveryContext } from "./auto-timeout-recovery.js";
 import { resolveAgentEndCancelled } from "./auto/resolve.js";
+import { getCurrentTurnGeneration } from "./auto/turn-epoch.js";
 import { startGlobalIdleWatchdog } from "./auto/global-idle-watchdog.js";
 import type { PauseAutoFn } from "./auto/loop-deps.js";
 import type { AutoSession } from "./auto/session.js";
@@ -305,6 +306,9 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
   }, 15000);
 
   // ── 3. Hard timeout ──
+  // The caller clears all supervision handles together when the unit ends, so
+  // this handle tells the hard timeout that its supervision is still installed.
+  const idleWatchdogHandle = s.idleWatchdogHandle;
   const hardTimeoutBody = async () => {
     try {
       s.unitTimeoutHandle = null;
@@ -322,6 +326,7 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
         s.unitTimeoutHandle = setTimeout(hardTimeoutBody, hardTimeoutMs);
         return;
       }
+      const turnGenerationAtExpiry = getCurrentTurnGeneration();
       const expectedCurrentUnit = s.currentUnit
         ? { type: s.currentUnit.type, id: s.currentUnit.id, startedAt: s.currentUnit.startedAt }
         : null;
@@ -336,7 +341,19 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
       }
 
       const recovery = await recoverTimedOutUnit(ctx, pi, unitType, unitId, "hard", buildRecoveryContext());
-      if (recovery === "recovered") return;
+      if (recovery === "recovered") {
+        // A recovery steer keeps the turn open, and a stalled model stream never
+        // reads it. This timer was one-shot, so no timer was left to end that
+        // unit (#2644). Re-arm with the same budget: the next expiry finds the
+        // recovery attempt spent and pauses, or advances a unit whose result is
+        // saved. Do not re-arm when recovery advanced the unit (that bumps the
+        // turn generation) or when the unit ended during recovery (its
+        // supervision handles are cleared or replaced).
+        if (s.idleWatchdogHandle === idleWatchdogHandle && getCurrentTurnGeneration() === turnGenerationAtExpiry) {
+          s.unitTimeoutHandle = setTimeout(hardTimeoutBody, hardTimeoutMs);
+        }
+        return;
+      }
 
       ctx.ui.notify(
         `Unit ${unitType} ${unitId} exceeded ${supervisor.hard_timeout_minutes}min hard timeout. Pausing auto-mode.`,
