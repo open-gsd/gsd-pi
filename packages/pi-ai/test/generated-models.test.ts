@@ -240,7 +240,37 @@ describe("models.generated.ts", () => {
 			expect(copilot[id].thinkingLevelMap, id).toMatchObject({ off: null, minimal: "low", xhigh: "xhigh", max: "max" });
 		}
 		for (const id of grokIds) {
-			expect(copilot[id].thinkingLevelMap, id).toMatchObject({ minimal: "low" });
+			// off must be marked unsupported: the curated Grok ladders have no
+			// "none" effort, so leaving "off" unmapped would advertise it as
+			// supported while silently falling back to the model's default effort.
+			expect(copilot[id].thinkingLevelMap, id).toMatchObject({ off: null, minimal: "low" });
+		}
+	});
+
+	test("scopes GPT-6 xhigh/max thinking-level additions to github-copilot only (PR #2735 review)", () => {
+		// GPT-6 ids exist across many providers (OpenAI, Bedrock, OpenRouter,
+		// Vercel, Azure, proxies). The xhigh/max capability checks are curated
+		// from Copilot's own /models catalog and must not leak onto those other
+		// providers' gpt-6 entries, which may have different (or no) live
+		// reasoning-effort ladders.
+		const nonCopilotGpt6: Array<[string, string]> = [
+			["openai", "gpt-6-astra"],
+			["openai", "gpt-6-sol"],
+			["openai", "gpt-6-luna"],
+			["openai", "gpt-6.1-sol"],
+		];
+		for (const [provider, id] of nonCopilotGpt6) {
+			const model = (MODELS as Record<string, Record<string, { thinkingLevelMap?: Record<string, unknown> }>>)[
+				provider
+			]?.[id];
+			expect(model, `${provider}/${id}`).toBeDefined();
+			expect(model?.thinkingLevelMap?.max, `${provider}/${id} must not gain 'max'`).toBeUndefined();
+		}
+
+		// The github-copilot gpt-6 entries keep both xhigh and max.
+		const copilot = MODELS["github-copilot"];
+		for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"] as const) {
+			expect(copilot[id].thinkingLevelMap, id).toMatchObject({ xhigh: "xhigh", max: "max" });
 		}
 	});
 

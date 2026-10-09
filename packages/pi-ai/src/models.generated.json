@@ -13893,6 +13893,7 @@
         "Copilot-Integration-Id": "vscode-chat"
       },
       "thinkingLevelMap": {
+        "off": null,
         "minimal": "low"
       }
     },
@@ -14263,6 +14264,7 @@
         "Copilot-Integration-Id": "vscode-chat"
       },
       "thinkingLevelMap": {
+        "off": null,
         "minimal": "low"
       }
     },
@@ -14807,6 +14809,7 @@
         "Copilot-Integration-Id": "vscode-chat"
       },
       "thinkingLevelMap": {
+        "off": null,
         "minimal": "low"
       }
     },
