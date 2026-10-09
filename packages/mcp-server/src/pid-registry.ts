@@ -658,6 +658,7 @@ export type SignalAutoLockPidResult =
   | 'signaled'
   | 'already-dead'
   | 'stale-lock'
+  | 'unverified'
   | 'foreign-cwd'
   | 'invalid-lock'
   | { error: string };
@@ -667,11 +668,13 @@ export type SignalAutoLockPidResult =
  *
  * The lock only records `pid` + `startedAt`; between write and read that PID
  * can be recycled by an unrelated process. Mirrors the killPid() policy above:
- * refuse to signal unless the live process's start time is no later than the
- * recorded one (within STALE_PID_START_SKEW_MS) and its cwd is rooted in the
- * project directory. An unknown cwd is tolerated (start time is the primary
- * identity); an unparseable `startedAt` invalidates the lock — a foreign or
- * corrupt lock must not authorize a signal.
+ * refuse to signal unless the live process's start time is finite, positive,
+ * and no later than the recorded one (within STALE_PID_START_SKEW_MS), and its
+ * known cwd is rooted in the project directory. An unknown or invalid live
+ * start time is unverified even when cwd matches. An unknown cwd is still
+ * tolerated when the start identity is verified (the existing policy);
+ * an unparseable `startedAt` invalidates the lock — a foreign or corrupt
+ * lock must not authorize a signal.
  */
 export function signalAutoLockPid(
   lock: unknown,
@@ -698,7 +701,10 @@ export function signalAutoLockPid(
   }
 
   const actualStartMs = getProcessStartTime(pid);
-  if (actualStartMs !== null && actualStartMs > recordedMs + STALE_PID_START_SKEW_MS) {
+  if (actualStartMs === null || !Number.isFinite(actualStartMs) || actualStartMs <= 0) {
+    return 'unverified';
+  }
+  if (actualStartMs > recordedMs + STALE_PID_START_SKEW_MS) {
     return 'stale-lock';
   }
 
