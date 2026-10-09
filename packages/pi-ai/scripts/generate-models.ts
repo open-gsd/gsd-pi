@@ -60,6 +60,33 @@ const COPILOT_STATIC_HEADERS = {
 	"Copilot-Integration-Id": "vscode-chat",
 } as const;
 
+/**
+ * GitHub Copilot serves these models exclusively through the Responses API:
+ * their live /models records list supported_endpoints without
+ * /chat/completions, and dispatching them via Completions hard-400s with
+ * "unsupported_api_for_model". models.dev does not carry per-provider
+ * endpoint support, so this set is curated from the live Copilot catalog
+ * (verified 2026-10-07). The gpt-5/gpt-6 families are covered by prefix in
+ * needsResponsesApi instead.
+ */
+const COPILOT_RESPONSES_ONLY_MODEL_IDS = new Set(["grok-4.5", "grok-4.6", "grok-4.7"]);
+
+/**
+ * Copilot's served context/output windows for the responses-only families,
+ * from the live /models capabilities.limits (verified 2026-10-07). models.dev
+ * reports the platform-native windows (e.g. 1.05M context for gpt-6), but
+ * Copilot rejects requests beyond its served window, so the served limits win.
+ */
+const COPILOT_LIVE_SERVING_LIMITS: Record<string, { contextWindow: number; maxTokens: number }> = {
+	"gpt-6-astra": { contextWindow: 400000, maxTokens: 128000 },
+	"gpt-6-luna": { contextWindow: 400000, maxTokens: 128000 },
+	"gpt-6-sol": { contextWindow: 400000, maxTokens: 128000 },
+	"gpt-6.1-sol": { contextWindow: 400000, maxTokens: 128000 },
+	"grok-4.5": { contextWindow: 328000, maxTokens: 128000 },
+	"grok-4.6": { contextWindow: 328000, maxTokens: 128000 },
+	"grok-4.7": { contextWindow: 328000, maxTokens: 128000 },
+};
+
 const KIMI_STATIC_HEADERS = {
 	"User-Agent": "KimiCLI/1.5",
 } as const;
@@ -179,12 +206,24 @@ function supportsOpenAiXhigh(modelId: string): boolean {
 		modelId.includes("gpt-5.3") ||
 		modelId.includes("gpt-5.4") ||
 		modelId.includes("gpt-5.5") ||
-		modelId.includes("gpt-5.6")
+		modelId.includes("gpt-5.6") ||
+		modelId.includes("gpt-6")
 	);
 }
 
 function isGpt56Variant(modelId: string): boolean {
 	return modelId === "gpt-5.6-sol" || modelId === "gpt-5.6-terra" || modelId === "gpt-5.6-luna";
+}
+
+// GPT-6 family members whose live reasoning-effort ladder includes "max"
+// (verified against the Copilot /models catalog 2026-10-07).
+function isGpt6MaxVariant(modelId: string): boolean {
+	return (
+		modelId === "gpt-6-luna" ||
+		modelId === "gpt-6-sol" ||
+		modelId === "gpt-6.1-sol" ||
+		modelId === "gpt-6-astra"
+	);
 }
 
 function isGoogleThinkingApi(model: Model<any>): boolean {
@@ -294,11 +333,14 @@ function isGemma4Model(modelId: string): boolean {
 function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
-		model.id.startsWith("gpt-5")
+		(model.id.startsWith("gpt-5") || (model.provider === "github-copilot" && model.id.startsWith("gpt-6")))
 	) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
-	if (model.provider === "github-copilot" && model.id.startsWith("gpt-5")) {
+	if (
+		model.provider === "github-copilot" &&
+		(model.id.startsWith("gpt-5") || model.id.startsWith("gpt-6") || COPILOT_RESPONSES_ONLY_MODEL_IDS.has(model.id))
+	) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
 	if (
@@ -311,7 +353,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
-	if (isGpt56Variant(model.id)) {
+	if (isGpt56Variant(model.id) || isGpt6MaxVariant(model.id)) {
 		mergeThinkingLevelMap(model, { max: "max" });
 	}
 	if (model.id.includes("opus-4-6") || model.id.includes("opus-4.6")) {
@@ -1107,8 +1149,14 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 				// Claude 4.x models route to Anthropic Messages API
 				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
-				// gpt-5 models require responses API, others use completions
-				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
+				// The gpt-5/gpt-6 families (and oswe) require the Responses API, as do
+				// the responses-only ids in COPILOT_RESPONSES_ONLY_MODEL_IDS -- live
+				// catalog evidence 2026-10-07: Completions dispatch hard-400s.
+				const needsResponsesApi =
+					modelId.startsWith("gpt-5") ||
+					modelId.startsWith("gpt-6") ||
+					modelId.startsWith("oswe") ||
+					COPILOT_RESPONSES_ONLY_MODEL_IDS.has(modelId);
 
 				const api: Api = isCopilotClaude4
 					? "anthropic-messages"
@@ -1146,6 +1194,15 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						},
 					} : {}),
 				};
+
+				// Copilot's served window is smaller than the platform-native window
+				// models.dev reports for these families; cap to the live-served limits
+				// so compaction/truncation logic does not trust an unreachable window.
+				const liveServingLimits = COPILOT_LIVE_SERVING_LIMITS[modelId];
+				if (liveServingLimits) {
+					copilotModel.contextWindow = liveServingLimits.contextWindow;
+					copilotModel.maxTokens = liveServingLimits.maxTokens;
+				}
 
 				models.push(copilotModel);
 			}
