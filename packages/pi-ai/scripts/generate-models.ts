@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { writeFileSync } from "fs";
-import { join, dirname } from "path";
+import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
@@ -9,7 +9,13 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
-import type { AnthropicMessagesCompat, Api, KnownProvider, Model, OpenAICompletionsCompat } from "../src/types.ts";
+import type {
+	AnthropicMessagesCompat,
+	Api,
+	KnownProvider,
+	Model,
+	OpenAICompletionsCompat,
+} from "../src/types.ts";
 import { formatCost, roundCost } from "./lib/model-cost.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -69,7 +75,11 @@ const COPILOT_STATIC_HEADERS = {
  * (verified 2026-10-07). The gpt-5/gpt-6 families are covered by prefix in
  * needsResponsesApi instead.
  */
-const COPILOT_RESPONSES_ONLY_MODEL_IDS = new Set(["grok-4.5", "grok-4.6", "grok-4.7"]);
+const COPILOT_RESPONSES_ONLY_MODEL_IDS = new Set([
+	"grok-4.5",
+	"grok-4.6",
+	"grok-4.7",
+]);
 
 /**
  * Copilot's served context/output windows for the responses-only families,
@@ -77,7 +87,10 @@ const COPILOT_RESPONSES_ONLY_MODEL_IDS = new Set(["grok-4.5", "grok-4.6", "grok-
  * reports the platform-native windows (e.g. 1.05M context for gpt-6), but
  * Copilot rejects requests beyond its served window, so the served limits win.
  */
-const COPILOT_LIVE_SERVING_LIMITS: Record<string, { contextWindow: number; maxTokens: number }> = {
+const COPILOT_LIVE_SERVING_LIMITS: Record<
+	string,
+	{ contextWindow: number; maxTokens: number }
+> = {
 	"gpt-6-astra": { contextWindow: 400000, maxTokens: 128000 },
 	"gpt-6-luna": { contextWindow: 400000, maxTokens: 128000 },
 	"gpt-6-sol": { contextWindow: 400000, maxTokens: 128000 },
@@ -118,8 +131,13 @@ const TOGETHER_REASONING_ONLY_MODELS = new Set([
 	"MiniMaxAI/MiniMax-M2.5",
 	"MiniMaxAI/MiniMax-M2.7",
 ]);
-const TOGETHER_REASONING_EFFORT_MODELS = new Set(["openai/gpt-oss-20b", "openai/gpt-oss-120b"]);
-const TOGETHER_TOGGLE_REASONING_EFFORT_MODELS = new Set(["deepseek-ai/DeepSeek-V4-Pro"]);
+const TOGETHER_REASONING_EFFORT_MODELS = new Set([
+	"openai/gpt-oss-20b",
+	"openai/gpt-oss-120b",
+]);
+const TOGETHER_TOGGLE_REASONING_EFFORT_MODELS = new Set([
+	"deepseek-ai/DeepSeek-V4-Pro",
+]);
 const TOGETHER_FIXED_REASONING_LEVEL_MAP = {
 	off: null,
 	minimal: null,
@@ -146,7 +164,12 @@ const TOGETHER_TOGGLE_REASONING_LEVEL_MAP = {
 const AI_GATEWAY_MODELS_URL = "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
 const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";
-const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
+const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set([
+	"glm-4.5",
+	"glm-4.5-air",
+	"glm-4.5-flash",
+	"glm-4.5v",
+]);
 const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-haiku-4.5",
 	"github-copilot:claude-sonnet-4",
@@ -174,14 +197,22 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.6-luna",
 ]);
 
-function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
+function mergeThinkingLevelMap(
+	model: Model<any>,
+	map: NonNullable<Model<any>["thinkingLevelMap"]>,
+): void {
 	model.thinkingLevelMap = { ...model.thinkingLevelMap, ...map };
 }
 
-function getTogetherCompat(modelId: string, reasoning: boolean): OpenAICompletionsCompat {
+function getTogetherCompat(
+	modelId: string,
+	reasoning: boolean,
+): OpenAICompletionsCompat {
 	if (!reasoning) return TOGETHER_BASE_COMPAT;
-	if (TOGETHER_REASONING_EFFORT_MODELS.has(modelId)) return TOGETHER_REASONING_EFFORT_COMPAT;
-	if (TOGETHER_TOGGLE_REASONING_EFFORT_MODELS.has(modelId)) return TOGETHER_TOGGLE_REASONING_EFFORT_COMPAT;
+	if (TOGETHER_REASONING_EFFORT_MODELS.has(modelId))
+		return TOGETHER_REASONING_EFFORT_COMPAT;
+	if (TOGETHER_TOGGLE_REASONING_EFFORT_MODELS.has(modelId))
+		return TOGETHER_TOGGLE_REASONING_EFFORT_COMPAT;
 	if (TOGETHER_REASONING_ONLY_MODELS.has(modelId)) return TOGETHER_BASE_COMPAT;
 	return TOGETHER_TOGGLE_REASONING_COMPAT;
 }
@@ -191,9 +222,12 @@ function getTogetherThinkingLevelMap(
 	reasoning: boolean,
 ): NonNullable<Model<any>["thinkingLevelMap"]> | undefined {
 	if (!reasoning) return undefined;
-	if (TOGETHER_REASONING_EFFORT_MODELS.has(modelId)) return { ...TOGETHER_REASONING_EFFORT_LEVEL_MAP };
-	if (TOGETHER_TOGGLE_REASONING_EFFORT_MODELS.has(modelId)) return { ...TOGETHER_DEEPSEEK_V4_THINKING_LEVEL_MAP };
-	if (TOGETHER_REASONING_ONLY_MODELS.has(modelId)) return { ...TOGETHER_FIXED_REASONING_LEVEL_MAP };
+	if (TOGETHER_REASONING_EFFORT_MODELS.has(modelId))
+		return { ...TOGETHER_REASONING_EFFORT_LEVEL_MAP };
+	if (TOGETHER_TOGGLE_REASONING_EFFORT_MODELS.has(modelId))
+		return { ...TOGETHER_DEEPSEEK_V4_THINKING_LEVEL_MAP };
+	if (TOGETHER_REASONING_ONLY_MODELS.has(modelId))
+		return { ...TOGETHER_FIXED_REASONING_LEVEL_MAP };
 	return { ...TOGETHER_TOGGLE_REASONING_LEVEL_MAP };
 }
 
@@ -209,7 +243,11 @@ function supportsOpenAiXhigh(modelId: string): boolean {
 }
 
 function isGpt56Variant(modelId: string): boolean {
-	return modelId === "gpt-5.6-sol" || modelId === "gpt-5.6-terra" || modelId === "gpt-5.6-luna";
+	return (
+		modelId === "gpt-5.6-sol" ||
+		modelId === "gpt-5.6-terra" ||
+		modelId === "gpt-5.6-luna"
+	);
 }
 
 // GPT-6 family members whose live reasoning-effort ladder includes "max"
@@ -250,12 +288,20 @@ function isSonnet55Model(modelId: string): boolean {
 	return modelId.includes("sonnet-5-5") || modelId.includes("sonnet-5.5");
 }
 
-function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
-	model.compat = { ...(model.compat as AnthropicMessagesCompat | undefined), ...compat };
+function mergeAnthropicMessagesCompat(
+	model: Model<Api>,
+	compat: AnthropicMessagesCompat,
+): void {
+	model.compat = {
+		...(model.compat as AnthropicMessagesCompat | undefined),
+		...compat,
+	};
 }
 
 function normalizeAnthropicVertexModelId(modelId: string): string {
-	return modelId.endsWith("@default") ? modelId.slice(0, modelId.length - "@default".length) : modelId;
+	return modelId.endsWith("@default")
+		? modelId.slice(0, modelId.length - "@default".length)
+		: modelId;
 }
 
 function isGemini3ProModel(modelId: string): boolean {
@@ -272,16 +318,20 @@ function isGemma4Model(modelId: string): boolean {
 
 function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (
-		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
+		(model.api === "openai-responses" ||
+			model.api === "azure-openai-responses") &&
 		(model.id.startsWith("gpt-5") ||
 			(model.provider === "github-copilot" &&
-				(model.id.startsWith("gpt-6") || COPILOT_RESPONSES_ONLY_MODEL_IDS.has(model.id))))
+				(model.id.startsWith("gpt-6") ||
+					COPILOT_RESPONSES_ONLY_MODEL_IDS.has(model.id))))
 	) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
 	if (
 		model.provider === "github-copilot" &&
-		(model.id.startsWith("gpt-5") || model.id.startsWith("gpt-6") || COPILOT_RESPONSES_ONLY_MODEL_IDS.has(model.id))
+		(model.id.startsWith("gpt-5") ||
+			model.id.startsWith("gpt-6") ||
+			COPILOT_RESPONSES_ONLY_MODEL_IDS.has(model.id))
 	) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
@@ -292,10 +342,16 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	) {
 		mergeThinkingLevelMap(model, { off: "none" });
 	}
-	if (supportsOpenAiXhigh(model.id) && (!model.id.includes("gpt-6") || model.provider === "github-copilot")) {
+	if (
+		supportsOpenAiXhigh(model.id) &&
+		(!model.id.includes("gpt-6") || model.provider === "github-copilot")
+	) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
-	if (isGpt56Variant(model.id) || (model.provider === "github-copilot" && isGpt6MaxVariant(model.id))) {
+	if (
+		isGpt56Variant(model.id) ||
+		(model.provider === "github-copilot" && isGpt6MaxVariant(model.id))
+	) {
 		mergeThinkingLevelMap(model, { max: "max" });
 	}
 	if (model.id.includes("opus-4-6") || model.id.includes("opus-4.6")) {
@@ -343,18 +399,33 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 	}
 	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
-		mergeThinkingLevelMap(model, { off: null, minimal: null, low: "LOW", medium: null, high: "HIGH" });
+		mergeThinkingLevelMap(model, {
+			off: null,
+			minimal: null,
+			low: "LOW",
+			medium: null,
+			high: "HIGH",
+		});
 	}
 	if (isGoogleThinkingApi(model) && isGemini3FlashModel(model.id)) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
 	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
-		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: null, medium: null, high: "HIGH" });
+		mergeThinkingLevelMap(model, {
+			off: null,
+			minimal: "MINIMAL",
+			low: null,
+			medium: null,
+			high: "HIGH",
+		});
 	}
 	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
-	if (model.provider === "openrouter" && model.id.startsWith("inception/mercury-2")) {
+	if (
+		model.provider === "openrouter" &&
+		model.id.startsWith("inception/mercury-2")
+	) {
 		// Mercury 2 in instant mode (reasoning_effort: "none") disables tool calling.
 		// Mark "off" unsupported so the openai-completions provider omits the reasoning param
 		// instead of defaulting to {reasoning:{effort:"none"}} (see openai-completions.ts:575).
@@ -363,8 +434,13 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 }
 
-function getAnthropicMessagesCompat(provider: string, modelId: string): AnthropicMessagesCompat | undefined {
-	return EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS.has(`${provider}:${modelId}`)
+function getAnthropicMessagesCompat(
+	provider: string,
+	modelId: string,
+): AnthropicMessagesCompat | undefined {
+	return EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS.has(
+		`${provider}:${modelId}`,
+	)
 		? { supportsEagerToolInputStreaming: false }
 		: undefined;
 }
@@ -375,9 +451,15 @@ function getBedrockBaseUrl(modelId: string): string {
 		: "https://bedrock-runtime.us-east-1.amazonaws.com";
 }
 
-function formatFiniteNumber(value: unknown, field: string, modelId: string): string {
+function formatFiniteNumber(
+	value: unknown,
+	field: string,
+	modelId: string,
+): string {
 	if (typeof value !== "number" || !Number.isFinite(value)) {
-		throw new Error(`${field} for model ${JSON.stringify(modelId)} must be a finite number.`);
+		throw new Error(
+			`${field} for model ${JSON.stringify(modelId)} must be a finite number.`,
+		);
 	}
 	return String(value);
 }
@@ -395,7 +477,7 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 			if (!model.supported_parameters?.includes("tools")) continue;
 
 			// Parse provider from model ID
-			let provider: KnownProvider = "openrouter";
+			const provider: KnownProvider = "openrouter";
 			let modelKey = model.id;
 
 			modelKey = model.id; // Keep full ID for OpenRouter
@@ -408,9 +490,12 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 
 			// Convert pricing from $/token to $/million tokens
 			const inputCost = parseFloat(model.pricing?.prompt || "0") * 1_000_000;
-			const outputCost = parseFloat(model.pricing?.completion || "0") * 1_000_000;
-			const cacheReadCost = parseFloat(model.pricing?.input_cache_read || "0") * 1_000_000;
-			const cacheWriteCost = parseFloat(model.pricing?.input_cache_write || "0") * 1_000_000;
+			const outputCost =
+				parseFloat(model.pricing?.completion || "0") * 1_000_000;
+			const cacheReadCost =
+				parseFloat(model.pricing?.input_cache_read || "0") * 1_000_000;
+			const cacheWriteCost =
+				parseFloat(model.pricing?.input_cache_write || "0") * 1_000_000;
 
 			const normalizedModel: Model<any> = {
 				id: modelKey,
@@ -455,7 +540,9 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 			return Number.isFinite(parsed) ? parsed : 0;
 		};
 
-		const items = Array.isArray(data.data) ? (data.data as AiGatewayModel[]) : [];
+		const items = Array.isArray(data.data)
+			? (data.data as AiGatewayModel[])
+			: [];
 		for (const model of items) {
 			const tags = Array.isArray(model.tags) ? model.tags : [];
 			// Only include models that support tools
@@ -468,8 +555,10 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 
 			const inputCost = toNumber(model.pricing?.input) * 1_000_000;
 			const outputCost = toNumber(model.pricing?.output) * 1_000_000;
-			const cacheReadCost = toNumber(model.pricing?.input_cache_read) * 1_000_000;
-			const cacheWriteCost = toNumber(model.pricing?.input_cache_write) * 1_000_000;
+			const cacheReadCost =
+				toNumber(model.pricing?.input_cache_read) * 1_000_000;
+			const cacheWriteCost =
+				toNumber(model.pricing?.input_cache_write) * 1_000_000;
 
 			models.push({
 				id: model.id,
@@ -490,7 +579,9 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 			});
 		}
 
-		console.log(`Fetched ${models.length} tool-capable models from Vercel AI Gateway`);
+		console.log(
+			`Fetched ${models.length} tool-capable models from Vercel AI Gateway`,
+		);
 		return models;
 	} catch (error) {
 		console.error("Failed to fetch Vercel AI Gateway models:", error);
@@ -508,11 +599,13 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process Amazon Bedrock models
 		if (data["amazon-bedrock"]?.models) {
-			for (const [modelId, model] of Object.entries(data["amazon-bedrock"].models)) {
+			for (const [modelId, model] of Object.entries(
+				data["amazon-bedrock"].models,
+			)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
-				let id = modelId;
+				const id = modelId;
 
 				if (id.startsWith("ai21.jamba")) {
 					// These models doesn't support tool use in streaming mode
@@ -531,7 +624,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "amazon-bedrock" as const,
 					baseUrl: getBedrockBaseUrl(id),
 					reasoning: m.reasoning === true,
-					input: (m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"]) as ("text" | "image")[],
+					input: (m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"]) as ("text" | "image")[],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -557,7 +652,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "anthropic",
 					baseUrl: "https://api.anthropic.com",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -572,7 +669,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process Anthropic models served through Google Vertex AI.
 		if (data["google-vertex-anthropic"]?.models) {
-			for (const [modelId, model] of Object.entries(data["google-vertex-anthropic"].models)) {
+			for (const [modelId, model] of Object.entries(
+				data["google-vertex-anthropic"].models,
+			)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
@@ -585,7 +684,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "anthropic-vertex",
 					baseUrl: VERTEX_BASE_URL,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -611,7 +712,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "google",
 					baseUrl: "https://generativelanguage.googleapis.com/v1beta",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -637,7 +740,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "openai",
 					baseUrl: "https://api.openai.com/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -663,7 +768,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "groq",
 					baseUrl: "https://api.groq.com/openai/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -689,7 +796,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "cerebras",
 					baseUrl: "https://api.cerebras.ai/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -704,7 +813,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process Cloudflare Workers AI models
 		if (data["cloudflare-workers-ai"]?.models) {
-			for (const [modelId, model] of Object.entries(data["cloudflare-workers-ai"].models)) {
+			for (const [modelId, model] of Object.entries(
+				data["cloudflare-workers-ai"].models,
+			)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
@@ -715,7 +826,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "cloudflare-workers-ai",
 					baseUrl: CLOUDFLARE_WORKERS_AI_BASE_URL,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -731,7 +844,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process Cloudflare AI Gateway models
 		if (data["cloudflare-ai-gateway"]?.models) {
-			for (const [prefixedId, model] of Object.entries(data["cloudflare-ai-gateway"].models)) {
+			for (const [prefixedId, model] of Object.entries(
+				data["cloudflare-ai-gateway"].models,
+			)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
@@ -740,7 +855,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const upstream = prefixedId.slice(0, slashIdx);
 				const nativeId = prefixedId.slice(slashIdx + 1);
 
-				let api: "anthropic-messages" | "openai-completions" | "openai-responses";
+				let api:
+					| "anthropic-messages"
+					| "openai-completions"
+					| "openai-responses";
 				let baseUrl: string;
 				let id: string;
 				if (upstream === "openai") {
@@ -761,7 +879,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 				// workers-ai/* through the gateway forwards x-session-affinity to
 				// the underlying Workers AI runtime for prefix-cache routing.
-				const compat = upstream === "workers-ai" ? { sendSessionAffinityHeaders: true } : undefined;
+				const compat =
+					upstream === "workers-ai"
+						? { sendSessionAffinityHeaders: true }
+						: undefined;
 
 				models.push({
 					id,
@@ -770,7 +891,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "cloudflare-ai-gateway",
 					baseUrl,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -797,7 +920,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "xai",
 					baseUrl: "https://api.x.ai/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -812,7 +937,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process zAi models
 		if (data["zai-coding-plan"]?.models) {
-			for (const [modelId, model] of Object.entries(data["zai-coding-plan"].models)) {
+			for (const [modelId, model] of Object.entries(
+				data["zai-coding-plan"].models,
+			)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 				const supportsImage = m.modalities?.input?.includes("image");
@@ -834,7 +961,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					compat: {
 						supportsDeveloperRole: false,
 						thinkingFormat: "zai",
-						...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(modelId) ? { zaiToolStream: true } : {}),
+						...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(modelId)
+							? { zaiToolStream: true }
+							: {}),
 					},
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
@@ -855,7 +984,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "mistral",
 					baseUrl: "https://api.mistral.ai",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -881,7 +1012,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "huggingface",
 					baseUrl: "https://router.huggingface.co/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -899,7 +1032,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process Fireworks models
 		if (data["fireworks-ai"]?.models) {
-			for (const [modelId, model] of Object.entries(data["fireworks-ai"].models)) {
+			for (const [modelId, model] of Object.entries(
+				data["fireworks-ai"].models,
+			)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
@@ -911,7 +1046,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					// Fireworks Anthropic-compatible API - SDK appends /v1/messages
 					baseUrl: "https://api.fireworks.ai/inference",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -935,7 +1072,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		}
 
 		// Process Together AI models
-		const togetherProvider = data.together ?? data.togetherai ?? data["together-ai"];
+		const togetherProvider =
+			data.together ?? data.togetherai ?? data["together-ai"];
 		if (togetherProvider?.models) {
 			for (const [modelId, model] of Object.entries(togetherProvider.models)) {
 				const m = model as ModelsDevModel & { status?: string };
@@ -943,7 +1081,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.status === "deprecated") continue;
 
 				const reasoning = m.reasoning === true;
-				const thinkingLevelMap = getTogetherThinkingLevelMap(modelId, reasoning);
+				const thinkingLevelMap = getTogetherThinkingLevelMap(
+					modelId,
+					reasoning,
+				);
 				models.push({
 					id: modelId,
 					name: m.name || modelId,
@@ -952,7 +1093,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: TOGETHER_BASE_URL,
 					reasoning,
 					...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -973,8 +1116,16 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		// - @ai-sdk/google → google-generative-ai
 		// - null/undefined/@ai-sdk/openai-compatible → openai-completions
 		const opencodeVariants = [
-			{ key: "opencode", provider: "opencode", basePath: "https://opencode.ai/zen" },
-			{ key: "opencode-go", provider: "opencode-go", basePath: "https://opencode.ai/zen/go" },
+			{
+				key: "opencode",
+				provider: "opencode",
+				basePath: "https://opencode.ai/zen",
+			},
+			{
+				key: "opencode-go",
+				provider: "opencode-go",
+				basePath: "https://opencode.ai/zen/go",
+			},
 		] as const;
 
 		for (const variant of opencodeVariants) {
@@ -1037,7 +1188,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: variant.provider,
 					baseUrl,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -1053,13 +1206,17 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process GitHub Copilot models
 		if (data["github-copilot"]?.models) {
-			for (const [modelId, model] of Object.entries(data["github-copilot"].models)) {
+			for (const [modelId, model] of Object.entries(
+				data["github-copilot"].models,
+			)) {
 				const m = model as ModelsDevModel & { status?: string };
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
 
 				// Claude 4.x models route to Anthropic Messages API
-				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
+				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.-]|$)/.test(
+					modelId,
+				);
 				// The gpt-5/gpt-6 families (and oswe) require the Responses API, as do
 				// the responses-only ids in COPILOT_RESPONSES_ONLY_MODEL_IDS -- live
 				// catalog evidence 2026-10-07: Completions dispatch hard-400s.
@@ -1076,7 +1233,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						: "openai-completions";
 
 				const anthropicCompat =
-					api === "anthropic-messages" ? getAnthropicMessagesCompat("github-copilot", modelId) : undefined;
+					api === "anthropic-messages"
+						? getAnthropicMessagesCompat("github-copilot", modelId)
+						: undefined;
 
 				const copilotModel: Model<any> = {
 					id: modelId,
@@ -1085,7 +1244,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "github-copilot",
 					baseUrl: "https://api.individual.githubcopilot.com",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -1097,13 +1258,15 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					headers: { ...COPILOT_STATIC_HEADERS },
 					...(anthropicCompat ? { compat: anthropicCompat } : {}),
 					// compat only applies to openai-completions
-					...(api === "openai-completions" ? {
-						compat: {
-							supportsStore: false,
-							supportsDeveloperRole: false,
-							supportsReasoningEffort: false,
-						},
-					} : {}),
+					...(api === "openai-completions"
+						? {
+								compat: {
+									supportsStore: false,
+									supportsDeveloperRole: false,
+									supportsReasoningEffort: false,
+								},
+							}
+						: {}),
 				};
 
 				// Copilot's served window is smaller than the platform-native window
@@ -1121,8 +1284,16 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process MiniMax models
 		const minimaxVariants = [
-			{ key: "minimax", provider: "minimax", baseUrl: "https://api.minimax.io/anthropic" },
-			{ key: "minimax-cn", provider: "minimax-cn", baseUrl: "https://api.minimaxi.com/anthropic" },
+			{
+				key: "minimax",
+				provider: "minimax",
+				baseUrl: "https://api.minimax.io/anthropic",
+			},
+			{
+				key: "minimax-cn",
+				provider: "minimax-cn",
+				baseUrl: "https://api.minimaxi.com/anthropic",
+			},
 		] as const;
 
 		for (const { key, provider, baseUrl } of minimaxVariants) {
@@ -1139,7 +1310,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						// MiniMax's Anthropic-compatible API - SDK appends /v1/messages
 						baseUrl,
 						reasoning: m.reasoning === true,
-						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+						input: m.modalities?.input?.includes("image")
+							? ["text", "image"]
+							: ["text"],
 						cost: {
 							input: m.cost?.input || 0,
 							output: m.cost?.output || 0,
@@ -1157,10 +1330,14 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		// region-scoped "kimi-code-plan-*" entries; the global plan is the one
 		// served at api.kimi.com/coding. Prefer the legacy key if upstream
 		// restores it.
-		const kimiProviderSource = data["kimi-for-coding"] ?? data["kimi-code-plan-global"];
+		const kimiProviderSource =
+			data["kimi-for-coding"] ?? data["kimi-code-plan-global"];
 		if (kimiProviderSource?.models) {
-			const kimiModels = kimiProviderSource.models as Record<string, ModelsDevModel>;
-			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
+			const kimiModels = kimiProviderSource.models as Record<
+				string,
+				ModelsDevModel
+			>;
+			const hasCanonicalModel = Object.hasOwn(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
 
@@ -1171,8 +1348,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				// Normalize aliases to the canonical model id and drop duplicates when canonical exists.
 				if (kimiAliases.has(modelId) && hasCanonicalModel) continue;
 
-				const normalizedId = kimiAliases.has(modelId) ? "kimi-for-coding" : modelId;
-				const normalizedName = kimiAliases.has(modelId) ? "Kimi For Coding" : m.name || normalizedId;
+				const normalizedId = kimiAliases.has(modelId)
+					? "kimi-for-coding"
+					: modelId;
+				const normalizedName = kimiAliases.has(modelId)
+					? "Kimi For Coding"
+					: m.name || normalizedId;
 
 				models.push({
 					id: normalizedId,
@@ -1183,7 +1364,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.kimi.com/coding",
 					headers: { ...KIMI_STATIC_HEADERS },
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -1198,8 +1381,16 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 		// Process Moonshot AI models
 		const moonshotVariants = [
-			{ key: "moonshotai", provider: "moonshotai", baseUrl: "https://api.moonshot.ai/v1" },
-			{ key: "moonshotai-cn", provider: "moonshotai-cn", baseUrl: "https://api.moonshot.cn/v1" },
+			{
+				key: "moonshotai",
+				provider: "moonshotai",
+				baseUrl: "https://api.moonshot.ai/v1",
+			},
+			{
+				key: "moonshotai-cn",
+				provider: "moonshotai-cn",
+				baseUrl: "https://api.moonshot.cn/v1",
+			},
 		] as const;
 		const moonshotCompat: OpenAICompletionsCompat = {
 			supportsStore: false,
@@ -1223,7 +1414,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider,
 					baseUrl,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					input: m.modalities?.input?.includes("image")
+						? ["text", "image"]
+						: ["text"],
 					cost: {
 						input: m.cost?.input || 0,
 						output: m.cost?.output || 0,
@@ -1247,9 +1440,18 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		};
 		const xiaomiVariants = [
 			{ provider: "xiaomi", baseUrl: "https://api.xiaomimimo.com/v1" },
-			{ provider: "xiaomi-token-plan-cn", baseUrl: "https://token-plan-cn.xiaomimimo.com/v1" },
-			{ provider: "xiaomi-token-plan-ams", baseUrl: "https://token-plan-ams.xiaomimimo.com/v1" },
-			{ provider: "xiaomi-token-plan-sgp", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1" },
+			{
+				provider: "xiaomi-token-plan-cn",
+				baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+			},
+			{
+				provider: "xiaomi-token-plan-ams",
+				baseUrl: "https://token-plan-ams.xiaomimimo.com/v1",
+			},
+			{
+				provider: "xiaomi-token-plan-sgp",
+				baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1",
+			},
 		] as const;
 
 		if (data.xiaomi?.models) {
@@ -1266,7 +1468,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						baseUrl,
 						compat: xiaomiCompat,
 						reasoning: m.reasoning === true,
-						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+						input: m.modalities?.input?.includes("image")
+							? ["text", "image"]
+							: ["text"],
 						cost: {
 							input: m.cost?.input || 0,
 							output: m.cost?.output || 0,
@@ -1298,12 +1502,16 @@ async function generateModels() {
 		console.error(
 			"models.dev fetch returned no models; refusing to overwrite src/models.generated.ts.",
 		);
-		console.error("Retry when network is available, or build with the committed catalog (skip generate-models).");
+		console.error(
+			"Retry when network is available, or build with the committed catalog (skip generate-models).",
+		);
 		process.exit(1);
 	}
 	const openRouterModels = await fetchOpenRouterModels();
 	if (openRouterModels.length === 0) {
-		throw new Error("OpenRouter returned no tool-capable models; refusing to overwrite src/models.generated.ts.");
+		throw new Error(
+			"OpenRouter returned no tool-capable models; refusing to overwrite src/models.generated.ts.",
+		);
 	}
 	const aiGatewayModels = await fetchAiGatewayModels();
 	if (aiGatewayModels.length === 0) {
@@ -1313,14 +1521,24 @@ async function generateModels() {
 	}
 
 	// Combine models (models.dev has priority)
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels].filter(
+	const allModels = [
+		...modelsDevModels,
+		...openRouterModels,
+		...aiGatewayModels,
+	].filter(
 		(model) =>
-			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
+			!(
+				(model.provider === "opencode" || model.provider === "opencode-go") &&
+				model.id === "gpt-5.3-codex-spark"
+			),
 	);
 
 	// MAI Code 1.1 Flash is exposed by GitHub Copilot but may lag in models.dev.
 	for (let i = allModels.length - 1; i >= 0; i--) {
-		if (allModels[i].provider === "github-copilot" && /mai[- ]code[- ]1\.1[- ]flash/i.test(allModels[i].id)) {
+		if (
+			allModels[i].provider === "github-copilot" &&
+			/mai[- ]code[- ]1\.1[- ]flash/i.test(allModels[i].id)
+		) {
 			allModels.splice(i, 1);
 		}
 	}
@@ -1332,7 +1550,12 @@ async function generateModels() {
 		baseUrl: "https://api.individual.githubcopilot.com",
 		reasoning: true,
 		headers: { ...COPILOT_STATIC_HEADERS },
-		thinkingLevelMap: { off: null, minimal: "low", medium: "medium", xhigh: "high" },
+		thinkingLevelMap: {
+			off: null,
+			minimal: "low",
+			medium: "medium",
+			xhigh: "high",
+		},
 		input: ["text"],
 		cost: { input: 0.2, output: 1.2, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 400_000,
@@ -1341,7 +1564,9 @@ async function generateModels() {
 
 	// Fix incorrect cache pricing for Claude Opus 4.5 from models.dev
 	// models.dev has 3x the correct pricing (1.5/18.75 instead of 0.5/6.25)
-	const opus45 = allModels.find(m => m.provider === "anthropic" && m.id === "claude-opus-4-5");
+	const opus45 = allModels.find(
+		(m) => m.provider === "anthropic" && m.id === "claude-opus-4-5",
+	);
 	if (opus45) {
 		opus45.cost.cacheRead = 0.5;
 		opus45.cost.cacheWrite = 6.25;
@@ -1349,7 +1574,10 @@ async function generateModels() {
 
 	// Temporary overrides until upstream model metadata is corrected.
 	for (const candidate of allModels) {
-		if (candidate.provider === "amazon-bedrock" && candidate.id.includes("anthropic.claude-opus-4-6-v1")) {
+		if (
+			candidate.provider === "amazon-bedrock" &&
+			candidate.id.includes("anthropic.claude-opus-4-6-v1")
+		) {
 			candidate.cost.cacheRead = 0.5;
 			candidate.cost.cacheWrite = 6.25;
 		}
@@ -1366,7 +1594,8 @@ async function generateModels() {
 		}
 		if (
 			candidate.provider === "github-copilot" &&
-			(candidate.id === "claude-opus-4.6" || candidate.id === "claude-sonnet-4.6")
+			(candidate.id === "claude-opus-4.6" ||
+				candidate.id === "claude-sonnet-4.6")
 		) {
 			candidate.contextWindow = 200000;
 			candidate.maxTokens = 32000;
@@ -1374,18 +1603,26 @@ async function generateModels() {
 
 		// OpenCode variants list Claude Sonnet 4/4.5 with 1M context, actual limit is 200K
 		if (
-			(candidate.provider === "opencode" || candidate.provider === "opencode-go") &&
-			(candidate.id === "claude-sonnet-4-5" || candidate.id === "claude-sonnet-4")
+			(candidate.provider === "opencode" ||
+				candidate.provider === "opencode-go") &&
+			(candidate.id === "claude-sonnet-4-5" ||
+				candidate.id === "claude-sonnet-4")
 		) {
 			candidate.contextWindow = 200000;
 		}
-		if ((candidate.provider === "opencode" || candidate.provider === "opencode-go") && candidate.id === "gpt-5.4") {
+		if (
+			(candidate.provider === "opencode" ||
+				candidate.provider === "opencode-go") &&
+			candidate.id === "gpt-5.4"
+		) {
 			candidate.contextWindow = 272000;
 			candidate.maxTokens = 128000;
 		}
 		if (
 			candidate.provider === "openai" &&
-			(candidate.id === "gpt-5.4" || candidate.id === "gpt-5.5" || isGpt56Variant(candidate.id))
+			(candidate.id === "gpt-5.4" ||
+				candidate.id === "gpt-5.5" ||
+				isGpt56Variant(candidate.id))
 		) {
 			candidate.contextWindow = 272000;
 			candidate.maxTokens = 128000;
@@ -1396,12 +1633,16 @@ async function generateModels() {
 			candidate.cost.output = 1.9;
 			candidate.cost.cacheRead = 0.119;
 		}
-
 	}
 
-
 	// Add missing EU Opus 4.6 profile
-	if (!allModels.some((m) => m.provider === "amazon-bedrock" && m.id === "eu.anthropic.claude-opus-4-6-v1")) {
+	if (
+		!allModels.some(
+			(m) =>
+				m.provider === "amazon-bedrock" &&
+				m.id === "eu.anthropic.claude-opus-4-6-v1",
+		)
+	) {
 		allModels.push({
 			id: "eu.anthropic.claude-opus-4-6-v1",
 			name: "Claude Opus 4.6 (EU)",
@@ -1422,7 +1663,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Opus 4.6
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-4-6")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic" && m.id === "claude-opus-4-6",
+		)
+	) {
 		allModels.push({
 			id: "claude-opus-4-6",
 			name: "Claude Opus 4.6",
@@ -1443,7 +1688,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Opus 4.7
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-4-7")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic" && m.id === "claude-opus-4-7",
+		)
+	) {
 		allModels.push({
 			id: "claude-opus-4-7",
 			name: "Claude Opus 4.7",
@@ -1464,7 +1713,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Opus 4.8
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-4-8")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic" && m.id === "claude-opus-4-8",
+		)
+	) {
 		allModels.push({
 			id: "claude-opus-4-8",
 			name: "Claude Opus 4.8",
@@ -1485,7 +1738,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Opus 5 until models.dev includes it.
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic" && m.id === "claude-opus-5",
+		)
+	) {
 		allModels.push({
 			id: "claude-opus-5",
 			name: "Claude Opus 5",
@@ -1506,7 +1763,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Opus 5 on Vertex until models.dev includes it.
-	if (!allModels.some(m => m.provider === "anthropic-vertex" && m.id === "claude-opus-5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic-vertex" && m.id === "claude-opus-5",
+		)
+	) {
 		allModels.push({
 			id: "claude-opus-5",
 			name: "Claude Opus 5 (Vertex)",
@@ -1532,7 +1793,11 @@ async function generateModels() {
 		["us.anthropic.claude-opus-5", " (US)"],
 		["global.anthropic.claude-opus-5", " (Global)"],
 	] as const) {
-		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
+		if (
+			!allModels.some(
+				(m) => m.provider === "amazon-bedrock" && m.id === bedrockId,
+			)
+		) {
 			allModels.push({
 				id: bedrockId,
 				name: `Claude Opus 5${regionLabel}`,
@@ -1554,7 +1819,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Opus 5.5 until models.dev includes it.
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-5-5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic" && m.id === "claude-opus-5-5",
+		)
+	) {
 		allModels.push({
 			id: "claude-opus-5-5",
 			name: "Claude Opus 5.5",
@@ -1575,7 +1844,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Opus 5.5 on Vertex until models.dev includes it.
-	if (!allModels.some(m => m.provider === "anthropic-vertex" && m.id === "claude-opus-5-5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic-vertex" && m.id === "claude-opus-5-5",
+		)
+	) {
 		allModels.push({
 			id: "claude-opus-5-5",
 			name: "Claude Opus 5.5 (Vertex)",
@@ -1601,7 +1874,11 @@ async function generateModels() {
 		["us.anthropic.claude-opus-5-5", " (US)"],
 		["global.anthropic.claude-opus-5-5", " (Global)"],
 	] as const) {
-		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
+		if (
+			!allModels.some(
+				(m) => m.provider === "amazon-bedrock" && m.id === bedrockId,
+			)
+		) {
 			allModels.push({
 				id: bedrockId,
 				name: `Claude Opus 5.5${regionLabel}`,
@@ -1623,7 +1900,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Sonnet 4.6
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-sonnet-4-6")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic" && m.id === "claude-sonnet-4-6",
+		)
+	) {
 		allModels.push({
 			id: "claude-sonnet-4-6",
 			name: "Claude Sonnet 4.6",
@@ -1644,7 +1925,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Sonnet 5 until models.dev includes it.
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-sonnet-5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic" && m.id === "claude-sonnet-5",
+		)
+	) {
 		allModels.push({
 			id: "claude-sonnet-5",
 			name: "Claude Sonnet 5",
@@ -1665,7 +1950,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Sonnet 5 on Vertex until models.dev includes it.
-	if (!allModels.some(m => m.provider === "anthropic-vertex" && m.id === "claude-sonnet-5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic-vertex" && m.id === "claude-sonnet-5",
+		)
+	) {
 		allModels.push({
 			id: "claude-sonnet-5",
 			name: "Claude Sonnet 5 (Vertex)",
@@ -1691,7 +1980,11 @@ async function generateModels() {
 		["us.anthropic.claude-sonnet-5", " (US)"],
 		["global.anthropic.claude-sonnet-5", " (Global)"],
 	] as const) {
-		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
+		if (
+			!allModels.some(
+				(m) => m.provider === "amazon-bedrock" && m.id === bedrockId,
+			)
+		) {
 			allModels.push({
 				id: bedrockId,
 				name: `Claude Sonnet 5${regionLabel}`,
@@ -1713,7 +2006,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Fable 5 (direct Anthropic) until models.dev includes it.
-	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-fable-5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic" && m.id === "claude-fable-5",
+		)
+	) {
 		allModels.push({
 			id: "claude-fable-5",
 			name: "Claude Fable 5",
@@ -1734,7 +2031,11 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Fable 5 (Anthropic on Vertex) until models.dev includes it.
-	if (!allModels.some(m => m.provider === "anthropic-vertex" && m.id === "claude-fable-5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "anthropic-vertex" && m.id === "claude-fable-5",
+		)
+	) {
 		allModels.push({
 			id: "claude-fable-5",
 			name: "Claude Fable 5 (Vertex)",
@@ -1761,7 +2062,11 @@ async function generateModels() {
 		["eu.anthropic.claude-fable-5", " (EU)"],
 		["global.anthropic.claude-fable-5", " (Global)"],
 	] as const) {
-		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
+		if (
+			!allModels.some(
+				(m) => m.provider === "amazon-bedrock" && m.id === bedrockId,
+			)
+		) {
 			allModels.push({
 				id: bedrockId,
 				name: `Claude Fable 5${regionLabel}`,
@@ -1783,7 +2088,12 @@ async function generateModels() {
 	}
 
 	// Add missing Gemini 3.1 Flash Lite Preview until models.dev includes it.
-	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-3.1-flash-lite-preview")) {
+	if (
+		!allModels.some(
+			(m) =>
+				m.provider === "google" && m.id === "gemini-3.1-flash-lite-preview",
+		)
+	) {
 		allModels.push({
 			id: "gemini-3.1-flash-lite-preview",
 			name: "Gemini 3.1 Flash Lite Preview",
@@ -1804,7 +2114,11 @@ async function generateModels() {
 	}
 
 	// Add missing gpt models
-	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5-chat-latest")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "openai" && m.id === "gpt-5-chat-latest",
+		)
+	) {
 		allModels.push({
 			id: "gpt-5-chat-latest",
 			name: "GPT-5 Chat Latest",
@@ -1824,7 +2138,9 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5.1-codex")) {
+	if (
+		!allModels.some((m) => m.provider === "openai" && m.id === "gpt-5.1-codex")
+	) {
 		allModels.push({
 			id: "gpt-5.1-codex",
 			name: "GPT-5.1 Codex",
@@ -1844,7 +2160,11 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5.1-codex-max")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "openai" && m.id === "gpt-5.1-codex-max",
+		)
+	) {
 		allModels.push({
 			id: "gpt-5.1-codex-max",
 			name: "GPT-5.1 Codex Max",
@@ -1864,7 +2184,11 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5.3-codex-spark")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "openai" && m.id === "gpt-5.3-codex-spark",
+		)
+	) {
 		allModels.push({
 			id: "gpt-5.3-codex-spark",
 			name: "GPT-5.3 Codex Spark",
@@ -1889,7 +2213,11 @@ async function generateModels() {
 		(m) => m.provider === "github-copilot" && m.id === "gpt-5.2-codex",
 	);
 	if (copilotBaseModel) {
-		if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-5.3-codex")) {
+		if (
+			!allModels.some(
+				(m) => m.provider === "github-copilot" && m.id === "gpt-5.3-codex",
+			)
+		) {
 			allModels.push({
 				...copilotBaseModel,
 				id: "gpt-5.3-codex",
@@ -1920,12 +2248,31 @@ async function generateModels() {
 
 	// Add missing GPT-5.6 variants until models.dev includes them.
 	const gpt56Variants = [
-		{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", input: 5, output: 30, cacheRead: 0.5 },
-		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra", input: 2.5, output: 15, cacheRead: 0.25 },
-		{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna", input: 1, output: 6, cacheRead: 0.1 },
+		{
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			input: 5,
+			output: 30,
+			cacheRead: 0.5,
+		},
+		{
+			id: "gpt-5.6-terra",
+			name: "GPT-5.6 Terra",
+			input: 2.5,
+			output: 15,
+			cacheRead: 0.25,
+		},
+		{
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			input: 1,
+			output: 6,
+			cacheRead: 0.1,
+		},
 	] as const;
 	for (const variant of gpt56Variants) {
-		if (allModels.some((m) => m.provider === "openai" && m.id === variant.id)) continue;
+		if (allModels.some((m) => m.provider === "openai" && m.id === variant.id))
+			continue;
 		allModels.push({
 			id: variant.id,
 			name: variant.name,
@@ -1957,13 +2304,21 @@ async function generateModels() {
 		contextWindow: 1050000,
 		maxTokens: 128000,
 	};
-	if (!allModels.some((m) => m.provider === "openai" && m.id === gpt6Astra.id)) allModels.push(gpt6Astra);
+	if (!allModels.some((m) => m.provider === "openai" && m.id === gpt6Astra.id))
+		allModels.push(gpt6Astra);
 
 	// Add missing GitHub Copilot GPT-5.6 variants until models.dev includes them.
-	const copilotGpt55 = allModels.find((m) => m.provider === "github-copilot" && m.id === "gpt-5.5");
+	const copilotGpt55 = allModels.find(
+		(m) => m.provider === "github-copilot" && m.id === "gpt-5.5",
+	);
 	if (copilotGpt55) {
 		for (const variant of gpt56Variants) {
-			if (allModels.some((m) => m.provider === "github-copilot" && m.id === variant.id)) continue;
+			if (
+				allModels.some(
+					(m) => m.provider === "github-copilot" && m.id === variant.id,
+				)
+			)
+				continue;
 			allModels.push({
 				...copilotGpt55,
 				id: variant.id,
@@ -1977,8 +2332,22 @@ async function generateModels() {
 			});
 		}
 	}
-	if (!allModels.some((m) => m.provider === "github-copilot" && m.id === gpt6Astra.id)) {
-		allModels.push({ ...gpt6Astra, provider: "github-copilot", baseUrl: "https://api.individual.githubcopilot.com", headers: COPILOT_STATIC_HEADERS, compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false } });
+	if (
+		!allModels.some(
+			(m) => m.provider === "github-copilot" && m.id === gpt6Astra.id,
+		)
+	) {
+		allModels.push({
+			...gpt6Astra,
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+			headers: COPILOT_STATIC_HEADERS,
+			compat: {
+				supportsStore: false,
+				supportsDeveloperRole: false,
+				supportsReasoningEffort: false,
+			},
+		});
 	}
 
 	const deepseekCompat: OpenAICompletionsCompat = {
@@ -2026,7 +2395,10 @@ async function generateModels() {
 	allModels.push(...deepseekV4Models);
 
 	for (const candidate of allModels) {
-		if (candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
+		if (
+			candidate.api === "openai-completions" &&
+			candidate.id.includes("deepseek-v4")
+		) {
 			candidate.compat = {
 				...candidate.compat,
 				...(candidate.provider === "openrouter"
@@ -2043,20 +2415,32 @@ async function generateModels() {
 
 	const minimaxDirectModelOverrides = new Map<
 		string,
-		{ contextWindow: number; maxTokens: number; input?: ("text" | "image" | "video")[] }
+		{
+			contextWindow: number;
+			maxTokens: number;
+			input?: ("text" | "image" | "video")[];
+		}
 	>([
 		["MiniMax-M2.7", { contextWindow: 204800, maxTokens: 131072 }],
 		["MiniMax-M2.7-highspeed", { contextWindow: 204800, maxTokens: 131072 }],
 		// MiniMax's API overview advertises a 1M context window for M3; models.dev
 		// currently reports the documented guaranteed 512K floor. M3 also accepts
 		// video inputs alongside text and image, which models.dev does not report.
-		["MiniMax-M3", { contextWindow: 1000000, maxTokens: 131072, input: ["text", "image", "video"] }],
+		[
+			"MiniMax-M3",
+			{
+				contextWindow: 1000000,
+				maxTokens: 131072,
+				input: ["text", "image", "video"],
+			},
+		],
 	]);
 	const minimaxDirectSupportedIds = new Set(minimaxDirectModelOverrides.keys());
 
 	for (const candidate of allModels) {
 		if (
-			(candidate.provider === "minimax" || candidate.provider === "minimax-cn") &&
+			(candidate.provider === "minimax" ||
+				candidate.provider === "minimax-cn") &&
 			minimaxDirectSupportedIds.has(candidate.id)
 		) {
 			const override = minimaxDirectModelOverrides.get(candidate.id);
@@ -2073,7 +2457,8 @@ async function generateModels() {
 	for (let i = allModels.length - 1; i >= 0; i--) {
 		const candidate = allModels[i];
 		if (
-			(candidate.provider === "minimax" || candidate.provider === "minimax-cn") &&
+			(candidate.provider === "minimax" ||
+				candidate.provider === "minimax-cn") &&
 			!minimaxDirectSupportedIds.has(candidate.id)
 		) {
 			allModels.splice(i, 1);
@@ -2172,7 +2557,15 @@ async function generateModels() {
 				output: 30,
 				cacheRead: 0.5,
 				cacheWrite: 0,
-				tiers: [{ inputTokensAbove: 272000, input: 10, output: 45, cacheRead: 1, cacheWrite: 0 }],
+				tiers: [
+					{
+						inputTokensAbove: 272000,
+						input: 10,
+						output: 45,
+						cacheRead: 1,
+						cacheWrite: 0,
+					},
+				],
 			},
 			contextWindow: 372000,
 			maxTokens: CODEX_MAX_TOKENS,
@@ -2190,7 +2583,15 @@ async function generateModels() {
 				output: 15,
 				cacheRead: 0.25,
 				cacheWrite: 0,
-				tiers: [{ inputTokensAbove: 272000, input: 5, output: 22.5, cacheRead: 0.5, cacheWrite: 0 }],
+				tiers: [
+					{
+						inputTokensAbove: 272000,
+						input: 5,
+						output: 22.5,
+						cacheRead: 0.5,
+						cacheWrite: 0,
+					},
+				],
 			},
 			contextWindow: 372000,
 			maxTokens: CODEX_MAX_TOKENS,
@@ -2208,7 +2609,15 @@ async function generateModels() {
 				output: 6,
 				cacheRead: 0.1,
 				cacheWrite: 0,
-				tiers: [{ inputTokensAbove: 272000, input: 2, output: 9, cacheRead: 0.2, cacheWrite: 0 }],
+				tiers: [
+					{
+						inputTokensAbove: 272000,
+						input: 2,
+						output: 9,
+						cacheRead: 0.2,
+						cacheWrite: 0,
+					},
+				],
 			},
 			contextWindow: 372000,
 			maxTokens: CODEX_MAX_TOKENS,
@@ -2302,13 +2711,19 @@ async function generateModels() {
 		},
 	];
 	for (const model of missingGrokModels) {
-		if (!allModels.some(m => m.provider === model.provider && m.id === model.id)) {
+		if (
+			!allModels.some((m) => m.provider === model.provider && m.id === model.id)
+		) {
 			allModels.push(model);
 		}
 	}
 
 	// Add missing Mistral Medium 3.5 model until models.dev includes it
-	if (!allModels.some(m => m.provider === "mistral" && m.id === "mistral-medium-3.5")) {
+	if (
+		!allModels.some(
+			(m) => m.provider === "mistral" && m.id === "mistral-medium-3.5",
+		)
+	) {
 		allModels.push({
 			id: "mistral-medium-3.5",
 			name: "Mistral Medium 3.5",
@@ -2332,14 +2747,30 @@ async function generateModels() {
 	// The models.dev "zai-coding-plan" provider only lists a subset of what the
 	// live https://api.z.ai/api/coding/paas/v4/models endpoint exposes, so pin
 	// the known-available GLM models here to keep the /model picker complete.
-	const ZAI_SUPPLEMENT_MODELS: { id: string; name: string; contextWindow: number; maxTokens: number }[] = [
+	const ZAI_SUPPLEMENT_MODELS: {
+		id: string;
+		name: string;
+		contextWindow: number;
+		maxTokens: number;
+	}[] = [
 		{ id: "glm-4.5", name: "GLM-4.5", contextWindow: 131072, maxTokens: 98304 },
-		{ id: "glm-4.6", name: "GLM-4.6", contextWindow: 204800, maxTokens: 131072 },
+		{
+			id: "glm-4.6",
+			name: "GLM-4.6",
+			contextWindow: 204800,
+			maxTokens: 131072,
+		},
 		{ id: "glm-5", name: "GLM-5", contextWindow: 200000, maxTokens: 131072 },
-		{ id: "glm-5.2", name: "GLM-5.2", contextWindow: 200000, maxTokens: 131072 },
+		{
+			id: "glm-5.2",
+			name: "GLM-5.2",
+			contextWindow: 200000,
+			maxTokens: 131072,
+		},
 	];
 	for (const zaiModel of ZAI_SUPPLEMENT_MODELS) {
-		if (allModels.some(m => m.provider === "zai" && m.id === zaiModel.id)) continue;
+		if (allModels.some((m) => m.provider === "zai" && m.id === zaiModel.id))
+			continue;
 		allModels.push({
 			id: zaiModel.id,
 			name: zaiModel.name,
@@ -2357,7 +2788,9 @@ async function generateModels() {
 			compat: {
 				supportsDeveloperRole: false,
 				thinkingFormat: "zai",
-				...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(zaiModel.id) ? { zaiToolStream: true } : {}),
+				...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(zaiModel.id)
+					? { zaiToolStream: true }
+					: {}),
 			},
 			contextWindow: zaiModel.contextWindow,
 			maxTokens: zaiModel.maxTokens,
@@ -2365,7 +2798,7 @@ async function generateModels() {
 	}
 
 	// Add "auto" alias for openrouter/auto
-	if (!allModels.some(m => m.provider === "openrouter" && m.id === "auto")) {
+	if (!allModels.some((m) => m.provider === "openrouter" && m.id === "auto")) {
 		allModels.push({
 			id: "auto",
 			name: "Auto",
@@ -2377,10 +2810,10 @@ async function generateModels() {
 			cost: {
 				// we dont know about the costs because OpenRouter auto routes to different models
 				// and then charges you for the underlying used model
-				input:0,
-				output:0,
-				cacheRead:0,
-				cacheWrite:0,
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
 			},
 			contextWindow: 2000000,
 			maxTokens: 30000,
@@ -2548,7 +2981,12 @@ async function generateModels() {
 	allModels.push(...vertexModels);
 
 	const azureOpenAiModels: Model<Api>[] = allModels
-		.filter((model) => model.provider === "openai" && model.api === "openai-responses" && !isGpt56Variant(model.id))
+		.filter(
+			(model) =>
+				model.provider === "openai" &&
+				model.api === "openai-responses" &&
+				!isGpt56Variant(model.id),
+		)
 		.map((model) => ({
 			...model,
 			api: "azure-openai-responses",
@@ -2586,8 +3024,10 @@ async function generateModels() {
 			for (const tier of model.cost.tiers ?? []) {
 				if (tier.input !== undefined) tier.input = roundCost(tier.input);
 				if (tier.output !== undefined) tier.output = roundCost(tier.output);
-				if (tier.cacheRead !== undefined) tier.cacheRead = roundCost(tier.cacheRead);
-				if (tier.cacheWrite !== undefined) tier.cacheWrite = roundCost(tier.cacheWrite);
+				if (tier.cacheRead !== undefined)
+					tier.cacheRead = roundCost(tier.cacheRead);
+				if (tier.cacheWrite !== undefined)
+					tier.cacheWrite = roundCost(tier.cacheWrite);
 			}
 		}
 	}
@@ -2629,21 +3069,27 @@ export const MODELS = {
 			if (model.thinkingLevelMap) {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
 			}
-			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;
+			output += `\t\t\tinput: [${model.input.map((i) => `"${i}"`).join(", ")}],\n`;
 			output += `\t\t\tcost: {\n`;
 			output += `\t\t\t\tinput: ${formatCost(model.cost.input)},\n`;
 			output += `\t\t\t\toutput: ${formatCost(model.cost.output)},\n`;
 			output += `\t\t\t\tcacheRead: ${formatCost(model.cost.cacheRead)},\n`;
 			output += `\t\t\t\tcacheWrite: ${formatCost(model.cost.cacheWrite)},\n`;
 			if (model.cost.tiers?.length) {
-				const tiers = model.cost.tiers.map((tier) => {
-					let serialized = `{inputTokensAbove:${tier.inputTokensAbove}`;
-					if (tier.input !== undefined) serialized += `,input:${formatCost(tier.input)}`;
-					if (tier.output !== undefined) serialized += `,output:${formatCost(tier.output)}`;
-					if (tier.cacheRead !== undefined) serialized += `,cacheRead:${formatCost(tier.cacheRead)}`;
-					if (tier.cacheWrite !== undefined) serialized += `,cacheWrite:${formatCost(tier.cacheWrite)}`;
-					return `${serialized}}`;
-				}).join(",");
+				const tiers = model.cost.tiers
+					.map((tier) => {
+						let serialized = `{inputTokensAbove:${tier.inputTokensAbove}`;
+						if (tier.input !== undefined)
+							serialized += `,input:${formatCost(tier.input)}`;
+						if (tier.output !== undefined)
+							serialized += `,output:${formatCost(tier.output)}`;
+						if (tier.cacheRead !== undefined)
+							serialized += `,cacheRead:${formatCost(tier.cacheRead)}`;
+						if (tier.cacheWrite !== undefined)
+							serialized += `,cacheWrite:${formatCost(tier.cacheWrite)}`;
+						return `${serialized}}`;
+					})
+					.join(",");
 				output += `\t\t\t\ttiers: [${tiers}],\n`;
 			}
 			output += `\t\t\t},\n`;
@@ -2662,12 +3108,15 @@ export const MODELS = {
 	writeFileSync(join(packageRoot, "src/models.generated.ts"), output);
 	console.log("Generated src/models.generated.ts");
 
-	writeFileSync(join(packageRoot, "src/models.generated.json"), `${JSON.stringify(providers, null, 2)}\n`);
+	writeFileSync(
+		join(packageRoot, "src/models.generated.json"),
+		`${JSON.stringify(providers, null, 2)}\n`,
+	);
 	console.log("Generated src/models.generated.json");
 
 	// Print statistics
 	const totalModels = allModels.length;
-	const reasoningModels = allModels.filter(m => m.reasoning).length;
+	const reasoningModels = allModels.filter((m) => m.reasoning).length;
 
 	console.log(`\nModel Statistics:`);
 	console.log(`  Total tool-capable models: ${totalModels}`);
