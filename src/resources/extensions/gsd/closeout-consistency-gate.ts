@@ -13,7 +13,7 @@ import {
   getWorkflowDatabasePath,
   refreshWorkflowDatabaseFromDisk,
 } from "./db-workspace.js";
-import { isDeferredStatus } from "./status-guards.js";
+import { isDeferredStatus, isNeverWillRunTaskStatus } from "./status-guards.js";
 import {
   inspectQualityGatesFromEvidence,
   type QualityGateClosureOptions,
@@ -138,17 +138,6 @@ export function formatCloseoutAuthorizationBlockers(
 
 function isFileBackedDbPath(path: string | null): boolean {
   return Boolean(path && path !== ":memory:");
-}
-
-/**
- * Task statuses that mean the task will never run, so its task-scoped gate
- * rows can never be evaluated: "skipped" (the canonical status replan-slice
- * projects onto removed "husk" tasks) and the raw legacy alias "cancelled".
- * Deferred is intentionally absent: a deferred task is not a closed status and
- * exits via the task-open check before gates are consulted.
- */
-function isNeverWillRunTaskStatus(status: string | undefined): boolean {
-  return status === "skipped" || status === "cancelled";
 }
 
 function artifactBasePathFromDb(): string | undefined {
@@ -340,9 +329,11 @@ export function checkCloseoutConsistencyGate(
     // #2239: replan-slice deliberately retains removed ("husk") task rows, but
     // their task-scoped gate rows stay pending forever. A gate whose owning
     // task was skipped/cancelled away is unreachable — no session will ever
-    // evaluate it — so it must not block closeout. Scope is what makes a gate
-    // task-owned (a slice-scoped row may still carry a task_id), and gates of
-    // live tasks keep blocking.
+    // evaluate it — so it must not block closeout. #2687: the same holds for
+    // the operator closeout disposition "blocker-accepted" (#2202): the Task
+    // is terminal and never re-executes, so its armed gates stay unevaluated.
+    // Scope is what makes a gate task-owned (a slice-scoped row may still
+    // carry a task_id), and gates of live tasks keep blocking.
     const pendingGate = getPendingGates(milestoneId, slice.id).find((gate) =>
       !(gate.scope === "task" && isNeverWillRunTaskStatus(taskStatusById.get(gate.task_id)))
       && !plannedGateClosure.repaired.some((repair) =>
