@@ -15,8 +15,9 @@ This is the live counterpart to the other two test layers:
 These exist to answer one question the other layers can't: *does a real agent,
 given a real plan, actually execute through gsd's real gates to a correct,
 durable outcome?* They are slow and cost real tokens, so they never run in the
-default suite. Production release CI runs them as a non-blocking optional smoke
-against the configured live workflow model.
+default suite. Production release CI runs them only when the release is
+dispatched with `run_live_tests=true`; a failure then blocks the release before
+anything is published.
 
 Two scenarios:
 

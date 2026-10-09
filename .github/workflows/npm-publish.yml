@@ -573,14 +573,15 @@ jobs:
       - name: Build release
         run: pnpm run build
 
+      # Blocking when opted in: this is the only check that runs a real agent
+      # through the built release, and it runs before anything is published.
       - name: Run live workflow LLM tests (optional)
         if: ${{ inputs.run_live_tests }}
-        continue-on-error: true
         run: |
           chmod +x dist/loader.js
           GSD_SMOKE_BINARY="$(pwd)/dist/loader.js"
           export GSD_SMOKE_BINARY
-          pnpm run test:live-workflow || echo "::warning::Live workflow LLM tests failed - non-blocking, but worth investigating"
+          pnpm run test:live-workflow
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GSD_LIVE_TESTS: "1"
