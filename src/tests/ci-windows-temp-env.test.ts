@@ -12,7 +12,7 @@ const workflow = readFileSync(workflowPath, "utf8");
 
 function windowsPackageTestStep(): string {
 	const job = workflow.match(
-		/ {2}windows-portability:\n(?<body>[\s\S]*?)(?=\n {2}[a-zA-Z0-9_-]+:|\n?$)/,
+		/ {2}windows-portability:\n(?<body>[\s\S]*?)(?=\n {2}[a-zA-Z0-9_-]+:\n|\n?$)/,
 	)?.groups?.body;
 	assert.ok(job, "windows-portability job must exist");
 	assert.match(job, /runs-on:\s*\$\{\{\s*github\.repository_owner/);
@@ -30,7 +30,7 @@ test("Windows package tests keep temp overrides step-local", () => {
 	for (const variable of ["TEMP", "TMP", "TMPDIR"]) {
 		assert.match(
 			step,
-			new RegExp(`^\\s+${variable}: \\${{ runner\\.temp }}$`, "m"),
+			new RegExp(`^\\s+${variable}: \\$\\{\\{ runner\\.temp \\}\\}$`, "m"),
 			`${variable} must point to runner.temp in the Windows package-test step`,
 		);
 	}
