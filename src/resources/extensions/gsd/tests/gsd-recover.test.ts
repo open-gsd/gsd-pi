@@ -27,6 +27,7 @@ import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { deriveStateFromDb, invalidateStateCache } from '../state.ts';
 import { handleRecover } from '../commands-maintenance.ts';
 import { handleTaskRecoveryResume } from '../commands-task-recovery.ts';
+import { renderPlanFromDb } from '../markdown-renderer.ts';
 import { generateDecisionsMd, generateRequirementsMd, saveArtifactToDb, saveDecisionToDb, saveRequirementToDb } from '../db-writer.ts';
 import { hasSavedArtifact } from '../db/queries.ts';
 import { getAllDecisionsFromMemories } from '../context-store.ts';
@@ -905,6 +906,620 @@ describe('gsd-recover', async () => {
       closeDatabase();
       cleanup(base);
     }
+  });
+
+  test('recover imports slice Goal, Demo and success criteria from a flat PLAN and a re-render preserves them', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'phases/01-m001/01-ROADMAP.md', [
+      '# M001: Recovery Test',
+      '',
+      '- [ ] **S01: Setup** `risk:low` `depends:[]`',
+      '',
+    ].join('\n'));
+    writeFile(base, 'phases/01-m001/01-01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Milestone:** M001',
+      '**Slice:** S01',
+      '',
+      '**Goal:** Scaffold the project.',
+      '**Demo:** Project scaffold builds.',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      '- Config loads',
+      '',
+      '## Verification',
+      '',
+      '- Run the task and slice verification checks for this slice.',
+      '',
+      '<tasks>',
+      '- [ ] **T01**: Init',
+      '</tasks>',
+      '',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const previewMessage = first.notes.at(-1)?.message ?? '';
+    assert.equal(first.notes.at(-1)?.kind, 'warning');
+    // The Preview shows the parsed plan content before anything is written.
+    assert.match(previewMessage, /slice-plan-content/);
+    assert.match(previewMessage, /Scaffold the project\./);
+    assert.match(previewMessage, /Fixtures initialize\\nConfig loads/);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(previewMessage)?.[0];
+    assert.ok(approval, 'the Preview names the hash to approve');
+
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, approval);
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal, demo, success_criteria FROM slices WHERE id = 'S01'").get(),
+      {
+        goal: 'Scaffold the project.',
+        demo: 'Project scaffold builds.',
+        success_criteria: 'Fixtures initialize\nConfig loads',
+      },
+      'the slice row carries the plan content, not empty strings',
+    );
+
+    // The rebuild writes the imported content back over the PLAN file.
+    const rendered = await renderPlanFromDb(base, 'M001', 'S01');
+    const renderedContent = readFileSync(rendered.planPath, 'utf8');
+    for (const kept of [
+      '**Goal:** Scaffold the project.',
+      '**Demo:** Project scaffold builds.',
+      '- Fixtures initialize',
+      '- Config loads',
+    ]) {
+      assert.ok(renderedContent.includes(kept), kept);
+    }
+  });
+
+  test('recover imports a slice PLAN with only a Goal and leaves the other columns at their defaults', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0);
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal, demo, success_criteria FROM slices WHERE id = 'S01'").get(),
+      { goal: 'Setup fixtures.', demo: '', success_criteria: '' },
+    );
+  });
+
+  test('recover reports an unmodelable Must-Haves line as a Preview blocker and imports only the bullets by choice', (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '**Demo:** Tasks done.',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      'Freeform operator note.',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+
+    const pending = prepareVerifiedRecoverApplication(base);
+    const diagnosis = pending.preview.preview.diagnoses.find((entry) => (
+      entry.code === 'unmodelable-slice-plan-content'
+    ));
+    assert.ok(diagnosis, 'the prose Must-Haves line blocks the import');
+    assert.match(diagnosis.message, /Must-Haves/);
+    assert.equal(pending.preview.preview.counts.unresolved, 1);
+    assert.equal(getMilestone('M001'), null, 'an unresolved Preview applies nothing');
+
+    const resolved = resolvePreparedVerifiedRecoverApplication(pending, [{
+      diagnosis_id: diagnosis.diagnosis_id,
+      disposition: 'preserved',
+    }]);
+    const result = applyPreparedVerifiedRecoverApplication(resolved, resolved.preview.preview_hash);
+    assert.equal(result.preview.preview_hash, resolved.preview.preview_hash);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal, demo, success_criteria FROM slices WHERE id = 'S01'").get(),
+      {
+        goal: 'Setup fixtures.',
+        demo: 'Tasks done.',
+        success_criteria: 'Fixtures initialize',
+      },
+      'the bullets import and the unmodelable prose stays out of the row',
+    );
+  });
+
+  test('recover imports a wrapped multiline Goal over blank lines and ignores fenced plan examples', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '',
+      'and keep them fast.',
+      '**Demo:** Tasks done.',
+      '',
+      '## Task details',
+      '',
+      '```md',
+      '**Goal:** Example only',
+      '```',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0, 'a fenced example is not plan metadata');
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal, demo, success_criteria FROM slices WHERE id = 'S01'").get(),
+      {
+        goal: 'Setup fixtures.\n\nand keep them fast.',
+        demo: 'Tasks done.',
+        success_criteria: 'Fixtures initialize',
+      },
+    );
+  });
+
+  test('recover blocks disagreeing duplicate Goal lines instead of silently keeping one', (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '**Demo:** Tasks done.',
+      '',
+      '## Task details',
+      '',
+      '**Goal:** Task-specific goal.',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+
+    const pending = prepareVerifiedRecoverApplication(base);
+    const diagnosis = pending.preview.preview.diagnoses.find((entry) => (
+      entry.code === 'conflicting-slice-plan-metadata'
+    ));
+    assert.ok(diagnosis, 'the disagreeing duplicate Goal line blocks the import');
+    assert.equal(pending.preview.preview.counts.unresolved, 1);
+    assert.equal(getMilestone('M001'), null, 'an unresolved Preview applies nothing');
+
+    const resolved = resolvePreparedVerifiedRecoverApplication(pending, [{
+      diagnosis_id: diagnosis.diagnosis_id,
+      disposition: 'preserved',
+    }]);
+    applyPreparedVerifiedRecoverApplication(resolved, resolved.preview.preview_hash);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal FROM slices WHERE id = 'S01'").get(),
+      { goal: 'Setup fixtures.' },
+      'the first Goal line wins and the conflict was surfaced for a decision',
+    );
+  });
+
+  test('recover does not donate content from a nested plan file whose slice identity disagrees', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S02: Core',
+      '',
+      '**Goal:** Wrong slice goal.',
+      '',
+      '## Must-Haves',
+      '',
+      '- Wrong criteria',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    writeFile(base, 'milestones/M001/slices/S01/S02-PLAN.md', [
+      '# S02: Core',
+      '',
+      '**Goal:** Other slice goal.',
+      '',
+      '## Must-Haves',
+      '',
+      '- Other criteria',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T02: Build** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0);
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal, success_criteria FROM slices WHERE id = 'S01'").get(),
+      { goal: '', success_criteria: '' },
+      'neither the mislabeled plan nor the other slice plan donates content to S01',
+    );
+  });
+
+  test('recover reports an indented Must-Haves sub-bullet as unmodelable instead of flattening it', (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '**Demo:** Tasks done.',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      '  - without dropping events',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+
+    const pending = prepareVerifiedRecoverApplication(base);
+    const diagnosis = pending.preview.preview.diagnoses.find((entry) => (
+      entry.code === 'unmodelable-slice-plan-content'
+    ));
+    assert.ok(diagnosis, 'the indented sub-bullet blocks the import');
+
+    const resolved = resolvePreparedVerifiedRecoverApplication(pending, [{
+      diagnosis_id: diagnosis.diagnosis_id,
+      disposition: 'preserved',
+    }]);
+    applyPreparedVerifiedRecoverApplication(resolved, resolved.preview.preview_hash);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT success_criteria FROM slices WHERE id = 'S01'").get(),
+      { success_criteria: 'Fixtures initialize' },
+      'the top-level bullet imports and the sub-bullet hierarchy is not flattened',
+    );
+  });
+
+  test('recover blocks a Must-Haves subsection instead of silently dropping its criteria', (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '**Demo:** Tasks done.',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      '',
+      '### Reliability',
+      '',
+      '- No dropped events',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+
+    const pending = prepareVerifiedRecoverApplication(base);
+    const diagnosis = pending.preview.preview.diagnoses.find((entry) => (
+      entry.code === 'unmodelable-slice-plan-content'
+    ));
+    assert.ok(diagnosis, 'the Must-Haves subsection blocks the import');
+
+    const resolved = resolvePreparedVerifiedRecoverApplication(pending, [{
+      diagnosis_id: diagnosis.diagnosis_id,
+      disposition: 'preserved',
+    }]);
+    applyPreparedVerifiedRecoverApplication(resolved, resolved.preview.preview_hash);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT success_criteria FROM slices WHERE id = 'S01'").get(),
+      { success_criteria: 'Fixtures initialize' },
+      'the subsection bullets are not silently dropped or flattened into peers',
+    );
+  });
+
+  test('recover never reads slice plan identity or Goal lines from inside fenced code', async (t) => {    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '**Demo:** Tasks done.',
+      '',
+      '## Task details',
+      '',
+      '````md',
+      '## Must-Haves',
+      '',
+      '```md',
+      '**Goal:** Example only',
+      '**Slice:** S02',
+      '```',
+      '',
+      '````',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0, 'fenced examples are not plan content');
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal, success_criteria FROM slices WHERE id = 'S01'").get(),
+      { goal: 'Setup fixtures.', success_criteria: 'Fixtures initialize' },
+      'the fenced example Goal and Slice identity never reach the row',
+    );
+  });
+
+  test('recover does not donate content from a slice plan with contradictory identity metadata', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '**Slice:** S01',
+      '**Slice:** S02',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0);
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal, success_criteria FROM slices WHERE id = 'S01'").get(),
+      { goal: '', success_criteria: '' },
+      'a plan claiming two slice identities donates content to neither',
+    );
+  });
+
+  test('recover blocks a flat slice plan with contradictory identity metadata', (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'phases/01-m001/01-ROADMAP.md', [
+      '# M001: Recovery Test',
+      '',
+      '- [ ] **S01: Setup** `risk:low` `depends:[]`',
+      '',
+    ].join('\n'));
+    writeFile(base, 'phases/01-m001/01-01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Milestone:** M001',
+      '**Slice:** S01',
+      '**Slice:** S02',
+      '',
+      '**Goal:** Setup fixtures.',
+      '',
+      '<tasks>',
+      '- [ ] **T01**: Init',
+      '</tasks>',
+      '',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+
+    const pending = prepareVerifiedRecoverApplication(base);
+    assert.ok(
+      pending.preview.preview.diagnoses.some((entry) => entry.code === 'task-plan-parent-conflict'),
+      'the contradictory identity blocks the flat plan like any parent conflict',
+    );
+    assert.equal(
+      pending.preview.preview.changes.some((change) => change.reason_code === 'slice-plan-content'),
+      false,
+      'no plan content is donated while the identity is contradictory',
+    );
+
+    const diagnosis = pending.preview.preview.diagnoses.find((entry) => (
+      entry.code === 'task-plan-parent-conflict'
+    ))!;
+    const resolved = resolvePreparedVerifiedRecoverApplication(pending, [{
+      diagnosis_id: diagnosis.diagnosis_id,
+      disposition: 'preserved',
+    }]);
+    applyPreparedVerifiedRecoverApplication(resolved, resolved.preview.preview_hash);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal FROM slices WHERE id = 'S01'").get(),
+      { goal: '' },
+      'the contradictory plan donates content to neither slice',
+    );
+  });
+
+  test('recover ignores a fenced example heading in a flat plan and imports the real slice', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'phases/01-m001/01-ROADMAP.md', [
+      '# M001: Recovery Test',
+      '',
+      '- [ ] **S01: Setup** `risk:low` `depends:[]`',
+      '',
+      '- [ ] **S02: Core** `risk:medium` `depends:[S01]`',
+      '',
+    ].join('\n'));
+    writeFile(base, 'phases/01-m001/01-02-PLAN.md', [
+      '```md',
+      '# S01: Example',
+      '```',
+      '',
+      '# S02: Core',
+      '',
+      '**Milestone:** M001',
+      '**Slice:** S02',
+      '',
+      '**Goal:** Build core.',
+      '',
+      '<tasks>',
+      '- [ ] **T02**: Init',
+      '</tasks>',
+      '',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0, 'the fenced heading is not plan identity');
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT id, goal FROM slices ORDER BY id").all(),
+      [
+        { id: 'S01', goal: '' },
+        { id: 'S02', goal: 'Build core.' },
+      ],
+      'the fenced example heading does not block or misroute the real slice content',
+    );
+  });
+
+  test('recover keeps a four-space-indented fence line inside a fenced example', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'milestones/M001/slices/S01/S01-PLAN.md', [
+      '# S01: Setup',
+      '',
+      '**Goal:** Setup fixtures.',
+      '**Demo:** Tasks done.',
+      '',
+      '## Task details',
+      '',
+      '```md',
+      'example line',
+      '    ```',
+      '**Slice:** S02',
+      '```',
+      '',
+      '## Must-Haves',
+      '',
+      '- Fixtures initialize',
+      '',
+      '## Tasks',
+      '',
+      '- [x] **T01: Init** `est:15m`',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0, 'an indented delimiter is not a closing fence');
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT goal, success_criteria FROM slices WHERE id = 'S01'").get(),
+      { goal: 'Setup fixtures.', success_criteria: 'Fixtures initialize' },
+      'the fenced Slice declaration never reaches identity parsing',
+    );
   });
 
   test('recover imports the milestone CONTEXT of a flat phase directory and no slice file', async (t) => {

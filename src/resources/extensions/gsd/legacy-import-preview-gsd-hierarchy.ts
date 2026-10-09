@@ -383,6 +383,266 @@ function dependencyRange(start?: string, end?: string): readonly string[] {
   return values;
 }
 
+const SLICE_PLAN_LABEL_PATTERN = /^\*\*(Goal|Demo):\*\*\s*(.*)$/u;
+
+interface FenceState {
+  char: string;
+  length: number;
+}
+
+/**
+ * CommonMark fenced-code tracking: a fence opens with three or more backticks
+ * or tildes indented at most three spaces and closes only with a bare line of
+ * the same character at least as long as its opening delimiter at the same
+ * indentation limit, so a ``` example inside a ```` block stays fenced and a
+ * four-space-indented delimiter is an indented code block, not a fence.
+ */
+function fenceTransition(state: FenceState | undefined, text: string): FenceState | undefined {
+  if (state === undefined) {
+    const opening = /^ {0,3}(`{3,}|~{3,})/u.exec(text);
+    return opening === null ? undefined : { char: opening[1][0], length: opening[1].length };
+  }
+  const closing = /^ {0,3}(`{3,}|~{3,})\s*$/u.exec(text);
+  if (closing !== null && closing[1][0] === state.char && closing[1].length >= state.length) return undefined;
+  return state;
+}
+
+interface SlicePlanIdentity {
+  heading?: { match: RegExpExecArray; line: SourceLine; span: TextSpan };
+  milestone?: { value: string; line: SourceLine };
+  slice?: { value: string; line: SourceLine };
+  contradictory: boolean;
+}
+
+/**
+ * The identity declarations of a slice PLAN — its first `# Sxx:` heading and
+ * `**Milestone:**` / `**Slice:**` metadata, read outside fenced code. A file
+ * that declares one of them twice with different values is contradictory and
+ * may not donate content to either row.
+ */
+function slicePlanIdentity(file: SourceFile): SlicePlanIdentity {
+  let fenced: FenceState | undefined;
+  let heading: SlicePlanIdentity["heading"];
+  let milestone: SlicePlanIdentity["milestone"];
+  let slice: SlicePlanIdentity["slice"];
+  const headings = new Set<string>();
+  const milestones = new Set<string>();
+  const slices = new Set<string>();
+  for (const line of file.lines) {
+    const outside = fenced === undefined;
+    fenced = fenceTransition(fenced, line.text);
+    if (fenced !== undefined || !outside) continue;
+    const headingMatch = /^#\s+(S\d+):\s+(.+)$/u.exec(line.text);
+    if (headingMatch !== null) {
+      heading ??= { match: headingMatch, line, span: matchSpan(line, headingMatch) };
+      headings.add(headingMatch[1]);
+    }
+    const milestoneMatch = /^\*\*Milestone:\*\*\s+(\S+)\s*$/u.exec(line.text);
+    if (milestoneMatch !== null) {
+      milestone ??= { value: milestoneMatch[1], line };
+      milestones.add(milestoneMatch[1]);
+    }
+    const sliceMatch = /^\*\*Slice:\*\*\s+(S\d+)\s*$/u.exec(line.text);
+    if (sliceMatch !== null) {
+      slice ??= { value: sliceMatch[1], line };
+      slices.add(sliceMatch[1]);
+    }
+  }
+  return {
+    ...(heading === undefined ? {} : { heading }),
+    ...(milestone === undefined ? {} : { milestone }),
+    ...(slice === undefined ? {} : { slice }),
+    contradictory: headings.size > 1 || milestones.size > 1 || slices.size > 1,
+  };
+}
+
+type SlicePlanContent = {
+  goal?: string;
+  demo?: string;
+  success_criteria?: string;
+};
+
+/**
+ * Goal and Demo render as single `**Label:** value` lines, but a stored value
+ * may itself contain newlines, so the value continues over the following lines
+ * until the next bold label, heading or fence; fenced lines never anchor
+ * anything. A repeated label is honored only when it repeats the same value —
+ * disagreeing duplicates block instead of silently overwriting. Must-Haves
+ * models top-level bullets only: the renderer bullets every stored criterion
+ * line, so an indented sub-bullet or prose line cannot re-render as itself and
+ * is reported as unmodelable instead of imported. A heading below the
+ * Must-Haves level starts an unmodelable subsection; only a peer or ancestor
+ * heading ends the section.
+ */
+function slicePlanContent(file: SourceFile): {
+  content: SlicePlanContent;
+  span: TextSpan;
+  unmodelable?: SourceLine;
+  conflicting?: SourceLine;
+} {
+  const content: SlicePlanContent = {};
+  let unmodelable: SourceLine | undefined;
+  let conflicting: SourceLine | undefined;
+  let current: "goal" | "demo" | undefined;
+  let currentLabel: SourceLine | undefined;
+  let value: string[] = [];
+  let mustHavesLevel = 0;
+  let childMustHaves = false;
+  let fenced: FenceState | undefined;
+  let start = 0;
+  let end = 0;
+  const close = (): void => {
+    if (current === undefined) return;
+    while (value.length > 0 && value[value.length - 1].trim() === "") value.pop();
+    const text = value.join("\n").trim();
+    if (text !== "") {
+      if (content[current] === undefined) content[current] = text;
+      else if (content[current] !== text) conflicting ??= currentLabel;
+    }
+    current = undefined;
+    currentLabel = undefined;
+    value = [];
+  };
+  for (const line of file.lines) {
+    const outside = fenced === undefined;
+    fenced = fenceTransition(fenced, line.text);
+    if (fenced !== undefined || !outside) {
+      if (current !== undefined) {
+        value.push(line.text);
+        end = line.end;
+      } else if (mustHavesLevel > 0) {
+        unmodelable ??= line;
+      }
+      continue;
+    }
+    const heading = /^(#{1,6})\s/u.exec(line.text);
+    if (heading !== null) {
+      close();
+      const level = heading[1].length;
+      if (mustHavesLevel > 0 && level > mustHavesLevel) {
+        childMustHaves = true;
+        unmodelable ??= line;
+        continue;
+      }
+      childMustHaves = false;
+      mustHavesLevel = line.text.trim() === "## Must-Haves" ? level : 0;
+      continue;
+    }
+    if (mustHavesLevel > 0) {
+      if (line.text.trim() === "") continue;
+      if (childMustHaves) {
+        unmodelable ??= line;
+        continue;
+      }
+      const bullet = /^[-*]\s+(.+)$/u.exec(line.text);
+      if (bullet === null) {
+        unmodelable ??= line;
+        continue;
+      }
+      const criterion = bullet[1].trim();
+      content.success_criteria = content.success_criteria === undefined
+        ? criterion
+        : `${content.success_criteria}\n${criterion}`;
+      if (start === end) start = line.start;
+      end = line.end;
+      continue;
+    }
+    const label = SLICE_PLAN_LABEL_PATTERN.exec(line.text);
+    if (label !== null) {
+      close();
+      current = label[1].toLowerCase() as "goal" | "demo";
+      currentLabel = line;
+      value = [label[2]];
+      if (start === end) start = line.start;
+      end = line.end;
+      continue;
+    }
+    if (current !== undefined) {
+      // Any other bold label starts a different metadata field and ends this
+      // value; a <tasks> block is structure, never part of a value. Those
+      // lines are not slice-plan content and stay unimported.
+      if (/^\*\*[^*]+:\*\*/u.test(line.text) || /^<\/?tasks>$/u.test(line.text.trim())) close();
+      else {
+        value.push(line.text);
+        end = line.end;
+      }
+    }
+  }
+  close();
+  return {
+    content,
+    span: { start, end },
+    ...(unmodelable === undefined ? {} : { unmodelable }),
+    ...(conflicting === undefined ? {} : { conflicting }),
+  };
+}
+
+/**
+ * Emit the Goal, Demo and success-criteria content of a slice's own PLAN file
+ * as a second candidate on the same `milestone/slice` key as its ROADMAP
+ * bullet. The application plan merges non-conflicting fields into one row
+ * write, so the rebuild persists the plan content instead of empty strings
+ * (#2739). Hybrid layouts never reach this: their PLAN files already block as
+ * `unresolved-hybrid-membership`, so nothing applies without a user decision.
+ */
+function emitSlicePlanContent(
+  file: SourceFile,
+  milestoneId: string,
+  sliceId: string,
+  candidates: PendingCandidate[],
+  diagnoses: PendingDiagnosis[],
+): void {
+  const { content, span, unmodelable, conflicting } = slicePlanContent(file);
+  if (unmodelable !== undefined || conflicting !== undefined) {
+    file.outcome = "unparsed";
+  }
+  if (unmodelable !== undefined) {
+    addDiagnosis(
+      diagnoses,
+      file,
+      "unmodelable-slice-plan-content",
+      "A Must-Haves line is not a success-criteria bullet, so the slice plan content cannot be imported without losing it.",
+      { start: unmodelable.start, end: unmodelable.end },
+    );
+  }
+  if (conflicting !== undefined) {
+    addDiagnosis(
+      diagnoses,
+      file,
+      "conflicting-slice-plan-metadata",
+      "Two Goal or Demo lines in one slice plan disagree, so neither value can be chosen automatically.",
+      { start: conflicting.start, end: conflicting.end },
+    );
+  }
+  if (Object.keys(content).length === 0) return;
+  addCandidate(
+    candidates,
+    file,
+    { kind: "slice", key: `${milestoneId}/${sliceId}` },
+    content,
+    "slice-plan-content",
+    span,
+  );
+}
+
+/**
+ * A nested slice PLAN carries the slice's Goal, Demo and Must-Haves content.
+ * Only a `-PLAN.md` file whose name, `# Sxx:` heading and `**Milestone:**` /
+ * `**Slice:**` metadata all agree with the directory's slice identity
+ * qualifies, so another slice's plan or a notes artifact never donates its
+ * content to the wrong slice row (#2739 review). A contradictory or
+ * disagreeing file keeps the existing handling of its tasks and donates no
+ * content.
+ */
+function isSlicePlanForSlice(file: SourceFile, milestoneId: string, sliceId: string): boolean {
+  const fileName = file.entry.logical_path.split("/").at(-1) ?? "";
+  if (!new RegExp(`^${sliceId}(?:-[a-z0-9]+)?-PLAN\\.md$`, "u").test(fileName)) return false;
+  const identity = slicePlanIdentity(file);
+  if (identity.contradictory || identity.heading?.match[1] !== sliceId) return false;
+  if (identity.milestone !== undefined && identity.milestone.value !== milestoneId) return false;
+  return identity.slice === undefined || identity.slice.value === sliceId;
+}
+
 function emitHybridClaim(
   claim: HierarchyClaim,
   candidates: PendingCandidate[],
@@ -671,6 +931,7 @@ function selectFlatSlicePlanParent(
   file: SourceFile,
   claimsByDirectory: ReadonlyMap<string, HierarchyClaim>,
   heading: { line: SourceLine; match: RegExpExecArray; span: TextSpan },
+  identity: SlicePlanIdentity,
 ): {
   selected?: { milestoneId: string; sliceId: string };
   evidence?: SourceLine;
@@ -684,20 +945,21 @@ function selectFlatSlicePlanParent(
     : legacyIdentity !== null
       ? `S${String(Number(legacyIdentity[1])).padStart(2, "0")}`
       : undefined;
-  const milestone = firstMatch(file, /^\*\*Milestone:\*\*\s+(\S+)\s*$/u);
-  const slice = firstMatch(file, /^\*\*Slice:\*\*\s+(S\d+)\s*$/u);
   const headingSliceId = heading.match[1];
   const sliceIds = claim === undefined
     ? new Set<string>()
     : new Set(roadmapSlices(claim.file).map((candidate) => candidate.id));
+  if (identity.contradictory) return { evidence: heading.line };
   if (claim === undefined || fileSliceId === undefined || !sliceIds.has(headingSliceId)) {
     return { evidence: heading.line };
   }
   if (fileSliceId !== headingSliceId) return { evidence: heading.line };
-  if (milestone !== undefined && milestone.match[1] !== claim.canonicalId) {
-    return { evidence: milestone.line };
+  if (identity.milestone !== undefined && identity.milestone.value !== claim.canonicalId) {
+    return { evidence: identity.milestone.line };
   }
-  if (slice !== undefined && slice.match[1] !== headingSliceId) return { evidence: slice.line };
+  if (identity.slice !== undefined && identity.slice.value !== headingSliceId) {
+    return { evidence: identity.slice.line };
+  }
   return { selected: { milestoneId: claim.canonicalId, sliceId: headingSliceId } };
 }
 
@@ -710,9 +972,11 @@ function interpretFlatArtifact(
   const path = file.entry.logical_path;
   if (roadmapPath(path) || file.encoding !== "utf-8") return;
   if (/-PLAN\.md$/u.test(path)) {
-    const sliceHeading = firstMatch(file, /^#\s+(S\d+):\s+(.+)$/u);
+    // Fence-aware identity: a fenced `# S01:` example is not the plan heading.
+    const identity = slicePlanIdentity(file);
+    const sliceHeading = identity.heading;
     if (sliceHeading !== undefined) {
-      const parent = selectFlatSlicePlanParent(file, claimsByDirectory, sliceHeading);
+      const parent = selectFlatSlicePlanParent(file, claimsByDirectory, sliceHeading, identity);
       if (parent.selected === undefined) {
         file.outcome = "unparsed";
         const evidence = parent.evidence ?? sliceHeading.line;
@@ -725,6 +989,13 @@ function interpretFlatArtifact(
         );
         return;
       }
+      emitSlicePlanContent(
+        file,
+        parent.selected.milestoneId,
+        parent.selected.sliceId,
+        candidates,
+        diagnoses,
+      );
       nestedTaskCandidates(
         file,
         parent.selected.milestoneId,
@@ -1114,6 +1385,9 @@ function interpretNested(
     if (roadmapPath(file.entry.logical_path) || file.encoding !== "utf-8") continue;
     const parent = nestedPlanParent(file, claimsByDirectory);
     if (parent !== undefined && memberships.get(parent.milestoneId)?.has(parent.sliceId)) {
+      if (isSlicePlanForSlice(file, parent.milestoneId, parent.sliceId)) {
+        emitSlicePlanContent(file, parent.milestoneId, parent.sliceId, candidates, diagnoses);
+      }
       nestedTaskCandidates(file, parent.milestoneId, parent.sliceId, candidates, diagnoses);
       continue;
     }
