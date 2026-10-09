@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { crossReferenceEvidence } from "../safety/evidence-cross-ref.ts";
+import { crossReferenceEvidence, splitTopLevelAnd } from "../safety/evidence-cross-ref.ts";
 import {
   getEvidence,
   recordToolCall,
@@ -587,6 +587,485 @@ test("an older observed pass followed by a deadline-timeouted run stays clean (n
         exitCode: -2,
         outputSnippet: "Workflow operation exceeded 300000ms deadline (GSD_MCP_WORKFLOW_TIMEOUT_MS)",
         timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+
+// ─── Compound-claim per-part matching (#2665) ───────────────────────────────
+
+test("a compound claim verified per part when each part ran separately (#2665)", () => {
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm run lint && npm run typecheck", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm run lint",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: "npm run typecheck",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+
+test("a compound claim fails when any part's newest execution failed (#2665)", () => {
+  // Safety hole closed: the newest matching execution overall was the passing
+  // typecheck run, so whole-claim matching passed the chain while the lint
+  // part's newest run had failed. Per-part judging catches it.
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm run lint && npm run typecheck", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm run lint",
+        exitCode: 1,
+        outputSnippet: "lint errors",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: "npm run typecheck",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  assert.match(mismatches[0].reason, /Claimed exitCode=0 but actual exitCode=1/);
+});
+
+test("a compound claim with a part recorded only inside a compound run is judged on that run (#2665)", () => {
+  // A passing compound recording proves every part of an `&&` chain passed,
+  // so a part matched only inside the script passes with it.
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm run lint && npm run custom-check", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "cd /work && npm run lint && npm run custom-check",
+        exitCode: 0,
+        outputSnippet: "ok",
+        timestamp: 1,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+
+test("a compound claim with a part recorded in a failing compound run still blocks (#2665)", () => {
+  // The script's exit code is its FINAL statement's (#2326): per-part
+  // matching must not launder that into a per-part pass.
+  const mismatches = crossReferenceEvidence(
+    [{ command: "bundle exec i18n-tasks missing", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "bundle exec rspec spec/requests && bundle exec i18n-tasks missing && grep -c LOCALE_KEY config/locales/en.yml",
+        exitCode: 1,
+        outputSnippet: "0",
+        timestamp: 1,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  assert.match(mismatches[0].reason, /compound script/);
+});
+
+test("a compound claim with an unrecorded part falls back to whole-claim matching (#2665)", () => {
+  // No part of this chain was ever executed and no recording contains it;
+  // the claim must keep the plain "no matching call" warning instead of a
+  // synthetic per-part verdict.
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm run lint && ssh deploy@host restart", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm run build",
+        exitCode: 0,
+        outputSnippet: "built",
+        timestamp: 1,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "warning");
+  assert.match(mismatches[0].reason, /No bash tool call found/);
+});
+
+test("an exact newer whole-chain recording stays authoritative over older standalone history (#2665 codex)", () => {
+  // Old standalone lint failure, then a successful exact recording of the
+  // whole chain: the chain's own newest outcome is the evidence — per-part
+  // matching must not resurrect the superseded standalone failure.
+  const chain = "npm run lint && npm run typecheck";
+  const mismatches = crossReferenceEvidence(
+    [{ command: chain, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm run lint",
+        exitCode: 1,
+        outputSnippet: "lint errors",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: chain,
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+
+test("a newer failed whole-chain recording still blocks over older standalone passes (#2665 codex)", () => {
+  const chain = "npm run lint && npm run typecheck";
+  const mismatches = crossReferenceEvidence(
+    [{ command: chain, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm run lint",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: "npm run typecheck",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-3",
+        command: chain,
+        exitCode: 1,
+        outputSnippet: "typecheck errors",
+        timestamp: 3,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+});
+
+test("a chain with mixed operators keeps whole-claim matching (#2665 codex)", () => {
+  // `||` short-circuits: per-part pass requirements would be wrong, so the
+  // claim falls back to the pre-#2665 whole-claim behavior (substring match
+  // against the recorded run, judged on its newest outcome).
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm run lint && npm test || true", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm test",
+        exitCode: 1,
+        outputSnippet: "test failure",
+        timestamp: 1,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+});
+
+test("a labeled whole-chain recording stays authoritative over older standalone history (#2665 codex r2)", () => {
+  // The collector prefixes a gsd_exec label to recorded bodies; authority
+  // detection must strip it before comparing to the claim.
+  const chain = "npm run lint && npm run typecheck";
+  const mismatches = crossReferenceEvidence(
+    [{ command: chain, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm run lint",
+        exitCode: 1,
+        outputSnippet: "lint errors",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: `gsd_exec bash: verify\n${chain}`,
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+
+test("a claim carrying the collector label keeps whole-chain authority (#2665 codex r3)", () => {
+  // Claims copied verbatim from persisted evidence carry the label too.
+  const chain = "npm run lint && npm run typecheck";
+  const mismatches = crossReferenceEvidence(
+    [{ command: `gsd_exec bash: verify\n${chain}`, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm run typecheck",
+        exitCode: 1,
+        outputSnippet: "older standalone failure",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: chain,
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+
+test("a labeled claim with structured purpose text still gets whole-chain authority (#2665 codex r4)", () => {
+  // The label purpose contains parens; the label must be stripped BEFORE
+  // splitting so the failed whole-chain recording stays authoritative over
+  // the newer standalone pass.
+  const chain = "npm run lint && npm run typecheck";
+  const mismatches = crossReferenceEvidence(
+    [{ command: `gsd_exec bash: lint (then typecheck)\n${chain}`, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: chain,
+        exitCode: 1,
+        outputSnippet: "typecheck errors",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: "npm run typecheck",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+});
+
+test("cd-prefixed single commands keep wrapper-suffix comparison (#2665 codex r4)", () => {
+  const base: BashEvidence[] = [
+    {
+      kind: "bash",
+      toolCallId: "call-1",
+      command: "cd /work",
+      exitCode: 0,
+      outputSnippet: "",
+      timestamp: 1,
+    },
+    {
+      kind: "bash",
+      toolCallId: "call-2",
+      command: "cd /work > out.log",
+      exitCode: 1,
+      outputSnippet: "",
+      timestamp: 2,
+    },
+  ];
+  // Newest redirect-suffixed failure is authoritative over the older exact
+  // pass (baseline behavior; the suffix must still be peeled).
+  const blocking = crossReferenceEvidence(
+    [{ command: "cd /work", exitCode: 0, verdict: "passed" }],
+    base,
+  );
+  assert.equal(blocking.length, 1);
+  assert.equal(blocking[0].severity, "error");
+
+  // Reversed outcomes stay clean.
+  const reversed = base.map((call) => ({ ...call, exitCode: call.exitCode === 0 ? 1 : 0 }));
+  const clean = crossReferenceEvidence(
+    [{ command: "cd /work", exitCode: 0, verdict: "passed" }],
+    reversed,
+  );
+  assert.deepEqual(clean, []);
+});
+
+test("a quoted cd path does not bypass whole-chain authority (#2665 codex r3)", () => {
+  // The cd wrapper path contains a quoted `&&`: the chain's own failed
+  // recording must not be shadowed by newer standalone successes.
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm run lint && npm run typecheck", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: 'cd "/work/a && b" && npm run lint && npm run typecheck',
+        exitCode: 1,
+        outputSnippet: "typecheck errors",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: "npm run typecheck",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-3",
+        command: "npm run lint",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 3,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+});
+
+test("a failed cd-wrapped chain recording stays authoritative over a newer standalone part pass (#2665 codex r2)", () => {
+  const chain = "npm run lint && npm run typecheck";
+  const mismatches = crossReferenceEvidence(
+    [{ command: chain, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: `cd /work && ${chain}`,
+        exitCode: 1,
+        outputSnippet: "typecheck errors",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: "npm run typecheck",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+});
+
+test("splitTopLevelAnd splits only real top-level && chains (#2665)", () => {
+  assert.deepEqual(splitTopLevelAnd("a && b"), ["a", "b"]);
+  assert.deepEqual(splitTopLevelAnd("a && b && c"), ["a", "b", "c"]);
+  assert.deepEqual(splitTopLevelAnd(" a &&  b "), ["a", "b"]);
+  // Quoted segments are data: an && inside them must not split.
+  assert.deepEqual(splitTopLevelAnd("grep 'a && b' file && npm test"), ["grep 'a && b' file", "npm test"]);
+  assert.deepEqual(splitTopLevelAnd('echo "x && y"'), null);
+  // Single commands, empty parts, unterminated quotes, and other operators or
+  // grouping keep whole-claim matching.
+  assert.equal(splitTopLevelAnd("npm test"), null);
+  assert.equal(splitTopLevelAnd("a && "), null);
+  assert.equal(splitTopLevelAnd("a && && b"), null);
+  assert.equal(splitTopLevelAnd("echo 'unterminated && b"), null);
+  assert.equal(splitTopLevelAnd("a || b"), null);
+  assert.equal(splitTopLevelAnd("a; b"), null);
+  assert.equal(splitTopLevelAnd("(a && b)"), null);
+  assert.equal(splitTopLevelAnd("echo $(a && b) && c"), null);
+  assert.equal(splitTopLevelAnd("a && b | tail -5"), null);
+  // Newlines separate script statements: line-wise execution means a trailing
+  // line can decide the outcome independently of the chain (#2665 codex r5).
+  assert.equal(splitTopLevelAnd("lint && typecheck\nbuild"), null);
+  // Command substitution inside double quotes executes too: keep whole-claim
+  // matching instead of trusting quote toggling (#2665 codex r2).
+  assert.equal(splitTopLevelAnd('echo "$(printf "%s" "a && b")" && npm test'), null);
+  assert.equal(splitTopLevelAnd("echo `ls && pwd` && npm test"), null);
+});
+
+test("a multiline cd-prefixed script is not wrapper-equivalent to a line (#2665 codex r5)", () => {
+  // `cd /work\nfalse && npm test` is two statements; the older exact pass of
+  // the claimed line stays the newest evidence FOR that line and the newer
+  // unrelated script must not shadow it (baseline behavior restored).
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm test", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm test",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: "cd /work\nfalse && npm test",
+        exitCode: 1,
+        outputSnippet: "failed",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+
+test("a compound claim with SOME parts unrecorded falls back to whole-claim matching (#2665 codex)", () => {
+  // `npm run lint` was recorded exactly, the tail never ran anywhere; per-part
+  // judging is impossible, so the claim keeps the pre-#2665 whole-claim
+  // behavior (substring match against the recorded run).
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm run lint && ssh deploy@host restart", exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: "npm run lint",
+        exitCode: 0,
+        outputSnippet: "clean",
+        timestamp: 1,
       },
     ] as EvidenceEntry[],
   );
