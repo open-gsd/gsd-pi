@@ -282,7 +282,7 @@ test("a unit that saves its result after the hard-timeout steer is advanced, not
 test("a unit that ends while the hard-timeout steer is sent gets no new hard timeout (#2644)", async (t) => {
   const h = startHarness(t);
   // The unit ends during recovery: the loop clears the supervision timers, as clearUnitTimeout() does.
-  h.sctx.pi.sendMessage = () => {
+  h.sctx.pi.sendMessage = async () => {
     for (const key of ["wrapupWarningHandle", "unitTimeoutHandle"]) {
       if (h.s[key]) clearTimeout(h.s[key]);
       h.s[key] = null;
