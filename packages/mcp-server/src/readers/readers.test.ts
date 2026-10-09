@@ -425,6 +425,81 @@ describe('flat-phase shared readers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// gsd_doctor projection-gap repair hints (issue #2651)
+// ---------------------------------------------------------------------------
+
+describe('gsd_doctor projection-gap repair hints (#2651)', () => {
+  let projectDir: string;
+
+  before(() => {
+    projectDir = tmpProject();
+    // M008, flat-phase: S01 is planned and done (checkbox in its slice plan),
+    // S02 has only a task summary artifact — the exact shape of a worktree
+    // milestone whose rendered markdown never reached this .gsd (slice
+    // plans/SUMMARY files missing, task summaries present).
+    writeFixture(projectDir, '.gsd/phases/08-z/08-01-PLAN.md', `# S01
+
+<tasks>
+- [x] **T01**: Done unit
+</tasks>
+`);
+    writeFixture(projectDir, '.gsd/phases/08-z/S01-T01-SUMMARY.md', '# T01 done\n');
+    writeFixture(projectDir, '.gsd/phases/08-z/S02-T01-SUMMARY.md', '# T01 done\n');
+  });
+
+  after(() => rmSync(projectDir, { recursive: true, force: true }));
+
+  it('every projection-gap finding names the conditional re-render repair', () => {
+    const result = runDoctorLite(projectDir);
+    const codes = ['all_slices_done_missing_summary', 'missing_slice_plan', 'missing_roadmap', 'missing_task_plan'];
+    for (const code of codes) {
+      const issue = result.issues.find((i) => i.code === code);
+      assert.ok(issue, `${code} should be reported for this fixture`);
+      assert.match(issue.message, /\/gsd sync/, `${code} must name the repair`);
+      assert.match(issue.message, /if the database holds/, `${code} must not promise recovery the fallback cannot verify`);
+    }
+    // The flat slice plan is the task state carrier: S02's plan gap is
+    // reported once as a slice finding and once per task.
+    assert.equal(result.issues.find((i) => i.code === 'missing_slice_plan')?.unitId, 'M008/S02');
+    assert.equal(result.issues.find((i) => i.code === 'missing_task_plan')?.unitId, 'M008/S02/T01');
+  });
+
+  it('keeps the fallback severities and provenance unchanged', () => {
+    const result = runDoctorLite(projectDir);
+    assert.equal(result.ok, false);
+    assert.equal(result.readMetadata?.authority, 'projection-fallback');
+    assert.equal(result.issues.find((i) => i.code === 'all_slices_done_missing_summary')?.severity, 'error');
+    assert.equal(result.issues.find((i) => i.code === 'missing_slice_plan')?.severity, 'error');
+    assert.equal(result.issues.find((i) => i.code === 'missing_roadmap')?.severity, 'warning');
+    assert.equal(result.issues.find((i) => i.code === 'missing_task_plan')?.severity, 'warning');
+    // S01 is planned and done: no findings for it.
+    assert.equal(result.issues.find((i) => i.code === 'missing_slice_plan' && i.unitId === 'M008/S01'), undefined);
+    assert.equal(result.issues.find((i) => i.code === 'missing_task_plan' && i.unitId === 'M008/S01/T01'), undefined);
+  });
+});
+
+describe('gsd_doctor legacy layout gets no task-plan re-render hint (#2651)', () => {
+  let projectDir: string;
+
+  before(() => {
+    projectDir = tmpProject();
+    // Legacy layout: task plans are their own tasks/T01-PLAN.md file, which
+    // the renderer deliberately does not re-render — the hint must not
+    // advertise a repair that cannot restore it.
+    writeFixture(projectDir, '.gsd/milestones/M002/slices/S01/tasks/T01-SUMMARY.md', '# T01 done\n');
+  });
+
+  after(() => rmSync(projectDir, { recursive: true, force: true }));
+
+  it('missing_task_plan carries no re-render hint in the legacy layout', () => {
+    const result = runDoctorLite(projectDir);
+    const issue = result.issues.find((i) => i.code === 'missing_task_plan');
+    assert.ok(issue, 'missing_task_plan should be reported for this fixture');
+    assert.doesNotMatch(issue.message, /\/gsd sync/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // readHistory tests
 // ---------------------------------------------------------------------------
 
