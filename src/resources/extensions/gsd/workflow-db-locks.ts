@@ -178,14 +178,19 @@ export function isDormantWorkflowDbLockHolderSafeToTerminate(
     && holder.processStartedAtMs <= workerStartedAtMs + 60_000;
 }
 
-export function formatLockedWorkflowDatabaseNotice(holderPids: readonly number[]): string {
+export function formatLockedWorkflowDatabaseNotice(
+  holderPids: readonly number[],
+  // The auto-mode backstop wording is the default subject; other seams
+  // (status, #2712) pass their own so the prefix never lies about the mode.
+  subject = "Auto-mode blocked — liveness backstop unavailable",
+): string {
   const pidDetail = holderPids.length === 1
     ? ` (PID ${holderPids[0]!})`
     : holderPids.length > 1
       ? ` (PIDs ${holderPids.join(", ")})`
       : "";
   return (
-    `Auto-mode blocked — liveness backstop unavailable: workflow database is locked by another GSD process${pidDetail}. ` +
+    `${subject}: workflow database is locked by another GSD process${pidDetail}. ` +
     "Run `/gsd doctor --fix` to clean orphaned holders or stop that process."
   );
 }
