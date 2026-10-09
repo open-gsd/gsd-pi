@@ -141,6 +141,27 @@ test("closeout consistency ignores pending gates of replanned-away (husk) tasks 
   assert.deepEqual(checkCloseoutConsistencyGate("M001"), { ok: true });
 });
 
+test("closeout consistency ignores pending gates of blocker-accepted tasks (#2687)", (t) => {
+  t.after(() => closeDatabase());
+  assert.equal(openDatabase(":memory:"), true);
+  // A skipped milestone needs no validation, so no validation verdict closes
+  // these gates and the pending-gate check alone decides.
+  insertMilestone({ id: "M001", title: "Milestone One", status: "skipped" });
+  insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
+  // Real task: evaluated gate rows are complete.
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Real", status: "complete" });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q5", scope: "task", taskId: "T01", status: "complete" });
+  // A Task closed via gsd_task_settle settleDisposition "blocker-accepted"
+  // (#2202): terminal in both vocabularies and never re-executed, so its
+  // armed execute-task gates stay pending forever — matching the reported
+  // auto-mode wedge.
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Blocked", status: "blocker-accepted" });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q6", scope: "task", taskId: "T02" });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q7", scope: "task", taskId: "T02" });
+
+  assert.deepEqual(checkCloseoutConsistencyGate("M001"), { ok: true });
+});
+
 test("closeout consistency still blocks on a slice-scoped gate row that carries a task_id (#2239)", (t) => {
   t.after(() => closeDatabase());
   assert.equal(openDatabase(":memory:"), true);
