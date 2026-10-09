@@ -363,6 +363,64 @@ async function waitForFile(filePath: string, signal: AbortSignal | undefined, ti
 	return false;
 }
 
+type CmuxExitWaitOutcome =
+	| { outcome: "exit" }
+	| { outcome: "wrapper-died"; wrapperPid: number }
+	| { outcome: "timeout" };
+
+/**
+ * Wait for the cmux wrapper's exit.code while revalidating the wrapper
+ * shell's pid (#2652). The wrapper is the only handle this process has: it
+ * owns the exit.code write, so if it dies the wait can never resolve on its
+ * own and would burn the full 30-minute ceiling. Same semantics as the
+ * direct-spawn poll (#2364): only ESRCH proves death (EPERM means alive,
+ * pid reuse stays conservatively alive), the first check runs as soon as
+ * the pid file appears, then every LIVENESS_POLL_INTERVAL_MS, and a
+ * suspected death is re-checked once after LIVENESS_DEATH_GRACE_MS so a
+ * racing exit write wins.
+ */
+async function waitForExitFileWithWrapperLiveness(
+	exitPath: string,
+	pidPath: string,
+	signal: AbortSignal | undefined,
+	onWrapperPid: (pid: number) => void,
+	timeoutMs = 30 * 60 * 1000,
+): Promise<CmuxExitWaitOutcome> {
+	const started = Date.now();
+	let wrapperPid: number | null = null;
+	let lastPollAt = 0;
+	while (Date.now() - started < timeoutMs) {
+		if (signal?.aborted) return { outcome: "timeout" };
+		// Observe the wrapper pid before the exit check: a pid published next
+		// to an exit code still belongs on the run record for status.
+		if (wrapperPid === null && fs.existsSync(pidPath)) {
+			const parsed = Number.parseInt(fs.readFileSync(pidPath, "utf-8").trim(), 10);
+			if (Number.isInteger(parsed) && parsed > 0) {
+				wrapperPid = parsed;
+				onWrapperPid(parsed);
+			}
+		}
+		if (fs.existsSync(exitPath)) return { outcome: "exit" };
+		if (wrapperPid !== null && Date.now() - lastPollAt >= LIVENESS_POLL_INTERVAL_MS) {
+			lastPollAt = Date.now();
+			if (!isProcessAlive(wrapperPid)) {
+				await new Promise((resolve) => setTimeout(resolve, LIVENESS_DEATH_GRACE_MS));
+				// Cancellation and the deadline outrank the death verdict after
+				// the grace sleep: an abort must keep its interrupted semantics,
+				// never a post-cancellation "exit".
+				if (signal?.aborted) return { outcome: "timeout" };
+				if (fs.existsSync(exitPath)) return { outcome: "exit" };
+				if (Date.now() - started >= timeoutMs) return { outcome: "timeout" };
+				if (!isProcessAlive(wrapperPid)) return { outcome: "wrapper-died", wrapperPid };
+				// The pid was reused between the two checks: conservatively
+				// alive; later polls keep re-checking.
+			}
+		}
+		await new Promise((resolve) => setTimeout(resolve, 150));
+	}
+	return { outcome: "timeout" };
+}
+
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 interface TaskParam {
@@ -443,10 +501,16 @@ function formatAgentLabel(agent: string, trackingName?: string): string {
  * dead: every active child must carry a persisted pid, all of them gone —
  * confirmed twice, grace apart, against a fresh read — and the record must
  * have been silent well past one poll interval, so nothing (funnel work like
- * isolation capture/merge included) can still own it. Then the completion
- * funnel can never run again and the record gets a terminal status (#2364).
- * Anything less — unknown pids, mixed dispatches, fresh records, pid reuse —
- * keeps the record untouched: never invents a death for healthy work.
+ * isolation capture/merge included) is likely to still own it. The record
+ * then gets a terminal status (#2364). Cmux children participate too: their
+ * persisted pid is the wrapper shell that owns the exit.code write (#2652),
+ * and a live dispatch's own watchdog resolves the record long before the
+ * silence gate could. The accepted residual (same as #2364): funnel work
+ * silent for longer than one poll interval with a dead child pid can be
+ * condemned once; the finishing dispatch overwrites the healed record with
+ * the true outcome. Anything less — unknown pids, mixed dispatches, fresh
+ * records, pid reuse — keeps the record untouched: never invents a death for
+ * healthy work.
  */
 async function revalidateRunningRecord(
 	runStore: SubagentRunStore,
@@ -540,7 +604,11 @@ interface SubagentRunOptions {
 	thinkingOverride?: string;
 	projectRoot?: string;
 	projectRootSourceCwd?: string;
-	/** Observability hook fired once when the direct-spawn child exists. */
+	/**
+	 * Observability hook fired once when the child's OS pid becomes known:
+	 * at direct-spawn spawn, or when the cmux wrapper shell publishes its
+	 * pid file (#2652). Persisted so action: "status" can revalidate.
+	 */
 	onChildSpawned?: (pid: number | undefined) => void;
 }
 
@@ -771,7 +839,8 @@ async function runSingleAgent(
 	}
 }
 
-async function runSingleAgentInCmuxSplit(
+/** Exported for tests (cmux-wrapper-liveness.test.ts drives the cmux path directly). */
+export async function runSingleAgentInCmuxSplit(
 	cmuxClient: CmuxClient,
 	directionOrSurfaceId: "right" | "down" | string,
 	defaultCwd: string,
@@ -840,6 +909,7 @@ async function runSingleAgentInCmuxSplit(
 		const stdoutPath = path.join(tmpOutputDir, "stdout.jsonl");
 		const stderrPath = path.join(tmpOutputDir, "stderr.log");
 		const exitPath = path.join(tmpOutputDir, "exit.code");
+		const pidPath = path.join(tmpOutputDir, "pid");
 		// Accept either a pre-created surface ID or a direction to create a new split
 		const isDirection = directionOrSurfaceId === "right" || directionOrSurfaceId === "down"
 			|| directionOrSurfaceId === "left" || directionOrSurfaceId === "up";
@@ -875,6 +945,10 @@ async function runSingleAgentInCmuxSplit(
 		const envPrefix = buildShellEnvAssignments(launch.env).join(" ");
 		const commandPrefix = envPrefix ? `${envPrefix} ` : "";
 		const innerScript = [
+			// Publish the wrapper shell's pid first (#2652): it is the process
+			// that owns the exit.code write, so its death is exactly the
+			// no-exit-file condition the wait must not sit on for 30 minutes.
+			`printf '%s' "$$" > ${bashPath(pidPath)}`,
 			`cd ${bashPath(launch.cwd)}`,
 			"set -o pipefail",
 			`${commandPrefix}${bashPath(process.execPath)} ${processArgs.map(a => bashPath(a)).join(" ")} 2> >(tee ${bashPath(stderrPath)} >&2) | tee ${bashPath(stdoutPath)}`,
@@ -887,8 +961,13 @@ async function runSingleAgentInCmuxSplit(
 			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, options);
 		}
 
-		const finished = await waitForFile(exitPath, signal);
-		if (!finished) {
+		const finished = await waitForExitFileWithWrapperLiveness(
+			exitPath,
+			pidPath,
+			signal,
+			(wrapperPid) => options.onChildSpawned?.(wrapperPid),
+		);
+		if (finished.outcome === "timeout") {
 			// Terminate the child running inside the cmux split: send Ctrl-C
 			// so bash interrupts the pipeline and writes the exit code, instead
 			// of leaving an orphaned subagent that can keep editing after cancel.
@@ -909,6 +988,32 @@ async function runSingleAgentInCmuxSplit(
 					processSubagentEventLine(line, currentResult, emitUpdate);
 				}
 			}
+			return currentResult;
+		}
+		if (finished.outcome === "wrapper-died") {
+			// The wrapper shell died without writing exit.code, so the normal
+			// completion can never land. Fail the dispatch now (#2652) and
+			// interrupt the surface best-effort so an orphaned pipeline member
+			// cannot keep editing after the run is marked failed.
+			try {
+				await cmuxClient.sendInterrupt(cmuxSurfaceId);
+			} catch {
+				/* ignore — best-effort */
+			}
+			currentResult.exitCode = 1;
+			currentResult.running = false;
+			currentResult.completedAt = Date.now();
+			if (fs.existsSync(stdoutPath)) {
+				const stdout = fs.readFileSync(stdoutPath, "utf-8");
+				for (const line of stdout.split("\n")) {
+					processSubagentEventLine(line, currentResult, emitUpdate);
+				}
+			}
+			if (fs.existsSync(stderrPath)) {
+				currentResult.stderr = fs.readFileSync(stderrPath, "utf-8");
+			}
+			const deathNotice = `cmux wrapper shell (pid ${finished.wrapperPid}) died without writing an exit code`;
+			currentResult.stderr = currentResult.stderr ? `${currentResult.stderr}\n${deathNotice}` : deathNotice;
 			return currentResult;
 		}
 
