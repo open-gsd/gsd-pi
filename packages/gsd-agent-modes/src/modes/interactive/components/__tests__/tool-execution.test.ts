@@ -498,6 +498,25 @@ test("renders output that is only carriage returns without hanging", () => {
 	assert.doesNotMatch(rendered, /\r/);
 });
 
+// Read results reach the same collapse through getTextOutput(): a `curl -D -`
+// header dump ends "\r\n\r\n" (#2743), so splitting on \n leaves a \r-only
+// line, which used to spin collapseCarriageReturnFrames forever on the read
+// path too.
+test("renders a read result ending in a blank CRLF line without hanging", () => {
+	const rendered = renderTool(
+		"read",
+		{ path: "headers.txt" },
+		{
+			content: [{ type: "text", text: "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n" }],
+			isError: false,
+		},
+	);
+
+	assert.match(rendered, /HTTP\/1\.1 200 OK/);
+	assert.match(rendered, /content-type: text\/html/);
+	assert.doesNotMatch(rendered, /\r/, "carriage returns must not reach the rendered read output");
+});
+
 test("caps raw output fallback for tools without a custom result renderer", () => {
 	const total = TOOL_TUI_EXPANDED_MAX_LINES + 40;
 	const output = Array.from({ length: total }, (_, index) => `raw-${index + 1}`).join("\n");
