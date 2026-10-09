@@ -49,6 +49,7 @@ function restoreTombstone(tombstonePath: string, artifactPath: string): void {
  * The roots whose readable projections a reopen removes. Completion renders
  * at the project root and, in a milestone worktree, at the worktree too
  * (#1763), and the next dispatch runs its drift guard at the project root.
+ * The abandoned staged task SUMMARY drift repair reads the same roots (#2714).
  */
 export function reopenProjectionRoots(basePath: string): string[] {
   return [...new Set([basePath, resolveGsdPathContract(basePath).projectRoot])];
