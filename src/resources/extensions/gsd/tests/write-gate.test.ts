@@ -451,6 +451,7 @@ test('write-gate: applyAskUserQuestionsGateResult verifies confirmed pending gat
       status: 'verified',
       gateId,
       milestoneId: 'M001',
+      verifiedGateIds: [gateId],
     });
     assert.strictEqual(getPendingGate(base), null, 'confirmed gate must clear pending state');
     assert.strictEqual(isMilestoneDepthVerified('M001', base), true, 'confirmed gate must verify milestone depth');
@@ -522,6 +523,237 @@ test('write-gate: applyAskUserQuestionsGateResult keeps empty-selection pending 
     clearDiscussionFlowState(base);
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ─── Scenario 20e: several gate questions in one round (#2653) ──────────────
+//
+// The payload validator allows 1-3 questions per round, and arming stores one
+// pending slot (the last gate id wins). Verifying only that slot silently
+// dropped the user's other confirmations: M028 unlocked, M025/M027 came back
+// as HARD BLOCK on save. Every gate question answered in the round must be
+// evaluated against the round's answers.
+
+function gateQuestion(id: string) {
+  return { id, options: [{ label: 'Confirm depth (Recommended)' }, { label: 'Needs adjustment' }] };
+}
+
+const CONFIRM = 'Confirm depth (Recommended)';
+const DECLINE = 'Needs adjustment';
+
+function makeGateBase(t: { after: (fn: () => void) => void }, label: string): string {
+  const base = join(tmpdir(), `gsd-write-gate-ask-${label}-${randomUUID()}`);
+  mkdirSync(base, { recursive: true });
+  clearDiscussionFlowState(base);
+  t.after(() => {
+    clearDiscussionFlowState(base);
+    rmSync(base, { recursive: true, force: true });
+  });
+  return base;
+}
+
+test('write-gate: applyAskUserQuestionsGateResult verifies every confirmed gate in a multi-gate round (#2653)', (t) => {
+  const base = makeGateBase(t, 'multi');
+  const gates = ['depth_verification_M025_confirm', 'depth_verification_M027_confirm', 'depth_verification_M028_confirm'];
+
+  // Mirror recordAskUserQuestionsPendingGate: every gate id armed, single
+  // slot keeps the last.
+  for (const id of gates) setPendingGate(id, base);
+  assert.strictEqual(getPendingGate(base), gates[gates.length - 1]);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: gates.map(gateQuestion),
+    details: {
+      response: {
+        answers: Object.fromEntries(gates.map((id) => [id, { selected: CONFIRM }])),
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: 'verified',
+    gateId: gates[gates.length - 1],
+    milestoneId: 'M028',
+    verifiedGateIds: gates,
+  });
+  for (const id of gates) {
+    const milestone = id.replace('depth_verification_', '').replace('_confirm', '');
+    assert.strictEqual(
+      isMilestoneDepthVerified(milestone, base),
+      true,
+      `${milestone} must be unlocked by its in-round confirmation`,
+    );
+    assert.ok(
+      loadWriteGateSnapshot(base).verifiedApprovalGates?.includes(id) ?? false,
+      `${id} must record verified approval`,
+    );
+  }
+  assert.strictEqual(getPendingGate(base), null, 'a fully verified round clears the pending slot');
+});
+
+test('write-gate: applyAskUserQuestionsGateResult fails closed when one gate of a multi-gate round is declined (#2653)', (t) => {
+  const base = makeGateBase(t, 'multi-declined');
+  const confirm = 'depth_verification_M025_confirm';
+  const declined = 'depth_verification_M027_confirm';
+
+  for (const id of [confirm, declined]) setPendingGate(id, base);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(confirm), gateQuestion(declined)],
+    details: {
+      response: {
+        answers: {
+          [confirm]: { selected: CONFIRM },
+          [declined]: { selected: DECLINE },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(result, { status: 'declined', gateId: declined, verifiedGateIds: [confirm] });
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), true, 'the confirmed gate still unlocks');
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), false, 'the declined gate stays locked');
+  assert.strictEqual(getPendingGate(base), declined, 'the declined gate is the pending gate');
+});
+
+test('write-gate: declined armed gate keeps pending while a later gate verifies (#2653)', (t) => {
+  // Reversed order: the ARMED (last-armed) gate is declined and an earlier
+  // question is confirmed — the decline must win the pending slot over the
+  // armed-slot clear.
+  const base = makeGateBase(t, 'multi-declined-armed');
+  const confirm = 'depth_verification_M025_confirm';
+  const declinedArmed = 'depth_verification_M027_confirm';
+
+  for (const id of [confirm, declinedArmed]) setPendingGate(id, base);
+  assert.strictEqual(getPendingGate(base), declinedArmed);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(confirm), gateQuestion(declinedArmed)],
+    details: {
+      response: {
+        answers: {
+          [confirm]: { selected: CONFIRM },
+          [declinedArmed]: { selected: DECLINE },
+        },
+      },
+    },
+  });
+
+  assert.equal(result.status, 'declined');
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), true);
+  assert.strictEqual(getPendingGate(base), declinedArmed, 'decline wins over the armed-slot clear');
+});
+
+test('write-gate: an unanswered gate keeps the pending block when the armed gate confirms (#2653)', (t) => {
+  // Reversed order: the unanswered gate comes FIRST, the armed (last) gate is
+  // confirmed. Clearing the armed slot must not drop the unanswered gate's
+  // pending block — otherwise shouldBlockPendingGate stops freezing tools
+  // while a gate is still unverified.
+  const base = makeGateBase(t, 'multi-waiting-clears');
+  const answered = 'depth_verification_M027_confirm';
+  const unansweredArmed = 'depth_verification_M025_confirm';
+
+  for (const id of [unansweredArmed, answered]) setPendingGate(id, base);
+  assert.strictEqual(getPendingGate(base), answered);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(unansweredArmed), gateQuestion(answered)],
+    details: {
+      response: { answers: { [answered]: { selected: CONFIRM } } },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: 'waiting',
+    pendingGateId: unansweredArmed,
+    interrupted: false,
+    verifiedGateIds: [answered],
+  });
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), true, 'the answered gate still unlocks');
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), false, 'the unanswered gate stays locked');
+  assert.strictEqual(getPendingGate(base), unansweredArmed, 'the unanswered gate owns the pending slot');
+});
+
+test('write-gate: a confirmation for a gate other than the armed one does not report success (#2653)', (t) => {
+  // The armed gate was left pending by an earlier round; this round asks and
+  // confirms a different gate. The new confirmation is recorded, but the
+  // result must name the armed gate as unresolved so the caller re-asks it.
+  const base = makeGateBase(t, 'multi-armed-absent');
+  const armed = 'depth_verification_M025_confirm';
+  const asked = 'depth_verification_M027_confirm';
+
+  setPendingGate(armed, base);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(asked)],
+    details: {
+      response: { answers: { [asked]: { selected: CONFIRM } } },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: 'waiting',
+    pendingGateId: armed,
+    interrupted: false,
+    verifiedGateIds: [asked],
+  });
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), true, 'the answered gate is still recorded');
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), false, 'the armed gate stays locked');
+  assert.strictEqual(getPendingGate(base), armed, 'the armed gate stays pending');
+});
+
+test('write-gate: a declined gate does not displace the armed unanswered gate in the pending slot (#2653)', (t) => {
+  // Armed gate A went unanswered; gate B was explicitly declined. The result
+  // names A (the caller re-asks A), so the pending slot must hold A too — a
+  // decline re-arm must not overwrite it, or the next confirmed round would
+  // clear the freeze while B is still unresolved.
+  const base = makeGateBase(t, 'multi-armed-waiting-declined');
+  const armedWaiting = 'depth_verification_M025_confirm';
+  const declined = 'depth_verification_M027_confirm';
+
+  for (const id of [declined, armedWaiting]) setPendingGate(id, base);
+  assert.strictEqual(getPendingGate(base), armedWaiting);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(armedWaiting), gateQuestion(declined)],
+    details: {
+      response: { answers: { [declined]: { selected: DECLINE } } },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: 'waiting',
+    pendingGateId: armedWaiting,
+    interrupted: false,
+  });
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), false);
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), false, 'the declined gate stays locked');
+  assert.strictEqual(getPendingGate(base), armedWaiting, 'the armed unanswered gate owns the pending slot');
+});
+
+test('write-gate: applyAskUserQuestionsGateResult fails closed when one gate of a multi-gate round is unanswered (#2653)', (t) => {
+  const base = makeGateBase(t, 'multi-empty');
+  const answered = 'depth_verification_M025_confirm';
+  const unanswered = 'depth_verification_M027_confirm';
+
+  for (const id of [answered, unanswered]) setPendingGate(id, base);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(answered), gateQuestion(unanswered)],
+    details: {
+      response: { answers: { [answered]: { selected: '' } } },
+    },
+  });
+
+  assert.deepEqual(result, { status: 'waiting', pendingGateId: unanswered, interrupted: false });
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), false, 'the empty selection is not an answer');
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), false, 'the unanswered gate stays locked');
 });
 
 // ─── Scenario 20d: applyAskUserQuestionsGateResult reports timed_out gate (#852) ──

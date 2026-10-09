@@ -1774,6 +1774,88 @@ describe('createMcpServer tool registration', () => {
     ]);
   });
 
+  it('ask_user_questions reports verified gates inside the JSON content, keeping it parseable (#2653)', async () => {
+    const questions = [
+      {
+        id: 'depth_verification_M003_confirm',
+        header: 'Depth Check',
+        question: 'Did I capture the depth right?',
+        options: [
+          { label: 'Yes, you got it (Recommended)', description: 'Continue with the current summary.' },
+          { label: 'Not quite', description: 'I need to clarify the depth further.' },
+        ],
+      },
+      {
+        id: 'depth_verification_M004_confirm',
+        header: 'Depth Check',
+        question: 'Did I capture the depth right for M004?',
+        options: [
+          { label: 'Yes, you got it (Recommended)', description: 'Continue with the current summary.' },
+          { label: 'Not quite', description: 'I need to clarify the depth further.' },
+        ],
+      },
+    ];
+    // Real applyAskUserQuestionsGateResult surface (not the legacy fallback):
+    // the module persists state itself and reports what it verified.
+    const writeGate = {
+      isGateQuestionId(questionId: string) {
+        return questionId.startsWith('depth_verification_');
+      },
+      isDepthConfirmationAnswer(selected: unknown, options?: Array<{ label?: string }>) {
+        return selected === options?.[0]?.label;
+      },
+      setPendingGate() {},
+      markApprovalGateVerified() {},
+      markDepthVerified() {},
+      clearPendingGate() {},
+      extractDepthVerificationMilestoneId(questionId: string) {
+        return questionId.match(/_(M\d+)_/)?.[1] ?? null;
+      },
+      applyAskUserQuestionsGateResult(options: { questions: Array<{ id: string }> }) {
+        return {
+          status: 'verified',
+          gateId: 'depth_verification_M004_confirm',
+          milestoneId: 'M004',
+          verifiedGateIds: options.questions.map((question) => question.id),
+        };
+      },
+    };
+
+    const result = await askUserQuestionsHandler(questions, undefined, {
+      async elicitInput() {
+        return {
+          action: 'accept',
+          content: {
+            depth_verification_M003_confirm: 'Yes, you got it (Recommended)',
+            depth_verification_M004_confirm: 'Yes, you got it (Recommended)',
+          },
+        };
+      },
+      isRemoteConfigured() {
+        return false;
+      },
+      async tryRemoteQuestions() {
+        throw new Error('should not be called');
+      },
+      writeGate,
+      writeGateBasePath: '/tmp/gsd-project',
+    });
+
+    assert.equal('isError' in result && result.isError, false);
+    // The text content stays a single JSON document (additive key) — appending
+    // prose after it broke JSON.parse consumers.
+    const payload = JSON.parse(result.content[0].text);
+    assert.deepEqual(payload.verified_gates, [
+      'depth_verification_M003_confirm',
+      'depth_verification_M004_confirm',
+    ]);
+    assert.ok(payload.answers.depth_verification_M003_confirm);
+    assert.deepEqual(
+      (result.structuredContent as { verified_gates?: string[] }).verified_gates,
+      ['depth_verification_M003_confirm', 'depth_verification_M004_confirm'],
+    );
+  });
+
   it('ask_user_questions persists confirmed depth gates for remote answers', async () => {
     const questions = [
       {
