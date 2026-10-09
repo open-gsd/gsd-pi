@@ -273,7 +273,9 @@ function isGemma4Model(modelId: string): boolean {
 function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
-		(model.id.startsWith("gpt-5") || (model.provider === "github-copilot" && model.id.startsWith("gpt-6")))
+		(model.id.startsWith("gpt-5") ||
+			(model.provider === "github-copilot" &&
+				(model.id.startsWith("gpt-6") || COPILOT_RESPONSES_ONLY_MODEL_IDS.has(model.id))))
 	) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
@@ -290,10 +292,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	) {
 		mergeThinkingLevelMap(model, { off: "none" });
 	}
-	if (supportsOpenAiXhigh(model.id)) {
+	if (supportsOpenAiXhigh(model.id) && (!model.id.includes("gpt-6") || model.provider === "github-copilot")) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
-	if (isGpt56Variant(model.id) || isGpt6MaxVariant(model.id)) {
+	if (isGpt56Variant(model.id) || (model.provider === "github-copilot" && isGpt6MaxVariant(model.id))) {
 		mergeThinkingLevelMap(model, { max: "max" });
 	}
 	if (model.id.includes("opus-4-6") || model.id.includes("opus-4.6")) {
