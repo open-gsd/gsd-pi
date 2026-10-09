@@ -99,6 +99,8 @@ export type DoctorIssueCode =
   | "projection_drift"
   | "unresolved_projection_evidence"
   | "stale_control_publication_intent"
+  // Node the native projection lock structurally rejects (#2648)
+  | "unsupported_projection_root_node"
   | "validation_source_revision_mismatch"
   // Orphaned execution Attempts (#1749)
   | "orphaned_running_attempt"

@@ -290,6 +290,53 @@ function isControlPublicationEvidenceError(error: unknown): boolean {
   return false;
 }
 
+// Structural native rejections (#2648): the lock refused a node inside the
+// projection root — a directory where a file belongs, a reparse point, a
+// device. Unlike the transient sharing-violation family these never resolve
+// by retrying and must never feed the health latch: writes stay fail-closed.
+// Matched on the stable leading phrase, which path-bearing engine builds keep
+// verbatim, plus the named control-file obstruction raised below.
+export function isStructuralProjectionRootError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { message?: unknown; cause?: unknown };
+    if (typeof candidate.message === "string"
+      && /projection root contains an unsupported (?:node|reparse point)|managed projection control file is obstructed by/u
+        .test(candidate.message)) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
+// Reads a protocol control file through the lock. Engine builds before #2648
+// reject a directory occupant with a bare, path-less "projection root
+// contains an unsupported node", which leaves the node unidentifiable once
+// the tree has changed. Name the obstructed logical path the way the
+// write-target obstruction gate does. The kind probe runs only after a
+// failed read, so the healthy path costs nothing.
+function readProjectionControlFile(handle: ProjectionRootIdentityLock, logicalPath: string): Buffer {
+  try {
+    return handle.readFile(logicalPath);
+  } catch (error) {
+    if (!isStructuralProjectionRootError(error)) throw error;
+    let occupantKind: string;
+    try {
+      occupantKind = handle.pathKind(logicalPath);
+    } catch {
+      throw error;
+    }
+    if (occupantKind !== "directory") throw error;
+    throw new Error(
+      `managed projection control file is obstructed by a directory: ${logicalPath}`,
+      { cause: error },
+    );
+  }
+}
+
 function openManagedProjectionRootWithRetry<T>(
   open: () => T,
   wait: (delayMs: number) => void = (delayMs) => {
@@ -493,7 +540,9 @@ function readFallbackManagedProjectionPaths(path: string): string[] {
 
 function readManagedProjectionPaths(handle: ProjectionRootIdentityLock): string[] {
   if (!handle.pathExists(HISTORY_LOGICAL_PATH)) return [];
-  return parseManagedProjectionPaths(JSON.parse(handle.readFile(HISTORY_LOGICAL_PATH).toString("utf8")) as unknown);
+  return parseManagedProjectionPaths(
+    JSON.parse(readProjectionControlFile(handle, HISTORY_LOGICAL_PATH).toString("utf8")) as unknown,
+  );
 }
 
 function recordManagedProjectionLogicalPath(handle: ProjectionRootIdentityLock, logicalPath: string): void {
@@ -570,6 +619,13 @@ function fallbackProjectionContentDigest(path: string, scope: "file" | "tree"): 
 function readFallbackUnboundProjectionEvidence(targetRoot: string): UnboundProjectionEvidence[] {
   const path = join(gsdProjectionRoot(targetRoot), UNBOUND_EVIDENCE_LOGICAL_PATH);
   if (!existsSync(path)) return [];
+  // Same named obstruction the lock-backed read raises (#2648), instead of a
+  // bare EISDIR that differs by platform.
+  if (lstatSync(path).isDirectory()) {
+    throw new Error(
+      `managed projection control file is obstructed by a directory: ${UNBOUND_EVIDENCE_LOGICAL_PATH}`,
+    );
+  }
   const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
   if (!Array.isArray(value)) throw new Error("unbound projection evidence is invalid");
   return value.map((entry): UnboundProjectionEvidence => {
@@ -811,7 +867,7 @@ function parseNativeDeletionAcknowledgement(
 
 function readUnboundProjectionEvidence(handle: ProjectionRootIdentityLock): UnboundProjectionEvidence[] {
   const value = handle.pathExists(UNBOUND_EVIDENCE_LOGICAL_PATH)
-    ? JSON.parse(handle.readFile(UNBOUND_EVIDENCE_LOGICAL_PATH).toString("utf8")) as unknown
+    ? JSON.parse(readProjectionControlFile(handle, UNBOUND_EVIDENCE_LOGICAL_PATH).toString("utf8")) as unknown
     : [];
   if (!Array.isArray(value)) throw new Error("unbound projection evidence is invalid");
   const nativeEvidencePaths = new Set<string>();
@@ -819,7 +875,7 @@ function readUnboundProjectionEvidence(handle: ProjectionRootIdentityLock): Unbo
     for (const name of handle.listDirectory(NATIVE_EVIDENCE_LOGICAL_ROOT)) {
       if (!/^[0-9a-f-]{36}\.json$/u.test(name)) throw new Error("native projection evidence is invalid");
       const descriptor = parseNativeEvidenceDescriptor(name, JSON.parse(
-        handle.readFile(`${NATIVE_EVIDENCE_LOGICAL_ROOT}/${name}`).toString("utf8"),
+        readProjectionControlFile(handle, `${NATIVE_EVIDENCE_LOGICAL_ROOT}/${name}`).toString("utf8"),
       ));
       const resolving = value.some(entry => entry !== null
         && typeof entry === "object"
@@ -1086,7 +1142,7 @@ function removeNativeEvidenceDescriptor(
   for (const name of handle.listDirectory(NATIVE_EVIDENCE_LOGICAL_ROOT)) {
     if (!name.endsWith(".json")) continue;
     const path = `${NATIVE_EVIDENCE_LOGICAL_ROOT}/${name}`;
-    const descriptor = JSON.parse(handle.readFile(path).toString("utf8")) as Record<string, unknown>;
+    const descriptor = JSON.parse(readProjectionControlFile(handle, path).toString("utf8")) as Record<string, unknown>;
     if (descriptor.evidencePath === evidencePath) {
       handle.removeFileViaGuardExact(
         path,
@@ -1109,7 +1165,7 @@ function markNativeEvidenceDescriptorResolving(
     const path = `${NATIVE_EVIDENCE_LOGICAL_ROOT}/${name}`;
     const descriptor = parseNativeEvidenceDescriptor(
       name,
-      JSON.parse(handle.readFile(path).toString("utf8")),
+      JSON.parse(readProjectionControlFile(handle, path).toString("utf8")),
     );
     if (descriptor.evidencePath !== evidencePath || descriptor.phase === "resolving") continue;
     const resolving = { ...descriptor, phase: "resolving" as const };
@@ -1923,7 +1979,7 @@ function recoverManagedProjectionMutations(
     }
     const journalPath = `${JOURNAL_LOGICAL_ROOT}/${name}`;
     const mutation = validateMutation(
-      JSON.parse(handle.readFile(journalPath).toString("utf8")),
+      JSON.parse(readProjectionControlFile(handle, journalPath).toString("utf8")),
       targetRoot,
       join(journalRoot(targetRoot), name),
     );
@@ -1967,13 +2023,143 @@ export function loadManagedProjectionPaths(targetRoot: string): string[] {
   }));
 }
 
-export function loadUnboundProjectionEvidence(targetRoot: string): UnboundProjectionEvidence[] {
-  if (!isProjectionRootIdentityLockAvailable()) {
-    return withProjectionMutationSync(
-      historyPath(targetRoot),
-      () => readFallbackUnboundProjectionEvidence(targetRoot),
+export interface ProjectionRootStructuralFinding {
+  /** Path below the projection root, forward slashes. */
+  readonly logicalPath: string;
+  /** What the native lock refuses about the node, as a noun phrase. */
+  readonly problem: string;
+}
+
+const PROJECTION_STRUCTURE_SCAN_LIMIT = 20;
+
+// Lock-free structural scan (#2648), in the pattern of the #2154 intent scan:
+// plain lstat only, never the projection-root identity lock, so it reports on
+// exactly the stores where every managed open throws a structural rejection.
+// It covers what a managed open touches before it can do anything else — the
+// protocol control files and directories, and the nodes that pending journal
+// entries and retained evidence refer to — and names each node the lock
+// refuses: a wrong-kind occupant, a symbolic link or junction, or a node that
+// is neither a regular file nor a directory. Reparse points Node does not
+// surface as links (cloud placeholders, for one) are invisible here; the
+// path-bearing engine message names those.
+export function scanProjectionRootStructure(targetRoot: string): ProjectionRootStructuralFinding[] {
+  const root = gsdProjectionRoot(targetRoot);
+  const findings = new Map<string, string>();
+  const absolute = (logicalPath: string): string => join(root, ...logicalPath.split("/"));
+  const report = (logicalPath: string, problem: string): void => {
+    if (findings.size < PROJECTION_STRUCTURE_SCAN_LIMIT && !findings.has(logicalPath)) {
+      findings.set(logicalPath, problem);
+    }
+  };
+  // The node's kind, or null when it is absent or was just reported.
+  const classify = (logicalPath: string): "file" | "directory" | null => {
+    let stat;
+    try {
+      stat = lstatSync(absolute(logicalPath));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return null;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      report(logicalPath, "a symbolic link or junction");
+      return null;
+    }
+    if (stat.isDirectory()) return "directory";
+    if (stat.isFile()) return "file";
+    report(logicalPath, "neither a regular file nor a directory");
+    return null;
+  };
+  const inspect = (
+    logicalPath: string,
+    expected: "file" | "directory" | null,
+  ): "file" | "directory" | null => {
+    const parts = logicalPath.split("/");
+    for (let depth = 1; depth < parts.length; depth++) {
+      const ancestor = parts.slice(0, depth).join("/");
+      const ancestorKind = classify(ancestor);
+      if (ancestorKind === "file") {
+        report(ancestor, "a regular file where the projection protocol requires a directory");
+      }
+      if (ancestorKind !== "directory") return null;
+    }
+    const kind = classify(logicalPath);
+    if (kind === null || expected === null || kind === expected) return kind;
+    report(logicalPath, expected === "file"
+      ? "a directory where the projection protocol requires a regular file"
+      : "a regular file where the projection protocol requires a directory");
+    return null;
+  };
+  const walk = (logicalPath: string): void => {
+    for (const name of readdirSync(absolute(logicalPath)).sort()) {
+      if (findings.size >= PROJECTION_STRUCTURE_SCAN_LIMIT) return;
+      const child = `${logicalPath}/${name}`;
+      if (classify(child) === "directory") walk(child);
+    }
+  };
+  // Paths recorded in journal entries and the evidence index are data: only
+  // a well-formed path below the root is followed.
+  const inspectReferenced = (value: unknown): void => {
+    if (typeof value !== "string"
+      || value.split("/").some((part) => part.length === 0 || part === "." || part === "..")
+      || relative(root, resolve(root, value)).replaceAll("\\", "/") !== value) return;
+    if (inspect(value, null) === "directory") walk(value);
+  };
+  const readRecords = (logicalPath: string): Record<string, unknown>[] => {
+    let value: unknown;
+    try {
+      value = JSON.parse(readFileSync(absolute(logicalPath), "utf8"));
+    } catch {
+      return [];
+    }
+    return (Array.isArray(value) ? value : [value]).filter(
+      (entry): entry is Record<string, unknown> => entry !== null && typeof entry === "object",
     );
+  };
+
+  inspect(HISTORY_LOGICAL_PATH, "file");
+  if (inspect(UNBOUND_EVIDENCE_LOGICAL_PATH, "file") === "file") {
+    for (const entry of readRecords(UNBOUND_EVIDENCE_LOGICAL_PATH)) {
+      inspectReferenced(entry.evidencePath);
+      inspectReferenced(entry.logicalPath);
+    }
   }
+  if (inspect(NATIVE_EVIDENCE_LOGICAL_ROOT, "directory") === "directory") {
+    for (const name of readdirSync(absolute(NATIVE_EVIDENCE_LOGICAL_ROOT)).sort()) {
+      inspect(`${NATIVE_EVIDENCE_LOGICAL_ROOT}/${name}`, "file");
+    }
+  }
+  if (inspect(JOURNAL_LOGICAL_ROOT, "directory") === "directory") {
+    for (const name of readdirSync(absolute(JOURNAL_LOGICAL_ROOT)).sort()) {
+      const journalPath = `${JOURNAL_LOGICAL_ROOT}/${name}`;
+      const journaled = name.endsWith(".json");
+      if (inspect(journalPath, journaled ? "file" : null) !== "file" || !journaled) continue;
+      for (const mutation of readRecords(journalPath)) {
+        inspectReferenced(mutation.logicalPath);
+        inspectReferenced(mutation.temporaryPath);
+        inspectReferenced(mutation.replacementPath);
+        inspectReferenced(mutation.quarantinePath);
+        inspectReferenced(mutation.exchangeGuardPath);
+      }
+    }
+  }
+  return [...findings].map(([logicalPath, problem]) => ({ logicalPath, problem }));
+}
+
+// Lock-free evidence listing: the plain-fs reader, with no journal replay and
+// no native-control descriptors merged in. It is the degraded read when the
+// native lock is unavailable, and the doctor's read on a store whose
+// projection root the lock structurally rejects (#2648) — there every native
+// open throws, and the retained evidence must stay enumerable.
+export function loadUnboundProjectionEvidenceLockFree(targetRoot: string): UnboundProjectionEvidence[] {
+  return withProjectionMutationSync(
+    historyPath(targetRoot),
+    () => readFallbackUnboundProjectionEvidence(targetRoot),
+  );
+}
+
+export function loadUnboundProjectionEvidence(targetRoot: string): UnboundProjectionEvidence[] {
+  if (!isProjectionRootIdentityLockAvailable()) return loadUnboundProjectionEvidenceLockFree(targetRoot);
   const path = historyPath(targetRoot);
   return withProjectionMutationSync(path, () => withManagedProjectionRoot(targetRoot, (handle) => {
     recoverManagedProjectionMutations(targetRoot, handle);
@@ -2455,28 +2641,38 @@ function recoverEvidenceResolutions(handle: ProjectionRootIdentityLock): void {
   }
 }
 
+// Lock-free counterpart of the resolution preview; see
+// loadUnboundProjectionEvidenceLockFree.
+export function previewUnboundProjectionEvidenceResolutionLockFree(
+  targetRoot: string,
+  evidenceId: string,
+  action: UnboundProjectionEvidenceResolutionAction = "discard",
+): UnboundProjectionEvidenceResolutionPreview {
+  return withProjectionMutationSync(historyPath(targetRoot), () => {
+    const evidence = findEvidence(readFallbackUnboundProjectionEvidence(targetRoot), evidenceId);
+    if (!evidence) throw new Error("unbound projection evidence is unavailable");
+    const path = fallbackProjectionPath(targetRoot, evidence.evidencePath);
+    if (!existsSync(path)) throw new Error("unbound projection evidence is unavailable");
+    const currentIdentity = fallbackProjectionIdentity(path);
+    const contentDigest = fallbackProjectionContentDigest(path, evidence.scope);
+    const destinationPath = evidenceDestination(evidence, action);
+    return {
+      ...evidence,
+      currentIdentity,
+      contentDigest,
+      destinationPath,
+      consent: evidenceConsent(evidence, action, currentIdentity, contentDigest, destinationPath),
+    };
+  });
+}
+
 export function previewUnboundProjectionEvidenceResolution(
   targetRoot: string,
   evidenceId: string,
   action: UnboundProjectionEvidenceResolutionAction = "discard",
 ): UnboundProjectionEvidenceResolutionPreview {
   if (!isProjectionRootIdentityLockAvailable()) {
-    return withProjectionMutationSync(historyPath(targetRoot), () => {
-      const evidence = findEvidence(readFallbackUnboundProjectionEvidence(targetRoot), evidenceId);
-      if (!evidence) throw new Error("unbound projection evidence is unavailable");
-      const path = fallbackProjectionPath(targetRoot, evidence.evidencePath);
-      if (!existsSync(path)) throw new Error("unbound projection evidence is unavailable");
-      const currentIdentity = fallbackProjectionIdentity(path);
-      const contentDigest = fallbackProjectionContentDigest(path, evidence.scope);
-      const destinationPath = evidenceDestination(evidence, action);
-      return {
-        ...evidence,
-        currentIdentity,
-        contentDigest,
-        destinationPath,
-        consent: evidenceConsent(evidence, action, currentIdentity, contentDigest, destinationPath),
-      };
-    });
+    return previewUnboundProjectionEvidenceResolutionLockFree(targetRoot, evidenceId, action);
   }
   return withProjectionMutationSync(historyPath(targetRoot), () => withManagedProjectionRoot(targetRoot, handle => {
     recoverManagedProjectionMutations(targetRoot, handle);
