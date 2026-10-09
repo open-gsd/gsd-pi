@@ -3106,6 +3106,45 @@ async function pumpSdkMessages(
 								}
 							}
 
+							// A parallel tool_use can lose its arguments: the synthetic
+							// tool-result boundary for a fast sibling folds the builder's
+							// blocks into the final-message accumulators and nulls the
+							// builder, so this tool's remaining input_json_delta /
+							// content_block_stop find no builder and are dropped — its
+							// block keeps the empty `arguments` it was created with, and
+							// tool_execution_start records empty args into the safety
+							// evidence (`command: ""` / `path: ""`) while the CLI actually
+							// executed the full input (#2585). The complete message
+							// carries every tool_use's real input: backfill any streamed
+							// block whose arguments never landed — still `{}`, or a
+							// `{ _raw }` truncation marker (#2574) — wherever it now
+							// lives (live builder or already-folded intermediate blocks).
+							// Blocks are mutated in place, so the start-partial mirror
+							// and the assembled final message — the content
+							// `tool_execution_start` reads args from — see the repair;
+							// events already emitted for a block (e.g. its synthetic
+							// toolcall_end fired at an earlier boundary) keep what they
+							// carried. Populated arguments are never touched: the
+							// streamed parse is authoritative for blocks that completed.
+							const backfillToolArguments = (
+								targets: AssistantMessage["content"],
+							): void => {
+								for (const block of sdkAssistant.message.content) {
+									if (block.type !== "tool_use" || !block.id) continue;
+									for (const streamed of targets) {
+										if (streamed.type !== "toolCall" || streamed.id !== block.id) continue;
+										const args = streamed.arguments as Record<string, unknown> | undefined;
+										const unfilled = !args
+											|| Object.keys(args).length === 0
+											|| (Object.keys(args).length === 1 && "_raw" in args);
+										if (unfilled) streamed.arguments = block.input;
+										break;
+									}
+								}
+							};
+							if (builder) backfillToolArguments(builder.message.content);
+							backfillToolArguments(intermediateToolBlocks);
+
 							// Subagent events carry their own (smaller) context; only
 							// main-loop events (parent_tool_use_id === null) see the
 							// conversation this turn's final usage must describe.

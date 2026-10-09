@@ -762,6 +762,250 @@ describe("stream-adapter — final message preserves streamed block order (#2540
 	});
 });
 
+describe("stream-adapter — parallel tool_use keeps its arguments when a sibling result lands first (#2585)", () => {
+	// One assistant message streams TWO tool_use blocks; the synthetic
+	// tool-result boundary for the fast first tool arrives while the second
+	// tool's input JSON is still streaming. The boundary folds the builder's
+	// blocks into the final-message accumulators and nulls the builder, so the
+	// second tool's remaining input_json_delta / content_block_stop find no
+	// builder and its block keeps the `arguments: {}` it was created with.
+	// The complete `assistant` message that follows carries every tool_use's
+	// full input — the same input the CLI actually executed.
+	function* parallelToolScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		const boundary = (uuid: string, toolUseId: string, content: string) => ({
+			type: "user",
+			uuid,
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: false }],
+			},
+		});
+		// -- one assistant message, two parallel tool_use blocks --
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		// tool-1 (fast): starts, streams args, completes
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-1", name: "Bash", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"command\":\"pnpm test\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		// tool-2 (slow): only its start event has streamed when tool-1's result lands
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+		// -- boundary for the FIRST tool's result (builder folds + nulls) --
+		yield boundary("user-1", "tool-1", "launched");
+		// tool-2's remaining input events land with no builder → dropped pre-fix
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"script\":\"pnpm verify\",\"timeout\":130000}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p1");
+		// complete assistant message: full input for both tool_use blocks.
+		// tool-1's input deliberately differs from its streamed args to prove
+		// the backfill never overwrites arguments that already parsed.
+		yield {
+			type: "assistant",
+			uuid: "assistant-1",
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				id: "msg_parallel_1",
+				role: "assistant",
+				model: "claude-sonnet-4-6",
+				content: [
+					{ type: "tool_use", id: "tool-1", name: "Bash", input: { command: "must-not-overwrite-parsed-args" } },
+					{ type: "tool_use", id: "tool-2", name: "mcp__gsd-workflow__gsd_exec", input: { script: "pnpm verify", timeout: 130000 } },
+				],
+				stop_reason: "tool_use",
+				usage: { input_tokens: 1, output_tokens: 1 },
+			},
+		};
+		// -- boundary for the second tool's result --
+		yield boundary("user-2", "tool-2", "exit 0");
+		yield makeSdkSuccessResult("done");
+	}
+
+	test("second parallel tool_use gets its real arguments back in the final message", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Run both." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: parallelToolScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		const toolcallEndArgsById = new Map<string, Record<string, unknown>>();
+		const toolcallEndBlocks: AssistantMessage["content"] = [];
+		for await (const event of stream) {
+			if (event.type === "toolcall_end") {
+				toolcallEndArgsById.set(event.toolCall.id, event.toolCall.arguments);
+				toolcallEndBlocks.push(event.toolCall);
+			}
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		assert.ok(finalMessage, "stream completed with done");
+		// The safety evidence and tool execution read args from the final
+		// message content; pre-fix tool-2 stayed at `arguments: {}` because its
+		// deltas were dropped after the sibling's boundary nulled the builder.
+		const tools = finalMessage!.content.filter((block) => block.type === "toolCall") as any[];
+		assert.deepEqual(
+			tools.map((block) => [block.id, block.arguments]),
+			[
+				["tool-1", { command: "pnpm test" }],
+				["tool-2", { script: "pnpm verify", timeout: 130000 }],
+			],
+		);
+		// The synthetic completion pushed when tool-2's result arrived must
+		// carry the same real input (what the TUI completion renders), and the
+		// backfill must have repaired the streamed block in place, not swapped
+		// in a new object (the TUI matches components by block identity).
+		assert.deepEqual(toolcallEndArgsById.get("tool-2"), { script: "pnpm verify", timeout: 130000 });
+		const tool2End = toolcallEndBlocks.find((block) => (block as any).id === "tool-2");
+		assert.ok(tool2End && finalMessage!.content.includes(tool2End), "tool-2 kept its block identity");
+	});
+
+	test("truncated-args (_raw) block is also repaired from the complete message", async () => {
+		// Same shape, but the second tool's JSON lands unparseable (stream
+		// truncation) before its stop, so the block ends at `{ _raw }` (#2574).
+		function* truncatedArgsScenario(): Generator<any> {
+			const streamEvent = (event: any, uuid: string) => ({
+				type: "stream_event",
+				event,
+				parent_tool_use_id: null,
+				uuid,
+				session_id: "session-1",
+			});
+			yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+			yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+			yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "not-json-at-all" } }, "p1");
+			yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+			yield {
+				type: "user",
+				uuid: "user-1",
+				session_id: "session-1",
+				parent_tool_use_id: null,
+				message: {
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: "tool-1", content: "exit 0", is_error: false }],
+				},
+			};
+			yield {
+				type: "assistant",
+				uuid: "assistant-1",
+				session_id: "session-1",
+				parent_tool_use_id: null,
+				message: {
+					id: "msg_truncated_1",
+					role: "assistant",
+					model: "claude-sonnet-4-6",
+					content: [
+						{ type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: { script: "pnpm verify" } },
+					],
+					stop_reason: "tool_use",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			};
+			yield makeSdkSuccessResult("done");
+		}
+
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Run." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: truncatedArgsScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		assert.ok(finalMessage, "stream completed with done");
+		const tool = finalMessage!.content.find((block) => block.type === "toolCall") as any;
+		assert.deepEqual(tool.arguments, { script: "pnpm verify" });
+	});
+
+	test("backfill also hits blocks still in the live builder (complete message before the boundary)", async () => {
+		// Same truncated-args setup, but the complete assistant message arrives
+		// while the builder is still alive (before the synthetic tool-result
+		// boundary folds it) — the backfill's builder branch.
+		function* liveBuilderScenario(): Generator<any> {
+			const streamEvent = (event: any, uuid: string) => ({
+				type: "stream_event",
+				event,
+				parent_tool_use_id: null,
+				uuid,
+				session_id: "session-1",
+			});
+			yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+			yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+			yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "not-json-at-all" } }, "p1");
+			yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+			yield {
+				type: "assistant",
+				uuid: "assistant-1",
+				session_id: "session-1",
+				parent_tool_use_id: null,
+				message: {
+					id: "msg_live_builder_1",
+					role: "assistant",
+					model: "claude-sonnet-4-6",
+					content: [
+						{ type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: { script: "pnpm verify" } },
+					],
+					stop_reason: "tool_use",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			};
+			yield {
+				type: "user",
+				uuid: "user-1",
+				session_id: "session-1",
+				parent_tool_use_id: null,
+				message: {
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: "tool-1", content: "exit 0", is_error: false }],
+				},
+			};
+			yield makeSdkSuccessResult("done");
+		}
+
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Run." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: liveBuilderScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		assert.ok(finalMessage, "stream completed with done");
+		const tool = finalMessage!.content.find((block) => block.type === "toolCall") as any;
+		assert.deepEqual(tool.arguments, { script: "pnpm verify" });
+	});
+});
+
 describe("stream-adapter — full context prompt (#2859)", () => {
 	test("buildPromptFromContext includes all user and assistant messages, not just the last user message", () => {
 		const context: Context = {
