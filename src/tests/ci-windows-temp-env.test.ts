@@ -12,7 +12,7 @@ const workflow = readFileSync(workflowPath, "utf8");
 
 function windowsPackageTestStep(): string {
 	const job = workflow.match(
-		/ {2}windows-portability:\n(?<body>[\s\S]*?)(?=\n {2}[a-zA-Z0-9_-]+:\n|\n?$)/,
+		/ {2}windows-portability:\n(?<body>[\s\S]*?)(?=\n {2}[a-zA-Z0-9_-]+:|\n?$)/,
 	)?.groups?.body;
 	assert.ok(job, "windows-portability job must exist");
 	assert.match(job, /runs-on:\s*\$\{\{\s*github\.repository_owner/);
