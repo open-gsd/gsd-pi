@@ -49,6 +49,7 @@ import {
 import { isCanonicalStagedTaskSummaryProjection } from "../../task-summary-projection-classification.js";
 import { readLatestTaskAttempt } from "../../task-execution-domain-operation.js";
 import { quarantineProjectionEvidence } from "../../projection-observation.js";
+import { reopenProjectionRoots } from "../../projection-cleanup.js";
 import { computeProjectionSha, deriveCompatProjectionKey, readCompatMarker } from "../../compat/compat-marker.js";
 import { comparableProjectionContent } from "../../markdown-renderer.js";
 import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
@@ -232,7 +233,13 @@ function isAbandonedStagedTaskSummary(
     projectionPath,
     [gsdProjectionRoot(basePath), join(basePath, ".gsd")],
   );
-  return readCompatMarker(basePath).projections[projectionKey]?.sha === computeProjectionSha(content);
+  // gsd_summary_save renders the SUMMARY at the project root and copies it into
+  // the milestone worktree. The baseline of that copy is only in the
+  // project-root marker (#2714).
+  const sha = computeProjectionSha(content);
+  return reopenProjectionRoots(basePath).some((root) =>
+    readCompatMarker(root).projections[projectionKey]?.sha === sha
+  );
 }
 
 function resolveTaskSummaryDriftPath(
@@ -784,8 +791,15 @@ export async function repairArtifactDbDrift(
   }
 
   if (isAbandonedStagedTaskSummary(record, ctx.basePath)) {
-    const projectionPath = resolveTaskSummaryDriftPath(ctx.basePath, record);
-    if (projectionPath) quarantineProjectionEvidence(ctx.basePath, projectionPath);
+    // The copy at the other root is the same drift at the next guard, and no
+    // command that runs at one root removes it (#2714). Move each copy that
+    // passes the same proof.
+    const canonical = { ...record, artifactPath: undefined };
+    for (const root of reopenProjectionRoots(ctx.basePath)) {
+      if (!isAbandonedStagedTaskSummary(canonical, root)) continue;
+      const projectionPath = resolveTaskSummaryDriftPath(root, canonical);
+      if (projectionPath) quarantineProjectionEvidence(root, projectionPath);
+    }
     clearTaskSummaryProjectionState(record.milestoneId, record.sliceId!, record.taskId!);
     clearPathCache();
     clearParseCache();
