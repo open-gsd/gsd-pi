@@ -177,6 +177,20 @@ export function recoveryRouteLever(route: TaskRecoveryRouteSnapshot): string {
  * projection refusal (#2348), so both surfaces name the same sanctioned exit.
  */
 function noRunningAttemptGateError(task: TaskCompletionIdentity): string {
+  let neverClaimed = false;
+  try {
+    neverClaimed = readLatestTaskAttempt(task) === null;
+  } catch {
+    // Best-effort: fall through to the general guidance.
+  }
+  // With zero Attempts there is no checkpoint to resume and nothing for
+  // gsd_task_settle to publish; only auto-mode dispatch claims one (#2697).
+  if (neverClaimed) {
+    return "Canonical Task completion has no running Attempt to close: no Attempt was ever claimed for this " +
+      "Task, so gsd_task_settle cannot publish it either. Only auto-mode dispatch claims an Attempt. " +
+      "Run `/gsd auto` (`/gsd next` for one unit; `gsd_execute` from an MCP host): the dispatched " +
+      "unit finds the finished work, verifies it, and completes the Task.";
+  }
   return "Canonical Task completion has no running Attempt to close. Re-enter `/gsd auto` to resume " +
     "the Task from its durable checkpoint; if its latest Attempt is settled succeeded at the verify " +
     "stage, dry-run `gsd_task_settle` (reconcileLifecycle) to publish the verified completion." +
