@@ -848,46 +848,94 @@ function parseWorkflowArgs<T extends { projectDir?: string }>(
   };
 }
 
+/**
+ * Required function exports for a workflow executor bridge module. Kept beside
+ * {@link isWorkflowToolExecutors} so the shape check and its mismatch
+ * diagnostics (#2741) can never drift apart.
+ */
+const WORKFLOW_TOOL_EXECUTOR_FUNCTION_EXPORTS = [
+  "runInToolSession",
+  "executeMilestoneStatus",
+  "executePlanMilestone",
+  "executePlanSlice",
+  "executeReplanSlice",
+  "executeReplanTask",
+  "executeReworkBriefSave",
+  "executeCheckpointSave",
+  "executeSliceComplete",
+  "executeCompleteMilestone",
+  "executeValidateMilestone",
+  "executeReassessRoadmap",
+  "executeSaveGateResult",
+  "executeHookVerdictSave",
+  "executeSummarySave",
+  "executeUatResultSave",
+  "executeTaskComplete",
+  "executeTaskReopen",
+  "executeTaskRecoveryResume",
+  "executeTaskSettle",
+  "executeSliceReopen",
+  "executeSkipSlice",
+  "executeMilestoneReopen",
+  "executeMilestoneGenerateId",
+  "executeMilestonePark",
+  "executeMilestoneUnpark",
+  "executeMilestoneDiscard",
+  "executeMilestoneReorder",
+  "executeMilestoneSetDependencies",
+  "executeResearchDecisionSave",
+  "executeCaptureResolve",
+  "executeCaptureComplete",
+] as const;
+
+const WORKFLOW_WRITE_GATE_FUNCTION_EXPORTS = [
+  "loadWriteGateSnapshot",
+  "shouldBlockPendingGateInSnapshot",
+  "shouldBlockQueueExecutionInSnapshot",
+] as const;
+
 function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  const functionExports = [
-    "runInToolSession",
-    "executeMilestoneStatus",
-    "executePlanMilestone",
-    "executePlanSlice",
-    "executeReplanSlice",
-    "executeReplanTask",
-    "executeReworkBriefSave",
-    "executeCheckpointSave",
-    "executeSliceComplete",
-    "executeCompleteMilestone",
-    "executeValidateMilestone",
-    "executeReassessRoadmap",
-    "executeSaveGateResult",
-    "executeHookVerdictSave",
-    "executeSummarySave",
-    "executeUatResultSave",
-    "executeTaskComplete",
-    "executeTaskReopen",
-    "executeTaskRecoveryResume",
-    "executeTaskSettle",
-    "executeSliceReopen",
-    "executeSkipSlice",
-    "executeMilestoneReopen",
-    "executeMilestoneGenerateId",
-    "executeMilestonePark",
-    "executeMilestoneUnpark",
-    "executeMilestoneDiscard",
-    "executeMilestoneReorder",
-    "executeMilestoneSetDependencies",
-    "executeResearchDecisionSave",
-    "executeCaptureResolve",
-    "executeCaptureComplete",
-  ];
-
   return Array.isArray(record.SUPPORTED_SUMMARY_ARTIFACT_TYPES) &&
-    functionExports.every((key) => typeof record[key] === "function");
+    WORKFLOW_TOOL_EXECUTOR_FUNCTION_EXPORTS.every((key) => typeof record[key] === "function");
+}
+
+/**
+ * Name exactly why a module failed the workflow executor shape check (#2741)
+ * so a bridge author sees the missing exports instead of a bare
+ * "module shape mismatch".
+ */
+function describeWorkflowExecutorShapeMismatch(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return `module does not export an object (got ${value === null ? "null" : typeof value})`;
+  }
+  const record = value as Record<string, unknown>;
+  const problems: string[] = [];
+  if (!Array.isArray(record.SUPPORTED_SUMMARY_ARTIFACT_TYPES)) {
+    problems.push("SUPPORTED_SUMMARY_ARTIFACT_TYPES is missing or not an array");
+  }
+  const missing = WORKFLOW_TOOL_EXECUTOR_FUNCTION_EXPORTS.filter(
+    (key) => typeof record[key] !== "function",
+  );
+  if (missing.length > 0) {
+    problems.push(`missing function exports: ${missing.join(", ")}`);
+  }
+  return problems.length > 0 ? problems.join("; ") : "unknown shape mismatch";
+}
+
+/** Same diagnostics for the write-gate bridge shape (#2741). */
+function describeWorkflowWriteGateShapeMismatch(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return `module does not export an object (got ${value === null ? "null" : typeof value})`;
+  }
+  const record = value as Record<string, unknown>;
+  const missing = WORKFLOW_WRITE_GATE_FUNCTION_EXPORTS.filter(
+    (key) => typeof record[key] !== "function",
+  );
+  return missing.length > 0
+    ? `missing function exports: ${missing.join(", ")}`
+    : "unknown shape mismatch";
 }
 
 function getSupportedSummaryArtifactTypes(executors: WorkflowToolExecutors): readonly string[] {
@@ -940,23 +988,39 @@ function buildBridgeImportCandidates(relativePath: string): string[] {
   return [...new Set(candidates)];
 }
 
-function getWriteGateModuleCandidates(): string[] {
-  const candidates: string[] = [];
+function getWriteGateModuleCandidates(): { candidate: string; explicit: boolean }[] {
+  const candidates: { candidate: string; explicit: boolean }[] = [];
   const explicitModule = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE?.trim();
   if (explicitModule) {
     if (/^[a-z]{2,}:/i.test(explicitModule) && !explicitModule.startsWith("file:")) {
       throw new Error("GSD_WORKFLOW_WRITE_GATE_MODULE only supports file: URLs or filesystem paths.");
     }
     warnCustomWorkflowModule("GSD_WORKFLOW_WRITE_GATE_MODULE", explicitModule);
-    candidates.push(explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule));
+    candidates.push({
+      candidate: explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule),
+      explicit: true,
+    });
   }
 
   candidates.push(
     ...buildBridgeImportCandidates("../../../src/resources/extensions/gsd/mcp-bridge.js")
-      .map((p) => new URL(p, import.meta.url).href),
+      .map((p) => new URL(p, import.meta.url).href)
+      .map((candidate) => ({ candidate, explicit: false })),
   );
 
-  return [...new Set(candidates)];
+  // Dedupe by candidate URL, keeping first-seen position. If the configured
+  // module collides with an auto-discovered candidate, it stays marked
+  // explicit so its failure still fails closed (#2741).
+  const deduped = new Map<string, { candidate: string; explicit: boolean }>();
+  for (const entry of candidates) {
+    const existing = deduped.get(entry.candidate);
+    if (existing) {
+      existing.explicit = existing.explicit || entry.explicit;
+    } else {
+      deduped.set(entry.candidate, { ...entry });
+    }
+  }
+  return [...deduped.values()];
 }
 
 function toFileUrl(modulePath: string): string {
@@ -1039,23 +1103,41 @@ async function loadProjectPreferences(projectDir: string): Promise<unknown | nul
   }
 }
 
-function getWorkflowExecutorModuleCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
-  const candidates: string[] = [];
+function getWorkflowExecutorModuleCandidates(
+  env: NodeJS.ProcessEnv = process.env,
+): { candidate: string; explicit: boolean }[] {
+  const candidates: { candidate: string; explicit: boolean }[] = [];
   const explicitModule = env.GSD_WORKFLOW_EXECUTORS_MODULE?.trim();
   if (explicitModule) {
     if (/^[a-z]{2,}:/i.test(explicitModule) && !explicitModule.startsWith("file:")) {
       throw new Error("GSD_WORKFLOW_EXECUTORS_MODULE only supports file: URLs or filesystem paths.");
     }
     warnCustomWorkflowModule("GSD_WORKFLOW_EXECUTORS_MODULE", explicitModule);
-    candidates.push(explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule));
+    candidates.push({
+      candidate: explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule),
+      explicit: true,
+    });
   }
 
   candidates.push(
     ...buildBridgeImportCandidates("../../../src/resources/extensions/gsd/tools/workflow-tool-executors.js")
-      .map((p) => new URL(p, import.meta.url).href),
+      .map((p) => new URL(p, import.meta.url).href)
+      .map((candidate) => ({ candidate, explicit: false })),
   );
 
-  return [...new Set(candidates)];
+  // Dedupe by candidate URL, keeping first-seen position. If the configured
+  // module collides with an auto-discovered candidate, it stays marked
+  // explicit so its failure still fails closed (#2741).
+  const deduped = new Map<string, { candidate: string; explicit: boolean }>();
+  for (const entry of candidates) {
+    const existing = deduped.get(entry.candidate);
+    if (existing) {
+      existing.explicit = existing.explicit || entry.explicit;
+    } else {
+      deduped.set(entry.candidate, { ...entry });
+    }
+  }
+  return [...deduped.values()];
 }
 
 export function hasWorkflowToolBridgeConfiguration(
@@ -1095,16 +1177,41 @@ async function getWorkflowToolExecutors(): Promise<WorkflowToolExecutors> {
   if (!workflowToolExecutorsPromise) {
     workflowToolExecutorsPromise = (async () => {
       const attempts: string[] = [];
-      for (const candidate of getWorkflowExecutorModuleCandidates()) {
+      for (const { candidate, explicit } of getWorkflowExecutorModuleCandidates()) {
+        let loaded: unknown;
         try {
-          const loaded = await import(candidate);
-          if (isWorkflowToolExecutors(loaded)) {
-            return loaded;
-          }
-          attempts.push(`${candidate} (module shape mismatch)`);
+          loaded = await import(candidate);
         } catch (err) {
-          attempts.push(`${candidate} (${err instanceof Error ? err.message : String(err)})`);
+          const reason = err instanceof Error ? err.message : String(err);
+          if (explicit) {
+            // #2741: an operator-configured module is a statement of intent.
+            // Silently substituting the packaged executors would fail open
+            // while the startup warning still announces the custom module, so
+            // configured bridge failures stay fail-closed (see README:
+            // "the MCP host sees a startup failure instead of a partially
+            // advertised workflow surface"). Only auto-discovered co-located
+            // candidates fall through.
+            throw new Error(
+              `GSD_WORKFLOW_EXECUTORS_MODULE is set to ${candidate} but the module failed to import (${reason}). ` +
+              `Refusing to fall back to the packaged workflow executors; fix the module or unset GSD_WORKFLOW_EXECUTORS_MODULE.`,
+            );
+          }
+          attempts.push(`${candidate} (${reason})`);
+          continue;
         }
+        if (isWorkflowToolExecutors(loaded)) {
+          return loaded;
+        }
+        const detail = describeWorkflowExecutorShapeMismatch(loaded);
+        if (explicit) {
+          // #2741: fail loud on a configured module that imports but does not
+          // satisfy the executor contract — see the import-error branch above.
+          throw new Error(
+            `GSD_WORKFLOW_EXECUTORS_MODULE is set to ${candidate} but the module failed the workflow executor shape check (${detail}). ` +
+            `Refusing to fall back to the packaged workflow executors; fix the module or unset GSD_WORKFLOW_EXECUTORS_MODULE.`,
+          );
+        }
+        attempts.push(`${candidate} (module shape mismatch: ${detail})`);
       }
 
       throw new Error(
@@ -1151,21 +1258,42 @@ async function getWorkflowWriteGateModule(): Promise<WorkflowWriteGateModule> {
   if (!workflowWriteGatePromise) {
     workflowWriteGatePromise = (async () => {
       const attempts: string[] = [];
-      for (const candidate of getWriteGateModuleCandidates()) {
+      for (const { candidate, explicit } of getWriteGateModuleCandidates()) {
+        let loaded: unknown;
         try {
-          const loaded = await import(candidate);
-          if (
-            loaded &&
-            typeof loaded.loadWriteGateSnapshot === "function" &&
-            typeof loaded.shouldBlockPendingGateInSnapshot === "function" &&
-            typeof loaded.shouldBlockQueueExecutionInSnapshot === "function"
-          ) {
-            return loaded as WorkflowWriteGateModule;
-          }
-          attempts.push(`${candidate} (module shape mismatch)`);
+          loaded = await import(candidate);
         } catch (err) {
-          attempts.push(`${candidate} (${err instanceof Error ? err.message : String(err)})`);
+          const reason = err instanceof Error ? err.message : String(err);
+          if (explicit) {
+            // #2741: fail closed for a configured write-gate module — same
+            // rationale as the executor loader.
+            throw new Error(
+              `GSD_WORKFLOW_WRITE_GATE_MODULE is set to ${candidate} but the module failed to import (${reason}). ` +
+              `Refusing to fall back to the packaged write gate; fix the module or unset GSD_WORKFLOW_WRITE_GATE_MODULE.`,
+            );
+          }
+          attempts.push(`${candidate} (${reason})`);
+          continue;
         }
+        const record = loaded as Record<string, unknown> | null | undefined;
+        if (
+          record &&
+          typeof record.loadWriteGateSnapshot === "function" &&
+          typeof record.shouldBlockPendingGateInSnapshot === "function" &&
+          typeof record.shouldBlockQueueExecutionInSnapshot === "function"
+        ) {
+          return loaded as WorkflowWriteGateModule;
+        }
+        const detail = describeWorkflowWriteGateShapeMismatch(loaded);
+        if (explicit) {
+          // #2741: fail loud on a configured module that imports but does not
+          // satisfy the write-gate contract — see the executor loader.
+          throw new Error(
+            `GSD_WORKFLOW_WRITE_GATE_MODULE is set to ${candidate} but the module failed the write-gate shape check (${detail}). ` +
+            `Refusing to fall back to the packaged write gate; fix the module or unset GSD_WORKFLOW_WRITE_GATE_MODULE.`,
+          );
+        }
+        attempts.push(`${candidate} (module shape mismatch: ${detail})`);
       }
 
       throw new Error(
