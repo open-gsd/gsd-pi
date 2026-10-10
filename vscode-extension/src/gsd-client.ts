@@ -52,6 +52,9 @@ export class GsdClient implements vscode.Disposable {
 	private requestId = 0;
 	private buffer = "";
 	private restartCount = 0;
+	private restartTimer: ReturnType<typeof setTimeout> | undefined;
+	private contextGeneration = 0;
+	private contextTrusted = false;
 	private restartTimestamps: number[] = [];
 	private _autoRetryEnabled = false;
 
@@ -81,6 +84,15 @@ export class GsdClient implements vscode.Disposable {
 		return this.cwd;
 	}
 
+	/** Local fences only: no wire version, provenance or project identity is inferred. */
+	get projectContextGeneration(): number {
+		return this.contextGeneration;
+	}
+
+	get isProjectContextTrusted(): boolean {
+		return this.contextTrusted && this.isConnected;
+	}
+
 	get autoRetryEnabled(): boolean {
 		return this._autoRetryEnabled;
 	}
@@ -93,6 +105,8 @@ export class GsdClient implements vscode.Disposable {
 			return;
 		}
 
+		clearTimeout(this.restartTimer);
+		const generation = this.invalidateProjectContext();
 		const spawnPlan = buildGsdClientSpawnPlan(this.binaryPath, this.cwd);
 		const proc = spawn(spawnPlan.command, spawnPlan.args, spawnPlan.options);
 		this.process = proc;
@@ -100,11 +114,13 @@ export class GsdClient implements vscode.Disposable {
 		this.buffer = "";
 
 		proc.stdout?.on("data", (chunk: Buffer) => {
+			if (this.process !== proc) return;
 			this.buffer += chunk.toString("utf8");
-			this.drainBuffer();
+			this.drainBuffer(proc);
 		});
 
 		proc.stderr?.on("data", (chunk: Buffer) => {
+			if (this.process !== proc) return;
 			const text = chunk.toString("utf8").trim();
 			if (text) {
 				this._onError.fire(text);
@@ -121,6 +137,11 @@ export class GsdClient implements vscode.Disposable {
 				if (startupSettled) return;
 				startupSettled = true;
 				cleanup();
+				if (this.process !== proc) {
+					reject(new Error("GSD startup context changed. Restart the agent and retry."));
+					return;
+				}
+				this.contextTrusted = this.contextGeneration === generation;
 				this._onConnectionChange.fire(true);
 				this.restartCount = 0;
 				resolve();
@@ -129,9 +150,13 @@ export class GsdClient implements vscode.Disposable {
 				if (startupSettled) return;
 				startupSettled = true;
 				cleanup();
-				if (this.process === proc) {
-					this.process = null;
+				if (this.process !== proc) {
+					reject(new Error("GSD startup context changed. Restart the agent and retry."));
+					return;
 				}
+				this.process = null;
+				this.invalidateProjectContext();
+				this.rejectAllPending("GSD startup failed. Restart the agent and retry.");
 				const hint = err.code === "ENOENT"
 					? ` Make sure GSD is installed ("npm install -g @opengsd/gsd-pi") and set "gsd.binaryPath" to the absolute path if it is not on PATH.`
 					: "";
@@ -145,12 +170,10 @@ export class GsdClient implements vscode.Disposable {
 		});
 
 		proc.on("error", (err: NodeJS.ErrnoException) => {
-			if (!startupSettled) {
-				return;
-			}
-			if (this.process === proc) {
-				this.process = null;
-			}
+			if (!startupSettled || this.process !== proc) return;
+			this.process = null;
+			this.invalidateProjectContext();
+			this.rejectAllPending("GSD process failed. Restart the agent and retry.");
 			this._onConnectionChange.fire(false);
 			const hint = err.code === "ENOENT"
 				? ` Make sure GSD is installed ("npm install -g @opengsd/gsd-pi") and set "gsd.binaryPath" to the absolute path if it is not on PATH.`
@@ -159,9 +182,9 @@ export class GsdClient implements vscode.Disposable {
 		});
 
 		proc.on("exit", (code, signal) => {
-			if (this.process === proc) {
-				this.process = null;
-			}
+			if (this.process !== proc) return;
+			this.process = null;
+			const exitGeneration = this.invalidateProjectContext();
 			this.rejectAllPending(`GSD process exited (code=${code}, signal=${signal})`);
 			this._onConnectionChange.fire(false);
 
@@ -178,7 +201,10 @@ export class GsdClient implements vscode.Disposable {
 					);
 				} else if (this.restartCount < 3) {
 					this.restartCount++;
-					setTimeout(() => this.start(), 1000 * this.restartCount);
+					this.restartTimer = setTimeout(() => {
+						if (this.contextGeneration !== exitGeneration || this.process) return;
+						void this.start().catch(() => this._onError.fire("GSD restart failed. Start the agent and retry."));
+					}, 1000 * this.restartCount);
 				}
 			}
 		});
@@ -190,12 +216,13 @@ export class GsdClient implements vscode.Disposable {
 	 * Stop the GSD agent process.
 	 */
 	async stop(): Promise<void> {
-		if (!this.process) {
-			return;
-		}
-
+		clearTimeout(this.restartTimer);
+		this.invalidateProjectContext();
 		const proc = this.process;
 		this.process = null;
+		this.rejectAllPending("GSD client stopped. Restart the agent and retry.");
+		this._onConnectionChange.fire(false);
+		if (!proc) return;
 		proc.kill("SIGTERM");
 
 		await new Promise<void>((resolve) => {
@@ -209,8 +236,6 @@ export class GsdClient implements vscode.Disposable {
 			});
 		});
 
-		this.rejectAllPending("Client stopped");
-		this._onConnectionChange.fire(false);
 	}
 
 	// =========================================================================
@@ -389,7 +414,7 @@ export class GsdClient implements vscode.Disposable {
 	 * Start a new session.
 	 */
 	async newSession(): Promise<void> {
-		const response = await this.send({ type: "new_session" });
+		const response = await this.mutateSession({ type: "new_session" });
 		this.assertSuccess(response);
 		this._autoRetryEnabled = false;
 	}
@@ -404,15 +429,11 @@ export class GsdClient implements vscode.Disposable {
 	}
 
 	async getProjectProgress(): Promise<ProjectProgress | null> {
-		const response = await this.send({ type: "get_project_progress" });
-		this.assertSuccess(response);
-		return response.data as ProjectProgress | null;
+		return this.readProjectContext<ProjectProgress>("get_project_progress");
 	}
 
 	async getProjectSnapshot(): Promise<ProjectSnapshot | null> {
-		const response = await this.send({ type: "get_project_snapshot" });
-		this.assertSuccess(response);
-		return response.data as ProjectSnapshot | null;
+		return this.readProjectContext<ProjectSnapshot>("get_project_snapshot");
 	}
 
 	/**
@@ -432,7 +453,7 @@ export class GsdClient implements vscode.Disposable {
 	 * Switch to a different session file.
 	 */
 	async switchSession(sessionPath: string): Promise<void> {
-		const response = await this.send({ type: "switch_session", sessionPath });
+		const response = await this.mutateSession({ type: "switch_session", sessionPath });
 		this.assertSuccess(response);
 	}
 
@@ -488,7 +509,7 @@ export class GsdClient implements vscode.Disposable {
 	 * Fork the session at the given entry point.
 	 */
 	async forkSession(entryId: string): Promise<{ text: string; cancelled: boolean }> {
-		const response = await this.send({ type: "fork", entryId });
+		const response = await this.mutateSession({ type: "fork", entryId });
 		this.assertSuccess(response);
 		return response.data as { text: string; cancelled: boolean };
 	}
@@ -522,8 +543,42 @@ export class GsdClient implements vscode.Disposable {
 
 	// -- Private helpers ------------------------------------------------------
 
-	private drainBuffer(): void {
-		while (true) {
+	private invalidateProjectContext(): number {
+		this.contextTrusted = false;
+		return ++this.contextGeneration;
+	}
+
+	private async mutateSession(command: Record<string, unknown>): Promise<RpcResponse> {
+		const priorTrust = this.isProjectContextTrusted;
+		const proc = this.process;
+		const generation = this.invalidateProjectContext();
+		const response = await this.send(command);
+		// Only explicit cancellation proves the previous session stayed selected. A successful
+		// arbitrary switch has no independently verified root; even new/fork cannot upgrade trust.
+		if (this.process === proc && this.contextGeneration === generation && this.isConnected
+			&& response.command === command.type && response.success === true && !("error" in response) && !("isError" in response)
+			&& response.data !== null && typeof response.data === "object" && !Array.isArray(response.data)
+			&& (response.data as { cancelled?: unknown }).cancelled === true) {
+			this.contextTrusted = priorTrust;
+		}
+		return response;
+	}
+
+	private async readProjectContext<T>(command: string): Promise<T | null> {
+		const generation = this.contextGeneration;
+		try {
+			const response = await this.send({ type: command });
+			if (!this.isConnected || this.contextGeneration !== generation || response.command !== command
+				|| response.success !== true || "error" in response || "isError" in response) throw new Error();
+			return response.data as T | null;
+		} catch {
+			// Runtime exceptions and rejected envelopes may contain project text or paths.
+			throw new Error("GSD project read failed or its context changed. Restart the agent and retry; update the runtime and extension if the problem persists.");
+		}
+	}
+
+	private drainBuffer(proc: ChildProcess): void {
+		while (this.process === proc) {
 			const newlineIdx = this.buffer.indexOf("\n");
 			if (newlineIdx === -1) {
 				break;
@@ -549,6 +604,8 @@ export class GsdClient implements vscode.Disposable {
 			return; // ignore non-JSON lines
 		}
 
+		if (data === null || typeof data !== "object" || Array.isArray(data)) return;
+
 		// Response to a pending request
 		if (data.type === "response" && typeof data.id === "string" && this.pendingRequests.has(data.id)) {
 			const pending = this.pendingRequests.get(data.id)!;
@@ -560,7 +617,7 @@ export class GsdClient implements vscode.Disposable {
 
 		// Extension UI request — agent needs user input
 		if (data.type === "extension_ui_request" && typeof data.id === "string") {
-			void this.handleUIRequest(data);
+			void this.handleUIRequest(data, this.process, this.contextGeneration);
 			return;
 		}
 
@@ -568,7 +625,11 @@ export class GsdClient implements vscode.Disposable {
 		this._onEvent.fire(data as AgentEvent);
 	}
 
-	private async handleUIRequest(request: Record<string, unknown>): Promise<void> {
+	private async handleUIRequest(request: Record<string, unknown>, proc: ChildProcess | null, generation: number): Promise<void> {
+		// A prompt can outlive its process or session. Never send its answer to a replacement.
+		const sendResponse = (data: Record<string, unknown>) => {
+			if (proc && this.process === proc && this.contextGeneration === generation) this.sendRaw(data);
+		};
 		const id = request.id as string;
 		const method = request.method as string;
 
@@ -585,16 +646,16 @@ export class GsdClient implements vscode.Disposable {
 							canPickMany: true,
 						});
 						if (picked) {
-							this.sendRaw({ type: "extension_ui_response", id, values: picked });
+							sendResponse({ type: "extension_ui_response", id, values: picked });
 						} else {
-							this.sendRaw({ type: "extension_ui_response", id, cancelled: true });
+							sendResponse({ type: "extension_ui_response", id, cancelled: true });
 						}
 					} else {
 						const picked = await vscode.window.showQuickPick(options, { title });
 						if (picked) {
-							this.sendRaw({ type: "extension_ui_response", id, value: picked });
+							sendResponse({ type: "extension_ui_response", id, value: picked });
 						} else {
-							this.sendRaw({ type: "extension_ui_response", id, cancelled: true });
+							sendResponse({ type: "extension_ui_response", id, cancelled: true });
 						}
 					}
 					break;
@@ -609,7 +670,7 @@ export class GsdClient implements vscode.Disposable {
 						"Yes",
 						"No",
 					);
-					this.sendRaw({ type: "extension_ui_response", id, confirmed: result === "Yes" });
+					sendResponse({ type: "extension_ui_response", id, confirmed: result === "Yes" });
 					break;
 				}
 
@@ -618,9 +679,9 @@ export class GsdClient implements vscode.Disposable {
 					const placeholder = String(request.placeholder ?? "");
 					const value = await vscode.window.showInputBox({ title, placeHolder: placeholder });
 					if (value !== undefined) {
-						this.sendRaw({ type: "extension_ui_response", id, value });
+						sendResponse({ type: "extension_ui_response", id, value });
 					} else {
-						this.sendRaw({ type: "extension_ui_response", id, cancelled: true });
+						sendResponse({ type: "extension_ui_response", id, cancelled: true });
 					}
 					break;
 				}
@@ -641,12 +702,12 @@ export class GsdClient implements vscode.Disposable {
 
 				default:
 					// Unknown method — cancel to unblock the agent
-					this.sendRaw({ type: "extension_ui_response", id, cancelled: true });
+					sendResponse({ type: "extension_ui_response", id, cancelled: true });
 					break;
 			}
 		} catch {
 			// On error, cancel to unblock
-			this.sendRaw({ type: "extension_ui_response", id, cancelled: true });
+			sendResponse({ type: "extension_ui_response", id, cancelled: true });
 		}
 	}
 
