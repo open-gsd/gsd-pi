@@ -27,7 +27,7 @@ function windowsPackageTestStep(): string {
 		/ {2}windows-portability:\n(?<body>[\s\S]*?)(?=\n {2}[a-zA-Z0-9_-]+:|\n?$)/,
 	)?.groups?.body;
 	assert.ok(job, "windows-portability job must exist");
-	assert.match(job, /runs-on:\s*\$\{\{\s*github\.repository_owner/);
+	assert.match(job, /runs-on:\s*blacksmith-4vcpu-windows-2025/);
 
 	const step = job.match(
 		/ {6}- name: Run package tests\n(?<body>[\s\S]*?)(?=\n {6}- name:|\n?$)/,
