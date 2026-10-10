@@ -213,8 +213,43 @@ export function createFakeProvider(opts: { transcriptPath: string }): ApiProvide
 		return transcript[cursor++];
 	}
 
-	function streamTurn(model: Model<typeof FAKE_API>, ctx: Context): AssistantMessageEventStream {
+	function endAborted(stream: AssistantMessageEventStream, model: Model<typeof FAKE_API>): void {
+		const abortedMsg: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "aborted",
+			errorMessage: "Request was aborted",
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "error", reason: "aborted", error: abortedMsg });
+		stream.end(abortedMsg);
+	}
+
+	function streamTurn(
+		model: Model<typeof FAKE_API>,
+		ctx: Context,
+		signal?: AbortSignal,
+	): AssistantMessageEventStream {
 		const stream = new AssistantMessageEventStream();
+
+		// Like a real provider, a request made on an already-aborted signal never
+		// reaches the model: it ends as "aborted" and consumes no transcript turn.
+		if (signal?.aborted) {
+			queueMicrotask(() => endAborted(stream, model));
+			return stream;
+		}
+
 		const turn = nextTurn();
 
 		// Synchronously validate expectations BEFORE doing any async work — this
@@ -278,7 +313,17 @@ export function createFakeProvider(opts: { transcriptPath: string }): ApiProvide
 
 				if (emit.kind === "timeout") {
 					const delay = emit.delayMs ?? 60_000;
-					await new Promise((r) => setTimeout(r, delay));
+					await new Promise<void>((resolve) => {
+						const timer = setTimeout(resolve, delay);
+						signal?.addEventListener("abort", () => {
+							clearTimeout(timer);
+							resolve();
+						}, { once: true });
+					});
+					if (signal?.aborted) {
+						endAborted(stream, model);
+						return;
+					}
 					// If the caller hasn't already aborted, emit a synthetic timeout error.
 					const errorMsg: AssistantMessage = {
 						role: "assistant",
@@ -366,9 +411,9 @@ export function createFakeProvider(opts: { transcriptPath: string }): ApiProvide
 
 	return {
 		api: FAKE_API,
-		stream: ((model: Model<typeof FAKE_API>, ctx: Context, _opts?: StreamOptions) =>
-			streamTurn(model, ctx)) as ApiProvider<typeof FAKE_API>["stream"],
-		streamSimple: ((model: Model<typeof FAKE_API>, ctx: Context, _opts?: SimpleStreamOptions) =>
-			streamTurn(model, ctx)) as ApiProvider<typeof FAKE_API>["streamSimple"],
+		stream: ((model: Model<typeof FAKE_API>, ctx: Context, opts?: StreamOptions) =>
+			streamTurn(model, ctx, opts?.signal)) as ApiProvider<typeof FAKE_API>["stream"],
+		streamSimple: ((model: Model<typeof FAKE_API>, ctx: Context, opts?: SimpleStreamOptions) =>
+			streamTurn(model, ctx, opts?.signal)) as ApiProvider<typeof FAKE_API>["streamSimple"],
 	};
 }
