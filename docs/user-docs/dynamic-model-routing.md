@@ -38,7 +38,7 @@ dynamic_routing:
 dynamic_routing:
   enabled: true
   tier_models:                    # explicit model per tier (optional)
-    light: claude-haiku-4-5
+    light: claude-haiku-5-5
     standard: claude-sonnet-4-6
     heavy: claude-opus-4-6
   escalate_on_failure: true       # bump tier on task failure (default: true)
@@ -68,7 +68,7 @@ Keep `cross_provider: false` when routing inside a flat-rate subscription unless
 
 Override which model is used for each tier. When omitted, the router uses a built-in capability mapping that knows common model families:
 
-- **Light:** `claude-haiku-4-5`, `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5.1-codex-mini`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gemini-2.0-flash`
+- **Light:** `claude-haiku-5-5`, `claude-haiku-4-5`, `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5.1-codex-mini`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gemini-2.0-flash`
 - **Standard:** `claude-sonnet-4`, `claude-sonnet-4-5`, `claude-sonnet-4-6`, `gpt-4o`, `gpt-4.1`, `gpt-5.1-codex-max`, `gemini-2.5-pro`, `deepseek-chat`
 - **Heavy:** `claude-opus-4-5`, `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `gpt-5`, `gpt-5-pro`, `gpt-5.1`, `gpt-5.2`, `gpt-5.2-codex`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `o1`, `o3`, `o4-mini`
 
@@ -320,6 +320,7 @@ The router includes a built-in cost table for common models, used for cross-prov
 
 | Model | Input | Output |
 |-------|-------|--------|
+| claude-haiku-5-5 | $0.10 | $0.50 |
 | claude-haiku-4-5 | $0.80 | $4.00 |
 | claude-sonnet-4-6 | $3.00 | $15.00 |
 | claude-opus-4-6 | $15.00 | $75.00 |

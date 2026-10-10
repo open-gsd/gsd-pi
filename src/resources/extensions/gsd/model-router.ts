@@ -983,7 +983,7 @@ export function defaultRoutingConfig(): DynamicRoutingConfig {
  *   4. CANONICAL_TIER_MODELS[tier] when the registry is empty
  */
 const CANONICAL_TIER_MODELS: Record<ComplexityTier, string> = {
-  light: "claude-haiku-4-5",
+  light: "claude-haiku-5-5",
   standard: "claude-sonnet-4-6",
   heavy: "claude-opus-5-5",
 };

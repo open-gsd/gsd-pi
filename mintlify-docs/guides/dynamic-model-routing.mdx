@@ -28,7 +28,7 @@ dynamic_routing:
 dynamic_routing:
   enabled: true
   tier_models:
-    light: claude-haiku-4-5
+    light: claude-haiku-5-5
     standard: claude-sonnet-4-6
     heavy: claude-opus-4-6
   escalate_on_failure: true    # bump tier on task failure
@@ -79,6 +79,7 @@ User feedback (`/gsd rate`) is weighted 2x vs automatic outcomes.
 
 | Model | Input (per M) | Output (per M) |
 |-------|-------|--------|
+| claude-haiku-5-5 | $0.10 | $0.50 |
 | claude-haiku-4-5 | $0.80 | $4.00 |
 | claude-sonnet-4-6 | $3.00 | $15.00 |
 | claude-opus-4-6 | $15.00 | $75.00 |
