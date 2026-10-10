@@ -630,6 +630,7 @@ export class Editor implements Component, Focusable {
 				if (selected && this.autocompleteProvider) {
 					this.pushUndoSnapshot();
 					this.lastAction = null;
+					const textBeforeCompletion = this.getText();
 					const result = this.autocompleteProvider.applyCompletion(
 						this.state.lines,
 						this.state.cursorLine,
@@ -641,7 +642,14 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 
-					if (this.autocompletePrefix.startsWith("/")) {
+					// A slash command whose argument is already typed in full
+					// ("/gsd auto" with "auto" highlighted) completes to the same
+					// text. Enter must then run the command, not be spent on a
+					// completion that changed nothing.
+					const completedSlashCommandAsTyped =
+						textBeforeCompletion.startsWith("/") && this.getText() === textBeforeCompletion;
+
+					if (this.autocompletePrefix.startsWith("/") || completedSlashCommandAsTyped) {
 						this.cancelAutocomplete();
 						// Fall through to submit
 					} else {
