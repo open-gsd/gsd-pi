@@ -9,6 +9,7 @@ import { Container } from "@gsd/pi-tui";
 import {
 	handleCtrlC,
 	handlePastedImagePath,
+	setupKeyHandlers,
 	shutdown,
 	toggleThinkingBlockVisibility,
 } from "./interactive-key-handlers.js";
@@ -402,4 +403,50 @@ test("toggleThinkingBlockVisibility: re-adds streaming component when present", 
 	assert.equal(host.streamingComponent, mockComponent);
 	assert.equal(host.streamingComponent?.setHideThinkingBlock?.called, undefined);
 	// The key assertion is that no error is thrown and the component survives the rebuild
+});
+
+// ── Escape ───────────────────────────────────────────────────────────
+
+/** Host with the editor surface `setupKeyHandlers` wires, recording interrupt requests. */
+function makeEscapeHost(extra: Record<string, unknown> = {}): any {
+	const interrupts: Array<{ abort?: boolean } | undefined> = [];
+	const host = makeHost({
+		defaultEditor: { onAction() {} },
+		editor: { getText: () => "", setText() {} },
+		settingsManager: { getDoubleEscapeAction: () => "none" },
+		restoreQueuedMessagesToEditor(options?: { abort?: boolean }) {
+			interrupts.push(options);
+			return 0;
+		},
+		...extra,
+	});
+	host.session.isBashRunning = false;
+	setupKeyHandlers(host);
+	return { host, interrupts };
+}
+
+test("Escape interrupts the turn while the default loader is shown", () => {
+	const { host, interrupts } = makeEscapeHost({ loadingAnimation: { stop() {} } });
+
+	host.defaultEditor.onEscape();
+
+	assert.deepEqual(interrupts, [{ abort: true }]);
+});
+
+test("Escape interrupts the turn when an extension replaced the loader with the activity indicator", () => {
+	// GSD auto-mode calls setWorkingMessage(null) for every unit: the default
+	// loader is gone and only the activity indicator marks the turn in flight.
+	const { host, interrupts } = makeEscapeHost({ loadingAnimation: undefined, activityLoader: { stop() {} } });
+
+	host.defaultEditor.onEscape();
+
+	assert.deepEqual(interrupts, [{ abort: true }]);
+});
+
+test("Escape interrupts nothing when no turn is in flight", () => {
+	const { host, interrupts } = makeEscapeHost();
+
+	host.defaultEditor.onEscape();
+
+	assert.deepEqual(interrupts, []);
 });
