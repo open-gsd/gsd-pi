@@ -970,7 +970,9 @@ impl ProjectionRootIdentityLock {
                 self.safe_windows_path(&quarantine_path, false)?;
             let file = open_windows_delete_node(&path)?;
             if windows_file_information(&file)?.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                return Err(projection_error("projection target is not a regular file"));
+                return Err(projection_error(projection_target_kind_message(
+                    &path, false,
+                )));
             }
             let (volume, id) = windows_file_identity(&file)?;
             rename_windows_handle(
@@ -1147,7 +1149,17 @@ impl ProjectionRootIdentityLock {
             // Enumerate the projection root through the identity-held handle
             // so the listing stays correlated with the locked root.
             if path != self.root {
-                guards.push(open_windows_directory(&path)?);
+                let directory = open_windows_directory(&path)?;
+                // The open succeeds on a regular file; enumerating it would
+                // fail with a bare "parameter is incorrect" (os error 87).
+                if windows_file_information(&directory)?.file_attributes & FILE_ATTRIBUTE_DIRECTORY
+                    == 0
+                {
+                    return Err(projection_error(projection_target_kind_message(
+                        &path, true,
+                    )));
+                }
+                guards.push(directory);
             }
             let list_children = |guards: &[File]| -> Result<Vec<String>> {
                 let directory = guards.last().or(self.file.as_ref()).ok_or_else(|| {
@@ -1729,7 +1741,9 @@ impl ProjectionRootIdentityLock {
                 let file = open_windows_delete_node(&target)?;
                 if windows_file_information(&file)?.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
                 {
-                    return Err(projection_error("projection target is not a regular file"));
+                    return Err(projection_error(projection_target_kind_message(
+                        &target, false,
+                    )));
                 }
                 Some(file)
             }
@@ -1996,6 +2010,26 @@ fn unsupported_projection_reparse_point_message(path: &Path) -> String {
     )
 }
 
+/// Kind mismatches on a named target must say which target (#2648). The bare
+/// "projection target is not a regular file", and the raw "parameter is
+/// incorrect" (os error 87) that listing a regular file used to surface,
+/// carry no path. As with the structural family, the path stays out of the
+/// text after the last ": ".
+#[cfg(any(windows, test))]
+fn projection_target_kind_message(path: &Path, directory_expected: bool) -> String {
+    if directory_expected {
+        format!(
+            "projection target is not a directory at {}: found a regular file",
+            path.display(),
+        )
+    } else {
+        format!(
+            "projection target is not a regular file at {}: found a directory",
+            path.display(),
+        )
+    }
+}
+
 /// Clears the thread-local errno before a readdir loop so a null return can
 /// distinguish end-of-directory from an I/O error. Without this, an I/O error
 /// would silently truncate listings that feed fail-closed occupant checks.
@@ -2083,7 +2117,9 @@ fn open_windows_root_directory(path: &Path) -> Result<File> {
         .open(path)
         .map_err(|error| projection_path_error(path, error))?;
     if windows_file_information(&file)?.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(projection_error(unsupported_projection_reparse_point_message(path)));
+        return Err(projection_error(
+            unsupported_projection_reparse_point_message(path),
+        ));
     }
     Ok(file)
 }
@@ -6527,8 +6563,9 @@ fn rename_relative_between_exclusive(
 #[cfg(test)]
 mod sharing_violation_tests {
     use super::{
-        is_windows_sharing_violation, projection_path_error, retry_windows_projection_operation,
-        unsupported_projection_node_message, unsupported_projection_reparse_point_message,
+        is_windows_sharing_violation, projection_path_error, projection_target_kind_message,
+        retry_windows_projection_operation, unsupported_projection_node_message,
+        unsupported_projection_reparse_point_message,
     };
     use std::path::Path;
 
@@ -6648,7 +6685,13 @@ mod sharing_violation_tests {
         assert!(node.starts_with("projection root contains an unsupported node while "));
         assert!(node.contains("opening projection file"));
         assert!(reparse.starts_with("projection root contains an unsupported reparse point at "));
-        for message in [&node, &reparse] {
+        let not_file = projection_target_kind_message(path, false);
+        let not_directory = projection_target_kind_message(path, true);
+        assert!(not_file.starts_with("projection target is not a regular file at "));
+        assert!(not_file.ends_with(": found a directory"));
+        assert!(not_directory.starts_with("projection target is not a directory at "));
+        assert!(not_directory.ends_with(": found a regular file"));
+        for message in [&node, &reparse, &not_file, &not_directory] {
             assert!(message.contains(path.to_string_lossy().as_ref()));
             let tail = message.rsplit(": ").next().unwrap();
             assert!(!tail.contains("EBUSY"));

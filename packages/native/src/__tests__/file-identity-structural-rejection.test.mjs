@@ -130,6 +130,34 @@ test("a junction inside the projection root is rejected by name on read and remo
   }
 });
 
+// The kind mismatches outside the "unsupported node" family were path-less
+// too: a write or quarantine onto a directory said only "projection target is
+// not a regular file", and listing a regular file surfaced the raw
+// "parameter is incorrect" (os error 87).
+test("a kind mismatch on a write, quarantine or listing target names the target", windowsOnly, (t) => {
+  const fixture = openFixture(t);
+  mkdirSync(join(fixture.root, "STATE.md"));
+  writeFileSync(join(fixture.root, "milestones"), "not a directory\n");
+  const lock = fixture.open();
+
+  for (const operation of [
+    () => lock.writeFile("STATE.md", Buffer.from("# State\n")),
+    () => lock.quarantineFile("STATE.md", ".gsd-projection-remove-00000000-0000-0000-0000-000000000001"),
+  ]) {
+    const message = rejection(operation);
+    assert.match(message, /projection target is not a regular file at .*STATE\.md: found a directory$/u);
+  }
+
+  const listing = rejection(() => lock.listDirectory("milestones"));
+  assert.match(listing, /projection target is not a directory at .*milestones: found a regular file$/u);
+  assert.doesNotMatch(listing, /os error 87/u);
+
+  // The occupants are untouched and the lock is still healthy.
+  assert.equal(lock.pathKind("STATE.md"), "directory");
+  assert.equal(lock.pathKind("milestones"), "file");
+  assert.equal(fixture.fileIdentity.isProjectionRootIdentityLockAvailable(), true);
+});
+
 test("repeated structural rejections never trip the transient health latch", windowsOnly, (t) => {
   const fixture = openFixture(t);
   mkdirSync(join(fixture.root, "STATE.md"));
