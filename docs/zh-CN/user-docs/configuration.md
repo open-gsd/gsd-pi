@@ -195,7 +195,7 @@ models:
     fallbacks:
       - openrouter/z-ai/glm-5
   execution: claude-sonnet-4-6
-  execution_simple: claude-haiku-4-5-20250414
+  execution_simple: claude-haiku-5-5
   completion: claude-sonnet-4-6
   subagent: claude-sonnet-4-6
 ```
@@ -743,7 +743,7 @@ dynamic_routing:
   enabled: true
   capability_routing: true          # 按 task capability 评分 models
   tier_models:
-    light: claude-haiku-4-5
+    light: claude-haiku-5-5
     standard: claude-sonnet-4-6
     heavy: claude-opus-4-6
   escalate_on_failure: true
@@ -832,7 +832,7 @@ models:
     fallbacks:
       - openrouter/z-ai/glm-5
   execution: claude-sonnet-4-6
-  execution_simple: claude-haiku-4-5-20250414
+  execution_simple: claude-haiku-5-5
   completion: claude-sonnet-4-6
 
 # Token optimization

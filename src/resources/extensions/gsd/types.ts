@@ -624,7 +624,7 @@ export interface ParallelConfig {
   budget_ceiling?: number;
   merge_strategy: MergeStrategy;
   auto_merge: AutoMergeMode;
-  /** Optional model override for parallel milestone workers (e.g. "claude-haiku-4-5"). */
+  /** Optional model override for parallel milestone workers (e.g. "claude-haiku-5-5"). */
   worker_model?: string;
 }
 

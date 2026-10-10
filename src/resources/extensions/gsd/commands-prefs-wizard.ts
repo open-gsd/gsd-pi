@@ -806,7 +806,7 @@ async function configureDynamicRouting(ctx: ExtensionCommandContext, prefs: Reco
   const tierModels = (dr.tier_models as Record<string, unknown> | undefined) ?? {};
   for (const tier of ["light", "standard", "heavy"] as const) {
     const current = typeof tierModels[tier] === "string" ? tierModels[tier] as string : "";
-    const input = await promptString(ctx, `Model for ${tier} tier (e.g. claude-haiku-4-5)`, current);
+    const input = await promptString(ctx, `Model for ${tier} tier (e.g. claude-haiku-5-5)`, current);
     if (input === undefined) continue;
     if (input) tierModels[tier] = input;
     else if (current) delete tierModels[tier];
@@ -1294,7 +1294,7 @@ async function configureParallelism(ctx: ExtensionCommandContext, prefs: Record<
   const pAuto = await promptEnum(ctx, "Auto-merge mode", parallel.auto_merge, ["auto", "confirm", "manual"]);
   if (pAuto !== undefined) parallel.auto_merge = pAuto;
 
-  const pWorkerModel = await promptString(ctx, "Worker model override (e.g. claude-haiku-4-5)", parallel.worker_model);
+  const pWorkerModel = await promptString(ctx, "Worker model override (e.g. claude-haiku-5-5)", parallel.worker_model);
   if (pWorkerModel !== undefined) {
     if (pWorkerModel) parallel.worker_model = pWorkerModel;
     else delete parallel.worker_model;

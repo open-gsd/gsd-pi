@@ -21,7 +21,7 @@ models:
   research: claude-sonnet-4-6        # scouting and research
   planning: claude-opus-4-8          # architectural decisions
   execution: claude-sonnet-4-6       # writing code
-  execution_simple: claude-haiku-4-5 # simple tasks (docs, config)
+  execution_simple: claude-haiku-5-5 # simple tasks (docs, config)
   completion: claude-sonnet-4-6      # summaries and wrap-up
   subagent: claude-sonnet-4-6        # delegated sub-tasks
 ```
