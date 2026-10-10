@@ -1107,7 +1107,7 @@ const SubagentParams = Type.Object({
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
 	agentScope: Type.Optional(AgentScopeSchema),
 	context: Type.Optional(ContextModeSchema),
-	background: Type.Optional(Type.Boolean({ description: "Return after starting the run and keep status in the persisted run record. Default: false.", default: false })),
+	background: Type.Optional(Type.Boolean({ description: "Return immediately after starting a single-mode run ({ agent, task }) and keep status in the persisted run record. Requires single mode; not supported with tasks or chain. Default: false.", default: false })),
 	followUp: Type.Optional(Type.String({ description: "Follow-up instruction for resume action. Falls back to task when omitted." })),
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: false.", default: false }),
@@ -1156,6 +1156,7 @@ export default function (pi: ExtensionAPI) {
 			"Delegate tasks to specialized subagents, each a separate pi process with its own isolated context window, tools, model, and system prompt.",
 			"Modes: single ({ agent, task }), parallel ({ tasks: [{agent, task},...] }), chain ({ chain: [{agent, task},...] } where each step's {previous} placeholder receives the prior output).",
 			"Agents are defined as .md files in ~/.gsd/agent/agents/ (user) or .gsd/agents/ (project); list them with the /subagent command.",
+			"background: true returns immediately after starting a single-mode run ({ agent, task }); it is not supported with tasks or chain.",
 		].join(" "),
 		promptGuidelines: [
 			"Prefer subagent dispatch over inline work for self-contained tasks (recon, planning, review, refactor, test writing, security audit, docs); each dispatch gets a fresh context window so the main session stays focused on synthesis.",
@@ -1622,7 +1623,10 @@ export default function (pi: ExtensionAPI) {
 			if (params.background) {
 				if (!params.agent || !params.task || hasTasks || hasChain) {
 					const failure = makeFailureResult(
-						new Error("Background launch currently requires single mode with agent and task."),
+						new Error(
+							"Background launch requires single mode with agent and task; it cannot be combined with tasks or chain. " +
+								"Remove background to dispatch tasks/chain synchronously.",
+						),
 						params.agent ?? "unknown",
 						params.task ?? "",
 					);
