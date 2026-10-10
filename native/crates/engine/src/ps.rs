@@ -84,7 +84,9 @@ mod platform {
 			return;
 		}
 
-		let child_count = actual as usize / size_of::<i32>();
+		// proc_listchildpids already converts proc_listpids' byte count to PIDs.
+		// Bound the returned element count to the initialized allocation.
+		let child_count = (actual as usize).min(buffer.len());
 		for &child_pid in &buffer[..child_count] {
 			if child_pid > 0 {
 				pids.push(child_pid);

@@ -45,19 +45,34 @@ describe("native ps: listDescendants()", () => {
     assert.equal(descendants.length, 0);
   });
 
-  test("finds child processes", { skip: "proc_listchildpids unreliable on macOS — needs sysctl KERN_PROC implementation" }, async () => {
-    const child = spawn("sh", ["-c", "sleep 30 & sleep 30 & wait"], {
-      stdio: "ignore",
+  test("finds direct children and grandchildren", { timeout: 10_000 }, async (t) => {
+    const child = spawn(process.execPath, ["-e", `
+      const { spawn } = require("node:child_process");
+      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+      child.once("spawn", () => process.send({ pid: child.pid }));
+      const cleanup = () => { child.kill("SIGTERM"); process.exit(0); };
+      process.once("SIGTERM", cleanup);
+      process.once("disconnect", cleanup);
+      setInterval(() => {}, 1000);
+    `], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    let grandchildPid;
+    t.after(async () => {
+      // Clean up only our recorded fixture processes, even if enumeration fails.
+      if (grandchildPid) {
+        try { process.kill(grandchildPid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+      }
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGTERM");
+        await exited;
+      }
     });
-
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    try {
-      const descendants = native.listDescendants(child.pid);
-      assert.ok(descendants.length > 0, `expected descendants of sh (pid ${child.pid}), got: ${JSON.stringify(descendants)}`);
-    } finally {
-      native.killTree(child.pid, 9);
-    }
+    const [message] = await once(child, "message", { signal: AbortSignal.timeout(5_000) });
+    assert.ok(Number.isInteger(message.pid) && message.pid > 0);
+    grandchildPid = message.pid;
+    assert.ok(native.listDescendants(process.pid).includes(child.pid), "enumeration must include our direct child");
+    assert.ok(native.listDescendants(child.pid).includes(grandchildPid), "enumeration must include our grandchild");
+    assert.ok(native.listDescendants(process.pid).includes(grandchildPid), "enumeration must traverse the child branch");
   });
 });
 
