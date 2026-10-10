@@ -414,9 +414,7 @@ export async function checkGitHealth(
 
       if (shouldFix("tracked_runtime_files")) {
         try {
-          for (const exclusion of RUNTIME_EXCLUSION_PATHS) {
-            nativeRmCached(basePath, [exclusion]);
-          }
+          nativeRmCached(basePath, [...RUNTIME_EXCLUSION_PATHS]);
           fixesApplied.push(`untracked ${trackedPaths.length} runtime file(s)`);
         } catch {
           fixesApplied.push("failed to untrack runtime files");

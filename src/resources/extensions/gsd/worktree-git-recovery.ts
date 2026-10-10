@@ -151,16 +151,21 @@ export function gsdJsonlFilesWithConflictMarkers(basePath: string): string[] {
 }
 
 export function removeMergeStateFiles(basePath: string, contextLabel: string): void {
+  const files = ["SQUASH_MSG", "MERGE_MSG", "MERGE_MODE", "MERGE_HEAD", "AUTO_MERGE"];
   try {
-    for (const f of ["SQUASH_MSG", "MERGE_MSG", "MERGE_MODE", "MERGE_HEAD", "AUTO_MERGE"]) {
-      const rawPath = execFileSync("git", ["rev-parse", "--git-path", f], {
-        cwd: basePath,
-        stdio: ["ignore", "pipe", "pipe"],
-        encoding: "utf-8",
-      }).trim();
+    // One rev-parse for all names: git prints one line per --git-path argument.
+    const rawPaths = execFileSync("git", ["rev-parse", ...files.flatMap((f) => ["--git-path", f])], {
+      cwd: basePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf-8",
+    }).trim().split(/\r?\n/);
+    const resolved = rawPaths.length === files.length;
+    let gitDir: string | undefined;
+    for (const [i, f] of files.entries()) {
+      const rawPath = resolved ? rawPaths[i]! : "";
       const p = rawPath.length > 0
         ? (isAbsolute(rawPath) ? rawPath : resolve(basePath, rawPath))
-        : join(resolveGitDir(basePath), f);
+        : join((gitDir ??= resolveGitDir(basePath)), f);
       if (existsSync(p)) unlinkSync(p);
     }
   } catch (err) {

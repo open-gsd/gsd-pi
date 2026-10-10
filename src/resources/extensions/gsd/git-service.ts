@@ -855,12 +855,8 @@ export class GitServiceImpl {
     // committed but the second half doesn't (#1326).
     const cleanupRepoKey = resolve(this.basePath);
     if (!runtimeFilesCleanedUpRepos.has(cleanupRepoKey)) {
-      let cleaned = false;
-      for (const exclusion of RUNTIME_EXCLUSION_PATHS) {
-        const removed = nativeRmCached(this.basePath, [exclusion]);
-        if (removed.length > 0) cleaned = true;
-      }
-      if (cleaned) {
+      const removed = nativeRmCached(this.basePath, [...RUNTIME_EXCLUSION_PATHS]);
+      if (removed.length > 0) {
         nativeCommit(this.basePath, "chore: untrack .gsd/ runtime files from git index", { allowEmpty: false });
       }
       runtimeFilesCleanedUpRepos.add(cleanupRepoKey);

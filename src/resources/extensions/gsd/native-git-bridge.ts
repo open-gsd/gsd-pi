@@ -1300,24 +1300,27 @@ export function nativeBranchForceReset(basePath: string, branch: string, target:
  * Remove files from the index (cache) without touching the working tree.
  * Returns list of removed files.
  * Native: libgit2 index remove.
- * Fallback: `git rm --cached -r --ignore-unmatch <path>`.
+ * Fallback: one `git rm --cached -r --ignore-unmatch -- <paths>` for the whole
+ * list, retried one path at a time only if that fails.
  */
 export function nativeRmCached(basePath: string, paths: string[], recursive = true): string[] {
   const native = loadNative();
   if (native) {
     return native.gitRmCached(basePath, paths, recursive);
   }
+  if (paths.length === 0) return [];
 
-  const removed: string[] = [];
-  for (const path of paths) {
-    const result = gitExec(
-      basePath,
-      ["rm", "--cached", ...(recursive ? ["-r"] : []), "--ignore-unmatch", path],
-      true,
-    );
-    if (result) removed.push(result);
+  const args = ["rm", "--cached", ...(recursive ? ["-r"] : []), "--ignore-unmatch", "--"];
+  let output: string;
+  try {
+    output = gitExec(basePath, [...args, ...paths], paths.length === 1);
+  } catch {
+    // git rm is all-or-nothing: one refused path (e.g. staged content that
+    // differs from both HEAD and the working tree) fails the whole batch.
+    // Retry per path so one bad path cannot keep the rest in the index.
+    output = paths.map((path) => gitExec(basePath, [...args, path], true)).join("\n");
   }
-  return removed;
+  return output.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 /**
