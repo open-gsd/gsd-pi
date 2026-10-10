@@ -165,3 +165,68 @@ test("ScheduleWakeup keeps interactive wakeups isolated per session base path", 
     autoSession.reset();
   }
 });
+
+test("ScheduleWakeup tool contract discloses non-blocking, turn-end, and replacement semantics (#2760)", () => {
+  let tool: any;
+  const pi = {
+    registerTool(registered: any) {
+      tool = registered;
+    },
+  };
+  registerScheduleWakeupTool(pi as any);
+
+  const description: string = tool.description;
+  assert.match(description, /non-blocking/i, "description must state scheduling is non-blocking");
+  assert.match(
+    description,
+    /returns immediately and does not wait or advance\s+elapsed time/i,
+    "description must state the call returns immediately without advancing elapsed time",
+  );
+  assert.match(
+    description,
+    /finish the current turn/i,
+    "description must require finishing the turn instead of polling",
+  );
+  // Interactive and auto-mode differ: interactive arms a timer immediately and
+  // keeps one per project; auto-mode consumes the wakeup when the unit turn
+  // returns (then waits the full requested delay) and keeps one per unit.
+  assert.match(
+    description,
+    /armed immediately/i,
+    "description must state the interactive timer is armed immediately",
+  );
+  assert.match(
+    description,
+    /per project/i,
+    "description must state the interactive one-pending-timer-per-project scope",
+  );
+  assert.match(
+    description,
+    /per unit/i,
+    "description must state the auto-mode one-pending-wakeup-per-unit scope",
+  );
+  assert.match(description, /replaces/i, "description must document re-schedule replacement semantics");
+  assert.match(
+    description,
+    /full requested delay/,
+    "description must state the auto-mode delay runs after the unit turn returns",
+  );
+
+  const delayDescription: string = tool.parameters.properties.delaySeconds.description;
+  assert.match(
+    delayDescription,
+    /returns immediately|does not block/i,
+    "delaySeconds must not read as a blocking sleep",
+  );
+
+  const guidelines: string[] = tool.promptGuidelines;
+  assert.ok(
+    guidelines.some((g) => /non-blocking/i.test(g) && /finish the current turn/i.test(g)),
+    "prompt guidelines must state the non-blocking finish-turn contract",
+  );
+  assert.ok(
+    guidelines.some((g) => /replaces/i.test(g) && /per project/i.test(g) && /per unit/i.test(g)),
+    "prompt guidelines must state replacement and its per-mode scope",
+  );
+});
+
