@@ -247,7 +247,7 @@ jobs:
           RECOVERED_SOURCE: ${{ needs.prerelease-resume.outputs.source_sha }}
         run: test "$(git rev-parse HEAD)" = "$RECOVERED_SOURCE"
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.2
         if: ${{ inputs.resume_prerelease_run }}
         with:
           name: recovered-prerelease
@@ -513,7 +513,7 @@ jobs:
           GSD_LIVE_TESTS: "1"
 
       - name: Download release metadata
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: prod-release-metadata
           path: release-metadata
@@ -596,7 +596,7 @@ jobs:
           pnpm run test:live-regression
 
       - name: Download native artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: native-*
           path: artifacts
