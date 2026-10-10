@@ -39,15 +39,24 @@ function makeTempDir(prefix: string): string {
 function withRtkDisabled<T>(callback: () => T): T {
   const previous = process.env.GSD_RTK_DISABLED;
   process.env.GSD_RTK_DISABLED = "1";
-  try {
-    return callback();
-  } finally {
+  const restore = (): void => {
     if (previous === undefined) {
       delete process.env.GSD_RTK_DISABLED;
     } else {
       process.env.GSD_RTK_DISABLED = previous;
     }
+  };
+  let result: T;
+  try {
+    result = callback();
+  } catch (error) {
+    restore();
+    throw error;
   }
+  // The gate is async: keep RTK disabled until its run has settled.
+  if (result instanceof Promise) return result.finally(restore) as T;
+  restore();
+  return result;
 }
 
 // ─── Discovery Tests ─────────────────────────────────────────────────────────
@@ -608,8 +617,8 @@ describe("verification-gate: execution", () => {
   beforeEach(() => { tmp = makeTempDir("vg-exec"); });
   afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
 
-  test("all commands pass → gate passes", () => {
-    const result = runVerificationGate({
+  test("all commands pass → gate passes", async () => {
+    const result = await runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["echo hello", "echo world"],
     });
@@ -623,11 +632,11 @@ describe("verification-gate: execution", () => {
     assert.equal(typeof result.timestamp, "number");
   });
 
-  test("executes nested-quote node -e commands without mangling (#1939)", () => {
+  test("executes nested-quote node -e commands without mangling (#1939)", async () => {
     writeFileSync(join(tmp, "nested-quote-probe.txt"), "ready\n");
     const command = String.raw`node -e "const fs=require('node:fs'); if (!fs.readFileSync(\"nested-quote-probe.txt\", 'utf8').includes(\"ready\")) process.exit(2)"`;
 
-    const result = withRtkDisabled(() => runVerificationGate({
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       preferenceCommands: [command],
     }));
@@ -636,8 +645,8 @@ describe("verification-gate: execution", () => {
     assert.equal(result.checks[0]?.exitCode, 0);
   });
 
-  test("shell parser failures are tagged as execution faults (#1939)", () => {
-    const result = withRtkDisabled(() => runVerificationGate({
+  test("shell parser failures are tagged as execution faults (#1939)", async () => {
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       preferenceCommands: [`node -e '\"const'`],
     }));
@@ -649,8 +658,8 @@ describe("verification-gate: execution", () => {
     assert.equal(result.checks[0]?.failureClass, "shell-parse");
   });
 
-  test("passing task evidence prevents unrelated preference verification from failing an artifact task (#1431)", () => {
-    const result = runVerificationGate({
+  test("passing task evidence prevents unrelated preference verification from failing an artifact task (#1431)", async () => {
+    const result = await runVerificationGate({
       cwd: tmp,
       taskPlanVerify: "Planning artifacts exist and contain all required sections",
       preferenceCommands: ["node -e 'process.exit(9)'"],
@@ -669,8 +678,8 @@ describe("verification-gate: execution", () => {
     ]);
   });
 
-  test("a prose Verify with no host-recorded evidence yields a result with no check", () => {
-    const result = runVerificationGate({
+  test("a prose Verify with no host-recorded evidence yields a result with no check", async () => {
+    const result = await runVerificationGate({
       cwd: tmp,
       taskPlanVerify: "Planning artifacts exist and contain all required sections",
     });
@@ -768,11 +777,11 @@ describe("verification-gate: execution", () => {
   test(
     "Windows verify chains reach Git's bundled POSIX tools (#2087)",
     { skip: process.platform !== "win32" || !resolveGitPosixToolsDirectory(process.env) },
-    () => {
+    async () => {
       const tmpDir = makeTempDir("gsd-verify-posix-chain");
       try {
         writeFileSync(join(tmpDir, "detail.py"), "No filings ingested\n");
-        const result = withRtkDisabled(() => runVerificationGate({
+        const result = await withRtkDisabled(() => runVerificationGate({
           cwd: tmpDir,
           taskPlanVerify: 'echo FIRST-HALF-OK && grep -q "No filings ingested" detail.py',
         }));
@@ -934,7 +943,7 @@ describe("verification-gate: execution", () => {
   test(
     "Windows verify runs POSIX text under Git bash and Windows-authored text under cmd (#2399)",
     { skip: process.platform !== "win32" || !resolveGitBashExecutable(process.env) },
-    () => {
+    async () => {
       const tmpDir = makeTempDir("gsd-verify-git-bash-quotes");
       const previousVirtualEnv = process.env.VIRTUAL_ENV;
       delete process.env.VIRTUAL_ENV;
@@ -950,7 +959,7 @@ describe("verification-gate: execution", () => {
         // injected native `...\.venv\Scripts\python.exe` path is exercised.
         mkdirSync(join(tmpDir, ".venv", "Scripts"), { recursive: true });
         copyFileSync(process.execPath, join(tmpDir, ".venv", "Scripts", "python.exe"));
-        const result = withRtkDisabled(() => runVerificationGate({
+        const result = await withRtkDisabled(() => runVerificationGate({
           cwd: tmpDir,
           taskPlanVerify: [
             // The #2399 reporter's shape: single quotes and a `\^` regex escape.
@@ -993,7 +1002,7 @@ describe("verification-gate: execution", () => {
     assert.equal(env.Path, `C:\\project\\.venv\\Scripts${delimiter}C:\\Windows\\System32`);
   });
 
-  test("host verification removes GSD control-plane routing while preserving ordinary environment", () => {
+  test("host verification removes GSD control-plane routing while preserving ordinary environment", async () => {
     const routingKeys = [
       "GSD_PROJECT_ROOT",
       "GSD_MILESTONE_LOCK",
@@ -1011,7 +1020,7 @@ describe("verification-gate: execution", () => {
       `process.stdout.write(JSON.stringify({ routing: ${JSON.stringify(routingKeys)}.map((key) => process.env[key]), sentinel: process.env.VERIFICATION_CHILD_SENTINEL }));\n`,
     );
     try {
-      const result = runVerificationGate({
+      const result = await runVerificationGate({
         cwd: tmp,
         preferenceCommands: ["node verification-env-probe.js"],
       });
@@ -1032,8 +1041,8 @@ describe("verification-gate: execution", () => {
     }
   });
 
-  test("one command fails → gate fails with exit code + stderr", () => {
-    const result = runVerificationGate({
+  test("one command fails → gate fails with exit code + stderr", async () => {
+    const result = await runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["echo ok", "sh -c 'echo err >&2; exit 1'"],
     });
@@ -1044,10 +1053,10 @@ describe("verification-gate: execution", () => {
     assert.ok(result.checks[1].stderr.includes("err"));
   });
 
-  test("grep -c zero-match failure includes absence-check warning", () => {
+  test("grep -c zero-match failure includes absence-check warning", async () => {
     writeFileSync(join(tmp, "sample.txt"), "present\n");
 
-    const result = withRtkDisabled(() => runVerificationGate({
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["grep -c missing sample.txt"],
     }));
@@ -1061,10 +1070,10 @@ describe("verification-gate: execution", () => {
     assert.match(result.checks[0].stderr, /! grep -q/);
   });
 
-  test("grep -c matching count does not warn", () => {
+  test("grep -c matching count does not warn", async () => {
     writeFileSync(join(tmp, "sample.txt"), "present\n");
 
-    const result = withRtkDisabled(() => runVerificationGate({
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["grep -c present sample.txt"],
     }));
@@ -1076,8 +1085,8 @@ describe("verification-gate: execution", () => {
     assert.equal(result.checks[0].stderr, "");
   });
 
-  test("no commands discovered → gate passes with 0 checks", () => {
-    const result = runVerificationGate({
+  test("no commands discovered → gate passes with 0 checks", async () => {
+    const result = await runVerificationGate({
       cwd: tmp,
     });
     assert.equal(result.passed, true);
@@ -1085,8 +1094,8 @@ describe("verification-gate: execution", () => {
     assert.equal(result.discoverySource, "none");
   });
 
-  test("command not found → inconclusive infrastructure failure", () => {
-    const result = withRtkDisabled(() => runVerificationGate({
+  test("command not found → inconclusive infrastructure failure", async () => {
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["__nonexistent_command_xyz_42__"],
     }));
@@ -1097,12 +1106,12 @@ describe("verification-gate: execution", () => {
     assert.ok(result.checks[0].durationMs >= 0);
   });
 
-  test("Windows cmd missing-command stderr is classified despite exit code 1 (#1943)", () => {
+  test("Windows cmd missing-command stderr is classified despite exit code 1 (#1943)", async () => {
     writeFileSync(
       join(tmp, "windows-command-not-found.cjs"),
       `process.stderr.write("'grep' is not recognized as an internal or external command"); process.exit(1);\n`,
     );
-    const result = withRtkDisabled(() => runVerificationGate({
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["node windows-command-not-found.cjs"],
     }));
@@ -1121,7 +1130,7 @@ describe("verification-gate: execution", () => {
     const resolverPath = join(thisDir, "resolve-ts.mjs");
     const script = [
       `import { runVerificationGate } from ${JSON.stringify(pathToFileURL(gatePath).href)};`,
-      `runVerificationGate({`,
+      `await runVerificationGate({`,
       `  cwd: ${JSON.stringify(tmp)},`,
       `  preferenceCommands: ["echo dep0190-check"],`,
       `});`,
@@ -1146,8 +1155,27 @@ describe("verification-gate: execution", () => {
     );
   });
 
-  test("each check has durationMs", () => {
-    const result = runVerificationGate({
+  test("the event loop keeps turning while a verify command runs", async () => {
+    // A verify command is the project test suite and can run for minutes; the
+    // TUI must stay able to paint and take input (Escape included) meanwhile.
+    writeFileSync(join(tmp, "slow-check.js"), "setTimeout(() => {}, 1000);");
+    let turns = 0;
+    const ticker = setInterval(() => { turns += 1; }, 20);
+    try {
+      const result = await withRtkDisabled(() => runVerificationGate({
+        cwd: tmp,
+        preferenceCommands: ["node slow-check.js"],
+      }));
+      assert.equal(result.passed, true);
+      assert.ok(result.checks[0]!.durationMs >= 900, "the command ran to completion");
+      assert.ok(turns >= 10, `event loop turned only ${turns} times during a 1 s verify command`);
+    } finally {
+      clearInterval(ticker);
+    }
+  });
+
+  test("each check has durationMs", async () => {
+    const result = await runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["echo fast"],
     });
@@ -1156,9 +1184,9 @@ describe("verification-gate: execution", () => {
     assert.ok(result.checks[0].durationMs >= 0);
   });
 
-  test("one command fails — remaining commands still run (non-short-circuit)", () => {
+  test("one command fails — remaining commands still run (non-short-circuit)", async () => {
     // First fails, second and third should still execute
-    const result = runVerificationGate({
+    const result = await runVerificationGate({
       cwd: tmp,
       preferenceCommands: [
         "sh -c 'exit 1'",
@@ -1175,7 +1203,7 @@ describe("verification-gate: execution", () => {
     assert.ok(result.checks[2].stdout.includes("third"));
   });
 
-  test("large failure output preserves the exit code and trailing test summary", () => {
+  test("large failure output preserves the exit code and trailing test summary", async () => {
     const scriptPath = join(tmp, "large-failure.cjs");
     writeFileSync(scriptPath, [
       'process.stdout.write("failure details\\n");',
@@ -1184,7 +1212,7 @@ describe("verification-gate: execution", () => {
       "process.exitCode = 1;",
     ].join("\n"));
 
-    const result = withRtkDisabled(() => runVerificationGate({
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       preferenceCommands: [`${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`],
     }));
@@ -1195,9 +1223,9 @@ describe("verification-gate: execution", () => {
     assert.doesNotMatch(result.checks[0].stderr, /ENOBUFS/);
   });
 
-test("gate execution uses cwd for spawnSync", () => {
+test("gate execution uses cwd for spawnSync", async () => {
     // pwd should report the temp dir
-    const result = runVerificationGate({
+    const result = await runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["pwd"],
     });
@@ -1207,13 +1235,13 @@ test("gate execution uses cwd for spawnSync", () => {
     assert.ok(result.checks[0].stdout.trim().length > 0, "pwd should produce output");
   });
 
-  test("multi-target execution runs verification in each repository root", () => {
+  test("multi-target execution runs verification in each repository root", async () => {
     const frontend = join(tmp, "frontend");
     const backend = join(tmp, "backend");
     mkdirSync(frontend, { recursive: true });
     mkdirSync(backend, { recursive: true });
 
-    const result = runVerificationGateForTargets({
+    const result = await runVerificationGateForTargets({
       targets: [
         { id: "frontend", cwd: frontend },
         { id: "backend", cwd: backend },
@@ -1229,7 +1257,7 @@ test("gate execution uses cwd for spawnSync", () => {
     assert.equal(result.discoverySource, "preference");
   });
 
-  test("multi-target execution falls back to per-repo package.json discovery", () => {
+  test("multi-target execution falls back to per-repo package.json discovery", async () => {
     const frontend = join(tmp, "frontend");
     const backend = join(tmp, "backend");
     mkdirSync(frontend, { recursive: true });
@@ -1237,7 +1265,7 @@ test("gate execution uses cwd for spawnSync", () => {
     writeFileSync(join(frontend, "package.json"), JSON.stringify({ scripts: { test: "echo front-ok" } }), "utf-8");
     writeFileSync(join(backend, "package.json"), JSON.stringify({ scripts: { test: "echo back-ok" } }), "utf-8");
 
-    const result = runVerificationGateForTargets({
+    const result = await runVerificationGateForTargets({
       targets: [
         { id: "frontend", cwd: frontend },
         { id: "backend", cwd: backend },
@@ -1690,9 +1718,9 @@ test("validateVerificationCommand rejects logical OR fallback syntax", () => {
   }
 });
 
-test("runVerificationGate: timeout is failureClass timeout, not exit 127 (#1759)", () => {
+test("runVerificationGate: timeout is failureClass timeout, not exit 127 (#1759)", async () => {
   const dir = makeTempDir("gsd-verify-timeout");
-  const result = withRtkDisabled(() => runVerificationGate({
+  const result = await withRtkDisabled(() => runVerificationGate({
     cwd: dir,
     preferenceCommands: ["sleep 5"],
     commandTimeoutMs: 50,
@@ -1705,9 +1733,9 @@ test("runVerificationGate: timeout is failureClass timeout, not exit 127 (#1759)
   assert.match(result.checks[0]?.stderr ?? "", /verification_timeout_ms/);
 });
 
-test("runVerificationGate: missing binary is classified separately from timeout (#1759, #1943)", () => {
+test("runVerificationGate: missing binary is classified separately from timeout (#1759, #1943)", async () => {
   const dir = makeTempDir("gsd-verify-enoent");
-  const result = withRtkDisabled(() => runVerificationGate({
+  const result = await withRtkDisabled(() => runVerificationGate({
     cwd: dir,
     preferenceCommands: ["__gsd_missing_binary_1783__"],
   }));
@@ -2381,12 +2409,12 @@ describe("verification-gate: python normalization (#4416)", () => {
   beforeEach(() => { tmp = makeTempDir("vg-python"); });
   afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
 
-  test("python3 --version command succeeds on this host (gate uses normalized invocation)", () => {
+  test("python3 --version command succeeds on this host (gate uses normalized invocation)", async () => {
     // This test verifies that runVerificationGate can execute a python command
     // without hard-failing due to interpreter name mismatch. On hosts where
     // python3 is available it runs directly; on hosts where only python or py
     // exists, normalizePythonCommand rewrites the token before spawnSync.
-    const result = runVerificationGate({
+    const result = await runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["python3 --version"],
     });
@@ -2395,8 +2423,8 @@ describe("verification-gate: python normalization (#4416)", () => {
     assert.ok(result.checks[0].durationMs >= 0);
   });
 
-  test("python --version command produces a VerificationResult (not a crash)", () => {
-    const result = runVerificationGate({
+  test("python --version command produces a VerificationResult (not a crash)", async () => {
+    const result = await runVerificationGate({
       cwd: tmp,
       preferenceCommands: ["python --version"],
     });

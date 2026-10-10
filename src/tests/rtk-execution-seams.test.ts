@@ -141,7 +141,7 @@ test("shared RTK helper falls back to the managed RTK path when GSD_RTK_PATH is 
 
 test("verification gate executes the RTK-rewritten command", async () => {
   await withFakeRtk({ "echo raw": "echo rewritten" }, async () => {
-    const result = runVerificationGate({
+    const result = await runVerificationGate({
       basePath: process.cwd(),
       unitId: "T-RTK",
       cwd: process.cwd(),
