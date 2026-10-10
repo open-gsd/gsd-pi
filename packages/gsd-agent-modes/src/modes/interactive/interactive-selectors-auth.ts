@@ -204,6 +204,9 @@ async function activateExternalCliProvider(host: InteractiveModeDelegateHost, pr
 	const modelRegistry = host.session.modelRegistry;
 	const providerName = modelRegistry.getProviderDisplayName(providerId);
 
+	// The user typically arrives here right after running the CLI's own login,
+	// so the cached answer may predate it. Re-probe (asynchronously) first.
+	await modelRegistry.settleProviderReadiness(providerId);
 	if (!modelRegistry.isProviderRequestReady(providerId)) {
 		host.showError(`${providerName} is not ready. Run the provider's own login command, then try /login again.`);
 		return;

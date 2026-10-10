@@ -1001,6 +1001,10 @@ export async function bootstrapAutoSession(
   // providers, so honoring it would silently reroute auto-mode to a built-in
   // provider the user is not logged into and surface as "Not logged in · Please
   // run /login" before pausing and resetting to claude-code/claude-sonnet-4-6.
+  //
+  // External-CLI readiness is cached and refreshed in the background; get a
+  // current answer first so a stale one cannot pick the start-model snapshot.
+  await ctx.modelRegistry.settleProviderReadiness?.();
   const manualSessionOverride = getSessionModelOverride(ctx.sessionManager.getSessionId());
   const sessionProviderIsCustom = isCustomProvider(ctx.model?.provider, ctx.modelRegistry);
   const profileModelIds = modelIdsForProfileResolution(

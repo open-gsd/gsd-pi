@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { AuthStorage } from "@gsd/pi-coding-agent";
 import { getEnvApiKey } from "@gsd/pi-ai";
-import { isCursorAgentReadyUncached } from "../cursor-cli/readiness.js";
+import { isCursorAgentReady, settleCursorAgentReadiness } from "../cursor-cli/readiness.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { getAuthPath, PROVIDER_REGISTRY, supportsBrowserOAuth, type ProviderCategory } from "./key-manager.js";
 
@@ -174,6 +174,7 @@ const CLI_AUTH_PATH_CHECK_PROVIDERS = new Set([
 ]);
 
 let asyncCliBinaryPathCache: Map<string, boolean> | null = null;
+let asyncCursorAgentReadyCache: boolean | null = null;
 
 function cliExecutableNames(providerId: string): string[] {
   const binaries = CLI_BINARY_MAP[providerId];
@@ -219,7 +220,12 @@ function isCliBinaryInPath(providerId: string): boolean {
 }
 
 function isExternalCliProviderReady(providerId: string): boolean {
-  if (providerId === "cursor-agent") return isCursorAgentReadyUncached();
+  if (providerId === "cursor-agent") {
+    // Never a child process on this synchronous path: use the answer
+    // runProviderChecksAsync() preloaded, else the cursor readiness cache
+    // (false while cold, refreshed in the background).
+    return asyncCursorAgentReadyCache ?? isCursorAgentReady();
+  }
   return isCliBinaryInPath(providerId);
 }
 
@@ -606,15 +612,23 @@ export async function runProviderChecksAsync(): Promise<ProviderCheckResult[]> {
     loadCliBinaryPathCache(),
     loadModelsJsonApiKeyCache(),
   ]);
+  // Cursor Agent readiness needs the CLI's own `status` output. Only ask when
+  // the binary is on PATH; the probe is asynchronous and cached for 30 s.
+  const cursorAgentReady = cliCache.get("cursor-agent") === true
+    ? await settleCursorAgentReadiness().catch(() => false)
+    : false;
   const previousCliCache = asyncCliBinaryPathCache;
   const previousModelsJsonCache = asyncModelsJsonApiKeyCache;
+  const previousCursorAgentReadyCache = asyncCursorAgentReadyCache;
   asyncCliBinaryPathCache = cliCache;
   asyncModelsJsonApiKeyCache = modelsJsonCache;
+  asyncCursorAgentReadyCache = cursorAgentReady;
   try {
     return runProviderChecks();
   } finally {
     asyncCliBinaryPathCache = previousCliCache;
     asyncModelsJsonApiKeyCache = previousModelsJsonCache;
+    asyncCursorAgentReadyCache = previousCursorAgentReadyCache;
   }
 }
 

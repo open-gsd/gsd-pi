@@ -223,6 +223,12 @@ export async function runUnit(
     if (provider && registry != null && typeof registry.isProviderRequestReady === "function") {
       let ready = false;
       try {
+        // External-CLI readiness is cached and refreshed in the background;
+        // wait for a current answer (without blocking the event loop) so a
+        // stale "not ready" cannot cancel the unit.
+        if (typeof registry.settleProviderReadiness === "function") {
+          await registry.settleProviderReadiness(provider);
+        }
         ready = registry.isProviderRequestReady(provider);
       } catch {
         ready = false;

@@ -11,7 +11,7 @@ import { isSkippedForDispatch } from "./status-guards.js";
 
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
 import type { Requirement, RoadmapSliceEntry } from "./types.js";
-import { runProviderChecks } from "./doctor-providers.js";
+import { runProviderChecksAsync } from "./doctor-providers.js";
 import { validateTitle } from "./validation.js";
 
 function matchesScope(unitId: string, scope?: string): boolean {
@@ -103,7 +103,7 @@ export async function checkGsdStateHealth(
   // where CI/test runners have no API key configured.
   if (state.activeMilestone) {
     try {
-      const providerResults = runProviderChecks();
+      const providerResults = await runProviderChecksAsync();
       for (const result of providerResults) {
         if (!result.required) continue;
         if (result.status === "error") {

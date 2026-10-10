@@ -1472,8 +1472,18 @@ export interface ProviderConfig {
 	authHeader?: boolean;
 	/** How this provider authenticates requests (overrides auto-detection). */
 	authMode?: "apiKey" | "oauth" | "externalCli" | "none";
-	/** Optional readiness check before accepting requests. */
+	/**
+	 * Optional readiness check before accepting requests. Called synchronously,
+	 * once per model, from UI code: it must not block (no sync child processes
+	 * or I/O). Answer from a cache and refresh it in the background.
+	 */
 	isReady?: () => boolean;
+	/**
+	 * Optional async companion to `isReady()`: resolves once `isReady()`
+	 * reflects a current readiness probe. Awaited at startup and before
+	 * readiness-gated actions so a cold cache is not mistaken for "not ready".
+	 */
+	settleReadiness?: () => Promise<unknown>;
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
 	/** OAuth provider for /login support. The `id` is set automatically from the provider name. */

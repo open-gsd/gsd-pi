@@ -18,6 +18,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, chmodSync 
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { clearCursorAgentReadinessCache } from "../../cursor-cli/readiness.ts";
 import {
   runProviderChecks,
   runProviderChecksAsync,
@@ -86,6 +87,29 @@ async function withCwdAsync(nextCwd: string, fn: () => Promise<void>): Promise<v
   } finally {
     process.chdir(saved);
   }
+}
+
+/** Fake cursor-agent on PATH whose `status` command prints `statusLine`. */
+function writeFakeCursorAgent(binDir: string, statusLine: string): void {
+  if (process.platform === "win32") {
+    writeFileSync(join(binDir, "cursor-agent.cmd"), [
+      "@echo off",
+      "if \"%1\"==\"--version\" (echo cursor-agent 1.0 & exit /b 0)",
+      `if "%1"=="status" (echo ${statusLine} & exit /b 0)`,
+      "echo mock",
+      "",
+    ].join("\r\n"));
+    return;
+  }
+  const fakeCursor = join(binDir, "cursor-agent");
+  writeFileSync(fakeCursor, [
+    "#!/bin/sh",
+    "if [ \"$1\" = \"--version\" ]; then echo cursor-agent 1.0; exit 0; fi",
+    `if [ "$1" = "status" ]; then echo "${statusLine}"; exit 0; fi`,
+    "echo mock",
+    "",
+  ].join("\n"));
+  chmodSync(fakeCursor, 0o755);
 }
 
 function normalizeProviderResults(results: ProviderCheckResult[]): string[] {
@@ -1015,7 +1039,8 @@ test("runProviderChecks detects claude.exe in PATH on Windows (#4548)", { skip: 
 });
 
 
-test("runProviderChecks reports error for required cursor-agent when binary is missing", () => {
+test("runProviderChecksAsync reports error for required cursor-agent when binary is missing", async () => {
+  clearCursorAgentReadinessCache();
   const repo = realpathSync(mkdtempSync(join(tmpdir(), "gsd-providers-cursor-repo-")));
   mkdirSync(join(repo, ".gsd"), { recursive: true });
   writeFileSync(
@@ -1033,13 +1058,13 @@ test("runProviderChecks reports error for required cursor-agent when binary is m
 
   const tmpHome = realpathSync(mkdtempSync(join(tmpdir(), "gsd-providers-cursor-home-")));
 
-  withEnv({
+  await withEnvAsync({
     HOME: tmpHome,
     PATH: tmpHome,
     CURSOR_API_KEY: undefined,
-  }, () => {
-    withCwd(repo, () => {
-      const results = runProviderChecks();
+  }, async () => {
+    await withCwdAsync(repo, async () => {
+      const results = await runProviderChecksAsync();
       const cursor = results.find(r => r.name === "cursor-agent");
       assert.ok(cursor, "cursor-agent result should exist");
       assert.equal(cursor!.status, "error", "cursor-agent should error when the CLI binary is missing");
@@ -1051,7 +1076,8 @@ test("runProviderChecks reports error for required cursor-agent when binary is m
   rmSync(tmpHome, { recursive: true, force: true });
 });
 
-test("runProviderChecks does not route OpenAI via unauthenticated cursor-agent binary in PATH", () => {
+test("runProviderChecksAsync does not route OpenAI via unauthenticated cursor-agent binary in PATH", async () => {
+  clearCursorAgentReadinessCache();
   const repo = realpathSync(mkdtempSync(join(tmpdir(), "gsd-providers-cursor-route-repo-")));
   mkdirSync(join(repo, ".gsd"), { recursive: true });
   writeFileSync(
@@ -1068,26 +1094,19 @@ test("runProviderChecks does not route OpenAI via unauthenticated cursor-agent b
   const tmpHome = realpathSync(mkdtempSync(join(tmpdir(), "gsd-providers-cursor-route-home-")));
   const binDir = join(tmpHome, "bin");
   mkdirSync(binDir, { recursive: true });
-  const fakeCursor = join(binDir, "cursor-agent");
-  writeFileSync(fakeCursor, [
-    "#!/bin/sh",
-    "if [ \"$1\" = \"status\" ]; then echo \"Not logged in\"; exit 0; fi",
-    "echo mock",
-    "",
-  ].join("\n"));
-  chmodSync(fakeCursor, 0o755);
+  writeFakeCursorAgent(binDir, "Not logged in");
 
-  withEnv({
+  await withEnvAsync({
     HOME: tmpHome,
     OPENAI_API_KEY: undefined,
     COPILOT_GITHUB_TOKEN: undefined,
     GH_TOKEN: undefined,
     GITHUB_TOKEN: undefined,
     PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
-  }, () => {
+  }, async () => {
     try {
-      withCwd(repo, () => {
-        const results = runProviderChecks();
+      await withCwdAsync(repo, async () => {
+        const results = await runProviderChecksAsync();
         const openai = results.find(r => r.name === "openai");
         assert.ok(openai, "openai result should exist");
         assert.equal(openai!.status, "error", "binary-only cursor-agent must not satisfy OpenAI routing");
@@ -1100,7 +1119,8 @@ test("runProviderChecks does not route OpenAI via unauthenticated cursor-agent b
   });
 });
 
-test("runProviderChecks routes OpenAI via authenticated cursor-agent CLI", () => {
+test("runProviderChecksAsync routes OpenAI via authenticated cursor-agent CLI", async () => {
+  clearCursorAgentReadinessCache();
   const repo = realpathSync(mkdtempSync(join(tmpdir(), "gsd-providers-cursor-auth-route-repo-")));
   mkdirSync(join(repo, ".gsd"), { recursive: true });
   writeFileSync(
@@ -1117,17 +1137,9 @@ test("runProviderChecks routes OpenAI via authenticated cursor-agent CLI", () =>
   const tmpHome = realpathSync(mkdtempSync(join(tmpdir(), "gsd-providers-cursor-auth-route-home-")));
   const binDir = join(tmpHome, "bin");
   mkdirSync(binDir, { recursive: true });
-  const fakeCursor = join(binDir, "cursor-agent");
-  writeFileSync(fakeCursor, [
-    "#!/bin/sh",
-    "if [ \"$1\" = \"--version\" ]; then echo cursor-agent 1.0; exit 0; fi",
-    "if [ \"$1\" = \"status\" ]; then echo \"Authenticated as user@example.com\"; exit 0; fi",
-    "echo mock",
-    "",
-  ].join("\n"));
-  chmodSync(fakeCursor, 0o755);
+  writeFakeCursorAgent(binDir, "Authenticated as user@example.com");
 
-  withEnv({
+  await withEnvAsync({
     HOME: tmpHome,
     OPENAI_API_KEY: undefined,
     COPILOT_GITHUB_TOKEN: undefined,
@@ -1135,10 +1147,10 @@ test("runProviderChecks routes OpenAI via authenticated cursor-agent CLI", () =>
     GITHUB_TOKEN: undefined,
     CURSOR_API_KEY: undefined,
     PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
-  }, () => {
+  }, async () => {
     try {
-      withCwd(repo, () => {
-        const results = runProviderChecks();
+      await withCwdAsync(repo, async () => {
+        const results = await runProviderChecksAsync();
         const openai = results.find(r => r.name === "openai");
         assert.ok(openai, "openai result should exist");
         assert.equal(openai!.status, "ok", "authenticated cursor-agent should satisfy OpenAI routing");

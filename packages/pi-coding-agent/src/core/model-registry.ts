@@ -51,6 +51,7 @@ import {
 	getProviderAuthMode as resolveProviderAuthMode,
 	isProviderRequestReady as checkProviderRequestReady,
 	setDisabledModelProviders as applyDisabledModelProviders,
+	settleProviderReadiness as settleRegisteredProviderReadiness,
 	type ProviderAuthMode,
 } from "./provider-readiness.js";
 
@@ -1262,6 +1263,17 @@ export class ModelRegistry {
 		return checkProviderRequestReady(this._readinessDeps(), provider);
 	}
 
+	/**
+	 * Wait until the cached readiness of `provider` (or of every registered
+	 * provider) reflects a current probe. External-CLI providers answer
+	 * `isProviderRequestReady()` from a cache that is refreshed in the
+	 * background, so a cold cache reports "not ready"; await this before
+	 * acting on readiness in a way that is hard to undo.
+	 */
+	settleProviderReadiness(provider?: string): Promise<void> {
+		return settleRegisteredProviderReadiness(this._readinessDeps(), provider);
+	}
+
 	private _readinessDeps() {
 		return {
 			authStorage: this.authStorage,
@@ -1292,6 +1304,8 @@ export interface ProviderConfigInput {
 	api?: Api;
 	authMode?: ProviderAuthMode;
 	isReady?: () => boolean;
+	/** Resolves once `isReady()` reflects a current readiness probe. */
+	settleReadiness?: () => Promise<unknown>;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
 	authHeader?: boolean;

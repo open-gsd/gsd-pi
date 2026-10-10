@@ -55,12 +55,12 @@ test("registers static Cursor subscription models as offline fallback (#1869)", 
 	assert.ok(models.every((model) => (model.cost as Record<string, number>).input === 0));
 });
 
-test("session_start rediscovers CLI models and replaces the fallback catalog (#1869)", () => {
+test("session_start rediscovers CLI models and replaces the fallback catalog (#1869)", async () => {
 	const { pi, providers, handlers } = makeMockPi();
 	cursorCli(pi as never);
 	assert.equal((providers[0].config.models as Array<{ id: string }>).some((m) => m.id === "composer-2.5"), true);
 
-	probeAndRegisterCursorModels(
+	await probeAndRegisterCursorModels(
 		pi as never,
 		() => ["gpt-5.6-sol-high - GPT-5.6 Sol 1M High", "composer-2.5 - Composer 2.5 (current)"].join("\n"),
 		() => true,
@@ -83,11 +83,11 @@ test("session_start does not block on live catalog discovery in headless (#1869)
 	assert.deepEqual(modelIds(providers), CURSOR_AGENT_MODELS.map((model) => model.id));
 });
 
-test("probe skips --list-models when the cursor-agent binary is missing (#1869)", () => {
+test("probe skips --list-models when the cursor-agent binary is missing (#1869)", async () => {
 	const { pi, providers } = makeMockPi();
 	cursorCli(pi as never);
 	let reads = 0;
-	const models = probeAndRegisterCursorModels(
+	const models = await probeAndRegisterCursorModels(
 		pi as never,
 		() => {
 			reads += 1;
@@ -100,10 +100,10 @@ test("probe skips --list-models when the cursor-agent binary is missing (#1869)"
 	assert.deepEqual(modelIds(providers), CURSOR_AGENT_MODELS.map((model) => model.id));
 });
 
-test("probe keeps the fallback catalog when list-models throws (#1869)", () => {
+test("probe keeps the fallback catalog when list-models throws (#1869)", async () => {
 	const { pi, providers } = makeMockPi();
 	cursorCli(pi as never);
-	const models = probeAndRegisterCursorModels(
+	const models = await probeAndRegisterCursorModels(
 		pi as never,
 		() => {
 			throw new Error("cursor-agent --list-models failed");
