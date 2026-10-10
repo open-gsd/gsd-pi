@@ -24,7 +24,10 @@ export function setupKeyHandlers(host: InteractiveModeDelegateHost): void {
 		// Set up handlers on defaultEditor - they use host.editor for text access
 		// so they work correctly regardless of which editor is active
 		host.defaultEditor.onEscape = () => {
-			if (host.loadingAnimation) {
+			// A turn in flight shows the default loader, or the activity
+			// indicator when an extension hid that loader (GSD auto-mode does
+			// for every unit). Escape interrupts the turn in both cases.
+			if (host.loadingAnimation || host.activityLoader) {
 				host.restoreQueuedMessagesToEditor({ abort: true });
 			} else if (host.session.isBashRunning) {
 				host.session.abortBash();

@@ -108,7 +108,10 @@ export interface VerificationContext {
   pi: ExtensionAPI;
   taskAuthority?: TaskVerificationAuthority;
   runPostExecutionChecks?: typeof runPostExecutionChecks;
-  runVerificationGate?: typeof runVerificationGate;
+  /** Test seam; may answer synchronously. */
+  runVerificationGate?: (
+    ...args: Parameters<typeof runVerificationGate>
+  ) => ReturnType<typeof runVerificationGate> | Awaited<ReturnType<typeof runVerificationGate>>;
 }
 
 export type VerificationResult = "continue" | "retry" | "pause" | "abort";
@@ -948,7 +951,7 @@ export async function runPostUnitVerification(
         timestamp: Date.now(),
       };
     } else if (verificationTargets.length <= 1) {
-      result = (vctx.runVerificationGate ?? runVerificationGate)({
+      result = await (vctx.runVerificationGate ?? runVerificationGate)({
         cwd: verificationTargets[0]?.cwd ?? s.basePath,
         preferenceCommands: prefs?.verification_commands ?? verificationTargets[0]?.preferenceCommands,
         taskPlanVerify,
@@ -956,7 +959,7 @@ export async function runPostUnitVerification(
         commandTimeoutMs: resolveVerificationTimeoutMs(prefs),
       });
     } else {
-      result = runVerificationGateForTargets({
+      result = await runVerificationGateForTargets({
         targets: verificationTargets,
         preferenceCommands: prefs?.verification_commands,
         taskPlanVerify,

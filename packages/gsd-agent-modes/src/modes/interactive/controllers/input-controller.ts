@@ -1,4 +1,6 @@
 import type { ImageContent } from "@gsd/pi-ai";
+import { Text } from "@gsd/pi-tui";
+import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { dispatchSlashCommand } from "../slash-command-handlers.js";
 import type { InteractiveModeStateHost } from "../interactive-mode-state.js";
 import type { ContextualTips } from "@gsd/agent-core";
@@ -164,7 +166,44 @@ export function setupEditorSubmitHandler(host: InteractiveModeStateHost & {
 		}
 	};
 
-	wireEditorSubmitHandler(host, onSubmit);
+	const onSubmitWithCommandFeedback = async (text: string) => {
+		const command = text.trim();
+		if (!command.startsWith("/") || looksLikeFilePath(command) || !host.isExtensionCommand(command)) {
+			return onSubmit(text);
+		}
+		const clearPending = await showExtensionCommandPending(host, command);
+		try {
+			await onSubmit(text);
+		} finally {
+			clearPending();
+		}
+	};
+
+	wireEditorSubmitHandler(host, onSubmitWithCommandFeedback);
+}
+
+/** Longer than the TUI's 16 ms render throttle, so the frame requested first paints first. */
+const EXTENSION_COMMAND_PAINT_DELAY_MS = 20;
+
+/**
+ * Extension command handlers may open with synchronous work (`/gsd auto` and
+ * `/gsd next` start with git and database calls), and nothing can paint while
+ * they hold the event loop: the screen keeps showing the typed command as if
+ * Enter had been ignored (#2598). Show that the command was accepted and let
+ * that frame reach the terminal before the handler runs.
+ *
+ * Returns a function that removes the line again.
+ */
+async function showExtensionCommandPending(host: InteractiveModeStateHost, command: string): Promise<() => void> {
+	const name = command.split(/\s+/).slice(0, 2).join(" ");
+	const pending = new Text(theme.fg("dim", `Running ${name}…`), 1, 0);
+	host.statusContainer.addChild(pending);
+	host.ui.requestRender();
+	await new Promise<void>((resolve) => setTimeout(resolve, EXTENSION_COMMAND_PAINT_DELAY_MS));
+	return () => {
+		host.statusContainer.removeChild(pending);
+		host.ui.requestRender();
+	};
 }
 
 /**

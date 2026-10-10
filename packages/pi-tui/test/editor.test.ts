@@ -2313,11 +2313,18 @@ describe("Editor component", () => {
 			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
-			// Press Enter - should apply the exact typed value "two", not the first item
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => {
+				submitted.push(text);
+			};
+
+			// Press Enter - should apply the exact typed value "two", not the first item.
+			// The argument was already typed in full, so the same Enter runs the command
+			// instead of being spent on a completion that changes nothing (#2598).
 			editor.handleInput("\r");
 
-			// The exact typed value "two" should be retained
-			assert.strictEqual(editor.getText(), "/argtest two");
+			assert.deepStrictEqual(submitted, ["/argtest two"]);
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
 		it("selects first prefix match on Enter when typed arg is not exact match", async () => {
@@ -2366,9 +2373,16 @@ describe("Editor component", () => {
 			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
-			// Press Enter - "t" prefix matches "two" (first in list), so "two" is applied
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => {
+				submitted.push(text);
+			};
+
+			// Press Enter - "t" prefix matches "two" (first in list), so "two" is applied.
+			// The text changed, so this Enter only accepts the completion.
 			editor.handleInput("\r");
 			assert.strictEqual(editor.getText(), "/argtest two");
+			assert.deepStrictEqual(submitted, []);
 		});
 
 		it("highlights unique prefix match as user types (before full exact match)", async () => {
@@ -2522,11 +2536,52 @@ describe("Editor component", () => {
 			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
-			// Press Enter - should retain exact typed value, not apply first highlighted item
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => {
+				submitted.push(text);
+			};
+
+			// Press Enter - should keep the exact typed value, not apply the first
+			// highlighted item, and run the command with it.
 			editor.handleInput("\r");
 
-			// The exact typed value should be retained
-			assert.strictEqual(editor.getText(), "/model gpt-4o-mini");
+			assert.deepStrictEqual(submitted, ["/model gpt-4o-mini"]);
+		});
+
+		it("does not submit a prose message when Enter accepts a completion that changes nothing", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			// Completion for an "@" reference that is already typed in full.
+			const mockProvider: AutocompleteProvider = {
+				getSuggestions: async (lines, _cursorLine, cursorCol) => {
+					const beforeCursor = (lines[0] || "").slice(0, cursorCol);
+					const match = beforeCursor.match(/(@\S+)$/);
+					if (match && "@notes".startsWith(match[1]!)) {
+						return { items: [{ value: "@notes", label: "notes" }], prefix: match[1]! };
+					}
+					return null;
+				},
+				applyCompletion,
+			};
+			editor.setAutocompleteProvider(mockProvider);
+
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => {
+				submitted.push(text);
+			};
+
+			for (const ch of "read @notes") editor.handleInput(ch);
+			// "@" completion is debounced.
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			// Only slash commands run on this Enter; a message under composition stays put.
+			editor.handleInput("\r");
+
+			assert.deepStrictEqual(submitted, []);
+			assert.strictEqual(editor.getText(), "read @notes");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
 		it("awaits async slash command argument completions", async () => {

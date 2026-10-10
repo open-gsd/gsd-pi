@@ -216,7 +216,7 @@ describe("venv awareness (#1700 / #1784)", () => {
     }
   });
 
-  test("verification child PATH prepends the venv bin directory", () => {
+  test("verification child PATH prepends the venv bin directory", async () => {
     const { dir, python } = makeProject("posix");
     const previous = process.env.VIRTUAL_ENV;
     delete process.env.VIRTUAL_ENV;
@@ -225,7 +225,7 @@ describe("venv awareness (#1700 / #1784)", () => {
         join(dir, "probe.js"),
         "process.stdout.write(process.env.PATH || '');\n",
       );
-      const result = runVerificationGate({
+      const result = await runVerificationGate({
         cwd: dir,
         preferenceCommands: ["node probe.js"],
       });

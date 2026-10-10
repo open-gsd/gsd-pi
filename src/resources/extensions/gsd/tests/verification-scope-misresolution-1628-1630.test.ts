@@ -44,15 +44,24 @@ function makeTempDir(prefix: string): string {
 function withRtkDisabled<T>(callback: () => T): T {
   const previous = process.env.GSD_RTK_DISABLED;
   process.env.GSD_RTK_DISABLED = "1";
-  try {
-    return callback();
-  } finally {
+  const restore = (): void => {
     if (previous === undefined) {
       delete process.env.GSD_RTK_DISABLED;
     } else {
       process.env.GSD_RTK_DISABLED = previous;
     }
+  };
+  let result: T;
+  try {
+    result = callback();
+  } catch (error) {
+    restore();
+    throw error;
   }
+  // The gate is async: keep RTK disabled until its run has settled.
+  if (result instanceof Promise) return result.finally(restore) as T;
+  restore();
+  return result;
 }
 
 // ─── #1628 — GSD tool names in verify must never execute as shell noise ─────
@@ -111,8 +120,8 @@ describe("verification-gate: GSD tool-name verify (issue #1628)", () => {
     assert.deepStrictEqual(result.commands, ["npm run test"]);
   });
 
-  test("gate passes a tool-name verify backed by qualifying task evidence — no exit-127 false fail", () => {
-    const result = withRtkDisabled(() => runVerificationGate({
+  test("gate passes a tool-name verify backed by qualifying task evidence — no exit-127 false fail", async () => {
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       taskPlanVerify: "gsd_exec_search limit 1 query D023",
       taskEvidence: [
@@ -129,8 +138,8 @@ describe("verification-gate: GSD tool-name verify (issue #1628)", () => {
     assert.equal(verdict.reason, "passed");
   });
 
-  test("gate still fails closed on a genuinely broken shell command", () => {
-    const result = withRtkDisabled(() => runVerificationGate({
+  test("gate still fails closed on a genuinely broken shell command", async () => {
+    const result = await withRtkDisabled(() => runVerificationGate({
       cwd: tmp,
       taskPlanVerify: "definitely-not-a-real-command-1628 --check",
     }));

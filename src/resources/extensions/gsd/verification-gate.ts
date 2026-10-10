@@ -3,7 +3,7 @@
 // Discovery order (D003): task plan verify → preference → package.json scripts.
 // First non-empty source wins.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { join, basename, delimiter, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { killProcessTree } from "@gsd/pi-coding-agent";
 import type { AuditWarning, RuntimeError, VerificationCheck, VerificationResult } from "./types.js";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
 import { redactSecrets } from "./redact-secrets.js";
@@ -1362,15 +1363,84 @@ function isShellParseFailure(exitCode: number, stdout: string, stderr: string): 
     || /was unexpected at this time/i.test(stderr);
 }
 
+/** How one verify command's process ended, in the shape `spawnSync` reports it. */
+interface VerificationSpawnResult {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  error?: Error;
+}
+
 /**
- * Run the verification gate: discover commands, execute each via spawnSync,
- * and return a structured result.
+ * Run one verify command to completion without holding the event loop.
+ *
+ * A project's verify command is its test suite and can run for minutes. Under
+ * `spawnSync` the TUI could not paint, take input or honor Escape for that
+ * whole time, and session heartbeats stopped.
+ */
+function spawnVerificationCommand(
+  bin: string,
+  args: string[],
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    stdio: ["ignore", number, number];
+    timeout: number;
+    windowsVerbatimArguments: boolean;
+  },
+): Promise<VerificationSpawnResult> {
+  return new Promise((resolve) => {
+    const { timeout, ...spawnOptions } = options;
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(bin, args, spawnOptions);
+    } catch (error) {
+      resolve({ status: null, signal: null, error: error as Error });
+      return;
+    }
+
+    let timedOut = false;
+    let settled = false;
+    // As with spawnSync, a timeout of 0 means no limit.
+    const timer = timeout > 0 ? setTimeout(() => {
+      timedOut = true;
+      // The command runs under a shell: take its children down with it, or a
+      // timed-out test runner keeps going (and on Windows keeps the output
+      // files open) after the gate has moved on.
+      if (child.pid != null) killProcessTree(child.pid);
+      else child.kill();
+    }, timeout) : undefined;
+    const settle = (result: VerificationSpawnResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    child.once("error", (error) => settle({ status: null, signal: null, error }));
+    child.once("exit", (status, signal) => {
+      if (!timedOut) {
+        settle({ status, signal });
+        return;
+      }
+      settle({
+        status,
+        signal,
+        error: Object.assign(new Error(`spawn ${bin} ETIMEDOUT`), { code: "ETIMEDOUT" }),
+      });
+    });
+  });
+}
+
+/**
+ * Run the verification gate: discover commands, execute each as a child
+ * process, and return a structured result.
  *
  * - All commands run sequentially regardless of individual pass/fail.
+ * - The event loop stays free while a command runs.
  * - `passed` is true when every command exits 0 (or no commands are discovered).
  * - stdout/stderr per command are truncated to 10 KB.
  */
-export function runVerificationGate(options: RunVerificationGateOptions): VerificationResult {
+export async function runVerificationGate(options: RunVerificationGateOptions): Promise<VerificationResult> {
   const timestamp = Date.now();
 
   const { commands, source } = discoverCommands({
@@ -1449,11 +1519,11 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
     const stderrPath = join(outputDir, "stderr");
     const stdoutFd = openSync(stdoutPath, "w");
     const stderrFd = openSync(stderrPath, "w");
-    let result: ReturnType<typeof spawnSync>;
+    let result: VerificationSpawnResult;
     let stdout: string;
     let capturedStderr: string;
     try {
-      result = spawnSync(shell.bin, shellArgs, {
+      result = await spawnVerificationCommand(shell.bin, shellArgs, {
         cwd: options.cwd,
         env: childEnv,
         stdio: ["ignore", stdoutFd, stderrFd],
@@ -1533,14 +1603,14 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
   };
 }
 
-export function runVerificationGateForTargets(options: {
+export async function runVerificationGateForTargets(options: {
   targets: VerificationTarget[];
   preferenceCommands?: string[];
   taskPlanVerify?: string;
   /** Structured task-specific evidence supplied at completion (#1591). */
   taskEvidence?: TaskVerificationEvidence[];
   commandTimeoutMs?: number;
-}): VerificationResult {
+}): Promise<VerificationResult> {
   const timestamp = Date.now();
   if (options.targets.length === 0) {
     return {
@@ -1556,7 +1626,7 @@ export function runVerificationGateForTargets(options: {
   let passed = true;
 
   for (const target of options.targets) {
-    const result = runVerificationGate({
+    const result = await runVerificationGate({
       cwd: target.cwd,
       preferenceCommands: options.preferenceCommands ?? target.preferenceCommands,
       taskPlanVerify: options.taskPlanVerify,
