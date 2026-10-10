@@ -690,7 +690,7 @@ tool_call_loop_guard:
       - ctx_search
 ```
 
-Omitted fields fall back to built-in defaults, so existing installs keep their current behavior. `exempt_tools` is merged with the built-in exempt set (`find`, `glob`, `grep`, `ls`, `read`, `search_and_read`) rather than replacing it. Every field can also be overridden with `GSD_TOOL_LOOP_*` environment variables (see [Environment Variables](#environment-variables)), which win over the preferences file. When a call is blocked, the message names the active cap and the relevant config key. Applies to both interactive sessions and `/gsd auto`.
+Omitted fields fall back to built-in defaults, so existing installs keep their current behavior. `exempt_tools` is merged with the built-in exempt set (the read-only navigation tools `find`, `glob`, `grep`, `ls`, `read`, `search_and_read` and the read-only workflow query tools `gsd_decision_get`, `gsd_decision_list`, `gsd_requirement_get`, `gsd_requirement_list`, `gsd_project_snapshot`, `gsd_milestone_status`, `gsd_journal_query`, `gsd_exec_search`, `gsd_resume`, `memory_query`/`gsd_memory_query`, `gsd_graph`/`gsd_memory_graph`) rather than replacing it. Every field can also be overridden with `GSD_TOOL_LOOP_*` environment variables (see [Environment Variables](#environment-variables)), which win over the preferences file. When a call is blocked, the message names the active cap and the relevant config key. Applies to both interactive sessions and `/gsd auto`.
 
 ### `uat_dispatch`
 

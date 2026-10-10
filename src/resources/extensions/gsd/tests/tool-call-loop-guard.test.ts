@@ -448,6 +448,140 @@ console.log('\n── Loop guard: distinct read-only navigation calls are not ca
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Distinct read-only workflow queries are legitimate lookups, not loops (#2753)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('distinct read-only workflow queries are not capped by per-tool count (#2753)', () => {
+  // The reported pattern: a planning turn fetches many DIFFERENT decisions one
+  // by one. Each call has distinct args, so Guard 1 never trips, and the query
+  // tools never record mutations, so Guard 2's count never decays. These tools
+  // are exempt from Guard 2 like the navigation tools above.
+  const queryTools = [
+    'gsd_decision_get',
+    'gsd_decision_list',
+    'gsd_requirement_get',
+    'gsd_requirement_list',
+    'gsd_project_snapshot',
+    'gsd_milestone_status',
+    'gsd_journal_query',
+    'gsd_exec_search',
+    'gsd_resume',
+    'memory_query',
+    'gsd_memory_query',
+    'gsd_graph',
+    'gsd_memory_graph',
+  ];
+
+  for (const toolName of queryTools) {
+    resetToolCallLoopGuard();
+
+    for (let i = 1; i <= 8; i++) {
+      const result = checkToolCallLoop(toolName, { id: `D${i}` });
+      assert.ok(result.block === false, `distinct ${toolName} call ${i} should be allowed`);
+    }
+  }
+
+  // The exact reported reproduction: 8 distinct-ID gsd_decision_get calls.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 8; i++) {
+    const result = checkToolCallLoop('gsd_decision_get', { id: `D5${i}` });
+    assert.ok(result.block === false, `gsd_decision_get lookup ${i} with a different ID should not be blocked`);
+  }
+
+  // MCP-surfaced variants canonicalize to the same exempt names.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 8; i++) {
+    const result = checkToolCallLoop('mcp__gsd__gsd_decision_get', { id: `D${i}` });
+    assert.ok(result.block === false, `distinct MCP-prefixed gsd_decision_get call ${i} should be allowed`);
+  }
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 8; i++) {
+    const result = checkToolCallLoop('mcp__gsd__gsd_memory_query', { query: `q${i}` });
+    assert.ok(result.block === false, `distinct MCP-prefixed gsd_memory_query call ${i} should be allowed`);
+  }
+
+  // Accepted nuance: reinforced memory queries bump hit counts (ranking
+  // telemetry, no workflow state), so distinct-arg reinforced queries stay
+  // exempt too; Guard 1 still catches an identical-args hammer.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 8; i++) {
+    const result = checkToolCallLoop('memory_query', { query: `q${i}`, reinforce_hits: true });
+    assert.ok(result.block === false, `distinct reinforced memory_query call ${i} should be allowed`);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Guard 1 still catches identical-args reread loops of exempt query tools (#2753)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('identical-args query loops are still caught by Guard 1 (#2753)', () => {
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 4; i++) {
+    const result = checkToolCallLoop('gsd_decision_get', { id: 'D554' });
+    assert.ok(result.block === false, `identical gsd_decision_get call ${i} should be allowed`);
+  }
+  // Blocked on the 5th identical call by Guard 1, before Guard 2 is relevant.
+  const blocked = checkToolCallLoop('gsd_decision_get', { id: 'D554' });
+  assert.ok(blocked.block === true, 'identical-args gsd_decision_get reread loop should be blocked');
+  assert.ok(blocked.reason?.includes('identical args'), 'reread loops should be caught by Guard 1, not Guard 2');
+
+  // Guard 1 also catches an identical-args loop under the MCP-prefixed name.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 4; i++) {
+    assert.ok(checkToolCallLoop('mcp__gsd__gsd_decision_get', { id: 'D554' }).block === false);
+  }
+  const mcpBlocked = checkToolCallLoop('mcp__gsd__gsd_decision_get', { id: 'D554' });
+  assert.ok(mcpBlocked.block === true, 'identical-args MCP-prefixed reread loop should be blocked by Guard 1');
+  assert.ok(mcpBlocked.reason?.includes('identical args'), 'MCP-prefixed reread loops should be caught by Guard 1');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The #2753 exemption must NOT widen to side-effecting workflow tools (#2753)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('query exemption does not widen to workflow write/side-effect tools (#2753)', () => {
+  // Negative invariant: exempting the getters must not exempt the savers.
+  // gsd_decision_save is a one-shot write tool (default cap 6, no decay —
+  // saves only decay via gsd_requirement_save-style mutation records).
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 6; i++) {
+    const result = checkToolCallLoop('gsd_decision_save', { title: `Decision ${i}` });
+    assert.ok(result.block === false, `gsd_decision_save call ${i} should be allowed`);
+  }
+  const blocked = checkToolCallLoop('gsd_decision_save', { title: 'Decision 7' });
+  assert.ok(blocked.block === true, '7th varied-arg gsd_decision_save must still trip Guard 2');
+  assert.ok(blocked.reason?.includes('repeated tool'), 'write-tool overflow should be caught by Guard 2');
+
+  // gsd_checkpoint_db flushes the SQLite WAL — side-effecting maintenance, so
+  // it stays capped despite its read writePolicy, under both name surfaces.
+  for (const checkpointName of ['gsd_checkpoint_db', 'mcp__gsd__gsd_checkpoint_db']) {
+    resetToolCallLoopGuard();
+    for (let i = 1; i <= 6; i++) {
+      const result = checkToolCallLoop(checkpointName, { reason: `flush-${i}` });
+      assert.ok(result.block === false, `${checkpointName} call ${i} should be allowed`);
+    }
+    const checkpointBlocked = checkToolCallLoop(checkpointName, { reason: 'flush-7' });
+    assert.ok(checkpointBlocked.block === true, `7th ${checkpointName} call must still trip Guard 2`);
+    assert.ok(checkpointBlocked.reason?.includes('repeated tool'), 'checkpoint overflow should be caught by Guard 2');
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// User-configured exempt names keep exact matching alongside canonical (#2753)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('user-configured MCP-prefixed exempt names still match exactly (#2753)', () => {
+  configureToolCallLoopGuard({ repeated_tool: { exempt_tools: ['mcp__custom__lookup'] } });
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 10; i++) {
+    const result = checkToolCallLoop('mcp__custom__lookup', { arg: `v${i}` });
+    assert.ok(result.block === false, `exact-match exempt call ${i} should be allowed`);
+  }
+  configureToolCallLoopGuard(null);
+  resetToolCallLoopGuard();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Per-tool counts are independent per tool and reset together
 // ═══════════════════════════════════════════════════════════════════════════
 
