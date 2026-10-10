@@ -5,7 +5,11 @@ export {
   shouldBlockQueueExecutionInSnapshot,
 } from "./bootstrap/write-gate.js";
 export { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
-export { openExistingWorkflowDatabase } from "./db-workspace.js";
+export {
+  closeWorkflowDatabase,
+  openExistingWorkflowDatabase,
+  openWorkflowDatabase,
+} from "./db-workspace.js";
 export { hasLiveAutoWorkerForProject } from "./db/auto-workers.js";
 export { readStoredPausedSession } from "./interrupted-session.js";
 export { readProgressFromDb, readProjectProgressFromDb } from "./state/progress-from-db.js";

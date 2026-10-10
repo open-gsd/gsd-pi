@@ -14,14 +14,17 @@ const {
 
 const ROOT_PACKAGE_JSON = path.join(ROOT, 'package.json');
 const STANDALONE_WEB_PACKAGE_JSON = path.join(ROOT, 'dist', 'web', 'standalone', 'package.json');
+const OPENCLAW_WEB_PACKAGE_JSON = path.join(ROOT, 'dist', 'web', 'standalone', 'openclaw', 'package.json');
 const TARGET_PACKAGE_JSONS = [
   ROOT_PACKAGE_JSON,
   STANDALONE_WEB_PACKAGE_JSON,
+  OPENCLAW_WEB_PACKAGE_JSON,
   ...RELEASE_WORKSPACE_PACKAGE_DIRS.map((dir) => path.join(ROOT, dir, 'package.json')),
 ];
 const DROP_INTERNAL_DEPS_PACKAGE_JSONS = new Set([
   ROOT_PACKAGE_JSON,
   STANDALONE_WEB_PACKAGE_JSON,
+  OPENCLAW_WEB_PACKAGE_JSON,
 ]);
 
 // Recover from a backup left behind by a previous prepack that was hard-killed
@@ -93,9 +96,9 @@ function resolvePackageJson(filePath) {
         // The published root no longer bundles workspace packages. Internal @gsd/@opengsd
         // packages are NOT on the public registry — they ship inside this tarball under
         // packages/*/dist and are symlinked into node_modules at postinstall by
-        // link-workspace-packages.cjs. The staged Next standalone package.json is also
+        // link-workspace-packages.cjs. The staged Next standalone package.json files are also
         // packed under dist/web/standalone and is scanned by npm during global install.
-        // Leaving internal workspace ranges in either manifest makes npm fail before
+        // Leaving internal workspace ranges in these manifests makes npm fail before
         // postinstall can repair links. Drop them; runtime resolution goes through the
         // root package and generated standalone server bundle.
         delete pkg[field][dep];
