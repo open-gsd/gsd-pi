@@ -368,9 +368,8 @@ jobs:
         # These TS-only builds are required before @gsd/native/file-identity
         # imports can run; a Rust addon alone is not the package's JS surface.
         run: |
-          pnpm --filter @opengsd/contracts run build
+          pnpm run build:pi
           pnpm --filter @opengsd/rpc-client run build
-          pnpm --filter @gsd/native run build
           pnpm --filter @opengsd/mcp-server run build
 
       - name: Typecheck extensions
@@ -385,6 +384,9 @@ jobs:
         if: needs.fast-gates.outputs.portability-changed == 'true'
         env:
           GSD_NATIVE_PREFER_LOCAL: '1'
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: pnpm run test:packages
 
       - name: Run Windows portability tests

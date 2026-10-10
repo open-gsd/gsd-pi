@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import childProcess, { spawn } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -12,6 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
@@ -950,7 +951,48 @@ describe('signalAutoLockPid', () => {
     assert.ok(signals.some((s) => s.signal === 'SIGTERM'));
   });
 
-  test('tolerates unknown cwd when the start time matches', () => {
+  for (const { name, startMs, cwd } of [
+    { name: 'unknown start and cwd', startMs: null, cwd: null },
+    { name: 'unknown start with matching cwd', startMs: null, cwd: '/tmp/project' },
+    { name: 'NaN start', startMs: NaN, cwd: '/tmp/project' },
+    { name: 'infinite start', startMs: Infinity, cwd: '/tmp/project' },
+    { name: 'negative infinite start', startMs: -Infinity, cwd: '/tmp/project' },
+    { name: 'zero start', startMs: 0, cwd: '/tmp/project' },
+    { name: 'negative start', startMs: -1, cwd: '/tmp/project' },
+  ]) {
+    test(`refuses ${name} without SIGTERM`, () => {
+      const { signals, opts } = probes({ startMs, cwd });
+      assert.equal(signalAutoLockPid(lock(7, new Date().toISOString()), '/tmp/project', opts), 'unverified');
+      // A signal-0 liveness probe is allowed; it does not establish identity.
+      assert.deepEqual(signals, [{ pid: 7, signal: 0 }]);
+    });
+  }
+
+  for (const cwd of [null, '/tmp/project']) {
+    test(`refuses ETIMEDOUT start probe with ${cwd === null ? 'unknown' : 'matching'} cwd`, (t) => {
+      const { signals, opts } = probes({ cwd });
+      const startProbe = t.mock.method(childProcess, 'execFileSync', () => {
+        const error = new Error('process identity query timed out') as NodeJS.ErrnoException;
+        error.code = 'ETIMEDOUT';
+        throw error;
+      });
+      // Update the named builtin binding used by the production start getter.
+      syncBuiltinESMExports();
+      try {
+        assert.equal(signalAutoLockPid(lock(7, new Date().toISOString()), '/tmp/project', {
+          kill: opts.kill,
+          ...(cwd === null ? {} : { getProcessCwd: opts.getProcessCwd }),
+        }), 'unverified');
+        assert.ok(startProbe.mock.callCount() > 0, 'must exercise the default process query');
+        assert.deepEqual(signals, [{ pid: 7, signal: 0 }]);
+      } finally {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+      }
+    });
+  }
+
+  test('tolerates unknown cwd when a finite positive start time matches', () => {
     const recorded = Date.now() - 1_000;
     const { opts, signals } = probes({ startMs: recorded, cwd: null });
     assert.equal(signalAutoLockPid(lock(7, new Date(recorded).toISOString()), '/tmp/project', opts), 'signaled');
