@@ -227,6 +227,11 @@ jobs:
           cp native/addon/*.node dist-test/native/addon/
           ls -la dist-test/native/addon/
 
+      - name: Run performance baseline gate
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
+        run: pnpm run test:unit:compiled:perf
+
       - name: Run unit tests
         env:
           GSD_NATIVE_PREFER_LOCAL: '1'
