@@ -9,7 +9,7 @@
 // the ordinary pool, not under src/tests/performance/.
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -47,6 +47,14 @@ const pkg = JSON.parse(
 	scripts: Record<string, string>;
 };
 
+// Extract every double-quoted glob argument from an npm script string, in
+// order. Used to assert the *exact* glob set (not just "contains"), so an
+// extra ordinary/package-test glob silently appended to the perf script
+// cannot pass by substring match alone.
+function extractQuotedGlobs(script: string): string[] {
+	return [...script.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
 test("test:unit:compiled:perf exists, is serialized, and targets only the performance directory", () => {
 	const perfScript = pkg.scripts["test:unit:compiled:perf"];
 	assert.ok(perfScript, "package.json must declare test:unit:compiled:perf");
@@ -55,10 +63,11 @@ test("test:unit:compiled:perf exists, is serialized, and targets only the perfor
 		/--test-concurrency=1\b/,
 		"the perf script must serialize (no sibling contention)",
 	);
-	assert.match(
-		perfScript,
-		/"dist-test\/src\/tests\/performance\/\*\.test\.js"/,
-		"the perf script must target the relocated performance directory",
+	const perfGlobs = extractQuotedGlobs(perfScript);
+	assert.deepEqual(
+		perfGlobs,
+		["dist-test/src/tests/performance/*.test.js"],
+		"the perf script must target exactly the relocated performance directory glob and nothing else -- an appended ordinary or package-test glob would silently defeat the isolation this gate exists to provide",
 	);
 });
 
