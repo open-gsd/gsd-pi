@@ -13,7 +13,7 @@
 
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import { buildClaudeCodeModelList } from "./models.js";
-import { isClaudeCodeReady } from "./readiness.js";
+import { isClaudeCodeReady, primeClaudeCodeReadiness, settleClaudeCodeReadiness } from "./readiness.js";
 import { setClaudeCodeUIContext, streamViaClaudeCode } from "./stream-adapter.js";
 
 export default function claudeCodeCli(pi: ExtensionAPI) {
@@ -29,11 +29,16 @@ export default function claudeCodeCli(pi: ExtensionAPI) {
 	pi.on("before_agent_start", captureUi);
 	pi.on("before_provider_request", captureUi);
 
+	// isReady() only reads a cache; start the first CLI probe now so the
+	// answer is usually there before anything asks.
+	primeClaudeCodeReadiness();
+
 	pi.registerProvider("claude-code", {
 		authMode: "externalCli",
 		api: "anthropic-messages",
 		baseUrl: "local://claude-code",
 		isReady: isClaudeCodeReady,
+		settleReadiness: settleClaudeCodeReadiness,
 		streamSimple: streamViaClaudeCode,
 		// Hardcoded list merged with the pi-ai anthropic catalog so new Claude
 		// releases register without a code change (#2437).

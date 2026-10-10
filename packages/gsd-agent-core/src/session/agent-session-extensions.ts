@@ -608,6 +608,9 @@ export class AgentSessionExtensionsModule {
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		// Reloaded extensions start with cold readiness caches; wait for their
+		// async probes so external-CLI providers do not read as "not ready".
+		await this.host.modelRegistry.settleProviderReadiness?.();
 
 		const hasBindings =
 			this.host._extensionUIContext ||

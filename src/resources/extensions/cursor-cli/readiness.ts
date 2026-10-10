@@ -1,13 +1,24 @@
-import { execFileSync } from "node:child_process";
+/**
+ * Readiness check for the Cursor Agent CLI provider.
+ *
+ * Nothing here spawns a synchronous child process: the sync accessors read a
+ * cache that asynchronous probes refresh (see ../shared/cli-readiness.ts).
+ * A stale cache returns the last known answer and re-probes in the
+ * background; a cold cache returns `false` (unknown is never reported as
+ * ready) and is primed at extension load. Code that must not act on a cold
+ * or stale answer awaits settleCursorAgentReadiness().
+ */
+
+import {
+	createReadinessCache,
+	keepEventLoopAlive,
+	READINESS_CHECK_INTERVAL_MS,
+	runCliProbe,
+} from "../shared/cli-readiness.js";
 
 const VERSION_TIMEOUT_MS = 5_000;
 const STATUS_TIMEOUT_MS = 10_000;
 const LIST_MODELS_TIMEOUT_MS = 15_000;
-const CHECK_INTERVAL_MS = 30_000;
-
-let cachedBinaryPresent: boolean | null = null;
-let cachedAuthed: boolean | null = null;
-let lastCheckMs = 0;
 
 export function getCursorAgentCommand(platform: NodeJS.Platform = process.platform): string {
 	return platform === "win32" ? "cursor-agent.cmd" : "cursor-agent";
@@ -35,15 +46,15 @@ function debugLog(...parts: unknown[]): void {
 	}
 }
 
-function spawnCursorAgent(command: string, args: string[], timeout: number): Buffer {
+function spawnCursorAgent(command: string, args: string[], timeout: number): Promise<string> {
 	const invocation = buildCursorAgentSpawnInvocation(command, args);
-	return execFileSync(invocation.command, invocation.args, { timeout, stdio: "pipe" });
+	return runCliProbe(invocation.command, invocation.args, timeout);
 }
 
-function findWorkingCommand(): string | null {
+async function findWorkingCommand(): Promise<string | null> {
 	for (const command of getCursorAgentCommandCandidates()) {
 		try {
-			spawnCursorAgent(command, ["--version"], VERSION_TIMEOUT_MS);
+			await spawnCursorAgent(command, ["--version"], VERSION_TIMEOUT_MS);
 			debugLog("version probe ok via", command);
 			return command;
 		} catch (error) {
@@ -83,11 +94,11 @@ function hasCursorApiKey(): boolean {
 	return isCursorAgentApiKeyValue(process.env.CURSOR_API_KEY);
 }
 
-function probeAuth(command: string): boolean | null {
+async function probeAuth(command: string): Promise<boolean | null> {
 	if (hasCursorApiKey()) return true;
 
 	try {
-		const out = spawnCursorAgent(command, ["status"], STATUS_TIMEOUT_MS).toString();
+		const out = await spawnCursorAgent(command, ["status"], STATUS_TIMEOUT_MS);
 		debugLog("status output", out.slice(0, 200));
 		return parseCursorAgentStatus(out);
 	} catch (error) {
@@ -97,54 +108,77 @@ function probeAuth(command: string): boolean | null {
 	return null;
 }
 
-export function isCursorAgentReadyUncached(): boolean {
-	const command = findWorkingCommand();
-	if (!command) return false;
-	return probeAuth(command) === true;
+/** One fresh asynchronous probe that bypasses (and does not touch) the cache. */
+export function probeCursorAgentReadyUncached(): Promise<boolean> {
+	return keepEventLoopAlive(
+		(async () => {
+			const command = await findWorkingCommand();
+			if (!command) return false;
+			return (await probeAuth(command)) === true;
+		})(),
+	);
 }
 
-function refreshCache(): void {
-	const now = Date.now();
-	if (cachedBinaryPresent !== null && now - lastCheckMs < CHECK_INTERVAL_MS) return;
-	lastCheckMs = now;
+interface CursorAgentReadiness {
+	binaryPresent: boolean;
+	authed: boolean;
+}
 
-	const command = findWorkingCommand();
+async function probeReadiness(previous: CursorAgentReadiness | null): Promise<CursorAgentReadiness> {
+	const command = await findWorkingCommand();
 	if (!command) {
-		cachedBinaryPresent = false;
-		cachedAuthed = false;
-		return;
+		return { binaryPresent: false, authed: false };
 	}
 
-	cachedBinaryPresent = true;
-	const authed = probeAuth(command);
+	const authed = await probeAuth(command);
 	if (authed === null) {
-		if (cachedAuthed === null) cachedAuthed = false;
-		return;
+		// Soft-fail: keep a previously known auth state, otherwise not authed.
+		return { binaryPresent: true, authed: previous?.authed ?? false };
 	}
-	cachedAuthed = authed;
+	return { binaryPresent: true, authed };
 }
 
+const readinessCache = createReadinessCache<CursorAgentReadiness>({
+	probe: probeReadiness,
+	intervalMs: READINESS_CHECK_INTERVAL_MS,
+});
+
+/** Cached answer; false while the cache is cold. Never blocks. */
 export function isCursorAgentBinaryPresent(): boolean {
-	refreshCache();
-	return cachedBinaryPresent ?? false;
+	return readinessCache.peek()?.binaryPresent ?? false;
 }
 
+/** Cached answer; false while the cache is cold. Never blocks. */
 export function isCursorAgentReady(): boolean {
-	refreshCache();
-	return (cachedBinaryPresent ?? false) && (cachedAuthed ?? false);
+	const readiness = readinessCache.peek();
+	return (readiness?.binaryPresent ?? false) && (readiness?.authed ?? false);
+}
+
+/** Readiness from a probe no older than the cache window. */
+export async function settleCursorAgentReadiness(): Promise<boolean> {
+	const readiness = await readinessCache.settle();
+	return readiness.binaryPresent && readiness.authed;
+}
+
+/** Binary presence from a probe no older than the cache window. */
+export async function settleCursorAgentBinaryPresent(): Promise<boolean> {
+	return (await readinessCache.settle()).binaryPresent;
+}
+
+/** Start the first probe in the background. Called at extension load. */
+export function primeCursorAgentReadiness(): void {
+	readinessCache.peek();
 }
 
 export function clearCursorAgentReadinessCache(): void {
-	cachedBinaryPresent = null;
-	cachedAuthed = null;
-	lastCheckMs = 0;
+	readinessCache.clear();
 }
 
-export function readCursorAgentListModels(): string | null {
-	const command = findWorkingCommand();
+export async function readCursorAgentListModels(): Promise<string | null> {
+	const command = await findWorkingCommand();
 	if (!command) return null;
 	try {
-		return spawnCursorAgent(command, ["--list-models"], LIST_MODELS_TIMEOUT_MS).toString("utf8");
+		return await spawnCursorAgent(command, ["--list-models"], LIST_MODELS_TIMEOUT_MS);
 	} catch (error) {
 		debugLog("list-models failed", (error as Error).message?.slice(0, 200));
 		return null;
