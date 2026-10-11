@@ -32,6 +32,7 @@ import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { captureMilestoneVerificationSourceRevision } from "./verification-source-integrity.js";
 import type { DispatchAction, DispatchContext } from "./auto-dispatch.js";
+import { uatVerdictPredatesAcceptedValidation } from "./uat-dispatch.js";
 import {
   commitPendingMilestoneCloseoutChanges,
   readUatGateVerdict,
@@ -225,6 +226,17 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
       }
       const { verdict, uatType } = result;
       if (!isAcceptableUatVerdict(verdict, uatType)) {
+        // #2770: a historical non-PASS verdict that strictly predates the
+        // milestone's current accepted validation receipt was already in
+        // front of the validator when it accepted the remediation; that
+        // acceptance governs closure the same way it governs UAT retry
+        // dispatch (#2347). The check is indeterminate-false: without an
+        // accepted receipt newer than the verdict, the failure still blocks.
+        if (await uatVerdictPredatesAcceptedValidation(
+          mid,
+          sliceId,
+          { assumeValidationWaived: opts.assumeValidationWaived },
+        )) continue;
         return {
           action: "stop",
           reason: uatSignoffBlockerGuidance(mid, sliceId, verdict),

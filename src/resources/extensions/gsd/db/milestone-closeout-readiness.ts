@@ -65,6 +65,26 @@ export type MilestoneCloseoutAuthorization =
     blockers: MilestoneCloseoutBlocker[];
   };
 
+/**
+ * Authorization blockers a fresh validation waiver supersedes. The real
+ * grant only requires an adopted, open lifecycle — it never inspects the
+ * recorded validation state — so under a preview dry-run these blockers are
+ * exactly the ones the would-be waiver would erase. `validation-receipt-invalid`
+ * is excluded: it implies corrupt or multiple waivers, where the real grant
+ * throws and the dispatch rule stops. Consumers: the closeout consistency
+ * gate's `assumeValidationWaived` handling and the UAT verdict-vs-validation
+ * ordering check (#2347/#2770).
+ */
+export const VALIDATION_SHAPED_BLOCKERS: ReadonlySet<MilestoneCloseoutBlocker["kind"]> = new Set([
+  "validation-missing",
+  "validation-not-pass",
+  "validation-stale",
+  "validation-attempt-newer",
+  "validation-source-revision-mismatch",
+  "criterion-unsatisfied",
+  "source-revision-mismatch",
+]);
+
 interface ValidationRow {
   event_id: string;
   operation_id: string;
