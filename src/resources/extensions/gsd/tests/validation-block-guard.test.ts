@@ -89,6 +89,8 @@ test("validation block allows recovery, diagnostics, and unrelated commands", ()
     "dispatch reassess-roadmap",
     "dispatch validate",
     "dispatch validate-milestone",
+    "dispatch uat",
+    "dispatch run-uat",
     "park M006",
     "logs debug",
     "notifications",
@@ -160,7 +162,6 @@ test("validation block rejects workflow-start and advancing commands", () => {
     "parallel resume",
     "parallel merge",
     "dispatch complete",
-    "dispatch uat",
     "complete-milestone",
     "ship",
     // code-review --fix applies changes and should be blocked

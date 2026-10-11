@@ -18,6 +18,8 @@ const VALIDATION_BLOCK_RE =
 const VALIDATION_SAFE_DISPATCH_COMMANDS = new Set([
   "reassess",
   "reassess-roadmap",
+  "uat",
+  "run-uat",
   "validate",
   "validate-milestone",
 ]);
