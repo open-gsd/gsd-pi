@@ -175,6 +175,25 @@ function readStateFileProgress(projectPath: string): ProjectProgressInfo | null 
   }
 }
 
+/** Inspect one selected checkout without treating its children as projects.
+ * Used by host-managed catalogs, whose identity is authoritative even for
+ * ordinary repositories, blank workspaces, and Git worktrees (.git files).
+ */
+export function inspectProject(projectPath: string, includeProgress?: boolean): ProjectMetadata | null {
+  try {
+    const stat = statSync(projectPath);
+    if (!stat.isDirectory()) return null;
+    const { kind, signals } = detectProjectKind(projectPath);
+    return {
+      name: basename(projectPath), path: projectPath, kind, signals,
+      lastModified: stat.mtimeMs,
+      ...(includeProgress ? { progress: readProjectProgress(projectPath) } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Scan one directory level under `devRootPath` and return metadata for each
  * discovered project directory. Hidden dirs (starting with `.`), `node_modules`,

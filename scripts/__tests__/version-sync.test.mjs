@@ -180,3 +180,52 @@ test("syncVersionSurfaces leaves open-gsd-hermes on stable Python metadata durin
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function writeOpenclawManifest(root, version) {
+  const dir = join(root, "integrations", "openclaw");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "openclaw.plugin.json"),
+    `{\n  "id": "open-gsd-openclaw",\n  "name": "Open GSD",\n  "version": "${version}"\n}\n`,
+  );
+}
+
+test("syncVersionSurfaces updates the open-gsd-openclaw plugin manifest on every channel", () => {
+  const root = mkdtempSync(join(tmpdir(), "gsd-openclaw-version-sync-"));
+
+  try {
+    createVersionSyncFixture(root, "1.5.0");
+    writeOpenclawManifest(root, "1.5.0");
+
+    syncVersionSurfaces(root, "1.6.0");
+    assert.match(
+      readFileSync(join(root, "integrations", "openclaw", "openclaw.plugin.json"), "utf8"),
+      /"version": "1\.6\.0"/,
+    );
+
+    // The package.json in integrations/openclaw is stamped on prerelease
+    // channels too, so the manifest must follow it, unlike the Hermes files.
+    syncVersionSurfaces(root, "1.7.0-dev.abc1234");
+    assert.match(
+      readFileSync(join(root, "integrations", "openclaw", "openclaw.plugin.json"), "utf8"),
+      /"version": "1\.7\.0-dev\.abc1234"/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("verifyVersionSync reports a stale open-gsd-openclaw plugin manifest", () => {
+  const root = mkdtempSync(join(tmpdir(), "gsd-openclaw-version-verify-"));
+
+  try {
+    createVersionSyncFixture(root, "1.6.0");
+    writeOpenclawManifest(root, "1.5.0");
+
+    assert.deepEqual(verifyVersionSync(root), [
+      "integrations/openclaw/openclaw.plugin.json version is 1.5.0, expected 1.6.0",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

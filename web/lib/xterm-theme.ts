@@ -1,3 +1,5 @@
+import type { EmbeddedTheme } from "./embedded-theme.ts";
+
 export type XtermPaletteMode = "classic" | "vivid";
 
 const XTERM_CLASSIC_DARK_THEME = {
@@ -101,14 +103,27 @@ const XTERM_VIVID_LIGHT_THEME = {
   brightWhite: "#1e293b",
 } as const;
 
-export function getXtermTheme(isDark: boolean, palette: XtermPaletteMode = "classic") {
-  if (palette === "vivid") {
-    return isDark ? XTERM_VIVID_DARK_THEME : XTERM_VIVID_LIGHT_THEME;
-  }
-  return isDark ? XTERM_CLASSIC_DARK_THEME : XTERM_CLASSIC_LIGHT_THEME;
+export function getXtermTheme(isDark: boolean, palette: XtermPaletteMode = "classic", hostTheme?: EmbeddedTheme) {
+  const dark = hostTheme ? hostTheme.mode === "dark" : isDark;
+  const base = palette === "vivid"
+    ? (dark ? XTERM_VIVID_DARK_THEME : XTERM_VIVID_LIGHT_THEME)
+    : (dark ? XTERM_CLASSIC_DARK_THEME : XTERM_CLASSIC_LIGHT_THEME);
+  if (!hostTheme) return base;
+  // xterm paints its own canvas; CSS variables alone do not reach it.
+  const background = hostTheme.variables["--terminal"] ?? base.background;
+  const foreground = hostTheme.variables["--terminal-foreground"] ?? base.foreground;
+  return {
+    ...base,
+    background,
+    foreground,
+    cursor: foreground,
+    cursorAccent: background,
+    selectionBackground: hostTheme.variables["--accent"] ?? base.selectionBackground,
+    selectionForeground: foreground,
+  };
 }
 
-export function getXtermOptions(isDark: boolean, fontSize?: number, palette: XtermPaletteMode = "classic") {
+export function getXtermOptions(isDark: boolean, fontSize?: number, palette: XtermPaletteMode = "classic", hostTheme?: EmbeddedTheme) {
   return {
     cursorBlink: true,
     cursorStyle: "bar" as const,
@@ -117,7 +132,7 @@ export function getXtermOptions(isDark: boolean, fontSize?: number, palette: Xte
       "'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, Monaco, 'Courier New', monospace",
     lineHeight: 1.35,
     letterSpacing: 0,
-    theme: getXtermTheme(isDark, palette),
+    theme: getXtermTheme(isDark, palette, hostTheme),
     allowProposedApi: true,
     scrollback: 10000,
     convertEol: false,

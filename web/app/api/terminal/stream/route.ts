@@ -10,6 +10,7 @@ import {
   getOrCreateSession,
   addListener,
   isAllowedTerminalCommand,
+  hasSession,
 } from "../../../../lib/pty-manager";
 import { requireProjectCwd } from "../../../../../src/web/bridge-service.ts";
 
@@ -34,7 +35,15 @@ export async function GET(request: Request): Promise<Response> {
 
   // Ensure the session exists
   try {
-    getOrCreateSession(sessionId, projectCwd, command, commandArgs);
+    if (url.searchParams.get("require_existing") === "1") {
+      // Non-starting subscription mode for embedded RPC callers: never
+      // create sessions; refuse with 409 when the session does not exist.
+      if (!hasSession(sessionId, projectCwd)) {
+        return Response.json({ error: "terminal session not found" }, { status: 409 });
+      }
+    } else {
+      getOrCreateSession(sessionId, projectCwd, command, commandArgs);
+    }
   } catch (error) {
     console.error("[pty-stream] Failed to create session:", error);
     return Response.json(

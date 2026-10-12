@@ -327,6 +327,9 @@ try {
     'scripts/link-workspace-packages.cjs',
     'integrations/hermes/plugin.yaml',
     'dist/web/standalone/server.js',
+    'dist/web/standalone/gsd-web-build.json',
+    'dist/web/standalone/openclaw/server.js',
+    'dist/web/standalone/openclaw/gsd-web-build.json',
   ];
 
   const retiredProductPrefixes = [

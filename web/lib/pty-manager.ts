@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs"
 /**
  * Server-side PTY manager — spawns and manages pseudo-terminal instances.
  *
@@ -250,6 +251,19 @@ function loadNodePty(): LoadedNodePty {
   );
 }
 
+/** Non-starting existence check: true only when the session exists AND is alive. */
+/** Project-bound existence check: a terminal belongs to exactly one canonical
+ * project; an admitted project A can never select a project-B terminal. */
+export function hasSession(sessionId: string, projectCwd?: string): boolean {
+  const existing = getSessions().get(sessionId);
+  if (!existing?.alive) return false;
+  if (projectCwd === undefined) return true;
+  try {
+    return realpathSync(projectCwd) === realpathSync(existing.projectCwd);
+  } catch {
+    return false;
+  }
+}
 export function getOrCreateSession(sessionId: string, projectCwd?: string, command?: string, commandArgs: string[] = []): PtySession {
   ensureProcessCleanupHandlers();
   if (!isAllowedTerminalCommand(command)) {
