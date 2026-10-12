@@ -19,7 +19,9 @@ and two verification tests. Resolution: keep FTM `host-check-runner` path +
 restore helper + event-loop verify test. Script now requires real GitHub CLI
 (`gh version`), not a conda/browser `gh` shim, and rebuilds
 `pi-coding-agent` + `agent-core` before `build:web-host`. Gate passed after
-that rebuild.
+that rebuild. Branch `sync/upstream-v1.22.0` at `34125e52` pushed; local
+`gh` has no auth token so PR create is pending
+(https://github.com/FirstTracksMaterials/gsd-pi/pull/new/sync/upstream-v1.22.0).
 
 ## FTM in-place hotfixes (2026-10-12)
 
