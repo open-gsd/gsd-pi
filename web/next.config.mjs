@@ -62,7 +62,10 @@ const nextConfig = {
             request.startsWith('node:') ||
             request.startsWith('@gsd/native/') ||
             request === 'koffi' ||
-            request.startsWith('koffi/')
+            request.startsWith('koffi/') ||
+            // workflow-mcp discovers optional CLI entrypoints via new URL(...);
+            // those paths are runtime existence checks, not webpack bundle deps.
+            /packages\/mcp-server\/(dist\/cli\.js|src\/cli\.ts)$/.test(request)
           )
         ) {
           return callback(null, `commonjs ${request}`);
