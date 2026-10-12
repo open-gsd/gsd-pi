@@ -3,7 +3,7 @@
 // Discovery order (D003): task plan verify → preference → package.json scripts.
 // First non-empty source wins.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   readFileSync,
@@ -11,16 +11,11 @@ import {
   type Dirent,
 } from "node:fs";
 import { join, basename, delimiter, dirname } from "node:path";
-<<<<<<< HEAD
 import {
   createHostCheckLogDir,
   runHostCheck,
   truncateCapturedOutput,
 } from "./host-check-runner.js";
-=======
-import { tmpdir } from "node:os";
-import { killProcessTree } from "@gsd/pi-coding-agent";
->>>>>>> 1c011ccc52091342649c18298ba7def3a9f9d0b6
 import type { AuditWarning, RuntimeError, VerificationCheck, VerificationResult } from "./types.js";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
 import { redactSecrets } from "./redact-secrets.js";
@@ -1308,117 +1303,12 @@ function mergeDiscoverySource(
   return "none";
 }
 
-<<<<<<< HEAD
 /**
  * Run the verification gate: discover commands, execute each via the async
  * process-group host-check runner, and return a structured result.
  *
  * - All commands run sequentially regardless of individual pass/fail unless aborted.
-=======
-function isSpawnTimeout(
-  result: { signal: NodeJS.Signals | null },
-  error: NodeJS.ErrnoException & { killed?: boolean },
-): boolean {
-  if (error.code === "ETIMEDOUT") return true;
-  if (error.killed && (result.signal === "SIGTERM" || result.signal === "SIGKILL")) return true;
-  return /etimedout|timed out/i.test(error.message);
-}
-
-function isCommandNotFound(error: NodeJS.ErrnoException): boolean {
-  if (error.code === "ENOENT") return true;
-  return /enoent|not found/i.test(error.message);
-}
-
-function isShellCommandNotFound(exitCode: number, stderr: string): boolean {
-  return exitCode === 127
-    || /command not found/i.test(stderr)
-    || /is not recognized as an internal or external command/i.test(stderr);
-}
-
-function isShellParseFailure(exitCode: number, stdout: string, stderr: string): boolean {
-  if (exitCode !== 1 || stdout.trim() !== "") return false;
-  return /unterminated string constant/i.test(stderr)
-    || /syntax error: unterminated quoted string/i.test(stderr)
-    || /unexpected eof while looking for matching/i.test(stderr)
-    || /syntax error near unexpected token/i.test(stderr)
-    || /was unexpected at this time/i.test(stderr);
-}
-
-/** How one verify command's process ended, in the shape `spawnSync` reports it. */
-interface VerificationSpawnResult {
-  status: number | null;
-  signal: NodeJS.Signals | null;
-  error?: Error;
-}
-
-/**
- * Run one verify command to completion without holding the event loop.
- *
- * A project's verify command is its test suite and can run for minutes. Under
- * `spawnSync` the TUI could not paint, take input or honor Escape for that
- * whole time, and session heartbeats stopped.
- */
-function spawnVerificationCommand(
-  bin: string,
-  args: string[],
-  options: {
-    cwd: string;
-    env: NodeJS.ProcessEnv;
-    stdio: ["ignore", number, number];
-    timeout: number;
-    windowsVerbatimArguments: boolean;
-  },
-): Promise<VerificationSpawnResult> {
-  return new Promise((resolve) => {
-    const { timeout, ...spawnOptions } = options;
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(bin, args, spawnOptions);
-    } catch (error) {
-      resolve({ status: null, signal: null, error: error as Error });
-      return;
-    }
-
-    let timedOut = false;
-    let settled = false;
-    // As with spawnSync, a timeout of 0 means no limit.
-    const timer = timeout > 0 ? setTimeout(() => {
-      timedOut = true;
-      // The command runs under a shell: take its children down with it, or a
-      // timed-out test runner keeps going (and on Windows keeps the output
-      // files open) after the gate has moved on.
-      if (child.pid != null) killProcessTree(child.pid);
-      else child.kill();
-    }, timeout) : undefined;
-    const settle = (result: VerificationSpawnResult): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-
-    child.once("error", (error) => settle({ status: null, signal: null, error }));
-    child.once("exit", (status, signal) => {
-      if (!timedOut) {
-        settle({ status, signal });
-        return;
-      }
-      settle({
-        status,
-        signal,
-        error: Object.assign(new Error(`spawn ${bin} ETIMEDOUT`), { code: "ETIMEDOUT" }),
-      });
-    });
-  });
-}
-
-/**
- * Run the verification gate: discover commands, execute each as a child
- * process, and return a structured result.
- *
- * - All commands run sequentially regardless of individual pass/fail.
- * - The event loop stays free while a command runs.
->>>>>>> 1c011ccc52091342649c18298ba7def3a9f9d0b6
+ * - The event loop stays free while a command runs (host-check uses async spawn).
  * - `passed` is true when every command exits 0 (or no commands are discovered).
  * - stdout/stderr per command are truncated to 10 KB; full logs remain as artefacts.
  */
@@ -1492,7 +1382,6 @@ export async function runVerificationGate(options: RunVerificationGateOptions): 
     const rewrittenCommand = shell.kind === "cmd"
       ? normalizeWindowsPackageManagerCommand(pythonNormalized)
       : pythonNormalized;
-<<<<<<< HEAD
     const host = await runHostCheck({
       cwd: options.cwd,
       timeoutMs: commandTimeoutMs,
@@ -1503,91 +1392,6 @@ export async function runVerificationGate(options: RunVerificationGateOptions): 
       logDir: join(logRoot, `${checks.length}-${Date.now().toString(36)}`),
     });
     const warning = countSearchWarning(command, host.exitCode);
-=======
-    const outputDir = mkdtempSync(join(tmpdir(), "gsd-verification-"));
-    // Git Bash runs authored Verify text from a temp script file so the
-    // selected absolute bash.exe executes the command as a script file in its
-    // own process, without re-resolving bash by name or re-parsing via eval.
-    const shellArgs = shell.kind === "git-bash"
-      ? (() => {
-          const commandPath = join(outputDir, "verify.sh");
-          writeFileSync(commandPath, `set -o pipefail\n${rewrittenCommand}\n`, "utf-8");
-          return [commandPath];
-        })()
-      // Pass the command string as an argument to the shell explicitly
-      // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
-      : shell.argsFor(rewrittenCommand);
-    const stdoutPath = join(outputDir, "stdout");
-    const stderrPath = join(outputDir, "stderr");
-    const stdoutFd = openSync(stdoutPath, "w");
-    const stderrFd = openSync(stderrPath, "w");
-    let result: VerificationSpawnResult;
-    let stdout: string;
-    let capturedStderr: string;
-    try {
-      result = await spawnVerificationCommand(shell.bin, shellArgs, {
-        cwd: options.cwd,
-        env: childEnv,
-        stdio: ["ignore", stdoutFd, stderrFd],
-        timeout: options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-        // cmd re-parses its command line itself; Node's quoting would mangle
-        // nested quotes (#1940). bash.exe follows the MSVCRT argv rules Node
-        // emits, so it needs the default quoting.
-        windowsVerbatimArguments: shell.kind === "cmd",
-      });
-      stdout = readBoundedCommandOutput(stdoutPath);
-      capturedStderr = readBoundedCommandOutput(stderrPath);
-    } finally {
-      closeSync(stdoutFd);
-      closeSync(stderrFd);
-      rmSync(outputDir, { recursive: true, force: true });
-    }
-    const durationMs = Date.now() - start;
-
-    let exitCode: number;
-    let stderr: string;
-
-    let failureClass: VerificationCheck["failureClass"];
-    if (result.error) {
-      const spawnError = result.error as NodeJS.ErrnoException & { killed?: boolean };
-      if (isSpawnTimeout(result, spawnError)) {
-        const limitMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
-        exitCode = 124;
-        failureClass = "timeout";
-        stderr = truncate(
-          `${capturedStderr}\ntimed out after ${limitMs}ms. Raise verification_timeout_ms if this command is expected to run longer.`.trim(),
-          MAX_OUTPUT_BYTES,
-        );
-      } else if (isCommandNotFound(spawnError)) {
-        exitCode = 127;
-        failureClass = "command-not-found";
-        stderr = truncate(
-          capturedStderr + "\n" + spawnError.message,
-          MAX_OUTPUT_BYTES,
-        );
-      } else {
-        exitCode = result.status ?? 1;
-        stderr = truncate(
-          capturedStderr + "\n" + spawnError.message,
-          MAX_OUTPUT_BYTES,
-        );
-      }
-    } else {
-      // status is null when killed by signal — treat as failure
-      exitCode = result.status ?? 1;
-      stderr = capturedStderr;
-      if (isShellCommandNotFound(exitCode, stderr)) {
-        failureClass = "command-not-found";
-      }
-    }
-
-    if (!failureClass && isShellParseFailure(exitCode, stdout, stderr)) {
-      failureClass = "shell-parse";
-    }
-
-    const warning = countSearchWarning(command, exitCode);
-
->>>>>>> 1c011ccc52091342649c18298ba7def3a9f9d0b6
     checks.push({
       command,
       exitCode: host.exitCode,
@@ -1614,11 +1418,8 @@ export async function runVerificationGateForTargets(options: {
   /** Structured task-specific evidence supplied at completion (#1591). */
   taskEvidence?: TaskVerificationEvidence[];
   commandTimeoutMs?: number;
-<<<<<<< HEAD
   abortSignal?: AbortSignal;
   logDir?: string;
-=======
->>>>>>> 1c011ccc52091342649c18298ba7def3a9f9d0b6
 }): Promise<VerificationResult> {
   const timestamp = Date.now();
   if (options.targets.length === 0) {

@@ -44,8 +44,41 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+# Prefer the real GitHub CLI over shadow binaries (e.g. conda "Github browser opener"
+# also named `gh`). Export GH_BIN for subsequent gh invocations.
+resolve_github_cli() {
+  if [[ -n "${GH_BIN:-}" && -x "${GH_BIN}" ]]; then
+    if "$GH_BIN" --version 2>/dev/null | grep -q '^gh version'; then
+      export PATH="$(dirname "$GH_BIN"):$PATH"
+      return 0
+    fi
+  fi
+  local candidate
+  for candidate in \
+    "${GH_BIN:-}" \
+    "$(command -v gh 2>/dev/null || true)" \
+    /usr/bin/gh \
+    /opt/homebrew/bin/gh \
+    "$HOME/.local/bin/gh"
+  do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    if "$candidate" --version 2>/dev/null | grep -q '^gh version'; then
+      GH_BIN="$candidate"
+      export GH_BIN
+      # Put the real CLI ahead of PATH shadows for bare `gh` calls.
+      export PATH="$(dirname "$candidate"):$PATH"
+      return 0
+    fi
+  done
+  return 1
+}
+
 require_cmd git
 require_cmd node
+
+require_github_cli() {
+  resolve_github_cli || die "GitHub CLI (cli/cli) required; install https://cli.github.com/ (not a conda/browser 'gh' shim)"
+}
 
 ensure_remotes() {
   if ! git remote get-url origin >/dev/null 2>&1; then
@@ -66,7 +99,7 @@ ensure_remotes() {
 
 resolve_tag() {
   local tag=""
-  if command -v gh >/dev/null 2>&1; then
+  if resolve_github_cli; then
     tag="$(gh release view --repo "$UPSTREAM_REPO" --json tagName -q .tag_name 2>/dev/null || true)"
   fi
   if [[ -z "$tag" ]]; then
@@ -142,7 +175,7 @@ if [[ "$MERGE_RC" -ne 0 ]]; then
   if [[ "$NO_PR" -eq 1 ]]; then
     die "merge conflict; resolve locally on $BRANCH (left in conflicted state)"
   fi
-  require_cmd gh
+  require_github_cli
   # Commit conflict markers so the PR is actionable; do not invent resolutions.
   git add -A
   git commit --no-verify -m "WIP: merge upstream $TAG (conflicts — needs human)"
@@ -177,6 +210,10 @@ log "Merge clean; building web host with pnpm@$PNPM_VERSION"
 require_cmd corepack
 corepack prepare "pnpm@$PNPM_VERSION" --activate
 pnpm install
+# Fresh package dists so src extensions see updated ProviderConfig / ModelRegistry
+# types after an upstream bump (build:web-host alone does not rebuild packages).
+pnpm run build:pi-coding-agent
+pnpm --filter @gsd/agent-core run build
 pnpm run build:web-host
 
 if [[ "$NO_PR" -eq 1 ]]; then
@@ -184,7 +221,7 @@ if [[ "$NO_PR" -eq 1 ]]; then
   exit 0
 fi
 
-require_cmd gh
+require_github_cli
 git push -u origin "$BRANCH" --force-with-lease
 
 PR_URL=""

@@ -10,6 +10,17 @@ released **v1.22.0** (same day). Gate is `build:web-host` only; conflicts open
 a human PR. Local deploy rebuilds standalone and restarts
 `raidnight-gsd-staging` only when the coding slot is idle.
 
+### sync/upstream-v1.22.0 conflict resolution
+
+WIP merge `a8b1c69b` had markers in `auto-timers.ts`, `verification-gate.ts`,
+and two verification tests. Resolution: keep FTM `host-check-runner` path +
+`abortSignal`/`logDir`; import both `shouldRefuseNewWork` and
+`getCurrentTurnGeneration` in auto-timers; take upstream `withRtkDisabled`
+restore helper + event-loop verify test. Script now requires real GitHub CLI
+(`gh version`), not a conda/browser `gh` shim, and rebuilds
+`pi-coding-agent` + `agent-core` before `build:web-host`. Gate passed after
+that rebuild.
+
 ## FTM in-place hotfixes (2026-10-12)
 
 Applied `TEMP/gsd-pi-ftm-inplace-hotfixes.patch`: allow auto-mode compaction

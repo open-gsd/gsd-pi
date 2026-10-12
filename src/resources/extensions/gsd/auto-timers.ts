@@ -25,11 +25,8 @@ import { closeoutUnit, type CloseoutOptions } from "./auto-unit-closeout.js";
 import { saveActivityLog } from "./activity-log.js";
 import { recoverTimedOutUnit, type RecoveryContext } from "./auto-timeout-recovery.js";
 import { resolveAgentEndCancelled } from "./auto/resolve.js";
-<<<<<<< HEAD
 import { shouldRefuseNewWork } from "./auto-cancellation.js";
-=======
 import { getCurrentTurnGeneration } from "./auto/turn-epoch.js";
->>>>>>> 1c011ccc52091342649c18298ba7def3a9f9d0b6
 import { startGlobalIdleWatchdog } from "./auto/global-idle-watchdog.js";
 import type { PauseAutoFn, PauseAutoOptions } from "./auto/loop-deps.js";
 import type { AutoSession } from "./auto/session.js";
