@@ -33,6 +33,16 @@ export interface Job {
 	 */
 	delivered?: boolean;
 	/**
+	 * Set true by the extension entry when the DELIVERED follow-up copy of the
+	 * result was truncated (the entry caps the follow-up at 2000 chars and appends
+	 * "[... truncated, use await_job for full output]"). A delivered-but-truncated
+	 * job has NOT been shown in full, so await_job must serve the complete
+	 * resultText once despite `delivered` being set — otherwise the truncation
+	 * pointer is a dead end and the full output is unreachable. Cleared after the
+	 * first full serve so subsequent awaits are terse again.
+	 */
+	deliveredTruncated?: boolean;
+	/**
 	 * Handle for the pending follow-up delivery timer (set by deliverResult).
 	 * Stored so suppressFollowUp() can cancel it before the notification fires,
 	 * even when await_job is called after the job has already completed (#3787).

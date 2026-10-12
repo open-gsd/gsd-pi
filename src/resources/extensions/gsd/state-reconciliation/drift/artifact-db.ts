@@ -38,7 +38,7 @@ import { isClosedStatus } from "../../status-guards.js";
 import { findMilestoneIds } from "../../milestone-ids.js";
 import { removeProjectionTreeSync } from "../../atomic-write.js";
 import { invalidateStateCache } from "../../state.js";
-import { hasTaskExecutionOrReopenHistory } from "../../db/lifecycle-queries.js";
+import { hasTaskExecutionOrReopenHistory, latestSliceReopenAt } from "../../db/lifecycle-queries.js";
 import type { GSDState } from "../../types.js";
 import {
   completedEventCoversDispatch,
@@ -49,6 +49,7 @@ import {
 import { isCanonicalStagedTaskSummaryProjection } from "../../task-summary-projection-classification.js";
 import { readLatestTaskAttempt } from "../../task-execution-domain-operation.js";
 import { quarantineProjectionEvidence } from "../../projection-observation.js";
+import { reopenProjectionRoots } from "../../projection-cleanup.js";
 import { computeProjectionSha, deriveCompatProjectionKey, readCompatMarker } from "../../compat/compat-marker.js";
 import { comparableProjectionContent } from "../../markdown-renderer.js";
 import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
@@ -165,6 +166,35 @@ function taskHasExecutionOrReopenHistory(
   return hasTaskExecutionOrReopenHistory(milestoneId, sliceId, taskId);
 }
 
+/**
+ * Disk-existence check for a slice-level SUMMARY artifact row: the recorded
+ * path, or the currently-resolved slice projection path. Mirrors the
+ * task-level stagedTaskSummaryExistsOnDisk above.
+ */
+function sliceSummaryExistsOnDisk(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  rowPath: string,
+): boolean {
+  const candidates = [
+    isAbsolute(rowPath) ? rowPath : resolve(basePath, rowPath),
+    resolveSliceFile(basePath, milestoneId, sliceId, "SUMMARY"),
+  ];
+  return candidates.some((candidate) => candidate !== null && existsSync(candidate));
+}
+
+/**
+ * The occurred-at of a slice's newest explicit reopen, or null when the DB
+ * is unavailable or the slice was never reopened. The caller ties this to
+ * the artifact row's imported_at: only a row that predates the reopen is
+ * dead bookkeeping left by the pre-reopen completion.
+ */
+function sliceLatestReopenAt(milestoneId: string, sliceId: string): string | null {
+  if (!isDbAvailable()) return null;
+  return latestSliceReopenAt(milestoneId, sliceId);
+}
+
 function isAbandonedStagedTaskSummary(
   record: ArtifactDbStatusDivergenceDrift,
   basePath: string,
@@ -203,7 +233,13 @@ function isAbandonedStagedTaskSummary(
     projectionPath,
     [gsdProjectionRoot(basePath), join(basePath, ".gsd")],
   );
-  return readCompatMarker(basePath).projections[projectionKey]?.sha === computeProjectionSha(content);
+  // gsd_summary_save renders the SUMMARY at the project root and copies it into
+  // the milestone worktree. The baseline of that copy is only in the
+  // project-root marker (#2714).
+  const sha = computeProjectionSha(content);
+  return reopenProjectionRoots(basePath).some((root) =>
+    readCompatMarker(root).projections[projectionKey]?.sha === sha
+  );
 }
 
 function resolveTaskSummaryDriftPath(
@@ -383,6 +419,24 @@ function detectArtifactDbStatusDriftForMilestone(
     if (row.artifact_type !== "SUMMARY" || !row.slice_id || row.task_id) continue;
     const slice = bySlice.get(row.slice_id);
     if (!slice || slice.closed) continue;
+    // A missing-file slice-level SUMMARY row imported BEFORE the slice's
+    // latest reopen is dead bookkeeping, mirroring the task-level
+    // #1771/#1983 exemption: the reopen cleared the summary carrier and
+    // quarantined the file, so the orphaned artifacts row must not wedge the
+    // reopened slice's re-execution. The temporal tie matters (PR #2674
+    // review): a row imported AFTER the latest reopen with no file on disk is
+    // a genuine divergence — for example a post-reopen gsd_summary_save whose
+    // projection write failed — and must stay flaggable. A slice that
+    // legitimately re-completes re-writes its SUMMARY to disk, so the
+    // disk-absence gate keeps that genuine completion-claim flaggable too.
+    const latestSliceReopen = sliceLatestReopenAt(milestoneId, row.slice_id);
+    if (
+      latestSliceReopen !== null &&
+      !isAfter(row.imported_at, latestSliceReopen) &&
+      !sliceSummaryExistsOnDisk(basePath, milestoneId, row.slice_id, row.path)
+    ) {
+      continue;
+    }
     addUniqueDrift(drifts, seen, {
       kind: "artifact-db-status-divergence",
       milestoneId,
@@ -737,8 +791,15 @@ export async function repairArtifactDbDrift(
   }
 
   if (isAbandonedStagedTaskSummary(record, ctx.basePath)) {
-    const projectionPath = resolveTaskSummaryDriftPath(ctx.basePath, record);
-    if (projectionPath) quarantineProjectionEvidence(ctx.basePath, projectionPath);
+    // The copy at the other root is the same drift at the next guard, and no
+    // command that runs at one root removes it (#2714). Move each copy that
+    // passes the same proof.
+    const canonical = { ...record, artifactPath: undefined };
+    for (const root of reopenProjectionRoots(ctx.basePath)) {
+      if (!isAbandonedStagedTaskSummary(canonical, root)) continue;
+      const projectionPath = resolveTaskSummaryDriftPath(root, canonical);
+      if (projectionPath) quarantineProjectionEvidence(root, projectionPath);
+    }
     clearTaskSummaryProjectionState(record.milestoneId, record.sliceId!, record.taskId!);
     clearPathCache();
     clearParseCache();

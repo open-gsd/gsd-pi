@@ -265,7 +265,8 @@ Configuration for `pi.registerProvider()`.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `authMode` | `"apiKey" \| "oauth" \| "externalCli" \| "none"` | No | Auth behavior. Defaults to `"apiKey"`. |
-| `isReady` | `() => boolean` | No | Readiness check before auth checks |
+| `isReady` | `() => boolean` | No | Readiness check before auth checks. Called synchronously, once per model, from the UI: it must not block (no sync child processes or I/O). Answer from a cache and refresh it in the background. |
+| `settleReadiness` | `() => Promise<unknown>` | No | Async companion to `isReady`. Resolves once `isReady()` reflects a current readiness probe. Awaited at startup and before readiness-gated actions, so a cold cache is not mistaken for "not ready". |
 | `baseUrl` | `string` | Conditional | API endpoint. Required when defining models. |
 | `apiKey` | `string` | Conditional | API key or env var name. Required when defining models (unless OAuth). |
 | `api` | `Api` | Conditional | API type (`"anthropic-messages"`, `"openai-responses"`, etc.). Required at provider or model level. |

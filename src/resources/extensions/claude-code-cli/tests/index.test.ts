@@ -74,7 +74,11 @@ test("registers catalog-only Claude models (claude-fable-5-1) with zero cost and
 	assert.equal(fable51.contextWindow, 1_000_000);
 	assert.equal(fable51.maxTokens, 128_000);
 	assert.deepEqual(fable51.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-	assert.deepEqual(fable51.compat, { forceAdaptiveThinking: true });
+	assert.deepEqual(
+		fable51.compat,
+		{ forceAdaptiveThinking: true, strictRequestParams: true },
+		"catalog strict-surface marker for Fable 5.1 must reach the registered model (#2645)",
+	);
 	assert.deepEqual(fable51.thinkingLevelMap, { xhigh: "xhigh" });
 });
 
@@ -170,6 +174,47 @@ test("buildClaudeCodeModelList: catalog strictRequestParams compat flows through
 		{ forceAdaptiveThinking: true, strictRequestParams: true },
 		"strictRequestParams must reach the registered model so the stream adapter can guard requests",
 	);
+});
+
+// #2645 — curated CLAUDE_CODE_MODELS entries win the catalog merge (#2437),
+// so the strict-surface compat must be restated on the curated opus-5-5 /
+// fable-5 entries; without it thinking-off sends {type:"disabled"} and 400s.
+test("curated 5.x entries carry the strict-surface compat through the merge (#2645)", () => {
+	const merged = buildClaudeCodeModelList([]);
+
+	const opus55 = merged.find((model) => model.id === "claude-opus-5-5");
+	assert.ok(opus55, "curated opus-5-5 must be present");
+	assert.deepEqual(
+		opus55.compat,
+		{ forceAdaptiveThinking: true, strictRequestParams: true },
+		"curated Opus 5.5 must keep the strictRequestParams umbrella",
+	);
+
+	const fable5 = merged.find((model) => model.id === "claude-fable-5");
+	assert.ok(fable5, "curated fable-5 must be present");
+	assert.deepEqual(
+		fable5.compat,
+		{ forceAdaptiveThinking: true, thinkingOffMode: "between_tools", rejectsTemperature: true },
+		"curated Fable 5 must carry the granular flags (it accepts forced tool_choice)",
+	);
+});
+
+// #2701 — Haiku 5.5 registers via the curated list with the adaptive +
+// temperature compat (no strict umbrella: it accepts disabled + forced
+// tool_choice) and the 1M/128K limits.
+test("curated Haiku 5.5 carries adaptive + temperature compat through the merge (#2701)", () => {
+	const merged = buildClaudeCodeModelList([]);
+
+	const haiku55 = merged.find((model) => model.id === "claude-haiku-5-5");
+	assert.ok(haiku55, "curated haiku-5-5 must be present");
+	assert.deepEqual(
+		haiku55.compat,
+		{ forceAdaptiveThinking: true, rejectsTemperature: true },
+		"curated Haiku 5.5 must be adaptive-only and temperature-guarded without the strict umbrella",
+	);
+	assert.equal(haiku55.contextWindow, 1_000_000);
+	assert.equal(haiku55.maxTokens, 128_000);
+	assert.deepEqual(haiku55.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 });
 
 test("captures UI context before streamSimple, including when before_provider_request never fires (#2118)", () => {

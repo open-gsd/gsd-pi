@@ -32,6 +32,7 @@ export type AutoPauseBlockerKind = HumanBlockerKind | "user_request" | "machine_
 export type TaskFailureKind =
   | RecoveryFailureKind
   | "transient-execution"
+  | "user-pause"
   | "verification-failed"
   | "objective-uat"
   | "plan-invalid"
@@ -116,6 +117,9 @@ function budgetedRule(
   switch (classification.failureKind) {
     case "transient-execution":
     case "tool-unavailable":
+    // A pause the user asked for is not a failure. Its own kind keeps its own
+    // budget row, so a pause does not use the retries of a real failure.
+    case "user-pause":
       return { action: "retry", policyClass: "transient-execution", maxUses: 2 };
     case "projection-lock-transient":
       return {

@@ -2,6 +2,10 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 
 function isExtensionFile(name: string): boolean {
+	// TypeScript declaration files are never loadable extensions; without this
+	// guard a stray `.d.ts` (e.g. from a declaration-emitting build) is picked up
+	// and fails with a spurious "does not export a valid factory function" error.
+	if (name.endsWith(".d.ts")) return false;
 	return name.endsWith(".ts") || name.endsWith(".js");
 }
 

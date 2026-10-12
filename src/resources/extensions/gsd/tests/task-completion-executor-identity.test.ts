@@ -341,7 +341,14 @@ test("a canonical lifecycle without an Attempt fails closed instead of using leg
   const result = await executeTaskComplete(completionParams() as never, basePath);
 
   assert.equal(result.isError, true);
-  assert.match(String(result.content[0]?.text), /canonical.*Attempt|Attempt.*canonical/i);
+  const text = String(result.content[0]?.text);
+  assert.match(text, /canonical.*Attempt|Attempt.*canonical/i);
+  // #2697: with zero Attempts there is no checkpoint to resume and nothing for
+  // gsd_task_settle to publish, so the refusal must name the exit that works.
+  assert.match(text, /no Attempt was ever claimed/);
+  assert.match(text, /`\/gsd auto`/);
+  assert.match(text, /gsd_task_settle cannot/);
+  assert.doesNotMatch(text, /durable checkpoint|dry-run `gsd_task_settle`/);
   assert.equal(row("SELECT status FROM tasks WHERE id = 'T01'").status, "in_progress");
 });
 

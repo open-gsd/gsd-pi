@@ -310,6 +310,127 @@ describe("warmWorkflowToolBridges", () => {
       }
     }
   });
+
+  it("fails loud, naming the missing exports, when a configured executor module fails the shape check (#2741)", async () => {
+    const base = makeTmpBase();
+    const incompleteModulePath = join(base, "incomplete-executors.mjs");
+    const prevModule = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    try {
+      // A 1.20.1-era bridge: imports cleanly but is short the exports the
+      // contract grew since — the exact silent-downgrade class #2741 reports.
+      writeFileSync(
+        incompleteModulePath,
+        [
+          `export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = ["SUMMARY"];`,
+          `export const executeMilestoneStatus = async () => ({});`,
+          `export const executeSliceComplete = async () => ({});`,
+        ].join("\n"),
+        "utf-8",
+      );
+      process.env.GSD_WORKFLOW_EXECUTORS_MODULE = incompleteModulePath;
+      const { warmWorkflowToolBridges: freshWarm } = await import(
+        cacheBustedWorkflowToolsImport("warm-shape-mismatch")
+      );
+      await assert.rejects(
+        freshWarm(),
+        (err: Error) =>
+          /failed the workflow executor shape check/.test(err.message)
+          && /missing function exports: .*runInToolSession/.test(err.message)
+          && /Refusing to fall back/.test(err.message),
+      );
+    } finally {
+      if (prevModule === undefined) {
+        delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+      } else {
+        process.env.GSD_WORKFLOW_EXECUTORS_MODULE = prevModule;
+      }
+      cleanup(base);
+    }
+  });
+
+  it("fails loud when a configured executor module cannot be imported (#2741)", async () => {
+    const base = makeTmpBase();
+    const brokenModulePath = join(base, "broken-executors.mjs");
+    const prevModule = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    try {
+      writeFileSync(brokenModulePath, `throw new Error("bridge exploded");`, "utf-8");
+      process.env.GSD_WORKFLOW_EXECUTORS_MODULE = brokenModulePath;
+      const { warmWorkflowToolBridges: freshWarm } = await import(
+        cacheBustedWorkflowToolsImport("warm-import-error")
+      );
+      await assert.rejects(
+        freshWarm(),
+        (err: Error) =>
+          /failed to import/.test(err.message)
+          && /bridge exploded/.test(err.message)
+          && /Refusing to fall back/.test(err.message),
+      );
+    } finally {
+      if (prevModule === undefined) {
+        delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+      } else {
+        process.env.GSD_WORKFLOW_EXECUTORS_MODULE = prevModule;
+      }
+      cleanup(base);
+    }
+  });
+
+  it("fails loud, naming the missing exports, when a configured write-gate module fails the shape check (#2741)", async () => {
+    const base = makeTmpBase();
+    const incompleteGatePath = join(base, "incomplete-write-gate.mjs");
+    const prevGate = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    try {
+      writeFileSync(
+        incompleteGatePath,
+        `export function loadWriteGateSnapshot() { return {}; }\n`,
+        "utf-8",
+      );
+      process.env.GSD_WORKFLOW_WRITE_GATE_MODULE = incompleteGatePath;
+      const { warmWorkflowToolBridges: freshWarm } = await import(
+        cacheBustedWorkflowToolsImport("warm-gate-mismatch")
+      );
+      await assert.rejects(
+        freshWarm(),
+        (err: Error) =>
+          /failed the write-gate shape check/.test(err.message)
+          && /missing function exports: .*shouldBlockQueueExecutionInSnapshot/.test(err.message),
+      );
+    } finally {
+      if (prevGate === undefined) {
+        delete process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+      } else {
+        process.env.GSD_WORKFLOW_WRITE_GATE_MODULE = prevGate;
+      }
+      cleanup(base);
+    }
+  });
+
+  it("fails loud when a configured write-gate module cannot be imported (#2741)", async () => {
+    const base = makeTmpBase();
+    const brokenGatePath = join(base, "broken-write-gate.mjs");
+    const prevGate = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    try {
+      writeFileSync(brokenGatePath, `throw new Error("gate exploded");`, "utf-8");
+      process.env.GSD_WORKFLOW_WRITE_GATE_MODULE = brokenGatePath;
+      const { warmWorkflowToolBridges: freshWarm } = await import(
+        cacheBustedWorkflowToolsImport("warm-gate-import-error")
+      );
+      await assert.rejects(
+        freshWarm(),
+        (err: Error) =>
+          /failed to import/.test(err.message)
+          && /gate exploded/.test(err.message)
+          && /Refusing to fall back/.test(err.message),
+      );
+    } finally {
+      if (prevGate === undefined) {
+        delete process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+      } else {
+        process.env.GSD_WORKFLOW_WRITE_GATE_MODULE = prevGate;
+      }
+      cleanup(base);
+    }
+  });
 });
 
 describe("runSerializedWorkflowOperation", () => {

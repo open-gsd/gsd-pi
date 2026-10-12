@@ -12,6 +12,7 @@ import type {
 } from "@gsd/pi-ai";
 import { createAssistantMessageEventStream } from "@gsd/pi-ai";
 import { blockedBashWriteReason, blockedWriteReason } from "../gsd/write-intercept.js";
+import { gsdToolBaseName, isCursorBridgedGsdTool } from "./bridged-tools.js";
 import { buildCursorAgentSpawnInvocation } from "./readiness.js";
 
 interface CursorAgentRunResult {
@@ -127,23 +128,8 @@ export function buildCursorAgentRunPlan(
 	);
 }
 
-const CURSOR_BRIDGED_GSD_TOOLS = new Set([
-	"gsd_task_complete",
-	"gsd_complete_task",
-	"gsd_task_recovery_resume",
-]);
-
 const GSD_TOOL_CALL_OPEN = "<gsd_tool_call>";
 const GSD_TOOL_CALL_CLOSE = "</gsd_tool_call>";
-
-function gsdToolBaseName(name: string): string {
-	return name.replace(/^mcp__.+?__/, "");
-}
-
-export function isCursorBridgedGsdTool(name: string): boolean {
-	const base = gsdToolBaseName(name);
-	return CURSOR_BRIDGED_GSD_TOOLS.has(name) || CURSOR_BRIDGED_GSD_TOOLS.has(base);
-}
 
 export function isGsdToolName(name: string): boolean {
 	const base = gsdToolBaseName(name);

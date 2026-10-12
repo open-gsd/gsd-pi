@@ -10,7 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-const scriptModule = await import("../../scripts/workflow-performance-baseline.mjs");
+const scriptModule = await import("../../../scripts/workflow-performance-baseline.mjs");
 const { compareAgainstBaseline, P50_TOLERANCE, P95_TOLERANCE } = scriptModule as {
   compareAgainstBaseline: (measured: Record<string, { p50: number; p95: number }>, baseline: Record<string, { p50: number; p95: number }>) => string[];
   P50_TOLERANCE: number;

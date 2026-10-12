@@ -1,12 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { isProjectionRootIdentityLockAvailable } from "@gsd/native/file-identity";
+
 import { runGSDDoctor } from "../doctor.ts";
 import { checkRuntimeHealth } from "../doctor-runtime-checks.ts";
+import { loadUnboundProjectionEvidence } from "../managed-projection-history.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
   closeDatabase,
@@ -399,3 +412,113 @@ test("doctor lists only aged control-publication intents plus quarantined artifa
     && /00000000-0000-0000-0000-000000000002\.json\.intent\.11111111[^\n]*\.quarantined\b/u.test(candidate.message)));
   assert.ok(!issues.some((candidate) => candidate.file?.endsWith(".quarantined.json") ?? false));
 });
+
+// #2648: a structural rejection used to surface as a bare "projection root
+// contains an unsupported node" against a hard-coded path, leaving the
+// rejected node unidentifiable and the doctor without anything to act on.
+test("doctor names a directory occupying the evidence index (#2648)", async (t) => {
+  const dir = createGitProject();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  mkdirSync(join(dir, ".gsd", "migration", "unbound-projection-evidence.json"), { recursive: true });
+
+  const report = await runGSDDoctor(dir);
+  const assessment = report.issues.find((candidate) => candidate.code === "unresolved_projection_evidence");
+  assert.ok(assessment, "the failed assessment is still reported");
+  assert.match(
+    assessment.message,
+    /obstructed by a directory: migration\/unbound-projection-evidence\.json/u,
+  );
+  const rejected = report.issues.filter((candidate) => candidate.code === "unsupported_projection_root_node");
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0]!.file, ".gsd/migration/unbound-projection-evidence.json");
+  assert.equal(rejected[0]!.severity, "error");
+  assert.equal(rejected[0]!.fixable, false);
+  assert.match(rejected[0]!.message, /a directory where the projection protocol requires a regular file/u);
+  assert.match(rejected[0]!.message, /move it out of \.gsd/u);
+});
+
+test(
+  "doctor keeps retained evidence listed when the lock rejects the projection root (#2648)",
+  // The rejection comes from the native journal replay; the plain-fs fallback
+  // never reads the journal, so there is nothing to degrade from without it.
+  { skip: !isProjectionRootIdentityLockAvailable() },
+  async (t) => {
+    const dir = createGitProject();
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+    const evidencePath = "notes/.gsd-projection-remove-00000000-0000-0000-0000-000000000001";
+    const obstructedEntry = "migration/projection-mutations/00000000-0000-0000-0000-000000000002.json";
+    const indexPath = join(dir, ".gsd", "migration", "unbound-projection-evidence.json");
+    mkdirSync(join(dir, ".gsd", evidencePath), { recursive: true });
+    mkdirSync(join(dir, ".gsd", "migration"), { recursive: true });
+    writeFileSync(join(dir, ".gsd", evidencePath, "later.md"), "later accepted work\n");
+    writeFileSync(indexPath, `${JSON.stringify([{
+      evidencePath,
+      evidenceIdentity: null,
+      kind: "quarantine",
+      logicalPath: "notes/result.md",
+      scope: "tree",
+      transition: "retained",
+    }])}\n`);
+    // Persist the entry in the shape the engine records it (id, identity,
+    // digest), which is what the lock-free reader requires.
+    const [recorded] = loadUnboundProjectionEvidence(dir);
+    assert.ok(recorded);
+    const identity = lstatSync(join(dir, ".gsd", evidencePath), { bigint: true });
+    writeFileSync(
+      indexPath,
+      `${JSON.stringify([{ ...recorded, evidenceIdentity: `${identity.dev}:${identity.ino}` }])}\n`,
+    );
+    // A directory where a journal entry belongs: every managed open replays
+    // the journal first, so every managed open is rejected.
+    const obstruction = join(dir, ".gsd", obstructedEntry);
+    mkdirSync(obstruction, { recursive: true });
+
+    const report = await runGSDDoctor(dir);
+    const rejected = report.issues.filter((candidate) => candidate.code === "unsupported_projection_root_node");
+    assert.deepEqual(rejected.map((candidate) => candidate.file), [`.gsd/${obstructedEntry}`]);
+    const evidence = report.issues.filter((candidate) => candidate.code === "unresolved_projection_evidence");
+    assert.ok(evidence.some((candidate) => candidate.message.includes(`obstructed by a directory: ${obstructedEntry}`)));
+    const listed = evidence.find((candidate) => candidate.file === `.gsd/${evidencePath}`);
+    assert.ok(listed, "retained evidence stays enumerable without the lock");
+    assert.match(listed.message, /Listed without the native projection lock/u);
+    assert.match(listed.message, /evidence:sha256:[0-9a-f]+ --action=discard --consent=discard:sha256:/u);
+    assert.match(listed.message, /--action=preserve/u);
+    assert.match(listed.message, /--action=restore/u);
+
+    // Once the rejected node is gone the same commands are served by the lock.
+    rmSync(obstruction, { recursive: true });
+    const repaired = await runGSDDoctor(dir);
+    assert.deepEqual(
+      repaired.issues.filter((candidate) => candidate.code === "unsupported_projection_root_node"),
+      [],
+    );
+    const relisted = repaired.issues.find((candidate) => candidate.file === `.gsd/${evidencePath}`);
+    assert.ok(relisted);
+    assert.equal(relisted.message, listed.message.replace(/ Listed without the native projection lock[^.]*\./u, ""));
+  },
+);
+
+test(
+  "doctor names a junction the lock rejects inside the projection root (#2648)",
+  // Junctions need no privilege on Windows, and only the Windows lock raises
+  // the structural reparse-point rejection this scan answers.
+  { skip: process.platform !== "win32" || !isProjectionRootIdentityLockAvailable() },
+  async (t) => {
+    const dir = createGitProject();
+    const outside = mkdtempSync(join(tmpdir(), "gsd-doctor-runtime-checks-outside-"));
+    t.after(() => {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    mkdirSync(join(dir, ".gsd"), { recursive: true });
+    symlinkSync(outside, join(dir, ".gsd", "migration"), "junction");
+
+    const report = await runGSDDoctor(dir);
+    const rejected = report.issues.filter((candidate) => candidate.code === "unsupported_projection_root_node");
+    assert.deepEqual(rejected.map((candidate) => candidate.file), [".gsd/migration"]);
+    assert.match(rejected[0]!.message, /a symbolic link or junction/u);
+  },
+);

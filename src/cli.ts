@@ -788,6 +788,11 @@ if (isPrintMode) {
   await resourceLoader.reload()
   markStartup('resourceLoader.reload')
   flushPendingProviderRegistrations(resourceLoader, modelRegistry)
+  // External-CLI providers answer readiness from a cache that async probes
+  // (started at extension load) fill in. Wait for those probes before the
+  // migrations and model validation below act on, and persist, the answer.
+  await modelRegistry.settleProviderReadiness()
+  markStartup('providerReadiness')
   migrateAnthropicDefaultToClaudeCode({
     authStorage,
     isClaudeCodeReady: () => modelRegistry.isProviderRequestReady('claude-code'),
@@ -929,6 +934,12 @@ const resourceLoadPromise = resourceLoader.reload()
 await resourceLoadPromise
 markStartup('resourceLoader.reload')
 flushPendingProviderRegistrations(resourceLoader, modelRegistry)
+// External-CLI providers answer readiness from a cache that async probes
+// (started at extension load) fill in. Wait for those probes before the
+// migrations and model validation below act on, and persist, the answer.
+// The wait is asynchronous: the event loop keeps running.
+await modelRegistry.settleProviderReadiness()
+markStartup('providerReadiness')
 migrateAnthropicDefaultToClaudeCode({
   authStorage,
   isClaudeCodeReady: () => modelRegistry.isProviderRequestReady('claude-code'),

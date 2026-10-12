@@ -81,14 +81,23 @@ export function registerScheduleWakeupTool(pi: ExtensionAPI): void {
     name: GSD_SCHEDULE_WAKEUP_TOOL_NAME,
     label: "Schedule Wakeup",
     description:
-      "Schedule a delayed continuation turn. In GSD auto-mode, continue the current unit in the same session; " +
-      "outside auto-mode, start a new triggered turn with the supplied wakeup prompt. " +
+      "Schedule a delayed continuation turn. Non-blocking: the call returns immediately and does not wait or advance " +
+      "elapsed time — never claim the requested delay has elapsed merely because scheduling returned. After scheduling, " +
+      "finish the current turn instead of polling in the same turn. " +
+      "In GSD auto-mode, after a completed unit turn (while auto-mode stays active and unpaused), the wakeup is consumed and " +
+      "the unit continues once the full requested delay has elapsed from that point; one pending wakeup is kept per unit, " +
+      "re-scheduling replaces it, and it is cleared if the unit ends without completing. " +
+      "Outside auto-mode, the timer is armed immediately and a new turn starts with the supplied wakeup prompt when it fires; " +
+      "one pending timer is kept per project, and re-scheduling cancels and replaces it. " +
       "Do not call Claude Code's native ScheduleWakeup tool.",
     promptSnippet: "Schedule a wakeup prompt after a delay.",
     promptGuidelines: [
       `Use ${GSD_SCHEDULE_WAKEUP_TOOL_NAME} at the end of an execute-task turn when waiting for a long external process.`,
       "Include a prompt that says exactly what external state to check next and what artifact to write when done.",
-      `Re-arm ${GSD_SCHEDULE_WAKEUP_TOOL_NAME} on each polling turn if the external process is still running.`,
+      `${GSD_SCHEDULE_WAKEUP_TOOL_NAME} is non-blocking: it returns immediately without advancing elapsed time. ` +
+        "After scheduling, finish the current turn instead of polling in the same turn or reporting the delay as elapsed.",
+      `Re-arm ${GSD_SCHEDULE_WAKEUP_TOOL_NAME} on each polling turn if the external process is still running; re-arming ` +
+        "replaces the previous wakeup instead of queueing another (one pending wakeup per project outside auto-mode, one per unit in auto-mode).",
       `Outside auto-mode, use ${GSD_SCHEDULE_WAKEUP_TOOL_NAME} when the user asks you to check back or poll later.`,
       "Never call the native ScheduleWakeup tool; it is not GSD's continuation mechanism.",
     ],
@@ -96,7 +105,8 @@ export function registerScheduleWakeupTool(pi: ExtensionAPI): void {
       delaySeconds: Type.Number({
         minimum: 1,
         maximum: MAX_WAKEUP_DELAY_SECONDS,
-        description: "How many seconds to wait before continuing the same auto-mode session.",
+        description:
+          "Seconds before the continuation fires. Scheduling returns immediately; the call does not block for this delay.",
       }),
       prompt: Type.String({
         minLength: 1,

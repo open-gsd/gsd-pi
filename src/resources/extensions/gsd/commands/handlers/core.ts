@@ -218,6 +218,22 @@ export async function handleStatus(ctx: ExtensionCommandContext): Promise<void> 
   // No .gsd dir means no project yet. Any other open failure is reported,
   // never shown as "no milestones" (ADR-046).
   if (!opened.ok && opened.reason !== "missing-gsd-dir") {
+    // A live GSD process holding the workflow DB is a lock-holder situation,
+    // not a broken store: report the holder like auto-mode does instead of a
+    // raw open error (#2712).
+    if (opened.reason === "locked") {
+      const { formatLockedWorkflowDatabaseNotice, listWorkflowDbLockHolderPids } =
+        await import("../../workflow-db-locks.js");
+      const { resolveProjectRootDbPath } = await import("../../db-workspace.js");
+      ctx.ui.notify(
+        formatLockedWorkflowDatabaseNotice(
+          listWorkflowDbLockHolderPids(resolveProjectRootDbPath(basePath)),
+          "Cannot read GSD status",
+        ),
+        "error",
+      );
+      return;
+    }
     ctx.ui.notify(`Cannot read GSD status: ${formatWorkflowDatabaseOpenFailure(opened)}`, "error");
     return;
   }

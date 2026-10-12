@@ -38,6 +38,13 @@ function requireString(value, name) {
 	}
 }
 
+function requireIsoTimestamp(value, name) {
+	requireString(value, name);
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
+		throw new Error(`${name}: expected ISO-8601 UTC timestamp, got ${describe(value)}`);
+	}
+}
+
 function requireBoolean(value, name) {
 	if (typeof value !== "boolean") throw new Error(`${name}: expected boolean, got ${describe(value)}`);
 }
@@ -122,14 +129,56 @@ export function assertProgressPayload(payload) {
 	return progress;
 }
 
-function assertBoundedCollection(value, name) {
+function assertBoundedCollection(value, name, assertItem) {
 	const collection = requireRecord(value, name);
 	if (!Array.isArray(collection.items)) throw new Error(`${name}.items: expected array`);
 	if (collection.items.length > MAX_OUTPUT_ITEMS) {
 		throw new Error(`${name}.items: exceeds output cap ${MAX_OUTPUT_ITEMS}`);
 	}
 	requireBoolean(collection.truncated, `${name}.truncated`);
-	if (collection.items.some((item) => !isRecord(item))) throw new Error(`${name}.items: expected object items`);
+	collection.items.forEach((item, index) => assertItem(item, `${name}.items[${index}]`));
+}
+
+// Canonical lifecycle status vocabulary (ADR-046), mirrored from
+// packages/contracts/src/rpc.ts LIFECYCLE_STATUSES. Optional snapshot item
+// metadata must use one of these values when it is present and non-null.
+const LIFECYCLE_STATUSES = new Set([
+	"pending",
+	"ready",
+	"in_progress",
+	"paused",
+	"completed",
+	"cancelled",
+	"blocker-accepted",
+]);
+
+function assertSnapshotMilestoneItem(item, name) {
+	requireRecord(item, name);
+	requireString(item.id, `${name}.id`);
+	// Registration accepts untitled milestones (title defaults to ""), so the
+	// title only needs to be a string, not a non-empty one.
+	if (typeof item.title !== "string") throw new Error(`${name}.title: expected string, got ${describe(item.title)}`);
+	requireString(item.status, `${name}.status`);
+	requireNonNegativeSafeInteger(item.sequence, `${name}.sequence`);
+	if (item.lifecycleStatus !== undefined && item.lifecycleStatus !== null && !LIFECYCLE_STATUSES.has(item.lifecycleStatus)) {
+		throw new Error(`${name}.lifecycleStatus: expected one of ${[...LIFECYCLE_STATUSES].join("/")} or null, got ${describe(item.lifecycleStatus)}`);
+	}
+}
+
+function assertSnapshotBlockerItem(item, name) {
+	requireRecord(item, name);
+	for (const field of ["blockerId", "blockerKind", "resolutionOwner", "description", "requestedAction"]) {
+		requireString(item[field], `${name}.${field}`);
+	}
+	requireIsoTimestamp(item.openedAt, `${name}.openedAt`);
+	requireNonNegativeSafeInteger(item.openedProjectRevision, `${name}.openedProjectRevision`);
+}
+
+function assertSnapshotOpenQuestionItem(item, name) {
+	requireRecord(item, name);
+	requireString(item.questionId, `${name}.questionId`);
+	requireString(item.questionText, `${name}.questionText`);
+	requireIsoTimestamp(item.createdAt, `${name}.createdAt`);
 }
 
 export function assertSnapshotPayload(payload, structuredContent) {
@@ -145,15 +194,17 @@ export function assertSnapshotPayload(payload, structuredContent) {
 	requireCountGroup(snapshot.progress?.milestones, ["total", "done", "active", "pending", "parked"], "gsd_project_snapshot.progress.milestones");
 	requireCountGroup(snapshot.progress?.slices, ["total", "done", "active", "pending"], "gsd_project_snapshot.progress.slices");
 	requireCountGroup(snapshot.progress?.tasks, ["total", "done", "pending"], "gsd_project_snapshot.progress.tasks");
-	if (!Array.isArray(snapshot.blockers) || snapshot.blockers.some((item) => !isRecord(item))) throw new Error("gsd_project_snapshot.blockers: expected object array");
+	if (!Array.isArray(snapshot.blockers)) throw new Error("gsd_project_snapshot.blockers: expected array");
 	if (snapshot.blockers.length > MAX_OUTPUT_ITEMS) throw new Error("gsd_project_snapshot.blockers: exceeds output cap 50");
 	requireBoolean(snapshot.blockersTruncated, "gsd_project_snapshot.blockersTruncated");
-	if (!Array.isArray(snapshot.openQuestions) || snapshot.openQuestions.some((item) => !isRecord(item))) throw new Error("gsd_project_snapshot.openQuestions: expected object array");
+	snapshot.blockers.forEach((item, index) => assertSnapshotBlockerItem(item, `gsd_project_snapshot.blockers[${index}]`));
+	if (!Array.isArray(snapshot.openQuestions)) throw new Error("gsd_project_snapshot.openQuestions: expected array");
 	if (snapshot.openQuestions.length > MAX_OUTPUT_ITEMS) throw new Error("gsd_project_snapshot.openQuestions: exceeds output cap 50");
 	requireBoolean(snapshot.openQuestionsTruncated, "gsd_project_snapshot.openQuestionsTruncated");
+	snapshot.openQuestions.forEach((item, index) => assertSnapshotOpenQuestionItem(item, `gsd_project_snapshot.openQuestions[${index}]`));
 	requireCountGroup(snapshot.verification?.assessments, ["total", "pass", "fail"], "gsd_project_snapshot.verification.assessments");
 	requireCountGroup(snapshot.verification?.evidence, ["total", "passed", "failed"], "gsd_project_snapshot.verification.evidence");
-	assertBoundedCollection(snapshot.milestones, "gsd_project_snapshot.milestones");
+	assertBoundedCollection(snapshot.milestones, "gsd_project_snapshot.milestones", assertSnapshotMilestoneItem);
 	requireString(snapshot.capturedAt, "gsd_project_snapshot.capturedAt");
 	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(snapshot.capturedAt) || Number.isNaN(Date.parse(snapshot.capturedAt)) || new Date(snapshot.capturedAt).toISOString() !== snapshot.capturedAt) {
 		throw new Error("gsd_project_snapshot.capturedAt: expected ISO-8601 UTC timestamp");

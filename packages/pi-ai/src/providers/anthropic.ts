@@ -242,7 +242,10 @@ const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
 
 function getAnthropicCompat(
 	model: Model<"anthropic-messages">,
-): Required<Omit<AnthropicMessagesCompat, "forceAdaptiveThinking" | "strictRequestParams">> {
+): Required<Omit<
+	AnthropicMessagesCompat,
+	"forceAdaptiveThinking" | "strictRequestParams" | "thinkingOffMode" | "rejectsTemperature"
+>> {
 	// Auto-detect session affinity and cache control support from provider
 	const isFireworks = model.provider === "fireworks";
 	const isCloudflareAiGatewayAnthropic =
@@ -1046,9 +1049,18 @@ function buildParams(
 		];
 	}
 
+	// Strict-param models reject the legacy request surface with 400s
+	// (#2500 Sonnet 5.5, #2645 Opus 5.5 / Fable 5.x). `strictRequestParams`
+	// is the full umbrella; `thinkingOffMode` / `rejectsTemperature` carry the
+	// granular surface for models that still accept forced tool_choice
+	// (Fable 5).
+	const strictRequestParams = model.compat?.strictRequestParams === true;
+	const rejectsTemperature = strictRequestParams || model.compat?.rejectsTemperature === true;
+	const thinkingOffParams = strictRequestParams || model.compat?.thinkingOffMode === "between_tools";
+
 	// Temperature is incompatible with extended thinking (adaptive or budget-based).
 	// Strict-param models (Sonnet 5.5, #2500) reject temperature outright.
-	if (options?.temperature !== undefined && !options?.thinkingEnabled && model.compat?.strictRequestParams !== true) {
+	if (options?.temperature !== undefined && !options?.thinkingEnabled && !rejectsTemperature) {
 		params.temperature = options.temperature;
 	}
 
@@ -1090,10 +1102,10 @@ function buildParams(
 				};
 			}
 		} else if (options?.thinkingEnabled === false) {
-			// Strict-param models (Sonnet 5.5, #2500) 400 on {type: "disabled"};
+			// Strict-param models (#2500/#2645) 400 on {type: "disabled"};
 			// {type: "between_tools"} is their off switch. The SDK type union
 			// lags the API value, same as the xhigh effort workaround above.
-			params.thinking = model.compat?.strictRequestParams === true
+			params.thinking = thinkingOffParams
 				? ({ type: "between_tools" } as unknown as NonNullable<MessageCreateParamsStreaming["thinking"]>)
 				: { type: "disabled" };
 		}
@@ -1112,7 +1124,7 @@ function buildParams(
 		const isForcedToolChoice = typeof options.toolChoice === "string"
 			? options.toolChoice === "any"
 			: options.toolChoice.type === "tool";
-		const omitToolChoice = model.compat?.strictRequestParams === true && isForcedToolChoice;
+		const omitToolChoice = strictRequestParams && isForcedToolChoice;
 		if (!omitToolChoice) {
 			if (typeof options.toolChoice === "string") {
 				params.tool_choice = { type: options.toolChoice };

@@ -498,6 +498,19 @@ export interface OpenAICompletionsCompat {
 	sendSessionAffinityHeaders?: boolean;
 	/** Whether the provider supports long prompt cache retention (`prompt_cache_retention: "24h"` or Anthropic-style `cache_control.ttl: "1h"`, depending on format). Default: true. */
 	supportsLongCacheRetention?: boolean;
+	/**
+	 * Whether the upstream model rejects `temperature` with 400s. The provider
+	 * omits `temperature` when set. Claude 5.x entries on relaying
+	 * OpenAI-compatible providers (Copilot, OpenRouter) set this (#2645).
+	 * Default: false.
+	 */
+	rejectsTemperature?: boolean;
+	/**
+	 * Whether the upstream model rejects a forced `tool_choice` (`"required"`
+	 * / named function) with 400s. The provider omits forced tool choice when
+	 * set; `"auto"` / `"none"` still pass through. Default: false.
+	 */
+	rejectsForcedToolChoice?: boolean;
 }
 
 /** Compatibility settings for OpenAI Responses APIs. */
@@ -552,9 +565,24 @@ export interface AnthropicMessagesCompat {
 	 * `{type: "between_tools"}` to turn thinking off), `temperature`,
 	 * `top_p` / `top_k`, and forced `tool_choice` (`any` / named tool).
 	 * Claude Sonnet 5.5 sets this in generated metadata (#2500).
+	 * Implies `thinkingOffMode: "between_tools"` and `rejectsTemperature`.
 	 * Default: false.
 	 */
 	strictRequestParams?: boolean;
+	/**
+	 * Thinking-off representation for models that reject
+	 * `thinking: {type: "disabled"}` with 400s: the provider sends
+	 * `thinking: {type: "between_tools"}` instead. Implied by
+	 * `strictRequestParams`. Claude Fable 5 sets this without the full strict
+	 * umbrella because it still accepts forced `tool_choice` (#2645).
+	 * Default: `thinking: {type: "disabled"}` is sent.
+	 */
+	thinkingOffMode?: "between_tools";
+	/**
+	 * Whether the model rejects `temperature` outright, even with thinking
+	 * off. Implied by `strictRequestParams`. Default: false.
+	 */
+	rejectsTemperature?: boolean;
 }
 
 /**

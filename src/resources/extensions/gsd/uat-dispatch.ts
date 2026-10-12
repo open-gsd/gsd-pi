@@ -55,13 +55,18 @@ export function sliceAwaitsUatVerdict(basePath: string, milestoneId: string, sli
  * accepted closeout authorization (validation pass receipt or active waiver).
  * Such a verdict was already in front of the validator when it accepted the
  * milestone, so re-running it cannot change closeout and only re-trips the
- * completed-no-advance liveness backstop (#2347). When authorization, receipt
- * timestamp, or slice UAT timestamp cannot be established, this fails open so
- * the existing retry behavior is unchanged.
+ * completed-no-advance liveness backstop (#2347), and the historical failure
+ * must not block closeout itself (#2770). With `assumeValidationWaived`
+ * (preview dry-run, #2230) a would-be waiver is treated as recorded when it
+ * would erase every current blocker — the same rule the closeout consistency
+ * gate applies. When authorization, receipt timestamp, or slice UAT timestamp
+ * cannot be established, this returns false (indeterminate): retry dispatch
+ * stays unchanged and closeout keeps blocking.
  */
-async function uatRetryPredatesAcceptedValidation(
+export async function uatVerdictPredatesAcceptedValidation(
   milestoneId: string,
   sliceId: string,
+  opts: { assumeValidationWaived?: boolean } = {},
 ): Promise<boolean> {
   try {
     const { isDbAvailable } = await import("./gsd-db.js");
@@ -69,9 +74,16 @@ async function uatRetryPredatesAcceptedValidation(
     const {
       readMilestoneCloseoutAuthorization,
       readMilestoneValidationReceiptRecordedAt,
+      VALIDATION_SHAPED_BLOCKERS,
     } = await import("./db/milestone-closeout-readiness.js");
     const authorization = readMilestoneCloseoutAuthorization({ milestoneId });
-    if (!authorization.authorized) return false;
+    if (!authorization.authorized) {
+      if (!opts.assumeValidationWaived) return false;
+      const waivable = authorization.blockers.length > 0 && authorization.blockers.every(
+        (blocker) => VALIDATION_SHAPED_BLOCKERS.has(blocker.kind),
+      );
+      if (!waivable) return false;
+    }
     const validationRecordedAt = readMilestoneValidationReceiptRecordedAt(milestoneId);
     if (!validationRecordedAt) return false;
     const { getSliceRunUatAssessmentRecordedAt } = await import("./gsd-db.js");
@@ -111,7 +123,7 @@ async function resolveCandidateRunUatDispatch(
   const verdict = getSliceRunUatAssessment(milestoneId, candidate.sliceId)?.status;
   if (verdict) {
     if (!options.retryNonPass || isAcceptableUatVerdict(verdict, uatType)) return null;
-    if (await uatRetryPredatesAcceptedValidation(milestoneId, candidate.sliceId)) return null;
+    if (await uatVerdictPredatesAcceptedValidation(milestoneId, candidate.sliceId)) return null;
   }
   if (!shouldDispatchUatForContent(uatContent, prefs)) return null;
 

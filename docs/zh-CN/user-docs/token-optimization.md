@@ -209,7 +209,7 @@ version: 1
 token_profile: budget
 budget_ceiling: 25.00
 models:
-  execution_simple: claude-haiku-4-5-20250414
+  execution_simple: claude-haiku-5-5
 ---
 ```
 

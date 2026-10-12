@@ -87,7 +87,7 @@ models:
     fallbacks:
       - openrouter/z-ai/glm-5
   execution: claude-sonnet-4-6
-  execution_simple: claude-haiku-4-5
+  execution_simple: claude-haiku-5-5
   completion: claude-sonnet-4-6
   subagent: claude-sonnet-4-6
 ```

@@ -433,7 +433,7 @@ test("resolveModelForTier: returns canonical Anthropic model when no available m
     resetLegacyTelemetry();
     assert.equal(resolveModelForTier("heavy", []), "claude-opus-5-5");
     assert.equal(resolveModelForTier("standard", []), "claude-sonnet-4-6");
-    assert.equal(resolveModelForTier("light", []), "claude-haiku-4-5");
+    assert.equal(resolveModelForTier("light", []), "claude-haiku-5-5");
     assert.equal(getLegacyTelemetry()["legacy.providerDefaultUsed"], 3);
   } finally {
     resetLegacyTelemetry();
@@ -1473,6 +1473,42 @@ describe("getModelTier unknown default", () => {
     assert.equal(warnings.length, 1, "unknown routing warnings should be deduplicated by canonical ID");
     assert.match(warnings[0] ?? "", /safe defaults.*standard tier.*neutral capabilities.*expensive cost/i);
   });
+
+  test("disabled routing resolves unknown models with safe defaults and no warning", (t) => {
+    // Token-profile defaults resolve a tier model on every preferences load,
+    // also when dynamic_routing.enabled is false. A provider with many
+    // unregistered models (cursor-agent) must not print one line per model.
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => warnings.push(message));
+    const unknownModels = [
+      "cursor-agent/quiet-unknown-a",
+      "cursor-agent/quiet-unknown-b",
+      "cursor-agent/quiet-unknown-c",
+    ];
+    const config: DynamicRoutingConfig = { enabled: false };
+
+    assert.equal(resolveModelForTier("standard", unknownModels, config), "cursor-agent/quiet-unknown-a");
+    assert.deepEqual(getEligibleModels("standard", unknownModels, config), unknownModels);
+    assert.deepEqual(getEligibleModels("light", unknownModels, config), []);
+    assert.equal(
+      resolveModelForTier("standard", unknownModels, { ...config, cross_provider: false }, undefined, unknownModels[1]),
+      "cursor-agent/quiet-unknown-b",
+    );
+    assert.deepEqual(warnings, []);
+  });
+
+  test("enabled routing reports the same unknown model one time", (t) => {
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => warnings.push(message));
+    const config: DynamicRoutingConfig = { enabled: true };
+
+    for (let call = 0; call < 3; call++) {
+      resolveModelForTier("standard", ["cursor-agent/loud-unknown-a"], config);
+    }
+
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /does not recognize model "cursor-agent\/loud-unknown-a"/);
+  });
 });
 
 // --- claude-sonnet-5 catalog regression (v1.12.0 gap) ---
@@ -1847,5 +1883,24 @@ describe("Copilot GPT-5.6 family tier classification (regression, 2026-09-20)", 
     assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-luna"), "gpt-5-6-luna");
     assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-terra"), "gpt-5-6-terra");
     assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-sol"), "gpt-5-6-sol");
+  });
+
+  // #2701 — Haiku 5.5 joins the light tier so tier routing recognizes it
+  // instead of silently bypassing it (#1612). Canonical default stays
+  // claude-haiku-4-5 (owner decision, out of scope).
+  test("claude-haiku-5-5 is a known light-tier model", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["claude-haiku-5-5"], "light");
+    const result = resolveModelForComplexity(
+      makeClassification("light"),
+      { primary: "claude-opus-4-6", fallbacks: [] },
+      { ...defaultRoutingConfig(), enabled: true },
+      ["claude-opus-4-6", "claude-haiku-5-5"],
+    );
+    assert.equal(result.modelId, "claude-haiku-5-5");
+    assert.equal(result.wasDowngraded, true);
+  });
+
+  test("claude-haiku-5-5 has a curated capability profile", () => {
+    assert.equal(getModelProfileConfidence("claude-haiku-5-5"), "curated");
   });
 });

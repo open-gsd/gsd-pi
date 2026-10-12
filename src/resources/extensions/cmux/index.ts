@@ -37,10 +37,18 @@ export interface CmuxSidebarProgress {
 
 export type CmuxLogLevel = "info" | "progress" | "success" | "warning" | "error";
 
-/** `cmux new-split` prints the new surface id. Ignore empty and stub "ok" output. */
+/**
+ * `cmux new-split` prints `OK surface:<id> workspace:<id>` (current CLI) or,
+ * on older builds, the bare surface id with no prefix. Without extracting the
+ * id from the `OK ...` line, the caller falls back to running the agent
+ * in-process while the freshly split cmux pane is left empty forever.
+ */
 function parseCreatedSurfaceId(stdout: string | null): string | null {
   const text = stdout?.trim() ?? "";
-  if (!text || text === "ok" || /\s/.test(text)) return null;
+  if (!text || text.toLowerCase() === "ok") return null;
+  const match = text.match(/surface:\S+/);
+  if (match) return match[0];
+  if (/\s/.test(text)) return null;
   return text;
 }
 
@@ -451,11 +459,20 @@ function extractSurfaceIds(value: unknown): string[] {
     if (!node || typeof node !== "object") return;
 
     for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
-      if (
-        typeof child === "string"
-        && (key === "surface_id" || key === "surface" || (key === "id" && child.includes("surface")))
-      ) {
-        found.add(child);
+      if (typeof child === "string") {
+        // Current `cmux list-pane-surfaces --json` nests surfaces under
+        // surfaces[].ref as "surface:<n>" (e.g. {"ref":"surface:1000040003"}),
+        // not a top-level "surface_id"/"surface" key. Without matching `ref`,
+        // every created surface id resolves to undefined and the caller falls
+        // back to running the agent in-process, leaving the pane empty.
+        if (
+          key === "surface_id"
+          || key === "surface"
+          || (key === "id" && child.includes("surface"))
+          || (key === "ref" && child.startsWith("surface:"))
+        ) {
+          found.add(child);
+        }
       }
       visit(child);
     }

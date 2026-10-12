@@ -526,8 +526,8 @@ process.exit(result.status ?? 0);
       assert.deepStrictEqual(first, "test: first cleanup pass", "first commit succeeds");
       assert.deepStrictEqual(
         countRmCachedInvocations(logFile),
-        RUNTIME_EXCLUSION_PATHS.length,
-        "first service instance checks each runtime exclusion once",
+        1,
+        "first service instance checks every runtime exclusion with one git rm --cached",
       );
 
       createFile(repo, "src/second.ts", "second");
@@ -535,7 +535,7 @@ process.exit(result.status ?? 0);
       assert.deepStrictEqual(second, "test: second cleanup pass", "second commit succeeds");
       assert.deepStrictEqual(
         countRmCachedInvocations(logFile),
-        RUNTIME_EXCLUSION_PATHS.length,
+        1,
         "fresh service instance for the same repo does not rerun runtime cleanup",
       );
     } finally {

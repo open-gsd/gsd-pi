@@ -3,7 +3,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -33,6 +34,12 @@ import {
   handleReopenSlice as handleReopenSliceWithInvocation,
   type ReopenSliceParams,
 } from '../tools/reopen-slice.ts';
+import { handleCompleteSlice } from '../tools/complete-slice.ts';
+import { flushWorkflowProjections } from '../projection-flush.ts';
+import { detectArtifactDbDrift } from '../state-reconciliation/drift/artifact-db.ts';
+import { clearPathCache } from '../paths.ts';
+import type { CompleteSliceParams, GSDState } from '../types.ts';
+import { seedSliceCompletionAuthority } from './slice-completion-fixture.ts';
 
 let invocationSequence = 0;
 
@@ -368,4 +375,84 @@ test('handleReopenSlice: rejects non-existent slice', async () => {
   } finally {
     cleanup(base);
   }
+});
+
+// ─── Completion artifacts after reopen ───────────────────────────────────
+
+function summaryDrift(basePath: string): string[] {
+  clearPathCache();
+  const state = { activeMilestone: { id: 'M001', title: 'Test Milestone' } } as GSDState;
+  return detectArtifactDbDrift(state, { basePath, state })
+    .flatMap((drift) => drift.kind === 'artifact-db-status-divergence' ? [drift.reason] : []);
+}
+
+function sliceSummaryRows(): string[] {
+  return _getAdapter()!.prepare(`
+    SELECT path FROM artifacts
+    WHERE artifact_type = 'SUMMARY' AND milestone_id = 'M001' AND slice_id = 'S01'
+    ORDER BY path
+  `).all().map((row: Record<string, unknown>) => String(row.path));
+}
+
+test('handleReopenSlice: a slice reopened inside a milestone worktree is not artifact/DB drift', async (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'gsd-reopen-slice-worktree-')));
+  t.after(() => cleanup(root));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: root });
+  git('init', '-q');
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'user.name', 'Test User');
+  writeFileSync(join(root, '.gitignore'), '.gsd/\n.gsd-worktrees/\n');
+  git('add', '.gitignore');
+  git('commit', '-qm', 'fixture');
+  git('worktree', 'add', '-q', '.gsd-worktrees/M001', '-b', 'milestone/M001');
+  const worktree = join(root, '.gsd-worktrees', 'M001');
+  const rootPhaseDir = join(root, '.gsd', 'phases', '01-test');
+  mkdirSync(rootPhaseDir, { recursive: true });
+  mkdirSync(join(worktree, '.gsd', 'phases', '01-test'), { recursive: true });
+
+  openDatabase(join(root, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'Test Milestone' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice', sequence: 1 });
+  insertTask({
+    id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Task One', status: 'complete',
+    fullSummaryMd: '---\nid: T01\n---\n# T01 summary\n',
+  });
+  seedSliceCompletionAuthority({ milestoneId: 'M001', sliceId: 'S01', completedTaskIds: ['T01'] });
+  const completion: CompleteSliceParams = {
+    sliceId: 'S01', milestoneId: 'M001', sliceTitle: 'Test Slice',
+    oneLiner: 'Completed the slice', narrative: 'Built it.', verification: 'All checks pass.',
+    deviations: 'None.', knownLimitations: 'None.', followUps: 'None.',
+    keyFiles: [], keyDecisions: [], patternsEstablished: [], observabilitySurfaces: [], provides: [],
+    requirementsSurfaced: [], drillDownPaths: [], affects: [], requirementsAdvanced: [],
+    requirementsValidated: [], requirementsInvalidated: [], filesModified: [], requires: [],
+    uatContent: '## Smoke Test\n\nRun the suite.\n',
+  };
+  const completed = await handleCompleteSlice(
+    completion, worktree, internalExecutionInvocation('test/reopen-slice/worktree/complete'),
+  );
+  assert.ok(!('error' in completed), `unexpected error: ${'error' in completed ? completed.error : ''}`);
+  // Any later workflow tool call drains the Projection Work of the completion:
+  // it stores the SUMMARY rows and renders the project-root copies.
+  await flushWorkflowProjections(worktree, { milestoneId: 'M001' });
+  assert.deepEqual(sliceSummaryRows(), ['phases/01-test/01-01-SUMMARY.md', 'phases/01-test/S01-T01-SUMMARY.md']);
+  assert.equal(existsSync(join(rootPhaseDir, '01-01-SUMMARY.md')), true, 'completion renders the project-root SUMMARY');
+  assert.equal(existsSync(completed.summaryPath), true, 'completion renders the worktree SUMMARY');
+
+  // The agent reopens the slice from a unit that runs in the milestone worktree.
+  const result = await handleReopenSlice({ milestoneId: 'M001', sliceId: 'S01', reason: 'redo the slice' }, worktree);
+  assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+  assert.equal(getSlice('M001', 'S01')?.status, 'in_progress');
+
+  // The next /gsd auto runs the pre-dispatch drift guard at the project root.
+  assert.deepEqual(summaryDrift(root), [], 'the reopened slice must be dispatchable from the project root');
+  assert.deepEqual(summaryDrift(worktree), [], 'the reopened slice must be dispatchable from the milestone worktree');
+  assert.deepEqual(sliceSummaryRows(), [], 'no SUMMARY row of the voided completion remains');
+  const reopenPayload = JSON.parse(String(_getAdapter()!.prepare(`
+    SELECT payload_json FROM workflow_domain_events WHERE event_type = 'slice.reopened'
+  `).get()?.payload_json)) as { invalidatedEvidence: { artifacts: Array<{ path: string }> } };
+  assert.deepEqual(
+    reopenPayload.invalidatedEvidence.artifacts.map((artifact) => artifact.path).sort(),
+    ['phases/01-test/01-01-SUMMARY.md', 'phases/01-test/S01-T01-SUMMARY.md'],
+    'the reopen event keeps the removed SUMMARY rows',
+  );
 });

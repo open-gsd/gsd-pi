@@ -916,6 +916,21 @@ describe("checkVerificationCommands", () => {
     assert.deepEqual(results, []);
   });
 
+  test("accepts repo-relative binstub and env-prefixed Rails Verify commands (issue #2664)", () => {
+    const results = checkVerificationCommands([
+      createTask({
+        id: "T01",
+        verify: "bin/rails test test/integration/a_test.rb test/integration/b_test.rb test/integration/c_test.rb",
+      }),
+      createTask({
+        id: "T02",
+        verify: "RUN_SYSTEM_TESTS=1 bin/rails test test/system/a_test.rb test/system/b_test.rb",
+      }),
+    ]);
+
+    assert.deepEqual(results, []);
+  });
+
   test("rejects piped pytest Verify command", () => {
     const results = checkVerificationCommands([
       createTask({

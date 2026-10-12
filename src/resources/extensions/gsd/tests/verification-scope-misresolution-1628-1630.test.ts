@@ -44,15 +44,30 @@ function makeTempDir(prefix: string): string {
 async function withRtkDisabled<T>(callback: () => T | Promise<T>): Promise<T> {
   const previous = process.env.GSD_RTK_DISABLED;
   process.env.GSD_RTK_DISABLED = "1";
+<<<<<<< HEAD
   try {
     return await callback();
   } finally {
+=======
+  const restore = (): void => {
+>>>>>>> 1c011ccc52091342649c18298ba7def3a9f9d0b6
     if (previous === undefined) {
       delete process.env.GSD_RTK_DISABLED;
     } else {
       process.env.GSD_RTK_DISABLED = previous;
     }
+  };
+  let result: T;
+  try {
+    result = callback();
+  } catch (error) {
+    restore();
+    throw error;
   }
+  // The gate is async: keep RTK disabled until its run has settled.
+  if (result instanceof Promise) return result.finally(restore) as T;
+  restore();
+  return result;
 }
 
 // ─── #1628 — GSD tool names in verify must never execute as shell noise ─────

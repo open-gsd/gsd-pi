@@ -16,7 +16,7 @@ import { logWarning } from "../workflow-logger.js";
 import { isGsdWorktreePath, resolveWorktreeProjectRoot } from "../worktree-root.js";
 import { worktreesDirs } from "../worktree-placement.js";
 import { bashReferencesProjectRootOutsideWorktree } from "../worktree-shell-guard.js";
-import { evaluateGateAnswer } from "../consent-verdict.js";
+import { evaluateGateAnswer, type GateAnswerVerdict } from "../consent-verdict.js";
 import { getWorkflowDatabasePath, openExistingWorkflowDatabase, resolveProjectRootDbPath } from "../db-workspace.js";
 import { isDbAvailable } from "../db/engine.js";
 import { blockedWriteReason } from "../write-intercept.js";
@@ -656,30 +656,10 @@ export interface AskUserQuestionsGateDetails {
 
 export type AskUserQuestionsGateResult =
   | { status: "not-gate" }
-  | { status: "waiting"; pendingGateId: string; interrupted: boolean }
-  | { status: "verified"; gateId: string; milestoneId: string | null }
-  | { status: "declined"; gateId: string }
-  | { status: "timeout"; pendingGateId: string; interrupted: boolean };
-
-function findGateQuestion(
-  questions: AskUserQuestionsGateQuestion[],
-  gateId: string,
-): AskUserQuestionsGateQuestion | undefined {
-  return questions.find((question) => question?.id === gateId);
-}
-
-function verifyAnsweredGate(
-  basePath: string,
-  question: AskUserQuestionsGateQuestion,
-  fallbackMilestoneId?: string | null,
-): AskUserQuestionsGateResult {
-  const gateId = typeof question.id === "string" ? question.id : "";
-  const milestoneId = extractDepthVerificationMilestoneId(gateId) ?? fallbackMilestoneId ?? null;
-  markApprovalGateVerified(gateId, basePath);
-  markDepthVerified(milestoneId, basePath);
-  clearPendingGate(basePath);
-  return { status: "verified", gateId, milestoneId };
-}
+  | { status: "waiting"; pendingGateId: string; interrupted: boolean; verifiedGateIds?: string[] }
+  | { status: "verified"; gateId: string; milestoneId: string | null; verifiedGateIds: string[] }
+  | { status: "declined"; gateId: string; verifiedGateIds?: string[] }
+  | { status: "timeout"; pendingGateId: string; interrupted: boolean; verifiedGateIds?: string[] };
 
 /**
  * An explicit decline is the latest answer to a gate question. It revokes a
@@ -727,14 +707,20 @@ function unresolvedGateResult(
  * Apply an ask_user_questions round to durable gate state. The per-question
  * VERDICT comes from the consent-verdict leaf (evaluateGateAnswer) — the same
  * engine the Consent Question module uses — so write-gate only owns the
- * persistence/arming side effects:
+ * persistence/arming side effects.
  *
- * - "verified" verdict → markApprovalGateVerified/markDepthVerified/clearPendingGate.
- * - "declined" verdict → an armed gate stays pending; a gate that is not armed
- *   loses its verification and becomes pending (revokeDeclinedGate).
- * - "waiting" verdict (empty/missing selection) → no state change; reported as
- *   "waiting" so callers pause instead of proceeding (fail-closed; an empty
- *   answer is never an answer).
+ * A round may carry several gate questions (the payload validator allows 1-3),
+ * so EVERY gate question in the round is evaluated against the round's answers
+ * (#2653) — verifying only the single armed slot silently dropped the user's
+ * other confirmations. Fail-closed semantics per question:
+ *
+ * - "verified" verdict → markApprovalGateVerified/markDepthVerified. The armed
+ *   slot is cleared when the armed gate itself verified (a decline re-arms its
+ *   own gate afterwards).
+ * - "declined" verdict → that gate loses its verification and becomes the
+ *   pending gate (revokeDeclinedGate); it fails the round.
+ * - "waiting" verdict (empty/missing selection) → no state change for that
+ *   gate; it fails the round so callers pause instead of proceeding.
  */
 export function applyAskUserQuestionsGateResult(options: {
   basePath: string;
@@ -744,54 +730,123 @@ export function applyAskUserQuestionsGateResult(options: {
 }): AskUserQuestionsGateResult {
   const { basePath, questions, details, fallbackMilestoneId } = options;
   const currentPendingGate = getPendingGate(basePath);
-  if (currentPendingGate) {
-    if (details.timed_out) {
-      // Host elicitation timed out before the user answered. Keep the gate
-      // pending (fail-closed) but report "timeout" so the caller pauses-and-
-      // waits instead of re-asking into the same timeout loop (#852).
+  if (details.timed_out) {
+    // Host elicitation timed out before the user answered. Keep the gate
+    // pending (fail-closed) but report "timeout" so the caller pauses-and-
+    // waits instead of re-asking into the same timeout loop (#852).
+    if (currentPendingGate) {
       return {
         status: "timeout",
         pendingGateId: currentPendingGate,
         interrupted: details.interrupted === true,
       };
     }
-    if (details.cancelled || !details.response) {
+    return { status: "not-gate" };
+  }
+  if (details.cancelled || !details.response) {
+    if (currentPendingGate) {
       return {
         status: "waiting",
         pendingGateId: currentPendingGate,
         interrupted: details.interrupted === true,
       };
     }
+    return { status: "not-gate" };
+  }
 
-    const pendingQuestion = findGateQuestion(questions, currentPendingGate);
-    if (pendingQuestion) {
-      const verdict = evaluateGateAnswer(pendingQuestion, details);
-      if (verdict === "verified") {
-        return verifyAnsweredGate(basePath, pendingQuestion, fallbackMilestoneId);
-      }
-      return unresolvedGateResult(verdict, currentPendingGate, details);
+  const gateQuestions = questions.filter(
+    (question): question is AskUserQuestionsGateQuestion & { id: string } =>
+      typeof question?.id === "string" && isGateQuestionId(question.id),
+  );
+  if (gateQuestions.length === 0) return { status: "not-gate" };
+
+  // Evaluate every gate question in the round before touching state, so the
+  // pending-slot writes below apply in a fixed order (clear armed, then
+  // re-arm declines).
+  const verdicts = gateQuestions.map((question) => ({
+    question,
+    verdict: evaluateGateAnswer(question, details),
+    milestoneId:
+      extractDepthVerificationMilestoneId(question.id) ?? fallbackMilestoneId ?? null,
+  }));
+
+  const verified = verdicts.filter(
+    (entry): entry is { question: (typeof gateQuestions)[number]; verdict: "verified"; milestoneId: string | null } =>
+      entry.verdict === "verified",
+  );
+  for (const entry of verified) {
+    markApprovalGateVerified(entry.question.id, basePath);
+    markDepthVerified(entry.milestoneId, basePath);
+  }
+  const verifiedGateIds = verified.map((entry) => entry.question.id);
+
+  // The armed slot clears only when the armed gate itself verified; a declined
+  // or still-unanswered gate must keep (or take over) the pending slot, so it
+  // wins over the clear.
+  if (currentPendingGate && verified.some((entry) => entry.question.id === currentPendingGate)) {
+    clearPendingGate(basePath);
+  }
+  for (const entry of verdicts) {
+    if (entry.verdict === "declined") {
+      revokeDeclinedGate(basePath, entry.question.id, fallbackMilestoneId);
     }
   }
 
-  if (details.timed_out) return { status: "not-gate" };
-  if (details.cancelled || !details.response) return { status: "not-gate" };
-
-  for (const question of questions) {
-    if (typeof question.id !== "string" || !isGateQuestionId(question.id)) continue;
-    const verdict = evaluateGateAnswer(question, details);
-    if (verdict !== "verified") {
-      if (verdict === "declined") revokeDeclinedGate(basePath, question.id, fallbackMilestoneId);
-      return unresolvedGateResult(verdict, question.id, details);
+  // The armed gate was not asked in this round, so its confirmation cannot be
+  // in the round's answers. Whatever the round did verify stays recorded, but
+  // the result must name the armed gate as unresolved so the caller re-asks it
+  // instead of treating the round as success over it (#2653 review).
+  if (currentPendingGate && !gateQuestions.some((question) => question.id === currentPendingGate)) {
+    if (getPendingGate(basePath) !== currentPendingGate) {
+      setPendingGate(currentPendingGate, basePath);
     }
-    if (currentPendingGate && question.id !== currentPendingGate) {
-      // A different gate than the armed one was confirmed — the armed gate is
-      // still unresolved, so do not verify and let discussion continue.
-      return { status: "declined", gateId: currentPendingGate };
-    }
-    return verifyAnsweredGate(basePath, question, fallbackMilestoneId);
+    return {
+      status: "waiting",
+      pendingGateId: currentPendingGate,
+      interrupted: details.interrupted === true,
+      verifiedGateIds,
+    };
   }
 
-  return { status: "not-gate" };
+  // Fail closed: a declined or unanswered gate fails the round (callers re-ask
+  // it) even when other gates of the same round verified — the verified ones
+  // stay recorded, so re-asking only the failed gate is enough. The armed
+  // gate's verdict wins when it is among the unresolved ones (callers name it
+  // in re-ask messages), else the first unresolved verdict.
+  const armedEntry = currentPendingGate
+    ? verdicts.find((entry) => entry.question.id === currentPendingGate)
+    : undefined;
+  const armedUnresolved =
+    armedEntry && armedEntry.verdict !== "verified" ? armedEntry : undefined;
+  const unresolved = armedUnresolved ?? verdicts.find((entry) => entry.verdict !== "verified");
+  if (unresolved) {
+    // The pending slot must agree with the reported gate: a declined gate's
+    // re-arm (revokeDeclinedGate above) must not displace the gate the result
+    // names, and a waiting gate must keep the slot when the confirmed armed
+    // gate cleared it.
+    if (getPendingGate(basePath) !== unresolved.question.id) {
+      setPendingGate(unresolved.question.id, basePath);
+    }
+    const base = unresolvedGateResult(
+      unresolved.verdict as Exclude<GateAnswerVerdict, "verified">,
+      unresolved.question.id,
+      details,
+    );
+    if (base.status === "not-gate") return base;
+    return verifiedGateIds.length > 0 ? { ...base, verifiedGateIds } : base;
+  }
+
+  // Primary = the armed gate when it verified (back-compat with single-gate
+  // callers), else the last verified gate of the round.
+  const primary =
+    verified.find((entry) => entry.question.id === currentPendingGate) ??
+    verified[verified.length - 1];
+  return {
+    status: "verified",
+    gateId: primary.question.id,
+    milestoneId: primary.milestoneId,
+    verifiedGateIds,
+  };
 }
 
 export function formatPendingAskUserQuestionsGateMessage(

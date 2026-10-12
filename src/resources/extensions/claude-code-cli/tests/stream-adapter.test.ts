@@ -53,6 +53,7 @@ import {
 	CLAUDE_CODE_INTERVIEW_FORM_TIMEOUT_MS,
 } from "../stream-adapter.ts";
 import { CLAUDE_CODE_MODELS } from "../models.ts";
+import { PROJECTION_WRITE_GUARD_MATCHER } from "../projection-write-guard.ts";
 import type { AssistantMessage, Context, Message } from "@gsd/pi-ai";
 import type { SDKUserMessage } from "../sdk-types.ts";
 import { _setAutoActiveForTest } from "../../gsd/auto.ts";
@@ -759,6 +760,250 @@ describe("stream-adapter — final message preserves streamed block order (#2540
 		for (const ref of completedToolRefs) {
 			assert.ok(finalMessage!.content.includes(ref), "completed tool block kept its identity");
 		}
+	});
+});
+
+describe("stream-adapter — parallel tool_use keeps its arguments when a sibling result lands first (#2585)", () => {
+	// One assistant message streams TWO tool_use blocks; the synthetic
+	// tool-result boundary for the fast first tool arrives while the second
+	// tool's input JSON is still streaming. The boundary folds the builder's
+	// blocks into the final-message accumulators and nulls the builder, so the
+	// second tool's remaining input_json_delta / content_block_stop find no
+	// builder and its block keeps the `arguments: {}` it was created with.
+	// The complete `assistant` message that follows carries every tool_use's
+	// full input — the same input the CLI actually executed.
+	function* parallelToolScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		const boundary = (uuid: string, toolUseId: string, content: string) => ({
+			type: "user",
+			uuid,
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: false }],
+			},
+		});
+		// -- one assistant message, two parallel tool_use blocks --
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		// tool-1 (fast): starts, streams args, completes
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-1", name: "Bash", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"command\":\"pnpm test\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		// tool-2 (slow): only its start event has streamed when tool-1's result lands
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+		// -- boundary for the FIRST tool's result (builder folds + nulls) --
+		yield boundary("user-1", "tool-1", "launched");
+		// tool-2's remaining input events land with no builder → dropped pre-fix
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"script\":\"pnpm verify\",\"timeout\":130000}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p1");
+		// complete assistant message: full input for both tool_use blocks.
+		// tool-1's input deliberately differs from its streamed args to prove
+		// the backfill never overwrites arguments that already parsed.
+		yield {
+			type: "assistant",
+			uuid: "assistant-1",
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				id: "msg_parallel_1",
+				role: "assistant",
+				model: "claude-sonnet-4-6",
+				content: [
+					{ type: "tool_use", id: "tool-1", name: "Bash", input: { command: "must-not-overwrite-parsed-args" } },
+					{ type: "tool_use", id: "tool-2", name: "mcp__gsd-workflow__gsd_exec", input: { script: "pnpm verify", timeout: 130000 } },
+				],
+				stop_reason: "tool_use",
+				usage: { input_tokens: 1, output_tokens: 1 },
+			},
+		};
+		// -- boundary for the second tool's result --
+		yield boundary("user-2", "tool-2", "exit 0");
+		yield makeSdkSuccessResult("done");
+	}
+
+	test("second parallel tool_use gets its real arguments back in the final message", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Run both." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: parallelToolScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		const toolcallEndArgsById = new Map<string, Record<string, unknown>>();
+		const toolcallEndBlocks: AssistantMessage["content"] = [];
+		for await (const event of stream) {
+			if (event.type === "toolcall_end") {
+				toolcallEndArgsById.set(event.toolCall.id, event.toolCall.arguments);
+				toolcallEndBlocks.push(event.toolCall);
+			}
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		assert.ok(finalMessage, "stream completed with done");
+		// The safety evidence and tool execution read args from the final
+		// message content; pre-fix tool-2 stayed at `arguments: {}` because its
+		// deltas were dropped after the sibling's boundary nulled the builder.
+		const tools = finalMessage!.content.filter((block) => block.type === "toolCall") as any[];
+		assert.deepEqual(
+			tools.map((block) => [block.id, block.arguments]),
+			[
+				["tool-1", { command: "pnpm test" }],
+				["tool-2", { script: "pnpm verify", timeout: 130000 }],
+			],
+		);
+		// The synthetic completion pushed when tool-2's result arrived must
+		// carry the same real input (what the TUI completion renders), and the
+		// backfill must have repaired the streamed block in place, not swapped
+		// in a new object (the TUI matches components by block identity).
+		assert.deepEqual(toolcallEndArgsById.get("tool-2"), { script: "pnpm verify", timeout: 130000 });
+		const tool2End = toolcallEndBlocks.find((block) => (block as any).id === "tool-2");
+		assert.ok(tool2End && finalMessage!.content.includes(tool2End), "tool-2 kept its block identity");
+	});
+
+	test("truncated-args (_raw) block is also repaired from the complete message", async () => {
+		// Same shape, but the second tool's JSON lands unparseable (stream
+		// truncation) before its stop, so the block ends at `{ _raw }` (#2574).
+		function* truncatedArgsScenario(): Generator<any> {
+			const streamEvent = (event: any, uuid: string) => ({
+				type: "stream_event",
+				event,
+				parent_tool_use_id: null,
+				uuid,
+				session_id: "session-1",
+			});
+			yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+			yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+			yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "not-json-at-all" } }, "p1");
+			yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+			yield {
+				type: "user",
+				uuid: "user-1",
+				session_id: "session-1",
+				parent_tool_use_id: null,
+				message: {
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: "tool-1", content: "exit 0", is_error: false }],
+				},
+			};
+			yield {
+				type: "assistant",
+				uuid: "assistant-1",
+				session_id: "session-1",
+				parent_tool_use_id: null,
+				message: {
+					id: "msg_truncated_1",
+					role: "assistant",
+					model: "claude-sonnet-4-6",
+					content: [
+						{ type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: { script: "pnpm verify" } },
+					],
+					stop_reason: "tool_use",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			};
+			yield makeSdkSuccessResult("done");
+		}
+
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Run." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: truncatedArgsScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		assert.ok(finalMessage, "stream completed with done");
+		const tool = finalMessage!.content.find((block) => block.type === "toolCall") as any;
+		assert.deepEqual(tool.arguments, { script: "pnpm verify" });
+	});
+
+	test("backfill also hits blocks still in the live builder (complete message before the boundary)", async () => {
+		// Same truncated-args setup, but the complete assistant message arrives
+		// while the builder is still alive (before the synthetic tool-result
+		// boundary folds it) — the backfill's builder branch.
+		function* liveBuilderScenario(): Generator<any> {
+			const streamEvent = (event: any, uuid: string) => ({
+				type: "stream_event",
+				event,
+				parent_tool_use_id: null,
+				uuid,
+				session_id: "session-1",
+			});
+			yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+			yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+			yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "not-json-at-all" } }, "p1");
+			yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+			yield {
+				type: "assistant",
+				uuid: "assistant-1",
+				session_id: "session-1",
+				parent_tool_use_id: null,
+				message: {
+					id: "msg_live_builder_1",
+					role: "assistant",
+					model: "claude-sonnet-4-6",
+					content: [
+						{ type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: { script: "pnpm verify" } },
+					],
+					stop_reason: "tool_use",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			};
+			yield {
+				type: "user",
+				uuid: "user-1",
+				session_id: "session-1",
+				parent_tool_use_id: null,
+				message: {
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: "tool-1", content: "exit 0", is_error: false }],
+				},
+			};
+			yield makeSdkSuccessResult("done");
+		}
+
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Run." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: liveBuilderScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		assert.ok(finalMessage, "stream completed with done");
+		const tool = finalMessage!.content.find((block) => block.type === "toolCall") as any;
+		assert.deepEqual(tool.arguments, { script: "pnpm verify" });
 	});
 });
 
@@ -2302,6 +2547,28 @@ describe("stream-adapter — catalog model metadata (#2437)", () => {
 		assert.deepEqual(options.thinking, { type: "disabled" }, "legacy models must keep {type:\"disabled\"}");
 	});
 
+	// #2645 — Fable 5 rejects {type:"disabled"} but still accepts forced
+	// tool_choice, so it carries the granular thinkingOffMode flag instead of
+	// the strictRequestParams umbrella.
+	test("granular thinkingOffMode compat (Fable 5) maps thinking-off to between_tools", () => {
+		const options = buildSdkOptions(
+			"claude-fable-5",
+			"test prompt",
+			undefined,
+			{},
+			{
+				compat: { forceAdaptiveThinking: true, thinkingOffMode: "between_tools", rejectsTemperature: true },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			},
+		);
+		assert.equal("effort" in options, false, "no effort when reasoning is off");
+		assert.deepEqual(
+			options.thinking,
+			{ type: "between_tools" },
+			"Fable 5 rejects {type:\"disabled\"}; off must map to between_tools via thinkingOffMode",
+		);
+	});
+
 	test("forceAdaptiveThinking: false does not disable the id-heuristic path (additive only)", () => {
 		const options = buildSdkOptions(
 			"claude-opus-4-6",
@@ -2312,6 +2579,23 @@ describe("stream-adapter — catalog model metadata (#2437)", () => {
 		);
 		assert.equal(options.effort, "high", "heuristic-supported model must keep mapping effort");
 		assert.deepEqual(options.thinking, { type: "adaptive" });
+	});
+
+	// #2701 — Haiku 5.5 is adaptive-thinking only (budget_tokens 400s); the id
+	// heuristic must recognize it (dash and dotted spellings) so custom catalogs
+	// without metadata still get adaptive thinking instead of a budget payload.
+	test("haiku-5-5 is recognized as adaptive by the id heuristic (#2701)", () => {
+		for (const modelId of ["claude-haiku-5-5", "claude-haiku-5.5"]) {
+			const options = buildSdkOptions(
+				modelId,
+				"test prompt",
+				undefined,
+				{ reasoning: "high" },
+				undefined,
+			);
+			assert.equal(options.effort, "high", `${modelId}: heuristic-supported model must map effort`);
+			assert.deepEqual(options.thinking, { type: "adaptive" }, `${modelId}: adaptive thinking required`);
+		}
 	});
 
 	test("missing, null, and non-effort thinkingLevelMap entries fall back to the legacy effort map", () => {
@@ -5622,6 +5906,79 @@ describe("stream-adapter — interactive legacy gsd-core skill guard (#2369)", (
 		pushEnv("GSD_CLAUDE_CODE_LEGACY_SKILL_FILTER", "0");
 		const options = buildInteractiveOptions();
 		assert.equal(hasSkillHook(options), false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #2742 — `extraOptions` is a pass-through channel, so a caller-supplied
+// `hooks` key used to replace the whole key and silently unregister the
+// native PreToolUse guards. Caller hooks must compose with them.
+// ---------------------------------------------------------------------------
+
+describe("stream-adapter — buildSdkOptions merges caller hooks with native guards", () => {
+	function preToolUseMatchers(options: Record<string, unknown>): (string | undefined)[] {
+		const hooks = options.hooks as { PreToolUse?: Array<{ matcher?: string }> } | undefined;
+		return (hooks?.PreToolUse ?? []).map((entry) => entry.matcher);
+	}
+
+	test("caller-supplied PreToolUse hooks compose with the native guards instead of replacing them", async () => {
+		const callerHook = async () => ({});
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+			hooks: { PreToolUse: [{ matcher: "WebFetch", hooks: [callerHook] }] },
+		});
+		const matchers = preToolUseMatchers(options);
+		assert.ok(matchers.includes(PROJECTION_WRITE_GUARD_MATCHER));
+		assert.ok(matchers.includes("Skill"));
+		assert.ok(matchers.includes("WebFetch"));
+		assert.equal(
+			matchers.indexOf(PROJECTION_WRITE_GUARD_MATCHER),
+			0,
+			"native guards come first (deny precedence is order-independent, but native entries stay primary)",
+		);
+		// The retained projection write guard still denies with caller hooks present.
+		const hooks = options.hooks as {
+			PreToolUse: Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<{ hookSpecificOutput?: { permissionDecision?: string } }>> }>;
+		};
+		const writeEntry = hooks.PreToolUse.find((entry) =>
+			new RegExp(`^(?:${entry.matcher})$`).test("Write"));
+		assert.ok(writeEntry, "expected the native projection write guard to survive the merge");
+		const decision = await writeEntry.hooks[0]({
+			hook_event_name: "PreToolUse",
+			tool_name: "Write",
+			tool_input: { file_path: "/tmp/project/.gsd/milestones/M001/M001-ROADMAP.md", content: "x" },
+			tool_use_id: "tu_merge_1",
+		});
+		assert.equal(decision.hookSpecificOutput?.permissionDecision, "deny");
+	});
+
+	test("caller hooks for other events keep the native PreToolUse guards", () => {
+		const callerHook = async () => ({});
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+			hooks: { PostToolUse: [{ matcher: "Bash", hooks: [callerHook] }] },
+		});
+		const hooks = options.hooks as Record<string, Array<{ matcher?: string }>>;
+		assert.ok(preToolUseMatchers(options).includes(PROJECTION_WRITE_GUARD_MATCHER));
+		assert.deepEqual(hooks.PostToolUse?.map((entry) => entry.matcher), ["Bash"]);
+	});
+
+	test("malformed caller hook values are ignored and keep the native guards", () => {
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+			hooks: { PreToolUse: {} as unknown as unknown[], PostToolUse: "nope" },
+		});
+		const hooks = options.hooks as Record<string, Array<{ matcher?: string }>>;
+		assert.ok(preToolUseMatchers(options).includes(PROJECTION_WRITE_GUARD_MATCHER));
+		assert.equal(Array.isArray(hooks.PreToolUse), true);
+		assert.ok(Array.isArray(hooks.PostToolUse) === false, "malformed event value must not land as a non-array");
+	});
+
+	test("no caller hooks leaves the native config untouched", () => {
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+		});
+		assert.ok(preToolUseMatchers(options).includes(PROJECTION_WRITE_GUARD_MATCHER));
 	});
 });
 

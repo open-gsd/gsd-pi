@@ -19,6 +19,7 @@ import { logWarning } from "../workflow-logger.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { removeProjectionFileSync } from "../atomic-write.js";
+import { reopenProjectionRoots } from "../projection-cleanup.js";
 import { reopenTask } from "../task-lifecycle-domain-operation.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import {
@@ -107,13 +108,14 @@ export async function handleReopenTask(
   // in flat-phase for auxiliary artifacts — its mere existence must NOT redirect
   // summary cleanup into tasks/ (#1208).
   try {
-    const slicePath = resolveSlicePath(basePath, params.milestoneId, params.sliceId);
-    const milestonePath = resolveMilestonePath(basePath, params.milestoneId);
-    if (milestonePath) {
-      const legacyBase = legacyMilestonesDir(basePath);
+    for (const root of reopenProjectionRoots(basePath)) {
+      const slicePath = resolveSlicePath(root, params.milestoneId, params.sliceId);
+      const milestonePath = resolveMilestonePath(root, params.milestoneId);
+      if (!milestonePath) continue;
+      const legacyBase = legacyMilestonesDir(root);
       const isLegacy = milestonePath.startsWith(legacyBase + "/") || milestonePath.startsWith(legacyBase + "\\");
       const summaryPaths = isLegacy
-        ? [join(resolveTasksDir(basePath, params.milestoneId, params.sliceId) ?? slicePath ?? join(milestonePath, "slices", params.sliceId, "tasks"), buildTaskFileName(params.taskId, "SUMMARY"))]
+        ? [join(resolveTasksDir(root, params.milestoneId, params.sliceId) ?? slicePath ?? join(milestonePath, "slices", params.sliceId, "tasks"), buildTaskFileName(params.taskId, "SUMMARY"))]
         : [
           join(milestonePath, buildFlatTaskFileName(params.sliceId, params.taskId, "SUMMARY")),
           join(milestonePath, buildTaskFileName(params.taskId, "SUMMARY")),

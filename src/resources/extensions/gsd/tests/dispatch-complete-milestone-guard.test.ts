@@ -19,6 +19,7 @@ import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import { seedLifecycles } from "./helpers/authority-cutover.ts";
 import {
   closeDatabase,
+  insertAssessment,
   insertGateRow,
   insertMilestone,
   insertSlice,
@@ -26,6 +27,10 @@ import {
 } from "../gsd-db.ts";
 import { handleValidateMilestone } from "../tools/validate-milestone.ts";
 import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
+import {
+  evaluateCompleteMilestoneDispatch,
+  evaluateGuardedCompleteMilestoneDispatch,
+} from "../milestone-closeout.ts";
 
 function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-complete-dispatch-"));
@@ -81,6 +86,26 @@ async function recordPassingValidation(base: string, key: string): Promise<void>
     },
   });
   assert.ok(!("error" in result), `canonical passing validation should be recorded: ${JSON.stringify(result)}`);
+}
+
+async function recordFailingValidation(base: string, key: string): Promise<void> {
+  const result = await handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "needs-attention",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [ ] Complete",
+    sliceDeliveryAudit: "S01 UAT failed",
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verdictRationale: "S01 UAT failed; remediation accepted.",
+  }, base, {
+    invocation: {
+      idempotencyKey: key,
+      sourceTransport: "internal",
+      actorType: "agent",
+    },
+  });
+  assert.ok(!("error" in result), `canonical failing validation should be recorded: ${JSON.stringify(result)}`);
 }
 
 function gitOutput(base: string, args: string[]): string {
@@ -245,6 +270,131 @@ describe("completing-milestone dispatch guard (#4324)", () => {
 
     assert.equal(result?.action, "stop");
     assert.match(result?.reason ?? "", /manual UAT sign-off \(PASS\) is required/i);
+  });
+
+  // ── #2770: a historical UAT FAIL covered by the accepted validation ──
+
+  const REMEDIATION_FAIL_RECORDED_AT = "2020-01-01T00:00:00.000Z";
+
+  /** Record a run-uat verdict row, as gsd_uat_result_save does. */
+  function recordRunUatVerdict(sliceId: string, status: string, createdAt: string): void {
+    insertAssessment({
+      path: `.gsd/milestones/M001/slices/${sliceId}/${sliceId}-ASSESSMENT.md`,
+      milestoneId: "M001",
+      sliceId,
+      status,
+      scope: "run-uat",
+      fullContent: `verdict: ${status.toUpperCase()}`,
+      createdAt,
+    });
+  }
+
+  /**
+   * Canonical closeout fixture for the #2770 remediation sequence: S01 and the
+   * S02 remediation slice are both completed and closed. The tests record the
+   * S01 UAT verdict and the validation receipt themselves, because their
+   * ordering against each other is the behavior under test.
+   */
+  function makeRemediationBase(key: string): string {
+    const base = makeCanonicalBase(key);
+    mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S02"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S02", "SUMMARY.md"), "# Summary\n");
+    insertSlice({ milestoneId: "M001", id: "S02", title: "Remediation", status: "complete" });
+    seedLifecycles(`${key}/s02`, [
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "completed" },
+    ]);
+    recordRunUatVerdict("S02", "pass", REMEDIATION_FAIL_RECORDED_AT);
+    return base;
+  }
+
+  test("proceeds to complete-milestone when a historical UAT FAIL predates the accepted validation receipt (#2770)", async () => {
+    base = makeRemediationBase("dispatch-guard/remediation-covered");
+    recordRunUatVerdict("S01", "fail", REMEDIATION_FAIL_RECORDED_AT);
+    await recordPassingValidation(base, "dispatch-guard/remediation-covered/validate");
+
+    const ctx = buildDispatchCtx(base);
+    ctx.prefs = { uat_dispatch: true } as DispatchContext["prefs"];
+    const result = await rule.match(ctx);
+
+    assert.equal(result?.action, "dispatch");
+    assert.equal(result?.unitType, "complete-milestone");
+  });
+
+  test("still blocks a UAT FAIL when no validation receipt exists (#2770)", async () => {
+    base = makeRemediationBase("dispatch-guard/remediation-uncovered");
+    recordRunUatVerdict("S01", "fail", REMEDIATION_FAIL_RECORDED_AT);
+
+    const ctx = buildDispatchCtx(base);
+    ctx.prefs = { uat_dispatch: true } as DispatchContext["prefs"];
+    const result = await rule.match(ctx);
+
+    assert.equal(result?.action, "stop");
+    assert.match(
+      result?.reason ?? "",
+      /Cannot complete milestone M001: UAT verdict for S01 is "fail"\. Manual UAT sign-off \(PASS\) is required before milestone closure\./,
+    );
+  });
+
+  test("still blocks a UAT FAIL recorded after the validation receipt (#2770)", async () => {
+    base = makeRemediationBase("dispatch-guard/remediation-newer-fail");
+    await recordPassingValidation(base, "dispatch-guard/remediation-newer-fail/validate");
+    // A fresh FAIL after validation accepted the remediation is not covered
+    // by that acceptance (+60s guards against receipt/verdict clock ties).
+    recordRunUatVerdict("S01", "fail", new Date(Date.now() + 60_000).toISOString());
+
+    const ctx = buildDispatchCtx(base);
+    ctx.prefs = { uat_dispatch: true } as DispatchContext["prefs"];
+    const result = await rule.match(ctx);
+
+    assert.equal(result?.action, "stop");
+    assert.match(
+      result?.reason ?? "",
+      /Cannot complete milestone M001: UAT verdict for S01 is "fail"\. Manual UAT sign-off \(PASS\) is required before milestone closure\./,
+    );
+  });
+
+  test("still blocks a UAT FAIL with an unparseable verdict timestamp (#2770)", async () => {
+    base = makeRemediationBase("dispatch-guard/remediation-unparseable");
+    recordRunUatVerdict("S01", "fail", " ");
+    await recordPassingValidation(base, "dispatch-guard/remediation-unparseable/validate");
+
+    const ctx = buildDispatchCtx(base);
+    ctx.prefs = { uat_dispatch: true } as DispatchContext["prefs"];
+    const result = await rule.match(ctx);
+
+    assert.equal(result?.action, "stop");
+    assert.match(
+      result?.reason ?? "",
+      /Cannot complete milestone M001: UAT verdict for S01 is "fail"\. Manual UAT sign-off \(PASS\) is required before milestone closure\./,
+    );
+  });
+
+  test("preview with an assumed waiver matches the real waive-and-proceed turn (#2770)", async () => {
+    // skip_milestone_validation preview: the waiver write is suppressed, so the
+    // UAT gate must treat the would-be waiver as recorded, exactly like the
+    // closeout consistency gate does — otherwise preview stops where the real
+    // turn dispatches.
+    base = makeRemediationBase("dispatch-guard/remediation-preview-waiver");
+    recordRunUatVerdict("S01", "fail", REMEDIATION_FAIL_RECORDED_AT);
+    await recordFailingValidation(base, "dispatch-guard/remediation-preview-waiver/validate");
+
+    const ctx = buildDispatchCtx(base);
+    ctx.prefs = { uat_dispatch: true } as DispatchContext["prefs"];
+    const preview = await evaluateGuardedCompleteMilestoneDispatch(
+      ctx,
+      { assumeValidationWaived: true },
+    );
+    assert.equal(preview.action, "dispatch");
+    assert.equal(preview.action === "dispatch" ? preview.unitType : null, "complete-milestone");
+
+    // Without the assumption the historical FAIL still blocks (the real state
+    // has no waiver yet).
+    const realPreWaiver = await evaluateCompleteMilestoneDispatch(ctx);
+    assert.equal(realPreWaiver?.action, "stop");
+    assert.match(
+      realPreWaiver?.action === "stop" ? realPreWaiver.reason : "",
+      /Manual UAT sign-off \(PASS\) is required/i,
+    );
   });
 });
 

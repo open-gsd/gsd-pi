@@ -115,7 +115,10 @@ export interface VerificationContext {
   pi: ExtensionAPI;
   taskAuthority?: TaskVerificationAuthority;
   runPostExecutionChecks?: typeof runPostExecutionChecks;
-  runVerificationGate?: typeof runVerificationGate;
+  /** Test seam; may answer synchronously. */
+  runVerificationGate?: (
+    ...args: Parameters<typeof runVerificationGate>
+  ) => ReturnType<typeof runVerificationGate> | Awaited<ReturnType<typeof runVerificationGate>>;
 }
 
 export type VerificationResult = "continue" | "retry" | "pause" | "abort";

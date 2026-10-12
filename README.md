@@ -28,10 +28,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.21.1**
+Latest release: **v1.22.0**
 
-- **release:** Wait for bounded npm registry propagation (#2688).
-- **release:** Verify npm artifact identity before accepting publication (#2686).
+- **gsd:** Make Claude Haiku 5.5 the default light-tier model (#2702).
+- **pi-ai:** Add Claude Haiku 5.5 to the model catalog with adaptive-only and temperature guards (#2701).
+- **models:** Refresh generated model catalog (#2737).
+- **vscode:** Guard canonical native Copilot project-context reads (#2699).
+- **mcp-server:** Bound Windows process queries and prepare complete SDK graph for Windows MCP tests (#2718).
+- **native:** Correct macOS descendant PID count handling (#2736).
+- **gsd:** Make complete-milestone prompt receipt-aware like the closeout guards (#2772) (#2773).
+- **gsd:** Let accepted milestone validation cover historical UAT failures at closure (#2770) (#2771).
 
 <!-- release-highlights:end -->
 

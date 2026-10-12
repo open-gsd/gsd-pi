@@ -609,7 +609,7 @@ function collectAutoExtensionEntries(dir: string): string[] {
 			const ignorePath = isDir ? `${relPath}/` : relPath;
 			if (ig.ignores(ignorePath)) continue;
 
-			if (isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) {
+			if (isFile && !entry.name.endsWith(".d.ts") && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) {
 				entries.push(fullPath);
 			} else if (isDir) {
 				const resolvedEntries = resolveExtensionEntries(fullPath);

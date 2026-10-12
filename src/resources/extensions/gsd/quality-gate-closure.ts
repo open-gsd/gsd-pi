@@ -2,7 +2,7 @@
 // File Purpose: Canonical quality-gate closure from durable DB evidence.
 
 import { extractSection } from "./files.js";
-import { getGateDefinition } from "./gate-registry.js";
+import { getGateDefinition, type GateDefinition } from "./gate-registry.js";
 import {
   getGateResults,
   getMilestoneSlices,
@@ -13,6 +13,7 @@ import {
   getTask,
   saveGateResult,
 } from "./gsd-db.js";
+import { isNeverWillRunTaskStatus } from "./status-guards.js";
 import type { GateId, GateRow, GateVerdict } from "./types.js";
 
 export interface QualityGateClosureOptions {
@@ -181,6 +182,26 @@ export function closeTaskQualityGates(
   }
 }
 
+/**
+ * Evidence for a pending task-scoped gate whose owning task will never run
+ * (skipped/cancelled husk, or the terminal blocker-accepted disposition,
+ * #2687): no session will ever evaluate it, so it is closed as `omitted`
+ * with provenance instead of blocking milestone completion — the read-side
+ * twin of the closeout consistency gate's never-will-run exemption (#2239).
+ */
+function neverWillRunTaskEvidence(row: GateRow, definition: GateDefinition): GateEvidence | null {
+  if (row.scope !== "task" || !row.task_id) return null;
+  const owner = getTask(row.milestone_id, row.slice_id, row.task_id);
+  if (!owner || !isNeverWillRunTaskStatus(owner.status)) return null;
+  return {
+    verdict: "omitted",
+    rationale:
+      `${definition.promptSection} never evaluated — owning task is ${owner.status} ` +
+      "and will never run",
+    findings: "",
+  };
+}
+
 function planQualityGateClosure(
   milestoneId: string,
   options: QualityGateClosureOptions = {},
@@ -203,7 +224,7 @@ function planQualityGateClosure(
       }
       if (row.status !== "pending" && definition.ownerTurn !== "validate-milestone") continue;
 
-      const evidence = closureEvidence(row, options);
+      const evidence = neverWillRunTaskEvidence(row, definition) ?? closureEvidence(row, options);
       if (!evidence) {
         unresolved.push(row);
         continue;

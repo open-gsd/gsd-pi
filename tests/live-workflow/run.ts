@@ -31,6 +31,8 @@
  *                                    enforce their own budget)
  *   GSD_LIVE_WORKFLOW_USE_HOME=1     forward the real HOME so the child uses
  *                                    ~/.gsd/agent/auth.json (counts as a credential)
+ *   GSD_LIVE_WORKFLOW_REQUIRE_PASS=1 fail (exit 1) when no scenario passed, so
+ *                                    an all-skip run cannot pass a release gate
  */
 import { readdirSync, existsSync } from "fs";
 import { execFileSync } from "child_process";
@@ -107,3 +109,9 @@ console.log(
   `\nLive-workflow tests: ${passed} passed, ${failed} failed, ${skipped} skipped`,
 );
 if (failed > 0) process.exit(1);
+if (process.env.GSD_LIVE_WORKFLOW_REQUIRE_PASS === "1" && passed === 0) {
+  console.error(
+    "GSD_LIVE_WORKFLOW_REQUIRE_PASS=1 but no live scenario ran; check the provider credential (*_API_KEY / *_OAUTH_TOKEN).",
+  );
+  process.exit(1);
+}

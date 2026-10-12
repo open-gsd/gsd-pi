@@ -21,8 +21,12 @@ import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { removeLegacyProjectionTreeSync, removeProjectionTreeSync } from "./atomic-write.js";
 import {
   loadUnboundProjectionEvidence,
+  loadUnboundProjectionEvidenceLockFree,
   previewUnboundProjectionEvidenceResolution,
+  previewUnboundProjectionEvidenceResolutionLockFree,
   isControlPublicationIntentName,
+  isStructuralProjectionRootError,
+  scanProjectionRootStructure,
   CONTROL_INTENT_QUARANTINE_MIN_AGE_MS,
 } from "./managed-projection-history.js";
 import {
@@ -36,6 +40,87 @@ import { deleteUatRetryCounter, listUatRetryCounters, readHookStateJson } from "
 
 const MAX_UAT_ATTEMPTS = 3;
 
+type EvidencePreview = ReturnType<typeof previewUnboundProjectionEvidenceResolution>;
+
+function unresolvedProjectionEvidenceIssue(
+  preview: (action: "discard" | "preserve" | "restore") => EvidencePreview,
+  note = "",
+): DoctorIssue {
+  const discard = preview("discard");
+  const preserve = preview("preserve");
+  const restore = preview("restore");
+  return {
+    severity: "error",
+    code: "unresolved_projection_evidence",
+    scope: "project",
+    unitId: "project",
+    message: `Unresolved ${discard.scope} projection evidence for ${discard.logicalPath} is retained at .gsd/${discard.evidencePath}.${note} Review exact content ${discard.contentDigest}. Resolve by ID: /gsd doctor resolve-evidence ${discard.evidenceId} --action=discard --consent=${discard.consent}; --action=preserve --consent=${preserve.consent} retains it at .gsd/${preserve.destinationPath}; or --action=restore --consent=${restore.consent} restores it to .gsd/${restore.destinationPath}.`,
+    file: `.gsd/${discard.evidencePath}`,
+    fixable: false,
+  };
+}
+
+// Structural rejection (#2648): the native lock refuses a node inside the
+// projection root, so every managed open — the evidence assessment included —
+// throws. In the pattern of the #2154 intent scan, name the rejected nodes
+// and keep the retained evidence enumerable without opening the lock.
+function reportRejectedProjectionRoot(
+  basePath: string,
+  issues: DoctorIssue[],
+  listedEvidenceIds: ReadonlySet<string>,
+): void {
+  try {
+    for (const finding of scanProjectionRootStructure(basePath)) {
+      issues.push({
+        severity: "error",
+        code: "unsupported_projection_root_node",
+        scope: "project",
+        unitId: "project",
+        message: `.gsd/${finding.logicalPath} is ${finding.problem}. The native projection lock rejects it, which blocks every managed projection write and the recovery-evidence assessment. With all GSD sessions stopped, move it out of .gsd (keep it for review), then rerun /gsd doctor.`,
+        file: `.gsd/${finding.logicalPath}`,
+        fixable: false,
+      });
+    }
+  } catch (error) {
+    issues.push({
+      severity: "warning",
+      code: "unsupported_projection_root_node",
+      scope: "project",
+      unitId: "project",
+      message: `Projection root structure scan could not read .gsd: ${error instanceof Error ? error.message : String(error)}`,
+      file: ".gsd",
+      fixable: false,
+    });
+  }
+  let retained;
+  try {
+    retained = loadUnboundProjectionEvidenceLockFree(basePath);
+  } catch {
+    // The index is unreadable without the lock too; the assessment failure
+    // and the structure scan above already say why.
+    return;
+  }
+  for (const evidence of retained) {
+    if (listedEvidenceIds.has(evidence.evidenceId)) continue;
+    try {
+      issues.push(unresolvedProjectionEvidenceIssue(
+        (action) => previewUnboundProjectionEvidenceResolutionLockFree(basePath, evidence.evidenceId, action),
+        " Listed without the native projection lock, which is rejecting this projection root: repair the root first, then the commands below apply.",
+      ));
+    } catch (error) {
+      issues.push({
+        severity: "error",
+        code: "unresolved_projection_evidence",
+        scope: "project",
+        unitId: "project",
+        message: `Unresolved ${evidence.scope} projection evidence for ${evidence.logicalPath} is retained at .gsd/${evidence.evidencePath}, but it could not be reviewed without the native projection lock: ${error instanceof Error ? error.message : String(error)}. Repair the projection root, then rerun /gsd doctor for the resolution commands.`,
+        file: `.gsd/${evidence.evidencePath}`,
+        fixable: false,
+      });
+    }
+  }
+}
+
 export async function checkRuntimeHealth(
   basePath: string,
   issues: DoctorIssue[],
@@ -48,20 +133,13 @@ export async function checkRuntimeHealth(
   const manageGitignore = gitPrefs?.manage_gitignore;
 
   if (existsSync(root)) {
+    const listedEvidenceIds = new Set<string>();
     try {
       for (const evidence of loadUnboundProjectionEvidence(basePath)) {
-        const discard = previewUnboundProjectionEvidenceResolution(basePath, evidence.evidenceId, "discard");
-        const preserve = previewUnboundProjectionEvidenceResolution(basePath, evidence.evidenceId, "preserve");
-        const restore = previewUnboundProjectionEvidenceResolution(basePath, evidence.evidenceId, "restore");
-        issues.push({
-          severity: "error",
-          code: "unresolved_projection_evidence",
-          scope: "project",
-          unitId: "project",
-          message: `Unresolved ${evidence.scope} projection evidence for ${evidence.logicalPath} is retained at .gsd/${evidence.evidencePath}. Review exact content ${discard.contentDigest}. Resolve by ID: /gsd doctor resolve-evidence ${evidence.evidenceId} --action=discard --consent=${discard.consent}; --action=preserve --consent=${preserve.consent} retains it at .gsd/${preserve.destinationPath}; or --action=restore --consent=${restore.consent} restores it to .gsd/${restore.destinationPath}.`,
-          file: `.gsd/${evidence.evidencePath}`,
-          fixable: false,
-        });
+        issues.push(unresolvedProjectionEvidenceIssue(
+          (action) => previewUnboundProjectionEvidenceResolution(basePath, evidence.evidenceId, action),
+        ));
+        listedEvidenceIds.add(evidence.evidenceId);
       }
     } catch (error) {
       issues.push({
@@ -73,6 +151,9 @@ export async function checkRuntimeHealth(
         file: ".gsd/migration/unbound-projection-evidence.json",
         fixable: false,
       });
+      if (isStructuralProjectionRootError(error)) {
+        reportRejectedProjectionRoot(basePath, issues, listedEvidenceIds);
+      }
     }
   }
 

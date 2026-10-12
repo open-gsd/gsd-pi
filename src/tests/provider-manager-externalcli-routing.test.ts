@@ -29,6 +29,9 @@ function createProviderManagerHarness(oauthProviderIds: string[]) {
   const setModels: Array<{ provider: string; id: string }> = [];
   let doneCount = 0;
   let component: any;
+  // External-CLI readiness is cached: the CLI only reads as ready once the
+  // activation flow has awaited a fresh probe.
+  const settledProviders = new Set<string>();
   const authStorage = {
     getOAuthProviders: () => oauthProviderIds.map((id) => ({ id })),
     hasAuth: () => false,
@@ -50,7 +53,10 @@ function createProviderManagerHarness(oauthProviderIds: string[]) {
       getAvailable: () => models,
       getProviderAuthMode: (provider: string) => provider === "claude-code" ? "externalCli" : "oauth",
       getProviderDisplayName: (provider: string) => provider === "claude-code" ? "Claude Code CLI" : provider,
-      isProviderRequestReady: (provider: string) => provider === "claude-code",
+      settleProviderReadiness: async (provider?: string) => {
+        if (provider) settledProviders.add(provider);
+      },
+      isProviderRequestReady: (provider: string) => provider === "claude-code" && settledProviders.has(provider),
       refresh() {},
       discoverModels: async () => [],
     },

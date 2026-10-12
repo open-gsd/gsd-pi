@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -106,6 +106,23 @@ function seedValidationBlockedMilestone(
     fullContent: `verdict: ${status}`,
   });
   invalidateStateCache();
+}
+
+function writeUatSpec(base: string): void {
+  const dir = join(base, ".gsd", "milestones", "M006", "slices", "S01");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "S01-UAT.md"),
+    [
+      "# S01 UAT",
+      "",
+      "## UAT Type",
+      "- UAT mode: artifact-driven",
+      "",
+      "## Steps",
+      "- Verify the completed slice behavior.",
+    ].join("\n"),
+  );
 }
 
 test("dispatcher blocks bare /gsd while milestone validation needs attention", async () => {
@@ -264,4 +281,75 @@ test("dispatcher allows diagnostic and knowledge commands while validation is bl
     invalidateStateCache();
     cleanup(base);
   }
+});
+
+test("dispatcher allows uat dispatch to collect missing evidence while validation is blocked", async (t) => {
+  for (const status of ["needs-attention", "needs-remediation"] as const) {
+    const base = makeBase();
+    t.after(() => {
+      closeDatabase();
+      invalidateStateCache();
+      cleanup(base);
+    });
+    seedValidationBlockedMilestone(base, status);
+    writeUatSpec(base);
+    const { ctx, calls } = makeMockCtx(base);
+    const { pi, messages } = makeMockPi();
+
+    await handleGSDCommand("dispatch uat", ctx, pi);
+
+    assert.equal(messages.length, 1, status);
+    assert.equal(messages[0].customType, "gsd-dispatch", status);
+    assert.equal(messages[0].display, false, status);
+    assert.match(messages[0].content, /UAT/, status);
+    assert.ok(
+      calls.some(
+        (call) => call.kind === "info" && /Dispatching run-uat for M006\/S01/.test(call.message),
+      ),
+      `expected run-uat dispatch notification under ${status}, got: ${JSON.stringify(calls)}`,
+    );
+  }
+});
+
+test("dispatcher allows run-uat alias dispatch while validation is blocked", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    invalidateStateCache();
+    cleanup(base);
+  });
+  seedValidationBlockedMilestone(base);
+  writeUatSpec(base);
+  const { ctx, calls } = makeMockCtx(base);
+  const { pi, messages } = makeMockPi();
+
+  await handleGSDCommand("dispatch run-uat", ctx, pi);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].customType, "gsd-dispatch");
+  assert.ok(
+    calls.some((call) => call.kind === "info" && /Dispatching run-uat for M006\/S01/.test(call.message)),
+    `expected run-uat dispatch notification, got: ${JSON.stringify(calls)}`,
+  );
+});
+
+test("uat dispatch under validation block still refuses without a UAT specification", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    invalidateStateCache();
+    cleanup(base);
+  });
+  seedValidationBlockedMilestone(base);
+  const { ctx, calls } = makeMockCtx(base);
+  const { pi, messages } = makeMockPi();
+
+  await handleGSDCommand("dispatch uat", ctx, pi);
+
+  assert.equal(messages.length, 0);
+  assert.ok(
+    calls.some((call) => /Cannot dispatch run-uat: no UAT file found/.test(call.message)),
+    `expected missing-UAT-spec refusal, got: ${JSON.stringify(calls)}`,
+  );
+  assert.ok(!calls.some((call) => /cannot run/.test(call.message)));
 });

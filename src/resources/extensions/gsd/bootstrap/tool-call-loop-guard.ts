@@ -40,7 +40,51 @@ import { canonicalToolName, canonicalWorkflowToolName } from "../engine-hook-con
 const DEFAULT_MAX_CONSECUTIVE_IDENTICAL_CALLS = 4;
 const DEFAULT_PER_TOOL_DEFAULT_CAP = 6;
 const DEFAULT_PER_TOOL_REPEATABLE_CAP = 15;
-const DEFAULT_PER_TOOL_CAP_EXEMPT_TOOLS = ["find", "glob", "grep", "ls", "read", "search_and_read"] as const;
+
+/**
+ * Tools exempt from Guard 2 (per-tool-name cap), exported so tests and tooling
+ * can inspect the defaults. User-supplied `exempt_tools` are additive to this
+ * set.
+ *
+ * Read-only navigation tools (#1093, #1095) and read-only workflow query tools
+ * (#2753) are normal context gathering: a planning turn legitimately looks up
+ * many different decisions/requirements, and these tools never record
+ * mutations so their counts would never decay. Guard 1's identical-args streak
+ * still catches a genuine reread loop of the same ID.
+ *
+ * The workflow names mirror the pure-lookup members of the contracts'
+ * `writePolicy: "read"` set (packages/contracts/src/workflow.ts). Where the
+ * pi-native and MCP surfaces spell a tool differently both names are listed
+ * (`memory_query`/`gsd_memory_query`, `gsd_graph`/`gsd_memory_graph`).
+ * Accepted nuance: `memory_query`/`gsd_memory_query` with `reinforce_hits`
+ * bump persistent hit counts — ranking telemetry only, no workflow state, and
+ * distinct-arg reinforced queries are legitimate, so they stay exempt (Guard 1
+ * still blocks an identical-args hammer). Side-effecting read-policy tools
+ * stay capped: `gsd_checkpoint_db` flushes the SQLite WAL.
+ */
+export const DEFAULT_PER_TOOL_CAP_EXEMPT_TOOLS = [
+  // Read-only navigation (#1093, #1095).
+  "find",
+  "glob",
+  "grep",
+  "ls",
+  "read",
+  "search_and_read",
+  // Read-only workflow queries (#2753).
+  "gsd_decision_get",
+  "gsd_decision_list",
+  "gsd_requirement_get",
+  "gsd_requirement_list",
+  "gsd_project_snapshot",
+  "gsd_milestone_status",
+  "gsd_journal_query",
+  "gsd_exec_search",
+  "gsd_resume",
+  "memory_query",
+  "gsd_memory_query",
+  "gsd_graph",
+  "gsd_memory_graph",
+] as const;
 
 /** Interactive/user-facing tools where even 1 duplicate is confusing. */
 const STRICT_LOOP_TOOLS = new Set(["ask_user_questions"]);
@@ -308,16 +352,22 @@ export function checkToolCallLoop(
   perToolLastMutationEpoch.set(toolName, mutationEpoch);
 
   // Read-only navigation tools are normal context gathering; Guard 1 still
-  // catches true reread loops with identical arguments. Browser Automation
-  // Contract tools (browser_*) are the same shape: a browser-backed UAT makes
-  // many distinct-arg calls (read a message, count edits, inspect a card, …),
-  // so the arg-independent per-tool cap misfires on legitimate verification;
-  // Guard 1's identical-signature streak still catches a genuinely stuck
-  // browser loop.
+  // catches true reread loops with identical arguments. Read-only workflow DB
+  // query tools are the same shape (#2753): a planning turn legitimately looks
+  // up many different decisions/requirements, and those lookups never record
+  // mutations, so the arg-independent per-tool cap would misfire. Exempt names
+  // are matched both exactly (preserving user-configured MCP-prefixed
+  // `exempt_tools` entries) and against the canonical (MCP-prefix-stripped)
+  // tool name — the way the Browser Automation Contract exemption below works —
+  // so MCP-surfaced variants (mcp__<server>__gsd_decision_get, …) are covered
+  // too. Browser Automation Contract tools (browser_*) are likewise a
+  // distinct-arg-heavy, read-mostly surface (#1120).
+  const canonicalName = canonicalToolName(toolName);
   if (
     !config.repeatedEnabled ||
     config.perToolExempt.has(toolName) ||
-    hasBrowserContractPrefix(canonicalToolName(toolName))
+    config.perToolExempt.has(canonicalName) ||
+    hasBrowserContractPrefix(canonicalName)
   ) {
     return { block: false, count: consecutiveCount };
   }

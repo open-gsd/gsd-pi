@@ -40,26 +40,58 @@ const MERGE_STATE_FILES = [
   "SQUASH_MSG",
   "AUTO_MERGE",
 ] as const;
+/** Markers left behind by an interrupted rebase, cherry-pick or revert. */
+const IN_PROGRESS_OP_MARKERS = [
+  "rebase-merge",
+  "rebase-apply",
+  "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
+] as const;
+const RECONCILE_GIT_PATHS = [...MERGE_STATE_FILES, ...IN_PROGRESS_OP_MARKERS] as const;
+const LEFTOVER_MARKERS = ["MERGE_HEAD", "SQUASH_MSG", ...IN_PROGRESS_OP_MARKERS] as const;
 
-function resolveGitPath(basePath: string, gitPath: string): string {
+type MergeStateFilePaths = Record<(typeof MERGE_STATE_FILES)[number], string>;
+type InProgressOpPaths = Record<(typeof IN_PROGRESS_OP_MARKERS)[number], string>;
+
+/**
+ * Resolve several git paths with one `git rev-parse` (one `--git-path`
+ * argument per name, one output line per argument) instead of one child
+ * process per name. `--git-path` is worktree-aware, so in a linked worktree
+ * MERGE_HEAD and friends resolve to that worktree's own git dir.
+ */
+function resolveGitPaths<T extends string>(
+  basePath: string,
+  gitPaths: readonly T[],
+): Record<T, string> {
+  let resolvedPaths: string[] = [];
   try {
-    const resolvedPath = execFileSync("git", ["rev-parse", "--git-path", gitPath], {
-      cwd: basePath,
-      stdio: ["ignore", "pipe", "pipe"],
-      encoding: "utf-8",
-    }).trim();
-
-    if (resolvedPath.length > 0) {
-      return isAbsolute(resolvedPath) ? resolvedPath : resolve(basePath, resolvedPath);
-    }
+    const lines = execFileSync(
+      "git",
+      ["rev-parse", ...gitPaths.flatMap((gitPath) => ["--git-path", gitPath])],
+      {
+        cwd: basePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf-8",
+      },
+    ).trim().split(/\r?\n/);
+    // Anything other than one line per name cannot be mapped back reliably.
+    if (lines.length === gitPaths.length) resolvedPaths = lines;
   } catch (err) {
     logWarning(
       "recovery",
-      `git path resolution failed for ${gitPath}: ${getErrorMessage(err)}`,
+      `git path resolution failed for ${gitPaths.join(", ")}: ${getErrorMessage(err)}`,
     );
   }
 
-  return join(resolveGitDir(basePath), gitPath);
+  let gitDir: string | undefined;
+  const paths = {} as Record<T, string>;
+  gitPaths.forEach((gitPath, index) => {
+    const resolvedPath = resolvedPaths[index] ?? "";
+    paths[gitPath] = resolvedPath.length > 0
+      ? (isAbsolute(resolvedPath) ? resolvedPath : resolve(basePath, resolvedPath))
+      : join((gitDir ??= resolveGitDir(basePath)), gitPath);
+  });
+  return paths;
 }
 
 function hasWorktreeOrIndexChanges(basePath: string): boolean | null {
@@ -75,10 +107,10 @@ function hasWorktreeOrIndexChanges(basePath: string): boolean | null {
   }
 }
 
-function removeMergeStateFiles(basePath: string): string[] {
+function removeMergeStateFiles(gitPaths: MergeStateFilePaths): string[] {
   const removed: string[] = [];
   for (const file of MERGE_STATE_FILES) {
-    const filePath = resolveGitPath(basePath, file);
+    const filePath = gitPaths[file];
     if (!existsSync(filePath)) continue;
     try {
       unlinkSync(filePath);
@@ -169,6 +201,7 @@ function abortAndResetMerge(
  */
 function reconcileOtherInProgressGitOps(
   basePath: string,
+  gitPaths: InProgressOpPaths,
   notify: NotifyFn,
 ): MergeReconcileResult {
   const states: Array<{
@@ -178,15 +211,12 @@ function reconcileOtherInProgressGitOps(
   }> = [
     {
       label: "rebase",
-      indicators: [
-        resolveGitPath(basePath, "rebase-merge"),
-        resolveGitPath(basePath, "rebase-apply"),
-      ],
+      indicators: [gitPaths["rebase-merge"], gitPaths["rebase-apply"]],
       abort: () => nativeRebaseAbort(basePath),
     },
     {
       label: "cherry-pick",
-      indicators: [resolveGitPath(basePath, "CHERRY_PICK_HEAD")],
+      indicators: [gitPaths.CHERRY_PICK_HEAD],
       abort: () => {
         try {
           execFileSync("git", ["cherry-pick", "--abort"], {
@@ -201,7 +231,7 @@ function reconcileOtherInProgressGitOps(
     },
     {
       label: "revert",
-      indicators: [resolveGitPath(basePath, "REVERT_HEAD")],
+      indicators: [gitPaths.REVERT_HEAD],
       abort: () => {
         try {
           execFileSync("git", ["revert", "--abort"], {
@@ -252,11 +282,12 @@ function reconcileMergeStateCore(
   // First, abort any rebase/cherry-pick/revert left over from a SIGKILL'd
   // worker. Doing this before the merge-state check unblocks any merge that
   // would otherwise refuse with "you have unfinished operation". (HIGH-7)
-  const otherOpsResult = reconcileOtherInProgressGitOps(basePath, notify);
+  const gitPaths = resolveGitPaths(basePath, RECONCILE_GIT_PATHS);
+  const otherOpsResult = reconcileOtherInProgressGitOps(basePath, gitPaths, notify);
   if (otherOpsResult === "blocked") return "blocked";
 
-  const mergeHeadPath = resolveGitPath(basePath, "MERGE_HEAD");
-  const squashMsgPath = resolveGitPath(basePath, "SQUASH_MSG");
+  const mergeHeadPath = gitPaths.MERGE_HEAD;
+  const squashMsgPath = gitPaths.SQUASH_MSG;
   const hasMergeHead = existsSync(mergeHeadPath);
   const hasSquashMsg = existsSync(squashMsgPath);
   if (!hasMergeHead && !hasSquashMsg) {
@@ -266,7 +297,7 @@ function reconcileMergeStateCore(
   const conflictedFiles = nativeConflictFiles(basePath);
   if (conflictedFiles.length === 0) {
     if (hasWorktreeOrIndexChanges(basePath) === false) {
-      const removed = removeMergeStateFiles(basePath);
+      const removed = removeMergeStateFiles(gitPaths);
       notify(
         removed.length > 0
           ? `Cleared stale merge/squash state (${removed.join(", ")}).`
@@ -280,11 +311,11 @@ function reconcileMergeStateCore(
     try {
       const commitSha = nativeCommit(basePath, "chore(gsd): reconcile merge state");
       if (commitSha) {
-        removeMergeStateFiles(basePath);
+        removeMergeStateFiles(gitPaths);
         const mode = hasMergeHead ? "merge" : "squash commit";
         notify(`Finalized leftover ${mode} from prior session.`, "info");
       } else {
-        removeMergeStateFiles(basePath);
+        removeMergeStateFiles(gitPaths);
         notify(
           "No new commit needed for leftover merge/squash state — already committed.",
           "info",
@@ -315,7 +346,7 @@ function reconcileMergeStateCore(
             basePath,
             "chore: auto-resolve safe state file conflicts",
           );
-          removeMergeStateFiles(basePath);
+          removeMergeStateFiles(gitPaths);
           notify(
             `Auto-resolved ${autoResolved.length} safe conflict path(s) from prior merge.`,
             "info",
@@ -366,14 +397,8 @@ export function reconcileMergeState(
 type MergeStateDrift = Extract<DriftRecord, { kind: "unmerged-merge-state" }>;
 
 function hasMergeStateLeftovers(basePath: string): boolean {
-  return (
-    existsSync(resolveGitPath(basePath, "MERGE_HEAD")) ||
-    existsSync(resolveGitPath(basePath, "SQUASH_MSG")) ||
-    existsSync(resolveGitPath(basePath, "rebase-merge")) ||
-    existsSync(resolveGitPath(basePath, "rebase-apply")) ||
-    existsSync(resolveGitPath(basePath, "CHERRY_PICK_HEAD")) ||
-    existsSync(resolveGitPath(basePath, "REVERT_HEAD"))
-  );
+  const gitPaths = resolveGitPaths(basePath, LEFTOVER_MARKERS);
+  return LEFTOVER_MARKERS.some((marker) => existsSync(gitPaths[marker]));
 }
 
 export function detectMergeStateDrift(

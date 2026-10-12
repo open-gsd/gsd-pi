@@ -24,6 +24,8 @@ import {
 import { loadPrompt } from "./prompt-loader.js";
 import { gsdRoot } from "./paths.js";
 import { createGitService, runGit, taskBranchArgs } from "./git-service.js";
+import { getIsolationMode } from "./preferences.js";
+import { nativeIsRepo } from "./native-git-bridge.js";
 import { isAutoActive, isAutoPaused } from "./auto.js";
 import { getErrorMessage } from "./error-utils.js";
 import { resolvePlugin, type WorkflowPlugin } from "./workflow-plugins.js";
@@ -452,19 +454,34 @@ export async function handleStart(
   // ─── Create git branch (unless isolation: none) ─────────────────────────
 
   const git = createGitService(basePath);
-  const skipBranch = git.prefs.isolation === "none";
+  const wantsBranch = getIsolationMode(basePath) !== "none";
+  const isRepo = nativeIsRepo(basePath);
+  if (wantsBranch && !isRepo) {
+    ctx.ui.notify(
+      "Branch isolation is enabled, but this directory is not a git repository. Working on the current branch. Run /gsd doctor to check your project setup.",
+      "warning",
+    );
+  }
+  const skipBranch = !wantsBranch || !isRepo;
   const slug = slugify(description || templateId);
   const branchName = `gsd/${templateId}/${slug}`;
   let branchCreated = false;
+  // Probe once, guarded (#2678): getCurrentBranch throws outside a repository,
+  // and the old fallback re-ran it unguarded after a branch failure.
+  let currentBranch = "";
+  if (isRepo) {
+    try {
+      currentBranch = git.getCurrentBranch();
+    } catch { /* keep "" — recorded as "(detached)" below */ }
+  }
 
   if (!skipBranch) {
     try {
-      const current = git.getCurrentBranch();
-      if (current !== branchName) {
+      if (currentBranch !== branchName) {
         try {
           git.autoCommit("workflow-template", templateId, []);
         } catch { /* nothing to commit */ }
-        runGit(basePath, taskBranchArgs(basePath, branchName, current, git.getMainBranch()));
+        runGit(basePath, taskBranchArgs(basePath, branchName, currentBranch, git.getMainBranch()));
         branchCreated = true;
       }
     } catch (err) {
@@ -476,7 +493,7 @@ export async function handleStart(
     }
   }
 
-  const actualBranch = branchCreated ? branchName : git.getCurrentBranch();
+  const actualBranch = branchCreated ? branchName : (currentBranch || "(detached)");
 
   // ─── Write workflow state for resume support ────────────────────────────
 
@@ -626,17 +643,32 @@ export function dispatchMarkdownPhasePlugin(
 
   // Create git branch unless isolation: none.
   const git = createGitService(basePath);
-  const skipBranch = git.prefs.isolation === "none";
+  const wantsBranch = getIsolationMode(basePath) !== "none";
+  const isRepo = nativeIsRepo(basePath);
+  if (wantsBranch && !isRepo) {
+    ctx.ui.notify(
+      "Branch isolation is enabled, but this directory is not a git repository. Working on the current branch. Run /gsd doctor to check your project setup.",
+      "warning",
+    );
+  }
+  const skipBranch = !wantsBranch || !isRepo;
   const slug = slugify(description || templateId);
   const branchName = `gsd/${templateId}/${slug}`;
   let branchCreated = false;
+  // Probe once, guarded (#2678): getCurrentBranch throws outside a repository,
+  // and the old fallback re-ran it unguarded after a branch failure.
+  let currentBranch = "";
+  if (isRepo) {
+    try {
+      currentBranch = git.getCurrentBranch();
+    } catch { /* keep "" — recorded as "(detached)" below */ }
+  }
 
   if (!skipBranch) {
     try {
-      const current = git.getCurrentBranch();
-      if (current !== branchName) {
+      if (currentBranch !== branchName) {
         try { git.autoCommit("workflow-template", templateId, []); } catch { /* nothing to commit */ }
-        runGit(basePath, taskBranchArgs(basePath, branchName, current, git.getMainBranch()));
+        runGit(basePath, taskBranchArgs(basePath, branchName, currentBranch, git.getMainBranch()));
         branchCreated = true;
       }
     } catch (err) {
@@ -647,7 +679,7 @@ export function dispatchMarkdownPhasePlugin(
     }
   }
 
-  const actualBranch = branchCreated ? branchName : git.getCurrentBranch();
+  const actualBranch = branchCreated ? branchName : (currentBranch || "(detached)");
 
   // Write STATE.json.
   if (artifactDir && plugin.meta.phases && plugin.meta.phases.length > 0) {

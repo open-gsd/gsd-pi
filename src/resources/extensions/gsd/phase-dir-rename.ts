@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Rename the on-disk phase directory when a milestone title changes.
 
-import { existsSync, renameSync } from "node:fs";
+import { existsSync, renameSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
@@ -44,4 +44,18 @@ export function renamePhaseDirOnTitleChange(
   renameSync(fromPath, nextPath);
   clearPathCache();
   return true;
+}
+
+/**
+ * True when the canonical phase directory for `milestoneId`/`title` already
+ * exists on disk under `basePath` — i.e. the rename's target state already
+ * holds, so artifact rows are safe to reconcile to it (#2633).
+ */
+export function canonicalPhaseDirExists(basePath: string, milestoneId: string, title: string): boolean {
+  if (isLegacyMilestonesLayout(basePath)) return false;
+  try {
+    return statSync(join(milestonesDir(basePath), canonicalPhaseDirName(milestoneId, title))).isDirectory();
+  } catch {
+    return false;
+  }
 }

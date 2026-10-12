@@ -36,6 +36,13 @@ test("lookupModelCost finds haiku", () => {
   assert.equal(entry.outputPer1k, 0.005, "haiku output price must match the catalog ($5/M)");
 });
 
+test("lookupModelCost finds Haiku 5.5 pricing (#2701)", () => {
+  const entry = lookupModelCost("claude-haiku-5-5");
+  assert.ok(entry);
+  assert.equal(entry.inputPer1k, 0.0001, "Haiku 5.5 input price must match the catalog ($0.10/M)");
+  assert.equal(entry.outputPer1k, 0.0005, "Haiku 5.5 output price must match the catalog ($0.50/M)");
+});
+
 test("lookupModelCost finds Claude Sonnet 5 pricing", () => {
   const entry = lookupModelCost("github-copilot/claude-sonnet-5");
   assert.ok(entry);

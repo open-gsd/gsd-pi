@@ -99,6 +99,11 @@ export async function handleClearCommand(host: InteractiveModeDelegateHost): Pro
 		// New session via session (emits extension session events)
 		await host.session.newSession();
 
+		// Keep the old conversation readable in scrollback before the screen
+		// is reset (#2637): the next, shorter frame would otherwise erase the
+		// visible rows in place.
+		host.ui.retireScreenToScrollback();
+
 		// Clear UI state
 		host.headerContainer.clear();
 		host.chatContainer.clear();

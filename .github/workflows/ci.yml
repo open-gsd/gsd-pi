@@ -227,6 +227,11 @@ jobs:
           cp native/addon/*.node dist-test/native/addon/
           ls -la dist-test/native/addon/
 
+      - name: Run performance baseline gate
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
+        run: pnpm run test:unit:compiled:perf
+
       - name: Run unit tests
         env:
           GSD_NATIVE_PREFER_LOCAL: '1'
@@ -362,6 +367,16 @@ jobs:
         # tests already use. GSD_NATIVE_PREFER_LOCAL loads gsd_engine.dev.node.
         run: pnpm run build:native:test
 
+      - name: Build package JS prerequisites for Windows runtime imports
+        if: needs.fast-gates.outputs.portability-changed == 'true'
+        # Test transpilation does not populate workspace dist/ entrypoints.
+        # These TS-only builds are required before @gsd/native/file-identity
+        # imports can run; a Rust addon alone is not the package's JS surface.
+        run: |
+          pnpm run build:pi
+          pnpm --filter @opengsd/rpc-client run build
+          pnpm --filter @opengsd/mcp-server run build
+
       - name: Typecheck extensions
         if: needs.fast-gates.outputs.portability-changed == 'true'
         env:
@@ -374,6 +389,9 @@ jobs:
         if: needs.fast-gates.outputs.portability-changed == 'true'
         env:
           GSD_NATIVE_PREFER_LOCAL: '1'
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: pnpm run test:packages
 
       - name: Run Windows portability tests

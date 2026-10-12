@@ -154,6 +154,7 @@ const CAPABILITY_DIMENSIONS: ReadonlyArray<keyof ModelCapabilities> = [
 
 export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   // Light-tier models (cheapest)
+  "claude-haiku-5-5": "light",             // Haiku line successor, $0.10/M input; stays light (#2701)
   "claude-haiku-4-5": "light",
   "claude-3-5-haiku-latest": "light",
   "claude-3-haiku-20240307": "light",
@@ -231,6 +232,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
 // the same capability tier.
 
 const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
+  "claude-haiku-5-5": 0.0001,              // $0.10/M input (base <=100K tier); matches pi-ai catalog (#2701)
   "claude-haiku-4-5": 0.001,               // $1.00/M input; matches pi-ai catalog (#2500)
   "claude-3-5-haiku-latest": 0.0008,
   "claude-sonnet-4": 0.003,
@@ -315,6 +317,7 @@ export const MODEL_CAPABILITY_PROFILES: Record<string, ModelCapabilities> = {
   "claude-sonnet-5-5":            { coding: 91, debugging: 86, research: 81, reasoning: 88, speed: 55, longContext: 80, instruction: 89 },
   "claude-sonnet-4-5-20250514":   { coding: 85, debugging: 80, research: 75, reasoning: 80, speed: 60, longContext: 75, instruction: 85 },
   "claude-3-5-sonnet-latest":     { coding: 82, debugging: 78, research: 72, reasoning: 78, speed: 62, longContext: 70, instruction: 82 },
+  "claude-haiku-5-5":             { coding: 60, debugging: 50, research: 45, reasoning: 50, speed: 95, longContext: 75, instruction: 75 }, // Haiku 4.5 scores; longContext raised for the 1M window (#2701)
   "claude-haiku-4-5":             { coding: 60, debugging: 50, research: 45, reasoning: 50, speed: 95, longContext: 50, instruction: 75 },
   "claude-3-5-haiku-latest":      { coding: 60, debugging: 50, research: 45, reasoning: 50, speed: 95, longContext: 50, instruction: 75 },
   "claude-3-haiku-20240307":      { coding: 50, debugging: 40, research: 35, reasoning: 40, speed: 95, longContext: 40, instruction: 65 },
@@ -625,16 +628,21 @@ export function getEligibleModels(
     if (match) return [match];
   }
 
+  // Token-profile defaults resolve tier models on every preferences load, also
+  // when dynamic routing is off. Unknown models keep their safe defaults there,
+  // but a "Dynamic routing does not recognize" line per model is noise.
+  const warnUnknown = Boolean(routingConfig.enabled);
+
   // 2. Auto-detect: filter by tier, sort cheapest first
   const tierMatches = availableModelIds
-    .filter(id => getModelTier(id) === tier)
+    .filter(id => getModelTier(id, warnUnknown) === tier)
     .sort((a, b) => {
-      const costA = getModelCost(a, availableModels);
-      const costB = getModelCost(b, availableModels);
+      const costA = getModelCost(a, availableModels, warnUnknown);
+      const costB = getModelCost(b, availableModels, warnUnknown);
       return costA - costB;
     });
 
-  const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId);
+  const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId, warnUnknown);
   if (!preferred) return tierMatches;
   return [preferred, ...tierMatches.filter(id => id !== preferred)];
 }
@@ -975,7 +983,7 @@ export function defaultRoutingConfig(): DynamicRoutingConfig {
  *   4. CANONICAL_TIER_MODELS[tier] when the registry is empty
  */
 const CANONICAL_TIER_MODELS: Record<ComplexityTier, string> = {
-  light: "claude-haiku-4-5",
+  light: "claude-haiku-5-5",
   standard: "claude-sonnet-4-6",
   heavy: "claude-opus-5-5",
 };
@@ -1032,7 +1040,7 @@ function findModelForTier(
   // Honor the preferred/session model only when it is itself a same-provider
   // (Anthropic/Claude) model. A non-Anthropic session model must not bypass
   // the cross_provider:false restriction.
-  const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId);
+  const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId, Boolean(routingConfig.enabled));
   if (preferred && sameProvider.includes(preferred)) return preferred;
 
   return sameProvider[0];
@@ -1134,18 +1142,19 @@ function findAvailableModelId(
   return availableModelIds.find(id => canonicalizeModelId(id) === preferredBare);
 }
 
-function modelSatisfiesTier(modelId: string, tier: ComplexityTier): boolean {
-  return tierOrdinal(getModelTier(modelId)) >= tierOrdinal(tier);
+function modelSatisfiesTier(modelId: string, tier: ComplexityTier, warnUnknown = true): boolean {
+  return tierOrdinal(getModelTier(modelId, warnUnknown)) >= tierOrdinal(tier);
 }
 
 function findPreferredModelForTier(
   tier: ComplexityTier,
   availableModelIds: string[],
   preferredModelId: string | undefined,
+  warnUnknown = true,
 ): string | undefined {
   const preferred = findAvailableModelId(preferredModelId, availableModelIds);
   if (!preferred) return undefined;
-  return modelSatisfiesTier(preferred, tier) ? preferred : undefined;
+  return modelSatisfiesTier(preferred, tier, warnUnknown) ? preferred : undefined;
 }
 
 /**
@@ -1162,13 +1171,13 @@ function isModelAvailable(modelId: string, availableModelIds: string[]): boolean
   return availableModelIds.some(id => canonicalizeModelId(id) === bare);
 }
 
-function getModelTier(modelId: string): ComplexityTier {
+function getModelTier(modelId: string, warnUnknown = true): ComplexityTier {
   // Normalize provider prefixes, casing, and separators before lookup.
   const bareId = canonicalizeModelId(modelId);
   if (MODEL_CAPABILITY_TIER[bareId]) return MODEL_CAPABILITY_TIER[bareId];
 
   // Unknown models are assumed standard (per D-15: avoids silently ignoring user config)
-  warnUnknownRoutingModel(modelId);
+  if (warnUnknown) warnUnknownRoutingModel(modelId);
   return "standard";
 }
 
@@ -1178,7 +1187,7 @@ function isKnownModel(modelId: string): boolean {
   return Boolean(bareId && MODEL_CAPABILITY_TIER[bareId]);
 }
 
-function getModelCost(modelId: string, availableModels?: Array<Model<Api>>): number {
+function getModelCost(modelId: string, availableModels?: Array<Model<Api>>, warnUnknown = true): number {
   const provider = modelProvider(modelId) ?? availableModels?.find((candidate) => sameProviderQualifiedModel(modelId, candidate))?.provider ?? "unknown";
   const bareId = canonicalizeModelId(modelId);
 
@@ -1247,7 +1256,7 @@ function getModelCost(modelId: string, availableModels?: Array<Model<Api>>): num
   }
 
   // Unknown cost — assume expensive to avoid routing to unknown cheap models
-  warnUnknownRoutingModel(modelId);
+  if (warnUnknown) warnUnknownRoutingModel(modelId);
   return 999;
 }
 

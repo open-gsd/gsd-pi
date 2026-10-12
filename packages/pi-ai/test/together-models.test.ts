@@ -51,7 +51,8 @@ describe("Together models", () => {
 			thinkingFormat: "openai",
 		});
 
-		const deepSeekV4 = getModel("together", "deepseek-ai/DeepSeek-V4-Pro");
+		// Together retired the deepseek-ai/DeepSeek-V4-Pro id; -0813 is the current surface.
+		const deepSeekV4 = getModel("together", "deepseek-ai/DeepSeek-V4-Pro-0813");
 		expect(deepSeekV4.thinkingLevelMap).toEqual({
 			minimal: null,
 			low: null,

@@ -55,6 +55,13 @@ const UNRESOLVED_COMMAND_PATTERNS = [
   /'([^']+)' is not recognized as an internal or external command/i,
   /(?:(?:[^\s:'"]+): (?:(?:line )?\d+: ))?(.+?): command not found/i,
   /(?:(?:[^\s:'"]+): (?:(?:line )?\d+: ))?(.+?): not found/i,
+  // zsh puts the missing name last: `zsh:1: no such file or directory: tool` (#2665).
+  /(?:(?:[^\s:'"]+): )?\d+: no such file or directory: (.+)/i,
+  // bash/zsh report a nonexistent path-like command this way (#2665) —
+  // `bash: bin/i18n-tasks: No such file or directory` for a missing binstub.
+  // The optional prefix also consumes the shell name and `line N:` segments
+  // (`/bin/bash: line 1: bin/i18n-tasks: No such file or directory`).
+  /(?:(?:[^\s:'"]+): (?:(?:line )?\d+: ))?(.+?): No such file or directory/,
 ];
 
 /** The specific tool a shell failed to resolve, so compound checks name the missing segment (#2087). */
@@ -62,7 +69,19 @@ export function unresolvedCommandToken(stderr: string | undefined): string | nul
   if (!stderr) return null;
   for (const pattern of UNRESOLVED_COMMAND_PATTERNS) {
     const match = pattern.exec(stderr);
-    if (match?.[1]) return match[1].trim();
+    if (match?.[1]) {
+      // Shells vary in how many `name: ` / `line N: ` segments they prefix to
+      // the missing command (`bash: bin/i18n-tasks: No such file or
+      // directory`, `/bin/bash: line 1: bin/i18n-tasks: ...`, #2665); peel
+      // them so only the missing command remains.
+      let token = match[1].trim();
+      for (;;) {
+        const stripped = token.replace(/^(?:(?:[^\s:'"]+):\s+)?(?:(?:line )?\d+:\s+)?/, "");
+        if (stripped === token || stripped.length === 0) break;
+        token = stripped;
+      }
+      return token;
+    }
   }
   return null;
 }

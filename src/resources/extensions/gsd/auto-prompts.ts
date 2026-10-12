@@ -44,6 +44,12 @@ import {
 } from "./gsd-db.js";
 import { readListedMilestoneIds, readMilestoneSlices, readSliceTasks, type TaskRead } from "./db/lifecycle-read.js";
 import {
+  readMilestoneCloseoutAuthorization,
+  type MilestoneCloseoutAuthorization,
+} from "./db/milestone-closeout-readiness.js";
+import { captureMilestoneVerificationSourceRevision } from "./verification-source-integrity.js";
+import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
+import {
   GATE_REGISTRY,
   assertGateCoverage,
   getGatesForTurn,
@@ -312,8 +318,62 @@ function isValidationFreshOrApplicable(validationContent: string | null, current
     .every((artifact) => coveredArtifacts.has(artifact));
 }
 
-function formatCloseoutReviewInstructions(validationContent: string | null, validationRel: string, currentArtifacts: string[]): string {
+/**
+ * Canonical closeout authorization for the completion prompt, using the same
+ * readers as the closeout consistency gate and the completion guard (#2772).
+ * Returns null when the database cannot authorize the current state — the
+ * prompt then falls back to the Markdown freshness heuristic, which stays the
+ * authority for receipt-absent and receipt-stale milestones.
+ */
+function readPromptCloseoutAuthorization(
+  base: string,
+  mid: string,
+): Extract<MilestoneCloseoutAuthorization, { authorized: true }> | null {
+  if (!isDbAvailable()) return null;
+  try {
+    const artifactBasePath = resolveCanonicalMilestoneRoot(base, mid);
+    const preferences = loadEffectiveGSDPreferences(artifactBasePath)?.preferences;
+    const source = captureMilestoneVerificationSourceRevision(artifactBasePath, preferences);
+    if (!source.ok) return null;
+    const authorization = readMilestoneCloseoutAuthorization({
+      milestoneId: mid,
+      sourceRevision: source.sourceRevision,
+    });
+    return authorization.authorized ? authorization : null;
+  } catch (err) {
+    logWarning("prompt", `closeout authorization lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+function formatCloseoutReviewInstructions(
+  validationContent: string | null,
+  validationRel: string,
+  currentArtifacts: string[],
+  closeoutAuthorization: Extract<MilestoneCloseoutAuthorization, { authorized: true }> | null,
+): string {
   const verdict = validationContent ? extractVerdict(validationContent) : null;
+
+  // #2772: the database receipt is the canonical validation status the
+  // dispatch consistency gate and the completion guard already accepted with
+  // the same readers. The prompt must agree with them: satisfied means
+  // satisfied, and Markdown freshness metadata is readable support, never the
+  // authorization test.
+  if (closeoutAuthorization) {
+    const receipt = closeoutAuthorization.kind === "validated"
+      ? `validation receipt \`${closeoutAuthorization.eventId}\` (revision ${closeoutAuthorization.revision}, tested source revision \`${closeoutAuthorization.testedSourceRevision}\`)`
+      : `validation waiver \`${closeoutAuthorization.waiverId}\` (revision ${closeoutAuthorization.revision}, tested source revision \`${closeoutAuthorization.testedSourceRevision}\`)`;
+    return [
+      "### Validation Satisfied by Current Database Receipt",
+      "",
+      `The canonical database authorizes milestone closeout with the current ${receipt}. Validation is satisfied: do not treat missing Markdown freshness metadata as a gap and do not delegate fresh reviewer/security/tester audits.`,
+      "",
+      validationContent
+        ? `The validation artifact at \`${validationRel}\` remains readable evidence support for success criteria, requirement coverage, verification classes, and cross-slice integration.`
+        : `No Markdown validation artifact is present at \`${validationRel}\`; readable Markdown evidence is optional support and its absence does not block completion.`,
+    ].join("\n");
+  }
+
   const validationFresh = isValidationFreshOrApplicable(validationContent, currentArtifacts);
   if (verdict === "pass" && validationFresh) {
     return [
@@ -3308,7 +3368,12 @@ export async function buildCompleteMilestonePrompt(
     trackPromptContext(contextTelemetry, "slice-summary", "on-demand", onDemandSummaries);
   }
   const validationContext = [
-    formatCloseoutReviewInstructions(validationContent, validationRel, [validationRel, roadmapRel, ...summaryRelPaths]),
+    formatCloseoutReviewInstructions(
+      validationContent,
+      validationRel,
+      [validationRel, roadmapRel, ...summaryRelPaths],
+      readPromptCloseoutAuthorization(base, mid),
+    ),
   ];
   trackPromptContext(contextTelemetry, "validation-review-instructions", "inline", validationContext[0]);
   if (validationContent) {

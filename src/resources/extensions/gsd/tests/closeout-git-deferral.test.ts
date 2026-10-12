@@ -11,6 +11,8 @@ import { AutoSession } from "../auto/session.ts";
 import { DISPATCH_RULES } from "../auto-dispatch.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { storeUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { executeDomainOperation } from "../db/domain-operation.ts";
+import { appendKernelCheckpoint, readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -358,4 +360,118 @@ test("deferred closeout source recapture invalidates a stale passing verdict", (
     closeDatabase();
     cleanup(base);
   }
+});
+
+test("deferred closeout source recapture keeps a settled published attempt intact (#2647)", (t) => {
+  const base = makeTempRepo("gsd-source-recapture-settled-");
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  writeFileSync(join(base, ".gitignore"), ".gsd/\n");
+  writeFileSync(join(base, "tracked.txt"), "verified\n");
+  git(base, "add", ".gitignore", "tracked.txt");
+  git(base, "commit", "-m", "fixture");
+
+  openDatabase(":memory:");
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active" });
+  insertTask({
+    id: "T01",
+    sliceId: "S01",
+    milestoneId: "M001",
+    title: "Add app entrypoint",
+    status: "in_progress",
+  });
+  settleCanonicalTaskForHostVerification(base);
+  const attempt = readLatestTaskAttempt({ milestoneId: "M001", sliceId: "S01", taskId: "T01" });
+  assert.ok(attempt);
+  assert.equal(attempt.nextStage, "verify");
+  const source = captureVerificationSourceSnapshot([{ id: "root", cwd: base }]);
+  assert.equal(source.ok, true, source.ok ? undefined : source.error);
+  recordTaskTechnicalVerdict({
+    invocation: {
+      idempotencyKey: "fixture:source-recapture-settled:verdict",
+      sourceTransport: "internal",
+      actorType: "agent",
+    },
+    attemptId: attempt.attemptId,
+    testedSourceRevision: source.snapshot.aggregateRevision,
+    verdict: "pass",
+    rationale: "Host verification passed before deferred closeout git.",
+    evidence: {
+      evidenceClass: "command",
+      commandOrTool: "npm test",
+      workingDirectory: base,
+      startedAt: "2026-07-12T00:02:00.000Z",
+      endedAt: "2026-07-12T00:02:01.000Z",
+      exitCode: 0,
+      observation: "passed",
+      durableOutputRef: `db://host-verification/${attempt.attemptId}`,
+      environment: { runner: "node-test", platform: "test" },
+    },
+  });
+
+  // Publication advanced the kernel checkpoint chain past verify/route to
+  // closeout and settled (#2647 production trace): the Attempt is settled,
+  // succeeded, and out of reach of invalidateTaskTechnicalPass.
+  const verdictBefore = readTaskTechnicalVerdict(attempt.attemptId);
+  assert.ok(verdictBefore);
+  const db = _getAdapter();
+  assert.ok(db, "DB should be open");
+  const head = db.prepare(`
+    SELECT checkpoint.kernel_checkpoint_id, checkpoint.lifecycle_id
+    FROM workflow_kernel_checkpoints checkpoint
+    WHERE checkpoint.attempt_id = ?
+    ORDER BY checkpoint.sequence DESC
+    LIMIT 1
+  `).get(attempt.attemptId) as { kernel_checkpoint_id: string; lifecycle_id: string };
+  const publicationKey = "fixture:publication:M001-S01-T01";
+  const fence = readDomainOperationFence(publicationKey);
+  executeDomainOperation({
+    operationType: "task.settle.publication-fixture",
+    idempotencyKey: publicationKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "agent",
+    sourceTransport: "internal",
+    payload: { attemptId: attempt.attemptId },
+  }, (context) => {
+    let previous = head.kernel_checkpoint_id;
+    for (const stage of ["route", "closeout", "settled"] as const) {
+      const checkpoint = appendKernelCheckpoint(context, {
+        lifecycleId: head.lifecycle_id,
+        attemptId: attempt.attemptId,
+        nextStage: stage,
+        previousKernelCheckpointId: previous,
+      });
+      previous = checkpoint.kernelCheckpointId;
+    }
+    return {
+      events: [{
+        eventType: "task.settle.publication-fixture",
+        entityType: "task",
+        entityId: "M001/S01/T01",
+        payload: { attemptId: attempt.attemptId },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: "verification/m001/s01/t01",
+        projectionKind: "task-verification",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  assert.equal(readLatestTaskAttempt({ milestoneId: "M001", sliceId: "S01", taskId: "T01" })?.nextStage, "settled");
+
+  writeFileSync(join(base, "tracked.txt"), "rewritten by pre-commit hook\n");
+  assert.equal(recaptureVerifiedSourceAfterDeferredCloseout({
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    basePath: base,
+  }), "unchanged");
+  const published = readTaskTechnicalVerdict(attempt.attemptId);
+  assert.equal(published?.verdict, "pass");
+  assert.equal(published?.verdictId, verdictBefore.verdictId);
+  assert.equal(published?.testedSourceRevision, verdictBefore.testedSourceRevision);
 });

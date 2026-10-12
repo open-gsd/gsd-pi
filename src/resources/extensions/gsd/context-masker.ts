@@ -32,6 +32,23 @@ const MASK_CONTENT_BLOCK = [{ type: "text" as const, text: MASK_PLACEHOLDER }];
 const RESPONSES_MASK_CONTENT_BLOCK = [{ type: "input_text" as const, text: MASK_PLACEHOLDER }];
 const TRUNCATION_MARKER = "\n…[truncated]";
 
+// Full-output exemption marker. await_job
+// (src/resources/extensions/async-jobs/await-tool.ts) serves a job's complete
+// result inline exactly once — both when it wins the within-turn race against
+// the follow-up and when the delivered follow-up was truncated at 2000 chars —
+// and clears the job's `deliveredTruncated` flag on the strength of that
+// serve. Display truncation here would silently re-truncate the recovered
+// output in the provider payload while the flag says fully served, making the
+// tail permanently unreachable ("nothing new to report" on re-await). Text
+// carrying this marker is therefore passed through untruncated and does not
+// consume the per-message budget. Keep synchronized with FULL_OUTPUT_MARKER in
+// await-tool.ts — bundled extensions do not import each other.
+export const FULL_TOOL_RESULT_MARKER = "<!-- async-jobs:full-output -->";
+
+function isFullToolResultText(text: string): boolean {
+  return text.startsWith(FULL_TOOL_RESULT_MARKER);
+}
+
 type TextLikeBlock = {
   type?: string;
   text?: unknown;
@@ -190,6 +207,7 @@ function truncateText(text: string, maxChars: number): string {
 
 function truncateTextBlocks(content: unknown, maxChars: number): unknown {
   if (typeof content === "string") {
+    if (isFullToolResultText(content)) return content;
     return truncateText(content, maxChars);
   }
   if (!Array.isArray(content)) return content;
@@ -200,6 +218,13 @@ function truncateTextBlocks(content: unknown, maxChars: number): unknown {
 
   for (const block of content) {
     if (!isTextLikeBlock(block) || typeof block.text !== "string") {
+      nextBlocks.push(block);
+      continue;
+    }
+
+    if (isFullToolResultText(block.text)) {
+      // Exempt and budget-neutral: a large recovered output must not starve
+      // neighboring results of their own allowance.
       nextBlocks.push(block);
       continue;
     }

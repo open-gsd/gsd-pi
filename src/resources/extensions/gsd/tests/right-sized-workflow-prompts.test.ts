@@ -16,6 +16,8 @@ import {
   isDbAvailable,
   openDatabase,
 } from "../gsd-db.ts";
+import { seedLifecycles } from "./helpers/authority-cutover.ts";
+import { handleValidateMilestone } from "../tools/validate-milestone.ts";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, {
@@ -75,6 +77,56 @@ function validationMetadata(): string {
     "    - `.gsd/milestones/M001/M001-ROADMAP.md`",
     "    - `.gsd/milestones/M001/slices/S01/S01-SUMMARY.md`",
   ].join("\n");
+}
+
+/**
+ * Canonical #2772 fixture: git repo with an adopted M001 lifecycle, so a
+ * recorded passing validation receipt is authorized by the same readers the
+ * dispatch consistency gate and the completion guard consult. `.gsd/` is
+ * gitignored so Markdown projection writes never move the tested source
+ * revision.
+ */
+function makeCanonicalPromptBase(key: string): string {
+  const base = makeRepo({
+    ".gitignore": ".gsd/\n",
+    "index.html": "<!doctype html>\n<title>Test</title>\n",
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Polish static page", status: "active" });
+  insertSlice({ milestoneId: "M001", id: "S01", title: "One", status: "complete", risk: "low", depends: [], sequence: 1 });
+  seedLifecycles(key, [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+  ]);
+  return base;
+}
+
+function writeMilestoneNarrativeFiles(base: string, validation: string): void {
+  const dir = join(base, ".gsd", "milestones", "M001");
+  mkdirSync(join(dir, "slices", "S01"), { recursive: true });
+  writeFileSync(join(dir, "M001-ROADMAP.md"), "# M001\n\n## Slices\n- [x] **S01: One** `risk:low` `depends:[]`\n  > Done\n");
+  writeFileSync(join(dir, "M001-VALIDATION.md"), validation);
+  writeFileSync(join(dir, "slices", "S01", "S01-SUMMARY.md"), "# S01 Summary\n\n**Verification:** passed\n");
+}
+
+async function recordCanonicalPassingValidation(base: string, key: string): Promise<void> {
+  const result = await handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Complete",
+    sliceDeliveryAudit: "Delivered",
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verdictRationale: "Everything passes.",
+  }, base, {
+    invocation: {
+      idempotencyKey: `${key}/validate`,
+      sourceTransport: "internal",
+      actorType: "agent",
+    },
+  });
+  assert.ok(!("error" in result), `canonical passing validation should be recorded: ${JSON.stringify(result)}`);
 }
 
 test("plan-milestone prompt includes tiny untyped project classification and one-slice guidance", async () => {
@@ -305,6 +357,47 @@ test("complete-milestone prompt keeps deeper review path without passing validat
     assert.match(prompt, /Validation Requires Attention/);
     assert.match(prompt, /verdict `needs-attention`/);
     assert.match(prompt, /Use `subagent` for review work needing fresh context/i);
+  } finally {
+    cleanupRepo(base);
+  }
+});
+
+test("complete-milestone prompt trusts a current database receipt without markdown freshness metadata (#2772)", async () => {
+  const key = "right-sized/2772-current";
+  const base = makeCanonicalPromptBase(key);
+  try {
+    // Normal validation projection: verdict: pass with remediation_round and
+    // no validation_metadata — exactly what gsd_validate_milestone renders.
+    writeMilestoneNarrativeFiles(base, "---\nverdict: pass\nremediation_round: 0\n---\n\n# Validation\nAll checks passed.");
+    await recordCanonicalPassingValidation(base, key);
+    const prompt = await buildCompleteMilestonePrompt("M001", "Polish static page", base, "minimal");
+    assert.match(prompt, /Validation Satisfied by Current Database Receipt/);
+    assert.doesNotMatch(prompt, /Validation Requires Attention/);
+    assert.doesNotMatch(prompt, /missing freshness metadata/);
+    // Lowercase "do not delegate" is unique to the receipt-satisfied block;
+    // the template's Closeout Review Mode sentence is capitalized.
+    assert.match(prompt, /do not delegate fresh reviewer\/security\/tester audits/);
+  } finally {
+    cleanupRepo(base);
+  }
+});
+
+test("complete-milestone prompt keeps the freshness gap when the database receipt is stale (#2772)", async () => {
+  const key = "right-sized/2772-stale";
+  const base = makeCanonicalPromptBase(key);
+  try {
+    writeMilestoneNarrativeFiles(base, "---\nverdict: pass\nremediation_round: 0\n---\n\n# Validation\nAll checks passed.");
+    await recordCanonicalPassingValidation(base, key);
+    // Move the tested source forward after validation accepted: the receipt
+    // no longer covers the current tree, so the prompt must not claim
+    // satisfaction and falls back to the Markdown freshness gap.
+    writeFileSync(join(base, "index.html"), "<!doctype html>\n<title>Changed</title>\n");
+    git(base, ["add", "."]);
+    git(base, ["commit", "-m", "change after validation"]);
+    const prompt = await buildCompleteMilestonePrompt("M001", "Polish static page", base, "minimal");
+    assert.match(prompt, /Validation Requires Attention/);
+    assert.match(prompt, /missing freshness metadata/);
+    assert.doesNotMatch(prompt, /Validation Satisfied by Current Database Receipt/);
   } finally {
     cleanupRepo(base);
   }

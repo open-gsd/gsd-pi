@@ -293,6 +293,36 @@ test("pauseAuto preserves artifact retry counts across pause/resume", async () =
   }
 });
 
+test("pauseAuto with no error context does not name a key as the pause origin", async () => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-pause-banner-"));
+  const previousCwd = process.cwd();
+  const notifications: string[] = [];
+
+  autoSession.reset();
+  autoSession.active = true;
+
+  try {
+    process.chdir(base);
+    // `/gsd pause` and the other user-request pauses pass no error context.
+    await pauseAuto({
+      ui: {
+        setStatus: () => {},
+        setWidget: () => {},
+        notify: (message: string) => notifications.push(message),
+      },
+    } as any, undefined, "user_request");
+
+    const banner = notifications.find((message) => message.startsWith("Auto-mode paused"));
+    assert.ok(banner, `expected a pause banner, got: ${JSON.stringify(notifications)}`);
+    assert.doesNotMatch(banner, /escape/i);
+    assert.match(banner, /\/gsd auto to resume/);
+  } finally {
+    autoSession.reset();
+    process.chdir(previousCwd);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("pauseAuto marks active worker as stopping and clears workerId", async () => {
   const base = mkdtempSync(join(tmpdir(), "gsd-pause-worker-stop-"));
   const previousCwd = process.cwd();

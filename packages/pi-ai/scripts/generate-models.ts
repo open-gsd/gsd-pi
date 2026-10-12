@@ -92,7 +92,10 @@ const TOGETHER_REASONING_ONLY_MODELS = new Set([
 	"MiniMaxAI/MiniMax-M2.7",
 ]);
 const TOGETHER_REASONING_EFFORT_MODELS = new Set(["openai/gpt-oss-20b", "openai/gpt-oss-120b"]);
-const TOGETHER_TOGGLE_REASONING_EFFORT_MODELS = new Set(["deepseek-ai/DeepSeek-V4-Pro"]);
+const TOGETHER_TOGGLE_REASONING_EFFORT_MODELS = new Set([
+	"deepseek-ai/DeepSeek-V4-Pro", // retired upstream; kept in case Together restores the id
+	"deepseek-ai/DeepSeek-V4-Pro-0813", // renamed successor, same toggle+effort(low/high/max) surface
+]);
 const TOGETHER_FIXED_REASONING_LEVEL_MAP = {
 	off: null,
 	minimal: null,
@@ -203,7 +206,9 @@ function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
 		modelId.includes("sonnet-5") ||
 		modelId.includes("sonnet.5") ||
 		modelId.includes("sonnet-4-6") ||
-		modelId.includes("sonnet-4.6")
+		modelId.includes("sonnet-4.6") ||
+		modelId.includes("haiku-5-5") ||
+		modelId.includes("haiku-5.5")
 	);
 }
 
@@ -211,8 +216,63 @@ function isSonnet55Model(modelId: string): boolean {
 	return modelId.includes("sonnet-5-5") || modelId.includes("sonnet-5.5");
 }
 
+/**
+ * Claude 5.x models with Sonnet 5.5's full strict request surface (#2645):
+ * they reject `thinking: {type: "disabled"}`, `temperature`, `top_p`/`top_k`,
+ * and forced `tool_choice`.
+ */
+function isClaude55StrictRequestModel(modelId: string): boolean {
+	return (
+		isSonnet55Model(modelId) ||
+		modelId.includes("opus-5-5") ||
+		modelId.includes("opus-5.5") ||
+		modelId.includes("fable-5-1") ||
+		modelId.includes("fable-5.1") ||
+		modelId.includes("fable.5.1")
+	);
+}
+
+/**
+ * Claude Fable 5 (base): rejects `thinking: {type: "disabled"}` and
+ * `temperature` but still accepts forced `tool_choice` (#2645), so it gets
+ * the granular compat flags instead of the strictRequestParams umbrella.
+ */
+function isFable5BaseModel(modelId: string): boolean {
+	return (
+		(modelId.includes("fable-5") || modelId.includes("fable.5")) &&
+		!modelId.includes("fable-5-1") &&
+		!modelId.includes("fable-5.1") &&
+		!modelId.includes("fable.5.1")
+	);
+}
+
+/**
+ * Claude 5.x ids that reject `temperature` when relayed over an
+ * OpenAI-compatible endpoint (Copilot, OpenRouter) (#2645, #2701).
+ */
+function isClaude55RelayTemperatureRejectionModel(modelId: string): boolean {
+	return (
+		modelId.includes("claude") &&
+		(isClaude55StrictRequestModel(modelId) || isFable5BaseModel(modelId) || isHaiku55Model(modelId))
+	);
+}
+
+/**
+ * Claude Haiku 5.5: adaptive-thinking only (`budget_tokens` 400s) and rejects
+ * non-default sampling params (#2701). Unlike the Sonnet/Opus/Fable 5.x tier
+ * it still accepts `thinking: {type: "disabled"}` and forced `tool_choice`,
+ * so it only gets the granular temperature flag, never the strict umbrella.
+ */
+function isHaiku55Model(modelId: string): boolean {
+	return modelId.includes("haiku-5-5") || modelId.includes("haiku-5.5");
+}
+
 function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
 	model.compat = { ...(model.compat as AnthropicMessagesCompat | undefined), ...compat };
+}
+
+function mergeOpenAICompletionsCompat(model: Model<Api>, compat: OpenAICompletionsCompat): void {
+	model.compat = { ...(model.compat as OpenAICompletionsCompat | undefined), ...compat };
 }
 
 function normalizeAnthropicVertexModelId(modelId: string): string {
@@ -279,12 +339,43 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (
 		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
-		isSonnet55Model(model.id)
+		isClaude55StrictRequestModel(model.id)
 	) {
 		// Sonnet 5.5 rejects the legacy request surface with 400s (#2500):
 		// thinking {type:"disabled"} (use "between_tools"), temperature,
-		// top_p/top_k, and forced tool_choice.
+		// top_p/top_k, and forced tool_choice. Opus 5.5 and Fable 5.1 share
+		// the same surface (#2645).
 		mergeAnthropicMessagesCompat(model, { strictRequestParams: true });
+	}
+	if (
+		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
+		isFable5BaseModel(model.id)
+	) {
+		// Fable 5 rejects thinking {type:"disabled"} and temperature but still
+		// accepts forced tool_choice (#2645) — granular flags, not the umbrella.
+		mergeAnthropicMessagesCompat(model, { thinkingOffMode: "between_tools", rejectsTemperature: true });
+	}
+	if (
+		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
+		isHaiku55Model(model.id)
+	) {
+		// Haiku 5.5 is adaptive-thinking only and rejects non-default sampling
+		// params, but still accepts thinking {type:"disabled"} and forced
+		// tool_choice (#2701) — granular temperature flag only.
+		mergeAnthropicMessagesCompat(model, { rejectsTemperature: true });
+	}
+	if (
+		model.api === "openai-completions" &&
+		isClaude55RelayTemperatureRejectionModel(model.id)
+	) {
+		// Claude 5.x relayed through OpenAI-compatible endpoints (Copilot,
+		// OpenRouter) rejects temperature, and the 5.5/5.1 tier also rejects a
+		// forced tool_choice (#2645).
+		const full = isClaude55StrictRequestModel(model.id);
+		mergeOpenAICompletionsCompat(model, {
+			rejectsTemperature: true,
+			...(full ? { rejectsForcedToolChoice: true } : {}),
+		});
 	}
 	if (
 		(model.provider === "minimax" || model.provider === "minimax-cn") &&

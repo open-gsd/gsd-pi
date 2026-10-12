@@ -422,6 +422,13 @@ async function main() {
       join(DIST_TEST_DIR, 'packages', entry.name, 'dist'),
       { skipFile: isCompiledTestArtifact },
     );
+    // Package test fixtures (e.g. mcp-server's workflow-bridge.mjs) are
+    // referenced relative to the compiled test file's import.meta.url, so they
+    // must be mirrored next to the compiled tests too.
+    const pkgTestFixtures = join(packagesDir, entry.name, 'test-fixtures');
+    if (existsSync(pkgTestFixtures)) {
+      await copyAssets(pkgTestFixtures, join(DIST_TEST_DIR, 'packages', entry.name, 'test-fixtures'));
+    }
     const pkgJsonPath = join(packagesDir, entry.name, 'package.json');
     if (existsSync(pkgJsonPath)) {
       await cp(pkgJsonPath, join(DIST_TEST_DIR, 'packages', entry.name, 'package.json'), { force: true });

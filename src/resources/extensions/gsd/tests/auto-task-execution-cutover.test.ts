@@ -1160,6 +1160,81 @@ for (const phaseResult of [
   });
 }
 
+// `/gsd pause` cancels the unit with no error context, so the unit phase breaks
+// with a pause-origin reason. A pause is not a Task failure: the next
+// `/gsd auto` must run the Task again with no `/gsd recover` step.
+for (const pauseReason of ["pause-during-setup", "paused"] as const) {
+  test(`a user pause (${pauseReason}) in execute-task lets the next dispatch run the Task again`, async () => {
+    const { runWithTaskExecutionAttempt } = await subject();
+    const firstDispatchId = seedCanonicalTask();
+    const userPause = { action: "break", reason: pauseReason } as const;
+
+    const pausedResult = await runWithTaskExecutionAttempt(input({
+      dispatchId: firstDispatchId,
+    }), async () => userPause, canonicalDeps());
+
+    assert.deepEqual(pausedResult, userPause, "the loop stops with the pause reason, not a recovery abort");
+    assert.equal(
+      readTerminalTaskRecoveryAbort("M001", "S01", "T01"),
+      null,
+      "the dispatch guard must not see a terminal recovery abort after a user pause",
+    );
+
+    let resumedRuns = 0;
+    const resumedResult = await runWithTaskExecutionAttempt(input({
+      dispatchId: insertClaimedDispatch(2),
+    }), async () => {
+      resumedRuns += 1;
+      return userPause;
+    }, canonicalDeps());
+
+    assert.equal(resumedRuns, 1, "the next dispatch must run the Task again");
+    assert.deepEqual(resumedResult, userPause, "a second pause must stay resumable");
+    const firstAttempt = database().prepare(`
+      SELECT attempt_id FROM workflow_execution_attempts WHERE attempt_number = 1
+    `).get() as { attempt_id: string };
+    assert.deepEqual(database().prepare(`
+      SELECT attempt_number, retry_of_attempt_id
+      FROM workflow_execution_attempts
+      ORDER BY attempt_number
+    `).all(), [
+      { attempt_number: 1, retry_of_attempt_id: null },
+      { attempt_number: 2, retry_of_attempt_id: firstAttempt.attempt_id },
+    ]);
+    assert.deepEqual(database().prepare(`
+      SELECT observation.failure_kind, action.action
+      FROM workflow_failure_observations observation
+      JOIN workflow_recovery_actions action
+        ON action.failure_observation_id = observation.failure_observation_id
+      ORDER BY observation.project_revision
+    `).all(), [
+      { failure_kind: "user-pause", action: "retry" },
+      { failure_kind: "user-pause", action: "retry" },
+    ]);
+  });
+}
+
+test("a user pause does not use the retry budget of transient execution failures", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const firstDispatchId = seedCanonicalTask();
+  const userPause: UnitPhaseResult = { action: "break", reason: "pause-during-setup" };
+  const transientFailure: UnitPhaseResult = { action: "break", reason: "session-timeout" };
+  const transientRetry: UnitPhaseResult = { action: "retry", reason: "task-recovery-retry" };
+  const steps = [
+    { phaseResult: userPause, expected: userPause },
+    { phaseResult: userPause, expected: userPause },
+    { phaseResult: transientFailure, expected: transientRetry },
+    { phaseResult: transientFailure, expected: transientRetry },
+  ];
+
+  for (const [index, step] of steps.entries()) {
+    const result = await runWithTaskExecutionAttempt(input({
+      dispatchId: index === 0 ? firstDispatchId : insertClaimedDispatch(index + 1),
+    }), async () => step.phaseResult, canonicalDeps());
+    assert.deepEqual(result, step.expected, `dispatch ${index + 1}`);
+  }
+});
+
 test("a durable abort overrides an executor retry", async () => {
   const { runWithTaskExecutionAttempt } = await subject();
   const domain = fakeDomain();

@@ -33,7 +33,6 @@ import {
   findStaleWorkerForProject,
   getAllAutoWorkers,
   markWorkerStopping,
-  markWorkerStoppingByPid,
   type AutoWorkerRow,
 } from "./db/auto-workers.js";
 import { forceReleaseLeasesForWorker } from "./db/milestone-leases.js";
@@ -249,35 +248,59 @@ export function clearLock(basePath: string): void {
   }
   try {
     const projectRoot = normalizeRealPath(basePath);
+
+    // Full cleanup for a worker already identified as dead by the calling
+    // route: stop -> settle -> release -> drop the session pointer. The
+    // finally chain guarantees lease release and KV cleanup even when
+    // settlement throws (#2441).
+    function cleanupDeadWorker(workerId: string): void {
+      try {
+        markWorkerStopping(workerId);
+        settleRunningAttemptsForWorker(workerId);
+      } finally {
+        try {
+          forceReleaseLeasesForWorker(workerId);
+        } finally {
+          deleteRuntimeKv("worker", workerId, SESSION_FILE_KV_KEY);
+        }
+      }
+    }
+
     const staleWorker = findStaleWorkerForProject(projectRoot);
     if (staleWorker) {
-      markWorkerStopping(staleWorker.worker_id);
-      forceReleaseLeasesForWorker(staleWorker.worker_id);
-      deleteRuntimeKv("worker", staleWorker.worker_id, SESSION_FILE_KV_KEY);
+      cleanupDeadWorker(staleWorker.worker_id);
       return;
     }
-    // #2532: only a dead holder may be marked stopping here. The legacy lock
+    // #2532: only a dead holder may be cleaned up here. The legacy lock
     // is frequently this process's own unit lock (step-mode exit path), and
     // marking our own live worker row 'stopping' kills the heartbeat and
     // status-gated paths for the rest of the process. isLockProcessAlive
     // treats our own pid as alive (#2470), matching the !isPidAlive guards
     // on the markWorkerStoppingByPid call sites in session-lock.ts.
     if (legacyLock?.pid && !isLockProcessAlive(legacyLock)) {
-      markWorkerStoppingByPid(projectRoot, legacyLock.pid);
-      const workerByLegacyPid = getAllAutoWorkers().find(
+      // Process every matching worker row, not just the oldest: repeated
+      // sessions can leave several rows sharing one dead PID and project root,
+      // and the oldest need not own the running Attempt or lease.
+      const workersByLegacyPid = getAllAutoWorkers().filter(
         (w) =>
           w.pid === legacyLock.pid
           && normalizeRealPath(w.project_root_realpath) === projectRoot,
       );
-      if (workerByLegacyPid) forceReleaseLeasesForWorker(workerByLegacyPid.worker_id);
+      for (const workerByLegacyPid of workersByLegacyPid) {
+        try {
+          cleanupDeadWorker(workerByLegacyPid.worker_id);
+        } catch {
+          // Best-effort per row; a failure on one historical row must not
+          // prevent cleanup of the remaining matching rows.
+        }
+      }
     }
     const worker = findActiveWorkerForCurrentProcess(projectRoot);
     if (worker) deleteRuntimeKv("worker", worker.worker_id, SESSION_FILE_KV_KEY);
 
     const stale = findStaleWorkerForProject(projectRoot);
     if (stale) {
-      markWorkerStopping(stale.worker_id);
-      deleteRuntimeKv("worker", stale.worker_id, SESSION_FILE_KV_KEY);
+      cleanupDeadWorker(stale.worker_id);
     }
   } catch {
     // Best-effort.

@@ -11,19 +11,22 @@
  * by tests/progress-from-db.test.ts in the extension).
  */
 
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 
+import { assertProgressPayload } from "../../scripts/mcp-host-smoke.mjs";
+import { createWorkflowAuthorityFixture } from "../resources/extensions/gsd/tests/workflow-authority-fixture.ts";
 import {
   runReadCli,
   type DbProgressModuleImporter,
   type DbProgressReader,
   type ReadCliSchemaPreflight,
 } from "../read-cli.ts";
-import { closeDatabase, openDatabase } from "../resources/extensions/gsd/gsd-db.ts";
+import { closeDatabase, openDatabase, _getAdapter } from "../resources/extensions/gsd/gsd-db.ts";
 import {
   openWorkflowDatabaseIsolated,
   resolveProjectRootDbPath,
@@ -247,4 +250,102 @@ test("gsd read progress preserves DB read metadata when the DB reader supplies i
   assert.equal(run.exitCode, 0);
   const envelope = JSON.parse(run.stdout);
   assert.deepEqual(envelope.data.readMetadata, { source: "database", authority: "db-authoritative" });
+});
+
+// ---------------------------------------------------------------------------
+// Composition with the production canonical smoke assertions (#2669): the
+// real registered CLI (fresh subprocess of the built entry, no injected
+// seams) feeds its actual payload into the same assertions the MCP host
+// smoke probe enforces.
+// ---------------------------------------------------------------------------
+
+// Resolve the repo root from either the source tree or the mirrored
+// dist-test tree, so the spawned CLI entry is the real built one.
+function findRepoRoot(): string {
+  let dir = import.meta.dirname;
+  for (let depth = 0; depth < 10 && dir; depth++) {
+    if (existsSync(join(dir, "pnpm-workspace.yaml"))) return dir;
+    dir = join(dir, "..");
+  }
+  throw new Error("repo root not found from " + import.meta.dirname);
+}
+
+function runRealCli(projectDir: string): { status: number; stdout: string; stderr: string } {
+  const entry = resolve(findRepoRoot(), "dist/bootstrap.js");
+  const result = spawnSync(
+    process.execPath,
+    [entry, "read", "progress", "--json", "--project", projectDir],
+    { encoding: "utf8", timeout: 60_000, env: { ...process.env, GSD_NON_INTERACTIVE: "1" } },
+  );
+  return { status: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+test("composition: real DB-backed CLI read passes the production smoke assertion", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  t.after(() => fixture.cleanup());
+  writeFileSync(
+    join(fixture.root, ".gsd", "STATE.md"),
+    "**Active Milestone:** M999: Projection Only\n**Phase:** plan\n",
+  );
+
+  const run = runRealCli(fixture.root);
+  assert.equal(run.status, 0, `CLI read failed: ${run.stderr}`);
+  const progress = assertProgressPayload(JSON.parse(run.stdout).data);
+  assert.equal(progress.activeMilestone?.id, "M001");
+  assert.equal(progress.activeMilestone?.title, "Authority Fixture");
+});
+
+test("composition: a valid empty real DB returns DB authority, not the STATE.md projection", async (t) => {
+  const base = makeProject();
+  writeFileSync(
+    join(base, ".gsd", "STATE.md"),
+    "# Project State\n\n**Active Milestone:** M999: Projection Only\n**Phase:** planning\n",
+  );
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+  closeDatabase();
+
+  const run = runRealCli(base);
+  assert.equal(run.status, 0, `CLI read failed: ${run.stderr}`);
+  const payload = JSON.parse(run.stdout).data;
+  assert.deepEqual(payload.readMetadata, { source: "database", authority: "db-authoritative" });
+  const progress = assertProgressPayload(payload);
+  assert.equal(progress.activeMilestone, null, "empty DB must not report the STATE.md milestone");
+  assert.equal(progress.milestones.total, 0);
+});
+
+test("composition: the real projection fallback is labelled and rejected by canonical validation", async (t) => {
+  const base = makeProject();
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const run = runRealCli(base);
+  assert.equal(run.status, 0);
+  const payload = JSON.parse(run.stdout).data;
+  assert.deepEqual(payload.readMetadata, { source: "projection", authority: "projection-fallback" });
+  // A bare STATE.md projection can fail on nextAction before provenance is
+  // inspected; the strict provenance rejection (projection source must be
+  // refused) is pinned in scripts/__tests__/mcp-host-smoke.test.mjs. Either
+  // failure means the compatibility fallback cannot pass canonical validation.
+  assert.throws(
+    () => assertProgressPayload(payload),
+    /readMetadata\.source: expected database|nextAction: expected non-empty string/,
+    "canonical smoke validation must reject the compatibility projection read",
+  );
+});
+
+test("composition: a query failure after a successful open fails closed with no payload", async (t) => {
+  const base = makeProject();
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+  const adapter = _getAdapter();
+  assert.ok(adapter, "adapter should be available");
+  // Schema damage is healed by a fresh open; deleting the authority row is
+  // not, so the read fails after a successful open instead of degrading.
+  adapter.prepare("DELETE FROM project_authority").run();
+  closeDatabase();
+
+  const run = runRealCli(base);
+  assert.equal(run.status, 1);
+  assert.equal(run.stdout, "", "no stale projection payload may be emitted after a query failure");
+  assert.ok(run.stderr.includes("DB-backed progress read failed"), `stderr should explain the failure, got: ${run.stderr}`);
 });

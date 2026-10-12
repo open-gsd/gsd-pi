@@ -157,6 +157,10 @@ const TRANSIENT_PHASE_FAILURE_REASONS = new Set([
   "unit-aborted-pause",
 ]);
 
+// Unit-phase break reasons for a pause that the user asked for (`/gsd pause`):
+// the unit was cancelled with auto-mode paused and no error context.
+const USER_PAUSE_PHASE_REASONS = new Set(["pause-during-setup", "paused"]);
+
 function parseTaskIdentity(unitId: string): ClaimTaskAttemptInput["task"] {
   const parts = unitId.split("/");
   if (parts.length !== 3 || parts.some((part) => part.trim().length === 0)) {
@@ -335,6 +339,13 @@ function taskRecoveryClassification(
       failureKind: "transient-execution",
       action: "retry",
       rationale: "Retry the bounded transient Task execution failure.",
+    };
+  }
+  if (failureClass === "executor-break" && USER_PAUSE_PHASE_REASONS.has(reason)) {
+    return {
+      failureKind: "user-pause",
+      action: "retry",
+      rationale: "The user paused auto-mode. Run /gsd auto to run the Task again.",
     };
   }
   if (failureClass === "verification-failed") {
@@ -671,7 +682,18 @@ export async function runWithTaskExecutionAttempt(
     failureReason(result),
     deps,
   );
-  return applyRecoveryDecision(recovery);
+  const decision = applyRecoveryDecision(recovery);
+  // A user pause must stop the loop. Its durable retry route only authorizes
+  // the Attempt that the next `/gsd auto` claims; a loop-level retry would
+  // also count as a finalize-retry recurrence.
+  if (
+    decision.action === "retry" &&
+    result.action === "break" &&
+    USER_PAUSE_PHASE_REASONS.has(result.reason)
+  ) {
+    return result;
+  }
+  return decision;
 }
 
 export async function publishVerifiedTaskExecution(

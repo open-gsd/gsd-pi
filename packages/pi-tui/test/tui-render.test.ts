@@ -1047,6 +1047,484 @@ describe("TUI shrink scrollback safety (issue #2541)", () => {
 	});
 });
 
+describe("TUI shrink scrollback safety follow-ups (issues #2582 / #2635)", () => {
+	function countInBuffer(terminal: VirtualTerminal, line: string): number {
+		return terminal.getScrollBuffer().filter((row) => row === line).length;
+	}
+
+	function assertExactlyOnce(terminal: VirtualTerminal, lines: string[]): void {
+		const buffer = terminal.getScrollBuffer();
+		for (const line of lines) {
+			assert.strictEqual(
+				countInBuffer(terminal, line),
+				1,
+				`${JSON.stringify(line)} must appear exactly once in the terminal buffer: ${JSON.stringify(buffer)}`,
+			);
+		}
+	}
+
+	// #2582: GSD finalizes the reply header (adds its timestamp) in the same
+	// frame that tears down the pinned zone. A line above the retained screen
+	// top is already in scrollback under both layouts and no render path can
+	// repaint it, so the change must not send the shrink back to the path that
+	// re-emits the overlap. "Line 4" sits just above the overlap (Line 5,
+	// Line 6) — the case a fixed boundary window got wrong.
+	const scrollbackChanges: Array<[string, string]> = [
+		["the header", "HEADER"],
+		["a line above the overlap", "Line 4"],
+	];
+	for (const [where, changed] of scrollbackChanges) {
+		for (const forced of [true, false]) {
+			it(`${forced ? "forced" : "unforced"} shrink keeps the flushed top when ${where} changed in scrollback`, async (t) => {
+				const terminal = new VirtualTerminal(40, 5);
+				const tui = new TUI(terminal);
+				const component = new TestComponent();
+				tui.addChild(component);
+				const transcript = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+				component.lines = ["HEADER", ...transcript, "PIN 0", "PIN 1"];
+				tui.start();
+				await terminal.waitForRender();
+				t.after(() => tui.stop());
+				assertExactlyOnce(terminal, transcript);
+
+				const finalized = ["HEADER", ...transcript].map((line) =>
+					line === changed ? `${line} 10:56` : line,
+				);
+				component.lines = finalized;
+				tui.requestRender(forced);
+				await terminal.waitForRender();
+
+				assertExactlyOnce(
+					terminal,
+					transcript.filter((line) => line !== changed),
+				);
+				assert.ok(
+					terminal.getViewport().join("\n").includes("Line 9"),
+					`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+				);
+
+				component.lines = [...finalized, "Line 10", "Line 11"];
+				tui.requestRender();
+				await terminal.waitForRender();
+
+				assertExactlyOnce(
+					terminal,
+					[...transcript.filter((line) => line !== changed), "Line 10", "Line 11"],
+				);
+				assert.ok(
+					terminal.getViewport().join("\n").includes("Line 11"),
+					`appended content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+				);
+			});
+		}
+	}
+
+	// #2635: small non-forced shrinks inside the visible window leave
+	// flushedLineCount / previousViewportTop at the old screen top. A later
+	// forced render whose own change is a deletion inside the overlap then
+	// fails the unchanged-overlap check, repaints from the new viewport top,
+	// and re-emits lines that are already in scrollback. Minimized by delta
+	// debugging from a random-event fuzzer (13 events).
+	it("forced repaint after small in-window shrinks keeps the flushed top", async (t) => {
+		const rows = 40;
+		const terminal = new VirtualTerminal(100, rows);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		let nextId = 0;
+		const body: number[] = Array.from({ length: 50 }, () => nextId++);
+		const lineFor = (id: number): string => `T${String(id).padStart(4, "0")} transcript line`;
+		component.render = (_width: number) => [
+			...body.map(lineFor),
+			"EDITOR 1",
+			"EDITOR 2",
+			"EDITOR 3",
+			"FOOTER 1",
+			"FOOTER 2",
+		];
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		const lastBodyId = () => body[body.length - 1];
+
+		const steps: Array<"append" | { fromEnd: number; count: number; force?: boolean }> = [
+			"append",
+			"append",
+			{ fromEnd: 16, count: 3 },
+			{ fromEnd: 3, count: 3 },
+			"append",
+			"append",
+			{ fromEnd: 8, count: 4 },
+			"append",
+			{ fromEnd: 18, count: 3 },
+			"append",
+			{ fromEnd: 7, count: 4 },
+			"append",
+			{ fromEnd: 24, count: 1, force: true },
+		];
+		for (const step of steps) {
+			if (step === "append") {
+				body.push(nextId++);
+			} else {
+				body.splice(Math.max(0, body.length - step.fromEnd), step.count);
+			}
+			tui.requestRender(step !== "append" && step.force === true);
+			await terminal.waitForRender();
+		}
+
+		// Nothing already flushed may be re-emitted...
+		const buffer = terminal.getScrollBuffer();
+		const counts = new Map<string, number>();
+		for (const line of buffer) {
+			if (/^T\d{4} transcript line$/.test(line)) {
+				counts.set(line, (counts.get(line) ?? 0) + 1);
+			}
+		}
+		const duplicated = [...counts].filter(([, n]) => n > 1).map(([line]) => line);
+		assert.deepStrictEqual(duplicated, [], `duplicated transcript lines: ${duplicated.join(", ")}`);
+		// ...and every line of the final frame must have survived exactly once.
+		for (const id of body) {
+			assert.strictEqual(
+				counts.get(lineFor(id)) ?? 0,
+				1,
+				`${lineFor(id)} must appear exactly once in the terminal buffer: ${JSON.stringify(buffer)}`,
+			);
+		}
+		assert.ok(
+			terminal.getViewport().join("\n").includes(lineFor(lastBodyId())),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		// Growth after the aligned repaint: the flushed mark must follow the
+		// aligned screen top, or a later clean/forced repaint would skip the
+		// screen-top row and destroy it.
+		for (let i = 0; i < 3; i++) {
+			body.push(nextId++);
+			tui.requestRender();
+			await terminal.waitForRender();
+		}
+		body.push(nextId++);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const bufferAfterGrowth = terminal.getScrollBuffer();
+		const countsAfterGrowth = new Map<string, number>();
+		for (const line of bufferAfterGrowth) {
+			if (/^T\d{4} transcript line$/.test(line)) {
+				countsAfterGrowth.set(line, (countsAfterGrowth.get(line) ?? 0) + 1);
+			}
+		}
+		const duplicatedAfterGrowth = [...countsAfterGrowth].filter(([, n]) => n > 1).map(([line]) => line);
+		assert.deepStrictEqual(
+			duplicatedAfterGrowth,
+			[],
+			`duplicated transcript lines after growth: ${duplicatedAfterGrowth.join(", ")}`,
+		);
+		for (const id of body) {
+			assert.strictEqual(
+				countsAfterGrowth.get(lineFor(id)) ?? 0,
+				1,
+				`${lineFor(id)} must appear exactly once after growth: ${JSON.stringify(bufferAfterGrowth)}`,
+			);
+		}
+		assert.ok(
+			terminal.getViewport().join("\n").includes(lineFor(lastBodyId())),
+			`latest content stays visible after growth: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	// The aligned repaint must verify the shift is confined below an identical,
+	// non-blank block. Repeated content must not let the seam pair with the
+	// wrong occurrence: this shape has two valid-looking seams, and only the
+	// shallow one keeps every B visible.
+	it("does not align the kept top through repeated content", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const before = ["X", "A", "B1", "B2", "B3", "C", "D", "E"];
+		component.lines = before;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// Delete X and A above the screen (kept top 3): the frame shifts by two.
+		// The shift cannot be verified here — an aligned top that keeps all
+		// three B lines visible would fall at the viewport top itself, outside
+		// the overlap bound — so the renderer must fall back to the bounded
+		// refill rather than align through repeated content. No surviving line
+		// may be lost.
+		const after = ["B1", "B2", "B3", "C", "D", "E"];
+		component.lines = after;
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		for (const line of after) {
+			assert.ok(
+				buffer.includes(line),
+				`${JSON.stringify(line)} must survive the shift: ${JSON.stringify(buffer)}`,
+			);
+		}
+		assert.ok(
+			terminal.getViewport().join("\n").includes("E"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	// Repetition must not let a shift hide inside an overlap of identical
+	// lines: same-index equality then cannot rule out a shift, and keeping the
+	// retained top would abandon rows whose occurrences the scrollback cannot
+	// back. The renderer must fall back to the bounded refill, which shows
+	// every occurrence of the repeated value the final frame holds.
+	it("does not keep the flushed top through a repeated-line window", async (t) => {
+		const terminal = new VirtualTerminal(40, 6);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const before = ["X", "Y", "C", "B", "D", "B", "B", "E", "F", "G", "H"];
+		component.lines = before;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// Delete X and Y above the screen; the B rows around the boundary would
+		// let a shift masquerade as an unchanged overlap.
+		const after = ["C", "B", "D", "B", "B", "E", "F", "G", "H"];
+		component.lines = after;
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		const expectedCounts = new Map<string, number>([
+			["C", 1],
+			["B", 3],
+			["D", 1],
+			["E", 1],
+			["F", 1],
+			["G", 1],
+			["H", 1],
+		]);
+		for (const [line, expected] of expectedCounts) {
+			assert.ok(
+				buffer.filter((row) => row === line).length >= expected,
+				`${JSON.stringify(line)} must appear at least ${expected} time(s): ${JSON.stringify(buffer)}`,
+			);
+		}
+		assert.ok(
+			terminal.getViewport().join("\n").includes("H"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	// Periodic content (an alternating two-line pattern) must not let a
+	// two-row shift masquerade as an unchanged overlap either: the window
+	// then matches at shift 2, and keeping the retained top would show fewer
+	// A/B copies than the final frame holds. Applies to forced and unforced
+	// renders alike.
+	for (const forced of [true, false]) {
+		it(`${forced ? "forced" : "unforced"} render does not keep the flushed top through a periodic window`, async (t) => {
+			const terminal = new VirtualTerminal(40, 8);
+			const tui = new TUI(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const before = ["X", "Y", "A", "B", "A", "B", "A", "B", "C", "D", "E", "F"];
+			component.lines = before;
+			tui.start();
+			await terminal.waitForRender();
+			t.after(() => tui.stop());
+
+			// Delete X and Y above the screen: the A/B window matches itself at
+			// shift 2, so retention must be rejected and the bounded refill
+			// must show every occurrence the final frame holds.
+			const after = ["A", "B", "A", "B", "A", "B", "C", "D", "E", "F"];
+			component.lines = after;
+			tui.requestRender(forced);
+			await terminal.waitForRender();
+
+			const buffer = terminal.getScrollBuffer();
+			for (const [line, expected] of new Map<string, number>([
+				["A", 3],
+				["B", 3],
+				["C", 1],
+				["D", 1],
+				["E", 1],
+				["F", 1],
+			])) {
+				assert.ok(
+					buffer.filter((row) => row === line).length >= expected,
+					`${JSON.stringify(line)} must appear at least ${expected} time(s): ${JSON.stringify(buffer)}`,
+				);
+			}
+			assert.ok(
+				terminal.getViewport().join("\n").includes("F"),
+				`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+			);
+		});
+	}
+
+	// An above-screen edit poisons the cache relative to physical scrollback
+	// (the edit is hidden by design). A later shrink must not treat the
+	// poisoned cache as provenance for occurrence backing: the accepted path
+	// here is the bounded refill, which re-shows every value the final frame
+	// holds.
+	it("does not retain through a cache poisoned by a prior above-screen edit", async (t) => {
+		const terminal = new VirtualTerminal(40, 10);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const ts = Array.from({ length: 6 }, (_, i) => `t${i} tail line`);
+		component.lines = ["X", "D", "D", "D", "C", "D", "D", "C", "D", "D", ...ts];
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// Turn 1: the first row gains its timestamp (above-screen edit) while
+		// the frame also shrinks — the accepted keep-flushed-top case.
+		component.lines = ["C(t)", "D", "D", "D", "C", "D", "D", "C", "D", "D", ...ts.slice(0, 5)];
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		// Turn 2: delete the first three rows and shrink again. Neither
+		// retention path may anchor on the poisoned cache.
+		for (const forced of [true, false]) {
+			component.lines = ["C", "D", "D", "C", "D", "D", "C", "D", "D", ...ts.slice(0, 5)];
+			tui.requestRender(forced);
+			await terminal.waitForRender();
+
+			const buffer = terminal.getScrollBuffer();
+			assert.ok(
+				buffer.filter((row) => row === "C").length >= 2,
+				`both C rows must survive a ${forced ? "forced" : "unforced"} render: ${JSON.stringify(buffer)}`,
+			);
+			// "C(t)" is the turn-1 above-screen edit: hidden by design (#2582).
+			// t5 was removed in turn 1 as well.
+			for (const line of ts.slice(0, 5)) {
+				assert.ok(
+					buffer.includes(line),
+					`${JSON.stringify(line)} must survive: ${JSON.stringify(buffer)}`,
+				);
+			}
+			assert.ok(
+				terminal.getViewport().join("\n").includes("t4"),
+				`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+			);
+		}
+	});
+});
+
+describe("TUI retireScreenToScrollback (issue #2637)", () => {
+	function assertInScrollbackOnce(terminal: VirtualTerminal, lines: string[]): void {
+		const buffer = terminal.getScrollBuffer();
+		for (const line of lines) {
+			assert.strictEqual(
+				buffer.filter((row) => row === line).length,
+				1,
+				`${JSON.stringify(line)} must survive exactly once in scrollback: ${JSON.stringify(buffer)}`,
+			);
+		}
+	}
+
+	it("scrolls the previous screen into scrollback when the transcript is discarded", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const summary = Array.from({ length: 8 }, (_, i) => `S${String(i).padStart(2, "0")} summary line`);
+		component.lines = summary;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// New session: the transcript is discarded and the next frame is short.
+		// Both happen before the coalesced render fires.
+		tui.retireScreenToScrollback();
+		component.lines = ["New session"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertInScrollbackOnce(terminal, summary);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("New session"),
+			`new frame renders after the retire: ${JSON.stringify(terminal.getViewport())}`,
+		);
+		assert.ok(
+			!terminal.getViewport().join("\n").includes("S0"),
+			`previous content must not stay on screen: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("keeps a short frame that never overflowed the screen", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const summary = Array.from({ length: 3 }, (_, i) => `S${String(i).padStart(2, "0")} short line`);
+		component.lines = summary;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		tui.retireScreenToScrollback();
+		component.lines = ["New session"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertInScrollbackOnce(terminal, summary);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("New session"),
+			`new frame renders after the retire: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("is a no-op when nothing was rendered, and the TUI keeps working", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		t.after(() => tui.stop());
+
+		tui.retireScreenToScrollback();
+
+		component.lines = ["After"];
+		tui.start();
+		await terminal.waitForRender();
+		assert.ok(
+			terminal.getViewport().join("\n").includes("After"),
+			`TUI renders normally after a no-op retire: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("retires a screen whose forced render is still pending", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const summary = Array.from({ length: 8 }, (_, i) => `S${String(i).padStart(2, "0")} summary line`);
+		component.lines = summary;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// A forced render empties previousLines immediately while the painted
+		// screen stays up until the next tick; retiring in that window must
+		// still scroll the painted rows into scrollback.
+		tui.requestRender(true);
+		tui.retireScreenToScrollback();
+		component.lines = ["New session"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertInScrollbackOnce(terminal, summary);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("New session"),
+			`new frame renders after the retire: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+});
+
 describe("TUI differential rendering", () => {
 	it("tracks cursor correctly when content shrinks with unchanged remaining lines", async () => {
 		const terminal = new VirtualTerminal(40, 10);

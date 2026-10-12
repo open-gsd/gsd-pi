@@ -1905,6 +1905,105 @@ test("ADR-017 (#414): a disk-only slice summary remains a blocker", async (t) =>
   assert.match(result.blockers.join("\n"), /Artifact\/DB status drift/);
 });
 
+test("slice-level reopen exemption: an orphaned slice SUMMARY artifact row does not wedge a reopened slice (mirrors #1771/#1983 at the slice level)", async (t) => {
+  // gsd_slice_reopen clears slices.full_summary_md and quarantines the
+  // on-disk SUMMARY file but does not delete the slice-level `artifacts`
+  // table row, so a completed-then-reopened slice is left with an orphaned
+  // SUMMARY artifact row pointing at a file that no longer exists on disk.
+  // Without the reopen-history exemption this looks identical to genuine
+  // artifact/DB divergence and wedges re-execution of the reopened slice.
+  const base = mkdtempSync(join(tmpdir(), "gsd-slice-reopen-orphan-artifact-"));
+  t.after(() => cleanup(base));
+
+  mkdirSync(join(base, ".gsd", "phases", "01-test"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S15", milestoneId: "M001", title: "Slice", status: "in_progress" });
+  insertTask({ id: "T01", sliceId: "S15", milestoneId: "M001", title: "Task", status: "pending" });
+  insertArtifact({
+    path: join(base, ".gsd", "phases", "01-test", "01-15-SUMMARY.md"),
+    artifact_type: "SUMMARY",
+    milestone_id: "M001",
+    slice_id: "S15",
+    task_id: null,
+    full_content: "# S15 Summary\n\nStale after reopen.\n",
+  });
+  // Production ordering: the artifact row is written when the slice completes
+  // and the slice.reopened event comes later. insertArtifact stamps
+  // imported_at with wall-clock now, so backdate the row to before the
+  // reopen event seeded below — only rows that predate the latest reopen are
+  // dead bookkeeping (PR #2674 review).
+  const adapter0 = _getAdapter();
+  assert.ok(adapter0, "DB must be open before backdating the artifact row");
+  adapter0.prepare(
+    `UPDATE artifacts SET imported_at = :imported_at WHERE slice_id = 'S15' AND task_id IS NULL`,
+  ).run({ ":imported_at": "2026-10-06T14:00:00.000Z" });
+  // No file written to disk — the reopen quarantined it — and no reopen
+  // history recorded yet: this must still be reported as real drift.
+
+  const stateBefore = makeState({ activeMilestone: { id: "M001", title: "Milestone" } });
+  const driftsBefore = detectArtifactDbDrift(stateBefore, { basePath: base, state: stateBefore });
+  assert.equal(
+    driftsBefore.filter((d) => d.kind === "artifact-db-status-divergence" && d.sliceId === "S15" && !("taskId" in d && d.taskId)).length,
+    1,
+    "without reopen history, an orphaned slice SUMMARY row must still be reported as drift",
+  );
+
+  // Seed the slice.reopened domain event the production reopenSlice()
+  // operation writes (slice-lifecycle-domain-operation.ts), proving the
+  // slice's current lifecycle head is an explicit reopen.
+  const adapter = _getAdapter();
+  assert.ok(adapter, "DB must be open before seeding a domain event");
+  adapter.prepare(
+    `INSERT INTO workflow_operations (
+       operation_id, project_id, operation_type, idempotency_key,
+       expected_revision, resulting_revision,
+       expected_authority_epoch, resulting_authority_epoch,
+       actor_type, source_transport, request_hash, created_at
+     )
+     SELECT :op_id, project_id, 'slice.reopen', :op_id,
+            0, 1, 0, 0, 'test', 'test', 'hash-slice-reopen', :created_at
+     FROM project_authority WHERE singleton = 1`,
+  ).run({ ":op_id": "op-slice-reopen-S15", ":created_at": "2026-10-06T14:18:45.000Z" });
+  adapter.prepare(
+    `INSERT INTO workflow_domain_events (
+       event_id, operation_id, event_index, project_id, project_revision,
+       authority_epoch, event_type, entity_type, entity_id, payload_json, created_at
+     )
+     SELECT :event_id, :op_id, 0, project_id, 1,
+            0, 'slice.reopened', 'slice', :entity_id, '{}', :created_at
+     FROM project_authority WHERE singleton = 1`,
+  ).run({
+    ":event_id": "event-slice-reopen-S15",
+    ":op_id": "op-slice-reopen-S15",
+    ":entity_id": "M001/S15",
+    ":created_at": "2026-10-06T14:18:45.000Z",
+  });
+
+  const stateAfter = makeState({ activeMilestone: { id: "M001", title: "Milestone" } });
+  const driftsAfter = detectArtifactDbDrift(stateAfter, { basePath: base, state: stateAfter });
+  assert.equal(
+    driftsAfter.filter((d) => d.kind === "artifact-db-status-divergence" && d.sliceId === "S15" && !("taskId" in d && d.taskId)).length,
+    0,
+    "with reopen history and no file on disk, the pre-reopen orphaned slice SUMMARY row must be exempted as dead bookkeeping",
+  );
+
+  // PR #2674 review regression: a row imported AFTER the latest reopen with
+  // no file on disk (for example a post-reopen gsd_summary_save whose
+  // projection write failed) is a genuine divergence, not reopen bookkeeping,
+  // and must be flagged again.
+  adapter.prepare(
+    `UPDATE artifacts SET imported_at = :imported_at WHERE slice_id = 'S15' AND task_id IS NULL`,
+  ).run({ ":imported_at": "2026-10-06T15:00:00.000Z" });
+  const statePostReopen = makeState({ activeMilestone: { id: "M001", title: "Milestone" } });
+  const driftsPostReopen = detectArtifactDbDrift(statePostReopen, { basePath: base, state: statePostReopen });
+  assert.equal(
+    driftsPostReopen.filter((d) => d.kind === "artifact-db-status-divergence" && d.sliceId === "S15" && !("taskId" in d && d.taskId)).length,
+    1,
+    "a slice SUMMARY row imported after the latest reopen with no file on disk must be flagged as genuine divergence",
+  );
+});
+
 test("completedMilestoneReopenedGuidance tells active milestones to finish closeout", async () => {
   const { completedMilestoneReopenedGuidance } = await import(
     "../state-reconciliation/drift/artifact-db.ts"

@@ -38,7 +38,7 @@ dynamic_routing:
 dynamic_routing:
   enabled: true
   tier_models:                    # 可选：为每个 tier 显式指定 model
-    light: claude-haiku-4-5
+    light: claude-haiku-5-5
     standard: claude-sonnet-4-6
     heavy: claude-opus-4-6
   escalate_on_failure: true       # task 失败时提升 tier（默认：true）
@@ -52,7 +52,7 @@ dynamic_routing:
 
 覆盖每个 tier 默认使用的 model。如果省略，router 会使用内置 capability mapping，它已经知道一些常见 model 家族的大致定位：
 
-- **Light：** `claude-haiku-4-5`、`gpt-4o-mini`、`gemini-2.0-flash`
+- **Light：** `claude-haiku-5-5`、`claude-haiku-4-5`、`gpt-4o-mini`、`gemini-2.0-flash`
 - **Standard：** `claude-sonnet-4`、`claude-sonnet-4-5`、`claude-sonnet-4-6`、`gpt-4o`、`gemini-2.5-pro`
 - **Heavy：** `claude-opus-4-5`、`claude-opus-4-6`、`claude-opus-4-7`、`claude-opus-4-8`、`gpt-5`、`o3`
 
@@ -292,6 +292,7 @@ Router 内置了一张常见 models 的成本表，用于跨 provider 成本比�
 
 | Model | Input | Output |
 |-------|-------|--------|
+| claude-haiku-5-5 | $0.10 | $0.50 |
 | claude-haiku-4-5 | $0.80 | $4.00 |
 | claude-sonnet-4-6 | $3.00 | $15.00 |
 | claude-opus-4-6 | $15.00 | $75.00 |

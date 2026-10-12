@@ -173,7 +173,26 @@ function parseTags(raw: unknown): string[] {
 // ─── Query Functions ────────────────────────────────────────────────────────
 
 /**
- * Get all memories where superseded_by IS NULL.
+ * Active-row predicate for the memories table. Decision mirrors (ADR-013)
+ * keep their supersedes-chain in structured_fields.superseded_by — the
+ * top-level superseded_by column is intentionally never set for them by
+ * saveDecisionToDb (see context-store.ts readDecisionsFromMemories), so a
+ * column-only filter let superseded decisions pass as active memory (#2756).
+ *
+ * json_extract returns SQL NULL for both an absent path and a JSON null,
+ * and active mirrors store `superseded_by: null`, so the guard keeps them.
+ * The CASE guard matters twice over: json_extract throws on malformed JSON,
+ * which would collapse the whole query into the callers' `catch → []` and
+ * silently blank every injected memory, and SQLite only guarantees
+ * short-circuit evaluation for CASE — a plain OR chain may evaluate
+ * json_extract on a corrupt row depending on the planner. Malformed rows
+ * stay active, matching parseStructuredFields' lenient JS-side handling.
+ */
+const ACTIVE_ROWS_SQL =
+  "superseded_by IS NULL AND (CASE WHEN json_valid(structured_fields) THEN json_extract(structured_fields, '$.superseded_by') IS NULL ELSE 1 END)";
+
+/**
+ * Get all active memories (see ACTIVE_ROWS_SQL for the active predicate).
  * Returns [] if DB is not available. Never throws.
  */
 export function getActiveMemories(): Memory[] {
@@ -182,7 +201,7 @@ export function getActiveMemories(): Memory[] {
   if (!adapter) return [];
 
   try {
-    const rows = adapter.prepare('SELECT * FROM memories WHERE superseded_by IS NULL').all();
+    const rows = adapter.prepare(`SELECT * FROM memories WHERE ${ACTIVE_ROWS_SQL}`).all();
     return rows.map(rowToMemory);
   } catch {
     return [];
@@ -201,7 +220,7 @@ export function getActiveMemoriesRanked(limit = 30): Memory[] {
   try {
     const rows = adapter.prepare(
       `SELECT * FROM memories
-       WHERE superseded_by IS NULL
+       WHERE ${ACTIVE_ROWS_SQL}
        ORDER BY (confidence * (1.0 + hit_count * 0.1)) DESC
        LIMIT :limit`,
     ).all({ ':limit': limit });
@@ -248,7 +267,9 @@ export function queryMemoriesRanked(opts: QueryMemoriesOptions): RankedMemory[] 
 
   const k = clampLimit(opts.k, 10);
   const rrfK = opts.rrfK ?? 60;
-  const activeClause = opts.include_superseded === true ? '' : 'WHERE superseded_by IS NULL';
+  // ACTIVE_ROWS_SQL also drops superseded decision mirrors (#2756) unless the
+  // caller explicitly opted back in via include_superseded.
+  const activeClause = opts.include_superseded === true ? '' : `WHERE ${ACTIVE_ROWS_SQL}`;
   const trimmedQuery = (opts.query ?? '').trim();
 
   // 1) Keyword hits — try FTS5 first, fall back to LIKE when unavailable.

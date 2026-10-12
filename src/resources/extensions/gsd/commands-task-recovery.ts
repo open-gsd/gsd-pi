@@ -30,7 +30,13 @@ export async function handleTaskRecoveryResume(
   ctx: ExtensionCommandContext,
   basePath: string,
 ): Promise<void> {
-  const recoveryActionId = args.trim();
+  // Auto-mode error/notification text embeds the recoveryActionId in prose
+  // (e.g. "...recoveryActionId: <id>). Resume it with /gsd recover <id>.").
+  // Operators frequently copy-paste the trailing sentence punctuation along
+  // with the id, producing a lookup that silently misses (#recoveryActionId
+  // trailing-punctuation false-negative). Strip common trailing punctuation
+  // before validating/using the id so a copy-pasted "<id>." still resolves.
+  const recoveryActionId = args.trim().replace(/[.,;:)\]}'"`]+$/u, "");
   if (!recoveryActionId || /\s/u.test(recoveryActionId) || recoveryActionId.startsWith("--")) {
     ctx.ui.notify(
       "Usage: /gsd recover <recoveryActionId>",

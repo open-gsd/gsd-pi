@@ -18,6 +18,9 @@ import {
 	buildAgentGitStatusArgs,
 } from "../src/git-args.ts";
 
+import { createHarness } from "./copilot-test-harness.ts";
+import { progressFixture } from "./project-context-fixtures.ts";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function readPackage(): {
@@ -104,16 +107,14 @@ test("checkpoint view is contributed in the extension manifest", () => {
 	assert.ok(pkg.contributes.commands.some((entry) => entry.command === "gsd.restoreCheckpoint"));
 });
 
-test("project progress uses the existing RPC client and one sidebar refresh loop", () => {
-	const contractSource = readFileSync(join(root, "..", "packages", "contracts", "src", "rpc.ts"), "utf8");
-	const clientSource = readSource("gsd-client.ts");
+test("project progress uses the existing RPC client and one sidebar refresh loop", async (t) => {
+	const h = createHarness(); await h.client.start(); t.after(() => h.client.stop());
+	const payload = progressFixture(); delete payload.readMetadata;
+	const read = h.client.getProjectProgress();
+	assert.equal(h.processes[0].lastCommand().type, "get_project_progress");
+	h.processes[0].respond(h.processes[0].lastCommand(), payload);
+	assert.deepEqual(JSON.parse(JSON.stringify(await read)), payload);
 	const sidebarSource = readSource("sidebar.ts");
-
-	assert.match(contractSource, /type ProjectProgressReadMetadata/);
-	assert.match(contractSource, /readMetadata\?: ProjectProgressReadMetadata/);
-	assert.match(clientSource, /type: "get_project_progress"/);
-	assert.match(clientSource, /async getProjectProgress\(\): Promise<ProjectProgress \| null>/);
-	assert.match(clientSource, /return response\.data as ProjectProgress \| null/);
 	assert.match(sidebarSource, /case "refreshProgress":/);
 	assert.match(sidebarSource, /this\.client\.getProjectProgress\(\)/);
 	assert.match(sidebarSource, /data-section="project-progress"/);
@@ -130,12 +131,8 @@ test("project progress uses the existing RPC client and one sidebar refresh loop
 	assert.equal((sidebarSource.match(/setInterval\(/g) ?? []).length, 1);
 });
 
-test("Copilot read tools are contributed and registered against the existing RPC client", () => {
+test("Copilot read tools are contributed and registered against the existing RPC client", async () => {
 	const pkg = readPackage();
-	const extensionSource = readSource("extension.ts");
-	const toolSource = readSource("copilot-tools.ts");
-	const guardSource = readSource("copilot-tools-guards.ts");
-	const clientSource = readSource("gsd-client.ts");
 	const tools = pkg.contributes.languageModelTools ?? [];
 
 	assert.equal(tools.length, 2);
@@ -151,29 +148,21 @@ test("Copilot read tools are contributed and registered against the existing RPC
 	}
 
 	assert.deepEqual(tools.map((tool) => tool.toolReferenceName), ["gsdProjectProgress", "gsdProjectSnapshot"]);
-	assert.match(extensionSource, /registerCopilotTools\(context, client\)/);
-	assert.match(toolSource, /typeof vscode\.lm\.registerTool !== "function"/);
-	assert.match(toolSource, /folder\.uri\.fsPath/);
-	assert.match(toolSource, /this\.client\.projectRoot/);
-	assert.match(toolSource, /vscode\.lm\.registerTool\("gsd_project_progress", new ProjectProgressTool\(client\)\)/);
-	assert.match(toolSource, /vscode\.lm\.registerTool\("gsd_project_snapshot", new ProjectSnapshotTool\(client\)\)/);
-	assert.match(toolSource, /The result is read-only, but it will be sent to the active chat\/model context/);
-	assert.match(toolSource, /awaitWithCancellation\(\(\) => this\.client\.getProjectProgress\(\), token\)/);
-	assert.match(toolSource, /awaitWithCancellation\(\(\) => this\.client\.getProjectSnapshot\(\), token\)/);
-	assert.match(toolSource, /GSD agent is not connected/);
-	assert.match(toolSource, /this\.client\.getProjectProgress\(\)/);
-	assert.match(toolSource, /this\.client\.getProjectSnapshot\(\)/);
-	assert.doesNotMatch(toolSource, /new GsdClient/);
-	assert.match(guardSource, /if \(input === undefined\) return/);
-	assert.match(guardSource, /resolve\(workspaceFolderPaths\[0\]\)/);
-	assert.match(guardSource, /resolve\(projectRoot\)/);
-	assert.match(guardSource, /GSD project read tools do not accept input parameters/);
-	assert.match(guardSource, /GSD project read tools require exactly one workspace folder/);
-	assert.match(guardSource, /GSD project read was cancelled/);
-	assert.match(guardSource, /awaitWithCancellation<T>\(operation: \(\) => Promise<T>/);
-	assert.match(clientSource, /get projectRoot\(\): string/);
-	assert.match(clientSource, /async getProjectSnapshot\(\): Promise<ProjectSnapshot \| null>/);
-	assert.match(clientSource, /type: "get_project_snapshot"/);
+	const h = createHarness();
+	const context = { subscriptions: [] as unknown[] };
+	h.registerCopilotTools(context, h.client);
+	assert.equal(context.subscriptions.length, 2);
+	assert.deepEqual(h.registeredTools.map(entry => entry.name), tools.map(tool => tool.name));
+	assert.ok(h.registeredTools[0].tool instanceof h.ProjectProgressTool);
+	assert.ok(h.registeredTools[1].tool instanceof h.ProjectSnapshotTool);
+	for (const { tool } of h.registeredTools) {
+		const preparation = await tool.prepareInvocation();
+		assert.match(preparation.confirmationMessages.message.value, /read-only.*active chat\/model context/);
+	}
+	(h.vscode.lm as any).registerTool = undefined;
+	const unavailable = { subscriptions: [] as unknown[] };
+	h.registerCopilotTools(unavailable, h.client);
+	assert.equal(unavailable.subscriptions.length, 0);
 });
 
 test("web bridge treats project progress and snapshot reads as read-only while onboarding is locked", () => {

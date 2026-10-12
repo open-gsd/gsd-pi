@@ -346,6 +346,12 @@ test("unresolvedCommandToken extracts the missing tool from cmd, bash, and sh st
   assert.equal(unresolvedCommandToken("sh: 1: jq: not found"), "jq");
   assert.equal(unresolvedCommandToken("dash: 12: sed: not found"), "sed");
   assert.equal(unresolvedCommandToken("sh: 1: C:/Program Files/Git/usr/bin/grep: not found"), "C:/Program Files/Git/usr/bin/grep");
+  // A nonexistent path-like command (missing binstub) names the token, not
+  // just the platform (#2665).
+  assert.equal(unresolvedCommandToken("bash: bin/i18n-tasks: No such file or directory"), "bin/i18n-tasks");
+  assert.equal(unresolvedCommandToken("bin/i18n-tasks: No such file or directory"), "bin/i18n-tasks");
+  assert.equal(unresolvedCommandToken("/bin/bash: line 1: bin/i18n-tasks: No such file or directory"), "bin/i18n-tasks");
+  assert.equal(unresolvedCommandToken("zsh:1: no such file or directory: bin/i18n-tasks"), "bin/i18n-tasks");
   assert.equal(unresolvedCommandToken("spawnSync cmd ENOENT"), null);
   assert.equal(unresolvedCommandToken(undefined), null);
 });

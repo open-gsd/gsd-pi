@@ -1895,6 +1895,8 @@ function modelSupportsAdaptiveThinking(modelId: string): boolean {
 		|| modelId.includes("sonnet-4.7")
 		|| modelId.includes("haiku-4-5")
 		|| modelId.includes("haiku-4.5")
+		|| modelId.includes("haiku-5-5")
+		|| modelId.includes("haiku-5.5")
 	);
 }
 
@@ -1935,7 +1937,12 @@ const ANTHROPIC_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
  * barrel lags behind monorepo source exports.
  */
 export interface ClaudeCodeModelMetadata {
-	compat?: { forceAdaptiveThinking?: boolean; strictRequestParams?: boolean } | undefined;
+	compat?: {
+		forceAdaptiveThinking?: boolean;
+		strictRequestParams?: boolean;
+		thinkingOffMode?: "between_tools";
+		rejectsTemperature?: boolean;
+	} | undefined;
 	thinkingLevelMap?: Partial<Record<string, string | null>> | undefined;
 }
 
@@ -1992,6 +1999,32 @@ function workflowQuestionToolAvailableFromAllowedTools(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Merge a caller-supplied SDK `hooks` config (arriving via `extraOptions`) with
+ * the adapter's own hook config (#2742). `extraOptions` is a pass-through
+ * channel, so a caller `hooks` key used to replace the whole key in the spread
+ * and silently unregister the native PreToolUse guards. Array entries are
+ * concatenated per event name, native entries first, so caller hooks compose
+ * with the built-in guards instead of removing them. Malformed caller values
+ * (the SDK types these as arrays) are ignored so the native guards survive
+ * every caller input.
+ */
+function mergeSdkHookConfigs(
+	native: Record<string, unknown>,
+	extra: unknown,
+): Record<string, unknown> {
+	if (!isRecord(extra)) return native;
+	const merged: Record<string, unknown> = { ...native };
+	for (const [event, extraEntries] of Object.entries(extra)) {
+		if (!Array.isArray(extraEntries)) continue;
+		const nativeEntries = merged[event];
+		merged[event] = Array.isArray(nativeEntries)
+			? [...nativeEntries, ...extraEntries]
+			: extraEntries;
+	}
+	return merged;
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -2211,7 +2244,7 @@ export function buildSdkOptions(
 	extraOptions: Record<string, unknown> & { reasoning?: ThinkingLevel; gsdPhase?: string } = {},
 	modelMetadata?: ClaudeCodeModelMetadata,
 ): Record<string, unknown> {
-	const { reasoning, cwd, gsdPhase, env: extraEnv, stderr: extraStderr, ...sdkExtraOptions } = extraOptions;
+	const { reasoning, cwd, gsdPhase, env: extraEnv, stderr: extraStderr, hooks: extraHooks, ...sdkExtraOptions } = extraOptions;
 	const sdkCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
 	// Claude Code runs in the milestone worktree for file/shell work, but workflow MCP
 	// config (.mcp.json) and server discovery live at the project root.
@@ -2388,11 +2421,15 @@ export function buildSdkOptions(
 	//        omitting the field leaves the SDK in its adaptive default (or persisted session state).
 	// #2500: strict-param models (Sonnet 5.5) 400 on {type:"disabled"} — their off
 	//        switch is {type:"between_tools"}, flagged via catalog compat.
+	// #2645: Opus 5.5 / Fable 5.1 share the umbrella; Fable 5 sets the
+	//        granular thinkingOffMode because it still accepts forced tool_choice.
 	const strictRequestParams = modelMetadata?.compat?.strictRequestParams === true;
+	const thinkingOffBetweenTools = strictRequestParams
+		|| modelMetadata?.compat?.thinkingOffMode === "between_tools";
 	const thinkingConfig = supportsAdaptive
 		? effort
 			? { thinking: { type: "adaptive" } }
-			: { thinking: { type: strictRequestParams ? "between_tools" : "disabled" } }
+			: { thinking: { type: thinkingOffBetweenTools ? "between_tools" : "disabled" } }
 		: undefined;
 
 	// Interactive runs load user settings, so legacy gsd-core v1 skills installed
@@ -2416,12 +2453,12 @@ export function buildSdkOptions(
 		systemPrompt: { type: "preset", preset: "claude_code" },
 		disallowedTools,
 		...(allowedTools.length > 0 ? { allowedTools } : {}),
-		hooks: {
+		hooks: mergeSdkHookConfigs({
 			PreToolUse: [
 				{ matcher: PROJECTION_WRITE_GUARD_MATCHER, hooks: [projectionWriteGuardHook] },
 				...(legacySkillGuardHook ? [{ matcher: "Skill", hooks: [legacySkillGuardHook] }] : []),
 			],
-		},
+		}, extraHooks),
 		...(sdkMcpServers ? { mcpServers: sdkMcpServers } : {}),
 		...(strictMcpConfig ? { strictMcpConfig: true } : {}),
 		betas: (
@@ -3096,6 +3133,45 @@ async function pumpSdkMessages(
 									lastThinkingContent = block.thinking;
 								}
 							}
+
+							// A parallel tool_use can lose its arguments: the synthetic
+							// tool-result boundary for a fast sibling folds the builder's
+							// blocks into the final-message accumulators and nulls the
+							// builder, so this tool's remaining input_json_delta /
+							// content_block_stop find no builder and are dropped — its
+							// block keeps the empty `arguments` it was created with, and
+							// tool_execution_start records empty args into the safety
+							// evidence (`command: ""` / `path: ""`) while the CLI actually
+							// executed the full input (#2585). The complete message
+							// carries every tool_use's real input: backfill any streamed
+							// block whose arguments never landed — still `{}`, or a
+							// `{ _raw }` truncation marker (#2574) — wherever it now
+							// lives (live builder or already-folded intermediate blocks).
+							// Blocks are mutated in place, so the start-partial mirror
+							// and the assembled final message — the content
+							// `tool_execution_start` reads args from — see the repair;
+							// events already emitted for a block (e.g. its synthetic
+							// toolcall_end fired at an earlier boundary) keep what they
+							// carried. Populated arguments are never touched: the
+							// streamed parse is authoritative for blocks that completed.
+							const backfillToolArguments = (
+								targets: AssistantMessage["content"],
+							): void => {
+								for (const block of sdkAssistant.message.content) {
+									if (block.type !== "tool_use" || !block.id) continue;
+									for (const streamed of targets) {
+										if (streamed.type !== "toolCall" || streamed.id !== block.id) continue;
+										const args = streamed.arguments as Record<string, unknown> | undefined;
+										const unfilled = !args
+											|| Object.keys(args).length === 0
+											|| (Object.keys(args).length === 1 && "_raw" in args);
+										if (unfilled) streamed.arguments = block.input;
+										break;
+									}
+								}
+							};
+							if (builder) backfillToolArguments(builder.message.content);
+							backfillToolArguments(intermediateToolBlocks);
 
 							// Subagent events carry their own (smaller) context; only
 							// main-loop events (parent_tool_use_id === null) see the

@@ -30,7 +30,7 @@ Each unit passes through two stages:
 dynamic_routing:
   enabled: true
   tier_models:                    # optional: explicit model per tier
-    light: claude-haiku-4-5
+    light: claude-haiku-5-5
     standard: claude-sonnet-4-6
     heavy: claude-opus-4-8
   escalate_on_failure: true       # bump tier on failure (default)

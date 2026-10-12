@@ -281,16 +281,16 @@ export function ensureGitignore(
  * version control.
  */
 export function untrackRuntimeFiles(basePath: string): void {
-  const runtimePaths = GSD_RUNTIME_PATTERNS;
-
-  for (const pattern of runtimePaths) {
-    // Use -r for directory patterns (trailing slash), strip the slash for the command
-    const target = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
-    try {
-      nativeRmCached(basePath, [target]);
-    } catch {
-      // File not tracked or doesn't exist — expected, ignore
-    }
+  // Use -r for directory patterns (trailing slash), strip the slash for the command
+  const targets = GSD_RUNTIME_PATTERNS.map((pattern) =>
+    pattern.endsWith("/") ? pattern.slice(0, -1) : pattern,
+  );
+  try {
+    // One call for the whole list: a git child process per pattern blocked
+    // `/gsd auto` start-up for about a second on Windows.
+    nativeRmCached(basePath, targets);
+  } catch {
+    // File not tracked or doesn't exist — expected, ignore
   }
 }
 

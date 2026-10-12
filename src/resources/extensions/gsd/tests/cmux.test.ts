@@ -330,6 +330,151 @@ describe("CmuxClient stdio isolation", () => {
   });
 });
 
+describe("CmuxClient surface id parsing (current cmux CLI output shapes, #2050 regression)", () => {
+  function writeFakeCli(binDir: string, logPath: string, opts: { splitOutput: string; listSurfacesJson: string }): string {
+    const cmuxPath = path.join(binDir, "cmux");
+    fs.writeFileSync(
+      cmuxPath,
+      [
+        "#!/usr/bin/env node",
+        "const fs = require('node:fs');",
+        `fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+        "const args = process.argv.slice(2);",
+        "if (args[0] === 'new-split') {",
+        `  process.stdout.write(${JSON.stringify(opts.splitOutput)});`,
+        "} else if (args[0] === 'list-pane-surfaces') {",
+        `  process.stdout.write(${JSON.stringify(opts.listSurfacesJson)});`,
+        "} else {",
+        "  process.stdout.write('ok');",
+        "}",
+      ].join("\n"),
+      "utf-8",
+    );
+    fs.chmodSync(cmuxPath, 0o755);
+    return cmuxPath;
+  }
+
+  function makeClient(): CmuxClient {
+    return new CmuxClient({
+      enabled: true,
+      available: true,
+      cliAvailable: true,
+      notifications: true,
+      sidebar: true,
+      splits: true,
+      browser: false,
+      workspaceId: "workspace:1000040001",
+      surfaceId: "surface:1000040003",
+      socketPath: "/tmp/cmux.sock",
+    });
+  }
+
+  test("createSplit extracts the surface id from the current 'OK surface:<id> workspace:<id>' output", async () => {
+    const binDir = fs.mkdtempSync(path.join(tmpdir(), "cmux-bin-"));
+    const logPath = path.join(binDir, "calls.jsonl");
+    const originalPath = process.env.PATH;
+    writeFakeCli(binDir, logPath, {
+      splitOutput: "OK surface:1000040021 workspace:1000040001",
+      listSurfacesJson: JSON.stringify({ surfaces: [] }),
+    });
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    try {
+      const client = makeClient();
+      const created = await client.createSplit("right");
+      assert.equal(created, "surface:1000040021");
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  test("createSplit returns null (not a false empty-room garbage id) for a bare 'OK' or empty response", async () => {
+    const binDir = fs.mkdtempSync(path.join(tmpdir(), "cmux-bin-"));
+    const logPath = path.join(binDir, "calls.jsonl");
+    const originalPath = process.env.PATH;
+    writeFakeCli(binDir, logPath, {
+      splitOutput: "ok",
+      listSurfacesJson: JSON.stringify({ surfaces: [] }),
+    });
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    try {
+      const client = makeClient();
+      const created = await client.createSplit("right");
+      assert.equal(created, null);
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  test("listSurfaceIds extracts ids from the current nested 'surfaces[].ref' JSON shape, not a flat 'surface_id'/'surface' key", async () => {
+    const binDir = fs.mkdtempSync(path.join(tmpdir(), "cmux-bin-"));
+    const logPath = path.join(binDir, "calls.jsonl");
+    const originalPath = process.env.PATH;
+    // Matches real `cmux list-pane-surfaces --json --id-format both` output.
+    writeFakeCli(binDir, logPath, {
+      splitOutput: "ok",
+      listSurfacesJson: JSON.stringify({
+        pane_id: "20E57FDE-5D08-4E7C-83CC-6C4A91F42645",
+        pane_ref: "pane:1000040003",
+        surfaces: [
+          { id: "6465E063-9860-445C-94FC-D83A429BE1F9", ref: "surface:1000040003", selected: true, title: "a", type: "terminal" },
+          { id: "ABC", ref: "surface:1000040021", selected: false, title: "b", type: "terminal" },
+        ],
+        window_id: "D2739624-967E-45A4-B7BB-29DF8CC610E0",
+        window_ref: "window:1000040000",
+        workspace_id: "26C7823A-940B-43D1-8698-A3CAEFF95F8A",
+        workspace_ref: "workspace:1000040001",
+      }),
+    });
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    try {
+      const client = makeClient();
+      const ids = await client.listSurfaceIds();
+      assert.deepEqual([...ids].sort(), ["surface:1000040003", "surface:1000040021"]);
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  test("createSplitFrom falls back to the list-pane-surfaces diff when new-split prints no parseable id, so a split created without id output is not silently left unattached", async () => {
+    const binDir = fs.mkdtempSync(path.join(tmpdir(), "cmux-bin-"));
+    const logPath = path.join(binDir, "calls.jsonl");
+    const originalPath = process.env.PATH;
+    const cmuxPath = path.join(binDir, "cmux");
+    const counterPath = path.join(binDir, "count");
+    fs.writeFileSync(
+      cmuxPath,
+      [
+        "#!/usr/bin/env node",
+        "const fs = require('node:fs');",
+        `fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+        "const args = process.argv.slice(2);",
+        "if (args[0] === 'new-split') { process.stdout.write('ok'); }",
+        "else if (args[0] === 'list-pane-surfaces') {",
+        `  const counterPath = ${JSON.stringify(counterPath)};`,
+        "  let n = 0; try { n = parseInt(fs.readFileSync(counterPath, 'utf-8'), 10); } catch {}",
+        "  fs.writeFileSync(counterPath, String(n + 1));",
+        "  if (n === 0) process.stdout.write(JSON.stringify({ surfaces: [{ ref: 'surface:1000040003' }] }));",
+        "  else process.stdout.write(JSON.stringify({ surfaces: [{ ref: 'surface:1000040003' }, { ref: 'surface:1000040099' }] }));",
+        "} else { process.stdout.write('ok'); }",
+      ].join("\n"),
+      "utf-8",
+    );
+    fs.chmodSync(cmuxPath, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    try {
+      const client = makeClient();
+      const created = await client.createSplitFrom("surface:1000040003", "down");
+      assert.equal(created, "surface:1000040099");
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("cmux extension discovery opt-out", () => {
   test("cmux directory has package.json with pi manifest to prevent auto-discovery as extension", () => {
     const cmuxDir = path.resolve(

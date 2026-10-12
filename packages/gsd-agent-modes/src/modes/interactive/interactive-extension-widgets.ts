@@ -40,6 +40,11 @@ export async function initExtensions(host: InteractiveModeDelegateHost): Promise
 							return { cancelled: true };
 						}
 
+						// Keep the previous screen readable in scrollback before the
+						// transcript is discarded (#2637): the next, shorter frame
+						// would otherwise erase the visible rows in place.
+						host.ui.retireScreenToScrollback();
+
 						// Clear UI state
 						host.chatContainer.clear();
 						host.pendingMessagesContainer.clear();

@@ -514,6 +514,11 @@ interface AskUserQuestionsStructuredContent {
    * and pauses auto-mode (#852).
    */
   timed_out?: boolean;
+  /**
+   * Depth-verification gate ids the round verified (#2653). Absent when no
+   * gate questions were answered or none verified.
+   */
+  verified_gates?: string[];
 }
 
 interface AskUserQuestionsWriteGateModule {
@@ -618,6 +623,7 @@ export function buildAskUserQuestionsElicitRequest(questions: AskUserQuestion[])
 export function formatAskUserQuestionsElicitResult(
   questions: AskUserQuestion[],
   result: AskUserQuestionsElicitResult,
+  verifiedGateIds: string[] = [],
 ): string {
   const answers: Record<string, { answers: string[] }> = {};
   const content = result.content ?? {};
@@ -635,7 +641,11 @@ export function formatAskUserQuestionsElicitResult(
     answers[question.id] = { answers: answerList };
   }
 
-  return JSON.stringify({ answers });
+  // Depth-verification gates the round verified are embedded as an additive
+  // JSON key (not appended text — consumers JSON.parse this content) so the
+  // caller learns which gates unlocked without hitting a later HARD BLOCK
+  // (#2653).
+  return JSON.stringify(verifiedGateIds.length > 0 ? { answers, verified_gates: verifiedGateIds } : { answers });
 }
 
 /**
@@ -768,23 +778,34 @@ async function recordAskUserQuestionsPendingGate(
   });
 }
 
+/**
+ * Record the gate outcome of an ask_user_questions round and return the gate
+ * ids the round verified, so the tool result can tell the caller which gates
+ * unlocked (#2653) instead of leaving it to a later HARD BLOCK.
+ */
 async function recordAskUserQuestionsGateResult(
   structured: AskUserQuestionsStructuredContent,
   deps: AskUserQuestionsHandlerDeps,
-): Promise<void> {
-  if (structured.cancelled || !structured.response) return;
+): Promise<string[]> {
+  if (structured.cancelled || !structured.response) return [];
   const writeGate = await resolveAskUserQuestionsWriteGate(deps);
-  if (!writeGate) return;
+  if (!writeGate) return [];
 
   const basePath = askUserQuestionsWriteGateBasePath(deps);
   const response = structured.response;
+  let verifiedGateIds: string[] = [];
   await runSerializedWorkflowOperation(async () => {
     if (writeGate.applyAskUserQuestionsGateResult) {
-      writeGate.applyAskUserQuestionsGateResult({
+      // Partial rounds (some gates verified, another declined/unanswered)
+      // still report the gates they did verify (#2653).
+      const result = writeGate.applyAskUserQuestionsGateResult({
         basePath,
         questions: structured.questions,
         details: structured,
-      });
+      }) as { verifiedGateIds?: string[] } | undefined;
+      if (Array.isArray(result?.verifiedGateIds)) {
+        verifiedGateIds = result.verifiedGateIds.filter((id): id is string => typeof id === 'string');
+      }
       return;
     }
 
@@ -796,8 +817,10 @@ async function recordAskUserQuestionsGateResult(
       writeGate.markApprovalGateVerified(question.id, basePath);
       writeGate.markDepthVerified(writeGate.extractDepthVerificationMilestoneId(question.id), basePath);
       writeGate.clearPendingGate(basePath);
+      verifiedGateIds.push(question.id);
     }
   });
+  return verifiedGateIds;
 }
 
 /**
@@ -899,9 +922,13 @@ export async function askUserQuestionsHandler(
           response: buildAskUserQuestionsRoundResult(questions, elicitation),
           cancelled: false,
         };
-        await recordAskUserQuestionsGateResult(structured, deps);
+        const verifiedGateIds = await recordAskUserQuestionsGateResult(structured, deps);
+        if (verifiedGateIds.length > 0) structured.verified_gates = verifiedGateIds;
         return {
-          content: [{ type: 'text' as const, text: formatAskUserQuestionsElicitResult(questions, elicitation) }],
+          content: [{
+            type: 'text' as const,
+            text: formatAskUserQuestionsElicitResult(questions, elicitation, verifiedGateIds),
+          }],
           structuredContent: structured as unknown as Record<string, unknown>,
         };
       }
@@ -1008,7 +1035,8 @@ export async function askUserQuestionsHandler(
               response: null,
               cancelled: true,
             };
-        await recordAskUserQuestionsGateResult(acceptedStructured, deps);
+        const remoteVerifiedGateIds = await recordAskUserQuestionsGateResult(acceptedStructured, deps);
+        if (remoteVerifiedGateIds.length > 0) acceptedStructured.verified_gates = remoteVerifiedGateIds;
         return {
           content: [{ type: 'text' as const, text: remoteResult.content[0]?.text ?? '' }],
           structuredContent: acceptedStructured as unknown as Record<string, unknown>,

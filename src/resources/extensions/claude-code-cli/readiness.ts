@@ -2,8 +2,21 @@
  * Readiness check for the Claude Code CLI provider.
  *
  * Verifies the `claude` binary is installed, responsive, AND authenticated.
- * Results are cached for 30 seconds to avoid shelling out on every
- * model-availability check.
+ *
+ * The provider `isReady()` hook is synchronous and runs once per model from
+ * the TUI and from auto mode, so nothing here may spawn a synchronous child
+ * process: on Windows `claude --version` + `claude auth status` take seconds
+ * and froze the UI for that long. The sync accessors only read a cache that
+ * asynchronous probes refresh (see ../shared/cli-readiness.ts):
+ *
+ *  - Fresh cache (< 30 s): the cached answer.
+ *  - Stale cache: the last known answer, immediately, plus one background
+ *    re-probe that updates the cache for the next call.
+ *  - Cold cache (process start, or after clearReadinessCache()): `false`,
+ *    plus a background probe. Readiness gates request routing and persisted
+ *    default-model migrations, so "unknown" must not be reported as "ready".
+ *    The extension primes the cache at load, and code that must not act on a
+ *    cold or stale answer awaits settleClaudeCodeReadiness() instead.
  *
  * Auth verification runs `claude auth status --json` and inspects the
  * `loggedIn` field, falling back to plain `claude auth status` and a text
@@ -14,7 +27,7 @@
  * failures (Issue #4997).
  */
 
-import { execFileSync } from "node:child_process";
+import { createReadinessCache, READINESS_CHECK_INTERVAL_MS, runCliProbe } from "../shared/cli-readiness.js";
 
 /**
  * Spawn the Claude CLI without triggering Node's DEP0190.
@@ -36,16 +49,16 @@ export function buildClaudeSpawnInvocation(
 	return { command, args };
 }
 
-function spawnClaude(command: string, args: string[], opts: { timeout: number; stdio: "pipe" }): Buffer {
+function spawnClaude(command: string, args: string[], timeout: number): Promise<string> {
 	const invocation = buildClaudeSpawnInvocation(command, args);
-	return execFileSync(invocation.command, invocation.args, opts);
+	return runCliProbe(invocation.command, invocation.args, timeout);
 }
 
 /**
  * Candidate executable names for the Claude Code CLI.
  *
  * Keep the explicit win32 ternary selector for regression coverage (Issue #4424):
- * Node's execFileSync must target `claude.cmd` directly on Windows.
+ * Node's execFile must target `claude.cmd` directly on Windows.
  */
 export function getClaudeCommand(platform: NodeJS.Platform = process.platform): string {
 	return platform === "win32" ? "claude.cmd" : "claude";
@@ -90,13 +103,10 @@ function debugLog(...parts: unknown[]): void {
  * detection is whether *some* candidate produces a `claude --version`
  * line.
  */
-function findWorkingCommand(): string | null {
+async function findWorkingCommand(): Promise<string | null> {
 	for (const command of CLAUDE_COMMAND_CANDIDATES) {
 		try {
-			spawnClaude(command, ["--version"], {
-				timeout: VERSION_TIMEOUT_MS,
-				stdio: "pipe",
-			});
+			await spawnClaude(command, ["--version"], VERSION_TIMEOUT_MS);
 			debugLog("version probe ok via", command);
 			return command;
 		} catch (error) {
@@ -140,13 +150,10 @@ export function parseAuthStatus(output: string): boolean | null {
 	return null;
 }
 
-function probeAuth(command: string): boolean | null {
+async function probeAuth(command: string): Promise<boolean | null> {
 	// Try --json first (newer CLIs).
 	try {
-		const out = spawnClaude(command, ["auth", "status", "--json"], {
-			timeout: AUTH_TIMEOUT_MS,
-			stdio: "pipe",
-		}).toString();
+		const out = await spawnClaude(command, ["auth", "status", "--json"], AUTH_TIMEOUT_MS);
 		debugLog("auth status --json output:", out.slice(0, 200));
 		const parsed = parseAuthStatus(out);
 		if (parsed !== null) return parsed;
@@ -156,10 +163,7 @@ function probeAuth(command: string): boolean | null {
 
 	// Fallback: plain `auth status` (older CLIs that don't accept --json).
 	try {
-		const out = spawnClaude(command, ["auth", "status"], {
-			timeout: AUTH_TIMEOUT_MS,
-			stdio: "pipe",
-		}).toString();
+		const out = await spawnClaude(command, ["auth", "status"], AUTH_TIMEOUT_MS);
 		debugLog("auth status output:", out.slice(0, 200));
 		return parseAuthStatus(out);
 	} catch (error) {
@@ -168,67 +172,80 @@ function probeAuth(command: string): boolean | null {
 	}
 }
 
-let cachedBinaryPresent: boolean | null = null;
-let cachedAuthed: boolean | null = null;
-let lastCheckMs = 0;
-const CHECK_INTERVAL_MS = 30_000;
+interface ClaudeReadiness {
+	binaryPresent: boolean;
+	authed: boolean;
+}
 
 /**
- * Refresh the cached binary/auth state when the cache window has expired.
+ * One full asynchronous probe: binary detection, then auth.
  * Preserves a known auth state across soft-fail auth probes.
  */
-function refreshCache(): void {
-	const now = Date.now();
-	if (cachedBinaryPresent !== null && now - lastCheckMs < CHECK_INTERVAL_MS) {
-		return;
-	}
-
-	// Set timestamp first to prevent re-entrant checks during the same window
-	lastCheckMs = now;
-
-	const command = findWorkingCommand();
+async function probeReadiness(previous: ClaudeReadiness | null): Promise<ClaudeReadiness> {
+	const command = await findWorkingCommand();
 	if (!command) {
-		cachedBinaryPresent = false;
-		cachedAuthed = false;
-		return;
+		return { binaryPresent: false, authed: false };
 	}
-	cachedBinaryPresent = true;
 
-	const authed = probeAuth(command);
+	const authed = await probeAuth(command);
 	if (authed === null) {
 		// Couldn't determine auth state from CLI output. Don't clobber a
 		// previously known-good cache; otherwise default to false so we don't
 		// silently route requests to an unauthenticated CLI.
-		if (cachedAuthed === null) cachedAuthed = false;
-		return;
+		return { binaryPresent: true, authed: previous?.authed ?? false };
 	}
-	cachedAuthed = authed;
+	return { binaryPresent: true, authed };
 }
+
+const readinessCache = createReadinessCache<ClaudeReadiness>({
+	probe: probeReadiness,
+	intervalMs: READINESS_CHECK_INTERVAL_MS,
+});
 
 /**
  * Whether the `claude` binary is installed (regardless of auth state).
+ * Cached answer; false while the cache is cold.
  */
 export function isClaudeBinaryPresent(): boolean {
-	refreshCache();
-	return cachedBinaryPresent ?? false;
+	return readinessCache.peek()?.binaryPresent ?? false;
 }
 
 /**
  * Whether the `claude` CLI is authenticated with a valid session.
- * Returns false if the binary is not installed.
+ * Returns false if the binary is not installed. Cached answer; false while
+ * the cache is cold.
  */
 export function isClaudeCodeAuthed(): boolean {
-	refreshCache();
-	return (cachedBinaryPresent ?? false) && (cachedAuthed ?? false);
+	const readiness = readinessCache.peek();
+	return (readiness?.binaryPresent ?? false) && (readiness?.authed ?? false);
 }
 
 /**
  * Full readiness check: binary installed AND authenticated.
- * This is the gating function used by the provider registration.
+ * This is the gating function used by the provider registration. It never
+ * blocks: it returns the cached answer (false while cold) and lets a
+ * background probe refresh a stale cache.
  */
 export function isClaudeCodeReady(): boolean {
-	refreshCache();
-	return (cachedBinaryPresent ?? false) && (cachedAuthed ?? false);
+	return isClaudeCodeAuthed();
+}
+
+/**
+ * Readiness from a probe no older than the cache window. Awaits the
+ * in-flight (or a new) probe when the cache is cold or stale; never blocks
+ * the event loop.
+ */
+export async function settleClaudeCodeReadiness(): Promise<boolean> {
+	const readiness = await readinessCache.settle();
+	return readiness.binaryPresent && readiness.authed;
+}
+
+/**
+ * Start the first probe in the background so the cache usually has an answer
+ * by the time something asks. Called at extension load.
+ */
+export function primeClaudeCodeReadiness(): void {
+	readinessCache.peek();
 }
 
 /**
@@ -236,7 +253,5 @@ export function isClaudeCodeReady(): boolean {
  * Useful after the user completes auth setup so the next check is fresh.
  */
 export function clearReadinessCache(): void {
-	cachedBinaryPresent = null;
-	cachedAuthed = null;
-	lastCheckMs = 0;
+	readinessCache.clear();
 }

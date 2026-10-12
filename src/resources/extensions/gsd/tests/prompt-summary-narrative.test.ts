@@ -119,17 +119,17 @@ test("a reopened Slice gives no SUMMARY to the prompts, and a second completion 
     internalExecutionInvocation("test/prompt-summary/reopen-slice"),
   );
   assert.ok(!("error" in reopened), `unexpected error: ${"error" in reopened ? reopened.error : ""}`);
-  assert.match(
-    getScopedArtifact("M001", "S01", null, "SUMMARY")?.full_content ?? "",
-    /FIRST-COMPLETION-MARKER/,
-    "the reopen keeps the SUMMARY artifact row",
+  assert.equal(
+    getScopedArtifact("M001", "S01", null, "SUMMARY") ?? null,
+    null,
+    "the reopen removes the SUMMARY artifact row",
   );
 
   for (const [builder, prompt] of Object.entries(await slicePrompts(base))) {
     assert.doesNotMatch(prompt, /FIRST-COMPLETION-MARKER/, `${builder} has no summary of the reopened Slice`);
   }
 
-  // The second completion has no drain: the artifact row still holds the first text.
+  // The second completion has no drain: no artifact row holds its text.
   seedSliceCompletionAuthority({ milestoneId: "M001", sliceId: "S01", completedTaskIds: ["T01"], runId: "second" });
   const completedAgain = await completeS01(base, "SECOND-COMPLETION-MARKER");
   assert.ok(!("error" in completedAgain), `unexpected error: ${"error" in completedAgain ? completedAgain.error : ""}`);
@@ -140,7 +140,7 @@ test("a reopened Slice gives no SUMMARY to the prompts, and a second completion 
   }
 });
 
-test("a reopened Task gives no SUMMARY to the prompts, although its artifact row stays", async () => {
+test("a reopened Task gives no SUMMARY to the prompts, and its artifact row is removed", async () => {
   const base = makeProject();
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Receipt", status: "pending" });
   // The projection seam of the Task completion: the file and the SUMMARY artifact row.
@@ -157,10 +157,10 @@ test("a reopened Task gives no SUMMARY to the prompts, although its artifact row
     internalExecutionInvocation("test/prompt-summary/reopen-task"),
   );
   assert.ok(!("error" in reopened), `unexpected error: ${"error" in reopened ? reopened.error : ""}`);
-  assert.match(
-    getScopedArtifact("M001", "S01", "T01", "SUMMARY")?.full_content ?? "",
-    /TASK-SUMMARY-MARKER/,
-    "the reopen keeps the SUMMARY artifact row",
+  assert.equal(
+    getScopedArtifact("M001", "S01", "T01", "SUMMARY") ?? null,
+    null,
+    "the reopen removes the SUMMARY artifact row",
   );
 
   invalidateAllCaches();
