@@ -12,7 +12,7 @@ import { ModelLease } from "./model-lease.ts";
 import { OperationStore } from "./operation-store.ts";
 import { RegistrationRegistry } from "./registration.ts";
 import { runtimeUnavailable } from "./errors.ts";
-import { configureRecoveryStore, issueRecoveryId } from "./recovery.ts";
+import { configureRecoveryStore, getRecovery, issueRecoveryId } from "./recovery.ts";
 import { publishOperationUpdated, publishSnapshotInvalidated } from "./event-hub.ts";
 import type { CrashHook, JobRecord, RegistrationFile } from "./types.ts";
 
@@ -74,6 +74,31 @@ export class RuntimeControl {
         next_state: "recovery_required",
       });
       stored.operation.result = { ...(stored.operation.result ?? {}), recovery_id: recovery.recovery_id };
+      this.store.update(stored);
+    }
+    // A prior recover may have applied the diagnostic while an earlier failed
+    // recover op stayed LIVE as recovery_required. Clear those orphans when the
+    // recovery_id is already applied and this process does not hold their lease.
+    const held = this.lease.current();
+    for (const stored of this.store.list()) {
+      if (stored.operation.state !== "recovery_required") continue;
+      if (held && held.operation_id === stored.operation.operation_id) continue;
+      const recoveryId = stored.operation.result && typeof stored.operation.result.recovery_id === "string"
+        ? stored.operation.result.recovery_id
+        : null;
+      if (!recoveryId) continue;
+      const diagnostic = getRecovery(recoveryId);
+      if (!diagnostic?.applied) continue;
+      const clearedAt = (this.clock() ?? new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
+      stored.operation.state = "cancelled";
+      stored.operation.updated_at = clearedAt;
+      stored.operation.error = null;
+      stored.operation.result = {
+        ...(stored.operation.result ?? {}),
+        reconciled: true,
+        idle_confirmed: true,
+        recovery_id: recoveryId,
+      };
       this.store.update(stored);
     }
     if (options.registration) {

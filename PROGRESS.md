@@ -1,5 +1,16 @@
 # gsd-pi progress
 
+## Phase C orphan recover cleanup (2026-10-12)
+
+Idle recover cancels sibling `recovery_required` ops on the same job
+(`native-commands.ts` `reconcileIdleRecovery`); startup cancels orphans whose
+`recovery_id` is already applied (`control.ts`). Tests added in
+`c06-native.test.ts`. Rebuilt via `pnpm run build:web-host`; restarted
+`raidnight-gsd-staging` once with coding slot idle. Cleared live orphan
+`27ab9fa9` so `quake-smoke:M001` could project `completed`.
+Authoritative acceptance write-up:
+`/home/blasky/Projects/FirstTracks/raid-night/docs/migration/reports/CONSOLIDATION-2026-10-12.md`.
+
 R5 save-point: a paused resume clears the cancellation flag before the loop, and recover releases a start that never created a worker when the slot is idle. Resume `22b934a8` is reconciled. Start `f79ce0bc` is in `validate-milestone`. Do not bundle `auto-dispatch` into the Next host.
 
 Save-point for future agents. This is the GSD fork worktree

@@ -16,7 +16,7 @@ import { admitImport } from "../import-jobs.ts";
 import { getLastMilestoneLock, registerNativeWorkflowOpsForTest } from "../native-commands.ts";
 import { registerNativeAutoDispatchForTest } from "../native-auto-dispatch.ts";
 import { applyPrepareDispatchBoundary, beginPrepareMode, endPrepareMode, isPrepareMode, resetPrepareModeForTest } from "../prepare-boundary.ts";
-import { issueRecoveryId } from "../recovery.ts";
+import { applyRecovery, issueRecoveryId } from "../recovery.ts";
 import { buildJobSnapshot } from "../snapshots.ts";
 import {
   assertTrustedGitRepo,
@@ -439,6 +439,149 @@ test("AT-C07 recover applies an issued recovery_id and never invents a shell rep
     assert.equal(stored.operation.result?.replayed_shell, false);
     assert.equal(stored.operation.result?.recovery_id, recovery.recovery_id);
   }
+});
+
+test("idle recover cancels sibling recovery_required ops on the same job", async () => {
+  const alpha = tempProject("recover-sibling");
+  const { control } = createControl({
+    projects: [{ project_id: "alpha", target: alpha, backend_idle_probe: "http://127.0.0.1/slots" }],
+  });
+  seedReadyProject(control, "alpha", alpha);
+  const binding = control.registration.getById("alpha")?.backend_binding ?? null;
+  assert.ok(binding);
+  control.store.writeAccepted({
+    operation: {
+      protocol_version: 1,
+      operation_id: "op-cancel-owner",
+      request_id: uuid(260),
+      job_id: "alpha:M001",
+      action: "cancel",
+      state: "cancelled",
+      admitted_at: "2026-10-12T17:37:25Z",
+      updated_at: "2026-10-12T17:37:43Z",
+      result: { kind: "cancel", cancelled: true },
+      error: null,
+      target_operation_id: "op-resume",
+    },
+    fingerprint: "bound-op-cancel-owner",
+    kind: "job-command",
+    dispatch_intent: false,
+    backend_binding: binding,
+  });
+  const recovery = issueRecoveryId({
+    operation_id: "op-cancel-owner",
+    job_id: "alpha:M001",
+    reason: "A backend slot is still processing",
+    issued_at: "2026-10-12T17:37:43Z",
+    next_state: "recovery_required",
+  });
+  control.store.writeAccepted({
+    operation: {
+      protocol_version: 1,
+      operation_id: "op-orphan-recover",
+      request_id: uuid(261),
+      job_id: "alpha:M001",
+      action: "recover",
+      state: "recovery_required",
+      admitted_at: "2026-10-12T17:41:00Z",
+      updated_at: "2026-10-12T17:41:16Z",
+      result: {
+        kind: "recover",
+        recovery_id: recovery.recovery_id,
+        next_state: "recovery_required",
+        idle_confirmed: false,
+        replayed_shell: false,
+      },
+      error: {
+        code: "recovery_required",
+        message: "A backend slot is still processing",
+        retryable: false,
+        operation_id: "op-orphan-recover",
+      },
+      target_operation_id: null,
+    },
+    fingerprint: "bound-op-orphan-recover",
+    kind: "job-command",
+    dispatch_intent: false,
+    backend_binding: null,
+  });
+  registerCancelNativeOpsForTest({
+    abortOwnedWorker: async (input) => ({
+      cleaned: true,
+      dispatch_quiesced: true,
+      request_closed: true,
+      tools_drained: true,
+      operation_id: input.operationId,
+      job_id: input.jobId,
+      session_id: null,
+      worker_generation: 1,
+      reason: null,
+    }),
+  });
+  registerIdleProbeForTest(async () => ({ idle: true, source: "slots" }));
+  const released = await admitCommand(control, "alpha:M001", commandRequest("recover", uuid(262), {
+    recovery_id: recovery.recovery_id,
+  }));
+  assert.equal(released.ok, true);
+  const orphan = control.store.read("op-orphan-recover");
+  assert.equal(orphan?.operation.state, "cancelled");
+  assert.equal(orphan?.operation.result?.reconciled, true);
+  assert.equal(orphan?.operation.result?.idle_confirmed, true);
+});
+
+test("startup cancels orphan recovery_required when recovery_id already applied", async () => {
+  const alpha = tempProject("recover-orphan-startup");
+  const { control, stateRoot } = createControl({
+    projects: [{ project_id: "alpha", target: alpha, backend_idle_probe: "http://127.0.0.1/slots" }],
+  });
+  seedReadyProject(control, "alpha", alpha);
+  const recovery = issueRecoveryId({
+    operation_id: "op-cancel-owner",
+    job_id: "alpha:M001",
+    reason: "A backend slot is still processing",
+    issued_at: "2026-10-12T17:37:43Z",
+    next_state: "recovery_required",
+  });
+  control.store.writeAccepted({
+    operation: {
+      protocol_version: 1,
+      operation_id: "op-orphan-recover",
+      request_id: uuid(263),
+      job_id: "alpha:M001",
+      action: "recover",
+      state: "recovery_required",
+      admitted_at: "2026-10-12T17:41:00Z",
+      updated_at: "2026-10-12T17:41:16Z",
+      result: {
+        kind: "recover",
+        recovery_id: recovery.recovery_id,
+        next_state: "recovery_required",
+        idle_confirmed: false,
+        replayed_shell: false,
+      },
+      error: {
+        code: "recovery_required",
+        message: "A backend slot is still processing",
+        retryable: false,
+        operation_id: "op-orphan-recover",
+      },
+      target_operation_id: null,
+    },
+    fingerprint: "bound-op-orphan-startup",
+    kind: "job-command",
+    dispatch_intent: false,
+    backend_binding: null,
+  });
+  applyRecovery(recovery.recovery_id);
+  assert.equal(control.store.read("op-orphan-recover")?.operation.state, "recovery_required");
+  const reopened = reopenControl(stateRoot, [
+    { project_id: "alpha", target: alpha, backend_idle_probe: "http://127.0.0.1/slots" },
+  ]);
+  const cleared = reopened.store.read("op-orphan-recover");
+  assert.equal(cleared?.operation.state, "cancelled");
+  assert.equal(cleared?.operation.result?.reconciled, true);
+  const snapshot = await buildJobSnapshot(reopened, "alpha:M001");
+  assert.notEqual(snapshot.state, "recovery_required");
 });
 
 test("AT-C08 answers validate scope, epoch, and duplicate values without a second lease", async () => {

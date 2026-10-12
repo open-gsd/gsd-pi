@@ -269,6 +269,15 @@ function reconcileIdleRecovery(
     host.lease.release(held.operation_id);
   }
   ids.add(recoveryOperationId);
+  // Prior failed recover ops stay LIVE as recovery_required and otherwise block
+  // the job after a later idle recover succeeds. Clear every sibling on the job.
+  if (jobId) {
+    for (const sibling of host.store.listForJob(jobId)) {
+      if (sibling.operation.state === "recovery_required") {
+        ids.add(sibling.operation.operation_id);
+      }
+    }
+  }
   for (const operationId of ids) {
     const stored = host.store.read(operationId);
     if (!stored || stored.operation.state !== "recovery_required") continue;
