@@ -1,5 +1,15 @@
 # gsd-pi progress
 
+## FTM upstream sync automation (2026-10-12)
+
+Added `scripts/ftm-sync-upstream.sh`, weekly
+`.github/workflows/ftm-sync-upstream.yml`, `scripts/ftm-deploy-local.sh`, and
+`docs/FTM-UPSTREAM-SYNC.md`. Pin source is the latest GitHub release on
+`open-gsd/gsd-pi`. When planned, fork was on **1.21.1** while upstream had
+released **v1.22.0** (same day). Gate is `build:web-host` only; conflicts open
+a human PR. Local deploy rebuilds standalone and restarts
+`raidnight-gsd-staging` only when the coding slot is idle.
+
 ## FTM in-place hotfixes (2026-10-12)
 
 Applied `TEMP/gsd-pi-ftm-inplace-hotfixes.patch`: allow auto-mode compaction

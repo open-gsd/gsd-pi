@@ -1,0 +1,45 @@
+# FTM fork only: merge latest stable open-gsd/gsd-pi release into main.
+name: FTM sync upstream
+
+on:
+  schedule:
+    # Mondays 15:00 UTC
+    - cron: "0 15 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ftm-sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge latest upstream release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Sync upstream release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: open-gsd/gsd-pi
+          PNPM_VERSION: "10.12.1"
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          chmod +x scripts/ftm-sync-upstream.sh
+          scripts/ftm-sync-upstream.sh
