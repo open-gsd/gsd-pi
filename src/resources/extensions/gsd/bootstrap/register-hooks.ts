@@ -1540,12 +1540,13 @@ export function registerHooks(
         isApprovalGateBlocking(agentEndBasePath),
         "Depth confirmation is waiting for your answer — pausing auto-mode.",
       );
-      await maybePauseAutoForApprovalGate(
-        ctx,
-        pi,
-        destructiveConfirmationBlocking,
-        "Destructive-command confirmation is waiting for your answer — pausing auto-mode.",
-      );
+      // The destructive command was blocked at execution.
+      // Do not pause auto-mode just because an abandoned command
+      // remains pending. Actual unanswered user questions are
+      // handled separately by the ask_user_questions lifecycle.
+      if (destructiveConfirmationBlocking) {
+        resetDestructiveConfirmation(agentEndBasePath);
+      }
     }
   });
 
@@ -1648,20 +1649,7 @@ export function registerHooks(
       return { cancel: true };
     }
 
-    // Only cancel compaction while auto-mode is actively running and context
-    // still has headroom. At ~90%+ the session is at risk of overflow/truncation;
-    // allow compaction (with CONTINUE checkpoint below) instead of growing unbounded.
-    if (isAutoActive()) {
-      const usage = ctx.getContextUsage?.();
-      const contextPercent = usage?.percent;
-      if (contextPercent == null || contextPercent < 90) {
-        return { cancel: true };
-      }
-      ctx.ui.notify(
-        `Context at ${contextPercent.toFixed(1)}% — compacting during auto-mode to recover headroom.`,
-        "warning",
-      );
-    }
+    // Respect core compaction thresholds during auto-mode.
     const { ensureDbOpen } = await import("./dynamic-tools.js");
     await ensureDbOpen(basePath);
     const state = await deriveGsdState(basePath);

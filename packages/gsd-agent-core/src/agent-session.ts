@@ -174,6 +174,43 @@ export class AgentSession implements AgentSessionHost {
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		this._unsubscribeAgent = this.agent.subscribe(this._events.handleAgentEvent);
+
+		// Check compaction between tool turns, not only at agent_end.
+		const previousPrepareNextTurn = this.agent.prepareNextTurn;
+		this.agent.prepareNextTurn = async (signal) => {
+			const previous = await previousPrepareNextTurn?.call(this.agent, signal);
+			const msg = this._lastAssistantMessage;
+
+			if (!msg || msg.stopReason === "error" || msg.stopReason === "aborted") {
+				return previous;
+			}
+
+			const countCompactions = () =>
+				this.sessionManager.getBranch().filter(
+					entry => entry.type === "compaction"
+				).length;
+
+			const before = countCompactions();
+			await this.checkCompaction(msg);
+
+			if (countCompactions() === before) {
+				return previous;
+			}
+
+			const base = previous?.context ?? {
+				systemPrompt: this.agent.state.systemPrompt,
+				messages: this.agent.state.messages,
+				tools: this.agent.state.tools
+			};
+
+			return {
+				...previous,
+				context: {
+					...base,
+					messages: this.agent.state.messages
+				}
+			};
+		};
 		this._extensions.installAgentToolHooks();
 		this._extensions.buildRuntime({
 			activeToolNames: this._initialActiveToolNames,

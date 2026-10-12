@@ -225,6 +225,19 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	}
 
 	const usageTokens = calculateContextTokens(usageInfo.usage);
+	// Local providers can return all-zero usage. Estimate the entire
+	// conversation rather than treating its context as empty.
+	if (usageTokens === 0) {
+		const estimated = messages.reduce(
+			(total, message) => total + estimateTokens(message), 0
+		);
+		return {
+			tokens: estimated,
+			usageTokens: 0,
+			trailingTokens: estimated,
+			lastUsageIndex: null
+		};
+	}
 	let trailingTokens = 0;
 	for (let i = usageInfo.index + 1; i < messages.length; i++) {
 		trailingTokens += estimateTokens(messages[i]);

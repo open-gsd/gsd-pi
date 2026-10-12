@@ -1,5 +1,13 @@
 # gsd-pi progress
 
+## FTM in-place hotfixes (2026-10-12)
+
+Applied `TEMP/gsd-pi-ftm-inplace-hotfixes.patch`: allow auto-mode compaction
+via core thresholds; reset abandoned destructive-confirmation at `agent_end`;
+estimate full history when local usage tokens are zero; run `checkCompaction`
+from `prepareNextTurn` between tool turns. `@gsd/agent-core` build OK. See
+`TEMP/gsd-pi-ftm-inplace-hotfixes-notes.md` (gitignored under `TEMP/`).
+
 ## Phase C orphan recover cleanup (2026-10-12)
 
 Idle recover cancels sibling `recovery_required` ops on the same job
