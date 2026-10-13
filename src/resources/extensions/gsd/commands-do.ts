@@ -99,9 +99,10 @@ export async function handleDo(
 
     ctx.ui.notify(`→ /gsd ${fullCommand}`, "info");
 
-    // Re-dispatch through the main dispatcher
+    // Re-dispatch through the main dispatcher. An unhandled result is reported
+    // as unknown rather than routed back here, which would loop forever.
     const { handleGSDCommand } = await import("./commands/dispatcher.js");
-    await handleGSDCommand(fullCommand, ctx, pi);
+    await handleGSDCommand(fullCommand, ctx, pi, { naturalLanguageFallback: false });
     return;
   }
 
