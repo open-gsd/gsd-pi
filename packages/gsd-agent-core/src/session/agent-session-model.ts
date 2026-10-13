@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@gsd/pi-agent-core";
+import { isDefaultPlaceholderModel } from "@gsd/pi-agent-core";
 import type { AssistantMessage, Model } from "@gsd/pi-ai";
 import { clampThinkingLevel, getSupportedThinkingLevels, modelsAreEqual, streamSimple } from "@gsd/pi-ai";
 import { formatNoApiKeyFoundMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
@@ -8,6 +9,9 @@ import { THINKING_LEVELS } from "./agent-session-types.js";
 import type { AgentSessionHost } from "./agent-session-host.js";
 
 export class AgentSessionModelModule {
+	/** In-flight placeholder repair, shared so concurrent first prompts run one repair. */
+	private placeholderRepairInFlight: Promise<boolean> | undefined;
+
 	constructor(readonly host: AgentSessionHost) {}
 
 	async getRequiredRequestAuth(model: Model<any>): Promise<{
@@ -62,7 +66,7 @@ export class AgentSessionModelModule {
 		});
 	}
 
-	async setModel(model: Model<any>, options?: { persist?: boolean }): Promise<void> {
+	async setModel(model: Model<any>, options?: { persist?: boolean; source?: "set" | "restore" }): Promise<void> {
 		if (!this.host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -78,7 +82,61 @@ export class AgentSessionModelModule {
 		// Re-clamp thinking level for new model's capabilities
 		this.host.setThinkingLevel(thinkingLevel);
 
-		await this.emitModelSelect(model, previousModel, "set");
+		// "restore" is the non-manual source: session resume and registry
+		// re-application, not a fresh user choice. Consumers treat it
+		// accordingly (e.g. the Copilot cheaper-alternative advisory skips it).
+		await this.emitModelSelect(model, previousModel, options?.source ?? "set");
+	}
+
+	/**
+	 * Apply the configured default model when the session still carries the
+	 * no-model placeholder (#2782). Providers registered on session_start
+	 * (e.g. the bundled Ollama extension) are absent from the registry while
+	 * cli.ts resolves the default, so the session can reach the first prompt
+	 * on the placeholder; by prompt time registration has settled. Never
+	 * rewrites the user's persisted default (persist: false — the default
+	 * being applied is already the persisted choice).
+	 */
+	async repairPlaceholderModel(): Promise<boolean> {
+		if (!isDefaultPlaceholderModel(this.host.model)) return false;
+
+		// Single-flight: concurrent first prompts (e.g. back-to-back RPC
+		// prompt commands, which rpc-mode does not await) share one repair,
+		// so the model_select event and the transcript model_change land
+		// exactly once. Today the check→set path is fully synchronous, so
+		// this is an explicit contract rather than a lock — it keeps the
+		// guarantee if the path ever awaits (e.g. awaiting provider
+		// registration settlement). Cleared on settle so a failed repair
+		// (nothing registered yet) retries on the next prompt.
+		this.placeholderRepairInFlight ??= this.applyConfiguredDefaultModel();
+		try {
+			return await this.placeholderRepairInFlight;
+		} finally {
+			this.placeholderRepairInFlight = undefined;
+		}
+	}
+
+	/**
+	 * Resolve and apply the configured default model. Only called while the
+	 * session model is the no-model placeholder (#2782).
+	 */
+	private async applyConfiguredDefaultModel(): Promise<boolean> {
+		const provider = this.host.settingsManager.getDefaultProvider();
+		const modelId = this.host.settingsManager.getDefaultModel();
+		if (!provider || !modelId) return false;
+
+		const match = this.host.modelRegistry.getAvailable().find(
+			(m: Model<any>) => m.provider === provider && m.id === modelId,
+		);
+		// Pre-check so an unauthenticated default degrades to no-repair
+		// instead of throwing past the gate — the original auth error
+		// must surface unchanged when repair is impossible.
+		if (!match || !this.host.modelRegistry.hasConfiguredAuth(match)) return false;
+
+		// "restore": an automatic re-application of the configured default,
+		// not a user choice — consumers distinguish it from manual selection.
+		await this.setModel(match, { persist: false, source: "restore" });
+		return true;
 	}
 
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {

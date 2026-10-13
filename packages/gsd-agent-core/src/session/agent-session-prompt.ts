@@ -151,6 +151,13 @@ export class AgentSessionPromptModule {
 			this.host.flushPendingBashMessages();
 			this.host.markTurnLatency("session.pending_bash_flushed");
 
+			// #2782: providers registered on session_start (e.g. the bundled
+			// Ollama extension) were absent from the registry when cli.ts
+			// resolved the default model, so the session may have reached the
+			// first prompt on the no-model placeholder. Registration has
+			// settled by now — apply the configured default before the gate.
+			await this.host.repairPlaceholderModel();
+
 			// Validate model
 			this.host.markTurnLatency("session.model_auth_check.start");
 			if (!this.host.model) {

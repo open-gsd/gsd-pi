@@ -1,6 +1,6 @@
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { Agent } from "../src/index.ts";
+import { Agent, DEFAULT_MODEL, isDefaultPlaceholderModel } from "../src/index.ts";
 
 // Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -645,5 +645,19 @@ describe("Agent", () => {
 
 		await agent.prompt("hello again");
 		expect(receivedCacheRetention).toBe("none");
+	});
+});
+
+describe("DEFAULT_MODEL placeholder (#2782)", () => {
+	it("is the model state an agent without an initial model carries", () => {
+		const agent = new Agent();
+		expect(agent.state.model).toBe(DEFAULT_MODEL);
+	});
+
+	it("is detected by reference, not by field values", () => {
+		expect(isDefaultPlaceholderModel(DEFAULT_MODEL)).toBe(true);
+		expect(isDefaultPlaceholderModel(undefined)).toBe(false);
+		// A value copy — same fields, different object — is NOT the placeholder.
+		expect(isDefaultPlaceholderModel({ ...DEFAULT_MODEL })).toBe(false);
 	});
 });

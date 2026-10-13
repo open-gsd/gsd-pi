@@ -184,6 +184,12 @@ export interface AgentSessionHost {
 	createReplacedSessionContext(): ReplacedSessionContext;
 
 	// Public methods modules delegate to
-	setModel(model: Model<any>, options?: { persist?: boolean }): Promise<void>;
+	setModel(model: Model<any>, options?: { persist?: boolean; source?: "set" | "restore" }): Promise<void>;
+	/**
+	 * Apply the configured default when the session still carries the
+	 * no-model placeholder (#2782). Returns false when there was nothing
+	 * to repair from.
+	 */
+	repairPlaceholderModel(): Promise<boolean>;
 	cycleModel(direction?: "forward" | "backward"): Promise<ModelCycleResult | undefined>;
 }

@@ -59,6 +59,22 @@ const DEFAULT_MODEL = {
 	maxTokens: 0,
 } satisfies Model<any>;
 
+/**
+ * The shared placeholder carried by agents created without an initial model
+ * (#2782). Exported so session layers can detect it by reference — state
+ * without a model holds this exact object, never a copy.
+ */
+export { DEFAULT_MODEL };
+
+/**
+ * True when `model` is the shared no-model placeholder instance. Reference
+ * identity is the contract: a value copy with identical fields is not the
+ * placeholder (#2782).
+ */
+export function isDefaultPlaceholderModel(model: unknown): model is typeof DEFAULT_MODEL {
+	return model === DEFAULT_MODEL;
+}
+
 type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "pendingToolCalls" | "errorMessage"> & {
 	isStreaming: boolean;
 	streamingMessage?: AgentMessage;

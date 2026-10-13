@@ -478,8 +478,17 @@ export class AgentSession implements AgentSessionHost {
 		this._prompt.abortRetry();
 	}
 
-	setModel(model: Model<any>, options?: { persist?: boolean }): Promise<void> {
+	setModel(model: Model<any>, options?: { persist?: boolean; source?: "set" | "restore" }): Promise<void> {
 		return this._model.setModel(model, options);
+	}
+
+	/**
+	 * Apply the configured default when the session still carries the
+	 * no-model placeholder (#2782) — providers registered on session_start
+	 * are absent from the registry during startup model resolution.
+	 */
+	repairPlaceholderModel(): Promise<boolean> {
+		return this._model.repairPlaceholderModel();
 	}
 
 	cycleModel(direction?: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
