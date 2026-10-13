@@ -70,6 +70,21 @@ export function isGsdWorktreePath(path: string): boolean {
 }
 
 /**
+ * Root directory of the GSD worktree a path lies in (the `<MID>` directory
+ * below the worktrees container), or null when the path is not inside a
+ * recognized worktree layout. Pure string split, sliced from the ORIGINAL
+ * string so it keeps its separators.
+ */
+export function worktreeRootFromWorktreePath(path: string): string | null {
+  const normalized = path.replaceAll("\\", "/");
+  const segment = findWorktreeSegment(normalized);
+  if (!segment) return null;
+  const nameEnd = normalized.indexOf("/", segment.afterWorktrees);
+  const root = nameEnd === -1 ? path : path.slice(0, nameEnd);
+  return root.length > segment.afterWorktrees ? root : null;
+}
+
+/**
  * Project-root prefix of a GSD worktree path, or null when the path is not
  * inside a recognized worktree layout. Pure string split — no env handling,
  * HOME guard, or filesystem fallbacks (resolveWorktreeProjectRoot adds

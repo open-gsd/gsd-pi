@@ -11,12 +11,16 @@ import { existsSync } from "node:fs";
 import { projectRoot } from "./commands/context.js";
 import {
   listWorktrees,
-  removeWorktree,
   mergeWorktreeToMain,
   diffWorktreeAll,
   diffWorktreeNumstat,
-  worktreeBranchName,
+  type WorktreeInfo,
 } from "./worktree-manager.js";
+import {
+  formatUnremovedWorktreeReason,
+  removeWorktreeGuarded,
+} from "./worktree-guarded-removal.js";
+import { findLiveWorktreeSession, formatLiveWorktreeSession } from "./worktree-live-session.js";
 import {
   nativeHasChanges,
   nativeDetectMainBranch,
@@ -42,9 +46,12 @@ export interface WorktreeStatus {
 
 // ─── Status helper ─────────────────────────────────────────────────────────
 
-function getStatus(basePath: string, name: string, wtPath: string, mainBranch: string): WorktreeStatus {
-  const diff = diffWorktreeAll(basePath, name, undefined, mainBranch);
-  const numstat = diffWorktreeNumstat(basePath, name, undefined, mainBranch);
+// The branch is the listed one: a milestone worktree is on `milestone/<MID>`,
+// and a diff against the `worktree/<name>` default would always be empty.
+function getStatus(basePath: string, wt: WorktreeInfo, mainBranch: string): WorktreeStatus {
+  const { name, path: wtPath, branch } = wt;
+  const diff = diffWorktreeAll(basePath, name, branch, mainBranch);
+  const numstat = diffWorktreeNumstat(basePath, name, branch, mainBranch);
   const filesChanged = diff.added.length + diff.modified.length + diff.removed.length;
   let linesAdded = 0;
   let linesRemoved = 0;
@@ -62,7 +69,7 @@ function getStatus(basePath: string, name: string, wtPath: string, mainBranch: s
 
   let commits = 0;
   try {
-    commits = nativeCommitCountBetween(basePath, mainBranch, worktreeBranchName(name));
+    commits = nativeCommitCountBetween(basePath, mainBranch, branch);
   } catch {
     // commit count unavailable → leave at 0
   }
@@ -70,7 +77,7 @@ function getStatus(basePath: string, name: string, wtPath: string, mainBranch: s
   return {
     name,
     path: wtPath,
-    branch: worktreeBranchName(name),
+    branch,
     exists: existsSync(wtPath),
     filesChanged,
     linesAdded,
@@ -129,7 +136,7 @@ async function handleList(ctx: ExtensionCommandContext): Promise<void> {
   const basePath = projectRoot();
   const worktrees = listWorktrees(basePath);
   const mainBranch = worktrees.length > 0 ? nativeDetectMainBranch(basePath) : "";
-  const statuses = worktrees.map((wt) => getStatus(basePath, wt.name, wt.path, mainBranch));
+  const statuses = worktrees.map((wt) => getStatus(basePath, wt, mainBranch));
   ctx.ui.notify(formatWorktreeList(statuses), "info");
 }
 
@@ -161,12 +168,30 @@ async function handleMerge(args: string, ctx: ExtensionCommandContext): Promise<
     return;
   }
 
+  const liveSession = findLiveWorktreeSession(basePath, wt);
+  if (liveSession) {
+    ctx.ui.notify(
+      [
+        `Worktree "${target}" is ${formatLiveWorktreeSession(liveSession)}.`,
+        "",
+        "Merging removes the worktree. Stop that session first (/gsd stop), then re-run the merge.",
+      ].join("\n"),
+      "warning",
+    );
+    return;
+  }
+
   const mainBranch = nativeDetectMainBranch(basePath);
-  const status = getStatus(basePath, target, wt.path, mainBranch);
+  const status = getStatus(basePath, wt, mainBranch);
   if (status.filesChanged === 0 && !status.uncommitted) {
     try {
-      removeWorktree(basePath, target, { deleteBranch: true });
-      ctx.ui.notify(`Removed empty worktree ${target}.`, "info");
+      const removal = removeWorktreeGuarded(basePath, wt, { ignoreLiveSession: true });
+      const unremoved = formatUnremovedWorktreeReason(removal);
+      if (unremoved) {
+        ctx.ui.notify(`Empty worktree ${target} was not fully removed: ${unremoved}`, "warning");
+      } else {
+        ctx.ui.notify(`Removed empty worktree ${target}.`, "info");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       ctx.ui.notify(
@@ -198,7 +223,7 @@ async function handleMerge(args: string, ctx: ExtensionCommandContext): Promise<
   const commitMessage = `${commitType}: merge worktree ${target}\n\nGSD-Worktree: ${target}`;
 
   try {
-    mergeWorktreeToMain(basePath, target, commitMessage);
+    mergeWorktreeToMain(basePath, target, commitMessage, wt.branch);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof GSDError && err.code === GSD_GIT_ERROR) {
@@ -222,8 +247,16 @@ async function handleMerge(args: string, ctx: ExtensionCommandContext): Promise<
   ];
 
   try {
-    removeWorktree(basePath, target, { deleteBranch: true });
-    ctx.ui.notify(successLines.join("\n"), "info");
+    const removal = removeWorktreeGuarded(basePath, wt, { ignoreLiveSession: true });
+    const unremoved = formatUnremovedWorktreeReason(removal);
+    if (unremoved) {
+      ctx.ui.notify(
+        [...successLines, "", `The worktree was not fully removed after the merge: ${unremoved}`].join("\n"),
+        "warning",
+      );
+    } else {
+      ctx.ui.notify(successLines.join("\n"), "info");
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const cleanupLines = [
@@ -249,14 +282,22 @@ async function handleClean(ctx: ExtensionCommandContext): Promise<void> {
   }
 
   const removed: string[] = [];
+  const partial: string[] = [];
   const kept: string[] = [];
   const mainBranch = nativeDetectMainBranch(basePath);
   for (const wt of worktrees) {
-    const status = getStatus(basePath, wt.name, wt.path, mainBranch);
+    const status = getStatus(basePath, wt, mainBranch);
     if (status.filesChanged === 0 && !status.uncommitted) {
       try {
-        removeWorktree(basePath, wt.name, { deleteBranch: true });
-        removed.push(wt.name);
+        const removal = removeWorktreeGuarded(basePath, wt);
+        const unremoved = formatUnremovedWorktreeReason(removal);
+        if (!unremoved) {
+          removed.push(wt.name);
+        } else if (removal.status === "partial") {
+          partial.push(`${wt.name} (${unremoved})`);
+        } else {
+          kept.push(`${wt.name} (${unremoved})`);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         kept.push(`${wt.name} (failed: ${msg})`);
@@ -272,11 +313,15 @@ async function handleClean(ctx: ExtensionCommandContext): Promise<void> {
     lines.push("", "Removed:");
     for (const n of removed) lines.push(`  ✓ ${n}`);
   }
+  if (partial.length > 0) {
+    lines.push("", "Partially removed:");
+    for (const n of partial) lines.push(`  ! ${n}`);
+  }
   if (kept.length > 0) {
     lines.push("", "Kept:");
     for (const n of kept) lines.push(`  ─ ${n}`);
   }
-  ctx.ui.notify(lines.join("\n"), "info");
+  ctx.ui.notify(lines.join("\n"), partial.length > 0 ? "warning" : "info");
 }
 
 // ─── Subcommand: remove ─────────────────────────────────────────────────────
@@ -300,7 +345,7 @@ async function handleRemove(args: string, ctx: ExtensionCommandContext): Promise
   }
 
   const mainBranch = nativeDetectMainBranch(basePath);
-  const status = getStatus(basePath, name, wt.path, mainBranch);
+  const status = getStatus(basePath, wt, mainBranch);
   if ((status.filesChanged > 0 || status.uncommitted) && !force) {
     ctx.ui.notify(
       [
@@ -315,9 +360,24 @@ async function handleRemove(args: string, ctx: ExtensionCommandContext): Promise
   }
 
   try {
-    const removed = removeWorktree(basePath, name, { deleteBranch: true });
-    if (removed) {
+    const removal = removeWorktreeGuarded(basePath, wt, { ignoreLiveSession: force });
+    if (removal.status === "removed") {
       ctx.ui.notify(`Removed worktree ${name}.`, "info");
+    } else if (removal.status === "live-session") {
+      ctx.ui.notify(
+        [
+          `Worktree "${name}" is ${formatLiveWorktreeSession(removal.session)}.`,
+          "",
+          "  Stop that session first: /gsd stop",
+          `  Or force-remove:         /gsd worktree remove ${name} --force`,
+        ].join("\n"),
+        "warning",
+      );
+    } else if (removal.status === "partial") {
+      ctx.ui.notify(
+        `Worktree "${name}" was only partially removed: ${formatUnremovedWorktreeReason(removal)}`,
+        "warning",
+      );
     } else {
       ctx.ui.notify(
         [

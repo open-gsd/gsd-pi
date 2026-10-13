@@ -49,10 +49,34 @@ const gsdExtensionPath = (...segments: string[]) =>
 let _ext: ExtensionModules | null = null
 let _mergeExt: MergeModules | null = null
 
+interface ListedWorktree {
+  name: string
+  path: string
+  branch: string
+}
+
+interface LiveWorktreeSession {
+  pid: number
+  unitType: string
+  unitId: string
+}
+
+/** Outcome of a guarded removal: `removed`, or why the worktree is not fully gone. */
+interface GuardedWorktreeRemoval {
+  status: 'removed' | 'live-session' | 'preserved' | 'partial'
+}
+
 interface ExtensionModules {
   createWorktree: (basePath: string, name: string) => { path: string; branch: string }
   listWorktrees: (basePath: string) => Array<{ name: string; path: string; branch: string }>
-  removeWorktree: (basePath: string, name: string, opts?: { deleteBranch?: boolean; branch?: string }) => void
+  removeWorktreeGuarded: (
+    basePath: string,
+    worktree: ListedWorktree,
+    opts?: { deleteBranch?: boolean; ignoreLiveSession?: boolean },
+  ) => GuardedWorktreeRemoval
+  formatUnremovedWorktreeReason: (removal: GuardedWorktreeRemoval) => string | null
+  findLiveWorktreeSession: (basePath: string, worktree: ListedWorktree) => LiveWorktreeSession | null
+  formatLiveWorktreeSession: (session: LiveWorktreeSession) => string
   mergeWorktreeToMain: (basePath: string, name: string, commitMessage: string, branch?: string) => void
   diffWorktreeAll: (basePath: string, name: string, branch?: string) => WorktreeDiff
   diffWorktreeNumstat: (basePath: string, name: string, branch?: string) => Array<{ added: number; removed: number }>
@@ -73,12 +97,21 @@ interface MergeModules {
 interface WorktreeManagerModule {
   createWorktree: ExtensionModules['createWorktree']
   listWorktrees: ExtensionModules['listWorktrees']
-  removeWorktree: ExtensionModules['removeWorktree']
   mergeWorktreeToMain: ExtensionModules['mergeWorktreeToMain']
   diffWorktreeAll: ExtensionModules['diffWorktreeAll']
   diffWorktreeNumstat: ExtensionModules['diffWorktreeNumstat']
   worktreeBranchName: ExtensionModules['worktreeBranchName']
   worktreePath: ExtensionModules['worktreePath']
+}
+
+interface WorktreeGuardedRemovalModule {
+  removeWorktreeGuarded: ExtensionModules['removeWorktreeGuarded']
+  formatUnremovedWorktreeReason: ExtensionModules['formatUnremovedWorktreeReason']
+}
+
+interface WorktreeLiveSessionModule {
+  findLiveWorktreeSession: ExtensionModules['findLiveWorktreeSession']
+  formatLiveWorktreeSession: ExtensionModules['formatLiveWorktreeSession']
 }
 
 interface WorktreePostCreateHookModule {
@@ -115,8 +148,10 @@ function logDebugFailure(scope: string, error: unknown): void {
 
 async function loadExtensionModules(): Promise<ExtensionModules> {
   if (_ext) return _ext
-  const [wtMgr, hook, gitBridge, wtRoot] = await Promise.all([
+  const [wtMgr, guarded, liveSession, hook, gitBridge, wtRoot] = await Promise.all([
     jiti.import(gsdExtensionPath('worktree-manager.ts'), {}) as Promise<WorktreeManagerModule>,
+    jiti.import(gsdExtensionPath('worktree-guarded-removal.ts'), {}) as Promise<WorktreeGuardedRemovalModule>,
+    jiti.import(gsdExtensionPath('worktree-live-session.ts'), {}) as Promise<WorktreeLiveSessionModule>,
     jiti.import(gsdExtensionPath('worktree-post-create-hook.ts'), {}) as Promise<WorktreePostCreateHookModule>,
     jiti.import(gsdExtensionPath('native-git-bridge.ts'), {}) as Promise<NativeGitBridgeModule>,
     jiti.import(gsdExtensionPath('worktree-root.ts'), {}) as Promise<WorktreeRootModule>,
@@ -124,7 +159,10 @@ async function loadExtensionModules(): Promise<ExtensionModules> {
   _ext = {
     createWorktree: wtMgr.createWorktree,
     listWorktrees: wtMgr.listWorktrees,
-    removeWorktree: wtMgr.removeWorktree,
+    removeWorktreeGuarded: guarded.removeWorktreeGuarded,
+    formatUnremovedWorktreeReason: guarded.formatUnremovedWorktreeReason,
+    findLiveWorktreeSession: liveSession.findLiveWorktreeSession,
+    formatLiveWorktreeSession: liveSession.formatLiveWorktreeSession,
     mergeWorktreeToMain: wtMgr.mergeWorktreeToMain,
     diffWorktreeAll: wtMgr.diffWorktreeAll,
     diffWorktreeNumstat: wtMgr.diffWorktreeNumstat,
@@ -209,7 +247,6 @@ async function handleMerge(basePath: string, args: string[]): Promise<void> {
 }
 
 async function doMerge(ext: ExtensionModules, basePath: string, name: string): Promise<void> {
-  const mergeExt = await loadMergeModules()
   const worktrees = ext.listWorktrees(basePath)
   const wt = worktrees.find(w => w.name === name)
   if (!wt) {
@@ -217,11 +254,26 @@ async function doMerge(ext: ExtensionModules, basePath: string, name: string): P
     process.exit(1)
   }
 
+  // Merging removes the worktree, so it must not run under a live session.
+  const liveSession = ext.findLiveWorktreeSession(basePath, wt)
+  if (liveSession) {
+    process.stderr.write(chalk.yellow(`⚠ Worktree "${name}" is ${ext.formatLiveWorktreeSession(liveSession)}.\n`))
+    process.stderr.write(chalk.yellow('  Stop that session first, then run gsd worktree merge again.\n'))
+    process.exit(1)
+  }
+
+  const mergeExt = await loadMergeModules()
   const status = getWorktreeStatus(ext, basePath, name, wt.path, wt.branch)
   if (status.filesChanged === 0 && !status.uncommitted) {
     process.stderr.write(chalk.dim(`Worktree "${name}" has no changes to merge.\n`))
     // Clean up empty worktree
-    ext.removeWorktree(basePath, name, { deleteBranch: true, branch: wt.branch })
+    const unremoved = ext.formatUnremovedWorktreeReason(
+      ext.removeWorktreeGuarded(basePath, wt, { ignoreLiveSession: true }),
+    )
+    if (unremoved) {
+      process.stderr.write(chalk.yellow(`⚠ Empty worktree ${chalk.bold(name)} was not fully removed: ${unremoved}\n`))
+      return
+    }
     process.stderr.write(chalk.green(`Removed empty worktree ${chalk.bold(name)}.\n`))
     return
   }
@@ -244,8 +296,15 @@ async function doMerge(ext: ExtensionModules, basePath: string, name: string): P
 
   try {
     ext.mergeWorktreeToMain(basePath, name, commitMessage, wt.branch)
-    ext.removeWorktree(basePath, name, { deleteBranch: true, branch: wt.branch })
-    process.stderr.write(chalk.green(`✓ Merged and cleaned up ${chalk.bold(name)}\n`))
+    const unremoved = ext.formatUnremovedWorktreeReason(
+      ext.removeWorktreeGuarded(basePath, wt, { ignoreLiveSession: true }),
+    )
+    if (unremoved) {
+      process.stderr.write(chalk.green(`✓ Merged ${chalk.bold(name)}\n`))
+      process.stderr.write(chalk.yellow(`⚠ The worktree was not fully removed after the merge: ${unremoved}\n`))
+    } else {
+      process.stderr.write(chalk.green(`✓ Merged and cleaned up ${chalk.bold(name)}\n`))
+    }
     process.stderr.write(chalk.dim(`  commit: ${commitMessage}\n`))
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -271,7 +330,11 @@ async function handleClean(basePath: string): Promise<void> {
     const status = getWorktreeStatus(ext, basePath, wt.name, wt.path, wt.branch)
     if (status.filesChanged === 0 && !status.uncommitted) {
       try {
-        ext.removeWorktree(basePath, wt.name, { deleteBranch: true, branch: wt.branch })
+        const unremoved = ext.formatUnremovedWorktreeReason(ext.removeWorktreeGuarded(basePath, wt))
+        if (unremoved) {
+          process.stderr.write(chalk.yellow(`  ─ Kept ${chalk.bold(wt.name)} (${unremoved})\n`))
+          continue
+        }
         process.stderr.write(chalk.green(`  ✓ Removed ${chalk.bold(wt.name)} (clean)\n`))
         cleaned++
       } catch (error) {
@@ -303,16 +366,25 @@ async function handleRemove(basePath: string, args: string[]): Promise<void> {
     process.exit(1)
   }
 
+  const force = process.argv.includes('--force')
   const status = getWorktreeStatus(ext, basePath, name, wt.path, wt.branch)
   if (status.filesChanged > 0 || status.uncommitted) {
     process.stderr.write(chalk.yellow(`⚠ Worktree "${name}" has unmerged changes (${status.filesChanged} files).\n`))
     process.stderr.write(chalk.yellow('  Use --force to remove anyway, or merge first: gsd worktree merge ' + name + '\n'))
-    if (!process.argv.includes('--force')) {
+    if (!force) {
       process.exit(1)
     }
   }
 
-  ext.removeWorktree(basePath, name, { deleteBranch: true, branch: wt.branch })
+  const removal = ext.removeWorktreeGuarded(basePath, wt, { ignoreLiveSession: force })
+  const unremoved = ext.formatUnremovedWorktreeReason(removal)
+  if (unremoved) {
+    process.stderr.write(chalk.yellow(`⚠ Worktree "${name}" was not ${removal.status === 'partial' ? 'fully ' : ''}removed: ${unremoved}\n`))
+    if (removal.status === 'live-session') {
+      process.stderr.write(chalk.yellow('  Stop that session first, or use --force to remove anyway.\n'))
+    }
+    process.exit(1)
+  }
   process.stderr.write(chalk.green(`✓ Removed worktree ${chalk.bold(name)}\n`))
 }
 

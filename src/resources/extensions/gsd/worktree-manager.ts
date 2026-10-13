@@ -924,11 +924,15 @@ export function listWorktrees(basePath: string): WorktreeInfo[] {
       entryVariants.push(realpathSync(entryPath));
     }
     const normalizedEntryVariants = [...new Set(entryVariants.map(normalizePathForComparison))];
+    // The comparison form is lower-cased on Windows. The name is read from
+    // the path as git registered it, so `M007` is not listed as `m007`.
+    const registeredLeaf = entryVariants[0].replaceAll("\\", "/").replace(/\/+$/, "").split("/").pop() ?? "";
     const matchedRoot = worktreeRoots.find(root =>
       normalizedEntryVariants.some(entryVariant => entryVariant.startsWith(`${root.normalized}/`)),
     );
-    const matchesBranchLeaf = branchWorktreeName
-      ? normalizedEntryVariants.some(entryVariant => entryVariant.split("/").pop() === branchWorktreeName)
+    const normalizedBranchLeaf = branchWorktreeName ? normalizePathForComparison(branchWorktreeName) : null;
+    const matchesBranchLeaf = normalizedBranchLeaf
+      ? normalizedEntryVariants.some(entryVariant => entryVariant.split("/").pop() === normalizedBranchLeaf)
       : false;
 
     // Only include worktrees under .gsd/worktrees/
@@ -946,6 +950,7 @@ export function listWorktrees(basePath: string): WorktreeInfo[] {
     }
 
     if (!name || name.includes("/")) continue;
+    if (normalizePathForComparison(registeredLeaf) === name) name = registeredLeaf;
 
     const resolvedEntryPath = existsSync(entryPath) ? realpathSync(entryPath) : resolve(entryPath);
 
@@ -1058,15 +1063,75 @@ export function findNestedGitDirs(rootPath: string): string[] {
   return results;
 }
 
+export interface RemoveWorktreeOptions {
+  deleteBranch?: boolean;
+  force?: boolean;
+  branch?: string;
+}
+
+/**
+ * Outcome of a worktree removal.
+ *   - `removed`: git no longer tracks the worktree and its directory is gone.
+ *   - `preserved`: the worktree holds uncommitted work that could not be
+ *     quarantined, so nothing was removed.
+ *   - `partial`: the directory is still on disk after every removal attempt.
+ *     Windows refuses to delete a directory that is the working directory of
+ *     a running process or holds an open file. `cleanupCommand` is absent
+ *     when the directory lies outside the worktrees containers, where nothing
+ *     is deleted by force (#2365).
+ */
+export type WorktreeRemovalResult =
+  | { status: "removed"; path: string }
+  | { status: "preserved"; path: string }
+  | { status: "partial"; path: string; cleanupCommand?: string };
+
+/** Shell command that deletes a leftover worktree directory on this platform. */
+export function worktreeManualCleanupCommand(
+  dirPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "win32") {
+    return `Remove-Item -Recurse -Force -LiteralPath '${dirPath.replaceAll("'", "''")}'`;
+  }
+  return `rm -rf "${dirPath}"`;
+}
+
+function defaultRemoveDirectoryTree(dirPath: string): void {
+  rmSync(dirPath, { recursive: true, force: true });
+}
+
+let removeDirectoryTree = defaultRemoveDirectoryTree;
+
+/** Test-only seam for a directory the operating system refuses to delete. */
+export function _setRemoveDirectoryTreeForTests(override: ((dirPath: string) => void) | null): void {
+  removeDirectoryTree = override ?? defaultRemoveDirectoryTree;
+}
+
 /**
  * Remove a worktree and optionally delete its branch.
  * If the process is currently inside the worktree, chdir out first.
+ *
+ * Returns false only when the worktree was kept to preserve uncommitted work.
+ * A true result does not say the directory is gone: use
+ * `removeWorktreeDetailed` to tell a full removal from a partial one.
  */
 export function removeWorktree(
   basePath: string,
   name: string,
-  opts: { deleteBranch?: boolean; force?: boolean; branch?: string } = {},
+  opts: RemoveWorktreeOptions = {},
 ): boolean {
+  return removeWorktreeDetailed(basePath, name, opts).status !== "preserved";
+}
+
+/**
+ * Remove a worktree and optionally delete its branch, and report whether the
+ * directory is really gone.
+ */
+export function removeWorktreeDetailed(
+  basePath: string,
+  name: string,
+  opts: RemoveWorktreeOptions = {},
+): WorktreeRemovalResult {
   basePath = normalizeBasePathForWorktreeOps(basePath);
 
   let wtPath = worktreePath(basePath, name);
@@ -1128,7 +1193,7 @@ export function removeWorktree(
     if (deleteBranchAfterRemoval) {
       deleteBranchIfPresent(basePath, branch, "nativeBranchDelete failed");
     }
-    return true;
+    return { status: "removed", path: resolvedWtPath };
   }
 
   // Submodule safety (#2337): detect submodules with uncommitted changes
@@ -1228,13 +1293,13 @@ export function removeWorktree(
         dirtyState.status,
       );
       if (!quarantinePath) {
-        return false;
+        return { status: "preserved", path: resolvedWtPath };
       }
 
       deleteBranchAfterRemoval = false;
       if (!existsSync(resolvedWtPath)) {
         nativeWorktreePrune(basePath);
-        return true;
+        return { status: "removed", path: resolvedWtPath };
       }
     }
   }
@@ -1263,15 +1328,16 @@ export function removeWorktree(
         if (existsSync(wtInternalDir)) {
           rmSync(wtInternalDir, { recursive: true, force: true });
         }
-        rmSync(resolvedWtPath, { recursive: true, force: true });
+        removeDirectoryTree(resolvedWtPath);
         if (wtPath !== resolvedWtPath && existsSync(wtPath)) {
-          rmSync(wtPath, { recursive: true, force: true });
+          removeDirectoryTree(wtPath);
         }
-      } catch {
+      } catch (e) {
         logWarning(
           "reconcile",
-          `Worktree directory could not be removed after git internal cleanup: ${resolvedWtPath}. ` +
-            `Manual cleanup: rm -rf "${resolvedWtPath.replaceAll("\\", "/")}"`,
+          `Worktree directory could not be removed after git internal cleanup: ${resolvedWtPath} ` +
+            `(${e instanceof Error ? e.message : String(e)}). ` +
+            `Manual cleanup: ${worktreeManualCleanupCommand(resolvedWtPath)}`,
           { worktree: name },
         );
       }
@@ -1292,7 +1358,16 @@ export function removeWorktree(
   if (deleteBranchAfterRemoval) {
     deleteBranchIfPresent(basePath, branch, "final branch delete failed");
   }
-  return true;
+
+  const leftoverPath = [resolvedWtPath, wtPath].find((candidate) => existsSync(candidate));
+  if (leftoverPath) {
+    return {
+      status: "partial",
+      path: leftoverPath,
+      ...(resolvedPathSafe ? { cleanupCommand: worktreeManualCleanupCommand(leftoverPath) } : {}),
+    };
+  }
+  return { status: "removed", path: resolvedWtPath };
 }
 
 /**

@@ -649,9 +649,13 @@ export async function checkGitHealth(
 
         if (health.safeToRemove && shouldFix("worktree_branch_merged") && !isCwd) {
           try {
-            const { removeWorktree } = await import("./worktree-manager.js");
-            removeWorktree(healthBasePath, wt.name, { deleteBranch: true, branch: wt.branch });
-            fixesApplied.push(`removed merged worktree "${wt.name}" and deleted branch ${wt.branch}`);
+            const { formatUnremovedWorktreeReason, removeWorktreeGuarded } = await import("./worktree-guarded-removal.js");
+            const unremoved = formatUnremovedWorktreeReason(removeWorktreeGuarded(healthBasePath, wt));
+            fixesApplied.push(
+              unremoved
+                ? `kept merged worktree "${wt.name}": ${unremoved}`
+                : `removed merged worktree "${wt.name}" and deleted branch ${wt.branch}`,
+            );
           } catch {
             fixesApplied.push(`failed to remove merged worktree "${wt.name}"`);
           }
