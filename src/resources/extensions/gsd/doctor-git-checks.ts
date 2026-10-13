@@ -15,7 +15,7 @@ import { RUNTIME_EXCLUSION_PATHS, resolveMilestoneIntegrationBranch, writeIntegr
 import { nativeIsRepo, nativeWorktreeList, nativeWorktreeRemove, nativeBranchList, nativeBranchDelete, nativeLsFiles, nativeRmCached, nativeHasChanges, nativeLastCommitEpoch, nativeGetCurrentBranch, nativeAddTracked, nativeCommit, nativeIsCurrentUnbornBranch } from "./native-git-bridge.js";
 import { getAllWorktreeHealth } from "./worktree-health.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
-import { listUnmergedGitPaths, probeGitConflictState, reconcileGitConflictsOnSignal } from "./git-conflict-state.js";
+import { gitDiffCheckFailures, listUnmergedGitPaths, probeGitConflictState, reconcileGitConflictsOnSignal } from "./git-conflict-state.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 import { enterBranchModeForMilestone } from "./auto-worktree-branch-lifecycle.js";
 
@@ -125,26 +125,6 @@ function copyProjectRootContentIntoWorktree(projectRoot: string, worktreeRoot: s
     copied++;
   }
   return copied;
-}
-
-function getSnapshotDiffCheckFailure(basePath: string): string | null {
-  const failures: string[] = [];
-
-  for (const args of [["--cached"], []]) {
-    const result = spawnSync("git", ["diff", "--check", ...args], {
-      cwd: basePath,
-      encoding: "utf-8",
-    });
-    if (result.status === 0) continue;
-
-    const output = [result.stdout, result.stderr, result.error?.message]
-      .filter(Boolean)
-      .join("\n")
-      .trim();
-    failures.push(output || `git diff --check ${args.join(" ")} failed`);
-  }
-
-  return failures.length > 0 ? failures.join("\n") : null;
 }
 
 export async function checkGitHealth(
@@ -587,21 +567,27 @@ export async function checkGitHealth(
             fixable: true,
           });
 
-          const diffCheckFailure = getSnapshotDiffCheckFailure(basePath);
+          // Only leftover conflict markers make a snapshot unsafe. Whitespace
+          // findings from `git diff --check` (trailing spaces, or the CR of a
+          // CRLF-saved file when core.autocrlf is off) are not conflicts (#2776).
+          const markerFailures = gitDiffCheckFailures(basePath);
+          const diffCheckFailure = markerFailures?.join("\n") ?? "";
           if (diffCheckFailure) {
             issues.push({
               severity: "error",
               code: "conflict_markers_in_tracked_files",
               scope: "project",
               unitId: "project",
-              message: `Cannot create gsd snapshot: tracked changes contain conflict markers or whitespace errors. Resolve conflicts manually before auto-mode can proceed.\n${diffCheckFailure}`,
+              message: `Cannot create gsd snapshot: tracked changes contain leftover conflict markers. Resolve conflicts manually before auto-mode can proceed.\n${diffCheckFailure}`,
               fixable: false,
             });
           }
 
           if (shouldFix("stale_uncommitted_changes")) {
             try {
-              if (diffCheckFailure) {
+              if (markerFailures === null) {
+                fixesApplied.push("gsd snapshot skipped - could not run git to check tracked files for conflict markers");
+              } else if (diffCheckFailure) {
                 fixesApplied.push("gsd snapshot skipped - conflict markers detected in tracked files");
               } else {
                 nativeAddTracked(basePath);
