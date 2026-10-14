@@ -189,6 +189,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "gpt-5-1-codex-max": "standard",
   "gemini-2-5-pro": "standard",
   "gemini-3-1-pro-preview": "standard",
+  "gemini-4-argon": "standard",            // models.dev 2026-10 refresh: Gemini 4 pro class ($2/$10 per M, 1M context), same tier class as Gemini 3.1 Pro
   "kimi-k2-7-code": "standard",
   "deepseek-chat": "standard",
   "gpt-5-6-terra": "standard",          // GitHub Copilot: "balanced everyday interactive and agentic coding"; was misclassified heavy (fixed 2026-09-20)
@@ -283,6 +284,7 @@ const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
   "gemini-2-0-flash": 0.0001,
   "gemini-2-5-pro": 0.00125,
   "gemini-3-1-pro-preview": 0.002,
+  "gemini-4-argon": 0.002,
   "gemini-3-5-flash": 0.0015,
   "gemini-3-6-flash": 0.00075,
   "gemini-3-7-flash": 0.00075,
@@ -370,6 +372,9 @@ export const MODEL_CAPABILITY_PROFILES: Record<string, ModelCapabilities> = {
   "gemini-2-5-pro":               { coding: 75, debugging: 70, research: 85, reasoning: 75, speed: 55, longContext: 90, instruction: 75 },
   "gemini-2-0-flash":             { coding: 50, debugging: 40, research: 50, reasoning: 40, speed: 95, longContext: 60, instruction: 65 },
   "gemini-3-1-pro-preview":       { coding: 80, debugging: 75, research: 88, reasoning: 82, speed: 55, longContext: 95, instruction: 78 },
+  // models.dev 2026-10 refresh: Gemini 4 Argon is the pro-class Gemini 4 flagship; no published eval deltas yet, so it
+  // inherits the Gemini 3.1 Pro profile with the longContext edge adjusted for the same 1M window.
+  "gemini-4-argon":               { coding: 80, debugging: 75, research: 88, reasoning: 82, speed: 55, longContext: 95, instruction: 78 },
   "gemini-3-5-flash":             { coding: 62, debugging: 55, research: 60, reasoning: 58, speed: 92, longContext: 75, instruction: 72 },
   "gemini-3-6-flash":             { coding: 66, debugging: 58, research: 64, reasoning: 62, speed: 93, longContext: 88, instruction: 74 },
   "gemini-3-7-flash":             { coding: 68, debugging: 60, research: 66, reasoning: 64, speed: 93, longContext: 88, instruction: 75 },

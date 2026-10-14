@@ -5311,6 +5311,26 @@
         "off": null
       }
     },
+    "gemini-4-argon": {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon",
+      "api": "google-generative-ai",
+      "provider": "google",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 10,
+        "cacheRead": 0.1,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 32768
+    },
     "gemini-3.1-flash-lite": {
       "id": "gemini-3.1-flash-lite",
       "name": "Gemini 3.1 Flash Lite",
@@ -7038,6 +7058,30 @@
       },
       "compat": {
         "forceAdaptiveThinking": true
+      }
+    },
+    "claude-haiku-5.5": {
+      "id": "claude-haiku-5.5",
+      "name": "Claude Haiku 5.5",
+      "api": "anthropic-messages",
+      "provider": "cloudflare-ai-gateway",
+      "baseUrl": "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.1,
+        "output": 0.5,
+        "cacheRead": 0.01,
+        "cacheWrite": 0.125
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "compat": {
+        "forceAdaptiveThinking": true,
+        "rejectsTemperature": true
       }
     },
     "claude-opus-4.8": {
@@ -9513,6 +9557,29 @@
       "contextWindow": 262144,
       "maxTokens": 65536
     },
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": {
+      "id": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+      "name": "Qwen3 VL 30B A3B Instruct",
+      "api": "openai-completions",
+      "provider": "huggingface",
+      "baseUrl": "https://router.huggingface.co/v1",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.2,
+        "output": 0.7,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "contextWindow": 131072,
+      "maxTokens": 32768
+    },
     "Qwen/Qwen3-VL-235B-A22B-Thinking": {
       "id": "Qwen/Qwen3-VL-235B-A22B-Thinking",
       "name": "Qwen3 VL 235B A22B Thinking",
@@ -10228,6 +10295,28 @@
       },
       "contextWindow": 524288,
       "maxTokens": 512000
+    },
+    "MiniMaxAI/MiniMax-M1-80k": {
+      "id": "MiniMaxAI/MiniMax-M1-80k",
+      "name": "MiniMax M1 80K",
+      "api": "openai-completions",
+      "provider": "huggingface",
+      "baseUrl": "https://router.huggingface.co/v1",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 0.55,
+        "output": 2.2,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 80000
     },
     "MiniMaxAI/MiniMax-M2.1": {
       "id": "MiniMaxAI/MiniMax-M2.1",
@@ -11904,25 +11993,6 @@
     }
   },
   "opencode": {
-    "ling-3.0-flash-fin-free": {
-      "id": "ling-3.0-flash-fin-free",
-      "name": "Ling 3.0 Flash Fin Free",
-      "api": "openai-completions",
-      "provider": "opencode",
-      "baseUrl": "https://opencode.ai/zen/v1",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
     "gpt-5.4": {
       "id": "gpt-5.4",
       "name": "GPT-5.4",
@@ -11990,25 +12060,6 @@
         "off": null,
         "xhigh": "xhigh"
       }
-    },
-    "ling-3.1-flash-free": {
-      "id": "ling-3.1-flash-free",
-      "name": "Ling 3.1 Flash Free",
-      "api": "openai-completions",
-      "provider": "opencode",
-      "baseUrl": "https://opencode.ai/zen/v1",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 32768
     },
     "muse-spark-1.3": {
       "id": "muse-spark-1.3",
@@ -12591,6 +12642,25 @@
       "thinkingLevelMap": {
         "off": null
       }
+    },
+    "cat-jam-free": {
+      "id": "cat-jam-free",
+      "name": "Cat Jam Free",
+      "api": "openai-completions",
+      "provider": "opencode",
+      "baseUrl": "https://opencode.ai/zen/v1",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "contextWindow": 262144,
+      "maxTokens": 131072
     },
     "gpt-6.1-sol": {
       "id": "gpt-6.1-sol",
@@ -13688,6 +13758,26 @@
         "max": "max"
       }
     },
+    "gemini-4-argon": {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon",
+      "api": "google-generative-ai",
+      "provider": "opencode",
+      "baseUrl": "https://opencode.ai/zen/v1",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 10,
+        "cacheRead": 0.1,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
     "muse-spark-1.3-contributor-free": {
       "id": "muse-spark-1.3-contributor-free",
       "name": "Muse Spark 1.3 Free",
@@ -13840,6 +13930,26 @@
       "contextWindow": 1000000,
       "maxTokens": 131072
     },
+    "gemini-4-argon-contributor": {
+      "id": "gemini-4-argon-contributor",
+      "name": "Gemini 4 Argon Contributor",
+      "api": "google-generative-ai",
+      "provider": "opencode-go",
+      "baseUrl": "https://opencode.ai/zen/go/v1",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 4,
+        "output": 20,
+        "cacheRead": 0.2,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
     "glm-5.3-flash": {
       "id": "glm-5.3-flash",
       "name": "GLM-5.3-Flash",
@@ -13931,37 +14041,6 @@
         "xhigh": "max"
       }
     },
-    "deepseek-v4-flash-vision-exp": {
-      "id": "deepseek-v4-flash-vision-exp",
-      "name": "DeepSeek V4 Flash Vision Exp",
-      "api": "openai-completions",
-      "provider": "opencode-go",
-      "baseUrl": "https://opencode.ai/zen/go/v1",
-      "reasoning": true,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 0.15,
-        "output": 0.6,
-        "cacheRead": 0.003,
-        "cacheWrite": 0
-      },
-      "contextWindow": 1000000,
-      "maxTokens": 384000,
-      "compat": {
-        "requiresReasoningContentOnAssistantMessages": true,
-        "thinkingFormat": "deepseek"
-      },
-      "thinkingLevelMap": {
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": "max"
-      }
-    },
     "longcat-2.0": {
       "id": "longcat-2.0",
       "name": "LongCat-2.0",
@@ -13979,6 +14058,25 @@
         "cacheWrite": 0
       },
       "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "cat-jam-free": {
+      "id": "cat-jam-free",
+      "name": "Cat Jam Free",
+      "api": "openai-completions",
+      "provider": "opencode-go",
+      "baseUrl": "https://opencode.ai/zen/go/v1",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "contextWindow": 262144,
       "maxTokens": 131072
     },
     "space-bunny": {
@@ -14393,36 +14491,6 @@
       },
       "contextWindow": 1000000,
       "maxTokens": 65536
-    },
-    "deepseek-v4-flash": {
-      "id": "deepseek-v4-flash",
-      "name": "DeepSeek V4 Flash",
-      "api": "openai-completions",
-      "provider": "opencode-go",
-      "baseUrl": "https://opencode.ai/zen/go/v1",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.15,
-        "output": 0.6,
-        "cacheRead": 0.003,
-        "cacheWrite": 0
-      },
-      "contextWindow": 1000000,
-      "maxTokens": 384000,
-      "compat": {
-        "requiresReasoningContentOnAssistantMessages": true,
-        "thinkingFormat": "deepseek"
-      },
-      "thinkingLevelMap": {
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": "high",
-        "xhigh": "max"
-      }
     }
   },
   "github-copilot": {
@@ -15472,6 +15540,37 @@
         "minimal": "low",
         "xhigh": "xhigh",
         "max": "max"
+      }
+    },
+    "gemini-4-argon": {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon",
+      "api": "openai-completions",
+      "provider": "github-copilot",
+      "baseUrl": "https://api.individual.githubcopilot.com",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 10,
+        "cacheRead": 0.1,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 65536,
+      "headers": {
+        "User-Agent": "GitHubCopilotChat/0.35.0",
+        "Editor-Version": "vscode/1.107.0",
+        "Editor-Plugin-Version": "copilot-chat/0.35.0",
+        "Copilot-Integration-Id": "vscode-chat"
+      },
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
       }
     },
     "gpt-6-sol": {
@@ -16836,6 +16935,125 @@
     }
   },
   "openrouter": {
+    "~unbiased/pareto-latest": {
+      "id": "~unbiased/pareto-latest",
+      "name": "Pareto Latest",
+      "api": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.5,
+        "output": 7.5,
+        "cacheRead": 0.25,
+        "cacheWrite": 0
+      },
+      "contextWindow": 262144,
+      "maxTokens": 131072
+    },
+    "unbiased/pareto-26.9": {
+      "id": "unbiased/pareto-26.9",
+      "name": "Pareto 26.9",
+      "api": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.5,
+        "output": 7.5,
+        "cacheRead": 0.25,
+        "cacheWrite": 0
+      },
+      "contextWindow": 262144,
+      "maxTokens": 131072
+    },
+    "liquid/lfm-2.5-24b-a2b": {
+      "id": "liquid/lfm-2.5-24b-a2b",
+      "name": "LiquidAI: LFM2.5-24B-A2B",
+      "api": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 0.05,
+        "output": 0.7,
+        "cacheRead": 0.025,
+        "cacheWrite": 0
+      },
+      "contextWindow": 128000,
+      "maxTokens": 8192
+    },
+    "google/gemini-4-argon": {
+      "id": "google/gemini-4-argon",
+      "name": "Google: Gemini 4 Argon",
+      "api": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 10,
+        "cacheRead": 0.1,
+        "cacheWrite": 0.1875
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
+    "google/gemini-4-argon:batch": {
+      "id": "google/gemini-4-argon:batch",
+      "name": "Google: Gemini 4 Argon (batch)",
+      "api": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 5,
+        "cacheRead": 0.05,
+        "cacheWrite": 0.1875
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 943718
+    },
+    "meta/muse-wonder": {
+      "id": "meta/muse-wonder",
+      "name": "Meta: Muse Wonder",
+      "api": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 4,
+        "output": 20,
+        "cacheRead": 0.2,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 943718
+    },
     "stepfun/step-5-preview": {
       "id": "stepfun/step-5-preview",
       "name": "StepFun: Step 5 Preview",
@@ -16953,28 +17171,9 @@
         "text"
       ],
       "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "apodex/apodex-1.1-mini:free": {
-      "id": "apodex/apodex-1.1-mini:free",
-      "name": "Apodex: Apodex 1.1 Mini (free)",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
+        "input": 0.075,
+        "output": 0.225,
+        "cacheRead": 0.015,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
@@ -17664,26 +17863,6 @@
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "unbiased/pareto": {
-      "id": "unbiased/pareto",
-      "name": "Pareto",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": false,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 2.5,
-        "output": 7.5,
-        "cacheRead": 0.25,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 131072
-    },
     "~deepseek/deepseek-pro-latest": {
       "id": "~deepseek/deepseek-pro-latest",
       "name": "DeepSeek: DeepSeek Pro Latest",
@@ -17695,7 +17874,7 @@
         "text"
       ],
       "cost": {
-        "input": 0.126,
+        "input": 0.1307,
         "output": 8,
         "cacheRead": 0.13,
         "cacheWrite": 0
@@ -17715,9 +17894,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.016,
-        "output": 0.6,
-        "cacheRead": 0.005,
+        "input": 0.02016,
+        "output": 0.891,
+        "cacheRead": 0.0054,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -17855,12 +18034,12 @@
         "image"
       ],
       "cost": {
-        "input": 0.021,
-        "output": 0.0616,
-        "cacheRead": 0.0042,
+        "input": 0.06,
+        "output": 0.18,
+        "cacheRead": 0.012,
         "cacheWrite": 0
       },
-      "contextWindow": 262144,
+      "contextWindow": 131072,
       "maxTokens": 32768
     },
     "deepseek/deepseek-v4.1-flash": {
@@ -17875,9 +18054,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.3,
-        "output": 1.2,
-        "cacheRead": 0.006,
+        "input": 0.02016,
+        "output": 0.891,
+        "cacheRead": 0.0054,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -18047,25 +18226,6 @@
       "contextWindow": 1050000,
       "maxTokens": 128000
     },
-    "inclusionai/ling-3.0-flash-sante": {
-      "id": "inclusionai/ling-3.0-flash-sante",
-      "name": "inclusionAI: Ling 3.0 Flash Sante",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.042,
-        "output": 0.1232,
-        "cacheRead": 0.0084,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
     "qwen/qwen3.8-max-0902": {
       "id": "qwen/qwen3.8-max-0902",
       "name": "Qwen: Qwen3.8 Max (0902)",
@@ -18081,7 +18241,7 @@
         "input": 2,
         "output": 6,
         "cacheRead": 0.25,
-        "cacheWrite": 2.5
+        "cacheWrite": 0
       },
       "contextWindow": 1000000,
       "maxTokens": 131072
@@ -18258,25 +18418,6 @@
       "contextWindow": 1048576,
       "maxTokens": 64000
     },
-    "inclusionai/ling-3.0-flash-fin": {
-      "id": "inclusionai/ling-3.0-flash-fin",
-      "name": "inclusionAI: Ling 3.0 Flash Fin",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.042,
-        "output": 0.1232,
-        "cacheRead": 0.0084,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
     "~z-ai/glm-flash-latest": {
       "id": "~z-ai/glm-flash-latest",
       "name": "Z.ai: GLM Flash Latest",
@@ -18289,9 +18430,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.032,
-        "output": 1.959642,
-        "cacheRead": 0.02,
+        "input": 0.036,
+        "output": 0.9,
+        "cacheRead": 0.0108,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -18312,7 +18453,7 @@
         "input": 0.15,
         "output": 0.47,
         "cacheRead": 0.016,
-        "cacheWrite": 0.2
+        "cacheWrite": 0
       },
       "contextWindow": 1000000,
       "maxTokens": 131072
@@ -18329,13 +18470,13 @@
         "image"
       ],
       "cost": {
-        "input": 0.15,
-        "output": 0.5,
-        "cacheRead": 0.03,
+        "input": 0.036,
+        "output": 0.9,
+        "cacheRead": 0.0108,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
-      "maxTokens": 943717
+      "maxTokens": 943718
     },
     "z-ai/glm-5.3-flash:batch": {
       "id": "z-ai/glm-5.3-flash:batch",
@@ -18419,9 +18560,9 @@
         "text"
       ],
       "cost": {
-        "input": 0.0312,
+        "input": 0.063,
         "output": 4.4,
-        "cacheRead": 0.029,
+        "cacheRead": 0.0586,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -18438,9 +18579,9 @@
         "text"
       ],
       "cost": {
-        "input": 0.039,
-        "output": 7,
-        "cacheRead": 0.038,
+        "input": 0.079,
+        "output": 4.8,
+        "cacheRead": 0.059,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -18477,13 +18618,13 @@
         "image"
       ],
       "cost": {
-        "input": 0.425,
-        "output": 2.55,
-        "cacheRead": 0.085,
-        "cacheWrite": 0.53125
+        "input": 0.04,
+        "output": 2.3,
+        "cacheRead": 0.0198,
+        "cacheWrite": 0
       },
       "contextWindow": 1000000,
-      "maxTokens": 131072
+      "maxTokens": 235929
     },
     "dots-studio/dots-3-note-preview:free": {
       "id": "dots-studio/dots-3-note-preview:free",
@@ -18684,13 +18825,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.0469,
-        "output": 0.134,
-        "cacheRead": 0.02345,
+        "input": 0.07,
+        "output": 0.2,
+        "cacheRead": 0.04,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 131072
+      "maxTokens": 235929
     },
     "nvidia/nemotron-3.5-lightning:free": {
       "id": "nvidia/nemotron-3.5-lightning:free",
@@ -18801,9 +18942,9 @@
         "text"
       ],
       "cost": {
-        "input": 0.006,
-        "output": 1.28,
-        "cacheRead": 0.006,
+        "input": 0.0144,
+        "output": 0.576,
+        "cacheRead": 0.0108,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -18831,9 +18972,9 @@
         "text"
       ],
       "cost": {
-        "input": 0.006,
-        "output": 1.28,
-        "cacheRead": 0.006,
+        "input": 0.016,
+        "output": 0.64,
+        "cacheRead": 0.016,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -19184,9 +19325,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.53,
-        "output": 12,
-        "cacheRead": 0.3,
+        "input": 0.7,
+        "output": 15,
+        "cacheRead": 0.32,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -19759,9 +19900,9 @@
         "text"
       ],
       "cost": {
-        "input": 0.084,
-        "output": 8,
-        "cacheRead": 0.083,
+        "input": 0.05,
+        "output": 7,
+        "cacheRead": 0.049,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -19870,13 +20011,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.5,
-        "output": 2.2,
-        "cacheRead": 0.1,
+        "input": 0.6,
+        "output": 2.4,
+        "cacheRead": 0.12,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 16384
+      "maxTokens": 182520
     },
     "nvidia/nemotron-3-ultra-550b-a55b:free": {
       "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -20314,9 +20455,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.1,
-        "output": 4,
-        "cacheRead": 0.1,
+        "input": 0.536,
+        "output": 14,
+        "cacheRead": 0.3,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -20414,29 +20555,10 @@
         "image"
       ],
       "cost": {
-        "input": 0.15,
-        "output": 1,
-        "cacheRead": 0.05,
+        "input": 0.1,
+        "output": 0.95,
+        "cacheRead": 0.1,
         "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 235929
-    },
-    "qwen/qwen3.6-max-preview": {
-      "id": "qwen/qwen3.6-max-preview",
-      "name": "Qwen: Qwen3.6 Max Preview",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 1.027,
-        "output": 6.162,
-        "cacheRead": 0,
-        "cacheWrite": 1.28375
       },
       "contextWindow": 262144,
       "maxTokens": 65536
@@ -20453,13 +20575,13 @@
         "image"
       ],
       "cost": {
-        "input": 0.45,
-        "output": 2.7,
+        "input": 0.32,
+        "output": 3.2,
         "cacheRead": 0,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 65536
+      "maxTokens": 81920
     },
     "openai/gpt-5.5-pro": {
       "id": "openai/gpt-5.5-pro",
@@ -20564,9 +20686,9 @@
         "text"
       ],
       "cost": {
-        "input": 0.95526,
-        "output": 1.91052,
-        "cacheRead": 0.079605,
+        "input": 0.422472,
+        "output": 0.844944,
+        "cacheRead": 0.035206,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -20594,13 +20716,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.0099,
-        "output": 1.28,
-        "cacheRead": 0.0099,
+        "input": 0.091,
+        "output": 0.182,
+        "cacheRead": 0.0182,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
-      "maxTokens": 943718,
+      "maxTokens": 943717,
       "compat": {
         "requiresReasoningContentOnAssistantMessages": true,
         "thinkingFormat": "deepseek"
@@ -20691,6 +20813,25 @@
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
+    "openrouter/pareto-code": {
+      "id": "openrouter/pareto-code",
+      "name": "Pareto Code Router",
+      "api": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": -1000000,
+        "output": -1000000,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "contextWindow": 2000000,
+      "maxTokens": 4096
+    },
     "moonshotai/kimi-k2.6": {
       "id": "moonshotai/kimi-k2.6",
       "name": "MoonshotAI: Kimi K2.6",
@@ -20703,9 +20844,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.465,
-        "output": 2.45,
-        "cacheRead": 0.0975,
+        "input": 0.65,
+        "output": 3.41,
+        "cacheRead": 0.15,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
@@ -20768,13 +20909,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.966,
-        "output": 3.036,
-        "cacheRead": 0.1794,
+        "input": 1.33,
+        "output": 4.18,
+        "cacheRead": 0.247,
         "cacheWrite": 0
       },
       "contextWindow": 204800,
-      "maxTokens": 128000
+      "maxTokens": 131072
     },
     "google/gemma-4-26b-a4b-it": {
       "id": "google/gemma-4-26b-a4b-it",
@@ -20788,9 +20929,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.0765,
-        "output": 0.255,
-        "cacheRead": 0.0425,
+        "input": 0.09,
+        "output": 0.3,
+        "cacheRead": 0.05,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
@@ -20966,13 +21107,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.21,
-        "output": 0.84,
-        "cacheRead": 0.042,
+        "input": 0.3,
+        "output": 1.2,
+        "cacheRead": 0.06,
         "cacheWrite": 0
       },
       "contextWindow": 204800,
-      "maxTokens": 176947
+      "maxTokens": 131072
     },
     "openai/gpt-5.4-nano": {
       "id": "openai/gpt-5.4-nano",
@@ -21369,13 +21510,13 @@
         "image"
       ],
       "cost": {
-        "input": 0.08,
-        "output": 0.75,
-        "cacheRead": 0.04,
+        "input": 0.15,
+        "output": 1,
+        "cacheRead": 0.05,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 32768
+      "maxTokens": 16384
     },
     "qwen/qwen3.5-27b": {
       "id": "qwen/qwen3.5-27b",
@@ -21611,9 +21752,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.55,
-        "output": 3.5,
-        "cacheRead": 0.225,
+        "input": 0.5,
+        "output": 3.6,
+        "cacheRead": 0.3,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
@@ -21656,25 +21797,6 @@
       },
       "contextWindow": 204800,
       "maxTokens": 128000
-    },
-    "qwen/qwen3-max-thinking": {
-      "id": "qwen/qwen3-max-thinking",
-      "name": "Qwen: Qwen3 Max Thinking",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.78,
-        "output": 3.9,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 65536
     },
     "anthropic/claude-opus-4.6": {
       "id": "anthropic/claude-opus-4.6",
@@ -21792,9 +21914,9 @@
         "image"
       ],
       "cost": {
-        "input": 0.45,
-        "output": 2.25,
-        "cacheRead": 0.07,
+        "input": 0.5,
+        "output": 2.5,
+        "cacheRead": 0.15,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
@@ -22381,8 +22503,8 @@
       ],
       "cost": {
         "input": 0.259,
-        "output": 0.42,
-        "cacheRead": 0.135,
+        "output": 0.8,
+        "cacheRead": 0.14,
         "cacheWrite": 0
       },
       "contextWindow": 163840,
@@ -22521,11 +22643,11 @@
       "cost": {
         "input": 0.6,
         "output": 2.5,
-        "cacheRead": 0,
+        "cacheRead": 0.15,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 235929
+      "maxTokens": 98304
     },
     "amazon/nova-premier-v1": {
       "id": "amazon/nova-premier-v1",
@@ -22596,33 +22718,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.3,
-        "output": 1.2,
+        "input": 0.255,
+        "output": 1.02,
         "cacheRead": 0,
         "cacheWrite": 0
       },
       "contextWindow": 204800,
-      "maxTokens": 176947
-    },
-    "qwen/qwen3-vl-32b-instruct": {
-      "id": "qwen/qwen3-vl-32b-instruct",
-      "name": "Qwen: Qwen3 VL 32B Instruct",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": false,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 0.104,
-        "output": 0.416,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 131072,
-      "maxTokens": 32768
+      "maxTokens": 131072
     },
     "anthropic/claude-haiku-4.5": {
       "id": "anthropic/claude-haiku-4.5",
@@ -22664,26 +22766,6 @@
       "contextWindow": 200000,
       "maxTokens": 64000
     },
-    "qwen/qwen3-vl-8b-thinking": {
-      "id": "qwen/qwen3-vl-8b-thinking",
-      "name": "Qwen: Qwen3 VL 8B Thinking",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 0.18,
-        "output": 2.1,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 131072,
-      "maxTokens": 32768
-    },
     "qwen/qwen3-vl-8b-instruct": {
       "id": "qwen/qwen3-vl-8b-instruct",
       "name": "Qwen: Qwen3 VL 8B Instruct",
@@ -22696,13 +22778,13 @@
         "image"
       ],
       "cost": {
-        "input": 0.117,
-        "output": 0.455,
-        "cacheRead": 0,
+        "input": 0.25,
+        "output": 0.75,
+        "cacheRead": 0.12,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 32768
+      "maxTokens": 235929
     },
     "qwen/qwen3-vl-30b-a3b-thinking": {
       "id": "qwen/qwen3-vl-30b-a3b-thinking",
@@ -22716,13 +22798,13 @@
         "image"
       ],
       "cost": {
-        "input": 0.2,
-        "output": 2.4,
+        "input": 0.29,
+        "output": 1,
         "cacheRead": 0,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 32768
+      "maxTokens": 235929
     },
     "qwen/qwen3-vl-30b-a3b-instruct": {
       "id": "qwen/qwen3-vl-30b-a3b-instruct",
@@ -22795,13 +22877,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.43,
-        "output": 1.75,
-        "cacheRead": 0.08,
+        "input": 0.5,
+        "output": 2,
+        "cacheRead": 0.1,
         "cacheWrite": 0
       },
       "contextWindow": 204800,
-      "maxTokens": 16384
+      "maxTokens": 131072
     },
     "anthropic/claude-sonnet-4.5": {
       "id": "anthropic/claude-sonnet-4.5",
@@ -22862,26 +22944,6 @@
       "contextWindow": 163840,
       "maxTokens": 147456
     },
-    "qwen/qwen3-vl-235b-a22b-thinking": {
-      "id": "qwen/qwen3-vl-235b-a22b-thinking",
-      "name": "Qwen: Qwen3 VL 235B A22B Thinking",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 0.4,
-        "output": 4,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 131072,
-      "maxTokens": 32768
-    },
     "qwen/qwen3-vl-235b-a22b-instruct": {
       "id": "qwen/qwen3-vl-235b-a22b-instruct",
       "name": "Qwen: Qwen3 VL 235B A22B Instruct",
@@ -22901,44 +22963,6 @@
       },
       "contextWindow": 262144,
       "maxTokens": 32768
-    },
-    "qwen/qwen3-max": {
-      "id": "qwen/qwen3-max",
-      "name": "Qwen: Qwen3 Max",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": false,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.78,
-        "output": 3.9,
-        "cacheRead": 0.156,
-        "cacheWrite": 0.975
-      },
-      "contextWindow": 262144,
-      "maxTokens": 65536
-    },
-    "qwen/qwen3-coder-plus": {
-      "id": "qwen/qwen3-coder-plus",
-      "name": "Qwen: Qwen3 Coder Plus",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": false,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.65,
-        "output": 3.25,
-        "cacheRead": 0.13,
-        "cacheWrite": 0.8125
-      },
-      "contextWindow": 1000000,
-      "maxTokens": 65536
     },
     "deepseek/deepseek-v3.1-terminus": {
       "id": "deepseek/deepseek-v3.1-terminus",
@@ -22995,7 +23019,7 @@
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 32768
+      "maxTokens": 235929
     },
     "qwen/qwen3-next-80b-a3b-instruct": {
       "id": "qwen/qwen3-next-80b-a3b-instruct",
@@ -23008,32 +23032,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.09,
+        "input": 0.1,
         "output": 1.1,
-        "cacheRead": 0,
+        "cacheRead": 0.07,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 16384
-    },
-    "qwen/qwen-plus-2025-07-28": {
-      "id": "qwen/qwen-plus-2025-07-28",
-      "name": "Qwen: Qwen Plus 0728",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": false,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.26,
-        "output": 0.78,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 1000000,
-      "maxTokens": 32768
+      "maxTokens": 235929
     },
     "moonshotai/kimi-k2-0905": {
       "id": "moonshotai/kimi-k2-0905",
@@ -23053,25 +23058,6 @@
       },
       "contextWindow": 262144,
       "maxTokens": 98304
-    },
-    "qwen/qwen3-30b-a3b-thinking-2507": {
-      "id": "qwen/qwen3-30b-a3b-thinking-2507",
-      "name": "Qwen: Qwen3 30B A3B Thinking 2507",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.2,
-        "output": 2.4,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 81920,
-      "maxTokens": 32768
     },
     "deepseek/deepseek-chat-v3.1": {
       "id": "deepseek/deepseek-chat-v3.1",
@@ -23513,13 +23499,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.23,
-        "output": 2.3,
+        "input": 0.45,
+        "output": 3.5,
         "cacheRead": 0,
         "cacheWrite": 0
       },
-      "contextWindow": 131072,
-      "maxTokens": 117964
+      "contextWindow": 128000,
+      "maxTokens": 16384
     },
     "qwen/qwen3-coder": {
       "id": "qwen/qwen3-coder",
@@ -23852,27 +23838,8 @@
         "cacheRead": 0,
         "cacheWrite": 0
       },
-      "contextWindow": 131072,
+      "contextWindow": 40960,
       "maxTokens": 16384
-    },
-    "qwen/qwen3-8b": {
-      "id": "qwen/qwen3-8b",
-      "name": "Qwen: Qwen3 8B",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.117,
-        "output": 0.455,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 131072,
-      "maxTokens": 8192
     },
     "qwen/qwen3-14b": {
       "id": "qwen/qwen3-14b",
@@ -23890,7 +23857,7 @@
         "cacheRead": 0,
         "cacheWrite": 0
       },
-      "contextWindow": 131072,
+      "contextWindow": 40960,
       "maxTokens": 16384
     },
     "qwen/qwen3-32b": {
@@ -23911,25 +23878,6 @@
       },
       "contextWindow": 131072,
       "maxTokens": 16384
-    },
-    "qwen/qwen3-235b-a22b": {
-      "id": "qwen/qwen3-235b-a22b",
-      "name": "Qwen: Qwen3 235B A22B",
-      "api": "openai-completions",
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "provider": "openrouter",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.455,
-        "output": 1.82,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 131072,
-      "maxTokens": 8192
     },
     "openai/o4-mini-high": {
       "id": "openai/o4-mini-high",
@@ -24183,13 +24131,13 @@
         "image"
       ],
       "cost": {
-        "input": 0.1,
-        "output": 0.3,
+        "input": 0.18,
+        "output": 0.59,
         "cacheRead": 0,
         "cacheWrite": 0
       },
       "contextWindow": 1310720,
-      "maxTokens": 16384
+      "maxTokens": 117964
     },
     "deepseek/deepseek-chat-v3-0324": {
       "id": "deepseek/deepseek-chat-v3-0324",
@@ -24395,13 +24343,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.2574,
-        "output": 1.0287,
+        "input": 0.32,
+        "output": 0.89,
         "cacheRead": 0,
         "cacheWrite": 0
       },
       "contextWindow": 163840,
-      "maxTokens": 16000
+      "maxTokens": 16384
     },
     "openai/o1": {
       "id": "openai/o1",
@@ -24434,13 +24382,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.22,
-        "output": 0.5,
-        "cacheRead": 0.11,
+        "input": 0.59,
+        "output": 0.79,
+        "cacheRead": 0.295,
         "cacheWrite": 0
       },
       "contextWindow": 131072,
-      "maxTokens": 16384
+      "maxTokens": 32768
     },
     "amazon/nova-lite-v1": {
       "id": "amazon/nova-lite-v1",
@@ -25096,52 +25044,13 @@
         "text"
       ],
       "cost": {
-        "input": 0.16,
-        "output": 0.64,
+        "input": 0.15,
+        "output": 0.6,
         "cacheRead": 0,
         "cacheWrite": 0
       },
       "contextWindow": 128000,
       "maxTokens": 8192
-    },
-    "alibaba/qwen-3.6-max-preview": {
-      "id": "alibaba/qwen-3.6-max-preview",
-      "name": "Qwen 3.6 Max Preview",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 1.3,
-        "output": 7.8,
-        "cacheRead": 0.13,
-        "cacheWrite": 1.625
-      },
-      "contextWindow": 240000,
-      "maxTokens": 64000
-    },
-    "alibaba/qwen3-235b-a22b-thinking": {
-      "id": "alibaba/qwen3-235b-a22b-thinking",
-      "name": "Qwen3 VL 235B A22B Thinking",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": true,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 0.4,
-        "output": 4,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 131072,
-      "maxTokens": 32768
     },
     "alibaba/qwen3-coder": {
       "id": "alibaba/qwen3-coder",
@@ -25154,13 +25063,13 @@
         "text"
       ],
       "cost": {
-        "input": 1.5,
-        "output": 7.5,
-        "cacheRead": 0.3,
+        "input": 0.22,
+        "output": 1.8,
+        "cacheRead": 0.022,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
-      "maxTokens": 65536
+      "maxTokens": 32768
     },
     "alibaba/qwen3-coder-30b-a3b": {
       "id": "alibaba/qwen3-coder-30b-a3b",
@@ -25199,63 +25108,6 @@
       },
       "contextWindow": 256000,
       "maxTokens": 256000
-    },
-    "alibaba/qwen3-coder-plus": {
-      "id": "alibaba/qwen3-coder-plus",
-      "name": "Qwen3 Coder Plus",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": false,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 1,
-        "output": 5,
-        "cacheRead": 0.2,
-        "cacheWrite": 0
-      },
-      "contextWindow": 1000000,
-      "maxTokens": 65536
-    },
-    "alibaba/qwen3-max": {
-      "id": "alibaba/qwen3-max",
-      "name": "Qwen3 Max",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": false,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 1.2,
-        "output": 6,
-        "cacheRead": 0.24,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "alibaba/qwen3-max-preview": {
-      "id": "alibaba/qwen3-max-preview",
-      "name": "Qwen3 Max Preview",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": false,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 1.2,
-        "output": 6,
-        "cacheRead": 0.24,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 32768
     },
     "alibaba/qwen3-max-thinking": {
       "id": "alibaba/qwen3-max-thinking",
@@ -25314,26 +25166,6 @@
       "contextWindow": 262144,
       "maxTokens": 262144
     },
-    "alibaba/qwen3-vl-235b-a22b-instruct": {
-      "id": "alibaba/qwen3-vl-235b-a22b-instruct",
-      "name": "Qwen3 VL 235B A22B Instruct",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": false,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 0.4,
-        "output": 1.6,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 131072,
-      "maxTokens": 129024
-    },
     "alibaba/qwen3-vl-instruct": {
       "id": "alibaba/qwen3-vl-instruct",
       "name": "Qwen3 VL 235B A22B Instruct",
@@ -25346,33 +25178,13 @@
         "image"
       ],
       "cost": {
-        "input": 0.4,
-        "output": 1.6,
-        "cacheRead": 0,
+        "input": 0.2,
+        "output": 0.88,
+        "cacheRead": 0.11,
         "cacheWrite": 0
       },
-      "contextWindow": 131072,
-      "maxTokens": 129024
-    },
-    "alibaba/qwen3-vl-thinking": {
-      "id": "alibaba/qwen3-vl-thinking",
-      "name": "Qwen3 VL 235B A22B Thinking",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": true,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 0.4,
-        "output": 4,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 131072,
-      "maxTokens": 32768
+      "contextWindow": 262144,
+      "maxTokens": 262144
     },
     "alibaba/qwen3.5-flash": {
       "id": "alibaba/qwen3.5-flash",
@@ -25732,26 +25544,6 @@
       "contextWindow": 300000,
       "maxTokens": 8192
     },
-    "anthropic/claude-3-haiku": {
-      "id": "anthropic/claude-3-haiku",
-      "name": "Claude 3 Haiku",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": false,
-      "input": [
-        "text",
-        "image"
-      ],
-      "cost": {
-        "input": 0.25,
-        "output": 1.25,
-        "cacheRead": 0.03,
-        "cacheWrite": 0.3
-      },
-      "contextWindow": 200000,
-      "maxTokens": 4096
-    },
     "anthropic/claude-fable-5": {
       "id": "anthropic/claude-fable-5",
       "name": "Claude Fable 5",
@@ -25768,6 +25560,34 @@
         "output": 50,
         "cacheRead": 1,
         "cacheWrite": 12.5
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true,
+        "thinkingOffMode": "between_tools",
+        "rejectsTemperature": true
+      }
+    },
+    "anthropic/claude-fable-5-batch": {
+      "id": "anthropic/claude-fable-5-batch",
+      "name": "Claude Fable 5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -25807,6 +25627,33 @@
         "strictRequestParams": true
       }
     },
+    "anthropic/claude-fable-5.1-batch": {
+      "id": "anthropic/claude-fable-5.1-batch",
+      "name": "Claude Fable 5.1 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.125,
+        "cacheWrite": 6.25
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true
+      }
+    },
     "anthropic/claude-haiku-4.5": {
       "id": "anthropic/claude-haiku-4.5",
       "name": "Claude Haiku 4.5",
@@ -25823,6 +25670,26 @@
         "output": 5,
         "cacheRead": 0.1,
         "cacheWrite": 1.25
+      },
+      "contextWindow": 200000,
+      "maxTokens": 64000
+    },
+    "anthropic/claude-haiku-4.5-batch": {
+      "id": "anthropic/claude-haiku-4.5-batch",
+      "name": "Claude Haiku 4.5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.5,
+        "output": 2.5,
+        "cacheRead": 0.05,
+        "cacheWrite": 0.625
       },
       "contextWindow": 200000,
       "maxTokens": 64000
@@ -25851,9 +25718,9 @@
         "rejectsTemperature": true
       }
     },
-    "anthropic/claude-opus-4": {
-      "id": "anthropic/claude-opus-4",
-      "name": "Claude Opus 4",
+    "anthropic/claude-haiku-5.5-batch": {
+      "id": "anthropic/claude-haiku-5.5-batch",
+      "name": "Claude Haiku 5.5 (Batch)",
       "api": "anthropic-messages",
       "baseUrl": "https://ai-gateway.vercel.sh",
       "provider": "vercel-ai-gateway",
@@ -25863,13 +25730,17 @@
         "image"
       ],
       "cost": {
-        "input": 15,
-        "output": 75,
-        "cacheRead": 1.5,
-        "cacheWrite": 18.75
+        "input": 0.05,
+        "output": 0.25,
+        "cacheRead": 0.005,
+        "cacheWrite": 0.0625
       },
-      "contextWindow": 200000,
-      "maxTokens": 32000
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "compat": {
+        "forceAdaptiveThinking": true,
+        "rejectsTemperature": true
+      }
     },
     "anthropic/claude-opus-4.5": {
       "id": "anthropic/claude-opus-4.5",
@@ -25887,6 +25758,26 @@
         "output": 25,
         "cacheRead": 0.5,
         "cacheWrite": 6.25
+      },
+      "contextWindow": 200000,
+      "maxTokens": 64000
+    },
+    "anthropic/claude-opus-4.5-batch": {
+      "id": "anthropic/claude-opus-4.5-batch",
+      "name": "Claude Opus 4.5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.5,
+        "output": 12.5,
+        "cacheRead": 0.25,
+        "cacheWrite": 3.125
       },
       "contextWindow": 200000,
       "maxTokens": 64000
@@ -25917,6 +25808,32 @@
         "forceAdaptiveThinking": true
       }
     },
+    "anthropic/claude-opus-4.6-batch": {
+      "id": "anthropic/claude-opus-4.6-batch",
+      "name": "Claude Opus 4.6 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.5,
+        "output": 12.5,
+        "cacheRead": 0.25,
+        "cacheWrite": 3.125
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "max"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true
+      }
+    },
     "anthropic/claude-opus-4.7": {
       "id": "anthropic/claude-opus-4.7",
       "name": "Claude Opus 4.7",
@@ -25933,6 +25850,32 @@
         "output": 25,
         "cacheRead": 0.5,
         "cacheWrite": 6.25
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true
+      }
+    },
+    "anthropic/claude-opus-4.7-batch": {
+      "id": "anthropic/claude-opus-4.7-batch",
+      "name": "Claude Opus 4.7 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.5,
+        "output": 12.5,
+        "cacheRead": 0.25,
+        "cacheWrite": 3.125
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -25995,6 +25938,32 @@
         "forceAdaptiveThinking": true
       }
     },
+    "anthropic/claude-opus-4.8-batch": {
+      "id": "anthropic/claude-opus-4.8-batch",
+      "name": "Claude Opus 4.8 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.5,
+        "output": 12.5,
+        "cacheRead": 0.25,
+        "cacheWrite": 3.125
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true
+      }
+    },
     "anthropic/claude-opus-5": {
       "id": "anthropic/claude-opus-5",
       "name": "Claude Opus 5",
@@ -26037,6 +26006,32 @@
         "output": 50,
         "cacheRead": 1,
         "cacheWrite": 12.5
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true
+      }
+    },
+    "anthropic/claude-opus-5-batch": {
+      "id": "anthropic/claude-opus-5-batch",
+      "name": "Claude Opus 5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.5,
+        "output": 12.5,
+        "cacheRead": 0.25,
+        "cacheWrite": 3.125
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -26101,6 +26096,33 @@
         "strictRequestParams": true
       }
     },
+    "anthropic/claude-opus-5.5-batch": {
+      "id": "anthropic/claude-opus-5.5-batch",
+      "name": "Claude Opus 5.5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 10,
+        "cacheRead": 0.1,
+        "cacheWrite": 2.5
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true
+      }
+    },
     "anthropic/claude-sonnet-4": {
       "id": "anthropic/claude-sonnet-4",
       "name": "Claude Sonnet 4",
@@ -26141,6 +26163,26 @@
       "contextWindow": 1000000,
       "maxTokens": 64000
     },
+    "anthropic/claude-sonnet-4.5-batch": {
+      "id": "anthropic/claude-sonnet-4.5-batch",
+      "name": "Claude Sonnet 4.5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1.5,
+        "output": 7.5,
+        "cacheRead": 0.15,
+        "cacheWrite": 1.875
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
     "anthropic/claude-sonnet-4.6": {
       "id": "anthropic/claude-sonnet-4.6",
       "name": "Claude Sonnet 4.6",
@@ -26157,6 +26199,29 @@
         "output": 15,
         "cacheRead": 0.3,
         "cacheWrite": 3.75
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "compat": {
+        "forceAdaptiveThinking": true
+      }
+    },
+    "anthropic/claude-sonnet-4.6-batch": {
+      "id": "anthropic/claude-sonnet-4.6-batch",
+      "name": "Claude Sonnet 4.6 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1.5,
+        "output": 7.5,
+        "cacheRead": 0.15,
+        "cacheWrite": 1.875
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -26190,6 +26255,32 @@
         "forceAdaptiveThinking": true
       }
     },
+    "anthropic/claude-sonnet-5-batch": {
+      "id": "anthropic/claude-sonnet-5-batch",
+      "name": "Claude Sonnet 5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 5,
+        "cacheRead": 0.1,
+        "cacheWrite": 1.25
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true
+      }
+    },
     "anthropic/claude-sonnet-5.5": {
       "id": "anthropic/claude-sonnet-5.5",
       "name": "Claude Sonnet 5.5",
@@ -26206,6 +26297,33 @@
         "output": 10,
         "cacheRead": 0.1,
         "cacheWrite": 2.5
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      },
+      "compat": {
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true
+      }
+    },
+    "anthropic/claude-sonnet-5.5-batch": {
+      "id": "anthropic/claude-sonnet-5.5-batch",
+      "name": "Claude Sonnet 5.5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 5,
+        "cacheRead": 0.05,
+        "cacheWrite": 1.25
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -26527,6 +26645,26 @@
       "contextWindow": 1048576,
       "maxTokens": 32768
     },
+    "deepseek/deepseek-v4.1-flash-fast": {
+      "id": "deepseek/deepseek-v4.1-flash-fast",
+      "name": "DeepSeek V4.1 Flash Fast",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.6,
+        "output": 2.4,
+        "cacheRead": 0.014,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 32768
+    },
     "fireworks/ember-1": {
       "id": "fireworks/ember-1",
       "name": "Ember-1",
@@ -26567,6 +26705,26 @@
       "contextWindow": 1000000,
       "maxTokens": 65535
     },
+    "google/gemini-2.5-flash-batch": {
+      "id": "google/gemini-2.5-flash-batch",
+      "name": "Gemini 2.5 Flash (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.15,
+        "output": 1.25,
+        "cacheRead": 0.03,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
     "google/gemini-2.5-flash-lite": {
       "id": "google/gemini-2.5-flash-lite",
       "name": "Gemini 2.5 Flash Lite",
@@ -26581,6 +26739,26 @@
       "cost": {
         "input": 0.1,
         "output": 0.4,
+        "cacheRead": 0.01,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 65535
+    },
+    "google/gemini-2.5-flash-lite-batch": {
+      "id": "google/gemini-2.5-flash-lite-batch",
+      "name": "Gemini 2.5 Flash Lite (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.05,
+        "output": 0.2,
         "cacheRead": 0.01,
         "cacheWrite": 0
       },
@@ -26607,6 +26785,26 @@
       "contextWindow": 1048576,
       "maxTokens": 65535
     },
+    "google/gemini-2.5-pro-batch": {
+      "id": "google/gemini-2.5-pro-batch",
+      "name": "Gemini 2.5 Pro (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.625,
+        "output": 5,
+        "cacheRead": 0.125,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 65535
+    },
     "google/gemini-3-flash": {
       "id": "google/gemini-3-flash",
       "name": "Gemini 3 Flash",
@@ -26626,6 +26824,26 @@
       },
       "contextWindow": 1000000,
       "maxTokens": 65000
+    },
+    "google/gemini-3-flash-batch": {
+      "id": "google/gemini-3-flash-batch",
+      "name": "Gemini 3 Flash (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.25,
+        "output": 1.5,
+        "cacheRead": 0.05,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 64000
     },
     "google/gemini-3.1-flash-lite": {
       "id": "google/gemini-3.1-flash-lite",
@@ -26647,6 +26865,26 @@
       "contextWindow": 1000000,
       "maxTokens": 65000
     },
+    "google/gemini-3.1-flash-lite-batch": {
+      "id": "google/gemini-3.1-flash-lite-batch",
+      "name": "Gemini 3.1 Flash Lite (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.125,
+        "output": 0.75,
+        "cacheRead": 0.015,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 65000
+    },
     "google/gemini-3.1-pro-preview": {
       "id": "google/gemini-3.1-pro-preview",
       "name": "Gemini 3.1 Pro Preview",
@@ -26661,6 +26899,26 @@
       "cost": {
         "input": 2,
         "output": 12,
+        "cacheRead": 0.2,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
+    "google/gemini-3.1-pro-preview-batch": {
+      "id": "google/gemini-3.1-pro-preview-batch",
+      "name": "Gemini 3.1 Pro Preview (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 6,
         "cacheRead": 0.2,
         "cacheWrite": 0
       },
@@ -26687,6 +26945,26 @@
       "contextWindow": 1000000,
       "maxTokens": 64000
     },
+    "google/gemini-3.5-flash-batch": {
+      "id": "google/gemini-3.5-flash-batch",
+      "name": "Gemini 3.5 Flash (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.75,
+        "output": 4.5,
+        "cacheRead": 0.075,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
     "google/gemini-3.5-flash-lite": {
       "id": "google/gemini-3.5-flash-lite",
       "name": "Gemini 3.5 Flash Lite",
@@ -26702,6 +26980,26 @@
         "input": 0.3,
         "output": 2.5,
         "cacheRead": 0.03,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 65000
+    },
+    "google/gemini-3.5-flash-lite-batch": {
+      "id": "google/gemini-3.5-flash-lite-batch",
+      "name": "Gemini 3.5 Flash Lite (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.15,
+        "output": 1.25,
+        "cacheRead": 0.015,
         "cacheWrite": 0
       },
       "contextWindow": 1000000,
@@ -26727,6 +27025,26 @@
       "contextWindow": 1000000,
       "maxTokens": 64000
     },
+    "google/gemini-3.6-flash-batch": {
+      "id": "google/gemini-3.6-flash-batch",
+      "name": "Gemini 3.6 Flash (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.375,
+        "output": 1.875,
+        "cacheRead": 0.0375,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 64000
+    },
     "google/gemini-3.7-flash": {
       "id": "google/gemini-3.7-flash",
       "name": "Gemini 3.7 Flash",
@@ -26742,6 +27060,26 @@
         "input": 0.75,
         "output": 3.75,
         "cacheRead": 0.075,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 65535
+    },
+    "google/gemini-3.7-flash-batch": {
+      "id": "google/gemini-3.7-flash-batch",
+      "name": "Gemini 3.7 Flash (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.375,
+        "output": 1.875,
+        "cacheRead": 0.0375,
         "cacheWrite": 0
       },
       "contextWindow": 1000000,
@@ -26766,6 +27104,26 @@
       },
       "contextWindow": 1000000,
       "maxTokens": 65535
+    },
+    "google/gemini-4-argon": {
+      "id": "google/gemini-4-argon",
+      "name": "Gemini 4 Argon",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 10,
+        "cacheRead": 0.1,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 1000000
     },
     "google/gemma-4-26b-a4b-it": {
       "id": "google/gemma-4-26b-a4b-it",
@@ -26952,28 +27310,9 @@
         "text"
       ],
       "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
-        "cacheWrite": 0
-      },
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
-    "inclusionai/ling-3.1-flash-free": {
-      "id": "inclusionai/ling-3.1-flash-free",
-      "name": "Ling 3.1 Flash (Free)",
-      "api": "anthropic-messages",
-      "baseUrl": "https://ai-gateway.vercel.sh",
-      "provider": "vercel-ai-gateway",
-      "reasoning": true,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0,
-        "output": 0,
-        "cacheRead": 0,
+        "input": 0.3,
+        "output": 0.9,
+        "cacheRead": 0.06,
         "cacheWrite": 0
       },
       "contextWindow": 262144,
@@ -26998,6 +27337,25 @@
       },
       "contextWindow": 1000000,
       "maxTokens": 32000
+    },
+    "liquid/lfm2.5-24b-a2b": {
+      "id": "liquid/lfm2.5-24b-a2b",
+      "name": "LFM2.5-24B-A2B",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 0.05,
+        "output": 0.7,
+        "cacheRead": 0.025,
+        "cacheWrite": 0
+      },
+      "contextWindow": 128000,
+      "maxTokens": 8200
     },
     "meituan/longcat-2.5-preview": {
       "id": "meituan/longcat-2.5-preview",
@@ -27231,6 +27589,26 @@
         "input": 0.1,
         "output": 0.2,
         "cacheRead": 0.002,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "meta/muse-wonder-1.0": {
+      "id": "meta/muse-wonder-1.0",
+      "name": "Muse Wonder",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 4,
+        "output": 20,
+        "cacheRead": 0.2,
         "cacheWrite": 0
       },
       "contextWindow": 1048576,
@@ -27539,7 +27917,7 @@
         "text"
       ],
       "cost": {
-        "input": 0.019,
+        "input": 0.029,
         "output": 0.03,
         "cacheRead": 0,
         "cacheWrite": 0
@@ -27801,6 +28179,25 @@
       "contextWindow": 262144,
       "maxTokens": 131072
     },
+    "nvidia/nemotron-3.5-lightning-free": {
+      "id": "nvidia/nemotron-3.5-lightning-free",
+      "name": "Nemotron 3.5 Lightning Free",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 65000
+    },
     "nvidia/nemotron-nano-12b-v2-vl": {
       "id": "nvidia/nemotron-nano-12b-v2-vl",
       "name": "Nvidia Nemotron Nano 12B V2 VL",
@@ -27919,6 +28316,26 @@
       "contextWindow": 1047576,
       "maxTokens": 32768
     },
+    "openai/gpt-4.1-batch": {
+      "id": "openai/gpt-4.1-batch",
+      "name": "GPT-4.1 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 4,
+        "cacheRead": 0.25,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1047576,
+      "maxTokens": 32768
+    },
     "openai/gpt-4.1-mini": {
       "id": "openai/gpt-4.1-mini",
       "name": "GPT-4.1 mini",
@@ -27954,6 +28371,26 @@
         "input": 0.7,
         "output": 2.8,
         "cacheRead": 0.175,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1047576,
+      "maxTokens": 32768
+    },
+    "openai/gpt-4.1-mini-batch": {
+      "id": "openai/gpt-4.1-mini-batch",
+      "name": "GPT-4.1 mini (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.2,
+        "output": 0.8,
+        "cacheRead": 0.05,
         "cacheWrite": 0
       },
       "contextWindow": 1047576,
@@ -27999,6 +28436,26 @@
       "contextWindow": 1047576,
       "maxTokens": 32768
     },
+    "openai/gpt-4.1-nano-batch": {
+      "id": "openai/gpt-4.1-nano-batch",
+      "name": "GPT-4.1 nano (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.05,
+        "output": 0.2,
+        "cacheRead": 0.0125,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1047576,
+      "maxTokens": 32768
+    },
     "openai/gpt-4o": {
       "id": "openai/gpt-4o",
       "name": "GPT-4o",
@@ -28034,6 +28491,26 @@
         "input": 4.25,
         "output": 17,
         "cacheRead": 2.125,
+        "cacheWrite": 0
+      },
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
+    "openai/gpt-4o-batch": {
+      "id": "openai/gpt-4o-batch",
+      "name": "GPT-4o (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1.25,
+        "output": 5,
+        "cacheRead": 0.625,
         "cacheWrite": 0
       },
       "contextWindow": 128000,
@@ -28079,6 +28556,26 @@
       "contextWindow": 128000,
       "maxTokens": 16384
     },
+    "openai/gpt-4o-mini-batch": {
+      "id": "openai/gpt-4o-mini-batch",
+      "name": "GPT-4o mini (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.075,
+        "output": 0.3,
+        "cacheRead": 0.0375,
+        "cacheWrite": 0
+      },
+      "contextWindow": 128000,
+      "maxTokens": 16384
+    },
     "openai/gpt-5": {
       "id": "openai/gpt-5",
       "name": "GPT-5",
@@ -28114,6 +28611,26 @@
         "input": 2.5,
         "output": 20,
         "cacheRead": 0.25,
+        "cacheWrite": 0
+      },
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-5-batch": {
+      "id": "openai/gpt-5-batch",
+      "name": "GPT-5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.625,
+        "output": 5,
+        "cacheRead": 0.0625,
         "cacheWrite": 0
       },
       "contextWindow": 400000,
@@ -28179,6 +28696,26 @@
       "contextWindow": 400000,
       "maxTokens": 128000
     },
+    "openai/gpt-5-mini-batch": {
+      "id": "openai/gpt-5-mini-batch",
+      "name": "GPT-5 mini (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.125,
+        "output": 1,
+        "cacheRead": 0.0125,
+        "cacheWrite": 0
+      },
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
     "openai/gpt-5-nano": {
       "id": "openai/gpt-5-nano",
       "name": "GPT-5 nano",
@@ -28199,6 +28736,26 @@
       "contextWindow": 400000,
       "maxTokens": 128000
     },
+    "openai/gpt-5-nano-batch": {
+      "id": "openai/gpt-5-nano-batch",
+      "name": "GPT-5 nano (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.025,
+        "output": 0.2,
+        "cacheRead": 0.0025,
+        "cacheWrite": 0
+      },
+      "contextWindow": 400000,
+      "maxTokens": 128000
+    },
     "openai/gpt-5-pro": {
       "id": "openai/gpt-5-pro",
       "name": "GPT-5 pro",
@@ -28213,6 +28770,26 @@
       "cost": {
         "input": 15,
         "output": 120,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "contextWindow": 400000,
+      "maxTokens": 272000
+    },
+    "openai/gpt-5-pro-batch": {
+      "id": "openai/gpt-5-pro-batch",
+      "name": "GPT-5 pro (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 7.5,
+        "output": 60,
         "cacheRead": 0,
         "cacheWrite": 0
       },
@@ -28365,6 +28942,29 @@
         "xhigh": "xhigh"
       }
     },
+    "openai/gpt-5.2-batch": {
+      "id": "openai/gpt-5.2-batch",
+      "name": "GPT 5.2 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.875,
+        "output": 7,
+        "cacheRead": 0.0875,
+        "cacheWrite": 0
+      },
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
     "openai/gpt-5.2-codex": {
       "id": "openai/gpt-5.2-codex",
       "name": "GPT 5.2 Codex",
@@ -28503,6 +29103,29 @@
         "xhigh": "xhigh"
       }
     },
+    "openai/gpt-5.4-batch": {
+      "id": "openai/gpt-5.4-batch",
+      "name": "GPT 5.4 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1.25,
+        "output": 7.5,
+        "cacheRead": 0.125,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
     "openai/gpt-5.4-mini": {
       "id": "openai/gpt-5.4-mini",
       "name": "GPT 5.4 Mini",
@@ -28549,6 +29172,29 @@
         "xhigh": "xhigh"
       }
     },
+    "openai/gpt-5.4-mini-batch": {
+      "id": "openai/gpt-5.4-mini-batch",
+      "name": "GPT 5.4 Mini (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.375,
+        "output": 2.25,
+        "cacheRead": 0.0375,
+        "cacheWrite": 0
+      },
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
     "openai/gpt-5.4-nano": {
       "id": "openai/gpt-5.4-nano",
       "name": "GPT 5.4 Nano",
@@ -28564,6 +29210,29 @@
         "input": 0.2,
         "output": 1.25,
         "cacheRead": 0.02,
+        "cacheWrite": 0
+      },
+      "contextWindow": 400000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
+    "openai/gpt-5.4-nano-batch": {
+      "id": "openai/gpt-5.4-nano-batch",
+      "name": "GPT 5.4 Nano (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.1,
+        "output": 0.625,
+        "cacheRead": 0.01,
         "cacheWrite": 0
       },
       "contextWindow": 400000,
@@ -28641,6 +29310,29 @@
         "xhigh": "xhigh"
       }
     },
+    "openai/gpt-5.5-batch": {
+      "id": "openai/gpt-5.5-batch",
+      "name": "GPT 5.5 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.5,
+        "output": 15,
+        "cacheRead": 0.25,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
     "openai/gpt-5.5-pro": {
       "id": "openai/gpt-5.5-pro",
       "name": "GPT 5.5 Pro",
@@ -28655,6 +29347,29 @@
       "cost": {
         "input": 30,
         "output": 180,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
+    "openai/gpt-5.5-pro-batch": {
+      "id": "openai/gpt-5.5-pro-batch",
+      "name": "GPT 5.5 Pro (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 15,
+        "output": 90,
         "cacheRead": 0,
         "cacheWrite": 0
       },
@@ -28710,6 +29425,29 @@
         "xhigh": "xhigh"
       }
     },
+    "openai/gpt-5.6-luna-batch": {
+      "id": "openai/gpt-5.6-luna-batch",
+      "name": "GPT 5.6 Luna (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.1,
+        "output": 0.6,
+        "cacheRead": 0.01,
+        "cacheWrite": 0.125
+      },
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
     "openai/gpt-5.6-sol": {
       "id": "openai/gpt-5.6-sol",
       "name": "GPT 5.6 Sol",
@@ -28749,6 +29487,29 @@
         "output": 40,
         "cacheRead": 0.8,
         "cacheWrite": 10
+      },
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
+    "openai/gpt-5.6-sol-batch": {
+      "id": "openai/gpt-5.6-sol-batch",
+      "name": "GPT 5.6 Sol (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 10,
+        "cacheRead": 0.2,
+        "cacheWrite": 2.5
       },
       "contextWindow": 1050000,
       "maxTokens": 128000,
@@ -28802,6 +29563,29 @@
         "xhigh": "xhigh"
       }
     },
+    "openai/gpt-5.6-terra-batch": {
+      "id": "openai/gpt-5.6-terra-batch",
+      "name": "GPT 5.6 Terra (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 6,
+        "cacheRead": 0.1,
+        "cacheWrite": 1.25
+      },
+      "contextWindow": 1050000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
     "openai/gpt-6-astra": {
       "id": "openai/gpt-6-astra",
       "name": "GPT-6 Astra",
@@ -28838,6 +29622,26 @@
         "output": 100,
         "cacheRead": 2,
         "cacheWrite": 25
+      },
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-6-astra-batch": {
+      "id": "openai/gpt-6-astra-batch",
+      "name": "GPT-6 Astra (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
       },
       "contextWindow": 1050000,
       "maxTokens": 128000
@@ -28882,6 +29686,26 @@
       "contextWindow": 1050000,
       "maxTokens": 128000
     },
+    "openai/gpt-6-luna-batch": {
+      "id": "openai/gpt-6-luna-batch",
+      "name": "GPT-6 Luna (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 0.05,
+        "output": 0.25,
+        "cacheRead": 0.005,
+        "cacheWrite": 0.0625
+      },
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
     "openai/gpt-6-sol": {
       "id": "openai/gpt-6-sol",
       "name": "GPT-6 Sol",
@@ -28922,6 +29746,26 @@
       "contextWindow": 1050000,
       "maxTokens": 128000
     },
+    "openai/gpt-6-sol-batch": {
+      "id": "openai/gpt-6-sol-batch",
+      "name": "GPT-6 Sol (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 5,
+        "cacheRead": 0.1,
+        "cacheWrite": 1.25
+      },
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
     "openai/gpt-6.1-sol": {
       "id": "openai/gpt-6.1-sol",
       "name": "GPT-6.1 Sol",
@@ -28958,6 +29802,26 @@
         "output": 20,
         "cacheRead": 0.2,
         "cacheWrite": 5
+      },
+      "contextWindow": 1050000,
+      "maxTokens": 128000
+    },
+    "openai/gpt-6.1-sol-batch": {
+      "id": "openai/gpt-6.1-sol-batch",
+      "name": "GPT-6.1 Sol (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 5,
+        "cacheRead": 0.05,
+        "cacheWrite": 1.25
       },
       "contextWindow": 1050000,
       "maxTokens": 128000
@@ -29512,6 +30376,26 @@
       "contextWindow": 2000000,
       "maxTokens": 2000000
     },
+    "spacexai/grok-4.20-multi-agent-batch": {
+      "id": "spacexai/grok-4.20-multi-agent-batch",
+      "name": "Grok 4.20 Multi-Agent (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 2,
+        "cacheRead": 0.16,
+        "cacheWrite": 0
+      },
+      "contextWindow": 2000000,
+      "maxTokens": 2000000
+    },
     "spacexai/grok-4.20-multi-agent-beta": {
       "id": "spacexai/grok-4.20-multi-agent-beta",
       "name": "Grok 4.20 Multi Agent Beta",
@@ -29547,6 +30431,26 @@
         "input": 1.25,
         "output": 2.5,
         "cacheRead": 0.2,
+        "cacheWrite": 0
+      },
+      "contextWindow": 2000000,
+      "maxTokens": 2000000
+    },
+    "spacexai/grok-4.20-non-reasoning-batch": {
+      "id": "spacexai/grok-4.20-non-reasoning-batch",
+      "name": "Grok 4.20 Non-Reasoning (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": false,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 2,
+        "cacheRead": 0.16,
         "cacheWrite": 0
       },
       "contextWindow": 2000000,
@@ -29592,6 +30496,26 @@
       "contextWindow": 2000000,
       "maxTokens": 2000000
     },
+    "spacexai/grok-4.20-reasoning-batch": {
+      "id": "spacexai/grok-4.20-reasoning-batch",
+      "name": "Grok 4.20 Reasoning (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 2,
+        "cacheRead": 0.16,
+        "cacheWrite": 0
+      },
+      "contextWindow": 2000000,
+      "maxTokens": 2000000
+    },
     "spacexai/grok-4.20-reasoning-beta": {
       "id": "spacexai/grok-4.20-reasoning-beta",
       "name": "Grok 4.20 Beta Reasoning",
@@ -29627,6 +30551,26 @@
         "input": 1.25,
         "output": 2.5,
         "cacheRead": 0.2,
+        "cacheWrite": 0
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 1000000
+    },
+    "spacexai/grok-4.3-batch": {
+      "id": "spacexai/grok-4.3-batch",
+      "name": "Grok 4.3 (Batch)",
+      "api": "anthropic-messages",
+      "baseUrl": "https://ai-gateway.vercel.sh",
+      "provider": "vercel-ai-gateway",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 1,
+        "output": 2,
+        "cacheRead": 0.16,
         "cacheWrite": 0
       },
       "contextWindow": 1000000,
