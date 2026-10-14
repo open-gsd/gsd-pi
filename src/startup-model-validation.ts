@@ -95,6 +95,22 @@ export function validateConfiguredModel(
     }
   }
 
+  // Deferred provider registration (#2782): extensions that register their
+  // providers on session_start (e.g. the bundled ollama extension) have no
+  // models in the registry at all at this point, so "provider removed"
+  // cannot be distinguished from "not registered yet". When the configured
+  // provider has no catalog presence whatsoever, preserve the
+  // configuration — the session re-resolves the model after session_start
+  // (repairPlaceholderModel) — instead of rewriting settings or resetting
+  // the thinking level against the empty-registry window. A stale model id
+  // on a *registered* provider still falls back below.
+  const configuredProviderRegistered = configuredProvider
+    ? catalogModels.some((m) => m.provider === configuredProvider)
+    : false
+  if (configuredProvider && configuredModel && !configuredExists && !configuredProviderRegistered) {
+    return preserved
+  }
+
   let result = preserved
   if (!configuredModel || !configuredExists) {
     // Model not configured at all, or removed from registry — pick a fallback.

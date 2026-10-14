@@ -138,6 +138,10 @@ export class AgentSessionExtensionsModule {
 		this.applyExtensionBindings(this.host._extensionRunner);
 		await this.host._extensionRunner.emit(this.host._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this.host._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		// Providers registered on session_start (e.g. ollama) are only visible
+		// to the registry now — re-resolve the model if startup had to fall
+		// back to the unknown placeholder (#2782).
+		await this.host.repairPlaceholderModel();
 	}
 
 	async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
