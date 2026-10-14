@@ -78,6 +78,10 @@ Production installs load the native engine from the `@opengsd/engine-*` platform
 
 If a change adds or changes N-API exports (e.g. in `native/crates/`), the already-published engine binaries do not contain them, so until the next release publishes new binaries the new flows fail closed as "unavailable" at runtime and gsd-pi runs on its JS fallbacks (or the locally built addon with `GSD_NATIVE_PREFER_LOCAL=1`). This is intentional — never republish or mutate an already-released engine version, and never bump versions inside a feature PR to work around it.
 
+### Release highlights automation
+
+Do not hand-edit the README `## Latest Release Highlights` section. During a release, the npm publish workflow runs `node scripts/update-readme-release-highlights.mjs` to rewrite that section (the `<!-- release-highlights:start -->` / `<!-- release-highlights:end -->` block) from the generated release notes, together with `scripts/bump-version.mjs` and `scripts/update-changelog.mjs`. If the section ever drifts, the "Release README Highlights" workflow can be run manually to re-sync it from a release tag. PRs that need to change the section's format should update `scripts/update-readme-release-highlights.mjs` and its tests instead.
+
 ## Branching and commits
 
 Always work on a dedicated branch. Never push directly to `main`.

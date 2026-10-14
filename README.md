@@ -43,7 +43,7 @@ Latest release: **v1.22.0**
 
 ## Status
 
-This repository is starting a new development baseline at version `1.0.0` under the `open-gsd/gsd-pi` project.
+The `open-gsd/gsd-pi` project restarted public development from a clean baseline at version `1.0.0`. Releases continue from that baseline; the latest version is shown under [Latest Release Highlights](#latest-release-highlights) and in [CHANGELOG.md](./CHANGELOG.md).
 
 Older release history has been archived outside the active changelog so new work can be reviewed from a clean project surface.
 
