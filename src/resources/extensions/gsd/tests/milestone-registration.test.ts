@@ -196,7 +196,7 @@ describe("milestone registration", () => {
       "## Milestone Sequence",
       "",
       "- [ ] M001: Foo — bar",
-      "- [x] M002: Baz — qux",
+      "- [ ] M002: Baz — qux",
       "",
     ].join("\n");
 
@@ -220,7 +220,7 @@ describe("milestone registration", () => {
       { id: "M001", source: "project-sequence", created: 1 },
       { id: "M002", source: "project-sequence", created: 1 },
     ]);
-    assert.equal(getMilestone("M002")?.status, "queued", "a checked box registers an open milestone");
+    assert.equal(getMilestone("M002")?.status, "queued", "a new unchecked line registers an open milestone");
     assert.deepEqual(
       milestoneLifecycle("M002"),
       { status: "ready", version: 0, writer: "artifact.save" },
@@ -268,13 +268,15 @@ describe("milestone registration", () => {
     const originalCwd = process.cwd();
     process.chdir(base);
     t.after(() => process.chdir(originalCwd));
-    const firstContent = ["# Project", "", "## Milestone Sequence", "", "- [x] M001: Legacy — done before", ""].join("\n");
+    // A done line never registers a milestone, so M001 is registered from an
+    // unchecked line and the checked box arrives with the second save.
+    const firstContent = ["# Project", "", "## Milestone Sequence", "", "- [ ] M001: Legacy — done before", ""].join("\n");
     const first = await executeSummarySave({ artifact_type: "PROJECT", content: firstContent }, base);
     assert.ok(!first.isError, first.content[0]!.text);
 
     const second = await executeSummarySave({
       artifact_type: "PROJECT",
-      content: `${firstContent}- [ ] M002: New — thing\n`,
+      content: `${firstContent.replace("- [ ] M001", "- [x] M001")}- [ ] M002: New — thing\n`,
     }, base);
 
     assert.ok(!second.isError, second.content[0]!.text);

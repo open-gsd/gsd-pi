@@ -384,15 +384,51 @@ function projectMilestoneRegistrations(content: string): MilestoneRegistration[]
   // milestone per sequence number, so map each parsed line onto the existing row
   // that shares its sequence number instead of minting a duplicate bare-ID row.
   const existingBySeq = existingMilestonesBySequence();
-  return parseProject(content).milestones.map((milestone) => {
-    const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
-    // An adopted row, or a row that owns the sequence number under another id,
-    // gets only its human title refreshed: a checked box never completes a
-    // milestone (only gsd_complete_milestone does).
-    const retitle = canonical !== undefined &&
-      (adoptedMilestoneProjectionDone(canonical.id) !== null || canonical.id !== milestone.id);
-    return { id: canonical?.id ?? milestone.id, title: milestone.title, retitle };
-  });
+  const maxExistingSeq = Math.max(0, ...existingBySeq.keys());
+  const lines = parseProject(content).milestones;
+  const registrations: MilestoneRegistration[] = [];
+  const skipped: string[] = [];
+  for (const milestone of lines) {
+    const seq = extractMilestoneSeq(milestone.id);
+    const canonical = existingBySeq.get(seq);
+    if (canonical) {
+      // An adopted row, or a row that owns the sequence number under another id,
+      // may only get an empty title filled: a sequence line is a one-line summary
+      // and never replaces a title the milestone already has. A checked box never
+      // completes a milestone either (only gsd_complete_milestone does).
+      const mayRetitle = adoptedMilestoneProjectionDone(canonical.id) !== null || canonical.id !== milestone.id;
+      const currentTitle = canonical.title.trim();
+      if (mayRetitle && currentTitle && milestone.title && currentTitle !== milestone.title) {
+        skipped.push(`${canonical.id} keeps its title "${canonical.title}" (the line says "${milestone.title}")`);
+      }
+      registrations.push({ id: canonical.id, title: milestone.title, retitle: mayRetitle && !currentTitle });
+      continue;
+    }
+    // A line with no DB row registers a new milestone only when it is open and
+    // above every existing milestone. A done line, or an id below the highest
+    // existing one, describes history (a milestone that predates the database),
+    // and a queued row for it would be picked up as work to plan.
+    if (milestone.done) {
+      skipped.push(`${milestone.id} is not registered: the line is marked done and the milestone has no DB row`);
+      continue;
+    }
+    if (seq > 0 && seq < maxExistingSeq) {
+      skipped.push(`${milestone.id} is not registered: it is below the highest existing milestone and has no DB row`);
+      continue;
+    }
+    registrations.push({ id: milestone.id, title: milestone.title, retitle: false });
+  }
+  for (const reason of skipped) {
+    logWarning("tool", `gsd_summary_save(PROJECT): ${reason}`, { tool: "gsd_summary_save" });
+  }
+  if (lines.length > 0 && registrations.length === 0) {
+    throw new Error(
+      "no Milestone Sequence line can be registered: a line marked done ([x]), or one below the highest existing " +
+      "milestone, never registers a new milestone. Add the next milestone as an unchecked line " +
+      "(`- [ ] M00N: <Title> — <One-liner>`)",
+    );
+  }
+  return registrations;
 }
 
 /** Minimal shape of a DB milestone row needed to re-render the sequence section. */

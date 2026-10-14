@@ -16,6 +16,7 @@ import {
   setProjectRootBinding,
   upsertMilestonePlanning,
   getArtifact,
+  getMilestone,
 } from "../gsd-db.ts";
 
 function makeProject(): string {
@@ -41,6 +42,29 @@ test("renamePhaseDirOnTitleChange moves the old slug dir to the canonical name (
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("renamePhaseDirOnTitleChange keeps an established dir named for the previous real title", (t) => {
+  const base = makeProject();
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const established = join(base, ".gsd", "phases", canonicalPhaseDirName("M002", "Billing - Invoices and Payments"));
+  mkdirSync(established, { recursive: true });
+  writeFileSync(join(established, "01-ROADMAP.md"), "# Billing\n");
+
+  assert.equal(renamePhaseDirOnTitleChange(base, "M002", "Billing - Invoices and Payments", "Billing"), false);
+  assert.equal(existsSync(join(established, "01-ROADMAP.md")), true, "the established dir keeps its name and files");
+  assert.equal(existsSync(join(base, ".gsd", "phases", canonicalPhaseDirName("M002", "Billing"))), false);
+});
+
+test("renamePhaseDirOnTitleChange still moves the bare-id dir of an untitled milestone (#1526)", (t) => {
+  const base = makeProject();
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const bare = join(base, ".gsd", "phases", canonicalPhaseDirName("M002"));
+  mkdirSync(bare, { recursive: true });
+
+  assert.equal(renamePhaseDirOnTitleChange(base, "M002", "", "Billing"), true);
+  assert.equal(existsSync(bare), false);
+  assert.equal(existsSync(join(base, ".gsd", "phases", canonicalPhaseDirName("M002", "Billing"))), true);
 });
 
 test("renamePhaseDirOnTitleChange is a no-op when the new dir already exists", () => {
@@ -257,4 +281,23 @@ test("canonicalPhaseDirExists mirrors the rename's target state (#2633)", (t) =>
   mkdirSync(join(base, ".gsd", "phases", canonicalPhaseDirName("M001", "Foundation")), { recursive: true });
   assert.equal(canonicalPhaseDirExists(base, "M001", "Foundation"), true);
   assert.equal(canonicalPhaseDirExists(base, "M001", "Other"), false);
+});
+
+test("upsertMilestonePlanning changes the title but keeps an established phase dir", (t) => {
+  const base = makeProject();
+  t.after(() => {
+    try { closeDatabase(); } catch { /* already closed */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M002", title: "Billing - Invoices and Payments", status: "active" });
+  const established = join(base, ".gsd", "phases", canonicalPhaseDirName("M002", "Billing - Invoices and Payments"));
+  mkdirSync(established, { recursive: true });
+  writeFileSync(join(established, "01-ROADMAP.md"), "# Billing\n");
+
+  upsertMilestonePlanning("M002", { title: "Billing" });
+
+  assert.equal(getMilestone("M002")?.title, "Billing", "the explicit title change lands in the DB");
+  assert.equal(existsSync(join(established, "01-ROADMAP.md")), true, "the established phase dir stays");
+  assert.equal(existsSync(join(base, ".gsd", "phases", canonicalPhaseDirName("M002", "Billing"))), false, "no renamed dir");
 });
