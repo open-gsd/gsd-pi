@@ -11,11 +11,31 @@ import {
   milestonesDir,
   resolveMilestonePath,
 } from "./paths.js";
+import { logWarning } from "./workflow-logger.js";
+
+/**
+ * True when `dirName` is an established phase directory of `milestoneId`: one
+ * named for the milestone's previous real title. Placeholder names (the bare
+ * id, "New milestone <id>") and the dir of an untitled milestone are not
+ * established.
+ */
+function isEstablishedPhaseDir(milestoneId: string, dirName: string, previousTitle: string | undefined): boolean {
+  const title = previousTitle?.trim() ?? "";
+  if (!title) return false;
+  if (dirName === canonicalPhaseDirName(milestoneId)) return false;
+  if (dirName === canonicalPhaseDirName(milestoneId, `New milestone ${milestoneId}`)) return false;
+  return dirName === canonicalPhaseDirName(milestoneId, title);
+}
 
 /**
  * Move `phases/NN-old-slug` → `phases/NN-canonical` after a title change.
  * No-op when the old dir is missing, the new dir already exists, names match,
  * or the project is still on the legacy milestones/ layout. (#1526)
+ *
+ * Only a placeholder dir follows the title. An established dir, named for the
+ * previous real title, keeps its name: renaming it moves every planning file
+ * of the milestone and breaks the paths that refer to them. Resolvers find the
+ * kept dir by its number prefix.
  */
 export function renamePhaseDirOnTitleChange(
   basePath: string,
@@ -40,6 +60,10 @@ export function renamePhaseDirOnTitleChange(
 
   if (!existsSync(fromPath)) return false;
   if (basename(fromPath) === nextName) return false;
+  if (isEstablishedPhaseDir(milestoneId, basename(fromPath), previousTitle)) {
+    logWarning("db", `phase dir ${basename(fromPath)} of ${milestoneId} kept after a title change: an established phase dir is not renamed`);
+    return false;
+  }
 
   renameSync(fromPath, nextPath);
   clearPathCache();

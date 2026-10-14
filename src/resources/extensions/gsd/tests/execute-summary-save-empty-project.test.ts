@@ -126,7 +126,7 @@ test("executeSummarySave never completes a milestone from a checked box", async 
 
   assert.notEqual(result.isError, true);
   assert.equal(getMilestone("M001")?.status, "active", "an existing milestone keeps its status");
-  assert.equal(getMilestone("M002")?.status, "queued", "a new milestone is registered open");
+  assert.equal(getMilestone("M002"), null, "a done line for a milestone with no row registers nothing");
 });
 
 test("executeSummarySave self-heals the Milestone Sequence when DB already has milestones but content parses zero", async (t) => {
