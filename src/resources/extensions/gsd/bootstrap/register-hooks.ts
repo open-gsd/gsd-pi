@@ -1574,11 +1574,21 @@ export function registerHooks(
     }
   });
 
-  // Squash-merge quick-task branch back to the original branch after the
-  // agent turn completes (#2668). cleanupQuickBranch is a no-op when no
-  // quick-return state is pending, so this is safe to call on every turn.
-  pi.on("turn_end", async () => {
+  // Per-turn housekeeping: drop native milestone status source revisions so
+  // each turn re-reads them fresh.
+  pi.on("turn_end", () => {
     clearNativeMilestoneStatusSourceRevisions();
+  });
+
+  // Squash-merge quick-task branch back to the original branch after the
+  // agent run completes (#2668). cleanupQuickBranch is a no-op when no
+  // quick-return state is pending, so this is safe to call on every run.
+  // Keyed on agent_end, NOT turn_end (#2791): turn_end fires after every
+  // tool round inside one agent run, which merged and deleted the quick
+  // branch mid-task for providers that execute tools in the agent loop
+  // (e.g. openai-codex). agent_end brackets the whole run for every
+  // provider; headless quick tasks already resolve on the same signal.
+  pi.on("agent_end", async () => {
     try {
       const { cleanupQuickBranch } = await import("../quick.js");
       cleanupQuickBranch();
