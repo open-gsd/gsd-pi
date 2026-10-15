@@ -24,6 +24,8 @@
     "packages/*/bin/**",
     "packages/*/package.json",
     "packages/*/README.md",
+    "packages/*/docs/**",
+    "packages/*/examples/**",
     "pkg",
     "src/resources",
     "integrations/hermes/plugin.yaml",
