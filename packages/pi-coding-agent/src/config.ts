@@ -94,16 +94,8 @@ function getPackageDir(): string {
 		// Bun binary: process.execPath points to the compiled executable
 		return (_cachedPackageDir = dirname(process.execPath));
 	}
-	// Node.js: walk up from __dirname until we find package.json
-	let dir = __dirname;
-	while (dir !== dirname(dir)) {
-		if (existsSync(join(dir, "package.json"))) {
-			return (_cachedPackageDir = dir);
-		}
-		dir = dirname(dir);
-	}
-	// Fallback (shouldn't happen)
-	return (_cachedPackageDir = __dirname);
+	// Node.js: resolve this module's own package root (walk-up from __dirname)
+	return (_cachedPackageDir = getSelfPackageDir());
 }
 
 /**
@@ -142,24 +134,55 @@ function getPackageJsonPath(): string {
 	return join(getPackageDir(), "package.json");
 }
 
+/**
+ * Get this package's own root (the directory holding its package.json) by
+ * walking up from this module's compiled location.
+ *
+ * Unlike getPackageDir(), this deliberately ignores PI_PACKAGE_DIR. That env
+ * var points at the host distribution's branding shim (e.g. gsd's pkg/:
+ * dist/ + package.json only), which carries piConfig branding but none of the
+ * bundled documentation. README.md, docs/, examples/, and CHANGELOG.md always
+ * ship with this package, so documentation paths must resolve from the real
+ * package root (#2809).
+ */
+let _cachedSelfPackageDir: string | undefined;
+
+function getSelfPackageDir(): string {
+	if (_cachedSelfPackageDir !== undefined) return _cachedSelfPackageDir;
+	if (isBunBinary) {
+		// Bun binary: docs ship beside the executable. import.meta.url is a
+		// virtual $bunfs path that cannot be walked on the real filesystem.
+		return (_cachedSelfPackageDir = dirname(process.execPath));
+	}
+	let dir = __dirname;
+	while (dir !== dirname(dir)) {
+		if (existsSync(join(dir, "package.json"))) {
+			return (_cachedSelfPackageDir = dir);
+		}
+		dir = dirname(dir);
+	}
+	// Fallback (shouldn't happen)
+	return (_cachedSelfPackageDir = __dirname);
+}
+
 /** Get path to README.md */
 export function getReadmePath(): string {
-	return resolve(join(getPackageDir(), "README.md"));
+	return resolve(join(getSelfPackageDir(), "README.md"));
 }
 
 /** Get path to docs directory */
 export function getDocsPath(): string {
-	return resolve(join(getPackageDir(), "docs"));
+	return resolve(join(getSelfPackageDir(), "docs"));
 }
 
 /** Get path to examples directory */
 export function getExamplesPath(): string {
-	return resolve(join(getPackageDir(), "examples"));
+	return resolve(join(getSelfPackageDir(), "examples"));
 }
 
 /** Get path to CHANGELOG.md */
 export function getChangelogPath(): string {
-	return resolve(join(getPackageDir(), "CHANGELOG.md"));
+	return resolve(join(getSelfPackageDir(), "CHANGELOG.md"));
 }
 
 // =============================================================================

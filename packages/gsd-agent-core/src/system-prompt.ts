@@ -2,6 +2,8 @@
  * System prompt construction and project context loading
  */
 
+import { existsSync } from "fs";
+
 import { getDocsPath, getExamplesPath, getReadmePath } from "@gsd/pi-coding-agent/config.js";
 import { toPosixPath } from "@gsd/pi-coding-agent/utils/path-display.js";
 
@@ -22,6 +24,13 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Whether to include a per-call date/time line in the prompt. */
 	includeDateTime?: boolean;
+}
+
+/** Join doc paths as a readable list: "a", "a and b", "a, b, and c". */
+export function joinDocPaths(paths: string[]): string {
+	if (paths.length <= 1) return paths.join("");
+	if (paths.length === 2) return `${paths[0]} and ${paths[1]}`;
+	return `${paths.slice(0, -1).join(", ")}, and ${paths[paths.length - 1]}`;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -85,10 +94,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		return prompt;
 	}
 
-	// Get absolute paths to documentation and examples
-	const readmePath = toPosixPath(getReadmePath());
-	const docsPath = toPosixPath(getDocsPath());
-	const examplesPath = toPosixPath(getExamplesPath());
+	// Get absolute paths to documentation and examples. Only reference paths
+	// that exist on disk — never inject nonexistent paths (#2809).
+	const docPaths = [getReadmePath(), getDocsPath(), getExamplesPath()].filter((p) => existsSync(p));
+	const docsLine =
+		docPaths.length > 0
+			? `When asked about pi internals (SDK, extensions, themes, skills, TUI), read the docs at ${joinDocPaths(
+					docPaths.map(toPosixPath),
+				)}; follow cross-references to related docs.`
+			: "";
 
 	const tools = selectedTools || ["read", "bash", "edit", "write"];
 	const toolsList = tools.length > 0 ? `- ${tools.join(", ")}` : "(none)";
@@ -163,8 +177,7 @@ In addition to the tools above, you may have access to other custom tools depend
 
 Guidelines:
 ${guidelines}
-
-When asked about pi internals (SDK, extensions, themes, skills, TUI), read the docs at ${readmePath}, ${docsPath}, and ${examplesPath}; follow cross-references to related docs.`;
+${docsLine ? `\n${docsLine}` : ""}`;
 
 	if (appendSection) {
 		prompt += appendSection;
