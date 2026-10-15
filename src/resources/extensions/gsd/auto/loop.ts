@@ -100,7 +100,7 @@ import { createWorkflowPhaseReporter } from "./workflow-phase-reporter.js";
 import { createWorkflowTurnReporter } from "./workflow-turn-reporter.js";
 import { validateWorkflowSessionLock } from "./workflow-session-lock.js";
 import { kernelAdvance } from "./lifecycle-kernel.js";
-import { releaseUnitRetry } from "../db/unit-dispatch-retries.js";
+import { hasStoredCommitRepairRetry, releaseCommitRepairRetry, releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { readLatestUserPauseForUnit } from "../db/writers/auto-pauses.js";
 import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.js";
 import { maintainWorkerHeartbeat, runWithWorkerHeartbeat } from "./workflow-worker-heartbeat.js";
@@ -1822,6 +1822,35 @@ export async function autoLoop(
           const retryPauseMessage =
             `Verification retry for ${iterData.unitType} ${iterData.unitId} failed before the unit started: ${retryFailure} ` +
             "The pending retry was discarded so the unit is not reselected. Resolve the failure, then run /gsd auto to resume.";
+          ctx.ui.notify(retryPauseMessage, "error");
+          finishIncompleteIteration({
+            status: "stopped",
+            reason: retryPauseMessage,
+            unitType: iterData.unitType,
+            unitId: iterData.unitId,
+            failureClass: "execution",
+          });
+          await deps.pauseAuto(ctx, pi, "machine_fixable", {
+            message: retryPauseMessage,
+            category: "unknown",
+          });
+          finishTurn("stopped", "execution", retryPauseMessage, null);
+          break;
+        }
+        // #2806: the durable git-commit repair row drives the same selection
+        // without the session marker — a restart, or a close-out that settled
+        // the task by another path, leaves the row stored while
+        // s.pendingVerificationRetry is null, so the guard above never fires
+        // and the "stored retry → execute-task (commit repair)" rule
+        // reselects the settled unit on every invocation. Release the stale
+        // git-commit retry (a pre-execution retry stays) and pause loudly the
+        // same way, so the next invocation dispatches from state derivation.
+        if (hasStoredCommitRepairRetry(iterData.unitType, iterData.unitId)) {
+          releaseCommitRepairRetry(iterData.unitType, iterData.unitId);
+          const retryFailure = formatDispatchExceptionSummary({ error: err });
+          const retryPauseMessage =
+            `Commit repair dispatch for ${iterData.unitType} ${iterData.unitId} failed: ${retryFailure} ` +
+            "The stored retry was released so the unit is not reselected. Resolve the failure, then run /gsd auto to resume.";
           ctx.ui.notify(retryPauseMessage, "error");
           finishIncompleteIteration({
             status: "stopped",

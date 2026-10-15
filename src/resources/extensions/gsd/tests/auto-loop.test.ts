@@ -44,6 +44,7 @@ import { mapStatusToExitCode } from "../../../../headless-events.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease, getMilestoneLease, milestoneLeaseTtlSeconds } from "../db/milestone-leases.js";
 import { getDispatchStage, getLatestForUnit, isDispatchExecutionOpen, recordDispatchClaim, markCanceled, setDispatchStage } from "../db/unit-dispatches.js";
+import { hasStoredCommitRepairRetry, hasStoredPreExecutionRetry, readStoredCommitRepairRetry, storeUnitRetry } from "../db/unit-dispatch-retries.js";
 import { clearStaleWorkerLock } from "../crash-recovery.js";
 import { setRuntimeKv, getRuntimeKv } from "../db/runtime-kv.js";
 import { SourceObservationStore } from "../source-observations.js";
@@ -1997,6 +1998,151 @@ test("a verification retry whose dispatch fails pre-claim is cleared and auto-mo
     "the failed retry-bound unit must not be reselected by the next iteration",
   );
   assert.equal(pauseContexts.length, 1, "auto-mode must pause on the failed retry dispatch");
+  assert.match(
+    pauseContexts[0]?.message ?? "",
+    /M001\/S01\/T01/,
+    "the pause diagnostic must name the retried unit",
+  );
+  assert.match(
+    pauseContexts[0]?.message ?? "",
+    /must activate exactly one matching coordination dispatch/,
+    "the pause diagnostic must include the underlying failure",
+  );
+  assert.ok(
+    notifications.some((n) => n.level === "error" && n.message.includes("M001/S01/T01")),
+    "the failure must be surfaced as an error notification naming the unit",
+  );
+});
+
+test("a stale durable commit-repair retry whose dispatch fails pre-claim is released and auto-mode pauses (#2806)", async (t) => {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  ctx.ui.setStatus = () => {};
+  const notifications: Array<{ message: string; level: string }> = [];
+  ctx.ui.notify = (message: string, level: any) => {
+    notifications.push({ message, level });
+  };
+  const pi = makeMockPi();
+  const s = makeLoopSession();
+  openLoopDatabase(t, s);
+
+  // The stale row (#2806): the git-commit repair retry of an already-settled
+  // task, stored on its dispatch row and left behind by a close-out that
+  // completed the task by another path. The session marker is gone (fresh
+  // invocation), so only the durable row drives the reselection.
+  _getAdapter()!.prepare(`
+    INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status,
+      project_root_realpath
+    ) VALUES (
+      'worker-2806', 'test-host', 1, '2026-10-01T00:00:00.000Z', 'test',
+      '2026-10-01T00:00:00.000Z', 'active', '${s.basePath.replace(/'/g, "''")}'
+    )
+  `).run();
+  _getAdapter()!.prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES ('trace-2806-t02', 'turn-2806-t02', 'worker-2806', 0,
+      'M001', 'S01', 'T02', 'execute-task', 'M001/S01/T02', 'completed', 1,
+      '2026-10-01T00:00:00.000Z')
+  `).run();
+  storeUnitRetry("execute-task", {
+    unitId: "M001/S01/T02",
+    failureContext: "git commit hook rejected the staged task changes",
+    signature: "git-commit:1:hook rejected T02",
+    attempt: 1,
+  });
+  // An older dispatch of the stale unit holds a pre-execution retry: the
+  // release must stay scoped to the git-commit signature.
+  _getAdapter()!.prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES ('trace-2806-t01-old', 'turn-2806-t01-old', 'worker-2806', 0,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01', 'failed', 1,
+      '2026-10-01T00:00:01.000Z')
+  `).run();
+  storeUnitRetry("execute-task", {
+    unitId: "M001/S01/T01",
+    failureContext: "pre-execution check: plan missing a task",
+    signature: "pre-execution:1:missing task",
+    attempt: 1,
+  });
+  _getAdapter()!.prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES ('trace-2806-t01', 'turn-2806-t01', 'worker-2806', 0,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01', 'completed', 2,
+      '2026-10-01T00:00:02.000Z')
+  `).run();
+  storeUnitRetry("execute-task", {
+    unitId: "M001/S01/T01",
+    failureContext: "git commit hook rejected the staged task changes",
+    signature: "git-commit:1:hook rejected",
+    attempt: 1,
+  });
+  assert.equal(
+    readStoredCommitRepairRetry("M001", "S01")?.unitId,
+    "M001/S01/T01",
+    "the stale row is the newest commit-repair retry, so the dispatch rule reselects the settled unit",
+  );
+
+  const pauseContexts: Array<{ message?: string } | undefined> = [];
+  const pauseKinds: string[] = [];
+  const deps = makeMockDeps({
+    // Same pre-claim failure as #2127: the rule dispatched the stale unit and
+    // the claim activated zero matching coordination dispatches.
+    taskExecutionBoundary: async () => {
+      throw new Error(
+        "Task Attempt claim must activate exactly one matching coordination dispatch",
+      );
+    },
+    pauseAuto: async (_ctx, _pi, blockerKind, errorContext) => {
+      pauseKinds.push(blockerKind);
+      pauseContexts.push(errorContext as { message?: string } | undefined);
+    },
+  });
+
+  await autoLoop(ctx, pi, s, deps);
+
+  assert.equal(
+    hasStoredCommitRepairRetry("execute-task", "M001/S01/T01"),
+    false,
+    "the stale git-commit retry must be released when its dispatch fails pre-claim",
+  );
+  assert.equal(
+    hasStoredPreExecutionRetry("execute-task", "M001/S01/T01"),
+    true,
+    "the unit's pre-execution retry on an older dispatch must survive the release",
+  );
+  assert.equal(
+    readStoredCommitRepairRetry("M001", "S01")?.unitId,
+    "M001/S01/T02",
+    "the next invocation's commit-repair rule can only select the live retry, never the settled unit",
+  );
+  assert.equal(
+    hasStoredCommitRepairRetry("execute-task", "M001/S01/T02"),
+    true,
+    "an unrelated unit's stored retry must be untouched",
+  );
+  assert.equal(
+    s.pendingVerificationRetry,
+    null,
+    "the durable path fires without a session marker",
+  );
+  assert.equal(
+    deps.callLog.filter((call) => call === "resolveDispatch").length,
+    1,
+    "the failed retry-bound unit must not be reselected by the next iteration",
+  );
+  assert.equal(pauseContexts.length, 1, "auto-mode must pause on the failed retry dispatch");
+  assert.deepEqual(pauseKinds, ["machine_fixable"], "the pause must be machine_fixable");
   assert.match(
     pauseContexts[0]?.message ?? "",
     /M001\/S01\/T01/,
