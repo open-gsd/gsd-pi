@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
+import { isAutoActive } from "./auto-runtime-state.js";
+import { pauseAuto } from "./auto.js";
 import {
   assertValidDebugSessionSlug,
   createDebugSession,
@@ -92,6 +94,41 @@ export function parseDebugCommand(args: string): DebugCommandIntent {
   return { type: "issue-start", issue: raw };
 }
 
+/**
+ * A debug dispatch must never steer into an in-flight auto unit's agent run.
+ * sendMessage's default delivery is "steer": issued while a unit turn streams,
+ * the debug prompt is injected into the still-running unit's run, so the unit
+ * never reaches agent_end, the sanctioned pause path never fires, and every
+ * debug read/edit is attributed to the old unit and advertised as protected
+ * Source Context Block entries (#2810). Pause auto first — the same operator
+ * interrupt as /gsd pause — so debug turns run outside the unit lifecycle;
+ * a later /gsd auto re-binds a fresh observation set on resume.
+ *
+ * The pause's abort only signals the host; turn teardown settles
+ * asynchronously, so wait for idleness before handing the debug prompt to
+ * sendMessage or it can still land as steer on the draining run.
+ */
+async function pauseAutoForDebugDispatch(
+  ctx: ExtensionCommandContext,
+  pi?: ExtensionAPI,
+): Promise<boolean> {
+  if (!isAutoActive()) return true;
+  try {
+    await pauseAuto(ctx, pi, "user_request", undefined, { abortActiveTurn: true });
+    if (typeof ctx.waitForIdle === "function") {
+      await ctx.waitForIdle();
+    }
+  } catch (err) {
+    ctx.ui.notify(
+      `Could not pause auto-mode for the debug dispatch: ${err instanceof Error ? err.message : String(err)}\nRun /gsd auto to recover the interrupted unit, then retry the debug command.`,
+      "error",
+    );
+    return false;
+  }
+  ctx.ui.notify("Auto-mode paused for the debug session. /gsd auto resumes the interrupted unit.", "info");
+  return true;
+}
+
 export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi?: ExtensionAPI): Promise<void> {
   const parsed = parseDebugCommand(args);
   const basePath = process.cwd();
@@ -129,6 +166,7 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
         "info",
       );
       if (canDispatch) {
+        if (!(await pauseAutoForDebugDispatch(ctx, pi))) return;
         try {
           const prompt = loadPrompt("debug-session-manager", {
             goal: "find_and_fix",
@@ -365,6 +403,7 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
       );
 
       if (canDispatch) {
+        if (!(await pauseAutoForDebugDispatch(ctx, pi))) return;
         try {
           const promptVars: Record<string, string> = {
             goal,
@@ -424,6 +463,7 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
       );
 
       if (pi && typeof pi.sendMessage === "function") {
+        if (!(await pauseAutoForDebugDispatch(ctx, pi))) return;
         try {
           const prompt = loadPrompt("debug-diagnose", {
             goal: "find_root_cause_only",
