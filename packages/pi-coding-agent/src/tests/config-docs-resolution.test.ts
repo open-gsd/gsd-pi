@@ -42,7 +42,7 @@ test("documentation path resolution ignores PI_PACKAGE_DIR branding override", a
 			mkdirSync(join(tempDir, "dist"), { recursive: true });
 			writeFileSync(
 				join(tempDir, "package.json"),
-				JSON.stringify({ name: "@opengsd/gsd-pi", version: "1.22.0", piConfig: { name: "gsd", configDir: ".gsd" } }),
+				JSON.stringify({ name: "gsd-pi-branding-shim", version: "1.22.0", piConfig: { name: "gsd", configDir: ".gsd" } }),
 			);
 			process.env.PI_PACKAGE_DIR = tempDir;
 

@@ -107,33 +107,6 @@ function getPackageDir(): string {
 }
 
 /**
- * Get the base directory for resolving bundled SDK documentation
- * (README.md, docs/, examples/).
- *
- * Unlike getPackageDir(), this intentionally IGNORES PI_PACKAGE_DIR.
- * PI_PACKAGE_DIR is a branding/config override (gsd-pi sets it to a
- * pkg/ shim directory containing only piConfig + theme assets, with no
- * README.md, docs/, or examples/ — see scripts/sync-pkg-version.cjs).
- * Resolving documentation through that override produces nonexistent
- * paths such as pkg/README.md (#2809). Documentation lives alongside
- * this module's own package.json, so walk up from __dirname exactly
- * like the non-override branch of getPackageDir().
- */
-function getDocsPackageDir(): string {
-	if (isBunBinary) {
-		return dirname(process.execPath);
-	}
-	let dir = __dirname;
-	while (dir !== dirname(dir)) {
-		if (existsSync(join(dir, "package.json"))) {
-			return dir;
-		}
-		dir = dirname(dir);
-	}
-	return __dirname;
-}
-
-/**
  * Get path to built-in themes directory (shipped with package)
  * - For Bun binary: theme/ next to executable
  * - For Node.js (dist/): dist/modes/interactive/theme/
@@ -169,6 +142,33 @@ function getPackageJsonPath(): string {
 	return join(getPackageDir(), "package.json");
 }
 
+/**
+ * Get the base directory for resolving bundled SDK documentation
+ * (README.md, docs/, examples/).
+ *
+ * Unlike getPackageDir(), this intentionally IGNORES PI_PACKAGE_DIR.
+ * PI_PACKAGE_DIR is a branding/config override (gsd-pi sets it to a
+ * pkg/ shim directory containing only piConfig + theme assets, with no
+ * README.md, docs/, or examples/ — see scripts/sync-pkg-version.cjs).
+ * Resolving documentation through that override produces nonexistent
+ * paths such as pkg/README.md (#2809). Documentation lives alongside
+ * this module's own package.json, so walk up from __dirname exactly
+ * like the non-override branch of getPackageDir().
+ */
+function getDocsPackageDir(): string {
+	if (isBunBinary) {
+		return dirname(process.execPath);
+	}
+	let dir = __dirname;
+	while (dir !== dirname(dir)) {
+		if (existsSync(join(dir, "package.json"))) {
+			return dir;
+		}
+		dir = dirname(dir);
+	}
+	return __dirname;
+}
+
 /** Get path to README.md (resolved independently of PI_PACKAGE_DIR branding — see #2809) */
 export function getReadmePath(): string {
 	return resolve(join(getDocsPackageDir(), "README.md"));
@@ -187,4 +187,86 @@ export function getExamplesPath(): string {
 /** Get path to CHANGELOG.md */
 export function getChangelogPath(): string {
 	return resolve(join(getPackageDir(), "CHANGELOG.md"));
+}
+
+// =============================================================================
+// App Config (from package.json piConfig)
+// =============================================================================
+
+const pkg = JSON.parse(readFileSync(getPackageJsonPath(), "utf-8"));
+
+export const APP_NAME: string = pkg.piConfig?.name || "pi";
+export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
+export const VERSION: string = pkg.version;
+
+// e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
+export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
+
+const DEFAULT_SHARE_VIEWER_URL = "https://pi.dev/session/";
+
+/** Get the share viewer URL for a gist ID */
+export function getShareViewerUrl(gistId: string): string {
+	const baseUrl = process.env.PI_SHARE_VIEWER_URL || DEFAULT_SHARE_VIEWER_URL;
+	return `${baseUrl}#${gistId}`;
+}
+
+// =============================================================================
+// User Config Paths (~/.pi/agent/*)
+// =============================================================================
+
+/** Get the agent config directory (e.g., ~/.pi/agent/) */
+export function getAgentDir(): string {
+	const envDir = process.env[ENV_AGENT_DIR];
+	if (envDir) {
+		// Expand tilde to home directory
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return homedir() + envDir.slice(1);
+		return envDir;
+	}
+	return join(homedir(), CONFIG_DIR_NAME, "agent");
+}
+
+/** Get path to user's custom themes directory */
+export function getCustomThemesDir(): string {
+	return join(getAgentDir(), "themes");
+}
+
+/** Get path to models.json */
+export function getModelsPath(): string {
+	return join(getAgentDir(), "models.json");
+}
+
+/** Get path to auth.json */
+export function getAuthPath(): string {
+	return join(getAgentDir(), "auth.json");
+}
+
+/** Get path to settings.json */
+export function getSettingsPath(): string {
+	return join(getAgentDir(), "settings.json");
+}
+
+/** Get path to managed binaries directory (fd, rg) */
+export function getBinDir(): string {
+	return join(getAgentDir(), "bin");
+}
+
+/** Get path to prompt templates directory */
+export function getPromptsDir(): string {
+	return join(getAgentDir(), "prompts");
+}
+
+/** Get path to sessions directory */
+export function getSessionsDir(): string {
+	return join(getAgentDir(), "sessions");
+}
+
+/** Get path to content-addressed blob store directory */
+export function getBlobsDir(): string {
+	return join(getAgentDir(), "blobs");
+}
+
+/** Get path to debug log file */
+export function getDebugLogPath(): string {
+	return join(getAgentDir(), `${APP_NAME}-debug.log`);
 }
