@@ -2320,6 +2320,29 @@ function findEvidence(entries: readonly UnboundProjectionEvidence[], id: string)
   return entries.find(entry => entry.evidenceId === id || entry.evidencePath === id);
 }
 
+// On-disk state of a prepared guard/exchange placeholder. A prepared
+// placeholder is empty by construction: content reaches these artifacts only
+// through the exchange rotation or the copy fallback, and both windows move
+// the reviewed bytes into them — so a non-empty artifact may hold the reviewed
+// content while an absent or empty one cannot (an originally empty evidence
+// file/tree can move without creating bytes; emptiness there proves there is
+// nothing to lose, not that no exchange ran).
+type PreparedArtifactState = "absent" | "empty" | "holds-content";
+
+function preparedArtifactState(artifactPath: string): PreparedArtifactState {
+  let artifactStat;
+  try {
+    artifactStat = lstatSync(artifactPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+    throw error;
+  }
+  if (artifactStat.isDirectory()) return readdirSync(artifactPath).length === 0 ? "empty" : "holds-content";
+  // Unknown node kinds fail closed; a 0-byte regular file is the prepared
+  // placeholder shape and cannot hold reviewed bytes.
+  return artifactStat.isFile() && artifactStat.size === 0 ? "empty" : "holds-content";
+}
+
 function copyEvidence(
   handle: ProjectionRootIdentityLock,
   sourcePath: string,
@@ -2892,22 +2915,53 @@ function resolveUnboundProjectionEvidencePlainFs(
     // in a guard/exchange artifact rather than at the evidence path (the
     // exchange window): resolving against the evidence path there would review
     // a placeholder while the real bytes go untracked. Native replay
-    // normalizes those records; degraded resolution is only safe once every
-    // prepared artifact is absent and the evidence file is the content holder.
+    // normalizes those records; degraded resolution is only safe once no
+    // prepared artifact can hold content and the evidence file is the content
+    // holder. An artifact that is absent or still an empty placeholder marks
+    // the attempt as abandoned (#2819): on a host whose native layer fails
+    // deterministically, every post-cooldown native attempt re-prepares fresh
+    // placeholders before failing, so a presence-only check would refuse the
+    // record forever and keep the convergence path unreachable. An abandoned
+    // record is finished in place under the consent/verification gates below;
+    // an artifact that holds bytes still requires the lock.
+    const stalePreparedArtifacts: string[] = [];
     if (evidence.resolution !== undefined) {
       const prepared = evidence.resolution;
-      const artifactPresent = (identity: string | null, artifactPath: string | null): boolean =>
-        identity !== null && artifactPath !== null && existsSync(artifactPath);
+      const guardArtifact = fallbackProjectionPath(targetRoot, prepared.guardPath);
+      const exchangeArtifact = prepared.exchangePath === null
+        ? null
+        : fallbackProjectionPath(targetRoot, resolveEvidenceResolutionPaths(evidence).exchangePath);
+      // One classification drives both admission and cleanup selection: an
+      // artifact observed holding content refuses the resolution outright —
+      // retiring the journal over unreviewed bytes is never acceptable.
+      const guardState = preparedArtifactState(guardArtifact);
+      const exchangeState = exchangeArtifact === null
+        ? "absent"
+        : preparedArtifactState(exchangeArtifact);
       const inFlight = prepared.phase !== "prepared"
-        || artifactPresent(prepared.guardIdentity, fallbackProjectionPath(targetRoot, prepared.guardPath))
-        || artifactPresent(
-          prepared.exchangeIdentity,
-          prepared.exchangePath === null
-            ? null
-            : fallbackProjectionPath(targetRoot, resolveEvidenceResolutionPaths(evidence).exchangePath),
-        );
+        || (prepared.guardIdentity !== null && guardState === "holds-content")
+        || (prepared.exchangeIdentity !== null && exchangeState === "holds-content");
       if (inFlight) {
         throw new Error("native projection root identity locking is required to finish this in-flight evidence resolution");
+      }
+      // Only journal-bound placeholders (the resolution carries their identity)
+      // are cleanup-eligible: a null identity means the protocol never
+      // journal-acknowledged the artifact, and an interrupted restage may have
+      // recorded a companion quarantine record for that same path — removing
+      // it here would orphan that record. Paths independently referenced by
+      // another evidence record stay for the same reason.
+      const otherReferencedPaths = new Set(
+        entries.filter((entry) => entry.evidenceId !== evidence.evidenceId)
+          .map((entry) => fallbackProjectionPath(targetRoot, entry.evidencePath)),
+      );
+      for (const [identity, artifact, state] of [
+        [prepared.guardIdentity, guardArtifact, guardState],
+        [prepared.exchangeIdentity, exchangeArtifact, exchangeState],
+      ] as const) {
+        if (identity !== null && artifact !== null && state === "empty"
+          && !otherReferencedPaths.has(artifact)) {
+          stalePreparedArtifacts.push(artifact);
+        }
       }
     }
     if (!existsSync(path)) throw new Error("unbound projection evidence is unavailable");
@@ -2926,6 +2980,26 @@ function resolveUnboundProjectionEvidencePlainFs(
     if (currentIdentity !== fallbackProjectionIdentity(path)
       || contentDigest !== fallbackProjectionContentDigest(path, evidence.scope)) {
       throw new Error("unbound projection evidence changed after review");
+    }
+    // The abandoned attempt's placeholders were verified empty before the
+    // consent gates ran; remove them so the in-place re-prepare starts clean
+    // instead of leaving stray protocol artifacts beside the fresh
+    // deleting-marker paths. Recheck immediately before removal: an artifact
+    // that gained bytes since the gate classified it may hold content now, so
+    // the resolution refuses instead of deleting unreviewed bytes (a write
+    // landing between this recheck and the removal stays inside the documented
+    // degraded-mode pathname-race limit; an artifact that raced away needs no
+    // removal).
+    for (const stale of stalePreparedArtifacts) {
+      if (preparedArtifactState(stale) !== "empty") {
+        throw new Error("native projection root identity locking is required to finish this in-flight evidence resolution");
+      }
+      try {
+        if (lstatSync(stale).isDirectory()) rmdirSync(stale);
+        else unlinkSync(stale);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
     removePlainFsNativeEvidenceDescriptors(targetRoot, evidence.evidencePath);
     const destination = destinationPath === null
