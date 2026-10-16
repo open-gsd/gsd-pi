@@ -1245,10 +1245,18 @@ test("a drifted resolution whose guard holds the moved bytes retains them as the
   // The later write lands the way a readable-index publication does: a fresh
   // file renamed into place, so the identity changes (an in-place truncation
   // would keep the placeholder's inode and converge as a completed exchange).
+  // Some filesystems hand the just-freed inode straight back, so recreate
+  // until the identity genuinely differs from the placeholder's.
   const REWRITTEN = "rewritten staged artifact\n";
-  rmSync(join(fixture.rootPath, fixture.evidencePath));
-  writeFileSync(join(fixture.rootPath, fixture.evidencePath), REWRITTEN);
-  const rewrittenStat = lstatSync(join(fixture.rootPath, fixture.evidencePath), { bigint: true });
+  const placeholderStat = lstatSync(join(fixture.rootPath, fixture.evidencePath), { bigint: true });
+  const placeholderIdentity = `${placeholderStat.dev}:${placeholderStat.ino}`;
+  let rewrittenStat = lstatSync(join(fixture.rootPath, fixture.evidencePath), { bigint: true });
+  for (let attempt = 0; `${rewrittenStat.dev}:${rewrittenStat.ino}` === placeholderIdentity; attempt++) {
+    if (attempt >= 50) throw new Error("could not produce a new inode for the rewritten artifact");
+    rmSync(join(fixture.rootPath, fixture.evidencePath));
+    writeFileSync(join(fixture.rootPath, fixture.evidencePath), REWRITTEN);
+    rewrittenStat = lstatSync(join(fixture.rootPath, fixture.evidencePath), { bigint: true });
+  }
 
   // Pre-fix this throws the raw journaled-exchange identity error on every
   // managed open; post-fix the record returns to review and the moved bytes
