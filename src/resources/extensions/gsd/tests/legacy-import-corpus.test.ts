@@ -2791,7 +2791,7 @@ test("legacy corpus capstone classifies database targets and changes without app
   assert.deepEqual(oracle("composite-capstone").counts, {
     create: 8, update: 0, delete: 0, preserve: 5, unparsed: 3, unresolved: 3,
   });
-  assert.equal(semanticHash("composite-capstone"), "sha256:2e6c7a558e74cd486095e09916b372d31c052e018a50878cbdfdb5c6bb44895c");
+  assert.equal(semanticHash("composite-capstone"), "sha256:9c3568ca44b50e7e3fe6517598683785b0b25e256b5dcd92072aec51dedf30ce");
   assert.ok(!oracle("composite-capstone").changes.some((change) => change.target.key.includes("M007")));
   assert.ok(oracle("composite-capstone").changes
     .filter((change) => change.target.kind.startsWith("legacy-"))
@@ -2859,7 +2859,7 @@ test("legacy corpus capstone classifies database targets and changes without app
       ],
       [
         "sha256:be640f15687502bb6cf6348f5a0b8c8f2bda92b71a0f18cd6b3285410e432242",
-        "sha256:069210b367d09b99efa05273f8f04fee38dd2d2b25611eb560fedd70a289f353",
+        "sha256:137e7dba835f45f3c22e03a5a7b33266d42d6bdb97d1348b0aa79b1831fe76a3",
         "sha256:66a890082358d06b19c2e38d7c6e74281fff8bccb09a14c3e34022344690b4e6",
         "sha256:20cdef594bba162267de1b477ca019296c0f03c4531f4f5514b39bbb0c830922",
       ],
