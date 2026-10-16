@@ -217,6 +217,10 @@ test("refuses malformed, parent-only, and mismatched pause lifecycle identities 
     {
       name: "task lifecycle missing while slice and milestone parents exist",
       corrupt(db) {
+        // This temp database is disposed after the subtest. Drop only the
+        // identity fence needed to model a row written by an older/corrupt
+        // store; production lifecycle identity remains immutable.
+        db.exec(`DROP TRIGGER trg_workflow_lifecycle_identity_immutable`);
         db.prepare(
           `UPDATE workflow_item_lifecycles SET task_id = 'T99' WHERE lifecycle_id = 'lc-m001-s01-t01'`,
         ).run();
@@ -667,6 +671,7 @@ test("rejects wrong-project, lifecycle, kind, owner, and non-human pause associa
       expected: "blocker-not-found",
       corrupt(db, blockerId) {
         db.exec(`PRAGMA foreign_keys = OFF`);
+        db.exec(`DROP TRIGGER trg_workflow_blocker_opening_immutable`);
         db.prepare(`UPDATE workflow_blockers SET project_id = 'crafted-other-project' WHERE blocker_id = :id`)
           .run({ ":id": blockerId });
       },
@@ -676,6 +681,7 @@ test("rejects wrong-project, lifecycle, kind, owner, and non-human pause associa
       expected: "association-mismatch",
       corrupt(db, blockerId) {
         db.exec(`PRAGMA foreign_keys = OFF`);
+        db.exec(`DROP TRIGGER trg_workflow_blocker_opening_immutable`);
         db.prepare(`UPDATE workflow_blockers SET lifecycle_id = 'crafted-other-lifecycle' WHERE blocker_id = :id`)
           .run({ ":id": blockerId });
       },
@@ -692,6 +698,9 @@ test("rejects wrong-project, lifecycle, kind, owner, and non-human pause associa
       name: "external owner",
       expected: "unsupported-blocker-kind",
       corrupt(db, blockerId) {
+        // The fixture database is isolated and disposed by makeProject(); only
+        // this named opening-identity fence is relaxed for the corrupt row.
+        db.exec(`DROP TRIGGER trg_workflow_blocker_opening_immutable`);
         db.prepare(`UPDATE workflow_blockers SET resolution_owner = 'external' WHERE blocker_id = :id`)
           .run({ ":id": blockerId });
       },
