@@ -136,10 +136,24 @@ export async function checkRuntimeHealth(
     const listedEvidenceIds = new Set<string>();
     try {
       for (const evidence of loadUnboundProjectionEvidence(basePath)) {
-        issues.push(unresolvedProjectionEvidenceIssue(
-          (action) => previewUnboundProjectionEvidenceResolution(basePath, evidence.evidenceId, action),
-        ));
         listedEvidenceIds.add(evidence.evidenceId);
+        try {
+          issues.push(unresolvedProjectionEvidenceIssue(
+            (action) => previewUnboundProjectionEvidenceResolution(basePath, evidence.evidenceId, action),
+          ));
+        } catch (error) {
+          // One record whose reviewed path is momentarily unreadable (a crash
+          // mid-resolution, #2815) must not blank the rest of the assessment.
+          issues.push({
+            severity: "error",
+            code: "unresolved_projection_evidence",
+            scope: "project",
+            unitId: "project",
+            message: `Unresolved ${evidence.scope} projection evidence for ${evidence.logicalPath} is retained at .gsd/${evidence.evidencePath} (${evidence.evidenceId}), but it could not be reviewed: ${error instanceof Error ? error.message : String(error)}. Resolve the in-flight state first, then rerun /gsd doctor for the resolution commands.`,
+            file: `.gsd/${evidence.evidencePath}`,
+            fixable: false,
+          });
+        }
       }
     } catch (error) {
       issues.push({

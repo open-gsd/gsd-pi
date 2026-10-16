@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -15,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { isProjectionRootIdentityLockAvailable } from "@gsd/native/file-identity";
+import { isProjectionRootIdentityLockAvailable, _latchProjectionRootIdentityLockForTest, _resetProjectionRootIdentityLockHealthForTest } from "@gsd/native/file-identity";
 
 import { runGSDDoctor } from "../doctor.ts";
 import { checkRuntimeHealth } from "../doctor-runtime-checks.ts";
@@ -436,6 +437,79 @@ test("doctor names a directory occupying the evidence index (#2648)", async (t) 
   assert.equal(rejected[0]!.fixable, false);
   assert.match(rejected[0]!.message, /a directory where the projection protocol requires a regular file/u);
   assert.match(rejected[0]!.message, /move it out of \.gsd/u);
+});
+
+test("doctor keeps listing resolvable evidence beside a record that cannot be reviewed (#2815)", async (t) => {
+  // With the addon present, trip the real health latch so the assessment takes
+  // the same degraded path a tripped #2489 latch produces; without it the
+  // store is already degraded.
+  if (isProjectionRootIdentityLockAvailable()) _latchProjectionRootIdentityLockForTest();
+  t.after(() => _resetProjectionRootIdentityLockHealthForTest());
+
+  const dir = createGitProject();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const rootPath = join(dir, ".gsd");
+  mkdirSync(join(rootPath, "notes"), { recursive: true });
+  mkdirSync(join(rootPath, "migration"), { recursive: true });
+
+  const healthy = "notes/.gsd-projection-remove-00000000-0000-0000-0000-000000000001";
+  writeFileSync(join(rootPath, healthy), "reviewed bytes\n");
+  const healthyStat = lstatSync(join(rootPath, healthy), { bigint: true });
+  const healthyId = `evidence:sha256:${createHash("sha256")
+    .update(JSON.stringify({ evidencePath: healthy, kind: "quarantine", logicalPath: "notes/result.md", scope: "file" }))
+    .digest("hex")}`;
+  // This record's evidence file is gone (a crash mid-resolution): its preview
+  // throws and must not blank the assessment of the other records.
+  const missing = "notes/.gsd-projection-remove-00000000-0000-0000-0000-000000000002";
+  const missingId = `evidence:sha256:${createHash("sha256")
+    .update(JSON.stringify({ evidencePath: missing, kind: "quarantine", logicalPath: "notes/other.md", scope: "file" }))
+    .digest("hex")}`;
+  writeFileSync(join(rootPath, "migration", "unbound-projection-evidence.json"), `${JSON.stringify([
+    {
+      evidenceId: healthyId,
+      evidencePath: healthy,
+      evidenceIdentity: `${healthyStat.dev}:${healthyStat.ino}`,
+      contentDigest: `sha256:${createHash("sha256").update("reviewed bytes\n").digest("hex")}`,
+      kind: "quarantine",
+      logicalPath: "notes/result.md",
+      scope: "file",
+      transition: "retained",
+    },
+    {
+      evidenceId: missingId,
+      evidencePath: missing,
+      evidenceIdentity: "1:1",
+      contentDigest: `sha256:${createHash("sha256").update("gone\n").digest("hex")}`,
+      kind: "quarantine",
+      logicalPath: "notes/other.md",
+      scope: "file",
+      transition: "resolving",
+      resolution: {
+        action: "discard",
+        currentIdentity: "1:1",
+        contentDigest: `sha256:${createHash("sha256").update("gone\n").digest("hex")}`,
+        destinationPath: null,
+        guardPath: "notes/.gsd-projection-remove-11111111-2222-4333-8444-555555555555",
+        guardIdentity: null,
+        stagingPath: null,
+        stagingIdentity: null,
+        exchangePath: "notes/.gsd-projection-exchange-11111111-2222-4333-8444-555555555555",
+        exchangeIdentity: null,
+        phase: "prepared",
+      },
+    },
+  ])}\n`);
+
+  const report = await runGSDDoctor(dir);
+  const issues = report.issues.filter((candidate) => candidate.code === "unresolved_projection_evidence");
+  assert.ok(
+    issues.some((candidate) => candidate.file === `.gsd/${healthy}`
+      && /--action=discard --consent=discard:sha256:/u.test(candidate.message)),
+    "the resolvable record still lists its resolution commands",
+  );
+  const unreviewable = issues.find((candidate) => candidate.file === `.gsd/${missing}`);
+  assert.ok(unreviewable, "the unreviewable record is still reported");
+  assert.match(unreviewable.message, /could not be reviewed/u);
 });
 
 test(
