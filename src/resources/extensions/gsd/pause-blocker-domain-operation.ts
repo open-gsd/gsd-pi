@@ -347,7 +347,7 @@ export function resolveAutoPauseBlockerById(input: {
           failure = "blocker-not-open";
         } else if (pauses.length === 0) {
           failure = "no-associated-pause";
-        } else if (pauses.length !== 1) {
+        } else if (pauses.length !== 1 || pause === undefined) {
           failure = "association-mismatch";
         } else if (
           !isHumanPauseBlockerKind(blocker.blocker_kind)
