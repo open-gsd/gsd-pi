@@ -135,6 +135,34 @@ const EXTERNAL_USAGE_FIELDS: readonly (keyof ExternalUsageSnapshot)[] = [
 	"cost",
 ];
 
+/**
+ * `custom` entry type carrying one child's durable usage high-water mark
+ * (#2836). Appended whenever a reconcile advances a key's high-water, and
+ * folded back into the accumulator when the session file is loaded, so a
+ * restart/resume restores prior child cost instead of resetting the footer
+ * to parent-only usage. Data shape: `{ key: string, snapshot: ExternalUsageSnapshot }`.
+ */
+const EXTERNAL_USAGE_ENTRY_TYPE = "external-usage";
+
+/**
+ * Validate a durable external-usage record. Returns a short corruption reason
+ * for diagnostics (#2836), or undefined when the record is well-formed: shape
+ * must be intact and every field a finite number, so a corrupt record is
+ * skipped whole (with its warning) instead of partially contributing.
+ */
+function validateExternalUsageRecord(
+	data: { key?: unknown; snapshot?: Record<string, unknown> } | undefined,
+): string | undefined {
+	if (!data || typeof data !== "object") return "data is missing or not an object";
+	if (typeof data.key !== "string" || !data.key) return "key is missing or not a non-empty string";
+	if (typeof data.snapshot !== "object" || data.snapshot === null) return "snapshot is missing or not an object";
+	const invalidFields = EXTERNAL_USAGE_FIELDS.filter(
+		(field) => typeof data.snapshot![field] !== "number" || !Number.isFinite(data.snapshot![field] as number),
+	);
+	if (invalidFields.length > 0) return `invalid fields: ${invalidFields.join(", ")}`;
+	return undefined;
+}
+
 function finiteOrZero(value: number | undefined): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
@@ -234,6 +262,7 @@ export class SessionManager {
 			}
 
 			this._buildIndex();
+			this._reconstructExternalUsage();
 			this.flushed = true;
 		} else {
 			const explicitPath = this.sessionFile;
@@ -693,8 +722,29 @@ export class SessionManager {
 			throw new Error(`Entry ${leafId} not found`);
 		}
 
-		// Filter out LabelEntry from path - we'll recreate them from the resolved map
-		const pathWithoutLabels = path.filter((e) => e.type !== "label");
+		// Filter out LabelEntry from path - we'll recreate them from the resolved map.
+		// Also strip durable external-usage records (#2836): branching re-uses
+		// this manager for a different session (#2821), and the branched file
+		// must not carry the discarded session's child spend — otherwise a
+		// later resume of the branch would reconstruct it.
+		const strippedUsage = path.some(
+			(e) => e.type === "custom" && (e as CustomEntry).customType === EXTERNAL_USAGE_ENTRY_TYPE,
+		);
+		const pathWithoutLabels = path.filter(
+			(e) => e.type !== "label"
+				&& !(e.type === "custom" && (e as CustomEntry).customType === EXTERNAL_USAGE_ENTRY_TYPE),
+		);
+		if (strippedUsage) {
+			// Reparent retained entries to their nearest retained ancestor so
+			// removing the records cannot orphan a descendant and break the
+			// conversation chain. Clone first: the entry objects are still
+			// referenced by this session's index and must not be mutated.
+			let previousId: string | null = null;
+			for (let i = 0; i < pathWithoutLabels.length; i++) {
+				pathWithoutLabels[i] = { ...pathWithoutLabels[i]!, parentId: previousId };
+				previousId = pathWithoutLabels[i]!.id;
+			}
+		}
 
 		// Branching re-uses this manager for a different session (#2821): the
 		// branched conversation must not inherit the discarded session's
@@ -1004,27 +1054,116 @@ export class SessionManager {
 	 * kept for the session's lifetime: child completion and worker-row expiry
 	 * never reduce them, and failed or interrupted children keep whatever
 	 * usage they already reported.
+	 *
+	 * Persisted sessions (#2836): a key's first registration (even at zero)
+	 * and every high-water advance are appended as `external-usage` custom
+	 * entries, so loading the session file again (restart/resume) reconstructs
+	 * the same totals through the same positive-delta reconciliation and a
+	 * registered child stays owned across a same-session resume. In-memory
+	 * sessions keep #2826 behavior.
 	 */
 	addExternalUsage(key: string, usage: ExternalUsageSnapshot): void {
-		if (!key) return;
+		const banked = this._bankExternalUsage(key, usage);
+		if (!banked) return;
+		// Persist the first registration even at zero: the launch path binds
+		// keys with a zero snapshot before any await (#2826), and without a
+		// durable record a same-session resume would leave that key on a stale
+		// generation tombstone, permanently dropping its first real report
+		// (#2836). Advances persist the new high-water; repeats stay free.
+		if (!banked.changed) return;
+		if (!this.persist || !this.sessionFile) return;
+		this.appendCustomEntry(EXTERNAL_USAGE_ENTRY_TYPE, { key, snapshot: banked.snapshot });
+	}
+
+	/**
+	 * Reconcile `usage` for `key` against its high-water mark. Returns the
+	 * stored per-key snapshot plus whether this call changed it (first
+	 * registration for the key, or a positive delta banked), or undefined when
+	 * the report is dropped (empty key, or the key is bound to a superseded
+	 * session generation).
+	 */
+	private _bankExternalUsage(
+		key: string,
+		usage: ExternalUsageSnapshot,
+	): { snapshot: ExternalUsageSnapshot; changed: boolean } | undefined {
+		if (!key) return undefined;
 		const bound = this.externalUsageByKey.get(key);
-		if (bound && bound.generation !== this.externalUsageGeneration) return;
+		if (bound && bound.generation !== this.externalUsageGeneration) return undefined;
 		const previous = bound?.snapshot;
+		let advanced = false;
 		for (const field of EXTERNAL_USAGE_FIELDS) {
 			const value = finiteOrZero(usage[field]);
 			const delta = value - finiteOrZero(previous?.[field]);
-			if (delta > 0) this.externalUsageTotals[field] += delta;
+			if (delta > 0) {
+				this.externalUsageTotals[field] += delta;
+				advanced = true;
+			}
 		}
+		const snapshot: ExternalUsageSnapshot = {
+			input: Math.max(finiteOrZero(usage.input), finiteOrZero(previous?.input)),
+			output: Math.max(finiteOrZero(usage.output), finiteOrZero(previous?.output)),
+			cacheRead: Math.max(finiteOrZero(usage.cacheRead), finiteOrZero(previous?.cacheRead)),
+			cacheWrite: Math.max(finiteOrZero(usage.cacheWrite), finiteOrZero(previous?.cacheWrite)),
+			cost: Math.max(finiteOrZero(usage.cost), finiteOrZero(previous?.cost)),
+		};
 		this.externalUsageByKey.set(key, {
 			generation: this.externalUsageGeneration,
-			snapshot: {
-				input: Math.max(finiteOrZero(usage.input), finiteOrZero(previous?.input)),
-				output: Math.max(finiteOrZero(usage.output), finiteOrZero(previous?.output)),
-				cacheRead: Math.max(finiteOrZero(usage.cacheRead), finiteOrZero(previous?.cacheRead)),
-				cacheWrite: Math.max(finiteOrZero(usage.cacheWrite), finiteOrZero(previous?.cacheWrite)),
-				cost: Math.max(finiteOrZero(usage.cost), finiteOrZero(previous?.cost)),
-			},
+			snapshot,
 		});
+		return { snapshot, changed: advanced || !bound };
+	}
+
+	/**
+	 * Rebuild the external-usage accumulator from the loaded session file
+	 * (#2836): fold the per-key high-water marks recorded by addExternalUsage
+	 * back through the same positive-delta reconciliation, in file order, so
+	 * repeated or out-of-order durable snapshots reconcile idempotently and a
+	 * resumed session starts from its real prior child cost. Entries are read,
+	 * never re-written here. A live child whose key was restored reconciles
+	 * against the restored high-water (its next cumulative snapshot banks no
+	 * delta); a key absent from the file keeps its stale generation tombstone
+	 * and stays dropped, as with any session switch (#2826).
+	 */
+	private _reconstructExternalUsage(): void {
+		const records: Array<{ key: string; snapshot: ExternalUsageSnapshot }> = [];
+		for (const entry of this.fileEntries) {
+			if (entry.type !== "custom") continue;
+			const custom = entry as CustomEntry;
+			if (custom.customType !== EXTERNAL_USAGE_ENTRY_TYPE) continue;
+			const data = custom.data as { key?: unknown; snapshot?: Record<string, unknown> } | undefined;
+			const reason = validateExternalUsageRecord(data);
+			if (reason) {
+				// #2836: corrupt durable usage must surface, never silently
+				// lower (or fabricate) the restored total. The entry is
+				// skipped; the diagnostic names the session entry.
+				console.warn(
+					`[session] ignoring corrupt external-usage entry ${custom.id}: ${reason}`,
+				);
+				continue;
+			}
+			const raw = data!.snapshot!;
+			records.push({
+				key: data!.key as string,
+				snapshot: {
+					input: raw.input as number,
+					output: raw.output as number,
+					cacheRead: raw.cacheRead as number,
+					cacheWrite: raw.cacheWrite as number,
+					cost: raw.cost as number,
+				},
+			});
+		}
+		// Rebind each restored key to the current generation once: the load
+		// bumped it, and a stale tombstone from before the switch must not
+		// drop the key's own restored state. The entries themselves then
+		// reconcile in file order through the normal positive-delta path, so
+		// repeated or out-of-order durable snapshots stay idempotent.
+		for (const key of new Set(records.map((record) => record.key))) {
+			this.externalUsageByKey.delete(key);
+		}
+		for (const record of records) {
+			this._bankExternalUsage(record.key, record.snapshot);
+		}
 	}
 
 	wasInterrupted(): boolean {

@@ -877,7 +877,7 @@ Current working directory.
 
 Read-only access to session state. See [Session Format](session-format.md) for the full SessionManager API and entry types.
 
-One reporting method is also available: `addExternalUsage(key, usage)` records provider-reported usage from work executed outside this session's message entries (e.g. child-process subagent sessions) so session cost totals can include it. Keys must be stable per reporting child; reconciliation is positive-delta and idempotent. Totals are session-scoped: they reset on `newSession()`/`setSessionFile()` and are not persisted.
+One reporting method is also available: `addExternalUsage(key, usage)` records provider-reported usage from work executed outside this session's message entries (e.g. child-process subagent sessions) so session cost totals can include it. Keys must be stable per reporting child; reconciliation is positive-delta and idempotent. Totals are session-scoped: they reset on `newSession()`/`setSessionFile()`. In persisted sessions each high-water advance is recorded in the session file and reconstructed on load, so resuming a session restores its prior child cost (#2836); in-memory sessions are not persisted.
 
 For `tool_call`, this state is synchronized through the current assistant message before handlers run. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
 
