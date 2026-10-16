@@ -132,5 +132,8 @@ describe("worker registry — host task workers (#2533)", () => {
 		assert.equal(row?.model, "openrouter/auto");
 		assert.equal(row?.reportedModel, "anthropic/claude-sonnet-5");
 		assert.equal(row?.thinking, "high");
+
+		updateWorkerIdentity(id, { reportedModel: undefined });
+		assert.equal(row?.reportedModel, undefined, "a replacement attempt can clear stale reported identity");
 	});
 });

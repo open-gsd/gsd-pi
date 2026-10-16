@@ -134,9 +134,9 @@ export function registerWorker(
 export function updateWorkerIdentity(id: string, identity: WorkerIdentityFields): void {
   const entry = activeWorkers.get(id);
   if (!entry) return;
-  if (identity.model !== undefined) entry.model = identity.model;
-  if (identity.reportedModel !== undefined) entry.reportedModel = identity.reportedModel;
-  if (identity.thinking !== undefined) entry.thinking = identity.thinking;
+  if ("model" in identity) entry.model = identity.model;
+  if ("reportedModel" in identity) entry.reportedModel = identity.reportedModel;
+  if ("thinking" in identity) entry.thinking = identity.thinking;
 }
 
 /**

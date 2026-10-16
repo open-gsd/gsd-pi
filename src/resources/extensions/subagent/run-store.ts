@@ -26,6 +26,7 @@ export interface SubagentChildArtifact {
 	errorMessage?: string;
 	stopReason?: string;
 	model?: string;
+	reportedModel?: string;
 	thinking?: string;
 	usage?: {
 		input: number;

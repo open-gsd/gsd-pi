@@ -13,6 +13,7 @@ import { afterEach, describe, it } from "node:test";
 
 import subagentExtension from "../index.js";
 import { getActiveWorkers, resetWorkerRegistry } from "../worker-registry.js";
+import { SubagentRunStore } from "../run-store.js";
 import { SessionManager } from "../../../../../packages/pi-coding-agent/src/core/session-manager.ts";
 
 const EMITS_USAGE_FIXTURE = fileURLToPath(new URL("./fixtures/emits-usage.cjs", import.meta.url));
@@ -116,6 +117,7 @@ describe("subagent usage reconciliation into the parent session", () => {
 	const savedBinPath = process.env.GSD_BIN_PATH;
 	const savedExitCode = process.env.FIXTURE_EXIT_CODE;
 	const savedFailOnceDir = process.env.FIXTURE_FAIL_ONCE_DIR;
+	const savedModelSequence = process.env.FIXTURE_MODEL_SEQUENCE;
 	let dir: string | undefined;
 
 	afterEach(() => {
@@ -130,6 +132,8 @@ describe("subagent usage reconciliation into the parent session", () => {
 		else process.env.FIXTURE_EXIT_CODE = savedExitCode;
 		if (savedFailOnceDir === undefined) delete process.env.FIXTURE_FAIL_ONCE_DIR;
 		else process.env.FIXTURE_FAIL_ONCE_DIR = savedFailOnceDir;
+		if (savedModelSequence === undefined) delete process.env.FIXTURE_MODEL_SEQUENCE;
+		else process.env.FIXTURE_MODEL_SEQUENCE = savedModelSequence;
 	});
 
 	function freshEnv(): string {
@@ -244,6 +248,21 @@ describe("subagent usage reconciliation into the parent session", () => {
 		assert.equal(result.details.results[0].model, "requested-model");
 		assert.equal(result.details.results[0].reportedModel, "test-model");
 		assert.match(renderCard(tool, result), /requested-model ← test-model/);
+		assert.match(
+			renderCard(tool, { ...result, details: { ...result.details, mode: "single" } }),
+			/requested-model ← test-model/,
+		);
+		assert.match(
+			renderCard(tool, {
+				...result,
+				details: {
+					...result.details,
+					mode: "chain",
+					results: [{ ...result.details.results[0], step: 1 }],
+				},
+			}),
+			/requested-model ← test-model/,
+		);
 		assert.ok(
 			liveIdentities.some(
 				(identity) => identity.model === "requested-model" && identity.reportedModel === "test-model",
@@ -253,6 +272,13 @@ describe("subagent usage reconciliation into the parent session", () => {
 		const worker = getActiveWorkers().find((entry) => entry.task === "report model");
 		assert.equal(worker?.model, "requested-model");
 		assert.equal(worker?.reportedModel, "test-model");
+		const storedRun = new SubagentRunStore().list().find((record) =>
+			record.children.some((child) => child.task === "report model")
+		);
+		assert.equal(storedRun?.children[0]?.model, "requested-model");
+		assert.equal(storedRun?.children[0]?.reportedModel, "test-model");
+		const statusResult = await execute({ action: "status", runId: storedRun?.runId });
+		assert.match(statusResult.content[0].text, /model: requested-model ← test-model/);
 
 		const matchingResult = await execute({
 			agent: "usage-emitter",
@@ -261,5 +287,24 @@ describe("subagent usage reconciliation into the parent session", () => {
 		});
 		assert.equal(matchingResult.details.results[0].model, "test-model");
 		assert.equal(matchingResult.details.results[0].reportedModel, undefined);
+	});
+
+	it("clears a failed attempt's provider model when the retry matches the request", async () => {
+		const cwd = freshEnv();
+		const failOnceDir = join(cwd, "model-retry");
+		mkdirSync(failOnceDir, { recursive: true });
+		process.env.FIXTURE_FAIL_ONCE_DIR = failOnceDir;
+		process.env.FIXTURE_MODEL_SEQUENCE = "fallback-model,requested-model";
+		const execute = makeExecute(SessionManager.inMemory(cwd));
+
+		const result = await execute({
+			tasks: [{ agent: "usage-emitter", task: "retry model", model: "requested-model" }],
+		});
+
+		assert.equal(result.details.results[0].model, "requested-model");
+		assert.equal(result.details.results[0].reportedModel, undefined);
+		const worker = getActiveWorkers().find((entry) => entry.task === "retry model");
+		assert.equal(worker?.model, "requested-model");
+		assert.equal(worker?.reportedModel, undefined);
 	});
 });

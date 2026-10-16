@@ -12,7 +12,9 @@ const path = require("node:path");
 
 const exitCode = Number(process.env.FIXTURE_EXIT_CODE || 0);
 const failOnceDir = process.env.FIXTURE_FAIL_ONCE_DIR;
+const modelSequence = (process.env.FIXTURE_MODEL_SEQUENCE || "test-model").split(",");
 let effectiveExitCode = exitCode;
+let reportedModel = modelSequence[0] || "test-model";
 if (failOnceDir) {
 	const marker = path.join(failOnceDir, "failed-once");
 	if (!fs.existsSync(marker)) {
@@ -20,6 +22,7 @@ if (failOnceDir) {
 		effectiveExitCode = 1;
 	} else {
 		effectiveExitCode = 0;
+		reportedModel = modelSequence[1] || reportedModel;
 	}
 }
 
@@ -29,7 +32,7 @@ const turn = (text, costTotal, turnTokens) => JSON.stringify({
 		role: "assistant",
 		content: [{ type: "text", text }],
 		usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5, cost: { total: costTotal }, totalTokens: turnTokens },
-		model: "test-model",
+		model: reportedModel,
 		stopReason: "stop",
 	},
 });

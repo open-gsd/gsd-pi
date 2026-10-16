@@ -33,7 +33,13 @@ import {
 	mergeDeltaPatches,
 	readIsolationMode,
 } from "./isolation.js";
-import { registerWorker, updateWorker, updateWorkerIdentity, formatWorkerIdentity } from "./worker-registry.js";
+import {
+	registerWorker,
+	updateWorker,
+	updateWorkerIdentity,
+	formatWorkerIdentity,
+	formatWorkerModelTokens,
+} from "./worker-registry.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 import { emitJournalEvent } from "../gsd/journal.js";
 import { CmuxClient, shellEscape } from "../cmux/index.js";
@@ -590,6 +596,7 @@ function resultToChildArtifact(result: SingleResult, index: number, cwd?: string
 		errorMessage: result.errorMessage,
 		stopReason: result.stopReason,
 		model: result.model,
+		reportedModel: result.reportedModel,
 		...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
 		usage: result.usage,
 		merge: result.mergeResult
@@ -722,6 +729,11 @@ function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
 		].filter(Boolean).join(", ");
 		const suffix = facts ? ` (${facts})` : "";
 		lines.push(`- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}: ${child.output || child.errorMessage || child.stderr || child.task}`);
+		const modelIdentity = formatWorkerModelTokens({
+			model: child.model,
+			reportedModel: child.reportedModel,
+		});
+		if (modelIdentity) lines.push(`  model: ${modelIdentity}`);
 		if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
 		if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
 	}
@@ -2397,6 +2409,10 @@ export default function (pi: ExtensionAPI) {
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
+				const identity = formatWorkerIdentity(
+					r,
+					r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+				);
 
 				if (expanded) {
 					const container = new Container();
@@ -2405,6 +2421,7 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+					if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
@@ -2438,6 +2455,7 @@ export default function (pi: ExtensionAPI) {
 
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(formatAgentLabel(r.agent, r.trackingName)))}${theme.fg("muted", ` (${r.agentSource})`)}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+				if (identity) text += `\n${theme.fg("dim", identity)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
@@ -2493,6 +2511,8 @@ export default function (pi: ExtensionAPI) {
 							),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						const identity = formatWorkerIdentity(r, r.exitCode === 0 ? "completed" : "failed");
+						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -2535,6 +2555,8 @@ export default function (pi: ExtensionAPI) {
 					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
+					const identity = formatWorkerIdentity(r, r.exitCode === 0 ? "completed" : "failed");
+					if (identity) text += `\n${theme.fg("dim", identity)}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
