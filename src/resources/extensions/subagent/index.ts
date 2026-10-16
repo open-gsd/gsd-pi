@@ -2295,18 +2295,29 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			// Ctrl+O exposes the complete untruncated assignment for every entry
+			// (#2834); the collapsed overview stays compact (40-char previews,
+			// first three entries). The Text component wraps long lines
+			// ANSI-safely at terminal width, so full tasks need no slicing here.
+			const expanded = context?.expanded ?? false;
 			const scope: AgentScope = args.agentScope ?? "both";
 			if (args.chain && args.chain.length > 0) {
+				const listedCount = expanded ? args.chain.length : Math.min(args.chain.length, 3);
 				let text =
 					theme.fg("toolTitle", theme.bold("subagent ")) +
 					theme.fg("accent", `chain (${args.chain.length} steps)`) +
 					theme.fg("muted", ` [${scope}]`);
-				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
+				for (let i = 0; i < listedCount; i++) {
 					const step = args.chain[i];
-					// Clean up {previous} placeholder for display
-					const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
-					const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
+					// Args may still be streaming: never assume task is present.
+					const rawTask: string = step.task ?? "";
+					// Clean up {previous} placeholder for display (the executed
+					// task, with the placeholder substituted, renders in full in
+					// the result detail); fall back to the raw task when cleanup
+					// would blank the entry.
+					const cleanTask = rawTask.replace(/\{previous\}/g, "").trim() || rawTask;
+					const preview = expanded || cleanTask.length <= 40 ? cleanTask : `${cleanTask.slice(0, 40)}...`;
 					text +=
 						"\n  " +
 						theme.fg("muted", `${i + 1}.`) +
@@ -2314,19 +2325,26 @@ export default function (pi: ExtensionAPI) {
 						theme.fg("accent", step.agent) +
 						theme.fg("dim", ` ${preview}`);
 				}
-				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
+				if (!expanded && args.chain.length > 3) {
+					text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
+				}
 				return new Text(text, 0, 0);
 			}
 			if (args.tasks && args.tasks.length > 0) {
+				const listedTasks = expanded ? args.tasks : args.tasks.slice(0, 3);
 				let text =
 					theme.fg("toolTitle", theme.bold("subagent ")) +
 					theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
 					theme.fg("muted", ` [${scope}]`);
-				for (const t of args.tasks.slice(0, 3)) {
-					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
+				for (const t of listedTasks) {
+					// Args may still be streaming: never render a bare undefined.
+					const taskText: string = t.task ?? "";
+					const preview = expanded || taskText.length <= 40 ? taskText : `${taskText.slice(0, 40)}...`;
 					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
 				}
-				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				if (!expanded && args.tasks.length > 3) {
+					text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				}
 				return new Text(text, 0, 0);
 			}
 			const agentName = args.agent || "...";
@@ -2531,7 +2549,10 @@ export default function (pi: ExtensionAPI) {
 					? `${successCount + failCount}/${details.results.length} done, ${running} running`
 					: `${successCount}/${details.results.length} tasks`;
 
-				if (expanded && !isRunning) {
+				if (expanded) {
+					// Ctrl+O opens the detail container while the batch runs too
+					// (#2834): running children show the live activity tail, done
+					// children keep the completed-result rendering.
 					const container = new Container();
 					container.addChild(
 						new Text(
@@ -2542,7 +2563,12 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon =
+							r.exitCode === -1
+								? theme.fg("warning", "⏳")
+								: r.exitCode === 0
+									? theme.fg("success", "✓")
+									: theme.fg("error", "✗");
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -2551,42 +2577,71 @@ export default function (pi: ExtensionAPI) {
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`, 0, 0),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-						// Terminal children keep their identity attribution (#2396)
-						const identity = formatWorkerIdentity(r, r.exitCode === 0 ? "completed" : "failed");
+						// Per-child identity in every state, running included (#2396)
+						const identity = formatWorkerIdentity(
+							r,
+							r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+						);
 						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
-						// Show tool calls
-						for (const item of displayItems) {
-							if (item.type === "toolCall") {
-								container.addChild(
-									new Text(
-										theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-										0,
-										0,
-									),
-								);
+						if (r.exitCode === -1) {
+							// Live child: the running view's recent-item tail, at
+							// expanded fidelity, inside the detail container (#2834).
+							if (displayItems.length === 0) {
+								container.addChild(new Text(theme.fg("muted", "(running...)"), 0, 0));
+							} else {
+								container.addChild(new Text(renderDisplayItems(displayItems, 5), 0, 0));
 							}
-						}
+						} else {
+							// Terminal child keeps its identity attribution (#2396)
+							// and completed-result rendering.
+							// Show tool calls
+							for (const item of displayItems) {
+								if (item.type === "toolCall") {
+									container.addChild(
+										new Text(
+											theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+											0,
+											0,
+										),
+									);
+								}
+							}
 
-						// Show final output as markdown
-						if (finalOutput) {
-							container.addChild(new Spacer(1));
-							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+							// Show final output as markdown
+							if (finalOutput) {
+								container.addChild(new Spacer(1));
+								container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+							}
 						}
 
 						const taskUsage = formatUsageStats(r.usage, r.model);
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
 
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) {
+					// Aggregate subtotal: while the batch runs, keep the latest
+					// known subtotal with the pending-usage suffix (#2821).
+					const totalUsage = aggregateUsage(details.results);
+					const usageStr = formatUsageStats(totalUsage);
+					if (isRunning) {
+						const pendingUsage = details.results.filter((r) => !r.usage || r.usage.turns === 0).length;
+						const subtotalParts = [
+							usageStr,
+							pendingUsage > 0 ? `${pendingUsage} pending usage` : undefined,
+						].filter(Boolean);
+						if (subtotalParts.length > 0) {
+							container.addChild(new Spacer(1));
+							container.addChild(new Text(theme.fg("dim", `Total: ${subtotalParts.join(" · ")}`), 0, 0));
+						}
+					} else if (usageStr) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
 					}
 					return container;
 				}
 
-				// Collapsed view (or still running)
+				// Collapsed overview: compact batch summary in every state
+				// (running included — Ctrl+O opens the live detail above)
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
 					const rIcon =
