@@ -295,8 +295,8 @@ describe('git-service', async () => {
 
   assert.deepStrictEqual(
     RUNTIME_EXCLUSION_PATHS.length,
-    25,
-    "exactly 25 runtime exclusion paths"
+    40,
+    "exactly 40 runtime exclusion paths"
   );
 
   const expectedPaths = [
@@ -307,11 +307,19 @@ describe('git-service', async () => {
     ".gsd/audit/",
     ".gsd/backups/**",
     ".gsd/forensics/",
+    ".gsd/migration/projection-mutations/",
+    ".gsd/migration/quarantined-control-publications/",
+    ".gsd/migration/native-projection-evidence/",
+    ".gsd/migration/managed-outputs.json",
+    ".gsd/migration/unbound-projection-evidence.json",
     ".gsd/migration-applications/**",
     ".gsd/recovery-applications/**",
     ".gsd/runtime/",
     ".gsd/worktrees/",
     ".gsd/parallel/",
+    ".gsd/exec/",
+    ".gsd/safety/",
+    ".gsd/graphs/",
     ".gsd/auto.lock",
     ".gsd/metrics.json",
     ".gsd/completed-units*.json",
@@ -322,6 +330,13 @@ describe('git-service', async () => {
     ".gsd/journal/",
     ".gsd/doctor-history.jsonl",
     ".gsd/event-log.jsonl",
+    ".gsd/audit-log.jsonl",
+    ".gsd/notifications.jsonl",
+    ".gsd/notifications.lock",
+    ".gsd/notifications.jsonl.tmp.*",
+    ".gsd/hook-state.json",
+    ".gsd/lifecycle-shadow-observation-loss.jsonl",
+    ".gsd/git-action-failures.log",
     ".gsd/DISCUSSION-MANIFEST.json",
     ".gsd/.compat.json",
     ".gsd/quarantine/",

@@ -373,11 +373,24 @@ export const RUNTIME_EXCLUSION_PATHS: readonly string[] = [
   ".gsd/audit/",
   ".gsd/backups/**",
   ".gsd/forensics/",
+  // Runtime control roots under migration/ — NOT the whole directory:
+  // MIGRATION.md, manifest.json and legacy/ (preserved legacy .planning copy)
+  // are one-time migration outputs a team may deliberately keep tracked.
+  // Trailing-slash directory form: the native index cleanup matches literal
+  // files and directory prefixes, not wildcards.
+  ".gsd/migration/projection-mutations/",
+  ".gsd/migration/quarantined-control-publications/",
+  ".gsd/migration/native-projection-evidence/",
+  ".gsd/migration/managed-outputs.json",
+  ".gsd/migration/unbound-projection-evidence.json",
   ".gsd/migration-applications/**",
   ".gsd/recovery-applications/**",
   ".gsd/runtime/",
   ".gsd/worktrees/",
   ".gsd/parallel/",
+  ".gsd/exec/", // gsd_exec/gsd_uat_exec stdout, stderr and meta.json evidence store
+  ".gsd/safety/", // session-scoped safety evidence (evidence-*.json, blocked/)
+  ".gsd/graphs/", // knowledge-graph build output (graph.json, .last-build-snapshot.json)
   ".gsd/auto.lock",
   ".gsd/metrics.json",
   ".gsd/completed-units*.json", // covers completed-units.json and archived completed-units-{MID}.json
@@ -388,6 +401,13 @@ export const RUNTIME_EXCLUSION_PATHS: readonly string[] = [
   ".gsd/journal/",
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
+  ".gsd/audit-log.jsonl", // error-severity audit entries (workflow-logger)
+  ".gsd/notifications.jsonl", // persistent notifications (notification-store)
+  ".gsd/notifications.lock", // notification-store rewrite lock (crash remnant)
+  ".gsd/notifications.jsonl.tmp.*", // atomic-rewrite temp file (crash remnant)
+  ".gsd/hook-state.json", // diagnostic copy of the hook-state database row
+  ".gsd/lifecycle-shadow-observation-loss.jsonl", // emergency observation-loss journal (uok/audit)
+  ".gsd/git-action-failures.log", // git action retry/failure log (auto-post-unit)
   ".gsd/DISCUSSION-MANIFEST.json",
   ".gsd/.compat.json",
   ".gsd/quarantine/",

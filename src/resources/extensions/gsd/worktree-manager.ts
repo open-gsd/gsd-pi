@@ -1386,6 +1386,12 @@ const SKIP_PATHS = [
   ".gsd/forensics/",
   ".gsd/parallel/",
   ".gsd/journal/",
+  ".gsd/exec/",
+  ".gsd/safety/",
+  ".gsd/graphs/",
+  ".gsd/migration/projection-mutations/",
+  ".gsd/migration/quarantined-control-publications/",
+  ".gsd/migration/native-projection-evidence/",
 ];
 const SKIP_EXACT = [
   ".gsd/STATE.md",
@@ -1395,11 +1401,20 @@ const SKIP_EXACT = [
   ".gsd/state.json",
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
+  ".gsd/notifications.jsonl",
+  ".gsd/notifications.lock",
+  ".gsd/hook-state.json",
+  ".gsd/audit-log.jsonl",
+  ".gsd/lifecycle-shadow-observation-loss.jsonl",
+  ".gsd/git-action-failures.log",
+  ".gsd/migration/managed-outputs.json",
+  ".gsd/migration/unbound-projection-evidence.json",
 ];
 /** File prefixes to skip (for wildcard patterns like completed-units*.json, gsd.db*). */
 const SKIP_PREFIXES = [
   ".gsd/completed-units",
   ".gsd/gsd.db",
+  ".gsd/notifications.jsonl.tmp.",
 ];
 
 function shouldSkipPath(filePath: string): boolean {
