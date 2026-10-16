@@ -134,6 +134,38 @@ function hasCompleteProjectResearch(base: string): boolean {
 }
 
 /**
+ * Milestone-level units whose markdown artifact is rendered by the unit's own
+ * save tool (ADR-046). On a milestone whose phase directory was never
+ * rendered, `resolveExpectedArtifactPath` resolves no file even though the
+ * unit carries a full database-row contract, so post-unit verification must
+ * not require a resolvable projection path before surfacing the verify-fail
+ * (#2827): a dropped verify-fail settles the unit "completed" with no rows
+ * and the second identical dispatch trips the completed-no-advance liveness
+ * wedge.
+ */
+export const LATE_RENDERED_MILESTONE_UNITS: ReadonlySet<string> = new Set([
+  "discuss-milestone",
+  "research-milestone",
+  "plan-milestone",
+]);
+
+/**
+ * The database-row contract failure for a unit owned by `missingUnitResult`,
+ * or null when the unit's result is recorded, the unit id is malformed, or
+ * the read fails. Read-only: callers render this into recovery context and
+ * must not re-open the database (the post-unit path already refreshed it).
+ */
+export function describeMissingUnitResult(unitType: string, unitId: string): string | null {
+  const { milestone: mid, slice: sid } = parseUnitId(unitId);
+  if (!mid) return null;
+  try {
+    return missingUnitResult(unitType, mid, sid, true);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The database rows that a unit's save tool commits, read as "what is missing".
  * Returns null when the unit's result is recorded. The rendered files of the
  * unit are projections of these rows and are not read.
