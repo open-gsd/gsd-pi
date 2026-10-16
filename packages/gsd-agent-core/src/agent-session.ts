@@ -359,8 +359,8 @@ export class AgentSession implements AgentSessionHost {
 		return this._events.findLastAssistantMessage();
 	}
 
-	setThinkingLevel(level: ThinkingLevel): void {
-		this._model.setThinkingLevel(level);
+	setThinkingLevel(level: ThinkingLevel, options?: { persist?: boolean }): void {
+		this._model.setThinkingLevel(level, options);
 	}
 
 	getAvailableThinkingLevels(): ThinkingLevel[] {

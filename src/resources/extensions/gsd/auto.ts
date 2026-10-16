@@ -2216,16 +2216,18 @@ export async function stopAuto(
     }
 
     // ── Step 13: Restore original model + thinking (before reset clears IDs) ──
+    // Restore is in-memory only: the user's stored defaults must survive an
+    // auto run unchanged (#2076, #2828).
     try {
       if (pi && ctx && s.originalModelId && s.originalModelProvider) {
         const original = ctx.modelRegistry.find(
           s.originalModelProvider,
           s.originalModelId,
         );
-        if (original) await pi.setModel(original);
+        if (original) await pi.setModel(original, { persist: false });
       }
       if (pi && s.originalThinkingLevel) {
-        pi.setThinkingLevel(s.originalThinkingLevel);
+        pi.setThinkingLevel(s.originalThinkingLevel, { persist: false });
       }
     } catch (e) {
       debugLog("stop-cleanup-model", { error: e instanceof Error ? e.message : String(e) });
@@ -3645,13 +3647,14 @@ export async function dispatchHookUnit(
       // selectAndApplyModel, which consults the same blocked-models store (#1229).
       if (isModelUnavailable(targetBasePath, match.provider, match.id)) continue;
       try {
-        if (await pi.setModel(match)) {
+        if (await pi.setModel(match, { persist: false })) {
           // The manual trigger path bypasses selectAndApplyModel, so apply the
           // hook's per-field `thinking` (from `post_unit_hooks[].model`'s object
           // form) here against the just-set model rather than leaving the hook at
           // the session level (#1269). A per-entry `thinking` on the matched
           // fallback entry wins over the field level (#1270). Absent → session
-          // level, unchanged.
+          // level, unchanged. Per-unit dispatch never persists the global
+          // default (#2828).
           const level = fallbackEntryThinking(candidate) ?? hookModelConfig?.thinking;
           if (level) {
             applyThinkingLevelForModel(pi, level, match, ctx);

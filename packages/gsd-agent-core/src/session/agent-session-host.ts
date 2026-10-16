@@ -140,7 +140,7 @@ export interface AgentSessionHost {
 		source: "set" | "cycle" | "restore",
 	): Promise<void>;
 	findLastAssistantMessage(): AssistantMessage | undefined;
-	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevel(level: ThinkingLevel, options?: { persist?: boolean }): void;
 	getAvailableThinkingLevels(): ThinkingLevel[];
 	clampThinkingLevel(level: ThinkingLevel, availableLevels: ThinkingLevel[]): ThinkingLevel;
 	supportsThinking(): boolean;

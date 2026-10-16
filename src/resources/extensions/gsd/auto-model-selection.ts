@@ -384,7 +384,8 @@ export function applyThinkingLevelForModel(
   // shape into a string or guess capability we can't see.
   if (typeof desired === "string" && model != null && typeof model === "object" && "reasoning" in model) {
     const clamped = clampThinkingLevel(model, desired as ModelThinkingLevel) as ReturnType<ExtensionAPI["getThinkingLevel"]>;
-    pi.setThinkingLevel(clamped);
+    // Per-unit dispatch: in-memory only — never rewrite the stored default (#2828).
+    pi.setThinkingLevel(clamped, { persist: false });
     if (clamped !== desired) {
       const key = `${model.provider}/${model.id}:${desired}`;
       if (!_warnedThinkingClamp.has(key)) {
@@ -397,7 +398,7 @@ export function applyThinkingLevelForModel(
     }
     return clamped;
   }
-  pi.setThinkingLevel(desired);
+  pi.setThinkingLevel(desired, { persist: false });
   return desired;
 }
 
