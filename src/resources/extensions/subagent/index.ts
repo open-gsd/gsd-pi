@@ -70,6 +70,11 @@ const COLLAPSED_ITEM_COUNT = 10;
 // deliberately exempt from stall detection — are never touched.
 const LIVENESS_POLL_INTERVAL_MS = 30_000;
 const LIVENESS_DEATH_GRACE_MS = 5_000;
+// How often the cmux-split tailer re-reads the wrapper's teed stdout (#2835).
+// Same sub-300ms feel as the exit/pid wait loop's 150ms existence poll; each
+// tick reads only the byte range appended since the last read, so the cost is
+// one small read per tick, not a file re-scan.
+const CMUX_STDOUT_TAIL_INTERVAL_MS = 250;
 
 /**
  * Bound a diagnostic excerpt so a noisy child cannot flood the parent session
@@ -460,6 +465,93 @@ async function waitForExitFileWithWrapperLiveness(
 }
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
+
+/**
+ * Incrementally tail the cmux wrapper's teed stdout while the child runs
+ * (#2835). The wrapper pipeline is `node … | tee stdout.jsonl`, so child
+ * events land on disk as the child emits them; complete `\n`-terminated
+ * records are fed through the same processSubagentEventLine path as
+ * direct-spawn children, giving live activity and per-turn usage
+ * reconciliation. Exactly-once is positional, not heuristic: consumed bytes
+ * are tracked by offset and never re-read, so the completion paths drain only
+ * the unconsumed tail instead of re-parsing the file (a full re-read would
+ * double usage and duplicate messages). The pending buffer stays raw bytes
+ * until a newline arrives, so a multi-byte UTF-8 character split across reads
+ * is only decoded once complete; a trailing record without a final newline is
+ * processed by drain once the writer is done.
+ */
+function createCmuxStdoutTailer(
+	stdoutPath: string,
+	currentResult: SingleResult,
+	emitUpdate: () => void,
+) {
+	let readOffset = 0;
+	let pending: Buffer = Buffer.alloc(0);
+
+	const consume = (chunk: Buffer) => {
+		pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
+		while (true) {
+			const newline = pending.indexOf(0x0a);
+			if (newline === -1) break;
+			const line = pending.subarray(0, newline).toString("utf-8");
+			pending = pending.subarray(newline + 1);
+			processSubagentEventLine(line, currentResult, emitUpdate);
+		}
+	};
+
+	const readNewBytes = (flush: boolean) => {
+		let size: number;
+		try {
+			size = fs.statSync(stdoutPath).size;
+		} catch (err) {
+			if (flush && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			return; // tee has not created the file yet; nothing to tail
+		}
+		if (size < readOffset) {
+			// The private tmp output was truncated or replaced: already
+			// processed events stay authoritative and the lost region is
+			// skipped rather than re-processed (no double count); a child
+			// that lost its whole transcript is surfaced at completion by
+			// markMissingFinalResponse / the real exit code.
+			readOffset = size;
+			pending = Buffer.alloc(0);
+		}
+		// Read through the size captured above: a single readSync may return
+		// short, and drain has no next tick to pick up the remainder.
+		while (readOffset < size) {
+			const fd = fs.openSync(stdoutPath, "r");
+			try {
+				const chunk = Buffer.alloc(size - readOffset);
+				const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, readOffset);
+				if (bytesRead <= 0) break; // zero-progress guard: never spin
+				readOffset += bytesRead;
+				consume(chunk.subarray(0, bytesRead));
+			} finally {
+				fs.closeSync(fd);
+			}
+		}
+		if (flush && pending.length > 0) {
+			// The writer has exited, so a buffered record without a trailing
+			// newline is complete; process and reset — even when this drain
+			// saw no new bytes.
+			const line = pending.toString("utf-8");
+			pending = Buffer.alloc(0);
+			processSubagentEventLine(line, currentResult, emitUpdate);
+		}
+	};
+
+	return {
+		poll: () => {
+			try {
+				readNewBytes(false);
+			} catch {
+				/* transient read failure (e.g. EBUSY/EACCES): retry next tick */
+			}
+		},
+		/** Final pass after the exit file exists (tee has flushed by then): process every remaining byte. */
+		drain: () => readNewBytes(true),
+	};
+}
 
 interface TaskParam {
 	agent: string;
@@ -923,6 +1015,10 @@ export async function runSingleAgentInCmuxSplit(
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 	let tmpOutputDir: string | null = null;
+	// Function scope, not try-block scope: the finally clause must be able to
+	// clear the tail interval on every path (try-block declarations are
+	// invisible to the finally clause).
+	let tailTimer: NodeJS.Timeout | undefined;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -967,6 +1063,9 @@ export async function runSingleAgentInCmuxSplit(
 		const stderrPath = path.join(tmpOutputDir, "stderr.log");
 		const exitPath = path.join(tmpOutputDir, "exit.code");
 		const pidPath = path.join(tmpOutputDir, "pid");
+		// Live tail of the teed child stdout (#2835): the poller owns consumed
+		// bytes, so the completion paths below drain only the unconsumed tail.
+		const stdoutTailer = createCmuxStdoutTailer(stdoutPath, currentResult, emitUpdate);
 		// Accept either a pre-created surface ID or a direction to create a new split
 		const isDirection = directionOrSurfaceId === "right" || directionOrSurfaceId === "down"
 			|| directionOrSurfaceId === "left" || directionOrSurfaceId === "up";
@@ -1017,6 +1116,7 @@ export async function runSingleAgentInCmuxSplit(
 		if (!sent) {
 			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, options);
 		}
+		tailTimer = setInterval(() => stdoutTailer.poll(), CMUX_STDOUT_TAIL_INTERVAL_MS);
 
 		const finished = await waitForExitFileWithWrapperLiveness(
 			exitPath,
@@ -1039,12 +1139,7 @@ export async function runSingleAgentInCmuxSplit(
 			currentResult.running = false;
 			currentResult.completedAt = Date.now();
 			currentResult.stderr = "cmux split execution timed out or was aborted";
-			if (fs.existsSync(stdoutPath)) {
-				const stdout = fs.readFileSync(stdoutPath, "utf-8");
-				for (const line of stdout.split("\n")) {
-					processSubagentEventLine(line, currentResult, emitUpdate);
-				}
-			}
+			stdoutTailer.drain();
 			return currentResult;
 		}
 		if (finished.outcome === "wrapper-died") {
@@ -1060,12 +1155,7 @@ export async function runSingleAgentInCmuxSplit(
 			currentResult.exitCode = 1;
 			currentResult.running = false;
 			currentResult.completedAt = Date.now();
-			if (fs.existsSync(stdoutPath)) {
-				const stdout = fs.readFileSync(stdoutPath, "utf-8");
-				for (const line of stdout.split("\n")) {
-					processSubagentEventLine(line, currentResult, emitUpdate);
-				}
-			}
+			stdoutTailer.drain();
 			if (fs.existsSync(stderrPath)) {
 				currentResult.stderr = fs.readFileSync(stderrPath, "utf-8");
 			}
@@ -1074,12 +1164,7 @@ export async function runSingleAgentInCmuxSplit(
 			return currentResult;
 		}
 
-		if (fs.existsSync(stdoutPath)) {
-			const stdout = fs.readFileSync(stdoutPath, "utf-8");
-			for (const line of stdout.split("\n")) {
-				processSubagentEventLine(line, currentResult, emitUpdate);
-			}
-		}
+		stdoutTailer.drain();
 		if (fs.existsSync(stderrPath)) {
 			currentResult.stderr = fs.readFileSync(stderrPath, "utf-8");
 		}
@@ -1089,6 +1174,7 @@ export async function runSingleAgentInCmuxSplit(
 		markMissingFinalResponse(currentResult);
 		return currentResult;
 	} finally {
+		if (tailTimer) clearInterval(tailTimer);
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
