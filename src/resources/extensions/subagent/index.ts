@@ -1107,7 +1107,7 @@ const SubagentParams = Type.Object({
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
 	agentScope: Type.Optional(AgentScopeSchema),
 	context: Type.Optional(ContextModeSchema),
-	background: Type.Optional(Type.Boolean({ description: "Return immediately after starting a single-mode run ({ agent, task }) and keep status in the persisted run record. Requires single mode; not supported with tasks or chain. Default: false.", default: false })),
+	background: Type.Optional(Type.Boolean({ description: "Return immediately after starting the run and keep status in the persisted run record. Supported for every valid dispatch mode: single ({ agent, task }), parallel ({ tasks }), and chain ({ chain }). Default: false.", default: false })),
 	followUp: Type.Optional(Type.String({ description: "Follow-up instruction for resume action. Falls back to task when omitted." })),
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: false.", default: false }),
@@ -1156,7 +1156,7 @@ export default function (pi: ExtensionAPI) {
 			"Delegate tasks to specialized subagents, each a separate pi process with its own isolated context window, tools, model, and system prompt.",
 			"Modes: single ({ agent, task }), parallel ({ tasks: [{agent, task},...] }), chain ({ chain: [{agent, task},...] } where each step's {previous} placeholder receives the prior output).",
 			"Agents are defined as .md files in ~/.gsd/agent/agents/ (user) or .gsd/agents/ (project); list them with the /subagent command.",
-			"background: true returns immediately after starting a single-mode run ({ agent, task }); it is not supported with tasks or chain.",
+			"background: true returns immediately after starting the run — single ({ agent, task }), parallel ({ tasks }), or chain ({ chain }) — and keeps status in the persisted run record.",
 		].join(" "),
 		promptGuidelines: [
 			"Prefer subagent dispatch over inline work for self-contained tasks (recon, planning, review, refactor, test writing, security audit, docs); each dispatch gets a fresh context window so the main session stays focused on synthesis.",
@@ -1451,12 +1451,18 @@ export default function (pi: ExtensionAPI) {
 			});
 			const errorMessageFor = (err: unknown): string =>
 				err instanceof Error ? err.message : String(err || "subagent dispatch failed");
+			// Failure attribution uses the signal the executor actually ran under:
+			// detached batches run with no signal, so a launch failure after the
+			// dispatching turn was canceled is an error, not an abort (#2820).
+			// failureSignal is always passed explicitly (no default): an explicit
+			// `undefined` must mean "ran detached", not "fall back to the turn".
 			const makeFailureResult = (
 				err: unknown,
 				agent: string,
 				task: string,
-				step?: number,
-				trackingName?: string,
+				step: number | undefined,
+				trackingName: string | undefined,
+				failureSignal: AbortSignal | undefined,
 			): SingleResult => {
 				const message = errorMessageFor(err);
 				const dispatchIndex = dispatchAgents.findIndex((dispatchAgent, index) =>
@@ -1471,13 +1477,13 @@ export default function (pi: ExtensionAPI) {
 					messages: [],
 					stderr: message,
 					usage: zeroUsage(),
-					stopReason: signal?.aborted ? "aborted" : "error",
+					stopReason: failureSignal?.aborted ? "aborted" : "error",
 					errorMessage: message,
 					thinking: dispatchIndex >= 0 ? dispatchChildren[dispatchIndex]?.thinking : undefined,
 					...(step !== undefined ? { step } : {}),
 				};
 			};
-			const synthesizeFailureResults = (err: unknown): SingleResult[] => {
+			const synthesizeFailureResults = (err: unknown, failureSignal: AbortSignal | undefined): SingleResult[] => {
 				if (finalResults.length > 0) {
 					let patchedRunning = false;
 					const patched = finalResults.map((result) => {
@@ -1488,7 +1494,7 @@ export default function (pi: ExtensionAPI) {
 							...result,
 							exitCode: 1,
 							stderr: result.stderr || message,
-							stopReason: signal?.aborted ? "aborted" : "error",
+							stopReason: failureSignal?.aborted ? "aborted" : "error",
 							errorMessage: result.errorMessage || message,
 							usage: result.usage ?? zeroUsage(),
 							// Freeze elapsed display at the failure moment (#2396)
@@ -1507,6 +1513,7 @@ export default function (pi: ExtensionAPI) {
 								dispatchTasks[nextIndex] ?? "",
 								dispatchMode === "chain" ? nextIndex + 1 : undefined,
 								dispatchTrackingNames[nextIndex],
+								failureSignal,
 							),
 						];
 					}
@@ -1520,6 +1527,7 @@ export default function (pi: ExtensionAPI) {
 						dispatchTasks[index] ?? "",
 						dispatchMode === "chain" ? index + 1 : undefined,
 						dispatchTrackingNames[index],
+						failureSignal,
 					),
 				);
 			};
@@ -1592,121 +1600,18 @@ export default function (pi: ExtensionAPI) {
 				}
 			};
 
-			try {
-			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
-				const requestedAgentNames = new Set<string>();
-				if (hasChain) for (const step of chainParams) requestedAgentNames.add(step.agent);
-				if (hasTasks) for (const t of taskParams) requestedAgentNames.add(t.agent);
-				if (params.agent) requestedAgentNames.add(params.agent);
-
-				const projectAgentsRequested = Array.from(requestedAgentNames)
-					.map((name) => agents.find((a) => a.name === name))
-					.filter((a): a is AgentConfig => a?.source === "project");
-
-				if (projectAgentsRequested.length > 0) {
-					const names = projectAgentsRequested.map((a) => a.name).join(", ");
-					const dir = discovery.projectAgentsDir ?? "(unknown)";
-					const ok = await ctx.ui.confirm(
-						"Run project-local agents?",
-						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-					);
-					if (!ok) {
-						finishDispatch([]);
-						return {
-							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
-						};
-					}
-				}
-			}
-
-			if (params.background) {
-				if (!params.agent || !params.task || hasTasks || hasChain) {
-					const failure = makeFailureResult(
-						new Error(
-							"Background launch requires single mode with agent and task; it cannot be combined with tasks or chain. " +
-								"Remove background to dispatch tasks/chain synchronously.",
-						),
-						params.agent ?? "unknown",
-						params.task ?? "",
-					);
-					finishDispatch([failure]);
-					return {
-						content: [{ type: "text", text: failure.errorMessage ?? failure.stderr }],
-						details: makeDetails("single")([failure]),
-						isError: true,
-					};
-				}
-
-				void (async () => {
-					let isolation: IsolationEnvironment | null = null;
-					try {
-						const effectiveCwd = resolveSubagentWorktreeCwd(ctx.cwd, params.cwd);
-						if (useIsolation) {
-							const taskId = crypto.randomUUID();
-							isolation = await createIsolation(effectiveCwd, taskId, isolationMode);
-						}
-						const projectRoot = isolation
-							? resolveSubagentProjectRoot(ctx.cwd, effectiveCwd)
-							: undefined;
-						const result = await runSingleAgent(
-							ctx.cwd,
-							agents,
-							params.agent!,
-							params.task!,
-							isolation ? isolation.workDir : effectiveCwd,
-							undefined,
-							undefined,
-							(partial) => {
-								if (partial.details?.results[0]) persistRunResults([partial.details.results[0]]);
-							},
-							makeDetails("single"),
-							{
-								modelOverride: params.model,
-								contextMode,
-								parentSessionManager: ctx.sessionManager,
-								trackingName: dispatchTrackingNames[0],
-								thinkingOverride: params.thinking,
-								projectRoot,
-								projectRootSourceCwd: isolation ? effectiveCwd : undefined,
-								onChildSpawned: noteChildPid(0),
-							},
-						);
-						if (isolation && result.exitCode === 0) {
-							const patches = await isolation.captureDelta();
-							if (patches.length > 0) {
-								const mergeResult = await mergeDeltaPatches(effectiveCwd, patches);
-								result.mergeResult = mergeResult;
-								if (!mergeResult.success) {
-									result.exitCode = 1;
-									result.stopReason = "error";
-									result.errorMessage = `Patch merge failed: ${mergeResult.error || "unknown error"}`;
-									result.stderr = result.stderr || result.errorMessage;
-								}
-							}
-						}
-						finalResults = [result];
-						finishDispatch([result]);
-						wakeSessionAfterDetachedCompletion([result]);
-					} catch (err) {
-						finalResults = synthesizeFailureResults(err);
-						finishDispatch(finalResults);
-						wakeSessionAfterDetachedCompletion(finalResults);
-					} finally {
-						if (isolation) await isolation.cleanup();
-					}
-				})();
-
-				return {
-					content: [{
-						type: "text",
-						text: `Started background subagent run ${dispatchId}. Use action: "status" with runId: "${dispatchId}" to inspect it.`,
-					}],
-					details: makeDetails("single")([]),
-				};
-			}
-
-			if (chainParams.length > 0) {
+			// Batch executors shared by the synchronous dispatch paths and detached
+			// background runs (#2820): a background batch must not drift from
+			// synchronous semantics, so ordering, {previous} handoff, concurrency,
+			// per-task overrides, retry, worker identity, isolation, cmux splits,
+			// and run-record persistence live here once. Detached runs pass no
+			// signal (children must outlive the dispatching turn) and no update
+			// forwarding (the tool call has returned; the persisted run record and
+			// action: "status" are the observation surface).
+			const runChainBatch = async (
+				batchSignal: AbortSignal | undefined,
+				batchOnUpdate: OnUpdateCallback | undefined,
+			): Promise<SingleResult[]> => {
 				const results: SingleResult[] = [];
 				finalResults = results;
 				let previousOutput = "";
@@ -1722,8 +1627,8 @@ export default function (pi: ExtensionAPI) {
 						if (currentResult) {
 							const allResults = [...results, currentResult];
 							persistRunResults(allResults);
-							if (onUpdate) {
-								onUpdate({
+							if (batchOnUpdate) {
+								batchOnUpdate({
 									content: partial.content,
 									details: makeDetails("chain")(allResults),
 								});
@@ -1739,7 +1644,7 @@ export default function (pi: ExtensionAPI) {
 						taskWithContext,
 						stepCwd,
 						i + 1,
-						signal,
+						batchSignal,
 						chainUpdate,
 						makeDetails("chain"),
 						{
@@ -1756,39 +1661,18 @@ export default function (pi: ExtensionAPI) {
 
 					const isError =
 						result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-					if (isError) {
-						const errorMsg =
-							result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-						finishDispatch(results);
-						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
-							details: makeDetails("chain")(results),
-							isError: true,
-						};
-					}
+					// A failed step stops the chain; it is the last entry. The caller
+					// formats the stop (synchronous) or the aggregate wake (background).
+					if (isError) return results;
 					previousOutput = getFinalOutput(result.messages);
 				}
-				finishDispatch(results);
-				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
-					details: makeDetails("chain")(results),
-				};
-			}
+				return results;
+			};
 
-			if (taskParams.length > 0) {
-				if (taskParams.length > MAX_PARALLEL_TASKS) {
-					finishDispatch([]);
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Too many parallel tasks (${taskParams.length}). Max is ${MAX_PARALLEL_TASKS}.`,
-							},
-						],
-						details: makeDetails("parallel")([]),
-					};
-				}
-
+			const runParallelBatch = async (
+				batchSignal: AbortSignal | undefined,
+				batchOnUpdate: OnUpdateCallback | undefined,
+			): Promise<SingleResult[]> => {
 				// Track all results for streaming updates
 				const allResults: SingleResult[] = new Array(taskParams.length);
 
@@ -1822,10 +1706,10 @@ export default function (pi: ExtensionAPI) {
 				finalResults = allResults;
 
 				const emitParallelUpdate = () => {
-					if (onUpdate) {
+					if (batchOnUpdate) {
 						const running = allResults.filter((r) => r.exitCode === -1).length;
 						const done = allResults.filter((r) => r.exitCode !== -1).length;
-						onUpdate({
+						batchOnUpdate({
 							content: [
 								{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` },
 							],
@@ -1877,7 +1761,7 @@ export default function (pi: ExtensionAPI) {
 								t.task,
 								runCwd,
 								undefined,
-								signal,
+								batchSignal,
 								updateParallelResult,
 								makeDetails("parallel"),
 								runOptions,
@@ -1889,7 +1773,7 @@ export default function (pi: ExtensionAPI) {
 								t.task,
 								runCwd,
 								undefined,
-								signal,
+								batchSignal,
 								updateParallelResult,
 								makeDetails("parallel"),
 								runOptions,
@@ -1930,12 +1814,22 @@ export default function (pi: ExtensionAPI) {
 							if (isolation) await isolation.cleanup();
 						}
 					};
-					let result = await runTask();
-
-					// Auto-retry failed tasks (likely API rate limit or transient error)
-					const isFailed = result.exitCode !== 0 || (result.messages.length === 0 && !signal?.aborted);
-					if (isFailed && MAX_RETRIES > 0 && !signal?.aborted) {
+					let result: SingleResult;
+					try {
 						result = await runTask();
+
+						// Auto-retry failed tasks (likely API rate limit or transient error)
+						const isFailed = result.exitCode !== 0 || (result.messages.length === 0 && !batchSignal?.aborted);
+						if (isFailed && MAX_RETRIES > 0 && !batchSignal?.aborted) {
+							result = await runTask();
+						}
+					} catch (err) {
+						// A thrown launch (isolation, fork setup) fails this child, not
+						// the batch: the executor must await every worker before the
+						// batch finalizes, or a detached run would complete early and
+						// the stragglers' progress writes would resurrect the terminal
+						// record as `running` (#2820 review).
+						result = makeFailureResult(err, t.agent, t.task, undefined, dispatchTrackingNames[index], batchSignal);
 					}
 
 					updateWorker(workerId, result.exitCode === 0 ? "completed" : "failed");
@@ -1945,6 +1839,159 @@ export default function (pi: ExtensionAPI) {
 					return result;
 				});
 				finalResults = results;
+				return results;
+			};
+
+			try {
+			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
+				const requestedAgentNames = new Set<string>();
+				if (hasChain) for (const step of chainParams) requestedAgentNames.add(step.agent);
+				if (hasTasks) for (const t of taskParams) requestedAgentNames.add(t.agent);
+				if (params.agent) requestedAgentNames.add(params.agent);
+
+				const projectAgentsRequested = Array.from(requestedAgentNames)
+					.map((name) => agents.find((a) => a.name === name))
+					.filter((a): a is AgentConfig => a?.source === "project");
+
+				if (projectAgentsRequested.length > 0) {
+					const names = projectAgentsRequested.map((a) => a.name).join(", ");
+					const dir = discovery.projectAgentsDir ?? "(unknown)";
+					const ok = await ctx.ui.confirm(
+						"Run project-local agents?",
+						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+					);
+					if (!ok) {
+						finishDispatch([]);
+						return {
+							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
+							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
+						};
+					}
+				}
+			}
+
+			// Batch-size validation must fail before any launch, synchronous or
+			// detached (#2820).
+			if (taskParams.length > MAX_PARALLEL_TASKS) {
+				finishDispatch([]);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Too many parallel tasks (${taskParams.length}). Max is ${MAX_PARALLEL_TASKS}.`,
+						},
+					],
+					details: makeDetails("parallel")([]),
+				};
+			}
+
+			if (params.background) {
+				// Detached single-child body (isolation + run + merge). Throws on
+				// abort or funnel failure; the IIFE below synthesizes failures.
+				const runSingleDetached = async (): Promise<SingleResult> => {
+					let isolation: IsolationEnvironment | null = null;
+					try {
+						const effectiveCwd = resolveSubagentWorktreeCwd(ctx.cwd, params.cwd);
+						if (useIsolation) {
+							const taskId = crypto.randomUUID();
+							isolation = await createIsolation(effectiveCwd, taskId, isolationMode);
+						}
+						const projectRoot = isolation
+							? resolveSubagentProjectRoot(ctx.cwd, effectiveCwd)
+							: undefined;
+						const result = await runSingleAgent(
+							ctx.cwd,
+							agents,
+							params.agent!,
+							params.task!,
+							isolation ? isolation.workDir : effectiveCwd,
+							undefined,
+							undefined,
+							(partial) => {
+								if (partial.details?.results[0]) persistRunResults([partial.details.results[0]]);
+							},
+							makeDetails("single"),
+							{
+								modelOverride: params.model,
+								contextMode,
+								parentSessionManager: ctx.sessionManager,
+								trackingName: dispatchTrackingNames[0],
+								thinkingOverride: params.thinking,
+								projectRoot,
+								projectRootSourceCwd: isolation ? effectiveCwd : undefined,
+								onChildSpawned: noteChildPid(0),
+							},
+						);
+						if (isolation && result.exitCode === 0) {
+							const patches = await isolation.captureDelta();
+							if (patches.length > 0) {
+								const mergeResult = await mergeDeltaPatches(effectiveCwd, patches);
+								result.mergeResult = mergeResult;
+								if (!mergeResult.success) {
+									result.exitCode = 1;
+									result.stopReason = "error";
+									result.errorMessage = `Patch merge failed: ${mergeResult.error || "unknown error"}`;
+									result.stderr = result.stderr || result.errorMessage;
+								}
+							}
+						}
+						return result;
+					} finally {
+						if (isolation) await isolation.cleanup();
+					}
+				};
+
+				// Every valid mode launches detached through the same executors the
+				// synchronous paths use (#2820); only completion differs: the run
+				// record goes terminal and one aggregate wake re-invokes the session.
+				void (async () => {
+					let results: SingleResult[];
+					try {
+						if (hasChain) results = await runChainBatch(undefined, undefined);
+						else if (hasTasks) results = await runParallelBatch(undefined, undefined);
+						else results = [await runSingleDetached()];
+						finishDispatch(results);
+						wakeSessionAfterDetachedCompletion(results);
+				} catch (err) {
+					// The detached run executed with no signal, so failure synthesis
+					// must not attribute the dispatching turn's cancellation (#2820).
+					const failures = synthesizeFailureResults(err, undefined);
+					finishDispatch(failures);
+					wakeSessionAfterDetachedCompletion(failures);
+				}
+				})();
+
+				return {
+					content: [{
+						type: "text",
+						text: `Started background subagent run ${dispatchId}. Use action: "status" with runId: "${dispatchId}" to inspect it.`,
+					}],
+					details: makeDetails(dispatchMode)([]),
+				};
+			}
+
+			if (chainParams.length > 0) {
+				const results = await runChainBatch(signal, onUpdate);
+				const last = results[results.length - 1];
+				const isError =
+					last.exitCode !== 0 || last.stopReason === "error" || last.stopReason === "aborted";
+				if (isError) {
+					const errorMsg =
+						last.errorMessage || last.stderr || getFinalOutput(last.messages) || "(no output)";
+					return {
+						content: [{ type: "text", text: `Chain stopped at step ${results.length} (${last.agent}): ${errorMsg}` }],
+						details: makeDetails("chain")(results),
+						isError: true,
+					};
+				}
+				return {
+					content: [{ type: "text", text: getFinalOutput(last.messages) || "(no output)" }],
+					details: makeDetails("chain")(results),
+				};
+			}
+
+			if (taskParams.length > 0) {
+				const results = await runParallelBatch(signal, onUpdate);
 
 				const successCount = results.filter((r) => r.exitCode === 0).length;
 				const summaries = results.map((r) => {
@@ -2073,7 +2120,7 @@ export default function (pi: ExtensionAPI) {
 				details: makeDetails("single")([]),
 			};
 			} catch (err) {
-				if (!dispatchCompletedEmitted) finalResults = synthesizeFailureResults(err);
+				if (!dispatchCompletedEmitted) finalResults = synthesizeFailureResults(err, signal);
 				throw err;
 			} finally {
 				if (!params.background) finishDispatch(finalResults);

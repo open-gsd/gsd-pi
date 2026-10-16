@@ -188,15 +188,21 @@ describe("detached subagent completion wake", () => {
 		assert.equal(harness.attemptsNow, 0);
 	});
 
-	it("does not wake for the synchronous background validation failure", async () => {
+	it("does not wake for the synchronous batch-size validation failure", async () => {
 		const cwd = freshAgentDir();
 		const harness = makeHarness({ hasUI: true });
 
+		// Since #2820 a pure batch is a valid background dispatch; the remaining
+		// synchronous launch rejection is the batch-size cap, which must ride the
+		// pending tool call (no wake, record terminal via finishDispatch).
+		const tasks = Array.from({ length: 9 }, (_, i) => ({ agent: "a", task: `t${i}` }));
 		const result: any = await harness.execute(
-			{ action: "launch", background: true, tasks: [{ agent: "a", task: "b" }] },
+			{ action: "launch", background: true, tasks },
 			{ cwd, hasUI: true },
 		);
-		assert.equal(result.isError, true);
+		const text: string = result.content[0].text;
+		assert.match(text, /Too many parallel tasks/, "the batch-size cap must reject synchronously");
+		assert.doesNotMatch(text, /Started background subagent run/, "no detached run may start");
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		assert.equal(harness.attemptsNow, 0, "sync failures ride the pending tool call; no wake");
 	});
