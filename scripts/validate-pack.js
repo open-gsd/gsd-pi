@@ -316,6 +316,13 @@ try {
   const requiredFiles = [
     'dist/loader.js',
     'packages/pi-coding-agent/dist/index.js',
+    // Bundled documentation the system prompt injects as absolute paths
+    // (#2809): a clean install must contain every doc location referenced.
+    'packages/pi-coding-agent/README.md',
+    'packages/pi-coding-agent/CHANGELOG.md',
+    'packages/pi-coding-agent/docs/index.md',
+    'packages/pi-coding-agent/docs/extensions.md',
+    'packages/pi-coding-agent/examples/README.md',
     'packages/pi-ai/bin/pi-ai.js',
     'packages/pi-ai/dist/cli.js',
     'packages/native/dist/file-identity/index.js',

@@ -21,7 +21,7 @@ import { registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.ts";
 import { getDispatchStage, markCompleted, recordDispatchClaim, setDispatchStage } from "../db/unit-dispatches.ts";
-import { openAutoPause } from "../db/writers/auto-pauses.ts";
+import { closeAutoPause, openAutoPause, readLatestUserPauseForUnit } from "../db/writers/auto-pauses.ts";
 import { checkRuntimeHealth } from "../doctor-runtime-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import {
@@ -242,6 +242,50 @@ test("a new pause closes the open pause of the scope and keeps its row", (t) => 
   const all = _getAdapter()!.prepare("SELECT pause_reason, closed_at FROM auto_pauses ORDER BY id").all();
   assert.equal(all.length, 2, "the closed pause stays in the table");
   assert.notEqual(all[0]["closed_at"], null);
+});
+
+test("readLatestUserPauseForUnit returns the newest user_request row for the unit, open or closed (#2787)", (t) => {
+  makeProject(t);
+
+  assert.equal(readLatestUserPauseForUnit("execute-task", "M001/S01/T01"), null);
+
+  openAutoPause({
+    blockerKind: "user_request",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    pausedAt: "2026-10-14T09:00:00.000Z",
+  });
+  openAutoPause({
+    blockerKind: "machine_fixable",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    pausedAt: "2026-10-14T09:30:00.000Z",
+  });
+  openAutoPause({
+    blockerKind: "user_request",
+    unitType: "execute-task",
+    unitId: "M001/S01/T02",
+    pausedAt: "2026-10-14T09:45:00.000Z",
+  });
+  // Newest user_request row of the unit wins; closed rows stay readable.
+  openAutoPause({
+    blockerKind: "user_request",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    pausedAt: "2026-10-14T10:00:00.000Z",
+  });
+  assert.equal(
+    readLatestUserPauseForUnit("execute-task", "M001/S01/T01")?.pausedAt,
+    "2026-10-14T10:00:00.000Z",
+  );
+
+  closeAutoPause();
+  assert.equal(
+    readLatestUserPauseForUnit("execute-task", "M001/S01/T01")?.pausedAt,
+    "2026-10-14T10:00:00.000Z",
+    "the closed pause row stays readable for recovery classification",
+  );
+  assert.equal(readLatestUserPauseForUnit("execute-task", "M001/S01/T99"), null);
 });
 
 test("the pause row refuses a blocker kind that is not in the taxonomy", (t) => {

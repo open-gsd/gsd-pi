@@ -58,6 +58,15 @@ export interface TaskExecutionCutoverDeps {
    * non-loop callers and tests keep the session-cached token behavior.
    */
   resolveHeldMilestoneLeaseToken?(milestoneId: string, workerId: string): number | null;
+  /**
+   * #2787: the latest user-requested pause recorded for a unit (open or
+   * closed), or null. Optional so non-loop callers and tests keep the
+   * stale-worker classification when no pause evidence is wired.
+   */
+  readLatestUserPauseForUnit?(
+    unitType: string,
+    unitId: string,
+  ): { pausedAt: string } | null;
   claimTaskAttempt(input: ClaimTaskAttemptInput): ClaimTaskAttemptReceipt;
   settleTaskAttempt(input: SettleTaskAttemptInput): SettleTaskAttemptReceipt;
   routeTaskFailure(input: RouteFailureInput): TaskRecoveryReceipt;
@@ -161,6 +170,34 @@ const TRANSIENT_PHASE_FAILURE_REASONS = new Set([
 // the unit was cancelled with auto-mode paused and no error context.
 const USER_PAUSE_PHASE_REASONS = new Set(["pause-during-setup", "paused"]);
 
+// #2787: recovery classification for a Task Attempt whose worker stopped
+// because the user paused auto-mode — a bounded retry, not a stale-worker
+// repair that terminates in an abort on its second use.
+const USER_PAUSE_INTERRUPT_RECOVERY: TaskResultRecoveryClassification = {
+  failureKind: "user-pause",
+  action: "retry",
+  rationale: "The user paused auto-mode. Run /gsd auto to run the Task again.",
+};
+
+/**
+ * #2787: whether a `running` (or stale-settled) Attempt was stopped by a user
+ * pause rather than a worker crash. A user-requested pause row for this unit
+ * recorded at or after the Attempt's start is the durable signal — the row
+ * survives both the resume that closes it and the process exit that leaves
+ * the Attempt orphaned. Both timestamps are ISO strings, so the ordering is
+ * plain lexicographic.
+ */
+function isUserPausedAttempt(
+  input: TaskExecutionCutoverInput,
+  predecessor: TaskExecutionAttemptSnapshot,
+  deps: TaskExecutionCutoverDeps,
+): boolean {
+  const pause = deps.readLatestUserPauseForUnit?.(input.unitType, input.unitId);
+  // A missing Attempt start (or a pause that predates it) keeps the
+  // stale-worker classification: the pause belongs to an earlier attempt.
+  return !!pause && !!predecessor.startedAt && pause.pausedAt >= predecessor.startedAt;
+}
+
 function parseTaskIdentity(unitId: string): ClaimTaskAttemptInput["task"] {
   const parts = unitId.split("/");
   if (parts.length !== 3 || parts.some((part) => part.trim().length === 0)) {
@@ -227,10 +264,17 @@ function interruptStaleAttempt(
     throw new Error("execute-task cannot replace an active running Attempt without a newer milestone lease");
   }
   const sameSession = identity.milestoneLeaseToken === predecessor.milestoneLeaseToken;
-  const summary = sameSession
+  // #2787: a pause the user asked for must settle as the budgeted user-pause
+  // retry, not as a stale-worker crash that aborts on its second use.
+  const userPaused = isUserPausedAttempt(input, predecessor, deps);
+  const summary = userPaused
+    ? "Replaced Task Attempt paused by the user"
+    : sameSession
     ? "Replaced stale Task Attempt during same-session re-dispatch"
     : "Replaced stale Task Attempt after milestone lease takeover";
-  const recovery = taskRecoveryClassification(input, "stale-worker", new Error(summary));
+  const recovery = userPaused
+    ? USER_PAUSE_INTERRUPT_RECOVERY
+    : taskRecoveryClassification(input, "stale-worker", new Error(summary));
   const settlement = deps.settleTaskAttempt({
     invocation: internalExecutionInvocation(
       sameSession
@@ -240,7 +284,7 @@ function interruptStaleAttempt(
     ),
     attemptId: predecessor.attemptId,
     outcome: "interrupted",
-    failureClass: "stale-worker",
+    failureClass: userPaused ? "user-pause" : "stale-worker",
     summary,
     output: {
       unitType: input.unitType,
@@ -341,12 +385,14 @@ function taskRecoveryClassification(
       rationale: "Retry the bounded transient Task execution failure.",
     };
   }
-  if (failureClass === "executor-break" && USER_PAUSE_PHASE_REASONS.has(reason)) {
-    return {
-      failureKind: "user-pause",
-      action: "retry",
-      rationale: "The user paused auto-mode. Run /gsd auto to run the Task again.",
-    };
+  if (
+    // #2787: a persisted user-pause failure class (settlement or route)
+    // re-classifies as the same bounded retry instead of falling through to
+    // the generic failure classifier.
+    failureClass === "user-pause" ||
+    (failureClass === "executor-break" && USER_PAUSE_PHASE_REASONS.has(reason))
+  ) {
+    return USER_PAUSE_INTERRUPT_RECOVERY;
   }
   if (failureClass === "verification-failed") {
     return {
@@ -616,10 +662,19 @@ export async function runWithTaskExecutionAttempt(
             predecessor.attemptId,
             predecessor.resultId,
             summary,
-            predecessor.resultRecovery ?? taskRecoveryClassification(
-              input,
-              predecessor.resultFailureClass ?? "executor-result-failed",
-              new Error(summary),
+            predecessor.resultRecovery ?? (
+              // #2787: a stale-worker settlement from crash recovery carries
+              // no stored recovery classification; a user pause behind that
+              // orphan must route as the budgeted user-pause retry, not the
+              // one-shot stale-worker repair that aborts on its second use.
+              predecessor.resultFailureClass === "stale-worker" &&
+                isUserPausedAttempt(input, predecessor, deps)
+                ? USER_PAUSE_INTERRUPT_RECOVERY
+                : taskRecoveryClassification(
+                  input,
+                  predecessor.resultFailureClass ?? "executor-result-failed",
+                  new Error(summary),
+                )
             ),
             deps,
           );

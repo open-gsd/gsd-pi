@@ -56,12 +56,12 @@ import { isClosedStatus } from "../status-guards.js";
 import { GATE_REGISTRY } from "../gate-registry.js";
 import { generateRequirementsMd, saveArtifactToDb, saveArtifactToDbByScope } from "../db-writer.js";
 import { createWorkspace, scopeMilestone } from "../workspace.js";
-import { clearPathCache, normalizeRealPath, relMilestoneFile, relSliceFile, relSlicePath, resolveGsdPathContract, resolveMilestoneFile, resolveSliceFile } from "../paths.js";
+import { canonicalPhaseDirName, clearPathCache, normalizeRealPath, relMilestoneFile, relSliceFile, relSlicePath, resolveGsdPathContract, resolveMilestoneFile, resolveMilestonePath, resolveSliceFile } from "../paths.js";
 import { saveFile, clearParseCache } from "../files.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { CompleteMilestoneParams } from "./complete-milestone.js";
 import { handleCompleteMilestone } from "./complete-milestone.js";
 import {
@@ -373,7 +373,7 @@ function projectMilestoneSequenceRepairNeeded(content: string): boolean {
 }
 
 /** The milestone rows that the Milestone Sequence of a PROJECT document asks for. */
-function projectMilestoneRegistrations(content: string): MilestoneRegistration[] {
+function projectMilestoneRegistrations(content: string, basePath: string): MilestoneRegistration[] {
   // Reconcile parsed IDs against existing DB milestones before inserting (#807).
   // Under unique_milestone_ids the planner mints suffixed IDs (e.g. "M001-b1nole"),
   // while PROJECT.md's template uses bare sequence IDs (e.g. "M001"). Inserting the
@@ -384,15 +384,40 @@ function projectMilestoneRegistrations(content: string): MilestoneRegistration[]
   // milestone per sequence number, so map each parsed line onto the existing row
   // that shares its sequence number instead of minting a duplicate bare-ID row.
   const existingBySeq = existingMilestonesBySequence();
-  return parseProject(content).milestones.map((milestone) => {
+  const registrations: MilestoneRegistration[] = [];
+  for (const milestone of parseProject(content).milestones) {
     const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
-    // An adopted row, or a row that owns the sequence number under another id,
-    // gets only its human title refreshed: a checked box never completes a
-    // milestone (only gsd_complete_milestone does).
-    const retitle = canonical !== undefined &&
-      (adoptedMilestoneProjectionDone(canonical.id) !== null || canonical.id !== milestone.id);
-    return { id: canonical?.id ?? milestone.id, title: milestone.title, retitle };
-  });
+    if (canonical !== undefined) {
+      // An existing row keeps its stored title: the sequence line's short text
+      // must not clobber an established title — the retitle renamed the
+      // milestone's established phase directory and broke its path references
+      // (#2801). A checked box never completes a milestone (only
+      // gsd_complete_milestone does).
+      if (canonical.title.trim()) {
+        registrations.push({ id: canonical.id });
+        continue;
+      }
+      // An empty stored title is a placeholder row (generate-id): the line
+      // fills it. The fill may rename only a demonstrable placeholder
+      // directory — one named for the id, or none at all; an established
+      // directory stays where it is and the title lands on the next
+      // planning write (#2801, rename as in #1526).
+      const dir = resolveMilestonePath(basePath, canonical.id);
+      const placeholderDir = dir === null || basename(dir) === canonicalPhaseDirName(canonical.id, canonical.id);
+      registrations.push(
+        placeholderDir
+          ? { id: canonical.id, title: milestone.title, retitle: true }
+          : { id: canonical.id },
+      );
+      continue;
+    }
+    // A done line with no row is history that predates the DB: like recover's
+    // import (completed work never re-enters as open), it is skipped rather
+    // than registered as `queued` for auto-mode to plan from scratch. (#2801)
+    if (milestone.done) continue;
+    registrations.push({ id: milestone.id, title: milestone.title });
+  }
+  return registrations;
 }
 
 /** Minimal shape of a DB milestone row needed to re-render the sequence section. */
@@ -410,6 +435,40 @@ function milestoneSequenceRows(): MilestoneSeqRow[] {
     vision: milestone.vision,
     done: adoptedMilestoneProjectionDone(milestone.id) ?? isClosedStatus(milestone.status),
   }));
+}
+
+/**
+ * The rows a Milestone Sequence rebuild renders: the authoritative DB rows,
+ * plus the document's checked lines whose rows predate the DB as done
+ * history. A repair that rendered only DB rows would erase that history from
+ * the projection (and the sequence table) (#2801).
+ */
+function milestoneSequenceRowsForRebuild(content: string): MilestoneSeqRow[] {
+  const seqRows = milestoneSequenceRows();
+  const rowsBySeq = new Map(seqRows.map((row) => [extractMilestoneSeq(row.id), row]));
+  const rendered: MilestoneSeqRow[] = [];
+  const emitted = new Set<string>();
+  for (const milestone of parseProject(content).milestones) {
+    const row = rowsBySeq.get(extractMilestoneSeq(milestone.id));
+    if (row) {
+      if (!emitted.has(row.id)) {
+        rendered.push(row);
+        emitted.add(row.id);
+      }
+      continue;
+    }
+    // An open line with no row registered just above, so it has a row here.
+    // A checked one is pre-DB history: keep the line, rendered from the
+    // document (the DB stays rowless). Duplicate lines of one id render once.
+    if (milestone.done && !emitted.has(milestone.id)) {
+      rendered.push({ id: milestone.id, title: milestone.title, vision: "", done: true });
+      emitted.add(milestone.id);
+    }
+  }
+  for (const row of seqRows) {
+    if (!emitted.has(row.id)) rendered.push(row);
+  }
+  return rendered;
 }
 
 /**
@@ -775,10 +834,14 @@ export async function executeSummarySave(
     if (params.artifact_type === "PROJECT") {
       try {
         if (projectRegistrationContent !== null) {
-          registrations = projectMilestoneRegistrations(projectRegistrationContent);
+          registrations = projectMilestoneRegistrations(projectRegistrationContent, basePath);
           registeredMilestones = registrations.map((milestone) => milestone.id);
         }
-        if (registeredMilestones.length === 0) {
+        // A sequence of only done lines whose rows predate the DB registers
+        // nothing — a legitimate save of history (#2801). Fail only when the
+        // content parsed zero milestone lines, which the preflight could not
+        // repair (no DB rows to rebuild from).
+        if (registeredMilestones.length === 0 && parseProject(contentToSave).milestones.length === 0) {
           throw new Error("PROJECT.md parsed zero milestone lines after preflight");
         }
       } catch (err) {
@@ -852,7 +915,7 @@ export async function executeSummarySave(
                 // Rebuild after registration: a line for a milestone that had no row
                 // before this save must stay in the sequence.
                 const rebuiltContent = milestoneSequenceSelfHealed
-                  ? rebuildMilestoneSequenceSection(contentToSave, milestoneSequenceRows())
+                  ? rebuildMilestoneSequenceSection(contentToSave, milestoneSequenceRowsForRebuild(contentToSave))
                   : undefined;
                 insertRow(rebuiltContent);
                 // The sequence rows follow the stored PROJECT document in this transaction.

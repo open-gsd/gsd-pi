@@ -169,6 +169,28 @@ test('direct arg "brave" sets preference and notifies', async (t) => {
 // 3. Direct arg — auto
 // ═══════════════════════════════════════════════════════════════════════════
 
+test('direct arg "firecrawl" sets preference and notifies', async (t) => {
+  const { setSearchProviderPreference, getSearchProviderPreference } = await import(
+    '../resources/extensions/search-the-web/provider.ts'
+  )
+  const cmd = await loadCommand()
+  const { authPath, cleanup } = makeTmpAuth()
+
+  t.after(() => { cleanup() });
+
+  await withEnv({ FIRECRAWL_API_KEY: 'fc-test', TAVILY_API_KEY: undefined, BRAVE_API_KEY: undefined }, async () => {
+    setSearchProviderPreference('auto', authPath)
+
+    const ctx = makeMockCtx()
+    await cmd.handler('firecrawl', ctx)
+
+    assert.equal(ctx.ui.selectCalls.length, 0, 'should not show select UI for direct arg')
+    assert.equal(ctx.ui.notifyCalls.length, 1, 'should notify once')
+    assert.match(ctx.ui.notifyCalls[0].message, /Search provider set to firecrawl/, 'notification should confirm provider set')
+    assert.match(ctx.ui.notifyCalls[0].message, /Effective provider: firecrawl/, 'notification should show effective provider')
+  })
+})
+
 test('direct arg "auto" sets preference and notifies', async (t) => {
   const cmd = await loadCommand()
   const { authPath, cleanup } = makeTmpAuth()
@@ -200,13 +222,14 @@ test('no arg shows select UI with 3 options, user picks brave', async () => {
 
     // Select UI shown
     assert.equal(ctx.ui.selectCalls.length, 1, 'should show select UI')
-    assert.equal(ctx.ui.selectCalls[0].options.length, 4)
+    assert.equal(ctx.ui.selectCalls[0].options.length, 5)
 
     // Options show key status
     assert.match(ctx.ui.selectCalls[0].options[0], /tavily \(key: ✓\)/)
     assert.match(ctx.ui.selectCalls[0].options[1], /brave \(key: ✓\)/)
     assert.match(ctx.ui.selectCalls[0].options[2], /ollama \(key:/)
-    assert.equal(ctx.ui.selectCalls[0].options[3], 'auto')
+    assert.match(ctx.ui.selectCalls[0].options[3], /firecrawl \(key:/)
+    assert.equal(ctx.ui.selectCalls[0].options[4], 'auto')
 
     // Title shows current preference
     assert.match(ctx.ui.selectCalls[0].title, /current:/)
@@ -266,16 +289,16 @@ test('invalid arg "google" falls back to interactive select', async () => {
 // 7. Tab completion — all 3 options when prefix is empty
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('tab completion returns all 4 options when prefix is empty', async () => {
+test('tab completion returns all 5 options when prefix is empty', async () => {
   const cmd = await loadCommand()
 
   withEnv({ TAVILY_API_KEY: 'tvly-test', BRAVE_API_KEY: 'BSA-test' }, () => {
     const items = cmd.getArgumentCompletions!('')
     assert.ok(items, 'completions should not be null')
-    assert.equal(items!.length, 4)
+    assert.equal(items!.length, 5)
 
     const values = items!.map((i: any) => i.value)
-    assert.deepEqual(values, ['tavily', 'brave', 'ollama', 'auto'])
+    assert.deepEqual(values, ['tavily', 'brave', 'ollama', 'firecrawl', 'auto'])
 
     // Each item has label and description
     assert.ok(items!.every((i: any) => i.label), 'every item should have a label')

@@ -8,6 +8,68 @@ This changelog starts from the `open-gsd/gsd-pi` ownership baseline. Earlier pro
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-10-12
+
+### Added
+- **gsd**: make Claude Haiku 5.5 the default light-tier model (#2702)
+- **pi-ai**: add Claude Haiku 5.5 to the model catalog with adaptive-only and temperature guards (#2701)
+
+### Fixed
+- **vscode**: guard canonical native Copilot project-context reads (#2699)
+- **mcp-server**: bound Windows process queries and prepare complete SDK graph for Windows MCP tests (#2718)
+- **native**: correct macOS descendant PID count handling (#2736)
+- **gsd**: make complete-milestone prompt receipt-aware like the closeout guards (#2772) (#2773)
+- **gsd**: let accepted milestone validation cover historical UAT failures at closure (#2770) (#2771)
+- **gsd**: allow uat dispatch while milestone validation is blocked (#2769)
+- **gsd**: batch per-path synchronous git spawns on the /gsd auto path (#2767)
+- **gsd**: make /gsd auto respond to Enter and Escape and keep the TUI live during verification (#2765)
+- **providers**: stop CLI readiness probes from blocking the event loop (#2763) (#2764)
+- **subagent**: disclose single-mode-only background execution in tool contract (#2761)
+- **gsd**: drop superseded decision mirrors from active memory queries (#2756) (#2757)
+- **gsd**: exempt read-only workflow queries from the per-tool loop cap (#2753) (#2754)
+- **native**: name the target in projection root kind-mismatch rejections (#2752)
+- **gsd**: name the node the projection root lock structurally rejects (#2751)
+- **gsd**: re-arm the unit hard timeout when the recovery steer gets no answer (#2750)
+- **gsd**: repair an abandoned staged task SUMMARY in the milestone worktree (#2749)
+- **gsd**: name a working exit when gsd_task_complete finds no claimed Attempt (#2748)
+- **mcp-server**: fail closed when a configured workflow bridge module fails to load (#2741) (#2747)
+- **gsd**: merge caller-supplied hooks with the native PreToolUse guards (#2742) (#2745)
+- **gsd**: import slice goal/demo/success_criteria from the slice PLAN during recover (#2740)
+- **release**: authenticate published prerelease for continuation (#2690)
+- **gsd**: verify every depth-verification gate answered in one ask_user_questions round (#2734)
+- **vscode**: preserve stronger queued sidebar refresh intent and honest progress provenance (#2732)
+- **mcp-server**: doctor-lite projection-gap findings name the re-render repair (#2651) (#2731)
+- **gsd**: /gsd start and /gsd quick no longer crash outside a git repository (#2730)
+- **gsd**: rename phase dir via bound checkout root and reconcile rows only when disk agrees (#2633) (#2727)
+- **ollama**: mint unique tool-call ids per response to stop idempotency-key collisions (#2726)
+- **safety**: judge compound closeout claims per part; one evidence row per gsd_exec (#2665) (#2724)
+- **pi-tui**: never re-emit flushed scrollback when a line above the screen changes, and scroll the retired screen into scrollback
+- **gsd**: backfill claude-code parallel tool_use args from the complete SDK message (#2585)
+- **auto**: keep settled published tasks intact on post-closeout source drift (#2647) (#2723)
+- **gsd**: report a live DB lock holder from /gsd status instead of a raw open error (#2720)
+- **subagent**: detect a dead cmux wrapper instead of waiting out the 30-minute exit-file ceiling (#2721)
+- **gsd**: treat repo-relative executables and env-prefixed commands as commands (#2664) (#2719)
+- **gsd**: exempt blocker-accepted tasks' pending gates from closeout (#2687) (#2716)
+- **pi-ai**: guard Claude 5.x strict request surface on Bedrock, relays, and Opus 5.5/Fable entries (#2645)
+- **gsd**: no unknown-model routing warning when dynamic routing is off (#2703)
+- **auto**: settle orphaned running Attempts in clearLock, not just clearStaleWorkerLock (#2441)
+- **pi-coding-agent**: skip .d.ts declaration files in extension discovery (#2641)
+- **gsd**: treat macOS 'write EIO' as recoverable pipe-closed (crash storm) (#2642)
+- **async-jobs**: make await_job serve full output for truncated follow-ups (#2643)
+- **gsd**: strip trailing punctuation from pasted /gsd recover ids (#2659)
+- **gsd**: exempt reopened-slice orphaned SUMMARY artifact rows from drift (#2674)
+- **cmux**: parse current CLI surface refs for subagent splits (#2695)
+- **mcp-server**: atomically publish the PID registry (#2698)
+- **gsd**: remove the stale SUMMARY when a task or slice is reopened (#2711)
+- **gsd**: resume an execute-task after a user pause without /gsd recover (#2709)
+- **gsd**: refuse units whose workflow tools cursor-agent cannot call (#2706)
+- **build**: rebuild stale dist/resources in the dev CLI preflight (#2707)
+- **gsd**: keep project root in the workspace folder outside git (#2708)
+- **tui**: stop CR-only lines from hanging collapseCarriageReturnFrames
+
+### Changed
+- **models**: refresh generated model catalog (#2737)
+
 ## [1.21.1] - 2026-10-07
 
 ### Fixed

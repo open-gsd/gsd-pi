@@ -67,6 +67,12 @@ export class AgentSessionPromptModule {
 	}
 
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		// Lazy repair for the unknown/unknown placeholder (#2782): in
+		// interactive mode session_start providers register asynchronously, so
+		// the post-bindExtensions repair can still race the probe. Re-resolve
+		// before the first turn that would otherwise stream against a
+		// provider-less placeholder. No-op once a real model is set.
+		await this.host.repairPlaceholderModel();
 		const source = options?.source ?? "interactive";
 		const latency = this.host.beginTurnLatency({ source, trigger: "session.prompt" });
 		let latencyStatus: "completed" | "queued" | "handled" | "error" = "completed";

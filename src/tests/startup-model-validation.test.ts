@@ -295,3 +295,52 @@ describe("validateConfiguredModel — fallback notification (#2077)", () => {
 		);
 	});
 });
+
+describe("validateConfiguredModel — deferred session_start registration (#2782)", () => {
+	it("preserves settings when the configured provider has no catalog presence yet", () => {
+		// Sole session_start provider (ollama) has not registered, so the
+		// registry is empty at validation time. The default must survive.
+		const registry = createMockRegistry([]);
+		const settings = createMockSettings({ provider: "ollama", model: "llama3", thinking: "high" });
+
+		const result = validateConfiguredModel(registry, settings);
+
+		assert.equal(result.action, "preserved");
+		assert.equal(settings._provider, "ollama");
+		assert.equal(settings._model, "llama3");
+		// The thinking-level reset must not fire against the empty-registry
+		// window — the configured model may well support thinking.
+		assert.equal(settings._thinking, "high");
+	});
+
+	it("preserves settings instead of rewriting to another provider in the pre-registration window", () => {
+		// Mixed setup: an authed builtin is available, but the configured
+		// ollama default simply has not registered yet. Rewriting the default
+		// here would silently lose it (the #2077 loss class).
+		const registry = createMockRegistry([
+			{ provider: "anthropic", id: "claude-opus-4-6" },
+		]);
+		const settings = createMockSettings({ provider: "ollama", model: "llama3", thinking: "high" });
+
+		const result = validateConfiguredModel(registry, settings);
+
+		assert.equal(result.action, "preserved");
+		assert.equal(settings._provider, "ollama");
+		assert.equal(settings._model, "llama3");
+		assert.equal(settings._thinking, "high");
+	});
+
+	it("still falls back when the configured model is a stale entry of a registered provider", () => {
+		// Provider registered (catalog has it) but the model id is gone —
+		// this is the genuine-stale case, not a registration race.
+		const registry = createMockRegistry([
+			{ provider: "anthropic", id: "claude-opus-4-6" },
+		]);
+		const settings = createMockSettings({ provider: "anthropic", model: "claude-opus-4-1" });
+
+		validateConfiguredModel(registry, settings);
+
+		assert.equal(settings._provider, "anthropic");
+		assert.equal(settings._model, "claude-opus-4-6");
+	});
+});

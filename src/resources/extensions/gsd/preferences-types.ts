@@ -626,7 +626,7 @@ export interface GSDPreferences {
   /** Multiplier over the rolling per-unit cost average that triggers a cost-spike pause. Default: 3.0. The `burn-max` token profile ignores this and never pauses on spikes. */
   unit_cost_spike_multiplier?: number;
   /** Search provider preference. "brave"/"tavily"/"ollama" force that backend and disable native Anthropic search. "native" forces native only. "auto" = current default behavior. */
-  search_provider?: "brave" | "tavily" | "ollama" | "native" | "auto";
+  search_provider?: "brave" | "tavily" | "ollama" | "firecrawl" | "native" | "auto";
   /** Context selection mode for file inlining. "full" inlines entire files, "smart" uses semantic chunking. Default derived from token profile. */
   context_selection?: ContextSelectionMode;
   /** Default widget display mode for auto-mode dashboard. "full" | "small" | "min" | "off". Default: "small". */

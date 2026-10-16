@@ -186,4 +186,5 @@ export interface AgentSessionHost {
 	// Public methods modules delegate to
 	setModel(model: Model<any>, options?: { persist?: boolean }): Promise<void>;
 	cycleModel(direction?: "forward" | "backward"): Promise<ModelCycleResult | undefined>;
+	repairPlaceholderModel(): Promise<void>;
 }

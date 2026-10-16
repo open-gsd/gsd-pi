@@ -115,6 +115,17 @@ export function hasStoredPreExecutionRetry(unitType: string, unitId: string): bo
   ).get({ ":unit_type": unitType, ":unit_id": unitId }) !== undefined;
 }
 
+/** True when the unit holds a stored git-commit repair retry that is not released. */
+export function hasStoredCommitRepairRetry(unitType: string, unitId: string): boolean {
+  if (!isDbAvailable()) return false;
+  return _getAdapter()!.prepare(
+    `${STORED_RETRY}
+     WHERE dispatch.unit_type = :unit_type AND dispatch.unit_id = :unit_id
+       AND retry.signature LIKE 'git-commit:%'
+     LIMIT 1`,
+  ).get({ ":unit_type": unitType, ":unit_id": unitId }) !== undefined;
+}
+
 /** The newest stored git-commit repair retry of a task of the slice, or null. */
 export function readStoredCommitRepairRetry(
   milestoneId: string,
@@ -146,7 +157,9 @@ export function releaseVerificationRetry(unitType: string, unitId: string): void
 
 /**
  * Release the stored git-commit repair retries of the unit: its commit
- * succeeded. A retry that another check stored stays.
+ * succeeded, or its repair dispatch failed and the loop abandoned the retry
+ * so the unit is not reselected (#2806). A retry that another check stored
+ * stays.
  */
 export function releaseCommitRepairRetry(unitType: string, unitId: string): void {
   if (isDbAvailable()) deleteUnitCommitRepairRetries(unitType, unitId);

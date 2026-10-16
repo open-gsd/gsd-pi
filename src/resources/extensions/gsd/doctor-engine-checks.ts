@@ -72,8 +72,25 @@ import {
   inspectWorkflowDbLockHolders,
   terminateDormantWorkflowDbLockHolders,
 } from "./workflow-db-locks.js";
+import { readTerminalTaskRecoveryAbort, taskAttemptArtifactReadiness } from "./artifact-verification.js";
+import { readLatestTaskAttempt } from "./task-execution-domain-operation.js";
+import { getProjectAuthorityRow } from "./db/queries.js";
 
 const USER_AUTHORED_ARTIFACT_TYPES = new Set(["CONTEXT", "RESEARCH"]);
+
+/** Canonical lifecycle statuses with no forward transition (#2778): completed, cancelled, blocker-accepted. */
+const TERMINAL_LIFECYCLE_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "cancelled",
+  "blocker-accepted",
+]);
+
+/** Canonical lifecycle statuses that still have a forward path (#2778). */
+const OPEN_LIFECYCLE_STATUSES: ReadonlySet<string> = new Set(["pending", "in_progress", "paused"]);
+
+function isTerminalLifecycleStatus(status: string | null): boolean {
+  return status !== null && TERMINAL_LIFECYCLE_STATUSES.has(status);
+}
 
 type RunningAttemptRow = DoctorRunningAttemptRow;
 
@@ -655,27 +672,111 @@ export function reportMilestoneValidationSourceDrift(basePath: string, issues: D
  * Evidence-backed drift converges through the shadow repair on the reopen path;
  * unverifiable drift must be resolved by an operator (#2313 tracks the
  * free-text verification-result classification gap).
+ *
+ * #2778: the comparison alone cannot distinguish harmful from benign drift.
+ * Task claim moves the canonical lifecycle to `in_progress` without writing
+ * legacy `tasks.status`, so every claimed-but-unclosed task reads legacy
+ * `pending` vs canonical `in_progress` — the normal shape of an in-flight
+ * attempt, and of a resumable recovery abort that the dispatch guard already
+ * routes through `/gsd recover`. Only the legacy-terminal direction (the #2440
+ * shape) lacks a forward-convergence writer; canonical-ahead task drift is
+ * downgraded when attempt/recovery state proves the path forward.
  */
 export function reportMilestoneLifecycleShadowDrift(issues: DoctorIssue[]): void {
   if (!isDbAvailable()) return;
+  // Attempt/recovery evidence lookups must not read a foreign project's
+  // imported rows that happen to share the milestone/slice/task identity (#2778).
+  const projectId = getProjectAuthorityRow()?.projectId;
+  const evidenceScope = projectId ? { projectId } : undefined;
   for (const milestone of getAllMilestones()) {
     const snapshot = getMilestoneLifecycleShadowSnapshot(milestone.id);
     if (snapshot.queryError) continue;
     for (const item of snapshot.items) {
       if (item.classification !== "status_mismatch") continue;
+      const identity = item.itemIdentity;
+      const { taskId, sliceId } = identity;
       const unitId = [
-        item.itemIdentity.milestoneId,
-        item.itemIdentity.sliceId,
-        item.itemIdentity.taskId,
+        identity.milestoneId,
+        sliceId,
+        taskId,
       ].filter(Boolean).join("/");
+      const statusPair =
+        `Legacy status "${item.rawLegacyStatus ?? "null"}" does not match canonical lifecycle ` +
+        `"${item.rawCanonicalStatus ?? "null"}" for ${unitId}.`;
+      const canonicalAheadTask = taskId !== null && sliceId !== null &&
+        OPEN_LIFECYCLE_STATUSES.has(item.normalizedLegacyStatus ?? "") &&
+        !isTerminalLifecycleStatus(item.normalizedCanonicalStatus) &&
+        (item.normalizedCanonicalStatus === "in_progress" || item.normalizedCanonicalStatus === "paused");
+      if (taskId !== null && sliceId !== null && canonicalAheadTask) {
+        // Same signal the dispatch guard refuses re-dispatch on (#1622/#1754):
+        // an agent-owned abort that is still resume-eligible and unresumed.
+        const terminalAbort = readTerminalTaskRecoveryAbort(
+          identity.milestoneId,
+          sliceId,
+          taskId,
+          evidenceScope,
+        );
+        if (terminalAbort) {
+          issues.push({
+            severity: "warning",
+            code: "lifecycle_shadow_mismatch",
+            scope: "task",
+            unitId,
+            message:
+              `${statusPair} The canonical Task Attempt recovery has aborted ` +
+              `(recoveryActionId: ${terminalAbort.recoveryActionId}) and the dispatch guard refuses ` +
+              `re-dispatch until it is resumed. Run \`/gsd recover ${terminalAbort.recoveryActionId}\` ` +
+              `to converge the drift.`,
+            file: ".gsd/gsd.db",
+            fixable: false,
+          });
+          continue;
+        }
+        const attempt = readLatestTaskAttempt(
+          { milestoneId: identity.milestoneId, sliceId, taskId },
+          evidenceScope,
+        );
+        if (attempt?.state === "running") continue;
+        const readiness = taskAttemptArtifactReadiness(attempt);
+        if (readiness) {
+          issues.push({
+            severity: "warning",
+            code: "lifecycle_shadow_mismatch",
+            scope: "task",
+            unitId,
+            message:
+              `${statusPair} The latest canonical Task Attempt has a settled Result awaiting ` +
+              `${readiness === "verify" ? "verification publication" : "a recovery route"}, which ` +
+              `converges the drift when the normal task flow continues.`,
+            file: ".gsd/gsd.db",
+            fixable: false,
+          });
+          continue;
+        }
+        issues.push({
+          severity: "error",
+          code: "lifecycle_shadow_mismatch",
+          scope: "task",
+          unitId,
+          message:
+            `${statusPair} ` +
+            (attempt
+              ? `The latest Task Attempt (#${attempt.attemptNumber}) is settled with no actionable ` +
+                `verification or route head`
+              : `No Task Attempt evidence backs the canonical state`) +
+            `, so no forward path converges the drift; resolve it manually.`,
+          file: ".gsd/gsd.db",
+          fixable: false,
+        });
+        continue;
+      }
       issues.push({
         severity: "error",
         code: "lifecycle_shadow_mismatch",
-        scope: item.itemIdentity.taskId ? "task" : item.itemIdentity.sliceId ? "slice" : "milestone",
+        scope: identity.taskId ? "task" : identity.sliceId ? "slice" : "milestone",
         unitId,
         message:
-          `Legacy status "${item.rawLegacyStatus ?? "null"}" does not match canonical lifecycle ` +
-          `"${item.rawCanonicalStatus ?? "null"}" for ${unitId}. Terminal-parity checks refuse ` +
+          `${statusPair} Terminal-parity checks refuse ` +
           `completion, validation, and reopen for this row. Reopen path converges drift backed by ` +
           `durable completion evidence via the lifecycle shadow repair; drift without evidence ` +
           `must be resolved manually.`,

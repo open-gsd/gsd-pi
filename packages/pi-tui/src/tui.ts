@@ -18,7 +18,9 @@ import {
 	setCellDimensions,
 } from "./terminal-image.js";
 import {
+	extractAnsiCode,
 	extractSegments,
+	isWhitespaceChar,
 	normalizeTerminalOutput,
 	sliceByColumn,
 	sliceWithWidth,
@@ -1330,12 +1332,14 @@ export class TUI extends Container {
 	 * already committed to scrollback — a second time. When the overlap is
 	 * unchanged (only content above the screen changed, e.g. a reply header
 	 * gaining its timestamp; see overlapMatches), or changed by deletions the
-	 * aligned top can absorb (see repairShiftedOverlap), the freed rows can
-	 * simply be left blank at the bottom, the same end state the
-	 * pure-deletion path leaves. Larger overlaps refill the screen so the
-	 * blank-viewport behavior (#613) is preserved; the pinned zone this
-	 * exists for is capped at ~40% of the viewport plus borders, well under
-	 * half. Unforced frames never take this path: there the differential
+	 * aligned top can absorb (see repairShiftedOverlap), or changed by
+	 * deletions the two-seam compound model can absorb (see
+	 * repairCompoundShrink, #2804), the freed rows can simply be left blank
+	 * at the bottom, the same end state the pure-deletion path leaves.
+	 * Overlaps without a verified alignment refill the screen so the
+	 * blank-viewport behavior (#613) is preserved; the aligned repairs leave
+	 * at most half the screen blank (the below-seam deletions alone). Unforced
+	 * frames never take this path: there the differential
 	 * renderer handles bottom deletions in place over the padded retained
 	 * layout.
 	 *
@@ -1368,8 +1372,17 @@ export class TUI extends Container {
 			return null;
 		}
 		const overlap = top - newTop;
-		if (overlap <= 0 || overlap > Math.floor(height / 2)) {
+		if (overlap <= 0) {
 			return null;
+		}
+		if (overlap > Math.floor(height / 2)) {
+			// A shrink this large usually deleted rows far above the screen (a
+			// turn's tool rows collapsing into a summary); refilling would
+			// re-emit the scrollback rows now above the new viewport top, so
+			// only a deletion-aligned top can help (see repairCompoundShrink).
+			// The blanks it leaves at the bottom are the below-seam deletions
+			// alone, still capped at half the screen (#613).
+			return TUI.alignedTopWithoutImages(newLines, newTop, TUI.repairCompoundShrink(baseLines, newLines, newTop, top, height));
 		}
 		const matches = (i: number): boolean => baseLines[i] === newLines[i];
 		// The seam row (`top`, the old screen top) is verified alongside the
@@ -1393,7 +1406,14 @@ export class TUI extends Container {
 			}
 			return top;
 		}
-		const alignedTop = TUI.repairShiftedOverlap(baseLines, newLines, newTop, top);
+		const alignedTop =
+			TUI.repairShiftedOverlap(baseLines, newLines, newTop, top) ??
+			TUI.repairCompoundShrink(baseLines, newLines, newTop, top, height);
+		return TUI.alignedTopWithoutImages(newLines, newTop, alignedTop);
+	}
+
+	/** The aligned top, or null when an image line would be skipped (the refill re-emits it). */
+	private static alignedTopWithoutImages(newLines: string[], newTop: number, alignedTop: number | null): number | null {
 		if (alignedTop === null) {
 			return null;
 		}
@@ -1403,6 +1423,230 @@ export class TUI extends Container {
 			}
 		}
 		return alignedTop;
+	}
+
+	/**
+	 * Align the retained screen top when a forced repaint deleted rows in two
+	 * places at once (#2804): far above the screen (a turn's tool rows
+	 * collapsing into a summary — any amount, even more than half a screen)
+	 * and below the old screen top (the pinned-zone teardown). Both index
+	 * checks fail there — the unchanged-overlap guard sees shifted indices,
+	 * and repairShiftedOverlap requires the whole skipped prefix
+	 * byte-identical at the same index, which any above-screen deletion
+	 * breaks — so the refill runs and re-emits the s rows of scrollback that
+	 * now sit above the new viewport top (seen as a table's top border and
+	 * header row printed twice at turn end).
+	 *
+	 * The frame is verified against a two-seam deletion model: above the old
+	 * screen top, the skipped rows must be the rows that sat just above it,
+	 * carried up by the above-screen deletions, with every window value
+	 * displayed above the aligned top backed by a distinct committed copy so
+	 * a repetition cannot double-book scrollback and hide a row it does not
+	 * show; on the screen, every painted row must pair with a row of the old
+	 * screen at the same offset until the single deleted block below the seam,
+	 * then at that block's shift. An edited or inserted row anywhere in the
+	 * verified region fails the model and keeps the refill, so the change
+	 * stays visible. The screen keeps at most half its rows blank in total —
+	 * the below-seam deletions plus the new frame's own trailing blank lines
+	 * (#613); the above-screen deletions shift the retained top instead.
+	 *
+	 * Like every retention path, this trusts the committed frame's
+	 * above-screen rows: an edit hidden there by the licensed #2582 boundary
+	 * makes the committed copy counts diverge from physical scrollback, and
+	 * repetition compounded with such an edit can under-show copies of a
+	 * window value. That residual is inherited from windowMultiplicitiesBacked
+	 * (#2725) — closing it would mean refusing every above-screen edit. The
+	 * removed-value guard below narrows it: the demonstrated destruction
+	 * chain (a hidden edit's value also vanishing from the visible screen)
+	 * is refused outright and falls back to the loss-free refill.
+	 */
+	private static repairCompoundShrink(
+		baseLines: string[],
+		newLines: string[],
+		newTop: number,
+		top: number,
+		height: number,
+	): number | null {
+		const newLen = newLines.length;
+		const baseLen = baseLines.length;
+		// Committed copies above the old screen top — the scrollback supply
+		// that backs skipped rows. Precomputed once for all candidates.
+		const supply = new Map<string, number>();
+		for (let i = 0; i < top; i++) {
+			const value = baseLines[i] ?? "";
+			supply.set(value, (supply.get(value) ?? 0) + 1);
+		}
+		// Values on the old screen, for the removed-value guard below.
+		const oldScreen = new Map<string, number>();
+		for (let i = top; i < Math.min(baseLen, top + height); i++) {
+			const value = baseLines[i] ?? "";
+			oldScreen.set(value, (oldScreen.get(value) ?? 0) + 1);
+		}
+		// The aligned screen's trailing blanks are the padding plus the new
+		// frame's own trailing visually-blank lines (space-only rows render
+		// blank too, and committed lines carry reset suffixes). #613 bounds
+		// their SUM at half the screen: the refill baseline shows the frame's
+		// own blanks either way, so only the padding is the retention's to
+		// cap.
+		const half = Math.floor(height / 2);
+		let tail = 0;
+		while (tail < newLen && TUI.isVisuallyBlank(newLines[newLen - 1 - tail] ?? "")) {
+			tail++;
+		}
+		// s counts both halves of the compound shrink at once: the rows deleted
+		// below the old screen top (they become the blank rows at the bottom of
+		// the aligned screen) and the rows the aligned repaint skips between
+		// the new viewport top and the retained content. The above-screen
+		// deletions only shift the retained top. s = 0 covers a pure large
+		// roll-up with nothing deleted below the seam.
+		const maxSkip = Math.min(half, top - newTop);
+		// Values the new frame displays above the candidates, grown by one row
+		// per candidate for the removed-value guard.
+		const valuesAbove = new Set<string>();
+		for (let i = 0; i < newTop; i++) {
+			valuesAbove.add(newLines[i] ?? "");
+		}
+		for (let s = 0; s <= maxSkip; s++) {
+			if (s + Math.min(tail, height - s) > half) {
+				continue;
+			}
+			const aligned = newTop + s;
+			if (s > 0) {
+				valuesAbove.add(newLines[aligned - 1] ?? "");
+			}
+			let anchored = false;
+			// Segment 1 — the skipped rows: the s rows just above the aligned
+			// top must be the rows that sat just above the old screen top,
+			// byte-identical at the deletion shift (new[newTop + t] with
+			// base[top - s + t]). An edited or inserted row here fails and
+			// keeps the refill, so the change stays visible.
+			const windowValues = new Set<string>();
+			let segmentMatches = true;
+			for (let t = 0; t < s; t++) {
+				const value = newLines[newTop + t] ?? "";
+				if (value !== (baseLines[top - s + t] ?? "")) {
+					segmentMatches = false;
+					break;
+				}
+				windowValues.add(value);
+				if (visibleWidth(value) > 0) {
+					anchored = true;
+				}
+			}
+			if (!segmentMatches) {
+				continue;
+			}
+			// Backing (windowMultiplicitiesBacked's rule): every copy of a
+			// window value the new frame displays above the aligned top claims
+			// one committed copy from scrollback — not just the skipped rows'
+			// copies. An above-viewport copy pairing, under repetition, with a
+			// committed row the skipped rows already claim would double-book
+			// it, and the aligned repaint would destroy the unflushed original
+			// (#2415). The window is scoped to the skipped values so unrelated
+			// above-screen edits stay licensed (#2582).
+			const claimed = new Map<string, number>();
+			for (let i = 0; i < aligned; i++) {
+				const value = newLines[i] ?? "";
+				if (windowValues.has(value)) {
+					claimed.set(value, (claimed.get(value) ?? 0) + 1);
+				}
+			}
+			for (const value of windowValues) {
+				if ((supply.get(value) ?? 0) < (claimed.get(value) ?? 0)) {
+					segmentMatches = false;
+					break;
+				}
+			}
+			if (!segmentMatches) {
+				continue;
+			}
+			// Segment 2 — the screen: every painted row must pair with a row
+			// of the old screen (never flushed, so repainting it duplicates
+			// nothing and no unflushed row is destroyed), same offset until
+			// the single deleted block below the seam (the teardown), then at
+			// that block's shift. The walk consumes exactly the old screen
+			// (newLen - aligned = height - s painted rows, plus the s deleted
+			// rows absorbed by the promotion); a second shift, an insertion,
+			// or an edit fails and keeps the refill.
+			let shift = 0;
+			for (let j = 0; aligned + j < newLen; j++) {
+				const painted = newLines[aligned + j] ?? "";
+				if (visibleWidth(painted) > 0) {
+					anchored = true;
+				}
+				const paired = top + j + shift;
+				if (paired < baseLen && painted === (baseLines[paired] ?? "")) {
+					continue;
+				}
+				if (shift === 0 && paired + s < baseLen && painted === (baseLines[paired + s] ?? "")) {
+					shift = s;
+					continue;
+				}
+				segmentMatches = false;
+				break;
+			}
+			if (!segmentMatches) {
+				continue;
+			}
+			// Removed-value guard: when the candidate deletes a visible row
+			// whose value still appears above the aligned top, the above-top
+			// copies lean on committed scrollback copies of that value — the
+			// exact place a hidden above-screen edit (#2582's licensed hide)
+			// can have inflated the committed counts. The pairing above proves
+			// byte-identity to the committed frame, not to physical
+			// scrollback, so such a candidate could destroy the screen's last
+			// physical copy under repetition. Refusing it costs only a refill
+			// (loss-free, bounded duplicates); in an untainted frame the guard
+			// fires only when genuinely deleted screen content repeats above
+			// the boundary.
+			const paintedCounts = new Map<string, number>();
+			for (let i = aligned; i < newLen; i++) {
+				const value = newLines[i] ?? "";
+				paintedCounts.set(value, (paintedCounts.get(value) ?? 0) + 1);
+			}
+			let removesBackedValue = false;
+			for (const [value, count] of oldScreen) {
+				if (
+					count - (paintedCounts.get(value) ?? 0) > 0 &&
+					visibleWidth(value) > 0 &&
+					valuesAbove.has(value)
+				) {
+					removesBackedValue = true;
+					break;
+				}
+			}
+			if (removesBackedValue) {
+				continue;
+			}
+			if (anchored) {
+				return aligned;
+			}
+		}
+		return null;
+	}
+
+	/** Whether a rendered line shows nothing — no visible non-blank cell. */
+	private static isVisuallyBlank(line: string): boolean {
+		if (isImageLine(line)) {
+			return false;
+		}
+		for (let i = 0; i < line.length; ) {
+			const ansi = extractAnsiCode(line, i);
+			if (ansi) {
+				i += ansi.length;
+				continue;
+			}
+			// Read whole code points: each UTF-16 surrogate of an astral char
+			// is zero-width alone, but the char it forms is visible content.
+			const ch = String.fromCodePoint(line.codePointAt(i) ?? 0);
+			// Whitespace renders blank; zero-width characters (U+200B, combining
+			// marks) occupy no cells and render blank too.
+			if (!isWhitespaceChar(ch) && visibleWidth(ch) > 0) {
+				return false;
+			}
+			i += ch.length;
+		}
+		return true;
 	}
 
 	/**

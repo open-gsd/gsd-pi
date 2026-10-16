@@ -1,5 +1,5 @@
 // gsd-pi - Write gate state (database rows) and policy guards.
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { minimatch } from "minimatch";
@@ -13,7 +13,7 @@ import {
   isReadOnlyPlanningDispatchAgent,
 } from "../planning-subagent-registry.js";
 import { logWarning } from "../workflow-logger.js";
-import { isGsdWorktreePath, resolveWorktreeProjectRoot } from "../worktree-root.js";
+import { isGsdWorktreePath, resolveWorktreeProjectRoot, worktreeRootFromWorktreePath } from "../worktree-root.js";
 import { worktreesDirs } from "../worktree-placement.js";
 import { bashReferencesProjectRootOutsideWorktree } from "../worktree-shell-guard.js";
 import { evaluateGateAnswer, type GateAnswerVerdict } from "../consent-verdict.js";
@@ -1424,12 +1424,44 @@ function isPathContained(target: string, container: string): boolean {
   return target.startsWith(container.endsWith(sep) ? container : container + sep);
 }
 
+/**
+ * Root of the worktree `effectiveBasePath` lies in when that directory is no
+ * longer a git worktree: it is gone, or it has no `.git` file with a
+ * `gitdir:` pointer. That is the state a worktree removal leaves behind while
+ * a session still runs in it. Null for a live worktree and for a path that is
+ * not inside a worktree layout.
+ */
+function staleWorktreeRoot(effectiveBasePath: string): string | null {
+  const worktreeRoot = worktreeRootFromWorktreePath(effectiveBasePath);
+  if (!worktreeRoot) return null;
+  try {
+    return readFileSync(join(worktreeRoot, ".git"), "utf-8").trimStart().startsWith("gitdir:")
+      ? null
+      : worktreeRoot;
+  } catch {
+    return worktreeRoot;
+  }
+}
+
 function formatWorktreeIsolationBlockReason(
   tool: string,
   displayTarget: string,
   isAutoLive: boolean,
   effectiveBasePath: string,
 ): string {
+  const staleRoot = staleWorktreeRoot(effectiveBasePath);
+  if (staleRoot) {
+    return [
+      `HARD BLOCK: ${tool} target "${displayTarget}" is blocked because the milestone worktree`,
+      `this session runs in is no longer a git worktree: "${staleRoot}" is missing or has no \`.git\``,
+      `link, so it was removed while the session was running. Nothing written there would be`,
+      `committed, and writes to the project root stay blocked while \`git.isolation: worktree\` is`,
+      `configured. Do not retry and do not work around this from the shell. Stop this unit and`,
+      `report it. The operator has to stop auto-mode, delete the leftover directory if it still`,
+      `exists, run \`git worktree prune\`, and start auto-mode again so the worktree is recreated.`,
+    ].join(" ");
+  }
+
   if (isGsdWorktreePath(effectiveBasePath)) {
     return [
       `HARD BLOCK: ${tool} target "${displayTarget}" is outside the active milestone worktree`,

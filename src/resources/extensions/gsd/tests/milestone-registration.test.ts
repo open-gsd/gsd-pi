@@ -3,12 +3,14 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { markApprovalGateVerified, clearDiscussionFlowState } from "../bootstrap/write-gate.ts";
-import { _setDomainOperationFaultForTest } from "../db/domain-operation.ts";
+import { _setDomainOperationFaultForTest, executeDomainOperation } from "../db/domain-operation.ts";
+import { adoptOrTransitionLifecycle, readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
+import { readProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.js";
 import { piExecutionInvocation } from "../execution-invocation.ts";
 import {
   _getAdapter,
@@ -23,7 +25,7 @@ import { countUnadoptedHierarchyRows } from "../lifecycle-backfill-domain-operat
 import { discardMilestone, parkMilestone, unparkMilestone } from "../milestone-actions.ts";
 import { clearReservedMilestoneIds, reserveMilestoneId } from "../milestone-ids.ts";
 import { registerMilestones } from "../milestone-registration.ts";
-import { clearPathCache } from "../paths.ts";
+import { canonicalPhaseDirName, clearPathCache } from "../paths.ts";
 import { piPlanningInvocation } from "../planning-invocation.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { executeMilestoneGenerateId, executeSummarySave } from "../tools/workflow-tool-executors.ts";
@@ -65,6 +67,47 @@ function milestoneLifecycle(milestoneId: string): Record<string, unknown> | unde
 
 function generateId(base: string, callId: string) {
   return executeMilestoneGenerateId(base, piExecutionInvocation("gsd_milestone_generate_id", callId));
+}
+
+/**
+ * Insert a milestone row and adopt it with the lifecycle status its legacy
+ * status maps to, as the lifecycle backfill would — the state of a row that
+ * predates a given tool call.
+ */
+function adoptMilestoneRow(milestoneId: string, title: string, status: "complete" | "active"): void {
+  insertMilestone({ id: milestoneId, title, status });
+  const lifecycleStatus = status === "complete" ? "completed" : "ready";
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: `test.milestone.adopt.${milestoneId.toLowerCase()}`,
+    idempotencyKey: `test:milestone-registration:adopt:${milestoneId.toLowerCase()}:${lifecycleStatus}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { milestoneId, lifecycleStatus },
+  }, (context) => {
+    const lifecycle = adoptOrTransitionLifecycle(context, {
+      itemKind: "milestone",
+      milestoneId,
+      lifecycleStatus,
+      adoptedFromStatus: lifecycleStatus,
+    });
+    return {
+      events: [{
+        eventType: "test.milestone.adopted",
+        entityType: "milestone",
+        entityId: milestoneId,
+        payload: { lifecycleId: lifecycle.lifecycleId, lifecycleStatus },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `test/milestone/${milestoneId.toLowerCase()}`,
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
 }
 
 describe("milestone registration", () => {
@@ -218,11 +261,10 @@ describe("milestone registration", () => {
     );
     assert.deepEqual(registeredEvents(), [
       { id: "M001", source: "project-sequence", created: 1 },
-      { id: "M002", source: "project-sequence", created: 1 },
     ]);
-    assert.equal(getMilestone("M002")?.status, "queued", "a checked box registers an open milestone");
+    assert.equal(getMilestone("M002"), null, "a checked box never registers a milestone (#2801)");
     assert.deepEqual(
-      milestoneLifecycle("M002"),
+      milestoneLifecycle("M001"),
       { status: "ready", version: 0, writer: "artifact.save" },
       "the new milestone is adopted in the same operation",
     );
@@ -232,7 +274,7 @@ describe("milestone registration", () => {
 
     const second = await executeSummarySave({ artifact_type: "PROJECT", content }, base);
     assert.ok(!second.isError, second.content[0]!.text);
-    assert.equal(registeredEvents().length, 2, "an unchanged sequence registers nothing");
+    assert.equal(registeredEvents().length, 1, "an unchanged sequence registers nothing");
     assert.equal(registerOperations(), 0, "a PROJECT save commits no separate milestone.register operation");
   });
 
@@ -268,7 +310,10 @@ describe("milestone registration", () => {
     const originalCwd = process.cwd();
     process.chdir(base);
     t.after(() => process.chdir(originalCwd));
-    const firstContent = ["# Project", "", "## Milestone Sequence", "", "- [x] M001: Legacy — done before", ""].join("\n");
+    // M001 registers from an open line; the NEXT save checks its box (as a
+    // model rewrite would) and the repair re-renders it from the DB, which
+    // says the milestone is not complete.
+    const firstContent = ["# Project", "", "## Milestone Sequence", "", "- [ ] M001: Legacy — done before", ""].join("\n");
     const first = await executeSummarySave({ artifact_type: "PROJECT", content: firstContent }, base);
     assert.ok(!first.isError, first.content[0]!.text);
 
@@ -291,5 +336,207 @@ describe("milestone registration", () => {
     assert.equal(await discardMilestone(base, "M001", { reason: "superseded" }), true);
     invalidateStateCache();
     assert.equal((await deriveState(base)).activeMilestone?.id, "M002");
+  });
+
+  test("a PROJECT save keeps stored titles, phase dirs, and done history; it registers only new open lines (#2801)", async (t) => {
+    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+    markApprovalGateVerified("depth_verification_project_confirm", base);
+    t.after(() => clearDiscussionFlowState(base));
+    const originalCwd = process.cwd();
+    process.chdir(base);
+    t.after(() => process.chdir(originalCwd));
+
+    // The issue's starting state: complete M002/M003, active M004, each with
+    // an established phase directory. M001 predates the DB — no row.
+    const adopted: Array<[string, string, "complete" | "active"]> = [
+      ["M002", "Billing - Invoices and Payments", "complete"],
+      ["M003", "Reporting - Monthly Revenue Dashboards", "complete"],
+      ["M004", "Notifications - Email and Push Delivery", "active"],
+    ];
+    for (const [id, title, status] of adopted) adoptMilestoneRow(id, title, status);
+    const dirs = adopted.map(([id, title]) => canonicalPhaseDirName(id, title));
+    for (const dir of dirs) {
+      mkdirSync(join(base, ".gsd", "phases", dir), { recursive: true });
+      writeFileSync(join(base, ".gsd", "phases", dir, "01-01-PLAN.md"), "# Plan\n");
+    }
+
+    // The discuss rewrite from the issue: short titles, checked history, one
+    // genuinely new open milestone.
+    const content = [
+      "# Project",
+      "",
+      "## Milestone Sequence",
+      "",
+      "- [x] M001: Foundation — app shell, auth and settings.",
+      "- [x] M002: Billing — invoices and payments.",
+      "- [x] M003: Reporting — monthly revenue dashboards.",
+      "- [ ] M004: Notifications — email and push delivery.",
+      "- [ ] M005: Search — full-text search.",
+      "",
+    ].join("\n");
+
+    const result = await executeSummarySave({ artifact_type: "PROJECT", content }, base);
+    assert.ok(!result.isError, result.content[0]!.text);
+
+    // Existing rows keep their stored titles — complete ones included.
+    assert.equal(getMilestone("M002")?.title, "Billing - Invoices and Payments", "a complete row keeps its stored title");
+    assert.equal(getMilestone("M003")?.title, "Reporting - Monthly Revenue Dashboards");
+    assert.equal(getMilestone("M004")?.title, "Notifications - Email and Push Delivery");
+    assert.equal(getMilestone("M002")?.status, "complete", "a checked box never completes a milestone");
+    assert.equal(getMilestone("M004")?.status, "active", "an existing row keeps its lifecycle status");
+
+    // Established phase directories stay where they are.
+    for (const dir of dirs) {
+      assert.ok(existsSync(join(base, ".gsd", "phases", dir, "01-01-PLAN.md")), `${dir} is not renamed`);
+    }
+    assert.ok(!existsSync(join(base, ".gsd", "phases", "02-billing")), "no short-title directory is created");
+
+    // Done history with no row is never resurrected as queued; only the new
+    // open line registers.
+    assert.equal(getMilestone("M001"), null, "a [x] line with no row does not become a queued milestone");
+    assert.equal(getMilestone("M005")?.status, "queued", "the new open milestone registers");
+    assert.equal(getMilestone("M005")?.title, "Search");
+    assert.deepEqual(
+      milestoneLifecycle("M005"),
+      { status: "ready", version: 0, writer: "artifact.save" },
+      "the new milestone is adopted in the same operation",
+    );
+  });
+
+  test("a PROJECT save of pure done history with no rows succeeds and keeps the lines (#2801)", async (t) => {
+    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+    markApprovalGateVerified("depth_verification_project_confirm", base);
+    t.after(() => clearDiscussionFlowState(base));
+    const originalCwd = process.cwd();
+    process.chdir(base);
+    t.after(() => process.chdir(originalCwd));
+
+    const content = [
+      "# Project",
+      "",
+      "## Milestone Sequence",
+      "",
+      "- [x] M001: Foundation — done.",
+      "- [x] M002: Billing — done.",
+      "",
+    ].join("\n");
+
+    const result = await executeSummarySave({ artifact_type: "PROJECT", content }, base);
+    assert.ok(!result.isError, result.content[0]!.text);
+    assert.equal(getAllMilestones().length, 0, "no rows are resurrected from done lines");
+    const stored = getArtifact("PROJECT.md");
+    assert.ok(stored);
+    assert.ok(stored.full_content.includes("- [x] M001: Foundation — done."), "the history lines persist");
+    assert.deepEqual(
+      readProjectMilestoneSequence(_getAdapter()!),
+      ["M001", "M002"],
+      "the sequence table keeps the history in document order",
+    );
+  });
+
+  test("a PROJECT save that repairs a done mismatch keeps checked history with no row (#2801)", async (t) => {
+    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+    markApprovalGateVerified("depth_verification_project_confirm", base);
+    t.after(() => clearDiscussionFlowState(base));
+    const originalCwd = process.cwd();
+    process.chdir(base);
+    t.after(() => process.chdir(originalCwd));
+
+    // M002 is active in the DB; the document wrongly checks its box. M001 has
+    // no row — its checked line is history the repair must keep (once, even
+    // when the document repeats it).
+    adoptMilestoneRow("M002", "Existing - Work", "active");
+    const content = [
+      "# Project",
+      "",
+      "## Milestone Sequence",
+      "",
+      "- [x] M001: Foundation — done.",
+      "- [x] M001: Foundation — done.",
+      "- [x] M002: Existing — work.",
+      "",
+    ].join("\n");
+
+    const result = await executeSummarySave({ artifact_type: "PROJECT", content }, base);
+    assert.ok(!result.isError, result.content[0]!.text);
+    assert.equal(result.details.milestoneSequenceSelfHealed, true);
+    assert.equal(getMilestone("M001"), null, "the history line stays rowless");
+    assert.equal(getMilestone("M002")?.status, "active", "a checked box never completes a milestone");
+
+    const stored = getArtifact("PROJECT.md");
+    assert.ok(stored);
+    assert.equal(
+      stored.full_content.split("- [x] M001: Foundation — done.").length - 1,
+      1,
+      "the checked history survives the repair exactly once",
+    );
+    assert.match(stored.full_content, /- \[ \] M002: [^\n]*\bwork\./, "the DB status corrects the checked box");
+  });
+
+  test("a sequence line fills an empty title only over a placeholder directory; an established directory is untouched (#2801)", async (t) => {
+    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+    markApprovalGateVerified("depth_verification_project_confirm", base);
+    t.after(() => clearDiscussionFlowState(base));
+    const originalCwd = process.cwd();
+    process.chdir(base);
+    t.after(() => process.chdir(originalCwd));
+
+    insertMilestone({ id: "M001", status: "queued" });
+    insertMilestone({ id: "M002", status: "queued" });
+    insertMilestone({ id: "M003", status: "queued" });
+    // M002 has an established directory named for a real title; M003 has the
+    // id-slug placeholder a generate-id-era directory would have.
+    mkdirSync(join(base, ".gsd", "phases", "02-established-name"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "phases", "02-established-name", "01-01-PLAN.md"), "# Plan\n");
+    mkdirSync(join(base, ".gsd", "phases", canonicalPhaseDirName("M003", "M003")), { recursive: true });
+
+    const content = [
+      "# Project",
+      "",
+      "## Milestone Sequence",
+      "",
+      "- [ ] M001: Fresh — thing.",
+      "- [ ] M002: Short — other.",
+      "- [ ] M003: Third — bit.",
+      "",
+    ].join("\n");
+
+    const result = await executeSummarySave({ artifact_type: "PROJECT", content }, base);
+    assert.ok(!result.isError, result.content[0]!.text);
+
+    assert.equal(getMilestone("M001")?.title, "Fresh", "no directory: the line fills the empty title");
+    assert.equal(getMilestone("M002")?.title, "", "an established directory blocks the fill");
+    assert.ok(existsSync(join(base, ".gsd", "phases", "02-established-name", "01-01-PLAN.md")), "the established directory stays");
+    assert.ok(!existsSync(join(base, ".gsd", "phases", "02-short")), "no short-title directory is created");
+
+    assert.equal(getMilestone("M003")?.title, "Third", "a placeholder directory still fills and renames (#1526)");
+    assert.ok(!existsSync(join(base, ".gsd", "phases", canonicalPhaseDirName("M003", "M003"))), "the placeholder directory is gone");
+    assert.ok(existsSync(join(base, ".gsd", "phases", canonicalPhaseDirName("M003", "Third"))), "the placeholder renamed to the title slug");
+  });
+
+  test("a sequence line fills only an empty stored title; a stored title is never overwritten", async (t) => {
+    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+    markApprovalGateVerified("depth_verification_project_confirm", base);
+    t.after(() => clearDiscussionFlowState(base));
+    const originalCwd = process.cwd();
+    process.chdir(base);
+    t.after(() => process.chdir(originalCwd));
+
+    // A generate-id placeholder row: id only, no title yet.
+    insertMilestone({ id: "M001", status: "queued" });
+
+    const first = await executeSummarySave(
+      { artifact_type: "PROJECT", content: "# Project\n\n## Milestone Sequence\n\n- [ ] M001: Real Title — one-liner\n" },
+      base,
+    );
+    assert.ok(!first.isError, first.content[0]!.text);
+    assert.equal(getMilestone("M001")?.title, "Real Title", "the line fills an empty stored title");
+
+    const second = await executeSummarySave(
+      { artifact_type: "PROJECT", content: "# Project\n\n## Milestone Sequence\n\n- [ ] M001: Other — tail\n" },
+      base,
+    );
+    assert.ok(!second.isError, second.content[0]!.text);
+    assert.equal(getMilestone("M001")?.title, "Real Title", "a stored title survives a rewrite with different wording");
   });
 });

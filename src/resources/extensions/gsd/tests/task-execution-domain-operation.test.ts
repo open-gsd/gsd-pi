@@ -440,7 +440,8 @@ for (const contract of [
       coordinationDispatchId: dispatchId,
       workerId: "worker-1",
       milestoneLeaseToken: 7,
-    } as const;
+      startedAt: String(row("SELECT COALESCE(started_at, claimed_at) AS started_at FROM workflow_execution_attempts").started_at),
+    };
     assert.deepEqual(readTaskAttempt(claim.attemptId), expectedSnapshot);
     assert.deepEqual(
       readLatestTaskAttempt({ milestoneId: "M001", sliceId: "S01", taskId: "T01" }),

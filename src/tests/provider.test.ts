@@ -235,7 +235,7 @@ test('getBraveApiKey reads from process.env.BRAVE_API_KEY', async () => {
 // 4. Boundary contract — S01→S02 public API surface
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('provider.ts exports exactly the 7 expected functions', async () => {
+test('provider.ts exports exactly the 8 expected functions', async () => {
   const provider = await import(
     '../resources/extensions/search-the-web/provider.ts'
   )
@@ -246,6 +246,7 @@ test('provider.ts exports exactly the 7 expected functions', async () => {
     'getBraveApiKey',
     'braveHeaders',
     'getOllamaApiKey',
+    'getFirecrawlApiKey',
     'getSearchProviderPreference',
     'setSearchProviderPreference',
   ] as const
@@ -262,6 +263,6 @@ test('provider.ts exports exactly the 7 expected functions', async () => {
   assert.deepEqual(
     actualFunctions.sort(),
     [...expectedExports].sort(),
-    'provider.ts should export exactly the 7 expected functions (no extra function exports)',
+    'provider.ts should export exactly the 8 expected functions (no extra function exports)',
   )
 })

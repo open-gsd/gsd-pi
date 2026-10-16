@@ -482,6 +482,16 @@ export class AgentSession implements AgentSessionHost {
 		return this._model.setModel(model, options);
 	}
 
+	/**
+	 * Re-resolve the session model if it is still the `unknown/unknown`
+	 * placeholder (#2782). Called after `session_start` (via
+	 * `bindExtensions()`) and lazily before each prompt so providers
+	 * registered on `session_start` can satisfy the configured default.
+	 */
+	repairPlaceholderModel(): Promise<void> {
+		return this._model.repairPlaceholderModel();
+	}
+
 	cycleModel(direction?: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		return this._model.cycleModel(direction);
 	}

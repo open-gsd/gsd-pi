@@ -97,6 +97,7 @@ This opens an interactive wizard showing which keys are configured and which are
 |------|---------------------|---------|-----------|
 | Tavily Search | `TAVILY_API_KEY` | Web search for non-Anthropic models | [tavily.com/app/api-keys](https://tavily.com/app/api-keys) |
 | Brave Search | `BRAVE_API_KEY` | Web search for non-Anthropic models | [brave.com/search/api](https://brave.com/search/api) |
+| Firecrawl Search | `FIRECRAWL_API_KEY` | Web search and page extraction for non-Anthropic models | [firecrawl.dev](https://firecrawl.dev) |
 | Context7 Docs | `CONTEXT7_API_KEY` | Library documentation lookup | [context7.com/dashboard](https://context7.com/dashboard) |
 
 ### How it works
