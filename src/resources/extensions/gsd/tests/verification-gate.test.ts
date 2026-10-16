@@ -372,6 +372,18 @@ describe("verification-gate: discovery", () => {
     assert.deepStrictEqual(result.commands, []);
   });
 
+  test("labelled prose checklist verify routes to task-plan-prose, not execution (issue #2849)", () => {
+    const result = discoverCommands({
+      taskPlanVerify: [
+        'Check 1 - front-door sections present. Command: grep -n "Live app" README.md. Expected: at least one match (exit 0).',
+        'Check 6 - moved deep-dive preserved. Command: grep -n "HEART_LOG_FORMAT" docs/operating-the-app.md. Expected: one match (exit 0).',
+      ].join("\n"),
+      cwd: tmp,
+    });
+    assert.equal(result.source, "task-plan-prose");
+    assert.deepStrictEqual(result.commands, []);
+  });
+
   test("prose taskPlanVerify with passing task evidence beats preference commands (issue #1591)", () => {
     const result = discoverCommands({
       taskPlanVerify: "Planning artifacts exist and contain all required sections",
@@ -1694,6 +1706,39 @@ test("isLikelyCommand: a repo-relative file path followed by prose stays prose (
   // prose: no marker words, 4+ word tail.
   assert.equal(isLikelyCommand("docs/report.txt one two three"), false);
   assert.equal(isLikelyCommand("src/app.ts compiles without errors"), false);
+});
+
+test("isLikelyCommand: labelled prose checklist lines with embedded flags are prose (issue #2849)", () => {
+  // #2849 repro: a human-readable Verify checklist line. The bare prose dash
+  // plus the embedded `grep -n` flag won the flag heuristic before the
+  // capitalized-prose guard was reached, so the line executed verbatim and
+  // the host VERIFY record filled with exit-2/exit-127 rows.
+  assert.equal(
+    isLikelyCommand('Check 1 - front-door sections present. Command: grep -n "Live app" README.md. Expected: at least one match (exit 0).'),
+    false,
+  );
+  assert.equal(
+    isLikelyCommand("Check four - no duplicated headers Command python code expected empty list"),
+    false,
+  );
+  assert.equal(
+    isLikelyCommand("Validate the report - ensure all cells match the published values"),
+    false,
+  );
+  // A bare `-` is a prose dash, not a flag.
+  assert.equal(isLikelyCommand("Rerun - failed"), false);
+  // The inverse failure mode stays closed: anchored first tokens and env
+  // assignment prefixes keep real commands runnable.
+  assert.equal(isLikelyCommand("grep -n 'Live app' README.md"), true);
+  assert.equal(isLikelyCommand("! grep -q 'M001 in progress' README.md"), true);
+  assert.equal(isLikelyCommand("CI=1 rspec --format progress"), true);
+  // Capitalized-but-real executables keep reading as commands (codex review):
+  // path-shaped first tokens are exempt from the prose guard, and Rscript is
+  // a known prefix.
+  assert.equal(isLikelyCommand("Rscript --vanilla scripts/verify.R fixture.json"), true);
+  assert.equal(isLikelyCommand("C:\\Python312\\python.exe -m pytest tests"), true);
+  // A bare `-` stays a stdin operand for lowercase invocations (codex review).
+  assert.equal(isLikelyCommand("cmp - reference.bin 0 0"), true);
 });
 
 test("validateVerificationCommand allows exit-code echo diagnostic suffix", () => {

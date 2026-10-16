@@ -724,6 +724,7 @@ const KNOWN_COMMAND_PREFIXES = new Set([
   "echo", "cat", "ls", "test", "true", "false", "pwd", "env",
   "make", "cargo", "go", "python", "python3", "pip", "pip3",
   "ruby", "gem", "bundle", "rake",
+  "Rscript",
   "java", "javac", "mvn", "gradle",
   "docker", "docker-compose",
   "git", "gh",
@@ -934,14 +935,17 @@ function stripLeadingEnvAssignments(command: string): { stripped: boolean; remai
  *   1. First token is a known command prefix
  *   2. First token is path-like (`/`, `./`, `../`, or a repo-relative
  *      executable path such as `bin/rails`, #2664)
- *   3. Any token starts with `-` (flag-like)
- *   4. First token contains no uppercase letters (commands are lowercase)
- *      AND first token does not end with a comma or colon (prose punctuation)
- *   5. Leading `NAME=value` environment assignments are unwrapped and the
+ *   3. Any token starts with `-` and is not a bare `-` in a capitalized line
+ *      (a bare `-` is a prose dash there, #2849; it stays a stdin operand
+ *      for lowercase invocations)
+ *   4. Leading `NAME=value` environment assignments are unwrapped and the
  *      anchored command they prefix is judged instead (#2664)
  *
  * Heuristics (any true → prose-like):
- *   1. First token starts with an uppercase letter and the string has 4+ words
+ *   1. First token starts with an uppercase letter (and is not path-like)
+ *      and the string has 4+ words — evaluated before the flag heuristic,
+ *      #2849; for env-prefixed strings the command word after the
+ *      assignments is judged, not the assignment
  *   2. String contains commas followed by spaces (prose clause structure)
  *   3. First token has no ASCII letters or digits and the string has 4+ words
  */
@@ -1004,11 +1008,27 @@ export function isLikelyCommand(cmd: string): boolean {
     return knownPrefixInvocationIsCommand(effectiveTokens, proseTokens);
   }
 
-  // Has flag-like tokens → command
-  if (effectiveTokens.some(t => t.startsWith("-"))) return true;
+  // An unanchored capitalized first word reads as prose even when the tail
+  // carries flags (#1671 principle, #2849): "Check 1 - front-door sections
+  // present. Command: grep -n ..." carries a bare prose dash plus an embedded
+  // flag, which used to win the flag heuristic below and run the labelled
+  // line verbatim. Known prefixes and executable paths are already accepted
+  // above, so only unrecognized first words reach this guard. Path-like first
+  // tokens (`C:\Python312\python.exe`) stay command-shaped, and env
+  // assignments are shell syntax, not prose words — judge the command they
+  // prefix (`CI=1 rspec --format progress` stays a command).
+  const proseFirstToken = envStrip.stripped
+    ? envStrip.remainder.split(/\s+/)[0] ?? ""
+    : effectiveFirstToken;
+  const capitalizedProseFirstWord = /^[A-Z]/.test(proseFirstToken)
+    && !proseFirstToken.includes("/")
+    && !proseFirstToken.includes("\\");
+  if (capitalizedProseFirstWord && effectiveTokens.length >= 4) return false;
 
-  // First token starts with uppercase + 4 or more words → prose
-  if (/^[A-Z]/.test(effectiveFirstToken) && effectiveTokens.length >= 4) return false;
+  // Has flag-like tokens → command. A bare `-` reads as a prose dash in a
+  // capitalized line (#2849) but stays a stdin operand for lowercase
+  // invocations (`cmp - reference.bin 0 0`).
+  if (effectiveTokens.some(t => t.startsWith("-") && (t !== "-" || !capitalizedProseFirstWord))) return true;
 
   // Contains comma-space patterns (prose clause separators) → prose
   if (/,\s/.test(trimmed) && tokens.length >= 4) return false;
