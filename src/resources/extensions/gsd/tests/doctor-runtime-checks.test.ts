@@ -240,11 +240,19 @@ test("doctor surfaces unresolved projection evidence with recovery instructions"
   mkdirSync(join(dir, ".gsd", evidencePath), { recursive: true });
   mkdirSync(join(dir, ".gsd", "migration"), { recursive: true });
   writeFileSync(join(dir, ".gsd", evidencePath, "later.md"), "later accepted work\n");
+  const evidenceStat = lstatSync(join(dir, ".gsd", evidencePath));
   writeFileSync(
     join(dir, ".gsd", "migration", "unbound-projection-evidence.json"),
     `${JSON.stringify([{
+      evidenceId: `evidence:sha256:${createHash("sha256").update(JSON.stringify({
+        evidencePath,
+        kind: "quarantine",
+        logicalPath: "notes/my notes/result.md",
+        scope: "tree",
+      })).digest("hex")}`,
       evidencePath,
-      evidenceIdentity: null,
+      evidenceIdentity: `${evidenceStat.dev}:${evidenceStat.ino}`,
+      contentDigest: `sha256:${createHash("sha256").update("later accepted work\n").digest("hex")}`,
       kind: "quarantine",
       logicalPath: "notes/my notes/result.md",
       scope: "tree",
@@ -261,7 +269,48 @@ test("doctor surfaces unresolved projection evidence with recovery instructions"
   assert.match(issue.message, /evidence:sha256:[0-9a-f]+ --action=discard --consent=discard:sha256:/u);
   assert.match(issue.message, /--action=preserve/u);
   assert.match(issue.message, /--action=restore/u);
+  assert.match(issue.message, /--consent=discard:sha256:[0-9a-f]{64} deletes \.gsd\/notes\/my notes\/\.gsd-projection-remove-/u);
+  assert.doesNotMatch(issue.message, /the projection itself/u);
   assert.equal(issue.fixable, false);
+});
+
+test("doctor says that discarding canonical evidence deletes the projection itself (#2846)", async (t) => {
+  const dir = createGitProject();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  // Canonical evidence is the projection file: discard removes it, which the
+  // printed command must say so an operator does not lose a merely stale
+  // projection by picking the first option.
+  mkdirSync(join(dir, ".gsd", "notes"), { recursive: true });
+  mkdirSync(join(dir, ".gsd", "migration"), { recursive: true });
+  writeFileSync(join(dir, ".gsd", "notes", "result.md"), "stale ledger\n");
+  const evidenceStat = lstatSync(join(dir, ".gsd", "notes", "result.md"));
+  writeFileSync(
+    join(dir, ".gsd", "migration", "unbound-projection-evidence.json"),
+    `${JSON.stringify([{
+      evidenceId: `evidence:sha256:${createHash("sha256").update(JSON.stringify({
+        evidencePath: "notes/result.md",
+        kind: "canonical",
+        logicalPath: "notes/result.md",
+        scope: "file",
+      })).digest("hex")}`,
+      evidencePath: "notes/result.md",
+      evidenceIdentity: `${evidenceStat.dev}:${evidenceStat.ino}`,
+      contentDigest: `sha256:${createHash("sha256").update("stale ledger\n").digest("hex")}`,
+      kind: "canonical",
+      logicalPath: "notes/result.md",
+      scope: "file",
+      transition: "retained",
+    }])}\n`,
+  );
+
+  const report = await runGSDDoctor(dir);
+  const issue = report.issues.find(candidate => candidate.code === "unresolved_projection_evidence");
+  assert.ok(issue);
+  assert.match(
+    issue.message,
+    /--action=discard --consent=discard:sha256:[0-9a-f]{64} deletes \.gsd\/notes\/result\.md \(the projection itself; --action=restore keeps it in place\)/u,
+  );
 });
 
 test("doctor fix preserves a pending gate block in the hook state (#2194)", async (t) => {

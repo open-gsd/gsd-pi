@@ -49,12 +49,17 @@ function unresolvedProjectionEvidenceIssue(
   const discard = preview("discard");
   const preserve = preview("preserve");
   const restore = preview("restore");
+  // Discard deletes the evidence path; for canonical evidence that is the
+  // projection itself, which an operator must not learn after the fact (#2846).
+  const discarded = discard.kind === "canonical"
+    ? `.gsd/${discard.evidencePath} (the projection itself; --action=restore keeps it in place)`
+    : `.gsd/${discard.evidencePath}`;
   return {
     severity: "error",
     code: "unresolved_projection_evidence",
     scope: "project",
     unitId: "project",
-    message: `Unresolved ${discard.scope} projection evidence for ${discard.logicalPath} is retained at .gsd/${discard.evidencePath}.${note} Review exact content ${discard.contentDigest}. Resolve by ID: /gsd doctor resolve-evidence ${discard.evidenceId} --action=discard --consent=${discard.consent}; --action=preserve --consent=${preserve.consent} retains it at .gsd/${preserve.destinationPath}; or --action=restore --consent=${restore.consent} restores it to .gsd/${restore.destinationPath}.`,
+    message: `Unresolved ${discard.scope} projection evidence for ${discard.logicalPath} is retained at .gsd/${discard.evidencePath}.${note} Review exact content ${discard.contentDigest}. Resolve by ID: /gsd doctor resolve-evidence ${discard.evidenceId} --action=discard --consent=${discard.consent} deletes ${discarded}; --action=preserve --consent=${preserve.consent} retains it at .gsd/${preserve.destinationPath}; or --action=restore --consent=${restore.consent} restores it to .gsd/${restore.destinationPath}.`,
     file: `.gsd/${discard.evidencePath}`,
     fixable: false,
   };
