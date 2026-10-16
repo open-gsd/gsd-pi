@@ -24,6 +24,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -1243,20 +1244,20 @@ test("a drifted resolution whose guard holds the moved bytes retains them as the
   );
   const resolution = (readIndex(fixture.base)[0]!.resolution as { guardPath: string }).guardPath;
   // The later write lands the way a readable-index publication does: a fresh
-  // file renamed into place, so the identity changes (an in-place truncation
-  // would keep the placeholder's inode and converge as a completed exchange).
-  // Some filesystems hand the just-freed inode straight back, so recreate
-  // until the identity genuinely differs from the placeholder's.
+  // file prepared beside the old node and renamed into place, so the identity
+  // changes (an in-place truncation would keep the placeholder's inode and
+  // converge as a completed exchange; recreating after an unlink races the
+  // filesystem's inode reuse). Preparing the replacement while the placeholder
+  // still exists guarantees a distinct inode on every filesystem.
   const REWRITTEN = "rewritten staged artifact\n";
-  const placeholderStat = lstatSync(join(fixture.rootPath, fixture.evidencePath), { bigint: true });
-  const placeholderIdentity = `${placeholderStat.dev}:${placeholderStat.ino}`;
-  let rewrittenStat = lstatSync(join(fixture.rootPath, fixture.evidencePath), { bigint: true });
-  for (let attempt = 0; `${rewrittenStat.dev}:${rewrittenStat.ino}` === placeholderIdentity; attempt++) {
-    if (attempt >= 50) throw new Error("could not produce a new inode for the rewritten artifact");
-    rmSync(join(fixture.rootPath, fixture.evidencePath));
-    writeFileSync(join(fixture.rootPath, fixture.evidencePath), REWRITTEN);
-    rewrittenStat = lstatSync(join(fixture.rootPath, fixture.evidencePath), { bigint: true });
-  }
+  const placeholderPath = join(fixture.rootPath, fixture.evidencePath);
+  const stagedPath = `${placeholderPath}.rewritten-staged`;
+  writeFileSync(stagedPath, REWRITTEN);
+  const placeholderStat = lstatSync(placeholderPath, { bigint: true });
+  rmSync(placeholderPath);
+  renameSync(stagedPath, placeholderPath);
+  const rewrittenStat = lstatSync(placeholderPath, { bigint: true });
+  assert.notEqual(`${rewrittenStat.dev}:${rewrittenStat.ino}`, `${placeholderStat.dev}:${placeholderStat.ino}`);
 
   // Pre-fix this throws the raw journaled-exchange identity error on every
   // managed open; post-fix the record returns to review and the moved bytes
