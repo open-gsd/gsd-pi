@@ -2604,6 +2604,134 @@ function publishEvidenceDestination(
   persistResolvingEvidence(handle, evidence);
 }
 
+// The replay's re-review hand-off (#2856): the entry has already been
+// rewritten to `retained` over the current bytes when this is thrown, so the
+// recovery loop keeps it and continues, while every other caller fails loud.
+const EVIDENCE_RETURNED_TO_REVIEW_MESSAGE
+  = "unbound projection evidence target changed under the journaled resolution; returned to retained for re-review";
+
+function isEvidenceReturnedToReviewError(error: unknown): boolean {
+  return projectionErrorMessage(error) === EVIDENCE_RETURNED_TO_REVIEW_MESSAGE;
+}
+
+// Lock-backed counterpart of preparedArtifactState: same tri-state over the
+// projection-root lock's own reads. Unknown node kinds fail closed. For an
+// empty artifact the digest of the exact observed content comes back with the
+// classification, so a removal can be pinned to the verified-empty state —
+// a writer that populates the node afterwards must make an identity- and
+// digest-bound removal refuse instead of authorizing the new bytes (#2856).
+function preparedArtifactStateUnderLock(
+  handle: ProjectionRootIdentityLock,
+  artifactPath: string,
+): { state: PreparedArtifactState; emptyDigest: string | null } {
+  if (!handle.pathExists(artifactPath)) return { state: "absent", emptyDigest: null };
+  const kind = handle.pathKind(artifactPath);
+  if (kind === "directory") {
+    if (handle.listDirectory(artifactPath).length !== 0) {
+      return { state: "holds-content", emptyDigest: null };
+    }
+    // The digest of an empty tree per the projectionContentDigest walk: the
+    // root entry frame and no children.
+    const hash = createHash("sha256");
+    hash.update(`\0directory\0`);
+    return { state: "empty", emptyDigest: `sha256:${hash.digest("hex")}` };
+  }
+  if (kind !== "file") return { state: "holds-content", emptyDigest: null };
+  const bytes = handle.readFile(artifactPath);
+  if (bytes.byteLength !== 0) return { state: "holds-content", emptyDigest: null };
+  const hash = createHash("sha256");
+  hash.update(bytes);
+  return { state: "empty", emptyDigest: `sha256:${hash.digest("hex")}` };
+}
+
+// A journaled "prepared" resolution whose evidence path was legitimately
+// rewritten after the attempt (#2856: the readable-index behaviour lets the
+// target be written again while the record is in flight) can never complete
+// its exchange — the native replay refuses the stale left identity
+// deterministically, and the raw error re-wedges every later managed open:
+// retention stays reachable, settlement becomes unreachable. The reviewed
+// bytes are gone (replaced at the evidence path), so the #2815/#2823 review
+// contract applies instead of a permanent refusal: journaled artifacts that
+// hold bytes become their own retained records, verified-empty protocol
+// placeholders are removed (never one another record still references), and
+// the entry returns to `retained` over the CURRENT bytes so the next preview
+// offers fresh consent.
+function returnDriftedResolutionToReview(
+  handle: ProjectionRootIdentityLock,
+  evidence: UnboundProjectionEvidence,
+): never {
+  const resolution = evidence.resolution!;
+  const paths = resolveEvidenceResolutionPaths(evidence);
+  // Paths independently referenced by another evidence record stay for the
+  // same reason the #2819 degraded cleanup leaves them: an interrupted
+  // restage may have recorded a companion quarantine row for that artifact.
+  const otherReferencedPaths = new Set(
+    readUnboundProjectionEvidence(handle)
+      .filter((entry) => entry.evidenceId !== evidence.evidenceId)
+      .map((entry) => entry.evidencePath),
+  );
+  for (const [artifactPath, artifactIdentity] of [
+    [resolution.guardPath, resolution.guardIdentity],
+    [paths.exchangePath, resolution.exchangeIdentity],
+  ] as const) {
+    // A null identity means the protocol never journal-acknowledged the
+    // artifact, so it is not journal-bound cleanup eligible either.
+    if (artifactIdentity === null) continue;
+    const observed = preparedArtifactStateUnderLock(handle, artifactPath);
+    if (observed.state === "absent") continue;
+    const isTree = handle.pathKind(artifactPath) === "directory";
+    const artifactScope = isTree ? "tree" as const : "file" as const;
+    if (observed.state === "holds-content" || handle.pathIdentity(artifactPath) !== artifactIdentity) {
+      // An artifact holding bytes, or one whose identity no longer matches
+      // the journaled slot (an exchange that rotated further than the
+      // journal recorded): never removed — it becomes its own reviewed
+      // record. An empty rotated occupant has nothing to lose but no
+      // journal-bound removal identity either, so retention is the only
+      // disposition that cannot refuse or destroy (#2856 codex).
+      recordUnboundProjectionEvidence(handle, {
+        evidencePath: artifactPath,
+        evidenceIdentity: handle.pathIdentity(artifactPath),
+        kind: "quarantine",
+        logicalPath: evidence.logicalPath,
+        scope: artifactScope,
+      });
+    } else if (!otherReferencedPaths.has(artifactPath)) {
+      // The exact journal-bound empty placeholder, removed under the digest
+      // of the same observation that established emptiness: a writer that
+      // populates the placeholder after this classification makes the
+      // identity- and digest-bound removal refuse instead of supplying
+      // fresh deletion authorization (#2856 codex).
+      if (handle.pathExists(artifactPath)) {
+        handle.removeFileViaGuardExact(
+          artifactPath,
+          artifactIdentity,
+          artifactPath,
+          isTree,
+          observed.emptyDigest!,
+        );
+      }
+    }
+  }
+  const entries = readUnboundProjectionEvidence(handle);
+  const currentIdentity = handle.pathIdentity(evidence.evidencePath);
+  writeUnboundProjectionEvidence(
+    handle,
+    entries.map((entry) => entry.evidenceId === evidence.evidenceId
+      ? {
+          evidenceId: entry.evidenceId,
+          evidencePath: entry.evidencePath,
+          evidenceIdentity: currentIdentity,
+          contentDigest: projectionContentDigest(handle, entry.evidencePath, entry.scope),
+          kind: entry.kind,
+          logicalPath: entry.logicalPath,
+          scope: entry.scope,
+          transition: "retained" as const,
+        }
+      : entry),
+  );
+  throw new Error(EVIDENCE_RETURNED_TO_REVIEW_MESSAGE);
+}
+
 function applyEvidenceResolution(
   handle: ProjectionRootIdentityLock,
   evidence: UnboundProjectionEvidence,
@@ -2639,6 +2767,19 @@ function applyEvidenceResolution(
       );
     }
     return;
+  }
+  // Left-drift replay gate (#2856): the evidence path holds other content
+  // under a new identity, so the journaled exchange can only refuse. The one
+  // drift the exchange replay still owns is the rotation-completed signature
+  // (the evidence path holding the journaled guard identity), which stays
+  // resumable below. Native-control records replay through the engine's own
+  // descriptor protocol and are not converted here.
+  if (resolution.phase === "prepared"
+    && evidence.origin !== "native-control"
+    && handle.pathExists(evidence.evidencePath)
+    && handle.pathIdentity(evidence.evidencePath) !== resolution.currentIdentity
+    && handle.pathIdentity(evidence.evidencePath) !== resolution.guardIdentity) {
+    returnDriftedResolutionToReview(handle, evidence);
   }
   const source = moveEvidenceIntoGuard(handle, evidence);
   unboundEvidenceGuardFaultForTest?.();
@@ -2715,8 +2856,25 @@ function recoverEvidenceResolutions(handle: ProjectionRootIdentityLock): void {
       retained.push(evidence);
       continue;
     }
-    applyEvidenceResolution(handle, evidence);
-    changed = true;
+    try {
+      applyEvidenceResolution(handle, evidence);
+      changed = true;
+    } catch (error) {
+      // The replay returned the record to `retained` over the current bytes
+      // (#2856) and may have retained records for artifacts that held the
+      // moved bytes: fold the persisted index back into the baseline instead
+      // of clobbering it with the stale loop state, and let the assessment
+      // continue — the record settles through normal review. Entries already
+      // folded in by an earlier conversion this pass are merged by ID.
+      if (!isEvidenceReturnedToReviewError(error)) throw error;
+      const journaledIds = new Set(entries.map((entry) => entry.evidenceId));
+      const retainedIds = new Set(retained.map((entry) => entry.evidenceId));
+      retained.push(...readUnboundProjectionEvidence(handle)
+        .filter((entry) => (entry.evidenceId === evidence.evidenceId
+          || !journaledIds.has(entry.evidenceId))
+          && !retainedIds.has(entry.evidenceId)));
+      changed = true;
+    }
   }
   if (changed) {
     writeUnboundProjectionEvidence(handle, retained);

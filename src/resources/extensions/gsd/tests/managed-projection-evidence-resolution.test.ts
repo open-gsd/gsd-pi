@@ -1106,6 +1106,312 @@ test("an interrupted native resolution whose artifacts vanished converges on rep
   assert.deepEqual(readIndex(fixture.base), []);
 });
 
+test("a resolution whose target was rewritten after the attempt returns to review instead of wedging the root (#2856)", { skip: !nativeMode }, (t) => {
+  // The reported sequence: a resolve attempt fails mid-protocol leaving an
+  // in-flight canonical record plus an empty guard placeholder, then the same
+  // projection is written again successfully (the readable-index behaviour),
+  // so the target's identity on disk no longer matches the journaled
+  // resolution. From then on every managed open replayed the doomed exchange
+  // and threw the raw native identity error, so the retained rows could never
+  // be listed or settled. A companion retained row models the other stuck
+  // records of the same store.
+  const base = mkdtempSync(join(tmpdir(), "gsd-evidence-native-drift-"));
+  t.after(() => cleanupFixture(base));
+  const rootPath = join(base, ".gsd");
+  mkdirSync(join(rootPath, "notes"), { recursive: true });
+  mkdirSync(join(rootPath, "migration"), { recursive: true });
+  const PRE_VIOLATION = "pre-violation render\n";
+  const REWRITTEN = "rewritten by a later successful write\n";
+  writeFileSync(join(rootPath, "state.md"), REWRITTEN);
+  const currentStat = lstatSync(join(rootPath, "state.md"), { bigint: true });
+  // The stale journaled identity: a real-format dev:ino that is not the
+  // rewritten target's (the pre-violation inode is gone).
+  const migrationStat = lstatSync(join(rootPath, "migration"), { bigint: true });
+  const staleIdentity = `${migrationStat.dev}:${migrationStat.ino}`;
+  const evidenceId = `evidence:sha256:${createHash("sha256")
+    .update(JSON.stringify({ evidencePath: "state.md", kind: "canonical", logicalPath: "state.md", scope: "file" }))
+    .digest("hex")}`;
+  const token = (label: string): string => {
+    const hex = createHash("sha256").update(`${label}\0${evidenceId}`).digest("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  };
+  const guardPath = `.gsd-projection-remove-${token("guard")}`;
+  const exchangePath = `.gsd-projection-exchange-${token("exchange")}`;
+  writeFileSync(join(rootPath, guardPath), "");
+  const guardStat = lstatSync(join(rootPath, guardPath), { bigint: true });
+  const companionPath = `notes/.gsd-projection-remove-${randomUUID()}`;
+  writeFileSync(join(rootPath, companionPath), REVIEWED);
+  const companionStat = lstatSync(join(rootPath, companionPath), { bigint: true });
+  const companionId = `evidence:sha256:${createHash("sha256")
+    .update(JSON.stringify({ evidencePath: companionPath, kind: "quarantine", logicalPath: "notes/result.md", scope: "file" }))
+    .digest("hex")}`;
+  writeFileSync(join(rootPath, "migration", "unbound-projection-evidence.json"), `${JSON.stringify([
+    {
+      evidenceId,
+      evidencePath: "state.md",
+      evidenceIdentity: staleIdentity,
+      contentDigest: `sha256:${createHash("sha256").update(PRE_VIOLATION).digest("hex")}`,
+      kind: "canonical",
+      logicalPath: "state.md",
+      scope: "file",
+      transition: "resolving",
+      resolution: {
+        action: "restore",
+        currentIdentity: staleIdentity,
+        contentDigest: `sha256:${createHash("sha256").update(PRE_VIOLATION).digest("hex")}`,
+        destinationPath: "state.md",
+        guardPath,
+        guardIdentity: `${guardStat.dev}:${guardStat.ino}`,
+        stagingPath: `.gsd-projection-tmp-${token("staging")}`,
+        stagingIdentity: null,
+        exchangePath,
+        exchangeIdentity: `${migrationStat.dev}:${migrationStat.ino}`,
+        phase: "prepared",
+      },
+    },
+    {
+      evidenceId: companionId,
+      evidencePath: companionPath,
+      evidenceIdentity: `${companionStat.dev}:${companionStat.ino}`,
+      contentDigest: `sha256:${createHash("sha256").update(REVIEWED).digest("hex")}`,
+      kind: "quarantine",
+      logicalPath: "notes/result.md",
+      scope: "file",
+      transition: "retained",
+    },
+  ])}\n`);
+
+  // The whole root is listing-reachable again, including for the companion
+  // row (pre-fix this throws the raw journaled-exchange identity error).
+  const listed = loadUnboundProjectionEvidence(base);
+  assert.equal(listed.length, 2);
+
+  // The drifted record returned to review over the CURRENT bytes; the
+  // verified-empty guard placeholder of the abandoned attempt is gone.
+  const seeded = readIndex(base) as Array<Record<string, unknown>>;
+  const converted = seeded.find((entry) => entry.evidencePath === "state.md") as Record<string, unknown>;
+  assert.equal(converted.transition, "retained");
+  assert.equal(converted.resolution, undefined);
+  assert.equal(converted.evidenceIdentity, `${currentStat.dev}:${currentStat.ino}`);
+  assert.equal(
+    converted.contentDigest,
+    `sha256:${createHash("sha256").update(REWRITTEN).digest("hex")}`,
+  );
+  assert.equal(existsSync(join(rootPath, guardPath)), false);
+
+  // The consented settlement routes work again on both records: the canonical
+  // restore retires the record in place over the current bytes ...
+  const restorePreview = previewUnboundProjectionEvidenceResolution(base, evidenceId, "restore");
+  resolveUnboundProjectionEvidence(base, evidenceId, "restore", restorePreview.consent);
+  assert.equal(readFileSync(join(rootPath, "state.md"), "utf8"), REWRITTEN);
+  // ... and the companion quarantine row discards.
+  const discardPreview = previewUnboundProjectionEvidenceResolution(base, companionId, "discard");
+  resolveUnboundProjectionEvidence(base, companionId, "discard", discardPreview.consent);
+  assert.equal(existsSync(join(rootPath, companionPath)), false);
+  assert.deepEqual(loadUnboundProjectionEvidence(base), []);
+});
+
+test("a drifted resolution whose guard holds the moved bytes retains them as their own record (#2856)", { skip: !nativeMode }, (t) => {
+  const fixture = seedEvidenceFixture("gsd-evidence-native-drift-guard-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // Drive a real resolution and interrupt it after the exchange moved the
+  // reviewed bytes into the guard, then model the later successful write to
+  // the staged artifact: the evidence path holds other content under a new
+  // identity while the journaled exchange can no longer complete.
+  const preview = previewUnboundProjectionEvidenceResolution(
+    fixture.base,
+    fixture.evidenceId,
+    "discard",
+  );
+  let crashed = false;
+  _setUnboundEvidenceExchangeFaultForTest((exchange) => {
+    exchange();
+    if (!crashed) {
+      crashed = true;
+      throw new Error("crashed after the exchange moved the reviewed bytes");
+    }
+  });
+  assert.throws(
+    () => resolveUnboundProjectionEvidence(
+      fixture.base,
+      fixture.evidenceId,
+      "discard",
+      preview.consent,
+    ),
+    /crashed after the exchange/u,
+  );
+  const resolution = (readIndex(fixture.base)[0]!.resolution as { guardPath: string }).guardPath;
+  // The later write lands the way a readable-index publication does: a fresh
+  // file renamed into place, so the identity changes (an in-place truncation
+  // would keep the placeholder's inode and converge as a completed exchange).
+  const REWRITTEN = "rewritten staged artifact\n";
+  rmSync(join(fixture.rootPath, fixture.evidencePath));
+  writeFileSync(join(fixture.rootPath, fixture.evidencePath), REWRITTEN);
+  const rewrittenStat = lstatSync(join(fixture.rootPath, fixture.evidencePath), { bigint: true });
+
+  // Pre-fix this throws the raw journaled-exchange identity error on every
+  // managed open; post-fix the record returns to review and the moved bytes
+  // become their own retained record instead of being stranded untracked.
+  const listed = loadUnboundProjectionEvidence(fixture.base);
+  assert.equal(listed.length, 2);
+  const converted = listed.find((entry) => entry.evidencePath === fixture.evidencePath)!;
+  assert.equal(converted.transition, "retained");
+  assert.equal(converted.resolution, undefined);
+  assert.equal(converted.evidenceIdentity, `${rewrittenStat.dev}:${rewrittenStat.ino}`);
+  const moved = listed.find((entry) => entry.evidencePath === resolution)!;
+  assert.equal(moved.transition, "retained");
+  assert.equal(moved.kind, "quarantine");
+  assert.equal(
+    moved.contentDigest,
+    `sha256:${createHash("sha256").update(REVIEWED).digest("hex")}`,
+  );
+
+  // Both records settle: the moved reviewed bytes discard, then the rewritten
+  // staged artifact does too.
+  const movedPreview = previewUnboundProjectionEvidenceResolution(fixture.base, moved.evidenceId, "discard");
+  resolveUnboundProjectionEvidence(fixture.base, moved.evidenceId, "discard", movedPreview.consent);
+  assert.equal(existsSync(join(fixture.rootPath, resolution)), false);
+  const convertedPreview = previewUnboundProjectionEvidenceResolution(fixture.base, converted.evidenceId, "discard");
+  resolveUnboundProjectionEvidence(fixture.base, converted.evidenceId, "discard", convertedPreview.consent);
+  assert.equal(existsSync(join(fixture.rootPath, fixture.evidencePath)), false);
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+});
+
+test("a rotated empty occupant is retained instead of refusing the conversion (#2856)", { skip: !nativeMode }, (t) => {
+  // The exchange rotated further than the journal recorded: the guard path
+  // now holds an EMPTY node under a different identity (the rotated original
+  // evidence was an empty file), so the journal-bound removal identity no
+  // longer matches. The conversion must retain the occupant instead of
+  // refusing, or the root stays wedged behind the drifted record.
+  const base = mkdtempSync(join(tmpdir(), "gsd-evidence-native-drift-rotated-"));
+  t.after(() => cleanupFixture(base));
+  const rootPath = join(base, ".gsd");
+  mkdirSync(join(rootPath, "migration"), { recursive: true });
+  const REWRITTEN = "rewritten by a later successful write\n";
+  writeFileSync(join(rootPath, "state.md"), REWRITTEN);
+  const currentStat = lstatSync(join(rootPath, "state.md"), { bigint: true });
+  const migrationStat = lstatSync(join(rootPath, "migration"), { bigint: true });
+  const staleIdentity = `${migrationStat.dev}:${migrationStat.ino}`;
+  const evidenceId = `evidence:sha256:${createHash("sha256")
+    .update(JSON.stringify({ evidencePath: "state.md", kind: "canonical", logicalPath: "state.md", scope: "file" }))
+    .digest("hex")}`;
+  const token = (label: string): string => {
+    const hex = createHash("sha256").update(`${label}\0${evidenceId}`).digest("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  };
+  const guardPath = `.gsd-projection-remove-${token("guard")}`;
+  writeFileSync(join(rootPath, guardPath), "");
+  const rotatedStat = lstatSync(join(rootPath, guardPath), { bigint: true });
+  writeFileSync(join(rootPath, "migration", "unbound-projection-evidence.json"), `${JSON.stringify([{
+    evidenceId,
+    evidencePath: "state.md",
+    evidenceIdentity: staleIdentity,
+    contentDigest: `sha256:${createHash("sha256").update("pre-violation\n").digest("hex")}`,
+    kind: "canonical",
+    logicalPath: "state.md",
+    scope: "file",
+    transition: "resolving",
+    resolution: {
+      action: "restore",
+      currentIdentity: staleIdentity,
+      contentDigest: `sha256:${createHash("sha256").update("pre-violation\n").digest("hex")}`,
+      destinationPath: "state.md",
+      guardPath,
+      // The journaled guard identity no longer matches the rotated occupant.
+      guardIdentity: staleIdentity,
+      stagingPath: `.gsd-projection-tmp-${token("staging")}`,
+      stagingIdentity: null,
+      exchangePath: `.gsd-projection-exchange-${token("exchange")}`,
+      exchangeIdentity: staleIdentity,
+      phase: "prepared",
+    },
+  }])}\n`);
+
+  // The conversion completes: the record returns to review and the rotated
+  // empty occupant becomes its own retained record instead of refusing.
+  assert.equal(loadUnboundProjectionEvidence(base).length, 2);
+  const seeded = readIndex(base) as Array<Record<string, unknown>>;
+  const converted = seeded.find((entry) => entry.evidencePath === "state.md") as Record<string, unknown>;
+  assert.equal(converted.transition, "retained");
+  const occupant = seeded.find((entry) => entry.evidencePath === guardPath) as Record<string, unknown>;
+  assert.equal(occupant.transition, "retained");
+  assert.equal(occupant.contentDigest, `sha256:${createHash("sha256").update("").digest("hex")}`);
+  assert.equal(existsSync(join(rootPath, guardPath)), true);
+
+  // Both records settle: the empty occupant discards, then the canonical
+  // restore retires the converted record in place over the current bytes.
+  const occupantPreview = previewUnboundProjectionEvidenceResolution(base, occupant.evidenceId as string, "discard");
+  resolveUnboundProjectionEvidence(base, occupant.evidenceId as string, "discard", occupantPreview.consent);
+  assert.equal(existsSync(join(rootPath, guardPath)), false);
+  const restorePreview = previewUnboundProjectionEvidenceResolution(base, evidenceId, "restore");
+  resolveUnboundProjectionEvidence(base, evidenceId, "restore", restorePreview.consent);
+  assert.equal(readFileSync(join(rootPath, "state.md"), "utf8"), REWRITTEN);
+  assert.deepEqual(loadUnboundProjectionEvidence(base), []);
+});
+
+test("two drifted records convert in one pass without duplicating retained rows (#2856)", { skip: !nativeMode }, (t) => {
+  const seedDrifted = (base: string, target: string, guardBytes: string): void => {
+    const rootPath = join(base, ".gsd");
+    const migrationStat = lstatSync(join(rootPath, "migration"), { bigint: true });
+    const staleIdentity = `${migrationStat.dev}:${migrationStat.ino}`;
+    writeFileSync(join(rootPath, target), `rewritten ${target}\n`);
+    const evidenceId = `evidence:sha256:${createHash("sha256")
+      .update(JSON.stringify({ evidencePath: target, kind: "canonical", logicalPath: target, scope: "file" }))
+      .digest("hex")}`;
+    const token = (label: string): string => {
+      const hex = createHash("sha256").update(`${label}\0${evidenceId}`).digest("hex");
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+    };
+    const guardPath = `.gsd-projection-remove-${token("guard")}`;
+    writeFileSync(join(rootPath, guardPath), guardBytes);
+    const guardStat = lstatSync(join(rootPath, guardPath), { bigint: true });
+    const index = join(rootPath, "migration", "unbound-projection-evidence.json");
+    const entries = existsSync(index)
+      ? JSON.parse(readFileSync(index, "utf8")) as Array<Record<string, unknown>>
+      : [];
+    entries.push({
+      evidenceId,
+      evidencePath: target,
+      evidenceIdentity: staleIdentity,
+      contentDigest: `sha256:${createHash("sha256").update("pre-violation\n").digest("hex")}`,
+      kind: "canonical",
+      logicalPath: target,
+      scope: "file",
+      transition: "resolving",
+      resolution: {
+        action: "restore",
+        currentIdentity: staleIdentity,
+        contentDigest: `sha256:${createHash("sha256").update("pre-violation\n").digest("hex")}`,
+        destinationPath: target,
+        guardPath,
+        guardIdentity: `${guardStat.dev}:${guardStat.ino}`,
+        stagingPath: `.gsd-projection-tmp-${token("staging")}`,
+        stagingIdentity: null,
+        exchangePath: `.gsd-projection-exchange-${token("exchange")}`,
+        exchangeIdentity: staleIdentity,
+        phase: "prepared",
+      },
+    });
+    writeFileSync(index, `${JSON.stringify(entries)}\n`);
+  };
+  const base = mkdtempSync(join(tmpdir(), "gsd-evidence-native-drift-two-"));
+  t.after(() => cleanupFixture(base));
+  mkdirSync(join(base, ".gsd", "migration"), { recursive: true });
+  seedDrifted(base, "state.md", "moved bytes one\n");
+  seedDrifted(base, "project.md", "moved bytes two\n");
+
+  // One recovery pass converts both records and retains both moved-byte
+  // guards exactly once: four distinct rows, no duplicate companions.
+  const listed = loadUnboundProjectionEvidence(base);
+  assert.equal(listed.length, 4);
+  assert.equal(new Set(listed.map((entry) => entry.evidenceId)).size, 4);
+  const index = JSON.parse(
+    readFileSync(join(base, ".gsd", "migration", "unbound-projection-evidence.json"), "utf8"),
+  ) as Array<Record<string, unknown>>;
+  assert.equal(index.length, 4);
+});
+
 test("a completed exchange replays idempotently instead of being re-prepared", { skip: !nativeMode }, (t) => {
   const fixture = seedEvidenceFixture("gsd-evidence-latch-exchanged-");
   t.after(() => cleanupFixture(fixture.base));
