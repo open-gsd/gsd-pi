@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGunzip } from "node:zlib";
@@ -235,11 +235,11 @@ test("tarball installs and gsd binary resolves", async (t) => {
     const sdkRoot = join(installedRoot, "packages", "pi-coding-agent");
     const docProbe = String.raw`
       import assert from "node:assert/strict";
-      import { readFileSync, readdirSync } from "node:fs";
+      import { readFileSync, readdirSync, realpathSync } from "node:fs";
       import { join } from "node:path";
       import { pathToFileURL } from "node:url";
 
-      const installedRoot = process.argv[1];
+      const installedRoot = realpathSync(process.argv[1]);
       process.env.PI_PACKAGE_DIR = join(installedRoot, "pkg");
       const sdkRoot = join(installedRoot, "packages", "pi-coding-agent");
       const { getReadmePath, getDocsPath, getExamplesPath } =
@@ -257,7 +257,7 @@ test("tarball installs and gsd binary resolves", async (t) => {
       assert.doesNotThrow(() => readFileSync(join(getDocsPath(), "sdk.md")), "readable SDK docs");
       assert.doesNotThrow(() => readdirSync(join(getExamplesPath(), "sdk")), "readable SDK examples");
     `;
-    const probe = () => spawnSync(process.execPath, ["--input-type=module", "--eval", docProbe, installedRoot], {
+    const probe = (root = installedRoot) => spawnSync(process.execPath, ["--input-type=module", "--eval", docProbe, root], {
       cwd: sandbox.installPrefix,
       env: sandbox.env,
       encoding: "utf-8",
@@ -267,6 +267,13 @@ test("tarball installs and gsd binary resolves", async (t) => {
     const installed = probe();
     assert.ifError(installed.error);
     assert.equal(installed.status, 0, installed.stderr);
+
+    // Exercise symlinked install paths on Linux too (e.g. /var on macOS).
+    const linkedRoot = join(sandbox.rootDir, "linked-install");
+    symlinkSync(installedRoot, linkedRoot, process.platform === "win32" ? "junction" : "dir");
+    const linked = probe(linkedRoot);
+    assert.ifError(linked.error);
+    assert.equal(linked.status, 0, linked.stderr);
 
     // Remove each directory from the disposable install, never the checkout.
     // Reuse the identical child probe so missing packed assets cannot pass.
