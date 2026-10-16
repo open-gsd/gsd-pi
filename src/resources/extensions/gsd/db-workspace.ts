@@ -175,7 +175,11 @@ export type WorkflowDatabaseProvider = ReturnType<typeof getDbProvider>;
 export function resolveWorkflowDatabaseLocation(basePath: string): WorkflowDatabaseLocation {
   const contract = resolveGsdPathContract(basePath);
   return {
-    projectRoot: dirname(dirname(contract.projectDb)),
+    // The contract's projectRoot, not dirname(dirname(projectDb)): with
+    // external state the DB lives at $GSD_STATE_DIR/projects/<hash>/gsd.db,
+    // so the DB's grandparent is the shared state-projects dir, and every
+    // project's audit logs collided there (#2831).
+    projectRoot: contract.projectRoot,
     projectGsd: contract.projectGsd,
     projectDb: contract.projectDb,
   };
