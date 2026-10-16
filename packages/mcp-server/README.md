@@ -292,21 +292,28 @@ The projection fallback returns `readMetadata: { "source": "projection", "author
 
 ### `gsd_resolve_blocker`
 
-Resolve a pending blocker. There are two kinds:
+Resolve a pending blocker. There are three supported routes:
 
 - A UI request that a live session waits on. Pass `sessionId`. This blocker exists only while the session runs.
 - An open escalation in the project database. Pass `projectDir`. This blocker is a database row, so the call needs no session and works after a server restart. `gsd_project_snapshot` lists it under `openQuestions`. The database is used only when `projectDir` is given: a call with only `sessionId` never resolves an escalation, and with both parameters `sessionId` is not used.
+- One exact auto-pause blocker in the project database. Pass `projectDir`, `pauseBlockerId`, a nonblank `rationale`, and the `expectedRevision` plus `expectedAuthorityEpoch` from the same `gsd_project_snapshot` that supplied the blocker under `blockers`. This clear-only route atomically resolves that blocker and closes its associated pause. It does not start auto mode, authorize retry, settle an Attempt, or record task success; use `gsd_task_recovery_resume` separately when recovery is intended.
 
-To resolve an escalation is a workflow mutation. The server refuses it while a discussion gate waits for the user and in queue mode. The request must carry the replay-stable `_meta` identity of a workflow mutation (see [Workflow tools](#workflow-tools)). The answer and its decision record the MCP caller: transport `workflow-mcp`, actor `agent`, and `made_by: agent`. Only `/gsd escalate resolve` records a response from the user.
+Database escalation and auto-pause resolution are workflow mutations. The server refuses them while a discussion gate waits for the user and in queue mode. The request must carry the replay-stable `_meta` identity of a workflow mutation (see [Workflow tools](#workflow-tools)). The same successful request replays even after the blocker has closed, while a changed payload conflicts. Invalid, stale, or refused selections create no operation, event, outbox, projection work, revision, blocker, or pause mutation and do not reserve their key; after state repair, that key may be attempted again. Database operations record the MCP caller provenance: transport `workflow-mcp`, actor `agent`, and trace identity. Escalation answers additionally record `made_by: agent`; only `/gsd escalate resolve` records a response from the user.
+
+For the new auto-pause route selected by `pauseBlockerId`, W070 uses two separate, versioned SHA-256 derivations. Packaged workflow MCP derives the durable trace ID from its own domain label plus the canonical tool, source transport, actor, and validated stable private identity. Independently, the auto-pause workflow/domain boundary derives the operation idempotency key from a different domain label plus the canonical tool, source transport, actor identity, and invocation idempotency identity. Consequently, a workflow-MCP auto-pause resolution does not persist the raw OpenGSD idempotency key or Claude Code tool-use ID in its `pause.blocker.resolve.by-id` operation row, and the transport and actor fields namespace native Pi-tool, packaged workflow-MCP, and internal callers. This privacy guarantee is specific to the W070 auto-pause path; escalation resolution and existing direct consumers retain their legacy persistence behavior outside that scope.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `sessionId` | `string` | | Session ID from `gsd_execute` |
 | `projectDir` | `string` | | Absolute path to the project directory. Give `sessionId` or `projectDir` |
-| `questionId` | `string` | | The open question to resolve. Required only when more than one escalation is open |
-| `response` | `string` | ✅ | Response for the pending blocker. For an escalation: `<choice> [rationale]`, where choice is an option id, `accept`, or `reject-blocker` |
+| `questionId` | `string` | Escalation only | The open question to resolve. Required only when more than one escalation is open; conflicts with `pauseBlockerId` |
+| `pauseBlockerId` | `string` | Auto-pause only | Exact blocker selected from snapshot `blockers`; conflicts with `sessionId`, `questionId`, and `response` |
+| `response` | `string` | Session/escalation | Response for the pending blocker. For an escalation: `<choice> [rationale]`, where choice is an option id, `accept`, or `reject-blocker` |
+| `rationale` | `string` | Auto-pause | Nonblank reason for clear-only resolution |
+| `expectedRevision` | non-negative integer | Auto-pause | `authority.revision` observed with the selected blocker |
+| `expectedAuthorityEpoch` | non-negative integer | Auto-pause | `authority.authorityEpoch` observed with the selected blocker |
 
-**Returns:** `{ resolved: true }` for a session blocker. For an escalation: `{ resolved: true, source: "database", status, message, questionId, milestoneId, sliceId, taskId, decisionId }`.
+**Returns:** `{ resolved: true }` for a session blocker. For an escalation: `{ resolved: true, source: "database", status, message, questionId, milestoneId, sliceId, taskId, decisionId }`. For an auto-pause blocker: `{ resolved: true, source: "database", pauseBlockerId, scope }`.
 
 ## Environment Variables
 

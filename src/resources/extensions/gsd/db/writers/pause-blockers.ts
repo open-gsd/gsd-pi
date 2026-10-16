@@ -1,7 +1,10 @@
 // Project/App: gsd-pi
 // File Purpose: Context-bound writers for the workflow_blockers row of a human
 // pause (ADR-046): the row a `pause.blocker.open` Domain Operation opens and a
-// `pause.blocker.resolve` Domain Operation resolves or dismisses.
+// `pause.blocker.resolve` Domain Operation resolves or dismisses. The exact
+// clear-only `pause.blocker.resolve.by-id` Domain Operation (an explicit
+// operator-named auto-pause blocker id) also resolves through this writer,
+// atomically with closing the blocker's bound pause row.
 
 import { randomUUID } from "node:crypto";
 
@@ -66,8 +69,14 @@ export function resolveOpenPauseBlocker(
     resolution: string;
   },
 ): { resolved: boolean } {
-  if (requireActiveDomainOperationContext(context) !== "pause.blocker.resolve") {
-    throw new Error("pause.blocker.resolve Domain Operation required");
+  const activeOperationType = requireActiveDomainOperationContext(context);
+  if (
+    activeOperationType !== "pause.blocker.resolve" &&
+    activeOperationType !== "pause.blocker.resolve.by-id"
+  ) {
+    throw new Error(
+      "pause.blocker.resolve or pause.blocker.resolve.by-id Domain Operation required",
+    );
   }
   const result = getDb().prepare(`
     UPDATE workflow_blockers

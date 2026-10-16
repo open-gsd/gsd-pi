@@ -5,6 +5,7 @@
  * Workflow MCP tools — exposes the core GSD mutation/read handlers over MCP.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -63,6 +64,13 @@ interface GsdMcpBridge {
     invocation: ExecutionInvocation,
     questionId?: string,
   ) => Promise<PersistedBlockerResolution>;
+  resolveAutoPauseBlockerById: (input: {
+    blockerId: string;
+    rationale: string;
+    invocation: ExecutionInvocation;
+    expectedRevision: number;
+    expectedAuthorityEpoch: number;
+  }) => { resolved: boolean; failure?: string; scope?: string };
 }
 
 /** The outcome of answering the open escalation question in the project database. */
@@ -1335,6 +1343,38 @@ interface McpToolServer {
 const MCP_IDEMPOTENCY_META_KEY = "io.opengsd/idempotency-key";
 const CLAUDE_CODE_TOOL_USE_META_KEY = "claudecode/toolUseId";
 const CLAUDE_CODE_IDEMPOTENCY_PREFIX = "transport:claude-code:";
+const MCP_TRACE_CORRELATION_LABEL = "opengsd:workflow-mcp:trace-correlation:v1";
+
+function lengthPrefixed(value: string): string {
+  return `${Buffer.byteLength(value, "utf8")}:${value}`;
+}
+
+/**
+ * Correlates private MCP retries without copying their idempotency identity
+ * into durable trace metadata. The versioned purpose label is intentionally
+ * distinct from every idempotency-key namespace. Length-prefixed fields keep
+ * tool, transport, actor, and stable input boundaries unambiguous.
+ *
+ * This only handles transport-private retry identity. Callers that already
+ * have a legitimate externally assigned trace ID continue to pass it through
+ * the separate trusted ExecutionInvocation.traceId field.
+ */
+export function derivePrivateMcpTraceId(input: {
+  canonicalToolName: string;
+  sourceTransport: ExecutionInvocation["sourceTransport"];
+  actorType: string;
+  stableInput: string;
+}): string {
+  const digestInput = [
+    MCP_TRACE_CORRELATION_LABEL,
+    input.canonicalToolName,
+    input.sourceTransport,
+    input.actorType,
+    input.stableInput,
+  ].map(lengthPrefixed).join("|");
+  const digest = createHash("sha256").update(digestInput, "utf8").digest("hex");
+  return `workflow-mcp-trace:v1:sha256:${digest}`;
+}
 
 function mcpInvocation(
   canonicalToolName: string,
@@ -1364,11 +1404,18 @@ function mcpInvocation(
       `Retry with the same nonblank value.`,
     );
   }
+  const sourceTransport = "workflow-mcp";
+  const actorType = "agent";
   return {
     idempotencyKey: `mcp:${canonicalToolName}:${stableKey}`,
-    sourceTransport: "workflow-mcp",
-    actorType: "agent",
-    traceId: stableKey,
+    sourceTransport,
+    actorType,
+    traceId: derivePrivateMcpTraceId({
+      canonicalToolName,
+      sourceTransport,
+      actorType,
+      stableInput: stableKey,
+    }),
   };
 }
 
@@ -1559,15 +1606,58 @@ export async function resolvePersistedBlockerViaBridge(
   questionId?: string,
   extra?: WorkflowMcpRequestExtra,
 ): Promise<PersistedBlockerResolution> {
-  await enforceWorkflowWriteGate("gsd_resolve_blocker", projectDir);
-  const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
   return runSerializedWorkflowOperation(async () => {
+    await checkWorkflowWriteGate("gsd_resolve_blocker", projectDir);
+    const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
     const bridge = await importBridgeModule();
     const opened = bridge.openExistingWorkflowDatabase(projectDir);
     if (!opened.ok) {
       throw opened.error ?? new Error(`No pending blocker: the project database is not available (${opened.reason}).`);
     }
     return bridge.resolvePendingEscalation(projectDir, response, invocation, questionId);
+  });
+}
+
+/** Outcome of resolving an exact auto-pause blocker (gsd_resolve_blocker, pauseBlockerId). */
+export interface PersistedAutoPauseBlockerResolution {
+  resolved: boolean;
+  failure?: string;
+  scope?: string;
+}
+
+/**
+ * Resolve one exact named auto-pause blocker (gsd_resolve_blocker,
+ * pauseBlockerId) and atomically close its bound `auto_pauses` row, through
+ * the `pause.blocker.resolve.by-id` Domain Operation. Clear-only: it never
+ * starts auto, authorizes a retry, settles an Attempt, or records task
+ * success — that stays `gsd_task_recovery_resume`'s job. It needs no
+ * session, so it works after a server restart; the write gate and workflow
+ * serialization queue apply like every other workflow mutation.
+ */
+export async function resolvePersistedAutoPauseBlockerViaBridge(
+  projectDir: string,
+  pauseBlockerId: string,
+  rationale: string,
+  expectedRevision: number,
+  expectedAuthorityEpoch: number,
+  extra?: WorkflowMcpRequestExtra,
+): Promise<PersistedAutoPauseBlockerResolution> {
+  if (!rationale.trim()) throw new Error("rationale must not be blank");
+  return runSerializedWorkflowOperation(async () => {
+    await checkWorkflowWriteGate("gsd_resolve_blocker", projectDir);
+    const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
+    const bridge = await importBridgeModule();
+    const opened = bridge.openExistingWorkflowDatabase(projectDir);
+    if (!opened.ok) {
+      throw opened.error ?? new Error(`No pending blocker: the project database is not available (${opened.reason}).`);
+    }
+    return bridge.resolveAutoPauseBlockerById({
+      blockerId: pauseBlockerId,
+      rationale,
+      invocation,
+      expectedRevision,
+      expectedAuthorityEpoch,
+    });
   });
 }
 

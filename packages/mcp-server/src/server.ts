@@ -52,6 +52,7 @@ import {
   registerWorkflowTools,
   runSerializedWorkflowOperation,
   resolvePersistedBlockerViaBridge,
+  resolvePersistedAutoPauseBlockerViaBridge,
   validateProjectDir,
   warmWorkflowToolBridges,
 } from './workflow-tools.js';
@@ -412,6 +413,11 @@ interface McpServerInstance {
     name: string,
     description: string,
     params: Record<string, unknown>,
+    handler: (args: Record<string, unknown>, extra?: McpToolExtra) => Promise<unknown>,
+  ): unknown;
+  registerTool(
+    name: string,
+    config: { description?: string; inputSchema?: unknown },
     handler: (args: Record<string, unknown>, extra?: McpToolExtra) => Promise<unknown>,
   ): unknown;
   server: {
@@ -1429,20 +1435,83 @@ export async function createMcpServer(
   //      it is resolved from the database and needs no session (it works after
   //      a server restart).
   // -----------------------------------------------------------------------
-  server.tool(
+  const resolveBlockerSchema = z.object({
+    sessionId: z.string().min(1).optional().describe('Session ID returned from gsd_execute'),
+    projectDir: z.string().min(1).optional().describe('Absolute path to the project directory. Resolves the open escalation or auto-pause blocker in the project database.'),
+    questionId: z.string().min(1).optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open. Mutually exclusive with pauseBlockerId.'),
+    pauseBlockerId: z.string().min(1).optional().describe('The exact open auto-pause blocker id to clear-only resolve (blockers in gsd_project_snapshot). Mutually exclusive with sessionId and questionId.'),
+    response: z.string().min(1).optional().describe('Required for session or database escalation selection; forbidden with pauseBlockerId.'),
+    rationale: z.string().trim().min(1).optional().describe('Required with pauseBlockerId: why the auto-pause blocker is being cleared.'),
+    expectedRevision: z.number().int().nonnegative().optional().describe('Required with pauseBlockerId: authority.revision from the gsd_project_snapshot that supplied the selected blocker.'),
+    expectedAuthorityEpoch: z.number().int().nonnegative().optional().describe('Required with pauseBlockerId: authority.authorityEpoch from the same gsd_project_snapshot.'),
+  }).superRefine((value, ctx) => {
+    const pauseSelection = value.pauseBlockerId !== undefined
+      || value.rationale !== undefined
+      || value.expectedRevision !== undefined
+      || value.expectedAuthorityEpoch !== undefined;
+    if (pauseSelection) {
+      for (const field of ['projectDir', 'pauseBlockerId', 'rationale', 'expectedRevision', 'expectedAuthorityEpoch'] as const) {
+        if (value[field] === undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for pause selection` });
+        }
+      }
+      for (const field of ['sessionId', 'questionId', 'response'] as const) {
+        if (value[field] !== undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} conflicts with pauseBlockerId` });
+        }
+      }
+      return;
+    }
+    if (value.response === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['response'], message: 'response is required for escalation selection' });
+    }
+    if (value.sessionId === undefined && value.projectDir === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['projectDir'], message: 'Either sessionId or projectDir must be provided' });
+    }
+  });
+
+  server.registerTool(
     'gsd_resolve_blocker',
-    'Resolve a pending blocker. With sessionId: answer the UI request that the session waits on. With projectDir: resolve the open escalation stored in the project database (this works after a server restart); sessionId is then not used. For an escalation the response is "<choice> [rationale]"; choice is an option id, "accept" (the recommendation), or "reject-blocker".',
     {
-      sessionId: z.string().optional().describe('Session ID returned from gsd_execute'),
-      projectDir: z.string().optional().describe('Absolute path to the project directory. Resolves the open escalation in the project database.'),
-      questionId: z.string().optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open.'),
-      response: z.string().describe('Response to send for the pending blocker'),
+      description: 'Resolve a pending blocker. With sessionId: answer the UI request that the session waits on. With projectDir and pauseBlockerId: clear-only resolve one exact open auto-pause blocker (blockers in gsd_project_snapshot) and its associated pause; this does not start auto, authorize a retry, or record task success — use gsd_task_recovery_resume separately for that. Pause selection requires the revision and Authority Epoch observed in that snapshot. With projectDir and no pauseBlockerId: resolve the open escalation stored in the project database (this works after a server restart); sessionId is then not used. For an escalation the response is "<choice> [rationale]"; choice is an option id, "accept" (the recommendation), or "reject-blocker".',
+      inputSchema: resolveBlockerSchema,
     },
     async (args: Record<string, unknown>, extra?: McpToolExtra) => {
-      const { sessionId, projectDir, questionId, response } = args as {
-        sessionId?: string; projectDir?: string; questionId?: string; response: string;
+      const {
+        sessionId, projectDir, questionId, pauseBlockerId, response, rationale,
+        expectedRevision, expectedAuthorityEpoch,
+      } = args as {
+        sessionId?: string; projectDir?: string; questionId?: string; pauseBlockerId?: string;
+        response?: string; rationale?: string; expectedRevision?: number; expectedAuthorityEpoch?: number;
       };
       try {
+        const pauseSelection = pauseBlockerId !== undefined
+          || rationale !== undefined
+          || expectedRevision !== undefined
+          || expectedAuthorityEpoch !== undefined;
+        if (pauseSelection) {
+          if (!projectDir) return errorContent('projectDir is required with pauseBlockerId.');
+          if (!pauseBlockerId) return errorContent('pauseBlockerId is required with rationale and pause fencing.');
+          if (!rationale || !rationale.trim()) return errorContent('rationale is required with pauseBlockerId.');
+          if (sessionId || questionId || response !== undefined) {
+            return errorContent('sessionId, questionId, and response conflict with pauseBlockerId.');
+          }
+          if (!Number.isSafeInteger(expectedRevision) || Number(expectedRevision) < 0) {
+            return errorContent('expectedRevision is required with pauseBlockerId.');
+          }
+          if (!Number.isSafeInteger(expectedAuthorityEpoch) || Number(expectedAuthorityEpoch) < 0) {
+            return errorContent('expectedAuthorityEpoch is required with pauseBlockerId.');
+          }
+          const result = await resolvePersistedAutoPauseBlockerViaBridge(
+            validateProjectDir(projectDir), pauseBlockerId, rationale,
+            expectedRevision!, expectedAuthorityEpoch!, extra,
+          );
+          if (!result.resolved) {
+            return errorContent(`Auto-pause blocker ${pauseBlockerId} was not resolved: ${result.failure ?? 'unknown'}.`);
+          }
+          return jsonContent({ source: 'database', pauseBlockerId, ...result, resolved: true });
+        }
+        if (!response) return errorContent('response is required for escalation selection.');
         if (!projectDir) {
           if (!sessionId) return errorContent('Either sessionId or projectDir must be provided');
           if (!sessionManager.getSession(sessionId)) {
