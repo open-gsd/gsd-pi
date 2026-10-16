@@ -392,7 +392,7 @@ function processSubagentEventLine(
 			const reportedModel = typeof msg.model === "string" ? msg.model.trim() : "";
 			if (reportedModel) {
 				if (!currentResult.model) currentResult.model = reportedModel;
-				else if (currentResult.model !== reportedModel) currentResult.reportedModel = reportedModel;
+				else currentResult.reportedModel = currentResult.model === reportedModel ? undefined : reportedModel;
 			}
 			if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 			if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
@@ -1888,6 +1888,13 @@ export default function (pi: ExtensionAPI) {
 					const taskModel = t.model || params.model;
 					const taskThinking = t.thinking ?? params.thinking;
 					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId, workerIdentities[index]);
+					const syncWorkerIdentity = (result: SingleResult) => {
+						updateWorkerIdentity(workerId, {
+							...(result.model !== undefined ? { model: result.model } : {}),
+							reportedModel: result.reportedModel,
+							...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
+						});
+					};
 					// A retry supersedes the failed attempt's result object, which
 					// would silently drop its billable usage from the card and the
 					// run record (#2821). Bank the replaced attempt and fold it into
@@ -1909,11 +1916,7 @@ export default function (pi: ExtensionAPI) {
 					const updateParallelResult = (partial: AgentToolResult<SubagentDetails>) => {
 						if (partial.details?.results[0]) {
 							const raw = partial.details.results[0];
-							updateWorkerIdentity(workerId, {
-								model: raw.model,
-								reportedModel: raw.reportedModel,
-								thinking: raw.thinking,
-							});
+							syncWorkerIdentity(raw);
 							allResults[index] = bankedUsage ? { ...raw, usage: withBankedUsage(raw.usage) } : raw;
 							persistRunResults([...allResults]);
 							emitParallelUpdate();
@@ -2021,6 +2024,7 @@ export default function (pi: ExtensionAPI) {
 						result = makeFailureResult(err, t.agent, t.task, undefined, dispatchTrackingNames[index], batchSignal);
 					}
 
+					syncWorkerIdentity(result);
 					updateWorker(workerId, result.exitCode === 0 ? "completed" : "failed");
 					allResults[index] = result;
 					persistRunResults([...allResults]);

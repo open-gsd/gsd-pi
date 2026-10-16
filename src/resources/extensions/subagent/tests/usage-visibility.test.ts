@@ -118,6 +118,8 @@ describe("subagent usage reconciliation into the parent session", () => {
 	const savedExitCode = process.env.FIXTURE_EXIT_CODE;
 	const savedFailOnceDir = process.env.FIXTURE_FAIL_ONCE_DIR;
 	const savedModelSequence = process.env.FIXTURE_MODEL_SEQUENCE;
+	const savedTurnModels = process.env.FIXTURE_TURN_MODELS;
+	const savedSkipSuccessEvents = process.env.FIXTURE_SKIP_SUCCESS_EVENTS;
 	let dir: string | undefined;
 
 	afterEach(() => {
@@ -134,6 +136,10 @@ describe("subagent usage reconciliation into the parent session", () => {
 		else process.env.FIXTURE_FAIL_ONCE_DIR = savedFailOnceDir;
 		if (savedModelSequence === undefined) delete process.env.FIXTURE_MODEL_SEQUENCE;
 		else process.env.FIXTURE_MODEL_SEQUENCE = savedModelSequence;
+		if (savedTurnModels === undefined) delete process.env.FIXTURE_TURN_MODELS;
+		else process.env.FIXTURE_TURN_MODELS = savedTurnModels;
+		if (savedSkipSuccessEvents === undefined) delete process.env.FIXTURE_SKIP_SUCCESS_EVENTS;
+		else process.env.FIXTURE_SKIP_SUCCESS_EVENTS = savedSkipSuccessEvents;
 	});
 
 	function freshEnv(): string {
@@ -289,12 +295,33 @@ describe("subagent usage reconciliation into the parent session", () => {
 		assert.equal(matchingResult.details.results[0].reportedModel, undefined);
 	});
 
-	it("clears a failed attempt's provider model when the retry matches the request", async () => {
+	it("clears a fallback identity when a later turn returns to the requested model", async () => {
+		const cwd = freshEnv();
+		process.env.FIXTURE_TURN_MODELS = "fallback-model|requested-model";
+		const tool = registerSubagentTool();
+		const execute = makeExecute(SessionManager.inMemory(cwd));
+
+		const result = await execute({
+			tasks: [{ agent: "usage-emitter", task: "return to requested model", model: "requested-model" }],
+		});
+
+		assert.equal(result.details.results[0].reportedModel, undefined);
+		assert.doesNotMatch(renderCard(tool, result), /←/);
+		const storedRun = new SubagentRunStore().list().find((record) =>
+			record.children.some((child) => child.task === "return to requested model")
+		);
+		assert.equal(storedRun?.children[0]?.reportedModel, undefined);
+		const statusResult = await execute({ action: "status", runId: storedRun?.runId });
+		assert.doesNotMatch(statusResult.content[0].text, /←/);
+	});
+
+	it("clears a failed attempt's provider model when a retry emits no events", async () => {
 		const cwd = freshEnv();
 		const failOnceDir = join(cwd, "model-retry");
 		mkdirSync(failOnceDir, { recursive: true });
 		process.env.FIXTURE_FAIL_ONCE_DIR = failOnceDir;
 		process.env.FIXTURE_MODEL_SEQUENCE = "fallback-model,requested-model";
+		process.env.FIXTURE_SKIP_SUCCESS_EVENTS = "1";
 		const execute = makeExecute(SessionManager.inMemory(cwd));
 
 		const result = await execute({
