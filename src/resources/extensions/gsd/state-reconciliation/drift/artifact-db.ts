@@ -47,7 +47,11 @@ import {
   legacyReopenImportGuidance,
 } from "../../milestone-reopen-events.js";
 import { isCanonicalStagedTaskSummaryProjection } from "../../task-summary-projection-classification.js";
-import { readLatestTaskAttempt } from "../../task-execution-domain-operation.js";
+import {
+  isTaskExecutionAttemptOrphaned,
+  readLatestSettledTaskAttempt,
+  readLatestTaskAttempt,
+} from "../../task-execution-domain-operation.js";
 import { quarantineProjectionEvidence } from "../../projection-observation.js";
 import { reopenProjectionRoots } from "../../projection-cleanup.js";
 import { computeProjectionSha, deriveCompatProjectionKey, readCompatMarker } from "../../compat/compat-marker.js";
@@ -202,11 +206,20 @@ function isAbandonedStagedTaskSummary(
   if (!record.sliceId || !record.taskId || record.artifactType !== "SUMMARY") return false;
   const task = readTask(record.milestoneId, record.sliceId, record.taskId);
   if (task?.status !== "in_progress") return false;
-  const attempt = readLatestTaskAttempt({
+  const attemptIdentity = {
     milestoneId: record.milestoneId,
     sliceId: record.sliceId,
     taskId: record.taskId,
-  });
+  };
+  const latest = readLatestTaskAttempt(attemptIdentity);
+  // #2855: a kill between staging and publication leaves the re-dispatch
+  // Attempt orphaned `running` (terminal coordination dispatch row, no live
+  // runner) on top of the settled attempt that owns the durable outcome.
+  // Classify the staged SUMMARY against that settled attempt instead of
+  // fail-closing on the orphan.
+  const attempt = isTaskExecutionAttemptOrphaned(latest)
+    ? readLatestSettledTaskAttempt(attemptIdentity) ?? latest
+    : latest;
   if (attempt?.state !== "settled" || attempt.outcome === "succeeded") return false;
 
   const projectionPath = resolveTaskSummaryDriftPath(basePath, record);

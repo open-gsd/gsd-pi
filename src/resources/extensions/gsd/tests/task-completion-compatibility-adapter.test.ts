@@ -1257,6 +1257,72 @@ function interruptedRetryFixture(basePath: string, attemptId: string): void {
   });
 }
 
+/**
+ * #2855: the kill window between staging and publication. The re-dispatch
+ * Attempt is claimed but never settles: the coordination row is canceled
+ * first (the #2850 pause/stop settlement window), so the Attempt stays
+ * `running` with no live runner able to settle it. `dispatchStatus` pins the
+ * final row status ("canceled" unless the test overrides it).
+ */
+function orphanedRetryFixture(
+  attemptId: string,
+  label: string,
+  dispatchStatus: string = "canceled",
+): string {
+  db().prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      :trace_id, :turn_id, 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed',
+      (SELECT COALESCE(MAX(attempt_n), 0) + 1 FROM unit_dispatches WHERE unit_id = 'M001/S01/T01'),
+      '2026-07-12T00:10:00.000Z'
+    )
+  `).run({ ":trace_id": `trace-dispatch-${label}`, ":turn_id": `turn-dispatch-${label}` });
+  const dispatchId = Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id);
+  const retry = claimTaskAttempt({
+    invocation: invocation(`task-completion/${label}-claim`),
+    task: TASK,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: dispatchId,
+    retryOfAttemptId: attemptId,
+  });
+  db().prepare(
+    "UPDATE unit_dispatches SET status = :status, ended_at = '2026-07-12T00:11:00.000Z' WHERE id = :id",
+  ).run({ ":status": dispatchStatus, ":id": dispatchId });
+  return retry.attemptId;
+}
+
+/**
+ * The staged SUMMARY with its publication blocked by the failing host
+ * Technical Verdict, routed for retry — the state the #2855 kill interrupts.
+ */
+async function stageWithBlockedPublication(
+  basePath: string,
+  attemptId: string,
+  label: string,
+): Promise<{ summaryPath: string; resultId: string }> {
+  const { stageTaskCompletion } = await subject();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  recordFailingHostVerdict(basePath, attemptId);
+  const routed = recordFailureAndSelectRecovery({
+    invocation: invocation(`task-completion/${label}-route-closeout`),
+    attemptId,
+    resultId: staged.resultId,
+    owner: "agent",
+    classification: { failureKind: "reconciliation-drift" },
+    summary: "Verified Task publication requires a passing host Technical Verdict",
+    evidence: { source: "agent-end-recovery" },
+    rationale: "publication blocked by the failing host Technical Verdict",
+  });
+  assert.equal(routed.action, "repair");
+  return { summaryPath: staged.summaryPath, resultId: staged.resultId };
+}
+
 test("#2427: a staged SUMMARY whose DB intent lost its trailing newline stays canonical", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath } = createFixture();
@@ -1414,6 +1480,205 @@ test("after the Cutover the abandoned staged SUMMARY repair takes the in-progres
   assert.equal(describeArtifactDbDriftBlocker(drift, { basePath, state }), null);
   await repairArtifactDbDrift(drift, { basePath, state });
   assert.equal(existsSync(staged.summaryPath), false, "the repair moves the abandoned projection to quarantine");
+});
+
+test("#2855: an orphaned running retry does not unstage a killed SUMMARY publication", async () => {
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageWithBlockedPublication(basePath, attemptId, "2855-orphan");
+
+  // The kill lands during the finalize-retry re-dispatch, canceling its
+  // dispatch row before the Attempt settles.
+  orphanedRetryFixture(attemptId, "2855-orphan-1");
+
+  assert.equal(existsSync(staged.summaryPath), true, "the staged projection survives the kill");
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).filter((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.deepEqual(
+    drift,
+    [],
+    "the orphaned running retry must not fail-close the staged SUMMARY",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "doctor and reconciliation must see the canonical staged SUMMARY through the orphaned attempt",
+  );
+});
+
+test("#2855: a stale-interrupted retry behind a second orphaned retry is abandoned bookkeeping", async () => {
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageWithBlockedPublication(basePath, attemptId, "2855-double");
+
+  // First re-entry: the cutover interrupts the orphaned retry as stale and
+  // routes the failure, then claims the next retry — which is killed the same
+  // way: dispatch canceled, Attempt never settles.
+  const firstOrphan = orphanedRetryFixture(attemptId, "2855-double-1");
+  const staleSettlement = settleTaskAttempt({
+    invocation: invocation("task-completion/2855-double-stale-settle"),
+    attemptId: firstOrphan,
+    outcome: "interrupted",
+    failureClass: "stale-worker",
+    summary: "Replaced stale Task Attempt during same-session re-dispatch",
+    output: {},
+  });
+  recordFailureAndSelectRecovery({
+    invocation: invocation("task-completion/2855-double-route-stale"),
+    attemptId: firstOrphan,
+    resultId: staleSettlement.resultId,
+    owner: "agent",
+    classification: { failureKind: "stale-worker" },
+    summary: "Replaced stale Task Attempt during same-session re-dispatch",
+    evidence: { source: "agent-end-recovery" },
+    rationale: "stale interrupt",
+  });
+  orphanedRetryFixture(firstOrphan, "2855-double-2");
+
+  assert.equal(existsSync(staged.summaryPath), true);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  // The newest settled Attempt is the stale interrupt, so the staged SUMMARY
+  // is abandoned bookkeeping: the auto-quarantine repair must be offered, not
+  // a fail-closed blocker.
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence", "the staged debris is still detected");
+  assert.equal(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }),
+    null,
+    "the abandoned staged SUMMARY must be repairable through the orphaned retry",
+  );
+  await repairArtifactDbDrift(drift, { basePath, state });
+  const stateAfter = reconciliationState();
+  assert.deepEqual(
+    detectArtifactDbDrift(stateAfter, { basePath, state: stateAfter }).filter((record) =>
+      record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+    ),
+    [],
+    "the quarantine clears the drift at both detection roots",
+  );
+});
+
+test("#2855: a re-dispatch that can still settle its Attempt keeps the guard fail-closed", async () => {
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageWithBlockedPublication(basePath, attemptId, "2855-live");
+
+  // Same kill sequence, but the coordination row stays claimed: a live runner
+  // may still act on the Attempt, so nothing may be exempted yet.
+  db().prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      'trace-dispatch-live', 'turn-dispatch-live', 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed', 2, '2026-07-12T00:10:00.000Z'
+    )
+  `).run();
+  claimTaskAttempt({
+    invocation: invocation("task-completion/2855-live-claim"),
+    task: TASK,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id),
+    retryOfAttemptId: attemptId,
+  });
+
+  assert.equal(existsSync(staged.summaryPath), true);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).filter((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(
+    drift.length > 0,
+    "a dispatch that can still settle its Attempt must not exempt the staged SUMMARY",
+  );
+  assert.match(
+    describeArtifactDbDriftBlocker(drift[0]!, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+  );
+});
+
+test("#2855: changed DB intent behind an orphaned running retry still blocks", async () => {
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageWithBlockedPublication(basePath, attemptId, "2855-changed");
+  orphanedRetryFixture(attemptId, "2855-changed-orphan");
+
+  const changed = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md)
+    .replace("Implemented the compatibility seam", "Implemented an entirely different seam");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": changed });
+
+  assert.equal(existsSync(staged.summaryPath), true);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+    "the orphan exemption must stay gated on the staged content matching the DB intent",
+  );
+});
+
+test("#2855: only explicitly terminal dispatch rows orphan the running Attempt", async () => {
+  const exempting = ["canceled", "completed", "failed", "stuck", "paused"];
+  for (const [index, dispatchStatus] of exempting.entries()) {
+    const label = `2855-terminal-${index}`;
+    const { basePath, attemptId } = createFixture();
+    const staged = await stageWithBlockedPublication(basePath, attemptId, label);
+    orphanedRetryFixture(attemptId, `${label}-orphan`, dispatchStatus);
+    assert.equal(existsSync(staged.summaryPath), true);
+    const state = reconciliationState();
+    assert.deepEqual(
+      detectArtifactDbDrift(state, { basePath, state }).filter((record) =>
+        record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+      ),
+      [],
+      `a ${dispatchStatus} dispatch row cannot settle its Attempt, so the staged SUMMARY stays canonical`,
+    );
+  }
+
+  // The status column is unconstrained TEXT: an unknown value must stay
+  // fail-closed — the exemption requires proving that no live runner exists.
+  {
+    const label = "2855-unknown";
+    const { basePath, attemptId } = createFixture();
+    const staged = await stageWithBlockedPublication(basePath, attemptId, label);
+    orphanedRetryFixture(attemptId, `${label}-orphan`, "teleported");
+    assert.equal(existsSync(staged.summaryPath), true);
+    const state = reconciliationState();
+    const drift = detectArtifactDbDrift(state, { basePath, state }).filter((record) =>
+      record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+    );
+    assert.ok(
+      drift.length > 0,
+      "an unknown dispatch status must not exempt the staged SUMMARY",
+    );
+    assert.match(
+      describeArtifactDbDriftBlocker(drift[0]!, { basePath, state }) ?? "",
+      /Artifact\/DB status drift/,
+    );
+
+    // A missing dispatch row (unreadable status) and a non-running Attempt
+    // also stay fail-closed at the orphan predicate itself.
+    const { isTaskExecutionAttemptOrphaned } = await import(
+      "../task-execution-domain-operation.js"
+    );
+    assert.equal(
+      isTaskExecutionAttemptOrphaned({ state: "running", coordinationDispatchId: 424242 }),
+      false,
+      "a missing dispatch row must not orphan the Attempt",
+    );
+    assert.equal(
+      isTaskExecutionAttemptOrphaned({ state: "settled", coordinationDispatchId: 424242 }),
+      false,
+      "only a running Attempt can be orphaned",
+    );
+    assert.equal(isTaskExecutionAttemptOrphaned(null), false);
+  }
 });
 
 function quarantinedTaskSummaries(root: string): string[] {
