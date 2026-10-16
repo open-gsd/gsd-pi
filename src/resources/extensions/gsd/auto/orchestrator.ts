@@ -103,7 +103,6 @@ import {
   getActiveForWorker,
   getDispatchById,
 } from "../db/unit-dispatches.js";
-import { claimMilestoneLease } from "../db/milestone-leases.js";
 import { readStoredUnitRetry, releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { isAutoWorkerLive } from "../db/auto-workers.js";
 import type { IterationRunOutcome } from "./iteration-run.js";
@@ -119,7 +118,11 @@ import {
   UNIT_RUN_LEASE_LOG,
 } from "./unit-run.js";
 import { evaluateAllCompleteSettlement } from "../milestone-settlement.js";
-import { hasHeldMilestoneLease, reclaimMissingMilestoneLease } from "./milestone-lease-reclaim.js";
+import {
+  claimMilestoneLeaseReclaimingDeadHolder,
+  hasHeldMilestoneLease,
+  reclaimMissingMilestoneLease,
+} from "./milestone-lease-reclaim.js";
 import {
   getAlreadyClosedDispatchReason as getDispatchAlreadyClosedReason,
   shouldBypassAlreadyClosedForVerificationRetry,
@@ -1745,7 +1748,16 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
       turnId: this.s.currentTurnId ?? randomUUID(),
       iterData: iterationDataForClaim(unitType, unitId, stateSnapshot, this.s),
       leaseDeps: {
-        claimMilestoneLease,
+        // #2851: a verifiably-dead local holder must not block the unit claim
+        // — probe and reclaim before reporting blocked (the guard above only
+        // reclaims for source-writing units; planning-only units and
+        // non-isolated execution reach this claim directly).
+        claimMilestoneLease: (workerId, milestoneId) =>
+          claimMilestoneLeaseReclaimingDeadHolder(
+            workerId,
+            milestoneId,
+            this.s.canonicalProjectRoot,
+          ).claim,
         logLeaseRecovered: UNIT_RUN_LEASE_LOG,
         logLeaseRecoveryFailed: UNIT_RUN_LEASE_FAIL_LOG,
       },

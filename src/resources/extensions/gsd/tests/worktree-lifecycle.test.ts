@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   WorktreeLifecycle,
   mergeMilestoneStandalone,
@@ -19,8 +19,8 @@ import { queryJournal } from "../journal.js";
 import { AutoSession } from "../auto/session.js";
 import { openDatabase, closeDatabase, getMilestone, insertMilestone, _getAdapter } from "../gsd-db.js";
 import { setStderrLoggingEnabled, _resetLogs } from "../workflow-logger.js";
-import { registerAutoWorker } from "../db/auto-workers.js";
-import { claimMilestoneLease } from "../db/milestone-leases.js";
+import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.js";
+import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -538,6 +538,71 @@ test("enterMilestone returns ok:false reason:lease-conflict when another worker 
   assert.equal(deps.calls.filter((c) => c.fn === "getIsolationMode").length, 0);
   assert.equal(ctx.messages.length, 1);
   assert.equal(ctx.messages[0]?.level, "error");
+});
+
+test("enterMilestone reclaims the lease of a dead local holder and enters (#2851)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase({ isolation: "worktree" });
+  t.after(() => cleanupRepoBase(base, previousCwd));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  const holder = registerAutoWorker({ projectRootRealpath: base });
+  _getAdapter()!.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
+    .run({ ":pid": -1, ":worker_id": holder });
+  const claim = claimMilestoneLease(holder, "M001");
+  assert.equal(claim.ok, true);
+  const contender = registerAutoWorker({ projectRootRealpath: base });
+
+  const s = makeSession({ basePath: base, originalBasePath: base, workerId: contender });
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  const result = lifecycle.enterMilestone("M001", ctx);
+
+  assert.equal(result.ok, true, `expected ok:true after reclaim, got: ${JSON.stringify(result)}`);
+  assert.equal(getAutoWorker(holder)?.status, "crashed", "dead holder must be marked crashed");
+  const lease = getMilestoneLease("M001");
+  assert.ok(lease);
+  assert.equal(lease!.worker_id, contender, "entry must hold the reclaimed lease");
+  assert.equal(lease!.fencing_token, 2, "reclaim takeover must advance the fencing token");
+  assert.equal(s.milestoneLeaseToken, 2);
+  const warning = ctx.messages.find((m) => m.level === "warning");
+  assert.ok(warning?.msg.includes(holder), "entry must surface the reclaim to the user");
+});
+
+test("enterMilestone keeps the lease conflict for a live local holder (#2851)", (t) => {
+  const live = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  assert.ok(live.pid !== undefined && live.pid > 0);
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase({ isolation: "worktree" });
+  t.after(() => {
+    live.kill();
+    cleanupRepoBase(base, previousCwd);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  const holder = registerAutoWorker({ projectRootRealpath: base });
+  _getAdapter()!.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
+    .run({ ":pid": live.pid!, ":worker_id": holder });
+  const claim = claimMilestoneLease(holder, "M001");
+  assert.equal(claim.ok, true);
+  const contender = registerAutoWorker({ projectRootRealpath: base });
+
+  const s = makeSession({ basePath: base, originalBasePath: base, workerId: contender });
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  const result = lifecycle.enterMilestone("M001", ctx);
+
+  assert.equal(result.ok, false, "a live holder's lease must never be stolen");
+  if (!result.ok) {
+    assert.equal(result.reason, "lease-conflict");
+  }
+  assert.equal(getAutoWorker(holder)?.status, "active", "live holder must not be marked crashed");
+  assert.equal(getMilestoneLease("M001")?.worker_id, holder);
+  assert.equal(s.milestoneLeaseToken, null);
 });
 
 test("enterMilestone is idempotent when already in the milestone worktree", (t) => {
