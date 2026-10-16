@@ -128,6 +128,18 @@ export function registerWorker(
 }
 
 /**
+ * Refresh identity fields learned after launch, such as the provider-reported
+ * model from an assistant message.
+ */
+export function updateWorkerIdentity(id: string, identity: WorkerIdentityFields): void {
+  const entry = activeWorkers.get(id);
+  if (!entry) return;
+  if (identity.model !== undefined) entry.model = identity.model;
+  if (identity.reportedModel !== undefined) entry.reportedModel = identity.reportedModel;
+  if (identity.thinking !== undefined) entry.thinking = identity.thinking;
+}
+
+/**
  * Update worker status when it completes or fails.
  */
 export function updateWorker(id: string, status: "completed" | "failed"): void {

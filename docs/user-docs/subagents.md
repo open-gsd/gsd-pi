@@ -101,6 +101,8 @@ Status output includes the run status, mode, context mode, update time, child st
 
 Each child is also assigned a random tracking name, shown as `<tracking-name> / <agent>`. The name is only for human tracking in status and result output; agent selection still uses the configured agent id.
 
+Live child rows retain the requested model. When the provider reports a different model, the TUI shows both as `<requested> ← <reported>` without changing model selection or routing.
+
 ## Resume And Follow-Up
 
 Resume follows up inside a child session captured by a previous run:

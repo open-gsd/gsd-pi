@@ -13,6 +13,7 @@ import {
 	releaseHostTaskBatch,
 	resetWorkerRegistry,
 	updateWorker,
+	updateWorkerIdentity,
 } from "../worker-registry.js";
 
 describe("worker registry — host task workers (#2533)", () => {
@@ -117,5 +118,19 @@ describe("worker registry — host task workers (#2533)", () => {
 		const row = getActiveWorkers().find((worker) => worker.id === id);
 		assert.equal(row?.status, "failed");
 		assert.match(formatWorkerElapsed(row!, "failed"), /^failed after/);
+	});
+
+	it("updates provider-reported identity while a worker is running", () => {
+		const id = registerWorker("scout", "inspect routing", 0, 1, "batch-model", {
+			model: "openrouter/auto",
+			thinking: "high",
+		});
+
+		updateWorkerIdentity(id, { reportedModel: "anthropic/claude-sonnet-5" });
+
+		const row = getActiveWorkers().find((worker) => worker.id === id);
+		assert.equal(row?.model, "openrouter/auto");
+		assert.equal(row?.reportedModel, "anthropic/claude-sonnet-5");
+		assert.equal(row?.thinking, "high");
 	});
 });

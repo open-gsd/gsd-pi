@@ -33,7 +33,7 @@ import {
 	mergeDeltaPatches,
 	readIsolationMode,
 } from "./isolation.js";
-import { registerWorker, updateWorker, formatWorkerIdentity } from "./worker-registry.js";
+import { registerWorker, updateWorker, updateWorkerIdentity, formatWorkerIdentity } from "./worker-registry.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 import { emitJournalEvent } from "../gsd/journal.js";
 import { CmuxClient, shellEscape } from "../cmux/index.js";
@@ -383,7 +383,11 @@ function processSubagentEventLine(
 				currentResult.usage.cost += usage.cost?.total || 0;
 				currentResult.usage.contextTokens = usage.totalTokens || 0;
 			}
-			if (!currentResult.model && msg.model) currentResult.model = msg.model;
+			const reportedModel = typeof msg.model === "string" ? msg.model.trim() : "";
+			if (reportedModel) {
+				if (!currentResult.model) currentResult.model = reportedModel;
+				else if (currentResult.model !== reportedModel) currentResult.reportedModel = reportedModel;
+			}
 			if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 			if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 		}
@@ -1893,6 +1897,11 @@ export default function (pi: ExtensionAPI) {
 					const updateParallelResult = (partial: AgentToolResult<SubagentDetails>) => {
 						if (partial.details?.results[0]) {
 							const raw = partial.details.results[0];
+							updateWorkerIdentity(workerId, {
+								model: raw.model,
+								reportedModel: raw.reportedModel,
+								thinking: raw.thinking,
+							});
 							allResults[index] = bankedUsage ? { ...raw, usage: withBankedUsage(raw.usage) } : raw;
 							persistRunResults([...allResults]);
 							emitParallelUpdate();

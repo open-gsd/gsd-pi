@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, it } from "node:test";
 
 import subagentExtension from "../index.js";
+import { getActiveWorkers, resetWorkerRegistry } from "../worker-registry.js";
 import { SessionManager } from "../../../../../packages/pi-coding-agent/src/core/session-manager.ts";
 
 const EMITS_USAGE_FIXTURE = fileURLToPath(new URL("./fixtures/emits-usage.cjs", import.meta.url));
@@ -118,6 +119,7 @@ describe("subagent usage reconciliation into the parent session", () => {
 	let dir: string | undefined;
 
 	afterEach(() => {
+		resetWorkerRegistry();
 		if (dir) rmSync(dir, { recursive: true, force: true });
 		dir = undefined;
 		if (savedAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
@@ -142,7 +144,7 @@ describe("subagent usage reconciliation into the parent session", () => {
 		return dir;
 	}
 
-	function makeExecute(sessionManager: unknown) {
+	function makeExecute(sessionManager: unknown, onUpdate?: (partial: any) => void) {
 		let tool: any;
 		subagentExtension({
 			on: () => {},
@@ -154,7 +156,7 @@ describe("subagent usage reconciliation into the parent session", () => {
 		} as any);
 		assert.ok(tool, "subagent tool was not registered");
 		return (params: Record<string, unknown>) =>
-			tool.execute("tool-call-1", params, undefined, undefined, {
+			tool.execute("tool-call-1", params, undefined, onUpdate, {
 				cwd: process.env.GSD_CODING_AGENT_DIR!,
 				hasUI: false,
 				sessionManager,
@@ -219,5 +221,45 @@ describe("subagent usage reconciliation into the parent session", () => {
 		const result = await execute({ agent: "usage-emitter", task: "no parent session manager" });
 
 		assert.equal(result.details.results[0].exitCode, 0);
+	});
+
+	it("shows a differing provider-reported model without replacing the requested model", async () => {
+		const cwd = freshEnv();
+		const liveIdentities: Array<{ model?: string; reportedModel?: string }> = [];
+		const tool = registerSubagentTool();
+		const execute = makeExecute(SessionManager.inMemory(cwd), (partial) => {
+			const result = partial.details?.results[0];
+			if (result) {
+				liveIdentities.push({
+					model: result.model,
+					reportedModel: result.reportedModel,
+				});
+			}
+		});
+
+		const result = await execute({
+			tasks: [{ agent: "usage-emitter", task: "report model", model: "requested-model" }],
+		});
+
+		assert.equal(result.details.results[0].model, "requested-model");
+		assert.equal(result.details.results[0].reportedModel, "test-model");
+		assert.match(renderCard(tool, result), /requested-model ← test-model/);
+		assert.ok(
+			liveIdentities.some(
+				(identity) => identity.model === "requested-model" && identity.reportedModel === "test-model",
+			),
+			"streaming result should expose requested and provider-reported identities",
+		);
+		const worker = getActiveWorkers().find((entry) => entry.task === "report model");
+		assert.equal(worker?.model, "requested-model");
+		assert.equal(worker?.reportedModel, "test-model");
+
+		const matchingResult = await execute({
+			agent: "usage-emitter",
+			task: "report matching model",
+			model: "test-model",
+		});
+		assert.equal(matchingResult.details.results[0].model, "test-model");
+		assert.equal(matchingResult.details.results[0].reportedModel, undefined);
 	});
 });
