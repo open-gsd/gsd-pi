@@ -181,7 +181,7 @@ export async function handleCleanupSnapshots(ctx: ExtensionCommandContext, baseP
 
 export async function handleCleanupWorktrees(ctx: ExtensionCommandContext, basePath: string): Promise<void> {
   const { getAllWorktreeHealth, formatWorktreeStatusLine } = await import("./worktree-health.js");
-  const { removeWorktree } = await import("./worktree-manager.js");
+  const { formatUnremovedWorktreeReason, removeWorktreeGuarded } = await import("./worktree-guarded-removal.js");
   const { sep } = await import("node:path");
 
   let statuses;
@@ -218,7 +218,11 @@ export async function handleCleanupWorktrees(ctx: ExtensionCommandContext, baseP
         continue;
       }
       try {
-        removeWorktree(basePath, wt.name, { deleteBranch: true });
+        const unremoved = formatUnremovedWorktreeReason(removeWorktreeGuarded(basePath, wt));
+        if (unremoved) {
+          lines.push(`  ⊘ ${wt.name}  (not removed — ${unremoved})`);
+          continue;
+        }
         lines.push(`  ✓ ${wt.name}  removed (branch ${wt.branch} deleted)`);
         removed++;
       } catch (e) {

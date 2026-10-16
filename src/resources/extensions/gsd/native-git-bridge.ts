@@ -502,9 +502,12 @@ export function nativeDiffNameStatus(
     return native.gitDiffNameStatus(basePath, fromRef, toRef, pathspec, useMergeBase);
   }
 
-  // Fallback
-  const separator = useMergeBase ? "..." : " ";
-  const args = ["diff", "--name-status", `${fromRef}${separator}${toRef}`];
+  // Fallback. The two refs of a direct diff are separate arguments: joined
+  // with a space they are one revision that git cannot resolve, and the
+  // failure reads as "no changes".
+  const args = useMergeBase
+    ? ["diff", "--name-status", `${fromRef}...${toRef}`]
+    : ["diff", "--name-status", fromRef, toRef];
   if (pathspec) args.push("--", pathspec);
 
   const result = gitExec(basePath, args, true);

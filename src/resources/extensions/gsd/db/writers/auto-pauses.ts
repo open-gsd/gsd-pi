@@ -51,6 +51,28 @@ export function setAutoPauseBlockerId(blockerId: string): void {
   });
 }
 
+/**
+ * The latest user-requested pause recorded for a unit (open or closed — the
+ * table keeps closed rows), or null. #2787: this is the durable signal that a
+ * `running` Task Attempt was paused by the user rather than orphaned by a
+ * crash, so recovery classifies the interrupt as a user pause, not a stale
+ * worker. Both timestamps are `new Date().toISOString()` strings, so the
+ * ordering comparison is plain lexicographic.
+ */
+export function readLatestUserPauseForUnit(
+  unitType: string,
+  unitId: string,
+): { pausedAt: string } | null {
+  if (!isDbAvailable()) return null;
+  const row = _getAdapter()!.prepare(
+    `SELECT paused_at FROM auto_pauses
+     WHERE unit_type = :unit_type AND unit_id = :unit_id AND blocker_kind = 'user_request'
+     ORDER BY paused_at DESC
+     LIMIT 1`,
+  ).get({ ":unit_type": unitType, ":unit_id": unitId }) as { paused_at: string } | undefined;
+  return row ? { pausedAt: row.paused_at } : null;
+}
+
 /** The open pause of this worker's scope, or null when it has none. */
 export function readOpenAutoPause(): PausedSessionMetadata | null {
   if (!isDbAvailable()) return null;

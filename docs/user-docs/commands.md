@@ -366,8 +366,8 @@ Use `/gsd worktree` from an active TUI session to inspect and clean up GSD-manag
 |---------|-------------|
 | `/gsd worktree list` | Show each worktree, branch, path, clean/unmerged/uncommitted status, diff stats, and commit count. Alias: `/gsd worktree ls`. |
 | `/gsd worktree merge [name]` | Merge a worktree into the detected main branch, then remove the worktree and its branch. The name is optional only when exactly one worktree exists. |
-| `/gsd worktree clean` | Remove only merged or empty worktrees. Worktrees with unmerged diffs or uncommitted changes are kept. |
-| `/gsd worktree remove <name> [--force]` | Remove a named worktree and delete its branch. Refuses unmerged or uncommitted work unless `--force` is supplied. Alias: `/gsd worktree rm`. |
+| `/gsd worktree clean` | Remove only merged or empty worktrees. Worktrees with unmerged diffs or uncommitted changes are kept, and so is a worktree that a running auto-mode session works in. A worktree whose directory could not be deleted (on Windows, a directory another program has open) is listed under "Partially removed" with the command that deletes it. |
+| `/gsd worktree remove <name> [--force]` | Remove a named worktree and delete its branch. Refuses unmerged or uncommitted work, and a worktree that a running auto-mode session works in, unless `--force` is supplied. Alias: `/gsd worktree rm`. |
 
 Safety behavior:
 

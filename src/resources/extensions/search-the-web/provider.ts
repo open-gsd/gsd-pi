@@ -21,10 +21,10 @@ function authFilePath(): string {
   return join(gsdHome(), 'agent', 'auth.json');
 }
 
-export type SearchProvider = 'tavily' | 'brave' | 'ollama'
+export type SearchProvider = 'tavily' | 'brave' | 'ollama' | 'firecrawl'
 export type SearchProviderPreference = SearchProvider | 'auto'
 
-const VALID_PREFERENCES = new Set<string>(['tavily', 'brave', 'ollama', 'auto'])
+const VALID_PREFERENCES = new Set<string>(['tavily', 'brave', 'ollama', 'firecrawl', 'auto'])
 const PREFERENCE_KEY = 'search_provider'
 
 /** Returns the Tavily API key from the environment, or empty string if not set. */
@@ -49,6 +49,11 @@ export function braveHeaders(): Record<string, string> {
 /** Returns the Ollama API key from the environment, or empty string if not set. */
 export function getOllamaApiKey(): string {
   return process.env.OLLAMA_API_KEY || ''
+}
+
+/** Returns the Firecrawl API key from the environment, or empty string if not set. */
+export function getFirecrawlApiKey(): string {
+  return process.env.FIRECRAWL_API_KEY || ''
 }
 
 /**
@@ -96,10 +101,12 @@ export function resolveSearchProvider(overridePreference?: string): SearchProvid
   const tavilyKey = getTavilyApiKey()
   const braveKey = getBraveApiKey()
   const ollamaKey = getOllamaApiKey()
+  const firecrawlKey = getFirecrawlApiKey()
 
   const hasTavily = tavilyKey.length > 0
   const hasBrave = braveKey.length > 0
   const hasOllama = ollamaKey.length > 0
+  const hasFirecrawl = firecrawlKey.length > 0
 
   // Determine effective preference
   let pref: SearchProviderPreference
@@ -122,6 +129,7 @@ export function resolveSearchProvider(overridePreference?: string): SearchProvid
     if (hasTavily) return 'tavily'
     if (hasBrave) return 'brave'
     if (hasOllama) return 'ollama'
+    if (hasFirecrawl) return 'firecrawl'
     return null
   }
 
@@ -129,6 +137,7 @@ export function resolveSearchProvider(overridePreference?: string): SearchProvid
     if (hasTavily) return 'tavily'
     if (hasBrave) return 'brave'
     if (hasOllama) return 'ollama'
+    if (hasFirecrawl) return 'firecrawl'
     return null
   }
 
@@ -136,6 +145,7 @@ export function resolveSearchProvider(overridePreference?: string): SearchProvid
     if (hasBrave) return 'brave'
     if (hasTavily) return 'tavily'
     if (hasOllama) return 'ollama'
+    if (hasFirecrawl) return 'firecrawl'
     return null
   }
 
@@ -143,6 +153,15 @@ export function resolveSearchProvider(overridePreference?: string): SearchProvid
     if (hasOllama) return 'ollama'
     if (hasTavily) return 'tavily'
     if (hasBrave) return 'brave'
+    if (hasFirecrawl) return 'firecrawl'
+    return null
+  }
+
+  if (pref === 'firecrawl') {
+    if (hasFirecrawl) return 'firecrawl'
+    if (hasTavily) return 'tavily'
+    if (hasBrave) return 'brave'
+    if (hasOllama) return 'ollama'
     return null
   }
 

@@ -19,8 +19,9 @@ import { LRUTTLCache } from "./cache.js";
 import { fetchWithRetryTimed, fetchWithRetry, classifyError, type RateLimitInfo } from "./http.js";
 import { normalizeQuery, toDedupeKey, detectFreshness } from "./url-utils.js";
 import { formatSearchResults, type SearchResultFormatted, type FormatSearchOptions } from "./format.js";
-import { getTavilyApiKey, getOllamaApiKey, getBraveApiKey, braveHeaders, resolveSearchProvider } from "./provider.js";
+import { getTavilyApiKey, getOllamaApiKey, getBraveApiKey, getFirecrawlApiKey, braveHeaders, resolveSearchProvider } from "./provider.js";
 import { normalizeTavilyResult, mapFreshnessToTavily, type TavilySearchResponse } from "./tavily.js";
+import { normalizeFirecrawlResult, mapFreshnessToFirecrawl, type FirecrawlSearchResponse } from "./firecrawl.js";
 
 // =============================================================================
 // Types
@@ -92,7 +93,7 @@ interface SearchDetails {
   errorKind?: string;
   error?: string;
   retryAfterMs?: number;
-  provider?: 'tavily' | 'brave' | 'ollama';
+  provider?: 'tavily' | 'brave' | 'ollama' | 'firecrawl';
 }
 
 // =============================================================================
@@ -302,6 +303,57 @@ async function executeOllamaSearch(
 }
 
 // =============================================================================
+// Firecrawl API execution
+// =============================================================================
+
+/**
+ * Execute a search against the Firecrawl v2 search API.
+ * Returns a CachedSearchResult with normalized, deduplicated results.
+ */
+async function executeFirecrawlSearch(
+  params: { query: string; freshness: string | null; domain?: string },
+  signal?: AbortSignal
+): Promise<{ results: CachedSearchResult; latencyMs: number; rateLimit?: RateLimitInfo }> {
+  const requestBody: Record<string, unknown> = {
+    query: params.query,
+    limit: 10,
+  };
+
+  const tbs = mapFreshnessToFirecrawl(params.freshness);
+  if (tbs) {
+    requestBody.tbs = tbs;
+  }
+
+  if (params.domain) {
+    requestBody.includeDomains = [params.domain];
+  }
+
+  const timed = await fetchWithRetryTimed("https://api.firecrawl.dev/v2/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${getFirecrawlApiKey()}`,
+    },
+    body: JSON.stringify(requestBody),
+    signal,
+  }, 2);
+
+  const data: FirecrawlSearchResponse = await timed.response.json();
+  const normalized = (data.data?.web ?? []).map(normalizeFirecrawlResult);
+  const deduplicated = deduplicateResults(normalized);
+
+  return {
+    results: {
+      results: deduplicated,
+      queryCorrected: false,
+      moreResultsAvailable: false,
+    },
+    latencyMs: timed.latencyMs,
+    rateLimit: timed.rateLimit,
+  };
+}
+
+// =============================================================================
 // Tool Registration
 // =============================================================================
 
@@ -356,7 +408,7 @@ export function registerSearchTool(pi: ExtensionAPI) {
       const provider = resolveSearchProvider();
       if (!provider) {
         return {
-          content: [{ type: "text", text: "Web search unavailable: No search API key is set. Use secure_env_collect to set TAVILY_API_KEY, BRAVE_API_KEY, or OLLAMA_API_KEY." }],
+          content: [{ type: "text", text: "Web search unavailable: No search API key is set. Use secure_env_collect to set TAVILY_API_KEY, BRAVE_API_KEY, OLLAMA_API_KEY, or FIRECRAWL_API_KEY." }],
           isError: true,
           details: { errorKind: "auth_error", error: "No search API key set" } satisfies Partial<SearchDetails>,
         };
@@ -403,7 +455,11 @@ export function registerSearchTool(pi: ExtensionAPI) {
       // ------------------------------------------------------------------
       // Cache lookup (provider-prefixed key)
       // ------------------------------------------------------------------
-      const cacheKey = normalizeQuery(effectiveQuery) + `|f:${freshness || ""}|s:${wantSummary}|p:${provider}`;
+      // Firecrawl filters by includeDomains instead of a site: query prefix,
+      // so its domain filter must join the cache/guard identity or two
+      // same-query different-domain searches would share a cache entry.
+      const cacheKey = normalizeQuery(effectiveQuery) + `|f:${freshness || ""}|s:${wantSummary}|p:${provider}` +
+        (provider === "firecrawl" ? `|d:${params.domain ?? ""}` : "");
 
       // ── Consecutive duplicate search guard (#949, #1671) ─────────────────
       // If the LLM keeps calling the same search query, break the loop
@@ -505,6 +561,14 @@ export function registerSearchTool(pi: ExtensionAPI) {
           searchResult = ollamaResult.results;
           latencyMs = ollamaResult.latencyMs;
           rateLimit = ollamaResult.rateLimit;
+        } else if (provider === "firecrawl") {
+          const firecrawlResult = await executeFirecrawlSearch(
+            { query: params.query, freshness, domain: params.domain },
+            signal
+          );
+          searchResult = firecrawlResult.results;
+          latencyMs = firecrawlResult.latencyMs;
+          rateLimit = firecrawlResult.rateLimit;
         } else {
           // ================================================================
           // BRAVE PATH (unchanged API logic)

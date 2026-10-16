@@ -108,6 +108,8 @@ export interface TaskExecutionAttemptSnapshot {
   coordinationDispatchId: number;
   workerId: string;
   milestoneLeaseToken: number;
+  /** Attempt start (claim fallback) time, ISO — #2787 pause-origin evidence. */
+  startedAt?: string;
 }
 
 export function isTaskAttemptAwaitingVerification<
@@ -152,6 +154,7 @@ interface AttemptSnapshotRow {
   attempt_number: number;
   retry_of_attempt_id: string | null;
   attempt_state: "running" | "settled";
+  started_at: string | null;
   outcome: TaskExecutionAttemptSnapshot["outcome"] | null;
   next_stage: KernelStage;
   coordination_dispatch_id: number;
@@ -303,6 +306,7 @@ function snapshot(row: AttemptSnapshotRow | undefined): TaskExecutionAttemptSnap
     coordinationDispatchId: row.coordination_dispatch_id,
     workerId: row.worker_id,
     milestoneLeaseToken: row.milestone_lease_token,
+    ...(row.started_at ? { startedAt: row.started_at } : {}),
   };
 }
 
@@ -330,6 +334,7 @@ export function readTaskAttempt(attemptId: string): TaskExecutionAttemptSnapshot
     SELECT attempt.attempt_id, attempt.attempt_number, attempt.retry_of_attempt_id,
            attempt.attempt_state,
            attempt.coordination_dispatch_id, attempt.worker_id, attempt.milestone_lease_token,
+           COALESCE(attempt.started_at, attempt.claimed_at) AS started_at,
            result.result_id, result.outcome, result.failure_class, result.summary, result.output_json,
            checkpoint.next_stage
     FROM workflow_execution_attempts attempt
@@ -348,11 +353,16 @@ export function readTaskAttempt(attemptId: string): TaskExecutionAttemptSnapshot
 
 export function readLatestTaskAttempt(
   task: ClaimTaskAttemptInput["task"],
+  options?: { projectId?: string },
 ): TaskExecutionAttemptSnapshot | null {
+  // #2778: identity columns alone can match a foreign project's imported row;
+  // callers that hold the project scope (e.g. the shadow-snapshot reader) pass it here.
+  const projectId = options?.projectId ?? null;
   const row = getDb().prepare(`
     SELECT attempt.attempt_id, attempt.attempt_number, attempt.retry_of_attempt_id,
            attempt.attempt_state,
            attempt.coordination_dispatch_id, attempt.worker_id, attempt.milestone_lease_token,
+           COALESCE(attempt.started_at, attempt.claimed_at) AS started_at,
            result.result_id, result.outcome, result.failure_class, result.summary, result.output_json,
            checkpoint.next_stage
     FROM workflow_item_lifecycles lifecycle
@@ -369,12 +379,14 @@ export function readLatestTaskAttempt(
       AND lifecycle.milestone_id = :milestone_id
       AND lifecycle.slice_id = :slice_id
       AND lifecycle.task_id = :task_id
+      AND (:project_id IS NULL OR lifecycle.project_id = :project_id)
     ORDER BY attempt.attempt_number DESC, checkpoint.sequence DESC
     LIMIT 1
   `).get({
     ":milestone_id": task.milestoneId,
     ":slice_id": task.sliceId,
     ":task_id": task.taskId,
+    ":project_id": projectId,
   }) as unknown as AttemptSnapshotRow | undefined;
   return snapshot(row);
 }

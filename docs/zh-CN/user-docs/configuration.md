@@ -70,6 +70,7 @@ token_profile: balanced
 |------|----------|------|----------|
 | Tavily Search | `TAVILY_API_KEY` | 为非 Anthropic models 提供 Web 搜索 | [tavily.com/app/api-keys](https://tavily.com/app/api-keys) |
 | Brave Search | `BRAVE_API_KEY` | 为非 Anthropic models 提供 Web 搜索 | [brave.com/search/api](https://brave.com/search/api) |
+| Firecrawl Search | `FIRECRAWL_API_KEY` | 为非 Anthropic models 提供 Web 搜索与页面提取 | [firecrawl.dev](https://firecrawl.dev) |
 | Context7 Docs | `CONTEXT7_API_KEY` | 库文档检索 | [context7.com/dashboard](https://context7.com/dashboard) |
 
 ### 工作方式

@@ -45,6 +45,7 @@ describe("AgentSessionExtensionsModule", () => {
         hasHandlers: () => false,
       },
       _sessionStartEvent: { type: "session_start", reason: "startup" },
+      repairPlaceholderModel: async () => {},
       agent: {
         streamFn: (_model: unknown, _context: unknown, options?: Record<string, unknown>) => {
           received = options;
@@ -58,6 +59,30 @@ describe("AgentSessionExtensionsModule", () => {
 
     host.agent.streamFn({}, {}, { maxTokens: 1 });
     assert.equal(received?.extensionUIContext, uiContext);
+  });
+
+  test("bindExtensions repairs the placeholder model after session_start (#2782)", async () => {
+    const order: string[] = [];
+    const host = {
+      _extensionRunner: {
+        setUIContext: () => {},
+        bindCommandContext: () => {},
+        onError: () => () => {},
+        emit: async (event: { type: string }) => {
+          if (event.type === "session_start") order.push("session_start");
+        },
+        hasHandlers: () => false,
+      },
+      _sessionStartEvent: { type: "session_start", reason: "startup" },
+      repairPlaceholderModel: async () => {
+        order.push("repair");
+      },
+    };
+
+    await new AgentSessionExtensionsModule(host as any).bindExtensions({});
+
+    // The repair must observe the registry AFTER session_start handlers ran.
+    assert.deepEqual(order, ["session_start", "repair"]);
   });
 
   test("skills are no longer embedded in the system prompt (discovered on-demand)", () => {
@@ -136,6 +161,143 @@ describe("AgentSessionModelModule", () => {
   });
 });
 
+describe("AgentSessionModelModule — repairPlaceholderModel (#2782)", () => {
+  const PLACEHOLDER = { provider: "unknown", id: "unknown", api: "unknown" };
+
+  function makeRepairHost(configuredModel: Record<string, unknown> | undefined) {
+    const events: Array<Record<string, unknown>> = [];
+    const persistedModels: string[][] = [];
+    const host = {
+      model: { ...PLACEHOLDER } as Record<string, unknown>,
+      agent: {
+        state: {
+          model: undefined as Record<string, unknown> | undefined,
+          thinkingLevel: "off" as string,
+        },
+      },
+      thinkingLevel: "off",
+      modelRegistry: {
+        find: (provider: string, id: string) =>
+          configuredModel && configuredModel.provider === provider && configuredModel.id === id
+            ? configuredModel
+            : undefined,
+        getAvailable: () => (configuredModel ? [configuredModel] : []),
+        hasConfiguredAuth: () => true,
+      },
+      sessionManager: {
+        buildSessionContext: () => ({ model: undefined as { provider: string; modelId: string } | undefined }),
+        appendModelChange: (provider: string, id: string) => persistedModels.push([provider, id]),
+      },
+      settingsManager: {
+        getDefaultProvider: () => "ollama",
+        getDefaultModel: () => "llama3",
+        getDefaultThinkingLevel: () => "high",
+        setDefaultModelAndProvider: (provider: string, id: string) => persistedModels.push([provider, id]),
+        setDefaultThinkingLevel: (level: string) => {
+          throw new Error(`repair must not persist thinking level (got ${level})`);
+        },
+      },
+      _extensionRunner: {
+        emit: async (event: Record<string, unknown>) => {
+          events.push(event);
+        },
+      },
+    };
+    return { host, events, persistedModels };
+  }
+
+  test("applies the configured default once its provider registers, without persisting", async () => {
+    const ollamaModel = { provider: "ollama", id: "llama3" };
+    const { host, events, persistedModels } = makeRepairHost(ollamaModel);
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.equal(host.agent.state.model, ollamaModel);
+    const select = events.find((e) => e.type === "model_select") as
+      | { model: unknown; previousModel: unknown; source: string }
+      | undefined;
+    assert.ok(select, "repair must emit model_select so the UI re-renders");
+    assert.equal(select.model, ollamaModel);
+    assert.equal(select.source, "set");
+    // No settings writes, no session-history model entries.
+    assert.deepEqual(persistedModels, []);
+    // Plain non-reasoning model: thinking stays "off" (in memory only).
+    assert.equal(host.agent.state.thinkingLevel, "off");
+  });
+
+  test("clamps the session thinking level in memory when the repaired model excludes off", async () => {
+    const reasoningModel = {
+      provider: "ollama",
+      id: "reasoner",
+      reasoning: true,
+      thinkingLevelMap: { off: null },
+    };
+    const { host } = makeRepairHost(reasoningModel);
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.equal(host.agent.state.model, reasoningModel);
+    // "off" is excluded by the model's thinkingLevelMap — startup clamps the
+    // same way; the repair must clamp in memory without persisting.
+    assert.equal(host.agent.state.thinkingLevel, "minimal");
+    assert.equal(host.settingsManager.getDefaultThinkingLevel(), "high");
+  });
+
+  test("prefers the model recorded in the resumed session over the settings default", async () => {
+    const recordedModel = { provider: "ollama", id: "recorded-b" };
+    const { host, events } = makeRepairHost({ provider: "ollama", id: "default-a" });
+    host.sessionManager.buildSessionContext = () => ({ model: { provider: "ollama", modelId: "recorded-b" } });
+    host.modelRegistry.find = (provider: string, id: string) =>
+      provider === recordedModel.provider && id === recordedModel.id ? recordedModel : undefined;
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.equal(host.agent.state.model, recordedModel);
+    assert.ok(events.some((e) => e.type === "model_select" && e.model === recordedModel));
+  });
+
+  test("leaves an already-resolved model alone", async () => {
+    const { host, events } = makeRepairHost(undefined);
+    host.model = { provider: "anthropic", id: "claude" };
+    let findCalls = 0;
+    host.modelRegistry.find = () => {
+      findCalls++;
+      return undefined;
+    };
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.equal(findCalls, 0);
+    assert.deepEqual(events, []);
+  });
+
+  test("keeps the placeholder when no configured model is registered", async () => {
+    const { host, events } = makeRepairHost(undefined);
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.deepEqual(events, []);
+    assert.equal(host.agent.state.model, undefined);
+  });
+
+  test("does not overwrite a model selected while the repair was awaiting", async () => {
+    const userPick = { provider: "anthropic", id: "user-pick" };
+    const ollamaModel = { provider: "ollama", id: "llama3" };
+    const { host, events } = makeRepairHost(ollamaModel);
+    // The settings default is not registered yet; while getAvailable is
+    // awaited, the user selects a different model.
+    host.modelRegistry.find = () => undefined;
+    host.modelRegistry.getAvailable = () => {
+      host.model = userPick;
+      return [ollamaModel];
+    };
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.deepEqual(events, []);
+    assert.equal(host.model, userPick);
+  });
+});
 describe("AgentSessionNavigationModule", () => {
   test("session-transition teardown aborts with the programmatic origin", async () => {
     // #2218: the origin lets downstream classification tell an internal
@@ -250,6 +412,26 @@ describe("AgentSessionEventsModule", () => {
 });
 
 describe("AgentSessionPromptModule", () => {
+  test("prompt repairs the placeholder model before anything else (#2782)", async () => {
+    const order: string[] = [];
+    const host = {
+      repairPlaceholderModel: async () => {
+        order.push("repair");
+        throw new Error("repair-ran-first sentinel");
+      },
+      beginTurnLatency: () => {
+        order.push("latency");
+        return undefined;
+      },
+    };
+
+    await assert.rejects(
+      new AgentSessionPromptModule(host as any).prompt("hi"),
+      /repair-ran-first sentinel/,
+    );
+    assert.deepEqual(order, ["repair"]);
+  });
+
   test("keeps no-progress terminal fingerprint across other retryable errors", async () => {
     const userMessage = {
       role: "user",

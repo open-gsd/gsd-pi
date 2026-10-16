@@ -26,7 +26,8 @@ import { normalizeQuery, extractDomain } from "./url-utils.js";
 import { formatLLMContext, type LLMContextSnippet, type LLMContextSource } from "./format.js";
 import type { TavilyResult, TavilySearchResponse } from "./tavily.js";
 import { publishedDateToAge } from "./tavily.js";
-import { getTavilyApiKey, getOllamaApiKey, getBraveApiKey, braveHeaders, resolveSearchProvider } from "./provider.js";
+import { getTavilyApiKey, getOllamaApiKey, getBraveApiKey, getFirecrawlApiKey, braveHeaders, resolveSearchProvider } from "./provider.js";
+import type { FirecrawlSearchResponse } from "./firecrawl.js";
 
 // =============================================================================
 // Types
@@ -78,7 +79,7 @@ interface LLMContextDetails {
   errorKind?: string;
   error?: string;
   retryAfterMs?: number;
-  provider?: 'tavily' | 'brave' | 'ollama';
+  provider?: 'tavily' | 'brave' | 'ollama' | 'firecrawl';
 }
 
 // =============================================================================
@@ -269,6 +270,57 @@ async function executeOllamaLLMContext(
 }
 
 // =============================================================================
+// Firecrawl LLM Context Execution
+// =============================================================================
+
+/**
+ * Execute a search_and_read query against the Firecrawl v2 search API.
+ *
+ * Asks for markdown per result via scrapeOptions, then feeds the results
+ * through budgetContent() for client-side token budgeting (Tavily path).
+ */
+async function executeFirecrawlLLMContext(
+  params: { query: string; maxTokens: number; maxUrls: number; count: number; threshold: string },
+  signal?: AbortSignal,
+): Promise<{ cached: CachedLLMContext; latencyMs: number; rateLimit?: RateLimitInfo }> {
+  const scoreThreshold = THRESHOLD_TO_SCORE[params.threshold] ?? 0.5;
+
+  const requestBody: Record<string, unknown> = {
+    query: params.query,
+    limit: params.count,
+    scrapeOptions: { formats: [{ type: "markdown" }] },
+  };
+
+  const timed = await fetchWithRetryTimed("https://api.firecrawl.dev/v2/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${getFirecrawlApiKey()}`,
+    },
+    body: JSON.stringify(requestBody),
+    signal,
+  }, 2);
+
+  const data: FirecrawlSearchResponse = await timed.response.json();
+
+  // Convert Firecrawl results to TavilyResult-compatible format for
+  // budgetContent: markdown page text is the richest content (raw_content),
+  // with the snippet description as fallback.
+  const tavilyLikeResults: TavilyResult[] = (data.data?.web ?? []).map(r => ({
+    title: r.title || "(untitled)",
+    url: r.url,
+    content: r.description || "",
+    score: 1.0, // Firecrawl doesn't provide relevance scores, assume all are relevant
+    ...(r.markdown ? { raw_content: r.markdown } : {}),
+  }));
+
+  // Honor the caller's URL cap (results are returned in relevance order).
+  const cached = budgetContent(tavilyLikeResults.slice(0, params.maxUrls), params.maxTokens, scoreThreshold);
+
+  return { cached, latencyMs: timed.latencyMs, rateLimit: timed.rateLimit };
+}
+
+// =============================================================================
 // Tool Registration
 // =============================================================================
 
@@ -333,7 +385,7 @@ export function registerLLMContextTool(pi: ExtensionAPI) {
       const provider = resolveSearchProvider();
       if (!provider) {
         return {
-          content: [{ type: "text", text: "search_and_read unavailable: No search API key is set. Use secure_env_collect to set TAVILY_API_KEY, BRAVE_API_KEY, or OLLAMA_API_KEY." }],
+          content: [{ type: "text", text: "search_and_read unavailable: No search API key is set. Use secure_env_collect to set TAVILY_API_KEY, BRAVE_API_KEY, OLLAMA_API_KEY, or FIRECRAWL_API_KEY." }],
           isError: true,
           details: { errorKind: "auth_error", error: "No search API key set" } satisfies Partial<LLMContextDetails>,
         };
@@ -404,6 +456,14 @@ export function registerLLMContextTool(pi: ExtensionAPI) {
           result = ollamaResult.cached;
           latencyMs = ollamaResult.latencyMs;
           rateLimit = ollamaResult.rateLimit;
+        } else if (provider === "firecrawl") {
+          const firecrawlResult = await executeFirecrawlLLMContext(
+            { query: params.query, maxTokens, maxUrls, count, threshold },
+            signal,
+          );
+          result = firecrawlResult.cached;
+          latencyMs = firecrawlResult.latencyMs;
+          rateLimit = firecrawlResult.rateLimit;
         } else {
           // ================================================================
           // BRAVE PATH (unchanged API logic)

@@ -70,6 +70,7 @@ export const PROVIDER_REGISTRY: ProviderInfo[] = [
   // Search Providers
   { id: "tavily",    label: "Tavily Search",      category: "search", envVar: "TAVILY_API_KEY",  dashboardUrl: "tavily.com/app/api-keys" },
   { id: "brave",     label: "Brave Search",       category: "search", envVar: "BRAVE_API_KEY",   dashboardUrl: "brave.com/search/api" },
+  { id: "firecrawl", label: "Firecrawl Search",   category: "search", envVar: "FIRECRAWL_API_KEY", dashboardUrl: "firecrawl.dev" },
 
   // Remote Integrations
   { id: "discord_bot",  label: "Discord Bot",     category: "remote", envVar: "DISCORD_BOT_TOKEN" },

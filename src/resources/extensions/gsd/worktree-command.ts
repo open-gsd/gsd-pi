@@ -20,7 +20,6 @@ import { resolveGsdPathContract } from "./paths.js";
 import {
   createWorktree,
   listWorktrees,
-  removeWorktree,
   mergeWorktreeToMain,
   diffWorktreeAll,
   diffWorktreeNumstat,
@@ -29,6 +28,7 @@ import {
   worktreeBranchName,
   worktreePath,
 } from "./worktree-manager.js";
+import { formatUnremovedWorktreeReason, removeWorktreeGuarded } from "./worktree-guarded-removal.js";
 import { inferCommitType } from "./git-service.js";
 import type { FileLineStat } from "./worktree-manager.js";
 import { existsSync, realpathSync, renameSync } from "node:fs";
@@ -825,12 +825,23 @@ async function handleRemove(
     }
 
     const prevCwd = process.cwd();
-    removeWorktree(mainBase, name, { deleteBranch: true });
+    const removal = removeWorktreeGuarded(mainBase, wt);
 
     // If we were in that worktree, removeWorktree chdir'd us out — clear tracking
     if (getWorktreeOriginalCwd() && process.cwd() !== prevCwd) {
       nudgeGitBranchCache(prevCwd);
       clearWorktreeOriginalCwd();
+    }
+
+    const unremoved = formatUnremovedWorktreeReason(removal);
+    if (unremoved) {
+      ctx.ui.notify(
+        removal.status === "partial"
+          ? `Worktree ${CLR.name(name)} was only partially removed: ${unremoved}`
+          : `Worktree ${CLR.name(name)} was not removed: ${unremoved}`,
+        "warning",
+      );
+      return;
     }
 
     ctx.ui.notify(`${CLR.ok("✓")} Worktree ${CLR.name(name)} removed ${CLR.muted("(branch deleted)")}.`, "info");
@@ -868,11 +879,16 @@ async function handleRemoveAll(
     const prevCwd = process.cwd();
     const removed: string[] = [];
     const failed: string[] = [];
+    const unremoved: string[] = [];
 
     for (const wt of worktrees) {
       try {
-        removeWorktree(mainBase, wt.name, { deleteBranch: true });
-        removed.push(wt.name);
+        const reason = formatUnremovedWorktreeReason(removeWorktreeGuarded(mainBase, wt));
+        if (reason) {
+          unremoved.push(`${CLR.name(wt.name)} (${reason})`);
+        } else {
+          removed.push(wt.name);
+        }
       } catch {
         failed.push(wt.name);
       }
@@ -887,7 +903,8 @@ async function handleRemoveAll(
     const lines: string[] = [];
     if (removed.length > 0) lines.push(`${CLR.ok("✓")} Removed: ${removed.map(n => CLR.name(n)).join(", ")}`);
     if (failed.length > 0) lines.push(`${CLR.warn("✗")} Failed: ${failed.map(n => CLR.name(n)).join(", ")}`);
-    ctx.ui.notify(lines.join("\n"), failed.length > 0 ? "warning" : "info");
+    for (const entry of unremoved) lines.push(`${CLR.warn("✗")} Not removed: ${entry}`);
+    ctx.ui.notify(lines.join("\n"), failed.length > 0 || unremoved.length > 0 ? "warning" : "info");
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(`Failed to remove worktrees: ${msg}`, "error");

@@ -9,6 +9,8 @@ import type { Api, Model } from "../src/types.ts";
 // cloudflare-ai-gateway/opencode/vercel-ai-gateway; both match the adaptive-thinking substrings.
 // #2701: Claude Haiku 5.5 is adaptive-thinking only; it matches the new `haiku-5-5` substring across the
 // Anthropic-backed providers.
+// 2026-10 catalog refresh: claude-haiku-5.5 reached cloudflare-ai-gateway and Vercel added -batch Anthropic
+// variants; both match the existing adaptive-thinking substrings via the generator rules.
 const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"anthropic-vertex/claude-fable-5",
 	"anthropic-vertex/claude-fable-5-1",
@@ -34,6 +36,7 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"anthropic/claude-sonnet-5-5",
 	"cloudflare-ai-gateway/claude-fable-5",
 	"cloudflare-ai-gateway/claude-fable-5.1",
+	"cloudflare-ai-gateway/claude-haiku-5.5",
 	"cloudflare-ai-gateway/claude-opus-4.6",
 	"cloudflare-ai-gateway/claude-opus-4.7",
 	"cloudflare-ai-gateway/claude-opus-4.8",
@@ -60,19 +63,30 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"opencode/claude-sonnet-5",
 	"opencode/claude-sonnet-5-5",
 	"vercel-ai-gateway/anthropic/claude-fable-5",
+	"vercel-ai-gateway/anthropic/claude-fable-5-batch",
 	"vercel-ai-gateway/anthropic/claude-fable-5.1",
+	"vercel-ai-gateway/anthropic/claude-fable-5.1-batch",
 	"vercel-ai-gateway/anthropic/claude-haiku-5.5",
+	"vercel-ai-gateway/anthropic/claude-haiku-5.5-batch",
 	"vercel-ai-gateway/anthropic/claude-opus-4.6",
+	"vercel-ai-gateway/anthropic/claude-opus-4.6-batch",
 	"vercel-ai-gateway/anthropic/claude-opus-4.7",
+	"vercel-ai-gateway/anthropic/claude-opus-4.7-batch",
 	"vercel-ai-gateway/anthropic/claude-opus-4.8",
+	"vercel-ai-gateway/anthropic/claude-opus-4.8-batch",
 	"vercel-ai-gateway/anthropic/claude-opus-4.8-fast",
 	"vercel-ai-gateway/anthropic/claude-opus-5",
+	"vercel-ai-gateway/anthropic/claude-opus-5-batch",
 	"vercel-ai-gateway/anthropic/claude-opus-5-fast",
 	"vercel-ai-gateway/anthropic/claude-opus-5.5",
+	"vercel-ai-gateway/anthropic/claude-opus-5.5-batch",
 	"vercel-ai-gateway/anthropic/claude-opus-5.5-fast",
 	"vercel-ai-gateway/anthropic/claude-sonnet-4.6",
+	"vercel-ai-gateway/anthropic/claude-sonnet-4.6-batch",
 	"vercel-ai-gateway/anthropic/claude-sonnet-5",
+	"vercel-ai-gateway/anthropic/claude-sonnet-5-batch",
 	"vercel-ai-gateway/anthropic/claude-sonnet-5.5",
+	"vercel-ai-gateway/anthropic/claude-sonnet-5.5-batch",
 ];
 
 function getAllModels(): Model<Api>[] {

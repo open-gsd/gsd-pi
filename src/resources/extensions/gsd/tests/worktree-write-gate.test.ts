@@ -32,6 +32,21 @@ function makeProject(isolation: "none" | "worktree" | "branch" | null): string {
   return root;
 }
 
+/**
+ * Create a milestone worktree directory as git leaves it: a `.git` file that
+ * points at the worktree's admin directory. The gate tells a live worktree
+ * from a leftover directory by that file.
+ */
+function makeMilestoneWorktree(root: string, milestoneId: string): string {
+  const worktreeRoot = join(root, ".gsd-worktrees", milestoneId);
+  mkdirSync(worktreeRoot, { recursive: true });
+  writeFileSync(
+    join(worktreeRoot, ".git"),
+    `gitdir: ${join(root, ".git", "worktrees", milestoneId)}\n`,
+  );
+  return worktreeRoot;
+}
+
 const PLANNING_WRITE_TOOLS = ["write", "edit", "multi_edit", "notebook_edit"];
 
 describe("shouldBlockWorktreeWrite (#5199)", () => {
@@ -181,8 +196,7 @@ describe("shouldBlockWorktreeWrite (#5199)", () => {
 
   test("Case 7c: auto active in worktree blocks absolute project-root source writes", () => {
     projectRoot = makeProject("worktree");
-    const inside = join(projectRoot, ".gsd-worktrees", "M004");
-    mkdirSync(inside, { recursive: true });
+    const inside = makeMilestoneWorktree(projectRoot, "M004");
     writeFileSync(join(projectRoot, "style.css"), "/* root */\n");
 
     const result = shouldBlockWorktreeWrite(
@@ -199,8 +213,7 @@ describe("shouldBlockWorktreeWrite (#5199)", () => {
 
   test("Case 7d: auto active in canonical .gsd-worktrees/ blocks root-relative escape via ..", () => {
     projectRoot = makeProject("worktree");
-    const inside = join(projectRoot, ".gsd-worktrees", "M004");
-    mkdirSync(inside, { recursive: true });
+    const inside = makeMilestoneWorktree(projectRoot, "M004");
 
     const result = shouldBlockWorktreeWrite(
       "edit",
@@ -211,6 +224,59 @@ describe("shouldBlockWorktreeWrite (#5199)", () => {
     );
     assert.equal(result.block, true);
     assert.match(result.reason ?? "", /outside the active milestone worktree/);
+  });
+
+  test("a worktree directory without a .git link is reported as removed, not as an isolation escape", () => {
+    projectRoot = makeProject("worktree");
+    const leftover = join(projectRoot, ".gsd-worktrees", "M004");
+    mkdirSync(join(leftover, ".gsd"), { recursive: true });
+
+    const result = shouldBlockWorktreeWrite(
+      "write",
+      join(projectRoot, "style.css"),
+      leftover,
+      /* isAutoLive */ true,
+      "execute-task",
+    );
+
+    assert.equal(result.block, true);
+    assert.match(result.reason ?? "", /is no longer a git worktree/);
+    assert.ok((result.reason ?? "").includes(leftover), "the reason names the leftover directory");
+    assert.match(result.reason ?? "", /git worktree prune/);
+    assert.doesNotMatch(result.reason ?? "", /outside the active milestone worktree/);
+  });
+
+  test("a worktree directory that is gone is reported as removed for a nested base path", () => {
+    projectRoot = makeProject("worktree");
+    const missing = join(projectRoot, ".gsd-worktrees", "M004");
+
+    const result = shouldBlockWorktreeWrite(
+      "edit",
+      join(projectRoot, "app.js"),
+      join(missing, "packages", "app"),
+      /* isAutoLive */ true,
+      "execute-task",
+    );
+
+    assert.equal(result.block, true);
+    assert.match(result.reason ?? "", /is no longer a git worktree/);
+    assert.ok((result.reason ?? "").includes(`"${missing}"`), "the reason names the worktree root, not the nested path");
+  });
+
+  test("bash from a worktree directory without a .git link is reported as removed", () => {
+    projectRoot = makeProject("worktree");
+    const leftover = join(projectRoot, ".gsd-worktrees", "M004");
+    mkdirSync(join(leftover, ".gsd"), { recursive: true });
+
+    const blocked = shouldBlockWorktreeBash(
+      `cd ${projectRoot} && git status`,
+      leftover,
+      /* isAutoLive */ true,
+      "execute-task",
+    );
+
+    assert.equal(blocked.block, true);
+    assert.match(blocked.reason ?? "", /is no longer a git worktree/);
   });
 
   test("Case 8: bootstrap unit type active → allow", () => {
@@ -256,8 +322,7 @@ describe("shouldBlockWorktreeWrite (#5199)", () => {
 
   test("bash blocks project-root path references during active worktree auto-mode", () => {
     projectRoot = makeProject("worktree");
-    const inside = join(projectRoot, ".gsd-worktrees", "M004");
-    mkdirSync(inside, { recursive: true });
+    const inside = makeMilestoneWorktree(projectRoot, "M004");
 
     const blocked = shouldBlockWorktreeBash(
       `sed -i '' 's/foo/bar/' ${join(projectRoot, "style.css")}`,
@@ -279,8 +344,7 @@ describe("shouldBlockWorktreeWrite (#5199)", () => {
 
   test("bash blocks project-root path references from worktree cwd without live auto (subagent children)", () => {
     projectRoot = makeProject("worktree");
-    const inside = join(projectRoot, ".gsd-worktrees", "M004");
-    mkdirSync(inside, { recursive: true });
+    const inside = makeMilestoneWorktree(projectRoot, "M004");
 
     const blocked = shouldBlockWorktreeBash(
       `cd ${projectRoot} && npm test`,

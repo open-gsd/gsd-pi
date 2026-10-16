@@ -62,8 +62,10 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "high", "xhigh"]);
 	});
 
-	it("includes only high/xhigh plus off for DeepSeek V4 Flash on opencode-go", () => {
-		const model = getModel("opencode-go", "deepseek-v4-flash");
+	it("includes only high/xhigh plus off for DeepSeek V4.1 Flash on opencode-go", () => {
+		// opencode-go/deepseek-v4-flash was deprecated upstream (models.dev status: deprecated)
+		// and dropped by the 2026-10 catalog refresh; V4.1 Flash carries the same level map.
+		const model = getModel("opencode-go", "deepseek-v4.1-flash");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "high", "xhigh"]);
 	});

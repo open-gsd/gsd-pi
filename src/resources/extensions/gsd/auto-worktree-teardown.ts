@@ -13,6 +13,7 @@ import {
   removeWorktree,
   worktreePath,
   isInsideWorktreesDir,
+  worktreeManualCleanupCommand,
 } from "./worktree-manager.js";
 import { nudgeGitBranchCache } from "./worktree.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
@@ -122,7 +123,7 @@ export function teardownAutoWorktree(
         "reconcile",
         `Worktree directory still exists after teardown: ${wtDir}. ` +
           `This is likely an orphaned directory consuming disk space. ` +
-          `Remove it manually with: rm -rf "${wtDir.replaceAll("\\", "/")}"`,
+          `Remove it manually with: ${worktreeManualCleanupCommand(wtDir)}`,
         { worktree: milestoneId },
       );
       // Attempt a direct filesystem removal as a fallback — but ONLY if the

@@ -114,6 +114,9 @@ export function preferBraveSearch(): boolean {
   // PREFERENCES.md takes priority over env var
   const prefsPref = resolveSearchProviderFromPreferences();
   if (prefsPref === "brave" || prefsPref === "tavily" || prefsPref === "ollama") return true;
+  // A Firecrawl preference only suppresses native search when its key is set:
+  // without the key no custom search tool registers and nothing would work.
+  if (prefsPref === "firecrawl") return !!process.env.FIRECRAWL_API_KEY;
   if (prefsPref === "native") return false;
   // Fall back to env var
   return process.env.PREFER_BRAVE_SEARCH === "1" || process.env.PREFER_BRAVE_SEARCH === "true";
