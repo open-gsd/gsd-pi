@@ -112,6 +112,60 @@ describe("subagent parallel card usage subtotal", () => {
 	});
 });
 
+describe("subagent chain card identity state (#2396)", () => {
+	const tool = registerSubagentTool();
+
+	function chainCard(expanded: boolean): string {
+		// `chainUpdate` streams the active step with exitCode -1 alongside the
+		// settled ones, so the card must not call a running step failed.
+		return renderCard(
+			tool,
+			{
+				content: [{ type: "text", text: "Chain: step 2 running..." }],
+				details: {
+					mode: "chain",
+					agentScope: "both",
+					projectAgentsDir: null,
+					results: [
+						{
+							agent: "a",
+							step: 1,
+							task: "first",
+							exitCode: 0,
+							messages: [],
+							stderr: "",
+							usage: zeroUsage(),
+							model: "requested-model",
+							startedAt: 1000,
+							completedAt: 4000,
+						},
+						{
+							agent: "b",
+							step: 2,
+							task: "second",
+							exitCode: -1,
+							messages: [],
+							stderr: "",
+							usage: zeroUsage(),
+							model: "requested-model",
+							startedAt: 4000,
+						},
+					],
+				},
+			},
+			expanded,
+		);
+	}
+
+	for (const expanded of [false, true]) {
+		it(`labels a streaming step running, not failed (${expanded ? "expanded" : "collapsed"})`, () => {
+			const text = chainCard(expanded);
+			assert.match(text, /running/);
+			assert.doesNotMatch(text, /failed after/);
+		});
+	}
+});
+
 describe("subagent usage reconciliation into the parent session", () => {
 	const savedAgentDir = process.env.GSD_CODING_AGENT_DIR;
 	const savedBinPath = process.env.GSD_BIN_PATH;

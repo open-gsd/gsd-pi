@@ -2515,7 +2515,10 @@ export default function (pi: ExtensionAPI) {
 							),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-						const identity = formatWorkerIdentity(r, r.exitCode === 0 ? "completed" : "failed");
+						const identity = formatWorkerIdentity(
+							r,
+							r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+						);
 						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
 						// Show tool calls
@@ -2559,7 +2562,10 @@ export default function (pi: ExtensionAPI) {
 					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
-					const identity = formatWorkerIdentity(r, r.exitCode === 0 ? "completed" : "failed");
+					const identity = formatWorkerIdentity(
+						r,
+						r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+					);
 					if (identity) text += `\n${theme.fg("dim", identity)}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
