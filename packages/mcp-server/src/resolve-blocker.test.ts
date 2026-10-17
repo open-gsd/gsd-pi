@@ -583,7 +583,7 @@ test("gsd_resolve_blocker pause selection keeps schema-too-new and checkout-unbo
   };
 
   const schemaResult = await resolveBlocker({ ...args, projectDir: tooNew.projectDir });
-  assert.equal(schemaResult.isError, true);
+  assert.equal(schemaResult.isError, true, schemaResult.content[0]?.text);
   assert.match(schemaResult.content[0]!.text, /schema.*newer|schema-too-new/i);
 
   const unbound = await seedProjectWithOpenAutoPause(t);

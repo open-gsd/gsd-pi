@@ -473,9 +473,6 @@ function openWorkflowDatabaseWithMode(
     };
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
-    if (!alreadyOpen) {
-      try { closeDatabase(); } catch { /* Preserve the original open failure. */ }
-    }
     if (isSchemaTooNewError(error)) {
       // Refuse-newer version skew stays distinguishable — never collapse it
       // into a generic open-failed that read seams degrade silently on.
