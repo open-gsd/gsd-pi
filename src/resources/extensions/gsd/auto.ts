@@ -2394,7 +2394,16 @@ export async function pauseAuto(
 
   s.active = false;
   s.paused = true;
-  if (options.abortActiveTurn && ctx && !ctx.isIdle()) ctx.abort();
+  // A throwing abort must not strand the half-paused state: active/paused are
+  // already observable above, so every step below (cancellation resolution,
+  // pause row, unit closeout) still has to run (#2877 codex review).
+  if (options.abortActiveTurn && ctx) {
+    try {
+      if (!ctx.isIdle()) ctx.abort();
+    } catch (err) {
+      logWarning("engine", `pause turn-abort failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
+  }
   clearUnitTimeout();
   stopAutoCommandPolling();
 
@@ -2425,10 +2434,10 @@ export async function pauseAuto(
   // kind, the action and the remediation, and a resume re-enters the kernel
   // advance with that route named on the row instead of re-diagnosing prose.
   // The seven human blocker kinds pause for a person unchanged.
-  let pauseReasonText = _errorContext?.message;
+  let pauseReasonText = _errorContext?.message ?? options.pauseReason;
   if (blockerKind === "machine_fixable") {
     const classification = classifyFailure({
-      error: _errorContext?.message ?? "machine-fixable failure",
+      error: options.pauseReason ?? _errorContext?.message ?? "machine-fixable failure",
       unitType: s.currentUnit?.type,
       unitId: s.currentUnit?.id,
     });

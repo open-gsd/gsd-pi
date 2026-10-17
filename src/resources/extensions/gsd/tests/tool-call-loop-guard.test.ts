@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
   checkToolCallLoop,
   configureToolCallLoopGuard,
+  noteLoopGuardModelResponse,
   recordToolCallLoopMutation,
   resetToolCallLoopGuard,
   disableToolCallLoopGuard,
@@ -864,6 +865,131 @@ console.log('\n── Loop guard: env overrides win over preferences (#1198) ─
   delete process.env.GSD_TOOL_LOOP_REPEATED_DEFAULT_CAP;
   configureToolCallLoopGuard(null);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Consecutive-block escalation (#2877): the 2nd block of the same tool in a
+// row carries escalate — but only across a model-response boundary, so the
+// model provably saw the first block before anything aborts.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('the second consecutive per-tool-cap block flags escalation (#2877)', () => {
+  resetToolCallLoopGuard();
+
+  // Calls 1-6 are allowed (cap 6): a legitimate varied-arg exploration keeps
+  // getting its results.
+  for (let i = 1; i <= 6; i++) {
+    const result = checkToolCallLoop('gsd_complete_milestone', { milestone: `M${i}` });
+    assert.ok(result.block === false, `call ${i} should be allowed`);
+    assert.equal(result.escalate, undefined, 'allowed calls carry no escalation');
+  }
+  // Call 7: the FIRST block stays a plain error result — the model gets its
+  // one explicit signal before anything aborts.
+  const firstBlock = checkToolCallLoop('gsd_complete_milestone', { milestone: 'M7' });
+  assert.ok(firstBlock.block === true, '7th call should be blocked by the per-tool cap');
+  assert.equal(firstBlock.escalate, false, 'the first block must not escalate');
+  // The model responds (a new model response starts) and re-issues the
+  // blocked tool: the 2nd consecutive block is the abort signal (observed
+  // repro: 425+ such retries in one turn).
+  noteLoopGuardModelResponse();
+  const secondBlock = checkToolCallLoop('gsd_complete_milestone', { milestone: 'M8' });
+  assert.ok(secondBlock.block === true, '8th call should be blocked again');
+  assert.equal(secondBlock.escalate, true, 'the post-response second block must escalate');
+});
+
+test('same-response blocks never escalate (tool batch safety, #2877)', () => {
+  resetToolCallLoopGuard();
+
+  // One assistant response carrying a whole bash batch (codex repro: 17
+  // distinct calls prepared back-to-back). Calls past the repeatable cap are
+  // blocked, but no model response started between the blocks, so the model
+  // has not seen any block yet — escalation must stay off.
+  for (let i = 1; i <= 15; i++) {
+    const result = checkToolCallLoop('bash', { command: `step ${i}` });
+    assert.ok(result.block === false, `batch call ${i} should be allowed`);
+  }
+  const firstOverflow = checkToolCallLoop('bash', { command: 'step 16' });
+  assert.ok(firstOverflow.block === true, '16th batch call should be blocked');
+  assert.equal(firstOverflow.escalate, false);
+  const secondOverflow = checkToolCallLoop('bash', { command: 'step 17' });
+  assert.ok(secondOverflow.block === true, '17th batch call should be blocked');
+  assert.equal(
+    secondOverflow.escalate,
+    false,
+    'a block within the same model response must never escalate',
+  );
+  // Only a response boundary — the model returning after seeing the block
+  // errors and retrying anyway — turns the next block into an abort signal.
+  noteLoopGuardModelResponse();
+  assert.equal(checkToolCallLoop('bash', { command: 'step 18' }).escalate, true);
+});
+
+test('an allowed call resets the consecutive-block escalation streak (#2877)', () => {
+  resetToolCallLoopGuard();
+
+  for (let i = 1; i <= 7; i++) checkToolCallLoop('gsd_complete_milestone', { milestone: `M${i}` });
+  // A different, allowed tool call breaks the tight re-issue loop.
+  const allowed = checkToolCallLoop('read', { path: 'notes.md' });
+  assert.ok(allowed.block === false, 'the interleaved allowed call should pass');
+  // The next block of the original tool is a fresh streak: signal again first.
+  const next = checkToolCallLoop('gsd_complete_milestone', { milestone: 'M8' });
+  assert.ok(next.block === true);
+  assert.equal(next.escalate, false, 'a block after an allowed call must not escalate');
+  noteLoopGuardModelResponse();
+  assert.equal(checkToolCallLoop('gsd_complete_milestone', { milestone: 'M9' }).escalate, true);
+});
+
+test('blocks of different tools do not share the escalation streak (#2877)', () => {
+  resetToolCallLoopGuard();
+
+  for (let i = 1; i <= 7; i++) checkToolCallLoop('gsd_complete_milestone', { milestone: `M${i}` });
+  for (let i = 1; i <= 7; i++) checkToolCallLoop('gsd_skip_slice', { slice: `S${i}` });
+  // Each tool's first block is its own signal: tool B's first block must not
+  // escalate just because tool A was also blocked this turn.
+  const againA = checkToolCallLoop('gsd_complete_milestone', { milestone: 'M8' });
+  assert.equal(againA.escalate, false, "a different tool's blocks must not escalate tool A");
+  noteLoopGuardModelResponse();
+  const b8 = checkToolCallLoop('gsd_skip_slice', { slice: 'S8' });
+  assert.equal(b8.escalate, false, "tool B's streak restarted after tool A's block");
+  noteLoopGuardModelResponse();
+  const b9 = checkToolCallLoop('gsd_skip_slice', { slice: 'S9' });
+  assert.equal(b9.escalate, true, "tool B's own second post-response block escalates");
+});
+
+test('identical-args blocks escalate on the second consecutive block (#2877)', () => {
+  resetToolCallLoopGuard();
+
+  for (let i = 1; i <= 4; i++) checkToolCallLoop('web_search', { query: 'same query' });
+  const firstBlock = checkToolCallLoop('web_search', { query: 'same query' });
+  assert.ok(firstBlock.block === true, '5th identical call should be blocked by Guard 1');
+  assert.equal(firstBlock.escalate, false);
+  noteLoopGuardModelResponse();
+  const secondBlock = checkToolCallLoop('web_search', { query: 'same query' });
+  assert.equal(secondBlock.escalate, true, 'repeated identical-args block must escalate');
+});
+
+test('reset clears the escalation streak (#2877)', () => {
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 7; i++) checkToolCallLoop('gsd_complete_milestone', { milestone: `M${i}` });
+  noteLoopGuardModelResponse();
+  assert.equal(checkToolCallLoop('gsd_complete_milestone', { milestone: 'M8' }).escalate, true);
+
+  // A new turn resets with the guard state: the first block after the
+  // boundary signals again before anything escalates.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 6; i++) checkToolCallLoop('gsd_complete_milestone', { milestone: `N${i}` });
+  const fresh = checkToolCallLoop('gsd_complete_milestone', { milestone: 'N7' });
+  assert.ok(fresh.block === true);
+  assert.equal(fresh.escalate, false, 'a new turn must start with a clean escalation streak');
+});
+
+test('exempt query tools never produce escalation flags (#2877, #2753)', () => {
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 30; i++) {
+    const result = checkToolCallLoop('gsd_decision_get', { id: `D${i}` });
+    assert.ok(result.block === false, `exempt call ${i} should be allowed`);
+    assert.equal(result.escalate, undefined, 'exempt calls never escalate');
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Reset restores default guard state after configuration tests

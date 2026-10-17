@@ -5,20 +5,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { autoSession } from "../auto-runtime-state.ts";
+import { autoSession, isAutoActive } from "../auto-runtime-state.ts";
 import { postUnitPreVerification } from "../auto-post-unit.ts";
 import { registerHooks } from "../bootstrap/register-hooks.ts";
 import { resetToolCallLoopGuard } from "../bootstrap/tool-call-loop-guard.ts";
+import { resetLoopGuardAbortGuard } from "../bootstrap/loop-guard-abort.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { readOpenAutoPause } from "../db/writers/auto-pauses.ts";
 import { readUnitHarnessAbort } from "../unit-runtime.ts";
+import { makeTempRepo } from "./test-utils.ts";
 
 type Handler = (event: any, ctx?: any) => Promise<any> | any;
+
+// pauseAuto anchors the process cwd to the paused base path. Captured at
+// module load, before any test can move it, so cleanup always has a directory
+// that exists to chdir back to.
+const initialCwd = process.cwd();
 
 // agent_end reads the write gate, and that read opens the project database of
 // `cwd`. A test that asserts on database rows after agent_end passes its own
 // base, so a database in the process working directory cannot replace its own.
-function makeHookHarness(cwd: string = process.cwd()): {
+function makeHookHarness(cwd: string = process.cwd(), ctxExtra: Record<string, unknown> = {}): {
   emitToolCall: (toolName: string, input: Record<string, unknown>) => Promise<any>;
+  emitMessageStart: (role?: string) => Promise<void>;
   emitToolResult: (event: Record<string, unknown>) => Promise<void>;
   emitToolExecutionEnd: (event: Record<string, unknown>) => Promise<void>;
   emitAgentEnd: (event: Record<string, unknown>) => Promise<void>;
@@ -34,6 +43,7 @@ function makeHookHarness(cwd: string = process.cwd()): {
   const ctx = {
     cwd,
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
+    ...ctxExtra,
   };
   let callId = 0;
 
@@ -45,6 +55,15 @@ function makeHookHarness(cwd: string = process.cwd()): {
       const loopGuardHandler = handlers.get("tool_call")?.[0];
       assert.ok(loopGuardHandler, "loop-guard tool_call handler should be registered");
       return loopGuardHandler({ toolCallId: `loop-${callId}`, toolName, input }, ctx);
+    },
+    async emitMessageStart(role: string = "assistant"): Promise<void> {
+      // A new conversation message started. Only ASSISTANT messages advance
+      // the loop guard's escalation streak (#2877) — tool-result messages
+      // (role "toolResult") are emitted between the calls of one response's
+      // sequential batch and must not.
+      for (const handler of handlers.get("message_start") ?? []) {
+        await handler({ message: { role } }, ctx);
+      }
     },
     async emitToolResult(event: Record<string, unknown>): Promise<void> {
       callId += 1;
@@ -696,4 +715,218 @@ test("register-hooks only records agent_end turn aborts for aborted or error sto
 
   const abort = readUnitHarnessAbort(base, "gate-evaluate", "M001/S01/gates+Q3", startedAt);
   assert.equal(abort, null);
+});
+
+// ─── #2877: post-cap consecutive blocks escalate to the sanctioned pause ───
+
+test("register-hooks escalates the second consecutive loop-guard block to a sanctioned auto pause (#2877)", async (t) => {
+  const base = makeTempRepo("gsd-loop-guard-abort-");
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  const startedAt = Date.now();
+  const abortCalls: string[] = [];
+  autoSession.reset();
+  resetToolCallLoopGuard();
+  resetLoopGuardAbortGuard();
+  autoSession.active = true;
+  autoSession.basePath = base;
+  // complete-milestone owns gsd_complete_milestone in its Tool Contract, so
+  // the scope guard passes it and only the loop guard can block these calls.
+  autoSession.currentUnit = { type: "complete-milestone", id: "M001", startedAt };
+  t.after(() => {
+    closeDatabase();
+    autoSession.reset();
+    resetToolCallLoopGuard();
+    resetLoopGuardAbortGuard();
+    process.chdir(initialCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const { emitToolCall, emitMessageStart } = makeHookHarness(base, {
+    isIdle: () => false,
+    abort: () => abortCalls.push("abort"),
+    sessionManager: { getSessionFile: () => null },
+  });
+
+  // Calls 1-6 are allowed: legitimate varied-arg calls keep working.
+  for (let i = 0; i < 6; i += 1) {
+    const allowed = await emitToolCall("gsd_complete_milestone", { milestone: `M${i}` });
+    assert.equal(allowed?.block ?? false, false, `call ${i} should pass the loop guard`);
+  }
+
+  // Call 7: the FIRST block stays a plain error toolResult and must not touch
+  // auto-mode state — the model gets its explicit signal first.
+  const firstBlock = await emitToolCall("gsd_complete_milestone", { milestone: "M6" });
+  assert.equal(firstBlock?.block, true);
+  assert.match(firstBlock.reason, /Tool loop detected \(repeated tool\): gsd_complete_milestone/);
+  assert.match(firstBlock.reason, /Do not re-issue this blocked tool/);
+  assert.equal(isAutoActive(), true, "the first block must not pause auto-mode");
+  assert.equal(abortCalls.length, 0, "the first block must not abort the turn");
+
+  // Same-response blocks never escalate: an adjacent retry inside one model
+  // response proves only that the batch blew the cap — the model has not seen
+  // any block yet (codex batch repro, #2877). Sequential execution emits each
+  // tool result as its own (role "toolResult") message_start between the
+  // calls; those must not advance the response boundary either.
+  await emitMessageStart("toolResult");
+  const sameResponseBlock = await emitToolCall("gsd_complete_milestone", { milestone: "M6b" });
+  assert.equal(sameResponseBlock?.block, true);
+  await emitMessageStart("toolResult");
+  const sameResponseBlock2 = await emitToolCall("gsd_complete_milestone", { milestone: "M6c" });
+  assert.equal(sameResponseBlock2?.block, true);
+  assert.equal(isAutoActive(), true, "a same-response block must not pause auto-mode");
+  assert.equal(abortCalls.length, 0);
+
+  // The model responds (new message_start) and re-issues the blocked tool
+  // anyway — the second post-response block escalates through pauseAuto (the
+  // sanctioned interrupt: turn aborted, unit closed into the pause/repair
+  // state, reason carried).
+  await emitMessageStart();
+  const escalated = await emitToolCall("gsd_complete_milestone", { milestone: "M7" });
+  assert.equal(escalated?.block, true);
+  assert.match(escalated.reason, /Auto-mode paused/);
+  assert.match(escalated.reason, /Tool loop detected \(repeated tool\): gsd_complete_milestone/,
+    "the abort result must carry the guard's reason");
+  assert.equal(isAutoActive(), false, "auto-mode must be paused through pauseAuto");
+  assert.equal(autoSession.paused, true);
+  assert.equal(autoSession.currentUnit, null, "the unit must be closed into the pause/repair state");
+  assert.equal(abortCalls.length, 1, "the active turn must be aborted exactly once");
+
+  // The pause row is the durable repair state: it must carry the machine
+  // blocker, the unit identity, and the guard's reason classified as a
+  // deterministic-policy stop (repair before resume, not an automatic retry).
+  const pauseRow = readOpenAutoPause();
+  assert.equal(pauseRow?.blockerKind, "machine_fixable");
+  assert.equal(pauseRow?.unitType, "complete-milestone");
+  assert.equal(pauseRow?.unitId, "M001");
+  assert.match(pauseRow?.pauseReason ?? "", /recovery:deterministic-policy\/stop/);
+  assert.match(pauseRow?.pauseReason ?? "", /Tool loop guard escalation: "gsd_complete_milestone"/);
+  assert.match(pauseRow?.pauseReason ?? "", /Tool loop detected \(repeated tool\)/,
+    "the row must carry the underlying guard reason");
+
+  // A post-pause retry of the blocked tool must stay a plain error result:
+  // auto is inactive, so the escalation can neither double-abort the turn
+  // nor re-pause the already-paused session (codex review, #2877).
+  await emitMessageStart();
+  const postPause = await emitToolCall("gsd_complete_milestone", { milestone: "M8" });
+  assert.equal(postPause?.block, true);
+  assert.doesNotMatch(postPause.reason, /Auto-mode paused/, "no second pause after the first");
+  assert.equal(abortCalls.length, 1, "the turn must never be aborted twice");
+});
+
+test("loop-guard blocks stay error results without escalation outside auto-mode (#2877)", async (t) => {
+  autoSession.reset();
+  resetToolCallLoopGuard();
+  resetLoopGuardAbortGuard();
+  t.after(() => {
+    autoSession.reset();
+    resetToolCallLoopGuard();
+    resetLoopGuardAbortGuard();
+  });
+
+  const abortCalls: string[] = [];
+  const { emitToolCall, emitMessageStart } = makeHookHarness(process.cwd(), {
+    isIdle: () => false,
+    abort: () => abortCalls.push("abort"),
+    sessionManager: { getSessionFile: () => null },
+  });
+
+  // Interactive sessions have no unit to land in a repair state, so every
+  // block stays a plain error toolResult. The model responds between the
+  // blocks (assistant message_start), so the guard's escalation flag DOES
+  // fire — what keeps the turn alive is the auto-active veto, which is the
+  // behavior under test here (codex review, #2877).
+  for (let i = 0; i < 9; i += 1) {
+    if (i >= 6) await emitMessageStart();
+    const result = await emitToolCall("gsd_complete_milestone", { milestone: `M${i}` });
+    if (i < 6) {
+      assert.equal(result?.block ?? false, false);
+    } else {
+      assert.equal(result?.block, true, `call ${i} should be blocked`);
+      assert.match(result.reason, /respond to the user in text/);
+      assert.doesNotMatch(result.reason, /Auto-mode paused/);
+    }
+  }
+  assert.equal(abortCalls.length, 0, "interactive sessions must never abort via the auto pause path");
+});
+
+test("a throwing turn-abort still completes the sanctioned pause (#2877 codex review)", async (t) => {
+  const base = makeTempRepo("gsd-loop-guard-abort-throw-");
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  const startedAt = Date.now();
+  autoSession.reset();
+  resetToolCallLoopGuard();
+  resetLoopGuardAbortGuard();
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.currentUnit = { type: "complete-milestone", id: "M001", startedAt };
+  t.after(() => {
+    closeDatabase();
+    autoSession.reset();
+    resetToolCallLoopGuard();
+    resetLoopGuardAbortGuard();
+    process.chdir(initialCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const { emitToolCall, emitMessageStart } = makeHookHarness(base, {
+    isIdle: () => false,
+    // The engine abort call fails (dead transport). pauseAuto flags the pause
+    // BEFORE aborting, so a throw here must not strand the half-paused state:
+    // cancellation resolution, pause row, and unit closeout still run.
+    abort: () => {
+      throw new Error("abort transport dead");
+    },
+    sessionManager: { getSessionFile: () => null },
+  });
+
+  for (let i = 0; i < 6; i += 1) {
+    await emitToolCall("gsd_complete_milestone", { milestone: `M${i}` });
+  }
+  await emitToolCall("gsd_complete_milestone", { milestone: "M6" });
+  await emitMessageStart();
+  const escalated = await emitToolCall("gsd_complete_milestone", { milestone: "M7" });
+
+  // The pause itself completed: durable row, unit closed into repair state.
+  assert.equal(autoSession.paused, true, "the pause must complete despite the abort failure");
+  assert.equal(autoSession.currentUnit, null, "the unit must not stay dispatched");
+  const pauseRow = readOpenAutoPause();
+  assert.equal(pauseRow?.blockerKind, "machine_fixable");
+  assert.match(pauseRow?.pauseReason ?? "", /Tool loop guard escalation: "gsd_complete_milestone"/);
+  assert.match(escalated.reason, /Auto-mode paused/,
+    "the escalation result must still report the sanctioned pause");
+  assert.equal(isAutoActive(), false);
+});
+
+test("exempt read-only query tools never reach the auto escalation (#2877, #2753)", async (t) => {
+  const base = makeRuntimeBase();
+  autoSession.reset();
+  resetToolCallLoopGuard();
+  resetLoopGuardAbortGuard();
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.currentUnit = { type: "plan-milestone", id: "M001", startedAt: Date.now() };
+  t.after(() => {
+    autoSession.reset();
+    resetToolCallLoopGuard();
+    resetLoopGuardAbortGuard();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const abortCalls: string[] = [];
+  const { emitToolCall } = makeHookHarness(base, {
+    isIdle: () => false,
+    abort: () => abortCalls.push("abort"),
+  });
+
+  // The #2753 pattern: a planning turn legitimately looks up many different
+  // decisions. Exempt tools skip Guard 2 entirely, so no block — and no
+  // escalation — ever fires.
+  for (let i = 0; i < 30; i += 1) {
+    const result = await emitToolCall("gsd_decision_get", { id: `D${i}` });
+    assert.equal(result?.block ?? false, false, `exempt lookup ${i} must not be blocked`);
+  }
+  assert.equal(isAutoActive(), true, "exempt lookups must not pause auto-mode");
+  assert.equal(abortCalls.length, 0);
 });
