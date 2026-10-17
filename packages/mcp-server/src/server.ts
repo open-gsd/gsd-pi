@@ -1440,7 +1440,7 @@ export async function createMcpServer(
     projectDir: z.string().min(1).optional().describe('Absolute path to the project directory. Resolves the open escalation or auto-pause blocker in the project database.'),
     questionId: z.string().min(1).optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open. Mutually exclusive with pauseBlockerId.'),
     pauseBlockerId: z.string().min(1).optional().describe('The exact open auto-pause blocker id to clear-only resolve (blockers in gsd_project_snapshot). Mutually exclusive with sessionId and questionId.'),
-    response: z.string().min(1).optional().describe('Required for session or database escalation selection; forbidden with pauseBlockerId.'),
+    response: z.string().optional().describe('Required for session or database escalation selection; forbidden with pauseBlockerId.'),
     rationale: z.string().trim().min(1).optional().describe('Required with pauseBlockerId: why the auto-pause blocker is being cleared.'),
     expectedRevision: z.number().int().nonnegative().optional().describe('Required with pauseBlockerId: authority.revision from the gsd_project_snapshot that supplied the selected blocker.'),
     expectedAuthorityEpoch: z.number().int().nonnegative().optional().describe('Required with pauseBlockerId: authority.authorityEpoch from the same gsd_project_snapshot.'),
@@ -1464,6 +1464,8 @@ export async function createMcpServer(
     }
     if (value.response === undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['response'], message: 'response is required for escalation selection' });
+    } else if (value.projectDir !== undefined && !value.response.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['response'], message: 'response must not be blank for escalation selection' });
     }
     if (value.sessionId === undefined && value.projectDir === undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['projectDir'], message: 'Either sessionId or projectDir must be provided' });
@@ -1511,7 +1513,7 @@ export async function createMcpServer(
           }
           return jsonContent({ source: 'database', pauseBlockerId, ...result, resolved: true });
         }
-        if (!response) return errorContent('response is required for escalation selection.');
+        if (response === undefined) return errorContent('response is required for escalation selection.');
         if (!projectDir) {
           if (!sessionId) return errorContent('Either sessionId or projectDir must be provided');
           if (!sessionManager.getSession(sessionId)) {
@@ -1520,6 +1522,7 @@ export async function createMcpServer(
           await sessionManager.resolveBlocker(sessionId, response);
           return jsonContent({ resolved: true });
         }
+        if (!response.trim()) return errorContent('response must not be blank for escalation selection.');
         const result = await resolvePersistedBlockerViaBridge(validateProjectDir(projectDir), response, questionId, extra);
         if (result.status !== 'resolved' && result.status !== 'rejected-to-blocker') {
           return errorContent(result.message);

@@ -33,9 +33,9 @@ export function isHumanPauseBlockerKind(kind: AutoPauseBlockerKind): boolean {
   return HUMAN_PAUSE_BLOCKER_KINDS.has(kind);
 }
 
-// Keep this aligned with the canonical auto/run-hook lifecycle-bearing units:
-// other current-unit labels do not prove one of these three workflow rows.
-const TASK_PAUSE_UNIT_TYPES = new Set(["execute-task"]);
+// Keep this aligned with the canonical lifecycle-bearing auto-dispatch units:
+// other current-unit labels do not prove one of these workflow rows.
+const TASK_PAUSE_UNIT_TYPES = new Set(["execute-task", "replan-task"]);
 const SLICE_PAUSE_UNIT_TYPES = new Set(["complete-slice", "plan-slice"]);
 const MILESTONE_PAUSE_UNIT_TYPES = new Set(["complete-milestone", "research-milestone"]);
 const SLICE_ID_RE = /^S\d{2,3}$/;

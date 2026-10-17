@@ -129,7 +129,7 @@ async function resolveBlockerToolAfterRestart() {
   });
 }
 
-async function seedProjectWithOpenAutoPause(t: TestContext): Promise<{
+async function seedProjectWithOpenAutoPause(t: TestContext, unitType = "execute-task"): Promise<{
   projectDir: string;
   blockerId: string;
   revision: number;
@@ -150,7 +150,7 @@ async function seedProjectWithOpenAutoPause(t: TestContext): Promise<{
   autoSession.basePath = projectDir;
   autoSession.originalBasePath = projectDir;
   autoSession.currentMilestoneId = "M001";
-  autoSession.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
+  autoSession.currentUnit = { type: unitType, id: "M001/S01/T01", startedAt: Date.now() };
   process.chdir(projectDir);
   await pauseAuto(undefined, undefined, "consent", {
     message: "Operator confirmation required",
@@ -196,7 +196,9 @@ test("gsd_resolve_blocker public schema enforces escalation and pause selector c
   const schema = (server as any)._registeredTools.gsd_resolve_blocker.inputSchema;
 
   assert.equal(schema.safeParse({ sessionId: "live", response: "answer" }).success, true);
+  assert.equal(schema.safeParse({ sessionId: "live", response: "" }).success, true);
   assert.equal(schema.safeParse({ projectDir: "/tmp/project", response: "accept" }).success, true);
+  assert.equal(schema.safeParse({ projectDir: "/tmp/project", response: "" }).success, false);
   assert.equal(schema.safeParse({
     projectDir: "/tmp/project",
     pauseBlockerId: "blocker-1",
@@ -224,6 +226,63 @@ test("gsd_resolve_blocker public schema enforces escalation and pause selector c
   ]) {
     assert.equal(schema.safeParse(invalid).success, false, JSON.stringify(invalid));
   }
+});
+
+test("pauseAuto opens a blocker for an exact task lifecycle during replan-task", async (t) => {
+  const selected = await seedProjectWithOpenAutoPause(t, "replan-task");
+
+  openDatabase(join(selected.projectDir, ".gsd", "gsd.db"));
+  const db = _getAdapter();
+  assert.ok(db);
+  const taskLifecycle = db.prepare(`
+    SELECT lifecycle_id FROM workflow_item_lifecycles
+    WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = 'S01' AND task_id = 'T01'
+  `).get() as { lifecycle_id: string } | undefined;
+  assert.ok(taskLifecycle);
+  const blocker = db.prepare(`
+    SELECT lifecycle_id FROM workflow_blockers WHERE blocker_id = :id
+  `).get({ ":id": selected.blockerId }) as { lifecycle_id: string } | undefined;
+  assert.ok(blocker);
+  assert.equal(blocker.lifecycle_id, taskLifecycle.lifecycle_id);
+});
+
+test("gsd_resolve_blocker passes an empty response through to a live session", async () => {
+  const sessionManager = new SessionManager();
+  let sentResponse: { blockerId: string; value: string } | undefined;
+  (sessionManager as any).sessions.set("/tmp/live-session", {
+    sessionId: "live-session",
+    projectDir: "/tmp/live-session",
+    status: "blocked",
+    client: {
+      sendUIResponse: (blockerId: string, response: { value: string }) => {
+        sentResponse = { blockerId, value: response.value };
+      },
+    },
+    events: [],
+    pendingBlocker: { id: "question-1" },
+    cost: { totalCost: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+    startTime: Date.now(),
+  });
+  const { server } = await createMcpServer(sessionManager, { includeWorkflowTools: false });
+  const tool = (server as any)._registeredTools.gsd_resolve_blocker;
+
+  const result: ToolResult = await tool.handler({ sessionId: "live-session", response: "" }, {
+    _meta: { "io.opengsd/idempotency-key": `resolve-blocker-test:${++callSequence}` },
+  });
+
+  assert.notEqual(result.isError, true, result.content[0]?.text);
+  assert.deepEqual(sentResponse, { blockerId: "question-1", value: "" });
+});
+
+test("gsd_resolve_blocker rejects blank escalation responses", async (t) => {
+  const projectDir = seedProjectWithOpenEscalation(t);
+  const resolveBlocker = await resolveBlockerToolAfterRestart();
+
+  const result = await resolveBlocker({ projectDir, response: "" });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0]!.text, /response must not be blank/);
+  assertEscalationStillOpen(projectDir);
 });
 
 test("gsd_resolve_blocker handler rejects invalid pause combinations without success fallback", async () => {
