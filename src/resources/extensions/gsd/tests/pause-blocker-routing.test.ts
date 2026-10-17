@@ -26,14 +26,14 @@ import { readOpenAutoPauseBlockerId } from "../db/writers/auto-pauses.ts";
 
 const TS = "2026-10-05T00:00:00.000Z";
 
-function makeProject(t: TestContext, options: { milestoneLifecycle?: boolean } = {}): string {
+function makeProject(t: TestContext, options: { sliceLifecycle?: boolean } = {}): string {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-pause-blocker-")));
   mkdirSync(join(base, ".gsd"), { recursive: true });
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Milestone", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "in-progress" });
   insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
-  if (options.milestoneLifecycle) seedMilestoneLifecycle(base);
+  if (options.sliceLifecycle) seedSliceLifecycle(base);
   autoSession.reset();
   t.after(() => {
     autoSession.reset();
@@ -43,8 +43,8 @@ function makeProject(t: TestContext, options: { milestoneLifecycle?: boolean } =
   return base;
 }
 
-/** The lifecycle row a paused milestone item needs for its workflow_blockers row. */
-function seedMilestoneLifecycle(base: string): void {
+/** The exact lifecycle row the active M001/S01 plan-slice pause needs. */
+function seedSliceLifecycle(base: string): void {
   const db = _getAdapter()!;
   db.prepare(
     `UPDATE project_authority SET revision = 1, updated_at = :ts WHERE singleton = 1`,
@@ -62,8 +62,8 @@ function seedMilestoneLifecycle(base: string): void {
        lifecycle_id, project_id, item_kind, milestone_id, slice_id, task_id,
        lifecycle_status, state_version, created_at, updated_at,
        last_operation_id, last_project_revision, last_authority_epoch
-     ) VALUES ('lc-m001', (SELECT project_id FROM project_authority WHERE singleton = 1),
-               'milestone', 'M001', NULL, NULL, 'in_progress', 1, :ts, :ts, 'op1', 1, 0)`,
+    ) VALUES ('lc-m001-s01', (SELECT project_id FROM project_authority WHERE singleton = 1),
+              'slice', 'M001', 'S01', NULL, 'in_progress', 1, :ts, :ts, 'op1', 1, 0)`,
   ).run({ ":ts": TS });
   void base;
 }
@@ -109,7 +109,7 @@ test("a machine_fixable pause records the Recovery Classifier's route on its pau
 });
 
 test("a human pause opens a workflow_blockers row for the paused item and links it to the pause row", async (t) => {
-  const base = makeProject(t, { milestoneLifecycle: true });
+  const base = makeProject(t, { sliceLifecycle: true });
   activateSession(base);
 
   await pauseAuto(undefined, undefined, "ambiguous_intent", {
@@ -122,7 +122,7 @@ test("a human pause opens a workflow_blockers row for the paused item and links 
   assert.equal(rows[0]["blocker_kind"], "ambiguous_intent");
   assert.equal(rows[0]["blocker_status"], "open");
   assert.equal(rows[0]["resolution_owner"], "user");
-  assert.equal(rows[0]["lifecycle_id"], "lc-m001");
+  assert.equal(rows[0]["lifecycle_id"], "lc-m001-s01");
   assert.match(String(rows[0]["description"]), /Two valid routes/);
   assert.match(String(rows[0]["requested_action"]), /\/gsd auto/);
 
@@ -147,7 +147,7 @@ test("a human pause of an item without a lifecycle row records the pause row alo
 });
 
 test("a user_request pause opens no blocker row", async (t) => {
-  const base = makeProject(t, { milestoneLifecycle: true });
+  const base = makeProject(t, { sliceLifecycle: true });
   activateSession(base);
 
   await pauseAuto(undefined, undefined, "user_request");
@@ -157,7 +157,7 @@ test("a user_request pause opens no blocker row", async (t) => {
 });
 
 test("the resolution of the pause resolves its blocker row", async (t) => {
-  const base = makeProject(t, { milestoneLifecycle: true });
+  const base = makeProject(t, { sliceLifecycle: true });
   activateSession(base);
   await pauseAuto(undefined, undefined, "consent", { message: "Needs approval to publish", category: "unknown" });
   const blockerId = String(blockerRows()[0]["blocker_id"]);
@@ -173,7 +173,7 @@ test("the resolution of the pause resolves its blocker row", async (t) => {
 });
 
 test("a newer pause resolves the blocker of the pause it replaces", async (t) => {
-  const base = makeProject(t, { milestoneLifecycle: true });
+  const base = makeProject(t, { sliceLifecycle: true });
   activateSession(base);
   await pauseAuto(undefined, undefined, "user_limit", { message: "Cost limit", category: "unknown" });
   const firstBlockerId = String(blockerRows()[0]["blocker_id"]);
