@@ -1457,6 +1457,21 @@ export function validatePreferences(preferences: GSDPreferences): {
     }
   }
 
+  if (preferences.verification_source_exclude_paths !== undefined) {
+    if (Array.isArray(preferences.verification_source_exclude_paths)) {
+      const allStrings = preferences.verification_source_exclude_paths.every(
+        (item: unknown) => typeof item === "string",
+      );
+      if (allStrings) {
+        validated.verification_source_exclude_paths = preferences.verification_source_exclude_paths;
+      } else {
+        errors.push("verification_source_exclude_paths must be an array of strings");
+      }
+    } else {
+      errors.push("verification_source_exclude_paths must be an array of strings");
+    }
+  }
+
   if (preferences.per_unit_cost_cap_usd !== undefined) {
     const raw = preferences.per_unit_cost_cap_usd;
     if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {

@@ -1370,6 +1370,69 @@ test("isolation:none merge skip pushes the integration branch when auto_push is 
   assert.equal(pushEvent.data?.remote, "origin");
 });
 
+test("isolation:none merge skip pushes through the worktree basePath when no session root was adopted (#2874)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase();
+  const bare = makeBareRemote("gsd-lifecycle-remote-");
+  t.after(() => {
+    cleanupRepoBase(base, previousCwd);
+    rmSync(bare, { recursive: true, force: true });
+  });
+  gitIn(base, "remote", "add", "origin", bare);
+  commitMilestoneWork(base, "M001"); // work lands directly on main in isolation:none
+
+  // A session that never adopted a root: worktreeBasePath is the project
+  // root and originalBasePath is the session's empty default — the push must
+  // still run.
+  const result = mergeMilestoneStandalone(autoPushDeps(), {
+    originalBasePath: "",
+    worktreeBasePath: base,
+    milestoneId: "M001",
+    isolationModeOverride: "none",
+    notify: () => {},
+  });
+
+  assert.equal(result.mode, "skipped");
+  assert.equal(result.pushed, true);
+  assert.match(gitIn(base, "ls-remote", "--heads", bare), /refs\/heads\/main/);
+});
+
+test("isolation:none merge skip never solo-pushes through a milestone worktree anchor (#2874)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase();
+  const bare = makeBareRemote("gsd-lifecycle-remote-");
+  t.after(() => {
+    cleanupRepoBase(base, previousCwd);
+    rmSync(bare, { recursive: true, force: true });
+  });
+  gitIn(base, "remote", "add", "origin", bare);
+  commitMilestoneWork(base, "M001");
+
+  // Degenerate session: no adopted root, and the only anchor is a milestone
+  // worktree. Publication belongs to the worktree flow there — the fallback
+  // must suppress the push instead of publishing an unmerged milestone branch.
+  const result = mergeMilestoneStandalone(
+    makeDeps({
+      loadEffectiveGSDPreferences: () => ({
+        preferences: { git: { auto_push: true } },
+      }),
+      isInAutoWorktree: () => true,
+    }),
+    {
+      originalBasePath: "",
+      worktreeBasePath: base,
+      milestoneId: "M001",
+      isolationModeOverride: "none",
+      notify: () => {},
+    },
+  );
+
+  assert.equal(result.mode, "skipped");
+  assert.equal(result.pushed, false);
+  assert.equal(result.pushError, undefined);
+  assert.equal(gitIn(base, "ls-remote", "--heads", bare).trim(), "");
+});
+
 test("isolation:none merge skip does not push when the branch is not ahead of upstream (#2153)", (t) => {
   const previousCwd = process.cwd();
   const base = makeGitRepoBase();

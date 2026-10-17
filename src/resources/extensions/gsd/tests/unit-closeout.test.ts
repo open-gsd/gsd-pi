@@ -16,6 +16,7 @@ import {
 interface DepsLog {
   commits: Array<{ unitType: string; unitId: string }>;
   notices: Array<{ message: string; severity: string }>;
+  pushes: Array<{ basePath: string; milestoneId: string }>;
 }
 
 function makeDeps(overrides: {
@@ -23,7 +24,7 @@ function makeDeps(overrides: {
   branch?: string | null;
   commitResult?: string | null | (() => string | null);
 } = {}): { deps: UnitCloseoutDeps; log: DepsLog } {
-  const log: DepsLog = { commits: [], notices: [] };
+  const log: DepsLog = { commits: [], notices: [], pushes: [] };
   const deps: UnitCloseoutDeps = {
     isolationMode: () => overrides.isolation ?? "none",
     currentBranch: () => (overrides.branch === undefined ? "main" : overrides.branch),
@@ -35,6 +36,9 @@ function makeDeps(overrides: {
     },
     notify: (message, severity) => {
       log.notices.push({ message, severity });
+    },
+    pushIfAhead: (basePath, milestoneId) => {
+      log.pushes.push({ basePath, milestoneId });
     },
   };
   return { deps, log };
@@ -62,6 +66,72 @@ test("milestone boundary under isolation none commits without a notice", () => {
   );
   assert.equal(result.gitVerdict, "committed");
   assert.equal(log.notices.length, 0);
+});
+
+// ─── Solo-mode auto-push honor point (#2874) ─────────────────────────────
+
+test("milestone closeout under isolation none honors auto_push after the commit (#2874)", () => {
+  const { deps, log } = makeDeps({ isolation: "none" });
+  closeUnit(
+    { basePath: BASE, unitType: "complete-milestone", unitId: "M001", boundary: "milestone", outcome: "complete" },
+    deps,
+  );
+  // The push follows the durable commit, never replaces it.
+  assert.deepEqual(log.commits, [{ unitType: "complete-milestone", unitId: "M001" }]);
+  assert.deepEqual(log.pushes, [{ basePath: BASE, milestoneId: "M001" }]);
+});
+
+test("auto_push honor point runs strictly after the closeout commit (#2874)", () => {
+  const events: string[] = [];
+  const deps: UnitCloseoutDeps = {
+    isolationMode: () => "none",
+    currentBranch: () => "main",
+    commit: () => {
+      events.push("commit");
+      return "chore(gsd): closeout";
+    },
+    notify: () => {},
+    pushIfAhead: () => {
+      events.push("push");
+    },
+  };
+  closeUnit(
+    { basePath: BASE, unitType: "complete-milestone", unitId: "M001", boundary: "milestone", outcome: "complete" },
+    deps,
+  );
+  assert.deepEqual(events, ["commit", "push"]);
+});
+
+test("auto_push honor point skips worktree and branch isolation (#2874)", () => {
+  for (const isolation of ["worktree", "branch"] as const) {
+    const { deps, log } = makeDeps({ isolation, branch: "milestone/M001" });
+    closeUnit(
+      { basePath: BASE, unitType: "complete-milestone", unitId: "M001", boundary: "milestone", outcome: "complete" },
+      deps,
+    );
+    assert.equal(log.pushes.length, 0, `${isolation} isolation must keep publication in its own flow`);
+  }
+});
+
+test("auto_push honor point skips a failed commit and non-milestone boundaries (#2874)", () => {
+  const failedCommit = makeDeps({
+    isolation: "none",
+    commitResult: () => {
+      throw new Error("index.lock exists");
+    },
+  });
+  closeUnit(
+    { basePath: BASE, unitType: "complete-milestone", unitId: "M001", boundary: "milestone", outcome: "complete" },
+    failedCommit.deps,
+  );
+  assert.equal(failedCommit.log.pushes.length, 0);
+
+  const taskBoundary = makeDeps({ isolation: "none" });
+  closeUnit(
+    { basePath: BASE, unitType: "execute-task", unitId: "M001/S01/T01", boundary: "task", outcome: "complete" },
+    taskBoundary.deps,
+  );
+  assert.equal(taskBoundary.log.pushes.length, 0);
 });
 
 test("milestone boundary off-worktree under isolation worktree fails closed loudly", () => {

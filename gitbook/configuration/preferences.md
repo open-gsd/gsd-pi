@@ -179,7 +179,11 @@ verification_commands:
 verification_auto_fix: true       # auto-retry runnable failures (default)
 verification_max_retries: 2       # max attempts (default: 2)
 verification_timeout_ms: 120000   # host verification and verification-oriented gsd_exec default (default: 120000)
+verification_source_exclude_paths: # git pathspecs skipped by source-revision hashing (default: [])
+  - artifacts/**
 ```
+
+`verification_source_exclude_paths` excludes git pathspecs from the verification source-revision snapshot. Each entry becomes a `:(exclude)` pathspec on the `git ls-files` passes, in addition to the built-in `.gsd/**` and `receipts/**` exclusions. On large repositories this keeps dispatches fast by skipping heavy non-evidence trees (historical test artifacts, committed fixtures) that would otherwise be re-hashed on every dispatch. Because changes under excluded paths no longer invalidate recorded verification evidence, exclude only trees verification evidence never depends on.
 
 `verification_timeout_ms` also supplies the default timeout for verification-oriented `gsd_exec` workloads such as builds, tests, linting, type checks, and verification commands. An explicit `context_mode.exec_timeout_ms` takes precedence; unrelated `gsd_exec` workloads keep the sandbox's 30-second default when `context_mode.exec_timeout_ms` is unset.
 

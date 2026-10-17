@@ -1541,7 +1541,15 @@ export function mergeMilestoneStandalone(
     // auto_push silently never pushed. Honor it here when the branch is ahead
     // of its upstream; push failure is non-fatal to the closeout.
     recognizeSkippedMilestoneMerge(deps, originalBasePath || worktreeBasePath, milestoneId);
-    const publication = pushIfAheadAtCloseout(deps, originalBasePath, milestoneId);
+    // Same anchor as the recognize call above: a session that never adopted a
+    // root must not silently skip the #2153 closeout push — unless that anchor
+    // is itself a milestone worktree, whose publication belongs to the
+    // worktree flow (a solo push there could publish an unmerged milestone
+    // branch).
+    const pushAnchor = !originalBasePath && lifecycleIsInAutoWorktree(deps, worktreeBasePath)
+      ? undefined
+      : (originalBasePath || worktreeBasePath);
+    const publication = pushIfAheadAtCloseout(deps, pushAnchor, milestoneId);
     return {
       merged: false,
       mode: "skipped",
