@@ -221,6 +221,47 @@ test("flat_rate_providers is a recognized preference key (no warning)", () => {
   );
 });
 
+test("verification_source_exclude_paths: array of strings validates and passes through", () => {
+  const { preferences, errors, warnings } = validatePreferences({
+    verification_source_exclude_paths: ["artifacts/**", "fixtures/historical"],
+  });
+
+  assert.equal(errors.length, 0);
+  assert.equal(warnings.filter(w => w.includes("verification_source_exclude_paths")).length, 0);
+  assert.deepEqual(preferences.verification_source_exclude_paths, ["artifacts/**", "fixtures/historical"]);
+});
+
+test("verification_source_exclude_paths: non-array rejected", () => {
+  const { errors } = validatePreferences({
+    verification_source_exclude_paths: "artifacts/**" as any,
+  });
+  assert.ok(
+    errors.some(e => e.includes("verification_source_exclude_paths")),
+    "should error on non-array value",
+  );
+});
+
+test("verification_source_exclude_paths: non-string elements rejected", () => {
+  const { errors } = validatePreferences({
+    verification_source_exclude_paths: ["ok", 7 as any],
+  });
+  assert.ok(
+    errors.some(e => e.includes("verification_source_exclude_paths")),
+    "should error when array contains non-strings",
+  );
+});
+
+test("verification_source_exclude_paths is a recognized preference key (no warning)", () => {
+  const { warnings } = validatePreferences({
+    verification_source_exclude_paths: ["artifacts/**"],
+  });
+  assert.equal(
+    warnings.filter(w => w.includes("verification_source_exclude_paths")).length,
+    0,
+    "verification_source_exclude_paths must be in KNOWN_PREFERENCE_KEYS",
+  );
+});
+
 test("slice_parallel preferences validate and pass through", () => {
   const { preferences, errors, warnings } = validatePreferences({
     slice_parallel: { enabled: true, max_workers: 8 },
@@ -648,6 +689,59 @@ test("loadEffectiveGSDPreferences preserves disabled_model_providers across merg
     rmSync(tempProject, { recursive: true, force: true });
     rmSync(tempGsdHome, { recursive: true, force: true });
   }
+});
+
+test("loadEffectiveGSDPreferences preserves verification_source_exclude_paths across merge layers", (t) => {
+  const originalCwd = process.cwd();
+  const originalGsdHome = process.env.GSD_HOME;
+  const tempProject = mkdtempSync(join(tmpdir(), "gsd-source-exclude-project-"));
+  const tempGsdHome = mkdtempSync(join(tmpdir(), "gsd-source-exclude-home-"));
+
+  t.after(() => {
+    clearGSDPreferencesCache();
+    process.chdir(originalCwd);
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    rmSync(tempProject, { recursive: true, force: true });
+    rmSync(tempGsdHome, { recursive: true, force: true });
+  });
+
+  mkdirSync(join(tempProject, ".gsd"), { recursive: true });
+
+  writeFileSync(
+    join(tempGsdHome, "PREFERENCES.md"),
+    [
+      "---",
+      "version: 1",
+      "verification_source_exclude_paths:",
+      "  - artifacts/**",
+      "---",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  writeFileSync(
+    join(tempProject, ".gsd", "PREFERENCES.md"),
+    [
+      "---",
+      "version: 1",
+      "verification_source_exclude_paths:",
+      "  - fixtures/**",
+      "---",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  process.env.GSD_HOME = tempGsdHome;
+  process.chdir(tempProject);
+
+  const loaded = loadEffectiveGSDPreferences();
+  assert.notEqual(loaded, null);
+  assert.deepEqual(
+    loaded!.preferences.verification_source_exclude_paths,
+    ["artifacts/**", "fixtures/**"],
+    "global and project exclusions must both survive validate + merge (#2873)",
+  );
 });
 
 test("loadEffectiveGSDPreferences caches unchanged files until mtime changes", (t) => {

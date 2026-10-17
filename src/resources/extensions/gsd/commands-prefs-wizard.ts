@@ -1939,6 +1939,7 @@ export function serializePreferencesToFrontmatter(prefs: Record<string, unknown>
     "reactive_execution", "gate_evaluation",
     "auto_visualize", "auto_report",
     "verification_commands", "verification_auto_fix", "verification_max_retries",
+    "verification_source_exclude_paths",
     "per_unit_cost_cap_usd",
     "enhanced_verification", "enhanced_verification_pre",
     "enhanced_verification_post", "enhanced_verification_strict",

@@ -14,6 +14,7 @@ import { internalExecutionInvocation } from "../execution-invocation.js";
 import {
   captureVerificationSourceSnapshot,
   resolveVerificationRepositoryTargets,
+  verificationSourceSnapshotOptions,
 } from "../verification-source-integrity.js";
 
 export type VerifiedSourceRecaptureResult = "unchanged" | "retry";
@@ -51,7 +52,7 @@ export function recaptureVerifiedSourceAfterDeferredCloseout(input: {
   const targets = resolved.repositories.length > 0
     ? resolved.repositories.map((repository) => ({ id: repository.id, cwd: repository.root }))
     : [{ id: "root", cwd: input.basePath }];
-  const source = captureVerificationSourceSnapshot(targets);
+  const source = captureVerificationSourceSnapshot(targets, verificationSourceSnapshotOptions(preferences));
   const currentRevision = source.ok ? source.snapshot.aggregateRevision : "unavailable";
   if (source.ok && currentRevision === verdict.testedSourceRevision) return "unchanged";
 

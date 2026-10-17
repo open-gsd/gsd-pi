@@ -85,6 +85,7 @@ import {
   captureVerificationSourceSnapshot,
   resolveVerificationRepositoryTargets,
   verificationSourceChanged,
+  verificationSourceSnapshotOptions,
   type VerificationSourceSnapshot,
 } from "./verification-source-integrity.js";
 
@@ -888,7 +889,10 @@ export async function runPostUnitVerification(
     const sourceTargets = verificationTargets.length > 0
       ? verificationTargets.map((target) => ({ id: target.id, cwd: target.cwd }))
       : [{ id: "root", cwd: s.basePath }];
-    const sourceBeforeResult = captureVerificationSourceSnapshot(sourceTargets);
+    const sourceBeforeResult = captureVerificationSourceSnapshot(
+      sourceTargets,
+      verificationSourceSnapshotOptions(prefs),
+    );
     if (replayedVerdict) {
       if (
         sourceBeforeResult.ok &&
@@ -1251,7 +1255,7 @@ export async function runPostUnitVerification(
     }
 
     const sourceAfterResult = sourceBeforeResult.ok
-      ? captureVerificationSourceSnapshot(sourceTargets)
+      ? captureVerificationSourceSnapshot(sourceTargets, verificationSourceSnapshotOptions(prefs))
       : sourceBeforeResult;
     let sourceError = sourceBeforeResult.ok ? undefined : sourceBeforeResult.error;
     if (sourceBeforeResult.ok && !sourceAfterResult.ok) {

@@ -9,11 +9,13 @@ import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import {
+  captureMilestoneVerificationSourceRevision,
   captureVerificationSourceSnapshot,
   confirmVerificationSourceSnapshot,
   diagnoseMilestoneVerificationSourceDrift,
   resolveVerificationRepositoryTargets,
   verificationSourceChanged,
+  verificationSourceSnapshotOptions,
 } from "../verification-source-integrity.js";
 
 const tempDirs = new Set<string>();
@@ -273,5 +275,51 @@ test("source snapshot ignores tracked receipts/** bookkeeping (#1819)", () => {
     after.aggregateRevision,
     before.aggregateRevision,
     "tracked receipts must not move the source hash",
+  );
+});
+
+test("verification_source_exclude_paths preference flows into the milestone source revision (#2873)", () => {
+  const cwd = createRepository("pref-exclude");
+  mkdirSync(join(cwd, "artifacts"), { recursive: true });
+  writeFileSync(join(cwd, "artifacts", "battery.bin"), "one\n");
+  git(cwd, ["add", "artifacts/battery.bin"]);
+  git(cwd, ["commit", "-qm", "heavy non-evidence artifacts"]);
+
+  const preferences = { verification_source_exclude_paths: ["artifacts/**"] };
+  const before = captureMilestoneVerificationSourceRevision(cwd, preferences);
+  if (!before.ok) throw new Error(before.error);
+
+  writeFileSync(join(cwd, "artifacts", "battery.bin"), "two\n");
+  writeFileSync(join(cwd, "artifacts", "extra.bin"), "scratch\n");
+  const after = captureMilestoneVerificationSourceRevision(cwd, preferences);
+  if (!after.ok) throw new Error(after.error);
+  assert.equal(
+    after.sourceRevision,
+    before.sourceRevision,
+    "changes under preference-excluded paths must not move the source revision",
+  );
+
+  writeFileSync(join(cwd, "tracked.txt"), "changed\n");
+  const changed = captureMilestoneVerificationSourceRevision(cwd, preferences);
+  if (!changed.ok) throw new Error(changed.error);
+  assert.notEqual(changed.sourceRevision, before.sourceRevision);
+});
+
+test("verificationSourceSnapshotOptions derives excludePaths from preferences", () => {
+  assert.deepEqual(verificationSourceSnapshotOptions(undefined), {});
+  assert.deepEqual(verificationSourceSnapshotOptions({}), {});
+  assert.deepEqual(
+    verificationSourceSnapshotOptions({ verification_source_exclude_paths: [] }),
+    {},
+  );
+  assert.deepEqual(
+    verificationSourceSnapshotOptions({ verification_source_exclude_paths: ["artifacts/**", "docs/"] }),
+    { excludePaths: ["artifacts/**", "docs/"] },
+  );
+  // A blank entry would serialize as a bare `:(exclude)` pathspec — git reads
+  // that as "exclude everything", collapsing the hash to an empty tree.
+  assert.deepEqual(
+    verificationSourceSnapshotOptions({ verification_source_exclude_paths: ["", "  ", "artifacts/**"] }),
+    { excludePaths: ["artifacts/**"] },
   );
 });

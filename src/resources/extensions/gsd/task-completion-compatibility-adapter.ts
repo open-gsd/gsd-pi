@@ -39,6 +39,7 @@ import { logWarning } from "./workflow-logger.js";
 import {
   captureVerificationSourceSnapshot,
   resolveVerificationRepositoryTargets,
+  verificationSourceSnapshotOptions,
 } from "./verification-source-integrity.js";
 import { renderSummaryContent } from "./workflow-projections.js";
 import {
@@ -681,7 +682,7 @@ function requireCurrentVerifiedSource(input: PublishVerifiedTaskCompletionInput)
   const targets = resolved.repositories.length > 0
     ? resolved.repositories.map((repository) => ({ id: repository.id, cwd: repository.root }))
     : [{ id: "root", cwd: input.basePath }];
-  const source = captureVerificationSourceSnapshot(targets);
+  const source = captureVerificationSourceSnapshot(targets, verificationSourceSnapshotOptions(preferences));
   if (!source.ok) throw new Error(source.error);
   if (source.snapshot.aggregateRevision !== verdict.testedSourceRevision) {
     throw new Error("Verified Task publication source no longer matches its host verification evidence");
