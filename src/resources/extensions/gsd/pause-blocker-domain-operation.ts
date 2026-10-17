@@ -256,9 +256,12 @@ function resolveAutoPauseOperationKey(invocation: ExecutionInvocation): string {
 }
 
 class ResolveAutoPauseRefusal extends Error {
-  constructor(readonly result: ResolveAutoPauseBlockerResult) {
+  readonly result: ResolveAutoPauseBlockerResult;
+
+  constructor(result: ResolveAutoPauseBlockerResult) {
     super(`auto-pause blocker resolution refused: ${result.failure}`);
     this.name = "ResolveAutoPauseRefusal";
+    this.result = result;
   }
 }
 
