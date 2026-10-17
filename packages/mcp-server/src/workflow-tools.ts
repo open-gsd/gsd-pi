@@ -1649,7 +1649,11 @@ export async function resolvePersistedAutoPauseBlockerViaBridge(
     const bridge = await importBridgeModule();
     const opened = bridge.openExistingWorkflowDatabase(projectDir);
     if (!opened.ok) {
-      throw opened.error ?? new Error(`No pending blocker: the project database is not available (${opened.reason}).`);
+      const detail = opened.error ? `: ${opened.error.message}` : "";
+      throw new Error(
+        `No pending blocker: the project database is not available (${opened.reason})${detail}`,
+        { cause: opened.error },
+      );
     }
     return bridge.resolveAutoPauseBlockerById({
       blockerId: pauseBlockerId,

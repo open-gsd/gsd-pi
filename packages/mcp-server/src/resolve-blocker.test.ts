@@ -30,11 +30,13 @@ import { autoSession } from "../../../src/resources/extensions/gsd/auto-runtime-
 import {
   _getAdapter,
   closeDatabase,
+  SCHEMA_VERSION,
   insertMilestone,
   insertSlice,
   insertTask,
   openDatabase,
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
+import { openExistingWorkflowDatabase } from "../../../src/resources/extensions/gsd/db-workspace.ts";
 import { createWorkflowMcpAdapterToolDefs } from "./mcp-adapter-tools.ts";
 import { createMcpServer } from "./server.ts";
 import { SessionManager } from "./session-manager.ts";
@@ -157,17 +159,18 @@ async function seedProjectWithOpenAutoPause(t: TestContext): Promise<{
     SELECT blocker_id FROM workflow_blockers WHERE blocker_status = 'open'
     ORDER BY opened_at DESC LIMIT 1
   `).get()!;
-  const authority = _getAdapter()!.prepare(`
-    SELECT revision, authority_epoch FROM project_authority WHERE singleton = 1
-  `).get()!;
   closeDatabase();
   autoSession.reset();
   process.chdir(originalCwd);
+
+  const reopened = openExistingWorkflowDatabase(projectDir);
+  if (!reopened.ok) assert.fail(reopened.error?.message ?? reopened.reason);
+  const fence = readDomainOperationFence();
   return {
     projectDir,
     blockerId: String(blocker["blocker_id"]),
-    revision: Number(authority["revision"]),
-    authorityEpoch: Number(authority["authority_epoch"]),
+    revision: fence.revision,
+    authorityEpoch: fence.authorityEpoch,
   };
 }
 
@@ -567,7 +570,9 @@ test("gsd_resolve_blocker pause selection reports missing and open-failed databa
 test("gsd_resolve_blocker pause selection keeps schema-too-new and checkout-unbound loud", async (t) => {
   const tooNew = await seedProjectWithOpenAutoPause(t);
   openDatabase(join(tooNew.projectDir, ".gsd", "gsd.db"));
-  _getAdapter()!.exec(`PRAGMA user_version = 2147483647`);
+  _getAdapter()!.prepare(
+    `INSERT INTO schema_version (version, applied_at) VALUES (:version, :appliedAt)`,
+  ).run({ ":version": SCHEMA_VERSION + 1, ":appliedAt": "2026-10-17T00:00:00.000Z" });
   closeDatabase();
   const resolveBlocker = await resolveBlockerToolAfterRestart();
   const args = {
