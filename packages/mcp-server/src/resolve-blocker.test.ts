@@ -27,6 +27,7 @@ import { getAllDecisionsFromMemories } from "../../../src/resources/extensions/g
 import { internalExecutionInvocation } from "../../../src/resources/extensions/gsd/execution-invocation.ts";
 import { pauseAuto } from "../../../src/resources/extensions/gsd/auto.ts";
 import { autoSession } from "../../../src/resources/extensions/gsd/auto-runtime-state.ts";
+import { resolveAutoPauseBlockerById } from "../../../src/resources/extensions/gsd/pause-blocker-domain-operation.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -302,6 +303,58 @@ test("gsd_resolve_blocker resolves an exact auto-pause after restart and replays
   assert.ok(readTaskEscalation("M001", "S01", "T01"), "the unrelated escalation remains open");
 });
 
+test("gsd_resolve_blocker replays a pre-upgrade workflow MCP receipt with its former raw trace", async (t) => {
+  const selected = await seedProjectWithOpenAutoPause(t);
+  const identity = "pre-upgrade-auto-pause-replay";
+  const rationale = "Operator approved before private trace hashing";
+
+  assert.equal(resolveAutoPauseBlockerById({
+    blockerId: selected.blockerId,
+    rationale,
+    expectedRevision: selected.revision,
+    expectedAuthorityEpoch: selected.authorityEpoch,
+    invocation: {
+      idempotencyKey: `mcp:gsd_resolve_blocker:${identity}`,
+      sourceTransport: "workflow-mcp",
+      actorType: "agent",
+      traceId: identity,
+    },
+  }).resolved, true);
+  const priorReceipt = _getAdapter()!.prepare(`
+    SELECT idempotency_key, trace_id
+    FROM workflow_operations
+    WHERE operation_type = 'pause.blocker.resolve.by-id'
+  `).get()!;
+  assert.match(
+    String(priorReceipt["idempotency_key"]),
+    /^resolve-auto-pause-blocker:v1:sha256:[a-f0-9]{64}$/,
+  );
+  assert.equal(priorReceipt["trace_id"], identity);
+  closeDatabase();
+
+  const resolveBlocker = await resolveBlockerToolAfterRestart();
+  const replay = await resolveBlocker({
+    projectDir: selected.projectDir,
+    pauseBlockerId: selected.blockerId,
+    rationale,
+    expectedRevision: selected.revision,
+    expectedAuthorityEpoch: selected.authorityEpoch,
+  }, identity);
+
+  assert.notEqual(replay.isError, true, replay.content[0]?.text);
+  assert.equal(JSON.parse(replay.content[0]!.text).resolved, true);
+
+  const conflict = await resolveBlocker({
+    projectDir: selected.projectDir,
+    pauseBlockerId: selected.blockerId,
+    rationale: "Changed after the pre-upgrade receipt committed",
+    expectedRevision: selected.revision,
+    expectedAuthorityEpoch: selected.authorityEpoch,
+  }, identity);
+  assert.equal(conflict.isError, true);
+  assert.match(conflict.content[0]!.text, /idempotency|different request/i);
+});
+
 test("gsd_resolve_blocker hashes Claude Code tool-use identity out of every operation field", async (t) => {
   const selected = await seedProjectWithOpenAutoPause(t);
   const resolveBlocker = await resolveBlockerToolAfterRestart();
@@ -429,6 +482,44 @@ test("GSD-mode adapter propagates tool-call identity for resolve replay and payl
     /^resolve-auto-pause-blocker:v1:sha256:[a-f0-9]{64}$/,
   );
   assert.doesNotMatch(String(operation["idempotency_key"]), /adapter-resolve-replay/);
+});
+
+test("GSD-mode adapter rejects empty conflicting selectors without resolving an auto-pause", async (t) => {
+  const selected = await seedProjectWithOpenAutoPause(t);
+  const tools = await createWorkflowMcpAdapterToolDefs(new SessionManager());
+  const resolveBlocker = tools.find((tool) => tool.name === "gsd_resolve_blocker");
+  assert.ok(resolveBlocker, "GSD-mode adapter should expose gsd_resolve_blocker");
+  const args = {
+    projectDir: selected.projectDir,
+    pauseBlockerId: selected.blockerId,
+    rationale: "valid pause selection must still reject a conflicting selector",
+    expectedRevision: selected.revision,
+    expectedAuthorityEpoch: selected.authorityEpoch,
+  };
+
+  for (const [selector, value] of [["sessionId", ""], ["questionId", ""]] as const) {
+    const result = await resolveBlocker.execute(`adapter-empty-${selector}`, {
+      ...args,
+      [selector]: value,
+    });
+    assert.equal(result.isError, true, `${selector} must be rejected when present`);
+
+    openDatabase(join(selected.projectDir, ".gsd", "gsd.db"));
+    assert.equal(
+      _getAdapter()!.prepare(
+        `SELECT blocker_status FROM workflow_blockers WHERE blocker_id = :id`,
+      ).get({ ":id": selected.blockerId })!["blocker_status"],
+      "open",
+    );
+    assert.equal(
+      _getAdapter()!.prepare(
+        `SELECT COUNT(*) AS count FROM workflow_operations
+         WHERE operation_type = 'pause.blocker.resolve.by-id'`,
+      ).get()!["count"],
+      0,
+    );
+    closeDatabase();
+  }
 });
 
 test("gsd_resolve_blocker pause selection obeys the workflow write gate", async (t) => {

@@ -232,6 +232,7 @@ export interface ResolveAutoPauseBlockerResult {
 }
 
 const RESOLVE_AUTO_PAUSE_IDENTITY_VERSION = "resolve-auto-pause-blocker:v1";
+const WORKFLOW_MCP_RESOLVE_KEY_PREFIX = "mcp:gsd_resolve_blocker:";
 
 /**
  * Namespace the caller's stable retry identity at the workflow/domain
@@ -253,6 +254,33 @@ function resolveAutoPauseOperationKey(invocation: ExecutionInvocation): string {
   });
   const digest = createHash("sha256").update(identity, "utf8").digest("hex");
   return `${RESOLVE_AUTO_PAUSE_IDENTITY_VERSION}:sha256:${digest}`;
+}
+
+/**
+ * Before private MCP traces were hashed, workflow MCP persisted its raw
+ * stable retry identity as the trace. Match that representation only when a
+ * receipt with the same durable key already has the former trace; new writes
+ * continue to use the caller's hashed trace.
+ */
+function replayCompatibleTraceId(
+  operationKey: string,
+  invocation: ExecutionInvocation,
+): string | undefined {
+  if (
+    invocation.sourceTransport !== "workflow-mcp"
+    || !invocation.idempotencyKey.startsWith(WORKFLOW_MCP_RESOLVE_KEY_PREFIX)
+  ) {
+    return invocation.traceId;
+  }
+  const formerRawTrace = invocation.idempotencyKey.slice(WORKFLOW_MCP_RESOLVE_KEY_PREFIX.length);
+  if (!formerRawTrace || invocation.traceId === formerRawTrace) return invocation.traceId;
+  const receipt = getDb().prepare(`
+    SELECT trace_id
+    FROM workflow_operations
+    WHERE operation_type = 'pause.blocker.resolve.by-id'
+      AND idempotency_key = :idempotency_key
+  `).get({ ":idempotency_key": operationKey });
+  return receipt?.["trace_id"] === formerRawTrace ? formerRawTrace : invocation.traceId;
 }
 
 class ResolveAutoPauseRefusal extends Error {
@@ -297,19 +325,21 @@ export function resolveAutoPauseBlockerById(input: {
     throw new Error("expectedAuthorityEpoch must be a non-negative safe integer");
   }
 
+  const operationKey = resolveAutoPauseOperationKey(input.invocation);
+  const traceId = replayCompatibleTraceId(operationKey, input.invocation);
   let outcome: ResolveAutoPauseBlockerResult | null = null;
   let operation: ReturnType<typeof executeDomainOperation>;
   try {
     operation = executeDomainOperation(
       {
         operationType: "pause.blocker.resolve.by-id",
-        idempotencyKey: resolveAutoPauseOperationKey(input.invocation),
+        idempotencyKey: operationKey,
         expectedRevision: input.expectedRevision,
         expectedAuthorityEpoch: input.expectedAuthorityEpoch,
         actorType: input.invocation.actorType,
         ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
         sourceTransport: input.invocation.sourceTransport,
-        ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+        ...(traceId ? { traceId } : {}),
         ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
         payload: {
           blockerId: input.blockerId,

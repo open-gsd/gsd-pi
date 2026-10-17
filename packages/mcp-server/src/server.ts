@@ -1493,7 +1493,7 @@ export async function createMcpServer(
           if (!projectDir) return errorContent('projectDir is required with pauseBlockerId.');
           if (!pauseBlockerId) return errorContent('pauseBlockerId is required with rationale and pause fencing.');
           if (!rationale || !rationale.trim()) return errorContent('rationale is required with pauseBlockerId.');
-          if (sessionId || questionId || response !== undefined) {
+          if (sessionId !== undefined || questionId !== undefined || response !== undefined) {
             return errorContent('sessionId, questionId, and response conflict with pauseBlockerId.');
           }
           if (!Number.isSafeInteger(expectedRevision) || Number(expectedRevision) < 0) {
