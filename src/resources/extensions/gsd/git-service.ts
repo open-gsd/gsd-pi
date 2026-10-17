@@ -49,6 +49,7 @@ import {
 } from "./native-git-bridge.js";
 import { GSDError, GSD_MERGE_CONFLICT, GSD_GIT_ERROR } from "./errors.js";
 import { getErrorMessage } from "./error-utils.js";
+import { buildScriptCommand, detectPackageManager } from "./package-manager.js";
 import { isInfrastructureError } from "./auto/infra-errors.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -1268,12 +1269,15 @@ export class GitServiceImpl {
     if (typeof this.prefs.pre_merge_check === "string") {
       command = this.prefs.pre_merge_check;
     } else {
-      // Auto-detect: look for package.json with a test script
+      // Auto-detect: look for package.json with a test script, then build the
+      // command with the project's own package manager (lockfile /
+      // packageManager detection — same helper as verification-gate, #2870).
       try {
         const pkg = readFileSync(join(this.basePath, "package.json"), "utf-8");
         const parsed = JSON.parse(pkg);
         if (parsed.scripts?.test) {
-          command = "npm test";
+          const pm = detectPackageManager(this.basePath) ?? "npm";
+          command = buildScriptCommand(pm, "test");
         } else {
           return { passed: true, skipped: true };
         }
