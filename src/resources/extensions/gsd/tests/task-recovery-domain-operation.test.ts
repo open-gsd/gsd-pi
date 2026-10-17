@@ -49,6 +49,7 @@ import {
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 import { buildExecuteTaskPrompt, buildTaskRecoveryReplanPrompt } from "../auto-prompts.ts";
 import { runWithTaskExecutionAttempt } from "../auto/task-execution-cutover.ts";
+import { openPauseBlockerRow } from "../pause-blocker-domain-operation.ts";
 import { handleReplanTask } from "../tools/replan-task.ts";
 import { applyBlockerAcceptedDisposition } from "../task-settle.ts";
 import { resolveDispatch } from "../auto-dispatch.ts";
@@ -462,6 +463,140 @@ test("replan recovery durably carries its evidence into restart-safe dispatch co
     sliceId: "S01",
     taskId: "T01",
   }), null, "the claimed replacement Attempt supersedes predecessor recovery context");
+});
+
+test("#2793: a user pause's own blocker leaves the terminal replan exit consumable", async () => {
+  // The pause-interrupted shape from the issue: the turn ends without a
+  // succeeded executor Result, the settle classifies lifecycle-progression,
+  // and the minted terminal replan is the first use.
+  const scope = seedFailedAttempt("missing-executor-result");
+  const routed = recordFailureAndSelectRecovery({
+    invocation: invocation("recovery/pause-replan/route"),
+    attemptId: scope.attemptId,
+    resultId: scope.resultId,
+    owner: "agent",
+    classification: { failureKind: "lifecycle-progression" },
+    summary: "execute-task ended without a succeeded executor Result",
+    evidence: { unitType: "execute-task", unitId: "M001/S01/T01" },
+    rationale: "Supersede the plan before another execution attempt.",
+  });
+  assert.equal(routed.action, "replan");
+
+  // The same pause opens its user-owned workflow_blockers row on the paused
+  // task (pauseAuto → openPauseBlockerRow, ADR-046).
+  const opened = openPauseBlockerRow({
+    lifecycleId: scope.lifecycleId,
+    blockerKind: "ambiguous_intent",
+    description: "execute-task M001/S01/T01 is waiting for your input",
+    requestedAction: "Run /gsd auto after resolving the blocker.",
+    idempotencyKey: "pause-blocker-open:2793-fixture",
+  });
+  assert.ok(opened.blockerId);
+
+  // The replan-task dispatch rule reads this context, so the pause's own
+  // blocker must not hide the pending replan from its sanctioned consumer.
+  const pending = readPendingTaskRecoveryContext({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+  });
+  assert.equal(pending?.action, "replan");
+  assert.equal(pending?.replanCompleted, false);
+
+  closeDatabase();
+  assert.equal(openDatabase(scope.dbPath), true);
+  db().prepare("UPDATE tasks SET full_plan_md = :plan WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'")
+    .run({ ":plan": "# T01: Recover atomically\n\nCARRIER-TASK-PLAN-MARKER-2793\n" });
+  const recoveryPrompt = await buildTaskRecoveryReplanPrompt(
+    "M001", "S01", "Recovery operation", "T01", "Recover atomically", scope.basePath,
+  );
+  assert.match(recoveryPrompt, /CARRIER-TASK-PLAN-MARKER-2793/);
+
+  const milestoneDir = join(scope.basePath, ".gsd", "milestones", "M001");
+  const sliceDir = join(milestoneDir, "slices", "S01");
+  mkdirSync(sliceDir, { recursive: true });
+  writeFileSync(join(milestoneDir, "M001-CONTEXT.md"), "# Recovery context\n");
+  writeFileSync(join(milestoneDir, "M001-RESEARCH.md"), "# Recovery research\n");
+  writeFileSync(join(milestoneDir, "M001-ROADMAP.md"), "# Recovery\n\n- [ ] **S01: Recovery operation**\n");
+  writeFileSync(join(sliceDir, "S01-CONTEXT.md"), "# Slice context\n");
+  writeFileSync(join(sliceDir, "S01-RESEARCH.md"), "# Slice research\n");
+  writeFileSync(join(sliceDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Recover atomically**\n");
+  const state = {
+    activeMilestone: { id: "M001", title: "Recovery" },
+    activeSlice: { id: "S01", title: "Recovery operation" },
+    activeTask: { id: "T01", title: "Recover atomically" },
+    phase: "executing" as const,
+    recentDecisions: [],
+    blockers: [],
+    nextAction: "",
+    registry: [],
+  };
+  const preparation = await resolveDispatch({
+    basePath: scope.basePath,
+    mid: "M001",
+    midTitle: "Recovery",
+    state,
+    prefs: undefined,
+  });
+  assert.equal(
+    count("workflow_blockers WHERE blocker_status = 'open'"),
+    1,
+    "the pause's own blocker stays open across the exit chain",
+  );
+  assert.equal(preparation.action, "dispatch");
+  assert.ok(preparation.action === "dispatch");
+  assert.equal(
+    preparation.unitType,
+    "replan-task",
+    "the sanctioned consumer must dispatch with the pause's own blocker open",
+  );
+
+  const taskDir = join(scope.basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
+  mkdirSync(taskDir, { recursive: true });
+  writeFileSync(join(taskDir, "T01-PLAN.md"), "# T01: Recover atomically\n\nOld invalid plan.\n");
+  const replanned = await handleReplanTask({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    title: "Recover atomically",
+    description: "Honor the migration boundary before execution.",
+    estimate: "1h",
+    files: ["src/recovery.ts"],
+    verify: "pnpm test",
+    inputs: ["migration contract"],
+    expectedOutput: ["durable recovery"],
+    triggerReason: "pause recovery replan",
+  }, scope.basePath, invocation("recovery/pause-replan/replace"));
+  assert.ok(!("error" in replanned), "the canonical Task replan must persist a replacement plan");
+  assert.equal(readPendingTaskRecoveryContext({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+  })?.replanCompleted, true);
+
+  closeDatabase();
+  assert.equal(openDatabase(scope.dbPath), true);
+  const execution = await resolveDispatch({
+    basePath: scope.basePath,
+    mid: "M001",
+    midTitle: "Recovery",
+    state,
+    prefs: undefined,
+  });
+  assert.equal(execution.action, "dispatch");
+  assert.ok(execution.action === "dispatch");
+  assert.equal(execution.unitType, "execute-task");
+
+  const retryDispatchId = insertClaimedDispatch(2);
+  const retryClaim = claimTaskAttempt({
+    invocation: invocation("recovery/pause-replan/claim-after-plan"),
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: retryDispatchId,
+    retryOfAttemptId: scope.attemptId,
+  });
+  assert.equal(retryClaim.attemptNumber, 2, "the replanned event must authorize the successor claim");
 });
 
 function seedRetryFailure(

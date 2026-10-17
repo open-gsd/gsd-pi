@@ -168,6 +168,13 @@ export function recoveryRouteLever(route: TaskRecoveryRouteSnapshot): string {
     return ` Recovery action ${route.recoveryActionId} (${route.action}) is eligible for resume — ` +
       `call gsd_task_recovery_resume with recoveryActionId "${route.recoveryActionId}".`;
   }
+  // #2793: a terminal replan has no agent-facing resume — its sanctioned
+  // consumer is the orchestrator's replan-task dispatch rule. Name that exit
+  // instead of presenting the action as a dead letter.
+  if (route.action === "replan") {
+    return ` Recovery action ${route.recoveryActionId} (${route.action}) is recorded for this Attempt — ` +
+      "rerun `/gsd auto`: the orchestrator dispatches the replan-task unit if the Task plan is not yet superseded, then re-executes the Task.";
+  }
   return ` Recovery action ${route.recoveryActionId} (${route.action}) is recorded for this Attempt.`;
 }
 

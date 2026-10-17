@@ -105,9 +105,11 @@ export interface InterviewRoundOptions {
 	 */
 	exitLabel?: string;
 	/**
-	 * Render as a floating overlay instead of replacing the editor. Use when the
+	 * Render as an overlay instead of replacing the editor. Use when the
 	 * interview must stay visible during an in-flight agent stream (e.g. claude-code-cli
-	 * MCP elicitation).
+	 * MCP elicitation). The overlay is docked below the transcript (reserveSpace), not
+	 * floated over it: the question usually refers to text just above it (a depth
+	 * summary, a roadmap preview) that a centered overlay would hide.
 	 */
 	overlay?: boolean;
 }
@@ -944,5 +946,5 @@ export async function showInterviewRound(
 			invalidate: () => { cachedLines = undefined; },
 			handleInput,
 		};
-	}, opts.overlay ? { overlay: true } : undefined);
+	}, opts.overlay ? { overlay: true, overlayOptions: { reserveSpace: true } } : undefined);
 }
