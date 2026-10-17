@@ -25,6 +25,7 @@ import {
   previewUnboundProjectionEvidenceResolution,
   previewUnboundProjectionEvidenceResolutionLockFree,
   isControlPublicationIntentName,
+  isExhaustedTransientProjectionSharingError,
   isStructuralProjectionRootError,
   scanProjectionRootStructure,
   CONTROL_INTENT_QUARANTINE_MIN_AGE_MS,
@@ -71,14 +72,16 @@ function unresolvedProjectionEvidenceIssue(
   };
 }
 
-// Structural rejection (#2648): the native lock refuses a node inside the
-// projection root, so every managed open — the evidence assessment included —
-// throws. In the pattern of the #2154 intent scan, name the rejected nodes
-// and keep the retained evidence enumerable without opening the lock.
+// Degraded evidence enumeration for stores whose every managed open throws:
+// structural rejections (#2648) and exhausted native sharing-violation
+// retries (#2355 family, #2883). In the pattern of the #2154 intent scan,
+// keep the retained evidence enumerable without opening the lock; the review
+// note names which class failed and when the listed commands apply.
 function reportRejectedProjectionRoot(
   basePath: string,
   issues: DoctorIssue[],
   listedEvidenceIds: ReadonlySet<string>,
+  reviewNote: string,
 ): void {
   try {
     for (const finding of scanProjectionRootStructure(basePath)) {
@@ -116,7 +119,7 @@ function reportRejectedProjectionRoot(
     try {
       issues.push(unresolvedProjectionEvidenceIssue(
         (action) => previewUnboundProjectionEvidenceResolutionLockFree(basePath, evidence.evidenceId, action),
-        " Listed without the native projection lock, which is rejecting this projection root: repair the root first, then the commands below apply.",
+        reviewNote,
       ));
     } catch (error) {
       issues.push({
@@ -177,7 +180,19 @@ export async function checkRuntimeHealth(
         fixable: false,
       });
       if (isStructuralProjectionRootError(error)) {
-        reportRejectedProjectionRoot(basePath, issues, listedEvidenceIds);
+        reportRejectedProjectionRoot(
+          basePath,
+          issues,
+          listedEvidenceIds,
+          " Listed without the native projection lock, which is rejecting this projection root: repair the root first, then the commands below apply.",
+        );
+      } else if (isExhaustedTransientProjectionSharingError(error)) {
+        reportRejectedProjectionRoot(
+          basePath,
+          issues,
+          listedEvidenceIds,
+          " Listed without the native projection lock, whose sharing-violation retries keep exhausting on this projection root (open-gsd/gsd-pi#2355): the commands below apply once a managed open succeeds.",
+        );
       }
     }
   }

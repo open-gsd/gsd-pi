@@ -303,6 +303,33 @@ function isControlPublicationEvidenceError(error: unknown): boolean {
   return false;
 }
 
+// Exhausted native sharing-violation retries (#2355 family, #2883): the
+// engine's Windows retry schedule ran out renaming a node inside the
+// projection root — among them the control-publication renames a pending
+// mutation's retention publishes on every managed open — and the same
+// failure returns deterministically (stable staging/destination names across
+// fresh processes, no visible control artifact). Writes stay fail-loud; the
+// doctor evidence assessment classifies this so the retained rows stay
+// enumerable. Matched as an anchored full-message scaffold, never a
+// substring: the engine builds the message verbatim around the two paths, so
+// an unrelated error quoting a managed pathname that happens to contain a
+// phrase must not read as an exhaustion (the #2880 classifier lesson).
+export function isExhaustedTransientProjectionSharingError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { message?: unknown; cause?: unknown };
+    if (typeof candidate.message === "string"
+      && /^projection root operation failed: transient projection root sharing violation while .+ after \d+ attempts:/u
+        .test(candidate.message)) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
 // Structural native rejections (#2648): the lock refused a node inside the
 // projection root — a directory where a file belongs, a reparse point, a
 // device. Unlike the transient sharing-violation family these never resolve

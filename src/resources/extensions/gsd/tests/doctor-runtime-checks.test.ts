@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -22,9 +23,14 @@ import { isProjectionRootIdentityLockAvailable, acquireProjectionRootIdentityLoc
 import { runGSDDoctor } from "../doctor.ts";
 import { checkRuntimeHealth } from "../doctor-runtime-checks.ts";
 import {
+  applyManagedProjectionMutation,
+  beginManagedProjectionMutation,
+  isExhaustedTransientProjectionSharingError,
   loadUnboundProjectionEvidence,
   previewUnboundProjectionEvidenceResolution,
   resolveUnboundProjectionEvidence,
+  retainManagedProjectionMutation,
+  _setManagedProjectionWriteFaultForTest,
 } from "../managed-projection-history.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
@@ -793,6 +799,198 @@ test(
     );
   },
 );
+
+test(
+  "doctor lists resolve commands while a pending mutation replay exhausts sharing-violation retries (#2883)",
+  // The failure is injected at the mutation-replay boundary: the engine's
+  // exhausted-retry publication shape is Windows-only and cannot be produced
+  // deterministically by the real addon on the CI filesystems.
+  { skip: !isProjectionRootIdentityLockAvailable() },
+  async (t) => {
+    const dir = createGitProject();
+    t.after(() => {
+      _setManagedProjectionWriteFaultForTest(null);
+      closeDatabase();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const rootPath = join(dir, ".gsd");
+    mkdirSync(rootPath, { recursive: true });
+    mkdirSync(join(rootPath, "notes"), { recursive: true });
+    mkdirSync(join(rootPath, "migration"), { recursive: true });
+    assert.equal(openDatabase(join(rootPath, "gsd.db")), true);
+
+    // Two retained evidence rows over real files (the #2815 index shape), on
+    // logical paths the pending mutation does not touch.
+    const retainedRows = [
+      {
+        evidencePath: "notes/.gsd-projection-remove-00000000-0000-0000-0000-000000000001",
+        logicalPath: "notes/kept-a.md",
+        bytes: "retained a\n",
+      },
+      {
+        evidencePath: "notes/.gsd-projection-remove-00000000-0000-0000-0000-000000000002",
+        logicalPath: "notes/kept-b.md",
+        bytes: "retained b\n",
+      },
+    ].map(({ evidencePath, logicalPath, bytes }) => {
+      writeFileSync(join(rootPath, evidencePath), bytes);
+      const stat = lstatSync(join(rootPath, evidencePath), { bigint: true });
+      return {
+        evidenceId: `evidence:sha256:${createHash("sha256")
+          .update(JSON.stringify({ evidencePath, kind: "quarantine", logicalPath, scope: "file" }))
+          .digest("hex")}`,
+        evidencePath,
+        evidenceIdentity: `${stat.dev}:${stat.ino}`,
+        contentDigest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+        kind: "quarantine",
+        logicalPath,
+        scope: "file",
+        transition: "retained",
+      };
+    });
+    writeFileSync(
+      join(rootPath, "migration", "unbound-projection-evidence.json"),
+      `${JSON.stringify(retainedRows)}\n`,
+    );
+
+    // A pending write mutation whose protocol already landed: every managed
+    // open replays it, and the replay is idempotent once publication is
+    // healthy again.
+    const mutation = beginManagedProjectionMutation(
+      join(rootPath, "notes", "result.md"),
+      "write",
+      "pending content\n",
+      "utf8",
+    );
+    assert.ok(mutation);
+    assert.equal(applyManagedProjectionMutation(mutation), true);
+    retainManagedProjectionMutation(mutation);
+    const journalDirectory = join(rootPath, "migration", "projection-mutations");
+    const [journalName] = readdirSync(journalDirectory).filter((name) => name.endsWith(".json"));
+    assert.ok(journalName, "the mutation journal entry is pending");
+
+    // The reported failure (#2883, the #2355 family): the replay's
+    // control-publication rename exhausts the engine's sharing-violation
+    // retries on every managed open — stable staging/destination names, no
+    // visible control artifact to move.
+    const exhaustion = "projection root operation failed: transient projection root sharing violation"
+      + " while renaming projection child from"
+      + " C:\\repo\\.gsd\\..gsd-control-.gsd-projection-remove-33ea6ab5.intent.prepared.write-a5b228c6d0e1f2a3b4c5d6e7f8a9b0c1"
+      + " to C:\\repo\\.gsd\\..gsd-control-.gsd-projection-remove-33ea6ab5.intent.prepared"
+      + " after 5 attempts: another process holds an incompatible handle (os error 32)";
+    _setManagedProjectionWriteFaultForTest((logicalPath) => {
+      if (logicalPath === "notes/result.md") throw new Error(exhaustion);
+    });
+
+    // The assessment survives: the retained rows list their resolution
+    // commands even though every managed open still fails.
+    const report = await runGSDDoctor(dir);
+    const evidenceIssues = report.issues.filter(
+      (candidate) => candidate.code === "unresolved_projection_evidence",
+    );
+    assert.ok(
+      evidenceIssues.some((candidate) => candidate.message.includes("could not be assessed")
+        && candidate.message.includes("sharing violation")),
+      "the assessment failure still names the underlying error",
+    );
+    const consents: string[] = [];
+    for (const record of retainedRows) {
+      const issue = evidenceIssues.find((candidate) => candidate.message.includes(record.evidenceId));
+      assert.ok(issue, `the row at .gsd/${record.evidencePath} is listed despite the wedge`);
+      const consent = /--action=discard --consent=(\S+)/u.exec(issue.message)?.[1];
+      assert.ok(consent, "the listed issue carries the discard consent token");
+      consents.push(consent);
+      assert.match(
+        issue.message,
+        /sharing-violation retries keep exhausting/u,
+        "the degraded note names the exhausted retries",
+      );
+    }
+    // The root itself is healthy: the degradation is the exhaustion class,
+    // not a structural rejection.
+    assert.equal(
+      report.issues.filter((candidate) => candidate.code === "unsupported_projection_root_node").length,
+      0,
+    );
+
+    // The mutation stays pending and fail-loud: the journal entry is kept
+    // (the classified transient never converges it), and the native resolve
+    // lane still refuses while the wedge holds — the commands apply once a
+    // managed open succeeds.
+    const journal = JSON.parse(readFileSync(join(journalDirectory, journalName!), "utf8")) as {
+      replayFailureCount?: number;
+    };
+    assert.ok(
+      (journal.replayFailureCount ?? 0) >= 1,
+      "the failed replay count is persisted on the pending entry",
+    );
+    assert.throws(
+      () => resolveUnboundProjectionEvidence(dir, retainedRows[0]!.evidenceId, "discard", "not-reviewed"),
+      (error: unknown) => (error as Error).message === exhaustion,
+      "the native resolve lane keeps failing loud while the wedge holds",
+    );
+
+    // A later pass with publication healthy again: the idempotent replay
+    // converges the entry, the rows list through the native lane, and the
+    // consent tokens listed during the wedge settle them unchanged.
+    _setManagedProjectionWriteFaultForTest(null);
+    const second = await runGSDDoctor(dir);
+    assert.equal(
+      existsSync(join(journalDirectory, journalName!)),
+      false,
+      "the pending entry converges once publication succeeds",
+    );
+    const secondIssues = second.issues.filter(
+      (candidate) => candidate.code === "unresolved_projection_evidence",
+    );
+    for (const record of retainedRows) {
+      assert.ok(secondIssues.some((candidate) => candidate.message.includes(record.evidenceId)));
+    }
+    assert.ok(secondIssues.every((candidate) => !/keep exhausting/u.test(candidate.message)));
+    retainedRows.forEach((record, index) => {
+      resolveUnboundProjectionEvidence(dir, record.evidenceId, "discard", consents[index]!);
+    });
+    assert.deepEqual(loadUnboundProjectionEvidence(dir), []);
+    const third = await runGSDDoctor(dir);
+    assert.deepEqual(
+      third.issues.filter((candidate) => candidate.code === "unresolved_projection_evidence"),
+      [],
+    );
+  },
+);
+
+test("exhausted sharing-violation classification stays anchored to the engine scaffold (#2883)", () => {
+  const exhaustion = "projection root operation failed: transient projection root sharing violation"
+    + " while renaming projection child from C:\\repo\\.gsd\\a.write-0 to C:\\repo\\.gsd\\a.intent.prepared"
+    + " after 5 attempts: another process holds an incompatible handle (os error 32)";
+  assert.equal(isExhaustedTransientProjectionSharingError(new Error(exhaustion)), true);
+  assert.equal(
+    isExhaustedTransientProjectionSharingError(new Error("projection root write failed", { cause: new Error(exhaustion) })),
+    true,
+  );
+  // The at-path sibling is the plain transient family, not an exhaustion.
+  assert.equal(
+    isExhaustedTransientProjectionSharingError(new Error(
+      "projection root operation failed: transient projection root sharing violation at"
+      + " C:\\repo\\.gsd\\a.md: another process holds an incompatible handle (os error 32)",
+    )),
+    false,
+  );
+  // A managed pathname quoting the phrases must not read as an exhaustion.
+  assert.equal(
+    isExhaustedTransientProjectionSharingError(new Error(
+      "projection root contains an unsupported node while renaming at"
+      + " C:\\repo\\.gsd\\transient projection root sharing violation while renaming after 5 attempts\\a.md:"
+      + " neither a regular file nor a directory",
+    )),
+    false,
+  );
+  assert.equal(
+    isExhaustedTransientProjectionSharingError(new Error("managed projection mutation journal is invalid")),
+    false,
+  );
+  assert.equal(isExhaustedTransientProjectionSharingError(null), false);
+});
 
 test(
   "doctor names a junction the lock rejects inside the projection root (#2648)",
