@@ -12,7 +12,10 @@ const path = require("node:path");
 
 const exitCode = Number(process.env.FIXTURE_EXIT_CODE || 0);
 const failOnceDir = process.env.FIXTURE_FAIL_ONCE_DIR;
+const modelSequence = (process.env.FIXTURE_MODEL_SEQUENCE || "test-model").split(",");
+const turnModels = (process.env.FIXTURE_TURN_MODELS || "").split("|");
 let effectiveExitCode = exitCode;
+let reportedModel = modelSequence[0] || "test-model";
 if (failOnceDir) {
 	const marker = path.join(failOnceDir, "failed-once");
 	if (!fs.existsSync(marker)) {
@@ -20,22 +23,28 @@ if (failOnceDir) {
 		effectiveExitCode = 1;
 	} else {
 		effectiveExitCode = 0;
+		reportedModel = modelSequence[1] || reportedModel;
 	}
 }
 
-const turn = (text, costTotal, turnTokens) => JSON.stringify({
+const turn = (text, costTotal, turnTokens, model) => JSON.stringify({
 	type: "message_end",
 	message: {
 		role: "assistant",
 		content: [{ type: "text", text }],
 		usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 5, cost: { total: costTotal }, totalTokens: turnTokens },
-		model: "test-model",
+		model,
 		stopReason: "stop",
 	},
 });
 
-process.stdout.write(`${turn("working", 0.01, 165)}\n`);
-setTimeout(() => {
-	process.stdout.write(`${turn("final answer", 0.02, 330)}\n`);
-	setTimeout(() => process.exit(effectiveExitCode), 50);
-}, 50);
+const skipSuccessfulEvents = process.env.FIXTURE_SKIP_SUCCESS_EVENTS === "1" && effectiveExitCode === 0;
+if (skipSuccessfulEvents) {
+	setTimeout(() => process.exit(0), 50);
+} else {
+	process.stdout.write(`${turn("working", 0.01, 165, turnModels[0] || reportedModel)}\n`);
+	setTimeout(() => {
+		process.stdout.write(`${turn("final answer", 0.02, 330, turnModels[1] || turnModels[0] || reportedModel)}\n`);
+		setTimeout(() => process.exit(effectiveExitCode), 50);
+	}, 50);
+}
