@@ -38,7 +38,7 @@ import { isClosedStatus } from "../../status-guards.js";
 import { findMilestoneIds } from "../../milestone-ids.js";
 import { removeProjectionTreeSync } from "../../atomic-write.js";
 import { invalidateStateCache } from "../../state.js";
-import { hasTaskExecutionOrReopenHistory, latestSliceReopenAt } from "../../db/lifecycle-queries.js";
+import { hasTaskExecutionOrReopenHistory, latestSliceReopenAt, listRunningTaskAttempts } from "../../db/lifecycle-queries.js";
 import type { GSDState } from "../../types.js";
 import {
   completedEventCoversDispatch,
@@ -51,7 +51,10 @@ import {
   isTaskExecutionAttemptOrphaned,
   readLatestSettledTaskAttempt,
   readLatestTaskAttempt,
+  type TaskExecutionAttemptSnapshot,
 } from "../../task-execution-domain-operation.js";
+import { readTaskRecoveryRoute } from "../../task-recovery-domain-operation.js";
+import { taskHasVerificationPauseReceipt } from "../../task-settle.js";
 import { quarantineProjectionEvidence } from "../../projection-observation.js";
 import { reopenProjectionRoots } from "../../projection-cleanup.js";
 import { computeProjectionSha, deriveCompatProjectionKey, readCompatMarker } from "../../compat/compat-marker.js";
@@ -199,6 +202,77 @@ function sliceLatestReopenAt(milestoneId: string, sliceId: string): string | nul
   return latestSliceReopenAt(milestoneId, sliceId);
 }
 
+/**
+ * Content proof that the staged SUMMARY projection named by `record` is the
+ * Task's own DB intent: a surviving disk copy comparable to
+ * `tasks.full_summary_md`, or the projection marker the staging write left
+ * behind. Shared by the abandoned (#2714) and verification-paused (#2864)
+ * staged-SUMMARY classifications.
+ */
+function stagedSummaryProjectionMatchesTaskIntent(
+  basePath: string,
+  record: ArtifactDbStatusDivergenceDrift,
+  task: { full_summary_md: string | null },
+  allowMarkerBaseline: boolean,
+): boolean {
+  const projectionPath = resolveTaskSummaryDriftPath(basePath, record);
+  const canonicalPath = resolveTaskFile(
+    basePath,
+    record.milestoneId,
+    record.sliceId!,
+    record.taskId!,
+    "SUMMARY",
+  );
+  if (!projectionPath || !canonicalPath || resolve(projectionPath) !== resolve(canonicalPath)) return false;
+  let content: string;
+  try {
+    content = readFileSync(projectionPath, "utf8");
+  } catch {
+    return false;
+  }
+  if (
+    task.full_summary_md &&
+    comparableProjectionContent(content) === comparableProjectionContent(task.full_summary_md)
+  ) return true;
+  // The marker vouches for what staging wrote, not for the current DB intent:
+  // admissible only where the repair keeps the Task's intent in place
+  // (#2714 abandoned staging), never where it deletes it (#2864 pause).
+  if (!allowMarkerBaseline) return false;
+
+  const projectionKey = deriveCompatProjectionKey(
+    projectionPath,
+    [gsdProjectionRoot(basePath), join(basePath, ".gsd")],
+  );
+  // gsd_summary_save renders the SUMMARY at the project root and copies it into
+  // the milestone worktree. The baseline of that copy is only in the
+  // project-root marker (#2714).
+  const sha = computeProjectionSha(content);
+  return reopenProjectionRoots(basePath).some((root) =>
+    readCompatMarker(root).projections[projectionKey]?.sha === sha
+  );
+}
+
+/**
+ * Whether a SUMMARY artifacts row of this Task still carries the Task's own
+ * DB intent. The disk-independent half of the #2864 proof: the pause state is
+ * exactly the one whose projection copy projection-worker may already have
+ * quarantined, so the row itself must be able to prove the staging.
+ */
+function stagedTaskSummaryRowMatchesTaskIntent(
+  record: ArtifactDbStatusDivergenceDrift,
+  task: { full_summary_md: string | null },
+): boolean {
+  const intent = task.full_summary_md;
+  if (!intent) return false;
+  return safeListArtifactRows(record.milestoneId).some((candidate) =>
+    candidate.artifact_type === "SUMMARY" &&
+    candidate.slice_id === record.sliceId &&
+    candidate.task_id === record.taskId &&
+    comparableProjectionContent(candidate.full_content) ===
+      comparableProjectionContent(intent)
+  );
+}
+
 function isAbandonedStagedTaskSummary(
   record: ArtifactDbStatusDivergenceDrift,
   basePath: string,
@@ -222,37 +296,92 @@ function isAbandonedStagedTaskSummary(
     : latest;
   if (attempt?.state !== "settled" || attempt.outcome === "succeeded") return false;
 
-  const projectionPath = resolveTaskSummaryDriftPath(basePath, record);
-  const canonicalPath = resolveTaskFile(
-    basePath,
-    record.milestoneId,
-    record.sliceId,
-    record.taskId,
-    "SUMMARY",
-  );
-  if (!projectionPath || !canonicalPath || resolve(projectionPath) !== resolve(canonicalPath)) return false;
-  let content: string;
-  try {
-    content = readFileSync(projectionPath, "utf8");
-  } catch {
-    return false;
-  }
-  if (
-    task.full_summary_md &&
-    comparableProjectionContent(content) === comparableProjectionContent(task.full_summary_md)
-  ) return true;
+  return stagedSummaryProjectionMatchesTaskIntent(basePath, record, task, true);
+}
 
-  const projectionKey = deriveCompatProjectionKey(
-    projectionPath,
-    [gsdProjectionRoot(basePath), join(basePath, ".gsd")],
-  );
-  // gsd_summary_save renders the SUMMARY at the project root and copies it into
-  // the milestone worktree. The baseline of that copy is only in the
-  // project-root marker (#2714).
-  const sha = computeProjectionSha(content);
-  return reopenProjectionRoots(basePath).some((root) =>
-    readCompatMarker(root).projections[projectionKey]?.sha === sha
-  );
+/**
+ * #2864: the verification-pause identity of a staged-SUMMARY drift record —
+ * legacy in_progress, `attempt` settled succeeded at the verify stage, a
+ * durable `task.verification.paused` receipt vouching for that exact Attempt
+ * (a receipt for an earlier Attempt never vouches, mirroring the #2334
+ * reconcile gate), and no agent-owned abort route owning the lineage. This is
+ * the state the `gsd task settle --reconcile-lifecycle` gate releases to
+ * ready, so the drift repair may treat its staged SUMMARY as repairable
+ * bookkeeping. Without the receipt the state stays fail-closed.
+ */
+function verificationPausedAttemptUnit(
+  record: ArtifactDbStatusDivergenceDrift,
+  attempt: TaskExecutionAttemptSnapshot | null,
+): { milestoneId: string; sliceId: string; taskId: string } | null {
+  if (!record.sliceId || !record.taskId || record.artifactType !== "SUMMARY") return null;
+  if (
+    attempt?.state !== "settled" ||
+    attempt.outcome !== "succeeded" ||
+    attempt.nextStage !== "verify"
+  ) return null;
+  const unit = {
+    milestoneId: record.milestoneId,
+    sliceId: record.sliceId,
+    taskId: record.taskId,
+  };
+  const task = readTask(record.milestoneId, record.sliceId, record.taskId);
+  if (task?.status !== "in_progress") return null;
+  if (!taskHasVerificationPauseReceipt(unit, attempt.attemptId)) return null;
+  const route = readTaskRecoveryRoute(attempt.attemptId);
+  if (route && route.recoveryOwner === "agent" && route.action === "abort" && !route.resumeAuthorized) {
+    return null;
+  }
+  return unit;
+}
+
+/**
+ * #2864: the verification-paused staged SUMMARY with its content proof — the
+ * row (or a surviving projection copy) must still carry the Task's own DB
+ * intent, exactly as the #2334 reconcile gate leaves it. The marker baseline
+ * is not proof here: it vouches for what staging wrote, not for the current
+ * DB intent, and this repair deletes the staged state. A diverged row stays a
+ * genuine divergence behind the guidance exit. An orphaned running retry is
+ * read through to the settled predecessor (#2855), mirroring the detector.
+ */
+function isVerificationPausedStagedTaskSummary(
+  record: ArtifactDbStatusDivergenceDrift,
+  basePath: string,
+): boolean {
+  if (!record.sliceId || !record.taskId || record.artifactType !== "SUMMARY") return false;
+  const unit = {
+    milestoneId: record.milestoneId,
+    sliceId: record.sliceId,
+    taskId: record.taskId,
+  };
+  const latest = readLatestTaskAttempt(unit);
+  const attempt = isTaskExecutionAttemptOrphaned(latest)
+    ? readLatestSettledTaskAttempt(unit) ?? latest
+    : latest;
+  if (!verificationPausedAttemptUnit(record, attempt)) return false;
+  const task = readTask(unit.milestoneId, unit.sliceId, unit.taskId);
+  if (!task) return false;
+  return stagedTaskSummaryRowMatchesTaskIntent(record, task) ||
+    stagedSummaryProjectionMatchesTaskIntent(basePath, record, task, false);
+}
+
+/**
+ * #2864: guidance-mirrors-enforcement. `gsd task settle --reconcile-lifecycle`
+ * refuses while any Attempt is still running (planTaskSettle has nothing to
+ * settle then), so the guidance may name that exit only in the exact shape
+ * the gate accepts: no running Attempt, latest Attempt settled succeeded at
+ * the verify stage, receipt present, no agent-owned abort route.
+ */
+function verificationPausedSettleExitUnit(
+  record: ArtifactDbStatusDivergenceDrift,
+): { milestoneId: string; sliceId: string; taskId: string } | null {
+  if (!record.sliceId || !record.taskId || record.artifactType !== "SUMMARY") return null;
+  const unit = {
+    milestoneId: record.milestoneId,
+    sliceId: record.sliceId,
+    taskId: record.taskId,
+  };
+  if (listRunningTaskAttempts(unit.milestoneId, unit.sliceId, unit.taskId).length > 0) return null;
+  return verificationPausedAttemptUnit(record, readLatestTaskAttempt(unit));
 }
 
 function resolveTaskSummaryDriftPath(
@@ -765,6 +894,22 @@ function diskSliceIdDivergenceGuidance(record: DiskSliceIdDivergenceDrift): stri
  * from a stale row. Do not tell the user that it can.
  */
 function artifactDbStatusDivergenceExit(record: ArtifactDbStatusDivergenceDrift, basePath?: string): string {
+  // #2864: guidance mirrors enforcement — for the verification-paused state,
+  // name the receipt-gated exit that actually releases the Task, not the
+  // rebuild/recover pair that cannot clear it.
+  const pausedUnit = verificationPausedSettleExitUnit(record);
+  if (pausedUnit) {
+    const unit = `${pausedUnit.milestoneId}/${pausedUnit.sliceId}/${pausedUnit.taskId}`;
+    return (
+      `Task ${unit} is verification-paused: its latest Attempt settled succeeded at the verify ` +
+      "stage and the auto finalizer recorded a verification-pause receipt for it. " +
+      `\`/gsd task settle ${unit} --reason "verification paused" --reconcile-lifecycle\` ` +
+      "(dry-run first; repeat with --apply) is the receipt-gated exit that releases the " +
+      "stranded Task for replan/cancel. If this blocker remains after that reconcile, the " +
+      "staged row itself is stale: `/gsd recover` with exact Preview approval is the command " +
+      "that replaces artifact rows from markdown."
+    );
+  }
   const row = safeListArtifactRows(record.milestoneId).find((candidate) => candidate.path === record.artifactPath);
   if (row) {
     const legacyReopen = basePath ? legacyReopenImportGuidance(basePath, record.milestoneId, row.imported_at) : null;
@@ -776,6 +921,28 @@ function artifactDbStatusDivergenceExit(record: ArtifactDbStatusDivergenceDrift,
     );
   }
   return "Run `/gsd rebuild markdown` after review to quarantine stale projections and re-render from the DB; use `/gsd recover` with exact Preview approval only when markdown should repopulate a lost or corrupt DB.";
+}
+
+/**
+ * Quarantine every projection copy of a classified staged SUMMARY that passes
+ * the same proof at each projection root, then clear the staged state (the
+ * artifacts row and the Task's DB intent). The copy at the other root is the
+ * same drift at the next guard, and no command that runs at one root removes
+ * it (#2714). Shared by the abandoned (#2714) and verification-paused (#2864)
+ * repairs.
+ */
+function quarantineStagedTaskSummaryCopies(
+  record: ArtifactDbStatusDivergenceDrift,
+  basePath: string,
+  matches: (candidate: ArtifactDbStatusDivergenceDrift, root: string) => boolean,
+): void {
+  const canonical = { ...record, artifactPath: undefined };
+  for (const root of reopenProjectionRoots(basePath)) {
+    if (!matches(canonical, root)) continue;
+    const projectionPath = resolveTaskSummaryDriftPath(root, canonical);
+    if (projectionPath) quarantineProjectionEvidence(root, projectionPath);
+  }
+  clearTaskSummaryProjectionState(record.milestoneId, record.sliceId!, record.taskId!);
 }
 
 export async function repairArtifactDbDrift(
@@ -807,13 +974,19 @@ export async function repairArtifactDbDrift(
     // The copy at the other root is the same drift at the next guard, and no
     // command that runs at one root removes it (#2714). Move each copy that
     // passes the same proof.
-    const canonical = { ...record, artifactPath: undefined };
-    for (const root of reopenProjectionRoots(ctx.basePath)) {
-      if (!isAbandonedStagedTaskSummary(canonical, root)) continue;
-      const projectionPath = resolveTaskSummaryDriftPath(root, canonical);
-      if (projectionPath) quarantineProjectionEvidence(root, projectionPath);
-    }
-    clearTaskSummaryProjectionState(record.milestoneId, record.sliceId!, record.taskId!);
+    quarantineStagedTaskSummaryCopies(record, ctx.basePath, isAbandonedStagedTaskSummary);
+    clearPathCache();
+    clearParseCache();
+    invalidateStateCache();
+    return;
+  }
+
+  if (isVerificationPausedStagedTaskSummary(record, ctx.basePath)) {
+    // #2864: the receipt-gated finalizer pause state — same bookkeeping
+    // treatment as the abandoned staging above, so the Task leaves the wedge
+    // without hand-editing the DB and the sanctioned settle exit stays
+    // reachable.
+    quarantineStagedTaskSummaryCopies(record, ctx.basePath, isVerificationPausedStagedTaskSummary);
     clearPathCache();
     clearParseCache();
     invalidateStateCache();
@@ -846,6 +1019,7 @@ export function describeArtifactDbDriftBlocker(
   }
 
   if (ctx && isAbandonedStagedTaskSummary(record, ctx.basePath)) return null;
+  if (ctx && isVerificationPausedStagedTaskSummary(record, ctx.basePath)) return null;
 
   return (
     `Artifact/DB status drift in ${record.milestoneId}` +

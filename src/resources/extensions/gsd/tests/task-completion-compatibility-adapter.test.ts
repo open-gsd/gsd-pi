@@ -1681,6 +1681,185 @@ test("#2855: only explicitly terminal dispatch rows orphan the running Attempt",
   }
 });
 
+// ─── #2864: the finalizer verification pause vs. the staged-SUMMARY drift ──
+//
+// The finalize verification pause (#2334) leaves the exact shape the staged-
+// SUMMARY policy exempts: legacy in_progress, Attempt settled succeeded at the
+// verify stage, staged SUMMARY row + DB intent on file. When projection-worker
+// quarantines the disk copy, the exemption's byte-exact disk match fails, the
+// row drift fires on every resume, and the only repair branch rejected the
+// succeeded outcome by construction — a permanent pre-dispatch wedge whose
+// blocker named exits that cannot clear it. The repair must consume the
+// receipt-gated pause state (and only it: without the durable
+// `task.verification.paused` receipt the state stays fail-closed), and the
+// guidance must name the settle exit that actually releases the Task.
+
+async function stageWithVerificationPause(
+  basePath: string,
+  attemptId: string,
+): Promise<string> {
+  const { stageTaskCompletion } = await subject();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  assert.equal(staged.nextStage, "verify");
+  const { recordTaskVerificationPause } = await import("../task-settle.js");
+  assert.equal(
+    recordTaskVerificationPause(TASK),
+    attemptId,
+    "the pause receipt binds to the settled Attempt",
+  );
+  return staged.summaryPath;
+}
+
+function stagedTaskSummaryDrift(basePath: string, state: GSDState) {
+  return detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+}
+
+test("#2864: a verification-paused staged SUMMARY whose projection was quarantined is receipt-gated repairable bookkeeping", async () => {
+  const { basePath, attemptId } = createFixture();
+  const summaryPath = await stageWithVerificationPause(basePath, attemptId);
+
+  // projection-worker quarantine: the disk copy is gone, the artifacts row and
+  // the DB intent remain — the wedge state.
+  unlinkSync(summaryPath);
+  clearPathCache();
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence", "the lost copy is still detected");
+  assert.equal(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }),
+    null,
+    "the receipt-gated pause state must be auto-repairable, not a permanent blocker",
+  );
+  await repairArtifactDbDrift(drift, { basePath, state });
+
+  const stateAfter = reconciliationState();
+  assert.deepEqual(
+    detectArtifactDbDrift(stateAfter, { basePath, state: stateAfter }).filter((record) =>
+      record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+    ),
+    [],
+    "the repair clears the wedge at both detection roots",
+  );
+  assert.equal(
+    Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'").count),
+    0,
+    "the stale staged row is cleared",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "doctor and reconciliation must accept the Task after the repair",
+  );
+});
+
+test("#2864: without the pause receipt the same state stays fail-closed", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  assert.equal(staged.nextStage, "verify");
+
+  unlinkSync(staged.summaryPath);
+  clearPathCache();
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  const blocker = describeArtifactDbDriftBlocker(drift, { basePath, state });
+  assert.match(
+    blocker ?? "",
+    /Artifact\/DB status drift/,
+    "a missing pause receipt must not become a quarantine path (#2334)",
+  );
+  assert.doesNotMatch(
+    blocker ?? "",
+    /reconcile-lifecycle/,
+    "the settle exit refuses without the receipt, so the guidance must not offer it",
+  );
+  await assert.rejects(() => repairArtifactDbDrift(drift, { basePath, state }));
+  assert.equal(
+    Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'").count),
+    1,
+    "the staged row survives a refused repair",
+  );
+});
+
+test("#2864: the blocker names the receipt-gated settle exit when the staged content no longer matches the DB intent", async () => {
+  const { basePath, attemptId } = createFixture();
+  const summaryPath = await stageWithVerificationPause(basePath, attemptId);
+
+  db().prepare(
+    "UPDATE artifacts SET full_content = 'tampered' WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'",
+  ).run();
+  unlinkSync(summaryPath);
+  clearPathCache();
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /reconcile-lifecycle/,
+    "guidance must name the exit that actually releases the verification-paused Task",
+  );
+});
+
+test("#2864: a diverged DB intent behind a receipt is not cleared — the marker baseline is not proof for the pause", async () => {
+  const { basePath, attemptId } = createFixture();
+  const summaryPath = await stageWithVerificationPause(basePath, attemptId);
+
+  // The Task's own intent changes after the pause; the disk copy and its
+  // projection marker still hold what staging wrote. The marker vouches for
+  // the staging bytes, never for the new intent — a destructive repair must
+  // not consume the Task's summary behind it.
+  const changed = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md)
+    .replace("Implemented the compatibility seam", "Implemented an entirely different seam");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": changed });
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence", "the changed intent is still drift");
+  const blocker = describeArtifactDbDriftBlocker(drift, { basePath, state });
+  assert.match(blocker ?? "", /reconcile-lifecycle/, "the Task state is still the settle exit's to release");
+  await assert.rejects(() => repairArtifactDbDrift(drift, { basePath, state }));
+  assert.equal(
+    Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'").count),
+    1,
+    "the staged row survives a refused repair",
+  );
+  assert.equal(
+    row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md,
+    changed,
+    "the changed DB intent is left in place",
+  );
+  assert.equal(existsSync(summaryPath), true, "the projection copy is left in place");
+});
+
+test("#2864: behind an orphaned running retry the guidance falls back — the settle exit refuses a running Attempt", async () => {
+  const { basePath, attemptId } = createFixture();
+  const summaryPath = await stageWithVerificationPause(basePath, attemptId);
+  orphanedRetryFixture(attemptId, "2864-orphan");
+
+  db().prepare(
+    "UPDATE artifacts SET full_content = 'tampered' WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'",
+  ).run();
+  unlinkSync(summaryPath);
+  clearPathCache();
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  const blocker = describeArtifactDbDriftBlocker(drift, { basePath, state });
+  assert.doesNotMatch(
+    blocker ?? "",
+    /reconcile-lifecycle/,
+    "the settle exit refuses while an Attempt is running, so the guidance must not offer it",
+  );
+  assert.match(blocker ?? "", /Artifact\/DB status drift/, "the divergence itself stays fail-closed");
+});
+
 function quarantinedTaskSummaries(root: string): string[] {
   const quarantineRoot = join(root, ".gsd", "quarantine", "projections");
   if (!existsSync(quarantineRoot)) return [];
