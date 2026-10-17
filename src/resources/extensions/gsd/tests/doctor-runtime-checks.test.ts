@@ -275,6 +275,9 @@ test("doctor surfaces unresolved projection evidence with recovery instructions"
   assert.match(issue.message, /--action=preserve/u);
   assert.match(issue.message, /--action=restore/u);
   assert.match(issue.message, /--consent=discard:sha256:[0-9a-f]{64} deletes \.gsd\/notes\/my notes\/\.gsd-projection-remove-/u);
+  // Staging evidence is moved by preserve; only canonical evidence is copied
+  // in place (#2881).
+  assert.match(issue.message, /--action=preserve --consent=preserve:sha256:[0-9a-f]{64} moves the evidence to \.gsd\//u);
   assert.doesNotMatch(issue.message, /the projection itself/u);
   assert.equal(issue.fixable, false);
 });
@@ -315,6 +318,61 @@ test("doctor says that discarding canonical evidence deletes the projection itse
   assert.match(
     issue.message,
     /--action=discard --consent=discard:sha256:[0-9a-f]{64} deletes \.gsd\/notes\/result\.md \(the projection itself; --action=restore keeps it in place\)/u,
+  );
+});
+
+test("doctor's canonical preserve retains a copy and keeps the projection in place (#2881)", async (t) => {
+  const dir = createGitProject();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  // The evidence IS the live projection file: the preserve command must say
+  // it retains a copy (not a move), and running it must leave the projection
+  // where the database recorded it so the next pass does not report the
+  // artifact missing.
+  mkdirSync(join(dir, ".gsd", "migration"), { recursive: true });
+  writeFileSync(join(dir, ".gsd", "state.md"), "recorded projection bytes\n");
+  const evidenceStat = lstatSync(join(dir, ".gsd", "state.md"));
+  const evidenceId = `evidence:sha256:${createHash("sha256").update(JSON.stringify({
+    evidencePath: "state.md",
+    kind: "canonical",
+    logicalPath: "state.md",
+    scope: "file",
+  })).digest("hex")}`;
+  writeFileSync(
+    join(dir, ".gsd", "migration", "unbound-projection-evidence.json"),
+    `${JSON.stringify([{
+      evidenceId,
+      evidencePath: "state.md",
+      evidenceIdentity: `${evidenceStat.dev}:${evidenceStat.ino}`,
+      contentDigest: `sha256:${createHash("sha256").update("recorded projection bytes\n").digest("hex")}`,
+      kind: "canonical",
+      logicalPath: "state.md",
+      scope: "file",
+      transition: "retained",
+    }])}\n`,
+  );
+
+  const report = await runGSDDoctor(dir);
+  const issue = report.issues.find(candidate => candidate.code === "unresolved_projection_evidence");
+  assert.ok(issue);
+  assert.match(
+    issue.message,
+    /--action=preserve --consent=preserve:sha256:[0-9a-f]{64} retains a copy at \.gsd\/migration\/preserved-projection-evidence\/[0-9a-f]+ \(the projection itself stays in place\)/u,
+  );
+
+  const preview = previewUnboundProjectionEvidenceResolution(dir, evidenceId, "preserve");
+  resolveUnboundProjectionEvidence(dir, evidenceId, "preserve", preview.consent);
+  assert.equal(readFileSync(join(dir, ".gsd", "state.md"), "utf8"), "recorded projection bytes\n");
+  assert.equal(
+    readFileSync(join(dir, ".gsd", preview.destinationPath!), "utf8"),
+    "recorded projection bytes\n",
+  );
+  assert.deepEqual(loadUnboundProjectionEvidence(dir), []);
+
+  const second = await runGSDDoctor(dir);
+  assert.deepEqual(
+    second.issues.filter((candidate) => candidate.code === "unresolved_projection_evidence"),
+    [],
   );
 });
 
