@@ -218,8 +218,9 @@ test("refuses malformed, parent-only, and mismatched pause lifecycle identities 
       name: "task lifecycle missing while slice and milestone parents exist",
       corrupt(db) {
         // This temp database is disposed after the subtest. Drop only the
-        // identity and transition fences needed to model a row written by an
-        // older/corrupt store; production lifecycle identity remains immutable.
+        // database fences needed to model a row written by an older/corrupt
+        // store; production lifecycle identity remains immutable.
+        db.exec("PRAGMA foreign_keys = OFF");
         db.exec(`
           DROP TRIGGER trg_workflow_lifecycle_identity_immutable;
           DROP TRIGGER trg_workflow_lifecycle_transition;
