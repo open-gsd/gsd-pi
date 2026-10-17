@@ -39,6 +39,7 @@ import {
 import {
   _buildBridgeImportCandidates,
   _buildImportCandidates,
+  derivePrivateMcpTraceId,
   readProjectProgressViaBridge,
   registerWorkflowTools,
   resolveRecoveryActionProjectDir,
@@ -2154,6 +2155,13 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
           { command: "npm test", exitCode: 0, verdict: "pass", durationMs: 1234 },
         ],
       };
+      const expectedPrivateTrace = (canonicalToolName: string, stableInput: string) =>
+        derivePrivateMcpTraceId({
+          canonicalToolName,
+          sourceTransport: "workflow-mcp",
+          actorType: "agent",
+          stableInput,
+        });
       const metadata = { _meta: { "io.opengsd/idempotency-key": "stable-task-retry" } };
       await taskTool!.handler(taskArgs, metadata);
 
@@ -2188,7 +2196,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
         idempotencyKey: "mcp:gsd_task_complete:stable-task-retry",
         sourceTransport: "workflow-mcp",
         actorType: "agent",
-        traceId: "stable-task-retry",
+        traceId: expectedPrivateTrace("gsd_task_complete", "stable-task-retry"),
       });
 
       await aliasTool!.handler(taskArgs, metadata);
@@ -2218,7 +2226,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
           idempotencyKey: "mcp:gsd_task_reopen:stable-task-reopen",
           sourceTransport: "workflow-mcp",
           actorType: "agent",
-          traceId: "stable-task-reopen",
+          traceId: expectedPrivateTrace("gsd_task_reopen", "stable-task-reopen"),
         });
       }
 
@@ -2242,7 +2250,10 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
         idempotencyKey: "mcp:gsd_task_recovery_resume:transport:claude-code:toolu_recovery_resume",
         sourceTransport: "workflow-mcp",
         actorType: "agent",
-        traceId: "transport:claude-code:toolu_recovery_resume",
+        traceId: expectedPrivateTrace(
+          "gsd_task_recovery_resume",
+          "transport:claude-code:toolu_recovery_resume",
+        ),
       });
 
       const sliceArgs = {
@@ -2332,7 +2343,10 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
           idempotencyKey: "mcp:gsd_validate_milestone:stable-milestone-validation",
           sourceTransport: "workflow-mcp",
           actorType: "agent",
-          traceId: "stable-milestone-validation",
+          traceId: expectedPrivateTrace(
+            "gsd_validate_milestone",
+            "stable-milestone-validation",
+          ),
         });
       }
       const invalidEvidence = await validateMilestoneTool!.handler({
@@ -2395,7 +2409,10 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
             idempotencyKey: `mcp:${entry.canonicalName}:stable-milestone-${entry.executor}`,
             sourceTransport: "workflow-mcp",
             actorType: "agent",
-            traceId: `stable-milestone-${entry.executor}`,
+            traceId: expectedPrivateTrace(
+              entry.canonicalName,
+              `stable-milestone-${entry.executor}`,
+            ),
           });
         }
       }
@@ -2416,7 +2433,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
             idempotencyKey: `mcp:${entry.canonicalName}:stable-slice-${entry.executor}`,
             sourceTransport: "workflow-mcp",
             actorType: "agent",
-            traceId: `stable-slice-${entry.executor}`,
+            traceId: expectedPrivateTrace(entry.canonicalName, `stable-slice-${entry.executor}`),
           });
         }
       }
