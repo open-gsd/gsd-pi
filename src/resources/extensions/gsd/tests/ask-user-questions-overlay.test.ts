@@ -64,7 +64,7 @@ describe("ask_user_questions interview overlay (#2333)", () => {
 		const result = await tool.execute("t1", { questions: [question] }, undefined, () => {}, ctx);
 
 		assert.equal(customCalls.length, 1, "interview should be dispatched through ui.custom");
-		assert.deepEqual(customCalls[0], { overlay: true });
+		assert.deepEqual(customCalls[0], { overlay: true, overlayOptions: { reserveSpace: true } });
 		assert.equal((result.details as any).cancelled, false);
 	});
 });
