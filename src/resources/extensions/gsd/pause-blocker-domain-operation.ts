@@ -363,7 +363,7 @@ export function resolveAutoPauseBlockerById(input: {
         } | undefined;
         const pauses = db.prepare(
           `SELECT scope, blocker_kind, milestone_id, unit_type, unit_id
-           FROM auto_pauses WHERE blocker_id = :blocker_id AND closed_at IS NULL`,
+           FROM auto_pauses WHERE blocker_id = :blocker_id AND closed_at IS NULL LIMIT 2`,
         ).all({ ":blocker_id": input.blockerId }) as Array<{
           scope: string;
           blocker_kind: AutoPauseBlockerKind;

@@ -287,7 +287,7 @@ test("gsd_resolve_blocker rejects blank escalation responses", async (t) => {
 
 test("gsd_resolve_blocker handler rejects invalid pause combinations without success fallback", async () => {
   const { server } = await createMcpServer(new SessionManager(), { includeWorkflowTools: false });
-  const handler = (server as any)._registeredTools.gsd_resolve_blocker.handler;
+  const { handler, inputSchema } = (server as any)._registeredTools.gsd_resolve_blocker;
   for (const invalid of [
     { projectDir: "/tmp/project", pauseBlockerId: "blocker-1" },
     { projectDir: "/tmp/project", rationale: "reason" },
@@ -295,12 +295,39 @@ test("gsd_resolve_blocker handler rejects invalid pause combinations without suc
       projectDir: "/tmp/project", pauseBlockerId: "blocker-1", rationale: "reason",
       expectedRevision: 1, expectedAuthorityEpoch: 0, response: "accept",
     },
+    {
+      projectDir: "/tmp/project", pauseBlockerId: "blocker-1", rationale: "   ",
+      expectedRevision: 1, expectedAuthorityEpoch: 0,
+    },
+    {
+      projectDir: "/tmp/project", pauseBlockerId: "blocker-1", rationale: "reason",
+      expectedRevision: Number.MAX_SAFE_INTEGER + 1, expectedAuthorityEpoch: 0,
+    },
+    {
+      projectDir: "/tmp/project", pauseBlockerId: "blocker-1", rationale: "reason",
+      expectedRevision: 1, expectedAuthorityEpoch: Number.MAX_SAFE_INTEGER + 1,
+    },
+    { projectDir: "/tmp/project", response: 42 },
+    { projectDir: "/tmp/project" },
+    { response: "answer" },
   ]) {
+    const parsed = inputSchema.safeParse(invalid);
+    assert.equal(parsed.success, false, JSON.stringify(invalid));
     const result: ToolResult = await handler(invalid, {
       _meta: { "io.opengsd/idempotency-key": `invalid:${++callSequence}` },
     });
     assert.equal(result.isError, true, JSON.stringify(invalid));
+    assert.equal(result.content[0]!.text, parsed.error.issues[0].message);
   }
+  const missingRationale: ToolResult = await handler({
+    projectDir: "/tmp/project", pauseBlockerId: "blocker-1",
+  });
+  assert.equal(missingRationale.content[0]!.text, "rationale is required with pauseBlockerId.");
+  const conflictingSelection: ToolResult = await handler({
+    projectDir: "/tmp/project", pauseBlockerId: "blocker-1", rationale: "reason",
+    expectedRevision: 1, expectedAuthorityEpoch: 0, response: "answer",
+  });
+  assert.equal(conflictingSelection.content[0]!.text, "sessionId, questionId, and response conflict with pauseBlockerId.");
 });
 
 test("gsd_resolve_blocker resolves an exact auto-pause after restart and replays the stable response", async (t) => {

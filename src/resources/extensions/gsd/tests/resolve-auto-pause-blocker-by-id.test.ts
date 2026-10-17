@@ -32,6 +32,7 @@ import {
 } from "../pause-blocker-domain-operation.ts";
 import { listOpenEscalations } from "../escalation-resolution.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
+import { readOpenAutoPauseByBlockerId } from "../db/writers/auto-pauses.ts";
 
 const TS = "2026-10-15T00:00:00.000Z";
 
@@ -297,7 +298,9 @@ test("refuses duplicate open pause associations without any durable mutation", a
     category: "unknown",
   });
   const blockerId = String(blockerRows()[0]!["blocker_id"]);
-  _getAdapter()!.prepare(`
+  assert.equal(readOpenAutoPauseByBlockerId("missing-blocker"), null);
+  assert.equal(readOpenAutoPauseByBlockerId(blockerId)?.scope, openPauseRows()[0]!["scope"]);
+  const insertDuplicate = _getAdapter()!.prepare(`
     INSERT INTO auto_pauses (
       scope, blocker_kind, dispatch_id, milestone_id, unit_type, unit_id,
       worktree_path, original_base_path, step_mode, session_file,
@@ -305,14 +308,18 @@ test("refuses duplicate open pause associations without any durable mutation", a
       pause_reason, paused_at, closed_at, blocker_id
     )
     SELECT
-      'duplicate-worker-scope', blocker_kind, dispatch_id, milestone_id, unit_type, unit_id,
+      :scope, blocker_kind, dispatch_id, milestone_id, unit_type, unit_id,
       worktree_path, original_base_path, step_mode, session_file,
       active_engine_id, active_run_dir, auto_start_time, milestone_lock,
       pause_reason, paused_at, NULL, blocker_id
-    FROM auto_pauses WHERE blocker_id = :blocker_id AND closed_at IS NULL
-  `).run({ ":blocker_id": blockerId });
+    FROM auto_pauses WHERE blocker_id = :blocker_id AND closed_at IS NULL LIMIT 1
+  `);
+  insertDuplicate.run({ ":blocker_id": blockerId, ":scope": "duplicate-worker-scope" });
+  assert.equal(readOpenAutoPauseByBlockerId(blockerId), null, "two associations are ambiguous");
+  insertDuplicate.run({ ":blocker_id": blockerId, ":scope": "third-worker-scope" });
+  assert.equal(readOpenAutoPauseByBlockerId(blockerId), null, "more than two remain ambiguous");
   const before = { blocker: blockerRows(), pauses: openPauseRows(), durable: durableCounts() };
-  assert.equal(before.pauses.length, 2);
+  assert.equal(before.pauses.length, 3);
   const input = resolutionInput(
     blockerId,
     "duplicates cannot identify one exact pause",

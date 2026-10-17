@@ -172,7 +172,7 @@ export function readOpenAutoPauseByBlockerId(
 ): { id: number; scope: string } | null {
   if (!isDbAvailable()) return null;
   const rows = _getAdapter()!.prepare(
-    `SELECT id, scope FROM auto_pauses WHERE blocker_id = :blocker_id AND closed_at IS NULL`,
+    `SELECT id, scope FROM auto_pauses WHERE blocker_id = :blocker_id AND closed_at IS NULL LIMIT 2`,
   ).all({ ":blocker_id": blockerId }) as Array<{ id: number; scope: string }>;
   return rows.length === 1 ? rows[0] : null;
 }
