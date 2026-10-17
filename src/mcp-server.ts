@@ -70,15 +70,14 @@ function sha256(value: string): string {
 }
 
 /**
- * Prefer the caller's retry-stable private tool-call identity. JSON-RPC ids
- * are the compatibility source for clients that do not send the optional
- * metadata. Explicit identities are hashed into a reserved namespace so
- * secret-like metadata is not persisted and cannot collide with fallback
- * request identities. Fallbacks include one server/transport-instance
- * namespace, so they support retries only while that instance remains alive.
+ * Prefer the caller's retry-stable private tool-call identity. Explicit
+ * identities are hashed into a reserved namespace so secret-like metadata is
+ * not persisted. Calls without metadata receive a fresh invocation identity:
+ * JSON-RPC request ids may be reused and therefore are not durable mutation
+ * identities.
  */
-export function createToolCallIdentityResolver(instanceNamespace = randomUUID()) {
-  return (request: any, extra: any): string => {
+export function createToolCallIdentityResolver() {
+  return (request: any, _extra: any): string => {
     const explicit = request?.params?._meta?.[MCP_IDEMPOTENCY_META_KEY]
     if (explicit !== undefined) {
       if (typeof explicit !== 'string' || explicit.trim().length === 0) {
@@ -93,16 +92,7 @@ export function createToolCallIdentityResolver(instanceNamespace = randomUUID())
       return `mcp-explicit:v1:sha256:${sha256(value)}`
     }
 
-    const requestId = extra?.requestId
-    if (typeof requestId === 'string' && requestId.length > 0) {
-      return `mcp-request:v1:${instanceNamespace}:string-sha256:${sha256(requestId)}`
-    }
-    if (typeof requestId === 'number' && Number.isSafeInteger(requestId)) {
-      return `mcp-request:v1:${instanceNamespace}:number:${String(requestId)}`
-    }
-    throw new Error(
-      `Tool call requires _meta["${MCP_IDEMPOTENCY_META_KEY}"] or a JSON-RPC request id`,
-    )
+    return `mcp-invocation:v1:${randomUUID()}`
   }
 }
 
@@ -177,9 +167,9 @@ export async function startMcpServer(options: {
     const signal: AbortSignal | undefined = extra?.signal
 
     try {
-      // Mutation tools use this as a permanent Domain Operation idempotency
-      // key. Never synthesize random success-shaped identity: a lost-response
-      // retry must be able to reproduce the same key.
+      // Mutation tools use this as a Domain Operation idempotency key.
+      // Only explicit metadata is durable across retries; ordinary calls get
+      // a fresh identity even if a client reuses its JSON-RPC request id.
       const toolCallId = resolveToolCallIdentity(request, extra)
       const result = await tool.execute(
         toolCallId,

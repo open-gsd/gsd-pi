@@ -26,33 +26,27 @@ test('startMcpServer accepts the correct argument shape', async () => {
   assert.strictEqual(startMcpServer.length, 1, 'startMcpServer should accept one argument')
 })
 
-test('native MCP identities keep explicit and instance-scoped request namespaces distinct', async () => {
+test('native MCP identities are fresh per invocation unless explicit metadata is supplied', async () => {
   const { createToolCallIdentityResolver } = await import(mcpServerSpecifier)
-  const firstInstance = createToolCallIdentityResolver('instance-a')
-  const restartedInstance = createToolCallIdentityResolver('instance-b')
+  const firstInstance = createToolCallIdentityResolver()
+  const restartedInstance = createToolCallIdentityResolver()
   const request = (key?: string) => key === undefined
     ? { params: {} }
     : { params: { _meta: { 'io.opengsd/idempotency-key': key } } }
 
-  const numericFallback = firstInstance(request(), { requestId: 1 })
-  const stringFallback = firstInstance(request(), { requestId: '1' })
+  const firstInvocation = firstInstance(request(), { requestId: 1 })
+  const reusedRequestIdInvocation = firstInstance(request(), { requestId: 1 })
   const explicitReservedLookingKey = firstInstance(request('mcp-request:1'), { requestId: 1 })
 
-  assert.notEqual(numericFallback, stringFallback, 'request-id type is part of fallback identity')
   assert.notEqual(
-    numericFallback,
-    explicitReservedLookingKey,
-    'explicit metadata cannot enter the fallback namespace',
-  )
-  assert.equal(
-    firstInstance(request(), { requestId: 1 }),
-    numericFallback,
-    'same-instance fallback retries are stable',
+    reusedRequestIdInvocation,
+    firstInvocation,
+    'sequential reuse of one request id receives a fresh invocation identity',
   )
   assert.notEqual(
-    restartedInstance(request(), { requestId: 1 }),
-    numericFallback,
-    'request-id reuse by a new server instance is distinct',
+    firstInstance(request(), {}),
+    firstInvocation,
+    'metadata and a request id remain optional for ordinary calls',
   )
   assert.equal(
     restartedInstance(request('mcp-request:1'), { requestId: 99 }),
@@ -60,6 +54,10 @@ test('native MCP identities keep explicit and instance-scoped request namespaces
     'explicit private keys remain stable across server instances',
   )
   assert.doesNotMatch(explicitReservedLookingKey, /mcp-request:1$/, 'raw private metadata is not persisted')
+  assert.throws(
+    () => firstInstance(request('   '), { requestId: 1 }),
+    /idempotency-key.*nonblank/i,
+  )
 })
 
 test('compiled MCP runtime dependencies resolve with explicit .js subpaths', async () => {
