@@ -1380,7 +1380,7 @@ function mcpInvocation(
   canonicalToolName: string,
   mutationKind: "Planning mutation" | "Task execution mutation" | "Workflow execution mutation",
   extra?: WorkflowMcpRequestExtra,
-): ExecutionInvocation {
+): ExecutionInvocation & { traceId: string } {
   const explicitKey = extra?._meta?.[MCP_IDEMPOTENCY_META_KEY];
   const stableExplicitKey = typeof explicitKey === "string" && explicitKey.trim()
     ? explicitKey.trim()
@@ -1410,12 +1410,7 @@ function mcpInvocation(
     idempotencyKey: `mcp:${canonicalToolName}:${stableKey}`,
     sourceTransport,
     actorType,
-    traceId: derivePrivateMcpTraceId({
-      canonicalToolName,
-      sourceTransport,
-      actorType,
-      stableInput: stableKey,
-    }),
+    traceId: stableKey,
   };
 }
 
@@ -1429,7 +1424,7 @@ function mcpPlanningInvocation(
 function mcpExecutionInvocation(
   canonicalToolName: string,
   extra?: WorkflowMcpRequestExtra,
-): ExecutionInvocation {
+): ExecutionInvocation & { traceId: string } {
   return mcpInvocation(canonicalToolName, "Task execution mutation", extra);
 }
 
@@ -1646,6 +1641,12 @@ export async function resolvePersistedAutoPauseBlockerViaBridge(
   return runSerializedWorkflowOperation(async () => {
     await checkWorkflowWriteGate("gsd_resolve_blocker", projectDir);
     const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
+    invocation.traceId = derivePrivateMcpTraceId({
+      canonicalToolName: "gsd_resolve_blocker",
+      sourceTransport: invocation.sourceTransport,
+      actorType: invocation.actorType,
+      stableInput: invocation.traceId,
+    });
     const bridge = await importBridgeModule();
     const opened = bridge.openExistingWorkflowDatabase(projectDir);
     if (!opened.ok) {

@@ -27,6 +27,7 @@ import {
   upsertMilestonePlanning,
 } from "../../../src/resources/extensions/gsd/mcp-bridge.ts";
 import { createMemory } from "../../../src/resources/extensions/gsd/memory-store.ts";
+import { saveRequirementToDb } from "../../../src/resources/extensions/gsd/db-writer.ts";
 import { buildReassessRoadmapPrompt } from "../../../src/resources/extensions/gsd/auto-prompts.ts";
 import { invalidateAllCaches } from "../../../src/resources/extensions/gsd/cache.ts";
 import { resolveToolPresentationPlan } from "../../../src/resources/extensions/gsd/tool-presentation-plan.ts";
@@ -39,7 +40,6 @@ import {
 import {
   _buildBridgeImportCandidates,
   _buildImportCandidates,
-  derivePrivateMcpTraceId,
   readProjectProgressViaBridge,
   registerWorkflowTools,
   resolveRecoveryActionProjectDir,
@@ -2155,13 +2155,6 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
           { command: "npm test", exitCode: 0, verdict: "pass", durationMs: 1234 },
         ],
       };
-      const expectedPrivateTrace = (canonicalToolName: string, stableInput: string) =>
-        derivePrivateMcpTraceId({
-          canonicalToolName,
-          sourceTransport: "workflow-mcp",
-          actorType: "agent",
-          stableInput,
-        });
       const metadata = { _meta: { "io.opengsd/idempotency-key": "stable-task-retry" } };
       await taskTool!.handler(taskArgs, metadata);
 
@@ -2196,7 +2189,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
         idempotencyKey: "mcp:gsd_task_complete:stable-task-retry",
         sourceTransport: "workflow-mcp",
         actorType: "agent",
-        traceId: expectedPrivateTrace("gsd_task_complete", "stable-task-retry"),
+        traceId: "stable-task-retry",
       });
 
       await aliasTool!.handler(taskArgs, metadata);
@@ -2226,7 +2219,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
           idempotencyKey: "mcp:gsd_task_reopen:stable-task-reopen",
           sourceTransport: "workflow-mcp",
           actorType: "agent",
-          traceId: expectedPrivateTrace("gsd_task_reopen", "stable-task-reopen"),
+          traceId: "stable-task-reopen",
         });
       }
 
@@ -2250,10 +2243,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
         idempotencyKey: "mcp:gsd_task_recovery_resume:transport:claude-code:toolu_recovery_resume",
         sourceTransport: "workflow-mcp",
         actorType: "agent",
-        traceId: expectedPrivateTrace(
-          "gsd_task_recovery_resume",
-          "transport:claude-code:toolu_recovery_resume",
-        ),
+        traceId: "transport:claude-code:toolu_recovery_resume",
       });
 
       const sliceArgs = {
@@ -2343,10 +2333,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
           idempotencyKey: "mcp:gsd_validate_milestone:stable-milestone-validation",
           sourceTransport: "workflow-mcp",
           actorType: "agent",
-          traceId: expectedPrivateTrace(
-            "gsd_validate_milestone",
-            "stable-milestone-validation",
-          ),
+          traceId: "stable-milestone-validation",
         });
       }
       const invalidEvidence = await validateMilestoneTool!.handler({
@@ -2409,10 +2396,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
             idempotencyKey: `mcp:${entry.canonicalName}:stable-milestone-${entry.executor}`,
             sourceTransport: "workflow-mcp",
             actorType: "agent",
-            traceId: expectedPrivateTrace(
-              entry.canonicalName,
-              `stable-milestone-${entry.executor}`,
-            ),
+            traceId: `stable-milestone-${entry.executor}`,
           });
         }
       }
@@ -2433,7 +2417,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
             idempotencyKey: `mcp:${entry.canonicalName}:stable-slice-${entry.executor}`,
             sourceTransport: "workflow-mcp",
             actorType: "agent",
-            traceId: expectedPrivateTrace(entry.canonicalName, `stable-slice-${entry.executor}`),
+            traceId: `stable-slice-${entry.executor}`,
           });
         }
       }
@@ -3109,6 +3093,46 @@ export const executeCaptureComplete = noop;
         ],
       });
       assert.match((sketchResult as any).content[0].text as string, /Planned milestone M001/);
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("replays pre-upgrade requirement receipts through workflow MCP without changing legacy traces", async () => {
+    const base = makeTmpBase();
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server);
+      const tool = server.tools.find((entry) => entry.name === "gsd_requirement_save");
+      assert.ok(tool);
+      openDatabase(join(base, ".gsd", "gsd.db"));
+      const fields = {
+        class: "operability",
+        description: "Requirement committed before W070",
+        why: "Legacy receipts must remain replayable",
+        source: "user",
+      };
+      for (const [stableKey, metadata] of [
+        ["legacy-requirement-key", { "io.opengsd/idempotency-key": "legacy-requirement-key" }],
+        ["transport:claude-code:toolu_legacy", { "claudecode/toolUseId": "toolu_legacy" }],
+      ] as const) {
+        const legacy = await saveRequirementToDb(fields, base, {
+          idempotencyKey: `mcp:gsd_requirement_save:${stableKey}`,
+          sourceTransport: "workflow-mcp",
+          actorType: "agent",
+          traceId: stableKey,
+        });
+        const before = _getAdapter()!.prepare("SELECT * FROM workflow_operations").all();
+        const replay = await tool.handler({ projectDir: base, ...fields }, { _meta: metadata });
+        const result = replay as { isError?: boolean; content: Array<{ text: string }> };
+        assert.notEqual(result.isError, true, result.content[0]?.text);
+        assert.match(result.content[0].text, new RegExp(`Saved requirement ${legacy.id}`));
+        assert.deepEqual(_getAdapter()!.prepare("SELECT * FROM workflow_operations").all(), before);
+        const conflict = await tool.handler({
+          projectDir: base, ...fields, description: "Changed legacy payload",
+        }, { _meta: metadata });
+        assertToolError(conflict, /idempotency|different request/i);
+      }
     } finally {
       cleanup(base);
     }
