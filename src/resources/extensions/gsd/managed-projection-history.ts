@@ -270,6 +270,18 @@ function isDeterministicExchangeIdentityError(error: unknown): boolean {
   return isUnexpectedOccupantError(error) || isJournaledExchangeIdentityChangedError(error);
 }
 
+// Completed journal retirements (#2879): every retention site records the
+// participant evidence rows and removes the journal entry BEFORE throwing this
+// stable message, so the entry is already converged when the error escapes.
+// Matched by exact equality, never a substring: a native error quoting a
+// managed path that happens to contain the phrase must not read as a
+// retirement (Codex round 1).
+function isRetiredProjectionExchangeError(error: unknown): boolean {
+  const message = projectionErrorMessage(error);
+  return message === "managed projection target identity changed; recovery evidence retained"
+    || message === "managed projection target kind changed; recovery evidence retained";
+}
+
 // Deterministic native control-publication replay failures (#2154): a stale
 // prepared intent (.gsd-control-*.json.intent) whose publication can no
 // longer complete throws these on every projection-root open, wedging every
@@ -1992,6 +2004,14 @@ function recoverManagedProjectionMutations(
       else if (mutation.operation === "write") applyWriteMutation(handle, mutation);
       else applyRemoveMutation(handle, mutation);
     } catch (error) {
+      // A retirement has already converged its entry: the participants are
+      // retained evidence rows and the journal file is removed. Continuing
+      // lets the remaining entries converge in this pass instead of failing
+      // every later managed open one retirement per pass, which kept the
+      // retained evidence unassessable and growing (#2879). A write to a
+      // retired target still fails loud through the unresolved-evidence
+      // conflict gate in beginManagedProjectionMutation.
+      if (isRetiredProjectionExchangeError(error)) continue;
       // A transient class (EBUSY / sharing violation / os error 32) keeps the
       // entry for the existing outer retry schedules, but a count persisted
       // across restarts bounds the retries: an entry whose exchange replay
@@ -2000,7 +2020,12 @@ function recoverManagedProjectionMutations(
       if (!isTransientProjectionRootLockError(error)) throw error;
       mutation.replayFailureCount = (mutation.replayFailureCount ?? 0) + 1;
       if (mutation.replayFailureCount >= MANAGED_PROJECTION_REPLAY_FAILURE_LIMIT) {
-        retireExchangeWithRetainedEvidence(handle, mutation);
+        try {
+          retireExchangeWithRetainedEvidence(handle, mutation);
+        } catch (retirement) {
+          if (!isRetiredProjectionExchangeError(retirement)) throw retirement;
+          continue;
+        }
       }
       persistMutation(handle, mutation);
       throw error;

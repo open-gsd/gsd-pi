@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -16,11 +17,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { isProjectionRootIdentityLockAvailable, _latchProjectionRootIdentityLockForTest, _resetProjectionRootIdentityLockHealthForTest } from "@gsd/native/file-identity";
+import { isProjectionRootIdentityLockAvailable, acquireProjectionRootIdentityLock, _latchProjectionRootIdentityLockForTest, _resetProjectionRootIdentityLockHealthForTest } from "@gsd/native/file-identity";
 
 import { runGSDDoctor } from "../doctor.ts";
 import { checkRuntimeHealth } from "../doctor-runtime-checks.ts";
-import { loadUnboundProjectionEvidence } from "../managed-projection-history.ts";
+import {
+  loadUnboundProjectionEvidence,
+  previewUnboundProjectionEvidenceResolution,
+  resolveUnboundProjectionEvidence,
+} from "../managed-projection-history.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
   closeDatabase,
@@ -620,6 +625,114 @@ test(
     const relisted = repaired.issues.find((candidate) => candidate.file === `.gsd/${evidencePath}`);
     assert.ok(relisted);
     assert.equal(relisted.message, listed.message.replace(/ Listed without the native projection lock[^.]*\./u, ""));
+  },
+);
+
+// Seeds pending journaled write exchanges whose targets were rewritten after
+// journaling, so the journaled left identity no longer matches — the reported
+// #2879 store. The lock closes before recovery runs.
+function seedDriftedExchangeJournals(rootPath: string): void {
+  mkdirSync(join(rootPath, "notes"), { recursive: true });
+  mkdirSync(join(rootPath, "migration", "projection-mutations"), { recursive: true });
+  const stat = lstatSync(rootPath, { bigint: true });
+  const handle = acquireProjectionRootIdentityLock(rootPath, stat.dev.toString(), stat.ino.toString());
+  try {
+    for (const [slot, target] of [["a", "notes/result.md"], ["b", "notes/other.md"]] as const) {
+      const uuid = `00000000-0000-0000-0000-0000000000${slot}`;
+      const temporaryPath = `notes/.gsd-projection-tmp-${uuid}1`;
+      const guardPath = `notes/.gsd-projection-exchange-${uuid}2`;
+      const placeholderIdentity = handle.prepareFileTemporary(target, Buffer.alloc(0));
+      const temporaryIdentity = handle.prepareFileTemporary(temporaryPath, Buffer.from(`replacement ${slot}\n`));
+      const guardIdentity = handle.prepareFileTemporary(guardPath, Buffer.alloc(0));
+      // Replace the target so the journaled left identity drifts on every
+      // filesystem (an in-place rewrite keeps the inode on Linux).
+      const rewritten = join(rootPath, `notes/.gsd-projection-tmp-${uuid}3`);
+      writeFileSync(rewritten, `rewritten ${slot}\n`);
+      rmSync(join(rootPath, target));
+      renameSync(rewritten, join(rootPath, target));
+      writeFileSync(join(rootPath, "migration", "projection-mutations", `${uuid.slice(0, -1)}0${slot}.json`), `${JSON.stringify({
+        logicalPath: target,
+        operation: "write",
+        legacyCleanup: false,
+        content: Buffer.from(`replacement ${slot}\n`).toString("base64"),
+        encoding: "base64",
+        temporaryPath,
+        temporaryIdentity,
+        replacementPath: `${temporaryPath}.replaced`,
+        replacementIdentity: null,
+        quarantinePath: null,
+        quarantineIdentity: null,
+        placeholderIdentity,
+        exchangeGuardPath: guardPath,
+        exchangeGuardIdentity: guardIdentity,
+        exchangeState: {
+          leftPath: target,
+          rightPath: temporaryPath,
+          leftIdentity: placeholderIdentity,
+          rightIdentity: temporaryIdentity,
+          guardPath,
+          guardIdentity,
+        },
+      })}\n`);
+    }
+  } finally {
+    handle.close();
+  }
+}
+
+test(
+  "doctor lists resolve commands for evidence a pending exchange retirement used to blank (#2879)",
+  // The retirement comes from the native journal replay; without the lock the
+  // load takes the lock-free path that never replays.
+  { skip: !isProjectionRootIdentityLockAvailable() },
+  async (t) => {
+    const dir = createGitProject();
+    t.after(() => {
+      closeDatabase();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const rootPath = join(dir, ".gsd");
+    // The reported store: every managed open retired one entry per pass and
+    // re-threw, so the assessment never got past the retirement error to list
+    // the retained evidence.
+    seedDriftedExchangeJournals(rootPath);
+    assert.equal(openDatabase(join(rootPath, "gsd.db")), true);
+
+    const report = await runGSDDoctor(dir);
+    // The pass that retires the entries still assesses the evidence: every
+    // retained row — including the ones this very pass retired — lists its
+    // review commands instead of a single unassessable line.
+    assert.equal(
+      report.issues.some((candidate) => /could not be assessed/u.test(candidate.message)),
+      false,
+      "the retirement converges the entry instead of failing the assessment",
+    );
+    const evidence = loadUnboundProjectionEvidence(dir);
+    assert.equal(evidence.length, 6);
+    for (const record of evidence) {
+      assert.equal(record.transition, "retained");
+      assert.equal(record.resolution, undefined);
+      const issue = report.issues.find((candidate) => candidate.code === "unresolved_projection_evidence"
+        && candidate.message.includes(record.evidenceId));
+      assert.ok(issue, `the row at .gsd/${record.evidencePath} lists its resolution commands`);
+      assert.ok(
+        issue.message.includes(`/gsd doctor resolve-evidence ${record.evidenceId} --action=discard --consent=`),
+      );
+    }
+
+    // The rows settle under the reviewed consent, and a second pass adds
+    // nothing: the growth loop is gone.
+    for (const record of evidence) {
+      const action = record.kind === "canonical" ? "preserve" : "discard";
+      const { consent } = previewUnboundProjectionEvidenceResolution(dir, record.evidenceId, action);
+      resolveUnboundProjectionEvidence(dir, record.evidenceId, action, consent);
+    }
+    assert.deepEqual(loadUnboundProjectionEvidence(dir), []);
+    const second = await runGSDDoctor(dir);
+    assert.deepEqual(
+      second.issues.filter((candidate) => candidate.code === "unresolved_projection_evidence"),
+      [],
+    );
   },
 );
 
