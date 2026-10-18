@@ -62,7 +62,12 @@ export interface PluginApi {
         getSessionEntry(input: { sessionKey: string; agentId?: string }): { sessionRoot?: string; cwd?: string } | undefined;
       };
     };
-    tasks: { managedFlows: { bindSession(input: { sessionKey: string }): Flows } };
+    // The host's Tasks/TaskFlow registry has been removed with no
+    // compatibility facade (see sdk-migration/removed-surfaces.md,
+    // "Tasks and TaskFlow APIs removed"); `tasks` itself is absent from the
+    // runtime's lazily-materialized property set. Keep this optional so
+    // callers must guard it instead of assuming it is always present.
+    tasks?: { managedFlows: { bindSession(input: { sessionKey: string }): Flows } };
     system: {
       enqueueSystemEvent(text: string, options: { sessionKey: string; contextKey: string; replace: boolean }): boolean;
       requestHeartbeat(options: { source: "other"; intent: "event"; reason: string; sessionKey: string; agentId: string }): void;

@@ -139,7 +139,17 @@ const gsdPluginEntry = definePluginEntry({
         const cfg = context.config;
         const agentId = resolveDefaultAgentId(cfg);
         ownerKey = buildAgentMainSessionKey({ agentId, mainKey: cfg.session?.mainKey });
-        flows = api.runtime.tasks.managedFlows.bindSession({ sessionKey: ownerKey });
+        // The host's Tasks/TaskFlow registry (api.runtime.tasks) has been
+        // removed with no compatibility facade. Degrade to "unavailable"
+        // instead of crashing plugin service start/reload when it is absent;
+        // behavior is unchanged on a host that still provides it.
+        const managedFlows = api.runtime.tasks?.managedFlows;
+        if (!managedFlows) {
+          context.serviceHealth?.reportFailure(new Error("GSD project synchronization requires the host Tasks API (api.runtime.tasks.managedFlows), which this gateway does not provide"));
+          api.logger.warn("GSD project synchronization disabled; this gateway has no Tasks/TaskFlow API (api.runtime.tasks.managedFlows is unavailable).");
+          return;
+        }
+        flows = managedFlows.bindSession({ sessionKey: ownerKey });
         const sessionKey = ownerKey;
         const env = { ...process.env, ...cfg.mcp?.servers?.gsd?.env };
         const fail = (_error: unknown) => {
