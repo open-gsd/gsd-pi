@@ -179,6 +179,7 @@ import {
   resolveProjectRoot,
 } from "./worktree.js";
 import { GitServiceImpl } from "./git-service.js";
+import type { GitPreferences } from "./git-service.js";
 import { nativeCheckoutBranch } from "./native-git-bridge.js";
 import { getPriorSliceCompletionBlocker } from "./dispatch-guard.js";
 import { autoWorktreeBranch, enterBranchModeForMilestone } from "./auto-worktree-branch-lifecycle.js";
@@ -1986,16 +1987,28 @@ export async function stopAuto(
           }
         } else if (exitAction === "preserve") {
           // Milestone still in progress — preserve branch for later resumption
+          const preserveWorktree = _resolveStopAutoPreserveWorktree({
+            explicit: options.preserveWorktree,
+            gitPreferences: loadedPreferences?.git,
+          });
           const r = lifecycle.exitMilestone(
             stopMilestoneId,
             {
               merge: false,
               preserveBranch: true,
-              preserveWorktree: options.preserveWorktree ?? false,
+              preserveWorktree,
             },
             notifyCtx,
           );
           if (!r.ok && r.cause instanceof Error) throw r.cause;
+          // Surface preference-driven preservation so the operator knows the
+          // worktree — and any uncommitted work in it — was left in place (#2888).
+          if (r.ok && preserveWorktree && options.preserveWorktree === undefined) {
+            ctx?.ui.notify(
+              `Worktree for ${stopMilestoneId} preserved (git.preserve_worktree_on_stop) — uncommitted work left in place. /gsd auto re-enters it.`,
+              "info",
+            );
+          }
         }
       }
     } catch (e) {
@@ -2342,6 +2355,19 @@ export function _selectStopAutoWorktreeExit(args: {
   if (!args.currentMilestoneId || args.milestoneMergedInPhases) return "none";
   if (args.milestoneComplete && args.preserveCompletedMilestoneBranch) return "preserve";
   return args.milestoneComplete ? "merge" : "preserve";
+}
+
+/**
+ * Resolve `preserveWorktree` for stopAuto's non-merge worktree exit (#2888).
+ * Precedence: an explicit caller option wins; otherwise the opt-in
+ * `git.preserve_worktree_on_stop` preference; otherwise false (remove the
+ * worktree — git-visible uncommitted work is quarantined on that path).
+ */
+export function _resolveStopAutoPreserveWorktree(args: {
+  explicit?: boolean;
+  gitPreferences?: GitPreferences;
+}): boolean {
+  return args.explicit ?? (args.gitPreferences?.preserve_worktree_on_stop === true);
 }
 
 /**
