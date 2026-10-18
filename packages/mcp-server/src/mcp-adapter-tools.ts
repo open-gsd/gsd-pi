@@ -1,6 +1,7 @@
 import { SessionManager } from "./session-manager.js";
 import { createMcpServer } from "./server.js";
 import { toMoonshotCompatibleInputSchema } from "./moonshot-tool-schema.js";
+import { NATIVE_MCP_TOOL_CALL_ID } from "./workflow-tools.js";
 
 export const GSD_MODE_MCP_WORKFLOW_ADAPTER_TOOL_NAMES = [
 	"gsd_execute",
@@ -50,7 +51,6 @@ interface McpServerWithRegisteredTools {
 }
 
 const ADAPTER_TOOL_NAME_SET = new Set<string>(GSD_MODE_MCP_WORKFLOW_ADAPTER_TOOL_NAMES);
-const MCP_IDEMPOTENCY_META_KEY = "io.opengsd/idempotency-key";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -110,7 +110,7 @@ export async function createWorkflowMcpAdapterToolDefs(
 			execute: async (toolCallId, params, signal) => normalizeMcpToolResult(
 				await handler(params, {
 					requestId: toolCallId,
-					_meta: { [MCP_IDEMPOTENCY_META_KEY]: toolCallId },
+					[NATIVE_MCP_TOOL_CALL_ID]: toolCallId,
 					...(signal ? { signal } : {}),
 				}),
 			),
