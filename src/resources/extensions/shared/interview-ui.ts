@@ -218,7 +218,7 @@ export async function showInterviewRound(
 	opts: InterviewRoundOptions,
 	ctx: ExtensionCommandContext,
 ): Promise<RoundResult> {
-	return ctx.ui.custom<RoundResult>((tui: TUI, theme: Theme, _kb, done) => {
+	return ctx.ui.custom<RoundResult>((tui: TUI, theme: Theme, kb, done) => {
 
 		interface QuestionState {
 			cursorIndex: number;
@@ -248,7 +248,7 @@ export async function showInterviewRound(
 
 		// Preview-panel scrolling. previewScroll is the first visible line of the
 		// side-by-side preview column; the viewport/total are captured on each
-		// render so PgUp/PgDn input can clamp against real bounds.
+		// render so page up/down input can clamp against real bounds.
 		let previewScroll = 0;
 		let previewViewport = 0;
 		let previewTotal = 0;
@@ -258,6 +258,13 @@ export async function showInterviewRound(
 		let optionsViewport = 0;
 		let optionsTotal = 0;
 		function resetOptionsScroll() { optionsScroll = 0; }
+
+		// Display label for the page up/down bindings (e.g. "pageUp/pageDown"),
+		// built from the user's keybindings so remaps are reflected in hints.
+		function scrollKeysLabel(): string {
+			const keys = [...kb.getKeys("tui.select.pageUp"), ...kb.getKeys("tui.select.pageDown")];
+			return keys.join("/");
+		}
 
 		function finish(result: RoundResult) {
 			if (completed) return;
@@ -473,7 +480,7 @@ export async function showInterviewRound(
 			}
 
 			// ── Side-by-side panel scrolling ─────────────────────────────
-			if (matchesKey(data, Key.pageUp)) {
+			if (kb.matches(data, "tui.select.pageUp")) {
 				let didScroll = false;
 				if (optionsScroll > 0) {
 					optionsScroll = Math.max(0, optionsScroll - optionsViewport);
@@ -486,7 +493,7 @@ export async function showInterviewRound(
 				if (didScroll) refresh();
 				return;
 			}
-			if (matchesKey(data, Key.pageDown)) {
+			if (kb.matches(data, "tui.select.pageDown")) {
 				let didScroll = false;
 				const maxOptionsScroll = Math.max(0, optionsTotal - optionsViewport);
 				if (optionsScroll < maxOptionsScroll) {
@@ -768,6 +775,9 @@ export async function showInterviewRound(
 				const maxOptionsScroll = Math.max(0, fullLeft.length - maxBody);
 				if (optionsScroll > maxOptionsScroll) optionsScroll = maxOptionsScroll;
 
+				const scrollLabel = scrollKeysLabel();
+				const scrollHintSuffix = scrollLabel ? ` · ${scrollLabel}` : "";
+
 				const leftLines = fullLeft.slice(optionsScroll, optionsScroll + maxBody);
 				if (fullLeft.length > maxBody) {
 					const hiddenAbove = optionsScroll;
@@ -776,14 +786,15 @@ export async function showInterviewRound(
 						leftLines[0] = scrollIndicator(`▲ ${hiddenAbove} more`, leftWidth);
 					}
 					if (hiddenBelow > 0) {
-						leftLines[leftLines.length - 1] = scrollIndicator(`▼ ${hiddenBelow} more · PgUp/PgDn`, leftWidth);
+						leftLines[leftLines.length - 1] = scrollIndicator(`▼ ${hiddenBelow} more${scrollHintSuffix}`, leftWidth);
 					}
 				}
 
 				const preview = getCurrentPreview();
 				const fullRight = preview ? renderPreviewColumn(preview, previewWidth) : [];
 				// The first two lines are the pinned "Preview" header; the body
-				// below them scrolls via PgUp/PgDn so no content is unreachable.
+				// below them scrolls via the page up/down bindings so no content
+				// is unreachable.
 				const headerRows = fullRight.length > 0 ? 2 : 0;
 				const previewBody = fullRight.slice(headerRows);
 				const bodyViewport = Math.max(1, maxBody - headerRows);
@@ -804,7 +815,7 @@ export async function showInterviewRound(
 						rightLines[headerRows] = scrollIndicator(`▲ ${hiddenAbove} more`, previewWidth);
 					}
 					if (hiddenBelow > 0) {
-						rightLines[rightLines.length - 1] = scrollIndicator(`▼ ${hiddenBelow} more · PgUp/PgDn`, previewWidth);
+						rightLines[rightLines.length - 1] = scrollIndicator(`▼ ${hiddenBelow} more${scrollHintSuffix}`, previewWidth);
 					}
 				}
 
@@ -830,8 +841,8 @@ export async function showInterviewRound(
 					if (isMultiQuestion) hints.push("←/→ navigate");
 					hints.push(isLast && allAnswered() ? "enter to review" : "enter to next");
 				}
-				if (previewTotal > previewViewport) hints.push("pgup/pgdn scroll preview");
-				if (optionsTotal > optionsViewport) hints.push("pgup/pgdn scroll options");
+				if (scrollLabel && previewTotal > previewViewport) hints.push(`${scrollLabel} scroll preview`);
+				if (scrollLabel && optionsTotal > optionsViewport) hints.push(`${scrollLabel} scroll options`);
 				hints.push("esc to exit");
 				const footer = ui.hints(hints)[0] ?? "";
 
