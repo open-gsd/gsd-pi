@@ -1,8 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import { executeDomainOperation, inspectDomainOperationReceipt, type DomainJsonValue } from "./db/domain-operation.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
-import { insertOpenPauseBlocker, resolveOpenPauseBlocker } from "./db/writers/pause-blockers.js";
+import { insertOpenPauseBlocker, insertPauseBlockerLink, resolveOpenPauseBlocker, resolvePauseBlockerLink } from "./db/writers/pause-blockers.js";
+import { deleteRuntimeKv, setRuntimeKv } from "./db/runtime-kv.js";
 import { closeAutoPause, closeAutoPauseForBlocker, readOpenAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
 import { getDb } from "./db/engine.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
@@ -103,6 +104,7 @@ export function openPauseBlockerForSession(input: {
   if (!HUMAN_BLOCKER_KINDS.has(input.blockerKind)) return null;
   const lifecycleId = findPauseLifecycleId(input.pause);
   if (!lifecycleId || !input.pause.milestoneId || !input.pause.unitType || !input.pause.unitId) return null;
+  const { milestoneId, unitType, unitId } = input.pause;
 
   const operationType = "pause.blocker.open";
   const idempotencyKey = `pause-blocker-open:${input.pause.pauseId}`;
@@ -122,44 +124,20 @@ export function openPauseBlockerForSession(input: {
       requestedAction: input.requestedAction,
     },
   }, (context) => {
-    const blockerId = randomUUID();
-    const openedAt = new Date().toISOString();
-    const resolutionOwner = input.blockerKind === "external_dependency" ? "external" : "user";
-    getDb().prepare(`
-      INSERT INTO workflow_blockers (
-        blocker_id, project_id, lifecycle_id, blocker_kind, resolution_owner,
-        blocker_status, description, requested_action, resolution, opened_at,
-        opened_operation_id, opened_project_revision, opened_authority_epoch
-      ) VALUES (
-        :blocker_id, :project_id, :lifecycle_id, :blocker_kind, :resolution_owner,
-        'open', :description, :requested_action, '', :opened_at,
-        :operation_id, :project_revision, :authority_epoch
-      )
-    `).run({
-      ":blocker_id": blockerId,
-      ":project_id": context.projectId,
-      ":lifecycle_id": lifecycleId,
-      ":blocker_kind": input.blockerKind,
-      ":resolution_owner": resolutionOwner,
-      ":description": input.description.trim(),
-      ":requested_action": input.requestedAction.trim(),
-      ":opened_at": openedAt,
-      ":operation_id": context.operationId,
-      ":project_revision": context.resultingRevision,
-      ":authority_epoch": context.resultingAuthorityEpoch,
+    const { blockerId } = insertOpenPauseBlocker(context, {
+      lifecycleId,
+      blockerKind: input.blockerKind,
+      resolutionOwner: input.blockerKind === "external_dependency" ? "external" : "user",
+      description: input.description,
+      requestedAction: input.requestedAction,
     });
-    getDb().prepare(`
-      INSERT INTO auto_pause_blocker_links (
-        blocker_id, pause_id, lifecycle_id, milestone_id, unit_type, unit_id, created_at
-      ) VALUES (:blocker_id, :pause_id, :lifecycle_id, :milestone_id, :unit_type, :unit_id, :created_at)
-    `).run({
-      ":blocker_id": blockerId,
-      ":pause_id": input.pause.pauseId,
-      ":lifecycle_id": lifecycleId,
-      ":milestone_id": input.pause.milestoneId,
-      ":unit_type": input.pause.unitType,
-      ":unit_id": input.pause.unitId,
-      ":created_at": openedAt,
+    insertPauseBlockerLink(context, {
+      blockerId,
+      pauseId: input.pause.pauseId,
+      lifecycleId,
+      milestoneId,
+      unitType,
+      unitId,
     });
     const row = getDb().prepare(`
       SELECT value_json FROM runtime_kv
@@ -171,14 +149,7 @@ export function openPauseBlockerForSession(input: {
       throw new Error("Paused session changed before blocker association");
     }
     metadata.pauseBlockerId = blockerId;
-    getDb().prepare(`
-      UPDATE runtime_kv SET value_json = :value_json, updated_at = :updated_at
-      WHERE scope = 'global' AND scope_id = '' AND key = :key
-    `).run({
-      ":value_json": JSON.stringify(metadata),
-      ":updated_at": openedAt,
-      ":key": PAUSED_SESSION_KV_KEY,
-    });
+    setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, metadata);
     return {
       events: [{
         eventType: "pause.blocker.opened",
@@ -515,32 +486,16 @@ function resolveLegacyAutoPauseBlockerById(input: {
       || (liveMetadata.blockerKind !== undefined && liveMetadata.blockerKind !== association.blocker_kind)
       || findPauseLifecycleId(liveMetadata) !== association.lifecycle_id
     ) throw new Error("Pause/blocker lifecycle association changed");
-    const now = new Date().toISOString();
-    const updated = getDb().prepare(`
-      UPDATE workflow_blockers
-      SET blocker_status = 'resolved', resolution = :rationale, resolved_at = :resolved_at,
-          resolved_operation_id = :operation_id, resolved_project_revision = :project_revision,
-          resolved_authority_epoch = :authority_epoch
-      WHERE blocker_id = :blocker_id AND project_id = :project_id AND blocker_status = 'open'
-    `).run({
-      ":rationale": input.rationale.trim(),
-      ":resolved_at": now,
-      ":operation_id": context.operationId,
-      ":project_revision": context.resultingRevision,
-      ":authority_epoch": context.resultingAuthorityEpoch,
-      ":blocker_id": input.blockerId,
-      ":project_id": context.projectId,
+    const updated = resolveOpenPauseBlocker(context, {
+      blockerId: input.blockerId,
+      disposition: "resolved",
+      resolution: input.rationale,
     });
-    if (Number((updated as { changes?: unknown }).changes ?? 0) !== 1) {
+    if (!updated.resolved) {
       throw new Error("Auto-pause blocker is no longer open");
     }
-    getDb().prepare(`
-      UPDATE auto_pause_blocker_links SET resolved_at = :resolved_at
-      WHERE blocker_id = :blocker_id AND resolved_at IS NULL
-    `).run({ ":resolved_at": now, ":blocker_id": input.blockerId });
-    getDb().prepare(`
-      DELETE FROM runtime_kv WHERE scope = 'global' AND scope_id = '' AND key = :key
-    `).run({ ":key": PAUSED_SESSION_KV_KEY });
+    resolvePauseBlockerLink(context, input.blockerId);
+    deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
     return {
       events: [{
         eventType: "pause.blocker.resolved",
