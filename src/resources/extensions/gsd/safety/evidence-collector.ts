@@ -20,7 +20,7 @@ import {
   renameSync,
   unlinkSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -56,11 +56,26 @@ const EXECUTION_TOOL_NAMES = new Set([
   "exec_command",
   "functions.exec_command",
   "gsd_exec",
-  "gsd_exec_search",
   "gsd_uat_exec",
   "powershell",
 ]);
-const MCP_EXECUTION_TOOL_RE = /^mcp__.+__gsd_(?:uat_)?exec(?:_search)?$/;
+// MCP workflow surface (#2513): only `gsd_exec` and `gsd_uat_exec` execute
+// anything. `gsd_exec_search` is a read-only lookup over past runs in
+// .gsd/exec/*.meta.json — its result embeds OLD runs' exit codes — so it must
+// not be classified as an execution tool. The trailing `$` (no `_search`
+// suffix) keeps search variants out; a name-based denylist is unnecessary
+// because the registry has exactly two execution tools.
+const MCP_EXECUTION_TOOL_RE = /^mcp__.+__gsd_(?:uat_)?exec$/;
+
+/**
+ * Exit-code sentinel for outcomes the harness never observed (#2425) — e.g.
+ * the MCP workflow queue deadline fired before the process exited. Not a real
+ * shell exit code; evidence-cross-ref treats it as inconclusive, not a failure.
+ */
+export const INCONCLUSIVE_EXIT_CODE = -2;
+
+/** Matches the deadline rejection thrown by the MCP workflow queue (workflow-tools.ts runSerializedWorkflowOperation). */
+const WORKFLOW_DEADLINE_RE = /Workflow operation exceeded \d+ms deadline/;
 
 // ─── Module State ───────────────────────────────────────────────────────────
 
@@ -215,6 +230,40 @@ export function clearEvidenceFromDisk(
   }
 }
 
+/**
+ * Move the persisted evidence file for a unit into `.gsd/safety/blocked/`
+ * instead of deleting it (#2425). The blocked path pauses the unit; archiving
+ * preserves the recorded evidence so the mismatch that caused the block stays
+ * inspectable. Normal-completion clearing still uses clearEvidenceFromDisk().
+ */
+export function archiveEvidenceToBlocked(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+): void {
+  try {
+    const path = evidencePath(basePath, milestoneId, sliceId, taskId);
+    if (!existsSync(path)) return;
+    const blockedDir = join(basePath, ".gsd", "safety", "blocked");
+    mkdirSync(blockedDir, { recursive: true });
+    const stem = basename(path, ".json");
+    let dest = join(blockedDir, `${stem}.json`);
+    // Keep earlier archives: suffix collisions instead of overwriting. The
+    // loop guards even same-millisecond collisions.
+    for (let i = 1; existsSync(dest); i++) {
+      dest = join(blockedDir, `${stem}-${Date.now()}-${i}.json`);
+    }
+    renameSync(path, dest);
+    if (path === lastWritePath) {
+      lastWritePath = null;
+      lastWriteSig = null;
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
 // ─── Recording (called from register-hooks.ts) ─────────────────────────────
 
 /**
@@ -231,7 +280,7 @@ export function recordToolCall(toolCallId: string, toolName: string, input: Reco
       kind: "bash",
       toolCallId,
       // gsd_exec / gsd_uat_exec carry the script body in `script` (or `code`);
-      // bash-style tools use `command`/`cmd`; gsd_exec_search uses `query`.
+      // bash-style tools use `command`/`cmd`.
       command: formatExecutionEvidenceCommand(toolName, input),
       exitCode: -1,
       outputSnippet: "",
@@ -269,7 +318,11 @@ function canonicalExecutionToolLabel(toolName: string): string {
 }
 
 function formatExecutionEvidenceCommand(toolName: string, input: Record<string, unknown>): string {
-  const body = pickString(input, "command", "script", "cmd", "code", "query");
+  // No `query` fallback (#2513): only the read-only gsd_exec_search takes a
+  // query, and a search query is not a command. If a search-classified tool
+  // ever slips through the execution guards, it records a blank command —
+  // which cross-ref can never match against a claim.
+  const body = pickString(input, "command", "script", "cmd", "code");
   const tool = canonicalExecutionToolLabel(toolName);
   const purpose = pickString(input, "purpose");
   const runtime = pickString(input, "runtime").toLowerCase();
@@ -298,7 +351,13 @@ export function recordToolResult(
   if (entry.kind === "bash") {
     const text = extractResultText(result);
     entry.outputSnippet = text.slice(0, 500);
-    entry.exitCode = resolveExitCode(text, isError);
+    // Belt-and-braces (#2513): a *_search tool executes nothing and its result
+    // embeds PAST runs' outcomes (exit_code, meta_path). Never derive an exit
+    // code from it — record the inconclusive sentinel (evidence-cross-ref
+    // treats the sentinel as inconclusive, not a failure).
+    entry.exitCode = canonicalExecutionToolLabel(toolName).endsWith("_search")
+      ? INCONCLUSIVE_EXIT_CODE
+      : resolveExitCode(text, isError);
   }
 }
 
@@ -324,6 +383,11 @@ function resolveExitCode(text: string, isError: boolean): number {
       // Fall through to the isError heuristic
     }
   }
+
+  // A harness deadline is not a process exit (#2425): the workflow queue timed
+  // out before observing the run, which keeps going and usually succeeds.
+  // Record the inconclusive sentinel instead of encoding "unknown" as failed.
+  if (WORKFLOW_DEADLINE_RE.test(text)) return INCONCLUSIVE_EXIT_CODE;
 
   return isError ? 1 : 0;
 }

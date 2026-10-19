@@ -101,11 +101,13 @@ for how existing tests are invoked and mirror it.
 ## Scope
 
 **In scope**:
+
 - `packages/cloud-mcp-gateway/src/auth-store.ts`
 - The pairing test file under `packages/cloud-mcp-gateway/` (create or extend —
   find the existing auth-store test first with `ls packages/cloud-mcp-gateway/**/*auth*`)
 
 **Out of scope** (do NOT touch):
+
 - The device-token format (`gsd_dev_` + `randomBytes(32)`) — already strong.
 - `server.ts` HTTP wiring, CORS, or adding any web framework.
 - `deriveSecretHash` / `findSecretEntry` internals — reuse them as-is.
@@ -186,6 +188,7 @@ existing test in `packages/cloud-mcp-gateway/`):
 ## STOP conditions
 
 Stop and report if:
+
 - `auth-store.ts` no longer matches the "Current state" excerpt (drifted).
 - `PairingCodeRecord` is defined in a different file than `auth-store.ts` and
   changing it there would touch out-of-scope code.

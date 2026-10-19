@@ -17,7 +17,7 @@ import {
   nativeAddPaths,
   nativeConflictFiles,
   nativeLsFiles,
-  nativeRmForce,
+  nativeResetPaths,
 } from "./native-git-bridge.js";
 import {
   gsdJsonlFilesWithConflictMarkers,
@@ -229,9 +229,11 @@ function resolveGsdConflictFiles(basePath: string, conflictFiles: string[]): voi
       });
       nativeAddPaths(basePath, [file]);
     } catch (err) {
-      // Last resort: remove the conflicted state file.
-      logWarning("worktree", `checkout HEAD failed for ${file}, removing: ${(err as Error).message}`);
-      nativeRmForce(basePath, [file]);
+      // HEAD does not have the file. Clear the conflict from the index and
+      // keep the file on disk: a `.gsd` projection is never removed to end a
+      // conflict, and the post-merge rebuild renders it from the database.
+      logWarning("worktree", `checkout HEAD failed for ${file}, keeping the file untracked: ${(err as Error).message}`);
+      nativeResetPaths(basePath, [file]);
     }
   }
 }

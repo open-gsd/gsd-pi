@@ -21,12 +21,14 @@ For this scan, only these documents are relevant: **{{documents}}**. Refer only 
 ### Document Schemas
 
 **STACK.md** — Technology stack overview
+
 - Languages, runtimes, and versions
 - Key frameworks and libraries (with versions where visible)
 - Build tools and bundlers
 - Package manager
 
 **INTEGRATIONS.md** — External dependencies and integrations
+
 - Third-party APIs and services
 - Database systems
 - Authentication providers
@@ -34,18 +36,21 @@ For this scan, only these documents are relevant: **{{documents}}**. Refer only 
 - Communication services (email, messaging, etc.)
 
 **ARCHITECTURE.md** — Architectural patterns and design decisions
+
 - Overall architecture style (monolith, microservices, monorepo, etc.)
 - Core data flow
 - Key design patterns in use
 - Module/package boundaries
 
 **STRUCTURE.md** — Directory and code organization
+
 - Top-level directory layout with purpose
 - Source code organization
 - Test organization
 - Configuration file locations
 
 **CONVENTIONS.md** — Coding conventions and standards
+
 - Naming conventions (files, functions, variables)
 - Code style and formatting rules
 - Import/export patterns
@@ -53,6 +58,7 @@ For this scan, only these documents are relevant: **{{documents}}**. Refer only 
 - TypeScript/language-specific conventions
 
 **TESTING.md** — Testing patterns and practices
+
 - Test framework(s) in use
 - Test file naming and location conventions
 - Test helper and fixture patterns
@@ -60,6 +66,7 @@ For this scan, only these documents are relevant: **{{documents}}**. Refer only 
 - How to run tests
 
 **CONCERNS.md** — Technical debt and risks
+
 - Known areas of technical debt
 - Fragile or high-risk code areas
 - Missing test coverage

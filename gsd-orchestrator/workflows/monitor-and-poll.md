@@ -165,7 +165,7 @@ gsd headless --resume "$SESSION_ID" --output-format json auto 2>/dev/null
 
 ## Reading Build Artifacts
 
-After completion, inspect what GSD produced:
+After completion, inspect what GSD produced. These files are renders of the GSD database: read them, never edit them. For state, use `gsd headless query`.
 
 ```bash
 cd /path/to/project

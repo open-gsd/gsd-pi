@@ -31,7 +31,6 @@ import {
 import { gsdRoot } from "../paths.ts";
 import {
   syncProjectRootToWorktree,
-  syncStateToProjectRoot,
 } from "../auto-worktree-sync.ts";
 import { writeLock, readCrashLock, clearLock } from "../crash-recovery.ts";
 import { describe, test, beforeEach, afterEach } from "node:test";
@@ -184,15 +183,6 @@ describe("parallel-worker-lock-contention (#2184)", () => {
         threw = true;
       }
       assert.ok(!threw, "syncProjectRootToWorktree does not throw on same-path symlink");
-
-      // Same for reverse direction
-      threw = false;
-      try {
-        syncStateToProjectRoot(worktreePath, projectRoot, "M001");
-      } catch {
-        threw = true;
-      }
-      assert.ok(!threw, "syncStateToProjectRoot does not throw on same-path symlink");
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

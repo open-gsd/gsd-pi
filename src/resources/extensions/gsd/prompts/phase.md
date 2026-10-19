@@ -10,7 +10,7 @@ Work is modeled as an ordered milestone queue. Map the requested action onto the
 
 - **add / insert <name>**: add a new milestone to the queue (or insert it at a position). Use `/gsd new-milestone` semantics then `/gsd queue` to position it.
 - **remove <id>**: remove a milestone from the queue (park it rather than hard-delete, to preserve history — confirm with the developer).
-- **edit <id>**: edit a milestone's title/scope in the ROADMAP/CONTEXT.
+- **edit <id>**: change a milestone's title/scope with `gsd_plan_milestone` (roadmap) or `gsd_summary_save` with `artifact_type: "CONTEXT"` (context). Do not edit the rendered files.
 - **list** (default): show the ordered milestone queue with state and progress.
 
 Confirm any destructive action (remove) before applying. Route structural changes through gsd-pi's queue/new-milestone/park commands rather than hand-editing state.

@@ -74,3 +74,21 @@ test("empty merge safety throws only when milestone has unanchored code changes"
     assertNoUnanchoredCodeChangesAfterEmptyMerge(metadataRepo, "main", "milestone/M002", "squash", true),
   );
 });
+
+test("empty merge safety ignores files that only the integration branch has", (t) => {
+  const repo = createRepo(t);
+  git(repo, ["checkout", "-b", "milestone/M001"]);
+  writeFileSync(join(repo, "feature.ts"), "export const value = 1;\n");
+  git(repo, ["add", "."]);
+  git(repo, ["commit", "-m", "milestone code"]);
+  git(repo, ["checkout", "main"]);
+  writeFileSync(join(repo, "other.ts"), "export const other = 1;\n");
+  git(repo, ["add", "."]);
+  git(repo, ["commit", "-m", "other work on main"]);
+  git(repo, ["merge", "--squash", "milestone/M001"]);
+  git(repo, ["commit", "-m", "milestone code by hand"]);
+
+  assert.doesNotThrow(() =>
+    assertNoUnanchoredCodeChangesAfterEmptyMerge(repo, "main", "milestone/M001", "squash", true),
+  );
+});

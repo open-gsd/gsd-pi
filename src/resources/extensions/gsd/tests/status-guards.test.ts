@@ -135,6 +135,6 @@ test('RAW_CLOSED_STATUSES is the single source: every member is closed', () => {
 });
 
 test('TERMINAL_STATUS_SQL is derived from RAW_CLOSED_STATUSES and renders identically', () => {
-  assert.equal(TERMINAL_STATUS_SQL, "'complete', 'done', 'skipped', 'closed', 'cancelled'");
+  assert.equal(TERMINAL_STATUS_SQL, "'complete', 'done', 'skipped', 'closed', 'cancelled', 'blocker-accepted'");
   assert.equal(TERMINAL_STATUS_SQL, RAW_CLOSED_STATUSES.map((s) => `'${s}'`).join(', '));
 });

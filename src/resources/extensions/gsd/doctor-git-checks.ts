@@ -15,7 +15,7 @@ import { RUNTIME_EXCLUSION_PATHS, resolveMilestoneIntegrationBranch, writeIntegr
 import { nativeIsRepo, nativeWorktreeList, nativeWorktreeRemove, nativeBranchList, nativeBranchDelete, nativeLsFiles, nativeRmCached, nativeHasChanges, nativeLastCommitEpoch, nativeGetCurrentBranch, nativeAddTracked, nativeCommit, nativeIsCurrentUnbornBranch } from "./native-git-bridge.js";
 import { getAllWorktreeHealth } from "./worktree-health.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
-import { listUnmergedGitPaths, probeGitConflictState, reconcileGitConflictsOnSignal } from "./git-conflict-state.js";
+import { gitDiffCheckFailures, listUnmergedGitPaths, probeGitConflictState, reconcileGitConflictsOnSignal } from "./git-conflict-state.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 import { enterBranchModeForMilestone } from "./auto-worktree-branch-lifecycle.js";
 
@@ -127,33 +127,12 @@ function copyProjectRootContentIntoWorktree(projectRoot: string, worktreeRoot: s
   return copied;
 }
 
-function getSnapshotDiffCheckFailure(basePath: string): string | null {
-  const failures: string[] = [];
-
-  for (const args of [["--cached"], []]) {
-    const result = spawnSync("git", ["diff", "--check", ...args], {
-      cwd: basePath,
-      encoding: "utf-8",
-    });
-    if (result.status === 0) continue;
-
-    const output = [result.stdout, result.stderr, result.error?.message]
-      .filter(Boolean)
-      .join("\n")
-      .trim();
-    failures.push(output || `git diff --check ${args.join(" ")} failed`);
-  }
-
-  return failures.length > 0 ? failures.join("\n") : null;
-}
-
 export async function checkGitHealth(
   basePath: string,
   issues: DoctorIssue[],
   fixesApplied: string[],
   shouldFix: (code: DoctorIssueCode) => boolean,
   isolationMode: "none" | "worktree" | "branch" = "none",
-  dryRun = false,
 ): Promise<void> {
   // Degrade gracefully if not a git repo
   if (!nativeIsRepo(basePath)) {
@@ -181,8 +160,9 @@ export async function checkGitHealth(
   // preflight/auto-worktree paths use before the doctor hard-blocks auto-mode,
   // so only genuinely-manual conflicts remain. This also clears stale
   // merge-state markers (e.g. MERGE_HEAD) in the same pass when auto-resolve
-  // empties the unmerged set (#849).
-  if (unmergedPaths.length > 0 && !dryRun) {
+  // empties the unmerged set (#849). It changes the git index and work tree,
+  // so it runs only under --fix; plain doctor reports and writes nothing.
+  if (unmergedPaths.length > 0 && shouldFix("unresolved_git_conflicts")) {
     try {
       const reconcileFixes = reconcileGitConflictsOnSignal(basePath, probeGitConflictState(basePath));
       if (reconcileFixes.length > 0) {
@@ -414,9 +394,7 @@ export async function checkGitHealth(
 
       if (shouldFix("tracked_runtime_files")) {
         try {
-          for (const exclusion of RUNTIME_EXCLUSION_PATHS) {
-            nativeRmCached(basePath, [exclusion]);
-          }
+          nativeRmCached(basePath, [...RUNTIME_EXCLUSION_PATHS]);
           fixesApplied.push(`untracked ${trackedPaths.length} runtime file(s)`);
         } catch {
           fixesApplied.push("failed to untrack runtime files");
@@ -589,21 +567,27 @@ export async function checkGitHealth(
             fixable: true,
           });
 
-          const diffCheckFailure = getSnapshotDiffCheckFailure(basePath);
+          // Only leftover conflict markers make a snapshot unsafe. Whitespace
+          // findings from `git diff --check` (trailing spaces, or the CR of a
+          // CRLF-saved file when core.autocrlf is off) are not conflicts (#2776).
+          const markerFailures = gitDiffCheckFailures(basePath);
+          const diffCheckFailure = markerFailures?.join("\n") ?? "";
           if (diffCheckFailure) {
             issues.push({
               severity: "error",
               code: "conflict_markers_in_tracked_files",
               scope: "project",
               unitId: "project",
-              message: `Cannot create gsd snapshot: tracked changes contain conflict markers or whitespace errors. Resolve conflicts manually before auto-mode can proceed.\n${diffCheckFailure}`,
+              message: `Cannot create gsd snapshot: tracked changes contain leftover conflict markers. Resolve conflicts manually before auto-mode can proceed.\n${diffCheckFailure}`,
               fixable: false,
             });
           }
 
           if (shouldFix("stale_uncommitted_changes")) {
             try {
-              if (diffCheckFailure) {
+              if (markerFailures === null) {
+                fixesApplied.push("gsd snapshot skipped - could not run git to check tracked files for conflict markers");
+              } else if (diffCheckFailure) {
                 fixesApplied.push("gsd snapshot skipped - conflict markers detected in tracked files");
               } else {
                 nativeAddTracked(basePath);
@@ -651,9 +635,13 @@ export async function checkGitHealth(
 
         if (health.safeToRemove && shouldFix("worktree_branch_merged") && !isCwd) {
           try {
-            const { removeWorktree } = await import("./worktree-manager.js");
-            removeWorktree(healthBasePath, wt.name, { deleteBranch: true, branch: wt.branch });
-            fixesApplied.push(`removed merged worktree "${wt.name}" and deleted branch ${wt.branch}`);
+            const { formatUnremovedWorktreeReason, removeWorktreeGuarded } = await import("./worktree-guarded-removal.js");
+            const unremoved = formatUnremovedWorktreeReason(removeWorktreeGuarded(healthBasePath, wt));
+            fixesApplied.push(
+              unremoved
+                ? `kept merged worktree "${wt.name}": ${unremoved}`
+                : `removed merged worktree "${wt.name}" and deleted branch ${wt.branch}`,
+            );
           } catch {
             fixesApplied.push(`failed to remove merged worktree "${wt.name}"`);
           }

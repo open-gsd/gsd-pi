@@ -76,49 +76,23 @@ export function recoveryRemediation(key: RecoveryGuidanceKey, observedError?: st
 // matches /milestone validation returned needs-(?:attention|remediation)/i.
 // Keep that phrase intact when editing.
 
-export function needsAttentionBlockerGuidance(
-  milestoneId: string,
-  allowLegacyOverride = true,
-): string {
-  if (!allowLegacyOverride) {
-    return [
-      `Milestone ${milestoneId} is blocked because milestone validation returned needs-attention.`,
-      `Fix options:`,
-      `1. Review the validation details: \`/gsd status\``,
-      `2. Fix the issue or gather the missing proof, then re-run milestone validation with current structured evidence: \`/gsd validate-milestone\``,
-      `3. Run \`/gsd auto\` after canonical validation passes.`,
-    ].join("\n");
-  }
+export function needsAttentionBlockerGuidance(milestoneId: string): string {
   return [
     `Milestone ${milestoneId} is blocked because milestone validation returned needs-attention.`,
     `Fix options:`,
     `1. Review the validation details: \`/gsd status\``,
-    `2. If you fixed the missing evidence or issue, re-run milestone validation: \`/gsd validate-milestone\``,
-    `3. If the finding is acceptable, override it: \`/gsd verdict pass --rationale "why this is okay"\``,
-    `4. If this should wait, defer it explicitly: \`/gsd park ${milestoneId}\``,
-    `After validation or override passes, run \`/gsd auto\` to complete and merge the milestone.`,
+    `2. Fix the issue or gather the missing proof, then re-run milestone validation with current structured evidence: \`/gsd validate-milestone\``,
+    `3. Run \`/gsd auto\` after canonical validation passes.`,
   ].join("\n");
 }
 
-export function needsRemediationBlockerGuidance(
-  milestoneId: string,
-  allowLegacyOverride = true,
-): string {
-  if (!allowLegacyOverride) {
-    return [
-      `Milestone ${milestoneId} is blocked because milestone validation returned needs-remediation, but all slices are complete.`,
-      `Fix options:`,
-      `1. Run \`/gsd dispatch reassess\` to add remediation slices, then complete the new work.`,
-      `2. Re-run milestone validation with current structured evidence: \`/gsd validate-milestone\``,
-      `3. Run \`/gsd auto\` after canonical validation passes.`,
-    ].join("\n");
-  }
+export function needsRemediationBlockerGuidance(milestoneId: string): string {
   return [
     `Milestone ${milestoneId} is blocked because milestone validation returned needs-remediation, but all slices are complete.`,
     `Fix options:`,
-    `1. Run \`/gsd dispatch reassess\` to add remediation slices, then run \`/gsd auto\``,
-    `2. If the finding is acceptable, override it: \`/gsd verdict pass --rationale "why this is okay"\``,
-    `3. If this should wait, defer it explicitly: \`/gsd park ${milestoneId}\``,
+    `1. Run \`/gsd dispatch reassess\` to add remediation slices, then complete the new work.`,
+    `2. Re-run milestone validation with current structured evidence: \`/gsd validate-milestone\``,
+    `3. Run \`/gsd auto\` after canonical validation passes.`,
   ].join("\n");
 }
 
@@ -226,6 +200,8 @@ export function crashResumeHint(unitType: string, unitId: string): string | unde
 const DOCTOR_FIX_HINTS: Partial<Record<DoctorIssueCode, string>> = {
   db_locked:
     "On macOS/Linux, run `/gsd doctor --fix` to stop proven dormant GSD holders, or stop the listed PID(s) manually. On Windows, identify the process using gsd.db in Resource Monitor and stop it.",
+  planning_blocked:
+    "Re-run milestone planning (`/gsd dispatch plan-milestone` or `gsd_plan_milestone`); a successful plan supersedes the recovery gate and unblocks `/gsd auto`.",
   db_unavailable:
     "The workflow database could not be opened — state derivation is degraded. Restart the session; if it persists, run `/gsd doctor` from the project root.",
   stale_crash_lock: "Run `/gsd doctor fix` to clear the stale lock, then `/gsd auto` to resume.",
@@ -247,7 +223,7 @@ const DOCTOR_FIX_HINTS: Partial<Record<DoctorIssueCode, string>> = {
   state_file_missing: "Run `/gsd doctor fix` to rebuild the projection from the database.",
   projection_drift: "Run `/gsd doctor fix` to rebuild markdown projections from the database (DB is the source of truth).",
   validation_source_revision_mismatch:
-    "If GSD's pre-merge auto-commit captured unintended files, run `git reset --mixed HEAD^` to preserve them as working-tree changes, remove or ignore unwanted files, then retry. Otherwise re-run `/gsd validate-milestone <id>` against the intended content before `/gsd auto`.",
+    "If GSD's pre-merge auto-commit captured unintended files, run `git reset --mixed HEAD^` to preserve them as working-tree changes, remove or ignore unwanted files, then retry. Otherwise, for an open milestone, once the tree holds the intended content, re-run validation with `/gsd dispatch validate <id>` — `/gsd auto` alone will not re-run milestone validation while a pass verdict from an older source revision stands. For a closed milestone the pinned validation receipt is unreachable: `/gsd validate-milestone` requires a ready or in_progress milestone, and no re-pin path for closed milestones exists yet.",
   artifact_user_content_missing:
     "Doctor cannot recreate user-authored content from the database. Re-run `/gsd discuss` for CONTEXT artifacts or `/gsd auto` for RESEARCH artifacts in that milestone.",
   uat_retry_exhausted: "Review the failing UAT criteria via `/gsd status`, fix the issue, then re-run `/gsd auto`.",

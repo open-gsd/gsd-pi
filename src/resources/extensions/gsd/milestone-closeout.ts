@@ -7,28 +7,21 @@
 
 import { existsSync } from "node:fs";
 
-import { loadFile } from "./files.js";
-import { resolveMilestoneFile } from "./paths.js";
 import {
   getMilestone,
-  getClosedSliceIds,
   getLatestAssessmentByScope,
-  getMilestoneSlices,
   isDbAvailable,
 } from "./gsd-db.js";
-import { isClosedStatus } from "./status-guards.js";
+import { readClosedSliceIds, readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { resolveExpectedArtifactPath } from "./auto-artifact-paths.js";
+import { repairAdoptedMilestoneSummaryProjection } from "./tools/complete-milestone.js";
 import {
-  handleCompleteMilestone,
-  repairAdoptedMilestoneSummaryProjection,
-} from "./tools/complete-milestone.js";
-import {
-  isMilestoneLifecycleAdopted,
   readMilestoneCloseoutAuthorization,
   readMilestoneLifecycleStatus,
 } from "./db/milestone-closeout-readiness.js";
 import { runSafely } from "./auto-utils.js";
-import { extractVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
+import { closeoutPlanClosesGitHubMilestone } from "./milestone-closeout-effects.js";
+import { isAcceptableUatVerdict } from "./verdict-parser.js";
 import { uatSignoffBlockerGuidance } from "./guidance.js";
 import { logWarning } from "./workflow-logger.js";
 import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
@@ -39,10 +32,9 @@ import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { captureMilestoneVerificationSourceRevision } from "./verification-source-integrity.js";
 import type { DispatchAction, DispatchContext } from "./auto-dispatch.js";
+import { uatVerdictPredatesAcceptedValidation } from "./uat-dispatch.js";
 import {
   commitPendingMilestoneCloseoutChanges,
-  findMissingSummaries,
-  isVerificationNotApplicable,
   readUatGateVerdict,
 } from "./auto-dispatch.js";
 
@@ -62,7 +54,7 @@ export async function isCompletedMilestoneTerminal(
 ): Promise<boolean> {
   if (!isDbAvailable()) return false;
 
-  const milestone = getMilestone(milestoneId);
+  const milestone = readMilestone(milestoneId);
   if (!milestone) return false;
 
   const lifecycleStatus = readMilestoneLifecycleStatus(milestoneId);
@@ -78,14 +70,14 @@ export async function isCompletedMilestoneTerminal(
       sourceRevision: source.sourceRevision,
     }).authorized) return false;
   } else {
-    if (isClosedStatus(milestone.status)) return true;
+    if (milestone.closed) return true;
     const validation = getLatestAssessmentByScope(milestoneId, "milestone-validation");
     if (validation?.status !== "pass") return false;
   }
 
-  const slices = getMilestoneSlices(milestoneId);
+  const slices = readMilestoneSlices(milestoneId);
   if (slices.length === 0) return false;
-  return slices.every((slice) => isClosedStatus(slice.status));
+  return slices.every((slice) => slice.closed);
 }
 
 /** Write a missing milestone SUMMARY projection when canonical DB closeout already settled. */
@@ -104,58 +96,32 @@ export async function repairMissingMilestoneSummaryProjection(
     return { ok: true };
   }
 
-  if (isMilestoneLifecycleAdopted(milestoneId)) {
-    try {
-      const repaired = await repairAdoptedMilestoneSummaryProjection(
-        artifactBasePath,
-        milestoneId,
-      );
-      return repaired
-        ? { ok: true }
-        : { ok: false, error: "milestone SUMMARY projection write failed" };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-
-  const result = await handleCompleteMilestone(
-    {
+  try {
+    const repaired = await repairAdoptedMilestoneSummaryProjection(
+      artifactBasePath,
       milestoneId,
-      title: milestone.title,
-      oneLiner: "Canonical closeout completed; summary projection repaired automatically.",
-      narrative:
-        "The workflow database recorded this milestone as complete, but the milestone SUMMARY artifact was missing on disk. " +
-        "Dispatch policy repaired the projection so closeout proof and cleanup can proceed.",
-      verificationPassed: true,
-      triggerReason: "closeout-projection-repair",
-    },
-    basePath,
-  );
-
-  if ("error" in result) {
-    return { ok: false, error: result.error };
+    );
+    return repaired
+      ? { ok: true }
+      : { ok: false, error: "milestone SUMMARY projection write failed" };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-  const writtenSummaryPath = result.summaryPath;
-  if (result.stale || !writtenSummaryPath || !existsSync(writtenSummaryPath)) {
-    return { ok: false, error: "milestone SUMMARY projection write failed" };
-  }
-  return { ok: true };
 }
 
 /**
- * True when the milestone is closed in the DB and the completion summary artifact exists.
+ * True when the milestone is closed in the DB and the closeout proof holds.
  * Polls briefly so post-unit verification can observe the tool's DB write.
  */
 export async function isMilestoneCloseoutSettled(mid: string, basePath: string): Promise<boolean> {
   const deadline = Date.now() + COMPLETE_MILESTONE_DB_SETTLE_MS;
   while (Date.now() < deadline) {
     if (isDbAvailable()) {
-      const milestone = getMilestone(mid);
-      if (milestone && isClosedStatus(milestone.status)) {
+      if (readMilestone(mid)?.closed) {
         const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, mid);
         const closeoutProof = proveMilestoneCloseout(mid, {
           refreshFromDisk: true,
-          summaryArtifactBasePath: artifactBasePath,
+          artifactBasePath,
           implementationEvidence: {
             basePath,
             requirement: "not-absent",
@@ -173,6 +139,11 @@ export async function isMilestoneCloseoutSettled(mid: string, basePath: string):
 
 /** Non-blocking GitHub milestone close after local closeout has settled. */
 export async function runMilestoneCloseoutGitHub(basePath: string, mid: string): Promise<void> {
+  // A prepared Closeout Plan is not completion: the Milestone closes on GitHub
+  // only after the settle transaction completed it in the database. A plan
+  // that carries the GitHub close runs it at settlement.
+  if (isDbAvailable() && !readMilestone(mid)?.closed) return;
+  if (closeoutPlanClosesGitHubMilestone(mid)) return;
   await runSafely("postUnit", "github-sync", async () => {
     const { finalizeMilestoneGitHubSync } = await import("../github-sync/sync.js");
     await finalizeMilestoneGitHubSync(basePath, mid);
@@ -196,33 +167,27 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
   opts: { assumeValidationWaived?: boolean } = {},
 ): Promise<DispatchAction> {
   const { mid, midTitle, basePath, prefs } = ctx;
-  const adoptedMilestone = isDbAvailable() && isMilestoneLifecycleAdopted(mid);
 
   if (isDbAvailable()) {
-    const milestone = getMilestone(mid);
-    if (milestone && isClosedStatus(milestone.status)) {
+    if (readMilestone(mid)?.closed) {
       const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, mid);
       const summaryPath = resolveExpectedArtifactPath("complete-milestone", mid, artifactBasePath);
       const summaryMissing = !summaryPath || !existsSync(summaryPath);
       if (summaryMissing) {
         // Preview must not persist dispatch effects (#2230): report the skip
-        // a successful repair produces without writing the projection.
-        // Failure-path divergence (accepted): when the repair would fail, the
-        // real turn dispatches complete-milestone to retry while preview
-        // still reports skip — a preview cannot write the repair.
+        // without writing the projection.
         if (ctx.preview) return { action: "skip" };
+        // The closed DB row is the completion. A missing SUMMARY is projection
+        // work: a failed repair is logged and never re-dispatches the unit.
         const repair = await repairMissingMilestoneSummaryProjection(basePath, mid);
         if (!repair.ok) {
           logWarning(
             "dispatch",
-            `Milestone ${mid} is closed in DB but SUMMARY repair failed: ${repair.error}. Dispatching complete-milestone to retry.`,
+            `Milestone ${mid} is closed in DB but SUMMARY repair failed: ${repair.error}.`,
           );
-        } else {
-          return { action: "skip" };
         }
-      } else {
-        return { action: "skip" };
       }
+      return { action: "skip" };
     }
   }
 
@@ -250,8 +215,8 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
         level: "warning",
       };
     }
-    for (const sliceId of getClosedSliceIds(mid)) {
-      const result = await readUatGateVerdict(basePath, mid, sliceId);
+    for (const sliceId of readClosedSliceIds(mid)) {
+      const result = readUatGateVerdict(mid, sliceId);
       if (!result) {
         return {
           action: "stop",
@@ -261,6 +226,17 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
       }
       const { verdict, uatType } = result;
       if (!isAcceptableUatVerdict(verdict, uatType)) {
+        // #2770: a historical non-PASS verdict that strictly predates the
+        // milestone's current accepted validation receipt was already in
+        // front of the validator when it accepted the remediation; that
+        // acceptance governs closure the same way it governs UAT retry
+        // dispatch (#2347). The check is indeterminate-false: without an
+        // accepted receipt newer than the verdict, the failure still blocks.
+        if (await uatVerdictPredatesAcceptedValidation(
+          mid,
+          sliceId,
+          { assumeValidationWaived: opts.assumeValidationWaived },
+        )) continue;
         return {
           action: "stop",
           reason: uatSignoffBlockerGuidance(mid, sliceId, verdict),
@@ -271,19 +247,12 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
   }
 
   if (isDbAvailable()) {
-    // Repair only the missing-validation closeout case here; existing guards below
-    // and post-unit proof remain responsible for blocking incomplete closeouts.
     const consistency = checkCloseoutConsistencyGate(mid, {
       allowOpenMilestone: true,
-      allowPassThroughValidation: !adoptedMilestone,
       artifactBasePath: resolveCanonicalMilestoneRoot(basePath, mid),
       assumeValidationWaived: opts.assumeValidationWaived,
-      // Preview must not persist the gate's own effects (pass-through
-      // validation recording, evidence-based gate closure) — decisions are
-      // mirrored read-only inside the gate (#2230).
-      readOnly: ctx.preview,
     });
-    if (adoptedMilestone && !consistency.ok) {
+    if (!consistency.ok) {
       return {
         action: "stop",
         reason: consistency.message,
@@ -292,74 +261,12 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
     }
   }
 
-  const validationFile = adoptedMilestone ? null : resolveMilestoneFile(basePath, mid, "VALIDATION");
-  if (validationFile) {
-    const validationContent = await loadFile(validationFile);
-    if (validationContent) {
-      const verdict = extractVerdict(validationContent);
-      if (verdict !== "pass") {
-        return {
-          action: "stop",
-          reason: `Cannot complete milestone ${mid}: VALIDATION verdict is "${verdict}". Address the findings and re-run validation. Only an unadopted compatibility milestone can use \`/gsd verdict pass --rationale "..."\` to override.`,
-          level: "warning",
-        };
-      }
-    }
-  }
-
-  const missingSlices = adoptedMilestone ? [] : findMissingSummaries(basePath, mid);
-  if (missingSlices.length > 0) {
-    return {
-      action: "stop",
-      reason: `Cannot complete milestone ${mid}: slices ${missingSlices.join(", ")} are missing SUMMARY files. Run /gsd doctor to diagnose.`,
-      level: "error",
-    };
-  }
-
   const artifactCheck = hasImplementationArtifacts(basePath, mid);
   if (artifactCheck === "absent") {
     logWarning("dispatch", `Milestone ${mid} has no implementation files outside .gsd/ — continuing complete-milestone dispatch (planning-only/documentation-only milestone).`);
   }
   if (artifactCheck === "unknown") {
     logWarning("dispatch", `Implementation artifact check inconclusive for ${mid} — proceeding (git context unavailable)`);
-  }
-
-  try {
-    if (isDbAvailable() && !adoptedMilestone) {
-      const milestone = getMilestone(mid);
-      if (milestone?.verification_operational &&
-          !isVerificationNotApplicable(milestone.verification_operational)) {
-        const validationPath = resolveMilestoneFile(basePath, mid, "VALIDATION");
-        if (validationPath) {
-          const validationContent = await loadFile(validationPath);
-          if (validationContent) {
-            const skippedByMarker = /^skip_validation:\s*true$/im.test(validationContent);
-            const skippedByPreference = /skip(?:ped)?[\s\-]+(?:by|per|due to)\s+(?:preference|budget|profile)/i.test(validationContent);
-            const skippedByTrivialVariant = /trivial-scope pipeline variant/i.test(validationContent);
-            const structuredMatch =
-              validationContent.includes("Operational") &&
-              (validationContent.includes("MET") || validationContent.includes("N/A") || validationContent.includes("SATISFIED") || validationContent.includes("DEFERRED") || validationContent.includes("PASS") || validationContent.includes("COVERED"));
-            const proseMatch =
-              /[Oo]perational[\s\S]{0,2000}?(?:✅|pass|verified|confirmed|met|complete|true|yes|addressed|covered|satisfied|partially|deferred|n\/a|not[\s-]+applicable)/i.test(validationContent);
-            const hasOperationalCheck =
-              skippedByMarker ||
-              skippedByPreference ||
-              skippedByTrivialVariant ||
-              structuredMatch ||
-              proseMatch;
-            if (!hasOperationalCheck) {
-              return {
-                action: "stop",
-                reason: `Milestone ${mid} has planned operational verification ("${milestone.verification_operational.substring(0, 100)}") but the validation output does not address it. Re-run validation with verification class awareness, or update the validation to document operational compliance.`,
-                level: "warning",
-              };
-            }
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logWarning("dispatch", `verification class check failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   return {

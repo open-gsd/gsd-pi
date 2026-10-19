@@ -40,6 +40,7 @@ import {
   insertMilestone,
   openDatabase,
 } from "../gsd-db.ts";
+import { saveContextArtifact } from "./helpers/saved-context.ts";
 
 // ─── Bug 2: this-binding regression ─────────────────────────────────────
 
@@ -97,6 +98,7 @@ test("checkAutoStartAfterDiscuss completes when discussion manifest is absent", 
     writeFileSync(join(base, ".gsd", "STATE.md"), "# State\n", "utf-8");
     openDatabase(":memory:");
     insertMilestone({ id: "M001", title: "M001", status: "queued" });
+    saveContextArtifact("M001");
     setPendingAutoStart(base, {
       basePath: base,
       milestoneId: "M001",

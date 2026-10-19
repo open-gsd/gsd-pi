@@ -14,8 +14,11 @@ import {
   getSliceTasks,
   getTask,
   getReplanHistory,
+  getLatestWorkflowDomainEvent,
   _getAdapter,
 } from '../gsd-db.ts';
+import { executeDomainOperation } from '../db/domain-operation.ts';
+import { adoptOrTransitionLifecycle, readDomainOperationFence } from '../db/writers/lifecycle-commands.ts';
 import { handleReplanSlice as handleReplanSliceWithInvocation } from '../tools/replan-slice.ts';
 import { internalPlanningInvocation } from '../planning-invocation.ts';
 import { parseProjectionPlan as parsePlan } from '../schemas/parsers.ts';
@@ -511,5 +514,172 @@ test('handleReplanSlice rejects ambiguous task mutations without residue', async
     }
   } finally {
     cleanup(base);
+  }
+});
+
+// ─── blocker-accepted closeout feeds the replan gate (#2202) ───────────────
+
+function seedBlockerAcceptedEvent(): void {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: 'test.task.blocker.accepted',
+    idempotencyKey: 'fixture/blocker-accepted',
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: 'user',
+    sourceTransport: 'test',
+    payload: { taskId: 'T01' },
+  }, () => {
+    return {
+      events: [{
+        eventType: 'task.blocker.accepted',
+        entityType: 'task',
+        entityId: 'M001/S01/T01',
+        payload: {
+          disposition: 'blocker-accepted',
+          from: 'in_progress',
+          to: 'blocker-accepted',
+          attemptId: 'attempt-blocker-1',
+          resultId: 'result-blocker-1',
+          blockerSummary: 'API contract invalidates the plan-invalidating slice scope',
+          rationale: 'operator accepts the blocker',
+          acceptedAt: '2026-09-10T00:00:00.000Z',
+        },
+        destinations: ['projection'],
+      }],
+      projections: [{
+        projectionKey: 'task.blocker.accepted/m001/s01/t01',
+        projectionKind: 'task-recovery',
+        rendererVersion: '1',
+      }],
+    };
+  });
+}
+
+function getLatestWorkflowDomainEventForSlice() {
+  return getLatestWorkflowDomainEvent('workflow.slice.replanned', 'slice', 'M001/S01');
+}
+
+test('handleReplanSlice accepts a blocker-accepted blocker task and attributes its provenance', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedSliceWithTasks({ t01Status: 'blocker-accepted', t03Status: 'pending' });
+    seedBlockerAcceptedEvent();
+
+    const result = await handleReplanSlice(validReplanParams(), base);
+    assert.ok(!('error' in result), `replan must accept a blocker-accepted blocker: ${'error' in result ? result.error : ''}`);
+
+    const durable = getLatestWorkflowDomainEventForSlice();
+    const accepted = durable?.payload['blockerAccepted'] as Record<string, string> | undefined;
+    assert.ok(accepted, 'the durable replan event must attribute the accepted blocker provenance');
+    assert.equal(accepted['disposition'], 'blocker-accepted');
+    assert.equal(accepted['attemptId'], 'attempt-blocker-1');
+    assert.equal(accepted['resultId'], 'result-blocker-1');
+    assert.match(accepted['blockerSummary'], /plan-invalidating/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handleReplanSlice still refuses to modify or remove a blocker-accepted task', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedSliceWithTasks({ t01Status: 'blocker-accepted' });
+    seedBlockerAcceptedEvent();
+
+    const modified = validReplanParams();
+    modified.updatedTasks[0] = {
+      ...modified.updatedTasks[0]!,
+      taskId: 'T01',
+      title: 'Rewrite the closed blocker',
+    };
+    const modifyResult = await handleReplanSlice(modified, base);
+    assert.ok('error' in modifyResult);
+    assert.match(modifyResult.error, /cannot modify completed task T01/);
+
+    const removed = validReplanParams();
+    removed.removedTaskIds = ['T01'];
+    const removeResult = await handleReplanSlice(removed, base);
+    assert.ok('error' in removeResult);
+    assert.match(removeResult.error, /cannot remove completed task T01/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handleReplanSlice adopts a missing parent Milestone lifecycle (#2313 plan-slice parity)', async (t) => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  t.after(() => cleanup(base));
+
+  {
+    seedSliceWithTasks();
+    const adapter = _getAdapter();
+    assert.ok(adapter);
+    assert.equal(adapter.prepare(`
+      SELECT COUNT(*) AS count FROM workflow_item_lifecycles WHERE item_kind = 'milestone'
+    `).get()?.['count'], 0, 'fixture must start without canonical Milestone authority');
+
+    const result = await handleReplanSlice(validReplanParams(), base);
+    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+
+    const milestoneRow = adapter.prepare(`
+      SELECT lifecycle_status FROM workflow_item_lifecycles
+      WHERE item_kind = 'milestone' AND milestone_id = 'M001'
+        AND slice_id IS NULL AND task_id IS NULL
+    `).get();
+    assert.equal(milestoneRow?.['lifecycle_status'], 'ready', 'replan must adopt the missing parent Milestone authority');
+  }
+});
+
+test('handleReplanSlice rejects replanning in a canonically-terminal Milestone (#2313)', async (t) => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  t.after(() => cleanup(base));
+
+  {
+    seedSliceWithTasks();
+    const adapter = _getAdapter();
+    assert.ok(adapter);
+    // Legacy status stays open, but the canonical Milestone row is terminal —
+    // the canonical authority wins and replan is refused (plan-slice parity).
+    const fence = readDomainOperationFence();
+    executeDomainOperation({
+      operationType: 'test.lifecycle.seed',
+      idempotencyKey: 'test/replan-terminal-milestone',
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: 'test',
+      sourceTransport: 'test',
+      payload: {},
+    }, (context) => {
+      adoptOrTransitionLifecycle(context, {
+        itemKind: 'milestone',
+        milestoneId: 'M001',
+        lifecycleStatus: 'completed',
+      });
+      return {
+        events: [{
+          eventType: 'test.lifecycle.seeded',
+          entityType: 'milestone',
+          entityId: 'M001',
+          payload: {},
+          destinations: ['test'],
+        }],
+        projections: [{
+          projectionKey: 'test/replan-terminal-milestone',
+          projectionKind: 'test',
+          rendererVersion: '1',
+        }],
+      };
+    });
+
+    const result = await handleReplanSlice(validReplanParams(), base);
+    assert.ok('error' in result);
+    assert.match(result.error, /completed milestone M001/);
   }
 });

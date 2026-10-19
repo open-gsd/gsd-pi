@@ -19,7 +19,7 @@ test("model-router keeps a single claude-sonnet-5 entry per routing table", () =
   );
 
   assert.equal(
-    countOccurrences(src, '"claude-sonnet-5": 0.003'),
+    countOccurrences(src, '"claude-sonnet-5": 0.002'),
     1,
     "MODEL_COST_PER_1K_INPUT must contain exactly one claude-sonnet-5 key",
   );

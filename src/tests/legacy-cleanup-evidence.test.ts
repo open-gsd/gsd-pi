@@ -11,7 +11,11 @@ const evidenceModule = await import("../../scripts/legacy-cleanup-evidence.mjs")
 const gateModule = await import("../../scripts/legacy-cleanup-gate.mjs");
 
 const { collectLegacyCleanupEvidence, DEFAULT_EVIDENCE_COMMANDS, parseArgs, parseCommandSpec } = evidenceModule;
-const { LEGACY_COUNTERS } = gateModule;
+const { LEGACY_COUNTERS, CUTOVER_COUNTERS } = gateModule;
+
+function allCounters(): Record<string, number> {
+  return Object.fromEntries([...LEGACY_COUNTERS, ...CUTOVER_COUNTERS].map((counter: string) => [counter, 0]));
+}
 
 async function makeCleanProofRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "gsd-legacy-proof-clean-"));
@@ -75,7 +79,7 @@ test("telemetry written before this run is rejected as stale", async () => {
 test("fresh zero telemetry plus a clean static proof passes", async () => {
   const root = await mkdtemp(join(tmpdir(), "gsd-legacy-cleanup-fresh-"));
   const file = join(root, "legacy-telemetry.json");
-  const counters = Object.fromEntries(LEGACY_COUNTERS.map((counter: string) => [counter, 0]));
+  const counters = allCounters();
   const writer = `require("node:fs").writeFileSync(process.env.GSD_LEGACY_TELEMETRY_FILE, JSON.stringify({ ts: new Date().toISOString(), counters: ${JSON.stringify(counters)} }))`;
 
   const result = await collectLegacyCleanupEvidence({
@@ -90,11 +94,11 @@ test("fresh zero telemetry plus a clean static proof passes", async () => {
   assert.deepEqual(result.proofOffenders, []);
 });
 
-test("collectLegacyCleanupEvidence reports nonzero counters as blockers", async () => {
+test("collectLegacyCleanupEvidence reports nonzero cutover counters as blockers", async () => {
   const root = await mkdtemp(join(tmpdir(), "gsd-legacy-cleanup-blocked-"));
   const file = join(root, "legacy-telemetry.json");
-  const counters = Object.fromEntries(LEGACY_COUNTERS.map((counter: string) => [counter, 0]));
-  counters["legacy.workflowEngineUsed"] = 1;
+  const counters = allCounters();
+  counters["legacy.importApplied"] = 1;
   const writer = `require("node:fs").writeFileSync(process.env.GSD_LEGACY_TELEMETRY_FILE, JSON.stringify({ ts: new Date().toISOString(), counters: ${JSON.stringify(counters)} }))`;
 
   const result = await collectLegacyCleanupEvidence({
@@ -105,5 +109,5 @@ test("collectLegacyCleanupEvidence reports nonzero counters as blockers", async 
   });
 
   assert.equal(result.ok, false);
-  assert.deepEqual(result.nonZero, [{ counter: "legacy.workflowEngineUsed", value: 1 }]);
+  assert.deepEqual(result.nonZero, [{ counter: "legacy.importApplied", value: 1 }]);
 });

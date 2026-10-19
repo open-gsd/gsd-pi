@@ -5,6 +5,7 @@ import type { DomainOperationContext } from "../domain-operation.js";
 import { getDb } from "../engine.js";
 import {
   adoptLifecycleIfMissing,
+  grantLegacyAttestedCancellationWaiver,
   requireActiveDomainOperationContext,
 } from "./lifecycle-commands.js";
 import {
@@ -17,12 +18,14 @@ import {
 import {
   LEGACY_IMPORT_APPLICATION_PLAN_SCHEMA_VERSION,
   type LegacyImportApplicationDecisionInstruction,
+  type LegacyImportApplicationKnowledgeInstruction,
   type LegacyImportApplicationPlan,
   type LegacyImportApplicationPlanInstruction,
   type LegacyImportApplicationRowInstruction,
 } from "../../legacy-import-application-plan.js";
 import { compareText } from "../../legacy-import-utils.js";
 import { LEGACY_IMPORT_TARGET_ADAPTERS } from "../../legacy-import-preview-classifier-targets.js";
+import { replaceProjectMilestoneSequence } from "./project-milestone-sequence.js";
 import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
@@ -31,6 +34,11 @@ import {
   type LegacyImportPreviewArtifact,
 } from "../../legacy-import-preview.js";
 import { synthesizeDecisionMemoryContent } from "../../memory-backfill.js";
+import {
+  KNOWLEDGE_CELL_FIELDS,
+  KNOWLEDGE_TABLE_BY_CATEGORY,
+  type KnowledgeTable,
+} from "../../knowledge-parser.js";
 
 type SqlValue = null | number | string;
 type SqlRecord = Readonly<Record<string, SqlValue>>;
@@ -187,6 +195,39 @@ function preflightDecision(instruction: LegacyImportApplicationDecisionInstructi
   }
 }
 
+const KNOWLEDGE_VALUE_FIELDS = new Set(["table", "cells"]);
+
+/** The table and cells of a knowledge instruction, or a failure when they are not exact. */
+function knowledgeValues(
+  instruction: LegacyImportApplicationKnowledgeInstruction,
+): { table: KnowledgeTable; cells: string[] } {
+  const table = instruction.values["table"];
+  const fields = typeof table === "string" && Object.hasOwn(KNOWLEDGE_CELL_FIELDS, table)
+    ? KNOWLEDGE_CELL_FIELDS[table as KnowledgeTable]
+    : undefined;
+  let cells: unknown;
+  try { cells = JSON.parse(String(instruction.values["cells"])); } catch {
+    fail("legacy import knowledge cells are invalid JSON");
+  }
+  if (
+    fields === undefined
+    || !Array.isArray(cells)
+    || cells.length !== fields.cells.length
+    || cells.some((cell) => typeof cell !== "string")
+  ) fail("legacy import knowledge row does not match its table");
+  return { table: table as KnowledgeTable, cells: cells as string[] };
+}
+
+function preflightKnowledge(instruction: LegacyImportApplicationKnowledgeInstruction): void {
+  if (
+    instruction.targetKind !== "knowledge"
+    || instruction.knowledgeId !== instruction.targetKey
+    || !/^[KPL]\d+$/u.test(instruction.knowledgeId)
+  ) fail("legacy import knowledge identity is inconsistent");
+  preflightSqlRecord(instruction.values, KNOWLEDGE_VALUE_FIELDS, "legacy import knowledge values");
+  knowledgeValues(instruction);
+}
+
 function preflight(plan: LegacyImportApplicationPlan): LegacyImportApplicationPlan {
   if (!isStrictLegacyImportData(plan)) fail("legacy import Application plan must be strict data");
   let snapshot: LegacyImportApplicationPlan;
@@ -207,6 +248,11 @@ function preflight(plan: LegacyImportApplicationPlan): LegacyImportApplicationPl
       || instruction.action === "delete-decision-memory"
     ) {
       preflightDecision(instruction);
+    } else if (
+      instruction.action === "create-knowledge-memory"
+      || instruction.action === "update-knowledge-memory"
+    ) {
+      preflightKnowledge(instruction);
     } else if (instruction.action === "adopt-lifecycle") {
       if (instruction.lifecycleAction !== "create" && instruction.lifecycleAction !== "update") {
         fail("legacy import lifecycle action is unsupported");
@@ -776,9 +822,85 @@ function applyDecision(
   return resultFor(instruction, 1, affected);
 }
 
+/**
+ * Write one KNOWLEDGE.md row as a memories row with its knowledge id. A
+ * create requires that no memories row holds the id. An update changes the
+ * active row that holds the id; the Preview plans no update for a forgotten
+ * id. Cells that the render shows as "—" are stored empty, as a capture does.
+ */
+function applyKnowledge(
+  context: Readonly<DomainOperationContext>,
+  occurredAt: string,
+  instruction: LegacyImportApplicationKnowledgeInstruction,
+): LegacyImportApplicationInstructionResult {
+  const { table, cells } = knowledgeValues(instruction);
+  const fields = KNOWLEDGE_CELL_FIELDS[table];
+  const category = Object.keys(KNOWLEDGE_TABLE_BY_CATEGORY)
+    .find((key) => KNOWLEDGE_TABLE_BY_CATEGORY[key] === table)!;
+  const structured: Record<string, unknown> = {};
+  fields.cells.forEach((field, index) => {
+    const cell = cells[index]!;
+    structured[field] = cell === "—" && field !== fields.content && field !== "scopeText" ? "" : cell;
+  });
+  const content = String(structured[fields.content]);
+  const scope = String(structured["scopeText"] ?? "") || "project";
+  const existing = getDb().prepare(`SELECT id, structured_fields FROM memories
+    WHERE json_valid(structured_fields)
+      AND json_extract(structured_fields, '$.sourceKnowledgeId') = :knowledge_id
+    ORDER BY superseded_by IS NOT NULL, seq DESC
+    LIMIT 1`).get({ ":knowledge_id": instruction.knowledgeId }) as DbRow | undefined;
+  let affected: number;
+  if (instruction.action === "create-knowledge-memory") {
+    if (existing) fail("legacy import knowledge row already exists");
+    const memoryId = `legacy-import-${hashLegacyImportValue({
+      operationId: context.operationId,
+      knowledgeId: instruction.knowledgeId,
+    }).slice(7, 31)}`;
+    affected = changes(getDb().prepare(`INSERT INTO memories (
+        id, category, content, confidence, source_unit_type, source_unit_id,
+        created_at, updated_at, superseded_by, hit_count, scope, tags, structured_fields
+      ) VALUES (
+        :id, :category, :content, 0.85, NULL, NULL,
+        :created_at, :updated_at, NULL, 0, :scope, '[]', :structured_fields
+      )`).run({
+      ":id": memoryId,
+      ":category": category,
+      ":content": content,
+      ":created_at": occurredAt,
+      ":updated_at": occurredAt,
+      ":scope": scope,
+      ":structured_fields": JSON.stringify({
+        sourceKnowledgeTable: table,
+        ...structured,
+        sourceKnowledgeId: instruction.knowledgeId,
+      }),
+    }));
+  } else {
+    if (!existing) fail("legacy import knowledge row is missing");
+    affected = changes(getDb().prepare(`UPDATE memories
+      SET category = :category, content = :content, scope = :scope,
+        structured_fields = :structured_fields, updated_at = :updated_at
+      WHERE id = :memory_id`).run({
+      ":category": category,
+      ":content": content,
+      ":scope": scope,
+      ":structured_fields": JSON.stringify({
+        ...JSON.parse(String(existing["structured_fields"])) as Record<string, unknown>,
+        sourceKnowledgeTable: table,
+        ...structured,
+      }),
+      ":updated_at": occurredAt,
+      ":memory_id": existing["id"],
+    }));
+  }
+  if (affected !== 1) fail("legacy import knowledge memory mutation must affect exactly one row");
+  return resultFor(instruction, 1, affected);
+}
+
 function adoptLifecycle(
   context: Readonly<DomainOperationContext>,
   occurredAt: string,
+  previewId: string,
   instruction: Extract<LegacyImportApplicationPlanInstruction, { action: "adopt-lifecycle" }>,
 ): LegacyImportApplicationInstructionResult {
   const adopted = adoptLifecycleIfMissing(context, {
@@ -799,40 +921,91 @@ function adoptLifecycle(
   if (!adopted.adopted || adopted.stateVersion !== 0) {
     fail("legacy import lifecycle already exists or was not adopted exactly");
   }
+  // Same rule as lifecycle.backfill: a legacy skipped, deferred or cancelled
+  // row is adopted as cancelled with one legacy-attested Waiver, so closeout
+  // and reopen do not refuse it. An Import Application has one event for the
+  // whole import, so the Waiver rationale keeps the raw legacy status (the
+  // hierarchy row status that the Preview's plan wrote) and the rule used.
+  if (instruction.lifecycleStatus === "cancelled") {
+    const table = instruction.itemKind === "milestone" ? "milestones"
+      : instruction.itemKind === "slice" ? "slices" : "tasks";
+    const rawStatus = getDb().prepare(`
+      SELECT status FROM ${table}
+      WHERE ${instruction.itemKind === "milestone" ? "id" : "milestone_id"} = :milestone_id
+        ${instruction.itemKind === "slice" ? "AND id = :slice_id" : ""}
+        ${instruction.itemKind === "task" ? "AND slice_id = :slice_id AND id = :task_id" : ""}
+    `).get({
+      ":milestone_id": instruction.milestoneId,
+      ...(instruction.itemKind === "milestone" ? {} : { ":slice_id": instruction.sliceId }),
+      ...(instruction.itemKind === "task" ? { ":task_id": instruction.taskId } : {}),
+    })?.["status"];
+    if (typeof rawStatus !== "string") fail("legacy import cancelled lifecycle has no hierarchy row status");
+    grantLegacyAttestedCancellationWaiver(context, {
+      lifecycleId: adopted.lifecycleId,
+      itemKind: instruction.itemKind,
+      milestoneId: instruction.milestoneId,
+      sliceId: instruction.sliceId ?? null,
+      taskId: instruction.taskId ?? null,
+      rationale: `Legacy-attested cancellation adopted by legacy import Preview ${previewId} ` +
+        `(raw status ${JSON.stringify(rawStatus)}, rule legacy-cancelled)`,
+      grantedByActorId: "legacy-import",
+    });
+  }
   return resultFor(instruction, 1, 1);
 }
 
 function seedQualityGate(
-  occurredAt: string,
   instruction: Extract<LegacyImportApplicationPlanInstruction, { action: "seed-quality-gate" }>,
 ): LegacyImportApplicationInstructionResult {
-  // #1658: complete-slice hard-requires exactly one Q8 quality gate per slice,
-  // so every imported slice mints the row the canonical seam would have left
-  // behind — plan_slice seeds a pending scope:"slice" Q8 (insertGateRow), and
-  // completeSliceHierarchy closes it with verdict "omitted" when no
-  // Operational Readiness evidence exists. A legacy import carries no gate
-  // evidence, so completed slices adopt the omitted shape; no gate_runs ledger
-  // row is minted because no evaluation actually ran.
-  const complete = instruction.gateStatus === "complete";
+  // #1658: an open imported slice gets the pending scope:"slice" Q8 row that
+  // plan_slice would have seeded (insertGateRow), so the complete-slice turn
+  // is told to close it. A legacy import carries no gate evidence, so a slice
+  // imported as completed gets no gate row: a closed verdict that no
+  // evaluation produced would be fabricated. Slice completion creates the row
+  // when it is missing (#1679), so a later reopen and closeout still works.
+  if (instruction.gateStatus === "complete") return resultFor(instruction, 0, 0);
   const result = getDb().prepare(`
     INSERT INTO quality_gates (
-      milestone_id, slice_id, gate_id, scope, task_id,
-      status, verdict, rationale, findings, evaluated_at
+      milestone_id, slice_id, gate_id, scope, task_id, status
     ) VALUES (
-      :milestone_id, :slice_id, 'Q8', 'slice', '',
-      :status, :verdict, :rationale, '', :evaluated_at
+      :milestone_id, :slice_id, 'Q8', 'slice', '', 'pending'
     )
   `).run({
     ":milestone_id": instruction.milestoneId,
     ":slice_id": instruction.sliceId,
-    ":status": instruction.gateStatus,
-    ":verdict": complete ? "omitted" : "",
-    ":rationale": complete ? "Seeded by legacy import — no Operational Readiness evidence available" : "",
-    ":evaluated_at": complete ? occurredAt : null,
   });
   const affected = changes(result);
   if (affected !== 1) fail("legacy import quality gate seed must affect exactly one row");
   return resultFor(instruction, 1, affected);
+}
+
+/** The PROJECT document artifact row, under any root directory. */
+const PROJECT_ARTIFACT_PATH = /(?:^|\/)PROJECT\.md$/u;
+
+/**
+ * The Milestone Sequence rows follow the stored PROJECT artifact row inside the
+ * same Application transaction (ADR-046): an Import Application that
+ * establishes or rewrites the PROJECT row replaces the rows from the stored
+ * document, and a delete of the row leaves no rows, so a stale row cannot
+ * mis-promote a phantom Milestone after the cutover. No repair: the rows are
+ * exactly what the stored document commits to.
+ */
+function refreshProjectMilestoneSequence(instructions: readonly LegacyImportApplicationPlanInstruction[]): void {
+  const projectPaths = new Set<string>();
+  for (const instruction of instructions) {
+    if (instruction.targetKind !== "artifact") continue;
+    if (instruction.action !== "create" && instruction.action !== "update" && instruction.action !== "delete") continue;
+    if (!PROJECT_ARTIFACT_PATH.test(instruction.targetKey)) continue;
+    projectPaths.add(String(instruction.identity["path"]));
+  }
+  for (const path of projectPaths) {
+    const row = getDb().prepare("SELECT full_content FROM artifacts WHERE path = :path").get({ ":path": path });
+    if (typeof row?.["full_content"] === "string") {
+      replaceProjectMilestoneSequence(getDb(), row["full_content"]);
+    } else {
+      getDb().prepare("DELETE FROM project_milestone_sequence").run();
+    }
+  }
 }
 
 export function applyLegacyImportApplicationPlan(
@@ -851,19 +1024,25 @@ export function applyLegacyImportApplicationPlan(
     } else if (instruction.action === "delete-slice-dependencies") {
       instructionResults.push(deleteDependencies(instruction));
     } else if (instruction.action === "adopt-lifecycle") {
-      instructionResults.push(adoptLifecycle(context, occurredAt, instruction));
+      instructionResults.push(adoptLifecycle(context, occurredAt, snapshot.previewId, instruction));
     } else if (instruction.action === "seed-quality-gate") {
-      instructionResults.push(seedQualityGate(occurredAt, instruction));
+      instructionResults.push(seedQualityGate(instruction));
     } else if (
       instruction.action === "create-decision-memory"
       || instruction.action === "update-decision-memory"
       || instruction.action === "delete-decision-memory"
     ) {
       instructionResults.push(applyDecision(context, occurredAt, instruction));
+    } else if (
+      instruction.action === "create-knowledge-memory"
+      || instruction.action === "update-knowledge-memory"
+    ) {
+      instructionResults.push(applyKnowledge(context, occurredAt, instruction));
     } else {
       instructionResults.push(resultFor(instruction, 0, 0));
     }
   }
+  refreshProjectMilestoneSequence(snapshot.instructions);
   requireRetainedSliceDependencyIntegrity(snapshot.instructions);
   return Object.freeze({ instructionResults: Object.freeze(instructionResults) });
 }

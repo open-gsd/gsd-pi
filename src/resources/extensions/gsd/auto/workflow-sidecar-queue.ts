@@ -9,18 +9,18 @@ export interface SidecarDequeuePayload extends Record<string, unknown> {
   unitId: string;
 }
 
-export interface DequeueSidecarItemInput {
-  queue: SidecarItem[];
+export interface DequeueSidecarItemInput<T extends SidecarItem> {
+  queue: T[];
   executionGraphEnabled: boolean;
-  scheduleQueue: (queue: SidecarItem[]) => Promise<SidecarItem[]>;
+  scheduleQueue: (queue: T[]) => Promise<T[]>;
   warnSchedulingFailure: (message: string) => void;
   logDequeue: (payload: SidecarDequeuePayload) => void;
   emitDequeue: (payload: SidecarDequeuePayload) => void;
 }
 
-export async function dequeueSidecarItem(
-  input: DequeueSidecarItemInput,
-): Promise<SidecarItem | undefined> {
+export async function dequeueSidecarItem<T extends SidecarItem>(
+  input: DequeueSidecarItemInput<T>,
+): Promise<T | undefined> {
   if (input.queue.length === 0) return undefined;
 
   if (input.executionGraphEnabled && input.queue.length > 1) {

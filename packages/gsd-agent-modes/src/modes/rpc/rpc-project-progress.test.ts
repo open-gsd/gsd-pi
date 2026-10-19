@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { invokeProjectProgressRead, invokeProjectSnapshotRead } from "./rpc-mode.js";
+import { invokeProjectProgressRead, invokeProjectSnapshotRead, invokeWorkflowCommand } from "./rpc-mode.js";
 
 test("project progress read forwards the active session CWD and request ID", async () => {
 	let receivedInput: unknown;
@@ -111,5 +111,57 @@ test("project snapshot reader failures preserve the request ID", async () => {
 		command: "get_project_snapshot",
 		success: false,
 		error: "snapshot unavailable",
+	});
+});
+
+test("workflow command forwards the typed command, its identity and the session CWD", async () => {
+	let receivedInput: unknown;
+	const response = await invokeWorkflowCommand(
+		async (input) => {
+			receivedInput = input;
+			return { ok: true, message: "Parked milestone M001.", revision: 8 };
+		},
+		{
+			id: "request-321",
+			type: "workflow_command",
+			name: "milestone_park",
+			args: { milestoneId: "M001", reason: "hold" },
+			idempotencyKey: "user-action-1",
+			expectedRevision: 7,
+		},
+		"/workspace/project",
+	);
+
+	assert.deepEqual(receivedInput, {
+		cwd: "/workspace/project",
+		name: "milestone_park",
+		args: { milestoneId: "M001", reason: "hold" },
+		idempotencyKey: "user-action-1",
+		expectedRevision: 7,
+	});
+	assert.deepEqual(response, {
+		id: "request-321",
+		type: "response",
+		command: "workflow_command",
+		success: true,
+		data: { ok: true, message: "Parked milestone M001.", revision: 8 },
+	});
+});
+
+test("workflow command failures preserve the request ID", async () => {
+	const response = await invokeWorkflowCommand(
+		async () => {
+			throw new Error("Unknown workflow command: nope");
+		},
+		{ id: "request-654", type: "workflow_command", name: "milestone_unpark", args: { milestoneId: "M001" }, idempotencyKey: "k" },
+		"/workspace/project",
+	);
+
+	assert.deepEqual(response, {
+		id: "request-654",
+		type: "response",
+		command: "workflow_command",
+		success: false,
+		error: "Unknown workflow command: nope",
 	});
 });

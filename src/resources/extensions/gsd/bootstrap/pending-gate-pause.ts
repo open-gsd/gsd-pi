@@ -27,7 +27,7 @@ export async function maybePauseAutoForApprovalGate(
 	pauseScheduledForTurn = true;
 	ctx.ui.notify(notifyMessage, "info");
 	const { pauseAuto } = await import("../auto.js");
-	await pauseAuto(ctx, pi);
+	await pauseAuto(ctx, pi, "ambiguous_intent");
 	return true;
 }
 

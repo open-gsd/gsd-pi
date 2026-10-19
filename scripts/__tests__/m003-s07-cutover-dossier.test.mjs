@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -95,13 +95,6 @@ const COMMANDS = Object.freeze([
     command: "pnpm exec tsx --test --test-concurrency=1 src/resources/extensions/gsd/tests/semantic-shadow-capstone.test.ts src/resources/extensions/gsd/tests/semantic-shadow-soak.test.ts packages/mcp-server/src/workflow-tools-parity.test.ts",
     stage: "post_generation",
     verdict: "required",
-  },
-  {
-    id: "semantic-shadow-no-cutover",
-    command: "pnpm run gate:semantic-shadow-no-cutover",
-    stage: "observed",
-    verdict: "pass",
-    exitCode: 0,
   },
   {
     id: "authority-baseline",
@@ -498,8 +491,8 @@ const failureCases = [
     input.commands[0].verdict = "pass";
     input.commands[0].exitCode = 0;
   }, /command inventory.*stage|post-generation command/i],
-  ["pre-certified post-generation command", (input) => { input.commands[3].verdict = "pass"; }, /post-generation command.*required/i],
-  ["post-generation exit claim", (input) => { input.commands[3].exitCode = 0; }, /post-generation command.*exit/i],
+  ["pre-certified post-generation command", (input) => { input.commands[2].verdict = "pass"; }, /post-generation command.*required/i],
+  ["post-generation exit claim", (input) => { input.commands[2].exitCode = 0; }, /post-generation command.*exit/i],
   ["no-cutover regression", (input) => { input.noCutover.behavioral.passed = 10; }, /no-cutover.*11\/11/i],
   ["authority baseline regression", (input) => { input.authorityBaseline.passed = 3; }, /baseline.*4\/4/i],
   ["GO recommendation", (input) => { input.recommendation = "GO"; }, /recommendation.*NO_GO/i],
@@ -614,4 +607,56 @@ test("CLI renders a validated local fixture without writing production JSON", (t
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), buildDossier(validInput()));
+});
+
+// The checked dossier is a frozen record: the M003/S07/T07 exact-merged UAT
+// evidence stores its dossierHash, so its bytes cannot be regenerated. These
+// are the references it lists that were retired after it was written.
+const RETIRED_DOSSIER_REFERENCES = Object.freeze({
+  files: [
+    "src/resources/extensions/gsd/tests/md-importer-adopted-authority.test.ts",
+    "src/resources/extensions/gsd/tests/semantic-shadow-contract.test.ts",
+    "src/resources/extensions/gsd/tests/semantic-shadow-mode-matrix.test.ts",
+    "src/resources/extensions/gsd/tests/workflow-reconcile.test.ts",
+  ],
+  pnpmScripts: ["gate:semantic-shadow-no-cutover"],
+});
+
+function checkedDossierReferences() {
+  const dossier = JSON.parse(readFileSync(DEFAULT_OUTPUT, "utf8"));
+  const files = new Set(dossier.compatibilityInventory.map((witness) => witness.file));
+  const pnpmScripts = new Set();
+  for (const { command } of dossier.commands) {
+    for (const token of command.split(/\s+/)) {
+      if (/^[\w.@/-]+\/[\w.@-]+\.(?:ts|mjs|cjs|js|json)$/.test(token)) files.add(token);
+    }
+    for (const match of command.matchAll(/pnpm run (\S+)/g)) pnpmScripts.add(match[1]);
+  }
+  return { files: [...files], pnpmScripts: [...pnpmScripts] };
+}
+
+test("checked dossier lists only existing files and pnpm scripts, or recorded retired ones", () => {
+  const references = checkedDossierReferences();
+  const packageScripts = JSON.parse(readFileSync("package.json", "utf8")).scripts;
+
+  assert.ok(references.files.length > 0 && references.pnpmScripts.length > 0);
+  assert.deepEqual(
+    references.files.filter((file) => !existsSync(file)).sort(),
+    [...RETIRED_DOSSIER_REFERENCES.files].sort(),
+    "every missing dossier file must be a recorded retired reference, and every retired file must be listed and missing",
+  );
+  assert.deepEqual(
+    references.pnpmScripts.filter((name) => !Object.hasOwn(packageScripts, name)).sort(),
+    [...RETIRED_DOSSIER_REFERENCES.pnpmScripts].sort(),
+    "every missing dossier pnpm script must be a recorded retired reference, and every retired script must be listed and missing",
+  );
+});
+
+test("dossier script emits only pnpm scripts that exist in package.json", () => {
+  const packageScripts = JSON.parse(readFileSync("package.json", "utf8")).scripts;
+  const emitted = COMMAND_INVENTORY.flatMap(({ command }) =>
+    [...command.matchAll(/pnpm run (\S+)/g)].map((match) => match[1]));
+
+  assert.ok(emitted.length > 0);
+  assert.deepEqual(emitted.filter((name) => !Object.hasOwn(packageScripts, name)), []);
 });

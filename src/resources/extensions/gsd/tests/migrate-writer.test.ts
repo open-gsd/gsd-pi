@@ -13,7 +13,6 @@ import {
   formatProject,
   formatDecisions,
   formatContext,
-  formatState,
 } from '../migrate/writer.ts';
 import {
   parseProjectionRoadmap as parseRoadmap,
@@ -325,17 +324,6 @@ test('F11: formatDecisions with empty content → produces valid stub', () => {
 test('F12: formatContext produces valid content', () => {
   const output = formatContext('M001');
   assert.ok(output.includes('M001'), 'edge: context mentions milestone');
-});
-
-test('F13: formatState produces valid content', () => {
-  const milestones = [makeMilestone({
-    slices: [
-      makeSlice({ done: true }),
-      makeSlice({ id: 'S02', done: false }),
-    ],
-  })];
-  const output = formatState(milestones);
-  assert.ok(output.includes('1/2'), 'edge: state shows slice progress');
 });
 
 test('F14: Task metadata remains in its task plan when the estimate is empty', () => {

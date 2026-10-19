@@ -116,7 +116,7 @@ afterEach(() => {
   temporaryDirectories.clear();
 });
 
-test("startup database open and derive ignore markdown-only hierarchy without changing authority", async () => {
+test("startup refuses an empty database beside markdown-only hierarchy and derive never imports it", async () => {
   const base = createMarkdownOnlyProject();
   const databasePath = join(base, ".gsd", "gsd.db");
   assert.equal(openDatabase(databasePath), true);
@@ -126,10 +126,10 @@ test("startup database open and derive ignore markdown-only hierarchy without ch
 
   await openProjectDbIfPresent(base);
 
-  assert.equal(isDbAvailable(), true);
-  assert.deepEqual(durableSnapshot(), beforeOpen);
+  assert.equal(isDbAvailable(), false, "an empty database beside planned projections is refused");
+  assert.equal(openDatabase(databasePath), true);
+  assert.deepEqual(durableSnapshot(), beforeOpen, "the refused open performs no authority write");
   assert.deepEqual(nonDatabaseTreeSnapshot(join(base, ".gsd")), sourceTreeBefore);
-  assert.equal(totalChanges(), 0, "opening an existing database performs no authority write");
   const beforeDerive = durableSnapshot();
   const changesBeforeDerive = totalChanges();
   invalidateStateCache();
@@ -166,9 +166,9 @@ test("PROJECT.md startup reconciliation cannot create canonical milestone rows",
   // projection-only bytes: zero authority writes, zero canonical rows.
   await openProjectDbIfPresent(base);
 
-  assert.equal(isDbAvailable(), true);
-  assert.deepEqual(durableSnapshot(), beforeOpen);
-  assert.equal(totalChanges(), 0, "startup database open performs no authority write");
+  assert.equal(isDbAvailable(), false, "an empty database beside planned projections is refused");
+  assert.equal(openDatabase(databasePath), true);
+  assert.deepEqual(durableSnapshot(), beforeOpen, "the refused open performs no authority write");
   const beforeDerive = durableSnapshot();
   const changesBeforeDerive = totalChanges();
   invalidateStateCache();

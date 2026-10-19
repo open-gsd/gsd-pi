@@ -137,12 +137,23 @@ test("a pre-fix markdown lifecycle head wedges canonical closeout and doctor rep
 test("doctor --fix rewrites the kind, restores the guard triggers, and closeout extends the chain (#1661)", () => {
   openFreshDatabase();
   seedPreFixMarkdownHead();
+  const revisionBefore = Number((db().prepare(
+    "SELECT revision FROM project_authority WHERE singleton = 1",
+  ).get() as { revision: number }).revision);
 
   const issues: DoctorIssue[] = [];
   const fixesApplied: string[] = [];
   checkLifecycleProjectionKinds(issues, fixesApplied, true);
   assert.equal(issues.length, 0);
   assert.equal(fixesApplied.length, 1);
+  // The repair is a Domain Operation: one operation row and one new revision.
+  assert.deepEqual(
+    db().prepare(`
+      SELECT operation_type, resulting_revision FROM workflow_operations
+      WHERE operation_type = 'projection.kind.repair'
+    `).all().map((row) => ({ ...row })),
+    [{ operation_type: "projection.kind.repair", resulting_revision: revisionBefore + 1 }],
+  );
   assert.match(fixesApplied[0] ?? "", /lifecycle\/m001\/s01/);
   assert.match(fixesApplied[0] ?? "", /markdown → slice-lifecycle/);
 
@@ -170,10 +181,14 @@ test("doctor --fix rewrites the kind, restores the guard triggers, and closeout 
 
   // ACCEPTANCE (#1661): the wedge is actually gone — the canonical
   // slice-lifecycle enqueue for the repaired key SUCCEEDS and extends the head.
+  // The repair operation itself extended the chain with one canonical head.
   enqueueProjection("1661/healed-closeout", SLICE_LIFECYCLE_PROJECTION_KIND);
   const chain = projectionChain();
-  assert.equal(chain.length, 2);
-  assert.equal(chain[0]?.["projection_kind"], SLICE_LIFECYCLE_PROJECTION_KIND);
-  assert.equal(chain[1]?.["projection_kind"], SLICE_LIFECYCLE_PROJECTION_KIND);
-  assert.notEqual(chain[1]?.["supersedes_projection_work_id"], null);
+  assert.equal(chain.length, 3);
+  assert.deepEqual(chain.map((link) => link["projection_kind"]), [
+    SLICE_LIFECYCLE_PROJECTION_KIND,
+    SLICE_LIFECYCLE_PROJECTION_KIND,
+    SLICE_LIFECYCLE_PROJECTION_KIND,
+  ]);
+  assert.notEqual(chain[2]?.["supersedes_projection_work_id"], null);
 });

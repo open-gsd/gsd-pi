@@ -43,6 +43,7 @@ export type {
 	ToolPreparationErrorsTurnEventResult,
 	UnitEndEvent,
 	UnitStartEvent,
+	PhaseChangeEvent,
 	VerifyFailure,
 	VerifyResultEvent,
 } from "../gsd-extension-types.js";

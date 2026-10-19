@@ -1,4 +1,7 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+
+const aiSrcIndex = fileURLToPath(new URL("../pi-ai/src/index.ts", import.meta.url));
 
 export default defineConfig({
 	test: {
@@ -14,5 +17,11 @@ export default defineConfig({
 			reporter: ["text", "html", "lcov"],
 			reportsDirectory: "coverage/harness",
 		},
+	},
+	resolve: {
+		alias: [
+			{ find: /^@earendil-works\/pi-ai$/, replacement: aiSrcIndex },
+			{ find: /^@gsd\/pi-ai$/, replacement: aiSrcIndex },
+		],
 	},
 });

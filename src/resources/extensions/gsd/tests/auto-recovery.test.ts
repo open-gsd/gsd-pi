@@ -10,7 +10,7 @@ import { createRequire } from "node:module";
 
 import { verifyExpectedArtifact, hasImplementationArtifacts, resolveExpectedArtifactPath, diagnoseExpectedArtifact, diagnoseWorktreeIntegrityFailure, buildLoopRemediationSteps, writeBlockerPlaceholder, refreshRecoveryDbForArtifact, writeReactiveExecuteBlocker } from "../auto-recovery.ts";
 import { resolveMilestoneFile } from "../paths.ts";
-import { _getAdapter, openDatabase, closeDatabase, insertMilestone, insertSlice, insertGateRow, insertTask, insertAssessment, getMilestone, getMilestoneCommitAttributionShas, getPlanMilestoneRecoveryBlock, getTask, getSlice, saveGateResult, updateMilestoneStatus } from "../gsd-db.ts";
+import { _getAdapter, openDatabase, closeDatabase, insertArtifact, insertMilestone, insertSlice, insertGateRow, insertTask, insertAssessment, getMilestone, getMilestoneCommitAttributionShas, getPlanMilestoneRecoveryBlock, getTask, getSlice, saveGateResult, projectCanonicalStatusToLegacy } from "../gsd-db.ts";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
 import { recordFailureAndSelectRecovery } from "../task-recovery-domain-operation.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
@@ -26,16 +26,9 @@ import { clearParseCache } from "../files.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { writeIntegrationBranch } from "../git-service.ts";
-import { loadSyncMapping } from "../../github-sync/mapping.ts";
-import {
-  _resetConfigCache,
-  _setGhCloseOverridesForTest,
-} from "../../github-sync/sync.ts";
-import {
-  _resetGhCache,
-  _setGhAvailableForTest,
-  _setGhRateLimitOkForTest,
-} from "../../github-sync/cli.ts";
+import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
+import { handleValidateMilestone } from "../tools/validate-milestone.ts";
+import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
 
 const tmpDirs: string[] = [];
 
@@ -200,12 +193,18 @@ function completeAdoptedMilestoneReceipt(receiptShape: "full" | "projection-only
     sourceTransport: "test",
     payload: { milestoneId: "M001" },
   }, (context) => {
-    updateMilestoneStatus("M001", "complete", completedAt);
     const lifecycle = adoptOrTransitionLifecycle(context, {
       itemKind: "milestone",
       milestoneId: "M001",
       lifecycleStatus: "completed",
       adoptedFromStatus: "completed",
+    });
+    // Project the legacy completion from the canonical row this operation wrote.
+    projectCanonicalStatusToLegacy(context, {
+      entity: "milestone",
+      milestoneId: "M001",
+      status: "complete",
+      completedAt,
     });
     return {
       events: [{
@@ -324,6 +323,7 @@ test("resolveExpectedArtifactPath returns correct path for plan-slice", () => {
 
 test("plan-slice artifact resolution handles lowercase unit IDs against uppercase paths", () => {
   const base = makeTmpBase();
+  openDatabase(join(base, ".gsd", "gsd.db"));
   try {
     const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     const tasksDir = join(sliceDir, "tasks");
@@ -351,93 +351,24 @@ test("plan-slice artifact resolution handles lowercase unit IDs against uppercas
       diagnostic?.includes("task plans"),
       "diagnostic should mention task plans because slice plan alone is insufficient",
     );
-
-    assert.equal(
-      verifyExpectedArtifact("plan-slice", "m001/s01", base),
-      true,
-      "verification should pass when the uppercase slice plan and task plans exist",
-    );
   } finally {
     cleanup(base);
   }
 });
 
-test("plan-slice verification accepts artifacts rendered in the live milestone worktree", () => {
+test("verifyExpectedArtifact returns false for file-contract units when the DB is unavailable", () => {
   const base = makeTmpBase();
   try {
-    const rootSlicePlan = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
-    rmSync(rootSlicePlan, { force: true });
-
-    const worktree = join(base, ".gsd", "worktrees", "M001");
-    const worktreeSliceDir = join(worktree, ".gsd", "milestones", "M001", "slices", "S01");
-    const worktreeTasksDir = join(worktreeSliceDir, "tasks");
-    mkdirSync(worktreeTasksDir, { recursive: true });
-    writeFileSync(join(worktree, ".git"), "gitdir: ../../../../.git/worktrees/M001\n", "utf-8");
-    writeFileSync(join(worktreeSliceDir, "S01-PLAN.md"), [
-      "# S01: Test Slice",
-      "",
-      "## Tasks",
-      "",
-      "- [ ] **T01: Implement feature** `est:1h`",
-    ].join("\n"));
-    writeFileSync(join(worktreeTasksDir, "T01-PLAN.md"), "# T01 Plan");
-
-    assert.equal(
-      verifyExpectedArtifact("plan-slice", "M001/S01", base),
-      true,
-      "verification should use the live worktree projection when project-root markdown is stale",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("complete-slice verification accepts artifacts rendered in the project root while a live worktree exists", () => {
-  const base = makeTmpBase();
-  try {
-    const milestoneDir = join(base, ".gsd", "milestones", "M001");
-    const sliceDir = join(milestoneDir, "slices", "S01");
-    writeFileSync(join(milestoneDir, "M001-ROADMAP.md"), [
-      "# M001: Test",
-      "",
-      "## Slices",
-      "",
-      "- [x] **S01: Test Slice** `risk:low` `depends:[]`",
-      "  > After this: done",
-    ].join("\n"));
-    writeFileSync(join(sliceDir, "S01-SUMMARY.md"), "# S01 Summary\nDone.");
-    writeFileSync(join(sliceDir, "S01-UAT.md"), "# S01 UAT\nPass.");
-    seedMilestoneSlices(base, [{ id: "S01", status: "complete" }]);
-
-    const worktree = join(base, ".gsd", "worktrees", "M001");
-    mkdirSync(join(worktree, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
-    writeFileSync(join(worktree, ".git"), "gitdir: ../../../../.git/worktrees/M001\n", "utf-8");
-
-    assert.equal(
-      verifyExpectedArtifact("complete-slice", "M001/S01", base),
-      true,
-      "verification should accept project-root slice summary/UAT artifacts when the live worktree projection is stale",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("validate-milestone verification accepts project-root VALIDATION while a live worktree exists", () => {
-  const base = makeTmpBase();
-  try {
+    closeDatabase();
     const milestoneDir = join(base, ".gsd", "milestones", "M001");
     writeFileSync(join(milestoneDir, "M001-VALIDATION.md"), "---\nverdict: pass\n---\n# Validation\nPass.");
+    writeFileSync(join(milestoneDir, "M001-ROADMAP.md"), "# M001\n\n## Slices\n- [ ] **S01: One** `risk:low` `depends:[]`\n");
+    writeFileSync(join(milestoneDir, "slices", "S01", "S01-PLAN.md"), "# S01\n\n## Tasks\n\n- [ ] **T01: Do it** `est:1h`\n");
+    writeFileSync(join(milestoneDir, "slices", "S01", "tasks", "T01-PLAN.md"), "# T01 Plan");
 
-    const worktree = join(base, ".gsd", "worktrees", "M001");
-    mkdirSync(join(worktree, ".gsd", "milestones", "M001"), { recursive: true });
-    writeFileSync(join(worktree, ".git"), "gitdir: ../../../../.git/worktrees/M001\n", "utf-8");
-
-    assert.equal(
-      verifyExpectedArtifact("validate-milestone", "M001", base),
-      true,
-      "verification should accept project-root validation artifacts when the live worktree projection is stale",
-    );
+    assert.equal(verifyExpectedArtifact("validate-milestone", "M001", base), false);
+    assert.equal(verifyExpectedArtifact("plan-milestone", "M001", base), false);
+    assert.equal(verifyExpectedArtifact("plan-slice", "M001/S01", base), false);
   } finally {
     cleanup(base);
   }
@@ -547,6 +478,15 @@ test("refreshRecoveryDbForArtifact does not report execute-task recovery success
       message: "Stuck recovery cannot confirm canonical Task Attempt readiness for execute-task M001/S01/T01 because the workflow DB is unavailable.",
     },
   );
+});
+
+test("refreshRecoveryDbForArtifact does not report plan-slice or complete-milestone recovery success without a DB", () => {
+  closeDatabase();
+  for (const [unitType, unitId] of [["plan-slice", "M001/S01"], ["complete-milestone", "M001"]] as const) {
+    const result = refreshRecoveryDbForArtifact(unitType, unitId, process.cwd());
+    assert.equal(result.ok, false, `${unitType} must not recover without a DB`);
+    assert.equal(result.reason, "db-unavailable");
+  }
 });
 
 test("refreshRecoveryDbForArtifact rejects a Task row without an actionable Attempt Result", () => {
@@ -680,7 +620,7 @@ test("refreshRecoveryDbForArtifact refuses execute-task recovery after a termina
   assert.ok(result.message.includes(`/gsd recover ${route.recoveryActionId}`));
 });
 
-test("refreshRecoveryDbForArtifact closes complete-milestone DB row when artifacts exist but DB is stale (#5568)", async () => {
+test("refreshRecoveryDbForArtifact never completes an open milestone from complete-looking artifacts", () => {
   const base = mkdtempSync(join(tmpdir(), "auto-recovery-complete-ms-"));
   mkdirSync(join(base, ".gsd"), { recursive: true });
   openDatabase(join(base, ".gsd", "gsd.db"));
@@ -694,26 +634,11 @@ test("refreshRecoveryDbForArtifact closes complete-milestone DB row when artifac
     risk: "low",
     depends: [],
   });
-  insertSlice({
-    milestoneId: "M001",
-    id: "S02",
-    title: "Done Slice",
-    status: "complete",
-    risk: "low",
-    depends: [],
-  });
   insertTask({
     milestoneId: "M001",
     sliceId: "S01",
     id: "T01",
     title: "Done Task",
-    status: "complete",
-  });
-  insertTask({
-    milestoneId: "M001",
-    sliceId: "S02",
-    id: "T02",
-    title: "Done Task 2",
     status: "complete",
   });
   insertAssessment({
@@ -730,57 +655,21 @@ test("refreshRecoveryDbForArtifact closes complete-milestone DB row when artifac
   runGit(base, ["init", "-b", "main"]);
   runGit(base, ["config", "user.email", "test@example.com"]);
   runGit(base, ["config", "user.name", "Test User"]);
-  runGit(base, ["checkout", "-b", "milestone/M001"]);
   writeFileSync(join(base, "feature.ts"), "export const shipped = true;\n");
   runGit(base, ["add", "feature.ts"]);
   runGit(base, ["commit", "-m", "feat: implementation evidence"]);
-  writeFileSync(join(base, ".gsd", "integration-branch"), "main\n");
-  writeFileSync(
-    join(base, ".gsd", "PREFERENCES.md"),
-    ["---", "version: 1", "github:", "  enabled: true", "  repo: owner/repo", "---"].join("\n"),
-    "utf-8",
-  );
-  writeFileSync(
-    join(base, ".gsd", "github-sync.json"),
-    JSON.stringify({
-      version: 1,
-      repo: "owner/repo",
-      milestones: {
-        M001: {
-          issueNumber: 42,
-          ghMilestoneNumber: 7,
-          lastSyncedAt: "2025-01-01T00:00:00Z",
-          state: "open",
-        },
-      },
-      slices: {},
-      tasks: {},
-    }, null, 2),
-    "utf-8",
-  );
-
-  _resetGhCache();
-  _resetConfigCache();
-  _setGhAvailableForTest(true);
-  _setGhRateLimitOkForTest(true);
-  _setGhCloseOverridesForTest({
-    closeIssue: () => ({ ok: true }),
-    closeMilestone: () => ({ ok: true }),
-  });
 
   const result = refreshRecoveryDbForArtifact("complete-milestone", "M001", base);
 
-  assert.deepEqual(result, { ok: true });
-  assert.equal(getMilestone("M001")?.status, "complete");
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const mapping = loadSyncMapping(base);
-  assert.equal(mapping?.milestones.M001?.state, "closed");
-
-  _setGhCloseOverridesForTest(null);
-  _setGhAvailableForTest(null);
-  _setGhRateLimitOkForTest(null);
-  _resetGhCache();
-  _resetConfigCache();
+  // The recovery path consults only the canonical completion receipt; an open
+  // milestone has none, so the artifacts never complete it.
+  assert.deepEqual(result, {
+    ok: false,
+    fatal: true,
+    reason: "complete-milestone-canonical-command-required",
+    message: "Stuck recovery cannot complete adopted Milestone M001 from artifacts; retry the original completion invocation or dispatch the normal completion command.",
+  });
+  assert.equal(getMilestone("M001")?.status, "active");
 });
 
 test("adopted Milestone recovery cannot promote complete-looking artifacts into authority", () => {
@@ -924,55 +813,6 @@ test("adopted Milestone recovery rejects a current projection-shaped but incompl
   assert.equal(getMilestone("M001")?.completed_at, legacyBefore.completed_at);
 });
 
-test("refreshRecoveryDbForArtifact fails closed for complete-milestone without implementation evidence", () => {
-  const base = mkdtempSync(join(tmpdir(), "auto-recovery-complete-ms-no-impl-"));
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  tmpDirs.push(base);
-  insertMilestone({ id: "M001", title: "Stale completion", status: "active" });
-  insertSlice({
-    milestoneId: "M001",
-    id: "S01",
-    title: "Done Slice",
-    status: "complete",
-    risk: "low",
-    depends: [],
-  });
-  insertTask({
-    milestoneId: "M001",
-    sliceId: "S01",
-    id: "T01",
-    title: "Done Task",
-    status: "complete",
-  });
-  insertAssessment({
-    path: ".gsd/milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "---\nverdict: pass\n---\n",
-  });
-  const milestoneDir = join(base, ".gsd", "milestones", "M001");
-  mkdirSync(milestoneDir, { recursive: true });
-  writeFileSync(join(milestoneDir, "M001-SUMMARY.md"), "# Milestone Summary\n");
-  writeFileSync(join(milestoneDir, "M001-VALIDATION.md"), "---\nverdict: pass\n---\n");
-  runGit(base, ["init", "-b", "main"]);
-  runGit(base, ["config", "user.email", "test@example.com"]);
-  runGit(base, ["config", "user.name", "Test User"]);
-  runGit(base, ["add", ".gsd"]);
-  runGit(base, ["commit", "-m", "chore: gsd artifacts only"]);
-
-  const result = refreshRecoveryDbForArtifact("complete-milestone", "M001", base);
-
-  assert.deepEqual(result, {
-    ok: false,
-    fatal: true,
-    reason: "complete-milestone-implementation-missing",
-    message: "Stuck recovery found complete-milestone M001 artifacts, but implementation evidence is not present.",
-  });
-  assert.equal(getMilestone("M001")?.status, "active");
-});
-
 // ─── diagnoseExpectedArtifact ─────────────────────────────────────────────
 
 test("diagnoseExpectedArtifact returns description for known types", () => {
@@ -1089,75 +929,7 @@ test("verifyExpectedArtifact accepts DB-complete slice when roadmap projection i
   }
 });
 
-// ─── verifyExpectedArtifact: plan-slice empty scaffold regression (#699) ──
-
-test("verifyExpectedArtifact rejects plan-slice with empty scaffold", () => {
-  const base = makeTmpBase();
-  try {
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(sliceDir, { recursive: true });
-    writeFileSync(join(sliceDir, "S01-PLAN.md"), "# S01: Test Slice\n\n## Tasks\n\n");
-    assert.strictEqual(
-      verifyExpectedArtifact("plan-slice", "M001/S01", base),
-      false,
-      "Empty scaffold should not be treated as completed artifact",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("verifyExpectedArtifact accepts plan-slice with actual tasks", () => {
-  const base = makeTmpBase();
-  try {
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    const tasksDir = join(sliceDir, "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    writeFileSync(join(sliceDir, "S01-PLAN.md"), [
-      "# S01: Test Slice",
-      "",
-      "## Tasks",
-      "",
-      "- [ ] **T01: Implement feature** `est:2h`",
-      "- [ ] **T02: Write tests** `est:1h`",
-    ].join("\n"));
-    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan");
-    writeFileSync(join(tasksDir, "T02-PLAN.md"), "# T02 Plan");
-    assert.strictEqual(
-      verifyExpectedArtifact("plan-slice", "M001/S01", base),
-      true,
-      "Plan with task entries should be treated as completed artifact",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("verifyExpectedArtifact accepts plan-slice with completed tasks", () => {
-  const base = makeTmpBase();
-  try {
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    const tasksDir = join(sliceDir, "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    writeFileSync(join(sliceDir, "S01-PLAN.md"), [
-      "# S01: Test Slice",
-      "",
-      "## Tasks",
-      "",
-      "- [x] **T01: Implement feature** `est:2h`",
-      "- [ ] **T02: Write tests** `est:1h`",
-    ].join("\n"));
-    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan");
-    writeFileSync(join(tasksDir, "T02-PLAN.md"), "# T02 Plan");
-    assert.strictEqual(
-      verifyExpectedArtifact("plan-slice", "M001/S01", base),
-      true,
-      "Plan with completed task entries should be treated as completed artifact",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
+// ─── verifyExpectedArtifact: complete-slice reads the DB slice row ───────
 
 test("verifyExpectedArtifact treats complete-slice as satisfied when summary, UAT, and the DB slice row are complete", () => {
   const base = makeTmpBase();
@@ -1213,228 +985,6 @@ test("verifyExpectedArtifact rejects complete-slice when the DB slice row is unr
   }
 });
 
-test("verifyExpectedArtifact rejects run-uat when ASSESSMENT has no verdict", () => {
-  const base = makeTmpBase();
-  try {
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    writeFileSync(join(sliceDir, "S01-ASSESSMENT.md"), "# Reassessment\n\nNo canonical verdict field.\n");
-
-    assert.equal(
-      verifyExpectedArtifact("run-uat", "M001/S01", base),
-      false,
-      "run-uat should not verify from a pre-existing ASSESSMENT without verdict",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("verifyExpectedArtifact accepts run-uat when ASSESSMENT has verdict", () => {
-  const base = makeTmpBase();
-  try {
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    writeFileSync(join(sliceDir, "S01-ASSESSMENT.md"), [
-      "---",
-      "verdict: pass",
-      "---",
-      "",
-      "# UAT Assessment",
-    ].join("\n"));
-
-    assert.equal(
-      verifyExpectedArtifact("run-uat", "M001/S01", base),
-      true,
-      "run-uat should verify when ASSESSMENT contains a canonical verdict",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-
-// ─── verifyExpectedArtifact: plan-slice task plan check (#739) ────────────
-
-test("verifyExpectedArtifact plan-slice passes when all task plan files exist", () => {
-  const base = makeTmpBase();
-  try {
-    const tasksDir = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-    const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
-    const planContent = [
-      "# S01: Test Slice",
-      "",
-      "## Tasks",
-      "",
-      "- [ ] **T01: First task** `est:1h`",
-      "- [ ] **T02: Second task** `est:2h`",
-    ].join("\n");
-    writeFileSync(planPath, planContent);
-    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan\n\nDo the thing.");
-    writeFileSync(join(tasksDir, "T02-PLAN.md"), "# T02 Plan\n\nDo the other thing.");
-
-    const result = verifyExpectedArtifact("plan-slice", "M001/S01", base);
-    assert.equal(result, true, "should pass when all task plan files exist");
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("verifyExpectedArtifact plan-slice fails when a task plan file is missing (#739)", () => {
-  const base = makeTmpBase();
-  try {
-    const tasksDir = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-    const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
-    const planContent = [
-      "# S01: Test Slice",
-      "",
-      "## Tasks",
-      "",
-      "- [ ] **T01: First task** `est:1h`",
-      "- [ ] **T02: Second task** `est:2h`",
-    ].join("\n");
-    writeFileSync(planPath, planContent);
-    // Only write T01-PLAN.md — T02 is missing
-    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan\n\nDo the thing.");
-
-    const result = verifyExpectedArtifact("plan-slice", "M001/S01", base);
-    assert.equal(result, false, "should fail when T02-PLAN.md is missing");
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("verifyExpectedArtifact accepts flat-phase plan-slice with embedded tasks and no task plan files", () => {
-  const base = join(tmpdir(), `gsd-test-${randomUUID()}`);
-  try {
-    const phaseDir = join(base, ".gsd", "phases", "01-test");
-    mkdirSync(join(phaseDir, "tasks"), { recursive: true });
-    writeFileSync(join(phaseDir, "01-01-PLAN.md"), [
-      "# S01: Test Slice",
-      "",
-      "<tasks>",
-      "- [ ] **T01**: Implement feature _(1h)_",
-      "  - Files: `src/index.ts`",
-      "  - Verify: pnpm test",
-      "- [ ] **T02**: Write tests _(1h)_",
-      "</tasks>",
-    ].join("\n"));
-
-    const result = verifyExpectedArtifact("plan-slice", "M001/S01", base);
-    assert.equal(result, true, "flat-phase embedded tasks should not require tasks/T##-PLAN.md files");
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("verifyExpectedArtifact plan-slice still verifies per-task files for legacy ## Tasks plan with a stray empty <tasks> block", () => {
-  const base = makeTmpBase();
-  try {
-    const tasksDir = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-    const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
-    // Legacy layout: real tasks live in a "## Tasks" section with separate
-    // per-task PLAN files, but the plan also carries an empty <tasks></tasks>
-    // block. The empty block must NOT flip the plan into flat-phase mode and
-    // skip the per-task artifact checks.
-    const planContent = [
-      "# S01: Test Slice",
-      "",
-      "<tasks>",
-      "</tasks>",
-      "",
-      "## Tasks",
-      "",
-      "- [ ] **T01: First task** `est:1h`",
-      "- [ ] **T02: Second task** `est:2h`",
-    ].join("\n");
-    writeFileSync(planPath, planContent);
-    // Only T01-PLAN.md exists; T02's artifact is missing.
-    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan\n\nDo the thing.");
-
-    const result = verifyExpectedArtifact("plan-slice", "M001/S01", base);
-    assert.equal(result, false, "a stray <tasks> block must not skip per-task file verification for a legacy ## Tasks plan");
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("verifyExpectedArtifact plan-slice fails for plan with no tasks (#699)", () => {
-  const base = makeTmpBase();
-  try {
-    const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
-    const planContent = [
-      "# S01: Test Slice",
-      "",
-      "## Goal",
-      "",
-      "Just some documentation updates, no tasks.",
-    ].join("\n");
-    writeFileSync(planPath, planContent);
-
-    const result = verifyExpectedArtifact("plan-slice", "M001/S01", base);
-    assert.equal(result, false, "should fail when plan has no task entries (empty scaffold, #699)");
-  } finally {
-    cleanup(base);
-  }
-});
-
-// ─── verifyExpectedArtifact: heading-style plan tasks (#1691) ─────────────
-
-test("verifyExpectedArtifact accepts plan-slice with heading-style tasks (### T01 --)", () => {
-  const base = makeTmpBase();
-  try {
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    const tasksDir = join(sliceDir, "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    writeFileSync(join(sliceDir, "S01-PLAN.md"), [
-      "# S01: Test Slice",
-      "",
-      "## Tasks",
-      "",
-      "### T01 -- Implement feature",
-      "",
-      "Feature description.",
-      "",
-      "### T02 -- Write tests",
-      "",
-      "Test description.",
-    ].join("\n"));
-    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan");
-    writeFileSync(join(tasksDir, "T02-PLAN.md"), "# T02 Plan");
-    assert.strictEqual(
-      verifyExpectedArtifact("plan-slice", "M001/S01", base),
-      true,
-      "Heading-style plan with task entries should be treated as completed artifact",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("verifyExpectedArtifact accepts plan-slice with colon-style heading tasks (### T01:)", () => {
-  const base = makeTmpBase();
-  try {
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    const tasksDir = join(sliceDir, "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    writeFileSync(join(sliceDir, "S01-PLAN.md"), [
-      "# S01: Test Slice",
-      "",
-      "## Tasks",
-      "",
-      "### T01: Implement feature",
-      "",
-      "Feature description.",
-    ].join("\n"));
-    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan");
-    assert.strictEqual(
-      verifyExpectedArtifact("plan-slice", "M001/S01", base),
-      true,
-      "Colon heading-style plan should be treated as completed artifact",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
 test("verifyExpectedArtifact execute-task requires checked checkbox or DB status for heading-style plan entry (#1691, #3607)", () => {
   const base = makeTmpBase();
   try {
@@ -1484,6 +1034,42 @@ function makeGitBase(): string {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Take the open adopted M001 through the real canonical validation and
+ * completion tools so the closeout proof has a receipt to read.
+ */
+async function recordCanonicalValidationAndCompletion(base: string, key: string): Promise<void> {
+  const validation = await handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Complete",
+    sliceDeliveryAudit: "Delivered",
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verdictRationale: "Everything passes.",
+  }, base, {
+    invocation: {
+      idempotencyKey: `auto-recovery/${key}/validate`,
+      sourceTransport: "internal",
+      actorType: "agent",
+    },
+  });
+  assert.ok(!("error" in validation), `canonical validation should record: ${JSON.stringify(validation)}`);
+  const completion = await handleCompleteMilestone({
+    milestoneId: "M001",
+    title: "Milestone One",
+    oneLiner: "Done end to end.",
+    narrative: "All slices landed and validation passed.",
+    verificationPassed: true,
+  }, base, {
+    idempotencyKey: `auto-recovery/${key}/complete`,
+    sourceTransport: "internal",
+    actorType: "agent",
+  });
+  assert.ok(!("error" in completion), `canonical completion should settle: ${JSON.stringify(completion)}`);
 }
 
 function withLoggedGitCommands<T>(base: string, action: () => T): { result: T; commands: string[] } {
@@ -1726,6 +1312,46 @@ test("hasImplementationArtifacts backfills untagged main implementation commits 
       "present",
       "completed task file hints should repair prior untagged implementation commits on main",
     );
+    assert.deepEqual(getMilestoneCommitAttributionShas("M001"), [commitSha]);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("after the Cutover hasImplementationArtifacts takes the completed tasks of the file hints from the lifecycle rows", () => {
+  const base = makeGitBase();
+  try {
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice One", status: "pending", risk: "low", depends: [] });
+    // The Task is legacy pending and canonical completed.
+    insertTask({
+      id: "T01",
+      sliceId: "S01",
+      milestoneId: "M001",
+      title: "Task One",
+      status: "pending",
+      keyFiles: ["app.js"],
+      planning: { files: ["app.js"] },
+    });
+    seedLifecycles("implementation-evidence", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+      { itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed" },
+    ]);
+
+    writeFileSync(join(base, "app.js"), "document.body.dataset.ready = 'true';\n");
+    execFileSync("git", ["add", "app.js"], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: add the app"], { cwd: base, stdio: "ignore" });
+    const commitSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: base, encoding: "utf-8" }).trim();
+
+    assert.equal(hasImplementationArtifacts(base, "M001"), "unknown", "the legacy rows have no completed task");
+    assert.deepEqual(getMilestoneCommitAttributionShas("M001"), []);
+
+    cutOver();
+
+    assert.equal(hasImplementationArtifacts(base, "M001"), "present");
     assert.deepEqual(getMilestoneCommitAttributionShas("M001"), [commitSha]);
   } finally {
     cleanup(base);
@@ -2118,7 +1744,7 @@ test("verifyExpectedArtifact complete-milestone fails with only .gsd/ files (#17
   }
 });
 
-test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)", () => {
+test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)", async () => {
   const base = makeGitBase();
   try {
     // Create feature branch with implementation files AND milestone summary
@@ -2130,20 +1756,18 @@ test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)",
     execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "feat: implementation"], { cwd: base, stdio: "ignore" });
 
-    // Closeout is DB-authoritative (ADR-017): the closeout proof must clear
-    // before implementation evidence is consulted at all. The invariant under
-    // test is still "real implementation files are honored" — this fixture
-    // simply had no DB to prove closeout against.
+    // Closeout is DB-authoritative (ADR-017): the canonical closeout proof
+    // must clear before implementation evidence is consulted at all. The
+    // invariant under test is still "real implementation files are honored".
+    writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
     openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-    insertAssessment({
-      path: "milestones/M001/M001-VALIDATION.md",
-      milestoneId: "M001",
-      status: "pass",
-      scope: "milestone-validation",
-      fullContent: "verdict: pass",
-    });
+    seedLifecycles("auto-recovery/impl-files", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
+    await recordCanonicalValidationAndCompletion(base, "auto-recovery/impl-files");
 
     const result = verifyExpectedArtifact("complete-milestone", "M001", base);
     assert.equal(result, true, "complete-milestone should pass verification with implementation files");
@@ -2152,7 +1776,7 @@ test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)",
   }
 });
 
-test("verifyExpectedArtifact complete-milestone passes on main retry with milestone implementation commits (#4699)", () => {
+test("verifyExpectedArtifact complete-milestone passes on main retry with milestone implementation commits (#4699)", async () => {
   const base = makeGitBase();
   try {
     mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
@@ -2164,19 +1788,19 @@ test("verifyExpectedArtifact complete-milestone passes on main retry with milest
     execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "feat: implementation already on main\n\nGSD-Task: S01/T01"], { cwd: base, stdio: "ignore" });
 
-    // Closeout is DB-authoritative (ADR-017) — seed the closed milestone so the
-    // proof clears and the assertion still isolates its real subject: a
-    // self-diff between HEAD and main must not by itself fail verification.
+    // Closeout is DB-authoritative (ADR-017) — take the milestone through the
+    // canonical closeout so the proof clears and the assertion still isolates
+    // its real subject: a self-diff between HEAD and main must not by itself
+    // fail verification.
+    writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
     openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-    insertAssessment({
-      path: "milestones/M001/M001-VALIDATION.md",
-      milestoneId: "M001",
-      status: "pass",
-      scope: "milestone-validation",
-      fullContent: "verdict: pass",
-    });
+    seedLifecycles("auto-recovery/self-diff", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
+    await recordCanonicalValidationAndCompletion(base, "auto-recovery/self-diff");
 
     const result = verifyExpectedArtifact("complete-milestone", "M001", base);
     assert.equal(result, true, "complete-milestone should not fail solely because HEAD vs main is a self-diff");
@@ -2206,7 +1830,7 @@ test("verifyExpectedArtifact complete-milestone fails when DB milestone is not c
   }
 });
 
-test("verifyExpectedArtifact complete-milestone passes when DB milestone is complete (#4658)", () => {
+test("verifyExpectedArtifact complete-milestone passes when DB milestone is complete (#4658)", async () => {
   const base = makeGitBase();
   try {
     execFileSync("git", ["checkout", "-b", "feat/ms-db-complete"], { cwd: base, stdio: "ignore" });
@@ -2217,16 +1841,15 @@ test("verifyExpectedArtifact complete-milestone passes when DB milestone is comp
     execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "feat: implementation complete"], { cwd: base, stdio: "ignore" });
 
+    writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
     openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-    insertAssessment({
-      path: "milestones/M001/M001-VALIDATION.md",
-      milestoneId: "M001",
-      status: "pass",
-      scope: "milestone-validation",
-      fullContent: "verdict: pass",
-    });
+    seedLifecycles("auto-recovery/db-complete", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
+    await recordCanonicalValidationAndCompletion(base, "auto-recovery/db-complete");
 
     const result = verifyExpectedArtifact("complete-milestone", "M001", base);
     assert.equal(result, true, "complete-milestone should pass when DB status is complete");
@@ -2297,37 +1920,29 @@ test("verifyExpectedArtifact ignores complete-slice gates in stale gate-evaluate
 
 // ─── #4414 regressions ────────────────────────────────────────────────────────
 
-test("#4414: writeBlockerPlaceholder invalidates path cache so dispatch guard sees file", () => {
-  const base = makeTmpBase();
-  try {
-    // Prime the readdir cache by resolving a DIFFERENT file first — this
-    // mirrors the stuck-loop condition where the dispatch guard cached an
-    // empty directory listing before the placeholder was written.
-    invalidateAllCaches();
-    assert.equal(
-      resolveMilestoneFile(base, "M001", "RESEARCH"),
-      null,
-      "no RESEARCH file yet",
-    );
+test("#4414: writeBlockerPlaceholder never writes onto the unit's projection path", () => {
+  const base = makeTmpProject();
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
 
-    const result = writeBlockerPlaceholder(
-      "research-milestone",
-      "M001",
-      base,
-      "verification retries exhausted",
-    );
-    assert.ok(result, "placeholder path returned");
+  const result = writeBlockerPlaceholder(
+    "research-milestone",
+    "M001",
+    base,
+    "verification retries exhausted",
+  );
 
-    // After writeBlockerPlaceholder, the dispatch guard must see the new file
-    // immediately — otherwise the rule re-fires (#4414, 7× re-dispatch).
-    const postResolve = resolveMilestoneFile(base, "M001", "RESEARCH");
-    assert.ok(
-      postResolve,
-      "resolveMilestoneFile finds the placeholder post-write (cache invalidated)",
-    );
-  } finally {
-    cleanup(base);
-  }
+  assert.ok(result, "diagnostic sidecar path returned");
+  assert.match(result, /M001-RESEARCH-RECOVERY-BLOCKER\.md$/);
+  assert.equal(
+    resolveMilestoneFile(base, "M001", "RESEARCH"),
+    null,
+    "the blocker must not be found as the RESEARCH projection",
+  );
+  assert.equal(
+    verifyExpectedArtifact("research-milestone", "M001", base),
+    false,
+    "a blocker is not the unit's result: the unit stays incomplete",
+  );
 });
 
 test("#4414: parallel-research sentinel path does not collide with RESEARCH suffix", () => {
@@ -2356,49 +1971,38 @@ test("#4414: parallel-research sentinel path does not collide with RESEARCH suff
   }
 });
 
-test("#4068: verifyExpectedArtifact parallel-research treats PARALLEL-BLOCKER as terminal completion", () => {
-  // Regression: when a parallel-research unit times out and the timeout-recovery
-  // machinery writes a PARALLEL-BLOCKER placeholder, verifyExpectedArtifact must
-  // return true so the dispatch loop can advance.  Previously it only returned
-  // true when every slice had a RESEARCH file — meaning a timeout always left
-  // verifyExpectedArtifact returning false, the unit was never cleared from
-  // unitDispatchCount, and the dispatch rule re-fired on the next iteration
-  // (infinite loop, issue #4068 / #4355).
+test("#4068: verifyExpectedArtifact parallel-research treats a recorded recovery block as terminal", () => {
+  // When a parallel-research unit times out, recovery records a manual-attention
+  // gate run and writes the PARALLEL-BLOCKER diagnostic. The recorded row is the
+  // terminal outcome: verification returns true so the loop advances and
+  // dispatch falls back to per-slice research (#4068 / #4355).
   const base = makeTmpBase();
   try {
-    // Write a minimal roadmap
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
-      [
-        "# M001: Timeout Test",
-        "",
-        "## Slices",
-        "",
-        "- [ ] **S01: Alpha** `risk:low` `depends:[]`",
-        "- [ ] **S02: Beta** `risk:low` `depends:[]`",
-        "",
-      ].join("\n"),
-      "utf-8",
+    seedMilestoneSlices(base, [
+      { id: "S01", status: "pending" },
+      { id: "S02", status: "pending" },
+    ]);
+    assert.equal(
+      verifyExpectedArtifact("research-slice", "M001/parallel-research", base),
+      false,
+      "no slice has saved RESEARCH and nothing is recorded",
     );
 
-    // No RESEARCH files written — subagents timed out
-    clearParseCache();
-    invalidateAllCaches();
-
-    // Simulate timeout-recovery writing the PARALLEL-BLOCKER placeholder
+    // A PARALLEL-BLOCKER file with no recorded row decides nothing.
     const blockerPath = resolveExpectedArtifactPath("research-slice", "M001/parallel-research", base);
     assert.ok(blockerPath, "PARALLEL-BLOCKER path must resolve for parallel-research unit");
-    writeFileSync(blockerPath!, "# BLOCKER — timeout recovery\n\n**Reason**: hard timeout.\n", "utf-8");
+    writeFileSync(blockerPath, "# BLOCKER — timeout recovery\n\n**Reason**: hard timeout.\n", "utf-8");
+    assert.equal(
+      verifyExpectedArtifact("research-slice", "M001/parallel-research", base),
+      false,
+      "a blocker file alone must not satisfy verification",
+    );
 
-    clearParseCache();
-    invalidateAllCaches();
-
-    // After blocker is written, verifyExpectedArtifact must return true
-    // so the dispatch loop treats this unit as complete and moves on.
+    assert.ok(writeBlockerPlaceholder("research-slice", "M001/parallel-research", base, "hard timeout"));
     assert.equal(
       verifyExpectedArtifact("research-slice", "M001/parallel-research", base),
       true,
-      "#4068: PARALLEL-BLOCKER on disk must satisfy verifyExpectedArtifact so the loop does not re-dispatch",
+      "#4068: the recorded recovery block must satisfy verification so the loop does not re-dispatch",
     );
   } finally {
     cleanup(base);
@@ -2408,6 +2012,9 @@ test("#4068: verifyExpectedArtifact parallel-research treats PARALLEL-BLOCKER as
 test("verifyExpectedArtifact treats REACTIVE-BLOCKER as diagnostic only", () => {
   const base = makeTmpBase();
   try {
+    seedMilestoneSlices(base, [{ id: "S01", status: "active" }]);
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "One", status: "complete" });
+    insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Two", status: "pending" });
     const blockerPath = resolveExpectedArtifactPath("reactive-execute", "M001/S01/reactive+T01,T02", base);
     assert.ok(blockerPath, "reactive blocker path resolves");
     writeFileSync(blockerPath!, "# BLOCKER\n", "utf-8");
@@ -2682,116 +2289,83 @@ test("writeBlockerPlaceholder fails closed instead of inserting an S00-blocker s
   }
 });
 
-test("#4414: verifyExpectedArtifact parallel-research succeeds when all research-ready slices have RESEARCH", () => {
+test("#4414: verifyExpectedArtifact parallel-research succeeds when all research-ready slices have saved RESEARCH", () => {
   const base = makeTmpBase();
   try {
-    mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S02", "tasks"), { recursive: true });
-    mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S03", "tasks"), { recursive: true });
     seedMilestoneSlices(base, [
       { id: "S01", status: "pending" },
       { id: "S02", status: "pending" },
       { id: "S03", status: "pending" },
     ]);
+    const saveResearch = (sliceId: string): void => insertArtifact({
+      path: `milestones/M001/slices/${sliceId}/${sliceId}-RESEARCH.md`,
+      artifact_type: "RESEARCH",
+      milestone_id: "M001",
+      slice_id: sliceId,
+      task_id: null,
+      full_content: "# research",
+    });
 
-    // Minimal roadmap with three slices
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
-      [
-        "# M001: Regression",
-        "",
-        "## Slices",
-        "",
-        "- [ ] **S01: Alpha** `risk:low` `depends:[]`",
-        "- [ ] **S02: Beta** `risk:low` `depends:[]`",
-        "- [ ] **S03: Gamma** `risk:low` `depends:[]`",
-        "",
-      ].join("\n"),
-      "utf-8",
-    );
-
-    // Only 2 of 3 have RESEARCH — should fail verification
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-RESEARCH.md"),
-      "# research",
-      "utf-8",
-    );
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "slices", "S02", "S02-RESEARCH.md"),
-      "# research",
-      "utf-8",
-    );
-
-    clearParseCache();
-    invalidateAllCaches();
+    // Only 2 of 3 have a saved RESEARCH row — should fail verification
+    saveResearch("S01");
+    saveResearch("S02");
     assert.equal(
       verifyExpectedArtifact("research-slice", "M001/parallel-research", base),
       false,
       "missing S03 RESEARCH → verification fails",
     );
 
-    // All three RESEARCH present → verification passes
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "slices", "S03", "S03-RESEARCH.md"),
-      "# research",
-      "utf-8",
+    // A RESEARCH file with no saved row does not count
+    mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S03"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S03", "S03-RESEARCH.md"), "# research", "utf-8");
+    assert.equal(
+      verifyExpectedArtifact("research-slice", "M001/parallel-research", base),
+      false,
+      "an S03 RESEARCH file with no saved row → verification still fails",
     );
-    clearParseCache();
-    invalidateAllCaches();
+
+    // All three saved → verification passes
+    saveResearch("S03");
     assert.equal(
       verifyExpectedArtifact("research-slice", "M001/parallel-research", base),
       true,
-      "all slices have RESEARCH → verification passes",
+      "all slices have saved RESEARCH → verification passes",
     );
   } finally {
     cleanup(base);
   }
 });
 
-test("parallel-research verification accepts canonical project artifacts from a worktree base", () => {
+test("parallel-research verification gives the same answer from a worktree base", () => {
   const base = makeTmpBase();
-  const previousProjectRoot = process.env.GSD_PROJECT_ROOT;
-  delete process.env.GSD_PROJECT_ROOT;
   try {
-    const milestoneDir = join(base, ".gsd", "milestones", "M001");
-    mkdirSync(join(milestoneDir, "slices", "S02", "tasks"), { recursive: true });
-    mkdirSync(join(milestoneDir, "slices", "S03", "tasks"), { recursive: true });
     seedMilestoneSlices(base, [
       { id: "S01", status: "pending" },
       { id: "S02", status: "pending" },
       { id: "S03", status: "pending" },
     ]);
-
-    writeFileSync(
-      join(milestoneDir, "M001-ROADMAP.md"),
-      [
-        "# M001: Regression",
-        "",
-        "## Slices",
-        "",
-        "- [ ] **S01: Alpha** `risk:low` `depends:[]`",
-        "- [ ] **S02: Beta** `risk:low` `depends:[]`",
-        "- [ ] **S03: Gamma** `risk:low` `depends:[]`",
-        "",
-      ].join("\n"),
-      "utf-8",
-    );
-    writeFileSync(join(milestoneDir, "M001-RESEARCH.md"), "# milestone research\n", "utf-8");
-    writeFileSync(join(milestoneDir, "slices", "S02", "S02-RESEARCH.md"), "# research\n", "utf-8");
-    writeFileSync(join(milestoneDir, "slices", "S03", "S03-RESEARCH.md"), "# research\n", "utf-8");
+    // Milestone research covers S01; S02 and S03 have their own saved RESEARCH.
+    for (const sliceId of [null, "S02", "S03"]) {
+      insertArtifact({
+        path: sliceId ? `milestones/M001/slices/${sliceId}/${sliceId}-RESEARCH.md` : "milestones/M001/M001-RESEARCH.md",
+        artifact_type: "RESEARCH",
+        milestone_id: "M001",
+        slice_id: sliceId,
+        task_id: null,
+        full_content: "# research\n",
+      });
+    }
 
     const worktree = join(base, ".gsd", "worktrees", "M001");
     mkdirSync(join(worktree, ".gsd", "milestones", "M001"), { recursive: true });
     writeFileSync(join(worktree, ".git"), "gitdir: ../../../../.git/worktrees/M001\n", "utf-8");
 
-    clearParseCache();
-    invalidateAllCaches();
     assert.equal(
       verifyExpectedArtifact("research-slice", "M001/parallel-research", worktree),
       true,
-      "worktree verification should use the same canonical artifacts as dispatch",
+      "verification reads the database, so the base path does not change the answer",
     );
   } finally {
-    if (previousProjectRoot !== undefined) process.env.GSD_PROJECT_ROOT = previousProjectRoot;
     cleanup(base);
   }
 });

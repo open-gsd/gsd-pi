@@ -1,16 +1,18 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 
-import { loadFile, saveFile } from "./files.js";
-import { _getAdapter, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
+import { _getAdapter, isDbAvailable } from "./gsd-db.js";
+import { readMilestoneSlices } from "./db/lifecycle-read.js";
 import {
   openExistingWorkflowDatabase,
   openWorkflowDatabaseIsolated,
   resolveWorkflowDatabaseLocation,
 } from "./db-workspace.js";
 import { hasRequiredSchemaFeature } from "./db-required-schema.js";
-import { resolveMilestoneFile, milestonesDir, legacyMilestonesDir, resolveGsdRootFile } from "./paths.js";
+import { milestonesDir, legacyMilestonesDir, gsdRoot } from "./paths.js";
 import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
+import { renderStateProjection } from "./workflow-projections.js";
 import { loadEffectiveGSDPreferences, type GSDPreferences } from "./preferences.js";
 import { appendDoctorHistory } from "./doctor-history.js";
 import { checkWorkspaceRepositoryHealth } from "./doctor-workspace-checks.js";
@@ -19,6 +21,7 @@ import { collectPreferenceDiagnostics, formatPreferenceDiagnosticDetail } from "
 import type { DoctorIssue, DoctorIssueCode, DoctorReport } from "./doctor-types.js";
 import { GLOBAL_STATE_CODES } from "./doctor-types.js";
 import { checkGitHealth, checkRuntimeHealth, checkGlobalHealth, checkEngineHealth } from "./doctor-checks.js";
+import { checkLifecycleShadowObservationLoss } from "./doctor-engine-checks.js";
 import { checkEnvironmentHealth } from "./doctor-environment.js";
 import { checkGsdStateHealth } from "./doctor-state-checks.js";
 import { validateTitle } from "./validation.js";
@@ -104,69 +107,15 @@ function validatePreferenceShape(preferences: GSDPreferences): string[] {
   return issues;
 }
 
-/** Build STATE.md content from derived state. Exported for guided-flow pre-dispatch rebuild (#3475). */
-export function buildStateMarkdown(state: Awaited<ReturnType<typeof deriveState>>): string {
-  const lines: string[] = [];
-  lines.push("# GSD State", "");
-
-  const activeMilestone = state.activeMilestone
-    ? `${state.activeMilestone.id}: ${state.activeMilestone.title}`
-    : "None";
-  const activeSlice = state.activeSlice
-    ? `${state.activeSlice.id}: ${state.activeSlice.title}`
-    : "None";
-
-  lines.push(`**Active Milestone:** ${activeMilestone}`);
-  lines.push(`**Active Slice:** ${activeSlice}`);
-  lines.push(`**Phase:** ${state.phase}`);
-  if (state.requirements) {
-    lines.push(`**Requirements Status:** ${state.requirements.active} active \u00b7 ${state.requirements.validated} validated \u00b7 ${state.requirements.deferred} deferred \u00b7 ${state.requirements.outOfScope} out of scope`);
-  }
-  lines.push("");
-  lines.push("## Milestone Registry");
-
-  for (const entry of state.registry) {
-    const glyph = entry.status === "complete" ? "\u2705" : entry.status === "active" ? "\uD83D\uDD04" : entry.status === "parked" ? "\u23F8\uFE0F" : "\u2B1C";
-    lines.push(`- ${glyph} **${entry.id}:** ${entry.title}`);
-  }
-
-  lines.push("");
-  lines.push("## Recent Decisions");
-  if (state.recentDecisions.length > 0) {
-    for (const decision of state.recentDecisions) lines.push(`- ${decision}`);
-  } else {
-    lines.push("- None recorded");
-  }
-
-  lines.push("");
-  lines.push("## Blockers");
-  if (state.blockers.length > 0) {
-    for (const blocker of state.blockers) lines.push(`- ${blocker}`);
-  } else {
-    lines.push("- None");
-  }
-
-  lines.push("");
-  lines.push("## Next Action");
-  lines.push(state.nextAction || "None");
-  lines.push("");
-
-  return lines.join("\n");
-}
-
 async function updateStateFile(basePath: string, fixesApplied: string[]): Promise<void> {
-  const state = await deriveState(basePath);
-  const path = resolveGsdRootFile(basePath, "STATE");
-  await saveFile(path, buildStateMarkdown(state));
-  fixesApplied.push(`updated ${path}`);
+  const { stale } = await renderStateProjection(basePath);
+  if (!stale) fixesApplied.push(`updated ${join(gsdRoot(basePath), "STATE.md")}`);
 }
 
-/** Rebuild STATE.md from current disk state. Exported for auto-mode post-hooks. */
+/** Rebuild STATE.md from the DB. Exported for auto-mode post-hooks. */
 export async function rebuildState(basePath: string): Promise<void> {
   invalidateAllCaches();
-  const state = await deriveState(basePath);
-  const path = resolveGsdRootFile(basePath, "STATE");
-  await saveFile(path, buildStateMarkdown(state));
+  await renderStateProjection(basePath);
 }
 
 export async function selectDoctorScope(basePath: string, requestedScope?: string): Promise<string | undefined> {
@@ -184,19 +133,16 @@ export async function selectDoctorScope(basePath: string, requestedScope?: strin
   const legacyMilestonesPath = legacyMilestonesDir(basePath);
   if (!existsSync(milestonesPath) && !existsSync(legacyMilestonesPath)) return undefined;
 
+  // Slice rows decide: a milestone with no slice rows is not planned, and a
+  // rendered ROADMAP file is not read.
   for (const milestone of state.registry) {
-    const roadmapPath = resolveMilestoneFile(basePath, milestone.id, "ROADMAP");
-    const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
-    if (!roadmapContent) continue;
-    const dbSlices = getMilestoneSlices(milestone.id);
-    const allDone = dbSlices.length > 0 && dbSlices.every(s => s.status === "complete");
-    if (!allDone) return milestone.id;
+    if (readMilestoneSlices(milestone.id).some(s => !s.done)) return milestone.id;
   }
 
   return state.registry[0]?.id;
 }
 
-export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; dryRun?: boolean; scope?: string; fixLevel?: "task" | "all"; isolationMode?: "none" | "worktree" | "branch"; includeBuild?: boolean; includeTests?: boolean }): Promise<DoctorReport> {
+export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; dryRun?: boolean; scope?: string; fixLevel?: "task" | "all"; isolationMode?: "none" | "worktree" | "branch"; includeBuild?: boolean; includeTests?: boolean; importFileOverrides?: boolean }): Promise<DoctorReport> {
   const issues: DoctorIssue[] = [];
   const fixesApplied: string[] = [];
   const fix = options?.fix === true;
@@ -256,7 +202,7 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
   const isolationMode: "none" | "worktree" | "branch" = options?.isolationMode ??
     (prefs?.preferences?.git?.isolation === "worktree" ? "worktree" :
     prefs?.preferences?.git?.isolation === "branch" ? "branch" : "none");
-  await checkGitHealth(basePath, issues, fixesApplied, shouldFix, isolationMode, dryRun);
+  await checkGitHealth(basePath, issues, fixesApplied, shouldFix, isolationMode);
   checkWorkspaceRepositoryHealth(basePath, prefs?.preferences, issues);
   const gitMs = Date.now() - t0git;
 
@@ -281,7 +227,12 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
   await checkEngineHealth(basePath, issues, fixesApplied, {
     repair: fix && !dryRun,
     repairDbLock: shouldFix("db_locked"),
+    importFileOverrides: options?.importFileOverrides,
   });
+
+  // Lifecycle shadow observation-loss accounting (#2442): surface audit events
+  // whose primary sink failed — otherwise lost shadow observations are silent.
+  checkLifecycleShadowObservationLoss(basePath, issues);
 
   const milestonesPath = milestonesDir(basePath);
   const legacyMilestonesPath2 = legacyMilestonesDir(basePath);

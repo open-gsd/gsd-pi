@@ -970,3 +970,89 @@ test("reconcileGsdBrowserPathAfterInstall does not throw when PATH entry vanishe
     });
   });
 });
+
+test("update-cmd fails loudly when the installer exits 0 but the installed version did not change (#2435)", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalVersion = process.env.GSD_VERSION;
+  const originalStdoutWrite = process.stdout.write;
+  const originalStderrWrite = process.stderr.write;
+  const originalExit = process.exit;
+  const originalPath = process.env.PATH;
+  const originalUserAgent = process.env.npm_config_user_agent;
+  const originalExecPath = process.env.npm_execpath;
+  const originalPnpmHome = process.env.PNPM_HOME;
+  const originalBunInstall = process.env.BUN_INSTALL;
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-update-verify-"));
+  const binDir = join(tmp, "bin");
+
+  t.after(() => {
+    rmSync(tmp, { recursive: true, force: true });
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdoutWrite;
+    process.stderr.write = originalStderrWrite;
+    process.exit = originalExit;
+    if (originalVersion === undefined) delete process.env.GSD_VERSION;
+    else process.env.GSD_VERSION = originalVersion;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalUserAgent === undefined) delete process.env.npm_config_user_agent;
+    else process.env.npm_config_user_agent = originalUserAgent;
+    if (originalExecPath === undefined) delete process.env.npm_execpath;
+    else process.env.npm_execpath = originalExecPath;
+    if (originalPnpmHome === undefined) delete process.env.PNPM_HOME;
+    else process.env.PNPM_HOME = originalPnpmHome;
+    if (originalBunInstall === undefined) delete process.env.BUN_INSTALL;
+    else process.env.BUN_INSTALL = originalBunInstall;
+  });
+
+  // Fake npm on PATH: exits 0 without touching anything, so the installer
+  // "succeeds" while the installed manifest stays untouched.
+  mkdirSync(binDir, { recursive: true });
+  const isWin = process.platform === "win32";
+  writeFileSync(
+    join(binDir, isWin ? "npm.cmd" : "npm"),
+    isWin ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n",
+  );
+  if (!isWin) chmodSync(join(binDir, "npm"), 0o755);
+
+  process.env.GSD_VERSION = "0.0.1";
+  // Pin resolveInstallCommand to the npm path: a dev shell running under
+  // pnpm would otherwise make it choose `pnpm add -g` for real.
+  delete process.env.npm_config_user_agent;
+  delete process.env.npm_execpath;
+  delete process.env.PNPM_HOME;
+  delete process.env.BUN_INSTALL;
+  process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
+  globalThis.fetch = async () => Response.json({ version: "9999.0.0" });
+  (process.stdout as any).write = (chunk: unknown) => {
+    stdout.push(String(chunk));
+    return true;
+  };
+  (process.stderr as any).write = (chunk: unknown) => {
+    stderr.push(String(chunk));
+    return true;
+  };
+  (process as any).exit = (code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  };
+
+  // The manifest re-read anchors at the running entry script (the test file),
+  // so it reads this workspace's @opengsd/gsd-pi version — strictly older than
+  // the fetched 9999.0.0 — and must fail loudly instead of claiming success.
+  await assert.rejects(
+    () => runUpdate({ agentDir: join(tmp, "agent"), skillsDir: join(tmp, "skills") }),
+    { message: "process.exit:1" },
+    "the incomplete-update branch must exit non-zero",
+  );
+
+  const err = stderr.join("");
+  assert.ok(err.includes("Update incomplete"), `stderr must report the incomplete update, got: ${err}`);
+  assert.ok(err.includes("v9999.0.0"), "stderr must state the expected version");
+  assert.ok(err.includes("Try manually:"), "stderr must include the manual remediation command");
+  assert.ok(
+    !stdout.join("").includes("Updated to v9999.0.0"),
+    "must not claim update success when the installed manifest did not change",
+  );
+});

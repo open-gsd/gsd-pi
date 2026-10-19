@@ -4,7 +4,7 @@
 // best-effort catch (auto-dispatch.ts:1492-1496) that logs a `dispatch` ERROR
 // "reactive graph derivation failed" and falls through to sequential execution.
 // The catch is otherwise unreachable because every operation it wraps
-// (loadSliceTaskIO, deriveTaskGraph, saveReactiveState) is internally
+// (loadSliceTaskIO, deriveTaskGraph) is internally
 // defensive — so we inject a throwing derive function via the sanctioned
 // setReactiveGraphDeriveFnForTest seam (mirroring the :1809 / :637 pattern) to
 // deterministically exercise the failure path.

@@ -14,6 +14,7 @@ Pi doesn't make you wait for the agent to finish before sending more instruction
 **Follow-up** is for chaining: "After you're done with that, also do this." The message waits until the agent has no more tool calls to make.
 
 **Settings:**
+
 - `steeringMode`: `"one-at-a-time"` (default) or `"all"` (deliver all queued at once)
 - `followUpMode`: same options
 

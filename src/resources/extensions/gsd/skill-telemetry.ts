@@ -8,6 +8,8 @@
  * Data flow:
  *   1. At dispatch, captureAvailableSkills(names) records catalog skill names
  *   2. During execution, recordSkillRead() tracks explicit SKILL.md reads
+ *      (NOT yet wired — units execute in child processes and this in-process
+ *      set is never populated there; #2495 follow-up)
  *   3. At unit completion, getAndClearSkills() returns the loaded list for metrics
  */
 
@@ -43,8 +45,12 @@ export function recordSkillRead(skillName: string): void {
 /**
  * Get the skill names for the current unit and clear state.
  * Returns actively loaded skills if any, otherwise available skills.
- * This gives the most useful signal: if the agent read specific skills,
- * report those; otherwise report what was available.
+ *
+ * NOTE (#2495): today this ALWAYS returns availability — the catalog captured
+ * at dispatch. recordSkillRead() has no call sites: units execute in child
+ * processes and the loaded set is never populated across that boundary, so
+ * the loaded-preferred branch below never fires. It is retained unchanged for
+ * when recordSkillRead gets wired across dispatch (follow-up).
  */
 export function getAndClearSkills(): string[] {
   const result = activelyLoadedSkills.size > 0

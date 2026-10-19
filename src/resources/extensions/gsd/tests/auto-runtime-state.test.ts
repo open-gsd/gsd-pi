@@ -18,6 +18,7 @@ import {
   readUnitHarnessAbort,
   recordUnitHarnessAbort,
 } from "../unit-runtime.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 test("getAutoRuntimeSnapshot includes orchestration phase when available", () => {
   autoSession.reset();
@@ -106,6 +107,7 @@ test("clearToolInvocationError clears stale tool error even when a harness abort
   const base = mkdtempSync(join(tmpdir(), "gsd-auto-runtime-state-"));
   const startedAt = 123456;
   try {
+    openDatabase(":memory:");
     autoSession.reset();
     autoSession.active = true;
     autoSession.basePath = base;
@@ -131,6 +133,7 @@ test("clearToolInvocationError clears stale tool error even when a harness abort
       "durable harness abort remains available for result-save blocking",
     );
   } finally {
+    closeDatabase();
     autoSession.reset();
     rmSync(base, { recursive: true, force: true });
   }

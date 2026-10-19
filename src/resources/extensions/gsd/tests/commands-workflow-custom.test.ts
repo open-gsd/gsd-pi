@@ -9,6 +9,7 @@ import { describe, it, afterEach, before } from "node:test";
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
+  realpathSync,
   rmSync,
   mkdirSync,
   writeFileSync,
@@ -18,6 +19,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { getGsdArgumentCompletions, TOP_LEVEL_SUBCOMMANDS } from "../commands/catalog.ts";
+import { closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
+import { autoSession } from "../auto-runtime-state.ts";
+import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
+import { customWorkflowRunId } from "../db/custom-workflow-runs.ts";
+import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.ts";
+import { PAUSED_SESSION_KV_KEY } from "../interrupted-session.ts";
+import { createRun, listRuns } from "../run-manager.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -31,6 +39,10 @@ function makeTmpBase(): string {
 }
 
 afterEach(() => {
+  // The run and resume subcommands name a run in the auto session.
+  autoSession.reset();
+  // The run and resume subcommands open the database of the project.
+  if (isDbAvailable()) closeDatabase();
   // Restore cwd if changed during tests
   if (savedCwd && process.cwd() !== savedCwd) {
     process.chdir(savedCwd);
@@ -123,11 +135,11 @@ describe("workflow catalog registration", () => {
     const completions = getGsdArgumentCompletions("workflow ");
     const labels = completions.map((c: any) => c.label);
     for (const sub of [
-      "new", "run", "list", "info", "install", "uninstall", "validate", "pause", "resume",
+      "new", "run", "list", "info", "install", "uninstall", "validate", "pause", "resume", "approve",
     ]) {
       assert.ok(labels.includes(sub), `missing completion: ${sub}`);
     }
-    assert.equal(labels.length, 9, "should have exactly 9 subcommands");
+    assert.equal(labels.length, 10, "should have exactly 10 subcommands");
   });
 
   it("getGsdArgumentCompletions('workflow r') filters to run and resume", () => {
@@ -278,6 +290,109 @@ describe("workflow command handler", () => {
     );
   });
 
+  it("'/gsd workflow resume <run>' for an unknown run shows an error", async () => {
+    const base = makeTmpBase();
+    mkdirSync(join(base, ".gsd"));
+    process.chdir(base);
+    const { handled, notifications } = await callHandler("workflow resume no-such-workflow/2026-01-01T00-00-00");
+    assert.ok(handled, "should be handled");
+    assert.ok(
+      notifications.some((n) => n.level === "error" && n.message.includes("no such run")),
+      "should show the unknown-run error",
+    );
+  });
+
+  /**
+   * Call a subcommand that starts auto-mode. The start is detached, so wait
+   * until it ends. An invalid GSD_PROJECT_ID ends it at the first check of the
+   * session bootstrap, before a model is called.
+   */
+  async function callAutoStartingHandler(t: { after(fn: () => void): void }, trimmed: string) {
+    const priorProjectId = process.env.GSD_PROJECT_ID;
+    process.env.GSD_PROJECT_ID = "invalid project id";
+    t.after(() => {
+      if (priorProjectId === undefined) delete process.env.GSD_PROJECT_ID;
+      else process.env.GSD_PROJECT_ID = priorProjectId;
+    });
+    const { handleWorkflowCommand } = await import("../commands/handlers/workflow.ts");
+    const ctx = {
+      ...createMockCtx(),
+      sessionManager: { getSessionFile: () => null, getSessionId: () => "workflow-command-test" },
+      modelRegistry: { getAvailable: () => [], isProviderRequestReady: () => false },
+      model: undefined,
+    };
+    const pi = { ...createMockPi(), getThinkingLevel: () => "off" };
+    await handleWorkflowCommand(trimmed, ctx as any, pi as any);
+    const deadline = Date.now() + 10_000;
+    const ended = () => ctx.notifications.some((n) =>
+      n.level === "error" || n.message.includes("GSD_PROJECT_ID must contain only"));
+    while (!ended() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    return ctx.notifications;
+  }
+
+  for (const command of ["workflow run home-notes", "workflow home-notes"]) {
+    it(`'/gsd ${command}' creates the run in a project with no .gsd directory`, async (t) => {
+      // The definition is a global plugin, so the project needs no .gsd directory for it.
+      const home = makeTmpBase();
+      mkdirSync(join(home, "workflows"));
+      writeFileSync(join(home, "workflows", "home-notes.yaml"), SIMPLE_DEF.replace("test-workflow", "home-notes"), "utf-8");
+      const priorHome = process.env.GSD_HOME;
+      process.env.GSD_HOME = home;
+      t.after(() => {
+        if (priorHome === undefined) delete process.env.GSD_HOME;
+        else process.env.GSD_HOME = priorHome;
+      });
+      const base = realpathSync(makeTmpBase());
+      process.chdir(base);
+
+      const notifications = await callAutoStartingHandler(t, command);
+
+      assert.ok(
+        notifications.some((n) => n.message.includes("Created workflow run: home-notes")),
+        notifications.map((n) => n.message).join(" | "),
+      );
+      // The run is database rows, and auto-mode started on it.
+      const [run] = listRuns(base, "home-notes");
+      assert.equal(run?.steps.total, 1);
+      assert.equal(existsSync(join(run!.runDir, "GRAPH.yaml")), true);
+      assert.equal(autoSession.activeRunDir, run!.runDir);
+      assert.ok(notifications.some((n) => n.message.includes("GSD_PROJECT_ID must contain only")),
+        "auto-mode start reached the session bootstrap");
+    });
+  }
+
+  it("'/gsd workflow resume <run>' starts the named run when another run has a pause record", async (t) => {
+    const base = realpathSync(makeTmpBase());
+    for (const name of ["alpha", "beta"]) writeDefinition(base, name, SIMPLE_DEF.replace("test-workflow", name));
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const alphaDir = createRun(base, "alpha");
+    const betaDir = createRun(base, "beta");
+    // alpha paused in an earlier process: its pause record is in runtime_kv.
+    setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
+      activeEngineId: "custom",
+      activeRunDir: alphaDir,
+      originalBasePath: base,
+    });
+    process.chdir(base);
+
+    const notifications = await callAutoStartingHandler(t, `workflow resume ${customWorkflowRunId(betaDir)}`);
+
+    const messages = notifications.map((n) => n.message);
+    assert.ok(messages.some((m) => m.includes("GSD_PROJECT_ID must contain only")),
+      `auto-mode start reached the session bootstrap, got: ${messages.join(" | ")}`);
+    assert.ok(!messages.some((m) => m.includes("Resuming paused custom workflow")), messages.join(" | "));
+    assert.equal(autoSession.activeRunDir, betaDir);
+    assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), null);
+    // The run that the session dispatches is beta. alpha did not start.
+    const engine = new CustomWorkflowEngine(autoSession.activeRunDir!);
+    const action = await engine.resolveDispatch(await engine.deriveState(base), { basePath: base });
+    assert.equal(
+      action.action === "dispatch" ? action.step.unitId : action.action,
+      `${customWorkflowRunId(betaDir)}/step-1`,
+    );
+    assert.equal(listRuns(base, "alpha")[0]?.status, "pending");
+  });
+
   it("'/gsd workflow unknown-sub' shows unknown subcommand", async () => {
     const { handled, notifications } = await callHandler("workflow blurble");
     assert.ok(handled, "should be handled");
@@ -294,6 +409,22 @@ describe("workflow command handler", () => {
       notifications.some((n) => n.message.includes("No workflow runs found")),
       "should show no runs message",
     );
+  });
+
+  it("'/gsd workflow list' in a cold session does not show a run that has rows as not imported", async () => {
+    const base = realpathSync(makeTmpBase());
+    writeDefinition(base, "alpha", SIMPLE_DEF.replace("test-workflow", "alpha"));
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    createRun(base, "alpha");
+    // A cold session: no command has opened the database yet.
+    closeDatabase();
+    process.chdir(base);
+
+    const { notifications } = await callHandler("workflow list");
+
+    const listing = notifications.map((n) => n.message).join("\n");
+    assert.match(listing, /alpha \[.+\] — pending \(0\/1 steps\)/);
+    assert.ok(!listing.includes("not imported"), listing);
   });
 
   it("non-workflow commands are not intercepted by custom workflow routing", async () => {

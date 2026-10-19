@@ -74,6 +74,7 @@ function db(): NonNullable<ReturnType<typeof _getAdapter>> {
 function prepareCase(
   seedExistingMilestone = false,
   corpusCase = "gsd-nested",
+  seed?: () => void,
 ): PreparedCase {
   sequence += 1;
   const workspace = mkdtempSync(join(tmpdir(), "gsd-forward-repair-"));
@@ -92,6 +93,7 @@ function prepareCase(
     db().prepare(`INSERT INTO milestones (id, title, status, created_at)
       VALUES ('M001', 'Original foundation', 'active', '2026-07-18T00:00:00.000Z')`).run();
   }
+  seed?.();
   const roots = createLegacyImportCorpusSourceRoots(source);
   const previewInput = { roots };
   const base = captureCurrentLegacyImportBaseSnapshot();
@@ -321,6 +323,55 @@ test("Forward Repair tombstones unchanged hierarchy introduced by the Import App
     FROM workflow_item_lifecycles WHERE milestone_id = 'M001'`).all(), [{ lifecycle_status: "cancelled" }]);
   assert.equal(db().prepare("SELECT COUNT(*) AS count FROM milestones WHERE id = 'M001'").get()?.["count"], 1);
   assert.equal(db().prepare("SELECT title FROM milestones WHERE id = 'M-LATER'").get()?.["title"], "Accepted later work");
+});
+
+test("Forward Repair keeps the status of an existing row that the Import Application adopted", () => {
+  // Rows of an older build: no lifecycle row. The source marks S01 and its
+  // Task complete, so the Application adopts both as completed.
+  const prepared = prepareCase(false, "gsd-nested", () => {
+    db().exec(`
+      INSERT INTO milestones (id, title, status) VALUES ('M001', 'Foundation', 'active');
+      INSERT INTO slices (milestone_id, id, title, status) VALUES ('M001', 'S01', 'Core setup', 'pending');
+      INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+        VALUES ('M001', 'S01', 'T01', 'Create the project skeleton', 'pending');
+    `);
+  });
+  commitLaterCanonicalRow(prepared);
+  const { input, plan } = prepareRepairInput(prepared, "adopted-existing-row");
+
+  assert.deepEqual(
+    plan.targets
+      .filter((entry) => entry.targetKey === "M001/S01" || entry.targetKey === "M001/S01/T01")
+      .filter((entry) => entry.targetKind !== "slice-dependencies")
+      .map((entry) => [entry.targetKind, entry.disposition, entry.reasonCode, entry.mutation]),
+    [
+      ["slice", "preserve", "STATUS_REQUIRED_BY_ADOPTED_LIFECYCLE", null],
+      ["task", "preserve", "STATUS_REQUIRED_BY_ADOPTED_LIFECYCLE", null],
+      ["slice-lifecycle", "preserve", "LIFECYCLE_REQUIRED_BY_PRESERVED_HIERARCHY", null],
+      ["task-lifecycle", "preserve", "LIFECYCLE_REQUIRED_BY_PRESERVED_HIERARCHY", null],
+    ],
+  );
+  assert.equal(applyLegacyImportForwardRepair(input).status, "committed");
+
+  // The legacy status and the lifecycle row still name the same state.
+  assert.deepEqual(db().prepare(`
+    SELECT 'slice' AS kind, item.status, lifecycle.lifecycle_status
+    FROM slices item
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = item.milestone_id
+        AND lifecycle.slice_id = item.id
+    WHERE item.milestone_id = 'M001' AND item.id = 'S01'
+    UNION ALL
+    SELECT 'task', item.status, lifecycle.lifecycle_status
+    FROM tasks item
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'task' AND lifecycle.milestone_id = item.milestone_id
+        AND lifecycle.slice_id = item.slice_id AND lifecycle.task_id = item.id
+    WHERE item.milestone_id = 'M001' AND item.slice_id = 'S01' AND item.id = 'T01'
+  `).all(), [
+    { kind: "slice", status: "complete", lifecycle_status: "completed" },
+    { kind: "task", status: "complete", lifecycle_status: "completed" },
+  ]);
 });
 
 test("Forward Repair Domain Operation rolls back mutations without its exact receipt", () => {
@@ -834,6 +885,129 @@ test("an imported decision already removed from a base without it is already rep
   assert.equal(plan.mutationCount, 0);
   assert.equal(plan.targets[0]?.disposition, "already-repaired");
   assert.equal(plan.targets[0]?.reasonCode, "DECISION_ALREADY_RESTORED");
+});
+
+test("Forward Repair keeps an imported knowledge row and plans no mutation for it", () => {
+  const identity = hashLegacyImportValue({ id: "K001" });
+  const applicationPlan = {
+    planSchemaVersion: 2,
+    previewId: identity,
+    previewHash: identity,
+    baseProjectRevision: 0,
+    baseAuthorityEpoch: 0,
+    instructions: [{
+      action: "create-knowledge-memory",
+      targetKind: "knowledge",
+      targetKey: "K001",
+      knowledgeId: "K001",
+      values: { table: "rules", cells: '["project","Imported rule","—","manual"]' },
+      changeIds: [identity],
+    }],
+  } as unknown as LegacyImportApplicationPlan;
+  const plan = compileLegacyImportForwardRepairPlan({
+    applicationOperationId: "application-op",
+    applicationIdentityHash: identity,
+    applicationRelevantRowsHash: identity,
+    previewId: identity,
+    previewHash: identity,
+    backupId: identity,
+    applicationPlan,
+    backupBase: baseSnapshot(0, []),
+    currentBase: baseSnapshot(2, []),
+  });
+
+  assert.equal(plan.unresolvedCount, 0);
+  assert.equal(plan.mutationCount, 0);
+  assert.equal(plan.targets[0]?.disposition, "preserve");
+  assert.equal(plan.targets[0]?.reasonCode, "KNOWLEDGE_MEMORY_RETAINED");
+});
+
+test("Forward Repair restores the backup row of a knowledge row that the import updated, and asks when it changed later", () => {
+  const identity = hashLegacyImportValue({ id: "P001" });
+  const knowledgeRow = (text: string): LegacyImportBaseRow => ({
+    row_set: "knowledge_memories",
+    identity: JSON.stringify({ source_knowledge_id: "P001" }),
+    value: {
+      source_knowledge_id: "P001",
+      category: "pattern",
+      content: text,
+      scope: "project",
+      structured_fields: JSON.stringify({
+        sourceKnowledgeTable: "patterns", pattern: text, where: "", notes: "", sourceKnowledgeId: "P001",
+      }),
+      superseded_by: null,
+    },
+  });
+  const applicationPlan = {
+    planSchemaVersion: 2,
+    previewId: identity,
+    previewHash: identity,
+    baseProjectRevision: 0,
+    baseAuthorityEpoch: 0,
+    instructions: [{
+      action: "update-knowledge-memory",
+      targetKind: "knowledge",
+      targetKey: "P001",
+      knowledgeId: "P001",
+      values: { table: "patterns", cells: '["Imported text","—","—"]' },
+      changeIds: [identity],
+    }],
+  } as unknown as LegacyImportApplicationPlan;
+  const backup = knowledgeRow("Text before the import");
+  const compile = (
+    currentText: string,
+    extra: Partial<Parameters<typeof compileLegacyImportForwardRepairPlan>[0]> = {},
+  ) => compileLegacyImportForwardRepairPlan({
+    applicationOperationId: "application-op",
+    applicationIdentityHash: identity,
+    applicationRelevantRowsHash: identity,
+    previewId: identity,
+    previewHash: identity,
+    backupId: identity,
+    applicationPlan,
+    backupBase: baseSnapshot(0, [backup]),
+    currentBase: baseSnapshot(2, [knowledgeRow(currentText)]),
+    ...extra,
+  });
+  const restore = {
+    action: "restore-knowledge-memory",
+    knowledgeId: "P001",
+    category: "pattern",
+    content: "Text before the import",
+    scope: "project",
+    structuredFields: backup.value["structured_fields"],
+  };
+
+  const unchanged = compile("Imported text").targets[0];
+  assert.equal(unchanged?.disposition, "safe-revert");
+  assert.equal(unchanged?.reasonCode, "KNOWLEDGE_MEMORY_UNCHANGED");
+  assert.deepEqual(unchanged?.mutation, restore);
+
+  const retained = compile("Imported text", { goal: "retain" }).targets[0];
+  assert.equal(retained?.disposition, "already-repaired");
+  assert.equal(retained?.mutation, null);
+
+  const restored = compile("Text before the import").targets[0];
+  assert.equal(restored?.disposition, "already-repaired");
+  assert.equal(restored?.reasonCode, "KNOWLEDGE_MEMORY_ALREADY_RESTORED");
+
+  const later = compile("Text of a later update");
+  assert.equal(later.unresolvedCount, 1);
+  assert.equal(later.mutationCount, 0);
+  assert.equal(later.targets[0]?.disposition, "choice-required");
+  assert.equal(later.targets[0]?.reasonCode, "KNOWLEDGE_MEMORY_CHANGED_LATER");
+  assert.deepEqual(later.targets[0]?.review?.proposedMutation, restore);
+  const chosen = compile("Text of a later update", {
+    choices: [{
+      instructionIndex: 0,
+      targetKind: "knowledge",
+      targetKey: "P001",
+      reviewHash: later.targets[0]!.reviewHash!,
+      decision: "restore-backup",
+    }],
+  }).targets[0];
+  assert.equal(chosen?.reasonCode, "EXPLICIT_CHOICE_RESTORE_BACKUP");
+  assert.deepEqual(chosen?.mutation, restore);
 });
 
 test("the retain goal keeps intact Application rows instead of reverting them", () => {

@@ -20,7 +20,6 @@ import { execSync } from "node:child_process";
 import { createAutoWorktree } from "../auto-worktree-creation.ts";
 import { worktreePath } from "../worktree-manager.ts";
 import {
-  copyWorktreeDb,
   reconcileWorktreeDb,
   openDatabase,
   closeDatabase,

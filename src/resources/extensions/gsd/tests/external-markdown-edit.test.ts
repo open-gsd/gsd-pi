@@ -1,17 +1,17 @@
 // Project/App: gsd-pi
-// File Purpose: Unit tests for the external-markdown-edit drift handler.
+// File Purpose: Unit tests for external .gsd edit observation.
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
-import { externalMarkdownEditHandler } from "../state-reconciliation/drift/external-markdown-edit.ts";
+import { observeExternalMarkdownEdits } from "../state-reconciliation/drift/external-markdown-edit.ts";
 import { readCompatMarker, writeCompatMarker, computeProjectionSha } from "../compat/compat-marker.ts";
-import { closeDatabase, insertArtifact, openDatabase } from "../gsd-db.ts";
-import type { DriftContext } from "../state-reconciliation/types.ts";
-import type { GSDState } from "../types.ts";
+import { closeDatabase, insertArtifact, insertDecision, openDatabase } from "../gsd-db.ts";
+import { readDecisionsProjectionIntent } from "../db-writer.ts";
+import { backfillDecisionsToMemories } from "../memory-backfill.ts";
 
 const tmpDirs: string[] = [];
 
@@ -20,12 +20,6 @@ function makeTmpBase(): string {
   mkdirSync(join(base, ".gsd"), { recursive: true });
   tmpDirs.push(base);
   return base;
-}
-
-const stubState = { phase: "idle" } as unknown as GSDState;
-
-function ctx(base: string): DriftContext {
-  return { basePath: base, state: stubState };
 }
 
 afterEach(() => {
@@ -53,7 +47,7 @@ test("detect returns no drift when file sha matches marker", async () => {
     piVersion: "1.4.0",
   });
 
-  const drift = await externalMarkdownEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0);
 });
 
@@ -70,7 +64,7 @@ test("detect returns drift when file content differs from marker", async () => {
     piVersion: "1.4.0",
   });
 
-  const drift = await externalMarkdownEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 1);
   assert.equal(drift[0].kind, "external-markdown-edit");
   assert.equal(drift[0].projectionPath, rel);
@@ -102,7 +96,7 @@ test("detect refreshes stale marker when current file already matches DB artifac
     piVersion: "1.9.0",
   });
 
-  const drift = await externalMarkdownEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0);
   const marker = readCompatMarker(base);
   assert.equal(marker.projections[rel]?.sha, computeProjectionSha(content));
@@ -119,7 +113,7 @@ test("detect treats missing marker as drift on every tracked projection file", a
   // no-op (the reconcile pipeline's other handlers cover the "import everything"
   // case via the existing /gsd recover flow). This is by design: this handler
   // only fires when we HAVE a baseline to compare.
-  const drift = await externalMarkdownEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0);
 });
 
@@ -135,37 +129,82 @@ test("detect ignores files missing from disk (other handlers cover that)", async
   });
   // No file written.
 
-  const drift = await externalMarkdownEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0);
 });
 
-test("modeled drift blocks with an explicit route and cannot run repair", async () => {
+test("a DECISIONS.md that matches the database render is not an external edit (#2728)", async () => {
   const base = makeTmpBase();
-  const rel = "m1/roadmap.md";
-  mkdirSync(join(base, ".gsd", "m1"), { recursive: true });
-  const content = "# Roadmap\n\n- [x] S1 done\n";
-  writeFileSync(join(base, ".gsd", rel), content, "utf-8");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertDecision({
+    id: "D001",
+    when_context: "2026-10-09",
+    scope: "global",
+    decision: "Store projections in SQLite",
+    choice: "SQLite is the authority",
+    rationale: "durable and inspectable",
+    revisable: "Yes",
+    made_by: "human",
+    superseded_by: null,
+  });
+  backfillDecisionsToMemories();
+  const intent = await readDecisionsProjectionIntent(base);
+  assert.ok(intent, "the database derives a DECISIONS.md render");
+  writeFileSync(join(base, ".gsd", "DECISIONS.md"), intent.content, "utf-8");
   writeCompatMarker(base, {
-    schema: 1,
+    schema: 2,
     lastWriter: "gsd-pi",
     lastProjectedAt: "2026-06-21T00:00:00.000Z",
-    projections: { [rel]: { sha: "stale000000000000", entities: ["m1"] } },
-    piVersion: "1.4.0",
+    projections: { "DECISIONS.md": { sha: "stale000000000000", entities: [] } },
+    planning: { active: false, layout: null, projections: {}, passthrough: {} },
+    piVersion: "1.21.0",
   });
 
-  const drift1 = await externalMarkdownEditHandler.detect(stubState, ctx(base));
-  assert.equal(drift1.length, 1);
-  const sourceBefore = readFileSync(join(base, ".gsd", rel));
-  const markerBefore = readCompatMarker(base);
-
-  const blocker = await externalMarkdownEditHandler.blocker?.(drift1[0], ctx(base));
-  assert.match(blocker ?? "", /database is authoritative/i);
-  assert.match(blocker ?? "", /\/gsd rebuild markdown/);
-  assert.match(blocker ?? "", /\/gsd recover/);
-  assert.throws(
-    () => externalMarkdownEditHandler.repair(drift1[0], ctx(base)),
-    /modeled projection repair must remain blocked/,
+  const drift = await observeExternalMarkdownEdits(base);
+  assert.equal(drift.length, 0, "a byte-identical render is not an external edit");
+  const marker = readCompatMarker(base);
+  assert.equal(
+    marker.projections["DECISIONS.md"]?.sha,
+    computeProjectionSha(intent.content),
+    "the stale baseline is refreshed",
   );
-  assert.deepEqual(readFileSync(join(base, ".gsd", rel)), sourceBefore);
-  assert.deepEqual(readCompatMarker(base), markerBefore);
+});
+
+test("a DECISIONS.md that diverges from the database render is still an external edit", async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertDecision({
+    id: "D001",
+    when_context: "2026-10-09",
+    scope: "global",
+    decision: "Store projections in SQLite",
+    choice: "SQLite is the authority",
+    rationale: "durable and inspectable",
+    revisable: "Yes",
+    made_by: "human",
+    superseded_by: null,
+  });
+  backfillDecisionsToMemories();
+  const intent = await readDecisionsProjectionIntent(base);
+  assert.ok(intent);
+  const diverged = intent.content.replace("SQLite is the authority", "Postgres is the authority");
+  writeFileSync(join(base, ".gsd", "DECISIONS.md"), diverged, "utf-8");
+  writeCompatMarker(base, {
+    schema: 2,
+    lastWriter: "gsd-pi",
+    lastProjectedAt: "2026-06-21T00:00:00.000Z",
+    projections: { "DECISIONS.md": { sha: computeProjectionSha(intent.content), entities: [] } },
+    planning: { active: false, layout: null, projections: {}, passthrough: {} },
+    piVersion: "1.21.0",
+  });
+
+  const drift = await observeExternalMarkdownEdits(base);
+  assert.equal(drift.length, 1, "a hand edit that the render does not produce still drifts");
+  assert.equal(drift[0].projectionPath, "DECISIONS.md");
+  const marker = readCompatMarker(base);
+  assert.equal(
+    marker.projections["DECISIONS.md"]?.sha,
+    computeProjectionSha(intent.content),
+    "the baseline is left alone",
+  );
 });

@@ -65,6 +65,26 @@ export type MilestoneCloseoutAuthorization =
     blockers: MilestoneCloseoutBlocker[];
   };
 
+/**
+ * Authorization blockers a fresh validation waiver supersedes. The real
+ * grant only requires an adopted, open lifecycle — it never inspects the
+ * recorded validation state — so under a preview dry-run these blockers are
+ * exactly the ones the would-be waiver would erase. `validation-receipt-invalid`
+ * is excluded: it implies corrupt or multiple waivers, where the real grant
+ * throws and the dispatch rule stops. Consumers: the closeout consistency
+ * gate's `assumeValidationWaived` handling and the UAT verdict-vs-validation
+ * ordering check (#2347/#2770).
+ */
+export const VALIDATION_SHAPED_BLOCKERS: ReadonlySet<MilestoneCloseoutBlocker["kind"]> = new Set([
+  "validation-missing",
+  "validation-not-pass",
+  "validation-stale",
+  "validation-attempt-newer",
+  "validation-source-revision-mismatch",
+  "criterion-unsatisfied",
+  "source-revision-mismatch",
+]);
+
 interface ValidationRow {
   event_id: string;
   operation_id: string;
@@ -789,6 +809,31 @@ function latestValidationEventRevision(milestoneId: string): number {
     LIMIT 1
   `).get({ ":milestone_id": milestoneId });
   return Number(row?.["project_revision"] ?? 0);
+}
+
+/**
+ * Recorded timestamp of the milestone's latest validation receipt event (same
+ * ordering `readMilestoneCloseoutReadiness` uses), or null when absent. Used to
+ * order slice UAT verdicts against the current accepted validation (#2347).
+ */
+export function readMilestoneValidationReceiptRecordedAt(milestoneId: string): string | null {
+  const row = getDb().prepare(`
+    SELECT event.created_at
+    FROM workflow_domain_events event
+    JOIN workflow_operations operation
+      ON operation.operation_id = event.operation_id
+     AND operation.project_id = event.project_id
+    JOIN project_authority authority
+      ON authority.project_id = event.project_id
+     AND authority.singleton = 1
+    WHERE event.event_type = 'milestone.validation.recorded'
+      AND event.entity_type = 'milestone'
+      AND event.entity_id = :milestone_id
+      AND operation.operation_type = 'milestone.validate'
+    ORDER BY event.project_revision DESC, event.event_index DESC, event.event_id DESC
+    LIMIT 1
+  `).get({ ":milestone_id": milestoneId });
+  return typeof row?.["created_at"] === "string" ? row["created_at"] : null;
 }
 
 export function readMilestoneCloseoutAuthorization(

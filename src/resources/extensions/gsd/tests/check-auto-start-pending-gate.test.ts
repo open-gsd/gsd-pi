@@ -24,6 +24,7 @@ import {
   closeDatabase,
   insertMilestone,
 } from "../gsd-db.ts";
+import { saveContextArtifact } from "./helpers/saved-context.ts";
 import {
   setPendingGate,
   clearPendingGate,
@@ -165,6 +166,7 @@ describe("checkAutoStartAfterDiscuss Gate 1a (pending depth-verification gate)",
     base = mkBase();
     openDatabase(":memory:");
     insertMilestone({ id: "M001", title: "Pending Gate Test", status: "queued" });
+    saveContextArtifact("M001");
 
     cap = mkCapture();
     setPendingAutoStart(base, {

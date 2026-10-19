@@ -1,5 +1,5 @@
 // GSD Extension — Undo Last Unit + Targeted State Reset
-// handleUndo: Rollback the most recent completed unit (revert git, remove state, uncheck plans).
+// handleUndo: Reopen the last completed unit from the DB ledger, then revert its git commits.
 // handleUndoTask: Reopen one Task through canonical authority and re-render markdown.
 // handleResetSlice: Reset a slice and all its tasks, re-rendering plan + roadmap.
 
@@ -8,19 +8,25 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { nativeRevertCommit, nativeRevertAbort } from "./native-git-bridge.js";
-import { atomicWriteSync, removeProjectionFileSync } from "./atomic-write.js";
-import { parseUnitId } from "./unit-id.js";
+import { removeProjectionFileSync } from "./atomic-write.js";
 import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
-import { gsdRoot, resolveTasksDir, resolveSlicePath, resolveTaskFile, buildTaskFileName } from "./paths.js";
+import { gsdRoot, resolveTasksDir, resolveTaskFile, buildTaskFileName } from "./paths.js";
 import { sendDesktopNotification } from "./notifications.js";
-import { getDb, getTask, getSlice, getSliceTasks } from "./gsd-db.js";
+import { getDb, getTask, getSlice, getSliceTasks, isDbAvailable } from "./gsd-db.js";
+import { readMilestone, readSlice, readTask } from "./db/lifecycle-read.js";
+import {
+  getLifecycleLastOperationId,
+  getSliceReopenOperationRow,
+  getUndoTaskStateRow,
+} from "./db/lifecycle-queries.js";
+import { openExistingWorkflowDatabase } from "./db-workspace.js";
 import { renderPlanCheckboxes } from "./markdown-renderer.js";
-import { UNIT_REGISTRY } from "./unit-registry.js";
+import { renderStateProjection } from "./workflow-projections.js";
 import { reopenTask } from "./task-lifecycle-domain-operation.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { normalizeLegacyLifecycleStatus } from "./db/lifecycle-shadow-comparison.js";
-import { executeSliceReopen } from "./tools/workflow-tool-executors.js";
+import { executeMilestoneReopen, executeSliceReopen } from "./tools/workflow-tool-executors.js";
 import { isCurrentSliceReopenOperation } from "./slice-lifecycle-domain-operation.js";
 
 const UNDO_TASK_REOPEN_REASON = "Task reopened by an explicit undo command";
@@ -36,34 +42,15 @@ interface UndoTaskState {
 
 function readUndoTaskState(mid: string, sid: string, tid: string): UndoTaskState {
   const entityId = `${mid}/${sid}/${tid}`;
-  const row = getDb().prepare(`
-    SELECT task.status AS legacy_status,
-           task.completed_at,
-           lifecycle.lifecycle_id,
-           lifecycle.lifecycle_status,
-           lifecycle.last_operation_id AS lifecycle_operation_id
-    FROM tasks task
-    LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'task'
-     AND lifecycle.milestone_id = task.milestone_id
-     AND lifecycle.slice_id = task.slice_id
-     AND lifecycle.task_id = task.id
-    WHERE task.milestone_id = :milestone_id
-      AND task.slice_id = :slice_id
-      AND task.id = :task_id
-  `).get({
-    ":milestone_id": mid,
-    ":slice_id": sid,
-    ":task_id": tid,
-  }) as Record<string, unknown> | undefined;
+  const row = getUndoTaskStateRow(mid, sid, tid);
   if (!row) throw new Error(`Task ${entityId} not found in database.`);
   return {
-    legacyStatus: String(row["legacy_status"]),
-    completedAt: row["completed_at"] ? String(row["completed_at"]) : null,
-    lifecycleId: row["lifecycle_id"] ? String(row["lifecycle_id"]) : null,
-    lifecycleStatus: row["lifecycle_status"] ? String(row["lifecycle_status"]) : null,
-    lifecycleOperationId: row["lifecycle_operation_id"]
-      ? String(row["lifecycle_operation_id"])
+    legacyStatus: String(row.legacy_status),
+    completedAt: row.completed_at ? String(row.completed_at) : null,
+    lifecycleId: row.lifecycle_id ? String(row.lifecycle_id) : null,
+    lifecycleStatus: row.lifecycle_status ? String(row.lifecycle_status) : null,
+    lifecycleOperationId: row.lifecycle_operation_id
+      ? String(row.lifecycle_operation_id)
       : null,
   };
 }
@@ -85,37 +72,21 @@ function undoTaskIdempotencyKey(mid: string, sid: string, tid: string, state: Un
 }
 
 function resolveResetSliceIdempotencyKey(mid: string, sid: string, status: string, completedAt: string | null): string {
-  const lifecycle = getDb().prepare(`
-    SELECT lifecycle.lifecycle_status, lifecycle.last_operation_id,
-           operation.operation_type, operation.idempotency_key, event.payload_json
-    FROM workflow_item_lifecycles lifecycle
-    LEFT JOIN workflow_operations operation
-      ON operation.operation_id = lifecycle.last_operation_id
-    LEFT JOIN workflow_domain_events event
-      ON event.operation_id = operation.operation_id
-     AND event.event_type = 'slice.reopened'
-    WHERE lifecycle.item_kind = 'slice'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id IS NULL
-  `).get({
-    ":milestone_id": mid,
-    ":slice_id": sid,
-  }) as Record<string, unknown> | undefined;
+  const lifecycle = getSliceReopenOperationRow(mid, sid);
   if (
-    lifecycle?.["lifecycle_status"] === "ready"
-    && lifecycle["operation_type"] === "slice.reopen"
-    && isCurrentSliceReopenOperation(String(lifecycle["last_operation_id"]), {
+    lifecycle?.lifecycle_status === "ready"
+    && lifecycle.operation_type === "slice.reopen"
+    && isCurrentSliceReopenOperation(String(lifecycle.last_operation_id), {
       milestoneId: mid,
       sliceId: sid,
     })
   ) {
-    const payload = JSON.parse(String(lifecycle["payload_json"])) as Record<string, unknown>;
+    const payload = JSON.parse(String(lifecycle.payload_json)) as Record<string, unknown>;
     if (payload["reason"] === RESET_SLICE_REOPEN_REASON) {
-      return String(lifecycle["idempotency_key"]);
+      return String(lifecycle.idempotency_key);
     }
   }
-  const terminalIdentity = lifecycle?.["last_operation_id"] ?? completedAt ?? `legacy:${status}`;
+  const terminalIdentity = lifecycle?.last_operation_id ?? completedAt ?? `legacy:${status}`;
   const digest = createHash("sha256").update(`${mid}/${sid}\n${terminalIdentity}`).digest("hex");
   return `internal:undo:slice.reopen:${digest}`;
 }
@@ -134,139 +105,262 @@ function reopenTaskForUndo(mid: string, sid: string, tid: string): void {
   });
 }
 
-/**
- * Undo the last completed unit: revert git commits,
- * delete summary artifacts, and uncheck the task in PLAN.
- * deriveState() handles re-derivation after revert.
- */
-export async function handleUndo(args: string, ctx: ExtensionCommandContext, _pi: ExtensionAPI, basePath: string): Promise<void> {
-  const force = args.includes("--force");
+/** Reopen a Task in the DB, then refresh its readable summary and plan. */
+async function reopenTaskAndRefresh(basePath: string, mid: string, sid: string, tid: string): Promise<boolean> {
+  reopenTaskForUndo(mid, sid, tid);
 
-  // Find the last GSD-related commit from git activity logs
+  // Delete readable summaries after the authoritative reopen. Legacy layouts
+  // keep them under tasks/, while flat layouts resolve them beside the plan.
+  let summaryDeleted = false;
+  const summaryPaths = new Set<string>();
+  const resolvedSummary = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
+  if (resolvedSummary) summaryPaths.add(resolvedSummary);
+  const tasksDir = resolveTasksDir(basePath, mid, sid);
+  if (tasksDir) summaryPaths.add(join(tasksDir, buildTaskFileName(tid, "SUMMARY")));
+  for (const summaryPath of summaryPaths) {
+    if (existsSync(summaryPath)) {
+      removeProjectionFileSync(summaryPath);
+      summaryDeleted = true;
+    }
+  }
+
+  await renderPlanCheckboxes(basePath, mid, sid);
+  invalidateAllCaches();
+  return summaryDeleted;
+}
+
+// ─── Undo Last Unit ──────────────────────────────────────────────────────────
+// The last completed Unit comes from the unit_dispatches ledger, and undo
+// reopens its work item through the reopen Domain Operation. A Unit with no
+// reopen operation is refused, never reported as undone.
+
+const UNDO_UNIT_REOPEN_REASON = "Reopened by an explicit undo of the last completed unit";
+const UNDO_TASK_UNIT_TYPES = new Set(["execute-task", "execute-task-simple"]);
+
+interface CompletedUnit {
+  unitType: string;
+  unitId: string;
+  milestoneId: string;
+  sliceId: string | null;
+  taskId: string | null;
+}
+
+export interface UndoUnitInfo {
+  lastUnitType: string | null;
+  lastUnitId: string | null;
+  lastUnitKey: string | null;
+  completedCount: number;
+  commits: string[];
+  /** The exact changes undo makes for this Unit, shown before the operator confirms. */
+  effects: string[];
+}
+
+export interface UndoUnitResult {
+  success: boolean;
+  message: string;
+}
+
+/** Open the existing project DB when no session has opened it. Never creates one. */
+function openUndoDatabase(basePath: string): string | null {
+  if (isDbAvailable()) return null;
+  const opened = openExistingWorkflowDatabase(basePath);
+  return opened.ok ? null : `GSD database is not available (${opened.reason}); nothing can be undone.`;
+}
+
+function readCompletedUnits(): { last: CompletedUnit | null; count: number } {
+  const db = getDb();
+  const count = db.prepare(
+    "SELECT COUNT(*) AS count FROM unit_dispatches WHERE status = 'completed'",
+  ).get() as Record<string, unknown> | undefined;
+  const row = db.prepare(`
+    SELECT unit_type, unit_id, milestone_id, slice_id, task_id
+    FROM unit_dispatches
+    WHERE status = 'completed'
+    ORDER BY ended_at DESC, id DESC
+    LIMIT 1
+  `).get() as Record<string, unknown> | undefined;
+  return {
+    count: Number(count?.["count"] ?? 0),
+    last: row
+      ? {
+          unitType: String(row["unit_type"]),
+          unitId: String(row["unit_id"]),
+          milestoneId: String(row["milestone_id"]),
+          sliceId: row["slice_id"] ? String(row["slice_id"]) : null,
+          taskId: row["task_id"] ? String(row["task_id"]) : null,
+        }
+      : null,
+  };
+}
+
+function unitCommits(basePath: string, unit: CompletedUnit): string[] {
   const activityDir = join(gsdRoot(basePath), "activity");
-  if (!existsSync(activityDir)) {
-    ctx.ui.notify("Nothing to undo — no activity logs found.", "info");
-    return;
+  return existsSync(activityDir) ? findCommitsForUnit(activityDir, unit.unitType, unit.unitId) : [];
+}
+
+function undoEffects(unit: CompletedUnit, commitCount: number): string[] {
+  const { milestoneId: mid, sliceId: sid, taskId: tid } = unit;
+  let effects: string[];
+  if (UNDO_TASK_UNIT_TYPES.has(unit.unitType) && sid && tid) {
+    effects = [
+      `Reopen task ${mid}/${sid}/${tid} in the database (status pending)`,
+      "Delete the task summary file",
+    ];
+  } else if (unit.unitType === "complete-slice" && sid) {
+    effects = [
+      `Reopen slice ${mid}/${sid} in the database`,
+      `Reset ${getSliceTasks(mid, sid).length} task(s) of the slice to pending`,
+      "Clear the slice summary and UAT in the database",
+      "Delete the slice summary, slice UAT and task summary files",
+    ];
+  } else if (unit.unitType === "complete-milestone") {
+    effects = [
+      `Reopen milestone ${mid} in the database; its slices and tasks stay complete`,
+      "Delete the milestone summary file",
+    ];
+  } else {
+    return [`Change nothing: a ${unit.unitType} unit has no reopen operation, so undo refuses it`];
+  }
+  if (commitCount > 0) effects.push(`Attempt to revert ${commitCount} git commit(s) (staged, not committed)`);
+  return effects;
+}
+
+/** Describe the Unit that /gsd undo and web undo would reopen. */
+export async function describeLastCompletedUnit(basePath: string): Promise<UndoUnitInfo> {
+  const empty: UndoUnitInfo = { lastUnitType: null, lastUnitId: null, lastUnitKey: null, completedCount: 0, commits: [], effects: [] };
+  const dbError = openUndoDatabase(basePath);
+  if (dbError) throw new Error(dbError);
+  const { last, count } = readCompletedUnits();
+  if (!last) return { ...empty, completedCount: count };
+  const commits = unitCommits(basePath, last);
+  return {
+    lastUnitType: last.unitType,
+    lastUnitId: last.unitId,
+    lastUnitKey: `${last.unitType}/${last.unitId}`,
+    completedCount: count,
+    commits,
+    effects: undoEffects(last, commits.length),
+  };
+}
+
+function undoReopenKey(kind: string, entityId: string, terminalIdentity: string): string {
+  const digest = createHash("sha256").update(`${entityId}\n${terminalIdentity}`).digest("hex");
+  return `internal:undo:${kind}.reopen:${digest}`;
+}
+
+/** Reopen the last completed Unit in the DB, then revert its commits. */
+export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitResult> {
+  const dbError = openUndoDatabase(basePath);
+  if (dbError) return { success: false, message: dbError };
+  const { last: unit } = readCompletedUnits();
+  if (!unit) return { success: false, message: "Nothing to undo — no completed unit is recorded in the database." };
+  const label = `${unit.unitType} (${unit.unitId})`;
+  const { milestoneId: mid, sliceId: sid, taskId: tid } = unit;
+  const results: string[] = [`Undone: ${label}`];
+
+  if (UNDO_TASK_UNIT_TYPES.has(unit.unitType) && sid && tid) {
+    const task = readTask(mid, sid, tid);
+    if (!task) return { success: false, message: `Cannot undo ${label}: task not found in database.` };
+    if (!task.done) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    let summaryDeleted: boolean;
+    try {
+      summaryDeleted = await reopenTaskAndRefresh(basePath, mid, sid, tid);
+    } catch (error) {
+      return { success: false, message: `Cannot undo ${label}: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    results.push(`  - Reopened task ${mid}/${sid}/${tid} in the database`);
+    if (summaryDeleted) results.push("  - Deleted task summary file");
+  } else if (unit.unitType === "complete-slice" && sid) {
+    const slice = readSlice(mid, sid);
+    if (!slice) return { success: false, message: `Cannot undo ${label}: slice not found in database.` };
+    if (!slice.closed) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    const terminal = getLifecycleLastOperationId("slice", mid, sid) ?? slice.completed_at ?? `legacy:${slice.status}`;
+    const result = await executeSliceReopen(
+      { milestoneId: mid, sliceId: sid, reason: UNDO_UNIT_REOPEN_REASON },
+      basePath,
+      internalExecutionInvocation(undoReopenKey("slice", `${mid}/${sid}`, terminal)),
+    );
+    if (result.isError) {
+      return { success: false, message: `Cannot undo ${label}: ${String(result.details["error"] ?? result.content[0]?.text)}` };
+    }
+    results.push(`  - Reopened slice ${mid}/${sid} in the database`);
+  } else if (unit.unitType === "complete-milestone") {
+    const milestone = readMilestone(mid);
+    if (!milestone) return { success: false, message: `Cannot undo ${label}: milestone not found in database.` };
+    if (!milestone.closed) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    const terminal = getLifecycleLastOperationId("milestone", mid, null) ?? milestone.completed_at ?? `legacy:${milestone.status}`;
+    // Undo reverses only the complete-milestone Unit: slices, tasks and their
+    // summaries stay complete.
+    const result = await executeMilestoneReopen(
+      { milestoneId: mid, reason: UNDO_UNIT_REOPEN_REASON, keepCompleted: true },
+      basePath,
+      internalExecutionInvocation(undoReopenKey("milestone", mid, terminal)),
+    );
+    if (result.isError) {
+      return { success: false, message: `Cannot undo ${label}: ${String(result.details["error"] ?? result.content[0]?.text)}` };
+    }
+    results.push(`  - Reopened milestone ${mid} in the database`);
+  } else {
+    return {
+      success: false,
+      message: `Cannot undo ${label}: only execute-task, complete-slice and complete-milestone units have a reopen operation.`,
+    };
   }
 
-  // Parse activity logs to find the most recent unit
-  const files = readdirSync(activityDir)
-    .filter(f => f.endsWith(".jsonl"))
-    .sort()
-    .reverse();
-
-  if (files.length === 0) {
-    ctx.ui.notify("Nothing to undo — no activity logs found.", "info");
-    return;
+  // Git commits are evidence of the Unit's work, not workflow state. Revert
+  // them best-effort only after the DB reopen has committed.
+  let commitsReverted = 0;
+  try {
+    for (const sha of unitCommits(basePath, unit).reverse()) {
+      try {
+        nativeRevertCommit(basePath, sha);
+        commitsReverted++;
+      } catch {
+        // Revert conflict or already reverted — skip
+        try { nativeRevertAbort(basePath); } catch { /* no-op */ }
+        break;
+      }
+    }
+  } finally {
+    // Re-render STATE.md — always invalidate caches even if git operations fail
+    invalidateAllCaches();
+    await renderStateProjection(basePath);
   }
-
-  // Extract unit type and ID from the most recent activity log filename.
-  // Both the unit type and the unit ID may contain hyphens, so anchor on the
-  // known unit-type vocabulary instead of guessing the unit-ID shape: a regex
-  // tuned to milestone-shaped IDs rejects project-level units whose IDs are
-  // symbolic (e.g. discuss-project uses PROJECT, workflow-preferences uses
-  // WORKFLOW-PREFS).
-  const parsed = parseActivityLogFilename(files[0]);
-  if (!parsed) {
-    ctx.ui.notify("Nothing to undo — could not parse latest activity log.", "warning");
-    return;
+  if (commitsReverted > 0) {
+    results.push(`  - Reverted ${commitsReverted} commit(s) (staged, not committed)`);
+    results.push(`  Review with 'git diff --cached' then 'git commit' or 'git reset HEAD'`);
   }
+  return { success: true, message: results.join("\n") };
+}
 
-  const unitType = parsed.unitType;
-  const unitId = parsed.unitId.replace(/-/g, "/");
-
-  if (!force) {
+/** /gsd undo: reopen the last completed Unit after an explicit --force. */
+export async function handleUndo(args: string, ctx: ExtensionCommandContext, _pi: ExtensionAPI, basePath: string): Promise<void> {
+  if (!args.includes("--force")) {
+    const dbError = openUndoDatabase(basePath);
+    if (dbError) {
+      ctx.ui.notify(dbError, "warning");
+      return;
+    }
+    const info = await describeLastCompletedUnit(basePath);
+    if (!info.lastUnitType) {
+      ctx.ui.notify("Nothing to undo — no completed unit is recorded in the database.", "info");
+      return;
+    }
     ctx.ui.notify(
-      `Will undo: ${unitType} (${unitId})\n` +
+      `Will undo: ${info.lastUnitType} (${info.lastUnitId})\n` +
       `This will:\n` +
-      `  - Delete summary artifacts\n` +
-      `  - Uncheck task in PLAN (if execute-task)\n` +
-      `  - Attempt to revert associated git commits\n\n` +
-      `Run /gsd undo --force to confirm.`,
+      info.effects.map((effect) => `  - ${effect}\n`).join("") +
+      `\nRun /gsd undo --force to confirm.`,
       "warning",
     );
     return;
   }
 
-  // 1. Reopen canonical Task authority before updating readable artifacts.
-  const { milestone, slice, task } = parseUnitId(unitId);
-  if (unitType === "execute-task" && task !== undefined && slice !== undefined &&
-      getTask(milestone, slice, task)) {
-    reopenTaskForUndo(milestone, slice, task);
+  const result = await undoLastCompletedUnit(basePath);
+  ctx.ui.notify(result.message, result.success ? "success" : "warning");
+  if (result.success) {
+    sendDesktopNotification("GSD", result.message.split("\n")[0], "info", "complete", basename(basePath));
   }
-
-  // 2. Delete summary artifact
-  let summaryRemoved = false;
-  if (task !== undefined && slice !== undefined) {
-    // Task-level: M001/S01/T01
-    const [mid, sid, tid] = [milestone, slice, task];
-    const tasksDir = resolveTasksDir(basePath, mid, sid);
-    if (tasksDir) {
-      const summaryFile = join(tasksDir, buildTaskFileName(tid, "SUMMARY"));
-      if (existsSync(summaryFile)) {
-        removeProjectionFileSync(summaryFile);
-        summaryRemoved = true;
-      }
-    }
-  } else if (slice !== undefined) {
-    // Slice-level: M001/S01
-    const [mid, sid] = [milestone, slice];
-    const slicePath = resolveSlicePath(basePath, mid, sid);
-    if (slicePath) {
-      for (const suffix of ["SUMMARY", "COMPLETE"]) {
-        const candidates = findFileWithPrefix(slicePath, sid, suffix);
-        for (const f of candidates) {
-          removeProjectionFileSync(f);
-          summaryRemoved = true;
-        }
-      }
-    }
-  }
-
-  // 3. Uncheck task in PLAN if execute-task
-  let planUpdated = false;
-  if (unitType === "execute-task" && task !== undefined && slice !== undefined) {
-    const [mid, sid, tid] = [milestone, slice, task];
-    planUpdated = uncheckTaskInPlan(basePath, mid, sid, tid);
-    if (getTask(mid, sid, tid)) {
-      await renderPlanCheckboxes(basePath, mid, sid);
-      planUpdated = true;
-    }
-  }
-
-  // 4. Try to revert git commits from activity log
-  let commitsReverted = 0;
-  try {
-    const commits = findCommitsForUnit(activityDir, unitType, unitId);
-    if (commits.length > 0) {
-      for (const sha of commits.reverse()) {
-        try {
-          nativeRevertCommit(basePath, sha);
-          commitsReverted++;
-        } catch {
-          // Revert conflict or already reverted — skip
-          try { nativeRevertAbort(basePath); } catch { /* no-op */ }
-          break;
-        }
-      }
-    }
-  } finally {
-    // 4. Re-derive state — always invalidate caches even if git operations fail
-    invalidateAllCaches();
-    await deriveState(basePath);
-  }
-
-  // Build result message
-  const results: string[] = [`Undone: ${unitType} (${unitId})`];
-  if (summaryRemoved) results.push(`  - Deleted summary artifact`);
-  if (planUpdated) results.push(`  - Unchecked task in PLAN`);
-  if (commitsReverted > 0) {
-    results.push(`  - Reverted ${commitsReverted} commit(s) (staged, not committed)`);
-    results.push(`  Review with 'git diff --cached' then 'git commit' or 'git reset HEAD'`);
-  }
-
-  ctx.ui.notify(results.join("\n"), "success");
-  sendDesktopNotification("GSD", `Undone: ${unitType} (${unitId})`, "info", "complete", basename(basePath));
 }
 
 // ─── Targeted State Reset ────────────────────────────────────────────────────
@@ -379,28 +473,8 @@ export async function handleUndoTask(
     return;
   }
 
-  reopenTaskForUndo(mid, sid, tid);
-
-  // Delete readable summaries after the authoritative reopen. Legacy layouts
-  // keep them under tasks/, while flat layouts resolve them beside the plan.
-  let summaryDeleted = false;
-  const summaryPaths = new Set<string>();
-  const resolvedSummary = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
-  if (resolvedSummary) summaryPaths.add(resolvedSummary);
-  const tasksDir = resolveTasksDir(basePath, mid, sid);
-  if (tasksDir) summaryPaths.add(join(tasksDir, buildTaskFileName(tid, "SUMMARY")));
-  for (const summaryPath of summaryPaths) {
-    if (existsSync(summaryPath)) {
-      removeProjectionFileSync(summaryPath);
-      summaryDeleted = true;
-    }
-  }
-
-  // Re-render plan checkboxes
-  await renderPlanCheckboxes(basePath, mid, sid);
-
-  // Invalidate caches
-  invalidateAllCaches();
+  const summaryDeleted = await reopenTaskAndRefresh(basePath, mid, sid, tid);
+  await renderStateProjection(basePath);
 
   const results: string[] = [`Reset task ${mid}/${sid}/${tid} to "pending".`];
   if (summaryDeleted) results.push("  - Deleted task summary file");
@@ -502,69 +576,6 @@ export async function handleResetSlice(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-// Known unit types sorted longest-first so a more specific type (e.g.
-// "execute-task-simple") matches before a prefix of it ("execute-task") when
-// splitting "<seq>-<unitType>-<unitId>.jsonl".
-const UNIT_TYPES_BY_LENGTH_DESC: readonly string[] = Object.keys(UNIT_REGISTRY).sort(
-  (a, b) => b.length - a.length,
-);
-
-/**
- * Parse an activity-log filename of the form `<seq>-<unitType>-<unitId>.jsonl`
- * (the format written by activity-log.ts). Both the unit type and the unit ID
- * may contain hyphens, so we anchor on the known unit-type vocabulary rather
- * than guessing the ID shape. This keeps non-milestone IDs (e.g. PROJECT,
- * WORKFLOW-PREFS) parseable. Returns null when the name has no sequence prefix
- * or does not start with a recognised unit type.
- */
-export function parseActivityLogFilename(
-  filename: string,
-): { unitType: string; unitId: string } | null {
-  const seqMatch = filename.match(/^\d+-(.+)\.jsonl$/);
-  if (!seqMatch) return null;
-  const rest = seqMatch[1];
-  for (const unitType of UNIT_TYPES_BY_LENGTH_DESC) {
-    const prefix = `${unitType}-`;
-    if (rest.startsWith(prefix)) {
-      const unitId = rest.slice(prefix.length);
-      if (unitId.length > 0) return { unitType, unitId };
-    }
-  }
-  return null;
-}
-
-export function uncheckTaskInPlan(basePath: string, mid: string, sid: string, tid: string): boolean {
-  const slicePath = resolveSlicePath(basePath, mid, sid);
-  if (!slicePath) return false;
-
-  // Find the PLAN file
-  const planCandidates = findFileWithPrefix(slicePath, sid, "PLAN");
-  if (planCandidates.length === 0) return false;
-
-  const planFile = planCandidates[0];
-  let content = readFileSync(planFile, "utf-8");
-
-  // Match checked task line: - [x] **T01** or - [x] T01:
-  const regex = new RegExp(`^(\\s*-\\s*)\\[x\\](\\s*\\**${tid}\\**[:\\s])`, "mi");
-  if (regex.test(content)) {
-    content = content.replace(regex, "$1[ ]$2");
-    atomicWriteSync(planFile, content);
-    return true;
-  }
-  return false;
-}
-
-function findFileWithPrefix(dir: string, prefix: string, suffix: string): string[] {
-  try {
-    const files = readdirSync(dir);
-    return files
-      .filter(f => f.includes(suffix) && (f.startsWith(prefix) || f.startsWith(`${prefix}-`)))
-      .map(f => join(dir, f));
-  } catch {
-    return [];
-  }
-}
 
 export function findCommitsForUnit(activityDir: string, unitType: string, unitId: string): string[] {
   const safeUnitId = unitId.replace(/\//g, "-");

@@ -21,7 +21,7 @@ If a `.gsd/**` or `.gsd/**/*` glob returns no matches, treat that as a possible 
 ## UAT Instructions
 
 **UAT file:** `{{uatPath}}`
-**Result file to write:** `{{uatResultPath}}`
+**Result file (rendered by `gsd_uat_result_save`; do not write it):** `{{uatResultPath}}`
 **Detected UAT mode:** `{{uatType}}`
 
 You are the UAT runner. Execute every check defined in `{{uatPath}}` as deeply as this mode truthfully allows. Do not collapse live or subjective checks into cheap artifact checks just to get a PASS.
@@ -58,6 +58,7 @@ In short:
 - When a check cannot be honestly automated, gather the best objective evidence you can and mark it `NEEDS-HUMAN`
 
 For each check, record:
+
 - The check description (from the UAT file)
 - The evidence mode used: `artifact`, `runtime`, `browser`, or `human-follow-up`
 - The command or action taken, including the `gsd_uat_exec` evidence ID for automated checks
@@ -65,6 +66,7 @@ For each check, record:
 - `PASS`, `FAIL`, or `NEEDS-HUMAN`
 
 After running all checks, compute the **overall verdict**:
+
 - `PASS` — all automatable checks passed. Any remaining checks that honestly require human judgment are marked `NEEDS-HUMAN` with clear instructions for the human reviewer. (This is the correct verdict for mixed/human-experience/live-runtime modes when all automatable checks succeed.)
 - `FAIL` — one or more automatable checks failed
 - `PARTIAL` — one or more automatable checks were skipped or returned inconclusive results (not the same as `NEEDS-HUMAN` — use PARTIAL only when the agent itself could not determine pass/fail for a check it was supposed to automate)
@@ -104,8 +106,8 @@ checks: [{
 
 Accepted `evidence.kind` values and `ref` rules:
 
-- `gsd_uat_exec` - `ref` is the `gsd_uat_exec` evidence ID, or a `.meta.json` path under `.gsd/exec/`. The metadata file must exist and be typed as `uat_exec`.
-- `gsd_exec` - `ref` is a `gsd_exec` evidence ID, or a `.meta.json` path under `.gsd/exec/`. The metadata file must exist.
+- `gsd_uat_exec` - `ref` is the `gsd_uat_exec` evidence ID, or a `.meta.json` path under `.gsd/exec/`. The host must have recorded the run as `uat_exec`, for this slice, in this run-uat attempt.
+- `gsd_exec` - `ref` is a `gsd_exec` evidence ID, or a `.meta.json` path under `.gsd/exec/`. The host must have recorded the run.
 - `screenshot` - `ref` is a path under `.artifacts/browser/`, `.gsd/exec/`, or `.gsd/uat/`.
 - `log` - `ref` is a path under `.gsd/exec/`, `.gsd/uat/`, or `.artifacts/browser/`.
 - `url` - `ref` is an `http://` or `https://` URL.

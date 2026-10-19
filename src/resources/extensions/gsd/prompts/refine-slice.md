@@ -58,6 +58,7 @@ Narrate decomposition reasoning: what the sketch promised, what prior slices cha
 
 Then:
 0. If `REQUIREMENTS.md` was preloaded, identify Active requirements the sketch owns/supports. Each owned requirement needs at least one task that advances it.
+
 1. Read the templates:
    - `{{planTemplatePath}}`
    - `{{taskPlanTemplatePath}}`

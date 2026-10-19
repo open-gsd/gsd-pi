@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 
 import { auditOrphanedMilestoneBranches } from "../auto-start.ts";
-import { openDatabase, closeDatabase, insertMilestone, updateMilestoneStatus } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, insertMilestone } from "../gsd-db.ts";
 
 function run(cmd: string, cwd: string): string {
   return execSync(cmd, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" }).trim();

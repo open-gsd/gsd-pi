@@ -22,6 +22,7 @@ ExtensionAPI methods — the `pi` object received in the default export function
 | `pi.sendUserMessage(content, options?)` | Send user message (triggers turn) |
 
 **Delivery modes for `sendMessage`:**
+
 - `"steer"` (default) — Interrupts streaming after current tool
 - `"followUp"` — Waits for agent to finish all tools
 - `"nextTurn"` — Queued for next user prompt
@@ -34,6 +35,7 @@ pi.sendMessage({
   details: { ... },
 }, { deliverAs: "steer", triggerTurn: true });
 ```
+
 </messaging>
 
 <state_session>
@@ -46,14 +48,17 @@ pi.sendMessage({
 </state_session>
 
 <tool_management>
+
 ```typescript
 const active = pi.getActiveTools();    // ["read", "bash", "edit", "write"]
 const all = pi.getAllTools();          // [{ name, description }, ...]
 pi.setActiveTools(["read", "bash"]);  // Enable/disable tools
 ```
+
 </tool_management>
 
 <model_management>
+
 ```typescript
 const model = ctx.modelRegistry.find("anthropic", "claude-sonnet-4-5");
 if (model) {
@@ -63,6 +68,7 @@ if (model) {
 pi.getThinkingLevel();               // "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
 pi.setThinkingLevel("high");
 ```
+
 </model_management>
 
 <utilities>

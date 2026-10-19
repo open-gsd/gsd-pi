@@ -104,10 +104,12 @@ termux-camera-photo out.jpg   # Take photo
 ### Clipboard not working
 
 Ensure both apps are installed:
+
 1. Termux (from GitHub or F-Droid)
 2. Termux:API (from GitHub or F-Droid)
 
 Then install the CLI tools:
+
 ```bash
 pkg install termux-api
 ```
@@ -115,6 +117,7 @@ pkg install termux-api
 ### Permission denied for shared storage
 
 Run once to grant storage permissions:
+
 ```bash
 termux-setup-storage
 ```
@@ -122,6 +125,7 @@ termux-setup-storage
 ### Node.js installation issues
 
 If npm fails, try clearing the cache:
+
 ```bash
 npm cache clean --force
 ```

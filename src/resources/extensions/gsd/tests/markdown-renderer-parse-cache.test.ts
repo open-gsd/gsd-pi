@@ -26,7 +26,7 @@ function roadmapMd(slices: Array<{ id: string; title: string; done: boolean }>):
   return lines.join("\n");
 }
 
-test("#442: detectStaleRenders re-parses ROADMAP only when it changes on disk", { skip: true }, (t) => {
+test("#442: detectStaleRenders re-parses ROADMAP only when it changes on disk", { skip: "projection drift uses DB-vs-render-intent, not roadmap parsing" }, (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-parse-cache-"));
   const milestoneDir = join(base, ".gsd", "milestones", "M001");
   mkdirSync(milestoneDir, { recursive: true });

@@ -33,6 +33,22 @@ export interface CapturesResult {
     resolved: number;
     actionable: number;
   };
+  /** Set only on the file read: the database was not available, so the rows come from the CAPTURES.md projection. */
+  readMetadata?: { source: 'projection'; authority: 'projection-fallback' };
+}
+
+/** One capture as the workflow database bridge returns it (captures.ts loadAllCaptures). */
+export interface DatabaseCapture {
+  id: string;
+  text: string;
+  timestamp: string;
+  status: CaptureStatus;
+  classification?: CaptureClassification;
+  resolution?: string;
+  rationale?: string;
+  resolvedAt?: string;
+  resolvedInMilestone?: string;
+  executedAt?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,38 +98,55 @@ function parseCapturesMarkdown(content: string): CaptureEntry[] {
 
 const ACTIONABLE_CLASSIFICATIONS = new Set<string>(['quick-task', 'inject', 'replan']);
 
+function capturesResult(all: CaptureEntry[], filter: 'all' | 'pending' | 'actionable'): CapturesResult {
+  const isActionable = (c: CaptureEntry) =>
+    c.classification !== null && ACTIONABLE_CLASSIFICATIONS.has(c.classification);
+  const counts = {
+    total: all.length,
+    pending: all.filter((c) => c.status === 'pending').length,
+    resolved: all.filter((c) => c.status === 'resolved').length,
+    actionable: all.filter(isActionable).length,
+  };
+  const captures = filter === 'pending'
+    ? all.filter((c) => c.status === 'pending')
+    : filter === 'actionable' ? all.filter(isActionable) : all;
+  return { captures, counts };
+}
+
+/** Build the tool result from the capture rows of the workflow database. */
+export function capturesResultFromDatabase(
+  rows: readonly DatabaseCapture[],
+  filter: 'all' | 'pending' | 'actionable' = 'all',
+): CapturesResult {
+  return capturesResult(rows.map((row) => ({
+    id: row.id,
+    text: row.text,
+    timestamp: row.timestamp,
+    status: row.status,
+    classification: row.classification ?? null,
+    resolution: row.resolution ?? null,
+    rationale: row.rationale ?? null,
+    resolvedAt: row.resolvedAt ?? null,
+    milestone: row.resolvedInMilestone ?? null,
+    executed: row.executedAt ?? null,
+  })), filter);
+}
+
+/**
+ * Display-only file read, used when the project database cannot be opened.
+ * The result is labelled as a projection fallback so the caller can tell it
+ * from a database read.
+ */
 export function readCaptures(
   projectDir: string,
   filter: 'all' | 'pending' | 'actionable' = 'all',
 ): CapturesResult {
   const gsd = resolveGsdRoot(projectDir);
   const capturesPath = resolveRootFile(gsd, 'CAPTURES.md');
+  const content = existsSync(capturesPath) ? readFileSync(capturesPath, 'utf-8') : '';
 
-  if (!existsSync(capturesPath)) {
-    return { captures: [], counts: { total: 0, pending: 0, resolved: 0, actionable: 0 } };
-  }
-
-  const content = readFileSync(capturesPath, 'utf-8');
-  let captures = parseCapturesMarkdown(content);
-
-  // Compute counts before filtering
-  const counts = {
-    total: captures.length,
-    pending: captures.filter((c) => c.status === 'pending').length,
-    resolved: captures.filter((c) => c.status === 'resolved').length,
-    actionable: captures.filter(
-      (c) => c.classification !== null && ACTIONABLE_CLASSIFICATIONS.has(c.classification),
-    ).length,
+  return {
+    ...capturesResult(parseCapturesMarkdown(content), filter),
+    readMetadata: { source: 'projection', authority: 'projection-fallback' },
   };
-
-  // Apply filter
-  if (filter === 'pending') {
-    captures = captures.filter((c) => c.status === 'pending');
-  } else if (filter === 'actionable') {
-    captures = captures.filter(
-      (c) => c.classification !== null && ACTIONABLE_CLASSIFICATIONS.has(c.classification),
-    );
-  }
-
-  return { captures, counts };
 }

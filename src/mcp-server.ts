@@ -8,6 +8,8 @@
  * `adaptExecutorResult` adapter on the workflow path. Keep both copies in
  * sync if the contract definition needs to evolve.
  */
+import { createHash, randomUUID } from 'node:crypto'
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object') return false
   if (Array.isArray(value)) return false
@@ -60,6 +62,40 @@ export function mcpSdkSpecifier(subpath: 'server/index' | 'server/stdio' | 'type
   return `${MCP_PKG}/${subpath}.js`
 }
 
+const MCP_IDEMPOTENCY_META_KEY = 'io.opengsd/idempotency-key'
+const MAX_MCP_IDEMPOTENCY_KEY_LENGTH = 512
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+/**
+ * Prefer the caller's retry-stable private tool-call identity. Explicit
+ * identities are hashed into a reserved namespace so secret-like metadata is
+ * not persisted. Calls without metadata receive a fresh invocation identity:
+ * JSON-RPC request ids may be reused and therefore are not durable mutation
+ * identities.
+ */
+export function createToolCallIdentityResolver() {
+  return (request: any, _extra: any): string => {
+    const explicit = request?.params?._meta?.[MCP_IDEMPOTENCY_META_KEY]
+    if (explicit !== undefined) {
+      if (typeof explicit !== 'string' || explicit.trim().length === 0) {
+        throw new Error(`_meta["${MCP_IDEMPOTENCY_META_KEY}"] must be a nonblank string`)
+      }
+      const value = explicit.trim()
+      if (value.length > MAX_MCP_IDEMPOTENCY_KEY_LENGTH) {
+        throw new Error(
+          `_meta["${MCP_IDEMPOTENCY_META_KEY}"] must be at most ${MAX_MCP_IDEMPOTENCY_KEY_LENGTH} characters`,
+        )
+      }
+      return `mcp-explicit:v1:sha256:${sha256(value)}`
+    }
+
+    return `mcp-invocation:v1:${randomUUID()}`
+  }
+}
+
 /**
  * Starts a native MCP (Model Context Protocol) server over stdin/stdout.
  *
@@ -77,6 +113,8 @@ export function mcpSdkSpecifier(subpath: 'server/index' | 'server/stdio' | 'type
 export async function startMcpServer(options: {
   tools: McpToolDef[]
   version?: string
+  /** MCP transport to serve on. Default: stdin/stdout. */
+  transport?: unknown
 }): Promise<void> {
   const { tools, version = '0.0.0' } = options
 
@@ -98,6 +136,7 @@ export async function startMcpServer(options: {
     { name: 'gsd', version },
     { capabilities: { tools: {} } },
   )
+  const resolveToolCallIdentity = createToolCallIdentityResolver()
 
   // tools/list — return every registered GSD tool with its JSON Schema parameters
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -128,8 +167,12 @@ export async function startMcpServer(options: {
     const signal: AbortSignal | undefined = extra?.signal
 
     try {
+      // Mutation tools use this as a Domain Operation idempotency key.
+      // Only explicit metadata is durable across retries; ordinary calls get
+      // a fresh identity even if a client reuses its JSON-RPC request id.
+      const toolCallId = resolveToolCallIdentity(request, extra)
       const result = await tool.execute(
-        `mcp-${Date.now()}`,
+        toolCallId,
         args ?? {},
         signal,
         undefined, // onUpdate not yet wired — progress notifications require a progressToken round-trip
@@ -177,8 +220,8 @@ export async function startMcpServer(options: {
     }
   })
 
-  // Connect to stdin/stdout transport
-  const transport = new StdioServerTransport()
+  // Connect to the given transport, or to stdin/stdout by default
+  const transport = options.transport ?? new StdioServerTransport()
   await server.connect(transport)
   process.stderr.write(`[gsd] MCP server started (v${version})\n`)
 }

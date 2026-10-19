@@ -5,8 +5,8 @@
  * Workflow MCP tools — exposes the core GSD mutation/read handlers over MCP.
  */
 
-import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,6 +19,7 @@ import {
 } from "@opengsd/contracts";
 
 import { logAliasUsage } from "./alias-telemetry.js";
+import type { DatabaseCapture } from "./readers/captures.js";
 
 export type MilestoneStatusObservationTokenState = "active" | "inactive" | "unavailable";
 
@@ -31,13 +32,6 @@ interface GsdMcpBridge {
   shouldBlockQueueExecutionInSnapshot: (...args: any[]) => any;
   ensureDbOpen: (...args: any[]) => any;
   openExistingWorkflowDatabase: (projectDir: string) => WorkflowDatabaseOpenResult;
-  resolveAutoPauseBlockerById: (input: {
-    blockerId: string;
-    rationale: string;
-    invocation: ExecutionInvocation;
-    expectedRevision: number;
-    expectedAuthorityEpoch: number;
-  }) => { resolved: boolean; failure?: string };
   _getAdapter: (...args: any[]) => any;
   checkpointDatabase: (...args: any[]) => any;
   closeDatabase: (...args: any[]) => any;
@@ -48,24 +42,47 @@ interface GsdMcpBridge {
   getPendingGates: (...args: any[]) => any;
   getSliceTasks: (...args: any[]) => any;
   insertDecision: (...args: any[]) => any;
-  insertMilestone: (...args: any[]) => any;
   insertSlice: (...args: any[]) => any;
   openDatabase: (...args: any[]) => any;
   upsertMilestonePlanning: (...args: any[]) => any;
   invalidateStateCache: (...args: any[]) => any;
-  isReusableGhostMilestone: (...args: any[]) => any;
   readProgressFromDb: (...args: any[]) => any;
+  readRoadmapFromDb: (projectDir: string, milestoneId?: string) => unknown;
+  readProjectQueryFromDb: (projectDir: string, fields: readonly string[]) => unknown;
+  runDoctorFromDb: (projectDir: string, scope?: string) => unknown;
+  readKnowledgeMarkdown: (projectDir: string) => string;
+  loadAllCaptures: (projectDir: string) => DatabaseCapture[];
+  listUnitMetrics: () => unknown[];
   loadEffectiveGSDPreferences: (...args: any[]) => any;
   saveDecisionToDb: (...args: any[]) => any;
   saveRequirementToDb: (...args: any[]) => any;
   updateRequirementInDb: (...args: any[]) => any;
-  rebuildState: (...args: any[]) => any;
   queryJournal: (...args: any[]) => any;
-  claimReservedId: (...args: any[]) => any;
-  findMilestoneIds: (...args: any[]) => any;
-  getReservedMilestoneIds: (...args: any[]) => any;
-  milestoneIdSort: (...args: any[]) => any;
-  nextMilestoneId: (...args: any[]) => any;
+  resolvePendingEscalation: (
+    projectDir: string,
+    response: string,
+    invocation: ExecutionInvocation,
+    questionId?: string,
+  ) => Promise<PersistedBlockerResolution>;
+  resolveAutoPauseBlockerById: (input: {
+    blockerId: string;
+    rationale: string;
+    invocation: ExecutionInvocation;
+    expectedRevision: number;
+    expectedAuthorityEpoch: number;
+  }) => { resolved: boolean; failure?: string; scope?: string };
+}
+
+/** The outcome of answering the open escalation question in the project database. */
+export interface PersistedBlockerResolution {
+  status: "resolved" | "not-found" | "already-resolved" | "invalid-choice" | "rejected-to-blocker";
+  message: string;
+  questionId: string;
+  milestoneId: string;
+  sliceId: string;
+  taskId: string;
+  decisionId?: string;
+  decisionError?: string;
 }
 
 type WorkflowDatabaseOpenResult =
@@ -75,7 +92,7 @@ type WorkflowDatabaseOpenResult =
       reason: "missing-database" | "missing-gsd-dir" | "locked" | "open-failed";
       error?: Error;
     }
-  | { ok: false; reason: "schema-too-new"; error: Error };
+  | { ok: false; reason: "schema-too-new" | "authority-missing" | "checkout-unbound"; error: Error };
 
 async function importBridgeModule(): Promise<GsdMcpBridge> {
   return importLocalModule<GsdMcpBridge>("../../../src/resources/extensions/gsd/mcp-bridge.js");
@@ -83,6 +100,7 @@ async function importBridgeModule(): Promise<GsdMcpBridge> {
 
 type WorkflowToolExecutors = {
   SUPPORTED_SUMMARY_ARTIFACT_TYPES: readonly string[];
+  runInToolSession: <T>(sessionKey: string, run: () => T) => T;
   MILESTONE_STATUS_OBSERVATION_TOKEN_ENV?: string;
   resolveMilestoneStatusObservationTokenState?: (
     basePath: string,
@@ -227,7 +245,22 @@ type WorkflowToolExecutors = {
         verificationCommands: string[];
       }>;
     },
-    basePath?: string,
+    basePath: string,
+    invocation: PlanningInvocation,
+  ) => Promise<unknown>;
+  executeCheckpointSave: (
+    params: {
+      milestoneId: string;
+      sliceId?: string;
+      taskId?: string;
+      kind: "pause" | "handoff";
+      confirmedContext: string;
+      unresolved?: string;
+      evidence?: string;
+      nextAction: string;
+    },
+    basePath: string,
+    invocation: PlanningInvocation,
   ) => Promise<unknown>;
   executeSliceComplete: (
     params: {
@@ -315,7 +348,7 @@ type WorkflowToolExecutors = {
   executePrepareMilestoneSubjectiveUat: (
     params: {
       milestoneId: string;
-      criterionKey: string;
+      criterionKey?: string;
       description: string;
       focusedPrompt: string;
       recommendedDisposition: "accepted" | "rejected";
@@ -325,19 +358,7 @@ type WorkflowToolExecutors = {
       recommendationConfidence?: number;
       requirementId?: string;
       required?: boolean;
-    },
-    basePath: string,
-    invocation: ExecutionInvocation,
-  ) => Promise<unknown>;
-  executeAnswerMilestoneSubjectiveUat: (
-    params: {
-      criterionId: string;
-      questionId: string;
-      interactionId: string;
-      selectedOptionId: string;
-      verbatimResponse: string;
-      rationale: string;
-      testedSourceRevision: string;
+      supersedesCriterionId?: string;
     },
     basePath: string,
     invocation: ExecutionInvocation,
@@ -379,7 +400,18 @@ type WorkflowToolExecutors = {
       rationale: string;
       findings?: string;
     },
-    basePath?: string,
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeHookVerdictSave: (
+    params: {
+      hookName: string;
+      unitId: string;
+      verdict: string;
+      rationale: string;
+    },
+    basePath: string,
+    invocation: ExecutionInvocation,
   ) => Promise<unknown>;
   executeUatResultSave: (
     params: {
@@ -393,7 +425,8 @@ type WorkflowToolExecutors = {
       attempt?: string;
       previousAttemptId?: string;
     },
-    basePath?: string,
+    basePath: string,
+    invocation: ExecutionInvocation,
   ) => Promise<unknown>;
   executeSummarySave: (
     params: {
@@ -403,7 +436,8 @@ type WorkflowToolExecutors = {
       artifact_type: string;
       content: string;
     },
-    basePath?: string,
+    basePath: string,
+    invocation: PlanningInvocation,
   ) => Promise<unknown>;
   executeTaskComplete: (
     params: {
@@ -497,6 +531,50 @@ type WorkflowToolExecutors = {
       actorName?: string;
       triggerReason?: string;
     },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeMilestoneGenerateId: (
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeMilestonePark: (
+    params: { milestoneId: string; reason: string },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeMilestoneUnpark: (
+    params: { milestoneId: string },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeMilestoneDiscard: (
+    params: { milestoneId: string; reason: string },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeMilestoneReorder: (
+    params: { order: string[] },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeMilestoneSetDependencies: (
+    params: { milestoneId: string; dependsOn: string[] },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeResearchDecisionSave: (
+    params: { decision: string },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeCaptureResolve: (
+    params: { captureId: string; classification: string; resolution: string; rationale: string },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeCaptureComplete: (
+    params: { captureId: string; outcome: string },
     basePath: string,
     invocation: ExecutionInvocation,
   ) => Promise<unknown>;
@@ -778,34 +856,94 @@ function parseWorkflowArgs<T extends { projectDir?: string }>(
   };
 }
 
+/**
+ * Required function exports for a workflow executor bridge module. Kept beside
+ * {@link isWorkflowToolExecutors} so the shape check and its mismatch
+ * diagnostics (#2741) can never drift apart.
+ */
+const WORKFLOW_TOOL_EXECUTOR_FUNCTION_EXPORTS = [
+  "runInToolSession",
+  "executeMilestoneStatus",
+  "executePlanMilestone",
+  "executePlanSlice",
+  "executeReplanSlice",
+  "executeReplanTask",
+  "executeReworkBriefSave",
+  "executeCheckpointSave",
+  "executeSliceComplete",
+  "executeCompleteMilestone",
+  "executeValidateMilestone",
+  "executeReassessRoadmap",
+  "executeSaveGateResult",
+  "executeHookVerdictSave",
+  "executeSummarySave",
+  "executeUatResultSave",
+  "executeTaskComplete",
+  "executeTaskReopen",
+  "executeTaskRecoveryResume",
+  "executeTaskSettle",
+  "executeSliceReopen",
+  "executeSkipSlice",
+  "executeMilestoneReopen",
+  "executeMilestoneGenerateId",
+  "executeMilestonePark",
+  "executeMilestoneUnpark",
+  "executeMilestoneDiscard",
+  "executeMilestoneReorder",
+  "executeMilestoneSetDependencies",
+  "executeResearchDecisionSave",
+  "executeCaptureResolve",
+  "executeCaptureComplete",
+] as const;
+
+const WORKFLOW_WRITE_GATE_FUNCTION_EXPORTS = [
+  "loadWriteGateSnapshot",
+  "shouldBlockPendingGateInSnapshot",
+  "shouldBlockQueueExecutionInSnapshot",
+] as const;
+
 function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  const functionExports = [
-    "executeMilestoneStatus",
-    "executePlanMilestone",
-    "executePlanSlice",
-    "executeReplanSlice",
-    "executeReplanTask",
-    "executeReworkBriefSave",
-    "executeSliceComplete",
-    "executeCompleteMilestone",
-    "executeValidateMilestone",
-    "executeReassessRoadmap",
-    "executeSaveGateResult",
-    "executeSummarySave",
-    "executeUatResultSave",
-    "executeTaskComplete",
-    "executeTaskReopen",
-    "executeTaskRecoveryResume",
-    "executeTaskSettle",
-    "executeSliceReopen",
-    "executeSkipSlice",
-    "executeMilestoneReopen",
-  ];
-
   return Array.isArray(record.SUPPORTED_SUMMARY_ARTIFACT_TYPES) &&
-    functionExports.every((key) => typeof record[key] === "function");
+    WORKFLOW_TOOL_EXECUTOR_FUNCTION_EXPORTS.every((key) => typeof record[key] === "function");
+}
+
+/**
+ * Name exactly why a module failed the workflow executor shape check (#2741)
+ * so a bridge author sees the missing exports instead of a bare
+ * "module shape mismatch".
+ */
+function describeWorkflowExecutorShapeMismatch(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return `module does not export an object (got ${value === null ? "null" : typeof value})`;
+  }
+  const record = value as Record<string, unknown>;
+  const problems: string[] = [];
+  if (!Array.isArray(record.SUPPORTED_SUMMARY_ARTIFACT_TYPES)) {
+    problems.push("SUPPORTED_SUMMARY_ARTIFACT_TYPES is missing or not an array");
+  }
+  const missing = WORKFLOW_TOOL_EXECUTOR_FUNCTION_EXPORTS.filter(
+    (key) => typeof record[key] !== "function",
+  );
+  if (missing.length > 0) {
+    problems.push(`missing function exports: ${missing.join(", ")}`);
+  }
+  return problems.length > 0 ? problems.join("; ") : "unknown shape mismatch";
+}
+
+/** Same diagnostics for the write-gate bridge shape (#2741). */
+function describeWorkflowWriteGateShapeMismatch(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return `module does not export an object (got ${value === null ? "null" : typeof value})`;
+  }
+  const record = value as Record<string, unknown>;
+  const missing = WORKFLOW_WRITE_GATE_FUNCTION_EXPORTS.filter(
+    (key) => typeof record[key] !== "function",
+  );
+  return missing.length > 0
+    ? `missing function exports: ${missing.join(", ")}`
+    : "unknown shape mismatch";
 }
 
 function getSupportedSummaryArtifactTypes(executors: WorkflowToolExecutors): readonly string[] {
@@ -858,23 +996,39 @@ function buildBridgeImportCandidates(relativePath: string): string[] {
   return [...new Set(candidates)];
 }
 
-function getWriteGateModuleCandidates(): string[] {
-  const candidates: string[] = [];
+function getWriteGateModuleCandidates(): { candidate: string; explicit: boolean }[] {
+  const candidates: { candidate: string; explicit: boolean }[] = [];
   const explicitModule = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE?.trim();
   if (explicitModule) {
     if (/^[a-z]{2,}:/i.test(explicitModule) && !explicitModule.startsWith("file:")) {
       throw new Error("GSD_WORKFLOW_WRITE_GATE_MODULE only supports file: URLs or filesystem paths.");
     }
     warnCustomWorkflowModule("GSD_WORKFLOW_WRITE_GATE_MODULE", explicitModule);
-    candidates.push(explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule));
+    candidates.push({
+      candidate: explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule),
+      explicit: true,
+    });
   }
 
   candidates.push(
     ...buildBridgeImportCandidates("../../../src/resources/extensions/gsd/mcp-bridge.js")
-      .map((p) => new URL(p, import.meta.url).href),
+      .map((p) => new URL(p, import.meta.url).href)
+      .map((candidate) => ({ candidate, explicit: false })),
   );
 
-  return [...new Set(candidates)];
+  // Dedupe by candidate URL, keeping first-seen position. If the configured
+  // module collides with an auto-discovered candidate, it stays marked
+  // explicit so its failure still fails closed (#2741).
+  const deduped = new Map<string, { candidate: string; explicit: boolean }>();
+  for (const entry of candidates) {
+    const existing = deduped.get(entry.candidate);
+    if (existing) {
+      existing.explicit = existing.explicit || entry.explicit;
+    } else {
+      deduped.set(entry.candidate, { ...entry });
+    }
+  }
+  return [...deduped.values()];
 }
 
 function toFileUrl(modulePath: string): string {
@@ -957,23 +1111,41 @@ async function loadProjectPreferences(projectDir: string): Promise<unknown | nul
   }
 }
 
-function getWorkflowExecutorModuleCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
-  const candidates: string[] = [];
+function getWorkflowExecutorModuleCandidates(
+  env: NodeJS.ProcessEnv = process.env,
+): { candidate: string; explicit: boolean }[] {
+  const candidates: { candidate: string; explicit: boolean }[] = [];
   const explicitModule = env.GSD_WORKFLOW_EXECUTORS_MODULE?.trim();
   if (explicitModule) {
     if (/^[a-z]{2,}:/i.test(explicitModule) && !explicitModule.startsWith("file:")) {
       throw new Error("GSD_WORKFLOW_EXECUTORS_MODULE only supports file: URLs or filesystem paths.");
     }
     warnCustomWorkflowModule("GSD_WORKFLOW_EXECUTORS_MODULE", explicitModule);
-    candidates.push(explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule));
+    candidates.push({
+      candidate: explicitModule.startsWith("file:") ? explicitModule : toFileUrl(explicitModule),
+      explicit: true,
+    });
   }
 
   candidates.push(
     ...buildBridgeImportCandidates("../../../src/resources/extensions/gsd/tools/workflow-tool-executors.js")
-      .map((p) => new URL(p, import.meta.url).href),
+      .map((p) => new URL(p, import.meta.url).href)
+      .map((candidate) => ({ candidate, explicit: false })),
   );
 
-  return [...new Set(candidates)];
+  // Dedupe by candidate URL, keeping first-seen position. If the configured
+  // module collides with an auto-discovered candidate, it stays marked
+  // explicit so its failure still fails closed (#2741).
+  const deduped = new Map<string, { candidate: string; explicit: boolean }>();
+  for (const entry of candidates) {
+    const existing = deduped.get(entry.candidate);
+    if (existing) {
+      existing.explicit = existing.explicit || entry.explicit;
+    } else {
+      deduped.set(entry.candidate, { ...entry });
+    }
+  }
+  return [...deduped.values()];
 }
 
 export function hasWorkflowToolBridgeConfiguration(
@@ -1013,16 +1185,41 @@ async function getWorkflowToolExecutors(): Promise<WorkflowToolExecutors> {
   if (!workflowToolExecutorsPromise) {
     workflowToolExecutorsPromise = (async () => {
       const attempts: string[] = [];
-      for (const candidate of getWorkflowExecutorModuleCandidates()) {
+      for (const { candidate, explicit } of getWorkflowExecutorModuleCandidates()) {
+        let loaded: unknown;
         try {
-          const loaded = await import(candidate);
-          if (isWorkflowToolExecutors(loaded)) {
-            return loaded;
-          }
-          attempts.push(`${candidate} (module shape mismatch)`);
+          loaded = await import(candidate);
         } catch (err) {
-          attempts.push(`${candidate} (${err instanceof Error ? err.message : String(err)})`);
+          const reason = err instanceof Error ? err.message : String(err);
+          if (explicit) {
+            // #2741: an operator-configured module is a statement of intent.
+            // Silently substituting the packaged executors would fail open
+            // while the startup warning still announces the custom module, so
+            // configured bridge failures stay fail-closed (see README:
+            // "the MCP host sees a startup failure instead of a partially
+            // advertised workflow surface"). Only auto-discovered co-located
+            // candidates fall through.
+            throw new Error(
+              `GSD_WORKFLOW_EXECUTORS_MODULE is set to ${candidate} but the module failed to import (${reason}). ` +
+              `Refusing to fall back to the packaged workflow executors; fix the module or unset GSD_WORKFLOW_EXECUTORS_MODULE.`,
+            );
+          }
+          attempts.push(`${candidate} (${reason})`);
+          continue;
         }
+        if (isWorkflowToolExecutors(loaded)) {
+          return loaded;
+        }
+        const detail = describeWorkflowExecutorShapeMismatch(loaded);
+        if (explicit) {
+          // #2741: fail loud on a configured module that imports but does not
+          // satisfy the executor contract — see the import-error branch above.
+          throw new Error(
+            `GSD_WORKFLOW_EXECUTORS_MODULE is set to ${candidate} but the module failed the workflow executor shape check (${detail}). ` +
+            `Refusing to fall back to the packaged workflow executors; fix the module or unset GSD_WORKFLOW_EXECUTORS_MODULE.`,
+          );
+        }
+        attempts.push(`${candidate} (module shape mismatch: ${detail})`);
       }
 
       throw new Error(
@@ -1069,21 +1266,42 @@ async function getWorkflowWriteGateModule(): Promise<WorkflowWriteGateModule> {
   if (!workflowWriteGatePromise) {
     workflowWriteGatePromise = (async () => {
       const attempts: string[] = [];
-      for (const candidate of getWriteGateModuleCandidates()) {
+      for (const { candidate, explicit } of getWriteGateModuleCandidates()) {
+        let loaded: unknown;
         try {
-          const loaded = await import(candidate);
-          if (
-            loaded &&
-            typeof loaded.loadWriteGateSnapshot === "function" &&
-            typeof loaded.shouldBlockPendingGateInSnapshot === "function" &&
-            typeof loaded.shouldBlockQueueExecutionInSnapshot === "function"
-          ) {
-            return loaded as WorkflowWriteGateModule;
-          }
-          attempts.push(`${candidate} (module shape mismatch)`);
+          loaded = await import(candidate);
         } catch (err) {
-          attempts.push(`${candidate} (${err instanceof Error ? err.message : String(err)})`);
+          const reason = err instanceof Error ? err.message : String(err);
+          if (explicit) {
+            // #2741: fail closed for a configured write-gate module — same
+            // rationale as the executor loader.
+            throw new Error(
+              `GSD_WORKFLOW_WRITE_GATE_MODULE is set to ${candidate} but the module failed to import (${reason}). ` +
+              `Refusing to fall back to the packaged write gate; fix the module or unset GSD_WORKFLOW_WRITE_GATE_MODULE.`,
+            );
+          }
+          attempts.push(`${candidate} (${reason})`);
+          continue;
         }
+        const record = loaded as Record<string, unknown> | null | undefined;
+        if (
+          record &&
+          typeof record.loadWriteGateSnapshot === "function" &&
+          typeof record.shouldBlockPendingGateInSnapshot === "function" &&
+          typeof record.shouldBlockQueueExecutionInSnapshot === "function"
+        ) {
+          return loaded as WorkflowWriteGateModule;
+        }
+        const detail = describeWorkflowWriteGateShapeMismatch(loaded);
+        if (explicit) {
+          // #2741: fail loud on a configured module that imports but does not
+          // satisfy the write-gate contract — see the executor loader.
+          throw new Error(
+            `GSD_WORKFLOW_WRITE_GATE_MODULE is set to ${candidate} but the module failed the write-gate shape check (${detail}). ` +
+            `Refusing to fall back to the packaged write gate; fix the module or unset GSD_WORKFLOW_WRITE_GATE_MODULE.`,
+          );
+        }
+        attempts.push(`${candidate} (module shape mismatch: ${detail})`);
       }
 
       throw new Error(
@@ -1129,6 +1347,38 @@ interface McpToolServer {
 const MCP_IDEMPOTENCY_META_KEY = "io.opengsd/idempotency-key";
 const CLAUDE_CODE_TOOL_USE_META_KEY = "claudecode/toolUseId";
 const CLAUDE_CODE_IDEMPOTENCY_PREFIX = "transport:claude-code:";
+const MCP_TRACE_CORRELATION_LABEL = "opengsd:workflow-mcp:trace-correlation:v1";
+
+function lengthPrefixed(value: string): string {
+  return `${Buffer.byteLength(value, "utf8")}:${value}`;
+}
+
+/**
+ * Correlates private MCP retries without copying their idempotency identity
+ * into durable trace metadata. The versioned purpose label is intentionally
+ * distinct from every idempotency-key namespace. Length-prefixed fields keep
+ * tool, transport, actor, and stable input boundaries unambiguous.
+ *
+ * This only handles transport-private retry identity. Callers that already
+ * have a legitimate externally assigned trace ID continue to pass it through
+ * the separate trusted ExecutionInvocation.traceId field.
+ */
+export function derivePrivateMcpTraceId(input: {
+  canonicalToolName: string;
+  sourceTransport: ExecutionInvocation["sourceTransport"];
+  actorType: string;
+  stableInput: string;
+}): string {
+  const digestInput = [
+    MCP_TRACE_CORRELATION_LABEL,
+    input.canonicalToolName,
+    input.sourceTransport,
+    input.actorType,
+    input.stableInput,
+  ].map(lengthPrefixed).join("|");
+  const digest = createHash("sha256").update(digestInput, "utf8").digest("hex");
+  return `workflow-mcp-trace:v1:sha256:${digest}`;
+}
 
 function mcpInvocation(
   canonicalToolName: string,
@@ -1172,10 +1422,12 @@ function mcpInvocation(
       `Retry with the same nonblank value.`,
     );
   }
+  const sourceTransport = "workflow-mcp";
+  const actorType = "agent";
   return {
     idempotencyKey: `mcp:${canonicalToolName}:${stableKey}`,
-    sourceTransport: "workflow-mcp",
-    actorType: "agent",
+    sourceTransport,
+    actorType,
     traceId: stableKey,
   };
 }
@@ -1190,7 +1442,7 @@ function mcpPlanningInvocation(
 function mcpExecutionInvocation(
   canonicalToolName: string,
   extra?: WorkflowMcpRequestExtra,
-): ExecutionInvocation {
+): ExecutionInvocation & { traceId: string } {
   return mcpInvocation(canonicalToolName, "Task execution mutation", extra);
 }
 
@@ -1199,21 +1451,6 @@ function mcpWorkflowExecutionInvocation(
   extra?: WorkflowMcpRequestExtra,
 ): ExecutionInvocation {
   return mcpInvocation(canonicalToolName, "Workflow execution mutation", extra);
-}
-
-function mcpUserResponseInvocation(
-  canonicalToolName: string,
-  extra?: WorkflowMcpRequestExtra,
-): ExecutionInvocation {
-  const actorId = extra?.sessionId?.trim();
-  if (!actorId) {
-    throw new Error(`${canonicalToolName} requires an authenticated MCP session identity`);
-  }
-  return {
-    ...mcpWorkflowExecutionInvocation(canonicalToolName, extra),
-    actorType: "user",
-    actorId,
-  };
 }
 
 export const WORKFLOW_TOOL_NAMES = CONTRACT_WORKFLOW_TOOL_NAMES;
@@ -1277,7 +1514,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === null || proto === Object.prototype;
 }
 
-async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): Promise<T> {
+export async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): Promise<T> {
   // The shared DB adapter and workflow log base path are process-global, so
   // workflow MCP mutations must not overlap within a single server process.
   // A per-operation deadline prevents a single stuck call from wedging its
@@ -1344,53 +1581,169 @@ async function runSerializedWorkflowDbOperation<T>(
 }
 
 /**
- * DB-authoritative progress payload for the `gsd_progress` tool
- * (ADR-046). Runs inside the workflow serialization queue with the bridge's
- * project-scoped DB open, so back-to-back calls for different projects
- * cannot serve one project's state for another.
+ * DB-authoritative payload for a session-less read tool (ADR-046). Runs inside
+ * the workflow serialization queue with the bridge's project-scoped DB open,
+ * so back-to-back calls for different projects cannot serve one project's
+ * state for another.
  *
  * Returns null when the project database is missing or cannot be opened, so
- * the caller falls back to the projection reader, matching `gsd read progress`.
- * Schema-version errors and failures after a successful open remain loud.
+ * the caller falls back to the labelled projection reader, matching
+ * `gsd read progress`. Schema-version errors and failures after a successful
+ * open remain loud.
  */
-export async function readProjectProgressViaBridge(projectDir: string): Promise<unknown | null> {
+async function readDbViaBridge<T>(
+  projectDir: string,
+  read: (bridge: GsdMcpBridge) => T | Promise<T>,
+): Promise<T | null> {
   return runSerializedWorkflowOperation(async () => {
     const bridge = await importBridgeModule();
     const opened = bridge.openExistingWorkflowDatabase(projectDir);
     if (!opened.ok) {
-      if (opened.reason === "schema-too-new") throw opened.error;
+      if (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound") throw opened.error;
       return null;
     }
-
-    return bridge.readProgressFromDb(projectDir);
+    return read(bridge);
   });
 }
 
+/**
+ * Resolve the pending blocker that the project database holds
+ * (gsd_resolve_blocker): the open escalation question, through its answer
+ * Domain Operation. It needs no session, so it works after a server restart.
+ * It is a workflow mutation: the write gate applies, and the answer records
+ * the MCP caller, not the user.
+ */
+export async function resolvePersistedBlockerViaBridge(
+  projectDir: string,
+  response: string,
+  questionId?: string,
+  extra?: WorkflowMcpRequestExtra,
+): Promise<PersistedBlockerResolution> {
+  return runSerializedWorkflowOperation(async () => {
+    await checkWorkflowWriteGate("gsd_resolve_blocker", projectDir);
+    const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
+    const bridge = await importBridgeModule();
+    const opened = bridge.openExistingWorkflowDatabase(projectDir);
+    if (!opened.ok) {
+      throw opened.error ?? new Error(`No pending blocker: the project database is not available (${opened.reason}).`);
+    }
+    return bridge.resolvePendingEscalation(projectDir, response, invocation, questionId);
+  });
+}
+
+/** Outcome of resolving an exact auto-pause blocker (gsd_resolve_blocker, pauseBlockerId). */
+export interface PersistedAutoPauseBlockerResolution {
+  resolved: boolean;
+  failure?: string;
+  scope?: string;
+}
+
+/**
+ * Resolve one exact named auto-pause blocker (gsd_resolve_blocker,
+ * pauseBlockerId) and atomically close its bound `auto_pauses` row, through
+ * the `pause.blocker.resolve.by-id` Domain Operation. Clear-only: it never
+ * starts auto, authorizes a retry, settles an Attempt, or records task
+ * success — that stays `gsd_task_recovery_resume`'s job. It needs no
+ * session, so it works after a server restart; the write gate and workflow
+ * serialization queue apply like every other workflow mutation.
+ */
 export async function resolvePersistedAutoPauseBlockerViaBridge(
   projectDir: string,
-  blockerId: string,
+  pauseBlockerId: string,
   rationale: string,
   expectedRevision: number,
   expectedAuthorityEpoch: number,
   extra?: WorkflowMcpRequestExtra,
-): Promise<{ resolved: boolean; failure?: string }> {
+): Promise<PersistedAutoPauseBlockerResolution> {
   if (!rationale.trim()) throw new Error("rationale must not be blank");
-  const validatedProjectDir = validateProjectDir(projectDir);
-  await enforceWorkflowWriteGate("gsd_resolve_blocker", validatedProjectDir);
   return runSerializedWorkflowOperation(async () => {
+    await checkWorkflowWriteGate("gsd_resolve_blocker", projectDir);
+    const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
+    invocation.traceId = derivePrivateMcpTraceId({
+      canonicalToolName: "gsd_resolve_blocker",
+      sourceTransport: invocation.sourceTransport,
+      actorType: invocation.actorType,
+      stableInput: invocation.traceId,
+    });
     const bridge = await importBridgeModule();
-    const opened = bridge.openExistingWorkflowDatabase(validatedProjectDir);
+    const opened = bridge.openExistingWorkflowDatabase(projectDir);
     if (!opened.ok) {
-      throw opened.error ?? new Error(`GSD database is not available (${opened.reason})`);
+      const detail = opened.error ? `: ${opened.error.message}` : "";
+      throw new Error(
+        `No pending blocker: the project database is not available (${opened.reason})${detail}`,
+        { cause: opened.error },
+      );
     }
     return bridge.resolveAutoPauseBlockerById({
-      blockerId,
+      blockerId: pauseBlockerId,
       rationale,
-      invocation: mcpExecutionInvocation("gsd_resolve_blocker", extra),
+      invocation,
       expectedRevision,
       expectedAuthorityEpoch,
     });
   });
+}
+
+/** Progress payload from the project database (gsd_progress). */
+export async function readProjectProgressViaBridge(projectDir: string): Promise<unknown | null> {
+  return readDbViaBridge(projectDir, (bridge) => bridge.readProgressFromDb(projectDir));
+}
+
+/** Roadmap hierarchy from the project database (gsd_roadmap). */
+export async function readRoadmapViaBridge(projectDir: string, milestoneId?: string): Promise<unknown | null> {
+  return readDbViaBridge(projectDir, (bridge) => bridge.readRoadmapFromDb(projectDir, milestoneId));
+}
+
+/** The requested gsd_query fields from the project database. */
+export async function readProjectQueryViaBridge(
+  projectDir: string,
+  fields: readonly string[],
+): Promise<Record<string, unknown> | null> {
+  return readDbViaBridge(
+    projectDir,
+    (bridge) => bridge.readProjectQueryFromDb(projectDir, fields) as Promise<Record<string, unknown> | null>,
+  );
+}
+
+/** Hierarchy health from the project database (gsd_doctor). */
+export async function runDoctorViaBridge(projectDir: string, scope?: string): Promise<unknown | null> {
+  return readDbViaBridge(projectDir, (bridge) => bridge.runDoctorFromDb(projectDir, scope));
+}
+
+/**
+ * KNOWLEDGE.md content built from the project database (gsd_knowledge).
+ * Returns null when the database cannot be opened, so the caller can use the
+ * display-only file read; once the database opens it is authoritative.
+ */
+export async function readKnowledgeViaBridge(projectDir: string): Promise<string | null> {
+  return readDbViaBridge(projectDir, (bridge) => bridge.readKnowledgeMarkdown(projectDir));
+}
+
+/**
+ * Capture rows of the project database (gsd_captures). Returns null when the
+ * database cannot be opened, so the caller can use the display-only file
+ * read; once the database opens it is authoritative.
+ */
+export async function readCapturesViaBridge(projectDir: string): Promise<DatabaseCapture[] | null> {
+  return runSerializedWorkflowOperation(async () => {
+    const bridge = await importBridgeModule();
+    const opened = bridge.openExistingWorkflowDatabase(projectDir);
+    if (!opened.ok) {
+      if (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound") throw opened.error;
+      return null;
+    }
+    return bridge.loadAllCaptures(projectDir);
+  });
+}
+
+/**
+ * Unit cost and token rows of the project database (gsd_history). Returns
+ * null when the database cannot be opened, so the caller can use the
+ * display-only file read. The caller also uses the file read when the database
+ * holds no unit rows and .gsd/metrics.json holds units.
+ */
+export async function readHistoryViaBridge(projectDir: string): Promise<unknown[] | null> {
+  return readDbViaBridge(projectDir, (bridge) => bridge.listUnitMetrics());
 }
 
 async function runSerializedCanonicalReadOperation(
@@ -1417,6 +1770,100 @@ async function runSerializedCanonicalReadOperation(
       adapter.close();
     }
   });
+}
+
+// #2445 — decision rows must be model-visible: ToolResultMessage carries
+// `content` only, so choice/rationale hidden in `details` never reach the
+// model. These formatters render the full row (get) and one compact line per
+// row (list). Kept textually identical to the native mirror in
+// src/resources/extensions/gsd/bootstrap/db-tools.ts (surface drift
+// prevention); canonical-read-tools.test.ts asserts both surfaces agree.
+const DECISION_LIST_RATIONALE_EXCERPT_CHARS = 120;
+
+type DecisionRowLike = {
+	id: unknown;
+	decision: unknown;
+	choice?: unknown;
+	rationale?: unknown;
+	scope?: unknown;
+	when_context?: unknown;
+	made_by?: unknown;
+	revisable?: unknown;
+	source?: unknown;
+	superseded_by?: unknown;
+	impacts?: unknown;
+};
+
+function decisionField(value: unknown): string {
+	return value === null || value === undefined ? "" : String(value);
+}
+
+// List lines must stay one physical line per row (#2445): collapse newlines
+// and whitespace runs that free-text fields can contain. get keeps original
+// values for full-row fidelity.
+function decisionListField(value: unknown): string {
+	return decisionField(value).replace(/\s+/g, " ").trim();
+}
+
+function decisionImpactRows(decision: DecisionRowLike): Array<Record<string, unknown>> {
+	return Array.isArray(decision.impacts)
+		? decision.impacts.filter(
+				(impact): impact is Record<string, unknown> =>
+					impact !== null && typeof impact === "object",
+			)
+		: [];
+}
+
+function decisionImpactTarget(impact: Record<string, unknown>): string {
+	const triple = [impact.milestone_id, impact.slice_id, impact.task_id]
+		.filter((value) => value !== null && value !== undefined)
+		.map((value) => String(value))
+		.join("/");
+	return triple || decisionField(impact.target_scope);
+}
+
+function formatDecisionImpact(impact: Record<string, unknown>): string {
+	const note = decisionListField(impact.payload);
+	return `Impact: ${decisionField(impact.impact_kind) || "?"} ${decisionImpactTarget(impact)}${note ? ` — ${note}` : ""}`;
+}
+
+function formatDecisionGetContent(decision: DecisionRowLike): string {
+	const field = (value: unknown, fallback: string): string => decisionField(value) || fallback;
+	const source = decisionField(decision.source);
+	return [
+		`Decision ${field(decision.id, "?")}: ${field(decision.decision, "-")}`,
+		`Choice: ${field(decision.choice, "-")}`,
+		`Rationale: ${field(decision.rationale, "-")}`,
+		`Scope: ${field(decision.scope, "-")}`,
+		`When: ${field(decision.when_context, "-")}`,
+		`Made by: ${field(decision.made_by, "-")}`,
+		...(source ? [`Source: ${source}`] : []),
+		`Revisable: ${field(decision.revisable, "-")}`,
+		`Superseded by: ${field(decision.superseded_by, "none")}`,
+		...decisionImpactRows(decision).map(formatDecisionImpact),
+	].join("\n");
+}
+
+function formatDecisionListLine(decision: DecisionRowLike): string {
+	const rationale = decisionListField(decision.rationale);
+	const excerpt = rationale.length > DECISION_LIST_RATIONALE_EXCERPT_CHARS
+		? `${rationale.slice(0, DECISION_LIST_RATIONALE_EXCERPT_CHARS)}…`
+		: rationale;
+	const impactRows = decisionImpactRows(decision);
+	const segments = [
+		`${decisionListField(decision.id) || "?"} [${decisionListField(decision.scope) || "-"}] ${decisionListField(decision.decision) || "-"}`,
+		decisionListField(decision.choice) ? `choice: ${decisionListField(decision.choice)}` : "",
+		excerpt ? `rationale: ${excerpt}` : "",
+		impactRows.length > 0
+			? `impacts: ${impactRows.map((impact) => `${decisionListField(impact.impact_kind)} ${decisionImpactTarget(impact)}`).join("; ")}`
+			: "",
+	].filter(Boolean);
+	const supersededBy = decisionListField(decision.superseded_by);
+	return `- ${segments.join(" | ")}${supersededBy ? ` (superseded by ${supersededBy})` : ""}`;
+}
+
+function formatDecisionListContent(decisions: DecisionRowLike[]): string {
+  return [`Found ${decisions.length} decision(s).`, ...decisions.map(formatDecisionListLine)].join("\n");
 }
 
 function mapCanonicalReadError(
@@ -1458,7 +1905,22 @@ function mapCanonicalReadError(
   });
 }
 
+/**
+ * Gate state is rows of the project database, so the check opens that
+ * database. It runs in the workflow queue, like every other database use: a
+ * call for another project cannot replace the open database under a running
+ * operation.
+ */
 async function enforceWorkflowWriteGate(
+  toolName: string,
+  projectDir: string,
+  milestoneId: string | null = null,
+): Promise<void> {
+  await runSerializedWorkflowOperation(() => checkWorkflowWriteGate(toolName, projectDir, milestoneId));
+}
+
+/** The gate check itself. Call it directly only from inside the workflow queue. */
+async function checkWorkflowWriteGate(
   toolName: string,
   projectDir: string,
   milestoneId: string | null = null,
@@ -1524,7 +1986,7 @@ async function handleTaskRecoveryResume(
   return adaptExecutorResult(
     await runSerializedWorkflowOperation(async () => {
       const resolvedProjectDir = await resolveRecoveryActionProjectDir(projectDir, args.recoveryActionId);
-      await enforceWorkflowWriteGate("gsd_task_recovery_resume", resolvedProjectDir);
+      await checkWorkflowWriteGate("gsd_task_recovery_resume", resolvedProjectDir);
       const { executeTaskRecoveryResume } = await getWorkflowToolExecutors();
       return executeTaskRecoveryResume(args, resolvedProjectDir, invocation);
     }),
@@ -1568,6 +2030,18 @@ async function handleMilestoneReopen(
   return adaptExecutorResult(
     await runSerializedWorkflowOperation(() => executeMilestoneReopen(args, projectDir, invocation)),
   );
+}
+
+/** Generate-id, park, unpark, discard, reorder and set-dependencies share one gate-and-run path. */
+async function handleMilestoneHierarchyTool(
+  toolName: string,
+  projectDir: string,
+  milestoneId: string | null,
+  run: (executors: WorkflowToolExecutors) => Promise<unknown>,
+): Promise<unknown> {
+  await enforceWorkflowWriteGate(toolName, projectDir, milestoneId);
+  const executors = await getWorkflowToolExecutors();
+  return adaptExecutorResult(await runSerializedWorkflowOperation(() => run(executors)));
 }
 
 async function handleSliceComplete(
@@ -1625,12 +2099,26 @@ async function handleReplanTask(
 async function handleReworkBriefSave(
   projectDir: string,
   args: z.infer<typeof reworkBriefSaveSchema>,
+  invocation: PlanningInvocation,
 ): Promise<unknown> {
   await enforceWorkflowWriteGate("gsd_rework_brief_save", projectDir, args.milestoneId);
   const { executeReworkBriefSave } = await getWorkflowToolExecutors();
   const { projectDir: _projectDir, ...params } = args;
   return adaptExecutorResult(
-    await runSerializedWorkflowOperation(() => executeReworkBriefSave(params, projectDir)),
+    await runSerializedWorkflowOperation(() => executeReworkBriefSave(params, projectDir, invocation)),
+  );
+}
+
+async function handleCheckpointSave(
+  projectDir: string,
+  args: z.infer<typeof checkpointSaveSchema>,
+  invocation: PlanningInvocation,
+): Promise<unknown> {
+  await enforceWorkflowWriteGate("gsd_checkpoint_save", projectDir, args.milestoneId);
+  const { executeCheckpointSave } = await getWorkflowToolExecutors();
+  const { projectDir: _projectDir, ...params } = args;
+  return adaptExecutorResult(
+    await runSerializedWorkflowOperation(() => executeCheckpointSave(params, projectDir, invocation)),
   );
 }
 
@@ -1676,18 +2164,6 @@ async function handlePrepareMilestoneSubjectiveUat(
   const { projectDir: _projectDir, ...params } = args;
   return adaptExecutorResult(await runSerializedWorkflowOperation(() =>
     executePrepareMilestoneSubjectiveUat(params, projectDir, invocation)
-  ));
-}
-
-async function handleAnswerMilestoneSubjectiveUat(
-  projectDir: string,
-  args: z.infer<typeof answerMilestoneSubjectiveUatSchema>,
-  invocation: ExecutionInvocation,
-): Promise<unknown> {
-  const { executeAnswerMilestoneSubjectiveUat } = await getWorkflowToolExecutors();
-  const { projectDir: _projectDir, ...params } = args;
-  return adaptExecutorResult(await runSerializedWorkflowOperation(() =>
-    executeAnswerMilestoneSubjectiveUat(params, projectDir, invocation)
   ));
 }
 
@@ -1792,93 +2268,26 @@ async function inferSaveGateResultScope(
 async function handleSaveGateResult(
   projectDir: string,
   args: z.infer<typeof saveGateResultSchema>,
+  invocation: ExecutionInvocation,
 ): Promise<unknown> {
   await enforceWorkflowWriteGate("gsd_save_gate_result", projectDir, args.milestoneId);
   const { executeSaveGateResult } = await getWorkflowToolExecutors();
   const { projectDir: _projectDir, ...params } = args;
   return adaptExecutorResult(
-    await runSerializedWorkflowOperation(() => executeSaveGateResult(params, projectDir)),
+    await runSerializedWorkflowOperation(() => executeSaveGateResult(params, projectDir, invocation)),
   );
 }
 
-async function ensureMilestoneDbRow(milestoneId: string): Promise<void> {
-  try {
-    const bridge = await importBridgeModule();
-    bridge.insertMilestone({ id: milestoneId, status: "queued" });
-  } catch {
-    // Ignore pre-existing rows or transient DB availability issues.
-  }
-}
-
-async function findDatabaseMilestoneIds(): Promise<string[]> {
-  try {
-    const bridge = await importBridgeModule();
-    return (bridge.getAllMilestones?.() ?? [])
-      .map((milestone: unknown) => {
-        const id = (milestone as { id?: unknown })?.id;
-        return typeof id === "string" ? id : null;
-      })
-      .filter((id: string | null): id is string => id !== null);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Fix #4996: Shared helper for both gsd_milestone_generate_id and
- * gsd_generate_milestone_id. Reuses the lowest reusable ghost milestone ID
- * (a disk-only stub with no DB row, no worktree, no content files) before
- * falling back to max+1. Uses the stricter `isReusableGhostMilestone` —
- * not `isGhostMilestone` — to avoid racing with in-flight queued DB rows
- * from an earlier call to this same tool.
- */
-async function generateOrReuseMilestoneId(projectDir: string): Promise<string> {
-  const bridge = await importBridgeModule();
-  const {
-    claimReservedId,
-    findMilestoneIds,
-    getReservedMilestoneIds,
-    nextMilestoneId,
-    milestoneIdSort,
-  } = bridge;
-
-  const reserved = claimReservedId();
-  if (reserved) {
-    await ensureMilestoneDbRow(reserved);
-    return reserved;
-  }
-
-  const allIds = [
-    ...new Set([
-      ...findMilestoneIds(projectDir),
-      ...getReservedMilestoneIds(),
-      ...(await findDatabaseMilestoneIds()),
-    ]),
-  ];
-
-  // Attempt ghost-ID reuse before falling back to max+1.
-  const { isReusableGhostMilestone } = bridge;
-  const sorted = [...allIds].sort(milestoneIdSort);
-  for (const candidate of sorted) {
-    if (isReusableGhostMilestone(projectDir, candidate)) {
-      await ensureMilestoneDbRow(candidate);
-      return candidate;
-    }
-  }
-
-  const prefsMod = await importBridgeModule().catch(() => null);
-  // Graceful degradation: a corrupt preferences file should not crash
-  // milestone-id generation. Fall back to non-unique IDs if anything
-  // throws here — matches the pre-fix behavior for missing prefs.
-  let uniqueEnabled = false;
-  try {
-    uniqueEnabled = !!prefsMod?.loadEffectiveGSDPreferences?.(projectDir)?.preferences?.unique_milestone_ids;
-  } catch {
-    uniqueEnabled = false;
-  }
-  const nextId = nextMilestoneId(allIds, uniqueEnabled);
-  await ensureMilestoneDbRow(nextId);
-  return nextId;
+async function handleHookVerdictSave(
+  projectDir: string,
+  args: z.infer<typeof hookVerdictSaveSchema>,
+  invocation: ExecutionInvocation,
+): Promise<unknown> {
+  const { executeHookVerdictSave } = await getWorkflowToolExecutors();
+  const { projectDir: _projectDir, ...params } = args;
+  return adaptExecutorResult(
+    await runSerializedWorkflowOperation(() => executeHookVerdictSave(params, projectDir, invocation)),
+  );
 }
 
 // projectDir is optional. When omitted, the server uses process.cwd(). This
@@ -2177,7 +2586,7 @@ const validateMilestoneSchema = z.object(validateMilestoneParams);
 const prepareMilestoneSubjectiveUatParams = {
   projectDir: projectDirParam,
   milestoneId: nonEmptyString("milestoneId"),
-  criterionKey: nonEmptyString("criterionKey"),
+  criterionKey: nonEmptyString("criterionKey").optional().describe("Criterion key to prepare; required unless supersedesCriterionId is given, in which case the replacement inherits the superseded criterion key"),
   description: nonEmptyString("description"),
   focusedPrompt: nonEmptyString("focusedPrompt"),
   recommendedDisposition: z.enum(["accepted", "rejected"]),
@@ -2187,20 +2596,9 @@ const prepareMilestoneSubjectiveUatParams = {
   recommendationConfidence: z.number().min(0).max(1).optional(),
   requirementId: nonEmptyString("requirementId").optional(),
   required: z.boolean().optional(),
+  supersedesCriterionId: nonEmptyString("supersedesCriterionId").optional().describe("Explicitly supersede this current subjective UAT criterion by ID; the replacement inherits its criterionKey and requirementId"),
 };
 const prepareMilestoneSubjectiveUatSchema = z.object(prepareMilestoneSubjectiveUatParams);
-
-const answerMilestoneSubjectiveUatParams = {
-  projectDir: projectDirParam,
-  criterionId: nonEmptyString("criterionId"),
-  questionId: nonEmptyString("questionId"),
-  interactionId: nonEmptyString("interactionId"),
-  selectedOptionId: nonEmptyString("selectedOptionId"),
-  verbatimResponse: nonEmptyString("verbatimResponse"),
-  rationale: nonEmptyString("rationale"),
-  testedSourceRevision: nonEmptyString("testedSourceRevision"),
-};
-const answerMilestoneSubjectiveUatSchema = z.object(answerMilestoneSubjectiveUatParams);
 
 const roadmapSliceChangeSchema = z.object({
   sliceId: nonEmptyString("sliceId"),
@@ -2256,6 +2654,15 @@ const saveGateResultParams = {
   findings: z.string().optional().describe("Detailed markdown findings"),
 };
 const saveGateResultSchema = z.object(saveGateResultParams);
+
+const hookVerdictSaveParams = {
+  projectDir: projectDirParam,
+  hookName: nonEmptyString("hookName").describe("Configured post_unit_hooks entry name"),
+  unitId: nonEmptyString("unitId").describe("Trigger unit id, e.g. M001/S01/T01 or M001"),
+  verdict: z.enum(["pass", "advisory", "needs-rework", "needs-remediation", "needs-attention"]).describe("Hook gate verdict"),
+  rationale: nonEmptyString("rationale").describe("Why the hook reached the verdict"),
+};
+const hookVerdictSaveSchema = z.object(hookVerdictSaveParams);
 
 const saveGateResultIncomingParams = {
   projectDir: projectDirParam,
@@ -2358,6 +2765,19 @@ const reworkBriefSaveParams = {
 };
 const reworkBriefSaveSchema = z.object(reworkBriefSaveParams);
 
+const checkpointSaveParams = {
+  projectDir: projectDirParam,
+  milestoneId: nonEmptyString("milestoneId").describe("Milestone ID (e.g. M001)"),
+  sliceId: z.string().optional().describe("Slice ID (e.g. S01); omit for a milestone checkpoint"),
+  taskId: z.string().optional().describe("Task ID (e.g. T01); pass it when a task is in progress"),
+  kind: z.enum(["pause", "handoff"]).describe("pause: work stops and the same work resumes; handoff: another session or a later phase picks the work up"),
+  confirmedContext: nonEmptyString("confirmedContext").describe("What is done and confirmed, with evidence"),
+  unresolved: z.string().optional().describe("Remaining work, open questions, and what not to do"),
+  evidence: z.string().optional().describe("Commands, files and results that support the confirmed context"),
+  nextAction: nonEmptyString("nextAction").describe("The one concrete action the next session takes first"),
+};
+const checkpointSaveSchema = z.object(checkpointSaveParams);
+
 const sliceCompleteParams = {
   projectDir: projectDirParam,
   sliceId: nonEmptyString("sliceId").describe("Slice ID (e.g. S01)"),
@@ -2456,6 +2876,15 @@ const decisionSaveParams = {
   revisable: z.string().optional().describe("Whether this can be revisited"),
   when_context: z.string().optional().describe("When/context for the decision"),
   made_by: z.enum(["human", "agent", "collaborative"]).optional().describe("Who made the decision"),
+  supersedes: z.string().optional().describe("ID of the active decision that this decision replaces (e.g. D003). The old decision is marked superseded."),
+  impacts: z.array(z.object({
+    kind: z.enum(["revalidates", "supersedes", "blocks"]).describe("Impact kind: 'revalidates' marks scope work that must be revisited, 'supersedes' names the decision this replaces, 'blocks' marks scope work that cannot proceed."),
+    milestone_id: z.string().optional().describe("Target milestone ID (e.g. M001)."),
+    slice_id: z.string().optional().describe("Target slice ID; requires milestone_id."),
+    task_id: z.string().optional().describe("Target task ID; requires milestone_id and slice_id."),
+    scope: z.string().optional().describe("Free scope text for targets that have no unit ID. Give milestone_id/slice_id/task_id or scope."),
+    note: z.string().optional().describe("Why this impact holds."),
+  })).optional().describe("Optional downstream impacts recorded with the decision. Omit or pass [] for none. Each needs a target: milestone_id (optionally slice_id/task_id) or free-text scope."),
 };
 const decisionSaveSchema = z.object(decisionSaveParams);
 
@@ -2538,14 +2967,14 @@ const taskCompleteParams = {
       id: z.string().describe("Short id (e.g. 'A', 'B') used by /gsd escalate resolve."),
       label: z.string().describe("One-line label."),
       tradeoffs: z.string().describe("1-2 sentences on the tradeoffs of this option."),
-    })).min(2).max(4).describe("2-4 options the user can choose between."),
+    })).min(2).max(3).describe("2-3 options the user can choose between."),
     recommendation: z.string().describe("Option id the executor recommends."),
     recommendationRationale: z.string().describe("Why the recommendation — 1-2 sentences."),
     continueWithDefault: z.boolean().describe(
       "When true, the recommendation is recorded as the default, but auto-mode still pauses until the user resolves via /gsd escalate resolve.",
     ),
   }).optional().describe("ADR-011 Phase 2: optional escalation payload. Only honored when phases.mid_execution_escalation is true."),
-  verificationEvidence: verificationEvidenceSchema.optional().describe("Verification evidence entries, or that array encoded as JSON"),
+  verificationEvidence: verificationEvidenceSchema.optional().describe("Verification evidence entries, or that array encoded as JSON. Each command is the exact gsd_exec script"),
   reworkResolution: z.array(z.object({
     findingId: nonEmptyString("findingId"),
     status: z.enum(["resolved", "deferred-with-override"]),
@@ -2587,6 +3016,12 @@ const taskSettleParams = {
   reconcileLifecycle: z.boolean().optional().describe(
     "After settling or an interrupted Attempt, adopt ready/completed; after a succeeded Attempt, adopt completed. Preserve SUMMARYs",
   ),
+  // #2202 operator closeout, mirrored from the native surface (db-tools.ts):
+  // without this field zod strips the key and the #2202 blocker → replan path
+  // is unreachable from MCP hosts (#2536).
+  settleDisposition: z.literal("blocker-accepted").optional().describe(
+    "#2202 operator closeout: accept a discovered blocker and close the Task terminal (no rerun, no fabricated success). Requires the latest Attempt settled failed/blocker-discovered at the route stage and no running Attempt. Mutually exclusive with reconcileLifecycle. Then replan the slice with this task as blockerTaskId.",
+  ),
 };
 const taskSettleSchema = z.object(taskSettleParams);
 
@@ -2609,6 +3044,61 @@ const milestoneReopenParams = {
   keepCompleted: z.boolean().optional().describe("When true, unlock the milestone without resetting completed slices/tasks or deleting their SUMMARY projections. Default false (full cascade reset)."),
 };
 const milestoneReopenSchema = z.object(milestoneReopenParams);
+
+const milestoneParkParams = {
+  projectDir: projectDirParam,
+  milestoneId: nonEmptyString("milestoneId").describe("Milestone ID (e.g. M003)"),
+  reason: nonEmptyString("reason").describe("Why the milestone is parked"),
+};
+const milestoneParkSchema = z.object(milestoneParkParams);
+
+const milestoneUnparkParams = {
+  projectDir: projectDirParam,
+  milestoneId: nonEmptyString("milestoneId").describe("Milestone ID (e.g. M003)"),
+};
+const milestoneUnparkSchema = z.object(milestoneUnparkParams);
+
+const milestoneDiscardParams = {
+  projectDir: projectDirParam,
+  milestoneId: nonEmptyString("milestoneId").describe("Milestone ID (e.g. M003)"),
+  reason: nonEmptyString("reason").describe("Why the milestone is discarded (recorded in the Waiver)"),
+};
+const milestoneDiscardSchema = z.object(milestoneDiscardParams);
+
+const milestoneReorderParams = {
+  projectDir: projectDirParam,
+  order: z.array(z.string()).min(1).describe("Open milestone IDs in execution order"),
+};
+const milestoneReorderSchema = z.object(milestoneReorderParams);
+
+const milestoneSetDependenciesParams = {
+  projectDir: projectDirParam,
+  milestoneId: nonEmptyString("milestoneId").describe("Milestone ID (e.g. M003)"),
+  dependsOn: z.array(z.string()).describe("Milestone IDs that must be complete first; [] removes all"),
+};
+const milestoneSetDependenciesSchema = z.object(milestoneSetDependenciesParams);
+
+const researchDecisionSaveParams = {
+  projectDir: projectDirParam,
+  decision: z.enum(["research", "skip"]).describe("research: run project research before milestone planning. skip: go straight to milestone work."),
+};
+const researchDecisionSaveSchema = z.object(researchDecisionSaveParams);
+
+const captureResolveParams = {
+  projectDir: projectDirParam,
+  captureId: nonEmptyString("captureId").describe("Capture ID (e.g. CAP-1a2b3c4d)"),
+  classification: z.enum(["quick-task", "inject", "defer", "replan", "note", "stop", "backtrack"]).describe("Confirmed classification"),
+  resolution: nonEmptyString("resolution").describe("What will happen (for backtrack, name the target milestone ID)"),
+  rationale: nonEmptyString("rationale").describe("Why this classification"),
+};
+const captureResolveSchema = z.object(captureResolveParams);
+
+const captureCompleteParams = {
+  projectDir: projectDirParam,
+  captureId: nonEmptyString("captureId").describe("Capture ID (e.g. CAP-1a2b3c4d)"),
+  outcome: nonEmptyString("outcome").describe("What was changed, or why no change was needed"),
+};
+const captureCompleteSchema = z.object(captureCompleteParams);
 
 const milestoneStatusParams = {
   projectDir: projectDirParam,
@@ -2759,7 +3249,9 @@ function wrapServerWithErrorHandler(realServer: McpToolServer): McpToolServer {
     tool(name, description, params, handler) {
       return realServer.tool(name, description, params, async (args, extra) => {
         try {
-          return await handler(args, extra);
+          // A mutation is checked against the revision that this MCP session last read.
+          const { runInToolSession } = await getWorkflowToolExecutors();
+          return await runInToolSession(`mcp:${extra?.sessionId ?? "default"}`, () => handler(args, extra));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           return {
@@ -2805,13 +3297,13 @@ export function registerWorkflowTools(
     "gsd_decision_save",
     "Record a project decision to the GSD database and regenerate DECISIONS.md.",
     decisionSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(decisionSaveSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_decision_save", projectDir);
       const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        return bridge.saveDecisionToDb(params, projectDir);
+        return bridge.saveDecisionToDb(params, projectDir, mcpPlanningInvocation("gsd_decision_save", extra));
       });
       return { content: [{ type: "text" as const, text: `Saved decision ${result.id}` }] };
     },
@@ -2821,14 +3313,14 @@ export function registerWorkflowTools(
     "gsd_save_decision",
     "Alias for gsd_decision_save. Record a project decision to the GSD database and regenerate DECISIONS.md.",
     decisionSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_save_decision", "gsd_decision_save");
       const parsed = parseWorkflowArgs(decisionSaveSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_decision_save", projectDir);
       const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        return bridge.saveDecisionToDb(params, projectDir);
+        return bridge.saveDecisionToDb(params, projectDir, mcpPlanningInvocation("gsd_decision_save", extra));
       });
       return { content: [{ type: "text" as const, text: `Saved decision ${result.id}` }] };
     },
@@ -2876,7 +3368,7 @@ export function registerWorkflowTools(
             adapter,
           );
           return {
-            content: [{ type: "text" as const, text: `Found ${results.length} decision(s).` }],
+            content: [{ type: "text" as const, text: formatDecisionListContent(results) }],
             details: { operation: "list_decisions", count: results.length, decisions: results },
           };
         });
@@ -2920,7 +3412,7 @@ export function registerWorkflowTools(
             };
           }
           return {
-            content: [{ type: "text" as const, text: `Decision ${decision.id}: ${decision.decision}` }],
+            content: [{ type: "text" as const, text: formatDecisionGetContent(decision) }],
             details: { operation: "get_decision", id: decision.id, decision },
           };
         });
@@ -2935,13 +3427,18 @@ export function registerWorkflowTools(
     "gsd_requirement_update",
     "Update an existing requirement in the GSD database and regenerate REQUIREMENTS.md.",
     requirementUpdateParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(requirementUpdateSchema, args);
       const { projectDir, id, ...updates } = parsed;
       await enforceWorkflowWriteGate("gsd_requirement_update", projectDir);
       await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        return bridge.updateRequirementInDb(id, updates, projectDir);
+        return bridge.updateRequirementInDb(
+          id,
+          updates,
+          projectDir,
+          mcpPlanningInvocation("gsd_requirement_update", extra),
+        );
       });
       return { content: [{ type: "text" as const, text: `Updated requirement ${id}` }] };
     },
@@ -2951,14 +3448,19 @@ export function registerWorkflowTools(
     "gsd_update_requirement",
     "Alias for gsd_requirement_update. Update an existing requirement in the GSD database and regenerate REQUIREMENTS.md.",
     requirementUpdateParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_update_requirement", "gsd_requirement_update");
       const parsed = parseWorkflowArgs(requirementUpdateSchema, args);
       const { projectDir, id, ...updates } = parsed;
       await enforceWorkflowWriteGate("gsd_requirement_update", projectDir);
       await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        return bridge.updateRequirementInDb(id, updates, projectDir);
+        return bridge.updateRequirementInDb(
+          id,
+          updates,
+          projectDir,
+          mcpPlanningInvocation("gsd_requirement_update", extra),
+        );
       });
       return { content: [{ type: "text" as const, text: `Updated requirement ${id}` }] };
     },
@@ -2968,13 +3470,13 @@ export function registerWorkflowTools(
     "gsd_requirement_save",
     "Record a new requirement to the GSD database and regenerate REQUIREMENTS.md.",
     requirementSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(requirementSaveSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_requirement_save", projectDir);
       const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        return bridge.saveRequirementToDb(params, projectDir);
+        return bridge.saveRequirementToDb(params, projectDir, mcpPlanningInvocation("gsd_requirement_save", extra));
       });
       return { content: [{ type: "text" as const, text: `Saved requirement ${result.id}` }] };
     },
@@ -2984,14 +3486,14 @@ export function registerWorkflowTools(
     "gsd_save_requirement",
     "Alias for gsd_requirement_save. Record a new requirement to the GSD database and regenerate REQUIREMENTS.md.",
     requirementSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_save_requirement", "gsd_requirement_save");
       const parsed = parseWorkflowArgs(requirementSaveSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_requirement_save", projectDir);
       const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        return bridge.saveRequirementToDb(params, projectDir);
+        return bridge.saveRequirementToDb(params, projectDir, mcpPlanningInvocation("gsd_requirement_save", extra));
       });
       return { content: [{ type: "text" as const, text: `Saved requirement ${result.id}` }] };
     },
@@ -3124,15 +3626,13 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_milestone_generate_id",
-    "Generate the next milestone ID for a new GSD milestone.",
+    "Generate the next milestone ID for a new GSD milestone and register its database row in one Domain Operation.",
     milestoneGenerateIdParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const { projectDir } = parseWorkflowArgs(milestoneGenerateIdSchema, args);
-      await enforceWorkflowWriteGate("gsd_milestone_generate_id", projectDir);
-      const id = await runSerializedWorkflowDbOperation(projectDir, () =>
-        generateOrReuseMilestoneId(projectDir),
-      );
-      return { content: [{ type: "text" as const, text: id }] };
+      const invocation = mcpWorkflowExecutionInvocation("gsd_milestone_generate_id", extra);
+      return handleMilestoneHierarchyTool("gsd_milestone_generate_id", projectDir, null, (executors) =>
+        executors.executeMilestoneGenerateId(projectDir, invocation));
     },
   );
 
@@ -3140,14 +3640,12 @@ export function registerWorkflowTools(
     "gsd_generate_milestone_id",
     "Alias for gsd_milestone_generate_id. Generate the next milestone ID for a new GSD milestone.",
     milestoneGenerateIdParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_generate_milestone_id", "gsd_milestone_generate_id");
       const { projectDir } = parseWorkflowArgs(milestoneGenerateIdSchema, args);
-      await enforceWorkflowWriteGate("gsd_milestone_generate_id", projectDir);
-      const id = await runSerializedWorkflowDbOperation(projectDir, () =>
-        generateOrReuseMilestoneId(projectDir),
-      );
-      return { content: [{ type: "text" as const, text: id }] };
+      const invocation = mcpWorkflowExecutionInvocation("gsd_milestone_generate_id", extra);
+      return handleMilestoneHierarchyTool("gsd_milestone_generate_id", projectDir, null, (executors) =>
+        executors.executeMilestoneGenerateId(projectDir, invocation));
     },
   );
 
@@ -3249,7 +3747,7 @@ export function registerWorkflowTools(
         throw new Error(result.error);
       }
       return {
-        content: [{ type: "text" as const, text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})` }],
+        content: [{ type: "text" as const, text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})${result.stale ? ". The readable plan update is pending repair." : ""}` }],
       };
     },
   );
@@ -3275,7 +3773,7 @@ export function registerWorkflowTools(
         throw new Error(result.error);
       }
       return {
-        content: [{ type: "text" as const, text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})` }],
+        content: [{ type: "text" as const, text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})${result.stale ? ". The readable plan update is pending repair." : ""}` }],
       };
     },
   );
@@ -3327,9 +3825,27 @@ export function registerWorkflowTools(
     "gsd_rework_brief_save",
     "Persist a structured task rework brief whose blocking findings gate gsd_task_complete.",
     reworkBriefSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(reworkBriefSaveSchema, args);
-      return handleReworkBriefSave(parsed.projectDir, parsed);
+      return handleReworkBriefSave(
+        parsed.projectDir,
+        parsed,
+        mcpPlanningInvocation("gsd_rework_brief_save", extra),
+      );
+    },
+  );
+
+  server.tool(
+    "gsd_checkpoint_save",
+    "Save a Work Checkpoint row (pause or handoff) for a milestone, slice or task. The row is the resume state; CONTINUE.md is rendered from it.",
+    checkpointSaveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const parsed = parseWorkflowArgs(checkpointSaveSchema, args);
+      return handleCheckpointSave(
+        parsed.projectDir,
+        parsed,
+        mcpPlanningInvocation("gsd_checkpoint_save", extra),
+      );
     },
   );
 
@@ -3449,20 +3965,6 @@ export function registerWorkflowTools(
   );
 
   server.tool(
-    "gsd_answer_milestone_subjective_uat",
-    "Record the user's actual response to a prepared subjective Milestone UAT question using authenticated MCP session identity.",
-    answerMilestoneSubjectiveUatParams,
-    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
-      const parsed = parseWorkflowArgs(answerMilestoneSubjectiveUatSchema, args);
-      return handleAnswerMilestoneSubjectiveUat(
-        parsed.projectDir,
-        parsed,
-        mcpUserResponseInvocation("gsd_answer_milestone_subjective_uat", extra),
-      );
-    },
-  );
-
-  server.tool(
     "gsd_reassess_roadmap",
     "Reassess a milestone roadmap after a slice completes, writing ROADMAP-ASSESSMENT.md and re-rendering ROADMAP.md.",
     reassessRoadmapParams,
@@ -3495,7 +3997,7 @@ export function registerWorkflowTools(
     "gsd_save_gate_result",
     "Save a quality gate result to the GSD database.",
     saveGateResultIncomingParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const incoming = parseWorkflowArgs(saveGateResultIncomingSchema, args);
       const { prepareSaveGateResultArguments } = await importLocalModule<{
         prepareSaveGateResultArguments: (raw: unknown) => unknown;
@@ -3509,7 +4011,22 @@ export function registerWorkflowTools(
           ? (prepared as Record<string, unknown>)
           : {};
       const parsed = parseWorkflowArgs(saveGateResultSchema, record);
-      return handleSaveGateResult(parsed.projectDir, parsed);
+      return handleSaveGateResult(
+        parsed.projectDir,
+        parsed,
+        mcpWorkflowExecutionInvocation("gsd_save_gate_result", extra),
+      );
+    },
+  );
+
+  server.tool(
+    "gsd_hook_verdict_save",
+    "Record a post-unit hook gate verdict in the GSD database. The workflow reads this recorded verdict; the artifact file is a report for the operator.",
+    hookVerdictSaveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const parsed = parseWorkflowArgs(hookVerdictSaveSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_hook_verdict_save", extra);
+      return handleHookVerdictSave(parsed.projectDir, parsed, invocation);
     },
   );
 
@@ -3517,13 +4034,14 @@ export function registerWorkflowTools(
     "gsd_uat_result_save",
     "Save structured UAT checks, evidence, verdict, and tool-presentation proof. Writes ASSESSMENT, attempt history, and aggregate UAT gate.",
     uatResultSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(uatResultSaveSchema, args);
       const { projectDir, ...params } = parsed;
+      const invocation = mcpWorkflowExecutionInvocation("gsd_uat_result_save", extra);
       await enforceWorkflowWriteGate("gsd_uat_result_save", projectDir, params.milestoneId);
       const { executeUatResultSave } = await getWorkflowToolExecutors();
       return adaptExecutorResult(
-        await runSerializedWorkflowOperation(() => executeUatResultSave(params, projectDir)),
+        await runSerializedWorkflowOperation(() => executeUatResultSave(params, projectDir, invocation)),
       );
     },
   );
@@ -3532,9 +4050,10 @@ export function registerWorkflowTools(
     "gsd_summary_save",
     "Save a GSD summary/research/context/assessment artifact to the database and disk. Omit milestone_id only for root-level PROJECT/PROJECT-DRAFT/REQUIREMENTS/REQUIREMENTS-DRAFT artifacts.",
     summarySaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(summarySaveSchema, args);
       const { projectDir, milestone_id, slice_id, task_id, artifact_type, content } = parsed;
+      const invocation = mcpPlanningInvocation("gsd_summary_save", extra);
       await enforceWorkflowWriteGate("gsd_summary_save", projectDir, milestone_id ?? null);
       const executors = await getWorkflowToolExecutors();
       const supportedArtifactTypes = getSupportedSummaryArtifactTypes(executors);
@@ -3545,7 +4064,11 @@ export function registerWorkflowTools(
       }
       return adaptExecutorResult(
         await runSerializedWorkflowOperation(() =>
-          executors.executeSummarySave({ milestone_id, slice_id, task_id, artifact_type, content }, projectDir),
+          executors.executeSummarySave(
+            { milestone_id, slice_id, task_id, artifact_type, content },
+            projectDir,
+            invocation,
+          ),
         ),
       );
     },
@@ -3555,10 +4078,11 @@ export function registerWorkflowTools(
     "gsd_save_summary",
     "Alias for gsd_summary_save. Save a GSD summary/research/context/assessment artifact to the database and disk.",
     summarySaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_save_summary", "gsd_summary_save");
       const parsed = parseWorkflowArgs(summarySaveSchema, args);
       const { projectDir, milestone_id, slice_id, task_id, artifact_type, content } = parsed;
+      const invocation = mcpPlanningInvocation("gsd_summary_save", extra);
       await enforceWorkflowWriteGate("gsd_summary_save", projectDir, milestone_id ?? null);
       const executors = await getWorkflowToolExecutors();
       const supportedArtifactTypes = getSupportedSummaryArtifactTypes(executors);
@@ -3569,7 +4093,11 @@ export function registerWorkflowTools(
       }
       return adaptExecutorResult(
         await runSerializedWorkflowOperation(() =>
-          executors.executeSummarySave({ milestone_id, slice_id, task_id, artifact_type, content }, projectDir),
+          executors.executeSummarySave(
+            { milestone_id, slice_id, task_id, artifact_type, content },
+            projectDir,
+            invocation,
+          ),
         ),
       );
     },
@@ -3654,7 +4182,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_task_settle",
-    "Operator tool: settle a Task's orphaned running Attempt as interrupted. Dry-run by default — prints the exact rows it would change; mutation requires apply: true. Optional reconcileLifecycle adopts ready/completed to match tasks.status without deleting SUMMARYs.",
+    "Operator tool: settle a Task's orphaned running Attempt as interrupted. Dry-run by default — prints the exact rows it would change; mutation requires apply: true. Optional reconcileLifecycle adopts ready/completed to match tasks.status without deleting SUMMARYs. Optional settleDisposition 'blocker-accepted' closes a Task whose latest Attempt failed as blocker-discovered: terminal closeout with blocker provenance, then replan via gsd_replan_slice (mutually exclusive with reconcileLifecycle).",
     taskSettleParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(taskSettleSchema, args);
@@ -3730,6 +4258,102 @@ export function registerWorkflowTools(
   );
 
   server.tool(
+    "gsd_milestone_park",
+    "Park a Milestone in one SQLite Domain Operation: it leaves the run, keeps its work, and can be unparked later. The PARKED marker is rendered from the database.",
+    milestoneParkParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(milestoneParkSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_milestone_park", extra);
+      return handleMilestoneHierarchyTool("gsd_milestone_park", projectDir, params.milestoneId, (executors) =>
+        executors.executeMilestonePark(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_milestone_unpark",
+    "Return a parked Milestone to the run in one SQLite Domain Operation. The PARKED marker is removed after the commit.",
+    milestoneUnparkParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(milestoneUnparkSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_milestone_unpark", extra);
+      return handleMilestoneHierarchyTool("gsd_milestone_unpark", projectDir, params.milestoneId, (executors) =>
+        executors.executeMilestoneUnpark(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_milestone_discard",
+    "Discard a Milestone in one SQLite Domain Operation: the Milestone and its open Slices and Tasks are cancelled with a Waiver, its id is never reused, and its files, worktree and branch are removed after the commit. This cannot be undone.",
+    milestoneDiscardParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(milestoneDiscardSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_milestone_discard", extra);
+      return handleMilestoneHierarchyTool("gsd_milestone_discard", projectDir, params.milestoneId, (executors) =>
+        executors.executeMilestoneDiscard(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_milestone_reorder",
+    "Set the execution order of the open Milestones in one SQLite Domain Operation. List every open Milestone in the wanted order; one that is not listed keeps its relative position after the listed ones. An order that puts a Milestone before one it depends on is refused. QUEUE-ORDER.json is rendered from the database.",
+    milestoneReorderParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(milestoneReorderSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_milestone_reorder", extra);
+      return handleMilestoneHierarchyTool("gsd_milestone_reorder", projectDir, null, (executors) =>
+        executors.executeMilestoneReorder(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_milestone_set_dependencies",
+    "Replace the depends_on list of one open Milestone in one SQLite Domain Operation. Unknown or discarded Milestones and dependency cycles are refused.",
+    milestoneSetDependenciesParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(milestoneSetDependenciesSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_milestone_set_dependencies", extra);
+      return handleMilestoneHierarchyTool("gsd_milestone_set_dependencies", projectDir, params.milestoneId, (executors) =>
+        executors.executeMilestoneSetDependencies(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_research_decision_save",
+    "Record the project research decision (research or skip) in one SQLite Domain Operation. The deep project setup gate reads this decision from the database.",
+    researchDecisionSaveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(researchDecisionSaveSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_research_decision_save", extra);
+      return handleMilestoneHierarchyTool("gsd_research_decision_save", projectDir, null, (executors) =>
+        executors.executeResearchDecisionSave(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_capture_resolve",
+    "Classify one user capture (triage) in one SQLite Domain Operation. The tool only records the classification; CAPTURES.md is rendered from the database.",
+    captureResolveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(captureResolveSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_capture_resolve", extra);
+      return handleMilestoneHierarchyTool("gsd_capture_resolve", projectDir, null, (executors) =>
+        executors.executeCaptureResolve(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_capture_complete",
+    "Record the outcome of a quick-task capture in one SQLite Domain Operation. The capture counts as executed only after this call.",
+    captureCompleteParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(captureCompleteSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_capture_complete", extra);
+      return handleMilestoneHierarchyTool("gsd_capture_complete", projectDir, null, (executors) =>
+        executors.executeCaptureComplete(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
     "gsd_milestone_status",
     "Read the current status of a milestone and all its slices from the GSD database. Includes `dependsOn`, the persisted milestone dependencies.",
     milestoneStatusParams,
@@ -3763,18 +4387,28 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_checkpoint_db",
-    "Flush the SQLite WAL into gsd.db so git add stages the current GSD database state.",
+    "Flush the SQLite WAL into gsd.db. Reports failure when the checkpoint did not complete. gsd.db is git-ignored runtime state: do not stage or commit it.",
     checkpointDbParams,
     async (args: Record<string, unknown>) => {
       const { projectDir } = parseWorkflowArgs(checkpointDbSchema, args);
-      await runSerializedWorkflowDbOperation(projectDir, async () => {
+      const complete = await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        bridge.checkpointDatabase();
+        return bridge.checkpointDatabase() === true;
       });
+      if (!complete) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: WAL checkpoint did not complete. Another connection may hold the database; retry later.",
+          }],
+          structuredContent: { operation: "checkpoint_db", error: "checkpoint_incomplete" },
+          isError: true,
+        };
+      }
       return {
         content: [{
           type: "text" as const,
-          text: "WAL checkpoint complete. gsd.db is now up to date and safe to stage with git add.",
+          text: "WAL checkpoint complete. gsd.db is now up to date.",
         }],
         structuredContent: { operation: "checkpoint_db", status: "ok" },
       };
@@ -3891,6 +4525,7 @@ export function registerWorkflowTools(
     "preference",
     "environment",
     "pattern",
+    "rule",
   ]);
 
   const captureThoughtSchema = z.object({
@@ -3916,16 +4551,17 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_capture_thought",
-    "Record a durable project insight into the GSD memory store. Categories: architecture, convention, gotcha, preference, environment, pattern. Mirrors the in-process capture_thought tool for external MCP clients.",
+    "Record a durable project insight into the GSD memory store. Categories: architecture, convention, gotcha, preference, environment, pattern, rule. Rule, pattern and gotcha captures get a K/P/L id and appear in KNOWLEDGE.md at once. Mirrors the in-process capture_thought tool for external MCP clients.",
     captureThoughtParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const { projectDir, ...params } = parseWorkflowArgs(captureThoughtSchema, args);
+      const invocation = mcpPlanningInvocation("gsd_capture_thought", extra);
       await enforceWorkflowWriteGate("gsd_capture_thought", projectDir);
       return runSerializedWorkflowDbOperation(projectDir, async () => {
         const { executeMemoryCapture } = await importWorkflowRuntimeModule<any>(
           "../../../src/resources/extensions/gsd/tools/memory-tools.js",
         );
-        return executeMemoryCapture(params);
+        return executeMemoryCapture(params, projectDir, invocation);
       });
     },
   );

@@ -140,7 +140,7 @@ export interface AgentSessionHost {
 		source: "set" | "cycle" | "restore",
 	): Promise<void>;
 	findLastAssistantMessage(): AssistantMessage | undefined;
-	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevel(level: ThinkingLevel, options?: { persist?: boolean }): void;
 	getAvailableThinkingLevels(): ThinkingLevel[];
 	clampThinkingLevel(level: ThinkingLevel, availableLevels: ThinkingLevel[]): ThinkingLevel;
 	supportsThinking(): boolean;
@@ -186,4 +186,5 @@ export interface AgentSessionHost {
 	// Public methods modules delegate to
 	setModel(model: Model<any>, options?: { persist?: boolean }): Promise<void>;
 	cycleModel(direction?: "forward" | "backward"): Promise<ModelCycleResult | undefined>;
+	repairPlaceholderModel(): Promise<void>;
 }

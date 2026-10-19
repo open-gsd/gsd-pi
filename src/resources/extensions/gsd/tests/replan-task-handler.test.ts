@@ -16,6 +16,7 @@ import {
 } from '../gsd-db.ts';
 import { handleReplanTask as handleReplanTaskWithInvocation } from '../tools/replan-task.ts';
 import { internalPlanningInvocation } from '../planning-invocation.ts';
+import { assertWorkerRendersStaleProjection } from './projection-render-failure-gate.ts';
 
 function handleReplanTask(
   params: Parameters<typeof handleReplanTaskWithInvocation>[0],
@@ -111,6 +112,28 @@ test('handleReplanTask updates one pending task plan and records a task-scoped r
     const planContent = readFileSync(planPath, 'utf-8');
     assert.match(planContent, /Replanned Task/);
     assert.match(planContent, /node --test replanned\.test\.ts/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handleReplanTask returns the committed replan with a stale flag when the render fails', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedTask('pending');
+    // A directory in the place of the slice plan makes the render fail (EISDIR).
+    const planPath = join(base, '.gsd', 'phases', '01-test', '01-01-PLAN.md');
+    mkdirSync(planPath, { recursive: true });
+
+    const result = await handleReplanTask(validReplanTaskParams(), base);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
+    assert.equal(getTask('M001', 'S01', 'T01')?.title, 'Replanned Task', 'the replan is committed');
+
+    rmSync(planPath, { recursive: true });
+    await assertWorkerRendersStaleProjection(base, planPath);
   } finally {
     cleanup(base);
   }

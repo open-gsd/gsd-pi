@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   _getAdapter,
+  getDb,
   isDbAvailable,
   transaction,
   insertAuditEvent,
@@ -202,10 +203,9 @@ export function refreshMilestoneLease(
   milestoneId: string,
   fencingToken: number,
 ): boolean {
-  if (!isDbAvailable()) return false;
   const now = new Date();
   const expiresIso = ttlExpiry(now);
-  const db = _getAdapter()!;
+  const db = getDb();
   const result = transaction(() => {
     return db.prepare(
       `UPDATE milestone_leases
@@ -237,8 +237,7 @@ export function releaseMilestoneLease(
   milestoneId: string,
   fencingToken: number,
 ): boolean {
-  if (!isDbAvailable()) return false;
-  const db = _getAdapter()!;
+  const db = getDb();
   return transaction(() => {
     const result = db.prepare(
       `UPDATE milestone_leases
@@ -278,8 +277,7 @@ export function releaseMilestoneLease(
  * non-running process.
  */
 export function forceReleaseLeasesForWorker(workerId: string): number {
-  if (!isDbAvailable()) return 0;
-  const db = _getAdapter()!;
+  const db = getDb();
   let changes = 0;
   transaction(() => {
     const result = db.prepare(
@@ -294,6 +292,42 @@ export function forceReleaseLeasesForWorker(workerId: string): number {
         : 0;
   });
   return changes;
+}
+
+/**
+ * Force-release one held lease of a dead worker, bound to the fencing token
+ * the caller observed on the held row. Returns true only when THIS call
+ * released the lease: a concurrent recovery claim under the dead worker's id
+ * (task-settle) or a competing reclaimer that moves the row off
+ * (worker_id, fencing_token) makes this a no-op, so the caller never revokes
+ * a newer lease epoch and never journals a release it did not perform.
+ */
+export function forceReleaseMilestoneLeaseForWorker(
+  workerId: string,
+  milestoneId: string,
+  fencingToken: number,
+): boolean {
+  const db = getDb();
+  let released = false;
+  transaction(() => {
+    const result = db.prepare(
+      `UPDATE milestone_leases
+       SET status = 'released'
+       WHERE milestone_id = :milestone_id
+         AND worker_id = :worker_id
+         AND fencing_token = :fencing_token
+         AND status = 'held'`,
+    ).run({
+      ":milestone_id": milestoneId,
+      ":worker_id": workerId,
+      ":fencing_token": fencingToken,
+    });
+    released =
+      typeof (result as { changes?: unknown }).changes === "number"
+        ? (result as { changes: number }).changes === 1
+        : false;
+  });
+  return released;
 }
 
 /**

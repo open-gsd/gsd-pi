@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { readFileSync, existsSync } from 'node:fs';
+import type { ProjectProgressReadMetadata } from '@opengsd/contracts';
 import {
   resolveGsdRoot,
   findMilestoneIds,
@@ -41,13 +42,15 @@ export interface MilestoneInfo {
 
 export interface RoadmapResult {
   milestones: MilestoneInfo[];
+  readMetadata?: ProjectProgressReadMetadata;
 }
 
 // ---------------------------------------------------------------------------
 // ROADMAP.md table parser
 // ---------------------------------------------------------------------------
 
-function parseRoadmapTable(content: string): Array<{
+/** @internal — exported for doctor-lite's slice inventory union */
+export function parseRoadmapTable(content: string): Array<{
   id: string; title: string; risk: string; depends: string[]; done: boolean; demo: string;
 }> {
   const results: Array<{
@@ -64,7 +67,8 @@ function parseRoadmapTable(content: string): Array<{
       if (cells.length < 4) continue;
       if (cells[0] === 'ID' || cells[0].startsWith('--')) continue;
 
-      const id = cells[0].match(/S\d+/)?.[0];
+      // Slice ids: planned S01… and remediation R01… (gsd_reassess_roadmap)
+      const id = cells[0].match(/[A-Z]\d+/)?.[0];
       if (!id) continue;
 
       const done = cells.some((c) => c === '\u2611' || c === '\u2705' || c.toLowerCase() === 'done');
@@ -83,7 +87,7 @@ function parseRoadmapTable(content: string): Array<{
   }
 
   // Try checkbox format: - [x] **S01: Title** `risk:high` `depends:[S01]`
-  const checkboxRe = /^-\s+\[([ xX])\]\s+\*\*(S\d+):\s*(.+?)\*\*(?:.*?`risk:(\w+)`)?(?:.*?`depends:\[([^\]]*)\]`)?/gm;
+  const checkboxRe = /^-\s+\[([ xX])\]\s+\*\*([A-Z]\d+):\s*(.+?)\*\*(?:.*?`risk:(\w+)`)?(?:.*?`depends:\[([^\]]*)\]`)?/gm;
   let match: RegExpExecArray | null;
   while ((match = checkboxRe.exec(content)) !== null) {
     const [, checked, id, title, risk, deps] = match;
@@ -99,7 +103,7 @@ function parseRoadmapTable(content: string): Array<{
   if (results.length > 0) return results;
 
   // Try prose headers: ## S01: Title
-  const headerRe = /^##\s+(S\d+):\s*(.+)/gm;
+  const headerRe = /^##\s+([A-Z]\d+):\s*(.+)/gm;
   while ((match = headerRe.exec(content)) !== null) {
     results.push({
       id: match[1],
@@ -126,19 +130,34 @@ function parseSlicePlanTasks(content: string): Array<{ id: string; title: string
   let match: RegExpExecArray | null;
   while ((match = taskRe.exec(content)) !== null) {
     results.push({
-      id: match[2],
-      title: match[3].trim(),
+      id: match[2]!,
+      title: match[3]!.trim(),
       done: match[1] !== ' ',
     });
   }
   if (results.length > 0) return results;
 
+  // Flat-phase renderer format: <tasks> block with - [x] **T01**: Title
+  // lines (optionally suffixed with an estimate like _(2h)_).
+  const tasksBlock = content.match(/<tasks>\s*\n([\s\S]*?)\n\s*<\/tasks>/);
+  if (tasksBlock) {
+    const flatRe = /^-\s+\[([ xX])\]\s+\*\*(T\d+)\*\*:\s*(.+?)$/gm;
+    while ((match = flatRe.exec(tasksBlock[1]!)) !== null) {
+      results.push({
+        id: match[2]!,
+        title: match[3]!.trim().replace(/\s*_\([^)]*\)_\s*$/, '').trim(),
+        done: match[1] !== ' ',
+      });
+    }
+    if (results.length > 0) return results;
+  }
+
   // H3 format: ### T01: Title
   const h3Re = /^###\s+(T\d+):\s*(.+)/gm;
   while ((match = h3Re.exec(content)) !== null) {
     results.push({
-      id: match[1],
-      title: match[2].trim(),
+      id: match[1]!,
+      title: match[2]!.trim(),
       done: false,
     });
   }
@@ -151,16 +170,18 @@ function parseSlicePlanTasks(content: string): Array<{ id: string; title: string
 // ---------------------------------------------------------------------------
 
 function readMilestoneTitle(gsdRoot: string, mid: string): string {
-  const ctxPath = resolveMilestoneFile(gsdRoot, mid, 'CONTEXT');
-  if (ctxPath && existsSync(ctxPath)) {
-    const content = readFileSync(ctxPath, 'utf-8');
+  // ROADMAP.md H1 wins: it names the milestone as the roadmap presents it;
+  // CONTEXT.md H1 may be a phase-level or rewritten heading.
+  const roadmapPath = resolveMilestoneFile(gsdRoot, mid, 'ROADMAP');
+  if (roadmapPath && existsSync(roadmapPath)) {
+    const content = readFileSync(roadmapPath, 'utf-8');
     const h1 = content.match(/^#\s+(?:M\d+:?\s*)?(.+)/m);
     if (h1) return h1[1].trim();
   }
 
-  const roadmapPath = resolveMilestoneFile(gsdRoot, mid, 'ROADMAP');
-  if (roadmapPath && existsSync(roadmapPath)) {
-    const content = readFileSync(roadmapPath, 'utf-8');
+  const ctxPath = resolveMilestoneFile(gsdRoot, mid, 'CONTEXT');
+  if (ctxPath && existsSync(ctxPath)) {
+    const content = readFileSync(ctxPath, 'utf-8');
     const h1 = content.match(/^#\s+(?:M\d+:?\s*)?(.+)/m);
     if (h1) return h1[1].trim();
   }
@@ -226,18 +247,34 @@ export function readRoadmap(projectDir: string, filterMilestoneId?: string): Roa
 
       for (const pt of planTasks) {
         const fsTask = taskFiles.find((t) => t.id === pt.id);
-        const done = fsTask?.hasSummary ?? pt.done;
+        // An explicit plan checkbox is the task's state carrier in the flat
+        // layout and wins over artifact presence: the writer stages a task
+        // summary BEFORE host verification, so a staged (unchecked) task has
+        // a summary but is not complete. Artifacts decide only when no
+        // checkbox state is known (H3-style plans, legacy task files).
+        const checked = pt.done || fsTask?.done === true;
+        const unchecked = !pt.done && fsTask?.done === false;
+        const done = checked ? true : unchecked ? false : (fsTask?.hasSummary ?? false);
         tasks.push({ id: pt.id, title: pt.title, status: done ? 'done' : 'pending' });
         seenIds.add(pt.id);
       }
       for (const ft of taskFiles) {
         if (seenIds.has(ft.id)) continue;
-        tasks.push({ id: ft.id, title: ft.id, status: ft.hasSummary ? 'done' : 'pending' });
+        tasks.push({
+          id: ft.id,
+          title: ft.id,
+          status: ft.done === false ? 'pending' : (ft.done === true || ft.hasSummary) ? 'done' : 'pending',
+        });
       }
 
+      // Slices with no task signal (empty plan, no task files) fall back to
+      // the roadmap table's .done mark — flat-phase projects often carry
+      // status only in the ROADMAP table.
       const allDone = tasks.length > 0 && tasks.every((t) => t.status === 'done');
       const anyDone = tasks.some((t) => t.status === 'done');
-      const sliceStatus: SliceInfo['status'] = allDone ? 'done' : anyDone ? 'active' : 'pending';
+      const sliceStatus: SliceInfo['status'] = tasks.length === 0
+        ? (roadmapEntry?.done ? 'done' : 'pending')
+        : allDone ? 'done' : anyDone ? 'active' : 'pending';
 
       slices.push({
         id: sid,
@@ -250,14 +287,17 @@ export function readRoadmap(projectDir: string, filterMilestoneId?: string): Roa
       });
     }
 
+    // Milestone status comes from slice content when slices are known — a
+    // SUMMARY file existing proves nothing (a failed verification round still
+    // writes one). SUMMARY existence decides only when no slices parse.
     const allSlicesDone = slices.length > 0 && slices.every((s) => s.status === 'done');
     const anySliceActive = slices.some((s) => s.status === 'active' || s.status === 'done');
-    const milestoneStatus: MilestoneInfo['status'] = hasSummary
-      ? 'done'
-      : allSlicesDone ? 'done' : anySliceActive ? 'active' : 'pending';
+    const milestoneStatus: MilestoneInfo['status'] = slices.length > 0
+      ? (allSlicesDone ? 'done' : anySliceActive ? 'active' : 'pending')
+      : hasSummary ? 'done' : 'pending';
 
     milestones.push({ id: mid, title, status: milestoneStatus, vision, slices });
   }
 
-  return { milestones };
+  return { milestones, readMetadata: { source: 'projection', authority: 'projection-fallback' } };
 }

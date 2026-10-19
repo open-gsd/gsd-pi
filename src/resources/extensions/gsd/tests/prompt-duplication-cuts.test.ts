@@ -17,6 +17,7 @@ import {
   openDatabase,
   upsertMilestonePlanning,
 } from "../gsd-db.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 type AutoPromptBuilders = typeof import("../auto-prompts.ts");
 
@@ -49,8 +50,7 @@ function seedDb(base: string, taskStatus = "complete"): void {
   insertMilestone({ id: "M001", title: "Prompt Cuts", status: "active", depends_on: [] });
   upsertMilestonePlanning("M001", {
     title: "Prompt Cuts",
-    status: "active",
-    vision: "Reduce duplicate prompt reads.",
+        vision: "Reduce duplicate prompt reads.",
     successCriteria: ["Prompt builders render compact context."],
     keyRisks: [],
     proofStrategy: [],
@@ -155,6 +155,7 @@ test("execute-task rendering makes memory_query and template disk reads fallback
   );
 
   const { buildExecuteTaskPrompt } = await loadAutoPromptBuilders(t);
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildExecuteTaskPrompt("M001", "S01", "Prompt Slice", "T01", "Task one", base);
 
   assert.match(prompt, /Call `memory_query`.*only when no injected memory block exists or the inlined memory\/context is insufficient/s);
@@ -176,6 +177,7 @@ test("complete-slice renders task summary excerpts without full summary bodies",
   writeTaskSummary(base, { repeatedNarrative });
 
   const { buildCompleteSlicePrompt } = await loadAutoPromptBuilders(t);
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildCompleteSlicePrompt("M001", "Prompt Cuts", "S01", "Prompt Slice", base);
 
   assert.match(prompt, /### Task Summary: T01 \(excerpt\)/);
@@ -200,6 +202,7 @@ test("complete-slice caps malformed task summaries instead of inlining full bodi
   );
 
   const { buildCompleteSlicePrompt } = await loadAutoPromptBuilders(t);
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildCompleteSlicePrompt("M001", "Prompt Cuts", "S01", "Prompt Slice", base);
 
   assert.match(prompt, /Truncated malformed summary/);
@@ -220,6 +223,7 @@ test("replan-slice renders blocker summary excerpt and tells the agent to read f
   });
 
   const { buildReplanSlicePrompt } = await loadAutoPromptBuilders(t);
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildReplanSlicePrompt("M001", "Prompt Cuts", "S01", "Prompt Slice", base);
 
   assert.match(prompt, /### Blocker Task Summary: T01 \(excerpt\)/);

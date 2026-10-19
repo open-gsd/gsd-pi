@@ -51,7 +51,7 @@ Kept despite looking stale (referenced, so not eligible to move):
 - `scripts/recover-gsd-{1364,1668}.{sh,ps1}`, `scripts/validate-pack.sh`,
   `scripts/watch-resources.js`, `scripts/preview-dashboard.ts` — referenced
   by `docs/dev/FILE-SYSTEM-MAP.md`.
-- `scripts/m003-s07-*`, `scripts/semantic-shadow-no-cutover-gate.mjs`,
+- `scripts/m003-s07-*`, `scripts/lifecycle-shadow-no-cutover-gate.mjs`,
   `scripts/workflow-authority-baseline.mjs` — referenced by `docs/dev/`
   M003-S07 research/runbook documents.
 - The pi vendoring chain (`vendor-pi*.cjs`, `apply-seam.cjs`,

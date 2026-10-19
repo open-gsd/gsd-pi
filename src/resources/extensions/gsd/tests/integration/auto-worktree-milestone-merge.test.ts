@@ -36,12 +36,27 @@ import {
   insertTask,
   openDatabase,
 } from "../../gsd-db.ts";
-import { seedMergeReadyMilestone } from "../merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "../merge-ready-fixture.ts";
 import { createGsdIntegrationProject } from "./gsd-integration-fixture.ts";
 
 function createAutoWorktree(repo: string, milestoneId: string): string {
-  seedMergeReadyMilestone(repo, milestoneId);
   return createAutoWorktreeBase(repo, milestoneId);
+}
+
+/**
+ * Seed canonical closeout state, then merge. The merge guards read canonical
+ * state bound to the tree the milestone ran in, so the receipt is recorded
+ * against the final worktree; branch-mode callers omit wtPath to bind the
+ * project root.
+ */
+function seedAndMergeMilestone(
+  repo: string,
+  wtPath: string | undefined,
+  milestoneId: string,
+  roadmap: string,
+): ReturnType<typeof mergeMilestoneToMain> {
+  seedCanonicalMergeReadyMilestone(repo, milestoneId, wtPath ? { sourceTree: wtPath } : {});
+  return mergeMilestoneToMain(repo, milestoneId, roadmap);
 }
 
 function run(cmd: string, cwd: string): string {
@@ -72,7 +87,12 @@ function createTempRepoWithExternalGsd(): { repo: string; externalState: string 
   symlinkSync(externalState, join(repo, ".gsd"));
 
   writeFileSync(join(repo, "README.md"), "# test\n");
-  writeFileSync(join(repo, ".gitignore"), ".gsd/worktrees/\n.gsd/gsd.db*\n");
+  // `.gsd` itself is ignored (no trailing slash: the entry is a symlink,
+  // which git matches as a file, not a directory). The symlink is host
+  // state, never branch content, and a tracked symlink replaced by a real
+  // directory (the #1852 divergence below) is not a publishable
+  // verification source.
+  writeFileSync(join(repo, ".gitignore"), ".gsd\n.gsd/worktrees/\n.gsd-worktrees/\n.gsd/gsd.db*\n");
   writeFileSync(join(externalState, "STATE.md"), "# State\n");
   run("git add .", repo);
   run("git commit -m init", repo);
@@ -160,7 +180,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     const mainLogBefore = run("git log --oneline main", repo);
     const mainCommitCountBefore = mainLogBefore.split("\n").length;
 
-    const result = mergeMilestoneToMain(repo, "M010", roadmap);
+    const result = seedAndMergeMilestone(repo, wtPath, "M010", roadmap);
 
     const mainLog = run("git log --oneline main", repo);
     const mainCommitCountAfter = mainLog.split("\n").length;
@@ -195,8 +215,11 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     addSliceToMilestone(repo, wtPath, "M020", "S03", "Logging infra", [
       { file: "logger.ts", content: "export const log = () => {};\n", message: "add logger" },
     ]);
-    openDatabase(":memory:");
-    insertMilestone({ id: "M020", title: "M020: Backend foundation", status: "complete" });
+    // The slice records feed the rich commit message, so they live in the
+    // project DB (the canonical fixture adopts them below) rather than a
+    // throwaway in-memory DB.
+    openDatabase(join(repo, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M020", title: "M020: Backend foundation", status: "active" });
     for (const slice of [
       { id: "S01", title: "Core API", tasks: [{ id: "T01", title: "Create API router" }] },
       { id: "S02", title: "Error handling", tasks: [{ id: "T02", title: "Handle API errors" }] },
@@ -227,7 +250,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
       { id: "S03", title: "Logging infra" },
     ]);
 
-    const result = mergeMilestoneToMain(repo, "M020", roadmap);
+    const result = seedAndMergeMilestone(repo, wtPath, "M020", roadmap);
 
     assert.match(result.commitMessage, /^feat:/, "subject has conventional commit prefix without milestone ID");
     assert.ok(result.commitMessage.includes("Backend foundation"), "subject includes milestone title");
@@ -258,7 +281,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     let threw = false;
     let errorMsg = "";
     try {
-      mergeMilestoneToMain(repo, "M030", roadmap);
+      seedAndMergeMilestone(repo, wtPath, "M030", roadmap);
     } catch (err: unknown) {
       threw = true;
       errorMsg = err instanceof Error ? err.message : String(err);
@@ -288,7 +311,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
       { id: "S01", title: "Push test" },
     ]);
 
-    const result = mergeMilestoneToMain(repo, "M040", roadmap);
+    const result = seedAndMergeMilestone(repo, wtPath, "M040", roadmap);
 
     const mainLog = run("git log --oneline main", repo);
     assert.ok(mainLog.includes("feat:"), "milestone commit on main");
@@ -323,7 +346,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
         { id: "S01", title: "Local-only push" },
       ]);
 
-      const result = mergeMilestoneToMain(repo, "M041", roadmap);
+      const result = seedAndMergeMilestone(repo, wtPath, "M041", roadmap);
       const logs = drainLogs();
       const messages = logs.map((entry) => entry.message).join("\n");
 
@@ -361,7 +384,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
 
     let threw = false;
     try {
-      const result = mergeMilestoneToMain(repo, "M050", roadmap);
+      const result = seedAndMergeMilestone(repo, wtPath, "M050", roadmap);
       assert.ok(result.commitMessage.includes("feat:") && result.commitMessage.includes("GSD-Milestone: M050"), "merge commit created despite .gsd conflict");
     } catch (err) {
       threw = true;
@@ -387,7 +410,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
 
     let threw = false;
     try {
-      const result = mergeMilestoneToMain(repo, "M060", roadmap);
+      const result = seedAndMergeMilestone(repo, wtPath, "M060", roadmap);
       assert.ok(result.commitMessage.includes("feat:") && result.commitMessage.includes("GSD-Milestone: M060"), "merge commit created");
     } catch (err) {
       threw = true;
@@ -425,7 +448,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     let threw = false;
     let errMsg = "";
     try {
-      const result = mergeMilestoneToMain(dir, "M070", roadmap);
+      const result = seedAndMergeMilestone(dir, wtPath, "M070", roadmap);
       assert.ok(result.commitMessage.includes("feat:") && result.commitMessage.includes("GSD-Milestone: M070"), "merge commit created on master");
     } catch (err) {
       threw = true;
@@ -471,7 +494,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     let threw = false;
     let errMsg = "";
     try {
-      mergeMilestoneToMain(repo, "M080", roadmap);
+      seedAndMergeMilestone(repo, wtPath, "M080", roadmap);
     } catch (err: unknown) {
       threw = true;
       errMsg = err instanceof Error ? err.message : String(err);
@@ -505,7 +528,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
 
     let threw = false;
     try {
-      const result = mergeMilestoneToMain(repo, "M090", roadmap);
+      const result = seedAndMergeMilestone(repo, wtPath, "M090", roadmap);
       assert.ok(result.commitMessage.includes("feat:") && result.commitMessage.includes("GSD-Milestone: M090"), "#1738 merge succeeds after cleaning synced dirs");
     } catch (err: unknown) {
       threw = true;
@@ -532,7 +555,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     // of causing an immediate rejection.  The merge should succeed.
     let threw = false;
     try {
-      const result = mergeMilestoneToMain(repo, "M100", roadmap);
+      const result = seedAndMergeMilestone(repo, wtPath, "M100", roadmap);
       assert.ok(result.commitMessage.includes("feat:") && result.commitMessage.includes("GSD-Milestone: M100"), "#2151: merge succeeds after stashing dirty files");
     } catch {
       threw = true;
@@ -558,7 +581,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     let threw = false;
     let errMsg = "";
     try {
-      mergeMilestoneToMain(repo, "M120", roadmap);
+      seedAndMergeMilestone(repo, wtPath, "M120", roadmap);
     } catch (err) {
       threw = true;
       errMsg = err instanceof Error ? err.message : String(err);
@@ -588,7 +611,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     let threw = false;
     let errMsg = "";
     try {
-      mergeMilestoneToMain(repo, "M130", roadmap);
+      seedAndMergeMilestone(repo, wtPath, "M130", roadmap);
     } catch (err) {
       threw = true;
       errMsg = err instanceof Error ? err.message : String(err);
@@ -632,7 +655,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     let threw = false;
     let errMsg = "";
     try {
-      const result = mergeMilestoneToMain(repo, "M140", roadmap);
+      const result = seedAndMergeMilestone(repo, wtPath, "M140", roadmap);
       assert.ok(result.commitMessage.includes("feat:") && result.commitMessage.includes("GSD-Milestone: M140"), "merge commit created");
     } catch (err) {
       threw = true;
@@ -666,8 +689,6 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     run("git checkout main", repo);
 
     process.chdir(wtPath);
-    seedMergeReadyMilestone(repo, "M150");
-
     const roadmap = makeRoadmap("M150", "Diverged milestone", [
       { id: "S01", title: "Base work" },
     ]);
@@ -675,7 +696,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     let threw = false;
     let errMsg = "";
     try {
-      mergeMilestoneToMain(repo, "M150", roadmap);
+      seedAndMergeMilestone(repo, wtPath, "M150", roadmap);
     } catch (err) {
       threw = true;
       errMsg = err instanceof Error ? err.message : String(err);
@@ -703,7 +724,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     writeFileSync(squashMsgPath, "leftover squash message\n");
     assert.ok(existsSync(squashMsgPath), "SQUASH_MSG planted before merge");
 
-    const result = mergeMilestoneToMain(repo, "M160", roadmap);
+    const result = seedAndMergeMilestone(repo, wtPath, "M160", roadmap);
     assert.ok(result.commitMessage.includes("feat:") && result.commitMessage.includes("GSD-Milestone: M160"), "merge commit created");
 
     assert.ok(!existsSync(squashMsgPath), "#1853: SQUASH_MSG must not persist after successful squash-merge");
@@ -716,6 +737,11 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     addSliceToMilestone(repo, wtPath, "M170", "S01", "Teardown safety test", [
       { file: "safe-file.ts", content: "export const safe = true;\n", message: "add safe file" },
     ]);
+
+    // The receipt must bind the committed worktree only: the merge's
+    // authorization stash removes uncommitted files before the closeout gate
+    // re-captures the tree, so seeding happens before this file is written.
+    seedCanonicalMergeReadyMilestone(repo, "M170", { sourceTree: wtPath });
 
     writeFileSync(join(wtPath, "uncommitted-agent-code.ts"), "export const lost = true;\n");
 
@@ -746,14 +772,18 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
 
     const roadmap = makeRoadmap("M180", "Metadata-only milestone", []);
 
-    const result = mergeMilestoneToMain(repo, "M180", roadmap);
+    const result = seedAndMergeMilestone(repo, wtPath, "M180", roadmap);
     assert.strictEqual(result.codeFilesChanged, false,
       "#1906: codeFilesChanged must be false when only .gsd/ files were merged");
   });
 
   test("#2156: mergeMilestoneToMain removes external-state worktrees using the milestone branch name", () => {
-    const { repo } = freshRepoWithExternalGsd();
+    const { repo, externalState } = freshRepoWithExternalGsd();
     const wtPath = createAutoWorktree(repo, "M215");
+
+    // Host-state layout: the worktree's `.gsd` links to the shared external
+    // state. It is gitignored host state, never branch content.
+    symlinkSync(externalState, join(wtPath, ".gsd"));
 
     addSliceToMilestone(repo, wtPath, "M215", "S01", "External cleanup", [
       { file: "external-cleanup.ts", content: "export const externalCleanup = true;\n", message: "add external cleanup" },
@@ -766,19 +796,35 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
       `worktree should use canonical path under project root, got ${realWtPath}`,
     );
 
+    // Normal operation ran before the divergence: opening the database once
+    // through the `.gsd` symlink creates it in the external state, where the
+    // assertions below expect it to survive.
+    openDatabase(join(repo, ".gsd", "gsd.db"));
+    closeDatabase();
+
     // Recreate the exact divergence from #1852: local .gsd/ is replaced with a
     // stale real directory, so worktreePath() no longer matches git's record.
     unlinkSync(join(repo, ".gsd"));
     mkdirSync(join(repo, ".gsd", "worktrees", "M215"), { recursive: true });
     writeFileSync(join(repo, ".gsd", "STATE.md"), "# Local stale state\n");
     writeFileSync(join(repo, ".gsd", "worktrees", "M215", "stale.txt"), "stale local artifact\n");
-
+    // The worktree `.gsd` still links to the external state, which holds the
+    // database from before the divergence. That file is shared state, not a
+    // worktree-local database: the merge neither stops on it nor merges it,
+    // so the project database must hold the milestone itself.
+    const externalDb = join(externalState, "gsd.db");
+    assert.equal(realpathSync(join(wtPath, ".gsd", "gsd.db")), externalDb);
     const roadmap = makeRoadmap("M215", "External cleanup", [
       { id: "S01", title: "External cleanup" },
     ]);
 
+    // The merge runs from the worktree cwd, so the closeout gate resolves the
+    // verification source from the worktree tree; the receipt binds that tree
+    // (the post-divergence repo root is stale host state, not the source).
+    seedCanonicalMergeReadyMilestone(repo, "M215", { sourceTree: wtPath });
     mergeMilestoneToMain(repo, "M215", roadmap);
 
+    assert.ok(existsSync(externalDb), "the external-state database must be kept");
     assert.ok(
       !run("git worktree list", repo).includes("M215"),
       "merged milestone worktree should be removed from git worktree list",
@@ -818,13 +864,11 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     mkdirSync(join(repo, ".gsd", "worktrees", "M216"), { recursive: true });
     writeFileSync(join(repo, ".gsd", "STATE.md"), "# Local stale state\n");
     writeFileSync(join(repo, ".gsd", "worktrees", "M216", "stale.txt"), "stale local artifact\n");
-    seedMergeReadyMilestone(repo, "M216");
-
     const roadmap = makeRoadmap("M216", "Legacy external cleanup", [
       { id: "S01", title: "Legacy external cleanup" },
     ]);
 
-    mergeMilestoneToMain(repo, "M216", roadmap);
+    seedAndMergeMilestone(repo, undefined, "M216", roadmap);
 
     assert.ok(
       !run("git worktree list", repo).includes("M216"),
@@ -860,7 +904,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     // The merge should throw MergeConflictError due to conflict.ts
     let threw = false;
     try {
-      mergeMilestoneToMain(repo, "M291", roadmap);
+      seedAndMergeMilestone(repo, wtPath, "M291", roadmap);
     } catch (err: unknown) {
       threw = true;
       // Verify it's a merge conflict error
@@ -901,7 +945,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     // mergeMilestoneToMain to verify the success path cleans it up.
     // We cannot plant it before the call because the function manages checkout
     // internally, so instead we verify after the call.
-    mergeMilestoneToMain(repo, "M292", roadmap);
+    seedAndMergeMilestone(repo, wtPath, "M292", roadmap);
 
     // After successful merge+commit, MERGE_HEAD must not linger
     const mergeHeadPath = join(repo, ".git", "MERGE_HEAD");
@@ -934,7 +978,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     const fakeHead = run("git rev-parse HEAD", repo);
     writeFileSync(join(gitDir, "MERGE_HEAD"), fakeHead + "\n");
 
-    mergeMilestoneToMain(repo, "M293", roadmap);
+    seedAndMergeMilestone(repo, wtPath, "M293", roadmap);
 
     // The planted MERGE_HEAD must be cleaned up
     assert.ok(
@@ -964,7 +1008,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     writeFileSync(join(gitDir, "SQUASH_MSG"), "stale squash message\n");
     writeFileSync(join(gitDir, "MERGE_MSG"), "stale merge message\n");
 
-    mergeMilestoneToMain(repo, "M294", roadmap);
+    seedAndMergeMilestone(repo, wtPath, "M294", roadmap);
 
     assert.ok(
       !existsSync(join(gitDir, "SQUASH_MSG")),
@@ -988,7 +1032,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
       { id: "S01", title: "Real code" },
     ]);
 
-    const result = mergeMilestoneToMain(repo, "M190", roadmap);
+    const result = seedAndMergeMilestone(repo, wtPath, "M190", roadmap);
     assert.strictEqual(result.codeFilesChanged, true,
       "#1906: codeFilesChanged must be true when real code files were merged");
     assert.ok(existsSync(join(repo, "real-code.ts")), "real-code.ts merged to main");
@@ -1016,7 +1060,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
       { id: "S01", title: "Feature" },
     ]);
 
-    const result = mergeMilestoneToMain(repo, "M200", roadmap);
+    const result = seedAndMergeMilestone(repo, wtPath, "M200", roadmap);
 
     // Normal success path: queued milestone restored, shelter cleaned up.
     assert.ok(existsSync(join(queuedDir, "CONTEXT.md")), "queued milestone restored from shelter");
@@ -1059,7 +1103,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     const previousStderr = setStderrLoggingEnabled(false);
     let logs: ReturnType<typeof drainLogs> = [];
     try {
-      mergeMilestoneToMain(repo, "M210", roadmap);
+      seedAndMergeMilestone(repo, wtPath, "M210", roadmap);
       logs = drainLogs();
     } finally {
       setStderrLoggingEnabled(previousStderr);

@@ -2,13 +2,10 @@
 // is mid-flight.
 //
 // `migrateToFlatPhase` moves .gsd/milestones/ aside before rendering .gsd/phases/,
-// so there is a window where slice plans exist in neither layout. A dispatch landing
-// in that window sees no plans, `hasMilestonePassedDiscuss` returns false, and the
-// `execution-entry phase (no context) → discuss-milestone` rule re-plans a milestone
-// that was already fully planned — discarding the plan while the DB still holds it.
-//
-// Observed on every acceptance run (3/3) before the guard: auto mode re-planned the
-// seeded milestone from scratch on startup.
+// so there is a window where slice plans exist in neither layout. A dispatch that
+// decided from plan files re-planned a milestone that was already fully planned —
+// discarding the plan while the DB still held it (observed on every acceptance
+// run, 3/3). Dispatch now decides from the DB rows, so the window cannot matter.
 
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";

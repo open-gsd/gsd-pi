@@ -1,12 +1,9 @@
 // Project/App: gsd-pi
-// File Purpose: Selects the UOK kernel path and records parity diagnostics.
+// File Purpose: Selects the UOK kernel path and runs the auto loop on it.
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 
 import type { AutoSession } from "../auto/session.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
-import { gsdRoot } from "../paths.js";
 import { buildAuditEnvelope, emitUokAuditEvent } from "./audit.js";
 import {
   getUnifiedAuditOverride,
@@ -18,6 +15,7 @@ import { resolveUokFlags, type UokFlags } from "./flags.js";
 import { createTurnObserver } from "./loop-adapter.js";
 import { incrementLegacyTelemetry } from "../legacy-telemetry.js";
 import { logWarning } from "../workflow-logger.js";
+import { withGlobalIdleWatchdog } from "../auto-timers.js";
 
 interface RunAutoLoopWithUokArgs {
   ctx: ExtensionContext;
@@ -36,19 +34,6 @@ interface RunAutoLoopWithUokArgs {
     s: AutoSession,
     deps: LoopDeps,
   ) => Promise<void>;
-}
-
-function parityLogPath(basePath: string): string {
-  return join(gsdRoot(basePath), "runtime", "uok-parity.jsonl");
-}
-
-function writeParityEvent(basePath: string, event: Record<string, unknown>): void {
-  try {
-    mkdirSync(join(gsdRoot(basePath), "runtime"), { recursive: true });
-    appendFileSync(parityLogPath(basePath), `${JSON.stringify(event)}\n`, "utf-8");
-  } catch {
-    // parity telemetry must never block orchestration
-  }
 }
 
 type UokKernelPathLabel = "uok-kernel" | "legacy-wrapper" | "legacy-fallback";
@@ -122,14 +107,6 @@ function emitKernelEnterAudit(input: {
     return true;
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    writeParityEvent(input.basePath, {
-      ts: new Date().toISOString(),
-      path: input.plan.pathLabel,
-      flags: input.plan.flags,
-      phase: "telemetry-error",
-      telemetry: "uok-kernel-enter",
-      error: errorMessage,
-    });
     logWarning("db", `uok-kernel-enter audit emit failed (non-fatal): ${errorMessage}`);
     return false;
   }
@@ -188,13 +165,6 @@ export async function runAutoLoopWithUok(args: RunAutoLoopWithUokArgs): Promise<
       incrementLegacyTelemetry("legacy.uokFallbackUsed");
     }
 
-    writeParityEvent(s.basePath, {
-      ts: new Date().toISOString(),
-      path: plan.pathLabel,
-      flags: plan.flags,
-      phase: "enter",
-    });
-
     const auditHealthy = emitKernelEnterAudit({
       basePath: s.basePath,
       plan,
@@ -209,36 +179,22 @@ export async function runAutoLoopWithUok(args: RunAutoLoopWithUokArgs): Promise<
       auditHealthy,
     });
 
-    await executeKernelRunPlan({
-      plan,
-      ctx,
-      pi,
-      s,
-      deps,
-      kernelDeps,
-      runKernelLoop,
-      runLegacyLoop,
-    });
-
-    writeParityEvent(s.basePath, {
-      ts: new Date().toISOString(),
-      path: plan.pathLabel,
-      flags: plan.flags,
-      phase: "exit",
-      status: "ok",
-    });
-  } catch (err) {
-    if (plan) {
-      writeParityEvent(s.basePath, {
-        ts: new Date().toISOString(),
-        path: plan.pathLabel,
-        flags: plan.flags,
-        phase: "exit",
-        status: "error",
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    throw err;
+    // The session-level idle watchdog (#2373) lives above whichever loop path
+    // runs: it observes unit presence across the whole loop run and is cleared
+    // when the loop promise settles. Disabled by default (global 0).
+    const resolvedPlan = plan;
+    await withGlobalIdleWatchdog(ctx, s, () =>
+      executeKernelRunPlan({
+        plan: resolvedPlan,
+        ctx,
+        pi,
+        s,
+        deps,
+        kernelDeps,
+        runKernelLoop,
+        runLegacyLoop,
+      }),
+    );
   } finally {
     auditState.restore();
   }

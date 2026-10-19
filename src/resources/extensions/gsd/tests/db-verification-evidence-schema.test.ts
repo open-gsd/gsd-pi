@@ -1,76 +1,73 @@
 // Project/App: gsd-pi
 // File Purpose: Tests for verification evidence schema helpers.
 
-import { describe, test } from "node:test";
+import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  dedupeVerificationEvidenceRows,
-  ensureVerificationEvidenceDedupIndex,
-} from "../db-verification-evidence-schema.ts";
-import type { DbAdapter, DbStatement } from "../db-adapter.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-class FakeStatement implements DbStatement {
-  private readonly row: Record<string, unknown> | undefined;
+import { closeDatabase, openDatabase, _getAdapter } from "../gsd-db.ts";
 
-  constructor(row: Record<string, unknown> | undefined) {
-    this.row = row;
-  }
+const INSERT_CLAIM = `
+  INSERT OR IGNORE INTO verification_evidence (
+    task_id, slice_id, milestone_id, attempt_ref, command, exit_code, verdict, duration_ms, created_at
+  ) VALUES ('T01', 'S01', 'M001', :attempt_ref, 'npm test', 0, 'pass', 5, '2026-04-12T00:00:00.000Z')
+`;
 
-  run(): unknown {
-    return undefined;
-  }
-
-  get(): Record<string, unknown> | undefined {
-    return this.row;
-  }
-
-  all(): Record<string, unknown>[] {
-    return [];
-  }
-}
-
-class FakeAdapter implements DbAdapter {
-  readonly execCalls: string[] = [];
-  hasDedupIndex = false;
-
-  exec(sql: string): void {
-    this.execCalls.push(sql);
-  }
-
-  prepare(): DbStatement {
-    return new FakeStatement(this.hasDedupIndex ? { present: 1 } : undefined);
-  }
-
-  close(): void {}
+function claims(): Array<Record<string, unknown>> {
+  return _getAdapter()!.prepare("SELECT attempt_ref, command FROM verification_evidence ORDER BY id").all()
+    .map((row) => ({ ...row }));
 }
 
 describe("db-verification-evidence-schema", () => {
-  test("dedupeVerificationEvidenceRows keeps the first row for each evidence identity", () => {
-    const db = new FakeAdapter();
+  let dir: string;
+  let dbPath: string;
 
-    dedupeVerificationEvidenceRows(db);
-
-    assert.equal(db.execCalls.length, 1);
-    assert.match(db.execCalls[0], /DELETE FROM verification_evidence/);
-    assert.match(db.execCalls[0], /GROUP BY task_id, slice_id, milestone_id, command, verdict/);
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "gsd-evidence-schema-"));
+    dbPath = join(dir, "gsd.db");
+    openDatabase(dbPath);
+    const adapter = _getAdapter()!;
+    adapter.prepare("INSERT INTO milestones (id, created_at) VALUES ('M001', '')").run();
+    adapter.prepare("INSERT INTO slices (milestone_id, id, created_at) VALUES ('M001', 'S01', '')").run();
+    adapter.prepare("INSERT INTO tasks (milestone_id, slice_id, id) VALUES ('M001', 'S01', 'T01')").run();
   });
 
-  test("ensureVerificationEvidenceDedupIndex dedupes before creating the unique index", () => {
-    const db = new FakeAdapter();
-
-    ensureVerificationEvidenceDedupIndex(db);
-
-    assert.equal(db.execCalls.length, 2);
-    assert.match(db.execCalls[0], /DELETE FROM verification_evidence/);
-    assert.match(db.execCalls[1], /CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_evidence_dedup/);
+  afterEach(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  test("ensureVerificationEvidenceDedupIndex no-ops when the index already exists", () => {
-    const db = new FakeAdapter();
-    db.hasDedupIndex = true;
+  test("the same claim is stored one time for each Attempt", () => {
+    const insert = _getAdapter()!.prepare(INSERT_CLAIM);
+    insert.run({ ":attempt_ref": "attempt-1" });
+    insert.run({ ":attempt_ref": "attempt-1" });
+    insert.run({ ":attempt_ref": "attempt-2" });
 
-    ensureVerificationEvidenceDedupIndex(db);
+    assert.deepEqual(claims(), [
+      { attempt_ref: "attempt-1", command: "npm test" },
+      { attempt_ref: "attempt-2", command: "npm test" },
+    ]);
+  });
 
-    assert.deepEqual(db.execCalls, []);
+  test("a database with the dedup index that has no Attempt is upgraded on open and keeps its claims", () => {
+    const adapter = _getAdapter()!;
+    adapter.exec("DROP INDEX idx_verification_evidence_dedup");
+    adapter.exec("ALTER TABLE verification_evidence DROP COLUMN attempt_ref");
+    adapter.exec("CREATE UNIQUE INDEX idx_verification_evidence_dedup ON verification_evidence(task_id, slice_id, milestone_id, command, verdict)");
+    adapter.exec(`
+      INSERT INTO verification_evidence (task_id, slice_id, milestone_id, command, exit_code, verdict, duration_ms, created_at)
+      VALUES ('T01', 'S01', 'M001', 'npm test', 0, 'pass', 5, '2026-04-12T00:00:00.000Z')
+    `);
+    closeDatabase();
+
+    assert.equal(openDatabase(dbPath), true);
+    _getAdapter()!.prepare(INSERT_CLAIM).run({ ":attempt_ref": "attempt-2" });
+
+    assert.deepEqual(claims(), [
+      { attempt_ref: "", command: "npm test" },
+      { attempt_ref: "attempt-2", command: "npm test" },
+    ]);
   });
 });

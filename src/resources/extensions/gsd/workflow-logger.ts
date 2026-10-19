@@ -26,6 +26,7 @@ import {
 import { join } from "node:path";
 
 import { withFileLockSync } from "./file-lock.js";
+import { isDbAvailable } from "./gsd-db.js";
 import { appendNotification } from "./notification-store.js";
 import { buildAuditEnvelope, emitUokAuditEvent } from "./uok/audit.js";
 import { isUnifiedAuditEnabled } from "./uok/audit-toggle.js";
@@ -66,7 +67,6 @@ export type LogComponent =
   | "memory-ingest"     // Memory layer ingestion pipeline
   | "memory-backfill"   // ADR-013: decisions->memories backfill
   | "memory-consolidation" // ADR-013: legacy memory surface gap scanner
-  | "knowledge-backfill" // ADR-013: KNOWLEDGE.md->memories backfill
   | "knowledge-projection" // ADR-013: KNOWLEDGE.md projection renderer
   | "knowledge-capture" // ADR-013: KNOWLEDGE.md capture pipeline
   | "memory-store"      // Memory CRUD layer — surfaces SQLite/store-level faults (#4967)
@@ -302,7 +302,7 @@ function _push(
     _buffer.shift();
   }
 
-  if (_auditBasePath && isUnifiedAuditEnabled(_auditBasePath)) {
+  if (_auditBasePath && isDbAvailable() && isUnifiedAuditEnabled(_auditBasePath)) {
     try {
       emitUokAuditEvent(
         _auditBasePath,

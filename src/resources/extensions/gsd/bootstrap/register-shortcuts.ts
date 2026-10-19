@@ -74,8 +74,10 @@ export function registerShortcuts(pi: ExtensionAPI): void {
     handler: openDashboardOverlay,
   });
 
-  // Fallback for terminals where Ctrl+Alt letter chords are not forwarded reliably.
-  pi.registerShortcut(Key.ctrlShift(GSD_SHORTCUTS.dashboard.key), {
+  // Fallback for terminals where Ctrl+Alt letter chords are not forwarded
+  // reliably. alt+<letter> has a legacy ESC-prefix path in pi-tui matching
+  // (and CSI-u on modern terminals), so it is reachable where Ctrl+Alt is not.
+  pi.registerShortcut(Key.alt(GSD_SHORTCUTS.dashboard.key), {
     description: shortcutDesc(`${GSD_SHORTCUTS.dashboard.action} (fallback)`, GSD_SHORTCUTS.dashboard.command),
     handler: openDashboardOverlay,
   });
@@ -85,8 +87,10 @@ export function registerShortcuts(pi: ExtensionAPI): void {
     handler: openNotificationsOverlay,
   });
 
-  // Fallback for terminals where Ctrl+Alt letter chords are not forwarded reliably.
-  pi.registerShortcut(Key.ctrlShift(GSD_SHORTCUTS.notifications.key), {
+  // Fallback for terminals where Ctrl+Alt letter chords are not forwarded
+  // reliably. alt+<letter> has a legacy ESC-prefix path in pi-tui matching
+  // (and CSI-u on modern terminals), so it is reachable where Ctrl+Alt is not.
+  pi.registerShortcut(Key.alt(GSD_SHORTCUTS.notifications.key), {
     description: shortcutDesc(`${GSD_SHORTCUTS.notifications.action} (fallback)`, GSD_SHORTCUTS.notifications.command),
     handler: openNotificationsOverlay,
   });
@@ -96,6 +100,6 @@ export function registerShortcuts(pi: ExtensionAPI): void {
     handler: openParallelOverlay,
   });
 
-  // No Ctrl+Shift+P fallback — conflicts with cycleModelBackward (shift+ctrl+p).
+  // No Alt+P fallback — legacy ESC+P aliases to alt+up (app.models.reorderUp).
   // Use Ctrl+Alt+P or /gsd parallel watch instead.
 }

@@ -12,7 +12,7 @@
 
 import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, unlinkSync, existsSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -32,7 +32,6 @@ import {
   shouldBlockContextArtifactSaveInSnapshot,
   shouldBlockRootArtifactSaveInSnapshot,
   clearDiscussionFlowState,
-  resetWriteGateState,
   loadWriteGateSnapshot,
 } from '../bootstrap/write-gate.ts';
 
@@ -452,6 +451,7 @@ test('write-gate: applyAskUserQuestionsGateResult verifies confirmed pending gat
       status: 'verified',
       gateId,
       milestoneId: 'M001',
+      verifiedGateIds: [gateId],
     });
     assert.strictEqual(getPendingGate(base), null, 'confirmed gate must clear pending state');
     assert.strictEqual(isMilestoneDepthVerified('M001', base), true, 'confirmed gate must verify milestone depth');
@@ -523,6 +523,237 @@ test('write-gate: applyAskUserQuestionsGateResult keeps empty-selection pending 
     clearDiscussionFlowState(base);
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ─── Scenario 20e: several gate questions in one round (#2653) ──────────────
+//
+// The payload validator allows 1-3 questions per round, and arming stores one
+// pending slot (the last gate id wins). Verifying only that slot silently
+// dropped the user's other confirmations: M028 unlocked, M025/M027 came back
+// as HARD BLOCK on save. Every gate question answered in the round must be
+// evaluated against the round's answers.
+
+function gateQuestion(id: string) {
+  return { id, options: [{ label: 'Confirm depth (Recommended)' }, { label: 'Needs adjustment' }] };
+}
+
+const CONFIRM = 'Confirm depth (Recommended)';
+const DECLINE = 'Needs adjustment';
+
+function makeGateBase(t: { after: (fn: () => void) => void }, label: string): string {
+  const base = join(tmpdir(), `gsd-write-gate-ask-${label}-${randomUUID()}`);
+  mkdirSync(base, { recursive: true });
+  clearDiscussionFlowState(base);
+  t.after(() => {
+    clearDiscussionFlowState(base);
+    rmSync(base, { recursive: true, force: true });
+  });
+  return base;
+}
+
+test('write-gate: applyAskUserQuestionsGateResult verifies every confirmed gate in a multi-gate round (#2653)', (t) => {
+  const base = makeGateBase(t, 'multi');
+  const gates = ['depth_verification_M025_confirm', 'depth_verification_M027_confirm', 'depth_verification_M028_confirm'];
+
+  // Mirror recordAskUserQuestionsPendingGate: every gate id armed, single
+  // slot keeps the last.
+  for (const id of gates) setPendingGate(id, base);
+  assert.strictEqual(getPendingGate(base), gates[gates.length - 1]);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: gates.map(gateQuestion),
+    details: {
+      response: {
+        answers: Object.fromEntries(gates.map((id) => [id, { selected: CONFIRM }])),
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: 'verified',
+    gateId: gates[gates.length - 1],
+    milestoneId: 'M028',
+    verifiedGateIds: gates,
+  });
+  for (const id of gates) {
+    const milestone = id.replace('depth_verification_', '').replace('_confirm', '');
+    assert.strictEqual(
+      isMilestoneDepthVerified(milestone, base),
+      true,
+      `${milestone} must be unlocked by its in-round confirmation`,
+    );
+    assert.ok(
+      loadWriteGateSnapshot(base).verifiedApprovalGates?.includes(id) ?? false,
+      `${id} must record verified approval`,
+    );
+  }
+  assert.strictEqual(getPendingGate(base), null, 'a fully verified round clears the pending slot');
+});
+
+test('write-gate: applyAskUserQuestionsGateResult fails closed when one gate of a multi-gate round is declined (#2653)', (t) => {
+  const base = makeGateBase(t, 'multi-declined');
+  const confirm = 'depth_verification_M025_confirm';
+  const declined = 'depth_verification_M027_confirm';
+
+  for (const id of [confirm, declined]) setPendingGate(id, base);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(confirm), gateQuestion(declined)],
+    details: {
+      response: {
+        answers: {
+          [confirm]: { selected: CONFIRM },
+          [declined]: { selected: DECLINE },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(result, { status: 'declined', gateId: declined, verifiedGateIds: [confirm] });
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), true, 'the confirmed gate still unlocks');
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), false, 'the declined gate stays locked');
+  assert.strictEqual(getPendingGate(base), declined, 'the declined gate is the pending gate');
+});
+
+test('write-gate: declined armed gate keeps pending while a later gate verifies (#2653)', (t) => {
+  // Reversed order: the ARMED (last-armed) gate is declined and an earlier
+  // question is confirmed — the decline must win the pending slot over the
+  // armed-slot clear.
+  const base = makeGateBase(t, 'multi-declined-armed');
+  const confirm = 'depth_verification_M025_confirm';
+  const declinedArmed = 'depth_verification_M027_confirm';
+
+  for (const id of [confirm, declinedArmed]) setPendingGate(id, base);
+  assert.strictEqual(getPendingGate(base), declinedArmed);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(confirm), gateQuestion(declinedArmed)],
+    details: {
+      response: {
+        answers: {
+          [confirm]: { selected: CONFIRM },
+          [declinedArmed]: { selected: DECLINE },
+        },
+      },
+    },
+  });
+
+  assert.equal(result.status, 'declined');
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), true);
+  assert.strictEqual(getPendingGate(base), declinedArmed, 'decline wins over the armed-slot clear');
+});
+
+test('write-gate: an unanswered gate keeps the pending block when the armed gate confirms (#2653)', (t) => {
+  // Reversed order: the unanswered gate comes FIRST, the armed (last) gate is
+  // confirmed. Clearing the armed slot must not drop the unanswered gate's
+  // pending block — otherwise shouldBlockPendingGate stops freezing tools
+  // while a gate is still unverified.
+  const base = makeGateBase(t, 'multi-waiting-clears');
+  const answered = 'depth_verification_M027_confirm';
+  const unansweredArmed = 'depth_verification_M025_confirm';
+
+  for (const id of [unansweredArmed, answered]) setPendingGate(id, base);
+  assert.strictEqual(getPendingGate(base), answered);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(unansweredArmed), gateQuestion(answered)],
+    details: {
+      response: { answers: { [answered]: { selected: CONFIRM } } },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: 'waiting',
+    pendingGateId: unansweredArmed,
+    interrupted: false,
+    verifiedGateIds: [answered],
+  });
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), true, 'the answered gate still unlocks');
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), false, 'the unanswered gate stays locked');
+  assert.strictEqual(getPendingGate(base), unansweredArmed, 'the unanswered gate owns the pending slot');
+});
+
+test('write-gate: a confirmation for a gate other than the armed one does not report success (#2653)', (t) => {
+  // The armed gate was left pending by an earlier round; this round asks and
+  // confirms a different gate. The new confirmation is recorded, but the
+  // result must name the armed gate as unresolved so the caller re-asks it.
+  const base = makeGateBase(t, 'multi-armed-absent');
+  const armed = 'depth_verification_M025_confirm';
+  const asked = 'depth_verification_M027_confirm';
+
+  setPendingGate(armed, base);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(asked)],
+    details: {
+      response: { answers: { [asked]: { selected: CONFIRM } } },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: 'waiting',
+    pendingGateId: armed,
+    interrupted: false,
+    verifiedGateIds: [asked],
+  });
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), true, 'the answered gate is still recorded');
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), false, 'the armed gate stays locked');
+  assert.strictEqual(getPendingGate(base), armed, 'the armed gate stays pending');
+});
+
+test('write-gate: a declined gate does not displace the armed unanswered gate in the pending slot (#2653)', (t) => {
+  // Armed gate A went unanswered; gate B was explicitly declined. The result
+  // names A (the caller re-asks A), so the pending slot must hold A too — a
+  // decline re-arm must not overwrite it, or the next confirmed round would
+  // clear the freeze while B is still unresolved.
+  const base = makeGateBase(t, 'multi-armed-waiting-declined');
+  const armedWaiting = 'depth_verification_M025_confirm';
+  const declined = 'depth_verification_M027_confirm';
+
+  for (const id of [declined, armedWaiting]) setPendingGate(id, base);
+  assert.strictEqual(getPendingGate(base), armedWaiting);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(armedWaiting), gateQuestion(declined)],
+    details: {
+      response: { answers: { [declined]: { selected: DECLINE } } },
+    },
+  });
+
+  assert.deepEqual(result, {
+    status: 'waiting',
+    pendingGateId: armedWaiting,
+    interrupted: false,
+  });
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), false);
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), false, 'the declined gate stays locked');
+  assert.strictEqual(getPendingGate(base), armedWaiting, 'the armed unanswered gate owns the pending slot');
+});
+
+test('write-gate: applyAskUserQuestionsGateResult fails closed when one gate of a multi-gate round is unanswered (#2653)', (t) => {
+  const base = makeGateBase(t, 'multi-empty');
+  const answered = 'depth_verification_M025_confirm';
+  const unanswered = 'depth_verification_M027_confirm';
+
+  for (const id of [answered, unanswered]) setPendingGate(id, base);
+
+  const result = applyAskUserQuestionsGateResult({
+    basePath: base,
+    questions: [gateQuestion(answered), gateQuestion(unanswered)],
+    details: {
+      response: { answers: { [answered]: { selected: '' } } },
+    },
+  });
+
+  assert.deepEqual(result, { status: 'waiting', pendingGateId: unanswered, interrupted: false });
+  assert.strictEqual(isMilestoneDepthVerified('M025', base), false, 'the empty selection is not an answer');
+  assert.strictEqual(isMilestoneDepthVerified('M027', base), false, 'the unanswered gate stays locked');
 });
 
 // ─── Scenario 20d: applyAskUserQuestionsGateResult reports timed_out gate (#852) ──
@@ -715,11 +946,11 @@ test('write-gate: no pending gate means no blocking', () => {
   assert.strictEqual(shouldBlockPendingGateBash('npm run build', 'M001').block, false);
 });
 
-// ─── Scenario 28: resetWriteGateState clears pending gate ──
+// ─── Scenario 28: clearDiscussionFlowState clears pending gate ──
 
-test('write-gate: resetWriteGateState clears pending gate', () => {
+test('write-gate: clearDiscussionFlowState clears pending gate', () => {
   setPendingGate('depth_verification', process.cwd());
-  resetWriteGateState(process.cwd());
+  clearDiscussionFlowState(process.cwd());
   assert.strictEqual(getPendingGate(), null);
 });
 
@@ -874,143 +1105,4 @@ test('write-gate: isDepthConfirmationAnswer fails closed when options are missin
     false,
     'no-options + non-Recommended must NOT unlock the gate',
   );
-});
-
-// ─── Scenario 29: loadWriteGateSnapshot returns clean state when persist file deleted (#4343) ──
-
-test('write-gate: loadWriteGateSnapshot returns empty default when persist file is deleted (#4343)', () => {
-  const base = join(tmpdir(), `gsd-write-gate-4343-${randomUUID()}`);
-  mkdirSync(join(base, '.gsd', 'runtime'), { recursive: true });
-  const stateFilePath = join(base, '.gsd', 'runtime', 'write-gate-state.json');
-  const originalEnv = process.env.GSD_PERSIST_WRITE_GATE_STATE;
-
-  try {
-    process.env.GSD_PERSIST_WRITE_GATE_STATE = '1';
-
-    // Write a state file with a pending gate and verified milestone
-    writeFileSync(stateFilePath, JSON.stringify({
-      verifiedDepthMilestones: ['M001'],
-      activeQueuePhase: false,
-      pendingGateId: 'depth_verification_M001',
-    }));
-    assert.ok(existsSync(stateFilePath), 'precondition: state file exists');
-
-    // While file exists, snapshot reflects its contents
-    const beforeDeletion = loadWriteGateSnapshot(base);
-    assert.strictEqual(beforeDeletion.pendingGateId, 'depth_verification_M001', 'pending gate from file');
-    assert.deepEqual(beforeDeletion.verifiedDepthMilestones, ['M001'], 'verified milestones from file');
-
-    // User deletes the state file to clear the HARD BLOCK
-    unlinkSync(stateFilePath);
-    assert.ok(!existsSync(stateFilePath), 'state file deleted');
-
-    // After deletion in persist mode, snapshot should be clean (not stale in-memory)
-    const afterDeletion = loadWriteGateSnapshot(base);
-    assert.strictEqual(afterDeletion.pendingGateId, null, 'pendingGateId cleared after file deletion');
-    assert.deepEqual(afterDeletion.verifiedDepthMilestones, [], 'verifiedDepthMilestones cleared after file deletion');
-    assert.strictEqual(afterDeletion.activeQueuePhase, false, 'activeQueuePhase cleared after file deletion');
-
-    // The CONTEXT artifact block check must also resolve to unblocked after deletion+verification
-    // (simulate the re-verify flow users would do: delete → depth verify → save)
-    const stillBlocked = shouldBlockContextArtifactSaveInSnapshot(afterDeletion, 'CONTEXT', 'M001', null);
-    assert.strictEqual(stillBlocked.block, true, 'still blocked without new depth verification');
-
-    const verifiedSnapshot = {
-      ...afterDeletion,
-      verifiedDepthMilestones: ['M001'],
-    };
-    const unblocked = shouldBlockContextArtifactSaveInSnapshot(verifiedSnapshot, 'CONTEXT', 'M001', null);
-    assert.strictEqual(unblocked.block, false, 'unblocked after fresh depth verification');
-  } finally {
-    if (originalEnv === undefined) {
-      delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-    } else {
-      process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
-    }
-    clearDiscussionFlowState(base);
-    try {
-      rmSync(base, { recursive: true, force: true });
-    } catch { /* swallow */ }
-  }
-});
-
-// ─── Scenario 30: write-gate persistence recreates dangling external .gsd target ──
-
-test('write-gate: resetWriteGateState persists through dangling .gsd symlink', () => {
-  const base = join(tmpdir(), `gsd-write-gate-dangling-${randomUUID()}`);
-  const externalState = join(tmpdir(), `gsd-write-gate-external-${randomUUID()}`);
-  const stateFilePath = join(base, '.gsd', 'runtime', 'write-gate-state.json');
-  const originalEnv = process.env.GSD_PERSIST_WRITE_GATE_STATE;
-
-  try {
-    process.env.GSD_PERSIST_WRITE_GATE_STATE = '1';
-    mkdirSync(base, { recursive: true });
-    symlinkSync(externalState, join(base, '.gsd'), 'junction');
-    assert.strictEqual(existsSync(join(base, '.gsd')), false, 'precondition: .gsd symlink target is missing');
-
-    resetWriteGateState(base);
-
-    assert.ok(existsSync(externalState), 'missing external state target was recreated');
-    assert.ok(existsSync(stateFilePath), 'write-gate snapshot persisted under .gsd/runtime');
-    assert.deepEqual(loadWriteGateSnapshot(base), {
-      verifiedDepthMilestones: [],
-      verifiedApprovalGates: [],
-      activeQueuePhase: false,
-      pendingGateId: null,
-      writer: 'host',
-    });
-  } finally {
-    if (originalEnv === undefined) {
-      delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-    } else {
-      process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
-    }
-    clearDiscussionFlowState(base);
-    try {
-      rmSync(base, { recursive: true, force: true });
-      rmSync(externalState, { recursive: true, force: true });
-    } catch { /* swallow */ }
-  }
-});
-
-// ─── Scenario 31: hydrate in-memory gate state from persisted snapshot (MCP subprocess) ──
-
-test('write-gate: getPendingGate hydrates from disk when workflow MCP verified gate in child process', () => {
-  const base = join(tmpdir(), `gsd-write-gate-mcp-hydrate-${randomUUID()}`);
-  const stateFilePath = join(base, '.gsd', 'runtime', 'write-gate-state.json');
-  const originalEnv = process.env.GSD_PERSIST_WRITE_GATE_STATE;
-  const gateId = 'depth_verification_M005_confirm';
-
-  try {
-    process.env.GSD_PERSIST_WRITE_GATE_STATE = '1';
-    mkdirSync(join(base, '.gsd', 'runtime'), { recursive: true });
-    clearDiscussionFlowState(base);
-    setPendingGate(gateId, base);
-
-    writeFileSync(stateFilePath, JSON.stringify({
-      verifiedDepthMilestones: ['M005'],
-      verifiedApprovalGates: [gateId],
-      activeQueuePhase: false,
-      pendingGateId: null,
-    }, null, 2), 'utf-8');
-
-    assert.strictEqual(getPendingGate(base), null, 'stale in-memory pending must refresh from disk');
-    assert.strictEqual(isMilestoneDepthVerified('M005', base), true, 'verified milestone must hydrate from disk');
-    assert.deepEqual(loadWriteGateSnapshot(base), {
-      verifiedDepthMilestones: ['M005'],
-      verifiedApprovalGates: [gateId],
-      activeQueuePhase: false,
-      pendingGateId: null,
-    });
-  } finally {
-    if (originalEnv === undefined) {
-      delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-    } else {
-      process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
-    }
-    clearDiscussionFlowState(base);
-    try {
-      rmSync(base, { recursive: true, force: true });
-    } catch { /* swallow */ }
-  }
 });

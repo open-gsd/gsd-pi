@@ -52,7 +52,7 @@ describe("db-open-state", () => {
     const state = createDbOpenState();
 
     state.markAttempted();
-    state.recordError("vacuum-recovery", "vacuum failed");
+    state.recordError("initSchema", "schema init failed");
     state.reset();
 
     assert.deepEqual(state.snapshot(), {

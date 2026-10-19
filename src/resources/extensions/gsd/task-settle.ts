@@ -1,10 +1,23 @@
 // Project/App: gsd-pi
 // File Purpose: Operator Task settle — human-gated, dry-run-first reconciliation
 // of a running Task Attempt whose executor is gone, plus optional lifecycle
-// adopt after an interrupted Attempt or succeeded completion (#1749, #2018).
+// adopt after an interrupted Attempt or succeeded completion (#1749, #2018),
+// the `blocker-accepted` operator closeout disposition (#2202), and the
+// receipt-gated verification-paused reconcile (#2334).
 
 import { executeDomainOperation } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
+import {
+  getAttemptResultCreatedAt,
+  getPassingProofAttemptId,
+  getTaskLegacyAndLifecycleStatus,
+  getTaskRouteHead,
+  hasTaskLifecycleRow,
+  listRunningTaskAttempts,
+  listVerificationPauseEventRows,
+  type RunningTaskAttemptRow,
+  type TaskRouteHeadRow,
+} from "./db/lifecycle-queries.js";
 import { isAutoWorkerLive } from "./db/auto-workers.js";
 import {
   claimMilestoneLease,
@@ -14,15 +27,27 @@ import {
 import { normalizeLegacyLifecycleStatus } from "./db/lifecycle-shadow-comparison.js";
 import {
   adoptOrTransitionLifecycle,
+  appendKernelCheckpoint,
+  closeLegacyTaskAsBlockerAccepted,
   readDomainOperationFence,
   type CanonicalLifecycleStatus,
 } from "./db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { internalExecutionInvocation } from "./execution-invocation.js";
+import { queryJournal } from "./journal.js";
 import { TASK_LIFECYCLE_PROJECTION_KIND } from "./projection-identity.js";
+import { publishVerifiedTaskCompletion } from "./task-completion-compatibility-adapter.js";
+import {
+  TASK_SOURCE_COMMIT_EFFECT,
+  readTaskCloseoutPlan,
+} from "./task-closeout.js";
 import {
   readLatestTaskAttempt,
   settleTaskAttempt,
 } from "./task-execution-domain-operation.js";
+import { readTaskRecoveryRoute } from "./task-recovery-domain-operation.js";
+import { readTaskTechnicalVerdict } from "./task-verification-domain-operation.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 export interface TaskSettleTask {
   milestoneId: string;
@@ -49,22 +74,34 @@ export interface TaskSettleProof {
   note: string;
 }
 
+export interface TaskPublicationPlanRow {
+  attemptId: string;
+  lifecycleStatus: string;
+  legacyStatus: string;
+  /** Recorded host Technical Verdict, or null when verification has not passed yet. */
+  verdict: string | null;
+  rationale: string;
+}
+
 export interface TaskSettlePlan {
   task: TaskSettleTask;
   rows: TaskSettleRow[];
   lifecycleRows: TaskLifecycleReconcileRow[];
   proof: TaskSettleProof | null;
+  publication: TaskPublicationPlanRow | null;
 }
 
 export interface TaskSettleOptions {
   reconcileLifecycle?: boolean;
+  /**
+   * Operator command only: the project root whose journal can hold a
+   * verification-pause receipt written before the receipt became a DB event.
+   * Dispatch, the auto loop, and the agent tool never set this.
+   */
+  legacyJournalBasePath?: string;
 }
 
-interface RunningAttemptRow {
-  attempt_id: string;
-  worker_id: string | null;
-  milestone_lease_token: number | null;
-}
+type RunningAttemptRow = RunningTaskAttemptRow;
 
 interface TaskLifecycleState {
   legacyStatus: string;
@@ -76,23 +113,7 @@ function unitId(task: TaskSettleTask): string {
 }
 
 function readRunningAttempts(task: TaskSettleTask): RunningAttemptRow[] {
-  return getDb().prepare(`
-    SELECT attempt.attempt_id, attempt.worker_id, attempt.milestone_lease_token
-    FROM workflow_item_lifecycles lifecycle
-    JOIN workflow_execution_attempts attempt
-      ON attempt.lifecycle_id = lifecycle.lifecycle_id
-     AND attempt.project_id = lifecycle.project_id
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-      AND attempt.attempt_state = 'running'
-    ORDER BY attempt.attempt_number DESC
-  `).all({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  }) as unknown as RunningAttemptRow[];
+  return listRunningTaskAttempts(task.milestoneId, task.sliceId, task.taskId);
 }
 
 function readLeaseHeld(row: RunningAttemptRow, milestoneId: string): boolean {
@@ -138,19 +159,7 @@ function claimRecoveryLease(
 }
 
 function requireSingleRunningAttempt(task: TaskSettleTask): RunningAttemptRow | null {
-  const lifecycle = getDb().prepare(`
-    SELECT 1 AS present
-    FROM workflow_item_lifecycles
-    WHERE item_kind = 'task'
-      AND milestone_id = :milestone_id
-      AND slice_id = :slice_id
-      AND task_id = :task_id
-  `).get({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  });
-  if (!lifecycle) {
+  if (!hasTaskLifecycleRow(task.milestoneId, task.sliceId, task.taskId)) {
     throw new Error(
       `gsd_task_settle: unknown Task ${task.milestoneId}/${task.sliceId}/${task.taskId}`,
     );
@@ -167,76 +176,20 @@ function requireSingleRunningAttempt(task: TaskSettleTask): RunningAttemptRow | 
 }
 
 function readTaskLifecycleState(task: TaskSettleTask): TaskLifecycleState {
-  const state = getDb().prepare(`
-    SELECT task.status AS task_status, lifecycle.lifecycle_status
-    FROM tasks task
-    LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'task'
-     AND lifecycle.milestone_id = task.milestone_id
-     AND lifecycle.slice_id = task.slice_id
-     AND lifecycle.task_id = task.id
-    WHERE task.milestone_id = :milestone_id
-      AND task.slice_id = :slice_id
-      AND task.id = :task_id
-  `).get({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  }) as Record<string, unknown> | undefined;
+  const state = getTaskLegacyAndLifecycleStatus(task.milestoneId, task.sliceId, task.taskId);
   if (!state) {
     throw new Error(`gsd_task_settle: unknown Task ${unitId(task)}`);
   }
   return {
-    legacyStatus: String(state["task_status"]),
-    lifecycleStatus: state["lifecycle_status"]
-      ? String(state["lifecycle_status"]) as CanonicalLifecycleStatus
+    legacyStatus: String(state.task_status),
+    lifecycleStatus: state.lifecycle_status
+      ? String(state.lifecycle_status) as CanonicalLifecycleStatus
       : null,
   };
 }
 
 function readPassingProofAttempt(task: TaskSettleTask): string | null {
-  const row = getDb().prepare(`
-    SELECT attempt.attempt_id
-    FROM workflow_item_lifecycles lifecycle
-    JOIN workflow_execution_attempts attempt
-      ON attempt.lifecycle_id = lifecycle.lifecycle_id
-     AND attempt.project_id = lifecycle.project_id
-     AND attempt.attempt_state = 'settled'
-    JOIN workflow_attempt_results result
-      ON result.attempt_id = attempt.attempt_id
-     AND result.lifecycle_id = lifecycle.lifecycle_id
-     AND result.outcome = 'succeeded'
-    JOIN workflow_acceptance_criteria criterion
-      ON criterion.lifecycle_id = lifecycle.lifecycle_id
-     AND criterion.criterion_key = 'host-technical-verification'
-     AND NOT EXISTS (
-       SELECT 1 FROM workflow_acceptance_criteria successor
-       WHERE successor.supersedes_criterion_id = criterion.criterion_id
-     )
-    JOIN workflow_technical_verdicts verdict
-      ON verdict.criterion_id = criterion.criterion_id
-     AND verdict.attempt_id = attempt.attempt_id
-     AND verdict.verdict = 'pass'
-     AND NOT EXISTS (
-       SELECT 1 FROM workflow_technical_verdicts successor
-       WHERE successor.supersedes_verdict_id = verdict.verdict_id
-     )
-    JOIN workflow_verification_evidence evidence
-      ON evidence.verdict_id = verdict.verdict_id
-     AND evidence.attempt_id = attempt.attempt_id
-     AND evidence.observation = 'passed'
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-    ORDER BY attempt.attempt_number DESC
-    LIMIT 1
-  `).get({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  }) as { attempt_id?: string } | undefined;
-  return row?.attempt_id ? String(row.attempt_id) : null;
+  return getPassingProofAttemptId(task.milestoneId, task.sliceId, task.taskId);
 }
 
 function planCompletionProof(
@@ -257,13 +210,158 @@ function planCompletionProof(
   };
 }
 
-function targetCanonicalStatus(legacyStatus: string): "ready" | "completed" {
+// ── verification-paused reconcile (#2334) ───────────────────────────────────
+//
+// A finalizer verification pause strands a succeeded Attempt: the legacy Task
+// stays in_progress, no Attempt is running, and every operator route refuses.
+// The sanctioned exit is a receipt-gated reconcile to ready — gated on the
+// durable DB receipt the finalize pause branch records, so only the
+// finalizer (never an operator hand-edit) can vouch for the pause. Failed
+// verification never qualifies: the Attempt outcome must be succeeded.
+// The journal line the finalizer also writes is a diagnostic, never proof —
+// except once, in the operator command, for a Task paused before the receipt
+// became a DB event: that line is imported as the DB event with source
+// 'legacy-journal'.
+
+const VERIFICATION_PAUSED_EVENT = "task.verification.paused";
+
+interface VerificationPauseReceipt {
+  ts: string;
+  attemptId: string;
+}
+
+/**
+ * Record the finalizer's verification pause as a Domain Operation event bound
+ * to the Task's latest Attempt. Returns the Attempt id, or null when the Task
+ * has no Attempt (nothing a receipt could vouch for).
+ */
+export function recordTaskVerificationPause(
+  task: TaskSettleTask,
+  source?: "legacy-journal",
+): string | null {
+  const latest = readLatestTaskAttempt(task);
+  if (!latest) return null;
+  const entityId = unitId(task);
+  const idempotencyKey = `internal:auto:task.verification.pause:${latest.attemptId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  executeDomainOperation({
+    operationType: "task.verification.pause",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "agent",
+    sourceTransport: "internal",
+    payload: {
+      milestoneId: task.milestoneId,
+      sliceId: task.sliceId,
+      taskId: task.taskId,
+      attemptId: latest.attemptId,
+    },
+  }, () => ({
+    events: [{
+      eventType: VERIFICATION_PAUSED_EVENT,
+      entityType: "task",
+      entityId,
+      payload: { attemptId: latest.attemptId, ...(source ? { source } : {}) },
+      destinations: ["projection"],
+    }],
+    projections: [{
+      projectionKey: `lifecycle/${entityId}`.toLowerCase(),
+      projectionKind: TASK_LIFECYCLE_PROJECTION_KIND,
+      rendererVersion: "1",
+    }],
+  }));
+  return latest.attemptId;
+}
+
+// The receipt must name the latest Attempt: a pause recorded for an earlier
+// Attempt must never vouch for this settlement (a superseding Attempt re-owns
+// the exit).
+function readVerificationPauseReceipt(
+  task: TaskSettleTask,
+  attemptId: string | undefined,
+): VerificationPauseReceipt | null {
+  if (!attemptId) return null;
+  const rows = listVerificationPauseEventRows(unitId(task), VERIFICATION_PAUSED_EVENT);
+  for (const row of rows) {
+    const payload = JSON.parse(row.payload_json) as { attemptId?: unknown };
+    if (payload.attemptId === attemptId) return { ts: String(row.created_at), attemptId };
+  }
+  return null;
+}
+
+/**
+ * Read-only (#2864): does a durable verification-pause receipt recorded by the
+ * auto finalizer vouch for this exact Attempt? Same match as the
+ * reconcileLifecycle gate below, exposed for the drift-repair seam so the
+ * repair consumes exactly the state this command releases.
+ */
+export function taskHasVerificationPauseReceipt(
+  task: TaskSettleTask,
+  attemptId: string | undefined,
+): boolean {
+  return readVerificationPauseReceipt(task, attemptId) !== null;
+}
+
+// The journal receipt of a pre-upgrade pause. A journal line has no Attempt
+// id, so freshness binds it to the Attempt: a line written before the latest
+// Attempt's Result belongs to an earlier pause.
+function readLegacyJournalPauseReceipt(
+  basePath: string,
+  task: TaskSettleTask,
+  attemptId: string,
+): VerificationPauseReceipt | null {
+  const settledAt = getAttemptResultCreatedAt(attemptId);
+  const settledMs = settledAt ? Date.parse(settledAt) : NaN;
+  if (Number.isNaN(settledMs)) return null;
+  const unit = unitId(task);
+  const latest = [
+    ...queryJournal(basePath, { eventType: "verification-paused", unitId: unit }),
+    ...queryJournal(basePath, { eventType: "post-unit-finalize-end", unitId: unit })
+      .filter((entry) => entry.data?.["reason"] === "verification-pause"),
+  ]
+    .filter((entry) => Date.parse(entry.ts) >= settledMs)
+    .sort((a, b) => a.ts.localeCompare(b.ts))
+    .at(-1);
+  return latest ? { ts: latest.ts, attemptId } : null;
+}
+
+function importLegacyJournalPauseReceipt(basePath: string, task: TaskSettleTask): void {
+  if (requireSingleRunningAttempt(task) !== null || !isVerificationPausedCandidate(task)) return;
+  const attemptId = readLatestTaskAttempt(task)?.attemptId;
+  if (!attemptId || readVerificationPauseReceipt(task, attemptId)) return;
+  if (readLegacyJournalPauseReceipt(basePath, task, attemptId)) {
+    recordTaskVerificationPause(task, "legacy-journal");
+  }
+}
+
+function isVerificationPausedCandidate(task: TaskSettleTask): boolean {
+  const state = readTaskLifecycleState(task);
+  if (normalizeLegacyLifecycleStatus(state.legacyStatus) !== "in_progress") return false;
+  const latest = readLatestTaskAttempt(task);
+  if (latest?.state !== "settled" || latest?.outcome !== "succeeded") return false;
+  // An agent-owned unrecovered abort route owns the lineage — `/gsd recover`
+  // is the sanctioned exit, never a lifecycle release (same fail-closed rule
+  // as the #2417 publication door).
+  const route = readTaskRecoveryRoute(latest.attemptId);
+  if (route && route.recoveryOwner === "agent" && route.action === "abort" && !route.resumeAuthorized) {
+    return false;
+  }
+  return true;
+}
+
+function targetCanonicalStatus(
+  legacyStatus: string,
+  verificationPaused: boolean,
+): "ready" | "completed" {
   const normalized = normalizeLegacyLifecycleStatus(legacyStatus);
   if (normalized === "pending") return "ready";
   if (normalized === "completed") return "completed";
+  if (normalized === "in_progress" && verificationPaused) return "ready";
   throw new Error(
     `gsd_task_settle: reconcileLifecycle only repairs a pending/complete mismatch ` +
-    `after an interrupted Attempt or succeeded completion; tasks.status is ${legacyStatus}`,
+    `after an interrupted Attempt or succeeded completion, or a receipt-gated ` +
+    `verification-paused in-progress Task; tasks.status is ${legacyStatus}`,
   );
 }
 
@@ -288,18 +386,31 @@ function planLifecycleReconcile(
   task: TaskSettleTask,
   reason: string,
   hasRunningAttempt: boolean,
+  verificationPaused: boolean,
+  pauseReceipt: VerificationPauseReceipt | null,
 ): TaskLifecycleReconcileRow[] {
   const latest = readLatestTaskAttempt(task);
   const state = readTaskLifecycleState(task);
+  const normalizedLegacy = normalizeLegacyLifecycleStatus(state.legacyStatus);
   const succeededCompletion = latest?.outcome === "succeeded" &&
-    normalizeLegacyLifecycleStatus(state.legacyStatus) === "completed";
-  if (!hasRunningAttempt && latest?.outcome !== "interrupted" && !succeededCompletion) {
+    normalizedLegacy === "completed";
+  if (
+    !hasRunningAttempt &&
+    latest?.outcome !== "interrupted" &&
+    !succeededCompletion &&
+    !(verificationPaused && pauseReceipt)
+  ) {
     throw new Error(
-      "gsd_task_settle: reconcileLifecycle requires an interrupted Attempt or a succeeded " +
-      "Attempt with tasks.status complete (settle the running Attempt first)",
+      verificationPaused
+        ? "gsd_task_settle: reconcileLifecycle of a verification-paused in-progress Task " +
+          "requires the durable verification-pause receipt for its latest Attempt; none was found " +
+          "(the receipt is recorded by the auto finalizer when verification pauses)"
+        : "gsd_task_settle: reconcileLifecycle requires an interrupted Attempt or a succeeded " +
+          "Attempt with tasks.status complete (settle the running Attempt first)",
     );
   }
-  const target = targetCanonicalStatus(state.legacyStatus);
+  const receiptGated = verificationPaused && pauseReceipt !== null;
+  const target = targetCanonicalStatus(state.legacyStatus, receiptGated);
   const fromStatus = state.lifecycleStatus;
   if (fromStatus === null) {
     throw new Error(`gsd_task_settle: Task ${unitId(task)} has no canonical lifecycle to reconcile`);
@@ -312,9 +423,12 @@ function planLifecycleReconcile(
     rows.push({
       currentStatus: current,
       targetStatus: next,
-      rationale:
-        `${reason} (adopt ${target} to match tasks.status=${state.legacyStatus}; ` +
-        "SUMMARY projections are left in place)",
+      rationale: receiptGated
+        ? `${reason} (verification-pause receipt ${pauseReceipt?.ts ?? "unknown"}; adopt ${target} to ` +
+          "release the stranded in-progress Task for replan/cancel; SUMMARY projections and " +
+          "tasks.status are left in place)"
+        : `${reason} (adopt ${target} to match tasks.status=${state.legacyStatus}; ` +
+          "SUMMARY projections are left in place)",
     });
     current = next;
   }
@@ -380,8 +494,60 @@ function applyLifecycleReconcile(
 }
 
 /**
+ * Detect a durable success stranded before publication (#2417): the latest
+ * Attempt is settled succeeded at the verify stage, no Attempt is running, the
+ * Task is not terminal in either vocabulary, and no abort route head owns the
+ * lineage. The vocabularies already agree on non-terminal here, so this is not
+ * a reconcile case — the only sanctioned writer is the verified publication
+ * pipeline. Returns null unless every structural predicate holds; evidence
+ * gates (passing verdict, source parity, UAT closure) stay inside publication
+ * and fail apply closed when unsatisfied.
+ *
+ * ADR-050: a stranded success whose Closeout Plan source commit has no
+ * Settlement Receipt cannot publish here — the Task is not committed. The
+ * sanctioned exit is `/gsd auto`, which prepares, commits, records the
+ * receipt and publishes; a refused commit is repaired by the stored
+ * git-commit retry.
+ */
+function planDurableSuccessPublication(task: TaskSettleTask): TaskPublicationPlanRow | null {
+  const state = readTaskLifecycleState(task);
+  const lifecycleStatus = state.lifecycleStatus;
+  if (lifecycleStatus !== "ready" && lifecycleStatus !== "in_progress") return null;
+  if (normalizeLegacyLifecycleStatus(state.legacyStatus) === "completed") return null;
+  const latest = readLatestTaskAttempt(task);
+  if (!latest || latest.state !== "settled" || latest.outcome !== "succeeded" || latest.nextStage !== "verify") {
+    return null;
+  }
+  const route = readTaskRecoveryRoute(latest.attemptId);
+  if (route && route.recoveryOwner === "agent" && route.action === "abort" && !route.resumeAuthorized) {
+    return null;
+  }
+  const commitEffect = readTaskCloseoutPlan(task)?.effects
+    .find((effect) => effect.effectKind === TASK_SOURCE_COMMIT_EFFECT);
+  if (commitEffect && !commitEffect.receipt) {
+    throw new Error(
+      `gsd_task_settle: the Closeout Plan of ${unitId(task)} has no Settlement Receipt for its ` +
+      "source commit — the Task is not committed and cannot publish here. Re-enter `/gsd auto`: " +
+      "it commits the Task source, records the receipt and publishes; a refused commit is " +
+      "repaired by the stored git-commit retry.",
+    );
+  }
+  const verdict = readTaskTechnicalVerdict(latest.attemptId);
+  return {
+    attemptId: latest.attemptId,
+    lifecycleStatus,
+    legacyStatus: state.legacyStatus,
+    verdict: verdict?.verdict ?? null,
+    rationale:
+      `Attempt ${latest.attemptId} settled succeeded at the verify stage — apply runs the ` +
+      "verified publication pipeline (lifecycle → completed, tasks.status → complete)",
+  };
+}
+
+/**
  * Read-only settle plan: the exact Attempt and optional lifecycle rows an
- * apply would change. Zero rows of both kinds means an apply is a no-op.
+ * apply would change, including publication of a stranded succeeded Attempt.
+ * An apply is a no-op only when rows, lifecycle rows, and publication are empty.
  */
 export function planTaskSettle(
   task: TaskSettleTask,
@@ -389,11 +555,33 @@ export function planTaskSettle(
   options: TaskSettleOptions = {},
 ): TaskSettlePlan {
   const attempt = requireSingleRunningAttempt(task);
-  const lifecycleRows = options.reconcileLifecycle
-    ? planLifecycleReconcile(task, reason, attempt !== null)
+  // #2334: a receipt-gated verification-paused reconcile takes precedence over
+  // the #2417 publication door — the finalizer paused this unit before the
+  // publication boundary, so the operator exit is replan/cancel, not publish.
+  // A candidate without the durable receipt fails closed instead of silently
+  // routing to publication: the pause must be proven, never assumed.
+  const verificationPaused =
+    attempt === null && options.reconcileLifecycle === true && isVerificationPausedCandidate(task);
+  const latestAttemptId = verificationPaused ? readLatestTaskAttempt(task)?.attemptId : undefined;
+  const pauseReceipt = readVerificationPauseReceipt(task, latestAttemptId)
+    ?? (latestAttemptId && options.legacyJournalBasePath
+      ? readLegacyJournalPauseReceipt(options.legacyJournalBasePath, task, latestAttemptId)
+      : null);
+  if (verificationPaused && !pauseReceipt) {
+    throw new Error(
+      "gsd_task_settle: reconcileLifecycle of a verification-paused in-progress Task " +
+      "requires the durable verification-pause receipt for its latest Attempt; none was found " +
+      "(the receipt is recorded by the auto finalizer when verification pauses)",
+    );
+  }
+  const publication = attempt === null && !pauseReceipt
+    ? planDurableSuccessPublication(task)
+    : null;
+  const lifecycleRows = options.reconcileLifecycle && !publication
+    ? planLifecycleReconcile(task, reason, attempt !== null, verificationPaused, pauseReceipt)
     : [];
   const proof = planCompletionProof(task, lifecycleRows);
-  if (!attempt) return { task, rows: [], lifecycleRows, proof };
+  if (!attempt) return { task, rows: [], lifecycleRows, proof, publication };
   const leaseHeld = readLeaseHeld(attempt, task.milestoneId);
   const rationale = leaseHeld
     ? reason
@@ -413,6 +601,7 @@ export function planTaskSettle(
     }],
     lifecycleRows,
     proof,
+    publication,
   };
 }
 
@@ -426,13 +615,33 @@ export function planTaskSettle(
  * Optional `reconcileLifecycle` then adopts ready/completed to match
  * tasks.status after an interrupted Attempt or succeeded completion, without
  * reopening or deleting SUMMARY projections (#1749).
+ *
+ * A durable success stranded before publication (#2417) is neither: apply
+ * runs the verified publication pipeline, which re-adopts the lifecycle to
+ * completed and completes the legacy Task row. Its evidence gates
+ * (passing host Technical Verdict, source parity, UAT closure) stay
+ * fail-closed; verification itself belongs to `/gsd auto`. A finalizer
+ * verification pause (#2334) outranks that door: when the durable
+ * verification-pause receipt exists for the unit, reconcileLifecycle plans
+ * in_progress → paused → ready so replan/cancel become reachable — never
+ * publication, and never for a failed verification.
  */
-export function applyTaskSettle(input: {
+export async function applyTaskSettle(input: {
   invocation: ExecutionInvocation;
   task: TaskSettleTask;
   reason: string;
+  basePath: string;
   reconcileLifecycle?: boolean;
-}): TaskSettlePlan & { settled: boolean; reconciled: boolean; resultId?: string } {
+  legacyJournalBasePath?: string;
+}): Promise<TaskSettlePlan & {
+  settled: boolean;
+  reconciled: boolean;
+  resultId?: string;
+  published?: { attemptId: string; status: "committed" | "replayed"; summaryPath: string };
+}> {
+  if (input.reconcileLifecycle && input.legacyJournalBasePath) {
+    importLegacyJournalPauseReceipt(input.legacyJournalBasePath, input.task);
+  }
   const plan = planTaskSettle(input.task, input.reason, {
     reconcileLifecycle: input.reconcileLifecycle,
   });
@@ -488,8 +697,10 @@ export function applyTaskSettle(input: {
   let lifecycleRows = plan.lifecycleRows;
   let proof = plan.proof;
   let reconciled = false;
-  if (input.reconcileLifecycle) {
-    const after = planTaskSettle(input.task, input.reason, { reconcileLifecycle: true });
+  if (input.reconcileLifecycle && !plan.publication) {
+    const after = planTaskSettle(input.task, input.reason, {
+      reconcileLifecycle: true,
+    });
     lifecycleRows = after.lifecycleRows;
     proof = after.proof;
     if (lifecycleRows.length > 0) {
@@ -497,6 +708,24 @@ export function applyTaskSettle(input: {
       reconciled = true;
     }
   }
+  let published: { attemptId: string; status: "committed" | "replayed"; summaryPath: string } | undefined;
+  if (plan.publication) {
+    // The deterministic per-Attempt key makes a concurrent auto-mode
+    // publication of the same success serialize through the same fenced
+    // domain-operation seam instead of racing it.
+    const publication = await publishVerifiedTaskCompletion({
+      invocation: internalExecutionInvocation(`internal:auto:task.publish:${plan.publication.attemptId}`),
+      basePath: input.basePath,
+      task: input.task,
+      attemptId: plan.publication.attemptId,
+    });
+    published = {
+      attemptId: plan.publication.attemptId,
+      status: publication.status,
+      summaryPath: publication.summaryPath,
+    };
+  }
+  if (settled || reconciled || published) await renderStateProjection(input.basePath);
   return {
     ...plan,
     lifecycleRows,
@@ -504,5 +733,245 @@ export function applyTaskSettle(input: {
     settled,
     reconciled,
     ...(resultId ? { resultId } : {}),
+    ...(published ? { published } : {}),
+  };
+}
+
+// ── blocker-accepted operator closeout (#2202) ──────────────────────────────
+//
+// A Task whose execute-task Attempt settled as failed/blocker-discovered at the
+// route stage with no running Attempt has no supported closeout: replan rejects
+// it (not closed), settle has nothing to settle, and resume only authorizes a
+// repaired retry. The `blocker-accepted` disposition accepts the discovered
+// blocker explicitly: it closes the Task as terminal `blocker-accepted` in both
+// vocabularies, records the blocker provenance on the canonical plan, and
+// consumes the route Kernel head with a terminal closeout decision so the
+// historical failure can never be re-routed. It never fabricates success
+// evidence and never satisfies verdict-gated completion.
+
+export type TaskSettleDisposition = "blocker-accepted";
+
+export interface TaskBlockerAcceptedRow {
+  attemptId: string;
+  resultId: string;
+  /** The discovered-blocker summary carried by the failed Result. */
+  blockerSummary: string;
+  currentStatus: string;
+  targetStatus: "blocker-accepted";
+  lifecycleFrom: CanonicalLifecycleStatus;
+  /** True when the route Kernel head is consumed with a closeout decision. */
+  routeConsumed: boolean;
+  supersededRecoveryActionId: string | null;
+  blockerId: string | null;
+  rationale: string;
+}
+
+export interface TaskBlockerAcceptedPlan {
+  task: TaskSettleTask;
+  /** Zero rows means an apply is a no-op (the disposition already committed). */
+  rows: TaskBlockerAcceptedRow[];
+  alreadyAccepted: boolean;
+}
+
+export interface TaskBlockerAcceptedApplyResult {
+  task: TaskSettleTask;
+  accepted: boolean;
+  alreadyAccepted: boolean;
+  attemptId: string | null;
+  resultId: string | null;
+  routeConsumed: boolean;
+}
+
+type RouteHeadRow = TaskRouteHeadRow;
+
+function readRouteHead(task: TaskSettleTask): RouteHeadRow | null {
+  return getTaskRouteHead(task.milestoneId, task.sliceId, task.taskId);
+}
+
+/**
+ * Read-only disposition plan: the exact Attempt, lifecycle, legacy status, and
+ * route-head transitions an apply would write. Guards fail closed with the
+ * exact prerequisite and the supported next action.
+ */
+export function planBlockerAcceptedDisposition(
+  task: TaskSettleTask,
+  reason: string,
+): TaskBlockerAcceptedPlan {
+  const state = readTaskLifecycleState(task);
+  if (state.lifecycleStatus === "blocker-accepted" || state.legacyStatus === "blocker-accepted") {
+    return { task, rows: [], alreadyAccepted: true };
+  }
+  const running = readRunningAttempts(task);
+  if (running.length > 0) {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires no running Attempt for ${unitId(task)} — ` +
+      "settle the running Attempt first (gsd_task_settle without settleDisposition).",
+    );
+  }
+  if (state.lifecycleStatus !== "in_progress") {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires the Task lifecycle in_progress; found ` +
+      `${state.lifecycleStatus ?? "none"} for ${unitId(task)} — only an active Task with a ` +
+      "discovered blocker can be closed by accepting the blocker.",
+    );
+  }
+  const attempt = readLatestTaskAttempt(task);
+  if (
+    !attempt || attempt.state !== "settled" || attempt.outcome !== "failed" ||
+    attempt.nextStage !== "route" || attempt.resultFailureClass !== "blocker-discovered"
+  ) {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires the latest Attempt of ${unitId(task)} settled ` +
+      `as failed/blocker-discovered at the route stage; found ` +
+      `${attempt ? `${attempt.state}/${attempt.outcome ?? "no-result"}` : "no Attempt"} at ` +
+      `${attempt?.nextStage ?? "no Kernel head"}${attempt?.resultFailureClass ? ` (${attempt.resultFailureClass})` : ""}. ` +
+      "Repair-and-retry is the separate successor-Attempt path (gsd_task_recovery_resume).",
+    );
+  }
+  if (!attempt.resultId) {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires the failed Result identity of Attempt ` +
+      `${attempt.attemptId} for ${unitId(task)}; the Attempt has no Result to preserve.`,
+    );
+  }
+  const head = readRouteHead(task);
+  if (!head || head.next_stage !== "route" || head.attempt_id !== attempt.attemptId) {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires the route Kernel head of ${unitId(task)} on ` +
+      `Attempt ${attempt.attemptId}; found ${head ? `next_stage ${head.next_stage}` : "no Kernel head"}. ` +
+      "The disposition consumes the route head with a terminal closeout decision.",
+    );
+  }
+  const route = readTaskRecoveryRoute(attempt.attemptId);
+  return {
+    task,
+    rows: [{
+      attemptId: attempt.attemptId,
+      resultId: attempt.resultId,
+      blockerSummary: attempt.resultSummary ?? "",
+      currentStatus: state.legacyStatus,
+      targetStatus: "blocker-accepted",
+      lifecycleFrom: state.lifecycleStatus,
+      routeConsumed: true,
+      supersededRecoveryActionId: route?.recoveryActionId ?? null,
+      blockerId: route?.blocker?.blockerId ?? null,
+      rationale: reason,
+    }],
+    alreadyAccepted: false,
+  };
+}
+
+/**
+ * Apply the `blocker-accepted` disposition: one Domain Operation writes the
+ * terminal `blocker-accepted` status to both vocabularies, the blocker
+ * provenance event on the canonical plan, and the terminal closeout Kernel
+ * decision that consumes the route head. A repeated applied run is a no-op.
+ */
+export function applyBlockerAcceptedDisposition(input: {
+  invocation: ExecutionInvocation;
+  task: TaskSettleTask;
+  reason: string;
+}): TaskBlockerAcceptedApplyResult {
+  const plan = planBlockerAcceptedDisposition(input.task, input.reason);
+  if (plan.alreadyAccepted || plan.rows.length === 0) {
+    return {
+      task: input.task,
+      accepted: false,
+      alreadyAccepted: true,
+      attemptId: null,
+      resultId: null,
+      routeConsumed: false,
+    };
+  }
+  const row = plan.rows[0];
+  const entityId = unitId(input.task);
+  const acceptedAt = new Date().toISOString();
+  const fence = readDomainOperationFence(input.invocation.idempotencyKey);
+  executeDomainOperation({
+    operationType: "task.settle.blocker-accepted",
+    idempotencyKey: input.invocation.idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: input.invocation.actorType,
+    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+    sourceTransport: input.invocation.sourceTransport,
+    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+    payload: {
+      milestoneId: input.task.milestoneId,
+      sliceId: input.task.sliceId,
+      taskId: input.task.taskId,
+      attemptId: row.attemptId,
+      resultId: row.resultId,
+      disposition: "blocker-accepted",
+      rationale: input.reason,
+    },
+  }, (context) => {
+    // Consume the route head first: the terminal closeout decision makes the
+    // historical failure unreachable for recovery routing.
+    const head = readRouteHead(input.task);
+    if (!head || head.next_stage !== "route" || head.attempt_id !== row.attemptId) {
+      throw new Error(
+        `gsd_task_settle: the route Kernel head of ${entityId} changed after the dry-run plan; ` +
+        "retry the operation",
+      );
+    }
+    const closeout = appendKernelCheckpoint(context, {
+      lifecycleId: head.lifecycle_id,
+      attemptId: row.attemptId,
+      nextStage: "closeout",
+      previousKernelCheckpointId: head.kernel_checkpoint_id,
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: input.task.milestoneId,
+      sliceId: input.task.sliceId,
+      taskId: input.task.taskId,
+      lifecycleStatus: "blocker-accepted",
+    });
+    closeLegacyTaskAsBlockerAccepted(context, input.task);
+    return {
+      events: [{
+        eventType: "task.blocker.accepted",
+        entityType: "task",
+        entityId,
+        payload: {
+          disposition: "blocker-accepted",
+          from: row.lifecycleFrom,
+          to: "blocker-accepted",
+          attemptId: row.attemptId,
+          resultId: row.resultId,
+          blockerSummary: row.blockerSummary,
+          ...(row.supersededRecoveryActionId
+            ? { supersededRecoveryActionId: row.supersededRecoveryActionId }
+            : {}),
+          ...(row.blockerId ? { blockerId: row.blockerId } : {}),
+          rationale: input.reason,
+          acceptedAt,
+          closeoutKernelCheckpointId: closeout.kernelCheckpointId,
+        },
+        destinations: ["projection"],
+      }],
+      projections: [
+        {
+          projectionKey: `task.blocker.accepted/${entityId}`.toLowerCase(),
+          projectionKind: "task-recovery",
+          rendererVersion: "1",
+        },
+        {
+          projectionKey: `lifecycle/${entityId}`.toLowerCase(),
+          projectionKind: TASK_LIFECYCLE_PROJECTION_KIND,
+          rendererVersion: "1",
+        },
+      ],
+    };
+  });
+  return {
+    task: input.task,
+    accepted: true,
+    alreadyAccepted: false,
+    attemptId: row.attemptId,
+    resultId: row.resultId,
+    routeConsumed: row.routeConsumed,
   };
 }

@@ -16,7 +16,7 @@
 
 import { describe, test, afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -198,13 +198,12 @@ describe('auto-discuss-milestone-deadlock-4973', () => {
     const rule = DISPATCH_RULES.find(r => r.name === 'needs-discussion → discuss-milestone');
     assert.ok(rule, 'dispatch rule must exist');
 
-    // Use a real temp directory so the snapshot file the rule writes is
+    // Use a real temp directory so the gate state the rule writes is
     // readable by the same loadWriteGateSnapshot(basePath) the test reads
     // from. The rule passes basePath through to markDepthVerified (since
-    // commit 73bb7e085) — without this, the rule writes the snapshot under
+    // commit 73bb7e085) — without this, the rule writes the state for
     // basePath but the test would read process.cwd() and never see it.
     const tempBase = mkdtempSync(join(tmpdir(), '4973-rule-test-'));
-    const snapshotFile = join(tempBase, '.gsd', 'runtime', 'write-gate-state.json');
     try {
       const baseCtx = {
         basePath: tempBase,
@@ -238,8 +237,7 @@ describe('auto-discuss-milestone-deadlock-4973', () => {
       );
 
       // ── Deep auto-mode case: the user-facing approval gate must stay closed ──
-      clearDiscussionFlowState(process.cwd());
-      if (existsSync(snapshotFile)) unlinkSync(snapshotFile);
+      clearDiscussionFlowState(tempBase);
       _setAutoActiveForTest(true);
       const deepCtx = {
         ...baseCtx,
@@ -264,8 +262,7 @@ describe('auto-discuss-milestone-deadlock-4973', () => {
       // ── Interactive case: the rule must NOT call markDepthVerified ──
       // clearDiscussionFlowState() only deletes the snapshot at process.cwd(),
       // so we must explicitly remove the snapshot under our tempBase too.
-      clearDiscussionFlowState(process.cwd());
-      if (existsSync(snapshotFile)) unlinkSync(snapshotFile);
+      clearDiscussionFlowState(tempBase);
       _setAutoActiveForTest(false);
       snap = loadWriteGateSnapshot(tempBase);
       assert.strictEqual(

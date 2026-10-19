@@ -1,12 +1,14 @@
 /**
  * GSD Session Status I/O
  *
- * File-based IPC protocol for coordinator-worker communication in
- * parallel milestone orchestration. Each worker writes its status to a
- * file; the coordinator reads all status files to monitor progress.
+ * Coordinator-worker communication in parallel milestone orchestration.
+ * Each worker status is a file; the coordinator reads all status files to
+ * monitor progress. Atomic writes (write to .tmp, then rename) prevent
+ * partial reads.
  *
- * Atomic writes (write to .tmp, then rename) prevent partial reads.
- * Signal files let the coordinator send pause/resume/stop/rebase to workers.
+ * A pause/resume/stop/rebase signal is a command_queue row in the project
+ * database, targeted at the worker's milestone. A legacy signal file from an
+ * external orchestrator is input only: the worker turns it into a row.
  * Stale detection combines PID liveness checks with heartbeat timeouts.
  */
 
@@ -19,6 +21,10 @@ import {
 import { join } from "node:path";
 import { gsdRoot } from "./paths.js";
 import { loadJsonFileOrNull, writeJsonFileAtomic } from "./json-persistence.js";
+import { dropPendingCommands, enqueueCommand, takeNextCommand } from "./db/command-queue.js";
+import { getDbOrNull } from "./gsd-db.js";
+import { isSqliteBusyError } from "./sqlite-errors.js";
+import { logWarning } from "./workflow-logger.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -46,7 +52,8 @@ export interface SignalMessage {
 
 const PARALLEL_DIR = "parallel";
 const STATUS_SUFFIX = ".status.json";
-const SIGNAL_SUFFIX = ".signal.json";
+const LEGACY_SIGNAL_SUFFIX = ".signal.json";
+const SIGNALS: readonly string[] = ["pause", "resume", "stop", "rebase"];
 const DEFAULT_STALE_TIMEOUT_MS = 30_000;
 // How long a paused worker waits for the coordinator to lift the pause before
 // it degrades to in-process serialization (#1273). Kept below the stale
@@ -56,10 +63,6 @@ const DEFAULT_RESUME_POLL_MS = 250;
 
 function isSessionStatus(data: unknown): data is SessionStatus {
   return data !== null && typeof data === "object" && "milestoneId" in data && "pid" in data;
-}
-
-function isSignalMessage(data: unknown): data is SignalMessage {
-  return data !== null && typeof data === "object" && "signal" in data && "sentAt" in data;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -72,8 +75,8 @@ function statusPath(basePath: string, milestoneId: string): string {
   return join(parallelDir(basePath), `${milestoneId}${STATUS_SUFFIX}`);
 }
 
-function signalPath(basePath: string, milestoneId: string): string {
-  return join(parallelDir(basePath), `${milestoneId}${SIGNAL_SUFFIX}`);
+function legacySignalPath(basePath: string, milestoneId: string): string {
+  return join(parallelDir(basePath), `${milestoneId}${LEGACY_SIGNAL_SUFFIX}`);
 }
 
 function ensureParallelDir(basePath: string): void {
@@ -121,36 +124,69 @@ export function readAllSessionStatuses(basePath: string): SessionStatus[] {
   return results;
 }
 
-/** Remove a milestone's session status file. */
+/**
+ * Remove a milestone's session status file. The session is over, so a signal
+ * its worker did not take (a row or a legacy signal file) is closed and does
+ * not reach the next worker.
+ */
 export function removeSessionStatus(basePath: string, milestoneId: string): void {
+  for (const p of [statusPath(basePath, milestoneId), legacySignalPath(basePath, milestoneId)]) {
+    try {
+      if (existsSync(p)) unlinkSync(p);
+    } catch { /* non-fatal */ }
+  }
   try {
-    const p = statusPath(basePath, milestoneId);
-    if (existsSync(p)) unlinkSync(p);
-  } catch { /* non-fatal */ }
+    dropPendingCommands(milestoneId);
+  } catch (e) {
+    logWarning("parallel", `pending signals for ${milestoneId} were not closed: ${(e as Error).message}`);
+  }
 }
 
 // ─── Signal I/O ────────────────────────────────────────────────────────────
 
-/** Write a signal file for a worker to consume. */
-export function sendSignal(basePath: string, milestoneId: string, signal: SessionSignal): void {
-  ensureParallelDir(basePath);
-  const msg: SignalMessage = { signal, sentAt: Date.now(), from: "coordinator" };
-  writeJsonFileAtomic(signalPath(basePath, milestoneId), msg);
+/** Queue a signal for the worker of a milestone. Throws when no database is open. */
+export function sendSignal(milestoneId: string, signal: SessionSignal): void {
+  enqueueCommand(milestoneId, signal);
 }
 
-/** Read and delete a signal file (atomic consume). Returns null if no signal pending. */
-export function consumeSignal(basePath: string, milestoneId: string): SignalMessage | null {
-  const p = signalPath(basePath, milestoneId);
-  const msg = loadJsonFileOrNull(p, isSignalMessage);
-  if (msg) {
-    try { unlinkSync(p); } catch { /* non-fatal */ }
+function isLegacySignal(data: unknown): data is { signal: SessionSignal } {
+  return data !== null && typeof data === "object" && SIGNALS.includes((data as { signal?: unknown }).signal as string);
+}
+
+/**
+ * Deprecated input bridge: an external orchestrator wrote a signal file. Queue
+ * its command as a row and remove the file. The file is never read as a command.
+ */
+function queueLegacySignalFile(basePath: string, milestoneId: string): void {
+  const p = legacySignalPath(basePath, milestoneId);
+  const msg = loadJsonFileOrNull(p, isLegacySignal);
+  if (!msg) return;
+  sendSignal(milestoneId, msg.signal);
+  try { unlinkSync(p); } catch { /* non-fatal */ }
+  logWarning("parallel", `${p}: the signal-file protocol is deprecated; "${msg.signal}" was queued as a command_queue row`);
+}
+
+/**
+ * Take the oldest pending signal for a milestone. Each signal is delivered one
+ * time. Returns null if none is pending, and also when the database is busy:
+ * the signal stays pending for the next poll. With `basePath`, a legacy signal
+ * file of the milestone is queued first.
+ */
+export function consumeSignal(milestoneId: string, basePath?: string): SignalMessage | null {
+  try {
+    if (basePath && getDbOrNull()) queueLegacySignalFile(basePath, milestoneId);
+    const taken = takeNextCommand(milestoneId, `pid-${process.pid}`);
+    if (!taken) return null;
+    return { signal: taken.command as SessionSignal, sentAt: Date.parse(taken.enqueuedAt), from: "coordinator" };
+  } catch (e) {
+    if (isSqliteBusyError(e)) return null;
+    throw e;
   }
-  return msg;
 }
 
 /**
  * Wait for a coordinator to lift a `pause` on a worker by sending `resume`
- * (or `stop`). Polls the signal file until one of those arrives or the timeout
+ * (or `stop`). Polls the command queue until one of those arrives or the timeout
  * elapses. Intervening `pause`/`rebase` signals are consumed and ignored so a
  * repeated pause doesn't reset the wait.
  *
@@ -160,16 +196,15 @@ export function consumeSignal(basePath: string, milestoneId: string): SignalMess
  * at a terminal pause it cannot resume (#1273).
  */
 export async function awaitWorkerResume(
-  basePath: string,
   milestoneId: string,
-  opts: { timeoutMs?: number; pollMs?: number } = {},
+  opts: { timeoutMs?: number; pollMs?: number; basePath?: string } = {},
 ): Promise<"resume" | "stop" | "timeout"> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_RESUME_WAIT_MS;
   const pollMs = opts.pollMs ?? DEFAULT_RESUME_POLL_MS;
   const deadline = Date.now() + timeoutMs;
 
   for (;;) {
-    const msg = consumeSignal(basePath, milestoneId);
+    const msg = consumeSignal(milestoneId, opts.basePath);
     if (msg?.signal === "resume") return "resume";
     if (msg?.signal === "stop") return "stop";
     if (Date.now() >= deadline) return "timeout";
@@ -200,11 +235,6 @@ export function cleanupStaleSessions(
   for (const status of statuses) {
     if (isSessionStale(status, timeoutMs)) {
       removeSessionStatus(basePath, status.milestoneId);
-      // Also clean up any lingering signal file
-      try {
-        const sig = signalPath(basePath, status.milestoneId);
-        if (existsSync(sig)) unlinkSync(sig);
-      } catch { /* non-fatal */ }
       removed.push(status.milestoneId);
     }
   }

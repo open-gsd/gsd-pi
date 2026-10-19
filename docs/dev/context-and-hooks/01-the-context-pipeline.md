@@ -113,12 +113,14 @@ pi.on("before_agent_start", async (event, ctx) => {
 ```
 
 **Critical facts:**
+
 - Fires **once** per user prompt, not per turn
 - System prompts **chain**: Extension A modifies it, Extension B sees the modified version in `event.systemPrompt`
 - Messages **accumulate**: All extensions' messages are collected and injected as separate entries
 - If no extension returns a `systemPrompt`, the base system prompt is restored (previous turn's modifications don't persist)
 
 **Message injection order in the final array:**
+
 ```
 [user message] → [nextTurn messages] → [extension messages from before_agent_start]
 ```
@@ -149,6 +151,7 @@ let currentMessages = structuredClone(messages);
 ```
 
 **This means:**
+
 - You get a deep copy — safe to mutate, splice, filter, or replace
 - You work at the `AgentMessage[]` level (includes custom types)
 - Multiple handlers chain: each sees the output of the previous
@@ -196,6 +199,7 @@ For each tool call:
 ### Stage 6: Follow-up and Continuation
 
 When the LLM finishes and has no more tool calls:
+
 1. Check for steering messages → if any, start new turn with them
 2. Check for follow-up messages → if any, start new turn with them  
 3. If neither → `agent_end` fires, agent goes idle
@@ -215,6 +219,7 @@ Tool definitions (active tools with names, descriptions, parameter schemas)
 ```
 
 The system prompt includes:
+
 - Base prompt (tool descriptions, guidelines, pi docs reference, date/time, cwd)
 - `promptSnippet` overrides from active tools (replaces tool description in "Available tools")
 - `promptGuidelines` from active tools (appended to "Guidelines" section)

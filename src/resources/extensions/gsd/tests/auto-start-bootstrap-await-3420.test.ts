@@ -18,6 +18,7 @@ import {
   setPendingAutoStart,
 } from "../guided-flow.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { saveContextArtifact } from "./helpers/saved-context.ts";
 
 test.afterEach(() => {
   closeDatabase();
@@ -43,6 +44,7 @@ test("checkAutoStartAfterDiscuss waits until discussion artifacts exist before r
 
   writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# Context\n", "utf-8");
   writeFileSync(join(base, ".gsd", "STATE.md"), "# State\n", "utf-8");
+  saveContextArtifact("M001");
 
   assert.equal(checkAutoStartAfterDiscuss(), true);
   assert.deepEqual(notifications, [

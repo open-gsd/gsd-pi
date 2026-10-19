@@ -75,10 +75,12 @@ If no linter or formatter is detected, inform the user and suggest common option
 
 - If a path argument was provided, use that path.
 - If no path argument, get changed files:
+
   ```bash
   git diff --name-only
   git diff --cached --name-only
   ```
+
   Filter to files that still exist on disk. If no files are changed, inform the user and offer to lint the entire project instead.
 
 **Step 2: Run the detected tools**
@@ -89,6 +91,7 @@ Run the linter and/or formatter against the target files or directory.
 - **With `--fix`**: Run with auto-fix flags enabled.
 
 When running formatters without `--fix`, show a preview of what would change:
+
 - For Prettier: use `--check` and list files that would change.
 - For Biome: use `check` without `--apply`.
 - For Black: use `--check --diff` to show the diff preview.

@@ -9,7 +9,8 @@
 import { Type, StringEnum } from "@gsd/pi-ai";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
-import { ensureDbOpen, resolveCtxCwd } from "./dynamic-tools.js";
+import { ensureDbOpen, resolveCtxCwd, runInPiToolSession } from "./dynamic-tools.js";
+import { piPlanningInvocation } from "../planning-invocation.js";
 import {
   executeGsdGraph,
   executeMemoryCapture,
@@ -24,11 +25,12 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
     name: "capture_thought",
     label: "Capture Thought",
     description:
-      "Record a durable piece of project knowledge (decision, convention, gotcha, pattern, " +
-      "preference, or environment detail) into the GSD memory store. Use sparingly — one memory " +
+      "Record a durable piece of project knowledge (decision, convention, gotcha, pattern, rule, " +
+      "preference, or environment detail) into the GSD memory store. Rule, pattern and gotcha captures " +
+      "get a K/P/L id and appear in KNOWLEDGE.md at once. Use sparingly — one memory " +
       "per genuinely reusable insight, not per task.",
     promptSnippet:
-      "Capture a durable project insight into the GSD memory store (categories: architecture, convention, gotcha, pattern, preference, environment)",
+      "Capture a durable project insight into the GSD memory store (categories: architecture, convention, gotcha, pattern, rule, preference, environment)",
     promptGuidelines: [
       "Use capture_thought for insights that will remain useful across future sessions.",
       "Do NOT capture one-off bug fixes, temporary state, secrets, or task-specific details.",
@@ -37,7 +39,7 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
     ],
     parameters: Type.Object({
       category: StringEnum(
-        ["architecture", "convention", "gotcha", "preference", "environment", "pattern"],
+        ["architecture", "convention", "gotcha", "preference", "environment", "pattern", "rule"],
         { description: "Memory category" },
       ),
       content: Type.String({ description: "The memory text (1–3 sentences, no secrets)" }),
@@ -53,8 +55,9 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const ok = await ensureDbOpen(resolveCtxCwd(_ctx));
+    async execute(toolCallId, params, _signal, _onUpdate, _ctx) {
+      const basePath = resolveCtxCwd(_ctx);
+      const ok = await ensureDbOpen(basePath);
       if (!ok) {
         return {
           content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot capture memory." }],
@@ -62,7 +65,11 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
           isError: true,
         };
       }
-      return executeMemoryCapture(params as Parameters<typeof executeMemoryCapture>[0]);
+      return runInPiToolSession(_ctx, () => executeMemoryCapture(
+        params as Parameters<typeof executeMemoryCapture>[0],
+        basePath,
+        piPlanningInvocation("capture_thought", toolCallId),
+      ));
     },
   });
 

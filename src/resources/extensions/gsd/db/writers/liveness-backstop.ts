@@ -111,3 +111,23 @@ export function reopenLivenessWedgeRecord(
      WHERE wedge_id = :wid`,
   ).run({ ':count': occurrenceCount, ':wid': wedgeId });
 }
+
+/**
+ * Clear persisted recurrence counters for a guard/unit pair. Used when a
+ * closeout attempt is abandoned by worker churn so the retried attempt does
+ * not inherit a false trip-at-2 from the killed run (#2159).
+ */
+export function clearLivenessBlockSignatures(
+  key: Pick<LivenessSignatureKey, "scopeId" | "guardId" | "unitType" | "unitId">,
+): void {
+  getDb().prepare(
+    `DELETE FROM liveness_block_signatures
+     WHERE scope_id = :scope AND guard_id = :guard
+       AND unit_type = :utype AND unit_id = :uid`,
+  ).run({
+    ":scope": key.scopeId,
+    ":guard": key.guardId,
+    ":utype": key.unitType,
+    ":uid": key.unitId,
+  });
+}

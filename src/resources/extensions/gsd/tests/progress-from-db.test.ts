@@ -13,9 +13,12 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   _getAdapter,
+  getProjectAuthorityRow,
   insertMilestone,
   insertSlice,
 } from "../gsd-db.ts";
+import { readOpenBlockers } from "../db/lifecycle-read.ts";
+import { readProjectSnapshotFromDb } from "../state/project-snapshot.ts";
 import {
   deriveState,
   getDeriveTelemetry,
@@ -125,6 +128,7 @@ test("readProgressFromDb emits exactly the ProgressResult key set", async (t) =>
     "tasks",
     "requirements",
     "blockers",
+    "blockerRows",
     "nextAction",
     "readMetadata",
   ]);
@@ -284,4 +288,66 @@ test("readProgressFromDb returns the last attempt during sustained revision move
   assert.equal(result.activeMilestone?.title, "Authority revision 2");
   assert.equal(getChanges(), 3);
   assert.equal(getDeriveTelemetry().dbDeriveCount, 3);
+});
+
+// Provenance seeds for the canonical blocker rows. workflow_blockers
+// references workflow_operations and workflow_item_lifecycles, so the seed
+// builds that minimal chain first (the same shape the project-snapshot tests
+// use). The revision sits far above the fixture's authority revision so the
+// seed never collides with a real writer operation.
+const SEED_REVISION_BASE = 930_001;
+
+function seedOpenCanonicalBlocker(fixture: WorkflowAuthorityFixture): void {
+  const authority = getProjectAuthorityRow();
+  assert.ok(authority, "fixture project_authority row should exist");
+  const db = _getAdapter();
+  assert.ok(db);
+  db.prepare(
+    `INSERT INTO workflow_operations (
+       operation_id, project_id, operation_type, idempotency_key,
+       expected_revision, resulting_revision,
+       expected_authority_epoch, resulting_authority_epoch,
+       actor_type, actor_id, source_transport, request_hash, created_at
+     ) VALUES ('op-progress-blocker', ?, 'progress-test', 'key-progress-blocker',
+       ?, ?, 0, 0, 'agent', 'test', 'test', 'hash-progress-blocker', '2026-10-05T00:00:00.000Z')`,
+  ).run(authority.projectId, SEED_REVISION_BASE - 1, SEED_REVISION_BASE);
+  db.prepare(
+    `INSERT INTO workflow_item_lifecycles (
+       lifecycle_id, project_id, item_kind, milestone_id, lifecycle_status,
+       created_at, updated_at,
+       last_operation_id, last_project_revision, last_authority_epoch
+     ) VALUES ('lc-progress-M001', ?, 'milestone', 'M001', 'in_progress',
+       '2026-10-05T00:00:00.000Z', '2026-10-05T00:00:00.000Z',
+       'op-progress-blocker', ?, 0)`,
+  ).run(authority.projectId, SEED_REVISION_BASE);
+  db.prepare(
+    `INSERT INTO workflow_blockers (
+       blocker_id, project_id, lifecycle_id, blocker_kind, resolution_owner,
+       blocker_status, description, requested_action, opened_at,
+       opened_operation_id, opened_project_revision, opened_authority_epoch
+     ) VALUES ('B-PROGRESS', ?, 'lc-progress-M001', 'ambiguous_intent', 'user', 'open',
+       'Progress blocker description', 'Resolve the ambiguity', '2026-10-05T00:00:01.000Z',
+       'op-progress-blocker', ?, 0)`,
+).run(authority.projectId, SEED_REVISION_BASE);
+  invalidateStateCache();
+}
+
+test("readProgressFromDb returns the canonical blocker rows the snapshot returns, at one revision", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  t.after(() => fixture.cleanup());
+  seedOpenCanonicalBlocker(fixture);
+
+  const progress = await readProgressFromDb(fixture.root);
+  assert.ok(progress);
+  // The derived blockers of deriveState are untouched; the canonical rows are
+  // a new, additive answer.
+  assert.deepEqual(progress.blockerRows, readOpenBlockers());
+  assert.deepEqual(
+    progress.blockerRows?.map((blocker) => [blocker.blockerId, blocker.description]),
+    [["B-PROGRESS", "Progress blocker description"]],
+  );
+
+  const snapshot = await readProjectSnapshotFromDb(fixture.root);
+  assert.ok(snapshot);
+  assert.deepEqual(progress.blockerRows, snapshot.blockers);
 });

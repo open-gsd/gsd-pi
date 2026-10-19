@@ -3,7 +3,7 @@
  *
  * Routes `null` and `"dev"` engine IDs to the DevWorkflowEngine/DevExecutionPolicy
  * pair. Any other non-null engine ID is treated as a custom workflow engine that
- * reads its state from an `activeRunDir`. Respects `GSD_ENGINE_BYPASS=1` kill
+ * runs the run of an `activeRunDir`. Respects `GSD_ENGINE_BYPASS=1` kill
  * switch to skip the engine layer entirely.
  */
 
@@ -42,7 +42,7 @@ export function resolveEngine(
   }
 
   // Any non-null, non-"dev" engine ID is a custom workflow engine.
-  // activeRunDir is required — the engine reads GRAPH.yaml from it.
+  // activeRunDir is required — it names the run.
   if (!activeRunDir || typeof activeRunDir !== "string") {
     throw new Error(
       `Custom engine "${activeEngineId}" requires activeRunDir to be a non-empty string, ` +

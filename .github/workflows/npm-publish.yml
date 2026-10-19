@@ -20,6 +20,24 @@ on:
         description: "Branch or SHA for standalone prerelease publishes (defaults: dev -> main, next -> next; latest always uses main)"
         required: false
         default: ""
+      resume_prerelease_run:
+        description: "Verification-only recovery of a dev artifact from an original run on current main; never republishes"
+        required: false
+        default: ""
+        type: string
+      registry_verification_timeout_ms:
+        description: "Bounded wait for registry validation/visibility after a new publication"
+        required: false
+        default: "1200000"
+        type: choice
+        options:
+          - "1200000"
+          - "7200000"
+      run_live_tests:
+        description: "Opt in to paid live-provider release tests"
+        required: false
+        default: false
+        type: boolean
       publish_auth:
         description: "npm auth fallback: token uses NPM_TOKEN for prerelease/native publishes; trusted uses OIDC (default)"
         required: false
@@ -44,9 +62,11 @@ env:
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
   NPM_CONFIG_LOGLEVEL: "error"
+  NPM_PUBLISH_VERIFY_TIMEOUT_MS: ${{ inputs.registry_verification_timeout_ms || '1200000' }}
 
 jobs:
   prerelease-publish:
+    if: ${{ !inputs.resume_prerelease_run }}
     name: Publish @${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
     # npm trusted publishing + provenance require GitHub-hosted runners (not Blacksmith).
     runs-on: ubuntu-latest
@@ -153,40 +173,9 @@ jobs:
           CHANNEL: ${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
         run: |
           VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
-          EXISTING=$(npm view "@opengsd/gsd-pi@${VERSION}" version 2>/dev/null || true)
-          if [ -n "${EXISTING}" ]; then
-            TAGGED=$(npm view "@opengsd/gsd-pi" "dist-tags.${CHANNEL}" 2>/dev/null || true)
-            if [ "${TAGGED}" = "${VERSION}" ]; then
-              echo "Version ${VERSION} is already published and @${CHANNEL} points to it — skipping publish."
-              exit 0
-            fi
-            echo "::error::Version ${VERSION} already exists but @${CHANNEL} points to '${TAGGED:-<unset>}'. Trusted publishing only authenticates npm publish, not dist-tag mutation."
-            echo "::error::Move the tag manually if intended: npm dist-tag add @opengsd/gsd-pi@${VERSION} ${CHANNEL}"
-            exit 1
-          fi
           trap 'node scripts/postpack-restore-workspace.cjs' EXIT
           node scripts/prepack-resolve-workspace.cjs
-          # The pre-check above is a TOCTOU window — a concurrent/manual publish
-          # of the same version between the check and here would otherwise surface
-          # a raw npm error. Mirror the prod path: tolerate "cannot publish over"
-          # as an idempotent skip, fail loudly on anything else.
-          if OUTPUT=$(npm publish --ignore-scripts --tag "${CHANNEL}" 2>&1); then
-            echo "$OUTPUT"
-          else
-            if echo "$OUTPUT" | grep -q "cannot publish over the previously published\|You cannot publish over"; then
-              echo "Version ${VERSION} was published concurrently — verifying @${CHANNEL} tag."
-              TAGGED=$(npm view "@opengsd/gsd-pi" "dist-tags.${CHANNEL}" 2>/dev/null || true)
-              if [ "${TAGGED}" != "${VERSION}" ]; then
-                echo "::error::@${CHANNEL} points to '${TAGGED:-<unset>}' not ${VERSION} after concurrent publish."
-                echo "::error::Move the tag manually if intended: npm dist-tag add @opengsd/gsd-pi@${VERSION} ${CHANNEL}"
-                exit 1
-              fi
-              echo "Confirmed: @${CHANNEL} → ${VERSION} (from concurrent publish)."
-            else
-              echo "$OUTPUT"
-              exit 1
-            fi
-          fi
+          node scripts/publish-npm-package.mjs . "${VERSION}" "${CHANNEL}"
           echo "Verifying @opengsd/gsd-pi@${VERSION} can be installed from npm..."
           DELAY=10
           for attempt in $(seq 1 12); do
@@ -206,17 +195,63 @@ jobs:
             DELAY=$((DELAY * 2))
             if [ "${DELAY}" -gt 60 ]; then DELAY=60; fi
           done
-          echo "::error::Publish step succeeded but @opengsd/gsd-pi@${VERSION} was not installable from npm after retries. Check registry tarball propagation before continuing."
-          exit 1
+          echo "::warning::Publish step succeeded but @opengsd/gsd-pi@${VERSION} was not installable from npm after retries."
+          echo "::warning::Continuing to the dedicated prerelease-verify job, which performs the authoritative post-publish install and regression validation."
+
+  prerelease-resume:
+    name: Authenticate existing dev artifact
+    if: ${{ inputs.resume_prerelease_run }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.recover.outputs.version }}
+      source_sha: ${{ steps.recover.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Authenticate original publication without publishing
+        id: recover
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN: ${{ inputs.resume_prerelease_run }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          test "$CHANNEL" = latest
+          node scripts/verify-published-prerelease.mjs "$ORIGINAL_RUN" recovered-prerelease
+      - uses: actions/upload-artifact@v7
+        with:
+          name: recovered-prerelease
+          path: recovered-prerelease/
+          if-no-files-found: error
+          retention-days: 14
 
   prerelease-verify:
     name: Verify @${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }} package
-    needs: prerelease-publish
+    needs: [prerelease-publish, prerelease-resume]
+    if: ${{ always() && !cancelled() && (needs.prerelease-publish.result == 'success' || needs.prerelease-resume.result == 'success') }}
+    outputs:
+      source_sha: ${{ needs.prerelease-resume.outputs.source_sha }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.channel == 'latest' && 'main' || github.event.inputs.ref || (github.event.inputs.channel == 'next' && 'next' || 'main') }}
+
+      - name: Require the recovered source to remain current
+        if: ${{ inputs.resume_prerelease_run }}
+        env:
+          RECOVERED_SOURCE: ${{ needs.prerelease-resume.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$RECOVERED_SOURCE"
+
+      - uses: actions/download-artifact@v8
+        if: ${{ inputs.resume_prerelease_run }}
+        with:
+          name: recovered-prerelease
+          path: recovered-prerelease
 
       - name: Setup pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
@@ -229,17 +264,34 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
 
-      - name: Install published @opengsd/gsd-pi@${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }} globally (with registry propagation retry)
+      - name: Install published @opengsd/gsd-pi@${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }} globally (with extended registry propagation retry)
         env:
-          PUBLISH_VERSION: ${{ needs.prerelease-publish.outputs.version }}
+          PUBLISH_VERSION: ${{ needs.prerelease-resume.outputs.version || needs.prerelease-publish.outputs.version }}
           CHANNEL: ${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
+          RESUME_RUN: ${{ inputs.resume_prerelease_run }}
         run: |
-          for i in 1 2 3 4 5 6; do
-            npm install -g "@opengsd/gsd-pi@${PUBLISH_VERSION}" && exit 0
-            echo "Attempt $i failed - waiting 10s for npm registry propagation..."
-            sleep 10
+          if [ -n "$RESUME_RUN" ]; then
+            (cd recovered-prerelease && sha512sum --check package.tgz.sha512)
+            npm install -g ./recovered-prerelease/package.tgz --prefer-online
+            exit 0
+          fi
+          DELAY=10
+          for i in $(seq 1 12); do
+            CACHE=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gsd-npm-cache-XXXXXX")
+            if npm install -g "@opengsd/gsd-pi@${PUBLISH_VERSION}" --prefer-online --cache "${CACHE}"; then
+              rm -rf "${CACHE}"
+              exit 0
+            fi
+            rm -rf "${CACHE}"
+            if [ "${i}" = "12" ]; then
+              break
+            fi
+            echo "Attempt ${i} failed - waiting ${DELAY}s for npm registry propagation..."
+            sleep "${DELAY}"
+            DELAY=$((DELAY * 2))
+            if [ "${DELAY}" -gt 60 ]; then DELAY=60; fi
           done
-          echo "::error::Failed to install @opengsd/gsd-pi@${PUBLISH_VERSION} after 6 attempts."
+          echo "::error::Failed to install @opengsd/gsd-pi@${PUBLISH_VERSION} after 12 attempts."
           echo "::error::Recommended actions: (1) investigate the failing step above, (2) if the version exists on npm, deprecate it with 'npm deprecate @opengsd/gsd-pi@${PUBLISH_VERSION} \"broken ${CHANNEL} build; see Actions run\"', (3) cut a fix and re-run NPM Publish."
           exit 1
 
@@ -270,7 +322,7 @@ jobs:
       - name: Warn on verify failure
         if: failure()
         env:
-          PUBLISH_VERSION: ${{ needs.prerelease-publish.outputs.version }}
+          PUBLISH_VERSION: ${{ needs.prerelease-resume.outputs.version || needs.prerelease-publish.outputs.version }}
           CHANNEL: ${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
         run: |
           echo "::error::Post-publish verification failed for @opengsd/gsd-pi@${PUBLISH_VERSION}."
@@ -279,7 +331,7 @@ jobs:
 
   prod-release-plan:
     name: Plan Production Release
-    if: ${{ github.event.inputs.channel == 'latest' }}
+    if: ${{ !cancelled() && !failure() && github.event.inputs.channel == 'latest' }}
     needs: prerelease-verify
     runs-on: ubuntu-latest
     outputs:
@@ -290,6 +342,12 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+
+      - name: Require production to use the recovered source
+        if: ${{ inputs.resume_prerelease_run }}
+        env:
+          RECOVERED_SOURCE: ${{ needs.prerelease-verify.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$RECOVERED_SOURCE"
 
       - name: Generate changelog and determine version
         id: release
@@ -312,7 +370,7 @@ jobs:
 
   prod-native-build:
     name: Build native ${{ matrix.platform }}
-    if: ${{ github.event.inputs.channel == 'latest' }}
+    if: ${{ !cancelled() && !failure() && github.event.inputs.channel == 'latest' }}
     needs: prod-release-plan
     strategy:
       fail-fast: false
@@ -397,7 +455,7 @@ jobs:
 
   prod-release:
     name: Production Release
-    if: ${{ github.event.inputs.channel == 'latest' }}
+    if: ${{ !cancelled() && !failure() && github.event.inputs.channel == 'latest' }}
     needs:
       - prod-release-plan
       - prod-native-build
@@ -446,6 +504,7 @@ jobs:
       - uses: ./.github/actions/cache-nextjs
 
       - name: Run live LLM tests (optional)
+        if: ${{ inputs.run_live_tests }}
         continue-on-error: true
         run: pnpm run test:live || echo "::warning::Live LLM tests failed - non-blocking, but worth investigating"
         env:
@@ -514,16 +573,19 @@ jobs:
       - name: Build release
         run: pnpm run build
 
+      # Blocking when opted in: this is the only check that runs a real agent
+      # through the built release, and it runs before anything is published.
       - name: Run live workflow LLM tests (optional)
-        continue-on-error: true
+        if: ${{ inputs.run_live_tests }}
         run: |
           chmod +x dist/loader.js
           GSD_SMOKE_BINARY="$(pwd)/dist/loader.js"
           export GSD_SMOKE_BINARY
-          pnpm run test:live-workflow || echo "::warning::Live workflow LLM tests failed - non-blocking, but worth investigating"
+          pnpm run test:live-workflow
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GSD_LIVE_TESTS: "1"
+          GSD_LIVE_WORKFLOW_REQUIRE_PASS: "1"
           GSD_LIVE_WORKFLOW_MODEL: openai/gpt-5.4-mini
 
       - name: Run live regression tests (against release build)
@@ -711,24 +773,7 @@ jobs:
         run: |
           trap 'node scripts/postpack-restore-workspace.cjs' EXIT
           node scripts/prepack-resolve-workspace.cjs
-          if OUTPUT=$(npm publish --ignore-scripts --tag latest 2>&1); then
-            echo "$OUTPUT"
-          else
-            if echo "$OUTPUT" | grep -q "cannot publish over the previously published\|You cannot publish over"; then
-              echo "::warning::${RELEASE_VERSION} concurrent publish detected — verifying @latest dist-tag."
-              ACTUAL=$(npm view "@opengsd/gsd-pi" dist-tags.latest 2>/dev/null || true)
-              if [ "${ACTUAL}" = "${RELEASE_VERSION}" ]; then
-                echo "Confirmed: @latest already points to ${RELEASE_VERSION}; treating as success."
-              else
-                echo "::error::@latest dist-tag is '${ACTUAL}', not '${RELEASE_VERSION}'. Trusted publishing only authenticates npm publish, not dist-tag mutation."
-                echo "::error::Promote manually if intended: npm dist-tag add @opengsd/gsd-pi@${RELEASE_VERSION} latest"
-                exit 1
-              fi
-            else
-              echo "$OUTPUT"
-              exit 1
-            fi
-          fi
+          node scripts/publish-npm-package.mjs . "${RELEASE_VERSION}" latest
           echo "Verifying @opengsd/gsd-pi@${RELEASE_VERSION} can be installed from npm..."
           DELAY=10
           for attempt in $(seq 1 12); do

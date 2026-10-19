@@ -2,6 +2,11 @@ import { execSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  CURSOR_AGENT_PROVIDER_ID,
+  CURSOR_BRIDGED_GSD_TOOL_NAMES,
+  isCursorBridgedGsdTool,
+} from "../cursor-cli/bridged-tools.js";
 import { getRequiredWorkflowToolsForUnit } from "./unit-tool-contracts.js";
 import { mcpToolMatchesBaseName } from "./mcp-tool-name.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
@@ -309,9 +314,13 @@ export function detectWorkflowMcpLaunchConfig(
     explicitCwd ||
     projectRoot;
   const resolvedWorkflowProjectRoot = resolve(workflowProjectRoot);
+  // The server binds a gsd_exec run to the Attempt of the worker these locks name.
+  const workerLocks = Object.fromEntries(
+    (["GSD_MILESTONE_LOCK", "GSD_SLICE_LOCK"] as const).flatMap((key) => (env[key] ? [[key, env[key]]] : [])),
+  ) as Record<string, string>;
 
   if (explicitCommand) {
-    const launchEnv = buildWorkflowLaunchEnv(resolve(workflowProjectRoot), gsdCliPath, explicitEnv);
+    const launchEnv = buildWorkflowLaunchEnv(resolve(workflowProjectRoot), gsdCliPath, { ...workerLocks, ...explicitEnv });
     return {
       name,
       command: explicitCommand,
@@ -328,7 +337,7 @@ export function detectWorkflowMcpLaunchConfig(
       command: process.execPath,
       args: [distCli],
       cwd: resolvedWorkflowProjectRoot,
-      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, undefined, distCli),
+      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, workerLocks, distCli),
     };
   }
 
@@ -339,7 +348,7 @@ export function detectWorkflowMcpLaunchConfig(
       command: process.execPath,
       args: [bundledCli],
       cwd: resolvedWorkflowProjectRoot,
-      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, undefined, bundledCli),
+      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, workerLocks, bundledCli),
     };
   }
 
@@ -348,7 +357,8 @@ export function detectWorkflowMcpLaunchConfig(
     return {
       name,
       command: binPath,
-      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath),
+      cwd: resolvedWorkflowProjectRoot,
+      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, workerLocks),
     };
   }
 
@@ -387,20 +397,46 @@ function hasRequiredTool(requiredTool: string, activeTools: string[]): boolean {
   });
 }
 
+/**
+ * Required tools that serve the agent session only (Context Mode and memory
+ * capture). They write no workflow state, so an agent runtime with its own
+ * shell and context can complete a unit without them.
+ */
+const SESSION_HELPER_WORKFLOW_TOOLS: ReadonlySet<string> = new Set([
+  "gsd_exec",
+  "gsd_exec_search",
+  "gsd_resume",
+  "gsd_capture_thought",
+]);
+
 export function getWorkflowTransportSupportError(
   provider: string | undefined,
   requiredTools: string[],
   options: WorkflowCapabilityOptions = {},
 ): string | null {
   if (!provider || requiredTools.length === 0) return null;
+
+  const surface = options.surface ?? "workflow dispatch";
+  const unitLabel = options.unitType ? ` for ${options.unitType}` : "";
+  const providerLabel = `"${provider}"`;
+
+  // cursor-agent runs its own tools and reaches GSD only through the bridged
+  // set of its stream adapter. The workflow MCP surface is not its surface, so
+  // a unit that must write state through any other tool cannot finish there.
+  if (provider === CURSOR_AGENT_PROVIDER_ID) {
+    const uncallable = [...new Set(requiredTools)].filter(
+      (tool) => !isCursorBridgedGsdTool(tool) && !SESSION_HELPER_WORKFLOW_TOOLS.has(tool),
+    );
+    if (uncallable.length > 0) {
+      return `Provider ${providerLabel} cannot run ${surface}${unitLabel}: this unit requires ${uncallable.join(", ")}, but cursor-agent can call only ${CURSOR_BRIDGED_GSD_TOOL_NAMES.join(", ")}. Switch to a provider that supports GSD workflow tools with /gsd model.`;
+    }
+  }
+
   if (!usesWorkflowMcpTransport(options.authMode, options.baseUrl)) return null;
 
   const projectRoot = options.projectRoot ?? process.cwd();
   const env = options.env ?? process.env;
   const launch = detectWorkflowMcpLaunchConfig(projectRoot, env);
-  const surface = options.surface ?? "workflow dispatch";
-  const unitLabel = options.unitType ? ` for ${options.unitType}` : "";
-  const providerLabel = `"${provider}"`;
 
   if (!launch) {
     return `Provider ${providerLabel} cannot run ${surface}${unitLabel}: the GSD workflow MCP server is not configured or discoverable. Detected Claude Code model but no workflow MCP. Please run /gsd mcp init . from your project root. You can also configure GSD_WORKFLOW_MCP_COMMAND, build packages/mcp-server/dist/cli.js, or install gsd-mcp-server on PATH.`;

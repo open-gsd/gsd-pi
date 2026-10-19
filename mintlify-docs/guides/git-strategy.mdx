@@ -107,7 +107,6 @@ git:
   main_branch: main
   merge_strategy: squash    # "squash" or "merge"
   isolation: none           # "none" (default), "worktree", or "branch"
-  commit_docs: true          # deprecated; .gsd runtime state is external/gitignored
   auto_pr: false
   pr_target_branch: develop
 ```
@@ -124,10 +123,6 @@ git:
 ```
 
 Pushes the completed milestone branch and creates a PR targeting your specified branch. If `auto_pr: true`, GSD does not also push the integration branch via `auto_push`; the PR is the delivery path. Requires `gh` CLI installed and authenticated.
-
-### `commit_docs: false`
-
-Deprecated. GSD now keeps runtime state external/gitignored by default. Milestone artifacts are managed by the workflow and runtime files such as `STATE.md`, `gsd.db`, activity logs, and worktrees are not committed.
 
 ## Worktree management
 

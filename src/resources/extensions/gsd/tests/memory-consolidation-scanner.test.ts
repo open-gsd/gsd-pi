@@ -24,8 +24,8 @@ import {
   initNotificationStore,
   readNotifications,
 } from "../notification-store.ts";
+import { parseKnowledgeRows } from "../knowledge-parser.ts";
 import {
-  parseKnowledgeRows,
   reportConsolidationGaps,
   scanConsolidationGaps,
 } from "../memory-consolidation-scanner.ts";

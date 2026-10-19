@@ -2,8 +2,8 @@
  * GSD Auto-Worktree -- teardown-cleanup-parity.test.ts
  *
  * Regression test: teardownAutoWorktree (abort path) must call
- * clearProjectRootStateFiles, removing STATE.md, auto.lock, and
- * {MID}-META.json from the project root .gsd/ dir.
+ * clearProjectRootStateFiles, removing {MID}-META.json from the project root
+ * .gsd/ dir. STATE.md is a DB projection and must survive teardown unchanged.
  *
  * Prior to the fix these files were left behind on disk after abort teardown.
  */
@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   writeFileSync,
   existsSync,
+  readFileSync,
   rmSync,
   realpathSync,
 } from "node:fs";
@@ -54,10 +55,10 @@ describe("teardownAutoWorktree cleanup parity", () => {
     _resetAutoWorktreeOriginalBaseForTests();
   });
 
-  test("STATE.md and M001-META.json are removed after abort teardown", () => {
+  test("M001-META.json is removed and STATE.md is kept after abort teardown", () => {
     // Phase C pt 2: auto.lock no longer exists as a file — it migrated
     // to the workers + unit_dispatches tables. clearProjectRootStateFiles
-    // still removes STATE.md and {MID}-META.json on teardown.
+    // still removes {MID}-META.json on teardown; STATE.md is never deleted.
     const gsdDir = join(repoDir, ".gsd");
     const milestonesDir = join(gsdDir, "milestones", "M001");
     mkdirSync(milestonesDir, { recursive: true });
@@ -80,7 +81,7 @@ describe("teardownAutoWorktree cleanup parity", () => {
       // git teardown may fail in a minimal test repo — that is acceptable
     }
 
-    assert.ok(!existsSync(stateMd), "STATE.md removed by teardownAutoWorktree");
+    assert.equal(readFileSync(stateMd, "utf-8"), "# State\nactive\n", "STATE.md kept unchanged by teardownAutoWorktree");
     assert.ok(!existsSync(metaJson), "M001-META.json removed by teardownAutoWorktree");
   });
 

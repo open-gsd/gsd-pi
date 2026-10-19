@@ -41,6 +41,7 @@ When the project is browser-facing (web app, SPA, static site with UI, Next/Reac
 ### Before deeper rounds
 
 Ground your questions in the **Preparation Context snapshot above** (stack, structure, greenfield/brownfield and framework signals) plus any prior `.planning/` or `.gsd/` artifacts — those are authoritative. **Do not survey the codebase** with `rg`/`find`/`scout` before asking; read a specific file only when a question's answer genuinely hinges on it.
+
 - Use `resolve_library` / `get_library_docs` for unfamiliar mentioned libraries.
 
 **Web search budget:** typically 3-5 per turn. Prefer docs tools; use 2-3 searches first and save the rest.
@@ -52,6 +53,7 @@ Ask **1–3 questions per round**, one focus at a time: what, who, core value, a
 **Never fabricate or simulate user input.** Never generate fake transcript markers like `[User]`, `[Human]`, or `User:`. Ask one question round, then wait for the user's actual response before continuing.
 
 **Shape-dependent cadence:**
+
 - **`simple`**: 1-2 plain-text rounds; use `ask_user_questions` only for concrete alternatives; reach the depth checklist quickly.
 - **`complex`**: ground in the snapshot and prior artifacts, multiple rounds, structured questions when meaningful alternatives exist.
 
@@ -96,6 +98,12 @@ If they clarify, absorb the correction and re-verify.
 The depth verification is the only required confirmation gate. Do not add a second "ready to proceed?" gate after it.
 
 **CRITICAL — Confirmation gate:** Do not persist final PROJECT content until the user selects the "(Recommended)" option (structured path) or explicitly confirms (plain-text path). If the user declines, cancels, does not respond, or the tool fails, re-ask.
+
+---
+
+## Project Research Decision
+
+Project research is skipped by default. If the user asks for domain research before milestone planning, call `gsd_research_decision_save` with `decision: "research"`. Do not ask about research yourself, and do not call the tool when the user did not raise it.
 
 ---
 

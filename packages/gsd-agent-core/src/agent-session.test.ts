@@ -45,6 +45,7 @@ describe("AgentSessionExtensionsModule", () => {
         hasHandlers: () => false,
       },
       _sessionStartEvent: { type: "session_start", reason: "startup" },
+      repairPlaceholderModel: async () => {},
       agent: {
         streamFn: (_model: unknown, _context: unknown, options?: Record<string, unknown>) => {
           received = options;
@@ -58,6 +59,30 @@ describe("AgentSessionExtensionsModule", () => {
 
     host.agent.streamFn({}, {}, { maxTokens: 1 });
     assert.equal(received?.extensionUIContext, uiContext);
+  });
+
+  test("bindExtensions repairs the placeholder model after session_start (#2782)", async () => {
+    const order: string[] = [];
+    const host = {
+      _extensionRunner: {
+        setUIContext: () => {},
+        bindCommandContext: () => {},
+        onError: () => () => {},
+        emit: async (event: { type: string }) => {
+          if (event.type === "session_start") order.push("session_start");
+        },
+        hasHandlers: () => false,
+      },
+      _sessionStartEvent: { type: "session_start", reason: "startup" },
+      repairPlaceholderModel: async () => {
+        order.push("repair");
+      },
+    };
+
+    await new AgentSessionExtensionsModule(host as any).bindExtensions({});
+
+    // The repair must observe the registry AFTER session_start handlers ran.
+    assert.deepEqual(order, ["session_start", "repair"]);
   });
 
   test("skills are no longer embedded in the system prompt (discovered on-demand)", () => {
@@ -114,6 +139,29 @@ describe("AgentSessionExtensionsModule", () => {
     assert.equal(await boundSetModel(model, { persist: false }), true);
     assert.deepEqual(receivedOptions, { persist: false });
   });
+
+  test("forwards setThinkingLevel persistence options to the session (#2828)", () => {
+    let received: Array<{ level: unknown; options?: { persist?: boolean } }> = [];
+    let boundSetThinkingLevel: ((level: never, options?: { persist?: boolean }) => void) | undefined;
+    const host = {
+      thinkingLevel: "high",
+      setThinkingLevel: (level: never, options?: { persist?: boolean }) => {
+        received.push({ level, options });
+      },
+      promptTemplates: [],
+      resourceLoader: { getSkills: () => ({ skills: [] }) },
+    };
+    const runner = {
+      bindCore: (actions: { setThinkingLevel: typeof boundSetThinkingLevel }) => {
+        boundSetThinkingLevel = actions.setThinkingLevel;
+      },
+    };
+
+    new AgentSessionExtensionsModule(host as any).bindExtensionCore(runner as any);
+    assert.ok(boundSetThinkingLevel);
+    boundSetThinkingLevel("off" as never, { persist: false });
+    assert.deepEqual(received, [{ level: "off", options: { persist: false } }]);
+  });
 });
 
 describe("AgentSessionModelModule", () => {
@@ -134,8 +182,214 @@ describe("AgentSessionModelModule", () => {
 
     assert.deepEqual(persistedModels, [[model.provider, model.id]]);
   });
+
+  test("persists the default thinking level when persistence options are omitted", () => {
+    const { host, persistedThinkingLevels } = makeModelModuleHost();
+
+    new AgentSessionModelModule(host as any).setThinkingLevel("high");
+
+    assert.equal(host.agent.state.thinkingLevel, "high");
+    assert.deepEqual(persistedThinkingLevels, ["high"]);
+  });
+
+  test("setThinkingLevel keeps the stored default when persist is false (#2828)", () => {
+    const { host, persistedThinkingLevels } = makeModelModuleHost();
+
+    new AgentSessionModelModule(host as any).setThinkingLevel("high", { persist: false });
+
+    // In-memory state changes; the stored default does not.
+    assert.equal(host.agent.state.thinkingLevel, "high");
+    assert.deepEqual(persistedThinkingLevels, []);
+  });
+
+  test("explicitly re-selecting the session level syncs a drifted stored default (#2828)", () => {
+    const { host, persistedThinkingLevels } = makeModelModuleHost();
+
+    // A temporary (non-persisting) level leaves the stored default behind...
+    new AgentSessionModelModule(host as any).setThinkingLevel("high", { persist: false });
+    assert.deepEqual(persistedThinkingLevels, []);
+
+    // ...so an explicit re-select of the same level must sync it.
+    new AgentSessionModelModule(host as any).setThinkingLevel("high");
+
+    assert.deepEqual(persistedThinkingLevels, ["high"]);
+  });
+
+  test("non-persisting model switch does not persist a re-clamped thinking level (#2828)", async () => {
+    const persistedModels: string[][] = [];
+    const persistedThinkingLevels: string[] = [];
+    const fullModel = { provider: "test-provider", id: "full-model", reasoning: true };
+    // Accepts every level except `high` — a `high` session level must clamp.
+    const clampedModel = { provider: "test-provider", id: "clamped-model", reasoning: true, thinkingLevelMap: { high: null } };
+    const state = { model: fullModel as unknown, thinkingLevel: "high" };
+    const host: Record<string, unknown> = {
+      modelRegistry: { hasConfiguredAuth: () => true },
+      sessionManager: {
+        appendModelChange: () => {},
+        appendThinkingLevelChange: () => {},
+      },
+      settingsManager: {
+        getDefaultThinkingLevel: () => "off",
+        setDefaultModelAndProvider: (provider: string, id: string) => persistedModels.push([provider, id]),
+        setDefaultThinkingLevel: (level: string) => persistedThinkingLevels.push(level),
+      },
+      _extensionRunner: { emit: async () => {} },
+      emit: () => {},
+      agent: { get state() { return state; } },
+      get model() { return state.model; },
+      get thinkingLevel() { return state.thinkingLevel; },
+    };
+
+    const mod = new AgentSessionModelModule(host as any);
+    host.setThinkingLevel = (level: never, options?: { persist?: boolean }) => mod.setThinkingLevel(level, options);
+
+    // Non-persisting switch to a model that rejects `high`: the level clamps
+    // to `medium` in memory, and the clamp must not become the stored default.
+    await mod.setModel(clampedModel as any, { persist: false });
+
+    assert.deepEqual(persistedModels, []);
+    assert.deepEqual(persistedThinkingLevels, []);
+    assert.equal(state.thinkingLevel, "medium");
+  });
 });
 
+describe("AgentSessionModelModule — repairPlaceholderModel (#2782)", () => {
+  const PLACEHOLDER = { provider: "unknown", id: "unknown", api: "unknown" };
+
+  function makeRepairHost(configuredModel: Record<string, unknown> | undefined) {
+    const events: Array<Record<string, unknown>> = [];
+    const persistedModels: string[][] = [];
+    const host = {
+      model: { ...PLACEHOLDER } as Record<string, unknown>,
+      agent: {
+        state: {
+          model: undefined as Record<string, unknown> | undefined,
+          thinkingLevel: "off" as string,
+        },
+      },
+      thinkingLevel: "off",
+      modelRegistry: {
+        find: (provider: string, id: string) =>
+          configuredModel && configuredModel.provider === provider && configuredModel.id === id
+            ? configuredModel
+            : undefined,
+        getAvailable: () => (configuredModel ? [configuredModel] : []),
+        hasConfiguredAuth: () => true,
+      },
+      sessionManager: {
+        buildSessionContext: () => ({ model: undefined as { provider: string; modelId: string } | undefined }),
+        appendModelChange: (provider: string, id: string) => persistedModels.push([provider, id]),
+      },
+      settingsManager: {
+        getDefaultProvider: () => "ollama",
+        getDefaultModel: () => "llama3",
+        getDefaultThinkingLevel: () => "high",
+        setDefaultModelAndProvider: (provider: string, id: string) => persistedModels.push([provider, id]),
+        setDefaultThinkingLevel: (level: string) => {
+          throw new Error(`repair must not persist thinking level (got ${level})`);
+        },
+      },
+      _extensionRunner: {
+        emit: async (event: Record<string, unknown>) => {
+          events.push(event);
+        },
+      },
+    };
+    return { host, events, persistedModels };
+  }
+
+  test("applies the configured default once its provider registers, without persisting", async () => {
+    const ollamaModel = { provider: "ollama", id: "llama3" };
+    const { host, events, persistedModels } = makeRepairHost(ollamaModel);
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.equal(host.agent.state.model, ollamaModel);
+    const select = events.find((e) => e.type === "model_select") as
+      | { model: unknown; previousModel: unknown; source: string }
+      | undefined;
+    assert.ok(select, "repair must emit model_select so the UI re-renders");
+    assert.equal(select.model, ollamaModel);
+    assert.equal(select.source, "set");
+    // No settings writes, no session-history model entries.
+    assert.deepEqual(persistedModels, []);
+    // Plain non-reasoning model: thinking stays "off" (in memory only).
+    assert.equal(host.agent.state.thinkingLevel, "off");
+  });
+
+  test("clamps the session thinking level in memory when the repaired model excludes off", async () => {
+    const reasoningModel = {
+      provider: "ollama",
+      id: "reasoner",
+      reasoning: true,
+      thinkingLevelMap: { off: null },
+    };
+    const { host } = makeRepairHost(reasoningModel);
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.equal(host.agent.state.model, reasoningModel);
+    // "off" is excluded by the model's thinkingLevelMap — startup clamps the
+    // same way; the repair must clamp in memory without persisting.
+    assert.equal(host.agent.state.thinkingLevel, "minimal");
+    assert.equal(host.settingsManager.getDefaultThinkingLevel(), "high");
+  });
+
+  test("prefers the model recorded in the resumed session over the settings default", async () => {
+    const recordedModel = { provider: "ollama", id: "recorded-b" };
+    const { host, events } = makeRepairHost({ provider: "ollama", id: "default-a" });
+    host.sessionManager.buildSessionContext = () => ({ model: { provider: "ollama", modelId: "recorded-b" } });
+    host.modelRegistry.find = (provider: string, id: string) =>
+      provider === recordedModel.provider && id === recordedModel.id ? recordedModel : undefined;
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.equal(host.agent.state.model, recordedModel);
+    assert.ok(events.some((e) => e.type === "model_select" && e.model === recordedModel));
+  });
+
+  test("leaves an already-resolved model alone", async () => {
+    const { host, events } = makeRepairHost(undefined);
+    host.model = { provider: "anthropic", id: "claude" };
+    let findCalls = 0;
+    host.modelRegistry.find = () => {
+      findCalls++;
+      return undefined;
+    };
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.equal(findCalls, 0);
+    assert.deepEqual(events, []);
+  });
+
+  test("keeps the placeholder when no configured model is registered", async () => {
+    const { host, events } = makeRepairHost(undefined);
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.deepEqual(events, []);
+    assert.equal(host.agent.state.model, undefined);
+  });
+
+  test("does not overwrite a model selected while the repair was awaiting", async () => {
+    const userPick = { provider: "anthropic", id: "user-pick" };
+    const ollamaModel = { provider: "ollama", id: "llama3" };
+    const { host, events } = makeRepairHost(ollamaModel);
+    // The settings default is not registered yet; while getAvailable is
+    // awaited, the user selects a different model.
+    host.modelRegistry.find = () => undefined;
+    host.modelRegistry.getAvailable = () => {
+      host.model = userPick;
+      return [ollamaModel];
+    };
+
+    await new AgentSessionModelModule(host as any).repairPlaceholderModel();
+
+    assert.deepEqual(events, []);
+    assert.equal(host.model, userPick);
+  });
+});
 describe("AgentSessionNavigationModule", () => {
   test("session-transition teardown aborts with the programmatic origin", async () => {
     // #2218: the origin lets downstream classification tell an internal
@@ -250,6 +504,26 @@ describe("AgentSessionEventsModule", () => {
 });
 
 describe("AgentSessionPromptModule", () => {
+  test("prompt repairs the placeholder model before anything else (#2782)", async () => {
+    const order: string[] = [];
+    const host = {
+      repairPlaceholderModel: async () => {
+        order.push("repair");
+        throw new Error("repair-ran-first sentinel");
+      },
+      beginTurnLatency: () => {
+        order.push("latency");
+        return undefined;
+      },
+    };
+
+    await assert.rejects(
+      new AgentSessionPromptModule(host as any).prompt("hi"),
+      /repair-ran-first sentinel/,
+    );
+    assert.deepEqual(order, ["repair"]);
+  });
+
   test("keeps no-progress terminal fingerprint across other retryable errors", async () => {
     const userMessage = {
       role: "user",
@@ -310,6 +584,7 @@ function makeSkill(name: string) {
 function makeModelModuleHost() {
   const model = { provider: "test-provider", id: "test-model", reasoning: false };
   const persistedModels: string[][] = [];
+  const persistedThinkingLevels: string[] = [];
   const sessionModels: string[][] = [];
   const host = {
     model: undefined,
@@ -318,16 +593,19 @@ function makeModelModuleHost() {
     modelRegistry: { hasConfiguredAuth: () => true },
     sessionManager: {
       appendModelChange: (provider: string, id: string) => sessionModels.push([provider, id]),
+      appendThinkingLevelChange: () => {},
     },
     settingsManager: {
       getDefaultThinkingLevel: () => "off",
       setDefaultModelAndProvider: (provider: string, id: string) => persistedModels.push([provider, id]),
+      setDefaultThinkingLevel: (level: string) => persistedThinkingLevels.push(level),
     },
     setThinkingLevel: () => {},
+    emit: () => {},
     _extensionRunner: { emit: async () => {} },
   };
 
-  return { host, model, persistedModels, sessionModels };
+  return { host, model, persistedModels, persistedThinkingLevels, sessionModels };
 }
 
 function makeAssistantError(errorMessage: string) {

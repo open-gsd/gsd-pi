@@ -1,3 +1,5 @@
+import type { ProjectProgressReadMetadata } from "@opengsd/contracts";
+
 export type RiskLevel = "low" | "medium" | "high";
 
 export interface WorkspaceTaskTarget {
@@ -55,4 +57,5 @@ export interface WorkspaceIndex {
   };
   scopes: WorkspaceScopeTarget[];
   validationIssues: WorkspaceValidationIssue[];
+  readMetadata?: ProjectProgressReadMetadata;
 }

@@ -11,6 +11,7 @@ import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import {
   answerMilestoneSubjectiveUatQuestion,
   prepareMilestoneSubjectiveUatQuestion,
+  resolveSubjectiveUatSupersedeTarget,
   type AnsweredMilestoneSubjectiveUat,
   type PreparedMilestoneSubjectiveUat,
 } from "./db/writers/milestone-subjective-uat.js";
@@ -19,7 +20,12 @@ import type { ExecutionInvocation } from "./execution-invocation.js";
 export interface PrepareMilestoneSubjectiveUatInput {
   invocation: ExecutionInvocation;
   milestoneId: string;
-  criterionKey: string;
+  /**
+   * Key of the criterion to prepare. Required unless {@link supersedesCriterionId}
+   * is given, in which case the replacement inherits the superseded criterion's
+   * key (and requirementId) and a passed key must match it (#2341).
+   */
+  criterionKey?: string;
   description: string;
   focusedPrompt: string;
   recommendedDisposition: "accepted" | "rejected";
@@ -29,6 +35,7 @@ export interface PrepareMilestoneSubjectiveUatInput {
   recommendationConfidence?: number;
   requirementId?: string;
   required?: boolean;
+  supersedesCriterionId?: string;
 }
 
 export interface AnswerMilestoneSubjectiveUatInput {
@@ -77,6 +84,66 @@ export function hasPendingMilestoneSubjectiveUat(milestoneId: string): boolean {
     LIMIT 1
   `).get({ ":milestone_id": milestoneId });
   return row !== undefined;
+}
+
+export interface OpenMilestoneSubjectiveUat {
+  milestoneId: string;
+  criterionId: string;
+  questionId: string;
+  interactionId: string;
+  focusedPrompt: string;
+  recommendation: string;
+  testedSourceRevision: string;
+  accepted: { optionId: string; label: string };
+  rejected: { optionId: string; label: string };
+}
+
+/**
+ * Every prepared subjective UAT question that waits for a person: the binding
+ * the answer Domain Operation needs, read for the host answer command.
+ */
+export function listOpenMilestoneSubjectiveUat(): OpenMilestoneSubjectiveUat[] {
+  const rows = getDb().prepare(`
+    SELECT lifecycle.milestone_id,
+           json_extract(event.payload_json, '$.criterionId') AS criterion_id,
+           question.question_id, interaction.interaction_id,
+           interaction.focused_prompt, interaction.recommendation_text,
+           json_extract(event.payload_json, '$.testedSourceRevision') AS tested_source_revision,
+           accepted.option_id AS accepted_option_id, accepted.label AS accepted_label,
+           rejected.option_id AS rejected_option_id, rejected.label AS rejected_label
+    FROM workflow_domain_events event
+    JOIN workflow_open_questions question
+      ON question.question_id = json_extract(event.payload_json, '$.questionId')
+     AND question.project_id = event.project_id
+    JOIN workflow_interactions interaction
+      ON interaction.interaction_id = json_extract(event.payload_json, '$.interactionId')
+     AND interaction.question_id = question.question_id
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = question.lifecycle_id
+     AND lifecycle.project_id = question.project_id
+    JOIN workflow_interaction_options accepted
+      ON accepted.interaction_id = interaction.interaction_id
+     AND accepted.option_id = json_extract(event.payload_json, '$.acceptedOptionId')
+    JOIN workflow_interaction_options rejected
+      ON rejected.interaction_id = interaction.interaction_id
+     AND rejected.option_id = json_extract(event.payload_json, '$.rejectedOptionId')
+    WHERE event.event_type = 'milestone.subjective-uat.prepared'
+      AND question.question_status = 'open'
+      AND interaction.interaction_kind = 'subjective-uat'
+      AND interaction.presentation_state = 'presented'
+    ORDER BY lifecycle.milestone_id, question.question_id
+  `).all() as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    milestoneId: String(row["milestone_id"]),
+    criterionId: String(row["criterion_id"]),
+    questionId: String(row["question_id"]),
+    interactionId: String(row["interaction_id"]),
+    focusedPrompt: String(row["focused_prompt"]),
+    recommendation: String(row["recommendation_text"]),
+    testedSourceRevision: String(row["tested_source_revision"]),
+    accepted: { optionId: String(row["accepted_option_id"]), label: String(row["accepted_label"]) },
+    rejected: { optionId: String(row["rejected_option_id"]), label: String(row["rejected_label"]) },
+  }));
 }
 
 function requireNonBlank(value: string, field: string): string {
@@ -207,7 +274,12 @@ export function prepareMilestoneSubjectiveUat(
   input: PrepareMilestoneSubjectiveUatInput,
 ): PrepareMilestoneSubjectiveUatReceipt {
   const milestoneId = requireNonBlank(input.milestoneId, "milestoneId");
-  const criterionKey = requireNonBlank(input.criterionKey, "criterionKey").toLowerCase();
+  const supersedesCriterionId = input.supersedesCriterionId === undefined
+    ? undefined
+    : requireNonBlank(input.supersedesCriterionId, "supersedesCriterionId");
+  const requestedRequirementId = input.requirementId === undefined
+    ? undefined
+    : requireNonBlank(input.requirementId, "requirementId");
   const description = requireNonBlank(input.description, "description");
   const focusedPrompt = requireNonBlank(input.focusedPrompt, "focusedPrompt");
   const recommendationRationale = requireNonBlank(
@@ -226,12 +298,18 @@ export function prepareMilestoneSubjectiveUat(
   if (recommendationConfidence < 0 || recommendationConfidence > 1) {
     throw new Error("recommendationConfidence must be between 0 and 1");
   }
-  const requirementId = input.requirementId === undefined
+  // The request payload records the caller's identity in its canonical form
+  // (same normalization the pre-supersede path used) so request hashes stay
+  // stable across upgrades and exact retries replay. The effective criterion
+  // key/requirement are resolved inside the Domain Operation so an exact
+  // retry replays the stored receipt instead of re-resolving a target that
+  // the first commit already superseded (#2341).
+  const normalizedCriterionKey = input.criterionKey === undefined
     ? undefined
-    : requireNonBlank(input.requirementId, "requirementId");
-  const preparedInput = {
+    : input.criterionKey.trim().toLowerCase();
+  const requestPayload = {
     milestoneId,
-    criterionKey,
+    ...(normalizedCriterionKey ? { criterionKey: normalizedCriterionKey } : {}),
     description,
     focusedPrompt,
     recommendedDisposition: input.recommendedDisposition,
@@ -240,7 +318,8 @@ export function prepareMilestoneSubjectiveUat(
     testedSourceRevision,
     recommendationConfidence,
     required: input.required ?? true,
-    ...(requirementId ? { requirementId } : {}),
+    ...(requestedRequirementId ? { requirementId: requestedRequirementId } : {}),
+    ...(supersedesCriterionId !== undefined ? { supersedesCriterionId } : {}),
   };
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
   let prepared: PreparedMilestoneSubjectiveUat | undefined;
@@ -254,8 +333,54 @@ export function prepareMilestoneSubjectiveUat(
     sourceTransport: input.invocation.sourceTransport,
     ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
     ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
-    payload: preparedInput,
+    payload: requestPayload,
   }, (context) => {
+    let requirementId = requestedRequirementId;
+    let criterionKey: string;
+    if (supersedesCriterionId !== undefined) {
+      // #2341: explicit by-ID supersession — the replacement inherits the
+      // superseded criterion's key and requirement identity (the schema
+      // trigger only accepts same-scope supersession). A passed key/requirement
+      // that disagrees with the target is rejected with the inherited identity
+      // named. Resolution runs inside the operation, after replay handling.
+      const target = resolveSubjectiveUatSupersedeTarget(milestoneId, supersedesCriterionId);
+      if (input.criterionKey !== undefined) {
+        const requestedKey = requireNonBlank(input.criterionKey, "criterionKey").toLowerCase();
+        if (requestedKey !== target.criterionKey) {
+          throw new Error(
+            `supersedesCriterionId ${supersedesCriterionId} carries criterionKey "${target.criterionKey}" — ` +
+            "prepare the replacement under that key or omit criterionKey",
+          );
+        }
+      }
+      if (requirementId !== undefined && requirementId !== target.requirementId) {
+        throw new Error(
+          `supersedesCriterionId ${supersedesCriterionId} carries requirementId ${target.requirementId ?? "null"} — ` +
+          "prepare the replacement with that requirement or omit requirementId",
+        );
+      }
+      criterionKey = target.criterionKey;
+      requirementId = target.requirementId ?? undefined;
+    } else {
+      if (input.criterionKey === undefined) {
+        throw new Error("criterionKey must not be blank");
+      }
+      criterionKey = requireNonBlank(input.criterionKey, "criterionKey").toLowerCase();
+    }
+    const preparedInput = {
+      milestoneId,
+      criterionKey,
+      description,
+      focusedPrompt,
+      recommendedDisposition: input.recommendedDisposition,
+      recommendationRationale,
+      recommendationEvidence,
+      testedSourceRevision,
+      recommendationConfidence,
+      required: input.required ?? true,
+      ...(requirementId ? { requirementId } : {}),
+      ...(supersedesCriterionId !== undefined ? { supersedesCriterionId } : {}),
+    };
     prepared = prepareMilestoneSubjectiveUatQuestion(context, preparedInput);
     const eventPayload: DomainJsonValue = {
       milestoneId: prepared.milestoneId,

@@ -28,22 +28,22 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.19.0**
+Latest release: **v1.22.0**
 
-- **vscode:** Add Copilot project read tools.
-- **gsd:** Expose progress read metadata.
-- **mcp:** GSD-side smoke probe and per-host checklist for canonical read tools (#2174).
-- **vscode:** Show DB-authoritative project progress in sidebar (#2136) (#2143).
-- **gsd:** Add gsd_project_snapshot canonical DB read tool (#2170).
-- **gsd:** Delete dead planner-handoff module (#2149).
-- **gsd:** Stop husk-task gates from wedging milestone closeout.
-- **gsd:** Rebuild markdown projections at the invocation root.
+- **gsd:** Make Claude Haiku 5.5 the default light-tier model (#2702).
+- **pi-ai:** Add Claude Haiku 5.5 to the model catalog with adaptive-only and temperature guards (#2701).
+- **models:** Refresh generated model catalog (#2737).
+- **vscode:** Guard canonical native Copilot project-context reads (#2699).
+- **mcp-server:** Bound Windows process queries and prepare complete SDK graph for Windows MCP tests (#2718).
+- **native:** Correct macOS descendant PID count handling (#2736).
+- **gsd:** Make complete-milestone prompt receipt-aware like the closeout guards (#2772) (#2773).
+- **gsd:** Let accepted milestone validation cover historical UAT failures at closure (#2770) (#2771).
 
 <!-- release-highlights:end -->
 
 ## Status
 
-This repository is starting a new development baseline at version `1.0.0` under the `open-gsd/gsd-pi` project.
+The `open-gsd/gsd-pi` project restarted public development from a clean baseline at version `1.0.0`. Releases continue from that baseline; the latest version is shown under [Latest Release Highlights](#latest-release-highlights) and in [CHANGELOG.md](./CHANGELOG.md).
 
 Older release history has been archived outside the active changelog so new work can be reviewed from a clean project surface.
 
@@ -158,7 +158,7 @@ Need help choosing settings? Use the [GSD Pi web configurator](https://pi.opengs
 gsd
 ```
 
-Run the setup flow, choose your preferred model provider, and open a project directory. Cursor Agent users can choose the `cursor-agent` provider after installing and authenticating the local `cursor-agent` CLI; its default model is `composer-2.5`, and `CURSOR_API_KEY` is supported as an auth signal. GSD stores project planning and runtime state in `.gsd/`, with gitignored sibling runtime directories such as `.gsd-backups/` for migration snapshots. Stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the flat-phase `.gsd/phases/` migration is complete.
+Run the setup flow, choose your preferred model provider, and open a project directory. Cursor Agent users can choose the `cursor-agent` provider after installing and authenticating the local `cursor-agent` CLI; its default model is `composer-2.5`, and `CURSOR_API_KEY` is supported as an auth signal. GSD stores project planning and runtime state in `.gsd/`, with gitignored sibling runtime directories such as `.gsd-backups/` for migration snapshots. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
 For a full first-run walkthrough, see [Getting Started With gsd-pi](./docs/user-docs/getting-started.md).
 

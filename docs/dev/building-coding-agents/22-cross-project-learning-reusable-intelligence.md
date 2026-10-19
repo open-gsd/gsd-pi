@@ -13,6 +13,7 @@
 ### The Optimal Architecture: A Pattern Library
 
 Each pattern includes:
+
 - Description of the problem it solves
 - The approach and tradeoffs
 - Common pitfalls

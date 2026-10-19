@@ -74,6 +74,7 @@ path/to/changed.ts
 Compaction is lossy — information is lost in the summary. But the full history remains in the JSONL file. You can always use `/tree` to revisit the pre-compaction state. The tradeoff is: continue working with a summary of earlier context, or start fresh. Extensions can customize compaction to produce better summaries for your specific use case.
 
 **Settings:**
+
 ```json
 {
   "compaction": {

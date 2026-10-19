@@ -8,19 +8,18 @@ import {
   applyReworkResolutions,
   getActiveRequirements,
   getAllMilestones,
+  getArtifact,
+  getDb,
   getMilestone,
   getMilestoneLifecycleShadowSnapshot,
-  getSliceStatusSummary,
-  getSliceTaskCounts,
-  getTask,
+  getSlice,
   getUnresolvedBlockingReworkFindingsForTask,
-  insertMilestone,
   insertAssessment,
+  insertAuditEvent,
   insertGateRun,
   readTransaction,
   saveGateResult,
   setSliceUatMd,
-  upsertMilestonePlanning,
   upsertQualityGate,
 } from "../gsd-db.js";
 import {
@@ -33,40 +32,74 @@ export {
   resolveMilestoneStatusObservationContext,
   resolveMilestoneStatusObservationTokenState,
 } from "../milestone-status-observation-context.js";
+export {
+  executeMilestoneDiscard,
+  executeMilestoneGenerateId,
+  executeMilestonePark,
+  executeMilestoneReorder,
+  executeMilestoneSetDependencies,
+  executeMilestoneUnpark,
+} from "./milestone-hierarchy.js";
+export { executeResearchDecisionSave } from "./research-decision.js";
+export { executeCaptureComplete, executeCaptureResolve } from "./capture-tools.js";
 import { emitLifecycleShadowObservation } from "../uok/audit.js";
 import { extractMilestoneSeq } from "../milestone-ids.js";
+import {
+  milestonesRegistered,
+  registerMilestoneRows,
+  type MilestoneRegistration,
+} from "../milestone-registration.js";
+import { readMilestoneStatus, readTask } from "../db/lifecycle-read.js";
+import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
-import { immediateTransaction } from "../db/engine.js";
 import { isClosedStatus } from "../status-guards.js";
 import { GATE_REGISTRY } from "../gate-registry.js";
-import { generateRequirementsMd, saveArtifactToDb } from "../db-writer.js";
-import { clearPathCache, normalizeRealPath, relMilestoneFile, relSliceFile, relSlicePath, resolveGsdPathContract, resolveMilestoneFile, resolveSliceFile } from "../paths.js";
+import { generateRequirementsMd, saveArtifactToDb, saveArtifactToDbByScope } from "../db-writer.js";
+import { createWorkspace, scopeMilestone } from "../workspace.js";
+import { canonicalPhaseDirName, clearPathCache, normalizeRealPath, relMilestoneFile, relSliceFile, relSlicePath, resolveGsdPathContract, resolveMilestoneFile, resolveMilestonePath, resolveSliceFile } from "../paths.js";
 import { saveFile, clearParseCache } from "../files.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { CompleteMilestoneParams } from "./complete-milestone.js";
 import { handleCompleteMilestone } from "./complete-milestone.js";
 import {
-  handleCompleteTask,
   normalizeReworkResolution,
   resolveTaskSummaryPath,
   satisfiesBlockingReworkFinding,
   unresolvedReworkError,
 } from "./complete-task.js";
 import {
+  recoveryRouteLever,
   resolveTaskCompletionAuthority,
   stageTaskCompletion,
 } from "../task-completion-compatibility-adapter.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import type { DomainJsonValue } from "../db/domain-operation.js";
-import { resumeTaskRecovery } from "../task-recovery-domain-operation.js";
-import { applyTaskSettle, planTaskSettle } from "../task-settle.js";
-import type { CompleteSliceParams, EscalationOption } from "../types.js";
+import {
+  readTaskRecoveryRoute,
+  recordFailureAndSelectRecovery,
+  resumeTaskRecovery,
+  type TaskRecoveryRouteSnapshot,
+} from "../task-recovery-domain-operation.js";
+import { internalExecutionInvocation } from "../execution-invocation.js";
+import {
+  applyBlockerAcceptedDisposition,
+  applyTaskSettle,
+  planBlockerAcceptedDisposition,
+  planTaskSettle,
+} from "../task-settle.js";
+import type { CompleteSliceParams, EscalationArtifact, EscalationOption } from "../types.js";
+import { buildEscalationArtifact, openTaskEscalation } from "../escalation.js";
 import { handleCompleteSlice } from "./complete-slice.js";
 import type { PlanMilestoneParams } from "./plan-milestone.js";
 import { handlePlanMilestone } from "./plan-milestone.js";
-import type { PlanningInvocation } from "../planning-invocation.js";
+import { noteSessionRead } from "../db/domain-operation.js";
+export { runInToolSession } from "../db/domain-operation.js";
+import { internalPlanningInvocation, type PlanningInvocation } from "../planning-invocation.js";
+import { executeRecordDomainOperation } from "../record-domain-operation.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 import type { PlanSliceParams } from "./plan-slice.js";
 import { handlePlanSlice } from "./plan-slice.js";
 import type { ReplanSliceParams } from "./replan-slice.js";
@@ -75,6 +108,7 @@ import type { ReplanTaskParams } from "./replan-task.js";
 import { handleReplanTask } from "./replan-task.js";
 import type { ReworkBriefSaveParams } from "./rework-brief.js";
 import { handleReworkBriefSave } from "./rework-brief.js";
+import { saveWorkCheckpoint, type SaveWorkCheckpointParams } from "../work-checkpoint.js";
 import type { ReopenMilestoneParams } from "./reopen-milestone.js";
 import { handleReopenMilestone } from "./reopen-milestone.js";
 import type { ReopenSliceParams } from "./reopen-slice.js";
@@ -88,28 +122,32 @@ import { handleReassessRoadmap } from "./reassess-roadmap.js";
 import type { ValidateMilestoneOptions, ValidateMilestoneParams } from "./validate-milestone.js";
 import { handleValidateMilestone } from "./validate-milestone.js";
 import {
-  answerMilestoneSubjectiveUat,
   prepareMilestoneSubjectiveUat,
-  type AnswerMilestoneSubjectiveUatInput,
   type PrepareMilestoneSubjectiveUatInput,
 } from "../milestone-subjective-uat-domain-operation.js";
 import { logError, logWarning } from "../workflow-logger.js";
 import { invalidateStateCache } from "../state.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
-import { loadEffectiveGSDPreferences } from "../preferences.js";
+import { renderStateProjection } from "../workflow-projections.js";
+import { loadEffectiveGSDPreferences, resolvePostUnitHooks } from "../preferences.js";
+import { parseUnitId } from "../unit-id.js";
+import { upsertHookGateVerdict } from "../db/writers/hook-verdicts.js";
 import { parseProject } from "../schemas/parsers.js";
 import { autoSession, getAutoRuntimeSnapshot, isAutoActive } from "../auto-runtime-state.js";
-import { renderPlanCheckboxes, renderPlanFromDb, writeTaskSummaryProjection } from "../markdown-renderer.js";
+import { renderPlanCheckboxes, renderPlanFromDb, renderWorkCheckpoint, writeTaskSummaryProjection } from "../markdown-renderer.js";
 import { readUnitHarnessAbort, type UnitHarnessAbortRecord } from "../unit-runtime.js";
 import {
   prepareUatRun,
+  renderUatAttemptRecord,
   saveUatAttemptArtifact,
+  uatAttemptArtifactPath,
   type UatResultSaveParams,
 } from "../uat-run.js";
 import { appendNotification } from "../notification-store.js";
-import { registerAutoWorker, markWorkerStopping, getAutoWorker } from "../db/auto-workers.js";
+import { registerAutoWorker, markWorkerStopping, getAutoWorker, isDeadLocalAutoWorker, markWorkerCrashed } from "../db/auto-workers.js";
 import {
   claimMilestoneLease,
+  forceReleaseLeasesForWorker,
   releaseMilestoneLease,
   getMilestoneLease,
   refreshMilestoneLease,
@@ -131,6 +169,8 @@ export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = [
   "SUMMARY",
   "RESEARCH",
   "UI-SPEC",
+  "AI-SPEC",
+  "SPEC",
   "CONTEXT",
   "ASSESSMENT",
   "CONTEXT-DRAFT",
@@ -233,6 +273,65 @@ function milestoneLeaseConflictResult(
   };
 }
 
+/**
+ * Reclaim a milestone lease whose holder worker is a local process that is
+ * verifiably dead (#2375). Mirrors the crash-recovery force-release path:
+ * mark the worker crashed, then force-release its held leases. The holder
+ * row's status column is irrelevant — process liveness is the OS-verifiable
+ * fact — but markWorkerCrashed only flips active rows, so a stopping/crashed
+ * row is left as-is and the reclaim is journaled explicitly below. Returns
+ * false — leaving the lease untouched — for alive, remote, or otherwise
+ * unprobeable holders, and when the lease was concurrently re-taken.
+ */
+function reclaimDeadHolderMilestoneLease(
+  milestoneId: string,
+  heldLease: { worker_id: string },
+  basePath: string,
+): boolean {
+  if (!isDeadLocalAutoWorker(heldLease.worker_id, basePath)) return false;
+  markWorkerCrashed(heldLease.worker_id);
+  const freed = forceReleaseLeasesForWorker(heldLease.worker_id);
+  if (freed < 1) return false;
+  insertAuditEvent({
+    eventId: randomUUID(),
+    traceId: heldLease.worker_id,
+    category: "orchestration",
+    type: "milestone-lease-reclaimed",
+    ts: new Date().toISOString(),
+    payload: { workerId: heldLease.worker_id, milestoneId },
+  });
+  appendNotification(
+    `Reclaimed milestone ${milestoneId} lease from dead worker ${heldLease.worker_id} (#2375).`,
+    "warning",
+    "notify",
+    { kind: "milestone-lease-reclaim", scope: milestoneId },
+  );
+  return true;
+}
+
+/**
+ * A dead holder's lease was reclaimed but no active auto worker row exists to
+ * claim it under. Fail closed — never plan leaseless while auto is active.
+ */
+function milestoneLeaseReclaimedNoWorkerResult(
+  milestoneId: string,
+  reclaimedFrom: string,
+): ToolExecutionResult {
+  return {
+    content: [{
+      type: "text",
+      text: `Milestone ${milestoneId} lease held by dead worker ${reclaimedFrom} was reclaimed, but no active auto worker row exists to claim it. Re-run planning once auto-mode has an active worker.`,
+    }],
+    details: {
+      operation: "plan_milestone",
+      error: "milestone_lease_reclaimed_no_active_worker",
+      milestoneId,
+      reclaimedFrom,
+    },
+    isError: true,
+  };
+}
+
 export interface SummarySaveParams {
   milestone_id?: string;
   slice_id?: string;
@@ -273,57 +372,52 @@ function projectMilestoneSequenceRepairNeeded(content: string): boolean {
   });
 }
 
-function registerProjectMilestoneSequence(content: string): string[] {
-  return immediateTransaction(() => {
-    const parsed = parseProject(content);
-    const registered: string[] = [];
-    // Reconcile parsed IDs against existing DB milestones before inserting (#807).
-    // Under unique_milestone_ids the planner mints suffixed IDs (e.g. "M001-b1nole"),
-    // while PROJECT.md's template uses bare sequence IDs (e.g. "M001"). Inserting the
-    // bare ID verbatim mints a phantom milestone row that collides with the planner's
-    // canonical one: the bare row gets its own git worktree, and at dispatch time the
-    // worktree/session scope ("M001") disagrees with ctx.mid ("M001-b1nole"), pausing
-    // auto-mode with "Dispatch milestone mismatch". A project DB holds at most one
-    // milestone per sequence number, so map each parsed line onto the existing row
-    // that shares its sequence number instead of minting a duplicate bare-ID row.
-    const existingBySeq = existingMilestonesBySequence();
-    const adoptedIds = new Set<string>();
-    for (const milestone of parsed.milestones) {
-      const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
-      if (!canonical) continue;
-      const canonicalDone = adoptedMilestoneProjectionDone(canonical.id);
-      if (canonicalDone !== null) adoptedIds.add(canonical.id);
-    }
-
-    for (const milestone of parsed.milestones) {
-      const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
-      const canonicalId = canonical?.id;
-      if (canonicalId && adoptedIds.has(canonicalId)) {
-        upsertMilestonePlanning(canonicalId, { title: milestone.title });
-        registered.push(canonicalId);
+/** The milestone rows that the Milestone Sequence of a PROJECT document asks for. */
+function projectMilestoneRegistrations(content: string, basePath: string): MilestoneRegistration[] {
+  // Reconcile parsed IDs against existing DB milestones before inserting (#807).
+  // Under unique_milestone_ids the planner mints suffixed IDs (e.g. "M001-b1nole"),
+  // while PROJECT.md's template uses bare sequence IDs (e.g. "M001"). Inserting the
+  // bare ID verbatim mints a phantom milestone row that collides with the planner's
+  // canonical one: the bare row gets its own git worktree, and at dispatch time the
+  // worktree/session scope ("M001") disagrees with ctx.mid ("M001-b1nole"), pausing
+  // auto-mode with "Dispatch milestone mismatch". A project DB holds at most one
+  // milestone per sequence number, so map each parsed line onto the existing row
+  // that shares its sequence number instead of minting a duplicate bare-ID row.
+  const existingBySeq = existingMilestonesBySequence();
+  const registrations: MilestoneRegistration[] = [];
+  for (const milestone of parseProject(content).milestones) {
+    const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
+    if (canonical !== undefined) {
+      // An existing row keeps its stored title: the sequence line's short text
+      // must not clobber an established title — the retitle renamed the
+      // milestone's established phase directory and broke its path references
+      // (#2801). A checked box never completes a milestone (only
+      // gsd_complete_milestone does).
+      if (canonical.title.trim()) {
+        registrations.push({ id: canonical.id });
         continue;
       }
-      if (canonicalId && canonicalId !== milestone.id) {
-        // An existing milestone already owns this sequence number. Treat the markdown
-        // line as referring to it: refresh the human title, and promote to complete
-        // when the line is checked — but never demote an in-flight milestone back to
-        // "queued" (the planner's row stays the single source of truth).
-        upsertMilestonePlanning(canonicalId, {
-          title: milestone.title,
-          ...(milestone.done ? { status: "complete" } : {}),
-        });
-        registered.push(canonicalId);
-        continue;
-      }
-      insertMilestone({
-        id: milestone.id,
-        title: milestone.title,
-        status: milestone.done ? "complete" : "queued",
-      });
-      registered.push(milestone.id);
+      // An empty stored title is a placeholder row (generate-id): the line
+      // fills it. The fill may rename only a demonstrable placeholder
+      // directory — one named for the id, or none at all; an established
+      // directory stays where it is and the title lands on the next
+      // planning write (#2801, rename as in #1526).
+      const dir = resolveMilestonePath(basePath, canonical.id);
+      const placeholderDir = dir === null || basename(dir) === canonicalPhaseDirName(canonical.id, canonical.id);
+      registrations.push(
+        placeholderDir
+          ? { id: canonical.id, title: milestone.title, retitle: true }
+          : { id: canonical.id },
+      );
+      continue;
     }
-    return registered;
-  });
+    // A done line with no row is history that predates the DB: like recover's
+    // import (completed work never re-enters as open), it is skipped rather
+    // than registered as `queued` for auto-mode to plan from scratch. (#2801)
+    if (milestone.done) continue;
+    registrations.push({ id: milestone.id, title: milestone.title });
+  }
+  return registrations;
 }
 
 /** Minimal shape of a DB milestone row needed to re-render the sequence section. */
@@ -341,6 +435,40 @@ function milestoneSequenceRows(): MilestoneSeqRow[] {
     vision: milestone.vision,
     done: adoptedMilestoneProjectionDone(milestone.id) ?? isClosedStatus(milestone.status),
   }));
+}
+
+/**
+ * The rows a Milestone Sequence rebuild renders: the authoritative DB rows,
+ * plus the document's checked lines whose rows predate the DB as done
+ * history. A repair that rendered only DB rows would erase that history from
+ * the projection (and the sequence table) (#2801).
+ */
+function milestoneSequenceRowsForRebuild(content: string): MilestoneSeqRow[] {
+  const seqRows = milestoneSequenceRows();
+  const rowsBySeq = new Map(seqRows.map((row) => [extractMilestoneSeq(row.id), row]));
+  const rendered: MilestoneSeqRow[] = [];
+  const emitted = new Set<string>();
+  for (const milestone of parseProject(content).milestones) {
+    const row = rowsBySeq.get(extractMilestoneSeq(milestone.id));
+    if (row) {
+      if (!emitted.has(row.id)) {
+        rendered.push(row);
+        emitted.add(row.id);
+      }
+      continue;
+    }
+    // An open line with no row registered just above, so it has a row here.
+    // A checked one is pre-DB history: keep the line, rendered from the
+    // document (the DB stays rowless). Duplicate lines of one id render once.
+    if (milestone.done && !emitted.has(milestone.id)) {
+      rendered.push({ id: milestone.id, title: milestone.title, vision: "", done: true });
+      emitted.add(milestone.id);
+    }
+  }
+  for (const row of seqRows) {
+    if (!emitted.has(row.id)) rendered.push(row);
+  }
+  return rendered;
 }
 
 /**
@@ -443,15 +571,22 @@ function rebuildMilestoneSequenceSection(content: string, milestones: MilestoneS
   ].join("\n");
 }
 
+/** Said to the caller when the change is committed but its readable plan file is not rendered yet. */
+const PLAN_PROJECTION_STALE_NOTICE = ". The readable plan update is pending repair.";
+
+/**
+ * Copy a saved artifact into the active worktree. The save is already stored at
+ * the project root, so a failed copy never fails the tool.
+ * @returns true when the worktree copy is stale.
+ */
 async function mirrorArtifactToActiveWorktreeProjection(
   basePath: string,
   relativePath: string,
   content: string,
-  required: boolean = false,
-): Promise<void> {
+): Promise<boolean> {
   const contract = resolveGsdPathContract(basePath);
-  if (!contract.worktreeGsd) return;
-  if (contract.worktreeGsd === contract.projectGsd) return;
+  if (!contract.worktreeGsd) return false;
+  if (contract.worktreeGsd === contract.projectGsd) return false;
 
   const fullPath = join(contract.worktreeGsd, relativePath);
   try {
@@ -459,17 +594,25 @@ async function mirrorArtifactToActiveWorktreeProjection(
     clearPathCache();
     clearParseCache();
     invalidateStateCache();
+    return false;
   } catch (err) {
     logWarning("tool", `gsd_summary_save worktree projection mirror failed: ${(err as Error).message}`, {
       path: relativePath,
     });
-    if (required) throw err;
+    return true;
   }
 }
 
+/**
+ * Save an artifact. The artifacts row, the slice UAT carrier (UAT) and the
+ * milestone rows of the Milestone Sequence (PROJECT) commit in one
+ * artifact.save Domain Operation; a replay of the invocation writes no row.
+ * A task SUMMARY is the exception: its row is stored by the projection write.
+ */
 export async function executeSummarySave(
   params: SummarySaveParams,
   basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ToolExecutionResult> {
   const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
@@ -520,7 +663,7 @@ export async function executeSummarySave(
       details: {
         operation: "save_summary",
         error: "root_artifact_write_blocked",
-        displayReason: "Approval confirmation required before saving final project setup artifacts.",
+        displayReason: rootArtifactGuard.displayReason ?? "Approval confirmation required before saving final project setup artifacts.",
       },
       isError: true,
     };
@@ -537,7 +680,7 @@ export async function executeSummarySave(
       details: {
         operation: "save_summary",
         error: "context_write_blocked",
-        displayReason: "Depth check required before writing milestone context.",
+        displayReason: contextGuard.displayReason ?? "Depth check required before writing milestone context.",
       },
       isError: true,
     };
@@ -634,7 +777,6 @@ export async function executeSummarySave(
             registeredMilestones = existingMilestones.map((milestone) => milestone.id);
             projectRegistrationContent = null;
           }
-          contentToSave = rebuildMilestoneSequenceSection(contentToSave, existingMilestones);
           milestoneSequenceSelfHealed = true;
         }
       } catch (healErr) {
@@ -664,39 +806,46 @@ export async function executeSummarySave(
       }
     }
 
+    const registrationFailure = (err: unknown): ToolExecutionResult => {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError("tool", `gsd_summary_save: PROJECT milestone registration failed before persistence: ${msg}`, {
+        tool: "gsd_summary_save",
+        error: String(err),
+        stack: err instanceof Error ? err.stack ?? "" : "",
+      });
+      return {
+        content: [{
+          type: "text",
+          text:
+            `Error: PROJECT.md was not saved because milestone registration failed: ${msg}. ` +
+            `The registration operation was rolled back; resolve the underlying error and re-call gsd_summary_save(PROJECT).`,
+        }],
+        details: {
+          operation: "save_summary",
+          path: relativePath,
+          artifact_type: params.artifact_type,
+          error: "milestone_registration_threw",
+          registration_error: msg,
+        },
+        isError: true,
+      };
+    };
+    let registrations: MilestoneRegistration[] = [];
     if (params.artifact_type === "PROJECT") {
       try {
         if (projectRegistrationContent !== null) {
-          registeredMilestones = registerProjectMilestoneSequence(projectRegistrationContent);
+          registrations = projectMilestoneRegistrations(projectRegistrationContent, basePath);
+          registeredMilestones = registrations.map((milestone) => milestone.id);
         }
-        if (registeredMilestones.length === 0) {
+        // A sequence of only done lines whose rows predate the DB registers
+        // nothing — a legitimate save of history (#2801). Fail only when the
+        // content parsed zero milestone lines, which the preflight could not
+        // repair (no DB rows to rebuild from).
+        if (registeredMilestones.length === 0 && parseProject(contentToSave).milestones.length === 0) {
           throw new Error("PROJECT.md parsed zero milestone lines after preflight");
         }
-        invalidateStateCache();
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logError("tool", `gsd_summary_save: PROJECT milestone registration failed before persistence: ${msg}`, {
-          tool: "gsd_summary_save",
-          error: String(err),
-          stack: err instanceof Error ? err.stack ?? "" : "",
-        });
-        return {
-          content: [{
-            type: "text",
-            text:
-              `Error: PROJECT.md was not saved because milestone registration failed: ${msg}. ` +
-              `The registration transaction was rolled back; resolve the underlying error and re-call gsd_summary_save(PROJECT). ` +
-              `INSERT OR IGNORE keeps the retry idempotent.`,
-          }],
-          details: {
-            operation: "save_summary",
-            path: relativePath,
-            artifact_type: params.artifact_type,
-            error: "milestone_registration_threw",
-            registration_error: msg,
-          },
-          isError: true,
-        };
+        return registrationFailure(err);
       }
     }
 
@@ -714,32 +863,82 @@ export async function executeSummarySave(
       relativePath = projection.artifactPath;
       projectedContent = projection.content;
     } else {
-      if (params.artifact_type === "UAT") {
-        // UAT must land in the slice's UAT carrier (full_uat_md), never the
-        // summary carrier: after slice completion the UAT projection re-renders
-        // from this column, so post-completion corrections survive flushes.
-        const updated = setSliceUatMd(params.milestone_id!, params.slice_id!, contentToSave);
-        if (!updated) {
-          return {
-            content: [{ type: "text", text: `Error: no slice "${params.slice_id}" found in milestone "${params.milestone_id}". UAT saves require an existing slice row.` }],
-            details: { operation: "save_summary", error: "slice_not_found" },
-            isError: true,
-          };
-        }
+      if (params.artifact_type === "UAT" && !getSlice(params.milestone_id!, params.slice_id!)) {
+        return {
+          content: [{ type: "text", text: `Error: no slice "${params.slice_id}" found in milestone "${params.milestone_id}". UAT saves require an existing slice row.` }],
+          details: { operation: "save_summary", error: "slice_not_found" },
+          isError: true,
+        };
       }
-      await saveArtifactToDb(
-        {
-          path: relativePath,
-          artifact_type: params.artifact_type,
-          content: contentToSave,
-          milestone_id: isRootArtifact ? undefined : params.milestone_id,
-          slice_id: isRootArtifact ? undefined : params.slice_id,
-          task_id: isRootArtifact ? undefined : params.task_id,
-        },
-        basePath,
-      );
+      const scopeIds = isRootArtifact ? [] : [params.milestone_id, params.slice_id, params.task_id].filter(Boolean);
+      const projectionKey = params.artifact_type === "REQUIREMENTS"
+        ? "planning/requirements"
+        : isRootArtifact
+        ? "planning/root-artifacts"
+        : `planning/${scopeIds.join("/")}`.toLowerCase();
+      let registrationError: unknown;
+      try {
+        await saveArtifactToDb(
+          {
+            path: relativePath,
+            artifact_type: params.artifact_type,
+            content: contentToSave,
+            milestone_id: isRootArtifact ? undefined : params.milestone_id,
+            slice_id: isRootArtifact ? undefined : params.slice_id,
+            task_id: isRootArtifact ? undefined : params.task_id,
+          },
+          basePath,
+          (insertRow) => {
+            executeRecordDomainOperation({
+              operationType: "artifact.save",
+              invocation,
+              payload: params,
+              eventType: "artifact.saved",
+              entityType: "artifact",
+              projectionKeys: [projectionKey],
+              mutate: (context) => {
+                // UAT must land in the slice's UAT carrier (full_uat_md), never the
+                // summary carrier: after slice completion the UAT projection re-renders
+                // from this column, so post-completion corrections survive flushes.
+                if (params.artifact_type === "UAT") {
+                  setSliceUatMd(params.milestone_id!, params.slice_id!, contentToSave);
+                }
+                let milestoneRows: ReturnType<typeof registerMilestoneRows> | undefined;
+                if (!milestonesRegistered(registrations)) {
+                  try {
+                    milestoneRows = registerMilestoneRows(context, registrations, "project-sequence");
+                  } catch (err) {
+                    registrationError = err;
+                    throw err;
+                  }
+                }
+                // Rebuild after registration: a line for a milestone that had no row
+                // before this save must stay in the sequence.
+                const rebuiltContent = milestoneSequenceSelfHealed
+                  ? rebuildMilestoneSequenceSection(contentToSave, milestoneSequenceRowsForRebuild(contentToSave))
+                  : undefined;
+                insertRow(rebuiltContent);
+                // The sequence rows follow the stored PROJECT document in this transaction.
+                if (params.artifact_type === "PROJECT") {
+                  replaceProjectMilestoneSequence(getDb(), rebuiltContent ?? contentToSave);
+                }
+                return {
+                  entityId: relativePath,
+                  result: { path: relativePath, artifactType: params.artifact_type },
+                  ...(milestoneRows ? { also: milestoneRows } : {}),
+                };
+              },
+            });
+          },
+        );
+      } catch (err) {
+        if (registrationError) return registrationFailure(registrationError);
+        throw err;
+      }
+      // The stored row: the operation can rebuild the sequence, and a replay writes no row.
+      projectedContent = getArtifact(relativePath)?.full_content ?? contentToSave;
     }
-    await mirrorArtifactToActiveWorktreeProjection(basePath, relativePath, projectedContent, isTaskSummary);
+    const worktreeCopyStale = await mirrorArtifactToActiveWorktreeProjection(basePath, relativePath, projectedContent);
 
     if (params.artifact_type === "CONTEXT" && !params.task_id) {
       try {
@@ -752,6 +951,10 @@ export async function executeSummarySave(
       }
     }
 
+    // A saved artifact can change the derived state: PROJECT registers
+    // milestones, and CONTEXT changes milestone readiness.
+    await renderStateProjection(basePath);
+
     return {
       content: [{ type: "text", text: `Saved ${params.artifact_type} artifact to ${relativePath}` }],
       details: {
@@ -761,6 +964,7 @@ export async function executeSummarySave(
         content_source: contentSource,
         ...(registeredMilestones.length > 0 ? { registeredMilestones } : {}),
         ...(milestoneSequenceSelfHealed ? { milestoneSequenceSelfHealed: true } : {}),
+        ...(worktreeCopyStale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -870,6 +1074,8 @@ export interface TaskSettleExecutorParams {
   reason: string;
   apply?: boolean;
   reconcileLifecycle?: boolean;
+  /** #2202: operator closeout disposition for a discovered blocker. */
+  settleDisposition?: "blocker-accepted";
 }
 export type ReopenSliceExecutorParams = ReopenSliceParams;
 export type SkipSliceExecutorParams = SkipSliceParams;
@@ -877,10 +1083,6 @@ export type ReopenMilestoneExecutorParams = ReopenMilestoneParams;
 export type ValidateMilestoneExecutorParams = ValidateMilestoneParams;
 export type PrepareMilestoneSubjectiveUatExecutorParams = Omit<
   PrepareMilestoneSubjectiveUatInput,
-  "invocation"
->;
-export type AnswerMilestoneSubjectiveUatExecutorParams = Omit<
-  AnswerMilestoneSubjectiveUatInput,
   "invocation"
 >;
 export type ReassessRoadmapExecutorParams = ReassessRoadmapParams;
@@ -929,8 +1131,7 @@ export async function executeTaskComplete(
         // error-trace anomalies for a task that actually completed, so when the
         // task is already closed in current DB state, unwind the duplicate as an
         // idempotent success pointing at the existing summary instead (#1569).
-        const existingTask = getTask(params.milestoneId, params.sliceId, params.taskId);
-        if (existingTask && isClosedStatus(existingTask.status)) {
+        if (readTask(params.milestoneId, params.sliceId, params.taskId)?.done) {
           const summaryPath = resolveTaskSummaryPath(
             basePath,
             params.milestoneId,
@@ -968,37 +1169,40 @@ export async function executeTaskComplete(
       sliceId: params.sliceId,
       taskId: params.taskId,
     };
-    const authority = resolveTaskCompletionAuthority(task, invocation?.idempotencyKey, {
-      blockerReport: params.blockerDiscovered === true,
-    });
+    const authority = resolveTaskCompletionAuthority(task, invocation?.idempotencyKey);
     if (authority === "canonical") {
       if (!invocation) {
         throw new Error("Canonical Task completion requires private invocation identity");
       }
+      // Escalation is honored only when phases.mid_execution_escalation is
+      // enabled. It is validated before any side effect and recorded as an
+      // Open Question on the Task lifecycle before the completion is staged.
+      // When escalation is disabled, a soft escalation is dropped with a
+      // warning and a hard blocker is rejected.
+      let escalation: EscalationArtifact | null = null;
       if (params.escalation) {
-        // The durable completion adapter cannot yet record escalation
-        // artifacts. Rather than dead-ending the closeout, mirror the legacy
-        // escalation gating (see handleCompleteTask): escalation is only
-        // honored when phases.mid_execution_escalation is enabled. When it is
-        // disabled (the default), the legacy path drops a soft escalation
-        // (continueWithDefault !== false) with a warning and completes the
-        // task — so do the same here instead of throwing. Only cases the
-        // legacy path would actually honor (escalation enabled) or reject (a
-        // hard blocker with escalation disabled) have no canonical equivalent
-        // yet, so those still surface the unsupported error.
         const escalationEnabled =
           loadEffectiveGSDPreferences(basePath)?.preferences?.phases?.mid_execution_escalation === true;
-        const hardBlocker = params.escalation.continueWithDefault === false;
-        if (escalationEnabled || hardBlocker) {
-          throw new Error("Canonical Task completion escalation is not yet supported by the durable completion adapter");
+        if (escalationEnabled) {
+          try {
+            escalation = buildEscalationArtifact({ ...task, ...params.escalation });
+          } catch (validationErr) {
+            throw new Error(
+              `complete-task escalation payload invalid for ${params.milestoneId}/${params.sliceId}/${params.taskId}: ${(validationErr as Error).message}`,
+            );
+          }
+        } else if (params.escalation.continueWithDefault === false) {
+          throw new Error(
+            `complete-task received a hard-blocker escalation (continueWithDefault=false) but phases.mid_execution_escalation is disabled for ${params.milestoneId}/${params.sliceId}/${params.taskId}`,
+          );
+        } else {
+          logWarning(
+            "tool",
+            `complete_task received escalation payload but phases.mid_execution_escalation is not enabled; ignoring on the canonical completion path (${params.milestoneId}/${params.sliceId}/${params.taskId})`,
+          );
         }
-        logWarning(
-          "tool",
-          `complete_task received escalation payload but phases.mid_execution_escalation is not enabled; ignoring on the canonical completion path (${params.milestoneId}/${params.sliceId}/${params.taskId})`,
-        );
       }
-      // Mirror the legacy blocking rework gate (handleCompleteTask) onto the
-      // canonical path (#2231): an unresolved blocking finding rejects the
+      // Blocking rework gate on the canonical path (#2231): an unresolved blocking finding rejects the
       // closeout unless covered by a satisfying reworkResolution.
       const reworkResolutions = normalizeReworkResolution(params);
       const resolvedFindingIds = new Set(
@@ -1026,6 +1230,17 @@ export async function executeTaskComplete(
       if (resolutionsToApply.length > 0) {
         applyReworkResolutions(resolutionsToApply);
       }
+      // Open the escalation before staging: staging settles the Attempt, and a
+      // settled Attempt accepts no new completion call. If the escalation
+      // fails here, the Attempt stays running and the worker can retry. If
+      // staging fails after it, the Task is paused with no staged completion,
+      // which is the safe failure.
+      if (escalation) {
+        openTaskEscalation(basePath, escalation, {
+          ...invocation,
+          idempotencyKey: `${invocation.idempotencyKey}:escalation`,
+        });
+      }
       const staged = await stageTaskCompletion({
         invocation,
         basePath,
@@ -1045,12 +1260,54 @@ export async function executeTaskComplete(
           verificationEvidence,
         },
       });
+      // A routed blocker must leave the worker with the recoveryActionId that
+      // gsd_task_recovery_resume requires instead of forcing it to guess ids
+      // or read the database (#2267). Route synchronously on the first blocker
+      // receipt so manual callers get the action id immediately.
+      let recoveryRoute: TaskRecoveryRouteSnapshot | null = null;
+      if (staged.nextStage === "route") {
+        try {
+          recoveryRoute = readTaskRecoveryRoute(staged.attemptId);
+        } catch {
+          recoveryRoute = null;
+        }
+        if (!recoveryRoute) {
+          try {
+            recordFailureAndSelectRecovery({
+              invocation: internalExecutionInvocation(
+                `pi:gsd_task_complete:blocker-route:${staged.resultId}`,
+              ),
+              attemptId: staged.attemptId,
+              resultId: staged.resultId,
+              owner: "agent",
+              classification: { failureKind: "fatal" },
+              summary: params.oneLiner ?? "A blocker was discovered during task execution.",
+              evidence: { source: "executor", blockerDiscovered: true },
+              rationale: "Route the recorded blocker through durable recovery policy.",
+            });
+            recoveryRoute = readTaskRecoveryRoute(staged.attemptId);
+          } catch {
+            recoveryRoute = null;
+          }
+        }
+      }
+      const stagedText = (staged.nextStage === "verify"
+        ? `Staged task ${params.taskId}; awaiting host verification before completion.`
+        : `Recorded blocker for task ${params.taskId}; awaiting recovery routing.${
+          recoveryRoute ? recoveryRouteLever(recoveryRoute) : ""
+        }`) + (staged.stale ? " The readable status update is pending repair." : "");
+      const recommended = escalation?.options.find((option) => option.id === escalation?.recommendation);
       return {
         content: [{
           type: "text",
-          text: staged.nextStage === "verify"
-            ? `Staged task ${params.taskId}; awaiting host verification before completion.`
-            : `Recorded blocker for task ${params.taskId}; awaiting recovery routing.`,
+          text: escalation
+            ? [
+              stagedText,
+              `Escalation decision required: ${escalation.question}`,
+              `Recommendation: ${escalation.recommendation}${recommended ? ` (${recommended.label})` : ""} — ${escalation.recommendationRationale}`,
+              `Resolve with: /gsd escalate resolve ${params.taskId} <${escalation.options.map((option) => option.id).join("|")}|accept|reject-blocker> [rationale...]`,
+            ].join("\n")
+            : stagedText,
         }],
         details: {
           operation: "complete_task",
@@ -1061,61 +1318,20 @@ export async function executeTaskComplete(
           resultId: staged.resultId,
           summaryPath: staged.summaryPath,
           nextStage: staged.nextStage,
+          ...(staged.stale ? { stale: true } : {}),
+          ...(escalation ? { escalation } : {}),
+          ...(recoveryRoute ? {
+            recoveryActionId: recoveryRoute.recoveryActionId,
+            action: recoveryRoute.action,
+            ...(recoveryRoute.resumeEligibility
+              ? { resumeEligible: recoveryRoute.resumeEligibility.eligible }
+              : {}),
+          } : {}),
         },
       };
     }
+    throw new Error("gsd_task_complete resolved no Task completion authority");
 
-    const result = await handleCompleteTask(coerced as any, basePath);
-    if ("error" in result) {
-      return {
-        content: [{ type: "text", text: `Error completing task: ${result.error}` }],
-        details: { operation: "complete_task", error: result.error },
-      isError: true,
-      };
-    }
-    const projectionNotice = result.stale
-      ? "The readable status update is pending repair."
-      : null;
-    if (result.escalation) {
-      const recommended = result.escalation.options.find((option) => option.id === result.escalation?.recommendation);
-      const optionIds = result.escalation.options.map((option) => option.id).join("|");
-      return {
-        content: [{
-          type: "text",
-          text: [
-            `Task completed with escalation decision required: ${result.escalation.question}`,
-            `Recommendation: ${result.escalation.recommendation}${recommended ? ` (${recommended.label})` : ""} — ${result.escalation.recommendationRationale}`,
-            `Resolve with: /gsd escalate resolve ${result.taskId} <${optionIds}|accept|reject-blocker> [rationale...]`,
-            ...(projectionNotice ? [projectionNotice] : []),
-          ].join("\n"),
-        }],
-        details: {
-          operation: "complete_task",
-          taskId: result.taskId,
-          sliceId: result.sliceId,
-          milestoneId: result.milestoneId,
-          summaryPath: result.summaryPath,
-          escalation: result.escalation,
-          ...(result.stale ? { stale: true } : {}),
-          ...(result.duplicate ? { duplicate: true } : {}),
-        },
-      };
-    }
-    return {
-      content: [{
-        type: "text",
-        text: `Completed task ${result.taskId} (${result.sliceId}/${result.milestoneId})${projectionNotice ? `. ${projectionNotice}` : ""}`,
-      }],
-      details: {
-        operation: "complete_task",
-        taskId: result.taskId,
-        sliceId: result.sliceId,
-        milestoneId: result.milestoneId,
-        summaryPath: result.summaryPath,
-        ...(result.stale ? { stale: true } : {}),
-        ...(result.duplicate ? { duplicate: true } : {}),
-      },
-    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logError("tool", `complete_task tool failed: ${msg}`, { tool: "gsd_task_complete", error: String(err) });
@@ -1185,7 +1401,17 @@ export async function executeTaskRecoveryResume(
   try {
     const result = resumeTaskRecovery({ invocation, ...params });
     return {
-      content: [{ type: "text", text: `Authorized one repaired Task continuation for ${result.attemptId}.` }],
+      content: [{
+        type: "text",
+        text:
+          `Authorized one repaired Task continuation for ${result.attemptId}. ` +
+          `Queued durable continuation ${result.workCheckpointId} for recovery action ${result.recoveryActionId} — ` +
+          "the next execute-task dispatch of this Task atomically claims the successor Attempt (one-shot); " +
+          "re-enter `/gsd auto` to consume it. " +
+          "Do not call gsd_task_complete from this session to close the successor: only a live `/gsd auto` " +
+          "dispatch can claim it, and the authorization is single-shot — if no host re-enters, it stays " +
+          "dormant instead of stranding the Task.",
+      }],
       details: { operation: "task_recovery_resume", ...result },
     };
   } catch (err) {
@@ -1221,11 +1447,88 @@ export async function executeTaskSettle(
     taskId: params.taskId,
   };
   const unit = `${task.milestoneId}/${task.sliceId}/${task.taskId}`;
-  const settleOptions = { reconcileLifecycle: params.reconcileLifecycle === true };
+  const settleOptions = { reconcileLifecycle: params.reconcileLifecycle === true, basePath };
+  const blockerAccepted = params.settleDisposition === "blocker-accepted";
+  if (blockerAccepted && settleOptions.reconcileLifecycle) {
+    return {
+      content: [{
+        type: "text",
+        text: "Error settling task attempt: settleDisposition 'blocker-accepted' and reconcileLifecycle are mutually exclusive — blocker-accepted closes the Task terminal without adopting ready/completed.",
+      }],
+      details: { operation: "task_settle", error: "conflicting-disposition" },
+      isError: true,
+    };
+  }
   try {
+    if (blockerAccepted) {
+      if (!params.apply) {
+        const plan = planBlockerAcceptedDisposition(task, params.reason);
+        if (plan.alreadyAccepted) {
+          return {
+            content: [{ type: "text", text: `gsd_task_settle (dry run): ${unit} is already closed as blocker-accepted — nothing to do.` }],
+            details: { operation: "task_settle", dryRun: true, settleDisposition: "blocker-accepted", rows: [], alreadyAccepted: true },
+          };
+        }
+        const row = plan.rows[0];
+        const lines = [
+          `  lifecycle ${row.lifecycleFrom} → blocker-accepted (terminal; legacy tasks.status ${row.currentStatus} → blocker-accepted)`,
+          `  attempt ${row.attemptId} Result ${row.resultId} preserved as history — route Kernel head consumed with a closeout decision`,
+          `  provenance: ${row.blockerSummary || "(failed Result carries no summary)"}` +
+            `${row.supersededRecoveryActionId ? `; supersedes Recovery Action ${row.supersededRecoveryActionId}` : ""}`,
+          `  next: gsd_replan_slice with blockerTaskId ${task.taskId} — replan the remaining work without re-executing this Task`,
+        ];
+        return {
+          content: [{
+            type: "text",
+            text: `gsd_task_settle (dry run) — blocker-accepted disposition, no changes made:\n${lines.join("\n")}\nRe-run with apply: true to accept the blocker.`,
+          }],
+          details: {
+            operation: "task_settle",
+            dryRun: true,
+            settleDisposition: "blocker-accepted",
+            rows: plan.rows,
+          },
+        };
+      }
+      const result = applyBlockerAcceptedDisposition({
+        invocation,
+        task,
+        reason: params.reason,
+      });
+      if (result.alreadyAccepted) {
+        return {
+          content: [{ type: "text", text: `gsd_task_settle: ${unit} is already closed as blocker-accepted — nothing to do.` }],
+          details: {
+            operation: "task_settle",
+            dryRun: false,
+            settleDisposition: "blocker-accepted",
+            accepted: false,
+            alreadyAccepted: true,
+          },
+        };
+      }
+      await renderStateProjection(basePath);
+      return {
+        content: [{
+          type: "text",
+          text:
+            `Accepted blocker for ${unit}: Task closed as blocker-accepted; Attempt ${result.attemptId} and its failed Result remain history and the route head is consumed (no re-route). ` +
+            `Replan with gsd_replan_slice (blockerTaskId ${task.taskId}) — the Task will not execute again.`,
+        }],
+        details: {
+          operation: "task_settle",
+          dryRun: false,
+          settleDisposition: "blocker-accepted",
+          accepted: true,
+          attemptId: result.attemptId,
+          resultId: result.resultId,
+          routeConsumed: result.routeConsumed,
+        },
+      };
+    }
     if (!params.apply) {
       const plan = planTaskSettle(task, params.reason, settleOptions);
-      if (plan.rows.length === 0 && plan.lifecycleRows.length === 0) {
+      if (plan.rows.length === 0 && plan.lifecycleRows.length === 0 && !plan.publication) {
         return {
           content: [{ type: "text", text: `gsd_task_settle (dry run): ${unit} has no running Attempt — nothing to do.` }],
           details: { operation: "task_settle", dryRun: true, rows: [], lifecycleRows: [] },
@@ -1238,6 +1541,12 @@ export async function executeTaskSettle(
         ...plan.lifecycleRows.map(
           (row) => `  lifecycle ${row.currentStatus} → ${row.targetStatus} — ${row.rationale}`,
         ),
+        ...(plan.publication ? [
+          `  publication: ${plan.publication.rationale} (host verdict: ${plan.publication.verdict ?? "none recorded"})` +
+          (plan.publication.verdict === "pass"
+            ? ""
+            : " — apply will fail closed until a passing host Technical Verdict is recorded (re-enter `/gsd auto` to run verification)"),
+        ] : []),
         ...(plan.proof ? [`  proof: ${plan.proof.note}`] : []),
       ];
       return {
@@ -1250,16 +1559,18 @@ export async function executeTaskSettle(
           dryRun: true,
           rows: plan.rows,
           lifecycleRows: plan.lifecycleRows,
+          ...(plan.publication ? { publication: plan.publication } : {}),
         },
       };
     }
-    const result = applyTaskSettle({
+    const result = await applyTaskSettle({
       invocation,
       task,
       reason: params.reason,
+      // settleOptions carries basePath for verified publication.
       ...settleOptions,
     });
-    if (!result.settled && !result.reconciled) {
+    if (!result.settled && !result.reconciled && !result.published) {
       return {
         content: [{ type: "text", text: `gsd_task_settle: ${unit} has no running Attempt — nothing to do.` }],
         details: {
@@ -1280,6 +1591,12 @@ export async function executeTaskSettle(
       const target = result.lifecycleRows[result.lifecycleRows.length - 1]?.targetStatus;
       parts.push(`Reconciled lifecycle to ${target} (${unit}) without deleting SUMMARYs.`);
     }
+    if (result.published) {
+      parts.push(
+        `Published verified Task completion for ${unit} from Attempt ${result.published.attemptId} ` +
+        `(${result.published.status}): lifecycle completed, tasks.status complete.`,
+      );
+    }
     if (result.proof) {
       parts.push(result.proof.note);
     }
@@ -1294,6 +1611,7 @@ export async function executeTaskSettle(
           ? { attemptId: result.rows[0].attemptId, resultId: result.resultId }
           : {}),
         lifecycleRows: result.lifecycleRows,
+        ...(result.published ? { published: result.published } : {}),
       },
     };
   } catch (err) {
@@ -1410,13 +1728,7 @@ export async function executeSkipSlice(
     invalidateStateCache();
     let projectionStale = false;
     try {
-      const { rebuildState } = await import("../doctor.js");
-      await rebuildState(basePath);
-    } catch (err) {
-      projectionStale = true;
-      logError("tool", `skip_slice rebuildState failed: ${(err as Error).message}`, { tool: "gsd_skip_slice" });
-    }
-    try {
+      // The flush renders STATE.md with the milestone projections.
       const flushed = await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
       projectionStale ||= flushed.stale;
     } catch (err) {
@@ -1673,6 +1985,20 @@ export async function executeCompleteMilestone(
       isError: true,
       };
     }
+    if (result.pendingCloseoutEffects) {
+      return {
+        content: [{
+          type: "text",
+          text: `Milestone ${result.milestoneId} closeout is prepared. The milestone completes when the system has merged ` +
+            `the milestone branch (pending: ${result.pendingCloseoutEffects.join(", ")}). Do not merge it yourself.`,
+        }],
+        details: {
+          operation: "complete_milestone",
+          milestoneId: result.milestoneId,
+          pendingCloseoutEffects: result.pendingCloseoutEffects,
+        },
+      };
+    }
     const historical = result.superseded || result.current === false;
     const message = historical
       ? `Milestone completion receipt for ${result.milestoneId} has been superseded; current state was not changed.`
@@ -1780,10 +2106,21 @@ export async function executePrepareMilestoneSubjectiveUat(
   }
   try {
     const result = prepareMilestoneSubjectiveUat({ ...params, invocation });
+    const optionLines = result.options
+      .map((option) => `  ${option.disposition}${option.recommended ? " (recommended)" : ""}: "${option.label}"`)
+      .join("\n");
     return {
       content: [{
         type: "text",
-        text: `Prepared subjective UAT for ${result.milestoneId}: ${params.focusedPrompt}`,
+        text: [
+          `Prepared subjective UAT for ${result.milestoneId}: ${params.focusedPrompt}`,
+          `  questionId: ${result.questionId}`,
+          "Options:",
+          optionLines,
+          // Human Acceptance has no model tool: only the person can record it.
+          "Present this question and the options to the user, then stop. The user records the answer with " +
+            '/gsd uat-answer <accept|reject> --rationale "why". You cannot record it.',
+        ].join("\n"),
       }],
       details: {
         operation: "prepare_milestone_subjective_uat",
@@ -1795,40 +2132,6 @@ export async function executePrepareMilestoneSubjectiveUat(
     return {
       content: [{ type: "text", text: `Error preparing subjective UAT: ${message}` }],
       details: { operation: "prepare_milestone_subjective_uat", error: message },
-      isError: true,
-    };
-  }
-}
-
-export async function executeAnswerMilestoneSubjectiveUat(
-  params: AnswerMilestoneSubjectiveUatExecutorParams,
-  basePath: string,
-  invocation: ExecutionInvocation,
-): Promise<ToolExecutionResult> {
-  if (!await ensureDbOpen(basePath)) {
-    return {
-      content: [{ type: "text", text: "Error: GSD database is not available. Cannot answer subjective UAT." }],
-      details: { operation: "answer_milestone_subjective_uat", error: "db_unavailable" },
-      isError: true,
-    };
-  }
-  try {
-    const result = answerMilestoneSubjectiveUat({ ...params, invocation });
-    return {
-      content: [{
-        type: "text",
-        text: `Recorded the authenticated subjective UAT response as ${result.disposition}.`,
-      }],
-      details: {
-        operation: "answer_milestone_subjective_uat",
-        ...result,
-      },
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      content: [{ type: "text", text: `Error answering subjective UAT: ${message}` }],
-      details: { operation: "answer_milestone_subjective_uat", error: message },
       isError: true,
     };
   }
@@ -1857,13 +2160,14 @@ export async function executeReassessRoadmap(
       };
     }
     return {
-      content: [{ type: "text", text: `Reassessed roadmap for milestone ${result.milestoneId} after ${result.completedSliceId}` }],
+      content: [{ type: "text", text: `Reassessed roadmap for milestone ${result.milestoneId} after ${result.completedSliceId}${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}` }],
       details: {
         operation: "reassess_roadmap",
         milestoneId: result.milestoneId,
         completedSliceId: result.completedSliceId,
         assessmentPath: result.assessmentPath,
         roadmapPath: result.roadmapPath,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -1880,6 +2184,7 @@ export async function executeReassessRoadmap(
 export async function executeSaveGateResult(
   params: SaveGateResultParams,
   basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ToolExecutionResult> {
   const harnessAbort = blockIfHarnessAbortedUnit("save_gate_result", basePath);
   if (harnessAbort) return harnessAbort;
@@ -1914,14 +2219,29 @@ export async function executeSaveGateResult(
   }
 
   try {
-    saveGateResult({
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      gateId: params.gateId,
-      taskId: params.taskId ?? "",
-      verdict: params.verdict,
-      rationale: params.rationale,
-      findings: params.findings ?? "",
+    // The verdict and its gate_runs ledger row commit in one Domain Operation.
+    executeRecordDomainOperation({
+      operationType: "gate-result.save",
+      invocation,
+      payload: params,
+      eventType: "gate-result.saved",
+      entityType: "quality-gate",
+      projectionKeys: [`planning/${params.milestoneId}/${params.sliceId}`.toLowerCase()],
+      mutate: () => {
+        saveGateResult({
+          milestoneId: params.milestoneId,
+          sliceId: params.sliceId,
+          gateId: params.gateId,
+          taskId: params.taskId ?? "",
+          verdict: params.verdict,
+          rationale: params.rationale,
+          findings: params.findings ?? "",
+        });
+        return {
+          entityId: [params.milestoneId, params.sliceId, params.taskId, params.gateId].filter(Boolean).join("/"),
+          result: { gateId: params.gateId, verdict: params.verdict },
+        };
+      },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1944,9 +2264,9 @@ export async function executeSaveGateResult(
       { error: err instanceof Error ? err.message : String(err) },
     );
   }
-  invalidateStateCache();
+  projectionStale ||= (await renderStateProjection(basePath)).stale;
 
-  const projectionNotice = projectionStale ? ". The readable plan update is pending repair." : "";
+  const projectionNotice = projectionStale ? PLAN_PROJECTION_STALE_NOTICE : "";
   return {
     content: [{ type: "text", text: `Gate ${params.gateId} result saved: verdict=${params.verdict}${projectionNotice}` }],
     details: {
@@ -1966,9 +2286,42 @@ function errorResult(operation: string, message: string, error: string): ToolExe
   };
 }
 
+/** The result of one saved UAT run. A replay of the call returns it from the operation. */
+type UatResultSaved = {
+  text: string;
+  milestoneId: string;
+  sliceId: string;
+  verdict: string;
+  gateVerdict: string;
+  attempt: number;
+  attemptPath: string;
+  /** Content of the attempt record file. A replay writes the file from it. */
+  attemptRecord: string;
+  runId: string;
+  worktreeRoot: string;
+  /** Project source revision the result was saved for; null when it cannot be read. */
+  sourceRevision: string | null;
+  browserToolsPresented: boolean;
+  recommendedNextUnit: string | null;
+  manualValidationPath?: string;
+};
+
+function uatResultSaved({ text, attemptRecord: _attemptRecord, ...details }: UatResultSaved): ToolExecutionResult {
+  return {
+    content: [{ type: "text", text }],
+    details: { operation: "save_uat_result", ...details },
+  };
+}
+
+/**
+ * Save a UAT run. The ASSESSMENT artifact row, the assessment row, the
+ * aggregate UAT gate verdict and its gate_runs row commit in one
+ * uat-result.save Domain Operation; the files are written after it.
+ */
 export async function executeUatResultSave(
   params: UatResultSaveParams,
   basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ToolExecutionResult> {
   const unitGuard = blockIfWrongAutoUnit("run-uat", "save_uat_result");
   if (unitGuard) return unitGuard;
@@ -1979,65 +2332,117 @@ export async function executeUatResultSave(
   const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) return errorResult("save_uat_result", "GSD database is not available.", "db_unavailable");
 
-  const prepared = prepareUatRun(basePath, params);
-  if (!prepared.ok) {
-    return errorResult("save_uat_result", prepared.error.message, prepared.error.code);
-  }
-  const { run } = prepared;
+  const operation = {
+    operationType: "uat-result.save",
+    invocation,
+    payload: params,
+    eventType: "uat-result.saved",
+    entityType: "slice",
+    projectionKeys: [`planning/${params.milestoneId}/${params.sliceId}`.toLowerCase()],
+  };
 
   try {
-    const summary = await executeSummarySave(
+    // A replay returns the stored result. The attempt number of a run comes
+    // from state, so preparing the run again would describe another attempt.
+    if (readDomainOperationFence(invocation.idempotencyKey).replay) {
+      const stored = executeRecordDomainOperation<UatResultSaved>({
+        ...operation,
+        mutate: () => {
+          throw new Error("the stored UAT result of this call was not found");
+        },
+      });
+      await saveUatAttemptArtifact(basePath, stored.attemptPath, stored.attemptRecord);
+      return uatResultSaved(stored);
+    }
+
+    const prepared = prepareUatRun(basePath, params);
+    if (!prepared.ok) {
+      return errorResult("save_uat_result", prepared.error.message, prepared.error.code);
+    }
+    const { run } = prepared;
+    const savedText = `UAT result saved for ${run.params.milestoneId}/${run.params.sliceId}: ${run.params.verdict}`;
+    const saved: UatResultSaved = {
+      text: run.manualGuidance ? `${savedText}\n\nManual validation needed:\n${run.manualGuidance}` : savedText,
+      milestoneId: run.params.milestoneId,
+      sliceId: run.params.sliceId,
+      verdict: run.params.verdict,
+      gateVerdict: run.gateVerdict,
+      attempt: run.attempt,
+      attemptPath: uatAttemptArtifactPath(run),
+      attemptRecord: renderUatAttemptRecord(run),
+      runId: run.runId,
+      worktreeRoot: run.worktreeRoot,
+      sourceRevision: run.sourceRevision,
+      browserToolsPresented: run.browserToolsPresented,
+      recommendedNextUnit: run.params.verdict === "PASS" ? null : "reactive-execute",
+      ...(run.hasHuman
+        ? { manualValidationPath: run.worktreeRoot }
+        : {}),
+    };
+    const assessmentPath = relSliceFile(basePath, run.params.milestoneId, run.params.sliceId, "ASSESSMENT");
+    const artifactPath = assessmentPath.replace(/^\.gsd\//, "");
+
+    await saveArtifactToDbByScope(
+      scopeMilestone(createWorkspace(basePath), run.params.milestoneId),
       {
-        milestone_id: run.params.milestoneId,
-        slice_id: run.params.sliceId,
+        path: artifactPath,
         artifact_type: "ASSESSMENT",
         content: run.assessment,
+        milestone_id: run.params.milestoneId,
+        slice_id: run.params.sliceId,
       },
-      basePath,
+      (insertRow) => {
+        executeRecordDomainOperation({
+          ...operation,
+          mutate: () => {
+            insertRow();
+            insertAssessment({
+              path: assessmentPath,
+              milestoneId: run.params.milestoneId,
+              sliceId: run.params.sliceId,
+              taskId: null,
+              status: run.params.verdict.toLowerCase(),
+              scope: "run-uat",
+              fullContent: run.assessment,
+            });
+            upsertQualityGate({
+              milestoneId: run.params.milestoneId,
+              sliceId: run.params.sliceId,
+              gateId: "UAT",
+              scope: "slice",
+              taskId: "",
+              status: "complete",
+              verdict: run.gateVerdict,
+              rationale: run.rationale,
+              findings: run.assessment,
+              evaluatedAt: run.evaluatedAt,
+            });
+            insertGateRun({
+              traceId: `uat:${run.params.milestoneId}:${run.params.sliceId}`,
+              turnId: run.runId,
+              gateId: "UAT",
+              gateType: "uat",
+              unitType: "run-uat",
+              unitId: `run-uat:${run.params.milestoneId}/${run.params.sliceId}`,
+              milestoneId: run.params.milestoneId,
+              sliceId: run.params.sliceId,
+              outcome: run.gateOutcome,
+              failureClass: run.params.verdict === "PASS" ? "none" : "verification",
+              rationale: run.rationale,
+              findings: run.assessment,
+              attempt: run.attempt,
+              maxAttempts: run.attempt,
+              retryable: run.params.verdict !== "PASS",
+              evaluatedAt: run.evaluatedAt,
+            });
+            return { entityId: `${run.params.milestoneId}/${run.params.sliceId}`, result: saved };
+          },
+        });
+      },
     );
-    if (summary.isError) return summary;
-    const assessmentPath = relSliceFile(basePath, run.params.milestoneId, run.params.sliceId, "ASSESSMENT");
-    insertAssessment({
-      path: assessmentPath,
-      milestoneId: run.params.milestoneId,
-      sliceId: run.params.sliceId,
-      taskId: null,
-      status: run.params.verdict.toLowerCase(),
-      scope: "run-uat",
-      fullContent: run.assessment,
-    });
-    const attemptPath = await saveUatAttemptArtifact(basePath, run);
-    upsertQualityGate({
-      milestoneId: run.params.milestoneId,
-      sliceId: run.params.sliceId,
-      gateId: "UAT",
-      scope: "slice",
-      taskId: "",
-      status: "complete",
-      verdict: run.gateVerdict,
-      rationale: run.rationale,
-      findings: run.assessment,
-      evaluatedAt: run.evaluatedAt,
-    });
-    insertGateRun({
-      traceId: `uat:${run.params.milestoneId}:${run.params.sliceId}`,
-      turnId: run.runId,
-      gateId: "UAT",
-      gateType: "uat",
-      unitType: "run-uat",
-      unitId: `run-uat:${run.params.milestoneId}/${run.params.sliceId}`,
-      milestoneId: run.params.milestoneId,
-      sliceId: run.params.sliceId,
-      outcome: run.gateOutcome,
-      failureClass: run.params.verdict === "PASS" ? "none" : "verification",
-      rationale: run.rationale,
-      findings: run.assessment,
-      attempt: run.attempt,
-      maxAttempts: run.attempt,
-      retryable: run.params.verdict !== "PASS",
-      evaluatedAt: run.evaluatedAt,
-    });
-    invalidateStateCache();
+    await mirrorArtifactToActiveWorktreeProjection(basePath, artifactPath, run.assessment);
+    await saveUatAttemptArtifact(basePath, saved.attemptPath, saved.attemptRecord);
+    await renderStateProjection(basePath);
     if (run.hasHuman) {
       appendNotification(
         `UAT for ${run.params.milestoneId}/${run.params.sliceId} has NEEDS-HUMAN checks awaiting human validation`,
@@ -2046,29 +2451,7 @@ export async function executeUatResultSave(
         { kind: "uat-needs-human", scope: `${run.params.milestoneId}/${run.params.sliceId}` },
       );
     }
-    const savedText = `UAT result saved for ${run.params.milestoneId}/${run.params.sliceId}: ${run.params.verdict}`;
-    return {
-      content: [{
-        type: "text",
-        text: run.manualGuidance ? `${savedText}\n\nManual validation needed:\n${run.manualGuidance}` : savedText,
-      }],
-      details: {
-        operation: "save_uat_result",
-        milestoneId: run.params.milestoneId,
-        sliceId: run.params.sliceId,
-        verdict: run.params.verdict,
-        gateVerdict: run.gateVerdict,
-        attempt: run.attempt,
-        attemptPath,
-        runId: run.runId,
-        worktreeRoot: run.worktreeRoot,
-        browserToolsPresented: run.browserToolsPresented,
-        recommendedNextUnit: run.params.verdict === "PASS" ? null : "reactive-execute",
-        ...(run.hasHuman
-          ? { manualValidationPath: run.worktreeRoot }
-          : {}),
-      },
-    };
+    return uatResultSaved(saved);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logError("tool", `gsd_uat_result_save failed: ${msg}`, { tool: "gsd_uat_result_save", error: String(err) });
@@ -2106,7 +2489,34 @@ export async function executePlanMilestone(
         const holderIsReentrantPeer = !!holder
           && holder.host === hostname()
           && holder.pid === process.pid;
-        if (holder?.status === "active" && !isOurAutoLease) {
+        // A held lease whose holder process is verifiably dead must not wedge
+        // planning (#2375): reclaim regardless of the holder row's status —
+        // the status column is what wedged planning in the first place. Alive,
+        // remote, re-entrant, and own-lease holders keep the handling below.
+        if (!isOurAutoLease && !holderIsReentrantPeer
+          && reclaimDeadHolderMilestoneLease(params.milestoneId, heldLease, basePath)) {
+          if (isAutoActive()) {
+            // Mirror reclaimMissingMilestoneLease: an auto session must plan
+            // under its own claimed lease. The worker heartbeat owns refresh,
+            // and the lease must survive planning — nothing is released below.
+            if (!activeAutoWorkerId) {
+              // Fail closed on the HELD lease the bug created; the reclaim
+              // already freed it, and a follow-up planning call intentionally
+              // proceeds via the normal free-lease path — auto planning does
+              // no tool-level acquisition of a free lease (the orchestrator
+              // owns leasing at milestone entry), and write-time fencing
+              // still guards dispatches.
+              return milestoneLeaseReclaimedNoWorkerResult(params.milestoneId, heldLease.worker_id);
+            }
+            const claimed = claimMilestoneLease(activeAutoWorkerId, params.milestoneId);
+            if (!claimed.ok) {
+              return milestoneLeaseConflictResult(params.milestoneId, claimed.byWorker, claimed.expiresAt);
+            }
+            autoSession.currentMilestoneId = params.milestoneId;
+            autoSession.milestoneLeaseToken = claimed.token;
+          }
+          // One-shot: fall through to the normal acquisition block below.
+        } else if (holder?.status === "active" && !isOurAutoLease) {
           if (!holderIsReentrantPeer) {
             return milestoneLeaseConflictResult(params.milestoneId, heldLease.worker_id, heldLease.expires_at);
           }
@@ -2144,7 +2554,12 @@ export async function executePlanMilestone(
       const leaseRefreshMs = (milestoneLeaseTtlSeconds() / 2) * 1000;
       leaseRefreshTimer = setInterval(() => {
         if (acquiredToken !== null && workerId !== null) {
-          refreshMilestoneLease(workerId, params.milestoneId, acquiredToken);
+          try {
+            refreshMilestoneLease(workerId, params.milestoneId, acquiredToken);
+          } catch (err) {
+            // A timer callback must not throw: an uncaught error ends the process.
+            logWarning("tool", `plan_milestone lease refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       }, leaseRefreshMs);
     }
@@ -2158,11 +2573,16 @@ export async function executePlanMilestone(
       };
     }
     return {
-      content: [{ type: "text", text: `Planned milestone ${result.milestoneId}` }],
+      content: [{
+        type: "text",
+        text: `Planned milestone ${result.milestoneId}${result.titleNormalized ? " (title normalized: em/en dashes and slashes were rewritten; the persisted title is authoritative)" : ""}${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}`,
+      }],
       details: {
         operation: "plan_milestone",
         milestoneId: result.milestoneId,
         roadmapPath: result.roadmapPath,
+        ...(result.titleNormalized ? { titleNormalized: true } : {}),
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -2209,14 +2629,18 @@ export async function executePlanSlice(
       isError: true,
       };
     }
+    const zeroTaskWarning = !result.stale && result.planPath === "" && result.taskPlanPaths.length === 0
+      ? "\n\nWarning: no non-skipped tasks remain for this slice. Pass tasks to gsd_plan_slice or call gsd_plan_task to persist them."
+      : "";
     return {
-      content: [{ type: "text", text: `Planned slice ${result.sliceId} (${result.milestoneId})` }],
+      content: [{ type: "text", text: `Planned slice ${result.sliceId} (${result.milestoneId})${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}${zeroTaskWarning}` }],
       details: {
         operation: "plan_slice",
         milestoneId: result.milestoneId,
         sliceId: result.sliceId,
         planPath: result.planPath,
         taskPlanPaths: result.taskPlanPaths,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -2254,13 +2678,14 @@ export async function executeReplanTask(
       };
     }
     return {
-      content: [{ type: "text", text: `Replanned task ${result.taskId} (${result.sliceId}/${result.milestoneId})` }],
+      content: [{ type: "text", text: `Replanned task ${result.taskId} (${result.sliceId}/${result.milestoneId})${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}` }],
       details: {
         operation: "replan_task",
         milestoneId: result.milestoneId,
         sliceId: result.sliceId,
         taskId: result.taskId,
         taskPlanPath: result.taskPlanPath,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -2274,9 +2699,57 @@ export async function executeReplanTask(
   }
 }
 
+/**
+ * Save a Work Checkpoint row for a milestone, slice or task, then render its
+ * CONTINUE file. The row is the resume state; a failed render is retried by
+ * the Projection Work that the operation enqueued.
+ */
+export async function executeCheckpointSave(
+  params: SaveWorkCheckpointParams,
+  basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
+): Promise<ToolExecutionResult> {
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) {
+    return {
+      content: [{ type: "text", text: "Error: GSD database is not available. Cannot save the checkpoint." }],
+      details: { operation: "checkpoint_save", error: "db_unavailable" },
+      isError: true,
+    };
+  }
+  try {
+    const saved = saveWorkCheckpoint(params, invocation);
+    const entity = [saved.milestoneId, saved.sliceId, saved.taskId].filter(Boolean).join("/");
+    let stale = false;
+    try {
+      await renderWorkCheckpoint(basePath, saved.milestoneId, saved.sliceId ?? undefined);
+    } catch (err) {
+      stale = true;
+      logWarning("tool", `gsd_checkpoint_save render failed: ${(err as Error).message}`);
+    }
+    return {
+      content: [{
+        type: "text",
+        text: `Saved ${params.kind} checkpoint ${saved.sequence} for ${entity}.` +
+          (stale ? " CONTINUE.md is not rendered yet; the database row is the resume state." : ""),
+      }],
+      details: { operation: "checkpoint_save", ...saved, ...(stale ? { stale: true } : {}) },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `checkpoint_save tool failed: ${msg}`, { tool: "gsd_checkpoint_save", error: String(err) });
+    return {
+      content: [{ type: "text", text: `Error saving checkpoint: ${msg}` }],
+      details: { operation: "checkpoint_save", error: msg },
+      isError: true,
+    };
+  }
+}
+
 export async function executeReworkBriefSave(
   params: ReworkBriefSaveExecutorParams,
   basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ToolExecutionResult> {
   const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
@@ -2287,7 +2760,7 @@ export async function executeReworkBriefSave(
     };
   }
   try {
-    const result = await handleReworkBriefSave(params);
+    const result = await handleReworkBriefSave(params, invocation);
     if ("error" in result) {
       return {
         content: [{ type: "text", text: `Error saving rework brief: ${result.error}` }],
@@ -2340,13 +2813,14 @@ export async function executeReplanSlice(
       };
     }
     return {
-      content: [{ type: "text", text: `Replanned slice ${result.sliceId} (${result.milestoneId})` }],
+      content: [{ type: "text", text: `Replanned slice ${result.sliceId} (${result.milestoneId})${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}` }],
       details: {
         operation: "replan_slice",
         milestoneId: result.milestoneId,
         sliceId: result.sliceId,
         replanPath: result.replanPath,
         planPath: result.planPath,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -2404,8 +2878,8 @@ export async function executeMilestoneStatus(
     }
 
     const observedRead = readTransaction(() => {
-      const milestone = getMilestone(params.milestoneId);
-      if (!milestone) {
+      const status = readMilestoneStatus(params.milestoneId);
+      if (!status) {
         const response = {
           content: [{ type: "text" as const, text: `Milestone ${params.milestoneId} not found in database.` }],
           details: { operation: "milestone_status", milestoneId: params.milestoneId, found: false },
@@ -2417,22 +2891,15 @@ export async function executeMilestoneStatus(
         };
       }
 
-      const sliceStatuses = getSliceStatusSummary(params.milestoneId);
-      const slices = sliceStatuses.map((s) => ({
-        id: s.id,
-        status: s.status,
-        taskCounts: getSliceTaskCounts(params.milestoneId, s.id),
-      }));
-
       const result = {
-        milestoneId: milestone.id,
-        title: milestone.title,
-        status: milestone.status,
-        createdAt: milestone.created_at,
-        completedAt: milestone.completed_at,
-        dependsOn: milestone.depends_on ?? [],
-        sliceCount: slices.length,
-        slices,
+        milestoneId: status.milestone.id,
+        title: status.milestone.title,
+        status: status.milestone.status,
+        createdAt: status.milestone.created_at,
+        completedAt: status.milestone.completed_at,
+        dependsOn: status.milestone.depends_on ?? [],
+        sliceCount: status.slices.length,
+        slices: status.slices,
       };
 
       milestoneStatusReadInterleaveForTest?.();
@@ -2451,6 +2918,8 @@ export async function executeMilestoneStatus(
       observationContext,
     );
     emitLifecycleShadowObservation(basePath, observation);
+    // A read whose revision query failed has no revision to fence the next write with.
+    if (observedRead.shadowSnapshot.queryError === undefined) noteSessionRead(observedRead.shadowSnapshot.projectRevision);
     return observedRead.response;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2474,4 +2943,101 @@ export async function executeMilestoneStatus(
       isError: true,
     };
   }
+}
+
+/** The verdict a post-unit hook gate records for its trigger unit (P18d). */
+export interface HookVerdictSaveParams {
+  hookName: string;
+  unitId: string;
+  verdict: string;
+  rationale: string;
+}
+
+/** The verdict vocabulary of a post-unit hook gate. */
+const HOOK_VERDICT_SAVE_VALUES = ["pass", "advisory", "needs-rework", "needs-remediation", "needs-attention"] as const;
+
+/**
+ * Save the verdict of a post-unit hook gate. The verdict is a database row
+ * (owner default: the gate outcome arrives as a tool call); the hook's
+ * artifact file is a render for the operator and decides nothing. The rule
+ * registry reads the row through db/hook-verdicts.ts.
+ */
+export async function executeHookVerdictSave(
+  params: HookVerdictSaveParams,
+  basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
+): Promise<ToolExecutionResult> {
+  const harnessAbort = blockIfHarnessAbortedUnit("hook_verdict_save", basePath);
+  if (harnessAbort) return harnessAbort;
+
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) return errorResult("hook_verdict_save", "GSD database is not available.", "db_unavailable");
+
+  const configuredHook = resolvePostUnitHooks(basePath).find(hook => hook.name === params.hookName);
+  if (!configuredHook) {
+    return errorResult(
+      "hook_verdict_save",
+      `Unknown hook "${params.hookName}". It must be a configured post_unit_hooks entry.`,
+      "unknown_hook",
+    );
+  }
+  if (!HOOK_VERDICT_SAVE_VALUES.includes(params.verdict as typeof HOOK_VERDICT_SAVE_VALUES[number])) {
+    return errorResult(
+      "hook_verdict_save",
+      `Invalid verdict "${params.verdict}". Must be one of: ${HOOK_VERDICT_SAVE_VALUES.join(", ")}`,
+      "invalid_verdict",
+    );
+  }
+  const rationale = params.rationale?.trim();
+  if (!rationale) {
+    return errorResult("hook_verdict_save", "A rationale is required.", "missing_rationale");
+  }
+  const { milestone, slice } = parseUnitId(params.unitId);
+  if (!milestone) {
+    return errorResult(
+      "hook_verdict_save",
+      `Invalid unitId "${params.unitId}". Expected a GSD unit id such as M001/S01/T01.`,
+      "invalid_unit_id",
+    );
+  }
+
+  try {
+    executeRecordDomainOperation({
+      operationType: "hook-verdict.save",
+      invocation,
+      payload: { ...params, rationale },
+      eventType: "hook-verdict.saved",
+      entityType: "hook-gate",
+      projectionKeys: [slice ? `planning/${milestone}/${slice}`.toLowerCase() : `planning/${milestone}`.toLowerCase()],
+      mutate: () => {
+        upsertHookGateVerdict({
+          hookName: params.hookName,
+          unitId: params.unitId,
+          milestoneId: milestone,
+          sliceId: slice ?? null,
+          taskId: parseUnitId(params.unitId).task ?? null,
+          verdict: params.verdict,
+          rationale,
+        });
+        return {
+          entityId: `${params.hookName}/${params.unitId}`,
+          result: { hookName: params.hookName, unitId: params.unitId, verdict: params.verdict },
+        };
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `gsd_hook_verdict_save database write failed: ${msg}`, { tool: "gsd_hook_verdict_save", error: String(err) });
+    return errorResult("hook_verdict_save", `Error saving hook verdict: ${msg}`, msg);
+  }
+
+  return {
+    content: [{ type: "text", text: `Hook ${params.hookName} verdict saved for ${params.unitId}: verdict=${params.verdict}` }],
+    details: {
+      operation: "hook_verdict_save",
+      hookName: params.hookName,
+      unitId: params.unitId,
+      verdict: params.verdict,
+    },
+  };
 }

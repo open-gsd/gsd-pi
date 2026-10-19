@@ -17,7 +17,7 @@ import { mergeMilestoneToMain } from "../auto-worktree-merge.ts";
 import { teardownAutoWorktree } from "../auto-worktree-teardown.ts";
 import { _resetServiceCache } from "../worktree.ts";
 import { _clearGsdRootCache } from "../paths.ts";
-import { seedMergeReadyMilestone } from "./merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 
 function run(command: string, cwd: string): string {
   return execSync(command, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" }).trim();
@@ -89,8 +89,6 @@ test("mergeMilestoneToMain restores cwd to project root", () => {
     run("git add .", tempDir);
     run("git commit -m \"add milestone\"", tempDir);
 
-    seedMergeReadyMilestone(tempDir, "M050");
-
     // Create auto-worktree (enters the worktree dir)
     const wtPath = createAutoWorktree(tempDir, "M050");
     assert.equal(process.cwd(), wtPath, "cwd is in worktree after create");
@@ -99,6 +97,10 @@ test("mergeMilestoneToMain restores cwd to project root", () => {
     writeFileSync(join(wtPath, "feature.txt"), "new feature\n");
     run("git add .", wtPath);
     run("git commit -m \"feat: add feature\"", wtPath);
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the worktree.
+    seedCanonicalMergeReadyMilestone(tempDir, "M050", { sourceTree: wtPath });
 
     // Merge back — should restore cwd to tempDir
     mergeMilestoneToMain(tempDir, "M050", roadmap);

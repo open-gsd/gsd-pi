@@ -26,6 +26,7 @@ Pi has four layers of customization, each serving a different purpose:
 TypeScript modules with full runtime access. They can hook into every event, register tools the LLM can call, add commands, render custom UI, override built-in behavior, and register model providers. Extensions are the most powerful customization mechanism.
 
 **Placement:**
+
 - `~/.gsd/agent/extensions/` (global)
 - `.gsd/extensions/` (project-local)
 
@@ -36,18 +37,21 @@ See the companion doc **Pi-Extensions-Complete-Guide.md** for the full 50KB refe
 On-demand capability packages following the [Agent Skills standard](https://agentskills.io). A skill is a directory with a `SKILL.md` file containing instructions the agent follows. Skills are progressive: only their names and descriptions are in the system prompt. The agent reads the full SKILL.md only when the task matches.
 
 **How skills work:**
+
 1. At startup, pi scans for skills and extracts names + descriptions
 2. Descriptions are listed in the system prompt
 3. When a task matches, the agent uses `read` to load the full SKILL.md
 4. The agent follows the instructions, using relative paths for scripts/assets
 
 **Invocation:**
+
 ```
 /skill:brave-search              # Explicit invocation
 /skill:pdf-tools extract file.pdf  # With arguments
 ```
 
 **Placement (catalog load order — first path wins on name collision):**
+
 - `.gsd/skills/` and `.agents/skills/` (project — highest precedence in the loader)
 - `~/.gsd/agent/skills/` (GSD bundled defaults)
 - `~/.agents/skills/` (global ecosystem)
@@ -68,6 +72,7 @@ from the installed `@opengsd/gsd-browser` package, not from Pi's bundled
 `src/resources/skills/` tree, and startup refreshes its referenced support files.
 
 **Skill structure:**
+
 ```
 my-skill/
 ├── SKILL.md              # Required: frontmatter + instructions
@@ -99,6 +104,7 @@ Focus area: $1
 Usage: `/review "error handling"` → expands with `$1` = "error handling"
 
 **Placement:**
+
 - `~/.gsd/agent/prompts/` (global)
 - `.gsd/prompts/` (project-local)
 
@@ -109,6 +115,7 @@ JSON files defining the color palette for the TUI. Hot-reload: edit the file and
 **Built-in:** `dark`, `light`
 
 **Placement:**
+
 - `~/.gsd/agent/themes/` (global)
 - `.gsd/themes/` (project-local)
 

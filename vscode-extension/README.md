@@ -76,6 +76,7 @@ Agent-modified files appear in a dedicated **"GSD Agent"** section of the Source
 ### Line-Level Decorations
 
 When the agent modifies a file, you'll see:
+
 - **Green background** on newly added lines
 - **Yellow background** on modified lines
 - **Left border gutter indicator** on all agent-touched lines

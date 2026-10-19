@@ -100,6 +100,7 @@ plan (that de-dup is noted in the audit report as separate tech-debt).
 ## Scope
 
 **In scope**:
+
 - `src/resources/extensions/gsd/auto.ts` (only `forceStopAutoRemote`)
 - `packages/rpc-client/src/rpc-client.ts` (only `stop()`)
 - `packages/gsd-agent-modes/src/modes/rpc/rpc-client.ts` (only `stop()`)
@@ -107,6 +108,7 @@ plan (that de-dup is noted in the audit report as separate tech-debt).
   (create or extend an existing auto/crash-recovery test)
 
 **Out of scope** (do NOT touch):
+
 - The `shutdown()` methods (already 5000ms) — leave them.
 - `stopAutoRemote` (the cooperative SIGTERM-only path) — correct as-is.
 - Merging the two duplicate rpc-client files — separate effort.
@@ -208,6 +210,7 @@ existing `stop()` tests — run them:
 ## STOP conditions
 
 Stop and report if:
+
 - `forceStopAutoRemote` or either `stop()` no longer matches the excerpts (drifted).
 - `SharedArrayBuffer`/`Atomics` is unavailable or disallowed in the runtime (it
   is standard on Node 22, but if a lint/policy forbids it, use the async sleep

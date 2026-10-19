@@ -676,8 +676,9 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
 
   // ─── Deep planning mode (project-level) units ────────────────────────
   // workflow-preferences: default-writing stage that records
-  // commit_policy / branch_model in PREFERENCES.md, defaults
-  // uat_dispatch/executor_class, and records the research decision. No project artifacts needed.
+  // uat_dispatch in PREFERENCES.md (#2832 — only validator-known keys).
+  // The research decision is a database fact, not a preference key.
+  // No project artifacts needed.
   "workflow-preferences": {
     skills: { mode: "none" },
     knowledge: "none",
@@ -727,23 +728,6 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
       onDemand: [],
     },
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
-  },
-  // research-decision: lightweight one-question yes/no unit. Writes a
-  // marker JSON; no project artifacts needed.
-  "research-decision": {
-    skills: { mode: "none" },
-    knowledge: "none",
-    memory: "none",
-    codebaseMap: false,
-    preferences: "none",
-    contextMode: "none",
-    tools: TOOLS_PLANNING,
-    artifacts: {
-      inline: [],
-      excerpt: [],
-      onDemand: [],
-    },
-    maxSystemPromptChars: COMMON_BUDGET_SMALL,
   },
   // research-project: orchestrator that fans out 4 parallel scout subagents
   // for project research (stack, features, architecture, pitfalls). Needs the

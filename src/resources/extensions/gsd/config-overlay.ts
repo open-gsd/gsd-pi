@@ -7,6 +7,7 @@
  * Opened via `/gsd show-config` or `/gsd config`.
  */
 
+import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import type { Theme } from "@gsd/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth } from "@gsd/pi-tui";
 
@@ -21,7 +22,11 @@ import {
   resolveEffectiveProfile,
   resolveModelWithFallbacksForUnit,
   resolveAutoSupervisorConfig,
+  modelIdsForProfileResolution,
+  resolveProfileAnchorProvider,
+  resolveDisabledModelProvidersFromPreferences,
 } from "./preferences.js";
+import { fallbackModelId } from "./preferences-types.js";
 
 const DEFAULT_WIDGET_MODE = "small";
 
@@ -36,6 +41,21 @@ export interface CollectConfigOptions {
   basePath?: string;
   availableModelIds?: string[];
   preferredModelId?: string;
+}
+
+/** Build overlay/text config options from the active session context. */
+export function buildCollectConfigOptions(
+  ctx: Pick<ExtensionCommandContext, "modelRegistry" | "model">,
+  basePath?: string,
+): CollectConfigOptions {
+  const anchorProvider = resolveProfileAnchorProvider(ctx.model?.provider);
+  const disabledProviders = resolveDisabledModelProvidersFromPreferences();
+  const availableModelIds = modelIdsForProfileResolution(ctx.modelRegistry, anchorProvider, disabledProviders);
+  return {
+    ...(basePath ? { basePath } : {}),
+    ...(availableModelIds && availableModelIds.length > 0 ? { availableModelIds } : {}),
+    ...(ctx.model ? { preferredModelId: `${ctx.model.provider}/${ctx.model.id}` } : {}),
+  };
 }
 
 function collectConfigSections(options?: CollectConfigOptions): ConfigSection[] {
@@ -87,7 +107,7 @@ function collectConfigSections(options?: CollectConfigOptions): ConfigSection[] 
     if (resolved) {
       let val = resolved.primary;
       if (resolved.fallbacks.length > 0) {
-        val += ` \u2192 ${resolved.fallbacks.join(" \u2192 ")}`;
+        val += ` \u2192 ${resolved.fallbacks.map(fallbackModelId).join(" \u2192 ")}`;
       }
       modelRows.push({ label, value: val });
     } else {
@@ -153,7 +173,7 @@ function collectConfigSections(options?: CollectConfigOptions): ConfigSection[] 
     if (sup.model) {
       let modelVal = sup.model;
       if (sup.modelFallbacks && sup.modelFallbacks.length > 0) {
-        modelVal += ` \u2192 ${sup.modelFallbacks.join(" \u2192 ")}`;
+        modelVal += ` \u2192 ${sup.modelFallbacks.map(fallbackModelId).join(" \u2192 ")}`;
       }
       supRows.push({ label: "Model", value: modelVal });
     }

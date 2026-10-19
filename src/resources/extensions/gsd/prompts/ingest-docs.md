@@ -20,7 +20,7 @@ You are running the GSD **ingest-docs** workflow — bootstrap or merge a `.gsd/
 
 4. **Resolve.** In `--resolve auto`, apply safe ingests and flag conflicts; otherwise confirm each.
 
-5. **Bootstrap/merge.** For `--mode new`, run `/gsd init` then write the ingested artifacts. For `--mode merge`, append into the existing `.gsd/` artifacts. Record ingested decisions durably via `/gsd knowledge rule`.
+5. **Bootstrap/merge.** For `--mode new`, run `/gsd init` first. In both modes save the ingested content through the GSD tools: project context with `gsd_summary_save` (`artifact_type: "PROJECT"`), requirements with `gsd_requirement_save`, decisions with `gsd_decision_save`. Do not write or append `.gsd/` files directly; the tools render them.
 
 ## Success criteria
 

@@ -3,8 +3,9 @@
 <!-- Maintained by the $gsd-path-build orchestrator. Human-readable summary;
      task-file frontmatter is the source of truth on any disagreement. -->
 
-Current wave: 3 of 4 — 24/24 DONE, RELEASED as v1.13.0 on 2026-08-08. Wave 4 unblocks no earlier than 2026-10-07 (ADR-046: +60d AND +2 stable releases).
-Updated: 2026-08-05
+Current wave: 4 of 4 — DONE 2026-08-12 (T020–T023). Milestone closed. Waves 1–3 released as v1.13.0 on 2026-08-08; the owner waived the remaining wave-4 calendar days on 2026-08-12.
+The ADR-046 program is not finished. Status and open Removal Gates: docs/dev/state-db-cutover-milestone-decision.md.
+Updated: 2026-10-02
 
 ## Waves
 
@@ -13,7 +14,7 @@ Updated: 2026-08-05
 | 1 | risk burn-down | 4 | 4/4 | pass, 1 cycle (wave-1.cycle1.md) |
 | 2 | walking skeleton (+T024/T025/T026/T027 repairs) | 9 | 9/9 | pass, 2 cycles (wave-2.cycle2.md) |
 | 3 | consumers, evidence, command, docs (+T028, +T029-T041 fixes) | 24 | 24/24 | c1(4) c2(3) c3(1) c4(3) blocked; GATE PASS (wave-3.gate.md) |
-| 4 | timebox-gated deletions (separable) and closeout | 4 | 0/4 | — |
+| 4 | timebox-gated deletions (separable) and closeout | 4 | 4/4 | — |
 
 ## In flight
 

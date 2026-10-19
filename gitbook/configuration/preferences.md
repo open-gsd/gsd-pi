@@ -18,6 +18,7 @@ GSD preferences live in YAML frontmatter markdown files. You can configure them 
 | Project | `.gsd/PREFERENCES.md` | Current project only |
 
 **How they merge:**
+
 - **Scalar fields** (`budget_ceiling`, `token_profile`): project wins if defined
 - **Array fields** (`always_use_skills`, etc.): concatenated (global first, then project)
 - **Object fields** (`models`, `git`, `auto_supervisor`): shallow-merged, project overrides per-key
@@ -86,7 +87,7 @@ models:
     fallbacks:
       - openrouter/z-ai/glm-5
   execution: claude-sonnet-4-6
-  execution_simple: claude-haiku-4-5
+  execution_simple: claude-haiku-5-5
   completion: claude-sonnet-4-6
   subagent: claude-sonnet-4-6
 ```
@@ -108,7 +109,7 @@ planning_depth: deep
 | `light` | Default. Uses the normal milestone discussion flow. |
 | `deep` | Runs workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, a research decision, and optional project research before milestone planning. |
 
-Enable deep mode with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by adding the setting to `.gsd/PREFERENCES.md`. The research decision is recorded in `.gsd/runtime/research-decision.json`; choosing research writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
+Enable deep mode with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by adding the setting to `.gsd/PREFERENCES.md`. The research decision is recorded in the database; ask for research during the project or requirements discussion, and no recorded decision means `skip`. Choosing research writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
 
 ### `planning_subagents`
 
@@ -178,7 +179,11 @@ verification_commands:
 verification_auto_fix: true       # auto-retry runnable failures (default)
 verification_max_retries: 2       # max attempts (default: 2)
 verification_timeout_ms: 120000   # host verification and verification-oriented gsd_exec default (default: 120000)
+verification_source_exclude_paths: # git pathspecs skipped by source-revision hashing (default: [])
+  - artifacts/**
 ```
+
+`verification_source_exclude_paths` excludes git pathspecs from the verification source-revision snapshot. Each entry becomes a `:(exclude)` pathspec on the `git ls-files` passes, in addition to the built-in `.gsd/**` and `receipts/**` exclusions. On large repositories this keeps dispatches fast by skipping heavy non-evidence trees (historical test artifacts, committed fixtures) that would otherwise be re-hashed on every dispatch. Because changes under excluded paths no longer invalidate recorded verification evidence, exclude only trees verification evidence never depends on.
 
 `verification_timeout_ms` also supplies the default timeout for verification-oriented `gsd_exec` workloads such as builds, tests, linting, type checks, and verification commands. An explicit `context_mode.exec_timeout_ms` takes precedence; unrelated `gsd_exec` workloads keep the sandbox's 30-second default when `context_mode.exec_timeout_ms` is unset.
 
@@ -245,7 +250,7 @@ phases:
 
 ### `reactive_execution`
 
-Automatic parallel task dispatch inside a slice. Reactive execution is enabled by default and only dispatches when task-plan IO annotations produce a non-ambiguous graph with enough ready, non-conflicting tasks.
+Automatic parallel task dispatch inside a slice. Reactive execution is enabled by default and only dispatches when the planned inputs and expected output on the task rows produce a non-ambiguous graph with enough ready, non-conflicting tasks. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch.
 
 ```yaml
 reactive_execution:
@@ -282,7 +287,6 @@ git:
   auto_push: false
   merge_strategy: squash
   isolation: none
-  commit_docs: true
   auto_pr: false
 ```
 
@@ -334,7 +338,7 @@ custom_instructions:
   - "Prefer functional patterns over classes"
 ```
 
-For project-specific durable guidance, use `.gsd/KNOWLEDGE.md` instead. Rules are read from the file; patterns and lessons are persisted to the `memories` table and projected back into `KNOWLEDGE.md` on the next session start.
+For project-specific durable guidance, use `.gsd/KNOWLEDGE.md` instead. Rules, patterns and lessons are persisted to the `memories` table by `/gsd knowledge` or `capture_thought`, and `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
 ### `context_pause_threshold`
 

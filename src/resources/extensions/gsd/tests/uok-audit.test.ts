@@ -25,6 +25,7 @@ import {
   emitUokAuditEvent,
 } from "../uok/audit.ts";
 import { closeDatabase, openDatabase, _getAdapter } from "../gsd-db.ts";
+import { _resetLogs, drainLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
 import {
   bumpTurnGeneration,
   runWithTurnGeneration,
@@ -99,21 +100,25 @@ test("buildAuditEnvelope mints a unique eventId per call", () => {
   assert.notEqual(a.eventId, b.eventId, "each call must mint a fresh eventId");
 });
 
-test("emitUokAuditEvent writes the jsonl projection when DB is unavailable", () => {
+test("emitUokAuditEvent logs an error and writes no jsonl when the DB is unavailable", (t) => {
   const basePath = makeBasePath();
-  try {
-    // No openDatabase() call → isDbAvailable() is false → DB branch skipped,
-    // envelope lands only in the jsonl projection.
-    emitUokAuditEvent(basePath, validEnvelope({ traceId: "trace-jsonl-only" }));
-
-    const events = readAuditEvents(basePath);
-    assert.equal(events.length, 1);
-    assert.equal(events[0].traceId, "trace-jsonl-only");
-    assert.equal(events[0].category, "orchestration");
-    assert.equal(events[0].type, "audit-sink-test");
-  } finally {
+  const previousStderr = setStderrLoggingEnabled(false);
+  t.after(() => {
+    setStderrLoggingEnabled(previousStderr);
+    _resetLogs();
     rmSync(basePath, { recursive: true, force: true });
-  }
+  });
+  closeDatabase();
+  _resetLogs();
+
+  emitUokAuditEvent(basePath, validEnvelope({ traceId: "trace-jsonl-only" }));
+
+  assert.equal(existsSync(auditEventsPath(basePath)), false, "no file-only audit event may be written");
+  assert.ok(
+    drainLogs().some((entry) =>
+      entry.severity === "error" && entry.message.includes("not recorded: workflow DB is unavailable")),
+    "the refused audit event is logged as an error",
+  );
 });
 
 test("emitUokAuditEvent drops the write when the turn is stale", () => {
@@ -181,7 +186,11 @@ test("emitUokAuditEvent re-throws when the authoritative DB write fails", (t) =>
 
 test("emitUokAuditEvent swallows jsonl projection failures (best-effort)", (t) => {
   const basePath = makeBasePath();
-  t.after(() => rmSync(basePath, { recursive: true, force: true }));
+  assert.equal(openDatabase(":memory:"), true, "DB must open for this scenario");
+  t.after(() => {
+    closeDatabase();
+    rmSync(basePath, { recursive: true, force: true });
+  });
 
   // Point the envelope at a path whose parent directory cannot be created:
   // gsdRoot() resolves under basePath, so a basePath whose .gsd is a regular
@@ -190,8 +199,8 @@ test("emitUokAuditEvent swallows jsonl projection failures (best-effort)", (t) =
   rmSync(join(basePath, ".gsd"), { recursive: true, force: true });
   writeFileSync(join(basePath, ".gsd"), "not-a-directory");
 
-  // With no DB open and an unwritable projection path, emit must NOT throw —
-  // audit writes are explicitly best-effort and must never break orchestration.
+  // With the DB row written and an unwritable projection path, emit must NOT
+  // throw — the projection write is best-effort.
   assert.doesNotThrow(() => {
     emitUokAuditEvent(basePath, validEnvelope({ traceId: "trace-swallow" }));
   }, "jsonl projection failure must be swallowed, not propagated");

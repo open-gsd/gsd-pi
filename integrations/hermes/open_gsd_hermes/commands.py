@@ -297,7 +297,13 @@ class GsdCommandRouter:
 
         # Spawn the supervised subprocess; create_milestone returns a local
         # session id immediately and continues the stream reader in the
-        # background.
+        # background. The delivery target is captured here on the bound
+        # command thread; the reader thread has no session binding.
+        notify_target = (
+            self._notifications.resolve_target()
+            if self._notifications is not None
+            else None
+        )
         try:
             session_id = self._client.create_milestone(
                 project_dir,
@@ -305,6 +311,7 @@ class GsdCommandRouter:
                 context_file=context_file,
                 notifications=self._notifications,
                 on_terminal=_on_milestone_terminal,
+                notify_target=notify_target,
             )
         except ValueError:
             return "Usage: `/gsd new-milestone <spec>` (or `--file <path>`)"

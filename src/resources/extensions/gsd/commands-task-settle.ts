@@ -1,25 +1,36 @@
 // Project/App: gsd-pi
-// File Purpose: /gsd task settle — operator CLI surface for gsd_task_settle (#1749).
+// File Purpose: /gsd task settle — operator CLI surface for gsd_task_settle (#1749),
+// including the `blocker-accepted` closeout disposition (#2202).
 
 import { randomUUID } from "node:crypto";
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
-import { applyTaskSettle, planTaskSettle, type TaskSettleTask } from "./task-settle.js";
+import {
+  applyBlockerAcceptedDisposition,
+  applyTaskSettle,
+  planBlockerAcceptedDisposition,
+  planTaskSettle,
+  type TaskSettleTask,
+} from "./task-settle.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 function parseTaskSettleArgs(args: string): {
   task: TaskSettleTask;
   reason: string;
   apply: boolean;
   reconcileLifecycle: boolean;
+  blockerAccepted: boolean;
 } | null {
   const apply = /(?:^|\s)--apply(?:\s|$)/.test(args);
   const reconcileLifecycle = /(?:^|\s)--reconcile-lifecycle(?:\s|$)/.test(args);
+  const blockerAccepted = /(?:^|\s)--blocker-accepted(?:\s|$)/.test(args);
   const reasonMatch = args.match(/--reason\s+"([^"]+)"|--reason\s+'([^']+)'|--reason\s+(\S+)/);
   const positional = args
     .replace(/--apply/g, "")
     .replace(/--reconcile-lifecycle/g, "")
+    .replace(/--blocker-accepted/g, "")
     .replace(/--reason\s+"[^"]*"|\s--reason\s+'[^']*'|--reason\s+\S+/g, "")
     .trim()
     .split(/\s+/)
@@ -33,6 +44,7 @@ function parseTaskSettleArgs(args: string): {
     reason,
     apply,
     reconcileLifecycle,
+    blockerAccepted,
   };
 }
 
@@ -54,9 +66,18 @@ export async function handleTaskSettle(
   const parsed = parseTaskSettleArgs(args);
   if (!parsed) {
     ctx.ui.notify(
-      'Usage: /gsd task settle <M001/S01/T01> --reason "why this Attempt is being settled" [--apply] [--reconcile-lifecycle]\n' +
-      "Dry-run by default: prints the exact Attempt and optional lifecycle rows it would change. --apply performs the settle.",
+      'Usage: /gsd task settle <M001/S01/T01> --reason "why" [--apply] [--reconcile-lifecycle] [--blocker-accepted]\n' +
+      "Dry-run by default: prints the exact Attempt, lifecycle, or blocker-accepted rows it would change. " +
+      "--apply performs the settle. --blocker-accepted closes a Task whose latest Attempt failed as " +
+      "blocker-discovered at the route stage (no rerun; then replan the slice).",
       "warning",
+    );
+    return;
+  }
+  if (parsed.blockerAccepted && parsed.reconcileLifecycle) {
+    ctx.ui.notify(
+      "gsd task settle: --blocker-accepted and --reconcile-lifecycle are mutually exclusive.",
+      "error",
     );
     return;
   }
@@ -66,10 +87,52 @@ export async function handleTaskSettle(
   }
   const unit = `${parsed.task.milestoneId}/${parsed.task.sliceId}/${parsed.task.taskId}`;
   try {
-    const settleOptions = { reconcileLifecycle: parsed.reconcileLifecycle };
+    if (parsed.blockerAccepted) {
+      if (!parsed.apply) {
+        const plan = planBlockerAcceptedDisposition(parsed.task, parsed.reason);
+        if (plan.alreadyAccepted) {
+          ctx.ui.notify(`gsd task settle (dry run): ${unit} is already closed as blocker-accepted — nothing to do.`, "info");
+          return;
+        }
+        const row = plan.rows[0];
+        ctx.ui.notify(
+          `gsd task settle (dry run) — blocker-accepted disposition, no changes made:\n` +
+          `  lifecycle ${row.lifecycleFrom} → blocker-accepted (legacy tasks.status ${row.currentStatus} → blocker-accepted)\n` +
+          `  attempt ${row.attemptId} Result ${row.resultId} preserved; route Kernel head consumed with a closeout decision\n` +
+          `  provenance: ${row.blockerSummary || "(failed Result carries no summary)"}` +
+          `${row.supersededRecoveryActionId ? `; supersedes Recovery Action ${row.supersededRecoveryActionId}` : ""}\n` +
+          `  next: gsd_replan_slice with blockerTaskId ${parsed.task.taskId}\n` +
+          "Re-run with --apply to accept the blocker.",
+          "info",
+        );
+        return;
+      }
+      const result = applyBlockerAcceptedDisposition({
+        invocation: cliInvocation(),
+        task: parsed.task,
+        reason: parsed.reason,
+      });
+      if (result.alreadyAccepted) {
+        ctx.ui.notify(`gsd task settle: ${unit} is already closed as blocker-accepted — nothing to do.`, "info");
+        return;
+      }
+      await renderStateProjection(basePath);
+      ctx.ui.notify(
+        `Accepted blocker for ${unit}: Task closed as blocker-accepted; Attempt ${result.attemptId} and its ` +
+        `failed Result remain history and the route head is consumed (no re-route). ` +
+        `Replan with gsd_replan_slice (blockerTaskId ${parsed.task.taskId}) — the Task will not execute again.`,
+        "info",
+      );
+      return;
+    }
+    const settleOptions = {
+      reconcileLifecycle: parsed.reconcileLifecycle,
+      basePath,
+      legacyJournalBasePath: basePath,
+    };
     if (!parsed.apply) {
       const plan = planTaskSettle(parsed.task, parsed.reason, settleOptions);
-      if (plan.rows.length === 0 && plan.lifecycleRows.length === 0) {
+      if (plan.rows.length === 0 && plan.lifecycleRows.length === 0 && !plan.publication) {
         ctx.ui.notify(`gsd task settle (dry run): ${unit} has no running Attempt — nothing to do.`, "info");
         return;
       }
@@ -80,6 +143,12 @@ export async function handleTaskSettle(
         ...plan.lifecycleRows.map(
           (row) => `  lifecycle ${row.currentStatus} → ${row.targetStatus} — ${row.rationale}`,
         ),
+        ...(plan.publication ? [
+          `  publication: ${plan.publication.rationale} (host verdict: ${plan.publication.verdict ?? "none recorded"})` +
+          (plan.publication.verdict === "pass"
+            ? ""
+            : " — apply will fail closed until a passing host Technical Verdict is recorded (re-enter `/gsd auto` to run verification)"),
+        ] : []),
         ...(plan.proof ? [`  proof: ${plan.proof.note}`] : []),
       ];
       ctx.ui.notify(
@@ -88,13 +157,15 @@ export async function handleTaskSettle(
       );
       return;
     }
-    const result = applyTaskSettle({
+    const result = await applyTaskSettle({
       invocation: cliInvocation(),
       task: parsed.task,
       reason: parsed.reason,
+      // settleOptions carries basePath for verified publication and for the
+      // one-time import of a pre-upgrade journal verification-pause receipt.
       ...settleOptions,
     });
-    if (!result.settled && !result.reconciled) {
+    if (!result.settled && !result.reconciled && !result.published) {
       ctx.ui.notify(`gsd task settle: ${unit} has no running Attempt — nothing to do.`, "info");
       return;
     }
@@ -105,6 +176,12 @@ export async function handleTaskSettle(
     if (result.reconciled) {
       const target = result.lifecycleRows[result.lifecycleRows.length - 1]?.targetStatus;
       parts.push(`Reconciled lifecycle to ${target} (${unit}) without deleting SUMMARYs.`);
+    }
+    if (result.published) {
+      parts.push(
+        `Published verified Task completion for ${unit} from Attempt ${result.published.attemptId} ` +
+        `(${result.published.status}): lifecycle completed, tasks.status complete.`,
+      );
     }
     ctx.ui.notify(parts.join(" "), "info");
   } catch (error) {

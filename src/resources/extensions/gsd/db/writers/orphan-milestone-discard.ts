@@ -153,7 +153,12 @@ function refusalErrors(snapshots: readonly OrphanMilestoneDbSnapshot[], targetId
       errors.push(`${snapshot.id}: planning content exists in ${snapshot.planningFields.join(", ")}`);
     }
     for (const [table, count] of Object.entries(snapshot.relatedRows)) {
-      errors.push(`${snapshot.id}: ${table} contains ${count} related row${count === 1 ? "" : "s"}`);
+      // A lifecycle row cannot be deleted (trg_workflow_lifecycle_delete), and
+      // milestone.register gives every new reservation one. Name the command
+      // that cancels the milestone instead.
+      errors.push(table === "workflow_item_lifecycles"
+        ? `${snapshot.id}: the milestone has a lifecycle row, which is durable history and cannot be deleted; cancel it with /gsd discard ${snapshot.id}`
+        : `${snapshot.id}: ${table} contains ${count} related row${count === 1 ? "" : "s"}`);
     }
     for (const dependent of snapshot.dependentMilestones) {
       if (!targetIds.has(dependent)) errors.push(`${dependent} depends on ${snapshot.id}`);

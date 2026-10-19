@@ -26,6 +26,7 @@ If the project has no UI layer (library, CLI, backend), say so and stop.
 ## 2. Run available a11y tooling
 
 Prefer automated tools when installed:
+
 - React: `@axe-core/react`, `eslint-plugin-jsx-a11y`.
 - Vue: `eslint-plugin-vuejs-accessibility`.
 - Any: `pa11y` or `axe` against a running dev server.

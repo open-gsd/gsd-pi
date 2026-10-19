@@ -62,6 +62,7 @@ import {
   insertMilestone,
   insertSlice,
   insertTask,
+  _getAdapter,
 } from "../../gsd-db.ts";
 import {
   deriveState,
@@ -246,7 +247,6 @@ describe("session management", () => {
     s.currentMilestoneId = "M001";
     s.unitDispatchCount.set("M001/S01/T01", 3);
     s.unitLifetimeDispatches.set("M001/S01/T01", 5);
-    s.unitRecoveryCount.set("M001/S01/T01", 1);
 
     s.reset();
 
@@ -256,7 +256,6 @@ describe("session management", () => {
     assert.equal(s.currentMilestoneId, null, "currentMilestoneId should be null");
     assert.equal(s.unitDispatchCount.size, 0, "dispatch counts cleared");
     assert.equal(s.unitLifetimeDispatches.size, 0, "lifetime dispatches cleared");
-    assert.equal(s.unitRecoveryCount.size, 0, "recovery counts cleared");
   });
 
   test("NEW_SESSION_TIMEOUT_MS is 120 seconds", () => {
@@ -454,7 +453,7 @@ describe("filesystem race conditions", () => {
     assert.ok(state.phase, "should produce valid phase after slice dir deletion");
   });
 
-  test("task PLAN file deleted between dispatch and execution → recovery dispatch", async () => {
+  test("task PLAN file deleted between dispatch and execution → execute-task still dispatched", async () => {
     base = createMinimalFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
@@ -490,17 +489,14 @@ describe("filesystem race conditions", () => {
     };
 
     const result = await resolveDispatch(ctx);
-    // The "executing → execute-task (recover missing task plan)" rule should
-    // detect missing T01-PLAN.md and dispatch plan-slice instead of execute-task
-    if (result.action === "dispatch") {
-      assert.equal(
-        (result as any).unitType,
-        "plan-slice",
-        "missing task plan should trigger plan-slice recovery",
-      );
-    }
-    // It's also valid if the state changed due to cache invalidation
-    assert.ok(result.action, "should produce a valid dispatch action");
+    // The task row in the DB is the plan. A deleted T01-PLAN.md is a missing
+    // projection: it must not send the slice back to plan-slice.
+    assert.equal(result.action, "dispatch");
+    assert.equal(
+      (result as any).unitType,
+      "execute-task",
+      "a missing task plan file must not trigger plan-slice",
+    );
   });
 
   test("worktree directory disappearance: isGhostMilestone still works", () => {
@@ -595,9 +591,12 @@ describe("state consistency under DB mutations", () => {
     const s1 = await deriveStateFromDb(base);
     states.push(s1.phase);
 
-    // pending → complete
-    const { updateTaskStatus } = await import("../../gsd-db.ts");
-    updateTaskStatus("M001", "S01", "T01", "complete", new Date().toISOString());
+    // pending → complete. Fixture stamp on the unadopted epoch-0 hierarchy:
+    // raw SQL, because the generic status writer refuses rows without a
+    // canonical lifecycle row.
+    _getAdapter()!.prepare(
+      "UPDATE tasks SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+    ).run({ ":completed_at": new Date().toISOString() });
     invalidateAllCaches();
     const s2 = await deriveStateFromDb(base);
     states.push(s2.phase);
@@ -623,9 +622,11 @@ describe("state consistency under DB mutations", () => {
     const s1 = await deriveStateFromDb(base);
     assert.equal(s1.phase, "validating-milestone");
 
-    // Mark milestone complete directly
-    const { updateMilestoneStatus } = await import("../../gsd-db.ts");
-    updateMilestoneStatus("M001", "complete", new Date().toISOString());
+    // Mark milestone complete directly. Fixture stamp on the unadopted
+    // milestone: the generic status writer refuses it.
+    _getAdapter()!.prepare(
+      "UPDATE milestones SET status = 'complete', completed_at = :completed_at WHERE id = 'M001'",
+    ).run({ ":completed_at": new Date().toISOString() });
     // Write SUMMARY to make it truly complete
     writeFileSync(
       join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"),

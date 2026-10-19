@@ -26,7 +26,7 @@ import {
   formatRequirementsForPrompt,
 } from '../context-store.ts';
 import { inlineRequirementsFromDb } from '../auto-prompts.ts';
-import { migrateFromMarkdown } from '../md-importer.ts';
+import { migrateFromMarkdown } from './helpers/md-importer.ts';
 
 function createDbProjectWithRequirements(content: string): { tmpDir: string; gsdDir: string } {
   const tmpDir = mkdtempSync(join(tmpdir(), 'prompt-db-requirements-'));

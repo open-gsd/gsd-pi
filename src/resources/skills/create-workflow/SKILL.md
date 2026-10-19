@@ -62,9 +62,9 @@ Workflow plugins declare a `mode:` field in their top-level YAML (or
 - `oneshot` — prompt-only, no state, no artifact dir. For one-pass tasks
   like reviews, reports, or one-off scripts. Default for YAML with a single
   step when iteration isn't needed.
-- `yaml-step` — full engine with GRAPH.yaml, iterate, and verify. **Default
-  for YAML.** Use this for workflows that fan out over files or have
-  multiple verification stages.
+- `yaml-step` — full engine with step rows in the database, iterate, and
+  verify. **Default for YAML.** Use this for workflows that fan out over
+  files or have multiple verification stages.
 - `markdown-phase` — phased markdown-driven workflows with STATE.json and
   phase-approval gates. For multi-session projects. Markdown-only.
 - `auto-milestone` — hooks into the full `/gsd auto` pipeline. Reserved
@@ -93,6 +93,7 @@ Determine the user's intent and route to the appropriate workflow:
 → Read `references/feature-patterns.md` and explain the relevant feature.
 
 **If intent is unclear, ask one clarifying question:**
+
 - "Do you want to create a workflow from scratch, or start from an existing template?"
 - Then route based on the answer.
 </routing>

@@ -38,6 +38,7 @@
 ## Task 1: Compat marker module (`compat-marker.ts`)
 
 **Files:**
+
 - Create: `src/resources/extensions/gsd/compat/compat-marker.ts`
 - Create: `src/resources/extensions/gsd/compat/index.ts`
 - Test: `src/resources/extensions/gsd/tests/compat-marker.test.ts`
@@ -320,6 +321,7 @@ treated as 'all projections external'; malformed marker is quarantined."
 ## Task 2: `external-markdown-edit` drift handler
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/state-reconciliation/types.ts` (lines 11–46 — the `DriftRecord` union)
 - Create: `src/resources/extensions/gsd/state-reconciliation/drift/external-markdown-edit.ts`
 - Test: `src/resources/extensions/gsd/tests/external-markdown-edit.test.ts`
@@ -614,6 +616,7 @@ successful repair is a no-op."
 ## Task 3: Register handler in `DRIFT_REGISTRY`
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/state-reconciliation/registry.ts`
 
 - [ ] **Step 3.1: Add the import and registry entry**
@@ -652,6 +655,7 @@ and before every dispatch, with no changes to reconcileBeforeDispatch."
 ## Task 4: Write-time marker invalidation hook
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/markdown-renderer.ts`
 
 The goal: after every projection write, update the matching entry in `.gsd/.compat.json` so the next reconcile pass sees gsd-pi's own writes as expected (feedback-loop prevention). The existing `invalidateCaches()` callback chain (line 66–69, registered via `registerCacheClearCallback`) is the documented extension point.
@@ -823,6 +827,7 @@ own writes as external drift."
 ## Task 5: `/gsd sync` command wiring
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/commands-maintenance.ts` (add `handleSync`)
 - Modify: `src/resources/extensions/gsd/commands/handlers/ops.ts` (wire the route)
 
@@ -948,6 +953,7 @@ the marker. Supports --dry-run."
 ## Task 6: `/gsd doctor` compat-health check
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/commands-handlers.ts` (`handleDoctor`)
 
 - [ ] **Step 6.1: Locate `handleDoctor`**
@@ -1009,6 +1015,7 @@ glance whether /gsd sync is needed."
 ## Task 7: Round-trip property test suite
 
 **Files:**
+
 - Create: `src/resources/extensions/gsd/tests/__fixtures__/round-trip/m001-basic/.gsd/...` (a small but real-shape gsd-core tree)
 - Create: `src/resources/extensions/gsd/tests/round-trip-property.test.ts`
 
@@ -1025,6 +1032,7 @@ Create a minimal but representative gsd-core `.gsd/` tree under `src/resources/e
 - `milestones/M001-foo/slices/S01/tasks/T01/PLAN.md`
 
 Content (example for ROADMAP.md):
+
 ```markdown
 # Roadmap — M001: Foo
 
@@ -1033,6 +1041,7 @@ Content (example for ROADMAP.md):
 ```
 
 Example for PLAN.md (slice):
+
 ```markdown
 # Plan — S01
 
@@ -1041,6 +1050,7 @@ Example for PLAN.md (slice):
 ```
 
 Example for DECISIONS.md:
+
 ```markdown
 # Decisions
 
@@ -1050,6 +1060,7 @@ Example for DECISIONS.md:
 ```
 
 Example for REQUIREMENTS.md:
+
 ```markdown
 # Requirements
 
@@ -1058,6 +1069,7 @@ The system must round-trip.
 ```
 
 Example for tasks/T01/PLAN.md:
+
 ```markdown
 # Plan — T01
 Steps to complete T01.
@@ -1216,6 +1228,7 @@ is the safety net that catches lossy-projection bugs before users do."
 ## Task 8: User-facing doc
 
 **Files:**
+
 - Create: `docs/how-to/switching-between-gsd-tools.md`
 
 - [ ] **Step 8.1: Write the doc**
@@ -1318,6 +1331,7 @@ node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental
   src/resources/extensions/gsd/tests/compat-marker-invalidation.test.ts \
   src/resources/extensions/gsd/tests/round-trip-property.test.ts
 ```
+
 Expected: all PASS.
 
 - [ ] **Step 9.2: Run the broader unit suite for regressions**
@@ -1325,7 +1339,9 @@ Expected: all PASS.
 ```bash
 pnpm run test:unit
 ```
+
 Expected: PASS (no regressions vs. baseline). Watch in particular for:
+
 - `markdown-renderer.test.ts` (Task 4 touched it)
 - `state-reconciliation` tests (Task 2–3 added a drift kind)
 - `commands-maintenance` tests (Task 5 added `handleSync`)
@@ -1335,6 +1351,7 @@ Expected: PASS (no regressions vs. baseline). Watch in particular for:
 ```bash
 pnpm run typecheck:extensions
 ```
+
 Expected: PASS.
 
 - [ ] **Step 9.4: Final commit (if any fixups)**
@@ -1346,6 +1363,7 @@ If steps 9.1–9.3 surfaced fixups, commit them. Otherwise nothing to commit.
 ## Self-Review Notes
 
 **Spec coverage:**
+
 - §4.2 compat marker → Task 1 ✓
 - §4.3 new drift kind + detect/repair → Task 2 ✓
 - §4.4 startup reconcile flow → covered by Task 3 (registering in `DRIFT_REGISTRY` means `reconcileBeforeDispatch` already runs on startup via the orchestrator); Task 5 adds the manual `/gsd sync` entry point ✓

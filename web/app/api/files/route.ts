@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { join, dirname } from "node:path";
 
 import { requireProjectCwd } from "../../../../src/web/bridge-service.ts";
+import { gsdWriteDenial } from "../../../lib/gsd-write-guard.ts";
 import { resolveSecurePath } from "../../../lib/secure-path.ts";
 
 export const runtime = "nodejs";
@@ -42,6 +43,12 @@ function getGsdRoot(projectCwd: string): string {
 
 function getRootForMode(mode: RootMode, projectCwd: string): string {
   return mode === "project" ? projectCwd : getGsdRoot(projectCwd);
+}
+
+/** 403 response when the path is GSD database authority or a rendered projection. */
+function writeDenied(root: RootMode, path: string): Response | null {
+  const reason = gsdWriteDenial(root, path);
+  return reason ? Response.json({ error: `Cannot modify ${path}: ${reason}` }, { status: 403 }) : null;
 }
 
 function buildTree(dirPath: string, skipDirs?: Set<string>, depth = 0, maxDepth = Infinity): FileNode[] {
@@ -189,6 +196,9 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
+  const denied = writeDenied(rootParam as RootMode, pathParam);
+  if (denied) return denied;
+
   const resolvedPath = resolveSecurePath(pathParam, root);
   if (!resolvedPath) {
     const label = rootParam === "project" ? "project root" : ".gsd/";
@@ -248,6 +258,9 @@ export async function PATCH(request: Request): Promise<Response> {
   const projectCwd = requireProjectCwd(request);
   const root = getRootForMode(rootParam as RootMode, projectCwd);
   const label = rootParam === "project" ? "project root" : ".gsd/";
+
+  const denied = writeDenied(rootParam as RootMode, from) ?? writeDenied(rootParam as RootMode, to);
+  if (denied) return denied;
 
   const resolvedFrom = resolveSecurePath(from, root);
   if (!resolvedFrom) {
@@ -322,6 +335,9 @@ export async function DELETE(request: Request): Promise<Response> {
   const root = getRootForMode(rootParam, projectCwd);
   const label = rootParam === "project" ? "project root" : ".gsd/";
 
+  const denied = writeDenied(rootParam as RootMode, pathParam);
+  if (denied) return denied;
+
   const resolvedPath = resolveSecurePath(pathParam, root);
   if (!resolvedPath) {
     return Response.json(
@@ -388,6 +404,9 @@ export async function PUT(request: Request): Promise<Response> {
   const projectCwd = requireProjectCwd(request);
   const root = getRootForMode(rootParam as RootMode, projectCwd);
   const label = rootParam === "project" ? "project root" : ".gsd/";
+
+  const denied = writeDenied(rootParam as RootMode, pathParam);
+  if (denied) return denied;
 
   const resolvedPath = resolveSecurePath(pathParam, root);
   if (!resolvedPath) {

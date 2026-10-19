@@ -1,11 +1,13 @@
 // gsd-pi — Tests for input-controller image pasting behavior
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
-import { describe, it, beforeEach } from "node:test";
+import { before, describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setupEditorSubmitHandler } from "./input-controller.js";
 import { ContextualTips } from "@gsd/agent-core";
+import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
+import { Container } from "@gsd/pi-tui";
 import type { InteractiveModeStateHost } from "../interactive-mode-state.js";
 import type { ImageContent } from "@gsd/pi-ai";
 
@@ -373,4 +375,77 @@ test("input-controller: /tmp paths are not treated as slash commands (#3478)", a
 
 	assert.deepEqual(errors, []);
 	assert.deepEqual(prompted, ["/tmp/some-file.log"]);
+});
+
+// ── extension command feedback (#2598) ───────────────────────────────
+
+before(() => {
+	initTheme("dark", false);
+});
+
+/**
+ * Host whose `/gsd …` commands are extension commands, with a real status
+ * container and a `requestRender` that paints the way the TUI does: on a
+ * timer, never inside the caller's tick. Each painted frame records how many
+ * lines the status container held.
+ */
+function createExtensionCommandHost() {
+	const created = createHost({ knownSlashCommands: ["gsd"] });
+	const statusContainer = new Container();
+	const paintedFrames: number[] = [];
+	const host = created.host as typeof created.host & { statusContainer: Container };
+	host.statusContainer = statusContainer;
+	host.isExtensionCommand = ((text: string) => text.startsWith("/gsd")) as typeof host.isExtensionCommand;
+	host.ui.requestRender = () => {
+		setTimeout(() => paintedFrames.push(statusContainer.children.length), 16);
+	};
+	return { ...created, host, statusContainer, paintedFrames };
+}
+
+test("input-controller: an extension command paints a pending line before its handler runs (#2598)", async () => {
+	const { host, statusContainer, paintedFrames, prompted } = createExtensionCommandHost();
+	let framesPaintedBeforeHandler = -1;
+	let pendingLinesSeenByHandler = -1;
+	host.session.prompt = async (text: string) => {
+		framesPaintedBeforeHandler = paintedFrames.length;
+		pendingLinesSeenByHandler = statusContainer.children.length;
+		prompted.push(text);
+	};
+
+	await host.defaultEditor.onSubmit("/gsd auto");
+
+	assert.deepEqual(prompted, ["/gsd auto"], "the command must still reach its handler");
+	assert.ok(framesPaintedBeforeHandler >= 1, "a frame must reach the terminal before the handler can block the event loop");
+	assert.equal(paintedFrames[0], 1, "the frame painted first must contain the pending line");
+	assert.equal(pendingLinesSeenByHandler, 1, "the pending line must still be up while the handler runs");
+	assert.equal(statusContainer.children.length, 0, "the pending line must be removed once the handler returns");
+});
+
+test("input-controller: the pending line is removed when the extension command handler throws", async () => {
+	const { host, statusContainer, errors } = createExtensionCommandHost();
+	host.session.prompt = async () => {
+		throw new Error("handler failed");
+	};
+
+	await host.defaultEditor.onSubmit("/gsd auto");
+
+	assert.deepEqual(errors, ["handler failed"]);
+	assert.equal(statusContainer.children.length, 0);
+});
+
+test("input-controller: ordinary prompts and built-in commands get no pending line", async () => {
+	const { host, statusContainer, prompted, getSettingsOpened } = createExtensionCommandHost();
+	let pendingLinesSeenByHandler = -1;
+	host.session.prompt = async (text: string) => {
+		pendingLinesSeenByHandler = statusContainer.children.length;
+		prompted.push(text);
+	};
+
+	await host.defaultEditor.onSubmit("explain this file");
+	await host.defaultEditor.onSubmit("/settings");
+
+	assert.deepEqual(prompted, ["explain this file"]);
+	assert.equal(pendingLinesSeenByHandler, 0);
+	assert.equal(getSettingsOpened(), 1);
+	assert.equal(statusContainer.children.length, 0);
 });

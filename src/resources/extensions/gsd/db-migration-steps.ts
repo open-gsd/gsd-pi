@@ -10,6 +10,7 @@ import { createTaskRecoveryCurrentHeadSchemaV39 } from "./db-task-recovery-curre
 import { createSliceCancellationSchemaV40 } from "./db-slice-cancellation-schema.js";
 import { createSliceCompletionSchemaV41 } from "./db-slice-completion-schema.js";
 import { createMilestoneValidationSchemaV42, createMilestoneVerdictScopeSchemaV49 } from "./db-milestone-validation-schema.js";
+import { createBlockerAcceptedCloseoutSchemaV50 } from "./db-blocker-accepted-closeout-schema.js";
 import { createMilestoneCompletionSchemaV43 } from "./db-milestone-completion-schema.js";
 import { createMilestoneReopenSchemaV44 } from "./db-milestone-reopen-schema.js";
 import { createCanonicalFoundationSchemaV31 } from "./db-canonical-foundation-schema.js";
@@ -17,7 +18,7 @@ import { createConversationFoundationSchemaV33 } from "./db-conversation-foundat
 import { createLifecycleFoundationSchemaV32 } from "./db-lifecycle-foundation-schema.js";
 import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "./db-projection-import-kernel-closeout-foundation-schema.js";
 import { createRecoveryEvidenceFoundationSchemaV34 } from "./db-recovery-evidence-foundation-schema.js";
-import { ensureColumn } from "./db-schema-metadata.js";
+import { columnExists, ensureColumn } from "./db-schema-metadata.js";
 
 export function applyMigrationV2Artifacts(db: DbAdapter): void {
   db.exec(`
@@ -585,4 +586,17 @@ export function applyMigrationV48TaskToolRequirements(db: DbAdapter): void {
 
 export function applyMigrationV49MilestoneVerdictScope(db: DbAdapter): void {
   createMilestoneVerdictScopeSchemaV49(db);
+}
+
+export function applyMigrationV50BlockerAcceptedCloseout(db: DbAdapter): void {
+  createBlockerAcceptedCloseoutSchemaV50(db);
+}
+
+export function applyMigrationV51OutboxAuditLink(db: DbAdapter): void {
+  db.exec("DROP INDEX IF EXISTS idx_workflow_outbox_pending");
+  for (const column of ["attempt_count", "claimed_by", "claim_expires_at", "delivered_at", "last_error"]) {
+    if (columnExists(db, "workflow_outbox", column)) {
+      db.exec(`ALTER TABLE workflow_outbox DROP COLUMN ${column}`);
+    }
+  }
 }

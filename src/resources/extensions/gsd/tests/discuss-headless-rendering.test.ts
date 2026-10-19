@@ -33,5 +33,9 @@ test("discuss-headless prompt renders compact investigation and audit guidance",
   assert.match(prompt, /Resolve all of these from the spec and investigation before writing artifacts:/);
   assert.match(prompt, /Print a structured depth summary in chat/);
   assert.match(prompt, /Document every assumption in CONTEXT\.md/);
+  const multiMilestone = prompt.slice(prompt.indexOf("### Multi-Milestone"));
+  assert.match(multiMilestone, /- \*\*Just queue it\*\* — call `gsd_checkpoint_save` with that milestone's `milestoneId`, `kind: "handoff"`/);
+  assert.match(multiMilestone, /- \[ \] Recorded a readiness decision for every remaining milestone: CONTEXT, CONTEXT-DRAFT, or `gsd_checkpoint_save`/);
+  assert.match(multiMilestone, /Do NOT write `\.gsd\/DISCUSSION-MANIFEST\.json`/);
   assert.doesNotMatch(prompt, /\{\{[a-zA-Z][a-zA-Z0-9_]*\}\}/);
 });

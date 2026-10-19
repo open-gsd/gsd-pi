@@ -12,8 +12,6 @@ import {
   insertTask,
   getMilestoneSlices,
   getSliceTasks,
-  getActiveSliceFromDb,
-  getActiveTaskFromDb,
 } from '../gsd-db.ts';
 
 function makeTmp(): string {
@@ -116,42 +114,6 @@ test('schema v9: default sequence (0) falls back to id-based ordering', () => {
     assert.equal(tasks[0]!.id, 'T01');
     assert.equal(tasks[1]!.id, 'T02');
     assert.equal(tasks[2]!.id, 'T03');
-  } finally {
-    cleanup(base);
-  }
-});
-
-test('schema v9: getActiveSliceFromDb respects sequence ordering', () => {
-  const base = makeTmp();
-  openDatabase(join(base, 'gsd.db'));
-  try {
-    insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
-
-    // S02 has lower sequence so should be active first despite higher id than S01
-    insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Higher seq', status: 'pending', sequence: 5 });
-    insertSlice({ id: 'S02', milestoneId: 'M001', title: 'Lower seq', status: 'pending', sequence: 2 });
-
-    const active = getActiveSliceFromDb('M001');
-    assert.ok(active);
-    assert.equal(active!.id, 'S02', 'lower sequence should be active first');
-  } finally {
-    cleanup(base);
-  }
-});
-
-test('schema v9: getActiveTaskFromDb respects sequence ordering', () => {
-  const base = makeTmp();
-  openDatabase(join(base, 'gsd.db'));
-  try {
-    insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
-    insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Slice' });
-
-    insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Higher seq', status: 'pending', sequence: 10 });
-    insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', title: 'Lower seq', status: 'pending', sequence: 1 });
-
-    const active = getActiveTaskFromDb('M001', 'S01');
-    assert.ok(active);
-    assert.equal(active!.id, 'T02', 'lower sequence should be active first');
   } finally {
     cleanup(base);
   }

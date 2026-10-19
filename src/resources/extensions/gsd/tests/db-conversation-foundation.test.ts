@@ -1020,7 +1020,7 @@ test("v32 upgrade is additive, backed up, and does not reinterpret legacy rows",
   }
 });
 
-test("v32 upgrade replaces a stale same-version backup", () => {
+test("v32 upgrade keeps a verified same-version backup and writes the new copy beside it", () => {
   const dbPath = createDatabasePath();
   rewindToV32(dbPath);
   copyFileSync(dbPath, `${dbPath}.backup-v32`);
@@ -1034,13 +1034,15 @@ test("v32 upgrade replaces a stale same-version backup", () => {
   assert.equal(openDatabase(dbPath), true);
   closeDatabase();
 
-  const backup = openRawDatabase(`${dbPath}.backup-v32`);
-  try {
-    assert.equal(maxSchemaVersion(backup), 32);
-    assert.equal(backup.prepare("SELECT decision FROM decisions WHERE id = 'D-LEGACY'").get()?.decision, "Current state");
-    assert.equal(backup.prepare("PRAGMA quick_check").get()?.quick_check, "ok");
-  } finally {
-    backup.close();
+  for (const [suffix, decision] of [["", "Preserve me"], [".latest", "Current state"]] as const) {
+    const backup = openRawDatabase(`${dbPath}.backup-v32${suffix}`);
+    try {
+      assert.equal(maxSchemaVersion(backup), 32);
+      assert.equal(backup.prepare("SELECT decision FROM decisions WHERE id = 'D-LEGACY'").get()?.decision, decision);
+      assert.equal(backup.prepare("PRAGMA quick_check").get()?.quick_check, "ok");
+    } finally {
+      backup.close();
+    }
   }
 });
 

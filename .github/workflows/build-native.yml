@@ -340,20 +340,12 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.platform_packages_only != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ github.event.inputs.publish_auth == 'token' && secrets.NPM_TOKEN || '' }}
+          PUBLISH_TAG: ${{ steps.version-check.outputs.is_prerelease == 'true' && 'next' || 'latest' }}
         run: |
-          node scripts/prepack-resolve-workspace.cjs
+          VERSION=$(node -p "require('./package.json').version")
           trap 'node scripts/postpack-restore-workspace.cjs' EXIT
-          # --ignore-scripts: skip prepublishOnly since we built explicitly above
-          if OUTPUT=$(npm publish --ignore-scripts ${{ steps.version-check.outputs.tag_flag }} 2>&1); then
-            echo "$OUTPUT"
-          else
-            if echo "$OUTPUT" | grep -q "cannot publish over the previously published\|You cannot publish over"; then
-              echo "Already published, skipping"
-            else
-              echo "$OUTPUT"
-              exit 1
-            fi
-          fi
+          node scripts/prepack-resolve-workspace.cjs
+          node scripts/publish-npm-package.mjs . "${VERSION}" "${PUBLISH_TAG}"
 
       - name: Post-publish smoke test
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.platform_packages_only != 'true'

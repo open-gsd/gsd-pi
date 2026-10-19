@@ -130,7 +130,7 @@ export async function applyDoctorFixes(scope?: string, projectCwdOverride?: stri
     `const mod = await import(pathToFileURL(process.env.${DOCTOR_MODULE_ENV}).href);`,
     'const basePath = process.env.GSD_DOCTOR_BASE;',
     'const scope = process.env.GSD_DOCTOR_SCOPE || undefined;',
-    'const report = await mod.runGSDDoctor(basePath, { fix: true, scope });',
+    'const report = await mod.runGSDDoctor(basePath, { fix: true, scope, importFileOverrides: true });',
     'const result = {',
     '  ok: report.ok,',
     '  fixesApplied: report.fixesApplied,',

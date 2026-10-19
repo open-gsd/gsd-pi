@@ -46,7 +46,7 @@ export function loadJsonFileOrNull<T>(
  *
  * Uses atomic write-tmp-rename to prevent partial/corrupt files on crash.
  * This is the canonical way to persist JSON state in GSD — all callers
- * (queue-order, metrics, routing-history, reactive-graph) benefit from
+ * (queue-order, metrics, reactive-graph) benefit from
  * crash-safety without code changes.
  */
 export function saveJsonFile<T>(filePath: string, data: T): void {

@@ -41,6 +41,7 @@ import {
   EXIT_BLOCKED,
   EXIT_CANCELLED,
   mapStatusToExitCode,
+  parseWorkflowOutcomeEvent,
 } from './headless-events.js'
 
 import type { OutputFormat, HeadlessJsonResult } from './headless-types.js'
@@ -425,6 +426,14 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     const runtimeDir = join(gsdDir, 'runtime')
     mkdirSync(runtimeDir, { recursive: true })
     writeFileSync(join(runtimeDir, 'headless-context.md'), contextContent, 'utf-8')
+  }
+
+  // Migrate: preview or apply a v1 .planning migration, with no RPC child
+  // needed. A v1 project has no .gsd/ yet, so this runs before the .gsd/ check.
+  if (options.command === 'migrate') {
+    const { handleMigrate } = await import('./headless-migrate.js')
+    const result = await handleMigrate(options.commandArgs)
+    process.exit(result.exitCode)
   }
 
   // Validate .gsd/ directory (skip for new-milestone since we just bootstrapped it)
@@ -879,6 +888,21 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       const status = String(eventObj.status ?? 'success')
       exitCode = mapStatusToExitCode(status)
       if (eventObj.status === 'blocked') blocked = true
+      resolveCompletion()
+      return
+    }
+
+    // Handle the typed workflow outcome first (ADR-046): the extension reports
+    // the run's terminal state as a contract event, so the exit code comes from
+    // the event rather than from notification text. Unlike execution_complete
+    // this is not a per-turn event — it fires once when auto-mode stops or
+    // pauses — so multi-turn commands (auto, next) resolve on it too. The text
+    // classifiers below stay as the fallback for a run of an older extension.
+    const workflowOutcome = parseWorkflowOutcomeEvent(eventObj)
+    if (workflowOutcome && !completed) {
+      completed = true
+      exitCode = workflowOutcome.exitCode
+      if (workflowOutcome.status === 'blocked') blocked = true
       resolveCompletion()
       return
     }

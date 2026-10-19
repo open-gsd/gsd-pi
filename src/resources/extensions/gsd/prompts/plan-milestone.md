@@ -27,6 +27,7 @@ You are the first deep look at this milestone. Understand codebase, docs, and te
 ### Explore First, Then Decompose
 
 Before decomposing:
+
 1. Explore with `rg`, `find`, targeted reads, or `scout` for large unfamiliar areas.
 2. Use `resolve_library` / `get_library_docs` for unfamiliar libraries only.
 3. **Skill Discovery ({{skillDiscoveryMode}}):**{{skillDiscoveryInstructions}}
@@ -45,13 +46,14 @@ Before decomposing:
 
 {{sourceFilePaths}}
 
-If milestone research is inlined, trust it and skip redundant exploration. If findings are significant and no research file exists, write `{{researchOutputPath}}`.
+If milestone research is inlined, trust it and skip redundant exploration.
 
 Narrate decomposition reasoning in complete sentences: grouping, risk order, verification strategy.
 
 **Web apps:** when inlined Web App UAT guidance is present, set milestone `Verification Classes` → UAT to browser-observable acceptance (Playwright spec or `browser_*` checks). Order an early slice to add Playwright smoke scaffolding when the dependency is missing.
 
 Then:
+
 1. Use the **Roadmap** output template from the inlined context above
 2. {{skillActivation}}
 3. Create only as many demoable vertical slices as the work genuinely needs. Use 1-10 slices, sized to the work; tiny/single-file/static work should usually be one slice.
@@ -74,6 +76,7 @@ Then:
 ## Planning Doctrine
 
 Apply these when decomposing and ordering slices:
+
 - Risk-first means proof-first; earliest slices ship real behavior through uncertain paths, not spikes or validation-only slices.
 - Every slice is vertical, demoable, and shippable through UI, CLI, API client, curl, protocol consumer, or extension API.
 - Ground slices in existing modules, conventions, and seams.

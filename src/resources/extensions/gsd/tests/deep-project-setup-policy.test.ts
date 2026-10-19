@@ -1,4 +1,4 @@
-import test from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,7 +8,9 @@ import { randomUUID } from "node:crypto";
 import {
   resolveDeepProjectSetupState,
 } from "../deep-project-setup-policy.ts";
+import { closeDatabase, insertArtifact, openDatabase } from "../gsd-db.ts";
 import type { GSDPreferences } from "../preferences.ts";
+import { recordResearchDecision, recordWorkflowPreferencesCaptured } from "../project-setup-facts.ts";
 
 const deepPrefs = { planning_depth: "deep" } as GSDPreferences;
 
@@ -21,173 +23,93 @@ const validRequirements = readFileSync(
   "utf-8",
 );
 
-function makeBase(): string {
-  const base = join(tmpdir(), `gsd-deep-policy-${randomUUID()}`);
+let base: string;
+
+beforeEach(() => {
+  base = join(tmpdir(), `gsd-deep-policy-${randomUUID()}`);
   mkdirSync(join(base, ".gsd"), { recursive: true });
-  return base;
+  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+});
+
+afterEach(() => {
+  closeDatabase();
+  rmSync(base, { recursive: true, force: true });
+});
+
+function saveRootArtifact(path: "PROJECT.md" | "REQUIREMENTS.md", content: string): void {
+  insertArtifact({
+    path,
+    artifact_type: path.replace(".md", ""),
+    milestone_id: null,
+    slice_id: null,
+    task_id: null,
+    full_content: content,
+  });
 }
 
-function writeReadyProject(base: string): void {
-  writeFileSync(
-    join(base, ".gsd", "PREFERENCES.md"),
-    "---\nplanning_depth: deep\nworkflow_prefs_captured: true\n---\n",
-  );
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), validRequirements);
-  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
+function saveReadyProject(): void {
+  recordWorkflowPreferencesCaptured();
+  saveRootArtifact("PROJECT.md", validProject);
+  saveRootArtifact("REQUIREMENTS.md", validRequirements);
 }
 
-function writeDecision(base: string, value: Record<string, unknown> | string): void {
-  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(
-    join(base, ".gsd", "runtime", "research-decision.json"),
-    typeof value === "string" ? value : JSON.stringify(value),
-  );
-}
-
-function readDecision(base: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(base, ".gsd", "runtime", "research-decision.json"), "utf-8"));
-}
-
-function writeAllDimensionBlockers(base: string): void {
+function writeResearchFiles(names: string[]): void {
   mkdirSync(join(base, ".gsd", "research"), { recursive: true });
-  for (const dimension of ["STACK", "FEATURES", "ARCHITECTURE", "PITFALLS"]) {
-    writeFileSync(join(base, ".gsd", "research", `${dimension}-BLOCKER.md`), "# blocked\n");
+  for (const name of names) {
+    writeFileSync(join(base, ".gsd", "research", name), "# research\n");
   }
+}
+
+const ALL_DIMENSION_BLOCKERS = ["STACK", "FEATURES", "ARCHITECTURE", "PITFALLS"].map((d) => `${d}-BLOCKER.md`);
+
+function resolved(): { status: string; stage: string | null } {
+  const { status, stage } = resolveDeepProjectSetupState(deepPrefs, base);
+  return { status, stage };
 }
 
 test("deep setup policy: skip decision wins over stale research blockers", () => {
-  const base = makeBase();
-  try {
-    writeReadyProject(base);
-    writeDecision(base, { decision: "skip", source: "workflow-preferences" });
-    writeAllDimensionBlockers(base);
+  saveReadyProject();
+  recordResearchDecision("skip");
+  writeResearchFiles(ALL_DIMENSION_BLOCKERS);
 
-    const state = resolveDeepProjectSetupState(deepPrefs, base);
-    assert.deepEqual({ status: state.status, stage: state.stage }, { status: "complete", stage: null });
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
+  assert.deepEqual(resolved(), { status: "complete", stage: null });
 });
 
-test("deep setup policy: legacy workflow research default normalizes to skip", () => {
-  const base = makeBase();
-  try {
-    writeReadyProject(base);
-    writeDecision(base, { decision: "research", source: "workflow-preferences" });
-    writeAllDimensionBlockers(base);
+test("deep setup policy: no recorded research decision means skip", () => {
+  saveReadyProject();
+  writeResearchFiles(ALL_DIMENSION_BLOCKERS);
 
-    const state = resolveDeepProjectSetupState(deepPrefs, base);
-    assert.deepEqual({ status: state.status, stage: state.stage }, { status: "complete", stage: null });
-    const decision = readDecision(base);
-    assert.equal(decision.decision, "skip");
-    assert.equal(decision.source, "workflow-preferences");
-    assert.equal(decision.previous_source, "workflow-preferences");
-    assert.equal(decision.reason, "legacy-workflow-research-default");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
+  assert.deepEqual(resolved(), { status: "complete", stage: null });
 });
 
-test("deep setup policy: missing and malformed markers repair to default skip", () => {
-  const missingBase = makeBase();
-  const malformedBase = makeBase();
-  try {
-    writeReadyProject(missingBase);
-    const missingState = resolveDeepProjectSetupState(deepPrefs, missingBase);
-    assert.deepEqual({ status: missingState.status, stage: missingState.stage }, { status: "complete", stage: null });
-    assert.equal(readDecision(missingBase).reason, "missing-default-repair");
+test("deep setup policy: a research decision can dispatch, block, or complete", () => {
+  saveReadyProject();
+  recordResearchDecision("research");
+  assert.deepEqual(resolved(), { status: "pending", stage: "project-research" });
 
-    writeReadyProject(malformedBase);
-    writeDecision(malformedBase, "{");
-    const malformedState = resolveDeepProjectSetupState(deepPrefs, malformedBase);
-    assert.deepEqual({ status: malformedState.status, stage: malformedState.stage }, { status: "complete", stage: null });
-    assert.equal(readDecision(malformedBase).reason, "malformed-default-repair");
-  } finally {
-    rmSync(missingBase, { recursive: true, force: true });
-    rmSync(malformedBase, { recursive: true, force: true });
-  }
+  writeResearchFiles(ALL_DIMENSION_BLOCKERS);
+  assert.deepEqual(resolved(), { status: "blocked", stage: "project-research" });
+
+  rmSync(join(base, ".gsd", "research"), { recursive: true, force: true });
+  writeResearchFiles(["STACK.md", "FEATURES.md", "ARCHITECTURE.md", "PITFALLS-BLOCKER.md"]);
+  assert.deepEqual(resolved(), { status: "complete", stage: null });
 });
 
-test("deep setup policy: explicit research can dispatch, block, or complete", () => {
-  const pendingBase = makeBase();
-  const blockedBase = makeBase();
-  const completeBase = makeBase();
-  try {
-    writeReadyProject(pendingBase);
-    writeDecision(pendingBase, { decision: "research", source: "research-decision" });
-    const pending = resolveDeepProjectSetupState(deepPrefs, pendingBase);
-    assert.deepEqual({ status: pending.status, stage: pending.stage }, { status: "pending", stage: "project-research" });
+test("resolveDeepProjectSetupState: saved PROJECT and REQUIREMENTS imply the workflow preferences stage, and nothing is written", () => {
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+  saveRootArtifact("PROJECT.md", validProject);
+  saveRootArtifact("REQUIREMENTS.md", validRequirements);
 
-    writeReadyProject(blockedBase);
-    writeDecision(blockedBase, { decision: "research", source: "user" });
-    writeAllDimensionBlockers(blockedBase);
-    const blocked = resolveDeepProjectSetupState(deepPrefs, blockedBase);
-    assert.deepEqual({ status: blocked.status, stage: blocked.stage }, { status: "blocked", stage: "project-research" });
-
-    writeReadyProject(completeBase);
-    writeDecision(completeBase, { decision: "research", source: "research-decision" });
-    mkdirSync(join(completeBase, ".gsd", "research"), { recursive: true });
-    for (const name of ["STACK.md", "FEATURES.md", "ARCHITECTURE.md"]) {
-      writeFileSync(join(completeBase, ".gsd", "research", name), "# done\n");
-    }
-    writeFileSync(join(completeBase, ".gsd", "research", "PITFALLS-BLOCKER.md"), "# blocked\n");
-    const complete = resolveDeepProjectSetupState(deepPrefs, completeBase);
-    assert.deepEqual({ status: complete.status, stage: complete.stage }, { status: "complete", stage: null });
-    assert.equal(existsSync(join(completeBase, ".gsd", "runtime", "research-project-inflight")), false);
-  } finally {
-    rmSync(pendingBase, { recursive: true, force: true });
-    rmSync(blockedBase, { recursive: true, force: true });
-    rmSync(completeBase, { recursive: true, force: true });
-  }
+  assert.deepEqual(resolved(), { status: "complete", stage: null });
+  assert.equal(readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8"), "---\nplanning_depth: deep\n---\n");
+  assert.equal(existsSync(join(base, ".gsd", "runtime")), false);
 });
 
+test("resolveDeepProjectSetupState: still pending when the PROJECT stage is not saved", () => {
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\nworkflow_prefs_captured: true\n---\n");
 
-test("resolveDeepProjectSetupState: self-heals missing workflow_prefs_captured when downstream artifacts are valid", () => {
-  const base = makeBase();
-  try {
-    // PREFERENCES.md missing the captured flag — simulating drift after manual
-    // edit / merge conflict / partial write.
-    writeFileSync(
-      join(base, ".gsd", "PREFERENCES.md"),
-      "---\nplanning_depth: deep\n---\n",
-    );
-    writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
-    writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), validRequirements);
-    writeDecision(base, {
-      decision: "skip",
-      decided_at: new Date().toISOString(),
-      source: "workflow-preferences",
-      reason: "deterministic-default",
-    });
+  assert.deepEqual(resolved(), { status: "pending", stage: "workflow-preferences" });
 
-    const state = resolveDeepProjectSetupState(deepPrefs, base);
-
-    assert.equal(state.status, "complete", "should self-heal to complete, not return pending");
-    const restored = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-    assert.match(restored, /workflow_prefs_captured:\s*true/, "captured flag should be restored on disk");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("resolveDeepProjectSetupState: still pending when downstream artifacts are NOT valid", () => {
-  const base = makeBase();
-  try {
-    // PREFERENCES.md missing flag AND PROJECT.md missing — genuine setup-incomplete.
-    writeFileSync(
-      join(base, ".gsd", "PREFERENCES.md"),
-      "---\nplanning_depth: deep\n---\n",
-    );
-    // No PROJECT.md, no REQUIREMENTS.md, no research-decision.json.
-
-    const state = resolveDeepProjectSetupState(deepPrefs, base);
-
-    assert.equal(state.status, "pending", "genuine incomplete setup must still pend");
-    assert.equal(state.stage, "workflow-preferences", "stage points at the missing flag");
-    const original = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-    assert.doesNotMatch(original, /workflow_prefs_captured:\s*true/, "flag not added when self-heal does not apply");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
+  recordWorkflowPreferencesCaptured();
+  assert.deepEqual(resolved(), { status: "pending", stage: "project" });
 });

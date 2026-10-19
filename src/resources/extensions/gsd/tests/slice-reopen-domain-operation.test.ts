@@ -14,7 +14,6 @@ import {
   insertSlice,
   openDatabase,
   readDomainOperationFence,
-  syncSliceDependencies,
 } from "../gsd-db.ts";
 import type { DomainOperationContext } from "../db/domain-operation.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
@@ -159,7 +158,7 @@ function completeTaskWithEvidence(taskId: string): void {
       endedAt: "2026-07-14T00:01:01.000Z",
       exitCode: 0,
       observation: "passed",
-      durableOutputRef: `db://fixture/${taskId}/verification`,
+      durableOutputRef: `db://host-verification/${claim.attemptId}`,
       environment: { runner: "node-test", fixture: "slice-reopen" },
     },
   });
@@ -346,8 +345,10 @@ function seedCyclicDownstreamSlice(): void {
     UPDATE slices SET depends = '["S02"]'
     WHERE milestone_id = 'M001' AND id = 'S01'
   `).run();
-  syncSliceDependencies("M001", "S01", ["S02"]);
-  syncSliceDependencies("M001", "S02", ["S01"]);
+  db().prepare(`
+    INSERT OR IGNORE INTO slice_dependencies (milestone_id, slice_id, depends_on_slice_id)
+    VALUES ('M001', 'S01', 'S02'), ('M001', 'S02', 'S01')
+  `).run();
   executeAtFence("test.slice-reopen.cyclic-downstream", "fixture/slice-reopen/cycle", (context) => {
     adoptOrTransitionLifecycle(context, {
       itemKind: "slice",

@@ -1,47 +1,38 @@
 // Project/App: gsd-pi
-// File Purpose: ADR-017 stale-render drift handler. Relocated from
-// markdown-renderer.ts as part of issue #5702. detectStaleRenders stays in
-// markdown-renderer.ts (it's a useful diagnostic primitive on its own); only
-// the detect+repair composition moves here. The previous repairStaleRenders
-// had zero callers in production code — wiring it through
-// reconcileBeforeDispatch closes that gap.
+// File Purpose: Stale-render projection drift: a projection file is missing or
+// differs from the database render. Detected and repaired by the Projection
+// Worker only (ADR-046). It is not part of pre-dispatch reconciliation, so a
+// file fault cannot block database-backed work.
 
 import { join } from "node:path";
 
 import {
   detectStaleRenders,
+  renderAllFromDb,
   renderPlanCheckboxes,
   renderRoadmapFromDb,
   renderSliceSummary,
   renderTaskSummary,
+  type RenderAllResult,
 } from "../../markdown-renderer.js";
 import {
   getMilestone,
   getMilestoneSlices,
-  getSlice,
   getSliceTasks,
-  setSliceSummaryMd,
 } from "../../gsd-db.js";
 import {
   ensureWorkflowDbForBase,
 } from "../../db-workspace.js";
-import { resolveSliceFile } from "../../paths.js";
-import type { GSDState } from "../../types.js";
 import { logWarning } from "../../workflow-logger.js";
-import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
+import type { DriftRecord } from "../types.js";
 
-type StaleRenderDrift = Extract<DriftRecord, { kind: "stale-render" }>;
-
-const VALIDATION_BLOCK_RE =
-  /milestone validation returned needs-(?:attention|remediation)|validation verdict is needs-(?:attention|remediation)/i;
-
-// ─── Core (basePath-only — usable by both drift API and legacy wrapper) ──────
+export type StaleRenderDrift = Extract<DriftRecord, { kind: "stale-render" }>;
 
 // No state-version stamp short-circuit here: `project_authority.revision` is
 // not bumped by the projection-affecting writes, and the stamp is a content
 // byte a hand-edited file keeps, so a matching stamp is not evidence of
 // freshness. Every entry the detector emits is kept.
-function detectStaleRenderDriftFromBasePath(basePath: string): StaleRenderDrift[] {
+export function detectStaleRenderDrift(basePath: string): StaleRenderDrift[] {
   const entries = detectStaleRenders(basePath);
   if (entries.length === 0) return [];
 
@@ -76,22 +67,6 @@ function isRepairableStaleRenderReason(reason: string): boolean {
   );
 }
 
-function validationBlocker(state: GSDState): string | null {
-  if (state.phase !== "blocked") return null;
-  return state.blockers.find((blocker) => VALIDATION_BLOCK_RE.test(blocker)) ?? null;
-}
-
-function isMilestoneSummaryMissing(record: StaleRenderDrift): boolean {
-  const normPath = record.renderPath.replace(/\\/g, "/");
-  return (
-    record.reason.includes("SUMMARY.md missing") &&
-    (
-      /^M\d+(?:\b|[-_:])/.test(record.reason) ||
-      /(?:^|\/)M\d+(?:-[a-z0-9]+)?-SUMMARY\.md$/i.test(normPath)
-    )
-  );
-}
-
 function canonicalizeMilestoneId(dirSegment: string): string {
   if (getMilestone(dirSegment)) return dirSegment;
   const suffixId = dirSegment.match(/^(M\d+-[a-z0-9]{6})(?:$|-)/)?.[1];
@@ -101,10 +76,11 @@ function canonicalizeMilestoneId(dirSegment: string): string {
   const baseId = dirSegment.match(/^(M\d+)(?:$|-)/i)?.[1];
   if (baseId && getMilestone(baseId)) return baseId;
 
-  // Flat-phase: e.g. 01-test → M001
-  const phaseMatch = dirSegment.match(/^(\d+)-/);
+  // Flat-phase: e.g. 01-test → M001, 04-abc123-fourth → M004-abc123
+  const phaseMatch = dirSegment.match(/^(\d+)-(?:([a-z0-9]{6})-)?/);
   if (phaseMatch) {
     const flatId = `M${String(parseInt(phaseMatch[1]!, 10)).padStart(3, "0")}`;
+    if (phaseMatch[2] && getMilestone(`${flatId}-${phaseMatch[2]}`)) return `${flatId}-${phaseMatch[2]}`;
     if (getMilestone(flatId)) return flatId;
   }
 
@@ -149,9 +125,10 @@ function retryDbForStaleRenderRepair(basePath: string): boolean {
   return ensureWorkflowDbForBase(basePath, { refresh: true });
 }
 
-async function repairStaleRenderFromBasePath(
+export async function repairStaleRender(
   record: StaleRenderDrift,
   basePath: string,
+  renderAll: (basePath: string) => Promise<RenderAllResult> = renderAllFromDb,
 ): Promise<void> {
   if (!ensureDbForStaleRenderRepair(basePath)) {
     throw new Error(`stale-render drift: database unavailable for repair (${basePath})`);
@@ -290,14 +267,6 @@ async function repairStaleRenderFromBasePath(
       const reasonSlice = reason.match(/^(S\d+)/);
       sliceId = reasonSlice ? reasonSlice[1] : "S01";
     }
-    const slice = getSlice(milestoneId, sliceId);
-    // Use resolveSliceFile so the UAT existence check matches the NN-MM-UAT.md
-    // name that renderSliceSummary actually writes (buildSliceFileName only yields MM-UAT.md).
-    const uatPath = resolveSliceFile(basePath, milestoneId, sliceId, "UAT");
-    // renderSliceSummary writes both artifacts, so clear deleted UAT first.
-    if (slice?.full_uat_md && !uatPath) {
-      setSliceSummaryMd(milestoneId, sliceId, slice.full_summary_md ?? "", "");
-    }
     const wrote = await renderSliceSummary(basePath, milestoneId, sliceId);
     if (!wrote) {
       throw new Error(
@@ -330,73 +299,42 @@ async function repairStaleRenderFromBasePath(
       const reasonSlice = reason.match(/(S\d+)/);
       sliceId = reasonSlice ? reasonSlice[1] : "S01";
     }
-    const slice = getSlice(milestoneId, sliceId);
-    if (!slice) {
+    // A missing UAT.md is projection drift. The DB row is the authority, so
+    // the repair renders the file again and never writes to the slice row.
+    const wrote = await renderSliceSummary(basePath, milestoneId, sliceId);
+    if (!wrote) {
       throw new Error(
-        `stale-render drift: missing slice for UAT clear ${milestoneId}/${sliceId}`,
+        `stale-render drift: UAT re-render wrote nothing for ` +
+          `${milestoneId}/${sliceId} (${record.renderPath}); slice has no summary/UAT ` +
+          `in DB or its path is unresolvable`,
       );
     }
-    setSliceSummaryMd(milestoneId, sliceId, slice.full_summary_md ?? "", "");
     return;
   }
 
-  throw new Error(
-    `stale-render drift: detector emitted unknown reason "${reason}" for ${record.renderPath}`,
-  );
+  // Any other file that differs from the database (for example a milestone or
+  // slice artifact) has no narrower renderer: render every projection again.
+  const rendered = await renderAll(basePath);
+  if (rendered.errors.length > 0) throw new Error(rendered.errors.join("; "));
 }
-
-// ─── Drift Handler API ───────────────────────────────────────────────────────
-
-export function detectStaleRenderDrift(
-  _state: GSDState,
-  ctx: DriftContext,
-): StaleRenderDrift[] {
-  return detectStaleRenderDriftFromBasePath(ctx.basePath);
-}
-
-export async function repairStaleRender(
-  record: StaleRenderDrift,
-  ctx: DriftContext,
-): Promise<void> {
-  await repairStaleRenderFromBasePath(record, ctx.basePath);
-}
-
-export function staleRenderBlocker(
-  record: StaleRenderDrift,
-  ctx: DriftContext,
-): string | null {
-  const blocker = validationBlocker(ctx.state);
-  if (!blocker || !isMilestoneSummaryMissing(record)) return null;
-  return [
-    `Stale milestone summary render at ${record.renderPath} is blocked by milestone validation.`,
-    blocker,
-  ].join("\n");
-}
-
-export const staleRenderHandler: DriftHandler<StaleRenderDrift> = {
-  kind: "stale-render",
-  detect: detectStaleRenderDrift,
-  blocker: staleRenderBlocker,
-  repair: repairStaleRender,
-};
 
 // ─── Legacy entry point ──────────────────────────────────────────────────────
 
 /**
  * Legacy bulk entry preserved for existing tests
  * (tests/markdown-renderer.test.ts, tests/integration/integration-proof.test.ts).
- * New code prefers the drift handler via `reconcileBeforeDispatch`. Matches the
+ * Production code runs the repair through the Projection Worker. Matches the
  * pre-ADR-017 behavior: silent per-entry error handling, returns the count of
  * successful repairs.
  */
 export async function repairStaleRenders(basePath: string): Promise<number> {
-  const drifts = detectStaleRenderDriftFromBasePath(basePath);
+  const drifts = detectStaleRenderDrift(basePath);
   if (drifts.length === 0) return 0;
 
   let repaired = 0;
   for (const drift of drifts) {
     try {
-      await repairStaleRenderFromBasePath(drift, basePath);
+      await repairStaleRender(drift, basePath);
       repaired++;
     } catch (err) {
       logWarning(

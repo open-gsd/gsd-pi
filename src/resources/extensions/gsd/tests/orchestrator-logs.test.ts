@@ -26,13 +26,13 @@ import { RuleRegistry, setRegistry, resetRegistry } from "../rule-registry.ts";
 import type { UnifiedRule } from "../rule-types.ts";
 import {
   closeDatabase,
-  insertAssessment,
   insertMilestone,
   insertSlice,
   insertTask,
   openDatabase,
   _getAdapter,
 } from "../gsd-db.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 import { resolveExpectedArtifactPath } from "../auto-artifact-paths.ts";
 import { AutoSession } from "../auto/session.ts";
 import { acquireSessionLock, releaseSessionLock } from "../session-lock.ts";
@@ -292,25 +292,23 @@ test("advance() logs an engine warning when the post-settlement projection rebui
     status: "complete",
     verificationResult: "passed",
   });
-  insertAssessment({
-    path: ".gsd/milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass\n",
-  });
-  // Create the milestone projection dir in the worktree BEFORE resolving the
-  // summary artifact path (resolveExpectedArtifactPath needs the dir to exist).
+  // Resolve the summary artifact path for the worktree layout. The layout
+  // sniffer needs a content-bearing milestone dir, and every projection in it
+  // is DB-modeled now: resolve with a stand-in file, then remove it so the
+  // settlement merge never sees hand-written projection drift.
   const milestoneProjDir = join(worktree, ".gsd", "milestones", "M001");
   mkdirSync(milestoneProjDir, { recursive: true });
-  // A content-bearing legacy milestone dir requires at least one non-META file
-  // (dirIsContentBearingLegacyMilestone) so the layout sniffer treats it as a
-  // real legacy milestone rather than a metadata-only placeholder.
-  writeFileSync(join(milestoneProjDir, "M001-CONTEXT.md"), "# M001\n");
+  const standIn = join(milestoneProjDir, "M001-ROADMAP.md");
+  writeFileSync(standIn, "# M001\n");
   const summaryPath = resolveExpectedArtifactPath("complete-milestone", "M001", worktree);
+  rmSync(standIn);
   assert.ok(summaryPath, "complete-milestone summary path must resolve");
-  mkdirSync(dirname(summaryPath), { recursive: true });
-  writeFileSync(summaryPath, "# Milestone One\n\nComplete.\n");
+
+  // The settlement proof and merge guard read canonical closeout state bound
+  // to the tree the milestone ran in, so the receipt is recorded against the
+  // worktree.
+  seedCanonicalMergeReadyMilestone(projectRoot, "M001", { sourceTree: worktree });
+  openDatabase(join(projectRoot, ".gsd", "gsd.db"));
 
   acquireSessionLock(projectRoot);
 

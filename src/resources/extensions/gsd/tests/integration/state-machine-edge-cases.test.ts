@@ -19,6 +19,7 @@
 
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -43,9 +44,7 @@ import {
   getMilestone,
   getSliceTasks,
   getMilestoneSlices,
-  updateTaskStatus,
-  updateSliceStatus,
-  updateMilestoneStatus,
+  _getAdapter,
   insertAssessment,
   insertReplanHistory,
   getReplanHistory,
@@ -68,10 +67,13 @@ import { isClosedStatus } from "../../status-guards.ts";
 // ── Cache invalidation ───────────────────────────────────────────────────
 import { invalidateAllCaches } from "../../cache.ts";
 
+// ── Canonical fixtures ───────────────────────────────────────────────────
+import { seedLifecycles } from "../helpers/authority-cutover.ts";
+import { seedCanonicalMilestoneValidation } from "../merge-ready-fixture.ts";
+
 // ── Dispatch ─────────────────────────────────────────────────────────────
 import {
   resolveDispatch,
-  DISPATCH_RULES,
   getDispatchRuleNames,
 } from "../../auto-dispatch.ts";
 import type { DispatchContext, DispatchAction } from "../../auto-dispatch.ts";
@@ -89,8 +91,6 @@ import { clearPathCache } from "../../paths.ts";
 // ═══════════════════════════════════════════════════════════════════════════
 // Fixture Helpers
 // ═══════════════════════════════════════════════════════════════════════════
-
-const UAT_VERDICT_GATE_RULE_NAME = "uat-verdict-gate (non-PASS observed; closeout enforces)";
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "gsd-edge-cases-"));
@@ -280,12 +280,21 @@ function buildDispatchCtx(
   };
 }
 
-function getUatVerdictGate(): import("../../auto-dispatch.ts").DispatchRule {
-  const rule = DISPATCH_RULES.find(
-    r => r.name === UAT_VERDICT_GATE_RULE_NAME,
-  );
-  assert.ok(rule, "uat-verdict-gate rule should be registered");
-  return rule;
+/**
+ * A createFullFixture whose tree is a committed git repository, so the
+ * canonical validation receipts and waivers can bind to a source revision.
+ * .gsd/ stays untracked: the workflow DB's WAL churn must not dirty the tree
+ * the closeout preflight commits.
+ */
+function makeCanonicalDispatchFixture(): string {
+  const base = createFullFixture();
+  writeFileSync(join(base, ".gitignore"), ".gsd/\n");
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: base });
+  execFileSync("git", ["add", ".gitignore"], { cwd: base });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: base, stdio: "ignore" });
+  return base;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -359,7 +368,11 @@ describe("state derivation failures", () => {
     const state1 = await deriveState(base);
     assert.equal(state1.phase, "executing");
 
-    updateTaskStatus("M001", "S01", "T01", "complete", new Date().toISOString());
+    // Fixture stamp on the unadopted epoch-0 hierarchy: raw SQL, because the
+    // generic status writer refuses rows without a canonical lifecycle row.
+    _getAdapter()!.prepare(
+      "UPDATE tasks SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+    ).run({ ":completed_at": new Date().toISOString() });
 
     invalidateStateCache();
     const state3 = await deriveState(base);
@@ -489,7 +502,9 @@ describe("transition boundary failures", () => {
 
     // Now write the full CONTEXT (simulates discussion completion)
     writeFileSync(join(mDir, "M001-CONTEXT.md"), "# M001: Resolved\n\n## Purpose\nDone.\n");
-    updateMilestoneStatus("M001", "active");
+    // Fixture stamp on the unadopted milestone: the generic status writer
+    // refuses rows without a canonical lifecycle row.
+    _getAdapter()!.prepare("UPDATE milestones SET status = 'active' WHERE id = 'M001'").run();
 
     invalidateAllCaches();
     const state2 = await deriveState(base);
@@ -774,7 +789,7 @@ describe("dispatch failure modes", () => {
       activeTask: { id: "T01", title: "Task" },
     });
 
-    // The "executing → execute-task (recover missing task plan)" rule checks activeSlice
+    // The "executing → execute-task (render missing plan projection)" rule checks activeSlice
     // and returns missingSliceStop when null
     const result = await resolveDispatch(ctx);
     assert.equal(result.action, "stop", "null activeSlice in executing should stop");
@@ -871,158 +886,11 @@ describe("dispatch failure modes", () => {
     const ruleNames = getDispatchRuleNames();
     // Verify critical ordering constraints
     const summarizeIdx = ruleNames.indexOf("summarizing → complete-slice");
-    const runUatIdx = ruleNames.indexOf("run-uat (post-completion)");
-    const uatGateIdx = ruleNames.indexOf(UAT_VERDICT_GATE_RULE_NAME);
     const executeIdx = ruleNames.indexOf("executing → execute-task");
 
     // summarizing should come before execute-task
     assert.ok(summarizeIdx < executeIdx, "summarizing rule should precede execute-task");
-    // run-uat should come before uat-verdict-gate
-    assert.ok(runUatIdx < uatGateIdx, "run-uat should precede uat-verdict-gate");
   });
-
-  test("UAT verdict gate: ASSESSMENT FAIL does not hard-stop progression", async () => {
-    base = createFullFixture();
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Active", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
-    insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "pending" });
-
-    const s01Dir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    writeFileSync(
-      join(s01Dir, "S01-UAT.md"),
-      "# UAT File\n\n## UAT Type\n\n- UAT mode: artifact-driven\n",
-    );
-    writeFileSync(
-      join(s01Dir, "S01-ASSESSMENT.md"),
-      "---\nverdict: FAIL\n---\n# UAT Assessment\n",
-    );
-
-    const ctx = buildDispatchCtx(base, "M001", {
-      phase: "planning",
-      activeSlice: { id: "S02", title: "Second" },
-      activeTask: null,
-    });
-    ctx.prefs = { uat_dispatch: true } as any;
-
-    const result = await getUatVerdictGate().match(ctx);
-    assert.equal(result, null, "ASSESSMENT FAIL should not hard-stop progression");
-  });
-
-  test("UAT verdict gate: roadmap-scoped ASSESSMENT verdict is ignored", async () => {
-    base = createFullFixture();
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Active", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
-    insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "pending" });
-
-    const s01Dir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    const assessmentRelPath = join(".gsd", "milestones", "M001", "slices", "S01", "S01-ASSESSMENT.md");
-    writeFileSync(
-      join(s01Dir, "S01-ASSESSMENT.md"),
-      "---\nverdict: roadmap-adjusted\n---\n# Reassessment\n",
-    );
-    insertAssessment({
-      path: assessmentRelPath,
-      milestoneId: "M001",
-      sliceId: "S01",
-      status: "roadmap-adjusted",
-      scope: "roadmap",
-      fullContent: "---\nverdict: roadmap-adjusted\n---\n# Reassessment\n",
-    });
-
-    const ctx = buildDispatchCtx(base, "M001", {
-      phase: "planning",
-      activeSlice: { id: "S02", title: "Second" },
-      activeTask: null,
-    });
-    ctx.prefs = { uat_dispatch: true } as any;
-
-    const result = await getUatVerdictGate().match(ctx);
-    assert.equal(result, null, "roadmap scoped assessment verdict should not be treated as UAT");
-  });
-
-  test("UAT verdict gate: ROADMAP fallback gates done slices when DB is unavailable", async () => {
-    base = createFullFixture();
-    const mDir = join(base, ".gsd", "milestones", "M001");
-    writeFileSync(
-      join(mDir, "M001-ROADMAP.md"),
-      [
-        "# M001: Edge Case Milestone",
-        "",
-        "## Vision",
-        "Prove edge case correctness.",
-        "",
-        "## Success Criteria",
-        "- All edge cases handled",
-        "",
-        "## Slices",
-        "",
-        "- [x] **S01: First Feature** `risk:low` `depends:[]`",
-        "  - After this: First feature proven.",
-        "",
-        "- [ ] **S02: Second Feature** `risk:low` `depends:[]`",
-        "  - After this: Second feature proven.",
-        "",
-        "## Boundary Map",
-        "",
-        "| From | To | Produces | Consumes |",
-        "|------|----|----------|----------|",
-        "| S01 | terminal | feature-a | nothing |",
-        "| S02 | terminal | feature-b | nothing |",
-      ].join("\n"),
-    );
-
-    const s01Dir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    writeFileSync(
-      join(s01Dir, "S01-UAT.md"),
-      "# UAT File\n\n## UAT Type\n\n- UAT mode: artifact-driven\n",
-    );
-    writeFileSync(
-      join(s01Dir, "S01-ASSESSMENT.md"),
-      "---\nverdict: needs-remediation\n---\n# UAT Assessment\n",
-    );
-
-    const ctx = buildDispatchCtx(base, "M001", {
-      phase: "planning",
-      activeSlice: { id: "S02", title: "Second" },
-      activeTask: null,
-    });
-    ctx.prefs = { uat_dispatch: true } as any;
-
-    const result = await getUatVerdictGate().match(ctx);
-    assert.equal(result, null, "ROADMAP done slices should not hard-stop progression without DB");
-  });
-
-  for (const status of ["done", "skipped"]) {
-    test(`UAT verdict gate: legacy closed status "${status}" does not hard-stop progression`, async () => {
-      base = createFullFixture();
-      openDatabase(join(base, ".gsd", "gsd.db"));
-      insertMilestone({ id: "M001", title: "Active", status: "active" });
-      insertSlice({ id: "S01", milestoneId: "M001", title: "First", status });
-      insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "pending" });
-
-      const s01Dir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-      writeFileSync(
-        join(s01Dir, "S01-UAT.md"),
-        "# UAT File\n\n## UAT Type\n\n- UAT mode: artifact-driven\n",
-      );
-      writeFileSync(
-        join(s01Dir, "S01-ASSESSMENT.md"),
-        "---\nverdict: needs-remediation\n---\n# UAT Assessment\n",
-      );
-
-      const ctx = buildDispatchCtx(base, "M001", {
-        phase: "planning",
-        activeSlice: { id: "S02", title: "Second" },
-        activeTask: null,
-      });
-      ctx.prefs = { uat_dispatch: true } as any;
-
-      const result = await getUatVerdictGate().match(ctx);
-      assert.equal(result, null, `${status} slices should not hard-stop progression`);
-    });
-  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1038,26 +906,16 @@ describe("completion and verification failures", () => {
   });
 
   test("needs-remediation VALIDATION blocks milestone completion dispatch", async () => {
-    base = createFullFixture();
-    const mDir = join(base, ".gsd", "milestones", "M001");
-    writeFileSync(
-      join(mDir, "M001-VALIDATION.md"),
-      [
-        "---",
-        "verdict: needs-remediation",
-        "remediation_round: 1",
-        "---",
-        "",
-        "# Validation",
-        "",
-        "Needs remediation work.",
-      ].join("\n"),
-    );
+    base = makeCanonicalDispatchFixture();
 
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "complete" });
+    // A needs-remediation VALIDATION records as a canonical fail receipt; the
+    // completion guard reads the receipt, never the VALIDATION.md projection.
+    seedCanonicalMilestoneValidation(base, "M001", "fail");
+    openDatabase(join(base, ".gsd", "gsd.db"));
 
     const ctx = buildDispatchCtx(base, "M001", {
       phase: "completing-milestone",
@@ -1066,34 +924,36 @@ describe("completion and verification failures", () => {
     });
 
     const result = await resolveDispatch(ctx);
-    assert.equal(result.action, "stop", "needs-remediation should block completion");
+    assert.equal(result.action, "stop", "a failed validation should block completion");
     assert.ok(
-      (result as any).reason?.includes("needs-remediation"),
-      "stop reason should mention needs-remediation",
+      (result as any).reason?.includes("verdict is fail"),
+      `stop reason should name the failed verdict, got: ${(result as any).reason}`,
     );
   });
 
-  test("missing slice SUMMARY blocks milestone validation dispatch", async () => {
-    base = createFullFixture();
+  test("open slices block milestone completion dispatch", async () => {
+    base = makeCanonicalDispatchFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
-    // Use "pending" status — closed slices (complete/done/skipped) are
-    // excluded from SUMMARY checks per #3620.
+    // Open slice rows block closeout. Slice SUMMARY files are not read.
     insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "pending" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "pending" });
-    // No S01-SUMMARY.md or S02-SUMMARY.md on disk
+    // The canonical record: adopted open authority and a passing receipt; the
+    // closeout gate still stops while a slice is open.
+    seedCanonicalMilestoneValidation(base, "M001", "pass");
+    openDatabase(join(base, ".gsd", "gsd.db"));
 
     const ctx = buildDispatchCtx(base, "M001", {
-      phase: "validating-milestone",
+      phase: "completing-milestone",
       activeSlice: null,
       activeTask: null,
     });
 
     const result = await resolveDispatch(ctx);
-    assert.equal(result.action, "stop", "missing SUMMARY files should block validation");
+    assert.equal(result.action, "stop", "open slices should block completion");
     assert.ok(
-      (result as any).reason?.includes("missing SUMMARY"),
-      "stop reason should mention missing SUMMARY",
+      (result as any).reason?.includes('slice S01 status is "pending"'),
+      `stop reason should name the open slice, got: ${(result as any).reason}`,
     );
   });
 
@@ -1271,21 +1131,18 @@ describe("dispatch guard integration", () => {
     if (base) rmSync(base, { recursive: true, force: true });
   });
 
-  test("skip_milestone_validation preference writes pass-through VALIDATION", async () => {
-    base = createFullFixture();
+  test("skip_milestone_validation records a canonical waiver and dispatches completion", async () => {
+    base = makeCanonicalDispatchFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "complete" });
-    // Write slice SUMMARYs so the missing SUMMARY guard doesn't fire
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md"),
-      "# S01 Summary\nDone.\n",
-    );
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "slices", "S02", "S02-SUMMARY.md"),
-      "# S02 Summary\nDone.\n",
-    );
+    // The adopted skip path records a canonical waiver (no fabricated PASS).
+    seedLifecycles("state-machine-edge-cases/waiver", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "completed" },
+    ]);
 
     const ctx = buildDispatchCtx(base, "M001", {
       phase: "validating-milestone",
@@ -1295,32 +1152,18 @@ describe("dispatch guard integration", () => {
     ctx.prefs = { phases: { skip_milestone_validation: true } } as any;
 
     const result = await resolveDispatch(ctx);
-    assert.equal(result.action, "skip", "skip_milestone_validation should produce skip action");
+    assert.equal(result.action, "dispatch", "the waiver should continue through the completion guards");
+    assert.equal((result as any).unitType, "complete-milestone");
 
-    // Should have written a pass-through VALIDATION file
+    // The waiver replaces the legacy pass-through VALIDATION writer: the file
+    // is projected, but it never carries a fabricated pass verdict.
     const validationPath = join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
-    assert.ok(existsSync(validationPath), "VALIDATION file should be written");
-    const content = readFileSync(validationPath, "utf-8");
-    assert.ok(content.includes("verdict: pass"), "should contain pass verdict");
-    assert.ok(content.includes("`skip_milestone_validation` preference"), "should note it was skipped via the preference path (#4781)");
-  });
-
-  test("rewrite-docs circuit breaker: exceeding MAX attempts resolves all overrides", async () => {
-    base = createFullFixture();
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Active", status: "active" });
-
-    // Write a rewrite count at the max
-    const runtimeDir = join(base, ".gsd", "runtime");
-    mkdirSync(runtimeDir, { recursive: true });
-    writeFileSync(
-      join(runtimeDir, "rewrite-count.json"),
-      JSON.stringify({ count: 3, updatedAt: new Date().toISOString() }),
-    );
-
-    // Import and check
-    const { getRewriteCount } = await import("../../auto-dispatch.ts");
-    assert.equal(getRewriteCount(base), 3, "rewrite count should be 3");
+    assert.ok(existsSync(validationPath), "waived VALIDATION file should be written");
+    assert.doesNotMatch(readFileSync(validationPath, "utf-8"), /verdict:\s*pass/i);
+    const waivers = _getAdapter()!.prepare(
+      "SELECT COUNT(*) AS count FROM workflow_waivers",
+    ).get() as Record<string, unknown>;
+    assert.equal(Number(waivers["count"]), 1, "the skip should record one canonical waiver");
   });
 
   test("replanning-slice with null activeSlice → stop (error)", async () => {

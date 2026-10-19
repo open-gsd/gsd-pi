@@ -109,7 +109,7 @@ test("public corpus compiles 13 eligible Previews and refuses 13 unresolved Prev
   assert.equal(compiled.get("gsd-nested"), 45);
   assert.equal(compiled.get("custom-workflow"), 18);
   assert.equal(compiled.get("jsonl-history"), 14);
-  assert.equal(compiled.get("knowledge-graph"), 3);
+  assert.equal(compiled.get("knowledge-graph"), 6);
   assert.equal(compiled.get("root-external-boundaries"), 3);
   assert.equal(compiled.get("synthetic-smoke"), 1);
 });

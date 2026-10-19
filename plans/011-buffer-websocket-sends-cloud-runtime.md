@@ -71,11 +71,13 @@ that style.
 ## Scope
 
 **In scope**:
+
 - `packages/daemon/src/cloud-runtime.ts`
 - The cloud-runtime test file under `packages/daemon/` (find with
   `ls packages/daemon/**/*cloud-runtime*` — create if absent)
 
 **Out of scope** (do NOT touch):
+
 - `handleSocketMessage` / inbound handling — this is about outbound only.
 - The gateway's 10-minute timeout (`cloud-mcp-gateway`) — a separate concern.
 - The reconnect backoff timing (5000ms) — leave as-is.
@@ -177,6 +179,7 @@ existing tests use (inspect one first).
 ## STOP conditions
 
 Stop and report if:
+
 - `send()` or `handleSocketOpen` no longer matches the excerpts (drifted).
 - The gateway protocol already has an ack/replay mechanism for `tool_result`
   (grep `cloud-mcp-gateway` for `ack`/`requestId` resend) that makes client-side

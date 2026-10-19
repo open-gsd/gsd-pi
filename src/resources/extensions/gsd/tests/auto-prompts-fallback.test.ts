@@ -12,6 +12,7 @@ import {
 } from "../auto-prompts.ts";
 import {
   closeDatabase,
+  insertArtifact,
   insertMilestone,
   insertSlice,
   openDatabase,
@@ -54,7 +55,7 @@ function seedDb(base: string): void {
   openDatabase(join(base, ".gsd", "gsd.db"));
 }
 
-test("inlineDependencySummaries sources depends from DB rows and inlines the dep summary", async (t) => {
+test("inlineDependencySummaries sources depends from DB rows and inlines the dep summary of the artifact row", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-prompts-db-deps-"));
   t.after(() => {
     closeDatabase();
@@ -65,19 +66,27 @@ test("inlineDependencySummaries sources depends from DB rows and inlines the dep
   insertSlice({ milestoneId: "M001", id: "S01", title: "Foundation", status: "complete", sequence: 1 });
   insertSlice({ milestoneId: "M001", id: "S02", title: "Build", status: "pending", depends: ["S01"], sequence: 2 });
 
+  // The projection file disagrees with the artifact row: the row is the narrative.
   const summaryDir = join(tmp, ".gsd", "milestones", "M001", "slices", "S01");
   mkdirSync(summaryDir, { recursive: true });
-  writeFileSync(join(summaryDir, "S01-SUMMARY.md"), "# S01 Summary\n\nDid things.\n");
+  writeFileSync(join(summaryDir, "S01-SUMMARY.md"), "# S01 Summary\n\nText of the file.\n");
+  insertArtifact({
+    path: "milestones/M001/slices/S01/S01-SUMMARY.md",
+    artifact_type: "SUMMARY",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: null,
+    full_content: "# S01 Summary\n\nDid things.\n",
+  });
 
-  const rel = relSliceFile(tmp, "M001", "S01", "SUMMARY");
   const result = await inlineDependencySummaries("M001", "S02", tmp);
   assert.equal(
     result,
-    `#### S01 Summary\nSource: \`${rel}\`\n\n# S01 Summary\n\nDid things.`,
+    "#### S01 Summary\nSource: `.gsd/milestones/M001/slices/S01/S01-SUMMARY.md`\n\n# S01 Summary\n\nDid things.",
   );
 });
 
-test("inlineDependencySummaries points at the dep summary path when the file is missing", async (t) => {
+test("inlineDependencySummaries points at the dep summary path when no artifact row is saved", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-prompts-db-deps-missing-"));
   t.after(() => {
     closeDatabase();
@@ -87,6 +96,11 @@ test("inlineDependencySummaries points at the dep summary path when the file is 
   insertMilestone({ id: "M001", title: "M001: Deps", status: "active" });
   insertSlice({ milestoneId: "M001", id: "S01", title: "Foundation", status: "complete", sequence: 1 });
   insertSlice({ milestoneId: "M001", id: "S02", title: "Build", status: "pending", depends: ["S01"], sequence: 2 });
+
+  // A projection file with no artifact row is not narrative.
+  const summaryDir = join(tmp, ".gsd", "milestones", "M001", "slices", "S01");
+  mkdirSync(summaryDir, { recursive: true });
+  writeFileSync(join(summaryDir, "S01-SUMMARY.md"), "# S01 Summary\n\nText of the file.\n");
 
   const rel = relSliceFile(tmp, "M001", "S01", "SUMMARY");
   const result = await inlineDependencySummaries("M001", "S02", tmp);

@@ -12,18 +12,23 @@ import { readForensicsMarker } from "../forensics.js";
 import { resolveAllSkillReferences, renderPreferencesForSystemPrompt, loadEffectiveGSDPreferences } from "../preferences.js";
 import { renderRuntimeContractForSystemPrompt } from "../runtime-contract.js";
 import { resolveModelWithFallbacksForUnit } from "../preferences-models.js";
-import { gsdRoot, resolveGsdRootFile, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
+import { gsdRoot, resolveGsdRootFile, resolveSliceFile, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
 import { extractIntroAndRules } from "../knowledge-parser.js";
+import { knowledgeUnavailableBlock, readKnowledgeMarkdown, readUnimportedPatternsAndLessons } from "../knowledge-projection.js";
+import { isDbAvailable } from "../gsd-db.js";
 import { ensureCodebaseMapFresh, readCodebaseMap } from "../codebase-generator.js";
 import { resolveRepositoryProjectRoot } from "../repository-registry.js";
 import { getActiveAutoWorktreeContext } from "../auto-worktree-session-registry.js";
 import { getActiveWorktreeName, getWorktreeOriginalCwd } from "../worktree-session-state.js";
 import { deriveState } from "../state.js";
-import { formatOverridesSection, formatShortcut, loadActiveOverrides, loadFile, parseContinue, parseSummary } from "../files.js";
+import { formatOverridesSection, formatShortcut, loadFile, parseSummary } from "../files.js";
+import { buildResumeSection } from "../work-checkpoint.js";
+import { loadActiveOverrides } from "../overrides.js";
 import { toPosixPath } from "../../shared/mod.js";
 import { autoEnableCmuxPreferences } from "../commands-cmux.js";
 import { gsdHome } from "../gsd-home.js";
 import { GSD_CONTEXT_MESSAGE_SENTINEL } from "../constants.js";
+import { discoverAgents } from "../../subagent/agents.js";
 
 // Single source of truth lives in ../constants.js; re-exported here because
 // buildContextMessage() stamps this marker on every context injection and the
@@ -67,7 +72,7 @@ export const BUNDLED_SKILL_TRIGGERS: Array<{ trigger: string; skill: string }> =
   { trigger: "Create a Model Context Protocol (MCP) server — tool design, error handling, Inspector testing, evals", skill: "create-mcp-server" },
   { trigger: "Write documentation, proposals, specs, RFCs, or READMEs for a fresh reader", skill: "write-docs" },
   { trigger: "Post-mortem a failed GSD auto-mode run using .gsd/activity, .gsd/journal, and .gsd/metrics.json", skill: "forensics" },
-  { trigger: "Prepare a clean cross-session handoff — continue.md + summary updates (pause/resume work)", skill: "handoff" },
+  { trigger: "Prepare a clean cross-session handoff — Work Checkpoint + summary updates (pause/resume work)", skill: "handoff" },
   { trigger: "Security review with STRIDE threat modeling and exploit-scenario reporting", skill: "security-review" },
   { trigger: "HTTP/REST/GraphQL API design — verbs, status codes, pagination, errors, idempotency, versioning", skill: "api-design" },
   { trigger: "Dependency upgrades — risk-batched, verified between batches, one major per commit", skill: "dependency-upgrade" },
@@ -175,13 +180,10 @@ async function performSessionStartupMaintenance(
   }
   if (!dbOpen) return false;
 
-  // These backfills are independent idempotent migrations. Keep them on the
-  // startup path because their rows can affect the MEMORY block for this turn,
-  // but do not make their import/IO latencies add serially.
-  await Promise.allSettled([
-    runDecisionsMemoryBackfill(ctx),
-    runKnowledgeMemoryBackfill(basePath, ctx),
-  ]);
+  // Keep the decisions backfill on the startup path because its rows can
+  // affect the MEMORY block for this turn. KNOWLEDGE.md is never read into
+  // the database here: file content enters only through an explicit import.
+  await runDecisionsMemoryBackfill(ctx);
 
   // Mark session complete before scheduling deferred work so any concurrent
   // caller that observes the completed state does not re-enter maintenance.
@@ -231,24 +233,6 @@ async function runDecisionsMemoryBackfill(ctx: ExtensionContext): Promise<void> 
     }
   } catch (e) {
     logWarning("bootstrap", `decisions backfill failed: ${(e as Error).message}`);
-  }
-}
-
-async function runKnowledgeMemoryBackfill(
-  basePath: string,
-  ctx: ExtensionContext,
-): Promise<void> {
-  // ADR-013 Stage 2b: KNOWLEDGE.md Patterns + Lessons backfill. Idempotent
-  // and best-effort — first run migrates rows into memories; repeated turns
-  // skip this session-once maintenance.
-  try {
-    const { backfillKnowledgeToMemories } = await import("../knowledge-backfill.js");
-    const writtenK = backfillKnowledgeToMemories(basePath);
-    if (writtenK > 0) {
-      ctx.ui.notify(`GSD: backfilled ${writtenK} KNOWLEDGE.md row${writtenK === 1 ? "" : "s"} into the memory store.`, "info");
-    }
-  } catch (e) {
-    logWarning("bootstrap", `KNOWLEDGE.md backfill failed: ${(e as Error).message}`);
   }
 }
 
@@ -447,7 +431,7 @@ export async function buildBeforeAgentStartResult(
 
   const subagentModelConfig = resolveModelWithFallbacksForUnit("subagent", basePath);
   const subagentModelBlock = subagentModelConfig
-    ? `\n\n## Subagent Model\n\nWhen spawning subagents via the \`subagent\` tool, always pass \`model: "${subagentModelConfig.primary}"\` in the tool call parameters. Never omit this — always specify it explicitly.`
+    ? buildSubagentModelBlock(subagentModelConfig.primary, hasFrontmatterModelAgent(basePath))
     : "";
 
   // memoryBlock is FTS-queried against the user prompt and changes per call.
@@ -469,6 +453,51 @@ export async function buildBeforeAgentStartResult(
     systemPrompt: fullSystem,
     ...(contextMessage ? { message: contextMessage } : {}),
   };
+}
+
+/**
+ * True when any discoverable agent (user or project scope) declares a
+ * frontmatter `model`. A hard tool-level "always pass this model" instruction
+ * would shadow those declared models at dispatch (`modelOverride ?? agent.model`
+ * in subagent/launch.ts), so callers must soften or suppress it (#2245).
+ *
+ * Scopes are unioned without name dedup: dispatch accepts `agentScope: "user"`,
+ * so a modeled user agent stays reachable even when a model-less project agent
+ * shares its name. Malformed agent files must not break context injection —
+ * discovery failures fail open to the advisory block.
+ */
+export function hasFrontmatterModelAgent(basePath: string): boolean {
+  const scopeHasModeledAgent = (scope: "user" | "project"): boolean => {
+    try {
+      return discoverAgents(basePath, scope).agents.some(
+        (agent) => typeof agent.model === "string" && agent.model.trim().length > 0,
+      );
+    } catch (e) {
+      // A malformed agent file must not break context injection — the failing
+      // scope fails open while the other scope's result is preserved.
+      logWarning("bootstrap", `subagent model guidance: ${scope} agent discovery failed: ${(e as Error).message}`);
+      return false;
+    }
+  };
+  return scopeHasModeledAgent("user") || scopeHasModeledAgent("project");
+}
+
+/**
+ * Build the "## Subagent Model" system-prompt block. Exported for direct unit
+ * testing (#2245 / #2394).
+ *
+ * - When any agent declares a frontmatter `model`, the agent's own model
+ *   governs; the injected guidance must not force a tool-level override.
+ * - Otherwise the resolved `models.subagent` value is advisory-by-complexity:
+ *   always pass an explicit `model`, chosen per task complexity, with the
+ *   resolved value as the suggested default — not a phase-ceiling default for
+ *   lightweight/recon dispatches.
+ */
+export function buildSubagentModelBlock(primary: string, hasFrontmatterModelAgents: boolean): string {
+  if (hasFrontmatterModelAgents) {
+    return `\n\n## Subagent Model\n\nSome available agents declare a \`model\` in their frontmatter; that declared model governs those agents — when spawning one of them via the \`subagent\` tool, do not pass a \`model\` override unless the caller explicitly requests a specific model for this invocation (on parallel/chain calls a top-level \`model\` reaches every item, so set \`model\` per item only where an override is intended). For agents without a declared model, pass an explicit \`model\` chosen per task complexity; the configured default \`${primary}\` is the suggested starting point — prefer a lighter model for lightweight/recon dispatches instead of defaulting to it.`;
+  }
+  return `\n\n## Subagent Model\n\nWhen spawning subagents via the \`subagent\` tool, always pass an explicit \`model\` in the tool call parameters. Use the caller's requested model when one is specified; otherwise choose per task complexity — the resolved default \`${primary}\` is the suggested default for standard work; prefer a lighter model for lightweight/recon dispatches instead of defaulting to it, and reserve heavier models for genuinely complex tasks.`;
 }
 
 /**
@@ -614,21 +643,25 @@ export function loadKnowledgeBlock(gsdHomeDir: string, cwd: string): { block: st
     }
   }
 
-  // 2. Project knowledge (.gsd/KNOWLEDGE.md) — project-specific.
-  //    ADR-013 Stage 2b: Patterns and Lessons are projected from the
-  //    memories table and already reach the LLM via loadMemoryBlock. Inject
-  //    only the intro prose + `## Rules` section here to avoid duplicating
-  //    Patterns/Lessons content in the prompt. Rules stay manual per
-  //    ADR-013 line 39 and have no memory equivalent.
+  // 2. Project knowledge — project-specific, read from the database
+  //    (readKnowledgeMarkdown), not from the file on disk. Patterns and
+  //    Lessons with a memories row already reach the LLM via loadMemoryBlock,
+  //    so inject only the intro prose + `## Rules` section for those. A
+  //    Pattern or Lesson that exists only in the file (fresh clone, pulled
+  //    teammate row) has no memories row, so inject it here.
+  //    Without a readable database the block says so: the file is not a
+  //    fallback, and the Rules must not go missing without a notice.
   let projectKnowledge = "";
   const knowledgePath = resolveGsdRootFile(cwd, "KNOWLEDGE");
-  if (existsSync(knowledgePath)) {
-    try {
-      const raw = readFileSync(knowledgePath, "utf-8").trim();
-      if (raw) projectKnowledge = extractIntroAndRules(raw).trim();
-    } catch (e) {
-      logWarning("bootstrap", `project knowledge file read failed: ${(e as Error).message}`);
-    }
+  try {
+    if (!isDbAvailable()) throw new Error("workflow DB is unavailable");
+    projectKnowledge = [
+      extractIntroAndRules(readKnowledgeMarkdown(cwd)).trim(),
+      readUnimportedPatternsAndLessons(cwd),
+    ].filter(Boolean).join("\n\n");
+  } catch (e) {
+    logWarning("bootstrap", `project knowledge read failed: ${(e as Error).message}`);
+    projectKnowledge = knowledgeUnavailableBlock((e as Error).message);
   }
 
   if (!globalKnowledge && !projectKnowledge) {
@@ -790,8 +823,8 @@ async function buildTaskExecutionContextInjection(
   const slicePlanContent = slicePlanPath ? await loadFile(slicePlanPath) : null;
   const slicePlanExcerpt = extractSliceExecutionExcerpt(slicePlanContent, slicePlanRelPath);
   const priorTaskLines = await buildCarryForwardLines(basePath, milestoneId, sliceId, taskId);
-  const resumeSection = await buildResumeSection(basePath, milestoneId, sliceId);
-  const activeOverrides = await loadActiveOverrides(basePath);
+  const resumeSection = buildResumeSection(milestoneId, sliceId, taskId);
+  const activeOverrides = loadActiveOverrides(basePath);
   const overridesSection = formatOverridesSection(activeOverrides);
 
   return [
@@ -850,37 +883,6 @@ async function buildCarryForwardLines(
     if (diagnostics) parts.push(`diagnostics: ${oneLine(diagnostics)}`);
     return `- \`${relPath}\` — ${parts.join(" | ")}`;
   }));
-}
-
-async function buildResumeSection(basePath: string, milestoneId: string, sliceId: string): Promise<string> {
-  const continueFile = resolveSliceFile(basePath, milestoneId, sliceId, "CONTINUE");
-  const legacyDir = resolveSlicePath(basePath, milestoneId, sliceId);
-  const legacyPath = legacyDir ? join(legacyDir, "continue.md") : null;
-  const continueContent = continueFile ? await loadFile(continueFile) : null;
-  const legacyContent = !continueContent && legacyPath ? await loadFile(legacyPath) : null;
-  const resolvedContent = continueContent ?? legacyContent;
-  const resolvedRelPath = continueContent
-    ? relSliceFile(basePath, milestoneId, sliceId, "CONTINUE")
-    : (legacyPath ? `${relSlicePath(basePath, milestoneId, sliceId)}/continue.md` : null);
-
-  if (!resolvedContent || !resolvedRelPath) {
-    return ["## Resume State", "- No continue file present. Start from the top of the task plan."].join("\n");
-  }
-
-  const cont = parseContinue(resolvedContent);
-  const lines = [
-    "## Resume State",
-    `Source: \`${resolvedRelPath}\``,
-    `- Status: ${cont.frontmatter.status || "in_progress"}`,
-  ];
-  if (cont.frontmatter.step && cont.frontmatter.totalSteps) {
-    lines.push(`- Progress: step ${cont.frontmatter.step} of ${cont.frontmatter.totalSteps}`);
-  }
-  if (cont.completedWork) lines.push(`- Completed: ${oneLine(cont.completedWork)}`);
-  if (cont.remainingWork) lines.push(`- Remaining: ${oneLine(cont.remainingWork)}`);
-  if (cont.decisions) lines.push(`- Decisions: ${oneLine(cont.decisions)}`);
-  if (cont.nextAction) lines.push(`- Next action: ${oneLine(cont.nextAction)}`);
-  return lines.join("\n");
 }
 
 function extractSliceExecutionExcerpt(content: string | null, relPath: string): string {

@@ -9,13 +9,13 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { handleGSDCommand } from "../commands/dispatcher.ts";
 import {
   closeDatabase,
-  insertAssessment,
   insertMilestone,
   insertSlice,
   openDatabase,
 } from "../gsd-db.ts";
 import { invalidateStateCache } from "../state.ts";
 import { cleanup, git, makeTempRepo } from "./test-utils.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 
 interface NotifyCall {
   message: string;
@@ -108,13 +108,6 @@ function seedRegisteredCompletedWorktreeWithoutRoadmap(base: string): void {
     title: "Live Text Search",
     status: "complete",
   });
-  insertAssessment({
-    path: "milestones/M008/M008-VALIDATION.md",
-    milestoneId: "M008",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
   writeFileSync(
     join(base, ".gsd", "PREFERENCES.md"),
     "---\ngit:\n  isolation: worktree\n---\n",
@@ -126,6 +119,9 @@ function seedRegisteredCompletedWorktreeWithoutRoadmap(base: string): void {
   writeFileSync(join(worktreePath, "index.html"), "<h1>M008</h1>\n");
   git(worktreePath, "add", "index.html");
   git(worktreePath, "commit", "-m", "feat: live text search");
+  // The merge recovery reads canonical closeout state bound to the tree the
+  // milestone ran in, so the receipt is recorded against the worktree.
+  seedCanonicalMergeReadyMilestone(base, "M008", { sourceTree: worktreePath });
   invalidateStateCache();
 }
 
@@ -139,13 +135,6 @@ function seedRegisteredCompletedWorktree(base: string): void {
     title: "Live Text Search",
     status: "complete",
   });
-  insertAssessment({
-    path: "milestones/M008/M008-VALIDATION.md",
-    milestoneId: "M008",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
   writeWorktreePreferencesAndRoadmap(base);
 
   const worktreePath = join(base, ".gsd", "worktrees", "M008");
@@ -154,6 +143,9 @@ function seedRegisteredCompletedWorktree(base: string): void {
   writeFileSync(join(worktreePath, "index.html"), "<h1>M008</h1>\n");
   git(worktreePath, "add", "index.html");
   git(worktreePath, "commit", "-m", "feat: live text search");
+  // The merge recovery reads canonical closeout state bound to the tree the
+  // milestone ran in, so the receipt is recorded against the worktree.
+  seedCanonicalMergeReadyMilestone(base, "M008", { sourceTree: worktreePath });
   invalidateStateCache();
 }
 

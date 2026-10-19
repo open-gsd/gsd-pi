@@ -12,24 +12,36 @@
  */
 
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { CLAUDE_CODE_MODELS } from "./models.js";
-import { isClaudeCodeReady } from "./readiness.js";
+import { buildClaudeCodeModelList } from "./models.js";
+import { isClaudeCodeReady, primeClaudeCodeReadiness, settleClaudeCodeReadiness } from "./readiness.js";
 import { setClaudeCodeUIContext, streamViaClaudeCode } from "./stream-adapter.js";
 
 export default function claudeCodeCli(pi: ExtensionAPI) {
 	// Core calls `streamSimple` with a plain `SimpleStreamOptions` (no UI
 	// context), so the elicitation handler used by `ask_user_questions` is
-	// otherwise never wired and self-cancels. Capture the live UI context here.
-	pi.on("before_provider_request", (_event, ctx) => {
+	// otherwise never wired and self-cancels. `before_provider_request` does
+	// not fire for this provider (#2118); capture the live UI from session
+	// start and each agent turn as well.
+	const captureUi = (_event: unknown, ctx: { hasUI: boolean; ui: Parameters<typeof setClaudeCodeUIContext>[0] }) => {
 		setClaudeCodeUIContext(ctx.hasUI ? ctx.ui : undefined);
-	});
+	};
+	pi.on("session_start", captureUi);
+	pi.on("before_agent_start", captureUi);
+	pi.on("before_provider_request", captureUi);
+
+	// isReady() only reads a cache; start the first CLI probe now so the
+	// answer is usually there before anything asks.
+	primeClaudeCodeReadiness();
 
 	pi.registerProvider("claude-code", {
 		authMode: "externalCli",
 		api: "anthropic-messages",
 		baseUrl: "local://claude-code",
 		isReady: isClaudeCodeReady,
+		settleReadiness: settleClaudeCodeReadiness,
 		streamSimple: streamViaClaudeCode,
-		models: CLAUDE_CODE_MODELS,
+		// Hardcoded list merged with the pi-ai anthropic catalog so new Claude
+		// releases register without a code change (#2437).
+		models: buildClaudeCodeModelList(),
 	});
 }

@@ -158,6 +158,7 @@ failure standalone before attributing it to your change.
 ## Scope
 
 **In scope** (the only files you should modify):
+
 - `src/resources/extensions/gsd/db/engine.ts`
 - `src/resources/extensions/gsd/db-schema-metadata.ts`
 - `src/resources/extensions/gsd/migrate/execution.ts`
@@ -166,6 +167,7 @@ failure standalone before attributing it to your change.
 - `plans/README.md` (status row only)
 
 **Out of scope** (do NOT touch, even though they look related):
+
 - `src/resources/extensions/gsd/flat-phase-migration.ts` and the legacy/flat
   layout seam — governed by ADR-045 (`docs/dev/ADR-045-flat-phase-layout-completion.md`), maintainer decision pending.
 - `src/resources/extensions/gsd/db-migration-steps.ts` — the individual

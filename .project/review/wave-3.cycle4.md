@@ -69,6 +69,7 @@ this worktree — see "Process finding" below):
   `a27f96189` version, so the fix is fixture-only as claimed.
 
 Warnings (non-blocking):
+
 - The Log's rationale is factually wrong even though the fix is right.
   `roadmapMeta` no longer comes from "the roadmap projection": `indexWorkspace`
   (`workspace-index.ts:139-141`) builds it from `getMilestoneSlices()` DB rows.
@@ -120,6 +121,7 @@ Warnings (non-blocking):
     The vacuity is genuinely removed.
 
 Warnings (non-blocking):
+
 - The disclosed unfailable test is **confirmed** — see "Disclosed items" below.
 
 ## T011 residue, round 3 — 2 RED tests reached transitively: **fail**

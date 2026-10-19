@@ -92,9 +92,11 @@ OpenRouter aggregates 200+ models from multiple providers behind a single API ke
 
 1. Get a key at [openrouter.ai/keys](https://openrouter.ai/keys)
 2. Set it:
+
    ```bash
    export OPENROUTER_API_KEY="sk-or-..."
    ```
+
 3. In GSD, type `/model` to select an OpenRouter model (prefixed with `openrouter/`)
 
 To add models not in the built-in list, add them to `~/.gsd/agent/models.json`. See [Custom Models](custom-models.md).
@@ -169,17 +171,20 @@ The file reloads each time you open `/model` — no restart needed.
 ### Ollama
 
 1. Install and start Ollama:
+
    ```bash
    brew install ollama
    ollama serve
    ```
 
 2. Pull a model:
+
    ```bash
    ollama pull llama3.1:8b
    ```
 
 3. Create `~/.gsd/agent/models.json`:
+
    ```json
    {
      "providers": {
@@ -206,6 +211,7 @@ The file reloads each time you open `/model` — no restart needed.
 1. Install [LM Studio](https://lmstudio.ai)
 2. Go to "Local Server" tab, load a model, click "Start Server" (default port 1234)
 3. Create `~/.gsd/agent/models.json`:
+
    ```json
    {
      "providers": {
@@ -290,6 +296,7 @@ This writes `~/.gsd/agent/models.json` for you. See [Custom Models](custom-model
 4. Send a test message to confirm it responds
 
 If the model doesn't appear, check:
+
 - The environment variable is set in the current shell
 - `models.json` is valid JSON
 - The server is running (for local providers)

@@ -59,6 +59,7 @@ pi.on("context", async (event) => {
 ### Why This Matters
 
 A naive implementation would just change the tool set. But:
+
 - `bash` with `rm -rf` is technically a "read-only" tool by name
 - Stale context messages from a previous mode can confuse the LLM
 - The LLM might try to work around restrictions if it sees the mode instructions but has the tools available
@@ -110,6 +111,7 @@ pi.on("before_agent_start", async (event) => {
 ```
 
 This is better than calling `agent.setSystemPrompt()` directly because:
+
 - `before_agent_start` fires on every prompt, keeping the system prompt current
 - The base system prompt is rebuilt by pi when tools change — a direct set would be overwritten
 - Other extensions can see and further modify the prompt in the chain
@@ -145,6 +147,7 @@ Session resume:
 On session resume, the extension does TWO things:
 
 1. **Reads the persisted state** from `appendEntry`:
+
    ```typescript
    const planModeEntry = entries
      .filter(e => e.type === "custom" && e.customType === "plan-mode")
@@ -152,6 +155,7 @@ On session resume, the extension does TWO things:
    ```
 
 2. **Re-scans assistant messages** for completion markers:
+
    ```typescript
    // Only scan messages AFTER the last plan-mode-execute marker
    const allText = messages.map(getTextContent).join("\n");

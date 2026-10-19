@@ -2,9 +2,9 @@
 pipeline: gsd-path/v1
 project: gsd-pi
 milestone: state-db-cutover # set by the grill; names the archive directory at ship
-phase: build        # onboard | grill | research | synthesize | plan | build | review | shipped
+phase: shipped      # onboard | grill | research | synthesize | plan | build | review | shipped
                     # onboard only for brownfield projects; greenfield starts at grill
-status: active      # active | done | blocked
+status: done        # active | done | blocked
 branch: gsd-path/gsd-pi # bound once at build; reset for the next milestone
 archive: null       # persisted archive transaction path; never recomputed
 ---
@@ -49,3 +49,4 @@ it on completion. If this file and the artifacts disagree, the artifacts win
 - 2026-08-08 — build — CUTOVER RELEASED as v1.13.0 (npm latest=1.13.0, all five @opengsd/engine-* at 1.13.0, tag v1.13.0, GitHub Release published 00:29:20Z, Docker pushed). ADR-046 DOWNGRADE WINDOW HAS NOW STARTED: it runs from this release — 2 stable releases + >=60 days, so the earliest wave-4 deletion date is 2026-10-07 AND requires one more stable release after 1.13.0. Release included the 15 fixes for live-1.12.0 bugs plus the DB-authority cutover (#1627).
 - 2026-08-08 — build — WAVE 4 STATUS: T020/T021/T022 remain timebox-blocked until the window above elapses. T020 is ADDITIONALLY blocked and this has no deadline relief: the symbol-keyed proof reports 7 production modules that still parse legacy markdown via the relocated parseLegacy* functions, every one carrying `Retired by: none`. They need owners before T020's zero-offender gate can ever pass. T023 (closeout) depends on all three.
 - 2026-08-12 — build — WAVE 4 DONE (T020–T023). User waived remaining ADR-046 calendar days. Proof PASS. `gate:lifecycle-shadow-no-cutover` PASS 7/7+11/11. Closeout docs updated. Branch `fix/wave-4-legacy-path-deletion`.
+- 2026-10-02 — shipped — STATE CORRECTED. This milestone (state-db-cutover) is done: wave 4 merged 2026-08-12, and this file still said build/active. No archive transaction was run, so `archive` stays null. The milestone removed the markdown fallback only. It did not run an Authority Epoch Cutover, and the ADR-046 program is not finished. Decision D012 (supersedes D005 for canonical lifecycle read authority; its project-database row is NOT written yet, so the ID is provisional), the Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates are in docs/dev/state-db-cutover-milestone-decision.md. The remaining work is not tracked in this pipeline.

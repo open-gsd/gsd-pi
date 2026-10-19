@@ -110,4 +110,92 @@ describe("isContextOverflow", () => {
 		const message = createLengthStopMessage(100, 0, 0);
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
+
+	function createStopMessage(
+		usage: AssistantMessage["usage"],
+		provider: string,
+	): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider,
+			model: "test-model",
+			usage,
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+	}
+
+	it("does not treat claude-code cumulative usage as overflow when live per-call context is attached (#2358)", () => {
+		// One turn with 4 internal API calls, each re-reading ~51k from cache:
+		// the SDK's terminal result.usage is cumulative, so input + cacheRead
+		// = 204,240 crosses the 200k window while the live end-of-turn context
+		// (last main-loop assistant event) is ~52k = 26% of the window. The
+		// adapter attaches that per-call value as liveContextTokens and Case 2
+		// must prefer it over the cumulative sum.
+		const message = createStopMessage(
+			{
+				input: 240,
+				output: 800,
+				cacheRead: 204_000,
+				cacheWrite: 5_200,
+				totalTokens: 6_240,
+				liveContextTokens: 52_440,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			"claude-code",
+		);
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("still reports overflow when the attached live context exceeds the window", () => {
+		const message = createStopMessage(
+			{
+				input: 240,
+				output: 800,
+				cacheRead: 204_000,
+				cacheWrite: 5_200,
+				totalTokens: 6_240,
+				liveContextTokens: 204_500,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			"claude-code",
+		);
+		expect(isContextOverflow(message, 200000)).toBe(true);
+	});
+
+	it("treats a zero liveContextTokens as absent and falls back to input+cacheRead", () => {
+		const message = createStopMessage(
+			{
+				input: 240,
+				output: 800,
+				cacheRead: 204_000,
+				cacheWrite: 5_200,
+				totalTokens: 6_240,
+				liveContextTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			"claude-code",
+		);
+		expect(isContextOverflow(message, 200000)).toBe(true);
+	});
+
+	it("still detects silent overflow from input+cacheRead when no live context is attached (z.ai zero-totalTokens)", () => {
+		// z.ai accepts overflow silently and reports no meaningful totalTokens;
+		// no adapter attaches liveContextTokens here, so the legacy
+		// input + cacheRead check must keep firing.
+		const message = createStopMessage(
+			{
+				input: 240_000,
+				output: 800,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			"zai",
+		);
+		expect(isContextOverflow(message, 200000)).toBe(true);
+	});
 });

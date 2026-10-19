@@ -79,12 +79,20 @@ closeout from one consistent project-database snapshot. Missing or unreadable
 authority fails explicitly; runtime does not fall back to files or cached
 prose.
 
-Read-only progress integrations are a display-only compatibility boundary:
-`gsd read progress` and packaged MCP `gsd_progress` may serve the `STATE.md`
-projection only when the project database is missing or cannot be opened, or
+Read-only integrations are a display-only compatibility boundary:
+`gsd read progress`, `gsd read roadmap` and packaged MCP `gsd_progress`,
+`gsd_query`, `gsd_roadmap`, `gsd_doctor` and the `gsd_graph` build may serve
+the `.gsd/` projections
+only when the project database is missing or cannot be opened, or
 when the standalone MCP package has no GSD runtime bridge. Once the database
 opens, it remains authoritative and any later read failure is reported instead
-of falling back. This exception cannot drive lifecycle state.
+of falling back. The web project picker lists projects that the user did not
+open, so it reads each project database read-only with no migration, and it
+shows the `STATE.md` projection only when that read fails. The web workspace
+index, project kind and inspect reads follow the same rule and, like the CLI
+and MCP reads, label a fallback result `readMetadata: { source: "projection",
+authority: "projection-fallback" }`. This exception cannot drive lifecycle
+state.
 
 Only Domain Operations in the Single Writer layer mutate workflow state. A
 Domain Operation validates revision, dependencies, lifecycle, lease/fencing,
@@ -95,6 +103,44 @@ and the new database revision together.
 Narrative content may be canonical database content, but every machine-relevant
 fact has a normalized database representation. Runtime never reconstructs
 workflow truth from narrative prose.
+
+Work outside the Milestone hierarchy is in scope when it keeps state. A custom
+workflow run (`yaml-step`) and a markdown-phase template run are workflow
+state: the run, its frozen definition and its step or phase lifecycle are
+database rows, and the files in the run directory are projections. A oneshot
+workflow run keeps no state (no run directory, no phase tracking) and is out
+of scope of this ADR.
+
+Current effect: a `yaml-step` run is `custom_workflow_runs` and
+`custom_workflow_steps` rows written by `custom_workflow.*` Domain Operations,
+with one `custom_workflow_step_verifications` evidence row for each
+verification. A step with no check records `inconclusive` with a waiver
+rationale on that row; it is not a `workflow_waivers` row, because a step has
+no lifecycle row. A step with a `human-review` or `prompt-verify` policy
+records `inconclusive` with no waiver and pauses the run;
+`/gsd workflow approve <name>/<timestamp> <step>` records the decision of the
+operator as a `pass` row written by a `user` actor and completes the step, in
+one `custom_workflow.step.approve` operation. A
+step that auto-mode runs is claimed as a `unit_dispatches` row (ADR-048), so a
+second session cannot run it. A step is not a Task: it has no Attempt. The run
+revision fence of the Domain Operation is the write safety of the step rows:
+each call has its own idempotency key, so a second session that read the same
+revision gets a revision conflict and never a silent replay. The
+verification retry count of a step is on its step row, written by a
+`custom_workflow.step.retry` Domain Operation. The rows are the only
+authority: a run directory with no run row (an older release) is imported with
+a `custom_workflow.run.import` Domain Operation before the engine reads it,
+and an import that is refused (an unknown step status) fails loud and writes
+nothing. This import is not an Import Preview. The pause row (`auto_pauses`) is session state,
+not run identity: a command that names a run starts that run and drops the
+record. A markdown-phase template run still keeps its phase state in
+an agent-edited `STATE.json`.
+
+The semantic shadow comparison does not cover custom runs. The `custom` mode
+entries of the M003/S07 cutover dossier compare the status of hierarchy items
+while a custom run is active; they are not evidence about run or step state.
+A custom run has no legacy status to compare with: its rows are the only
+authority and the run directory files are renders.
 
 ### Markdown and other files are one-way projections
 
@@ -110,6 +156,16 @@ dependency, authorize recovery, roll back a committed operation, or block
 otherwise valid work. A full projection rebuild is idempotent from the
 database.
 
+Agents change a projection only through the tool that owns its state. The
+agent write guard (`write-intercept.ts`) refuses a direct write, edit or shell
+write to a managed projection that has a save tool and names that tool; the
+guarded kinds, the engines it runs on and its limits are in
+[`state-db-cutover-projection-contract.md`](state-db-cutover-projection-contract.md),
+section 1. The command outputs under `.gsd/spikes`, `.gsd/sketches`,
+`.gsd/reviews` and `.gsd/codebase` are non-workflow documents: no workflow
+decision reads them, and agents write them directly. A
+`/gsd thread` has no typed row; it is a memory entry by prompt convention.
+
 Legacy disk content enters authority only through explicit Import Preview and
 Import Application. Preview is read-only, reports exact mappings and loss, and
 binds approval to source fingerprints, parser/schema versions, and database
@@ -117,6 +173,47 @@ revision. Application requires unchanged inputs, a verified restorable backup,
 resolved ambiguity, required consent, and one transaction. Import is never an
 implicit startup, database-open, derive-state, dispatch, or reconciliation
 behavior.
+
+### One database per bound checkout
+
+The state-directory hash (remote URL or path) only locates a database; it is
+not the Project identity. `project_authority` holds a stable `project_id` and
+the realpath of the one checkout root the database belongs to. The first open
+binds an unbound database. Every later open from another root, such as a second
+clone that resolves to the same state directory or a copied `gsd.db`, is
+refused with `checkout-unbound` until `/gsd db bind` explicitly moves the
+binding. An internal reopen that holds only the database path has no root to
+compare, so it checks that the file is the one its bound checkout resolves to.
+Worktrees belong to the checkout that created them. One resolver
+(`resolveGsdPathContract`) finds the database, anchored on `gsd.db` and
+preferences, never on projection files. The binding is not identity: Import
+Application restore and Forward Repair match a backup by `project_id`, so a
+backup taken before binding (root `''`) or under an earlier binding stays
+usable. A restore installs the backup's own binding; when that names another
+root, the next open refuses until `/gsd db bind`.
+
+Committed `.gsd/` markdown (tracked mode, team repositories) is an export, not
+shared authority. A clone with milestone projections and no database, or a
+database with no milestone rows beside a planned (ROADMAP) projection, fails
+closed with `authority-missing` in every entry point and every internal reopen
+until Import Application (`/gsd recover`), a restore, or the explicit
+start-empty choice. The same refusal applies to a git-tracked `PROJECT.md`,
+`DECISIONS.md` or `REQUIREMENTS.md` beside no database, or beside a database
+with no workflow rows and no Domain Operation: only rows produce these files.
+`KNOWLEDGE.md` is not such evidence, because a render with no rows writes its
+empty frame. `/gsd db start-empty` stores the choice as one Domain Operation
+(`project.start_empty`), so every later open admits the database. It moves and
+deletes no file: a milestone that exists only as markdown still blocks dispatch
+until the user discards, renames or imports it. A `/gsd recover` that
+applies nothing closes the handle it opened, so the same process refuses the
+database again. Guided entry holds a changed tracked projection
+the same way before its markdown self-heal. A tracked projection changed by pull, merge,
+rebase, or branch switch raises one "changed outside GSD" state before
+dispatch in auto mode, parallel spawn, guided flow and `/gsd dispatch`: the
+user imports it through Import Preview or discards it with a
+projection rebuild; GSD never quarantines and re-renders it silently. The
+render baseline (`.gsd/.compat.json`) and `.gsd/quarantine/` are runtime files
+and are never committed.
 
 ### One natural conversation contract
 
@@ -152,6 +249,15 @@ git/worktree mechanics, projection workers, transports, UI, and parallel
 capacity stay in their owning deep modules. They return typed results and do
 not mutate lifecycle independently. Parallelism is database-claim concurrency,
 not a second lifecycle or a DAG wrapped around one work item.
+
+Attempts are the kernel record of Task execution. For every other unit type the
+kernel record is the claimed `unit_dispatches` row. The target is that retry and
+recovery budgets, pause state and stage checkpoints are stored on that row.
+Today three retry budgets (zero-tool, tool-unavailable and pre-execution
+repair), the sidecar queue, the planner retry after a failed pre-execution
+check and the stage checkpoint are stored there. The pause is a row of its own
+(`auto_pauses`) with a link to the dispatch row. See the amendments in
+[ADR-048](ADR-048-unitrun-dispatch-row.md) for the parts that are done.
 
 The refactor remains provider-neutral and extension-first. Provider-specific
 execution stays behind typed adapters, and capabilities that do not require
@@ -238,13 +344,48 @@ Migration is additive and never runs two authorities.
    custom-definition storage.
 3. Backfill in one verified transaction. Preserve raw legacy values; map
    `skipped` only to cancellation and a provable Waiver; convert fabricated
-   completion to failed/interrupted work with remediation; treat unreliable
-   assessment history as unverified.
+   completion to failed/interrupted work with remediation (superseded by the
+   2026-10-03 note below); treat unreliable assessment history as unverified.
+
+   > **Note (2026-10-03):** the owner-decision default, as implemented by
+   > `lifecycle.backfill`, replaces "failed/interrupted work with remediation".
+   > A legacy completion with `completed_at`, a summary and a verification
+   > result that is not failed is adopted as completed with an
+   > `unverified-legacy` evidence marker. Every other legacy completion is
+   > adopted as open work (`ready` or `pending`) and reported as a finding,
+   > except under a parent already adopted as completed, where it stays
+   > completed as unverified legacy and is reported as a finding.
+   > The per-item-kind evidence rule lives in
+   > `src/resources/extensions/gsd/lifecycle-backfill-domain-operation.ts`.
 4. Route one low-risk work family through the kernel, then auto, interactive,
    standard, custom, and parallel families with semantic shadow comparison.
    Shadow comparison observes outcomes; it never creates disk authority.
 5. Increment the per-Project Authority Epoch at cutover. A migrated Project
    cannot downgrade to disk authority.
+
+   > **Note (2026-10-04):** owner decision: the cutover is automatic. The first
+   > open of an existing project database at Authority Epoch 0 writes a
+   > verified backup, runs `lifecycle.backfill`, and advances the epoch with
+   > the `authority.cutover` Domain Operation. The precondition is a lifecycle
+   > row for every milestone, slice and task, and idle coordination. It no
+   > longer requires an Import Application as the operation head. The run is
+   > the default; `GSD_AUTHORITY_CUTOVER=0` is the opt-out, kept for one
+   > release. `CONTEXT.md` (State layer) owns the rest of the contract: when
+   > the run stops or waits. The code is
+   > `src/resources/extensions/gsd/authority-cutover-on-open.ts`.
+   >
+   > **Note (2026-10-04, older copy of the database file):** a process that
+   > holds a receipt of a Domain Operation above Authority Epoch 0 refuses to
+   > open the same Project at a lower epoch. `/gsd db restore-backup` refuses a
+   > backup from a lower epoch. A new process that opens a file copy of a
+   > database from before the cutover is outside this guarantee: nothing
+   > outside the database file records the epoch. That copy holds no accepted
+   > work from after the cutover. When the automatic cutover is on, the open
+   > backs the copy up, backfills it and cuts it over again, so it does not
+   > stay on legacy authority. A record of the highest epoch beside the
+   > database file was considered and not built: it would refuse a file that
+   > the automatic cutover can bring forward, and it cannot see an older copy
+   > at the same epoch.
 6. Roll out through development corpus, opt-in canary, and stable release gates
    with restart, fault, import, restore, parity, projection, and performance
    evidence.
@@ -310,37 +451,54 @@ These dispositions define the accepted post-cutover architecture. They do not
 claim that current runtime behavior has changed before the corresponding
 migration and cutover gates complete.
 
-| Existing decision | Disposition under ADR-046 |
-|---|---|
-| ADR-003 Pipeline Simplification | Superseded before adoption. Research remains first-class, resumable Milestone work rather than being merged into planning or reduced to optional artifacts; its ceremony-reduction goal remains valid through the shared Lifecycle Kernel, automated verification, and durable closeout. |
-| ADR-009 Unified Orchestration Kernel | Superseded for workflow orchestration. Provider/model/TOS policy remains independently valid. |
-| ADR-011 Progressive Planning and Escalation | Progressive refinement retained; file-backed escalation, DAG, broad pauses, and forward-only correction superseded. |
-| ADR-013 Memory Store Consolidation | Amended. `memories` remains canonical for reusable cross-session knowledge, while workflow Decisions and their lifecycle effects move to the Conversation domain; memory extraction is noncritical follow-on work. |
-| ADR-014 Auto Orchestration Deep Module | Amended and generalized into the shared Lifecycle Kernel. |
-| ADR-015 Runtime Invariant Modules | Retained with database-only reconciliation and typed module results. |
-| ADR-016 Worktree Lifecycle and Projection | Worktree Lifecycle retained; workflow-state copying and worktree-local authority reconciliation superseded. |
-| ADR-016 Worktree Safety | Retained. |
-| ADR-016 Phase 2 Design Notes | Historical implementation addendum. |
-| ADR-017 Drift-Driven State Reconciliation | Superseded; only idempotent database-invariant repair remains. |
-| ADR-018 PROJECT Authority Contract | Retained and generalized to all workflow artifacts; prose cannot register machine facts implicitly. |
-| ADR-022 Post-Unit Gate Enforcement | Amended: the shared kernel owns progression; remediation replaces routine pauses. |
-| ADR-023 Hook Outcome Frontmatter | Superseded by database Verification Evidence and Technical Verdicts. |
-| ADR-025 Closeout Consistency Gate | Retained and generalized by prepared/settled closeout and receipts. |
-| ADR-028/029 Preload-Authoritative Guidance | Grounded-context discipline retained; workflow context must derive from one database snapshot. |
-| ADR-030 Two-Altitude State Machine | Single Writer chokepoint retained; in-memory phase authority, skipped status, and filesystem replay superseded. |
-| ADR-032 Unit Closeout Module | Superseded by `prepareCloseout` plus `settleCloseout`. |
-| ADR-033 Unit Registry | Retained as adapter/tool/prompt metadata only. |
-| ADR-034 Merge and Publication Split | Retained; required source effects precede completion and publication remains non-authoritative. |
-| ADR-035 Dirty Projection Scope | Superseded before adoption by durable Projection Work. |
-| ADR-038 Dispatch History Module | Superseded by persisted Attempts, Failure Observations, fingerprints, and recovery budgets. |
-| ADR-039 Consent Question Module | Superseded by explicit interaction kinds and the narrow consent boundary. |
-| ADR-040 Write-Gate Snapshot Adapters | Superseded by Domain Operations, revisions, fencing, and Authority Epoch. |
-| ADR-041 Engine Hook Contract | Retained; hooks submit typed adapter results and cannot own lifecycle. |
-| ADR-042 Three Session Types | Session separation retained; durable GSD lifecycle moves out of AutoSession. |
-| ADR-045 Flat-Phase Migration | Superseded before adoption; legacy layouts are explicit import/export formats, not startup authority. |
+The "Current effect" column records which dispositions are true in the runtime
+now. It was assessed against `main` at `f083599c4`. "Not assessed" means that
+no evidence was collected; it is not a claim in either direction. Update the
+column when a migration gate passes.
+
+| Existing decision | Disposition under ADR-046 | Current effect (2026-10-02) |
+|---|---|---|
+| ADR-003 Pipeline Simplification | Superseded before adoption. Research remains first-class, resumable Milestone work rather than being merged into planning or reduced to optional artifacts; its ceremony-reduction goal remains valid through the shared Lifecycle Kernel, automated verification, and durable closeout. | Partly. ADR-003 was not adopted. The shared Lifecycle Kernel and durable closeout are not complete. |
+| ADR-009 Unified Orchestration Kernel | Superseded for workflow orchestration. Provider/model/TOS policy remains independently valid. | Not assessed. |
+| ADR-011 Progressive Planning and Escalation | Progressive refinement retained; file-backed escalation, DAG, broad pauses, and forward-only correction superseded. | Partly. A Task escalation is an Open Question with a choice interaction and an Answer in the database (`escalation.ts`); no escalation file is written. Only a Task with a canonical lifecycle can escalate. DAG, broad pauses, and forward-only correction are not yet replaced. |
+| ADR-013 Memory Store Consolidation | Amended. `memories` remains canonical for reusable cross-session knowledge, while workflow Decisions and their lifecycle effects move to the Conversation domain; memory extraction is noncritical follow-on work. KNOWLEDGE.md Rules are `memories` rows (`category = rule`, `sourceKnowledgeId` K###); this supersedes ADR-013's file-owned Rules. Global knowledge (`~/.gsd/agent/KNOWLEDGE.md`) and the pi-coding-agent memory extension (`~/.gsd/agent/agent.db`) are user-level stores outside project authority: they are not project database content, not imported, and not rendered. gsd-pi does not load that extension: it is not a bundled resource and no extension discovery path includes it, so it does not run beside the gsd extension. | Not yet. Workflow Decisions are still `memories` rows. The Conversation domain is not in production. |
+| ADR-014 Auto Orchestration Deep Module | Amended and generalized into the shared Lifecycle Kernel. | Not yet. The Lifecycle Kernel is not the sole sequencer for every unit type and entry point. |
+| ADR-015 Runtime Invariant Modules | Retained with database-only reconciliation and typed module results. | Partly. The modules are retained. Reconciliation still compares projection files. |
+| ADR-016 Worktree Lifecycle and Projection | Worktree Lifecycle retained; workflow-state copying and worktree-local authority reconciliation superseded. | Partly. Worktree Lifecycle is in effect. `worktree-state-projection.ts` still copies workflow files to worktrees. |
+| ADR-016 Worktree Safety | Retained. | In effect. |
+| ADR-016 Phase 2 Design Notes | Historical implementation addendum. | In effect (historical record). |
+| ADR-017 Drift-Driven State Reconciliation | Superseded; only idempotent database-invariant repair remains. | Not yet. `reconcileBeforeDispatch` is in production and projection drift can still block dispatch. |
+| ADR-018 PROJECT Authority Contract | Retained and generalized to all workflow artifacts; prose cannot register machine facts implicitly. | Partly. In effect for PROJECT. KNOWLEDGE.md Rules, Patterns and Lessons are written as DB rows and KNOWLEDGE.md is rendered from them. Session start no longer imports KNOWLEDGE.md rows into the database, and prompt inlines, the visualizer, `gsd_knowledge` and the web Knowledge view read the database, not the file. `/gsd recover` imports KNOWLEDGE.md Rule, Pattern and Lesson rows through an Import Preview and Import Application; the Preview reports every other part of the file as not imported. A file row that differs from its active database row is reported as a conflict and the database row is kept; the file text replaces it only by an explicit `--choice=<id>.use-file` in a new sealed Preview, and Forward Repair can restore the earlier database row. File rows that are not imported yet, and file content the import does not model, are still kept in the render and shown by those readers. An on-disk CONTEXT.md still enters state from files. |
+| ADR-022 Post-Unit Gate Enforcement | Amended: the shared kernel owns progression; remediation replaces routine pauses. | Not yet. See ADR-014. |
+| ADR-023 Hook Outcome Frontmatter | Superseded by database Verification Evidence and Technical Verdicts. | Not yet. Hook verdicts are still read from artifact files. |
+| ADR-025 Closeout Consistency Gate | Retained and generalized by prepared/settled closeout and receipts. | Partly. The gate is retained. `prepareCloseout` and `settleCloseout` exist for a Milestone whose work is on a milestone branch; the gate accepts that open Milestone once its Closeout Plan is stored. A Task closes out through its own Closeout Plan whose source commit is effect ordinal 1 ([ADR-050](ADR-050-task-and-slice-closeout-receipts.md)); a Slice has no plan row, and `slice.complete` cites the tested source set hash and its Tasks' receipts. |
+| ADR-028/029 Preload-Authoritative Guidance | Grounded-context discipline retained; workflow context must derive from one database snapshot. | Partly. The discipline is in effect. Workflow context still reads some projection files. |
+| ADR-030 Two-Altitude State Machine | Single Writer chokepoint retained; in-memory phase authority, skipped status, and filesystem replay superseded. | Partly. The Single Writer chokepoint is in effect. The `skipped` status still exists. |
+| ADR-032 Unit Closeout Module | Superseded by `prepareCloseout` plus `settleCloseout`. | Partly. `prepareCloseout` and `settleCloseout` close out a Milestone that has a milestone branch, and a Task's closeout is a plan whose source commit settles before publication ([ADR-050](ADR-050-task-and-slice-closeout-receipts.md)). `unit-closeout.ts` is still in production for the interactive commit; a Slice has no plan row. |
+| ADR-033 Unit Registry | Retained as adapter/tool/prompt metadata only. | Not assessed. |
+| ADR-034 Merge and Publication Split | Retained; required source effects precede completion and publication remains non-authoritative. | Partly. The split is retained. For an adopted Milestone with a milestone branch, the merge is a required Closeout Effect that settles before completion, and the push is a non-required effect that the next closeout retries. The GitHub milestone close is a non-required effect that runs only after the Milestone is completed. A Milestone closed out on a validation Waiver uses the same plan: the plan cites the newest settled validation Attempt, and when validation never ran, the Attempt that the Waiver settled as interrupted. For an adopted Task, the source commit is a required Closeout Effect of the Task Closeout Plan and publication waits for its Settlement Receipt ([ADR-050](ADR-050-task-and-slice-closeout-receipts.md)); an unadopted Task still uses the old order, and the draft PR is unchanged (`closeout-effects`, `merge-publication-settlement`). |
+| ADR-035 Dirty Projection Scope | Superseded before adoption by durable Projection Work. | Partly. The Projection Worker delivers durable Projection Work per row through a kind-to-renderer registry, with retry and `dead_letter`. Each kind that production code enqueues has a renderer; a row of any other kind stays pending and visible. |
+| ADR-038 Dispatch History Module | Superseded by persisted Attempts, Failure Observations, fingerprints, and recovery budgets. | In effect through [ADR-047](ADR-047-auto-mode-liveness-backstop.md), which deleted the dispatch-history module. |
+| ADR-039 Consent Question Module | Superseded by explicit interaction kinds and the narrow consent boundary. | Partly. An answered `ask_user_questions` round of a Milestone discussion is stored as Open Question, interaction and Answer rows with an explicit interaction kind: `consent` for a gate question, `choice` for any other. A round outside a Milestone discussion, a question with more than three options, and an unanswered round are not stored as rows. `consent-question.ts` is in production and still decides the pause and the answer policy. |
+| ADR-040 Write-Gate Snapshot Adapters | Superseded by Domain Operations, revisions, fencing, and Authority Epoch. | Partly. The snapshot file and its two-process merge are deleted: write-gate state is `write_gate_state` rows that the host and the workflow MCP child read through one reader, and a verified gate survives a restart. The rows are enforcement rows written outside Domain Operations and do not read the Authority Epoch. The Authority Epoch advances on the first open of an existing database (unless `GSD_AUTHORITY_CUTOVER=0`). A gate question answered in a Milestone discussion and its answer are a consent interaction row and an Answer row; the gate itself is still enforced from the `write_gate_state` rows. A gate question with no Milestone lifecycle (PROJECT, REQUIREMENTS) has no interaction row. |
+| ADR-041 Engine Hook Contract | Retained; hooks submit typed adapter results and cannot own lifecycle. | Not assessed. |
+| ADR-042 Three Session Types | Session separation retained; durable GSD lifecycle moves out of AutoSession. | Not assessed. |
+| ADR-045 Flat-Phase Migration | Amended: superseded for startup layout detection and automatic filesystem migration; legacy layouts are explicit import/export formats, not startup authority. Flat-phase projection layout work continues. | Partly. Flat-phase layout work continues (see the amendment below). The read cutover that removes on-disk layout from runtime decisions is open. |
 
 Each superseded or amended ADR has a short top-of-file status notice linking
 here. Historical bodies remain intact.
+
+**Amendment (2026-10-05), ADR-050:** the Current effect of ADR-025, ADR-032
+and ADR-034 was reassessed against the Task and Slice closeout receipts: a
+Task publishes only when its source commit has a Settlement Receipt, and
+`slice.complete` requires every Task of the Slice to be published. See
+[ADR-050](ADR-050-task-and-slice-closeout-receipts.md).
+
+**Amendment (2026-10-02), ADR-045:** flat-phase layout work continues. ADR-045
+is superseded only where it gives an on-disk layout runtime authority: startup
+layout detection and automatic filesystem migration. Its projection work
+(single-sourced layout resolution for renders, and stale-render detection as a
+diagnostic) stays valid and is not blocked by this ADR.
 
 ## Implementation boundary and references
 

@@ -10,6 +10,7 @@ import { gsdRoot } from "../paths.js";
 import { isDbAvailable, insertAuditEvent } from "../gsd-db.js";
 import { CURRENT_UOK_CONTRACT_VERSION, validateAuditEvent, type AuditEventEnvelope } from "./contracts.js";
 import { isUnifiedAuditEnabled } from "./audit-toggle.js";
+import { logError } from "../workflow-logger.js";
 import {
   lifecycleShadowErrorHash,
   type LifecycleShadowObservation,
@@ -106,18 +107,24 @@ export function emitUokAuditEvent(basePath: string, event: AuditEventEnvelope): 
   }
   const canonical = validation.value;
 
-  if (isDbAvailable()) {
-    try {
-      insertAuditEvent({
-        ...canonical,
-        payload: {
-          ...canonical.payload,
-          contractVersion: canonical.version ?? CURRENT_UOK_CONTRACT_VERSION,
-        },
-      });
-    } catch (err) {
-      throw new Error(`DB authoritative audit write failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  // The DB row is the audit record; the JSONL file is only its projection.
+  // With no DB the event is refused and logged as an error, never written
+  // file-only (ADR-046). It does not throw: audit callers are telemetry and
+  // must not stop orchestration (a failed DB insert still throws below).
+  if (!isDbAvailable()) {
+    logError("db", `audit event ${canonical.type} (${canonical.traceId}) not recorded: workflow DB is unavailable`);
+    return;
+  }
+  try {
+    insertAuditEvent({
+      ...canonical,
+      payload: {
+        ...canonical.payload,
+        contractVersion: canonical.version ?? CURRENT_UOK_CONTRACT_VERSION,
+      },
+    });
+  } catch (err) {
+    throw new Error(`DB authoritative audit write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   try {

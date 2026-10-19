@@ -70,6 +70,7 @@ ctx.ui.setFooter(undefined);
 ```
 
 **`footerData` provides:**
+
 - `getGitBranch(): string | null` — current git branch (not accessible through any other API)
 - `getExtensionStatuses(): ReadonlyMap<string, string>` — all `setStatus` values
 - `onBranchChange(callback): () => void` — subscribe to branch changes, returns dispose function

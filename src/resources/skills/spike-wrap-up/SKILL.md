@@ -13,6 +13,7 @@ GSD's spike workflow (`src/resources/extensions/gsd/workflow-templates/spike.md`
 GSD already watches `.agents/skills/` (and `.claude/skills/` as a legacy compat path) at both user and project levels — see `src/resources/extensions/gsd/skill-discovery.ts`. Any skill written there is picked up on the next session without further wiring. This skill is the bridge from "spike done" to "skill available."
 
 Invocation points:
+
 - End of Phase 3 (synthesize) in `/gsd start spike` — prompt suggests running this skill
 - User has a spike directory and wants to harvest it
 - Pre-existing `RECOMMENDATION.md` that deserves a permanent home
@@ -35,6 +36,7 @@ Invocation points:
 3. If none exist, tell the user and stop. This skill requires a completed spike.
 
 Read the core files:
+
 - `<spike>/SCOPE.md` — the question that was asked
 - `<spike>/research/*.md` — the angles investigated
 - `<spike>/RECOMMENDATION.md` — the conclusion
@@ -48,7 +50,7 @@ Ask the user — one round:
 
 2. **What is the trigger?** When should a future agent load this skill? Give concrete keywords — "adding a new webhook handler", "writing a SQL migration", etc.
 
-If the user says it's not worth packaging, offer instead to append a summary to `.gsd/DECISIONS.md` and stop.
+If the user says it's not worth packaging, offer instead to save a summary with `gsd_decision_save` and stop.
 
 ## Step 3: Design the skill
 
@@ -108,7 +110,7 @@ If the spike produced a reusable template (a config file, a starter script), cop
 
 1. In the new SKILL.md, reference the originating spike: "Derived from `.gsd/workflows/spikes/<slug>/RECOMMENDATION.md` (dated YYYY-MM-DD)."
 2. Do NOT delete the spike directory — spikes are research artifacts and retain value for forensics.
-3. Append one line to `.gsd/DECISIONS.md`: `- YYYY-MM-DD [spike]: packaged "<slug>" findings as skill <name>`.
+3. Call `gsd_decision_save` to record that the "<slug>" spike findings were packaged as skill <name>.
 
 ## Step 6: Confirm pickup
 
@@ -120,7 +122,7 @@ Tell the user the skill will be surfaced on the next session via `skill-discover
 
 - **Writing to `~/.claude/skills/` or `.claude/skills/`.** These are legacy Claude Code compatibility paths. Write project skills to `.agents/skills/` in the project root instead.
 - **Verbose frontmatter description.** The description is an index entry, not a tutorial. Keywords over prose.
-- **Packaging every spike.** If the outcome was "we decided X once," append to DECISIONS.md and move on.
+- **Packaging every spike.** If the outcome was "we decided X once," save it with `gsd_decision_save` and move on.
 - **Copy-pasting the spike verbatim into the skill.** The spike is research; the skill is executable guidance. Re-author.
 - **Deleting the source spike.** Research artifacts should persist.
 
@@ -132,7 +134,7 @@ Tell the user the skill will be surfaced on the next session via `skill-discover
 - [ ] The `description` field uses keywords that will plausibly match future agent work.
 - [ ] The skill body is executable on its own without re-reading the originating spike.
 - [ ] The originating spike is referenced from the skill.
-- [ ] `.gsd/DECISIONS.md` has a one-line entry recording the packaging.
+- [ ] The packaging is recorded with `gsd_decision_save`.
 - [ ] The spike directory itself is untouched.
 
 </success_criteria>

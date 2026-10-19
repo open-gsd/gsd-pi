@@ -23,6 +23,7 @@ Write for the roadmap planner. It needs to understand: what exists in the codeba
 A milestone adding a small feature to an established codebase needs targeted research — check the relevant code, confirm the approach, note constraints. A milestone introducing new technology, building a new system, or spanning multiple unfamiliar subsystems needs deep research — explore broadly, look up docs, investigate alternatives. Match your effort to the actual uncertainty, not the template's section count. Include only sections that have real content.
 
 Then research the codebase and relevant technologies. Narrate key findings and surprises as you go — what exists, what's missing, what constrains the approach.
+
 1. {{skillActivation}}
 2. **Skill Discovery ({{skillDiscoveryMode}}):**{{skillDiscoveryInstructions}}
 3. **Ground in the preloaded context, do not re-survey.** The Codebase Snapshot and Project Classification above describe current code reality and project size — treat them as authoritative. Do NOT open-endedly survey the tree (`rg`/`find`/`scout`) to rediscover what they already cover. Read a specific file with a targeted `read` only when a research question's answer hinges on that file's exact contents. Match research depth to the classified project size: a tiny project needs a short, targeted research note, not a broad survey.

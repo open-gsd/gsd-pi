@@ -172,3 +172,63 @@ test("buildGateEvaluatePrompt uses nested context guidance and model instruction
   assert.match(prompt, /## Context Mode/);
   assert.match(prompt, /model: "claude-opus-4-6"/);
 });
+
+test("buildGateEvaluatePrompt requires synchronous dispatch and persists a verdict for every scoped gate", async (t) => {
+  const { closeDatabase, insertGateRow, insertMilestone, insertSlice, openDatabase } = await import("../gsd-db.ts");
+  const repo = mkdtempSync(join(tmpdir(), "gsd-gate-eval-sync-"));
+  t.after(() => {
+    try { closeDatabase(); } catch { /* noop */ }
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  const sliceDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01");
+  mkdirSync(sliceDir, { recursive: true });
+  writeFileSync(join(sliceDir, "S01-PLAN.md"), "# S01 Plan\n\n## Verification\n- Run checks.\n");
+  openDatabase(join(repo, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active", depends_on: [] });
+  insertSlice({
+    id: "S01",
+    milestoneId: "M001",
+    title: "Test Slice",
+    status: "planned",
+    risk: "low",
+    depends: [],
+    demo: "",
+    sequence: 1,
+  });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q4", scope: "slice" });
+
+  const prompt = await buildGateEvaluatePrompt(
+    "M001",
+    "Test Milestone",
+    "S01",
+    "Test Slice",
+    repo,
+  );
+
+  // Background dispatch is the #2309 failure mode: the executor's Agent tool
+  // defaults to run_in_background: true, the unit's turn ends, and no
+  // gsd_save_gate_result call ever persists a verdict.
+  assert.match(
+    prompt,
+    /run_in_background: false/,
+    "prompt must forbid background dispatch for gate subagents",
+  );
+
+  // The turn-end gate must be tied to persisting a verdict for every gate id
+  // in the unit's scope, and each scoped id must be named alongside it.
+  const syncIdx = prompt.indexOf("run_in_background: false");
+  const persistWindow = prompt.slice(syncIdx, syncIdx + 800);
+  assert.match(
+    persistWindow,
+    /gsd_save_gate_result/,
+    "sync-dispatch requirement must be paired with the gsd_save_gate_result persist mandate",
+  );
+  for (const gateId of ["Q3", "Q4"]) {
+    assert.ok(
+      persistWindow.includes(gateId),
+      `persist requirement must name scoped gate ${gateId}`,
+    );
+  }
+});

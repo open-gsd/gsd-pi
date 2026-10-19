@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
-import { getAllMilestones, getMilestoneSlices, getSliceTasks } from "../gsd-db.js";
+import { getAllMilestones, getDbOrNull, getMilestoneSlices, getSliceTasks } from "../gsd-db.js";
 import { saveFile } from "../files.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import { isClosedStatus } from "../status-guards.js";
@@ -85,18 +85,27 @@ function formatPlanningRoadmapFlat(
   return lines.join("\n");
 }
 
+/** Commit time of the last Domain Operation, or "" when none was committed. */
+function lastOperationTime(): string {
+  const row = getDbOrNull()
+    ?.prepare("SELECT updated_at FROM project_authority WHERE singleton = 1")
+    .get() as { updated_at?: unknown } | undefined;
+  return typeof row?.updated_at === "string" ? row.updated_at : "";
+}
+
 /**
  * Format STATE.md in gsd-core's phase-progress schema. gsd-pi is authoritative
  * for status; this is a one-way DB→projection (edits to STATE.md are not
- * re-imported — see spec §7).
+ * re-imported — see spec §7). `lastUpdated` is a database time, never the
+ * wall clock, so a second render of the same database writes the same bytes.
  */
 function formatPlanningState(
   activeMilestone: string,
   totalPhases: number,
   completedPhases: number,
+  lastUpdated: string,
 ): string {
   const pct = totalPhases === 0 ? 0 : Math.round((completedPhases / totalPhases) * 100);
-  const ts = new Date().toISOString();
   return [
     "---",
     "gsd_state_version: 1.0",
@@ -104,8 +113,9 @@ function formatPlanningState(
     'milestone_name: "milestone"',
     "status: active",
     `stopped_at: Phase 01 — in progress`,
-    `last_updated: "${ts}"`,
-    `last_activity: ${ts.slice(0, 10)}`,
+    ...(lastUpdated
+      ? [`last_updated: "${lastUpdated}"`, `last_activity: ${lastUpdated.slice(0, 10)}`]
+      : []),
     "progress:",
     `  total_phases: ${totalPhases}`,
     `  completed_phases: ${completedPhases}`,
@@ -273,7 +283,12 @@ export async function writePlanningDirectory(
 
   const completedPhases = roadmapEntries.filter((e) => e.done).length;
   const statePath = join(root, "STATE.md");
-  const stateContent = formatPlanningState(milestones[0]!.id, roadmapEntries.length, completedPhases);
+  const stateContent = formatPlanningState(
+    milestones[0]!.id,
+    roadmapEntries.length,
+    completedPhases,
+    lastOperationTime(),
+  );
   await saveFile(statePath, stateContent);
   paths.push(statePath);
   projectionWrites.push({

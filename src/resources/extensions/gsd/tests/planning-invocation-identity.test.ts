@@ -235,7 +235,7 @@ test("milestone replanning preserves existing lifecycle status and causal proven
   const base = makeBase();
   try {
     insertMilestone({ id: "M001", title: "Reserved", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "Reserved slice", status: "paused" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Reserved slice", status: "blocked" });
     const fence = readDomainOperationFence();
     executeDomainOperation({
       operationType: "test.lifecycle.seed",
@@ -275,7 +275,7 @@ test("milestone replanning preserves existing lifecycle status and causal proven
     assert.equal(result["isError"], undefined);
 
     assert.deepEqual(lifecycleRows(), before);
-    assert.equal(getSlice("M001", "S01")?.status, "paused");
+    assert.equal(getSlice("M001", "S01")?.status, "blocked");
   } finally {
     cleanup(base);
   }

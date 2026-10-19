@@ -42,6 +42,25 @@ export function findLatestPinnableText(contentBlocks: Array<any>): string {
 // Performance: uses getLineCount() for Markdown components to avoid full
 // markdown lexer passes on every streaming delta. The cached line count
 // is only recomputed when the width changes (rare during streaming).
+//
+// Tool segments are measured at the height the transcript actually
+// displays, not the full render(): after replaceCompactToolRowsWithPhaseSummary()
+// folds finished tools into single-row phase summaries, render() still returns
+// the expanded body (read shows up to 10 collapsed lines, bash cards 5 preview
+// lines). Counting the raw render height overstates the rows below the
+// pinnable text, crosses the offscreen threshold early, and mirrors a
+// sentence that is still on-screen — the duplicate shown at "Working ·
+// Latest Output".
+function displayedLineCount(component: unknown, width: number, fallback: () => string[]): number {
+	try {
+		const hook = (component as { getDisplayedLineCount?: (width: number) => number }).getDisplayedLineCount;
+		if (typeof hook === "function") return hook.call(component, width);
+	} catch {
+		// Fall through to render-based measurement below.
+	}
+	return fallback().length;
+}
+
 export function rowsRenderedAfterContentIndex(
 	contentIndex: number,
 	width: number,
@@ -54,6 +73,10 @@ export function rowsRenderedAfterContentIndex(
 				// Use cached line count — avoids full render + lexer pass
 				rows += (seg.component as any).getLineCount?.(width) ?? seg.component.render(width).length;
 			} else if (seg.kind === "tool" && seg.contentIndex > contentIndex) {
+				rows += displayedLineCount(seg.component, width, () => seg.component.render(width));
+			} else if (seg.kind === "tool-summary") {
+				// Rolled-up phase summaries: render() matches their displayed height
+				// (1-2 rows per phase), so plain render() is the displayed count.
 				rows += seg.component.render(width).length;
 			}
 		} catch {

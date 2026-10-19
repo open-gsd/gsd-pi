@@ -31,6 +31,10 @@ function createMockCtx(cwd?: string) {
   return {
     cwd,
     notifications,
+    modelRegistry: {
+      getAvailable: () => [],
+    },
+    model: { provider: "anthropic", id: "claude-sonnet-4" },
     ui: {
       notify(message: string, level: string) {
         notifications.push({ message, level });

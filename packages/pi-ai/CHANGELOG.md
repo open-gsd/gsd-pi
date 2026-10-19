@@ -126,6 +126,7 @@
 ### Breaking Changes
 
 - Replaced `OpenAICompletionsCompat.reasoningEffortMap` with top-level `Model.thinkingLevelMap` for model-specific thinking controls ([#3208](https://github.com/badlogic/pi-mono/issues/3208)). Migration: move mappings from `model.compat.reasoningEffortMap` to `model.thinkingLevelMap`. See `packages/ai/README.md#custom-models` and `packages/coding-agent/docs/models.md#thinking-level-map`. Map values keep the same provider-specific string semantics, and `null` marks a pi thinking level unsupported. Example:
+
   ```ts
   // Before
   compat: { reasoningEffortMap: { high: "high", xhigh: "max" } }
@@ -133,6 +134,7 @@
   // After
   thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" }
   ```
+
 - Removed `supportsXhigh()`. Migration: use `getSupportedThinkingLevels(model).includes("xhigh")` or `clampThinkingLevel(model, requestedLevel)` instead ([#3208](https://github.com/badlogic/pi-mono/issues/3208)).
 
 ### Added

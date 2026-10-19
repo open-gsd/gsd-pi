@@ -14,9 +14,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -29,7 +27,10 @@ import {
   insertTask,
   insertDecision,
   insertArtifact,
+  _getAdapter,
 } from '../gsd-db.ts';
+import { replaceProjectMilestoneSequence } from '../db/writers/project-milestone-sequence.ts';
+import { recordProjectionReads } from './db-authority-gate.ts';
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
 
@@ -196,30 +197,12 @@ describe('derive-seam-authority', () => {
   });
 
   // (c) The live derive path does not open markdown projections for parsing.
-  // Spy on both fs.readFileSync and fs.promises.readFile (the two read
-  // channels used under the seam) and assert no state projection is read.
+  // The shared gate spy records fs.readFileSync and fs.promises.readFile (the
+  // two read channels used under the seam) for every managed file under .gsd.
   test('derive-seam-authority: live derive path never opens markdown projections', async (t) => {
     const base = createFixtureBase();
 
-    const readPaths: string[] = [];
-    const mutableFs = fs as { readFileSync: typeof fs.readFileSync };
-    const originalReadFileSync = fs.readFileSync;
-    mutableFs.readFileSync = ((path: fs.PathLike, ...args: unknown[]) => {
-      readPaths.push(String(path));
-      return (originalReadFileSync as (...a: unknown[]) => unknown)(path, ...args);
-    }) as typeof fs.readFileSync;
-    const originalReadFile = fs.promises.readFile;
-    const mutablePromises = fs.promises as { readFile: typeof fs.promises.readFile };
-    mutablePromises.readFile = ((path: fs.PathLike, ...args: unknown[]) => {
-      readPaths.push(String(path));
-      return (originalReadFile as unknown as (...a: unknown[]) => unknown)(path, ...args);
-    }) as typeof fs.promises.readFile;
-    syncBuiltinESMExports();
-
     t.after(() => {
-      mutableFs.readFileSync = originalReadFileSync;
-      mutablePromises.readFile = originalReadFile;
-      syncBuiltinESMExports();
       closeDatabase();
       cleanup(base);
     });
@@ -232,19 +215,11 @@ describe('derive-seam-authority', () => {
     insertDbHierarchy();
 
     invalidateStateCache();
-    const state = await deriveState(base);
-    assert.equal(state.phase, 'executing', 'spy-fixture: DB path taken');
+    const projectionReads = await recordProjectionReads(base, async () => {
+      const state = await deriveState(base);
+      assert.equal(state.phase, 'executing', 'spy-fixture: DB path taken');
+    });
 
-    const projectionReads = readPaths.filter(p =>
-      /STATE\.md$/i.test(p)
-      || /DECISIONS\.md$/i.test(p)
-      || /PROJECT\.md$/i.test(p)
-      || /-ROADMAP\.md$/i.test(p)
-      || /-PLAN\.md$/i.test(p)
-      || /-SUMMARY\.md$/i.test(p)
-      || /-CONTEXT(-DRAFT)?\.md$/i.test(p)
-      || /REQUIREMENTS\.md$/i.test(p)
-    );
     assert.deepStrictEqual(
       projectionReads,
       [],
@@ -321,25 +296,32 @@ describe('derive-seam-authority', () => {
     const fromDisk = await deriveState(base);
     assert.equal(fromDisk.activeMilestone, null, 'seam: disk PROJECT.md must not promote a queued shell');
 
+    const projectDocument = [
+      '# Project',
+      '',
+      '## Milestone Sequence',
+      '',
+      '- [ ] M001: Foundation - Establish the first runnable slice.',
+      '',
+    ].join('\n');
     insertArtifact({
       path: 'PROJECT.md',
       artifact_type: 'PROJECT',
       milestone_id: null,
       slice_id: null,
       task_id: null,
-      full_content: [
-        '# Project',
-        '',
-        '## Milestone Sequence',
-        '',
-        '- [ ] M001: Foundation - Establish the first runnable slice.',
-        '',
-      ].join('\n'),
+      full_content: projectDocument,
     });
 
     invalidateStateCache();
+    const fromArtifactText = await deriveState(base);
+    assert.equal(fromArtifactText.activeMilestone, null, 'seam: the text of the PROJECT artifact row is not parsed');
+
+    replaceProjectMilestoneSequence(_getAdapter()!, projectDocument);
+
+    invalidateStateCache();
     const fromDb = await deriveState(base);
-    assert.equal(fromDb.activeMilestone?.id, 'M001', 'seam: PROJECT artifact promotes the in-sequence shell');
+    assert.equal(fromDb.activeMilestone?.id, 'M001', 'seam: the Milestone Sequence row promotes the in-sequence shell');
     assert.equal(fromDb.phase, 'pre-planning', 'seam: in-sequence shell goes to pre-planning');
   });
 });

@@ -1,19 +1,22 @@
-/**
- * GSD Captures — Fire-and-forget thought capture with triage classification
- *
- * Append-only capture file at `.gsd/CAPTURES.md`. Each capture is an H3 section
- * with bold metadata fields, parseable by the same patterns used in files.ts.
- *
- * Worktree-aware: captures always resolve to the original project root's
- * `.gsd/CAPTURES.md`, not the worktree's local `.gsd/`.
- */
+// Project/App: gsd-pi
+// File Purpose: Captures as Domain Operation events; CAPTURES.md is their render.
 
-import { existsSync, readFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
-import { gsdRoot } from "./paths.js";
-import { projectRootFromWorktreePath } from "./worktree-root.js";
+import { createHash, randomUUID } from "node:crypto";
+
 import { atomicWriteSync } from "./atomic-write.js";
+import { noteRenderedProjectionFile } from "./compat/compat-marker.js";
+import type { DomainJsonValue } from "./db/domain-operation.js";
+import { getDbOrNull } from "./db/engine.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import type { ExecutionInvocation } from "./execution-invocation.js";
+import { executeDomainOperation, isDbAvailable } from "./gsd-db.js";
+import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
+import { gsdRoot } from "./paths.js";
+import { logWarning } from "./workflow-logger.js";
+import { deriveState } from "./state.js";
+import { projectRootFromWorktreePath } from "./worktree-root.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +33,7 @@ export interface CaptureEntry {
   resolvedAt?: string;
   resolvedInMilestone?: string;
   executed?: boolean;
+  executedAt?: string;
 }
 
 export interface TriageResult {
@@ -43,25 +47,17 @@ export interface TriageResult {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const CAPTURES_FILENAME = "CAPTURES.md";
-const VALID_CLASSIFICATIONS: readonly string[] = [
+export const VALID_CLASSIFICATIONS: readonly string[] = [
   "quick-task", "inject", "defer", "replan", "note", "stop", "backtrack",
 ];
 
 // ─── Path Resolution ──────────────────────────────────────────────────────────
 
 /**
- * Resolve the path to CAPTURES.md, aware of worktree context.
- *
- * In worktree-isolated mode, basePath is `.gsd/worktrees/<MID>/`.
- * Captures must resolve to the *original* project root's `.gsd/CAPTURES.md`,
- * not the worktree-local `.gsd/`. This ensures all captures go to one file
- * regardless of which worktree the agent is running in.
- *
- * Detection: if basePath contains `/.gsd/worktrees/`, walk up to the
- * directory that contains `.gsd/worktrees/` — that's the project root.
+ * Path of the CAPTURES.md render. A worktree base path resolves to the
+ * project root's `.gsd/CAPTURES.md`, so there is one render per project.
  */
 export function resolveCapturesPath(basePath: string): string {
-  // If basePath is inside a worktree, resolve to the project root.
   const projectRoot = projectRootFromWorktreePath(resolve(basePath));
   if (projectRoot) {
     return join(projectRoot, ".gsd", CAPTURES_FILENAME);
@@ -69,52 +65,159 @@ export function resolveCapturesPath(basePath: string): string {
   return join(gsdRoot(basePath), CAPTURES_FILENAME);
 }
 
-// ─── File I/O ─────────────────────────────────────────────────────────────────
+// ─── Domain Operations ────────────────────────────────────────────────────────
 
-/**
- * Append a new capture entry to CAPTURES.md.
- * Creates `.gsd/` and the file if they don't exist.
- * Returns the generated capture ID.
- */
-export function appendCapture(basePath: string, text: string): string {
-  const filePath = resolveCapturesPath(basePath);
-  const dir = join(filePath, "..");
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+interface CaptureEvent {
+  eventType: "capture.registered" | "capture.resolved" | "capture.executed";
+  entityId: string;
+  payload: DomainJsonValue;
+}
+
+/** Run one capture Domain Operation, then render CAPTURES.md from the committed rows. */
+function runCaptureOperation(
+  basePath: string,
+  operationType: string,
+  payload: DomainJsonValue,
+  buildEvents: () => CaptureEvent[],
+  invocation?: ExecutionInvocation,
+): void {
+  if (!isDbAvailable()) throw new Error(`${operationType} requires the GSD database`);
+  const fence = readDomainOperationFence(invocation?.idempotencyKey);
+  executeDomainOperation({
+    operationType,
+    idempotencyKey: invocation?.idempotencyKey ?? `${operationType}/${fence.revision}`,
+    // The caller's revision is a precondition of the first send only. A retry
+    // can carry a newer revision, so a replay uses the recorded one.
+    expectedRevision: fence.replay ? fence.revision : invocation?.expectedRevision ?? fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: invocation?.actorType ?? "operator",
+    ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),
+    sourceTransport: invocation?.sourceTransport ?? "internal",
+    ...(invocation?.traceId ? { traceId: invocation.traceId } : {}),
+    ...(invocation?.turnId ? { turnId: invocation.turnId } : {}),
+    payload,
+  }, () => ({
+    events: buildEvents().map((event) => ({ ...event, entityType: "capture", destinations: ["projection"] })),
+    projections: [{ projectionKey: "captures", projectionKind: "markdown", rendererVersion: "1" }],
+  }));
+  try {
+    renderCapturesProjection(basePath);
+  } catch (err) {
+    // The operation is committed and its Projection Work row stays pending for the worker.
+    logWarning("projection", `CAPTURES.md render failed: ${(err as Error).message}`);
   }
-
-  const id = `CAP-${randomUUID().slice(0, 8)}`;
-  const timestamp = new Date().toISOString();
-
-  const entry = [
-    `### ${id}`,
-    `**Text:** ${text}`,
-    `**Captured:** ${timestamp}`,
-    `**Status:** pending`,
-    "",
-  ].join("\n");
-
-  if (existsSync(filePath)) {
-    const existing = readFileSync(filePath, "utf-8");
-    atomicWriteSync(filePath, existing.trimEnd() + "\n\n" + entry, "utf-8");
-  } else {
-    const header = `# Captures\n\n`;
-    atomicWriteSync(filePath, header + entry, "utf-8");
-  }
-
-  return id;
 }
 
 /**
- * Parse all capture entries from CAPTURES.md.
- * Returns entries in file order (oldest first).
+ * `/gsd capture` and the `capture_register` workflow command: record one
+ * pending capture in a capture.register Domain Operation. Returns its id.
+ * With an invocation the id comes from the idempotency key, so a command that
+ * is sent again gives the same capture.
  */
-export function loadAllCaptures(basePath: string): CaptureEntry[] {
-  const filePath = resolveCapturesPath(basePath);
-  if (!existsSync(filePath)) return [];
+export function appendCapture(basePath: string, text: string, invocation?: ExecutionInvocation): string {
+  const suffix = invocation
+    ? createHash("sha256").update(invocation.idempotencyKey).digest("hex")
+    : randomUUID();
+  const id = `CAP-${suffix.slice(0, 8)}`;
+  runCaptureOperation(basePath, "capture.register", { captureId: id, text }, () => [
+    { eventType: "capture.registered", entityId: id, payload: { text } },
+  ], invocation);
+  return id;
+}
 
-  const content = readFileSync(filePath, "utf-8");
-  return parseCapturesContent(content);
+function requireCapture(captureId: string): void {
+  if (!loadAllCaptures("").some((capture) => capture.id === captureId)) {
+    throw new Error(`capture ${captureId} is not in the GSD database`);
+  }
+}
+
+/** Classify one capture in a capture.resolve Domain Operation. An unknown id fails loud. */
+export function markCaptureResolved(
+  basePath: string,
+  captureId: string,
+  classification: Classification,
+  resolution: string,
+  rationale: string,
+  milestoneId?: string,
+  invocation?: ExecutionInvocation,
+): void {
+  requireCapture(captureId);
+  const payload = { captureId, classification, resolution, rationale, ...(milestoneId ? { milestoneId } : {}) };
+  runCaptureOperation(basePath, "capture.resolve", payload, () => [
+    { eventType: "capture.resolved", entityId: captureId, payload },
+  ], invocation);
+}
+
+/**
+ * Classify one capture and record the active Milestone of the project, so a
+ * later Milestone does not run a stale resolution. The active Milestone is the
+ * one that dispatch and triage use (deriveState).
+ */
+export async function resolveCapture(
+  basePath: string,
+  captureId: string,
+  classification: Classification,
+  resolution: string,
+  rationale: string,
+  invocation?: ExecutionInvocation,
+): Promise<void> {
+  const milestoneId = (await deriveState(basePath)).activeMilestone?.id;
+  markCaptureResolved(basePath, captureId, classification, resolution, rationale, milestoneId, invocation);
+}
+
+/** Record that a capture's resolution was carried out, in a capture.execute Domain Operation. An unknown id fails loud. */
+export function markCaptureExecuted(
+  basePath: string,
+  captureId: string,
+  detail: { [key: string]: DomainJsonValue } = {},
+  invocation?: ExecutionInvocation,
+): void {
+  requireCapture(captureId);
+  const payload = { captureId, ...detail };
+  runCaptureOperation(basePath, "capture.execute", payload, () => [
+    { eventType: "capture.executed", entityId: captureId, payload },
+  ], invocation);
+}
+
+// ─── Readers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Every capture in registration order, read only from the database. Empty
+ * when no database is open. The latest classification of a capture wins; an
+ * event for an id that was never registered is ignored.
+ */
+export function loadAllCaptures(_basePath: string): CaptureEntry[] {
+  const rows = getDbOrNull()?.prepare(`
+    SELECT event_type, entity_id, payload_json, created_at
+    FROM workflow_domain_events
+    WHERE entity_type = 'capture'
+    ORDER BY project_revision, event_index
+  `).all() ?? [];
+  const captures = new Map<string, CaptureEntry>();
+  for (const row of rows) {
+    const id = String(row["entity_id"]);
+    const at = String(row["created_at"]);
+    const payload = JSON.parse(String(row["payload_json"])) as Record<string, string | undefined>;
+    if (row["event_type"] === "capture.registered") {
+      captures.set(id, { id, text: payload.text ?? "", timestamp: payload.timestamp ?? at, status: "pending" });
+      continue;
+    }
+    const capture = captures.get(id);
+    if (!capture) continue;
+    if (row["event_type"] === "capture.resolved") {
+      capture.status = "resolved";
+      capture.classification = payload.classification as Classification;
+      capture.resolution = payload.resolution;
+      capture.rationale = payload.rationale;
+      capture.resolvedAt = payload.resolvedAt ?? at;
+      if (payload.milestoneId) capture.resolvedInMilestone = payload.milestoneId;
+      else delete capture.resolvedInMilestone;
+    } else if (row["event_type"] === "capture.executed") {
+      capture.executed = true;
+      capture.executedAt = payload.executedAt ?? at;
+    }
+  }
+  return [...captures.values()];
 }
 
 /**
@@ -124,127 +227,12 @@ export function loadPendingCaptures(basePath: string): CaptureEntry[] {
   return loadAllCaptures(basePath).filter(c => c.status === "pending");
 }
 
-/**
- * Fast check for pending captures without full parse.
- * Reads the file and scans for `**Status:** pending` via regex.
- * Returns false if the file doesn't exist.
- */
-export function hasPendingCaptures(basePath: string): boolean {
-  const filePath = resolveCapturesPath(basePath);
-  if (!existsSync(filePath)) return false;
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    return /\*\*Status:\*\*\s*pending/i.test(content);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Count pending captures without full parse — single file read.
- * Uses regex to count `**Status:** pending` occurrences.
- * Returns 0 if file doesn't exist or on error.
- */
 export function countPendingCaptures(basePath: string): number {
-  const filePath = resolveCapturesPath(basePath);
-  if (!existsSync(filePath)) return 0;
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    const matches = content.match(/\*\*Status:\*\*\s*pending/gi);
-    return matches ? matches.length : 0;
-  } catch {
-    return 0;
-  }
+  return loadPendingCaptures(basePath).length;
 }
 
-/**
- * Mark a capture as resolved with classification and rationale.
- * Rewrites the entry in place, preserving other entries.
- */
-export function markCaptureResolved(
-  basePath: string,
-  captureId: string,
-  classification: Classification,
-  resolution: string,
-  rationale: string,
-  milestoneId?: string,
-): void {
-  const filePath = resolveCapturesPath(basePath);
-  if (!existsSync(filePath)) return;
-
-  const content = readFileSync(filePath, "utf-8");
-  const resolvedAt = new Date().toISOString();
-
-  // Find the section for this capture ID and rewrite its fields
-  const sectionRegex = new RegExp(
-    `(### ${escapeRegex(captureId)}\\n(?:(?!### ).)*?)(?=### |$)`,
-    "s",
-  );
-  const match = sectionRegex.exec(content);
-  if (!match) return;
-
-  let section = match[1];
-
-  // Update Status field
-  section = section.replace(
-    /\*\*Status:\*\*\s*.+/,
-    `**Status:** resolved`,
-  );
-
-  // Append classification, resolution, rationale, and timestamp if not present
-  const newFields = [
-    `**Classification:** ${classification}`,
-    `**Resolution:** ${resolution}`,
-    `**Rationale:** ${rationale}`,
-    `**Resolved:** ${resolvedAt}`,
-  ];
-  if (milestoneId) {
-    newFields.push(`**Milestone:** ${milestoneId}`);
-  }
-
-  // Remove any existing classification/resolution/rationale/resolved/milestone fields
-  // (in case of re-triage)
-  section = section.replace(/\*\*Classification:\*\*\s*.+\n?/g, "");
-  section = section.replace(/\*\*Resolution:\*\*\s*.+\n?/g, "");
-  section = section.replace(/\*\*Rationale:\*\*\s*.+\n?/g, "");
-  section = section.replace(/\*\*Resolved:\*\*\s*.+\n?/g, "");
-  section = section.replace(/\*\*Milestone:\*\*\s*.+\n?/g, "");
-
-  // Add new fields after Status line
-  section = section.trimEnd() + "\n" + newFields.join("\n") + "\n";
-
-  const updated = content.replace(sectionRegex, section);
-  atomicWriteSync(filePath, updated, "utf-8");
-}
-
-/**
- * Mark a resolved capture as executed — its resolution action was carried out.
- * Appends `**Executed:** <timestamp>` to the capture's section in CAPTURES.md.
- */
-export function markCaptureExecuted(basePath: string, captureId: string): void {
-  const filePath = resolveCapturesPath(basePath);
-  if (!existsSync(filePath)) return;
-
-  const content = readFileSync(filePath, "utf-8");
-  const executedAt = new Date().toISOString();
-
-  const sectionRegex = new RegExp(
-    `(### ${escapeRegex(captureId)}\\n(?:(?!### ).)*?)(?=### |$)`,
-    "s",
-  );
-  const match = sectionRegex.exec(content);
-  if (!match) return;
-
-  let section = match[1];
-
-  // Remove any existing Executed field (in case of re-execution)
-  section = section.replace(/\*\*Executed:\*\*\s*.+\n?/g, "");
-
-  // Append Executed timestamp
-  section = section.trimEnd() + "\n" + `**Executed:** ${executedAt}` + "\n";
-
-  const updated = content.replace(sectionRegex, section);
-  atomicWriteSync(filePath, updated, "utf-8");
+export function hasPendingCaptures(basePath: string): boolean {
+  return countPendingCaptures(basePath) > 0;
 }
 
 /**
@@ -257,8 +245,8 @@ export function markCaptureExecuted(basePath: string, captureId: string): void {
  * captures from a prior milestone re-executing after the underlying issues
  * were already fixed by planned milestone work (#2872).
  *
- * Captures that have no `resolvedInMilestone` (legacy captures resolved before
- * this field was introduced) are always included for backward compatibility.
+ * Captures that have no `resolvedInMilestone` (resolved with no active
+ * milestone, or imported from an older CAPTURES.md) are always included.
  */
 export function loadActionableCaptures(basePath: string, currentMilestoneId?: string): CaptureEntry[] {
   return loadAllCaptures(basePath).filter(
@@ -287,108 +275,108 @@ export function loadStopCaptures(basePath: string): CaptureEntry[] {
   );
 }
 
+// ─── CAPTURES.md render and import ────────────────────────────────────────────
+
 /**
- * Load unexecuted backtrack captures specifically — captures directing
- * auto-mode to abandon current milestone and return to a previous one.
+ * The `### <id>` sections of CAPTURES.md whose id no database capture holds
+ * (written by an older release, by hand, or by a teammate's commit). They are
+ * not read as state: doctor reports them and `doctor --fix` imports them.
  */
-export function loadBacktrackCaptures(basePath: string): CaptureEntry[] {
-  return loadAllCaptures(basePath).filter(
-    c => c.status === "resolved" && !c.executed && c.classification === "backtrack",
-  );
+export function unimportedFileCaptures(basePath: string): CaptureEntry[] {
+  const filePath = resolveCapturesPath(basePath);
+  if (!existsSync(filePath)) return [];
+  const knownIds = new Set(loadAllCaptures(basePath).map((capture) => capture.id));
+  return parseCapturesContent(readFileSync(filePath, "utf-8")).filter((capture) => !knownIds.has(capture.id));
 }
 
 /**
- * Revert captures that were silenced by non-triage agents.
- *
- * When an execute-task or other non-triage agent writes `**Status:** resolved`
- * to CAPTURES.md, it bypasses the triage pipeline entirely. This function
- * detects such captures (resolved but missing the Classification field that
- * triage always writes) and reverts them to pending so the triage sidecar
- * picks them up properly.
- *
- * Returns the number of captures reverted.
+ * doctor --fix: record file captures as capture events in one capture.import
+ * Domain Operation. A file section marked resolved with no valid
+ * classification was not triaged, so it is imported as pending.
  */
-export function revertExecutorResolvedCaptures(basePath: string): number {
-  const filePath = resolveCapturesPath(basePath);
-  if (!existsSync(filePath)) return 0;
-
-  let content = readFileSync(filePath, "utf-8");
-  let reverted = 0;
-
-  const all = loadAllCaptures(basePath);
-  for (const capture of all) {
-    // A properly triaged capture has both resolved status AND a classification.
-    // An executor-silenced capture has resolved status but NO classification.
-    if (capture.status === "resolved" && !capture.classification) {
-      const sectionRegex = new RegExp(
-        `(### ${escapeRegex(capture.id)}\\n(?:(?!### ).)*?)(?=### |$)`,
-        "s",
-      );
-      const match = sectionRegex.exec(content);
-      if (match) {
-        let section = match[1];
-        section = section.replace(
-          /\*\*Status:\*\*\s*resolved/i,
-          "**Status:** pending",
-        );
-        content = content.replace(sectionRegex, section);
-        reverted++;
+export function importFileCaptures(basePath: string, captures: readonly CaptureEntry[]): void {
+  if (captures.length === 0) return;
+  incrementLegacyTelemetry("legacy.fileCapturesImported");
+  runCaptureOperation(basePath, "capture.import", { captureIds: captures.map((capture) => capture.id) },
+    () => captures.flatMap((capture) => {
+      const events: CaptureEvent[] = [{
+        eventType: "capture.registered",
+        entityId: capture.id,
+        payload: { text: capture.text, timestamp: capture.timestamp },
+      }];
+      if (capture.status !== "resolved" || !capture.classification) return events;
+      events.push({
+        eventType: "capture.resolved",
+        entityId: capture.id,
+        payload: {
+          classification: capture.classification,
+          resolution: capture.resolution ?? "",
+          rationale: capture.rationale ?? "",
+          ...(capture.resolvedAt ? { resolvedAt: capture.resolvedAt } : {}),
+          ...(capture.resolvedInMilestone ? { milestoneId: capture.resolvedInMilestone } : {}),
+        },
+      });
+      if (capture.executedAt) {
+        events.push({ eventType: "capture.executed", entityId: capture.id, payload: { executedAt: capture.executedAt } });
       }
+      return events;
+    }));
+}
+
+const FIELD_LINE_RE = /^\*\*(?:Text|Captured|Status|Classification|Resolution|Rationale|Resolved|Milestone|Executed):\*\*/;
+
+/** One field line. The file holds one line per field, so a line break in a value is written as a space. */
+function fieldLine(key: string, value: string): string {
+  return `**${key}:** ${value.replace(/\s*\n\s*/g, " ")}`;
+}
+
+/**
+ * Write CAPTURES.md from the database: the field lines under each database
+ * capture's `### <id>` heading are set, and a new capture is appended. Every
+ * other line of the file is kept as it is: free text, a note under a capture,
+ * and a section that is not imported yet (doctor imports it).
+ */
+export function renderCapturesProjection(basePath: string): void {
+  const rows = loadAllCaptures(basePath);
+  if (rows.length === 0) return;
+  const path = resolveCapturesPath(basePath);
+  const lines = existsSync(path)
+    ? readFileSync(path, "utf-8").split("\n")
+    : ["# Captures", "", "Rendered from the GSD database; edits to the captures below are not read.", "", ""];
+  for (const capture of rows) {
+    const fields = [
+      fieldLine("Text", capture.text),
+      fieldLine("Captured", capture.timestamp),
+      fieldLine("Status", capture.status),
+      ...(capture.classification ? [fieldLine("Classification", capture.classification)] : []),
+      ...(capture.resolution ? [fieldLine("Resolution", capture.resolution)] : []),
+      ...(capture.rationale ? [fieldLine("Rationale", capture.rationale)] : []),
+      ...(capture.resolvedAt ? [fieldLine("Resolved", capture.resolvedAt)] : []),
+      ...(capture.resolvedInMilestone ? [fieldLine("Milestone", capture.resolvedInMilestone)] : []),
+      ...(capture.executedAt ? [fieldLine("Executed", capture.executedAt)] : []),
+    ];
+    const header = lines.findIndex((line) => line.startsWith("### ") && line.slice(4).trim() === capture.id);
+    if (header === -1) {
+      // Append at the end of the file, with one blank line before the heading
+      if (lines[lines.length - 1] === "") lines.pop();
+      if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+      lines.push(`### ${capture.id}`, ...fields, "");
+      continue;
     }
+    // The section ends at the next heading. Only its field lines are replaced.
+    let end = header + 1;
+    while (end < lines.length && !lines[end].startsWith("### ")) end++;
+    const kept = lines.slice(header + 1, end).filter((line) => !FIELD_LINE_RE.test(line));
+    lines.splice(header + 1, end - header - 1, ...fields, ...kept);
   }
-
-  if (reverted > 0) {
-    atomicWriteSync(filePath, content, "utf-8");
-  }
-
-  return reverted;
+  const content = lines.join("\n");
+  atomicWriteSync(path, content, "utf-8");
+  // Not registered in the compat marker: a worktree base path writes this
+  // project-root file, and its own marker cannot hold a key outside its .gsd.
+  noteRenderedProjectionFile(path, content);
 }
 
-/**
- * Retroactively stamp a capture with a milestone ID.
- *
- * Used by executeTriageResolutions() as a safety net when the triage LLM
- * resolves a capture without writing the **Milestone:** field.  This ensures
- * the staleness gate in loadActionableCaptures() works correctly even for
- * captures resolved before the prompt was updated (#2872).
- */
-export function stampCaptureMilestone(basePath: string, captureId: string, milestoneId: string): void {
-  const filePath = resolveCapturesPath(basePath);
-  if (!existsSync(filePath)) return;
-
-  const content = readFileSync(filePath, "utf-8");
-
-  const sectionRegex = new RegExp(
-    `(### ${escapeRegex(captureId)}\\n(?:(?!### ).)*?)(?=### |$)`,
-    "s",
-  );
-  const match = sectionRegex.exec(content);
-  if (!match) return;
-
-  let section = match[1];
-
-  // Only stamp if not already present
-  if (/\*\*Milestone:\*\*/.test(section)) return;
-
-  // Insert after the Resolved field (or at end of section)
-  const resolvedFieldEnd = section.search(/\*\*Resolved:\*\*\s*.+\n?/);
-  if (resolvedFieldEnd !== -1) {
-    const resolvedMatch = section.match(/\*\*Resolved:\*\*\s*.+\n?/);
-    const insertPos = resolvedFieldEnd + (resolvedMatch?.[0]?.length ?? 0);
-    section = section.slice(0, insertPos) + `**Milestone:** ${milestoneId}\n` + section.slice(insertPos);
-  } else {
-    section = section.trimEnd() + "\n" + `**Milestone:** ${milestoneId}` + "\n";
-  }
-
-  const updated = content.replace(sectionRegex, section);
-  atomicWriteSync(filePath, updated, "utf-8");
-}
-
-// ─── Parser ───────────────────────────────────────────────────────────────────
-
-/**
- * Parse CAPTURES.md content into CaptureEntry array.
- */
+/** Parse the `### <id>` sections of a CAPTURES.md file. Used only by the import. */
 function parseCapturesContent(content: string): CaptureEntry[] {
   const entries: CaptureEntry[] = [];
 
@@ -427,7 +415,7 @@ function parseCapturesContent(content: string): CaptureEntry[] {
       ...(rationale ? { rationale } : {}),
       ...(resolvedAt ? { resolvedAt } : {}),
       ...(milestoneId ? { resolvedInMilestone: milestoneId } : {}),
-      ...(executedAt ? { executed: true } : {}),
+      ...(executedAt ? { executed: true, executedAt } : {}),
     });
   }
 

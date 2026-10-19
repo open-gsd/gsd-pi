@@ -40,6 +40,7 @@ pi --mode rpc --provider anthropic
 ```
 
 Send commands:
+
 ```json
 {"type": "prompt", "message": "Hello, world!"}
 {"type": "steer", "message": "Stop and do this instead"}
@@ -47,6 +48,7 @@ Send commands:
 ```
 
 Receive events:
+
 ```json
 {"type": "event", "event": {"type": "message_update", ...}}
 {"type": "response", "command": "prompt", "success": true}

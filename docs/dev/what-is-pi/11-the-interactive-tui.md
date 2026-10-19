@@ -42,6 +42,7 @@ Pi's terminal interface is built with a custom TUI framework (`@gsd/pi-tui`).
 ### Tool Output Display
 
 Tool calls and results are rendered inline with collapsible output:
+
 - `Ctrl+O` — Toggle expand/collapse all tool output
 - `Ctrl+T` — Toggle expand/collapse thinking blocks
 

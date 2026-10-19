@@ -21,6 +21,8 @@ export const LEGACY_IMPORT_BASE_ROW_SETS = [
   "assessments",
   "decisions",
   "decision_memories",
+  "knowledge_memories",
+  "knowledge_memory_rows",
   "item_lifecycles",
 ] as const;
 
@@ -36,6 +38,8 @@ export const LEGACY_IMPORT_BASE_IDENTITY_COLUMNS: Record<LegacyImportBaseRowSet,
   assessments: ["path"],
   decisions: ["id"],
   decision_memories: ["source_decision_id"],
+  knowledge_memories: ["source_knowledge_id"],
+  knowledge_memory_rows: ["id"],
   item_lifecycles: ["project_id", "item_kind", "milestone_id", "slice_id", "task_id"],
 };
 
@@ -85,6 +89,33 @@ const ROW_SET_QUERIES: Record<LegacyImportBaseRowSet, string> = {
     FROM memories
     WHERE category = 'architecture'
       AND instr(structured_fields, '"sourceDecisionId"') > 0`,
+  // One row per KNOWLEDGE.md id (K/P/L###). A capture supersedes the prior
+  // row that held the id, so an id can have many memories rows: the active
+  // row is the authority, else the newest superseded row. `superseded_by` is
+  // set only when no active row holds the id: the row was forgotten.
+  knowledge_memories: `SELECT source_knowledge_id, category, content, scope, structured_fields, superseded_by
+    FROM (
+      SELECT source_knowledge_id, category, content, scope, structured_fields, superseded_by,
+        ROW_NUMBER() OVER (
+          PARTITION BY source_knowledge_id
+          ORDER BY superseded_by IS NOT NULL, seq DESC
+        ) AS authority_rank
+      FROM (
+        SELECT
+          CASE WHEN json_valid(structured_fields)
+            THEN json_extract(structured_fields, '$.sourceKnowledgeId')
+            ELSE NULL
+          END AS source_knowledge_id,
+          category, content, scope, structured_fields, superseded_by, seq
+        FROM memories
+        WHERE instr(structured_fields, '"sourceKnowledgeId"') > 0
+      )
+      WHERE typeof(source_knowledge_id) = 'text' AND trim(source_knowledge_id) <> ''
+    )
+    WHERE authority_rank = 1`,
+  // Each active memory that KNOWLEDGE.md has a table for, by its memory id.
+  knowledge_memory_rows: `SELECT id, category, content, scope, structured_fields FROM memories
+    WHERE superseded_by IS NULL AND category IN ('rule', 'pattern', 'gotcha')`,
   item_lifecycles: `SELECT
     project_id, item_kind, milestone_id, slice_id, task_id, lifecycle_status,
     state_version, last_operation_id
@@ -107,8 +138,22 @@ export interface LegacyImportBaseRow {
   value: Readonly<Record<string, LegacyImportValue>>;
 }
 
+/**
+ * The schema version of a base snapshot. Version 1 has no `knowledge_memories`
+ * and no `knowledge_memory_rows` rows. Evidence that an earlier build retained holds hashes of version 1 rows.
+ */
+export const LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION = 2 as const;
+
+export type LegacyImportBaseSnapshotSchemaVersion = 1 | typeof LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION;
+
+export function isLegacyImportBaseSnapshotSchemaVersion(
+  value: unknown,
+): value is LegacyImportBaseSnapshotSchemaVersion {
+  return value === 1 || value === LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION;
+}
+
 export interface LegacyImportBaseSnapshot {
-  snapshot_schema_version: 1;
+  snapshot_schema_version: LegacyImportBaseSnapshotSchemaVersion;
   database_schema_version: typeof LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION;
   authority: LegacyImportBaseAuthority;
   rows: readonly LegacyImportBaseRow[];
@@ -295,6 +340,50 @@ function freezeSnapshot(snapshot: LegacyImportBaseSnapshot): LegacyImportBaseSna
   return Object.freeze(snapshot);
 }
 
+/**
+ * The snapshot as an earlier snapshot schema version captured it. Retained
+ * evidence is compared at the version that made it, so a row set that a later
+ * version added does not read as a change.
+ */
+export function legacyImportBaseSnapshotAtVersion(
+  snapshot: LegacyImportBaseSnapshot,
+  version: LegacyImportBaseSnapshotSchemaVersion,
+): LegacyImportBaseSnapshot {
+  if (version >= snapshot.snapshot_schema_version) return snapshot;
+  const rows = snapshot.rows.filter((row) => (
+    row.row_set !== "knowledge_memories" && row.row_set !== "knowledge_memory_rows"
+  ));
+  return freezeSnapshot({
+    ...snapshot,
+    snapshot_schema_version: version,
+    rows,
+    relevant_rows_hash: hashLegacyImportValue(rows),
+  });
+}
+
+/**
+ * The snapshot at the snapshot schema version whose rows hash is
+ * `retainedHash`, for retained evidence that does not hold its version. When
+ * no version gives that hash, the result is the snapshot unchanged.
+ */
+export function legacyImportBaseSnapshotForRetainedHash(
+  snapshot: LegacyImportBaseSnapshot,
+  retainedHash: string,
+): LegacyImportBaseSnapshot {
+  if (snapshot.relevant_rows_hash === retainedHash) return snapshot;
+  const earlier = legacyImportBaseSnapshotAtVersion(snapshot, 1);
+  return earlier.relevant_rows_hash === retainedHash ? earlier : snapshot;
+}
+
+let captureSchemaVersion: LegacyImportBaseSnapshotSchemaVersion = LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION;
+
+/** Test-only: capture as an earlier build did, to make evidence of that snapshot schema version. */
+export function _setLegacyImportBaseSnapshotSchemaVersionForTest(
+  version: LegacyImportBaseSnapshotSchemaVersion = LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION,
+): void {
+  captureSchemaVersion = version;
+}
+
 export function createLegacyImportBaseSnapshotSource(
   db: DbAdapter,
 ): LegacyImportBaseSnapshotSource {
@@ -326,13 +415,13 @@ export function captureLegacyImportBaseSnapshot(
     }
     const authority = authorityFrom(dependencies.source.readAuthorityRows());
     const rows = captureRows(dependencies.source);
-    return freezeSnapshot({
-      snapshot_schema_version: 1,
+    return legacyImportBaseSnapshotAtVersion(freezeSnapshot({
+      snapshot_schema_version: LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION,
       database_schema_version: LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION,
       authority,
       rows,
       relevant_rows_hash: hashLegacyImportValue(rows),
-    });
+    }), captureSchemaVersion);
   });
 }
 

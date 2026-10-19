@@ -37,18 +37,21 @@ test("Deep mode: setPlanningDepth creates PREFERENCES.md when missing", (t) => {
   assert.ok(existsSync(path), "PREFERENCES.md must be created");
   const { frontmatter } = readFrontmatter(path);
   assert.strictEqual(frontmatter.planning_depth, "deep");
-  assert.strictEqual(frontmatter.workflow_prefs_captured, true);
-  assert.strictEqual(frontmatter.commit_policy, "per-task");
-  assert.strictEqual(frontmatter.branch_model, "single");
+  assert.strictEqual("workflow_prefs_captured" in frontmatter, false, "the stage marker is a database fact, not a frontmatter key");
   assert.strictEqual(frontmatter.uat_dispatch, true);
-  assert.deepStrictEqual(frontmatter.models, { executor_class: "balanced" });
-  assert.ok(existsSync(join(base, ".gsd", "runtime", "research-decision.json")));
-  const researchDecision = JSON.parse(
-    readFileSync(join(base, ".gsd", "runtime", "research-decision.json"), "utf-8"),
-  );
-  assert.strictEqual(researchDecision.decision, "skip");
-  assert.strictEqual(researchDecision.source, "workflow-preferences");
-  assert.strictEqual(researchDecision.reason, "deterministic-default");
+  assert.equal(existsSync(join(base, ".gsd", "runtime")), false, "no research decision file is written");
+});
+
+test("Deep mode: setPlanningDepth writes only keys the validator knows (#2832)", (t) => {
+  const base = makeBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  setPlanningDepth(base, "deep");
+
+  const { frontmatter } = readFrontmatter(join(base, ".gsd", "PREFERENCES.md"));
+  assert.strictEqual("commit_policy" in frontmatter, false, "top-level commit_policy is not a known preference key");
+  assert.strictEqual("branch_model" in frontmatter, false, "branch_model is not a known preference key");
+  assert.strictEqual("models" in frontmatter, false, "executor_class is not a known model phase key");
 });
 
 test("Deep mode: setPlanningDepth updates existing planning_depth", (t) => {
@@ -103,11 +106,72 @@ test("Deep mode: setPlanningDepth preserves explicit workflow preference values"
   setPlanningDepth(base, "deep");
 
   const { frontmatter } = readFrontmatter(join(base, ".gsd", "PREFERENCES.md"));
-  assert.strictEqual(frontmatter.workflow_prefs_captured, true);
   assert.strictEqual(frontmatter.commit_policy, "manual");
   assert.strictEqual(frontmatter.branch_model, "per-milestone-worktree");
   assert.strictEqual(frontmatter.uat_dispatch, false);
   assert.deepStrictEqual(frontmatter.models, { executor_class: "heavy" });
+});
+
+test("Deep mode: setPlanningDepth preserves frontmatter comments (#2832)", (t) => {
+  const base = makeBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  writeFileSync(
+    join(base, ".gsd", "PREFERENCES.md"),
+    [
+      "---",
+      "# Hand-maintained preferences.",
+      "version: 1  # schema version",
+      "mode: solo",
+      "---",
+      "",
+    ].join("\n"),
+  );
+  setPlanningDepth(base, "deep");
+
+  const content = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
+  assert.ok(content.includes("# Hand-maintained preferences."), "leading comment must survive");
+  // yaml's Document API keeps comment text but normalizes the gap before "#".
+  assert.ok(content.match(/^version: 1 +# schema version$/m), "trailing comment must survive");
+  const { frontmatter } = readFrontmatter(join(base, ".gsd", "PREFERENCES.md"));
+  assert.strictEqual(frontmatter.planning_depth, "deep");
+  assert.strictEqual(frontmatter.version, 1);
+});
+
+test("Deep mode: setPlanningDepth falls back to fresh frontmatter for unserializable frontmatter (#2832)", (t) => {
+  const base = makeBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  // An unresolved alias parses without errors but fails on serialize — the
+  // write must fall back to fresh frontmatter with the original kept as body.
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\ngit: *missing\nmode: solo\n---\n\nBody line.\n");
+  setPlanningDepth(base, "deep");
+
+  const { frontmatter, body } = readFrontmatter(join(base, ".gsd", "PREFERENCES.md"));
+  assert.strictEqual(frontmatter.planning_depth, "deep");
+  assert.strictEqual(frontmatter.uat_dispatch, true);
+  assert.ok(body.includes("git: *missing"), "unserializable original content preserved as body");
+  assert.ok(body.includes("Body line."), "original body preserved");
+});
+
+test("Deep mode: repeated setPlanningDepth writes keep frontmatter comments (#2832)", (t) => {
+  const base = makeBase();
+  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
+
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  writeFileSync(
+    join(base, ".gsd", "PREFERENCES.md"),
+    "---\n# user comment\nversion: 1\n---\n",
+  );
+  setPlanningDepth(base, "deep");
+  setPlanningDepth(base, "light");
+
+  const content = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
+  assert.ok(content.includes("# user comment"), "comment must survive repeated writes");
+  const { frontmatter } = readFrontmatter(join(base, ".gsd", "PREFERENCES.md"));
+  assert.strictEqual(frontmatter.planning_depth, "light");
 });
 
 test("Deep mode: setPlanningDepth preserves body content", (t) => {
@@ -150,23 +214,4 @@ test("Deep mode: setPlanningDepth can flip back to light", (t) => {
 
   const { frontmatter } = readFrontmatter(join(base, ".gsd", "PREFERENCES.md"));
   assert.strictEqual(frontmatter.planning_depth, "light");
-});
-
-test("Deep mode: setPlanningDepth preserves explicit user research decision", (t) => {
-  const base = makeBase();
-  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
-
-  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(
-    join(base, ".gsd", "runtime", "research-decision.json"),
-    JSON.stringify({ decision: "research", source: "research-decision", decided_at: "2026-04-27T00:00:00Z" }),
-  );
-
-  setPlanningDepth(base, "deep");
-
-  const researchDecision = JSON.parse(
-    readFileSync(join(base, ".gsd", "runtime", "research-decision.json"), "utf-8"),
-  );
-  assert.strictEqual(researchDecision.decision, "research");
-  assert.strictEqual(researchDecision.source, "research-decision");
 });

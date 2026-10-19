@@ -10,7 +10,9 @@ import { tmpdir } from "node:os";
 import {
   openDatabase,
   closeDatabase,
+  insertArtifact,
   insertGateRow,
+  insertTask,
   markAllGatesOmitted,
   getGateResults,
   getPendingGates,
@@ -18,7 +20,7 @@ import {
   insertSlice,
 } from "../gsd-db.ts";
 import type { GateVerdict } from "../types.ts";
-import { closeQualityGatesFromEvidence } from "../quality-gate-closure.ts";
+import { closeQualityGatesFromEvidence, inspectQualityGatesFromEvidence } from "../quality-gate-closure.ts";
 
 describe("gate-state canonicalization (#4950)", () => {
   let tmpDir: string;
@@ -101,21 +103,26 @@ describe("gate-state canonicalization (#4950)", () => {
     }
   });
 
-  test("closeQualityGatesFromEvidence repairs pending gate from durable section", () => {
-    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
-    mkdirSync(join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
-    writeFileSync(
-      join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"),
-      [
-        "# S01",
-        "",
-        "## Threat Surface",
-        "",
-        "- Credential stuffing is rate-limited.",
-      ].join("\n"),
-    );
+  const THREAT_SURFACE_PLAN = [
+    "# S01",
+    "",
+    "## Threat Surface",
+    "",
+    "- Credential stuffing is rate-limited.",
+  ].join("\n");
 
-    const result = closeQualityGatesFromEvidence("M001", { artifactBasePath: tmpDir });
+  test("closeQualityGatesFromEvidence repairs pending gate from the section in the stored PLAN row", () => {
+    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
+    insertArtifact({
+      path: "milestones/M001/slices/S01/S01-PLAN.md",
+      artifact_type: "PLAN",
+      milestone_id: "M001",
+      slice_id: "S01",
+      task_id: null,
+      full_content: THREAT_SURFACE_PLAN,
+    });
+
+    const result = closeQualityGatesFromEvidence("M001");
 
     assert.deepEqual(result.unresolved, []);
     assert.deepEqual(result.repaired, [{ gateId: "Q3", sliceId: "S01", verdict: "pass" }]);
@@ -123,11 +130,21 @@ describe("gate-state canonicalization (#4950)", () => {
     assert.equal(getGateResults("M001", "S01")[0].verdict, "pass");
   });
 
+  test("closeQualityGatesFromEvidence does not close a gate from a heading in the PLAN.md file", () => {
+    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
+    mkdirSync(join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
+    writeFileSync(join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"), THREAT_SURFACE_PLAN);
+
+    const result = closeQualityGatesFromEvidence("M001");
+
+    assert.deepEqual(result.repaired, []);
+    assert.equal(getPendingGates("M001", "S01").length, 1);
+  });
+
   test("closeQualityGatesFromEvidence omits stale pending gate after validation pass", () => {
     insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q4", scope: "slice" });
 
     const result = closeQualityGatesFromEvidence("M001", {
-      artifactBasePath: tmpDir,
       milestoneValidationPassed: true,
     });
 
@@ -139,11 +156,73 @@ describe("gate-state canonicalization (#4950)", () => {
   test("closeQualityGatesFromEvidence leaves pending gate unresolved without evidence", () => {
     insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
 
-    const result = closeQualityGatesFromEvidence("M001", { artifactBasePath: tmpDir });
+    const result = closeQualityGatesFromEvidence("M001");
 
     assert.deepEqual(result.repaired, []);
     assert.equal(result.unresolved.length, 1);
     assert.equal(result.unresolved[0].gate_id, "Q3");
     assert.equal(getPendingGates("M001", "S01").length, 1);
+  });
+
+  test("pending task gate of a blocker-accepted task closes as omitted (#2687)", () => {
+    // The task produced partial summary sections before its Attempt failed
+    // blocker-discovered and the operator accepted the blocker — the gate is
+    // still never evaluated: the omitted close is unconditional, evidence
+    // repair must not spin a never-completed task's gate up to "pass".
+    insertTask({
+      milestoneId: "M001",
+      sliceId: "S01",
+      id: "T01",
+      title: "Blocked",
+      status: "blocker-accepted",
+      fullSummaryMd: ["## Failure Modes", "", "- Route blocked on missing vendor API."].join("\n"),
+    });
+    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q5", scope: "task", taskId: "T01" });
+
+    // completeMilestone throws on the first unresolved row, so a never-will-run
+    // task's gate must not be reported there — mirroring the closeout
+    // consistency gate's never-will-run exemption.
+    const inspection = inspectQualityGatesFromEvidence("M001", {
+      milestoneValidationAuthorization: { kind: "validated", eventId: "evt-1", revision: 1 },
+    });
+    assert.deepEqual(inspection.unresolved, []);
+    assert.deepEqual(inspection.repaired, [{
+      gateId: "Q5",
+      sliceId: "S01",
+      taskId: "T01",
+      verdict: "omitted",
+    }]);
+
+    const result = closeQualityGatesFromEvidence("M001");
+    assert.deepEqual(result.unresolved, []);
+    const row = getGateResults("M001", "S01")[0];
+    assert.equal(row.status, "complete");
+    assert.equal(row.verdict, "omitted");
+    assert.match(row.rationale, /never evaluated — owning task is blocker-accepted/);
+    assert.equal(getPendingGates("M001", "S01").length, 0);
+  });
+
+  test("pending task gate of a normally-completed task still resolves from its stored summary", () => {
+    insertTask({
+      milestoneId: "M001",
+      sliceId: "S01",
+      id: "T01",
+      title: "Done",
+      status: "complete",
+      fullSummaryMd: ["## Failure Modes", "", "- Unvalidated input is rejected at the boundary."].join("\n"),
+    });
+    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q5", scope: "task", taskId: "T01" });
+
+    const result = inspectQualityGatesFromEvidence("M001");
+
+    // The #2687 exemption must stay scoped to never-will-run tasks: gates of
+    // live tasks keep resolving from durable evidence.
+    assert.deepEqual(result.unresolved, []);
+    assert.deepEqual(result.repaired, [{
+      gateId: "Q5",
+      sliceId: "S01",
+      taskId: "T01",
+      verdict: "pass",
+    }]);
   });
 });

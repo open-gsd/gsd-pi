@@ -8,7 +8,7 @@ Before asking "What do you want to add?", check existing milestone context. If a
 
 1. Tell the user which milestones have draft contexts and summarize each after reading it.
 2. Use `ask_user_questions` to ask per-draft milestone:
-   - **"Discuss now"** — Treat the draft as primary topic. Run reflection -> investigation -> questions -> depth verification -> requirements -> roadmap, call `gsd_summary_save` with `artifact_type: "CONTEXT"`, then delete `CONTEXT-DRAFT.md`.
+   - **"Discuss now"** — Treat the draft as primary topic. Run reflection -> investigation -> questions -> depth verification -> requirements -> roadmap, then call `gsd_summary_save` with `artifact_type: "CONTEXT"`; the tool removes the draft.
    - **"Leave for later"** — Keep the draft. Auto-mode will keep pausing when it reaches this milestone.
 3. Resolve all draft discussions before new queue work.
 4. If no drafts exist in the context, skip this section entirely and proceed to "What do you want to add?"
@@ -56,6 +56,7 @@ Before writing artifacts, classify scope as **single-milestone** or **multi-mile
 **Single milestone**: one coherent deliverable set, roughly 2-12 slices.
 
 **Multi-milestone** if:
+
 - The work has natural phase boundaries
 - Different parts could ship independently on different timelines
 - The full scope is too large for one milestone to stay focused
@@ -89,6 +90,7 @@ id: "depth_verification_M010-3ym37m"
 ```
 
 This triggers the per-milestone write-gate. Present:
+
 - Scope you are about to capture.
 - Key technical assumptions verified or still unverified.
 - Risks or unknowns surfaced by investigation.
@@ -104,24 +106,17 @@ The user confirms or corrects before you write. Use one depth verification per m
 Once the user is satisfied, in one pass for **each** new milestone:
 
 1. Call `gsd_milestone_generate_id`; never invent IDs. Then `mkdir -p .gsd/milestones/<ID>/slices`.
-2. Call `gsd_summary_save` with `artifact_type: "CONTEXT"` and full context markdown. The tool computes path and persists DB + disk. Capture intent, scope, risks, constraints, integration points, and requirements. Mark status "Queued — pending auto-mode execution." **If dependent, include YAML frontmatter:**
-   ```yaml
-   ---
-   depends_on: [M001, M002]
-   ---
-   ```
-   Auto-mode reads this to enforce order. List exact milestone IDs, including suffixes.
+2. Call `gsd_summary_save` with `artifact_type: "CONTEXT"` and full context markdown. The tool computes path and persists DB + disk. Capture intent, scope, risks, constraints, integration points, and requirements. Mark status "Queued — pending auto-mode execution." If the milestone depends on others, call `gsd_milestone_set_dependencies` with its `milestoneId` and the exact `dependsOn` milestone IDs, including suffixes. The database is the only source of execution order; do not put `depends_on` in the context file.
 
 After all milestone directories and context files are written:
 
 3. Refresh project state through `gsd_summary_save` with `artifact_type: "PROJECT"` and full PROJECT content that includes the new milestones in the Milestone Sequence; omit `milestone_id`.
 4. If the queued work introduces new in-scope capabilities or promotes Deferred items, persist those changes with `gsd_requirement_save` or `gsd_requirement_update`, then call `gsd_summary_save` with `artifact_type: "REQUIREMENTS"` so `.gsd/REQUIREMENTS.md` renders from DB rows.
 5. If discussion produced decisions relevant to existing work, call `gsd_decision_save` for each decision; the tool regenerates `.gsd/DECISIONS.md`.
-6. If `.gsd/QUEUE.md` is maintained, update it only as an audit projection of queued intent. Runtime queue state must come from the DB-backed milestone/context tool calls above.
-7. {{commitInstruction}}
+6. {{commitInstruction}}
 
 **Do NOT write roadmaps for queued milestones.**
-**Do NOT update `.gsd/STATE.md`.**
+**Do NOT update `.gsd/STATE.md` or `.gsd/QUEUE.md`; both are rendered from the database.**
 
 After writing the files and committing, say exactly: "Queued N milestone(s). Auto-mode will pick them up after current work completes." — nothing else.
 

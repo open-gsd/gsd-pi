@@ -16,7 +16,9 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { openDatabase, closeDatabase, isDbAvailable, insertMilestone } from "../gsd-db.ts";
+import { openDatabase, executeDomainOperation, closeDatabase, isDbAvailable, insertMilestone, readDomainOperationFence } from "../gsd-db.ts";
+import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 
 afterEach(() => {
@@ -30,11 +32,32 @@ describe("discuss cold-start DB ordering (#5837)", () => {
     try {
       mkdirSync(join(base, ".gsd"), { recursive: true });
 
-      // Seed a milestone into the DB, then close it — this is the cold-start
+      // Seed the project the way production holds it. The open after the one
+      // that created the database adopts the milestone row and advances the
+      // Authority Epoch, and the started milestone reaches in_progress through
+      // the Domain Operation layer. Then close it — this is the cold-start
       // state: the DB file exists on disk but nothing is open in-process.
       const dbPath = join(base, ".gsd", "gsd.db");
       assert.equal(openDatabase(dbPath), true);
       insertMilestone({ id: "M001", title: "Cold start milestone", status: "active" });
+      closeDatabase();
+      assert.equal(openWorkflowDatabase(base).ok, true);
+      const fence = readDomainOperationFence();
+      executeDomainOperation({
+        operationType: "test.start-milestone",
+        idempotencyKey: "discuss-cold-start/start-milestone",
+        expectedRevision: fence.revision,
+        expectedAuthorityEpoch: fence.authorityEpoch,
+        actorType: "test",
+        sourceTransport: "test",
+        payload: {},
+      }, (context) => {
+        adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "in_progress" });
+        return {
+          events: [{ eventType: "test.milestone-started", entityType: "milestone", entityId: "M001", payload: {}, destinations: ["test"] }],
+          projections: [{ projectionKey: "test/start-milestone", projectionKind: "test", rendererVersion: "1" }],
+        };
+      });
       closeDatabase();
       invalidateStateCache();
 

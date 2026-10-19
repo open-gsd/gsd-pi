@@ -7,9 +7,11 @@ import type { LegacyImportApplicationPlanInstruction } from "./legacy-import-app
 import {
   captureCurrentLegacyImportBaseSnapshot,
   LEGACY_IMPORT_BASE_IDENTITY_COLUMNS,
+  legacyImportBaseSnapshotForRetainedHash,
   type LegacyImportBaseRow,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
+import { legacyImportKnowledgeRow } from "./legacy-import-preview-classifier-targets.js";
 import { canonicalLegacyImportJson, hashLegacyImportValue } from "./legacy-import-preview.js";
 import type { LegacyImportValue } from "./legacy-import-contract.js";
 
@@ -86,6 +88,8 @@ function instructionMatches(
     return row?.value["lifecycle_status"] === instruction.lifecycleStatus;
   }
   if (instruction.action === "seed-quality-gate") {
+    // A slice imported as completed gets no gate row, so nothing is asserted.
+    if (instruction.gateStatus === "complete") return true;
     // quality_gates is not a Preview base row set, so the seeded Q8 row is
     // verified directly against the live database the snapshot was captured
     // from. Only existence is asserted — post-import slice work legitimately
@@ -100,6 +104,14 @@ function instructionMatches(
       ":slice_id": instruction.sliceId,
     });
     return Boolean(row);
+  }
+  if (instruction.action === "create-knowledge-memory" || instruction.action === "update-knowledge-memory") {
+    const row = snapshot.rows.find((candidate) => candidate.row_set === "knowledge_memories"
+      && candidate.value["source_knowledge_id"] === instruction.knowledgeId);
+    return row !== undefined && valuesMatch(legacyImportKnowledgeRow(row.value), {
+      table: instruction.values["table"],
+      cells: JSON.parse(String(instruction.values["cells"])),
+    });
   }
   if (instruction.action !== "create-decision-memory"
     && instruction.action !== "update-decision-memory"
@@ -165,7 +177,12 @@ export function verifyLegacyImportApplicationTargets(
 export function verifyLegacyImportApplicationResult(
   application: LegacyImportApplicationEvidence,
 ): LegacyImportBaseSnapshot {
-  const snapshot = verifyLegacyImportApplicationTargets(application);
+  // The Application does not hold its snapshot schema version, so the rows are
+  // hashed at the version that made the Application result hash.
+  const snapshot = legacyImportBaseSnapshotForRetainedHash(
+    verifyLegacyImportApplicationTargets(application),
+    application.applicationRelevantRowsHash,
+  );
   if (snapshot.authority.revision !== application.resultingProjectRevision
     || snapshot.authority.authority_epoch !== application.resultingAuthorityEpoch
     || snapshot.relevant_rows_hash !== application.applicationRelevantRowsHash) {

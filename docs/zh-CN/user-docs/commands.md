@@ -32,9 +32,9 @@
 | `/gsd export --html` | 为当前或已完成的 milestone 生成自包含 HTML 报告 |
 | `/gsd export --html --all` | 一次性为所有 milestones 生成回顾报告 |
 | `/gsd update` | 在会话内更新 GSD；`--models` 可刷新 models 和定价且无需重启 |
-| `/gsd knowledge` | 添加持久化项目知识。Rules 仍手动维护在 `KNOWLEDGE.md` 中；patterns 和 lessons 由 memories 承载，并投影回文件。 |
+| `/gsd knowledge` | 添加持久化项目知识。Rules、patterns 和 lessons 都作为带 K/P/L 编号的 memories 保存；每次捕获后以及重建时，`KNOWLEDGE.md` 会从数据库重新渲染。 |
 | `/gsd fast` | 为支持的模型切换 service tier（优先级 API 路由） |
-| `/gsd rate` | 评价上一个单元所用模型层级（over / ok / under），帮助改进自适应路由 |
+| `/gsd rate` | 评价上一个单元所用模型层级（over / ok / under）或重置路由历史（reset），帮助改进自适应路由 |
 | `/gsd changelog` | 查看分类后的发行说明 |
 | `/gsd logs` | 浏览活动日志、调试日志和指标 |
 | `/gsd remote` | 控制远程自动模式 |
@@ -98,7 +98,7 @@
 | `/gsd reset-slice` | 完整安全语义见英文 [Lifecycle safety](../../user-docs/commands.md#lifecycle-safety) |
 | `/gsd park` | Park 一个 milestone，不删除，只跳过 |
 | `/gsd unpark` | 重新激活一个已 park 的 milestone |
-| Discard milestone | 在 `/gsd` 向导的 “Milestone actions” → “Discard” 中可用；已有规范 lifecycle 历史的 milestone 不能 discard，必须改用 park |
+| Discard milestone | 在 `/gsd` 向导的 “Milestone actions” → “Discard” 中可用 |
 
 ## 额外的 Prompt 驱动 Workflows
 
@@ -183,6 +183,8 @@
 | `/gsd workflow validate <name>` | 校验一个 workflow YAML definition |
 | `/gsd workflow pause` | 暂停自定义 workflow 的自动模式 |
 | `/gsd workflow resume` | 恢复已暂停的自定义 workflow 自动模式 |
+| `/gsd workflow resume <name>/<timestamp>` | 按 `/gsd workflow list` 显示的名称和时间戳恢复一次 YAML 运行（崩溃后同样适用） |
+| `/gsd workflow approve <name>/<timestamp> <step>` | 批准一个暂停等待人工审核的步骤（`human-review` 或 `prompt-verify`），之后再恢复该运行 |
 
 ## 扩展
 
@@ -361,6 +363,7 @@ gsd headless query | jq '.cost.total'
 ```
 
 <a id="mcp-server-mode"></a>
+
 ## MCP Server 模式
 
 `gsd --mode mcp` 会通过 stdin/stdout 将 GSD 作为一个 [Model Context Protocol](https://modelcontextprotocol.io) server 运行。这会把所有 GSD 工具（read、write、edit、bash 等）暴露给外部 AI 客户端，例如 Claude Desktop、VS Code Copilot，以及任何兼容 MCP 的宿主。

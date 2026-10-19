@@ -339,40 +339,12 @@ export function synthesizeCrashRecovery(
  * Deep diagnostic from any JSONL source (activity log or session file).
  * Replaces the old shallow getLastActivityDiagnostic().
  */
-export function getDeepDiagnostic(basePath: string, worktreePath?: string): string | null {
-  // Try worktree activity logs first if a worktree path is provided
-  let trace: ExecutionTrace | null = null;
-  try {
-    if (worktreePath) {
-      const wtActivityDir = join(gsdRoot(worktreePath), "activity");
-      trace = readLastActivityLog(wtActivityDir);
-    }
-  } catch { /* non-fatal — fall through to root */ }
-
-  // Fall back to root activity logs
-  if (!trace || trace.toolCallCount === 0) {
-    const activityDir = join(gsdRoot(basePath), "activity");
-    trace = readLastActivityLog(activityDir);
-  }
-
+export function getDeepDiagnostic(basePath: string): string | null {
+  // gsdRoot resolves a milestone worktree to the project's .gsd, so this one
+  // read covers the project root and every worktree.
+  const trace = readLastActivityLog(join(gsdRoot(basePath), "activity"));
   if (!trace || trace.toolCallCount === 0) return null;
   return formatTraceSummary(trace);
-}
-
-/**
- * Read the active milestone ID directly from STATE.md without async deriveState().
- * Looks for `**Active Milestone:** M001` pattern.
- */
-export function readActiveMilestoneId(basePath: string): string | null {
-  try {
-    const statePath = join(gsdRoot(basePath), "STATE.md");
-    if (!existsSync(statePath)) return null;
-    const content = readFileSync(statePath, "utf-8");
-    const match = /\*\*Active Milestone:\*\*\s*(\S+)/i.exec(content);
-    return match?.[1] ?? null;
-  } catch {
-    return null;
-  }
 }
 
 // ─── Formatting ───────────────────────────────────────────────────────────────

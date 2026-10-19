@@ -231,6 +231,23 @@ test("Milestone reopen removes coexisting canonical and plan-number-only Slice p
   for (const path of sliceArtifacts) assert.equal(existsSync(path), false, path);
 });
 
+test("Milestone reopen removes the VALIDATION projection of the deleted validation verdict", async (t) => {
+  const fixture = seedTerminalMilestone();
+  t.after(() => cleanup(fixture.base));
+  const validationFile = targetMilestoneFile(fixture.base, "M001", "VALIDATION", "Projection fencing");
+  mkdirSync(dirname(validationFile), { recursive: true });
+  writeFileSync(validationFile, "verdict: pass\n");
+
+  const result = await reopenTool.handleReopenMilestone(
+    { milestoneId: "M001", reason: "The Milestone must be validated again." },
+    fixture.base,
+    invocation("milestone-reopen/validation-projection"),
+  );
+
+  assert.ok(!("error" in result));
+  assert.equal(existsSync(validationFile), false, validationFile);
+});
+
 test("delayed Milestone reopen replay preserves projections from newer completion", async (t) => {
   const fixture = seedTerminalMilestone();
   t.after(() => cleanup(fixture.base));

@@ -9,6 +9,7 @@ Parallel mode is off by default. Enable it in preferences to use `/gsd parallel`
 ## Quick Start
 
 1. Enable parallel mode:
+
    ```yaml
    parallel:
      enabled: true
@@ -16,17 +17,21 @@ Parallel mode is off by default. Enable it in preferences to use `/gsd parallel`
    ```
 
 2. Start parallel execution:
+
    ```
    /gsd parallel start
    ```
+
    GSD scans milestones, checks dependencies and file overlap, shows an eligibility report, and spawns workers.
 
 3. Monitor:
+
    ```
    /gsd parallel status
    ```
 
 4. Stop:
+
    ```
    /gsd parallel stop
    ```
@@ -43,7 +48,7 @@ Each worker is a separate GSD process with complete isolation:
 | Metrics | Own `metrics.json` |
 | Crash recovery | Own `auto.lock` |
 
-Workers communicate with the coordinator through file-based IPC — heartbeat files and signal files in `.gsd/parallel/`.
+Workers communicate with the coordinator through heartbeat files in `.gsd/parallel/` and `command_queue` rows in the project database. A signal file in `.gsd/parallel/` is deprecated: a worker still accepts it and turns it into a `command_queue` row.
 
 ## Eligibility
 

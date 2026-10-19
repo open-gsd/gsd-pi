@@ -1,31 +1,29 @@
 // gsd-pi — Auto-worktree teardown module.
 //
 // Owns the teardown path for milestone worktrees: returning to the project
-// root, transient state cleanup, legacy DB reconciliation, worktree/branch
+// root, transient state cleanup, the worktree-local DB check, worktree/branch
 // removal, fallback orphan-directory cleanup, and active workspace registry
 // clearing.
 
 import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
 
 import { GSDError, GSD_IO_ERROR } from "./errors.js";
-import {
-  CanonicalWorktreeDivergenceError,
-  reconcileWorktreeDb,
-} from "./gsd-db.js";
 import { resolveGsdPathContract } from "./paths.js";
 import {
   removeWorktree,
   worktreePath,
   isInsideWorktreesDir,
+  worktreeManualCleanupCommand,
 } from "./worktree-manager.js";
 import { nudgeGitBranchCache } from "./worktree.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 import { autoWorktreeBranch } from "./auto-worktree-branch-lifecycle.js";
 import { setActiveWorkspace } from "./auto-worktree-session-registry.js";
 import {
-  _shouldReconcileWorktreeDb,
+  _hasWorktreeLocalDb,
   clearProjectRootStateFiles,
+  worktreeLocalDbInstruction,
+  worktreeOwnDbPath,
 } from "./auto-worktree-cleanup.js";
 import { logWarning, logError } from "./workflow-logger.js";
 
@@ -68,7 +66,7 @@ export function teardownAutoWorktree(
 
     // Mirror cleanup steps from mergeMilestoneToMain abort path:
 
-    // 1. Remove transient state files (STATE.md, auto.lock, .gsd/{MID}-META.json).
+    // 1. Remove the transient state file (.gsd/{MID}-META.json).
     //    Non-fatal — must not block teardown.
     try {
       clearProjectRootStateFiles(originalBasePath, milestoneId);
@@ -79,28 +77,19 @@ export function teardownAutoWorktree(
       );
     }
 
-    // 2. Reconcile worktree-local gsd.db into project root DB if both exist.
-    //    Ordinary legacy reconcile failures stay non-fatal. Canonical history
-    //    divergence preserves the worktree because deleting it would lose work.
-    try {
-      const contract = resolveGsdPathContract(previousCwd, originalBasePath);
-      const worktreeDbPath = join(
-        contract.worktreeGsd ?? join(previousCwd, ".gsd"),
-        "gsd.db",
-      );
-      const mainDbPath = contract.projectDb;
-      if (_shouldReconcileWorktreeDb(worktreeDbPath, mainDbPath)) {
-        reconcileWorktreeDb(mainDbPath, worktreeDbPath);
-      }
-    } catch (err) {
+    // 2. A worktree-local gsd.db is never merged into the project DB here.
+    //    Keep the worktree, because removing it would delete rows that only
+    //    that file holds, and tell the operator how to import them.
+    const contract = resolveGsdPathContract(previousCwd, originalBasePath);
+    const worktreeDbPath = worktreeOwnDbPath(previousCwd);
+    if (worktreeDbPath && _hasWorktreeLocalDb(worktreeDbPath, contract.projectDb)) {
       logError(
         "worktree",
-        `DB reconciliation failed during teardown: ${err instanceof Error ? err.message : String(err)}`,
+        `Worktree ${milestoneId} was kept: ${worktreeLocalDbInstruction(worktreeDbPath, milestoneId)}`,
+        { worktree: milestoneId },
       );
-      if (err instanceof CanonicalWorktreeDivergenceError) {
-        clearActiveWorkspace = false;
-        return;
-      }
+      clearActiveWorkspace = false;
+      return;
     }
 
     nudgeGitBranchCache(previousCwd);
@@ -134,7 +123,7 @@ export function teardownAutoWorktree(
         "reconcile",
         `Worktree directory still exists after teardown: ${wtDir}. ` +
           `This is likely an orphaned directory consuming disk space. ` +
-          `Remove it manually with: rm -rf "${wtDir.replaceAll("\\", "/")}"`,
+          `Remove it manually with: ${worktreeManualCleanupCommand(wtDir)}`,
         { worktree: milestoneId },
       );
       // Attempt a direct filesystem removal as a fallback — but ONLY if the

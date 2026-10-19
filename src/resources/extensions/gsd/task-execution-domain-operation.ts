@@ -108,6 +108,8 @@ export interface TaskExecutionAttemptSnapshot {
   coordinationDispatchId: number;
   workerId: string;
   milestoneLeaseToken: number;
+  /** Attempt start (claim fallback) time, ISO — #2787 pause-origin evidence. */
+  startedAt?: string;
 }
 
 export function isTaskAttemptAwaitingVerification<
@@ -152,6 +154,7 @@ interface AttemptSnapshotRow {
   attempt_number: number;
   retry_of_attempt_id: string | null;
   attempt_state: "running" | "settled";
+  started_at: string | null;
   outcome: TaskExecutionAttemptSnapshot["outcome"] | null;
   next_stage: KernelStage;
   coordination_dispatch_id: number;
@@ -303,6 +306,7 @@ function snapshot(row: AttemptSnapshotRow | undefined): TaskExecutionAttemptSnap
     coordinationDispatchId: row.coordination_dispatch_id,
     workerId: row.worker_id,
     milestoneLeaseToken: row.milestone_lease_token,
+    ...(row.started_at ? { startedAt: row.started_at } : {}),
   };
 }
 
@@ -330,6 +334,7 @@ export function readTaskAttempt(attemptId: string): TaskExecutionAttemptSnapshot
     SELECT attempt.attempt_id, attempt.attempt_number, attempt.retry_of_attempt_id,
            attempt.attempt_state,
            attempt.coordination_dispatch_id, attempt.worker_id, attempt.milestone_lease_token,
+           COALESCE(attempt.started_at, attempt.claimed_at) AS started_at,
            result.result_id, result.outcome, result.failure_class, result.summary, result.output_json,
            checkpoint.next_stage
     FROM workflow_execution_attempts attempt
@@ -348,11 +353,16 @@ export function readTaskAttempt(attemptId: string): TaskExecutionAttemptSnapshot
 
 export function readLatestTaskAttempt(
   task: ClaimTaskAttemptInput["task"],
+  options?: { projectId?: string },
 ): TaskExecutionAttemptSnapshot | null {
+  // #2778: identity columns alone can match a foreign project's imported row;
+  // callers that hold the project scope (e.g. the shadow-snapshot reader) pass it here.
+  const projectId = options?.projectId ?? null;
   const row = getDb().prepare(`
     SELECT attempt.attempt_id, attempt.attempt_number, attempt.retry_of_attempt_id,
            attempt.attempt_state,
            attempt.coordination_dispatch_id, attempt.worker_id, attempt.milestone_lease_token,
+           COALESCE(attempt.started_at, attempt.claimed_at) AS started_at,
            result.result_id, result.outcome, result.failure_class, result.summary, result.output_json,
            checkpoint.next_stage
     FROM workflow_item_lifecycles lifecycle
@@ -369,12 +379,14 @@ export function readLatestTaskAttempt(
       AND lifecycle.milestone_id = :milestone_id
       AND lifecycle.slice_id = :slice_id
       AND lifecycle.task_id = :task_id
+      AND (:project_id IS NULL OR lifecycle.project_id = :project_id)
     ORDER BY attempt.attempt_number DESC, checkpoint.sequence DESC
     LIMIT 1
   `).get({
     ":milestone_id": task.milestoneId,
     ":slice_id": task.sliceId,
     ":task_id": task.taskId,
+    ":project_id": projectId,
   }) as unknown as AttemptSnapshotRow | undefined;
   return snapshot(row);
 }
@@ -420,6 +432,60 @@ export function readTaskAttemptIds(task: ClaimTaskAttemptInput["task"]): string[
     ":task_id": task.taskId,
   }) as Array<Record<string, unknown>>;
   return rows.map((row) => String(row["attempt_id"]));
+}
+
+/** The unit_dispatches row status for a coordination dispatch id, or null. */
+export function readTaskExecutionDispatchStatus(dispatchId: number): string | null {
+  const row = getDb().prepare(
+    "SELECT status FROM unit_dispatches WHERE id = :dispatch_id LIMIT 1",
+  ).get({ ":dispatch_id": dispatchId }) as { status: string } | undefined;
+  return row ? String(row.status) : null;
+}
+
+/**
+ * Dispatch rows that can no longer act on their Attempt. The terminal mirror
+ * of terminalizeTaskExecutionDispatch's tolerated sets (db/writers/
+ * task-execution.ts): "completed" for succeeded settlements, and
+ * canceled/failed/stuck/paused for failed/interrupted ones. The column is
+ * unconstrained TEXT, so this is an explicit allowlist — an unknown status
+ * stays live (fail-closed), never orphaning.
+ */
+const TERMINAL_DISPATCH_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "canceled",
+  "failed",
+  "stuck",
+  "paused",
+]);
+
+/**
+ * A `running` Attempt is orphaned when its coordination dispatch row is
+ * terminal: no live runner can settle it anymore. This is the kill window of
+ * #2850/#2855 — the row is canceled before the Attempt settlement runs. An
+ * unknown or missing dispatch row stays live (fail-closed).
+ */
+export function isTaskExecutionAttemptOrphaned(
+  attempt: Pick<TaskExecutionAttemptSnapshot, "state" | "coordinationDispatchId"> | null | undefined,
+): boolean {
+  if (attempt?.state !== "running") return false;
+  const status = readTaskExecutionDispatchStatus(attempt.coordinationDispatchId);
+  return status !== null && TERMINAL_DISPATCH_STATUSES.has(status);
+}
+
+/**
+ * The newest settled Attempt of the Task's lifecycle, or null. #2855: an
+ * orphaned running re-dispatch Attempt must not hide the settled predecessor
+ * from staged-SUMMARY classification, so its readers look through the orphan
+ * to the attempt that actually owns the durable outcome.
+ */
+export function readLatestSettledTaskAttempt(
+  task: ClaimTaskAttemptInput["task"],
+): TaskExecutionAttemptSnapshot | null {
+  for (const attemptId of readTaskAttemptIds(task)) {
+    const attempt = readTaskAttempt(attemptId);
+    if (attempt?.state === "settled") return attempt;
+  }
+  return null;
 }
 
 export function claimTaskAttempt(input: ClaimTaskAttemptInput): ClaimTaskAttemptReceipt {
@@ -498,6 +564,7 @@ export function settleTaskAttempt(input: SettleTaskAttemptInput): SettleTaskAtte
     const attempt = loadAttemptExecution(input.attemptId);
     if (input.stagedTaskCompletion) {
       writeStagedTaskCompletion(context, {
+        attemptId: input.attemptId,
         milestoneId: attempt.milestone_id,
         sliceId: attempt.slice_id,
         taskId: attempt.task_id,

@@ -210,10 +210,13 @@ test("guided resume prompt substitutes skillActivation", () => {
   const result = loadPrompt("guided-resume-task", {
     milestoneId: "M001",
     sliceId: "S01",
+    taskId: "T01",
+    resumeState: "## Resume State\n- Next action: Run the suite.",
     skillActivation: "Load debugging skill first.",
   });
 
   assert.ok(result.includes("Load debugging skill first."));
+  assert.ok(result.includes("- Next action: Run the suite."));
   assert.ok(!result.includes("{{skillActivation}}"));
 });
 
@@ -295,7 +298,6 @@ test("plan-milestone prompt substitutes skillActivation", () => {
     milestonePath: ".gsd/milestones/M001",
     contextPath: ".gsd/milestones/M001/M001-CONTEXT.md",
     researchPath: ".gsd/milestones/M001/M001-RESEARCH.md",
-    researchOutputPath: join(fixtureRoot, ".gsd", "milestones", "M001", "M001-RESEARCH.md"),
     outputPath: join(fixtureRoot, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
     secretsOutputPath: join(fixtureRoot, ".gsd", "milestones", "M001", "M001-SECRETS.md"),
     inlinedContext: "Context",
@@ -318,7 +320,6 @@ test("plan-milestone prompt: compact planning gates survive template substitutio
     milestonePath: ".gsd/milestones/M001",
     contextPath: ".gsd/milestones/M001/M001-CONTEXT.md",
     researchPath: ".gsd/milestones/M001/M001-RESEARCH.md",
-    researchOutputPath: join(fixtureRoot, ".gsd", "milestones", "M001", "M001-RESEARCH.md"),
     outputPath: join(fixtureRoot, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
     secretsOutputPath: join(fixtureRoot, ".gsd", "milestones", "M001", "M001-SECRETS.md"),
     inlinedContext: "Context",

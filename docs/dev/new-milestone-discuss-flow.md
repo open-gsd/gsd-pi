@@ -179,18 +179,18 @@ First interview message ending with `?` should **not** trigger empty-turn nudge 
 
 ## After CONTEXT is written
 
-1. `M###-CONTEXT.md` on disk (+ depth gate cleared)
+1. CONTEXT artifact row saved through `gsd_summary_save`, which renders `M###-CONTEXT.md` (+ depth gate cleared)
 2. User or auto resumes the planning pipeline: `research-milestone` if needed, then `plan-milestone`, which persists Slices and renders `M###-ROADMAP.md`.
 3. Slice execution / auto-mode
 
-`checkAutoStartAfterDiscuss` clears `pendingAutoStart` and may call `scheduleAutoStartAfterIdle` when artifacts and gates pass. Single-milestone handoff needs context plus a cleared depth gate; multi-milestone discussion still waits for manifest gates.
+`checkAutoStartAfterDiscuss` clears `pendingAutoStart` and may call `scheduleAutoStartAfterIdle` when artifacts and gates pass. Single-milestone handoff needs context plus a cleared depth gate; multi-milestone discussion still waits for manifest gates. A `CONTEXT.md` that is on disk but not in the database does not count as context: see "Implicit disk ingress" in [state-db-cutover-projection-contract.md](./state-db-cutover-projection-contract.md).
 
 The user-facing handoff should describe context capture and planning continuation, not imply the Milestone is fully planned or execution-ready. The model-facing ready phrase remains a prompt contract for post-write detection.
 
 Runtime handoff rules:
 
 - Generic `unregistered-milestone` drift still fails closed; runtime reconciliation must not import arbitrary markdown-only milestones into the DB.
-- A matching `pendingAutoStart` entry, the pinned `entry.scope.contextFile()`, and a cleared depth gate prove the in-flight milestone was just reserved. If the DB row is missing, guided-flow may insert the minimal queued row, log the repair, and continue in the same check.
+- A matching `pendingAutoStart` entry, a CONTEXT artifact row for the milestone, and a cleared depth gate prove the in-flight milestone was just reserved. If the DB row is missing, guided-flow may insert the minimal queued row, log the repair, and continue in the same check.
 - Staleness is artifact-based once context exists. No manifest, no context, no roadmap, plus an expired short timeout may be cleared as interrupted; pinned context remains a legitimate handoff until it progresses or is explicitly cleared.
 - Context capture does not promote the stored milestone row to `active`. The durable row may remain `queued` until `plan-milestone` persists Slices; `queued` plus pinned context plus no Slices is interpreted as **Discussion Complete, Planning Pending**, not execution-ready.
 - Gate 1b treats `queued` plus pinned context plus a cleared depth gate as normal handoff, not a plan-blocked failure. It must not warn the user about `queued`, inject a hidden `gsd_plan_milestone` retry, or wait for another model turn.

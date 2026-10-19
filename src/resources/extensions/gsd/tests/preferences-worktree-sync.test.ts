@@ -12,31 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { syncGsdStateToWorktree, syncWorktreeStateBack } from "../auto-worktree-sync.ts";
-
-test("#2684: syncWorktreeStateBack does not overwrite project PREFERENCES.md", () => {
-  const mainBase = mkdtempSync(join(tmpdir(), "gsd-wt-prefs-main-"));
-  const wtBase = mkdtempSync(join(tmpdir(), "gsd-wt-prefs-worktree-"));
-  const mainGsd = join(mainBase, ".gsd");
-  const wtGsd = join(wtBase, ".gsd");
-  mkdirSync(mainGsd, { recursive: true });
-  mkdirSync(wtGsd, { recursive: true });
-
-  try {
-    const authoritative = "---\nversion: 1\n---\n\nmode: team\n";
-    writeFileSync(join(mainGsd, "PREFERENCES.md"), authoritative);
-    writeFileSync(join(wtGsd, "PREFERENCES.md"), "---\nversion: 1\n---\n\nmode: solo\n");
-
-    const result = syncWorktreeStateBack(mainBase, wtBase, "M001");
-
-    assert.equal(readFileSync(join(mainGsd, "PREFERENCES.md"), "utf-8"), authoritative);
-    assert.ok(!result.synced.includes("PREFERENCES.md"));
-    assert.ok(!result.synced.includes("preferences.md"));
-  } finally {
-    rmSync(mainBase, { recursive: true, force: true });
-    rmSync(wtBase, { recursive: true, force: true });
-  }
-});
+import { syncGsdStateToWorktree } from "../auto-worktree-sync.ts";
 
 // Phase C: copyPlanningArtifacts was deleted. Worktrees no longer
 // maintain a parallel .gsd/ projection; preference seeding is now

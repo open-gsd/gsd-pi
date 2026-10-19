@@ -14,12 +14,11 @@ import {
   insertSlice,
   insertTask,
   openDatabase,
-  updateSliceStatus,
+  _getAdapter,
 } from "../gsd-db.ts";
 import { clearParseCache } from "../files.ts";
 import { clearPathCache } from "../paths.ts";
 import { invalidateStateCache } from "../state.ts";
-import { handleCompleteTask } from "../tools/complete-task.ts";
 import { handleCompleteSlice as handleCompleteSliceWithInvocation } from "../tools/complete-slice.ts";
 import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
 import { handleValidateMilestone } from "../tools/validate-milestone.ts";
@@ -138,21 +137,6 @@ function validateMilestoneParams() {
   };
 }
 
-test("complete-task writes SUMMARY under the active worktree projection", async (t) => {
-  const { projectRoot, worktreeRoot } = makeFixture(t);
-  seedMilestoneAndSlice();
-  insertTask({ id: "T02", sliceId: SID, milestoneId: MID, status: "pending", title: "Other task" });
-
-  const result = await handleCompleteTask(completeTaskParams(), worktreeRoot);
-
-  assert.ok(!("error" in result), "complete-task should succeed");
-  const expected = join(worktreeRoot, ".gsd", "milestones", MID, "slices", SID, "tasks", "T01-SUMMARY.md");
-  const projectProjection = join(projectRoot, ".gsd", "milestones", MID, "slices", SID, "tasks", "T01-SUMMARY.md");
-  assert.equal(result.summaryPath, expected);
-  assert.equal(existsSync(expected), true);
-  assert.equal(existsSync(projectProjection), false);
-});
-
 test("complete-slice writes SUMMARY and UAT under the active worktree projection", async (t) => {
   const { projectRoot, worktreeRoot } = makeFixture(t);
   seedMilestoneAndSlice();
@@ -178,49 +162,3 @@ test("complete-slice writes SUMMARY and UAT under the active worktree projection
   assert.equal(existsSync(projectUat), false);
 });
 
-test("validate-milestone invoked from the project root writes VALIDATION under the live worktree projection", async (t) => {
-  const { projectRoot, worktreeRoot } = makeFixture(t);
-  seedMilestoneAndSlice();
-
-  const result = await handleValidateMilestone(validateMilestoneParams(), projectRoot, {
-    uokGatesEnabled: false,
-  });
-
-  assert.ok(!("error" in result), "validate-milestone should succeed");
-  const expected = join(worktreeRoot, ".gsd", "milestones", MID, "M001-VALIDATION.md");
-  const projectProjection = join(projectRoot, ".gsd", "milestones", MID, "M001-VALIDATION.md");
-  assert.equal(result.validationPath, expected);
-  assert.equal(existsSync(expected), true);
-  assert.equal(existsSync(projectProjection), true, "VALIDATION should mirror to project root for consistent reads");
-});
-
-test("complete-milestone writes SUMMARY under the active worktree projection", async (t) => {
-  const { projectRoot, worktreeRoot } = makeFixture(t);
-  seedMilestoneAndSlice();
-  insertTask({ id: "T01", sliceId: SID, milestoneId: MID, status: "complete", title: "Task" });
-  updateSliceStatus(MID, SID, "complete", new Date().toISOString());
-  insertAssessment({
-    path: join(worktreeRoot, ".gsd", "milestones", MID, "M001-VALIDATION.md"),
-    milestoneId: MID,
-    sliceId: null,
-    taskId: null,
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "---\nverdict: pass\nremediation_round: 0\n---\n\n# Validation\n",
-  });
-
-  const result = await handleCompleteMilestone({
-    milestoneId: MID,
-    title: "Milestone",
-    oneLiner: "Finished milestone",
-    narrative: "Completed the milestone.",
-    verificationPassed: true,
-  }, worktreeRoot);
-
-  assert.ok(!("error" in result), "complete-milestone should succeed");
-  const expected = join(worktreeRoot, ".gsd", "milestones", MID, "M001-SUMMARY.md");
-  const projectProjection = join(projectRoot, ".gsd", "milestones", MID, "M001-SUMMARY.md");
-  assert.equal(result.summaryPath, expected);
-  assert.equal(existsSync(expected), true);
-  assert.equal(existsSync(projectProjection), false);
-});

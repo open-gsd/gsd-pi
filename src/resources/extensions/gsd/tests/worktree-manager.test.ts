@@ -11,15 +11,20 @@ import {
   removeWorktree,
   diffWorktreeGSD,
   diffWorktreeNumstat,
-  getWorktreeGSDDiff,
   getWorktreeLog,
   mergeWorktreeToMain,
   worktreeBranchName,
   worktreePath,
   pruneEphemeralGhostWorktreeDirectories,
   removeStaleWorktreeDirectory,
+  verifyBranchFreeForWorktreeAdd,
 } from "../worktree-manager.ts";
-import { GSD_GIT_ERROR, GSDError } from "../errors.ts";
+import { nativeWorktreeList } from "../native-git-bridge.ts";
+import { GSD_GIT_ERROR, GSD_LOCK_HELD, GSDError } from "../errors.ts";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function run(command: string, cwd: string): string {
   return execSync(command, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" }).trim();
@@ -170,23 +175,55 @@ describe("createWorktree", () => {
   });
 });
 
-test("stale worktree cleanup gives actionable guidance for EACCES", () => {
-  const cause = Object.assign(new Error("permission denied"), { code: "EACCES" });
+test("stale worktree cleanup retries transient EPERM/EBUSY before succeeding (#1987)", () => {
+  let calls = 0;
+  const sleeps: number[] = [];
+  removeStaleWorktreeDirectory(
+    "/project/.gsd-worktrees/M010",
+    "M010",
+    () => {
+      calls += 1;
+      if (calls <= 2) throw Object.assign(new Error("locked"), { code: calls === 1 ? "EPERM" : "EBUSY" });
+    },
+    (ms) => { sleeps.push(ms); },
+  );
+  assert.equal(calls, 3);
+  assert.equal(sleeps.length, 2);
+});
 
+test("stale worktree cleanup surfaces the lock error once retries are exhausted (#1987)", () => {
+  let calls = 0;
+  const cause = Object.assign(new Error("resource busy"), { code: "EBUSY" });
+  const sleeps: number[] = [];
   assert.throws(
-    () => removeStaleWorktreeDirectory("/project/.gsd-worktrees/M010", "M010", () => {
-      throw cause;
-    }),
+    () => removeStaleWorktreeDirectory(
+      "/project/.gsd-worktrees/M010",
+      "M010",
+      () => { calls += 1; throw cause; },
+      (ms) => { sleeps.push(ms); },
+    ),
     (error: unknown) => {
       assert.ok(error instanceof GSDError);
       assert.equal(error.code, GSD_GIT_ERROR);
       assert.equal(error.cause, cause);
-      assert.match(error.message, /EACCES/);
-      assert.match(error.message, /owned by another user/);
-      assert.match(error.message, /ownership or permissions/);
+      assert.match(error.message, /EBUSY/);
+      assert.doesNotMatch(error.message, /after \d+ attempts/);
       return true;
     },
   );
+  assert.deepEqual(sleeps, [20, 50, 100]);
+  assert.equal(calls, 4);
+});
+
+test("stale worktree cleanup does not retry EACCES (#1987)", () => {
+  let calls = 0;
+  assert.throws(() => removeStaleWorktreeDirectory(
+    "/project/.gsd-worktrees/M010",
+    "M010",
+    () => { calls += 1; throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+    () => { throw new Error("must not sleep"); },
+  ));
+  assert.equal(calls, 1);
 });
 
 describe("createWorktree — duplicate rejection", () => {
@@ -211,6 +248,138 @@ describe("createWorktree — duplicate rejection", () => {
     );
   });
 
+});
+
+describe("createWorktree — stale worktree registration (#2317)", () => {
+  let base: string;
+  beforeEach(() => { base = makeBaseRepo(); });
+  afterEach(() => { rmSync(base, { recursive: true, force: true }); });
+
+  test("fails loudly naming branch, path, and remediation when a stale registration still claims the branch after prune", () => {
+    // Issue #2317: the reconcile path removes an orphaned worktree directory,
+    // but git's .git/worktrees/<name> admin metadata can survive the prune
+    // (e.g. a locked entry). The next createWorktree then hit "branch already
+    // in use" and the caller silently degraded to project-root. The fix must
+    // retry the prune once, then fail loudly — never fall back silently.
+    const info = createWorktree(base, "M011");
+    run(`git worktree lock "${info.path}"`, base);
+    rmSync(info.path, { recursive: true, force: true });
+
+    const stalePath = nativeWorktreeList(base).find((e) => e.branch === "worktree/M011")?.path;
+    assert.ok(stalePath, "fixture precondition: git still lists the stale locked entry");
+
+    assert.throws(
+      () => createWorktree(base, "M011"),
+      (err: unknown) => {
+        assert.ok(err instanceof GSDError, "should throw GSDError");
+        assert.equal(err.code, GSD_LOCK_HELD, "error code must be GSD_LOCK_HELD");
+        assert.match(err.message, /worktree\/M011/, "error must name the branch");
+        assert.match(err.message, new RegExp(escapeRegExp(stalePath!)), "error must name the stale path");
+        assert.match(err.message, /git worktree unlock/, "error must give the unlock remediation (locked entries survive /worktree remove)");
+        assert.match(err.message, /git worktree prune/, "error must give the prune remediation");
+        return true;
+      },
+    );
+  });
+
+  test("guidance is actionable: unlock plus prune permits recreation", () => {
+    // Following the error message's remediation sequence must actually clear
+    // the stale registration and let createWorktree succeed.
+    const info = createWorktree(base, "M011");
+    run(`git worktree lock "${info.path}"`, base);
+    rmSync(info.path, { recursive: true, force: true });
+
+    assert.throws(() => createWorktree(base, "M011"), /stale worktree registration/, "precondition: creation blocked by stale registration");
+    const stalePath = nativeWorktreeList(base).find((e) => e.branch === "worktree/M011")?.path;
+    assert.ok(stalePath, "fixture precondition: stale locked entry is listed");
+
+    run(`git worktree unlock "${stalePath}"`, base);
+    run("git worktree prune", base);
+
+    const recreated = createWorktree(base, "M011");
+    assert.strictEqual(recreated.name, "M011");
+    assert.ok(existsSync(join(recreated.path, ".git")), "recreated worktree has .git marker");
+  });
+
+  test("fails loud for a surviving stale registration at a legacy path with undeterminable branch (native mode)", () => {
+    // With GSD_ENABLE_NATIVE_GSD_GIT=1, libgit2's worktree list reports an
+    // empty branch for a registration whose directory is missing, so the
+    // stale registration claims neither our branch nor our canonical path.
+    // It sits inside the GSD worktrees containers — it must still fail loud.
+    const legacyStalePath = join(base, ".gsd", "worktrees", "M014");
+    assert.ok(!existsSync(legacyStalePath), "fixture precondition: legacy stale dir is missing");
+    assert.throws(
+      () =>
+        verifyBranchFreeForWorktreeAdd(base, "M014", "worktree/M014", worktreePath(base, "M014"), {
+          list: () => [{ path: legacyStalePath, branch: "", isBare: false }],
+          prune: () => {},
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof GSDError, "should throw GSDError");
+        assert.equal(err.code, GSD_LOCK_HELD, "error code must be GSD_LOCK_HELD");
+        assert.match(err.message, /worktree\/M014/, "error must name the branch");
+        assert.match(err.message, new RegExp(escapeRegExp(legacyStalePath)), "error must name the stale legacy path");
+        assert.match(err.message, /git worktree unlock/, "error must give the unlock remediation");
+        assert.match(err.message, /git worktree prune/, "error must give the prune remediation");
+        return true;
+      },
+    );
+  });
+
+  test("stale registration outside the worktrees root triggers the prune retry but does not block", () => {
+    let pruneCalls = 0;
+    assert.doesNotThrow(() =>
+      verifyBranchFreeForWorktreeAdd(base, "M015", "worktree/M015", worktreePath(base, "M015"), {
+        list: () => [{ path: "/opt/unrelated/wt", branch: "", isBare: false }],
+        prune: () => { pruneCalls += 1; },
+      }),
+    );
+    assert.strictEqual(pruneCalls, 1, "the broad stale-registration trigger must still retry the prune once");
+  });
+
+  test("recreates cleanly when the registration is already gone (no false fail-loud)", () => {
+    const info = createWorktree(base, "M012");
+    rmSync(info.path, { recursive: true, force: true });
+    run("git worktree prune", base);
+
+    const recreated = createWorktree(base, "M012");
+    assert.strictEqual(recreated.name, "M012");
+    assert.ok(existsSync(join(recreated.path, ".git")), "recreated worktree has .git marker");
+    run("git rev-parse --git-dir", recreated.path);
+  });
+});
+
+describe("verifyBranchFreeForWorktreeAdd (#2317)", () => {
+  const staleEntry = { path: "/repo/.gsd-worktrees/M013", branch: "worktree/M013", isBare: false };
+
+  test("retries prune once and passes when the stale registration clears", () => {
+    let listCalls = 0;
+    let pruneCalls = 0;
+    verifyBranchFreeForWorktreeAdd("/repo", "M013", "worktree/M013", "/repo/.gsd-worktrees/M013", {
+      list: () => (listCalls++ === 0 ? [staleEntry] : []),
+      prune: () => { pruneCalls += 1; },
+    });
+    assert.strictEqual(listCalls, 2, "must recheck the worktree list after the retry prune");
+    assert.strictEqual(pruneCalls, 1, "must retry the prune exactly once");
+  });
+
+  test("throws naming branch, path, and remediation when the registration survives the retry", () => {
+    assert.throws(
+      () => verifyBranchFreeForWorktreeAdd("/repo", "M013", "worktree/M013", "/repo/.gsd-worktrees/M013", {
+        list: () => [staleEntry],
+        prune: () => {},
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof GSDError, "should throw GSDError");
+        assert.equal(err.code, GSD_LOCK_HELD, "error code must be GSD_LOCK_HELD");
+        assert.match(err.message, /worktree\/M013/, "error must name the branch");
+        assert.match(err.message, /\/repo\/\.gsd-worktrees\/M013/, "error must name the stale path");
+        assert.match(err.message, /git worktree unlock/, "error must give the unlock remediation");
+        assert.match(err.message, /git worktree prune/, "error must give the prune remediation");
+        return true;
+      },
+    );
+  });
 });
 
 describe("createWorktree — branch cleanup on add failure", () => {
@@ -284,7 +453,7 @@ describe("listWorktrees", () => {
 
 // ─── diffWorktreeGSD ─────────────────────────────────────────────────────────
 
-describe("diffWorktreeGSD and getWorktreeGSDDiff", () => {
+describe("diffWorktreeGSD", () => {
   let base: string;
   beforeEach(() => {
     const repo = makeRepoWithChanges("feature-x");
@@ -305,12 +474,6 @@ describe("diffWorktreeGSD and getWorktreeGSDDiff", () => {
       "M001 roadmap should be in modified files",
     );
     assert.strictEqual(diff.removed.length, 0, "should have no removed files");
-  });
-
-  test("returns patch content", () => {
-    const fullDiff = getWorktreeGSDDiff(base, "feature-x");
-    assert.ok(fullDiff.includes("M002"), "diff should mention M002");
-    assert.ok(fullDiff.includes("updated"), "diff should mention the update");
   });
 });
 

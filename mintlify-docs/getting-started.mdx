@@ -116,7 +116,7 @@ gsd
 /gsd queue      # queue the next milestone
 ```
 
-Both terminals read and write the same `.gsd/` files. Decisions in terminal 2 are picked up at the next phase boundary automatically.
+Both terminals share the project database (`.gsd/gsd.db`) — that database is what teams and terminals share. The `.gsd/` markdown files are rendered views of it: a command writes a row, and the files re-render. Decisions in terminal 2 are picked up at the next phase boundary automatically.
 
 ## Project structure
 
@@ -136,7 +136,7 @@ All state lives on disk in `.gsd/`:
   PROJECT.md          — what the project is right now
   REQUIREMENTS.md     — requirement contract (active/validated/deferred)
   DECISIONS.md        — append-only architectural decisions
-  KNOWLEDGE.md        — manual rules plus memory-projected patterns and lessons
+  KNOWLEDGE.md        — rules, patterns and lessons rendered from the database
   RUNTIME.md          — runtime context: API endpoints, env vars, services
   STATE.md            — quick-glance status
   phases/

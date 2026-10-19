@@ -21,6 +21,8 @@ import {
   LegacyImportBaseSnapshotError,
   captureLegacyImportBaseSnapshot,
   captureCurrentLegacyImportBaseSnapshot,
+  legacyImportBaseSnapshotAtVersion,
+  legacyImportBaseSnapshotForRetainedHash,
   type LegacyImportBaseSnapshot,
   type LegacyImportBaseSnapshotSource,
 } from "../legacy-import-preview-base.ts";
@@ -46,6 +48,7 @@ import {
   createLegacyImportPreview,
   hashLegacyImportValue,
   isValidLegacyImportPreviewArtifact,
+  legacyImportBaseSnapshotForPreview,
   LegacyImportPreviewError,
   resolveLegacyImportPreview,
   revalidateLegacyImportPreview,
@@ -77,6 +80,8 @@ const EXPECTED_BASE_ROW_SETS = [
   "assessments",
   "decisions",
   "decision_memories",
+  "knowledge_memories",
+  "knowledge_memory_rows",
   "item_lifecycles",
 ] as const;
 const EXPECTED_BASE_ROW_KEYS: Record<(typeof EXPECTED_BASE_ROW_SETS)[number], readonly string[]> = {
@@ -112,6 +117,8 @@ const EXPECTED_BASE_ROW_KEYS: Record<(typeof EXPECTED_BASE_ROW_SETS)[number], re
     "made_by", "source", "superseded_by",
   ],
   decision_memories: ["source_decision_id", "structured_fields"],
+  knowledge_memories: ["source_knowledge_id", "category", "content", "scope", "structured_fields", "superseded_by"],
+  knowledge_memory_rows: ["id", "category", "content", "scope", "structured_fields"],
   item_lifecycles: [
     "project_id", "item_kind", "milestone_id", "slice_id", "task_id",
     "lifecycle_status", "state_version", "last_operation_id",
@@ -328,7 +335,7 @@ describe("legacy preview identity", () => {
       ...input.base,
       database_schema_version: 44 as typeof LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION,
     };
-    assert.throws(() => sealLegacyImportPreview(input), /database schema 49/);
+    assert.throws(() => sealLegacyImportPreview(input), /database schema 51/);
   });
 
   test("legacy preview identity rejects import kinds the application receipt cannot store", () => {
@@ -430,8 +437,8 @@ describe("legacy preview identity", () => {
     assert.throws(() => sealLegacyImportPreview(blankImporter), /importer_version must not be blank/);
 
     const wrongSnapshotSchema = sealInput();
-    wrongSnapshotSchema.base = { ...wrongSnapshotSchema.base, snapshot_schema_version: 2 as 1 };
-    assert.throws(() => sealLegacyImportPreview(wrongSnapshotSchema), /snapshot schema 1/);
+    wrongSnapshotSchema.base = { ...wrongSnapshotSchema.base, snapshot_schema_version: 3 as 1 };
+    assert.throws(() => sealLegacyImportPreview(wrongSnapshotSchema), /snapshot schema 1 or 2/);
   });
 
   test("legacy preview identity full-envelope hash catches non-identity evidence drift", () => {
@@ -535,6 +542,8 @@ function sourceFixture(overrides: Partial<LegacyImportBaseSnapshotSource> = {}) 
     }]],
     ["decisions", [{ id: "D001", decision: "Decision" }]],
     ["decision_memories", [{ source_decision_id: "D002", structured_fields: '{"sourceDecisionId":"D002"}' }]],
+    ["knowledge_memories", [{ source_knowledge_id: "K001", structured_fields: '{"sourceKnowledgeId":"K001"}' }]],
+    ["knowledge_memory_rows", [{ id: "MEM001", category: "pattern", content: "Pattern" }]],
     ["item_lifecycles", [{
       project_id: "project-1",
       item_kind: "milestone",
@@ -616,6 +625,34 @@ describe("legacy preview base snapshot", () => {
     assert.notEqual(hashLegacyImportValue(changedRows), snapshot.relevant_rows_hash);
     assert.equal(Object.isFrozen(snapshot), true);
     assert.equal(Object.isFrozen(snapshot.rows), true);
+  });
+
+  test("legacy preview base snapshot gives the rows and hash of schema 1 for evidence that an earlier build retained", () => {
+    const snapshot = captureLegacyImportBaseSnapshot(sourceFixture());
+    assert.equal(snapshot.snapshot_schema_version, 2);
+    assert.equal(legacyImportBaseSnapshotAtVersion(snapshot, 2), snapshot);
+
+    const earlier = legacyImportBaseSnapshotAtVersion(snapshot, 1);
+    assert.equal(earlier.snapshot_schema_version, 1);
+    assert.equal(earlier.rows.length, snapshot.rows.length - 2);
+    assert.deepEqual(earlier.rows, snapshot.rows.filter((row) => (
+      row.row_set !== "knowledge_memories" && row.row_set !== "knowledge_memory_rows"
+    )));
+    assert.equal(earlier.relevant_rows_hash, hashLegacyImportValue(earlier.rows));
+    assert.notEqual(earlier.relevant_rows_hash, snapshot.relevant_rows_hash);
+    assert.deepEqual(earlier.authority, snapshot.authority);
+    assert.equal(Object.isFrozen(earlier), true);
+
+    // Evidence without a snapshot schema version: its rows hash selects the version.
+    assert.equal(legacyImportBaseSnapshotForRetainedHash(snapshot, snapshot.relevant_rows_hash), snapshot);
+    assert.deepEqual(legacyImportBaseSnapshotForRetainedHash(snapshot, earlier.relevant_rows_hash), earlier);
+    assert.equal(legacyImportBaseSnapshotForRetainedHash(snapshot, hashLegacyImportValue("other rows")), snapshot);
+
+    // A sealed Preview: its identity selects the version.
+    const sealOn = (base: LegacyImportBaseSnapshot) => sealLegacyImportPreview({ ...sealInput(), base });
+    assert.deepEqual(legacyImportBaseSnapshotForPreview(sealOn(earlier), snapshot), earlier);
+    assert.equal(legacyImportBaseSnapshotForPreview(sealOn(snapshot), snapshot), snapshot);
+    assert.notEqual(sealOn(earlier).preview.preview_id, sealOn(snapshot).preview.preview_id);
   });
 
   test("legacy preview base snapshot is stable when a reader returns rows in another order", () => {
@@ -769,6 +806,16 @@ describe("legacy preview base snapshot", () => {
           'memory-1', 'architecture', 'Decision memory', 'created', 'updated',
           '{ "choice": "Memory choice", "sourceDecisionId": "D002" }'
         );
+        INSERT INTO memories (
+          id, category, content, created_at, updated_at, structured_fields
+        ) VALUES (
+          'memory-2', 'rule', 'Newer rule', 'created', 'updated', '{"sourceKnowledgeId":"K001"}'
+        );
+        INSERT INTO memories (
+          id, category, content, created_at, updated_at, superseded_by, structured_fields
+        ) VALUES (
+          'memory-3', 'rule', 'Older rule', 'created', 'updated', 'memory-2', '{"sourceKnowledgeId":"K001"}'
+        );
       `);
       const projectId = String(db.prepare(
         "SELECT project_id FROM project_authority WHERE singleton = 1",
@@ -812,6 +859,14 @@ describe("legacy preview base snapshot", () => {
       assert.equal(rows.get("assessments")?.["scope"], "roadmap");
       assert.equal(rows.get("decisions")?.["decision"], "Decision");
       assert.equal(rows.get("decision_memories")?.["source_decision_id"], "D002");
+      // One row per knowledge id: the active memories row, not the superseded one.
+      assert.equal(rows.get("knowledge_memories")?.["source_knowledge_id"], "K001");
+      assert.equal(rows.get("knowledge_memories")?.["content"], "Newer rule");
+      // One row per active memory with a KNOWLEDGE.md table, by its memory id.
+      assert.deepEqual(
+        snapshot.rows.filter((row) => row.row_set === "knowledge_memory_rows").map((row) => row.value["id"]),
+        ["memory-2"],
+      );
       assert.equal(rows.get("item_lifecycles")?.["lifecycle_status"], "pending");
 
       db.exec(`
@@ -1076,6 +1131,7 @@ describe("legacy preview task classification", () => {
         "conflicting-legacy-import-completeness",
         "duplicate-logical-milestone",
         "hybrid-conflicting-content",
+        "knowledge-content-not-imported",
         "unsupported-database-schema",
       ],
     );
@@ -1083,6 +1139,7 @@ describe("legacy preview task classification", () => {
       result.changes.map((change) => [change.action, change.target.kind, change.target.key]).sort(),
       [
         ["create", "assessment", "M702/S01/run-uat"],
+        ["create", "knowledge", "K701"],
         ["create", "milestone", "M702"],
         ["create", "milestone-status", "M702"],
         ["create", "requirement", "R701"],
@@ -1095,7 +1152,7 @@ describe("legacy preview task classification", () => {
       ].sort(),
     );
     assert.deepEqual(result.counts, {
-      create: 5, update: 0, delete: 0, preserve: 5, unparsed: 3, unresolved: 5,
+      create: 6, update: 0, delete: 0, preserve: 5, unparsed: 3, unresolved: 5,
     });
     assert.equal(result.changes.some((change) => change.target.key.includes("M007")), false);
     assert.equal(result.changes.some((change) => change.target.key === "M701"), false);

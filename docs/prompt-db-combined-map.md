@@ -3,6 +3,7 @@
 > How each prompt in the pipeline reads and writes the database, and which DB state drives which prompt to fire.
 
 See also:
+
 - [prompt-map.md](./prompt-map.md) — full prompt system detail
 - [db-map.md](./db-map.md) — full database schema detail
 
@@ -20,7 +21,7 @@ See also:
                        │  reads
                        ▼
               auto-dispatch.ts
-            (DISPATCH_RULES, 29 rules,
+            (DISPATCH_RULES,
              first match → prompt + builder)
                        │
                        ▼
@@ -56,7 +57,7 @@ See also:
    auto.ts loop ──► back to auto-dispatch.ts
 ```
 
-`QUEUE-ORDER.json` is the exception to the usual generated-artifact projection rule. `/gsd rethink` and related phase-management flows write it as the durable milestone reorder contract, and state derivation mirrors it into `milestones.sequence` before dispatch so stale DB sequence can be repaired without importing arbitrary markdown projections.
+`QUEUE-ORDER.json` is a projection of `milestones.sequence`. `/gsd queue` and the `gsd_milestone_reorder` tool (used by `/gsd rethink`) change the order through the `milestone.reorder` Domain Operation, which renders the file. No startup, state derivation, dispatch, reconciliation or `/gsd sync` path reads the file back into the database.
 
 The current lifecycle authority and cutover boundaries are owned by the
 [architecture overview](./dev/architecture.md) and the
@@ -74,21 +75,20 @@ Each row = one prompt file. Columns show which DB tables it touches and how.
 
 | Prompt | DB Reads | DB Writes | Disk Artifact Written |
 |--------|----------|-----------|----------------------|
-| `guided-workflow-preferences` | — | runtime_kv (research-decision seed) | PREFERENCES.md |
-| `guided-discuss-project` | — | artifacts (PROJECT) | PROJECT.md |
-| `guided-discuss-requirements` | requirements | requirements (INSERT), artifacts (REQUIREMENTS) | REQUIREMENTS.md |
-| `guided-research-decision` | runtime_kv | runtime_kv (research-decision.json key) | — |
+| `guided-workflow-preferences` | — | — | PREFERENCES.md |
+| `guided-discuss-project` | — | artifacts (PROJECT); workflow_operations, workflow_domain_events (`project.setup.record`) when the user asks for research | PROJECT.md |
+| `guided-discuss-requirements` | requirements | requirements (INSERT), artifacts (REQUIREMENTS); workflow_operations, workflow_domain_events (`project.setup.record`) when the user asks for research | REQUIREMENTS.md |
 | `guided-research-project` | milestones, artifacts | artifacts (RESEARCH × 4 aspects) | M##-RESEARCH.md |
 
 ### Milestone Planning Phase
 
 | Prompt | DB Reads | DB Writes | Disk Artifact Written |
 |--------|----------|-----------|----------------------|
-| `discuss` / `guided-discuss-milestone` | milestones, artifacts | artifacts (CONTEXT) | M##-CONTEXT.md |
-| `discuss-headless` | milestones, artifacts | milestones, slices, decisions, artifacts | M##-CONTEXT.md, DECISIONS.md |
+| `discuss` / `guided-discuss-milestone` | milestones, artifacts | artifacts (CONTEXT), milestones.depends_on via `gsd_milestone_set_dependencies`, workflow_work_checkpoints via `gsd_checkpoint_save` for a queued milestone (`discuss` only) | M##-CONTEXT.md |
+| `discuss-headless` | milestones, artifacts | milestones, slices, decisions, artifacts, workflow_work_checkpoints via `gsd_checkpoint_save` for a queued milestone | M##-CONTEXT.md, DECISIONS.md |
 | `research-milestone` | milestones, artifacts | artifacts (RESEARCH) | M##-RESEARCH.md |
 | `plan-milestone` | project_authority, workflow_operations, workflow_item_lifecycles, milestones, slices | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, milestones (UPDATE planning), slices (INSERT), optional single-slice metadata via `gsd_plan_slice`, optional single-slice tasks via `gsd_plan_task`, decisions | ROADMAP.md; NN-MM-PLAN.md with embedded tasks for single-slice fast path |
-| `queue` | milestones | milestones (INSERT queued), artifacts (CONTEXT) | PROJECT.md, QUEUE.md |
+| `queue` | milestones | milestones (INSERT queued), artifacts (CONTEXT), milestones.depends_on via `gsd_milestone_set_dependencies` | PROJECT.md, QUEUE.md |
 
 ### Slice Planning Phase
 
@@ -106,9 +106,9 @@ The task-bearing planning payloads use camel-case `requiredWorkflowTools` on `gs
 
 | Prompt | DB Reads | DB Writes | Disk Artifact Written |
 |--------|----------|-----------|----------------------|
-| `execute-task` | Task lifecycle, current Attempt/Result/verdict evidence, slices, milestones, memories, quality gates | invokes evidence-backed Task publication; see the [database map](./db-map.md), plus memory hit counts | S##-T##-SUMMARY.md and NN-MM-PLAN.md projections after commit; legacy T##-SUMMARY.md readable |
-| `guided-resume-task` | Task lifecycle, current Attempt/Result/verdict evidence, slices | invokes evidence-backed Task publication; see the [database map](./db-map.md) | S##-T##-SUMMARY.md projection after commit; legacy T##-SUMMARY.md readable |
-| `reactive-execute` | tasks | tasks via N× execute-task subagents; retry-cap exhaustion writes a diagnostic blocker and does not derive completion/skipped state from summaries | S##-T##-SUMMARY.md × N; S##-REACTIVE-BLOCKER.md when batch summaries remain missing after retries |
+| `execute-task` | Task lifecycle, current Attempt/Result/verdict evidence, the head Work Checkpoint of the task (`workflow_work_checkpoints`), slices, milestones, memories, quality gates | invokes evidence-backed Task publication; see the [database map](./db-map.md), plus memory hit counts | S##-T##-SUMMARY.md and NN-MM-PLAN.md projections after commit; legacy T##-SUMMARY.md readable |
+| `guided-resume-task` | Task lifecycle, current Attempt/Result/verdict evidence, the head Work Checkpoint of the task (`workflow_work_checkpoints`), slices | invokes evidence-backed Task publication; see the [database map](./db-map.md) | S##-T##-SUMMARY.md projection after commit; legacy T##-SUMMARY.md readable |
+| `reactive-execute` | tasks | tasks via N× execute-task subagents; retry-cap exhaustion records a recovery block (`gate_runs`) and does not derive completion/skipped state from summaries | S##-T##-SUMMARY.md × N; S##-REACTIVE-BLOCKER.md diagnostic when batch tasks are still open with no Attempt Result after retries |
 | `quick-task` | — | — (no DB; writes summaryPath directly) | {{summaryPath}} |
 
 ### Quality Gate Phase
@@ -135,14 +135,14 @@ The task-bearing planning payloads use camel-case `requiredWorkflowTools` on `gs
 |--------|----------|-----------|----------------------|
 | `replan-slice` | project_authority, workflow_operations, workflow_item_lifecycles, slices, tasks | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, slices, tasks (including execution-compatible `required_workflow_tools`), replan_history, quality_gates; removed pending tasks become `skipped` / `cancelled` | NN-MM-PLAN.md, NN-MM-REPLAN.md |
 | `replan-task` | project_authority, workflow_operations, workflow_item_lifecycles, slices, tasks, current recovery evidence | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, one pending task planning row (including execution-compatible `required_workflow_tools`), replan_history | re-renders the task/slice PLAN projection before replacement execution |
-| `rethink` | milestones, slices, artifacts | Slice cancellation through `gsd_skip_slice`; milestone sequence updates are repaired from QUEUE-ORDER.json during state derivation | QUEUE-ORDER.json, PARKED.md |
-| `rewrite-docs` | decisions, requirements, artifacts | decisions, requirements, artifacts | DECISIONS.md, REQUIREMENTS.md, slice plans with embedded task planning |
+| `rethink` | milestones, slices, artifacts | Slice cancellation through `gsd_skip_slice`; milestone park, unpark, discard, reorder and dependency changes through the `gsd_milestone_*` tools, one Domain Operation each | QUEUE-ORDER.json and PARKED.md, rendered from the DB |
+| `rewrite-docs` | decisions, requirements, artifacts | decisions, requirements, artifacts (PROJECT), slices and incomplete tasks via `gsd_plan_slice` / `gsd_plan_task` | DECISIONS.md, REQUIREMENTS.md, slice plans with embedded task planning |
 | `doctor-heal` | slices, tasks, artifacts | artifacts (repair CONTEXT/SUMMARY/UAT) | repairs existing artifacts |
 | `review-migration` | milestones, slices, tasks, artifacts, decisions, requirements | — (read-only audit) | — |
 | `scan` | — | — | STACK.md, INTEGRATIONS.md, ARCHITECTURE.md |
 | `debug-diagnose` | memories | memories (INSERT pattern/gotcha), memories (hit_count++) | — |
 | `forensics` | audit_events, gate_runs, turn_git_transactions | — (read-only) | — |
-| `triage-captures` | artifacts (CAPTURES) | artifacts (CAPTURES, updated classifications) | CAPTURES.md |
+| `triage-captures` | workflow_domain_events (`capture.*`) | workflow operations/events/Projection Work (one `capture.resolve` operation per `gsd_capture_resolve` call) | CAPTURES.md (render) |
 | `add-tests` | tasks, slices | — | test files (via code execution) |
 | `heal-skill` | — | — | skill-review-queue.md |
 
@@ -155,17 +155,17 @@ The dispatch loop reads DB state to determine which prompt to issue next. This i
 ```
 DB State                                           → Prompt Dispatched
 ───────────────────────────────────────────────────────────────────────
-PREFERENCES.md missing                             → guided-workflow-preferences
+no project.setup.recorded event for 'workflow-preferences'
+  (and PROJECT + REQUIREMENTS not both saved)      → workflow preferences defaults (in-process)
 
-artifacts WHERE artifact_type='PROJECT' missing    → guided-discuss-project
+no valid PROJECT artifact row                      → guided-discuss-project
 
-requirements table empty                           → guided-discuss-requirements
+no valid REQUIREMENTS artifact row                 → guided-discuss-requirements
 
-runtime_kv[scope='global', key='research-decision']
-  absent or value='pending'                        → guided-research-decision
-
-runtime_kv[research-decision]='deep' AND
-  M##-RESEARCH artifacts missing                   → guided-research-project × 4 subagents
+newest project.setup.recorded event for 'research-decision'
+  absent or decision='skip'                        → no project research (default)
+  decision='research' AND
+  .gsd/research/ files missing                     → guided-research-project × 4 subagents
 
 milestones.status='active' AND
   artifacts WHERE artifact_type='CONTEXT' missing  → discuss / guided-discuss-milestone
@@ -187,7 +187,8 @@ S##-CONTEXT present AND
 
 slices WHERE is_sketch = 1                         → refine-slice
 
-tasks WHERE status='pending' AND count ≥ 3 AND no S##-REACTIVE-BLOCKER
+tasks WHERE status='pending' AND count ≥ 3 AND no recorded reactive recovery block
+  AND no selected task has a lifecycle row (IO read from tasks.inputs / expected_output / files)
                                                        → reactive-execute (parallel)
 
 tasks WHERE status='pending' AND count < 3         → execute-task (sequential)
@@ -287,10 +288,10 @@ user cancels
   └─► worker polls: SELECT FROM cancellation_requests WHERE status='pending'
   └─► UPDATE cancellation_requests SET status='acked', acked_worker_id, acked_at
 
-command broadcast
-  └─► INSERT INTO command_queue (target_worker=NULL, command, args_json)  ← NULL = all workers
-  └─► INSERT INTO command_queue (target_worker='w-123', command, args_json) ← targeted
-  └─► worker claims with BEGIN IMMEDIATE so read-then-write claim races serialize under WAL
+parallel pause / resume / stop (details: db-map.md, `command_queue`)
+  └─► INSERT INTO command_queue (target_worker='<milestone ID>', command)
+  └─► worker takes the oldest pending row at a unit boundary; the take runs in
+      BEGIN IMMEDIATE so read-then-write claim races serialize under WAL
 
 unit completes
   └─► UPDATE unit_dispatches SET status='done'|'failed', ended_at, exit_reason, error_summary
@@ -340,7 +341,7 @@ complete migration history.
 |-----------|---------------|
 | Single-writer: raw write SQL is limited to the explicit writer-layer allowlists and named exceptions; `db/queries.ts` is read-only | authoritative allowlists and enforcement in `single-writer-invariant.test.ts`; architecture detail in [db-map.md](./db-map.md#7-write-path-invariants) |
 | Milestone full-redo reopen: every hierarchy head → canonical `ready`, legacy Milestone → `active`, Slices → `in_progress`, Tasks → `pending`; current cancellation Waivers are revoked | `gsd_milestone_reopen` Domain Operation |
-| No nested write transactions: `transaction()` and `immediateTransaction()` share one depth counter; `executeDomainOperation()` rejects an existing outer transaction so it owns the reserved-writer boundary; read-then-write claims use `immediateTransaction()` and gate verdict + ledger writes commit atomically | `db-transaction.test.ts`, `domain-operation.test.ts`, `command-queue.test.ts`, `gate-storage.test.ts` |
+| No nested write transactions: `transaction()` and `immediateTransaction()` share one depth counter; `executeDomainOperation()` rejects an existing outer transaction so it owns the reserved-writer boundary; read-then-write claims use `immediateTransaction()` and gate verdict + ledger writes commit atomically | `db-transaction.test.ts`, `domain-operation.test.ts`, `gate-storage.test.ts` |
 | Workspace isolation: one DB per project root, shared across worktrees via WAL | `db-connection-cache.ts` identityKey |
 | Coordination: one active dispatch per unit_id at a time | `idx_unit_dispatches_active_per_unit` unique partial index |
 | Memory FTS fallback: LIKE scan if FTS5 unavailable | `tryCreateMemoriesFtsSchema` onUnavailable callback |

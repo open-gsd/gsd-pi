@@ -42,6 +42,7 @@ import { invalidateAllCaches } from "../cache.ts";
 import {
   openDatabase,
   closeDatabase,
+  insertArtifact,
   insertGateRow,
   insertMilestone,
   upsertMilestonePlanning,
@@ -50,6 +51,7 @@ import {
   saveReworkBrief,
 } from "../gsd-db.ts";
 import { clearGSDPreferencesCache, getProjectGSDPreferencesPath } from "../preferences.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 // ─── Pure composer tests ──────────────────────────────────────────────────
 
@@ -239,6 +241,13 @@ const contextModeGuidanceOverrideExpectedTools: Record<string, readonly string[]
     "subagent",
     "gsd_save_gate_result",
   ],
+  "rewrite-docs": [
+    "gsd_plan_slice",
+    "gsd_plan_task",
+    "gsd_requirement_update",
+    "gsd_summary_save",
+    "gsd_decision_save",
+  ],
 };
 
 test("Context Mode composer: every known eligible unit renders its configured lane and required tools", () => {
@@ -387,6 +396,31 @@ test("Context Mode composer: narrow planning guidance steers only to contracted 
   }
 });
 
+test("Context Mode composer: rewrite-docs guidance steers only to contracted save tools", () => {
+  const expectedTools = ["gsd_plan_slice", "gsd_plan_task", "gsd_requirement_update", "gsd_summary_save", "gsd_decision_save"];
+  const disallowedTools = ["gsd_exec", "gsd_exec_search", "gsd_resume"];
+
+  for (const renderMode of ["nested", "standalone"] as const) {
+    const out = composeContextModeInstructions("rewrite-docs", { enabled: true, renderMode });
+    assert.match(out, /documentation lane/i, "rewrite-docs should still render documentation lane guidance");
+    for (const toolName of expectedTools) {
+      assert.ok(out.includes(`\`${toolName}\``), `rewrite-docs guidance should mention ${toolName}`);
+    }
+    for (const toolName of disallowedTools) {
+      assert.ok(!out.includes(`\`${toolName}\``), `rewrite-docs guidance must not mention ${toolName}`);
+    }
+  }
+
+  for (const toolName of disallowedTools) {
+    const scope = shouldBlockAutoUnitToolCall("rewrite-docs", toolName);
+    assert.equal(scope.block, true, `rewrite-docs should hard-block ${toolName}: ${scope.reason ?? ""}`);
+  }
+  for (const toolName of expectedTools) {
+    const scope = shouldBlockAutoUnitToolCall("rewrite-docs", toolName);
+    assert.equal(scope.block, false, `rewrite-docs should not hard-block ${toolName}: ${scope.reason ?? ""}`);
+  }
+});
+
 test("Context Mode composer: lane guidance tools pass unit contracts", () => {
   const affectedUnits = [
     "research-milestone",
@@ -418,13 +452,9 @@ test("Context Mode composer: lane guidance tools pass unit contracts", () => {
   }
 });
 
-test("Context Mode composer: workflow-preferences and research-decision render no Context Mode block", () => {
+test("Context Mode composer: workflow-preferences renders no Context Mode block", () => {
   assert.strictEqual(
     composeContextModeInstructions("workflow-preferences", { enabled: true, renderMode: "standalone" }),
-    "",
-  );
-  assert.strictEqual(
-    composeContextModeInstructions("research-decision", { enabled: true, renderMode: "standalone" }),
     "",
   );
 });
@@ -458,6 +488,18 @@ test("Tool Surface composer: planning-dispatch lists allowed subagents", () => {
   assert.match(out, /\*\*planner\*\*/);
   assert.match(out, /`gsd_exec`/);
   assert.match(out, /active worktree/);
+});
+
+test("Tool Surface composer: fan-out units require synchronous subagent dispatch (#2533)", () => {
+  for (const unitType of ["research-slice", "plan-slice", "validate-milestone", "reactive-execute"] as const) {
+    const out = composeToolSurfaceInstructions(unitType, { renderMode: "standalone" });
+    assert.match(out, /run_in_background: false/, `${unitType} must require synchronous dispatch`);
+    assert.match(
+      out,
+      /native `Agent` tool/,
+      `${unitType} must cover hosts where the native Agent tool is the only dispatch path`,
+    );
+  }
 });
 
 test("Tool Surface composer: planning_subagents updates plan-milestone dispatch guidance", (t) => {
@@ -531,8 +573,7 @@ function seed(base: string, mid: string): void {
   insertMilestone({ id: mid, title: "Test", status: "active", depends_on: [] });
   upsertMilestonePlanning(mid, {
     title: "Test",
-    status: "active",
-    vision: "Ship it",
+        vision: "Ship it",
     successCriteria: ["It ships"],
     keyRisks: [],
     proofStrategy: [],
@@ -565,6 +606,7 @@ function writeArtifacts(base: string): void {
     join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md"),
     "---\nid: S01\nparent: M001\n---\n# S01 Summary\n**One-liner**\n\n## What Happened\nDone.\n",
   );
+  saveMilestoneFilesAsArtifacts(base);
 }
 
 test("#4782 phase 2: buildReassessRoadmapPrompt emits composer-shaped context with manifest-declared artifacts", async (t) => {
@@ -653,6 +695,7 @@ test("execute-task prompt resolves an inline slice task without a standalone tas
       "",
     ].join("\n"),
   );
+  saveMilestoneFilesAsArtifacts(base);
 
   const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T02", "Inline task", base);
 
@@ -663,7 +706,7 @@ test("execute-task prompt resolves an inline slice task without a standalone tas
   assert.doesNotMatch(prompt, /tasks\/T02-PLAN\.md/);
 });
 
-test("execute-task prompt prefers durable inline task planning state when no task file exists", async (t) => {
+test("execute-task prompt prefers durable inline task planning state when no task plan row is saved", async (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
   invalidateAllCaches();
@@ -694,6 +737,37 @@ test("execute-task prompt prefers durable inline task planning state when no tas
   assert.doesNotMatch(prompt, /Task plan not found at dispatch time/);
 });
 
+test("execute-task prompt names the projection path as the source when the task plan row is saved, with the text of the carrier", async (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+  invalidateAllCaches();
+
+  seed(base, "M001");
+  insertTask({
+    id: "T02",
+    sliceId: "S01",
+    milestoneId: "M001",
+    title: "Durable task",
+    status: "pending",
+    planning: { fullPlanMd: "# T02: Durable task\n\nCARRIER-PLAN-TEXT\n" },
+  });
+  insertArtifact({
+    path: "milestones/M001/slices/S01/tasks/T02-PLAN.md",
+    artifact_type: "PLAN",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: "T02",
+    full_content: "# T02: Durable task\n\nARTIFACT-ROW-PLAN-TEXT\n",
+  });
+
+  const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T02", "Durable task", base);
+
+  assert.match(prompt, /Source: `\.gsd\/milestones\/M001\/slices\/S01\/tasks\/T02-PLAN\.md`/);
+  assert.doesNotMatch(prompt, /durable task planning state/);
+  assert.match(prompt, /CARRIER-PLAN-TEXT/);
+  assert.doesNotMatch(prompt, /ARTIFACT-ROW-PLAN-TEXT/);
+});
+
 test("reactive execute-task dispatch resolves inline slice task plans", async (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
@@ -714,6 +788,7 @@ test("reactive execute-task dispatch resolves inline slice task plans", async (t
       "",
     ].join("\n"),
   );
+  saveMilestoneFilesAsArtifacts(base);
 
   const prompt = await buildReactiveExecutePrompt(
     "M001",
@@ -784,13 +859,18 @@ test("execute-task recovery context gives repair, remediation, and replan distin
   assert.ok(!executeContract?.requiredWorkflowTools.includes("gsd_replan_task"));
 });
 
-test("execute-task prompt omits on-demand slice research when the artifact is absent", async (t) => {
+test("execute-task prompt omits on-demand slice research when no RESEARCH row is saved", async (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
   invalidateAllCaches();
 
   seed(base, "M001");
   writeArtifacts(base);
+  // A RESEARCH file with no artifact row is not research.
+  writeFileSync(
+    join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-RESEARCH.md"),
+    "# S01 Research\n",
+  );
 
   const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T01", "Task", base);
 
@@ -809,6 +889,7 @@ test("execute-task prompt surfaces on-demand slice research when the artifact ex
     join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-RESEARCH.md"),
     "# S01 Research\n",
   );
+  saveMilestoneFilesAsArtifacts(base);
 
   const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T01", "Task", base);
 

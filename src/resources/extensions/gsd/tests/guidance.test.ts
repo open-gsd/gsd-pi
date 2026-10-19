@@ -113,10 +113,10 @@ describe("milestone blocker guidance", () => {
     assert.match(text, /\/gsd validate-milestone/);
   });
 
-  test("canonical blockers do not recommend the legacy verdict override", () => {
+  test("blockers do not recommend the removed verdict override", () => {
     for (const text of [
-      needsAttentionBlockerGuidance("M007", false),
-      needsRemediationBlockerGuidance("M007", false),
+      needsAttentionBlockerGuidance("M007"),
+      needsRemediationBlockerGuidance("M007"),
     ]) {
       assert.doesNotMatch(text, /\/gsd verdict/);
       assert.match(text, /current structured evidence|reassess/i);
@@ -195,5 +195,18 @@ describe("doctor fix hints", () => {
     assert.ok(hint);
     assert.match(hint, /\/gsd doctor/);
     assert.doesNotMatch(hint, /\/gsd doctor fix/);
+  });
+
+  test("validation_source_revision_mismatch names the working dispatch form (#2433)", () => {
+    const hint = doctorFixHint("validation_source_revision_mismatch");
+    assert.ok(hint);
+    assert.match(hint, /git reset --mixed HEAD\^/);
+    assert.match(hint, /\/gsd dispatch validate <id>/);
+    // #2434 forbids prescribing /gsd validate-milestone as the repair; #2439 requires naming
+    // it as unreachable for closed milestones — only the repair form is banned.
+    assert.doesNotMatch(hint, /run `\/gsd validate-milestone/);
+    assert.doesNotMatch(hint, /\/gsd validate-phase/);
+    assert.match(hint, /`\/gsd auto` alone will not re-run milestone validation/);
+    assert.match(hint, /unreachable/);
   });
 });

@@ -19,11 +19,13 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureGitignore, hasGitTrackedGsdFiles } from "../../gitignore.ts";
+import { ensureGitignore, hasGitTrackedGsdFiles, untrackRuntimeFiles } from "../../gitignore.ts";
 import { migrateToExternalState } from "../../migrate-external.ts";
+import { RUNTIME_EXCLUSION_PATHS } from "../../git-service.ts";
+import { nativeAddAllWithExclusions } from "../../native-git-bridge.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -147,6 +149,22 @@ test("ensureGitignore adds granular runtime patterns when .gsd/ has tracked file
       ".gsd/event-log.jsonl",
       ".gsd/metrics.json",
       ".gsd/state-manifest.json",
+      // #2829 — exec/notify/hook/audit runtime writers in tracked-.gsd projects
+      ".gsd/exec/",
+      ".gsd/safety/",
+      ".gsd/graphs/",
+      ".gsd/migration/projection-mutations/",
+      ".gsd/migration/quarantined-control-publications/",
+      ".gsd/migration/native-projection-evidence/",
+      ".gsd/migration/managed-outputs.json",
+      ".gsd/migration/unbound-projection-evidence.json",
+      ".gsd/notifications.jsonl",
+      ".gsd/notifications.lock",
+      ".gsd/notifications.jsonl.tmp.*",
+      ".gsd/hook-state.json",
+      ".gsd/audit-log.jsonl",
+      ".gsd/lifecycle-shadow-observation-loss.jsonl",
+      ".gsd/git-action-failures.log",
     ]) {
       assert.ok(
         lines.has(pattern),
@@ -308,5 +326,90 @@ test("migrateToExternalState cleans git index so tracked files don't show as del
     );
   } finally {
     cleanup(dir);
+  }
+});
+
+// ─── #2829 — runtime files written into tracked .gsd/ must not commit ──
+
+/** The runtime artifacts the #2829 reporters saw land in auto-commits. */
+const GSD_2829_RUNTIME_FILES = [
+  ".gsd/exec/run-1.stdout",
+  ".gsd/exec/run-1.stderr",
+  ".gsd/exec/run-1.meta.json",
+  ".gsd/notifications.jsonl",
+  ".gsd/notifications.lock",
+  ".gsd/notifications.jsonl.tmp.4242",
+  ".gsd/hook-state.json",
+  ".gsd/audit-log.jsonl",
+  ".gsd/safety/evidence-M001-S01-T01.json",
+  ".gsd/graphs/graph.json",
+  ".gsd/migration/projection-mutations/op-1.json",
+  ".gsd/migration/unbound-projection-evidence.json",
+  ".gsd/lifecycle-shadow-observation-loss.jsonl",
+  ".gsd/git-action-failures.log",
+];
+
+function write2829RuntimeFiles(dir: string): void {
+  for (const rel of GSD_2829_RUNTIME_FILES) {
+    const p = join(dir, rel);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, "{}\n");
+  }
+}
+
+test("staging excludes #2829 runtime files in a tracked-.gsd repo", (t) => {
+  const dir = makeTempRepo();
+  t.after(() => { cleanup(dir); });
+
+  // Tracked .gsd/ markdown (the project deliberately commits its .gsd/ docs)
+  mkdirSync(join(dir, ".gsd", "milestones"), { recursive: true });
+  writeFileSync(join(dir, ".gsd", "PROJECT.md"), "# Test Project\n");
+  git(dir, "add", ".gsd/");
+  git(dir, "commit", "-m", "track gsd state");
+
+  // Runtime artifacts appear, plus a real source change
+  write2829RuntimeFiles(dir);
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "app.ts"), "export {};\n");
+
+  // GSD staging: add-all with the runtime exclusions (same path smartStage uses)
+  nativeAddAllWithExclusions(dir, RUNTIME_EXCLUSION_PATHS);
+  git(dir, "commit", "-m", "work");
+
+  const tracked = new Set(
+    git(dir, "ls-files").split("\n").map((l) => l.trim()).filter(Boolean),
+  );
+
+  assert.ok(tracked.has("src/app.ts"), "real source change must be committed");
+  for (const rel of GSD_2829_RUNTIME_FILES) {
+    assert.ok(
+      !tracked.has(rel),
+      `runtime file ${rel} must not be committed (found in ls-files)`,
+    );
+  }
+});
+
+test("untrackRuntimeFiles untracks the #2829 runtime paths from the index", (t) => {
+  const dir = makeTempRepo();
+  t.after(() => { cleanup(dir); });
+
+  // Simulate a repo that already committed the runtime files before the fix
+  mkdirSync(join(dir, ".gsd", "milestones"), { recursive: true });
+  writeFileSync(join(dir, ".gsd", "PROJECT.md"), "# Test Project\n");
+  write2829RuntimeFiles(dir);
+  git(dir, "add", "-A");
+  git(dir, "commit", "-m", "accidentally committed runtime files");
+
+  untrackRuntimeFiles(dir);
+
+  const tracked = new Set(
+    git(dir, "ls-files").split("\n").map((l) => l.trim()).filter(Boolean),
+  );
+  assert.ok(tracked.has(".gsd/PROJECT.md"), "durable .gsd/ markdown stays tracked");
+  for (const rel of GSD_2829_RUNTIME_FILES) {
+    assert.ok(
+      !tracked.has(rel),
+      `runtime file ${rel} must be untracked (still in ls-files)`,
+    );
   }
 });

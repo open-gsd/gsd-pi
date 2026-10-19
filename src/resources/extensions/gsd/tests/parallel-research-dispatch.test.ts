@@ -41,7 +41,8 @@ after(() => {
 
 const { resolveDispatch } = await import("../auto-dispatch.ts");
 const { buildParallelResearchSlicesPrompt } = await import("../auto-prompts.ts");
-const { openDatabase, closeDatabase, insertMilestone, insertSlice } = await import("../gsd-db.ts");
+const { openDatabase, closeDatabase, insertArtifact, insertMilestone, insertSlice } = await import("../gsd-db.ts");
+const { writeBlockerPlaceholder } = await import("../auto-recovery.ts");
 
 type DispatchState = Parameters<typeof resolveDispatch>[0]["state"];
 
@@ -264,17 +265,18 @@ describe("parallel-research-slices dispatch rule", () => {
     assertNotParallelResearchDispatch(action);
   });
 
-  test("does not dispatch when a PARALLEL-BLOCKER placeholder exists (#4414)", async () => {
+  test("does not dispatch when a parallel-research recovery block is recorded (#4414)", async () => {
     writeRoadmap(base, "M001", [
       { id: "S01", title: "Alpha" },
       { id: "S02", title: "Beta" },
     ]);
-    const milestoneDir = join(base, ".gsd", "milestones", "M001");
-    writeFileSync(
-      join(milestoneDir, "M001-PARALLEL-BLOCKER.md"),
-      "# Parallel research escalated\nPrevious dispatch failed; need per-slice fallback.\n",
-      "utf-8",
-    );
+    // Recovery records the block in the database and writes the diagnostic file.
+    assert.ok(writeBlockerPlaceholder(
+      "research-slice",
+      "M001/parallel-research",
+      base,
+      "Previous dispatch failed; need per-slice fallback.",
+    ));
 
     const action = await resolveDispatch({
       basePath: base,
@@ -287,19 +289,42 @@ describe("parallel-research-slices dispatch rule", () => {
     assertNotParallelResearchDispatch(action);
   });
 
-  test("excludes slices that already have a RESEARCH file (falls back to <2)", async () => {
+  test("a PARALLEL-BLOCKER file with no recorded block does not stop the dispatch", async () => {
     writeRoadmap(base, "M001", [
       { id: "S01", title: "Alpha" },
       { id: "S02", title: "Beta" },
     ]);
-    // S01 already has research → only S02 remains → <2 ready → no parallel dispatch
-    const s01Dir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(s01Dir, { recursive: true });
     writeFileSync(
-      join(s01Dir, "S01-RESEARCH.md"),
-      "# Research\n",
+      join(base, ".gsd", "milestones", "M001", "M001-PARALLEL-BLOCKER.md"),
+      "# Parallel research escalated\n",
       "utf-8",
     );
+
+    const action = await resolveDispatch({
+      basePath: base,
+      mid: "M001",
+      midTitle: "Parallel Research Milestone",
+      state: baseState(),
+      prefs: undefined,
+    });
+
+    assert.equal(action.action === "dispatch" ? action.unitId : null, "M001/parallel-research");
+  });
+
+  test("excludes slices that already have saved RESEARCH (falls back to <2)", async () => {
+    writeRoadmap(base, "M001", [
+      { id: "S01", title: "Alpha" },
+      { id: "S02", title: "Beta" },
+    ]);
+    // S01 already has a saved RESEARCH row → only S02 remains → <2 ready → no parallel dispatch
+    insertArtifact({
+      path: "milestones/M001/slices/S01/S01-RESEARCH.md",
+      artifact_type: "RESEARCH",
+      milestone_id: "M001",
+      slice_id: "S01",
+      task_id: null,
+      full_content: "# Research\n",
+    });
 
     const action = await resolveDispatch({
       basePath: base,

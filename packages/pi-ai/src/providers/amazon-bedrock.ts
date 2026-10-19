@@ -18,6 +18,7 @@ import {
 	type SystemContentBlock,
 	type ToolChoice,
 	type ToolConfiguration,
+	type ToolResultContentBlock,
 	ToolResultStatus,
 } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
@@ -27,6 +28,7 @@ import type {
 	AssistantMessage,
 	CacheRetention,
 	Context,
+	ImageContent,
 	Model,
 	SimpleStreamOptions,
 	StopReason,
@@ -183,15 +185,24 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			const client = new BedrockRuntimeClient(config);
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
+			// Claude 5.x strict-surface guards (#2645). Mirrors the anthropic
+			// path's compat handling; matched by id because Bedrock models carry
+			// no compat metadata.
+			const rejectsTemperature = rejectsTemperatureParams(model.id, model.name);
+			const rejectsForcedToolChoice = rejectsForcedToolChoiceParams(model.id, model.name);
+			const isForcedToolChoice =
+				options.toolChoice === "any" || (typeof options.toolChoice === "object" && options.toolChoice.type === "tool");
+			const effectiveToolChoice =
+				rejectsForcedToolChoice && isForcedToolChoice ? "auto" : options.toolChoice;
 			let commandInput = {
 				modelId: model.id,
 				messages: convertMessages(context, model, cacheRetention),
 				system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
 				inferenceConfig: {
 					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
-					...(options.temperature !== undefined && { temperature: options.temperature }),
+					...(options.temperature !== undefined && !rejectsTemperature && { temperature: options.temperature }),
 				},
-				toolConfig: convertToolConfig(context.tools, options.toolChoice),
+				toolConfig: convertToolConfig(context.tools, effectiveToolChoice),
 				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
 				...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
 			};
@@ -485,7 +496,38 @@ function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean 
 			s.includes("opus-4-8") ||
 			s.includes("opus-5") ||
 			s.includes("sonnet-5") ||
-			s.includes("sonnet-4-6"),
+			s.includes("sonnet-4-6") ||
+			s.includes("fable-5") ||
+			s.includes("haiku-5-5"),
+	);
+}
+
+/**
+ * Claude 5.x models with the strict request surface reject `temperature`
+ * outright, even with thinking off (#2500 Sonnet 5.5, #2645 Opus 5.5 and
+ * Fable 5.x, #2701 Haiku 5.5). The Converse path carries no compat metadata
+ * for Bedrock models, so this mirrors the catalog markers by id, following
+ * the supportsAdaptiveThinking heuristic convention.
+ */
+function rejectsTemperatureParams(modelId: string, modelName?: string): boolean {
+	const candidates = getModelMatchCandidates(modelId, modelName);
+	return candidates.some(
+		(s) =>
+			s.includes("claude") &&
+			(s.includes("sonnet-5-5") || s.includes("opus-5-5") || s.includes("fable-5") || s.includes("haiku-5-5")),
+	);
+}
+
+/**
+ * Claude 5.x models that reject a forced tool choice (`any` / named tool):
+ * Sonnet 5.5, Opus 5.5 and Fable 5.1 (#2645). Fable 5 still accepts it.
+ */
+function rejectsForcedToolChoiceParams(modelId: string, modelName?: string): boolean {
+	const candidates = getModelMatchCandidates(modelId, modelName);
+	return candidates.some(
+		(s) =>
+			s.includes("claude") &&
+			(s.includes("sonnet-5-5") || s.includes("opus-5-5") || (s.includes("fable-5") && s.includes("fable-5-1"))),
 	);
 }
 
@@ -614,6 +656,47 @@ function normalizeToolCallId(id: string): string {
 	return sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
 }
 
+const ERROR_TOOL_RESULT_IMAGE_PLACEHOLDER = "[image omitted from tool error]";
+
+/**
+ * Bedrock Claude rejects tool results with status=error whose content carries
+ * non-text blocks (same constraint as the Anthropic Messages API),
+ * deterministically failing every turn once a poisoned result is persisted.
+ * Serialize a tool result accordingly: for error results carrying images, the
+ * tool result content becomes text-only (each image replaced by a placeholder
+ * note) and the image blocks are returned separately so the caller can hoist
+ * them into sibling content after the whole consecutive tool result run — the
+ * model still sees the image and tool use/tool result pairing stays intact.
+ * Everything else is converted unchanged.
+ */
+function splitErrorToolResultContent(
+	content: (TextContent | ImageContent)[],
+	isError: boolean,
+): { content: ToolResultContentBlock[]; hoistedImages: ContentBlock[] } {
+	const hasImages = content.some((c) => c.type === "image");
+	if (!isError || !hasImages) {
+		return {
+			content: content.map((c) =>
+				c.type === "image"
+					? { image: createImageBlock(c.mimeType, c.data) }
+					: { text: sanitizeSurrogates(c.text) },
+			),
+			hoistedImages: [],
+		};
+	}
+	const out: ToolResultContentBlock[] = [];
+	const hoistedImages: ContentBlock[] = [];
+	for (const c of content) {
+		if (c.type === "image") {
+			hoistedImages.push({ image: createImageBlock(c.mimeType, c.data) });
+			out.push({ text: ERROR_TOOL_RESULT_IMAGE_PLACEHOLDER });
+		} else {
+			out.push({ text: sanitizeSurrogates(c.text) });
+		}
+	}
+	return { content: out, hoistedImages };
+}
+
 function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
@@ -718,44 +801,44 @@ function convertMessages(
 				// Collect all consecutive toolResult messages into a single user message
 				// Bedrock requires all tool results to be in one message
 				const toolResults: ContentBlock.ToolResultMember[] = [];
+				// Images from error tool results, hoisted after the whole run below
+				// (Bedrock Claude rejects image blocks inside status=error tool results)
+				const hoistedImages: ContentBlock[] = [];
 
 				// Add current tool result with all content blocks combined
+				const currentSplit = splitErrorToolResultContent(m.content, m.isError);
 				toolResults.push({
 					toolResult: {
 						toolUseId: m.toolCallId,
-						content: m.content.map((c) =>
-							c.type === "image"
-								? { image: createImageBlock(c.mimeType, c.data) }
-								: { text: sanitizeSurrogates(c.text) },
-						),
+						content: currentSplit.content,
 						status: m.isError ? ToolResultStatus.ERROR : ToolResultStatus.SUCCESS,
 					},
 				});
+				hoistedImages.push(...currentSplit.hoistedImages);
 
 				// Look ahead for consecutive toolResult messages
 				let j = i + 1;
 				while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 					const nextMsg = transformedMessages[j] as ToolResultMessage;
+					const nextSplit = splitErrorToolResultContent(nextMsg.content, nextMsg.isError);
 					toolResults.push({
 						toolResult: {
 							toolUseId: nextMsg.toolCallId,
-							content: nextMsg.content.map((c) =>
-								c.type === "image"
-									? { image: createImageBlock(c.mimeType, c.data) }
-									: { text: sanitizeSurrogates(c.text) },
-							),
+							content: nextSplit.content,
 							status: nextMsg.isError ? ToolResultStatus.ERROR : ToolResultStatus.SUCCESS,
 						},
 					});
+					hoistedImages.push(...nextSplit.hoistedImages);
 					j++;
 				}
 
 				// Skip the messages we've already processed
 				i = j - 1;
 
+				// Hoisted error images follow the whole tool result run so pairing is preserved
 				result.push({
 					role: ConversationRole.USER,
-					content: toolResults,
+					content: hoistedImages.length > 0 ? [...toolResults, ...hoistedImages] : toolResults,
 				});
 				break;
 			}

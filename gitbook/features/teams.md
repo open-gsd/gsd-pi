@@ -26,37 +26,9 @@ This enables unique milestone IDs, push branches, pre-merge checks, and other te
 
 You can override individual settings on top of `mode: team`.
 
-## Configure `.gitignore`
+## Know What Is Shared
 
-Share planning artifacts while keeping runtime files local:
-
-```bash
-# Runtime files (per-developer, gitignore these)
-.gsd/auto.lock
-.gsd/completed-units.json
-.gsd/STATE.md
-.gsd/gsd.db*
-.gsd/metrics.json
-.gsd/activity/
-.gsd/runtime/
-.gsd/worktrees/
-.gsd-backups/
-.gsd/phases/**/continue.md
-.gsd/phases/**/*-CONTINUE.md
-.gsd/milestones/**/continue.md
-.gsd/milestones/**/*-CONTINUE.md
-```
-
-**What gets shared** (committed to git):
-- `.gsd/PREFERENCES.md` — project preferences
-- `.gsd/PROJECT.md` — living project description
-- `.gsd/REQUIREMENTS.md` — requirement contract
-- `.gsd/DECISIONS.md` — architectural decisions
-- `.gsd/phases/` — flat-phase roadmaps, plans, summaries, and research
-- `.gsd/milestones/` — legacy milestone artifacts, if the project has not migrated yet
-
-**What stays local** (gitignored):
-- Database files, lock files, metrics, state projections, activity logs, worktrees, and migration backups under `.gsd-backups/`. Stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the flat-phase `.gsd/phases/` migration is complete.
+The workflow database is never committed, and every checkout has its own. Committed `.gsd/` markdown is an export for review, not shared authority: it enters a database only through an explicit `/gsd recover` import. GSD keeps its runtime files out of git for you. See the [authoritative team guide](../../docs/user-docs/working-in-teams.md#2-know-what-is-shared) for the bound-checkout rules and the import flow after a clone or pull.
 
 ## Commit the Config
 
@@ -64,17 +36,6 @@ Share planning artifacts while keeping runtime files local:
 git add .gsd/PREFERENCES.md
 git commit -m "chore: enable GSD team workflow"
 ```
-
-## Keeping `.gsd/` Local
-
-For teams where only some members use GSD:
-
-```yaml
-git:
-  commit_docs: false
-```
-
-This gitignores `.gsd/` entirely. You get structured planning without affecting teammates.
 
 ## Parallel Development
 

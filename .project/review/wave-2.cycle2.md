@@ -27,6 +27,7 @@ task_branch/commit) — no contract-body edits.
 - ✅ AC5 (diff touches only files list; verify:pr not weakened) — `--stat`: 6 declared test files + task-file Log line only. No script/threshold/skip/gate change; package.json untouched.
 
 Warnings (non-blocking):
+
 - `gsd-rebuild.test.ts` builds the expected stamp's R:E values via `getCurrentProjectStateVersion()` — the same DB state the renderer stamps from, so the R:E values are partially self-referential (a wrong-revision stamp that matches current DB state would pass). The stamp line's presence/format and the body bytes are still pinned exactly, so the test still fails on an unstamped or malformed render. Matches the `markdown-renderer.test.ts:1810` pattern; acceptable, wording could be tightened.
 - New environmental-interaction finding (not a task defect): the cycle-1 GSD_HOME isolation recipe reds 4 `doctor-providers.test.js` tests ("detects key from auth.json" + 3 siblings) — with `GSD_HOME` pointed at an empty dir the agent dir resolves away from the test's `$HOME`-based auth.json fixture, the check falls through to this machine's real `claude`/`codex`/`gemini` PATH CLIs, and the "auth.json source" assertions fail (reproduced standalone: `GSD_HOME=<empty>` → "available via Claude Code CLI"; unset → "key present (auth.json)"). CI sets only `GSD_NATIVE_PREFER_LOCAL=1` and no GSD_HOME; the whole compiled tier is green here with exactly the CI env. Recommend the orchestrator's isolation recipe scope GSD_HOME to the read-cli-args rerun only (as done here), never to full-tier runs.
 
@@ -46,6 +47,7 @@ AC1–AC4 passed in cycle 1 and are untouched by T027 (T009's four product files
   The 6 previously-red test files are all green: db-authority-recovery-schema ✅, db-lifecycle-foundation ✅, db-milestone-reopen-schema ✅, db-milestone-completion-schema ✅, gsd-rebuild ✅, migrate-safety-audit ✅.
 
 Warnings (non-blocking):
+
 - Full verify:pr executed as decisive legs (300s cap), exactly as recorded above; nothing skipped except a single-invocation end-to-end run.
 - Cycle-1 flag (a) stands: dangling `semantic-shadow-no-cutover-gate.mjs` imports in `scripts/m003-s07-dossier-input.ts` + its test remain unreachable by verify:pr and unaddressed (T021 scope).
 

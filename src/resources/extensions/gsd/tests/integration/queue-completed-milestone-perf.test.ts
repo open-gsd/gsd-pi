@@ -16,7 +16,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { buildExistingMilestonesContext } from "../../guided-flow-queue.ts";
+import { closeDatabase, openDatabase } from "../../gsd-db.ts";
 import type { GSDState, MilestoneRegistryEntry } from "../../types.ts";
+import { saveMilestoneFilesAsArtifacts } from "../narrative-artifact-fixture.ts";
 import { createTestContext } from "../test-helpers.ts";
 
 const { assertTrue, assertEq, report } = createTestContext();
@@ -93,7 +95,12 @@ const state: GSDState = {
 
 console.log("\n=== Queue completed milestone performance (#2379) ===");
 
+// The queue context takes the narrative from artifact rows.
+openDatabase(":memory:");
+saveMilestoneFilesAsArtifacts(tmpBase);
+
 const context = await buildExistingMilestonesContext(tmpBase, allMilestoneIds, state);
+closeDatabase();
 
 // Active and pending milestones SHOULD have full context loaded
 const activeMid = `M${String(COMPLETED_COUNT + 1).padStart(3, "0")}`;

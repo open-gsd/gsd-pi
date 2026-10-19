@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
   checkToolCallLoop,
   configureToolCallLoopGuard,
+  noteLoopGuardModelResponse,
   recordToolCallLoopMutation,
   resetToolCallLoopGuard,
   disableToolCallLoopGuard,
@@ -448,6 +449,140 @@ console.log('\n── Loop guard: distinct read-only navigation calls are not ca
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Distinct read-only workflow queries are legitimate lookups, not loops (#2753)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('distinct read-only workflow queries are not capped by per-tool count (#2753)', () => {
+  // The reported pattern: a planning turn fetches many DIFFERENT decisions one
+  // by one. Each call has distinct args, so Guard 1 never trips, and the query
+  // tools never record mutations, so Guard 2's count never decays. These tools
+  // are exempt from Guard 2 like the navigation tools above.
+  const queryTools = [
+    'gsd_decision_get',
+    'gsd_decision_list',
+    'gsd_requirement_get',
+    'gsd_requirement_list',
+    'gsd_project_snapshot',
+    'gsd_milestone_status',
+    'gsd_journal_query',
+    'gsd_exec_search',
+    'gsd_resume',
+    'memory_query',
+    'gsd_memory_query',
+    'gsd_graph',
+    'gsd_memory_graph',
+  ];
+
+  for (const toolName of queryTools) {
+    resetToolCallLoopGuard();
+
+    for (let i = 1; i <= 8; i++) {
+      const result = checkToolCallLoop(toolName, { id: `D${i}` });
+      assert.ok(result.block === false, `distinct ${toolName} call ${i} should be allowed`);
+    }
+  }
+
+  // The exact reported reproduction: 8 distinct-ID gsd_decision_get calls.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 8; i++) {
+    const result = checkToolCallLoop('gsd_decision_get', { id: `D5${i}` });
+    assert.ok(result.block === false, `gsd_decision_get lookup ${i} with a different ID should not be blocked`);
+  }
+
+  // MCP-surfaced variants canonicalize to the same exempt names.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 8; i++) {
+    const result = checkToolCallLoop('mcp__gsd__gsd_decision_get', { id: `D${i}` });
+    assert.ok(result.block === false, `distinct MCP-prefixed gsd_decision_get call ${i} should be allowed`);
+  }
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 8; i++) {
+    const result = checkToolCallLoop('mcp__gsd__gsd_memory_query', { query: `q${i}` });
+    assert.ok(result.block === false, `distinct MCP-prefixed gsd_memory_query call ${i} should be allowed`);
+  }
+
+  // Accepted nuance: reinforced memory queries bump hit counts (ranking
+  // telemetry, no workflow state), so distinct-arg reinforced queries stay
+  // exempt too; Guard 1 still catches an identical-args hammer.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 8; i++) {
+    const result = checkToolCallLoop('memory_query', { query: `q${i}`, reinforce_hits: true });
+    assert.ok(result.block === false, `distinct reinforced memory_query call ${i} should be allowed`);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Guard 1 still catches identical-args reread loops of exempt query tools (#2753)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('identical-args query loops are still caught by Guard 1 (#2753)', () => {
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 4; i++) {
+    const result = checkToolCallLoop('gsd_decision_get', { id: 'D554' });
+    assert.ok(result.block === false, `identical gsd_decision_get call ${i} should be allowed`);
+  }
+  // Blocked on the 5th identical call by Guard 1, before Guard 2 is relevant.
+  const blocked = checkToolCallLoop('gsd_decision_get', { id: 'D554' });
+  assert.ok(blocked.block === true, 'identical-args gsd_decision_get reread loop should be blocked');
+  assert.ok(blocked.reason?.includes('identical args'), 'reread loops should be caught by Guard 1, not Guard 2');
+
+  // Guard 1 also catches an identical-args loop under the MCP-prefixed name.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 4; i++) {
+    assert.ok(checkToolCallLoop('mcp__gsd__gsd_decision_get', { id: 'D554' }).block === false);
+  }
+  const mcpBlocked = checkToolCallLoop('mcp__gsd__gsd_decision_get', { id: 'D554' });
+  assert.ok(mcpBlocked.block === true, 'identical-args MCP-prefixed reread loop should be blocked by Guard 1');
+  assert.ok(mcpBlocked.reason?.includes('identical args'), 'MCP-prefixed reread loops should be caught by Guard 1');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The #2753 exemption must NOT widen to side-effecting workflow tools (#2753)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('query exemption does not widen to workflow write/side-effect tools (#2753)', () => {
+  // Negative invariant: exempting the getters must not exempt the savers.
+  // gsd_decision_save is a one-shot write tool (default cap 6, no decay —
+  // saves only decay via gsd_requirement_save-style mutation records).
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 6; i++) {
+    const result = checkToolCallLoop('gsd_decision_save', { title: `Decision ${i}` });
+    assert.ok(result.block === false, `gsd_decision_save call ${i} should be allowed`);
+  }
+  const blocked = checkToolCallLoop('gsd_decision_save', { title: 'Decision 7' });
+  assert.ok(blocked.block === true, '7th varied-arg gsd_decision_save must still trip Guard 2');
+  assert.ok(blocked.reason?.includes('repeated tool'), 'write-tool overflow should be caught by Guard 2');
+
+  // gsd_checkpoint_db flushes the SQLite WAL — side-effecting maintenance, so
+  // it stays capped despite its read writePolicy, under both name surfaces.
+  for (const checkpointName of ['gsd_checkpoint_db', 'mcp__gsd__gsd_checkpoint_db']) {
+    resetToolCallLoopGuard();
+    for (let i = 1; i <= 6; i++) {
+      const result = checkToolCallLoop(checkpointName, { reason: `flush-${i}` });
+      assert.ok(result.block === false, `${checkpointName} call ${i} should be allowed`);
+    }
+    const checkpointBlocked = checkToolCallLoop(checkpointName, { reason: 'flush-7' });
+    assert.ok(checkpointBlocked.block === true, `7th ${checkpointName} call must still trip Guard 2`);
+    assert.ok(checkpointBlocked.reason?.includes('repeated tool'), 'checkpoint overflow should be caught by Guard 2');
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// User-configured exempt names keep exact matching alongside canonical (#2753)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('user-configured MCP-prefixed exempt names still match exactly (#2753)', () => {
+  configureToolCallLoopGuard({ repeated_tool: { exempt_tools: ['mcp__custom__lookup'] } });
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 10; i++) {
+    const result = checkToolCallLoop('mcp__custom__lookup', { arg: `v${i}` });
+    assert.ok(result.block === false, `exact-match exempt call ${i} should be allowed`);
+  }
+  configureToolCallLoopGuard(null);
+  resetToolCallLoopGuard();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Per-tool counts are independent per tool and reset together
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -730,6 +865,131 @@ console.log('\n── Loop guard: env overrides win over preferences (#1198) ─
   delete process.env.GSD_TOOL_LOOP_REPEATED_DEFAULT_CAP;
   configureToolCallLoopGuard(null);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Consecutive-block escalation (#2877): the 2nd block of the same tool in a
+// row carries escalate — but only across a model-response boundary, so the
+// model provably saw the first block before anything aborts.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('the second consecutive per-tool-cap block flags escalation (#2877)', () => {
+  resetToolCallLoopGuard();
+
+  // Calls 1-6 are allowed (cap 6): a legitimate varied-arg exploration keeps
+  // getting its results.
+  for (let i = 1; i <= 6; i++) {
+    const result = checkToolCallLoop('gsd_complete_milestone', { milestone: `M${i}` });
+    assert.ok(result.block === false, `call ${i} should be allowed`);
+    assert.equal(result.escalate, undefined, 'allowed calls carry no escalation');
+  }
+  // Call 7: the FIRST block stays a plain error result — the model gets its
+  // one explicit signal before anything aborts.
+  const firstBlock = checkToolCallLoop('gsd_complete_milestone', { milestone: 'M7' });
+  assert.ok(firstBlock.block === true, '7th call should be blocked by the per-tool cap');
+  assert.equal(firstBlock.escalate, false, 'the first block must not escalate');
+  // The model responds (a new model response starts) and re-issues the
+  // blocked tool: the 2nd consecutive block is the abort signal (observed
+  // repro: 425+ such retries in one turn).
+  noteLoopGuardModelResponse();
+  const secondBlock = checkToolCallLoop('gsd_complete_milestone', { milestone: 'M8' });
+  assert.ok(secondBlock.block === true, '8th call should be blocked again');
+  assert.equal(secondBlock.escalate, true, 'the post-response second block must escalate');
+});
+
+test('same-response blocks never escalate (tool batch safety, #2877)', () => {
+  resetToolCallLoopGuard();
+
+  // One assistant response carrying a whole bash batch (codex repro: 17
+  // distinct calls prepared back-to-back). Calls past the repeatable cap are
+  // blocked, but no model response started between the blocks, so the model
+  // has not seen any block yet — escalation must stay off.
+  for (let i = 1; i <= 15; i++) {
+    const result = checkToolCallLoop('bash', { command: `step ${i}` });
+    assert.ok(result.block === false, `batch call ${i} should be allowed`);
+  }
+  const firstOverflow = checkToolCallLoop('bash', { command: 'step 16' });
+  assert.ok(firstOverflow.block === true, '16th batch call should be blocked');
+  assert.equal(firstOverflow.escalate, false);
+  const secondOverflow = checkToolCallLoop('bash', { command: 'step 17' });
+  assert.ok(secondOverflow.block === true, '17th batch call should be blocked');
+  assert.equal(
+    secondOverflow.escalate,
+    false,
+    'a block within the same model response must never escalate',
+  );
+  // Only a response boundary — the model returning after seeing the block
+  // errors and retrying anyway — turns the next block into an abort signal.
+  noteLoopGuardModelResponse();
+  assert.equal(checkToolCallLoop('bash', { command: 'step 18' }).escalate, true);
+});
+
+test('an allowed call resets the consecutive-block escalation streak (#2877)', () => {
+  resetToolCallLoopGuard();
+
+  for (let i = 1; i <= 7; i++) checkToolCallLoop('gsd_complete_milestone', { milestone: `M${i}` });
+  // A different, allowed tool call breaks the tight re-issue loop.
+  const allowed = checkToolCallLoop('read', { path: 'notes.md' });
+  assert.ok(allowed.block === false, 'the interleaved allowed call should pass');
+  // The next block of the original tool is a fresh streak: signal again first.
+  const next = checkToolCallLoop('gsd_complete_milestone', { milestone: 'M8' });
+  assert.ok(next.block === true);
+  assert.equal(next.escalate, false, 'a block after an allowed call must not escalate');
+  noteLoopGuardModelResponse();
+  assert.equal(checkToolCallLoop('gsd_complete_milestone', { milestone: 'M9' }).escalate, true);
+});
+
+test('blocks of different tools do not share the escalation streak (#2877)', () => {
+  resetToolCallLoopGuard();
+
+  for (let i = 1; i <= 7; i++) checkToolCallLoop('gsd_complete_milestone', { milestone: `M${i}` });
+  for (let i = 1; i <= 7; i++) checkToolCallLoop('gsd_skip_slice', { slice: `S${i}` });
+  // Each tool's first block is its own signal: tool B's first block must not
+  // escalate just because tool A was also blocked this turn.
+  const againA = checkToolCallLoop('gsd_complete_milestone', { milestone: 'M8' });
+  assert.equal(againA.escalate, false, "a different tool's blocks must not escalate tool A");
+  noteLoopGuardModelResponse();
+  const b8 = checkToolCallLoop('gsd_skip_slice', { slice: 'S8' });
+  assert.equal(b8.escalate, false, "tool B's streak restarted after tool A's block");
+  noteLoopGuardModelResponse();
+  const b9 = checkToolCallLoop('gsd_skip_slice', { slice: 'S9' });
+  assert.equal(b9.escalate, true, "tool B's own second post-response block escalates");
+});
+
+test('identical-args blocks escalate on the second consecutive block (#2877)', () => {
+  resetToolCallLoopGuard();
+
+  for (let i = 1; i <= 4; i++) checkToolCallLoop('web_search', { query: 'same query' });
+  const firstBlock = checkToolCallLoop('web_search', { query: 'same query' });
+  assert.ok(firstBlock.block === true, '5th identical call should be blocked by Guard 1');
+  assert.equal(firstBlock.escalate, false);
+  noteLoopGuardModelResponse();
+  const secondBlock = checkToolCallLoop('web_search', { query: 'same query' });
+  assert.equal(secondBlock.escalate, true, 'repeated identical-args block must escalate');
+});
+
+test('reset clears the escalation streak (#2877)', () => {
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 7; i++) checkToolCallLoop('gsd_complete_milestone', { milestone: `M${i}` });
+  noteLoopGuardModelResponse();
+  assert.equal(checkToolCallLoop('gsd_complete_milestone', { milestone: 'M8' }).escalate, true);
+
+  // A new turn resets with the guard state: the first block after the
+  // boundary signals again before anything escalates.
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 6; i++) checkToolCallLoop('gsd_complete_milestone', { milestone: `N${i}` });
+  const fresh = checkToolCallLoop('gsd_complete_milestone', { milestone: 'N7' });
+  assert.ok(fresh.block === true);
+  assert.equal(fresh.escalate, false, 'a new turn must start with a clean escalation streak');
+});
+
+test('exempt query tools never produce escalation flags (#2877, #2753)', () => {
+  resetToolCallLoopGuard();
+  for (let i = 1; i <= 30; i++) {
+    const result = checkToolCallLoop('gsd_decision_get', { id: `D${i}` });
+    assert.ok(result.block === false, `exempt call ${i} should be allowed`);
+    assert.equal(result.escalate, undefined, 'exempt calls never escalate');
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Reset restores default guard state after configuration tests

@@ -207,6 +207,24 @@ test("queryDecisionsFromMemories preserves decision order across multiple writes
   }
 });
 
+test("queryDecisionsFromMemories includes project-wide decisions with empty when_context for milestone queries (#2248)", async () => {
+  const base = makeTmpBase();
+  try {
+    const id = await seedDecision(base, {
+      when_context: "",
+      scope: "verify-field-rules",
+      decision: "Every verify line must be a shell command",
+      choice: "Shell only",
+      rationale: "Pre-exec enforcement",
+    });
+    const m001 = queryDecisionsFromMemories({ milestoneId: "M001" });
+    assert.equal(m001.length, 1);
+    assert.equal(m001[0]?.id, id);
+  } finally {
+    cleanup(base);
+  }
+});
+
 test("queryDecisionsFromMemories filters by milestoneId (substring match on when_context)", async () => {
   const base = makeTmpBase();
   try {

@@ -75,6 +75,7 @@ Format using Keep a Changelog v1.1 conventions:
 ## 5. Report
 
 End with:
+
 - the file path (or "printed, not written"),
 - the commit range used,
 - the number of commits processed per category.

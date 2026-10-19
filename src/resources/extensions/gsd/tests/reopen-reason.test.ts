@@ -3,11 +3,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
+  _getAdapter,
   openDatabase,
   closeDatabase,
   insertMilestone,
@@ -16,16 +17,20 @@ import {
 } from '../gsd-db.ts';
 import { handleReopenTask } from '../tools/reopen-task.ts';
 import { internalExecutionInvocation } from '../execution-invocation.ts';
-import {
-  reopenReasonArtifactPath,
-  writeReopenReason,
-  claimReopenReasonForInjection,
-} from '../reopen-reason.ts';
+import { readPendingReopenReason } from '../reopen-reason.ts';
+import { claimTaskAttempt } from '../task-execution-domain-operation.ts';
+import { reopenTask } from '../task-lifecycle-domain-operation.ts';
+
+const TASK = { milestoneId: 'M001', sliceId: 'S01', taskId: 'T01' };
 
 function makeTmpBase(): string {
   const base = mkdtempSync(join(tmpdir(), 'gsd-reopen-reason-'));
-  mkdirSync(join(base, '.gsd', 'milestones', 'M001', 'slices', 'S01', 'tasks'), { recursive: true });
+  mkdirSync(tasksDir(base), { recursive: true });
   return base;
+}
+
+function tasksDir(base: string): string {
+  return join(base, '.gsd', 'milestones', 'M001', 'slices', 'S01', 'tasks');
 }
 
 function cleanup(base: string): void {
@@ -39,83 +44,119 @@ function seedCompleteTask(): void {
   insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Task One', status: 'complete' });
 }
 
-test('writeReopenReason then claim: injects the reason, then is one-shot', () => {
-  const base = makeTmpBase();
-  try {
-    const reason = 'T01 shifted the descendants count to 12. Fix: update the assertion to 12.';
-    writeReopenReason(base, 'M001', 'S01', 'T01', reason);
+function claimNextAttempt(): void {
+  const db = _getAdapter()!;
+  db.exec(`
+    INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status,
+      project_root_realpath
+    ) VALUES (
+      'worker-1', 'test-host', 1, '2026-07-13T00:00:00.000Z', 'test',
+      '2026-07-13T00:00:00.000Z', 'active', '/tmp/project'
+    );
+    INSERT INTO milestone_leases (
+      milestone_id, worker_id, fencing_token, acquired_at, expires_at, status
+    ) VALUES (
+      'M001', 'worker-1', 7, '2026-07-13T00:00:00.000Z',
+      '2099-07-13T00:00:00.000Z', 'held'
+    );
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      'dispatch-trace-1', 'dispatch-turn-1', 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed', 1, '2026-07-13T00:00:00.000Z'
+    );
+  `);
+  const dispatch = db.prepare('SELECT id FROM unit_dispatches').get() as { id: number };
+  claimTaskAttempt({
+    invocation: internalExecutionInvocation('test/reopen-reason/claim'),
+    task: TASK,
+    workerId: 'worker-1',
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: Number(dispatch.id),
+  });
+}
 
-    const path = reopenReasonArtifactPath(base, 'M001', 'S01', 'T01')!;
-    assert.ok(existsSync(path), 'artifact should be written');
-
-    const claimed = claimReopenReasonForInjection(base, 'M001', 'S01', 'T01');
-    assert.ok(claimed, 'first claim should return an injection block');
-    assert.match(claimed!.injectionBlock, /Reopened — Reason/);
-    assert.match(claimed!.injectionBlock, /descendants count to 12/);
-    assert.ok(!existsSync(path), 'artifact should be deleted after claim (one-shot)');
-
-    const second = claimReopenReasonForInjection(base, 'M001', 'S01', 'T01');
-    assert.equal(second, null, 'second claim should return null');
-  } finally {
-    cleanup(base);
-  }
-});
-
-test('claimReopenReasonForInjection: returns null when nothing pending', () => {
-  const base = makeTmpBase();
-  try {
-    assert.equal(claimReopenReasonForInjection(base, 'M001', 'S01', 'T01'), null);
-  } finally {
-    cleanup(base);
-  }
-});
-
-test('writeReopenReason: empty/whitespace reason is a no-op', () => {
-  const base = makeTmpBase();
-  try {
-    writeReopenReason(base, 'M001', 'S01', 'T01', '   ');
-    const path = reopenReasonArtifactPath(base, 'M001', 'S01', 'T01')!;
-    assert.ok(!existsSync(path), 'no artifact should be written for an empty reason');
-  } finally {
-    cleanup(base);
-  }
-});
-
-test('handleReopenTask: persists a claimable reopen reason when reason is provided', async () => {
+test('handleReopenTask: the reason is pending from the DB until a new Attempt is claimed', async () => {
   const base = makeTmpBase();
   openDatabase(join(base, '.gsd', 'gsd.db'));
   try {
     seedCompleteTask();
 
     const result = await handleReopenTask({
-      milestoneId: 'M001',
-      sliceId: 'S01',
-      taskId: 'T01',
+      ...TASK,
       reason: 'Full suite caught NavNodeTest regression — update count assertion to 12.',
     }, base, internalExecutionInvocation('test/reopen-reason/provided'));
     assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
 
-    const claimed = claimReopenReasonForInjection(base, 'M001', 'S01', 'T01');
-    assert.ok(claimed, 'reopen reason should be claimable after handleReopenTask');
-    assert.match(claimed!.injectionBlock, /NavNodeTest regression/);
+    assert.deepEqual(
+      readdirSync(tasksDir(base)).filter((name) => name.endsWith('-REOPEN.json')),
+      [],
+      'the reason is not a file',
+    );
+    const pending = readPendingReopenReason('M001', 'S01', 'T01');
+    assert.ok(pending, 'reopen reason should be pending after handleReopenTask');
+    assert.match(pending.injectionBlock, /Reopened — Reason/);
+    assert.match(pending.injectionBlock, /NavNodeTest regression/);
+    // Reading does not consume it: a preview build must not eat the diagnosis.
+    assert.deepEqual(readPendingReopenReason('M001', 'S01', 'T01'), pending);
+
+    claimNextAttempt();
+    assert.equal(readPendingReopenReason('M001', 'S01', 'T01'), null);
   } finally {
     cleanup(base);
   }
 });
 
-test('handleReopenTask: no reason provided leaves nothing to claim', async () => {
+test('handleReopenTask: no reason provided leaves nothing pending', async () => {
   const base = makeTmpBase();
   openDatabase(join(base, '.gsd', 'gsd.db'));
   try {
     seedCompleteTask();
 
     await handleReopenTask(
-      { milestoneId: 'M001', sliceId: 'S01', taskId: 'T01' },
+      { ...TASK },
       base,
       internalExecutionInvocation('test/reopen-reason/omitted'),
     );
 
-    assert.equal(claimReopenReasonForInjection(base, 'M001', 'S01', 'T01'), null);
+    assert.equal(readPendingReopenReason('M001', 'S01', 'T01'), null);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('a reopen that is not a gate diagnosis (undo, hook retry) is not injected', () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  try {
+    seedCompleteTask();
+    reopenTask({
+      invocation: internalExecutionInvocation('test/reopen-reason/undo'),
+      task: TASK,
+      reason: 'Task reopened by an explicit undo command',
+    });
+    assert.equal(readPendingReopenReason('M001', 'S01', 'T01'), null);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('a T##-REOPEN.json file on disk is not a reopen reason', () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  try {
+    seedCompleteTask();
+    writeFileSync(join(tasksDir(base), 'T01-REOPEN.json'), JSON.stringify({
+      version: 1,
+      ...TASK,
+      reason: 'injected from disk',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }));
+    assert.equal(readPendingReopenReason('M001', 'S01', 'T01'), null);
   } finally {
     cleanup(base);
   }

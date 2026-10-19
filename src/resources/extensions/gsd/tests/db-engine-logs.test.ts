@@ -70,10 +70,17 @@ test("checkpointDatabase logs a `db` warning when the WAL checkpoint throws", ()
   try {
     const adapter = _getAdapter();
     assert.ok(adapter, "an adapter must be open");
-    const restore = breakExecOn(adapter!, "wal_checkpoint");
+    // The checkpoint reads its result row, so it runs through `prepare`.
+    const origPrepare = adapter!.prepare.bind(adapter);
+    adapter!.prepare = (sql: string) => {
+      if (sql.includes("wal_checkpoint")) throw new Error("forced failure for: wal_checkpoint");
+      return origPrepare(sql);
+    };
 
-    const { logs } = captureLogs(() => checkpointDatabase());
-    restore();
+    const { result, logs } = captureLogs(() => checkpointDatabase());
+    adapter!.prepare = origPrepare;
+
+    assert.equal(result, false, "a failed checkpoint must report failure to the caller");
 
     const dbWarn = logs.find((e) => e.component === "db" && e.severity === "warn");
     assert.ok(dbWarn, "a db warning must be logged on checkpoint failure");

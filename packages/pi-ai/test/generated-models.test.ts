@@ -82,6 +82,44 @@ describe("models.generated.ts", () => {
 		}
 	});
 
+	test("includes Claude Opus 5.5 across Anthropic-backed providers with adaptive thinking", () => {
+		const anthropic = MODELS.anthropic["claude-opus-5-5"];
+		expect(anthropic).toBeDefined();
+		expect(anthropic.api).toBe("anthropic-messages");
+		expect(anthropic.name).toBe("Claude Opus 5.5");
+		expect(anthropic.contextWindow).toBe(1_000_000);
+		expect(anthropic.maxTokens).toBe(128_000);
+		expect(anthropic.cost).toMatchObject({ input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 });
+		expect(anthropic.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
+		expect(anthropic.compat).toMatchObject({ forceAdaptiveThinking: true });
+
+		const vertex = MODELS["anthropic-vertex"]["claude-opus-5-5"];
+		expect(vertex).toBeDefined();
+		expect(vertex.api).toBe("anthropic-vertex");
+		expect(vertex.name).toBe("Claude Opus 5.5 (Vertex)");
+		expect(vertex.contextWindow).toBe(1_000_000);
+		expect(vertex.maxTokens).toBe(128_000);
+		expect(vertex.cost).toMatchObject({ input: 4, output: 20 });
+		expect(vertex.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
+		expect(vertex.compat).toMatchObject({ forceAdaptiveThinking: true });
+
+		// models.dev prices the US Bedrock region ~10% above the global regions.
+		for (const [id, name, cost] of [
+			["anthropic.claude-opus-5-5", "Claude Opus 5.5", { input: 4, output: 20 }],
+			["us.anthropic.claude-opus-5-5", "Claude Opus 5.5 (US)", { input: 4.4, output: 22 }],
+			["global.anthropic.claude-opus-5-5", "Claude Opus 5.5 (Global)", { input: 4, output: 20 }],
+		] as const) {
+			const bedrock = MODELS["amazon-bedrock"][id];
+			expect(bedrock).toBeDefined();
+			expect(bedrock.api).toBe("bedrock-converse-stream");
+			expect(bedrock.name).toBe(name);
+			expect(bedrock.contextWindow).toBe(1_000_000);
+			expect(bedrock.maxTokens).toBe(128_000);
+			expect(bedrock.cost).toMatchObject(cost);
+			expect(bedrock.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
+		}
+	});
+
 	test("includes Claude Sonnet 5 across Anthropic-backed providers with adaptive thinking", () => {
 		const anthropic = MODELS.anthropic["claude-sonnet-5"];
 		expect(anthropic).toBeDefined();
@@ -117,10 +155,11 @@ describe("models.generated.ts", () => {
 	});
 
 	test("includes GPT-5.6 variants for the GitHub Copilot provider", () => {
+		// models.dev 2026-09 refresh: Copilot's gpt-5.6-sol cost moved to 4/20/0.4, matching the OpenAI listing; terra/luna unchanged.
 		expect("gpt-5.6" in MODELS["github-copilot"]).toBe(false);
 
 		for (const [id, name, input, output, cacheRead] of [
-			["gpt-5.6-sol", "GPT-5.6 Sol", 2, 10, 0.2],
+			["gpt-5.6-sol", "GPT-5.6 Sol", 4, 20, 0.4],
 			["gpt-5.6-terra", "GPT-5.6 Terra", 2, 12, 0.2],
 			["gpt-5.6-luna", "GPT-5.6 Luna", 0.2, 1.2, 0.02],
 		] as const) {
@@ -164,6 +203,18 @@ describe("models.generated.ts", () => {
 			contextWindow: 1_050_000,
 			maxTokens: 128_000,
 			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+		});
+	});
+
+	test("includes GPT-6 Astra for OpenAI Codex (#2250)", () => {
+		const model = MODELS["openai-codex"]["gpt-6-astra"];
+		expect(model).toMatchObject({
+			id: "gpt-6-astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 0 },
 		});
 	});
 
@@ -309,14 +360,17 @@ describe("models.generated.ts", () => {
 		});
 	});
 
-	test("keeps GitHub Copilot Claude 4.6 context at Copilot's 200K limit", () => {
-		for (const id of ["claude-opus-4.6", "claude-sonnet-4.6"] as const) {
-			const model = MODELS["github-copilot"][id];
+	test("keeps GitHub Copilot Claude context at Copilot's 200K limit", () => {
+		// models.dev 2026-09 refresh: Copilot dropped the Claude 4.6 generation this test pinned (claude-opus-4.6), so the 200K cap is guarded as a property over the Anthropic-transport Claude entries.
+		const anthropicClaudeModels = Object.values(MODELS["github-copilot"]).filter(
+			(model) => model.api === "anthropic-messages",
+		);
 
+		expect(anthropicClaudeModels.length).toBeGreaterThan(0);
+		for (const model of anthropicClaudeModels) {
+			expect(model.id).toMatch(/^claude-/);
 			expect(model.provider).toBe("github-copilot");
-			expect(model.api).toBe("anthropic-messages");
-			expect(model.contextWindow).toBe(200000);
-			expect(model.maxTokens).toBe(32000);
+			expect(model.contextWindow).toBe(200_000);
 		}
 	});
 

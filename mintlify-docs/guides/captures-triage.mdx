@@ -14,7 +14,7 @@ While auto-mode is running (or any time):
 /gsd capture "the auth flow should support OAuth, not just JWT"
 ```
 
-Captures are appended to `.gsd/CAPTURES.md` and triaged automatically between tasks.
+Captures are stored in the GSD database and triaged automatically between tasks. `.gsd/CAPTURES.md` is rendered from the database; edits to it are not read.
 
 ## How it works
 
@@ -24,7 +24,7 @@ capture → triage → confirm → resolve → resume
 
 <Steps>
   <Step title="Capture">
-    `/gsd capture "thought"` appends to `.gsd/CAPTURES.md` with a timestamp and unique ID.
+    `/gsd capture "thought"` records the thought in the GSD database with a timestamp and unique ID, and renders `.gsd/CAPTURES.md`.
   </Step>
   <Step title="Triage">
     At natural seams between tasks, GSD classifies each capture.
@@ -72,4 +72,6 @@ Capture context is automatically injected into:
 
 ## Worktree awareness
 
-Captures resolve to the **original project root's** `.gsd/CAPTURES.md`, not the worktree's local copy. Captures from a steering terminal are visible to the auto-mode session running in a worktree.
+Captures are rows of the project database, which the project root and every worktree share. A capture from a steering terminal is visible to the auto-mode session running in a worktree. The render is always the **original project root's** `.gsd/CAPTURES.md`.
+
+A `CAPTURES.md` section that the database does not hold (written by an older release, by hand, or committed by a teammate) is not read. `/gsd doctor` reports it and `/gsd doctor --fix` imports it.

@@ -62,14 +62,17 @@ the repo.
    entries untouched.
 
 3. **Commit:**
+
    ```
    chore(release): v<x.y.z>
    ```
 
 4. **Create an annotated tag:**
+
    ```
    git tag -a v<x.y.z> -m "Release v<x.y.z>"
    ```
+
    Don't push yet.
 
 5. **Gate:** Show the diff (`git show HEAD`, `git show v<x.y.z>`) and confirm
@@ -80,6 +83,7 @@ the repo.
 **Goal:** Push the release and kick off downstream pipelines.
 
 1. **Push commit + tag:**
+
    ```
    git push origin <branch>
    git push origin v<x.y.z>

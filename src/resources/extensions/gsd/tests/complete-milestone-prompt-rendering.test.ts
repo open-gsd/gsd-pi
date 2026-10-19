@@ -25,6 +25,7 @@ test("complete milestone prompt renders compact verification and completion guid
     milestoneTitle: "Baseline And Safety",
     roadmapPath: ".gsd/milestones/M001/M001-ROADMAP.md",
     milestoneSummaryPath: ".gsd/milestones/M001/M001-SUMMARY.md",
+    verificationFailedPath: ".gsd/milestones/M001/M001-VERIFICATION-FAILED.md",
     inlinedContext: "## Milestone Summary\n\n## Horizontal Checklist\n\n## Decision Re-evaluation",
     extractLearningsSteps: "Write M001-LEARNINGS.md and call capture_thought.",
   });
@@ -47,6 +48,7 @@ test("complete milestone prompt renders compact verification and completion guid
   assert.match(prompt, /Milestone M001 closeout submitted/);
   assert.match(prompt, /Do not say the milestone is complete/);
   assert.match(prompt, /VERIFICATION FAILED/);
+  assert.match(prompt, /M001-VERIFICATION-FAILED\.md/);
   assert.doesNotMatch(prompt, /emit only one closeout line: "Milestone M001 complete\."/);
   assert.doesNotMatch(prompt, /\{\{[a-zA-Z][a-zA-Z0-9_]*\}\}/);
 });

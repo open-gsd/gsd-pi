@@ -3,6 +3,7 @@
 ## Problem Statement
 
 GSD has solid API key infrastructure (AuthStorage, OAuth flows, rate-limit backoff, multi-key rotation) but lacks a user-facing CLI for day-to-day key management. Users currently must either:
+
 - Run the full onboarding wizard to add keys
 - Manually edit `~/.gsd/agent/auth.json`
 - Use the limited `/gsd setup keys` flow (only covers 5 tool keys, no LLM keys)
@@ -100,12 +101,14 @@ GSD API Key Manager
 ### Provider Registry
 
 Build a unified provider registry that merges:
+
 - `LLM_PROVIDER_IDS` from onboarding.ts
 - `TOOL_KEYS` from commands.ts
 - `envMap` from env-api-keys.ts
 - Remote bot tokens (discord_bot, slack_bot, telegram_bot)
 
 Each entry has:
+
 ```typescript
 interface ProviderInfo {
   id: string
@@ -133,6 +136,7 @@ interface ProviderInfo {
 ### Multi-key handling
 
 If a provider has multiple keys (round-robin), show:
+
 ```
 anthropic has 3 API keys configured:
   [1] sk-ant-...a4Bf
@@ -236,6 +240,7 @@ API Key Health Check
 ### Command Registration (commands.ts)
 
 Add to the `/gsd` subcommand router:
+
 ```typescript
 if (trimmed === "keys" || trimmed.startsWith("keys ")) {
   const keysArgs = trimmed.replace(/^keys\s*/, "").trim();
@@ -245,6 +250,7 @@ if (trimmed === "keys" || trimmed.startsWith("keys ")) {
 ```
 
 Add tab completions for `keys` subcommands:
+
 ```typescript
 if (parts[0] === "keys" && parts.length <= 2) {
   // list, add, remove, test, rotate, doctor

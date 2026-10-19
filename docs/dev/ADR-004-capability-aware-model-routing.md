@@ -393,6 +393,7 @@ If the default profiles are not reviewed regularly, GSD will encode outdated ass
 The highest-scoring model may not be selected because budget pressure constrained the eligible tier. This could look inconsistent if the user doesn't understand the pipeline order.
 
 **Mitigation:** Pipeline order is explicit and enforced in code:
+
 1. Complexity classification determines tier
 2. Budget pressure may downgrade tier
 3. Tier-eligible models are filtered (downgrade-only from user ceiling)

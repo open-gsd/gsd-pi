@@ -30,7 +30,7 @@ export interface StagedTaskCompletionWriteInput {
 
 export function writeStagedTaskCompletion(
   context: Readonly<DomainOperationContext>,
-  attempt: Readonly<{ milestoneId: string; sliceId: string; taskId: string }>,
+  attempt: Readonly<{ attemptId: string; milestoneId: string; sliceId: string; taskId: string }>,
   completion: Readonly<StagedTaskCompletionWriteInput>,
 ): void {
   if (requireActiveDomainOperationContext(context) !== "attempt.settle") {
@@ -81,9 +81,9 @@ export function writeStagedTaskCompletion(
 
   const insertEvidence = getDb().prepare(`
     INSERT OR IGNORE INTO verification_evidence (
-      task_id, slice_id, milestone_id, command, exit_code, verdict, duration_ms, created_at
+      task_id, slice_id, milestone_id, attempt_ref, command, exit_code, verdict, duration_ms, created_at
     )
-    SELECT :task_id, :slice_id, :milestone_id, :command, :exit_code, :verdict,
+    SELECT :task_id, :slice_id, :milestone_id, :attempt_ref, :command, :exit_code, :verdict,
            :duration_ms, operation.created_at
     FROM workflow_operations operation
     WHERE operation.operation_id = :operation_id
@@ -93,6 +93,7 @@ export function writeStagedTaskCompletion(
       ":task_id": completion.task.taskId,
       ":slice_id": completion.task.sliceId,
       ":milestone_id": completion.task.milestoneId,
+      ":attempt_ref": attempt.attemptId,
       ":command": evidence.command,
       ":exit_code": evidence.exitCode,
       ":verdict": evidence.verdict,
@@ -199,19 +200,28 @@ export function terminalizeTaskExecutionDispatch(
   });
   if (Number((result as { changes?: number }).changes ?? 0) === 1) return;
 
-  if (input.outcome === "interrupted") {
-    const alreadyTerminal = getDb().prepare(`
-      SELECT 1 AS present FROM unit_dispatches
-      WHERE id = :dispatch_id
-        AND worker_id = :worker_id
-        AND milestone_lease_token = :lease_token
-        AND status IN ('canceled', 'failed', 'stuck', 'paused')
-    `).get({
-      ":dispatch_id": input.dispatchId,
-      ":worker_id": input.workerId,
-      ":lease_token": input.milestoneLeaseToken,
-    });
-    if (alreadyTerminal) return;
-  }
+  // An already-terminal row under this dispatch's exact identity
+  // (dispatch_id + worker_id + milestone_lease_token) means a legitimate owner
+  // of the same unit run already recorded its terminal transition — e.g. a
+  // pause cancels the in-flight row before the loop's own Attempt settlement
+  // runs (#2850). The tolerance is per-outcome so a settlement can only accept
+  // terminal statuses compatible with its outcome: a succeeded settle never
+  // accepts a failed/canceled dispatch, and an identity mismatch still throws
+  // below.
+  const toleratedTerminalStatuses = input.outcome === "succeeded"
+    ? ["completed"]
+    : ["canceled", "failed", "stuck", "paused"];
+  const alreadyTerminal = getDb().prepare(`
+    SELECT 1 AS present FROM unit_dispatches
+    WHERE id = :dispatch_id
+      AND worker_id = :worker_id
+      AND milestone_lease_token = :lease_token
+      AND status IN (${toleratedTerminalStatuses.map((status) => `'${status}'`).join(", ")})
+  `).get({
+    ":dispatch_id": input.dispatchId,
+    ":worker_id": input.workerId,
+    ":lease_token": input.milestoneLeaseToken,
+  });
+  if (alreadyTerminal) return;
   throw new Error("Task execution settlement did not terminalize exactly one coordination dispatch");
 }

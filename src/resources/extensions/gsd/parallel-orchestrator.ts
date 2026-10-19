@@ -871,8 +871,11 @@ export async function stopParallel(
     const worker = state.workers.get(mid);
     if (!worker) continue;
 
-    // Send stop signal via file-based IPC (worker checks on next dispatch)
-    sendSignal(basePath, mid, "stop");
+    // Queue the stop command (the worker reads it at its next unit boundary).
+    // SIGTERM below stops the worker now, so a closed database does not block the stop.
+    try {
+      sendSignal(mid, "stop");
+    } catch (e) { logWarning("parallel", `stop command for ${mid} was not queued: ${(e as Error).message}`); }
 
     // Send SIGTERM to the process for immediate response.
     // Use process handle when available, fall back to PID-based kill
@@ -948,7 +951,7 @@ export function pauseWorker(
     const worker = state.workers.get(mid);
     if (!worker || worker.state !== "running") continue;
 
-    sendSignal(basePath, mid, "pause");
+    sendSignal(mid, "pause");
     worker.state = "paused";
   }
 }
@@ -968,7 +971,7 @@ export function resumeWorker(
     const worker = state.workers.get(mid);
     if (!worker || worker.state !== "paused") continue;
 
-    sendSignal(basePath, mid, "resume");
+    sendSignal(mid, "resume");
     worker.state = "running";
   }
 }

@@ -17,6 +17,7 @@
 ### Self-Verification Architecture
 
 Every task completion should self-evaluate against a checklist:
+
 1. Does the code compile?
 2. Do all existing tests still pass?
 3. Do new tests pass?

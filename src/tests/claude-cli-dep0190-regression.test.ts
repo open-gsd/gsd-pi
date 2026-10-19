@@ -22,6 +22,7 @@ import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcRoot = join(__dirname, "..");
+const resolveTsPath = join(process.cwd(), "src", "resources", "extensions", "gsd", "tests", "resolve-ts.mjs");
 const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
 const supportsExperimentalStripTypes =
 	nodeMajor > 22 || (nodeMajor === 22 && nodeMinor >= 6);
@@ -30,12 +31,12 @@ const stripTypesSkipReason = supportsExperimentalStripTypes
 	: "--experimental-strip-types requires Node 22.6+";
 
 function runUnderThrowDeprecation(modulePath: string, exportName: string): { status: number | null; stderr: string } {
-	// Inline ESM script: import the module, call the named export. The function
-	// internally invokes execFileSync — which is what triggered DEP0190 before
-	// the fix.
+	// Inline ESM script: import the module, call the named export and wait for
+	// its asynchronous probe. The probe spawns the CLI with execFile; that spawn
+	// is what triggered DEP0190 before the fix.
 	const script = [
 		`import { ${exportName} } from ${JSON.stringify(modulePath)};`,
-		`try { ${exportName}(); } catch { /* binary missing on CI is fine */ }`,
+		`try { await ${exportName}(); } catch { /* binary missing on CI is fine */ }`,
 	].join("\n");
 
 	// --experimental-strip-types requires Node 22.6+; tests using this
@@ -44,6 +45,9 @@ function runUnderThrowDeprecation(modulePath: string, exportName: string): { sta
 		process.execPath,
 		[
 			"--throw-deprecation",
+			// The probes import the shared readiness helper via a `.js` specifier.
+			"--import",
+			pathToFileURL(resolveTsPath).href,
 			"--experimental-strip-types",
 			"--input-type=module",
 			"-e",
@@ -65,11 +69,11 @@ describe("Issue #5017 — DEP0190 must not fire from Claude CLI probes", () => {
 		);
 	});
 
-	test("readiness.ts isClaudeBinaryPresent() emits no DeprecationWarning", { skip: stripTypesSkipReason }, () => {
+	test("readiness.ts settleClaudeCodeReadiness() emits no DeprecationWarning", { skip: stripTypesSkipReason }, () => {
 		const modulePath = pathToFileURL(
 			join(srcRoot, "resources", "extensions", "claude-code-cli", "readiness.ts"),
 		).href;
-		const { status, stderr } = runUnderThrowDeprecation(modulePath, "isClaudeBinaryPresent");
+		const { status, stderr } = runUnderThrowDeprecation(modulePath, "settleClaudeCodeReadiness");
 		assert.equal(
 			status,
 			0,

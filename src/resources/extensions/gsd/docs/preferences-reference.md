@@ -109,7 +109,7 @@ Diagnostics record the file path, scope (global/project), severity (error/warnin
 
 - `skill_rules`: situational rules with a human-readable `when` trigger and one or more of `use`, `prefer`, or `avoid`.
 
-- `custom_instructions`: extra durable instructions related to skill use. For operational project knowledge, use `.gsd/KNOWLEDGE.md` instead. Rules are file-canonical; patterns and lessons are persisted to the `memories` table and projected back into `KNOWLEDGE.md` on the next session start.
+- `custom_instructions`: extra durable instructions related to skill use. For operational project knowledge, use `.gsd/KNOWLEDGE.md` instead. Rules, patterns and lessons are saved to the `memories` table (`/gsd knowledge` or `capture_thought`), and `KNOWLEDGE.md` is rendered from them after each save.
 
 - `language`: preferred response language for all GSD interactions. Accepts any language name or code — `"Chinese"`, `"zh"`, `"German"`, `"de"`, `"日本語"`, etc. When set, GSD injects "Always respond in \<language\>" into every agent's system prompt, including after `/clear`. Quickest way to set it: `/gsd language <name>`. To clear: `/gsd language off`.
 
@@ -157,6 +157,7 @@ Diagnostics record the file path, scope (global/project), severity (error/warnin
   - `isolation`: `"none"`, `"worktree"`, or `"branch"` — controls auto-mode git isolation strategy. `"none"` works directly on the current branch with no worktree or milestone branch (default, ideal for step-mode with hot reloads); `"worktree"` creates a milestone worktree for isolated work; `"branch"` works directly in the project root but creates a milestone branch (useful for submodule-heavy repos). `worktree` requires a committed `HEAD`; in a zero-commit repo, GSD temporarily treats it as `none` until the first commit exists. Default: `"none"`.
   - `manage_gitignore`: boolean — when `false`, GSD will not touch `.gitignore` at all. Useful when your project has a strictly managed `.gitignore` and you don't want GSD adding entries. Default: `true`.
   - `worktree_post_create`: string — script to run after a worktree is created (both auto-mode and manual `/worktree`). Receives `SOURCE_DIR` and `WORKTREE_DIR` as environment variables. Can be absolute or relative to project root. Runs with 30-second timeout. Failure is non-fatal (logged as warning). Default: none.
+  - `preserve_worktree_on_stop`: boolean — when `true`, a stop with an in-progress milestone leaves the milestone worktree directory on disk alongside the preserved branch instead of removing it (#2888). This covers attempt-death teardown (liveness backstop, recovery abort) and manual stops alike — both reach the same stop path. Use this when attempts produce uncommitted work (build caches, gitignored receipts) that must survive a stop: on the default path (`false`) the worktree is removed and git-visible uncommitted work is only quarantined under `.gsd/quarantine/worktrees/`, while gitignored content is not recoverable. `/gsd auto` re-enters an existing worktree on resume. Default: `false`.
   - `auto_pr`: boolean — automatically create a GitHub pull request after a milestone branch is merged. Requires `gh` CLI to be installed. Default: `false`.
   - `pr_target_branch`: string — branch to target when `auto_pr` is enabled. Defaults to `main_branch` when omitted.
   - **Deprecated:** `commit_docs` — no longer valid; `.gsd/` is always gitignored. Remove this setting.
@@ -222,7 +223,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
 
 - `token_profile`: `"budget"`, `"balanced"`, `"quality"`, or `"burn-max"` — coordinates model selection, phase skipping, and context compression. `budget` skips research/reassessment and uses cheaper models; `balanced` (default) skips research/reassessment to reduce token burn; `quality` prefers higher-quality models; `burn-max` keeps full-context defaults, disables downgrade routing, and keeps phase skips off.
 
-- `planning_depth`: `"light"` or `"deep"` — controls project-level discovery before milestone planning. `"light"` is the default milestone discussion flow. `"deep"` runs workflow preferences, project discussion, requirements discussion, a research-decision gate, and optional project research before milestone planning. Enable it with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by setting `planning_depth: deep` in project-local `.gsd/PREFERENCES.md`. Global `~/.gsd/PREFERENCES.md` does not opt every fresh repo into deep mode. Deep mode writes `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, `.gsd/runtime/research-decision.json`, and, when research is approved, `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
+- `planning_depth`: `"light"` or `"deep"` — controls project-level discovery before milestone planning. `"light"` is the default milestone discussion flow. `"deep"` runs workflow preferences, project discussion, requirements discussion, and optional project research before milestone planning. Enable it with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by setting `planning_depth: deep` in project-local `.gsd/PREFERENCES.md`. Global `~/.gsd/PREFERENCES.md` does not opt every fresh repo into deep mode. Deep mode writes `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, and, when research is approved, `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`. The research decision is recorded in the database with `gsd_research_decision_save`; no decision means `skip`.
 
 - `phases`: fine-grained control over which phases run. Usually set by `token_profile`, but can be overridden. Keys:
   - `skip_research`: boolean — skip milestone-level research. Default: `false`.
@@ -230,7 +231,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `skip_reassess`: boolean — force-disable roadmap reassessment even if `reassess_after_slice` is enabled. Default: `false`.
   - `skip_slice_research`: boolean — skip per-slice research. Default: `false`.
 
-- `reactive_execution`: controls automatic parallel task dispatch inside a slice. Reactive execution is enabled by default when omitted; set `enabled: false` to opt out. With default-on behavior, GSD only attempts a reactive batch when at least three ready tasks are available and the task-plan IO graph is non-ambiguous. If you set `enabled: true` explicitly, GSD uses the earlier opt-in threshold of two ready tasks. Keys:
+- `reactive_execution`: controls automatic parallel task dispatch inside a slice. Reactive execution is enabled by default when omitted; set `enabled: false` to opt out. With default-on behavior, GSD only attempts a reactive batch when at least three ready tasks are available and the graph of planned task inputs and expected output (read from the task rows) is non-ambiguous. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch. If you set `enabled: true` explicitly, GSD uses the earlier opt-in threshold of two ready tasks. Keys:
   - `enabled`: boolean — set `false` to force sequential task execution. Default: `true`.
   - `max_parallel`: number — maximum tasks to dispatch in one batch, range `1`-`8`. Default: `2`.
   - `isolation_mode`: `"same-tree"` — currently the only supported value.
@@ -266,7 +267,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `budget_pressure`: boolean — downgrade model tier when budget is under pressure. Default: `true`.
   - `cross_provider`: boolean — allow routing across different providers. Default: `true`.
   - `hooks`: boolean — enable routing hooks. Default: `true`.
-  - `capability_routing`: boolean — enable capability-profile scoring for model selection within a tier. Requires `enabled: true`. Default: `false`.
+  - `capability_routing`: boolean — enable capability-profile scoring for model selection within a tier. Requires `enabled: true`. Default: `true`.
 
 - `disabled_model_providers`: string[] — provider IDs to hide from model selection and routing (for example `["google-gemini-cli"]`). This only affects model availability (`/model`, auto-model selection, routing); it does not disable tool auth flows like `google_search`.
 
@@ -303,7 +304,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `budget_ceiling`: number — optional per-parallel-run budget ceiling.
   - `merge_strategy`: `"per-slice"` or `"per-milestone"` — when to merge worktree results back. Default: `"per-milestone"`.
   - `auto_merge`: `"auto"`, `"confirm"`, or `"manual"` — merge behavior after completion. `"auto"` merges immediately; `"confirm"` asks first; `"manual"` leaves branches for you. Default: `"confirm"`.
-  - `worker_model`: string — optional model override for parallel milestone workers. When set, workers use this model (e.g. `"claude-haiku-4-5"`) instead of inheriting the coordinator's model. Useful for cost savings on execution-heavy milestones.
+  - `worker_model`: string — optional model override for parallel milestone workers. When set, workers use this model (e.g. `"claude-haiku-5-5"`) instead of inheriting the coordinator's model. Useful for cost savings on execution-heavy milestones.
 
 - `workspace`: repository-scoping for parent/multi-repo workspaces. Keys:
   - `mode`: `"project"` | `"parent"` — enables single-repo (default) or parent workspace behavior.

@@ -123,6 +123,7 @@ parses but the target must be rejected). First READ `cloud-config.ts` lines
 35–130 to confirm which function rejects which case, then assert at minimum:
 
 Rejected (assert `throws`, and match the error message the code actually uses):
+
 - `http://evil.example` (plain HTTP, non-localhost)
 - `https://10.0.0.1`, `https://192.168.1.1`, `https://172.16.0.1` (RFC1918)
 - `https://169.254.169.254` (link-local / cloud metadata)
@@ -131,6 +132,7 @@ Rejected (assert `throws`, and match the error message the code actually uses):
 - empty string / garbage (`"not a url"`)
 
 Accepted (assert no throw, and the returned `URL` round-trips):
+
 - `https://cloud-gateway.opengsd.net`
 - `http://localhost:8787` and `http://127.0.0.1:8787` (the documented local-dev carve-out — confirm the exact allowed forms from the code first)
 

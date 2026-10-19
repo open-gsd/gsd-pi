@@ -68,6 +68,7 @@ Before analyzing the diff:
 Analyze the changes against each category below. Only report findings that are actually present. Skip categories with no issues.
 
 **A. Security Issues** (Severity: CRITICAL or HIGH)
+
 - Injection vulnerabilities (SQL injection, command injection, template injection)
 - Cross-site scripting (XSS) - unsanitized user input rendered in HTML
 - Authentication and authorization flaws (missing auth checks, privilege escalation)
@@ -77,6 +78,7 @@ Analyze the changes against each category below. Only report findings that are a
 - Missing input validation on external data
 
 **B. Performance Concerns** (Severity: HIGH or MEDIUM)
+
 - N+1 query patterns in database access
 - Unnecessary memory allocations in hot paths or loops
 - Blocking operations on the main thread or in async contexts
@@ -85,6 +87,7 @@ Analyze the changes against each category below. Only report findings that are a
 - Large payloads without streaming or chunking
 
 **C. Bug Risks** (Severity: HIGH or MEDIUM)
+
 - Off-by-one errors in loops or array access
 - Null/undefined dereferences without guards
 - Race conditions in concurrent or async code
@@ -94,6 +97,7 @@ Analyze the changes against each category below. Only report findings that are a
 - Resource leaks (unclosed connections, file handles, listeners)
 
 **D. Code Quality** (Severity: MEDIUM or LOW)
+
 - Unclear or misleading naming
 - Significant code duplication that should be extracted
 - Excessive complexity (deeply nested logic, functions doing too many things)
@@ -102,6 +106,7 @@ Analyze the changes against each category below. Only report findings that are a
 - Inconsistency with patterns used elsewhere in the codebase
 
 **E. Test Coverage Gaps** (Severity: MEDIUM or LOW)
+
 - New logic paths without corresponding test cases
 - Changed behavior without updated tests
 - Edge cases not covered (empty inputs, boundary values, error paths)
@@ -126,6 +131,7 @@ For each finding, use this structure:
 ```
 
 Severity levels:
+
 - **CRITICAL** - Must fix before merge. Security vulnerability or data loss risk.
 - **HIGH** - Should fix before merge. Likely bug or significant performance issue.
 - **MEDIUM** - Should fix soon. Code quality or moderate risk issue.

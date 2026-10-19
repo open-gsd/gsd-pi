@@ -16,10 +16,6 @@ import {
   renderDossier,
 } from "./m003-s07-cutover-dossier.mjs";
 import {
-  REPO_ROOT as NO_CUTOVER_ROOT,
-  runSemanticShadowNoCutoverGate,
-} from "./semantic-shadow-no-cutover-gate.mjs";
-import {
   REPO_ROOT as AUTHORITY_BASELINE_ROOT,
   runWorkflowAuthorityBaseline,
 } from "./workflow-authority-baseline.mjs";
@@ -352,7 +348,10 @@ export async function collectM003S07DossierInput(
   const sourceRoot = localPath(paths.sourceRoot, "Source root");
   const databasePath = localPath(paths.databasePath, "Canonical database");
   const capstonePath = localPath(paths.capstonePath, "Capstone evidence");
-  if (sourceRoot !== resolve(NO_CUTOVER_ROOT) || sourceRoot !== resolve(AUTHORITY_BASELINE_ROOT)) {
+  if (!dependencies.runNoCutover) {
+    throw new Error("No-cutover report is required: the semantic-shadow no-cutover gate is retired");
+  }
+  if (sourceRoot !== resolve(AUTHORITY_BASELINE_ROOT)) {
     throw new Error("Source root must be the local repository used by the no-cutover and authority reports");
   }
   const resolveCanonicalDatabasePath = dependencies.resolveCanonicalDatabasePath
@@ -376,7 +375,7 @@ export async function collectM003S07DossierInput(
     throw new Error("Capstone evidence source revision does not match the current local source");
   }
   const snapshot = readCanonicalSnapshot(databasePath);
-  const noCutover = await (dependencies.runNoCutover ?? runSemanticShadowNoCutoverGate)();
+  const noCutover = await dependencies.runNoCutover();
   const authorityBaseline = await (dependencies.runAuthorityBaseline ?? runWorkflowAuthorityBaseline)();
   const input = {
     recommendation: "NO_GO",

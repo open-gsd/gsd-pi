@@ -17,6 +17,7 @@ import { existsSync } from 'node:fs';
 import { basename, delimiter, join, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { RpcClient } from '@opengsd/rpc-client';
+import { parseWorkflowOutcomeCustomMessage, type RpcWorkflowOutcomeEvent } from '@opengsd/contracts';
 import type { RpcCostUpdateEvent, RpcExtensionUIRequest, RpcInitResult, SdkAgentEvent } from '@opengsd/contracts';
 import type {
   ManagedSession,
@@ -487,6 +488,49 @@ export class SessionManager extends EventEmitter {
         session.cost.tokens.cacheRead = Math.max(session.cost.tokens.cacheRead, costEvent.tokens.cacheRead ?? 0);
         session.cost.tokens.cacheWrite = Math.max(session.cost.tokens.cacheWrite, costEvent.tokens.cacheWrite ?? 0);
       }
+    }
+
+    // Typed workflow outcome first (ADR-046): the extension reports the run's
+    // terminal state as a contract event. The notification-text classifiers
+    // below stay as the fallback for a run of an older extension.
+    const outcome = parseWorkflowOutcomeCustomMessage(event as Parameters<typeof parseWorkflowOutcomeCustomMessage>[0])
+      ?? ((event as Record<string, unknown>).type === 'workflow_outcome'
+        ? event as unknown as RpcWorkflowOutcomeEvent
+        : null);
+    if (outcome) {
+      if (outcome.status === 'blocked') {
+        session.status = 'blocked';
+        session.pendingBlocker = {
+          id: `workflow-outcome-${outcome.status}`,
+          method: 'notify',
+          message: outcome.reason ?? 'workflow blocked',
+          event: { type: 'extension_ui_request', id: '', method: 'notify', message: outcome.reason ?? 'workflow blocked' },
+        };
+        this.logger.info('session blocked', {
+          sessionId: session.sessionId,
+          projectDir: session.projectDir,
+          blockerId: session.pendingBlocker.id,
+          blockerMethod: session.pendingBlocker.method,
+        });
+        this.emit('session:blocked', {
+          sessionId: session.sessionId,
+          projectDir: session.projectDir,
+          projectName: session.projectName,
+          blocker: session.pendingBlocker,
+        });
+      } else {
+        session.status = 'completed';
+        session.unsubscribe?.();
+        session.unsubscribe = undefined;
+        this.logger.info('session completed', { sessionId: session.sessionId, projectDir: session.projectDir });
+        this.emit('session:completed', {
+          sessionId: session.sessionId,
+          projectDir: session.projectDir,
+          projectName: session.projectName,
+        });
+        this.markTerminal(session.projectDir);
+      }
+      return;
     }
 
     // Paused detection — pauseAuto() is resumable and must not leave the

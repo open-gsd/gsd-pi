@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   WorktreeLifecycle,
   mergeMilestoneStandalone,
@@ -17,9 +17,10 @@ import {
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import { queryJournal } from "../journal.js";
 import { AutoSession } from "../auto/session.js";
-import { openDatabase, closeDatabase, insertMilestone, _getAdapter } from "../gsd-db.js";
-import { registerAutoWorker } from "../db/auto-workers.js";
-import { claimMilestoneLease } from "../db/milestone-leases.js";
+import { openDatabase, closeDatabase, getMilestone, insertMilestone, _getAdapter } from "../gsd-db.js";
+import { setStderrLoggingEnabled, _resetLogs } from "../workflow-logger.js";
+import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.js";
+import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -214,6 +215,48 @@ test("enterMilestone returns ok:true mode:none when isolation disabled", () => {
     assert.equal(result.path, "/project");
   }
   assert.equal(s.basePath, "/project");
+});
+
+test("enterMilestone classifies a stale worktree registration as stale-worktree-registration (#2317)", (t) => {
+  // Issue #2317: after a reconcile-removal, git's .git/worktrees/<name> admin
+  // metadata can survive (locked entry). On resume, enterMilestone must
+  // classify this failure so auto-mode can STOP instead of resuming onto the
+  // project root and operating on the wrong tree.
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase({ isolation: "worktree" });
+  t.after(() => cleanupRepoBase(base, previousCwd));
+
+  // First entry (fresh session) creates the worktree for real.
+  const first = new WorktreeLifecycle(
+    makeSession({ basePath: base, originalBasePath: base }),
+    makeDeps(),
+  ).enterMilestone("M001", makeCtx());
+  assert.equal(first.ok, true, `fixture precondition: first entry should succeed: ${JSON.stringify(first)}`);
+
+  // Orphan the worktree: lock the registration, remove the directory.
+  const wtPath = join(base, ".gsd-worktrees", "M001");
+  execFileSync("git", ["worktree", "lock", wtPath], { cwd: base, stdio: "pipe" });
+  rmSync(wtPath, { recursive: true, force: true });
+
+  // Resume = fresh session re-entering the milestone.
+  const s2 = makeSession({ basePath: base, originalBasePath: base });
+  const ctx2 = makeCtx();
+  const result = new WorktreeLifecycle(s2, makeDeps()).enterMilestone("M001", ctx2);
+
+  assert.equal(result.ok, false, "expected ok:false");
+  if (!result.ok) {
+    assert.equal(
+      result.reason,
+      "stale-worktree-registration",
+      `expected reason stale-worktree-registration, got: ${result.reason}`,
+    );
+  }
+  // Interactive session-level degrade is preserved (established pattern).
+  assert.equal(s2.isolationDegraded, true, "isolation should be flagged degraded for the session");
+  assert.ok(
+    ctx2.messages.some((m) => m.level === "warning" && m.msg.includes("stale worktree registration")),
+    `warning with remediation expected, got: ${JSON.stringify(ctx2.messages)}`,
+  );
 });
 
 test("adoptStrandedMilestone forces branch recovery even when normal preferences differ", (t) => {
@@ -497,6 +540,71 @@ test("enterMilestone returns ok:false reason:lease-conflict when another worker 
   assert.equal(ctx.messages[0]?.level, "error");
 });
 
+test("enterMilestone reclaims the lease of a dead local holder and enters (#2851)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase({ isolation: "worktree" });
+  t.after(() => cleanupRepoBase(base, previousCwd));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  const holder = registerAutoWorker({ projectRootRealpath: base });
+  _getAdapter()!.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
+    .run({ ":pid": -1, ":worker_id": holder });
+  const claim = claimMilestoneLease(holder, "M001");
+  assert.equal(claim.ok, true);
+  const contender = registerAutoWorker({ projectRootRealpath: base });
+
+  const s = makeSession({ basePath: base, originalBasePath: base, workerId: contender });
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  const result = lifecycle.enterMilestone("M001", ctx);
+
+  assert.equal(result.ok, true, `expected ok:true after reclaim, got: ${JSON.stringify(result)}`);
+  assert.equal(getAutoWorker(holder)?.status, "crashed", "dead holder must be marked crashed");
+  const lease = getMilestoneLease("M001");
+  assert.ok(lease);
+  assert.equal(lease!.worker_id, contender, "entry must hold the reclaimed lease");
+  assert.equal(lease!.fencing_token, 2, "reclaim takeover must advance the fencing token");
+  assert.equal(s.milestoneLeaseToken, 2);
+  const warning = ctx.messages.find((m) => m.level === "warning");
+  assert.ok(warning?.msg.includes(holder), "entry must surface the reclaim to the user");
+});
+
+test("enterMilestone keeps the lease conflict for a live local holder (#2851)", (t) => {
+  const live = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  assert.ok(live.pid !== undefined && live.pid > 0);
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase({ isolation: "worktree" });
+  t.after(() => {
+    live.kill();
+    cleanupRepoBase(base, previousCwd);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  const holder = registerAutoWorker({ projectRootRealpath: base });
+  _getAdapter()!.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
+    .run({ ":pid": live.pid!, ":worker_id": holder });
+  const claim = claimMilestoneLease(holder, "M001");
+  assert.equal(claim.ok, true);
+  const contender = registerAutoWorker({ projectRootRealpath: base });
+
+  const s = makeSession({ basePath: base, originalBasePath: base, workerId: contender });
+  const deps = makeDeps();
+  const ctx = makeCtx();
+  const lifecycle = new WorktreeLifecycle(s, deps);
+
+  const result = lifecycle.enterMilestone("M001", ctx);
+
+  assert.equal(result.ok, false, "a live holder's lease must never be stolen");
+  if (!result.ok) {
+    assert.equal(result.reason, "lease-conflict");
+  }
+  assert.equal(getAutoWorker(holder)?.status, "active", "live holder must not be marked crashed");
+  assert.equal(getMilestoneLease("M001")?.worker_id, holder);
+  assert.equal(s.milestoneLeaseToken, null);
+});
+
 test("enterMilestone is idempotent when already in the milestone worktree", (t) => {
   // Real-fixture variant after C2/C3. The session is already pointing at
   // the worktree path with currentMilestoneId set, so the idempotency
@@ -618,6 +726,34 @@ test("exitMilestone leaves a dirty worktree intact when auto-commit fails (#1492
     ),
     `expected error notify naming the worktree path, got: ${JSON.stringify(ctx.messages)}`,
   );
+});
+
+test("exitMilestone merge does not create a 'complete' row for a milestone with no DB row", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase({ isolation: "worktree" });
+  const previousStderr = setStderrLoggingEnabled(false);
+  t.after(() => {
+    setStderrLoggingEnabled(previousStderr);
+    _resetLogs();
+    cleanupRepoBase(base, previousCwd);
+  });
+  execFileSync("git", ["checkout", "-b", "milestone/M001"], { cwd: base, stdio: "pipe" });
+  execFileSync("git", ["checkout", "main"], { cwd: base, stdio: "pipe" });
+  const wt = join(base, ".gsd", "worktrees", "M001");
+  execFileSync("git", ["worktree", "add", wt, "milestone/M001"], { cwd: base, stdio: "pipe" });
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# M001\n- [x] S01: Slice one\n");
+  openDatabase(":memory:");
+  _resetLogs();
+  process.chdir(wt);
+
+  const result = new WorktreeLifecycle(
+    makeSession({ basePath: wt, originalBasePath: base }),
+    makeDeps(),
+  ).exitMilestone("M001", { merge: true }, makeCtx());
+
+  assert.deepEqual(result, { ok: true, merged: true, codeFilesChanged: true });
+  assert.equal(getMilestone("M001"), null);
 });
 
 // ─── Queries (issue #5587) ────────────────────────────────────────────────────
@@ -1232,6 +1368,69 @@ test("isolation:none merge skip pushes the integration branch when auto_push is 
   assert.equal(pushEvent.data?.pushed, true);
   assert.equal(pushEvent.data?.branch, "main");
   assert.equal(pushEvent.data?.remote, "origin");
+});
+
+test("isolation:none merge skip pushes through the worktree basePath when no session root was adopted (#2874)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase();
+  const bare = makeBareRemote("gsd-lifecycle-remote-");
+  t.after(() => {
+    cleanupRepoBase(base, previousCwd);
+    rmSync(bare, { recursive: true, force: true });
+  });
+  gitIn(base, "remote", "add", "origin", bare);
+  commitMilestoneWork(base, "M001"); // work lands directly on main in isolation:none
+
+  // A session that never adopted a root: worktreeBasePath is the project
+  // root and originalBasePath is the session's empty default — the push must
+  // still run.
+  const result = mergeMilestoneStandalone(autoPushDeps(), {
+    originalBasePath: "",
+    worktreeBasePath: base,
+    milestoneId: "M001",
+    isolationModeOverride: "none",
+    notify: () => {},
+  });
+
+  assert.equal(result.mode, "skipped");
+  assert.equal(result.pushed, true);
+  assert.match(gitIn(base, "ls-remote", "--heads", bare), /refs\/heads\/main/);
+});
+
+test("isolation:none merge skip never solo-pushes through a milestone worktree anchor (#2874)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase();
+  const bare = makeBareRemote("gsd-lifecycle-remote-");
+  t.after(() => {
+    cleanupRepoBase(base, previousCwd);
+    rmSync(bare, { recursive: true, force: true });
+  });
+  gitIn(base, "remote", "add", "origin", bare);
+  commitMilestoneWork(base, "M001");
+
+  // Degenerate session: no adopted root, and the only anchor is a milestone
+  // worktree. Publication belongs to the worktree flow there — the fallback
+  // must suppress the push instead of publishing an unmerged milestone branch.
+  const result = mergeMilestoneStandalone(
+    makeDeps({
+      loadEffectiveGSDPreferences: () => ({
+        preferences: { git: { auto_push: true } },
+      }),
+      isInAutoWorktree: () => true,
+    }),
+    {
+      originalBasePath: "",
+      worktreeBasePath: base,
+      milestoneId: "M001",
+      isolationModeOverride: "none",
+      notify: () => {},
+    },
+  );
+
+  assert.equal(result.mode, "skipped");
+  assert.equal(result.pushed, false);
+  assert.equal(result.pushError, undefined);
+  assert.equal(gitIn(base, "ls-remote", "--heads", bare).trim(), "");
 });
 
 test("isolation:none merge skip does not push when the branch is not ahead of upstream (#2153)", (t) => {

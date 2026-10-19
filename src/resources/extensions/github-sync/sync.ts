@@ -8,9 +8,7 @@
  * All errors are caught internally — sync failures never block execution.
  */
 
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { loadFile, parseSummary } from "../gsd/files.js";
+import { parseSummary } from "../gsd/files.js";
 import {
   getMilestone,
   getMilestoneSlices,
@@ -19,10 +17,8 @@ import {
   isDbAvailable,
 } from "../gsd/gsd-db.js";
 import { openExistingWorkflowDatabase } from "../gsd/db-workspace.js";
-import {
-  resolveSliceFile,
-  resolveTaskFile,
-} from "../gsd/paths.js";
+import { readMilestones, readMilestoneSlices, readSliceTasks } from "../gsd/db/lifecycle-read.js";
+import { normalizeLegacyLifecycleStatus } from "../gsd/status-guards.js";
 import { debugLog } from "../gsd/debug-logger.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 
@@ -453,23 +449,30 @@ async function syncTaskComplete(
   const taskRecord = getTaskRecord(mapping, mid, sid, tid);
   if (!taskRecord || taskRecord.state === "closed") return;
 
-  // Load task summary
+  // The database decides whether the Task is complete. An execute-task unit
+  // whose Task is not complete there (its verification failed or has not run)
+  // posts nothing.
+  ensureSyncDb(basePath);
+  const task = isDbAvailable() ? readSliceTasks(mid, sid).find((t) => t.id === tid) : undefined;
+  if (!task || normalizeLegacyLifecycleStatus(task.status) !== "completed") {
+    debugLog("github-sync", { skip: "task is not complete in the database", mid, sid, tid });
+    return;
+  }
+
+  // Post the task summary. The summary is the one stored on the task row; the
+  // SUMMARY.md projection is not read.
   let commentOk = true;
-  const summaryPath = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
-  if (summaryPath) {
-    const content = await loadFile(summaryPath);
-    if (content) {
-      const summary = parseSummary(content);
-      const comment = formatSummaryComment({
-        oneLiner: summary.oneLiner,
-        body: summary.whatHappened,
-        frontmatter: summary.frontmatter as unknown as Record<string, unknown>,
-      });
-      const commentResult = ghAddComment(basePath, mapping.repo, taskRecord.issueNumber, comment);
-      commentOk = commentResult.ok;
-      if (!commentResult.ok) {
-        debugLog("github-sync", { phase: "task-comment-failed", mid, sid, tid, error: commentResult.error });
-      }
+  if (task.full_summary_md) {
+    const summary = parseSummary(task.full_summary_md);
+    const comment = formatSummaryComment({
+      oneLiner: summary.oneLiner,
+      body: summary.whatHappened,
+      frontmatter: summary.frontmatter as unknown as Record<string, unknown>,
+    });
+    const commentResult = ghAddComment(basePath, mapping.repo, taskRecord.issueNumber, comment);
+    commentOk = commentResult.ok;
+    if (!commentResult.ok) {
+      debugLog("github-sync", { phase: "task-comment-failed", mid, sid, tid, error: commentResult.error });
     }
   }
 
@@ -492,6 +495,15 @@ async function syncSliceComplete(
   mid: string,
   sid: string,
 ): Promise<void> {
+  // The database decides whether the Slice is complete. A complete-slice unit
+  // that ended without completing its Slice must not publish or merge the PR.
+  ensureSyncDb(basePath);
+  const slice = isDbAvailable() ? readMilestoneSlices(mid).find((s) => s.id === sid) : undefined;
+  if (!slice || normalizeLegacyLifecycleStatus(slice.status) !== "completed") {
+    debugLog("github-sync", { skip: "slice is not complete in the database", mid, sid });
+    return;
+  }
+
   let sliceRecord = getSliceRecord(mapping, mid, sid);
   if (!sliceRecord) {
     await syncSlicePlan(basePath, mapping, config, mid, sid);
@@ -504,26 +516,25 @@ async function syncSliceComplete(
     if (!sliceRecord || !sliceRecord.prNumber) return;
   }
 
-  // Post slice summary as PR comment
-  const summaryPath = resolveSliceFile(basePath, mid, sid, "SUMMARY");
-  if (summaryPath && sliceRecord.prNumber) {
-    const content = await loadFile(summaryPath);
-    if (content) {
-      const summary = parseSummary(content);
-      const comment = formatSummaryComment({
-        oneLiner: summary.oneLiner,
-        body: summary.whatHappened,
-        frontmatter: summary.frontmatter as unknown as Record<string, unknown>,
-      });
-      ghAddComment(basePath, mapping.repo, sliceRecord.prNumber, comment);
-    }
+  // Post the slice summary as a PR comment. The summary is the one stored on
+  // the slice row; the SUMMARY.md projection is not read.
+  if (slice.full_summary_md && sliceRecord.prNumber) {
+    const summary = parseSummary(slice.full_summary_md);
+    const comment = formatSummaryComment({
+      oneLiner: summary.oneLiner,
+      body: summary.whatHappened,
+      frontmatter: summary.frontmatter as unknown as Record<string, unknown>,
+    });
+    ghAddComment(basePath, mapping.repo, sliceRecord.prNumber, comment);
   }
 
   // Mark PR ready for review, then merge
   if (sliceRecord.prNumber) {
     ghMarkPRReady(basePath, mapping.repo, sliceRecord.prNumber);
-    // Squash-merge into milestone branch
-    ghMergePR(basePath, mapping.repo, sliceRecord.prNumber, "squash");
+    // Merge honors the git.merge_strategy preference (#2279); squash is the default.
+    const gitPrefs = loadEffectiveGSDPreferences(basePath)?.preferences?.git ?? {};
+    const effectiveStrategy = gitPrefs.merge_strategy === "merge" ? "merge" : "squash";
+    ghMergePR(basePath, mapping.repo, sliceRecord.prNumber, effectiveStrategy);
   }
 
   sliceRecord.state = "closed";
@@ -612,6 +623,27 @@ export async function finalizeMilestoneGitHubSync(basePath: string, mid: string)
   }
 }
 
+/**
+ * Close a milestone on GitHub from a record carried outside the mapping file,
+ * and store the result in the mapping under `basePath`. Returns true when the
+ * milestone is closed on GitHub.
+ */
+export function closeMilestoneFromRecord(
+  basePath: string,
+  repo: string,
+  mid: string,
+  numbers: { issueNumber: number; ghMilestoneNumber: number },
+): boolean {
+  if (!ghIsAvailable() || !ghHasRateLimit(basePath)) return false;
+  const mapping = loadSyncMapping(basePath) ?? createEmptyMapping(repo);
+  if (!getMilestoneRecord(mapping, mid)) {
+    setMilestoneRecord(mapping, mid, { ...numbers, lastSyncedAt: new Date().toISOString(), state: "open" });
+  }
+  closeMilestoneOnGitHub(basePath, mapping, mid);
+  saveSyncMapping(basePath, mapping);
+  return getMilestoneRecord(mapping, mid)?.state === "closed";
+}
+
 async function syncMilestoneComplete(
   basePath: string,
   mapping: SyncMapping,
@@ -624,8 +656,9 @@ async function syncMilestoneComplete(
 // ─── Bootstrap ──────────────────────────────────────────────────────────────
 
 /**
- * Walk the `.gsd/milestones/` tree and create GitHub entities for any
- * that are missing from the sync mapping. Safe to run multiple times.
+ * Walk the Milestones and Slices of the database and create GitHub entities
+ * for any that are missing from the sync mapping. A discarded Milestone is
+ * skipped. Safe to run multiple times.
  */
 export async function bootstrapSync(basePath: string): Promise<{
   milestones: number;
@@ -644,30 +677,16 @@ export async function bootstrapSync(basePath: string): Promise<{
 
   const taskCountBefore = Object.keys(mapping.tasks).length;
   const counts = { milestones: 0, slices: 0, tasks: 0 };
-  const milestonesDir = join(basePath, ".gsd", "milestones");
-  if (!existsSync(milestonesDir)) return counts;
+  ensureSyncDb(basePath);
+  if (!isDbAvailable()) return counts;
 
-  const milestoneIds = readdirSync(milestonesDir, { withFileTypes: true })
-    .filter(d => d.isDirectory())
-    .map(d => d.name)
-    .sort();
-
-  for (const mid of milestoneIds) {
+  for (const { id: mid } of readMilestones().filter((milestone) => !milestone.discarded)) {
     if (!getMilestoneRecord(mapping, mid)) {
       await syncMilestonePlan(basePath, mapping, config, mid);
       counts.milestones++;
     }
 
-    // Find slices
-    const slicesDir = join(milestonesDir, mid, "slices");
-    if (!existsSync(slicesDir)) continue;
-
-    const sliceIds = readdirSync(slicesDir, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => d.name)
-      .sort();
-
-    for (const sid of sliceIds) {
+    for (const { id: sid } of readMilestoneSlices(mid)) {
       if (!getSliceRecord(mapping, mid, sid)) {
         await syncSlicePlan(basePath, mapping, config, mid, sid);
         counts.slices++;

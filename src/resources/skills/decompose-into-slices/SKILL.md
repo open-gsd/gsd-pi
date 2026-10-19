@@ -1,16 +1,17 @@
 ---
 name: decompose-into-slices
-description: Break a plan or milestone brief into independently-grabbable vertical slices (tracer bullets), written to `M###-ROADMAP.md` by default (GitHub issues only on explicit confirmation). Prefers many thin slices over few thick ones and marks dependency order. Use when asked to "break this into slices", "decompose the plan", "vertical slices", "break into issues", or when a plan needs task-level decomposition.
+description: Break a plan or milestone brief into independently-grabbable vertical slices (tracer bullets), saved with `gsd_plan_milestone` by default (GitHub issues only on explicit confirmation). Prefers many thin slices over few thick ones and marks dependency order. Use when asked to "break this into slices", "decompose the plan", "vertical slices", "break into issues", or when a plan needs task-level decomposition.
 ---
 
 <objective>
-Decompose an approved plan into the smallest useful vertical slices that each cut end-to-end through every relevant layer. Primary output is the `Slices` section of `M###-ROADMAP.md` (matching the template at `src/resources/extensions/gsd/templates/roadmap.md`). Secondary output, only with explicit confirmation, is a set of GitHub issues with blocked-by relationships wired up.
+Decompose an approved plan into the smallest useful vertical slices that each cut end-to-end through every relevant layer. Primary output is the milestone's slices, saved with `gsd_plan_milestone`, which renders `M###-ROADMAP.md`. Secondary output, only with explicit confirmation, is a set of GitHub issues with blocked-by relationships wired up.
 </objective>
 
 <context>
 This skill runs after the brief is stable — `M###-CONTEXT.md` exists and the user has signed off on scope. It's the bridge from "we know what we're building" to "we know in what order and chunks." The vertical-slice discipline (tracer bullets) is non-negotiable here — it's the core of what makes GSD slices demoable and parallel-safe.
 
 Typical invocation points:
+
 - After `write-milestone-brief` (or after a `discuss` phase that produced a brief)
 - When a roadmap exists but slices are too thick, too few, or poorly ordered
 - When exporting the plan for external collaborators (GitHub issues)
@@ -67,20 +68,13 @@ Present the draft as a numbered list with ID, title, risk, depends, demo line. T
 
 Iterate on feedback until the user approves the breakdown. Do not proceed to Step 5 without explicit approval.
 
-## Step 5: Write the roadmap
+## Step 5: Save the roadmap
 
-Once approved, write or update `M###-ROADMAP.md` matching the template exactly. Critical format (parsers depend on it):
+Once approved, call `gsd_plan_milestone` with `milestoneId`, `title`, `vision` and `slices[]`. Each slice needs `sliceId`, `title`, `risk`, `depends` (slice IDs, in dependency order), `demo` (one sentence showing what is demoable after the slice) and `goal`.
 
-```markdown
-- [ ] **S01: Title** `risk:high` `depends:[]`
-  > After this: one sentence showing what's demoable
-- [ ] **S02: Title** `risk:medium` `depends:[S01]`
-  > After this: one sentence showing what's demoable
-```
+Fill the rest of the tool parameters: success criteria, key risks, proof strategy, verification classes, definition of done, requirement coverage, the horizontal checklist (omit for trivial milestones), and the boundary map (`S01 → S02` produces/consumes — be specific, name real APIs/types/invariants).
 
-Fill the rest of the template: Vision, Success Criteria, Key Risks, Proof Strategy, Verification Classes, Definition of Done, Requirement Coverage, Horizontal Checklist (omit entirely for trivial milestones), and the Boundary Map (`S01 → S02` produces/consumes blocks — be specific, name real APIs/types/invariants).
-
-Use `write` to the path `.gsd/milestones/<MID>/<MID>-ROADMAP.md`. Do not edit checkboxes by hand during normal execution — the `gsd_*` tools own state.
+The tool stores the roadmap in the database and renders `.gsd/milestones/<MID>/<MID>-ROADMAP.md`. Do not write or edit that file — the `gsd_*` tools own state.
 
 ## Step 6: Optionally file as GitHub issues
 
@@ -132,7 +126,7 @@ Do NOT close or modify any parent issue.
 - [ ] Every slice has a concrete, observable demo line.
 - [ ] Dependency graph is explicit and correct — `depends:[]` on slices that can start immediately.
 - [ ] Risk ordering puts the hardest uncertainty-retiring slices first.
-- [ ] `M###-ROADMAP.md` matches the template format exactly (parsers depend on it).
+- [ ] The roadmap is saved with `gsd_plan_milestone` (it renders `M###-ROADMAP.md`).
 - [ ] If the milestone crosses runtime boundaries, a final integration slice exists.
 - [ ] GitHub issues, if filed, cite real issue numbers for blocked-by and reference the brief.
 

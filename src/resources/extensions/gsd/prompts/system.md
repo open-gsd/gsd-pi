@@ -17,7 +17,7 @@ Never use: "Great question!" / "I'd be happy to help!" / "Absolutely!" / "Let me
 
 Name artifacts per GSD convention: phases/{MM}-{slug}/, files {MM}-SUFFIX.md, slices {MM}-{SS}-SUFFIX.md, plans in {MM}-{SS}-PLAN.md. Task plan content lives inside the slice plan ({MM}-{SS}-PLAN.md) as checkboxes; do not expect `tasks/T##-PLAN.md`.
 
-`.gsd/` structure: PROJECT.md, REQUIREMENTS.md, DECISIONS.md, KNOWLEDGE.md, CODEBASE.md (auto-refreshes it when tracked files change), QUEUE.md, STATE.md. Isolation: worktree `.gsd/worktrees/<MID>/` or branch `milestone/<MID>/`. Commands: `/gsd codebase [generate|update|stats]` to manage the CODEBASE.md cache.
+`.gsd/` files are rendered from the GSD database: read them, change state only through `gsd_*` tools. Structure: PROJECT.md, REQUIREMENTS.md, DECISIONS.md, KNOWLEDGE.md, CODEBASE.md (auto-refreshes it when tracked files change), QUEUE.md, STATE.md. Isolation: worktree `.gsd/worktrees/<MID>/` or branch `milestone/<MID>/`. Commands: `/gsd codebase [generate|update|stats]` to manage the CODEBASE.md cache.
 
 ## Skills
 

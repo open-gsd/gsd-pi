@@ -23,6 +23,7 @@ import {
   SKILL_ACTIONS,
   type WorkflowMode,
   type GSDPreferences,
+  type GSDModelFallback,
   type GSDPhaseModelConfig,
   type GSDSkillRule,
   type GSDThinkingLevel,
@@ -81,7 +82,7 @@ function sanitizeModelField(
       sanitized.provider = obj.provider.trim();
     }
     if (obj.fallbacks !== undefined) {
-      const fallbacks = normalizeStringArray(obj.fallbacks);
+      const fallbacks = sanitizeFallbackEntries(obj.fallbacks, `${label} fallbacks`, warnings);
       if (fallbacks.length > 0) sanitized.fallbacks = fallbacks;
     }
     // Preserve the object form's `thinking` sub-field so the dispatch site can
@@ -102,6 +103,55 @@ function sanitizeModelField(
   }
   errors.push(`${label} must be a string or an object with a "model" field`);
   return undefined;
+}
+
+/**
+ * Sanitize a `fallbacks[]` list (#1270). Each entry is either a bare model ID
+ * string (pre-#1270 form, unchanged) or `{ model, thinking? }`. Entries that
+ * are neither are warned-and-skipped so one bad entry cannot discard the whole
+ * chain; an invalid per-entry `thinking` is warned-and-stripped, mirroring the
+ * field-level `thinking` handling above.
+ */
+function sanitizeFallbackEntries(
+  raw: unknown,
+  label: string,
+  warnings?: string[],
+): GSDModelFallback[] {
+  if (!Array.isArray(raw)) return [];
+  const entries: GSDModelFallback[] = [];
+  for (const item of raw) {
+    if (typeof item === "string") {
+      const trimmed = item.trim();
+      if (trimmed) entries.push(trimmed);
+      continue;
+    }
+    if (item && typeof item === "object") {
+      const entry = item as Record<string, unknown>;
+      const model = typeof entry.model === "string" ? entry.model.trim() : "";
+      if (!model) {
+        warnings?.push(
+          `${label} entry must be a non-empty model ID string or an object with a non-empty "model" — entry ignored`,
+        );
+        continue;
+      }
+      if (entry.thinking === undefined) {
+        entries.push({ model });
+      } else if (VALID_THINKING_LEVELS.has(entry.thinking as GSDThinkingLevel)) {
+        entries.push({ model, thinking: entry.thinking as GSDThinkingLevel });
+      } else {
+        warnings?.push(
+          `${label} thinking "${String(entry.thinking)}" is not a valid thinking level ` +
+          `(off, minimal, low, medium, high, xhigh, max) — ignored`,
+        );
+        entries.push({ model });
+      }
+      continue;
+    }
+    warnings?.push(
+      `${label} entry must be a non-empty model ID string or an object with a non-empty "model" — entry ignored`,
+    );
+  }
+  return entries;
 }
 
 const VALID_POST_UNIT_HOOK_CRITICALITIES = new Set(["advisory", "blocking"]);
@@ -438,11 +488,11 @@ export function validatePreferences(preferences: GSDPreferences): {
 
   // ─── Search Provider ─────────────────────────────────────────────
   if (preferences.search_provider !== undefined) {
-    const validSearchProviders = new Set(["brave", "tavily", "ollama", "native", "auto"]);
+    const validSearchProviders = new Set(["brave", "tavily", "ollama", "firecrawl", "native", "auto"]);
     if (typeof preferences.search_provider === "string" && validSearchProviders.has(preferences.search_provider)) {
       validated.search_provider = preferences.search_provider as GSDPreferences["search_provider"];
     } else {
-      errors.push(`search_provider must be one of: brave, tavily, ollama, native, auto`);
+      errors.push(`search_provider must be one of: brave, tavily, ollama, firecrawl, native, auto`);
     }
   }
 
@@ -538,6 +588,16 @@ export function validatePreferences(preferences: GSDPreferences): {
       // we warn on illegal level strings AND strip them, so a typo can't reach
       // resolveThinkingLevelForUnit and be treated as explicit configuration.
       const sanitizedModels: Record<string, unknown> = {};
+      const sanitizePhaseEntry = (phase: string, value: unknown): unknown => {
+        if (!value || typeof value !== "object" || Array.isArray(value) || !("fallbacks" in value)) return value;
+        const record = value as Record<string, unknown>;
+        const fallbacks = sanitizeFallbackEntries(record.fallbacks, `models.${phase}.fallbacks`, warnings);
+        if (fallbacks.length > 0) {
+          return { ...record, fallbacks };
+        }
+        const { fallbacks: _dropped, ...rest } = record;
+        return rest;
+      };
       for (const [phase, entry] of Object.entries(preferences.models as Record<string, unknown>)) {
         if (entry && typeof entry === "object" && "thinking" in entry) {
           const level = (entry as { thinking?: unknown }).thinking;
@@ -551,12 +611,12 @@ export function validatePreferences(preferences: GSDPreferences): {
             // phase entirely rather than storing a hollow `{}` / `{ provider }`
             // entry that resolveWinningPhase would otherwise treat as configured.
             if (rest.model) {
-              sanitizedModels[phase] = rest;
+              sanitizedModels[phase] = sanitizePhaseEntry(phase, rest);
             }
             continue;
           }
         }
-        sanitizedModels[phase] = entry;
+        sanitizedModels[phase] = sanitizePhaseEntry(phase, entry);
       }
       validated.models = sanitizedModels as GSDPreferences["models"];
     } else {
@@ -1397,6 +1457,21 @@ export function validatePreferences(preferences: GSDPreferences): {
     }
   }
 
+  if (preferences.verification_source_exclude_paths !== undefined) {
+    if (Array.isArray(preferences.verification_source_exclude_paths)) {
+      const allStrings = preferences.verification_source_exclude_paths.every(
+        (item: unknown) => typeof item === "string",
+      );
+      if (allStrings) {
+        validated.verification_source_exclude_paths = preferences.verification_source_exclude_paths;
+      } else {
+        errors.push("verification_source_exclude_paths must be an array of strings");
+      }
+    } else {
+      errors.push("verification_source_exclude_paths must be an array of strings");
+    }
+  }
+
   if (preferences.per_unit_cost_cap_usd !== undefined) {
     const raw = preferences.per_unit_cost_cap_usd;
     if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
@@ -1527,6 +1602,10 @@ export function validatePreferences(preferences: GSDPreferences): {
       } else {
         errors.push("git.milestone_resquash must be a boolean");
       }
+    }
+    if (g.preserve_worktree_on_stop !== undefined) {
+      if (typeof g.preserve_worktree_on_stop === "boolean") git.preserve_worktree_on_stop = g.preserve_worktree_on_stop;
+      else errors.push("git.preserve_worktree_on_stop must be a boolean");
     }
 
     if (Object.keys(git).length > 0) {

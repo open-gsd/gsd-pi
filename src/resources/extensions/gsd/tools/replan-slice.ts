@@ -2,20 +2,19 @@ import { clearParseCache } from "../files.js";
 import {
   adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
-  getSlice,
   getSliceTasks,
-  getTask,
   getLatestWorkflowDomainEvent,
   insertTask,
   upsertTaskPlanning,
   insertReplanHistory,
-  normalizeLegacyLifecycleStatus,
   projectCanonicalStatusToLegacy,
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
-import { isClosedStatus } from "../status-guards.js";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
+import { readMilestone, readSlice, readSliceTasks, readTask } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
-import { renderPlanFromDb, renderReplanFromDb } from "../markdown-renderer.js";
+import { renderPlanFromDb, renderSliceReplan } from "../markdown-renderer.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
 import { appendEvent } from "../workflow-events.js";
@@ -28,6 +27,14 @@ import {
   PlanningGuardError,
   planningOperationPayload,
 } from "../planning-domain-operation.js";
+import { executeDomainOperation, type DomainOperationResult } from "../db/domain-operation.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
+import {
+  grantPlanReconciliationWaiver,
+  readActivePlanReconciliationWaiver,
+  recordPlanReconciliationDisposition,
+  type PlanReconciliationAuthorization,
+} from "../db/writers/slice-lifecycle.js";
 import { readLatestTaskAttempt } from "../task-execution-domain-operation.js";
 import { ensurePendingSliceQ8 } from "../db/writers/slice-companion-state.js";
 import { validateTaskToolRequirements } from "../task-tool-requirements.js";
@@ -64,6 +71,47 @@ export interface ReplanSliceResult {
   sliceId: string;
   replanPath: string;
   planPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
+}
+
+/**
+ * Provenance of a `blocker-accepted` closeout for the blocker task (#2202).
+ * When the requested blockerTaskId was closed by accepting a discovered
+ * blocker, the durable replan event carries the accepted blocker's provenance
+ * so the revised plan is attributed to the accepted blocker explicitly instead
+ * of an arbitrary closed task in the slice.
+ */
+function readBlockerAcceptedProvenance(
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+): Record<string, string> | null {
+  const blockerTask = readTask(milestoneId, sliceId, taskId);
+  if (!blockerTask || blockerTask.status !== "blocker-accepted") return null;
+  const event = getLatestWorkflowDomainEvent(
+    "task.blocker.accepted",
+    "task",
+    `${milestoneId}/${sliceId}/${taskId}`,
+  );
+  if (!event) return null;
+  const payload = event.payload;
+  const accepted: Record<string, string> = {
+    disposition: "blocker-accepted",
+    acceptedAt: typeof payload["acceptedAt"] === "string" ? payload["acceptedAt"] : event.createdAt,
+  };
+  for (const key of [
+    "attemptId",
+    "resultId",
+    "blockerSummary",
+    "supersededRecoveryActionId",
+    "blockerId",
+    "rationale",
+  ] as const) {
+    const value = payload[key];
+    if (typeof value === "string" && value.length > 0) accepted[key] = value as string;
+  }
+  return accepted;
 }
 
 function validateParams(params: ReplanSliceParams): ReplanSliceParams {
@@ -110,6 +158,64 @@ function validateParams(params: ReplanSliceParams): ReplanSliceParams {
   return { ...params, updatedTasks };
 }
 
+/**
+ * Record the waived Requirement Dispositions for the cancellation Waivers the
+ * replan operation minted for removed tasks (#2346/#2451). The schema's
+ * waiver-authority trigger requires a Waiver to precede its waived
+ * Disposition by at least one project revision, so this runs as its own
+ * fenced Domain Operation keyed to the replan operation's receipt — a replayed
+ * replan operation reuses the same key and therefore stays idempotent.
+ */
+function authorizeReconciliationOmissions(input: {
+  invocation: PlanningInvocation;
+  replanReceipt: DomainOperationResult;
+  milestoneId: string;
+  sliceId: string;
+  authorizations: PlanReconciliationAuthorization[];
+}): void {
+  const idempotencyKey = `replan-authorization:${input.replanReceipt.operationId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  const authorizationsPayload = input.authorizations.map((authorization) => ({
+    taskId: authorization.taskId,
+    requirementId: authorization.requirementId,
+    waiverId: authorization.waiverId,
+  }));
+  executeDomainOperation({
+    operationType: "workflow.slice.plan.authorization",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: input.invocation.actorType,
+    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+    sourceTransport: input.invocation.sourceTransport,
+    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+    payload: planningOperationPayload({
+      milestoneId: input.milestoneId,
+      sliceId: input.sliceId,
+      authorizations: authorizationsPayload,
+    }),
+  }, (context) => {
+    for (const authorization of input.authorizations) {
+      recordPlanReconciliationDisposition(context, authorization);
+    }
+    return {
+      events: [{
+        eventType: "workflow.slice.plan.authorized",
+        entityType: "slice",
+        entityId: `${input.milestoneId}/${input.sliceId}`,
+        payload: { authorizations: authorizationsPayload },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `planning/${input.milestoneId}/${input.sliceId}`.toLowerCase(),
+        projectionKind: "markdown",
+        rendererVersion: "v1",
+      }],
+    };
+  });
+}
+
 export async function handleReplanSlice(
   rawParams: ReplanSliceParams,
   basePath: string,
@@ -124,11 +230,15 @@ export async function handleReplanSlice(
   }
 
   let operationStatus: "committed" | "replayed";
+  const blockerAcceptedProvenance = readBlockerAcceptedProvenance(
+    params.milestoneId,
+    params.sliceId,
+    params.blockerTaskId,
+  );
   try {
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.slice.replan",
       invocation,
-      actorId: params.actorName,
       payload: planningOperationPayload(params),
       event: {
         eventType: "workflow.slice.replanned",
@@ -142,6 +252,7 @@ export async function handleReplanSlice(
           whatChanged: params.whatChanged,
           removedTaskIds: params.removedTaskIds,
           updatedTaskIds: params.updatedTasks.map((task) => task.taskId),
+          ...(blockerAcceptedProvenance ? { blockerAccepted: blockerAcceptedProvenance } : {}),
         },
         destinations: ["projection"],
       },
@@ -151,6 +262,9 @@ export async function handleReplanSlice(
         rendererVersion: "v1",
       },
       lifecycleItems: () => [
+        // #2313: include the parent Milestone for plan-slice parity so the
+        // emitted shadow comparisons cover the full authority chain.
+        { itemKind: "milestone", milestoneId: params.milestoneId },
         { itemKind: "slice", milestoneId: params.milestoneId, sliceId: params.sliceId },
         ...getSliceTasks(params.milestoneId, params.sliceId).map((task) => ({
           itemKind: "task" as const,
@@ -161,15 +275,40 @@ export async function handleReplanSlice(
       ],
       mutate(context) {
         // Verify parent slice exists and has not been canonically cancelled.
-        const parentSlice = getSlice(params.milestoneId, params.sliceId);
+        const parentSlice = readSlice(params.milestoneId, params.sliceId);
         if (!parentSlice) {
           throw new PlanningGuardError(`missing parent slice: ${params.milestoneId}/${params.sliceId}`);
+        }
+        // #2313: adopt the parent Milestone lifecycle too, aligned with
+        // plan-slice — replanning must not leave the authority chain
+        // partially canonicalized.
+        const parentMilestone = readMilestone(params.milestoneId);
+        if (!parentMilestone) {
+          throw new PlanningGuardError(`missing parent milestone: ${params.milestoneId}`);
+        }
+        if (parentMilestone.closed) {
+          throw new PlanningGuardError(
+            `cannot replan a slice in a closed milestone: ${params.milestoneId} (status: ${parentMilestone.status})`,
+          );
+        }
+        const milestoneLifecycle = adoptLifecycleIfMissing(context, {
+          itemKind: "milestone",
+          milestoneId: params.milestoneId,
+          lifecycleStatus: adoptionLifecycleStatus(`milestone ${params.milestoneId}`, parentMilestone.status, "ready"),
+        });
+        if (
+          milestoneLifecycle.lifecycleStatus === "completed" ||
+          milestoneLifecycle.lifecycleStatus === "cancelled"
+        ) {
+          throw new PlanningGuardError(
+            `cannot replan a slice in a ${milestoneLifecycle.lifecycleStatus} milestone ${params.milestoneId} — use gsd_milestone_reopen first`,
+          );
         }
         const sliceLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(parentSlice.status) ?? "ready",
+          lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${params.sliceId}`, parentSlice.status),
         });
         if (sliceLifecycle.lifecycleStatus === "cancelled" || parentSlice.status === "skipped") {
           throw new PlanningGuardError(`cannot replan cancelled slice ${params.sliceId} — use gsd_slice_reopen first`);
@@ -177,12 +316,12 @@ export async function handleReplanSlice(
         if (sliceLifecycle.lifecycleStatus === "completed") {
           throw new PlanningGuardError(`cannot replan completed slice ${params.sliceId} — use gsd_slice_reopen first`);
         }
-        if (isClosedStatus(parentSlice.status)) {
+        if (parentSlice.closed) {
           throw new PlanningGuardError(`cannot replan a closed slice: ${params.sliceId} (status: ${parentSlice.status})`);
         }
 
         // Verify blocker task exists and is complete
-        const blockerTask = getTask(params.milestoneId, params.sliceId, params.blockerTaskId);
+        const blockerTask = readTask(params.milestoneId, params.sliceId, params.blockerTaskId);
         if (!blockerTask) {
           throw new PlanningGuardError(`blockerTaskId not found: ${params.milestoneId}/${params.sliceId}/${params.blockerTaskId}`);
         }
@@ -191,23 +330,25 @@ export async function handleReplanSlice(
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
           taskId: params.blockerTaskId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(blockerTask.status) ?? "ready",
+          lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${params.blockerTaskId}`, blockerTask.status),
         });
         if (blockerLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
             `blockerTaskId ${params.blockerTaskId} is canonically cancelled — explicitly reopen it before using it as a completed blocker`,
           );
         }
-        if (!isClosedStatus(blockerTask.status) || blockerTask.status === "skipped") {
+        // #2202: a `blocker-accepted` Task counts as the closed blocker for the
+        // replan gate; `skipped`/`cancelled` remain rejected.
+        if (!blockerTask.done || blockerTask.status === "skipped") {
           throw new PlanningGuardError(`blockerTaskId ${params.blockerTaskId} is not complete (status: ${blockerTask.status}) — the blocker task must be finished before a replan is triggered`);
         }
 
         // Structural enforcement — reject modifications/removal of completed tasks
-        const existingTasks = getSliceTasks(params.milestoneId, params.sliceId);
+        const existingTasks = readSliceTasks(params.milestoneId, params.sliceId);
         const existingTaskById = new Map(existingTasks.map((task) => [task.id, task]));
         const completedTaskIds = new Set(
           existingTasks
-            .filter((task) => isClosedStatus(task.status) && task.status !== "skipped" && task.status !== "deferred" && task.status !== "cancelled")
+            .filter((task) => task.done && task.status !== "skipped" && task.status !== "deferred" && task.status !== "cancelled")
             .map((task) => task.id),
         );
 
@@ -227,7 +368,7 @@ export async function handleReplanSlice(
               milestoneId: params.milestoneId,
               sliceId: params.sliceId,
               taskId: updatedTask.taskId,
-              lifecycleStatus: normalizeLegacyLifecycleStatus(existingTask.status) ?? "ready",
+              lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${updatedTask.taskId}`, existingTask.status),
             });
             if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
               throw new PlanningGuardError(
@@ -253,8 +394,7 @@ export async function handleReplanSlice(
           if (latestAttempt?.state === "running") {
             throw new PlanningGuardError(`cannot remove task ${taskId} while it has a running Attempt`);
           }
-          const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
-          const observedLifecycleStatus = legacyLifecycleStatus ?? "ready";
+          const observedLifecycleStatus = adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${taskId}`, task.status);
           const lifecycle = adoptLifecycleIfMissing(context, {
             itemKind: "task",
             milestoneId: params.milestoneId,
@@ -325,7 +465,7 @@ export async function handleReplanSlice(
             milestoneId: params.milestoneId,
             sliceId: params.sliceId,
             taskId: removedTask.id,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(removedTask.status) ?? "ready",
+            lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${removedTask.id}`, removedTask.status),
           });
           if (lifecycle.lifecycleStatus !== "cancelled") {
             adoptOrTransitionLifecycle(context, {
@@ -343,17 +483,55 @@ export async function handleReplanSlice(
             taskId: removedTask.id,
             status: "skipped",
           });
+          // #2346/#2451: a replan removal must carry the cancellation
+          // authorization the completion-side invariants demand, so slice and
+          // milestone closeout are not permanently blocked without a manual
+          // waiver.
+          grantPlanReconciliationWaiver(context, {
+            milestoneId: params.milestoneId,
+            sliceId: params.sliceId,
+            taskId: removedTask.id,
+          });
         }
         ensurePendingSliceQ8(context, params);
       },
     });
     operationStatus = receipt.status;
+    // Re-derive the authorizations from durable state — not from the mutation
+    // run, which a replayed replan operation skips — so an exact retry after a
+    // lost or failed authorization operation still records the waived
+    // Dispositions (#2346). The follow-up operation is fenced by the replan
+    // receipt's operation id, so re-running it stays idempotent.
+    const reconciliationAuthorizations = params.removedTaskIds
+      .map((taskId) => readActivePlanReconciliationWaiver({
+        milestoneId: params.milestoneId,
+        sliceId: params.sliceId,
+        taskId,
+      }))
+      .filter((authorization): authorization is PlanReconciliationAuthorization => authorization !== null);
+    if (reconciliationAuthorizations.length > 0) {
+      authorizeReconciliationOmissions({
+        invocation,
+        replanReceipt: receipt,
+        milestoneId: params.milestoneId,
+        sliceId: params.sliceId,
+        authorizations: reconciliationAuthorizations,
+      });
+    }
   } catch (err) {
-    if (err instanceof PlanningGuardError) return { error: err.message };
+    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 
+  // A re-planned unit gets its verification retries again (ADR-048).
+  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}`);
+
   // ── Render artifacts ──────────────────────────────────────────────
+  // The replan is committed. A failed render must not fail the tool: its
+  // Projection Work stays pending and the Projection Worker renders it again.
+  let planPath = "";
+  let replanPath = "";
+  let stale = false;
   try {
     for (const task of getSliceTasks(params.milestoneId, params.sliceId)) {
       if (task.status !== "skipped") continue;
@@ -361,59 +539,42 @@ export async function handleReplanSlice(
       if (!taskPlanPath) continue;
       removeOwnedPlanProjection(basePath, taskPlanPath);
     }
-    const renderResult = await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
-    const durableReplan = getLatestWorkflowDomainEvent(
-      "workflow.slice.replanned",
-      "slice",
-      `${params.milestoneId}/${params.sliceId}`,
-    );
-    if (!durableReplan) throw new Error("durable replan event not found");
-    const blockerTaskId = durableReplan.payload["blockerTaskId"];
-    const blockerDescription = durableReplan.payload["blockerDescription"];
-    const whatChanged = durableReplan.payload["whatChanged"];
-    if (
-      typeof blockerTaskId !== "string" ||
-      typeof blockerDescription !== "string" ||
-      typeof whatChanged !== "string"
-    ) {
-      throw new Error("durable replan event is missing projection data");
-    }
-    const replanResult = await renderReplanFromDb(basePath, params.milestoneId, params.sliceId, {
-      blockerTaskId,
-      blockerDescription,
-      whatChanged,
-      createdAt: durableReplan.createdAt,
-    });
-
-    // ── Invalidate caches ─────────────────────────────────────────
-    invalidateStateCache();
-    clearParseCache();
-
-    // ── Post-mutation hook: projections, manifest, event log ─────
-    try {
-      await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
-      await writeManifestAndFlush(basePath);
-      if (operationStatus === "committed") {
-        appendEvent(basePath, {
-          cmd: "replan-slice",
-          params: { milestoneId: params.milestoneId, sliceId: params.sliceId, blockerTaskId: params.blockerTaskId },
-          ts: new Date().toISOString(),
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
-      }
-    } catch (hookErr) {
-      logWarning("tool", `replan-slice post-mutation hook warning: ${(hookErr as Error).message}`);
-    }
-
-    return {
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      replanPath: replanResult.replanPath,
-      planPath: renderResult.planPath,
-    };
+    planPath = (await renderPlanFromDb(basePath, params.milestoneId, params.sliceId)).planPath;
+    const replanResult = await renderSliceReplan(basePath, params.milestoneId, params.sliceId);
+    if (!replanResult) throw new Error("durable replan event not found");
+    replanPath = replanResult.replanPath;
   } catch (err) {
-    return { error: `render failed: ${(err as Error).message}` };
+    stale = true;
+    logWarning("projection", `replan_slice render failed for ${params.milestoneId}/${params.sliceId}; the replan stays committed`, { error: (err as Error).message });
   }
+
+  // ── Invalidate caches ─────────────────────────────────────────
+  invalidateStateCache();
+  clearParseCache();
+
+  // ── Post-mutation hook: projections, manifest, event log ─────
+  try {
+    await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
+    await writeManifestAndFlush(basePath);
+    if (operationStatus === "committed") {
+      appendEvent(basePath, {
+        cmd: "replan-slice",
+        params: { milestoneId: params.milestoneId, sliceId: params.sliceId, blockerTaskId: params.blockerTaskId },
+        ts: new Date().toISOString(),
+        actor: "agent",
+        actor_name: params.actorName,
+        trigger_reason: params.triggerReason,
+      });
+    }
+  } catch (hookErr) {
+    logWarning("tool", `replan-slice post-mutation hook warning: ${(hookErr as Error).message}`);
+  }
+
+  return {
+    milestoneId: params.milestoneId,
+    sliceId: params.sliceId,
+    replanPath,
+    planPath,
+    ...(stale ? { stale: true as const } : {}),
+  };
 }

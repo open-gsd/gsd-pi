@@ -99,6 +99,7 @@ left behind, and one regression a fix introduced outside its Verify.
   Only the #1500 reseed is tautological.
 
 Warnings (non-blocking):
+
 - **The one remaining markdown-over-DB fallback in the file is `plan-slice`
   (`artifact-verification.ts:443-499`).** When the DB is unavailable — or
   available with zero task rows for the slice, i.e. "a required row is
@@ -145,6 +146,7 @@ Warnings (non-blocking):
   a written rationale) rather than an accidental fall-through.
 
 Warnings (non-blocking):
+
 - `"skipped"` handling is **deliberately not** equivalent to the checkbox.
   Pre-wave-3, `loadRoadmapCompletedSliceCandidates` fed on
   `parseRoadmap(...).slices.filter(s => s.done)`, and the renderer marks
@@ -287,6 +289,7 @@ without running the files.
   "No telemetry file provided") — T015's AC1 still holds.
 
 Warnings (non-blocking — these decide what wave 4 can honestly claim):
+
 - **The proof is still satisfiable by one more rename, and only the new
   live-repo test stops it.** `LEGACY_PARSER_HOME` (`gsd/schemas/parsers.ts`) is
   exempt from symbol matching (`legacy-state-path-proof.mjs:39`, `:183`).

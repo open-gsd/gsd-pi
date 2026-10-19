@@ -16,9 +16,9 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { gsdRoot, resolveGsdRootFile } from "./paths.js";
+import { gsdRoot } from "./paths.js";
 import { readCrashLock, isLockProcessAlive, clearLock } from "./crash-recovery.js";
-import { rebuildState } from "./doctor.js";
+import { renderStateProjection } from "./workflow-projections.js";
 import { deriveState } from "./state.js";
 import { resolveMilestoneIntegrationBranch } from "./git-service.js";
 import { nativeIsRepo, nativeHasChanges, nativeLastCommitEpoch, nativeGetCurrentBranch, nativeAddTracked, nativeCommit } from "./native-git-bridge.js";
@@ -249,22 +249,10 @@ export async function preDispatchHealthGate(basePath: string): Promise<PreDispat
   }
 
   // ── STATE.md existence check ──
-  // If STATE.md is missing, attempt to rebuild it for the next unit's context.
-  // Non-blocking — fresh worktrees won't have it until the first unit completes (#889).
-  try {
-    const stateFile = resolveGsdRootFile(basePath, "STATE");
-    const milestonesDir = join(gsdRoot(basePath), "milestones");
-    if (existsSync(milestonesDir) && !existsSync(stateFile)) {
-      try {
-        await rebuildState(basePath);
-        fixesApplied.push("rebuilt missing STATE.md before dispatch");
-      } catch {
-        // Rebuild failed — non-blocking, dispatch continues
-        fixesApplied.push("STATE.md missing — will rebuild after first unit completes");
-      }
-    }
-  } catch {
-    // Non-fatal — dispatch continues without STATE.md if rebuild fails
+  // If STATE.md is missing, render it for the next unit's context.
+  // Without a DB it stays missing until the first unit completes (#889).
+  if (!existsSync(join(gsdRoot(basePath), "STATE.md")) && !(await renderStateProjection(basePath)).stale) {
+    fixesApplied.push("rebuilt missing STATE.md before dispatch");
   }
 
   // #442 Phase 1.7: resolve repo-ness once per gate. ensureWorkspaceGitReady

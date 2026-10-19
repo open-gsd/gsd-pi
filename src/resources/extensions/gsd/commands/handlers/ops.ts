@@ -9,7 +9,7 @@ import { handleDoctor, handleCapture, handleKnowledge, handleRunHook, handleSkil
 import { handleInspect } from "../../commands-inspect.js";
 import { handleLogs } from "../../commands-logs.js";
 import { handleDebug } from "../../commands-debug.js";
-import { handleCleanupBranches, handleCleanupSnapshots, handleSkip, handleCleanupProjects, handleCleanupWorktrees, handleRecover, handleRebuild, handleSync, handleDbRestoreBackup } from "../../commands-maintenance.js";
+import { handleCleanupBranches, handleCleanupSnapshots, handleSkip, handleCleanupProjects, handleCleanupWorktrees, handleRecover, handleRebuild, handleSync, handleDbRestoreBackup, handleDbBind, handleDbStartEmpty, handleDbAdopt, handleDbPruneQuarantine } from "../../commands-maintenance.js";
 import { handleExport } from "../../export.js";
 import { handleHistory } from "../../history.js";
 import { handleUndo } from "../../undo.js";
@@ -152,8 +152,29 @@ export async function handleOpsCommand(trimmed: string, ctx: ExtensionCommandCon
     await handleRebuild(ctx, currentDirectoryRoot(), trimmed.replace(/^rebuild\s*/, "").trim());
     return true;
   }
+  if (trimmed === "db bind") {
+    handleDbBind(ctx, projectRoot());
+    return true;
+  }
+  if (trimmed === "db start-empty") {
+    handleDbStartEmpty(ctx, projectRoot());
+    return true;
+  }
+  if (trimmed === "db adopt" || trimmed.startsWith("db adopt ")) {
+    await handleDbAdopt(ctx, projectRoot(), trimmed.replace(/^db adopt\s*/, "").trim());
+    return true;
+  }
   if (trimmed === "db restore-backup" || trimmed.startsWith("db restore-backup ")) {
     await handleDbRestoreBackup(ctx, projectRoot(), trimmed.replace(/^db restore-backup\s*/, "").trim());
+    return true;
+  }
+  if (trimmed === "db prune-quarantine" || trimmed.startsWith("db prune-quarantine ")) {
+    await handleDbPruneQuarantine(ctx, projectRoot(), trimmed.replace(/^db prune-quarantine\s*/, "").trim());
+    return true;
+  }
+  if (trimmed === "uat-answer" || trimmed.startsWith("uat-answer ")) {
+    const { handleUatAnswer } = await import("../../commands-uat-answer.js");
+    await handleUatAnswer(trimmed.replace(/^uat-answer\s*/, "").trim(), ctx, projectRoot());
     return true;
   }
   if (trimmed === "task settle" || trimmed.startsWith("task settle ")) {
@@ -275,11 +296,6 @@ Examples:
       return true;
     }
     await dispatchDirectPhase(ctx, pi, phase, basePath);
-    return true;
-  }
-  if (trimmed === "verdict" || trimmed.startsWith("verdict ")) {
-    const { handleVerdict } = await import("../../commands-verdict.js");
-    await handleVerdict(trimmed.replace(/^verdict\s*/, "").trim(), ctx, projectRoot());
     return true;
   }
   if (trimmed === "notifications" || trimmed.startsWith("notifications ")) {

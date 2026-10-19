@@ -27,6 +27,7 @@ import {
   formatMemoriesForPrompt,
 } from '../memory-store.ts';
 import type { MemoryAction } from '../memory-store.ts';
+import { updateMemoryStructuredFieldsRow } from '../gsd-db.ts';
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -163,6 +164,153 @@ test('memory-store: createMemory supersedes prior active row for same sourceKnow
   assert.equal(active[0]?.id, second);
 
   closeDatabase();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// regression #2756 — superseded decision mirrors must not pass as active
+// ═══════════════════════════════════════════════════════════════════════════
+
+function decisionMirrorFields(id: string, decision: string, supersededBy: string | null) {
+  return {
+    sourceDecisionId: id,
+    when_context: '',
+    scope: 'project',
+    decision,
+    choice: decision,
+    rationale: 'because',
+    made_by: 'agent',
+    revisable: 'Yes',
+    superseded_by: supersededBy,
+  };
+}
+
+test('memory-store: superseded decision mirrors are excluded from active queries (#2756)', (t) => {
+  t.after(closeDatabase);
+  openDatabase(':memory:');
+
+  const d1 = createMemory({
+    category: 'architecture',
+    content: 'decision D001: use provider A',
+    confidence: 0.85,
+    structuredFields: decisionMirrorFields('D001', 'use provider A', null),
+  });
+  const d2 = createMemory({
+    category: 'architecture',
+    content: 'decision D002: use provider B',
+    confidence: 0.85,
+    structuredFields: decisionMirrorFields('D002', 'use provider B', null),
+  });
+  const d3 = createMemory({
+    category: 'architecture',
+    content: 'decision D003: keep deploys on Fridays',
+    confidence: 0.85,
+    structuredFields: decisionMirrorFields('D003', 'keep deploys on Fridays', null),
+  });
+  assert.ok(d1 && d2 && d3, 'mirror seeds should succeed');
+
+  // saveDecisionToDb(supersedes: D001) → supersedeActiveDecision writes ONLY
+  // structured_fields.superseded_by on D001's mirror; the memories.superseded_by
+  // column stays NULL (context-store.ts: decision mirrors never set the column).
+  updateMemoryStructuredFieldsRow(
+    d1,
+    decisionMirrorFields('D001', 'use provider A', d2),
+    new Date().toISOString(),
+  );
+
+  // Both active queries: D001's mirror drops out, D002/D003 stay.
+  for (const ids of [
+    getActiveMemories().map((m) => m.id),
+    getActiveMemoriesRanked(30).map((m) => m.id),
+    queryMemoriesRanked({ query: '', k: 10 }).map((r) => r.memory.id),
+  ]) {
+    assert.ok(!ids.includes(d1), 'superseded decision mirror must not be active');
+    assert.ok(ids.includes(d2) && ids.includes(d3), 'active mirrors must survive');
+  }
+
+  // Keyword path (FTS when available, LIKE fallback otherwise).
+  const hits = queryMemoriesRanked({ query: 'provider', k: 10 }).map((r) => r.memory.id);
+  assert.ok(!hits.includes(d1), 'superseded mirror must not resurface via keyword search');
+  assert.ok(hits.includes(d2), 'the superseding mirror matches the same topic');
+
+  // Explicit opt-in keeps the full supersedes chain visible — both the
+  // keyword path and the blank-query ranked path.
+  for (const opts of [{ query: 'provider', k: 10, include_superseded: true }, { query: '', k: 10, include_superseded: true }] as const) {
+    const withSuperseded = queryMemoriesRanked(opts).map((r) => r.memory.id);
+    assert.ok(withSuperseded.includes(d1), `include_superseded: true keeps the full chain visible (${opts.query ? 'keyword' : 'ranked'} path)`);
+  }
+});
+
+test('memory-store: column supersession still filters non-decision memories (#2756)', (t) => {
+  t.after(closeDatabase);
+  openDatabase(':memory:');
+
+  const plain1 = createMemory({ category: 'gotcha', content: 'plain memory one' });
+  const plain2 = createMemory({ category: 'gotcha', content: 'plain memory two' });
+  assert.ok(plain1 && plain2, 'plain seeds should succeed');
+  supersedeMemory(plain1, plain2); // sets the real memories.superseded_by column
+
+  const rankedIds = getActiveMemoriesRanked(30).map((m) => m.id);
+  assert.ok(!rankedIds.includes(plain1), 'column-superseded rows stay filtered');
+  assert.ok(rankedIds.includes(plain2), 'the superseding row stays active');
+});
+
+test('memory-store: LIKE fallback also drops superseded decision mirrors (#2756)', (t) => {
+  t.after(closeDatabase);
+  openDatabase(':memory:');
+
+  // Drop the FTS machinery so keywordSearch takes the LIKE fallback path.
+  const adapter = _getAdapter()!;
+  adapter.exec('DROP TRIGGER IF EXISTS memories_ai');
+  adapter.exec('DROP TRIGGER IF EXISTS memories_ad');
+  adapter.exec('DROP TRIGGER IF EXISTS memories_au');
+  adapter.exec('DROP TABLE IF EXISTS memories_fts');
+
+  const d1 = createMemory({
+    category: 'architecture',
+    content: 'decision D001: cache eviction policy',
+    structuredFields: decisionMirrorFields('D001', 'cache eviction policy', null),
+  });
+  const d2 = createMemory({
+    category: 'architecture',
+    content: 'decision D002: cache eviction policy v2',
+    structuredFields: decisionMirrorFields('D002', 'cache eviction policy v2', null),
+  });
+  assert.ok(d1 && d2, 'mirror seeds should succeed');
+  updateMemoryStructuredFieldsRow(
+    d1,
+    decisionMirrorFields('D001', 'cache eviction policy', d2),
+    new Date().toISOString(),
+  );
+
+  const hits = queryMemoriesRanked({ query: 'cache eviction', k: 10 }).map((r) => r.memory.id);
+  assert.ok(!hits.includes(d1), 'superseded mirror must not resurface via the LIKE fallback');
+  assert.ok(hits.includes(d2), 'the superseding mirror matches via the LIKE fallback');
+});
+
+test('memory-store: malformed structured_fields does not blank the active set (#2756)', (t) => {
+  t.after(closeDatabase);
+  openDatabase(':memory:');
+
+  const healthy = createMemory({ category: 'gotcha', content: 'healthy plain memory' });
+  const corrupt = createMemory({
+    category: 'architecture',
+    content: 'decision D009: corrupt mirror',
+    structuredFields: decisionMirrorFields('D009', 'corrupt mirror', null),
+  });
+  assert.ok(healthy && corrupt, 'seeds should succeed');
+  // Simulate a corrupted row (manual edit / legacy writer): json_extract would
+  // throw on it and collapse the whole query into `catch → []` without the
+  // json_valid guard.
+  _getAdapter()!
+    .prepare('UPDATE memories SET structured_fields = :sf WHERE id = :id')
+    .run({ ':sf': '{broken json', ':id': corrupt });
+
+  // The query must not throw: healthy rows survive, and the corrupt row stays
+  // active (parseStructuredFields treats unreadable fields as plain memory).
+  const ranked = getActiveMemoriesRanked(30);
+  const rankedIds = ranked.map((m) => m.id);
+  assert.ok(rankedIds.includes(healthy), 'healthy rows must survive a corrupt neighbor');
+  assert.ok(rankedIds.includes(corrupt), 'corrupt row stays active (lenient parse semantics)');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

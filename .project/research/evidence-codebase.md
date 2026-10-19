@@ -8,6 +8,7 @@ Repo root: /Users/jeremymcspadden/github/open-gsd/gsd-pi
 Scanned: 2026-08-01 (clean HEAD `ade9db0e4cb7c69440000fa81630091f56dbdcd1`, via disposable worktree `.worktrees/onboard-codebase`)
 Updated: 2026-08-10 to remove retired legacy remote-product surfaces from the current-state map.
 Checks run (all inside the disposable worktree at clean HEAD):
+
 - `pnpm install --frozen-lockfile --ignore-scripts` → success in 10.1s (lockfile 9.0, pnpm 10.12.1)
 - `npx tsc --noEmit -p tsconfig.json` → exit 0, zero errors
 - `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/tests/parse-cli-args.test.ts` → 45/45 pass, 0 fail

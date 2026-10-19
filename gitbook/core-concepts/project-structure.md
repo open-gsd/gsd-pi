@@ -15,6 +15,7 @@ Milestone  →  a shippable version (4-10 slices)
 A milestone is a shippable version of your project — an MVP, a major release, or a feature set that delivers standalone value. Milestones typically contain 4-10 slices.
 
 Examples:
+
 - "MVP with user auth, dashboard, and settings"
 - "v2.0 with real-time collaboration and API v2"
 - "Security hardening milestone"
@@ -24,6 +25,7 @@ Examples:
 A slice is one demoable, vertical capability within a milestone. It cuts across layers (database, backend, frontend) to deliver something you could show to a user. Slices contain 1-7 tasks.
 
 Examples:
+
 - "User authentication with JWT"
 - "Dashboard layout with charts"
 - "API rate limiting"
@@ -33,6 +35,7 @@ Examples:
 A task is the smallest unit of work — something that fits in one AI context window. If a task can't be completed in a single AI session, it's broken into smaller tasks.
 
 Examples:
+
 - "Create the User model and migration"
 - "Implement JWT middleware"
 - "Build the login form component"
@@ -49,7 +52,7 @@ The `.gsd/` directory looks like this:
   PROJECT.md          — living description of what the project is
   REQUIREMENTS.md     — requirement contract (active/validated/deferred)
   DECISIONS.md        — projected architectural decisions log
-  KNOWLEDGE.md        — manual rules plus projected patterns and lessons
+  KNOWLEDGE.md        — rules, patterns and lessons rendered from the database
   RUNTIME.md          — runtime context: API endpoints, env vars, services
   STATE.md            — quick-glance status of current work
   PREFERENCES.md      — project-level preferences (optional)
@@ -65,7 +68,7 @@ The `.gsd/` directory looks like this:
 
 Flat-phase task summaries use `S##-T##-SUMMARY.md` so identical task IDs in different slices do not collide. GSD still resolves older flat `T##-SUMMARY.md` task summaries when reading legacy projects.
 
-GSD may also create sibling runtime directories next to `.gsd/`. `.gsd-worktrees/` holds isolated milestone checkouts, and `.gsd-backups/` holds migration snapshots such as `.gsd-backups/migrate-*`. These sibling directories are local-only and gitignored; stale `migrate-*` backup snapshots are pruned after 30 days once the project has completed the flat-phase `.gsd/phases/` migration.
+GSD may also create sibling runtime directories next to `.gsd/`. `.gsd-worktrees/` holds isolated milestone checkouts, and `.gsd-backups/` holds migration snapshots such as `.gsd-backups/migrate-*`. These sibling directories are local-only and gitignored. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
 ### Key Files
 
@@ -74,7 +77,7 @@ GSD may also create sibling runtime directories next to `.gsd/`. `.gsd-worktrees
 | `PROJECT.md` | High-level project description, updated as the project evolves |
 | `REQUIREMENTS.md` | Formal requirement contract — tracks what's active, validated, and deferred |
 | `DECISIONS.md` | Projected architectural decisions with rationale, rendered from memory-backed decision rows |
-| `KNOWLEDGE.md` | Manual Rules plus memory-projected Patterns and Lessons. GSD injects Rules from the file and injects Patterns/Lessons through the memory block at the start of every task |
+| `KNOWLEDGE.md` | Rules, Patterns and Lessons rendered from the database. GSD injects Rules from the database and injects Patterns/Lessons through the memory block at the start of every task |
 | `RUNTIME.md` | Runtime context like API URLs, ports, and environment variables |
 | `gsd.db` | Authoritative runtime state for workflow hierarchy, completion, requirements, memory-backed decisions/knowledge, and summaries |
 | `STATE.md` | Current status at a glance — rendered from the database, don't edit manually |
@@ -105,4 +108,4 @@ GSD maintains a knowledge base that persists across sessions. Add rules, pattern
 /gsd knowledge lesson "The OAuth flow requires the redirect URL to match exactly"
 ```
 
-Rules append directly to `.gsd/KNOWLEDGE.md`. Patterns and Lessons are stored as memories, projected back into `.gsd/KNOWLEDGE.md` for review, and injected into task prompts through the memory block.
+Rules, Patterns and Lessons are stored as memories. `.gsd/KNOWLEDGE.md` is rendered from the database after each capture and on rebuild, for review. Patterns and Lessons are injected into task prompts through the memory block.

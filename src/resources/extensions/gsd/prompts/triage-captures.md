@@ -2,7 +2,7 @@ You are triaging user-captured thoughts during a GSD session.
 
 ## UNIT: Triage Captures
 
-The user captured thoughts with `/gsd capture`. Classify each capture, present proposals, get needed confirmation, and update CAPTURES.md with final classifications.
+The user captured thoughts with `/gsd capture`. Classify each capture, present proposals, get needed confirmation, and record the final classifications with `gsd_capture_resolve`.
 
 ## Pending Captures
 
@@ -21,7 +21,7 @@ The user captured thoughts with `/gsd capture`. Classify each capture, present p
 Classify each capture as one of:
 
 - **stop**: Halt/pause auto-mode immediately after the current unit. Examples: "stop", "halt", "abort", "don't continue".
-- **backtrack**: Abandon current milestone and return to an earlier one. Include target milestone ID (e.g., M003) in Resolution. Auto-mode pauses and writes a regression marker.
+- **backtrack**: Abandon current milestone and return to an earlier one. Include target milestone ID (e.g., M003) in Resolution. Auto-mode pauses.
 - **quick-task**: Small, self-contained, no downstream impact; minutes of work without plan changes.
 - **inject**: Belongs in current slice but was not planned; needs a new task.
 - **defer**: Belongs in a future slice/milestone; not urgent for current work.
@@ -48,21 +48,21 @@ Classify each capture as one of:
    - Your proposed classification
    - Your rationale
    - If applicable, which files would be affected
-   
+
    Auto-confirm **note** and **defer** because they are low-impact.
    Auto-confirm **stop** and **backtrack** because they are urgent user directives.
    For captures classified as **quick-task**, **inject**, or **replan**, ask the user to confirm or choose a different classification. **Non-bypassable:** If `ask_user_questions` fails, errors, or the user does not respond, you MUST re-ask — never auto-confirm these classifications without explicit user approval.
 
-3. **Update** `.gsd/CAPTURES.md` — for each capture, update its section with the confirmed classification:
-   - Change `**Status:** pending` to `**Status:** resolved`
-   - Add `**Classification:** <type>`
-   - Add `**Resolution:** <brief description of what will happen>`
-   - Add `**Rationale:** <why this classification>`
-   - Add `**Resolved:** <current ISO timestamp>`
-   - Add `**Milestone:** <current milestone ID>` (e.g., `**Milestone:** M003`)
+3. **Record** each confirmed classification with one `gsd_capture_resolve` call per capture:
+   - `captureId`: the capture ID (e.g., `CAP-1a2b3c4d`)
+   - `classification`: the confirmed type
+   - `resolution`: brief description of what will happen
+   - `rationale`: why this classification
+
+   Do NOT edit `.gsd/CAPTURES.md`. It is rendered from the database and edits to it are not read.
 
 4. **Summarize** count, assigned classifications, and pending actions (e.g., "2 quick-tasks ready, 1 deferred to S03").
 
-**Important:** Do NOT execute any resolutions. Only classify and update CAPTURES.md. Resolution execution happens separately (in auto-mode dispatch or manually by the user).
+**Important:** Do NOT execute any resolutions. Only classify and record the classifications. Resolution execution happens separately (in auto-mode dispatch or manually by the user).
 
 When done, say: "Triage closeout submitted." Do not say triage is complete — GSD announces completion only after post-unit verification passes. Say this exactly once — if you already said it in a prior message, do not repeat it.

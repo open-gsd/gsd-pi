@@ -11,6 +11,8 @@ import type {
 	ToolCall,
 } from "@gsd/pi-ai";
 import { createAssistantMessageEventStream } from "@gsd/pi-ai";
+import { blockedBashWriteReason, blockedWriteReason } from "../gsd/write-intercept.js";
+import { gsdToolBaseName, isCursorBridgedGsdTool } from "./bridged-tools.js";
 import { buildCursorAgentSpawnInvocation } from "./readiness.js";
 
 interface CursorAgentRunResult {
@@ -126,27 +128,47 @@ export function buildCursorAgentRunPlan(
 	);
 }
 
-const CURSOR_BRIDGED_GSD_TOOLS = new Set([
-	"gsd_task_complete",
-	"gsd_complete_task",
-	"gsd_task_recovery_resume",
-]);
-
 const GSD_TOOL_CALL_OPEN = "<gsd_tool_call>";
 const GSD_TOOL_CALL_CLOSE = "</gsd_tool_call>";
-
-function gsdToolBaseName(name: string): string {
-	return name.replace(/^mcp__.+?__/, "");
-}
-
-export function isCursorBridgedGsdTool(name: string): boolean {
-	const base = gsdToolBaseName(name);
-	return CURSOR_BRIDGED_GSD_TOOLS.has(name) || CURSOR_BRIDGED_GSD_TOOLS.has(base);
-}
 
 export function isGsdToolName(name: string): boolean {
 	const base = gsdToolBaseName(name);
 	return base.startsWith("gsd_") || name.startsWith("gsd_");
+}
+
+/**
+ * Refusal text when a cursor-agent write tool targets a managed projection
+ * (STATE.md, gsd.db, or a renderer-owned file that has a save tool); null
+ * when the call is not one.
+ *
+ * cursor-agent runs its own tools before the adapter sees them and its
+ * stream-json protocol has no pre-execution hook, so a block is not possible
+ * here. This is the detect-and-report mirror: the adapter marks the executed
+ * tool call's result as the projection refusal, so the GSD-side agent loop
+ * learns the write is not authoritative and which tool owns the file. The
+ * real cursor-agent conversation still saw the tool succeed.
+ */
+export function cursorProjectionWriteRefusal(toolName: string, args: Record<string, unknown>): string | null {
+	const tool = toolName.toLowerCase();
+	if (tool === "bash") {
+		const command = args.command;
+		if (typeof command !== "string") return null;
+		const reason = blockedBashWriteReason(command);
+		return reason ? cursorRefusalText(reason) : null;
+	}
+	if (!["write", "edit", "multiedit", "notebookedit"].includes(tool)) return null;
+	const path = args.file_path ?? args.path ?? args.notebook_path;
+	if (typeof path !== "string") return null;
+	const reason = blockedWriteReason(path);
+	return reason ? cursorRefusalText(reason) : null;
+}
+
+function cursorRefusalText(reason: string): string {
+	return [
+		"cursor-agent executed this tool before GSD could refuse it, so the bytes may be on disk:",
+		"the write is not workflow state and the next render discards it.",
+		reason,
+	].join(" ");
 }
 
 export function unsupportedCursorGsdToolError(name: string): string {
@@ -449,6 +471,10 @@ export function streamViaCursorAgent(
 				if (isGsdToolName(toolCall.name) && !isCursorBridgedGsdTool(toolCall.name)) {
 					throw new Error(unsupportedCursorGsdToolError(toolCall.name));
 				}
+				const refusal = cursorProjectionWriteRefusal(toolCall.name, toolCall.arguments as Record<string, unknown>);
+				if (refusal) {
+					toolCall.externalResult = { content: [{ type: "text", text: refusal }], isError: true };
+				}
 				ensureStart();
 				toolCalls.set(toolCall.id, toolCall);
 				content.push(toolCall);
@@ -528,7 +554,9 @@ export function streamViaCursorAgent(
 				if (parsed.type === "tool_result") {
 					const toolCall = toolCalls.get(parsed.toolCallId);
 					if (toolCall && isCursorBridgedGsdTool(toolCall.name)) return;
-					if (toolCall) toolCall.externalResult = parsed.result;
+					// A projection refusal attached at tool_call time is the verdict the
+					// GSD side acts on; the executed tool's own success does not overwrite it.
+					if (toolCall && !toolCall.externalResult) toolCall.externalResult = parsed.result;
 				}
 			};
 

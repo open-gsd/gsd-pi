@@ -5,13 +5,13 @@ import type { CanonicalLifecycleStatus } from "./db/writers/lifecycle-commands.j
 import { clearParseCache } from "./files.js";
 import {
   adoptLifecycleIfMissing,
-  getMilestone,
   getMilestoneSlices,
   getSlice,
   insertMilestone,
   insertSlice,
   normalizeCanonicalLifecycleStatus,
   normalizeLegacyLifecycleStatus,
+  projectCanonicalStatusToLegacy,
   upsertMilestonePlanning,
   upsertSlicePlanning,
 } from "./gsd-db.js";
@@ -27,7 +27,8 @@ import { flushWorkflowProjections } from "./projection-flush.js";
 import { writeManifestAndFlush } from "./workflow-manifest.js";
 import { appendEvent } from "./workflow-events.js";
 import { logWarning } from "./workflow-logger.js";
-import { isClosedStatus } from "./status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "./status-guards.js";
+import { readMilestone } from "./db/lifecycle-read.js";
 
 export interface PersistMilestonePlanSlice {
   sliceId: string;
@@ -68,6 +69,8 @@ export interface PersistMilestonePlanParams {
 export interface PersistMilestonePlanResult {
   milestoneId: string;
   roadmapPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 function validatePlanPromotion(
@@ -81,19 +84,15 @@ function validatePlanPromotion(
     return `cannot plan milestone ${params.milestoneId} with terminal status ${params.status}`;
   }
 
-  const existingMilestone = getMilestone(params.milestoneId);
-  if (existingMilestone && isClosedStatus(existingMilestone.status)) {
+  const existingMilestone = readMilestone(params.milestoneId);
+  if (existingMilestone?.closed) {
     return `cannot re-plan milestone ${params.milestoneId}: it is already complete`;
   }
   if (existingMilestone) {
-    const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(existingMilestone.status);
-    const lifecycleStatus = legacyLifecycleStatus === "completed" || legacyLifecycleStatus === "cancelled"
-      ? legacyLifecycleStatus
-      : "ready";
     const lifecycle = adoptLifecycleIfMissing(context, {
       itemKind: "milestone",
       milestoneId: params.milestoneId,
-      lifecycleStatus,
+      lifecycleStatus: adoptionLifecycleStatus(`milestone ${params.milestoneId}`, existingMilestone.status, "ready"),
     });
     if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
       return `cannot re-plan ${lifecycle.lifecycleStatus} milestone ${params.milestoneId} — use gsd_milestone_reopen first`;
@@ -108,17 +107,15 @@ function validatePlanPromotion(
   const incomingSliceById = new Map(params.slices.map((slice) => [slice.sliceId, slice]));
   const existingSliceLifecycleById = new Map<string, CanonicalLifecycleStatus>();
   for (const slice of existingSlices) {
-    const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(slice.status);
-    const plannedLifecycleStatus = incomingSliceById.get(slice.id)?.isSketch === true
-      ? "pending"
-      : "ready";
     const lifecycle = adoptLifecycleIfMissing(context, {
       itemKind: "slice",
       milestoneId: params.milestoneId,
       sliceId: slice.id,
-      lifecycleStatus: legacyLifecycleStatus === "completed" || legacyLifecycleStatus === "cancelled"
-        ? legacyLifecycleStatus
-        : plannedLifecycleStatus,
+      lifecycleStatus: adoptionLifecycleStatus(
+        `slice ${params.milestoneId}/${slice.id}`,
+        slice.status,
+        incomingSliceById.get(slice.id)?.isSketch === true ? "pending" : "ready",
+      ),
     });
     existingSliceLifecycleById.set(slice.id, lifecycle.lifecycleStatus);
     if (incomingSliceById.has(slice.id) && (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled")) {
@@ -140,11 +137,14 @@ function validatePlanPromotion(
   // Validate depends_on: all dependencies must exist and be complete
   if (params.dependsOn && params.dependsOn.length > 0) {
     for (const depId of params.dependsOn) {
-      const dep = getMilestone(depId);
+      const dep = readMilestone(depId);
       if (!dep) {
         return `depends_on references unknown milestone: ${depId}`;
       }
-      if (!isClosedStatus(dep.status)) {
+      if (dep.discarded) {
+        return `depends_on milestone ${depId} was discarded and can never be complete; remove it from depends_on`;
+      }
+      if (!dep.closed) {
         return `depends_on milestone ${depId} is not yet complete (status: ${dep.status})`;
       }
     }
@@ -161,9 +161,13 @@ function writePlanRows(params: PersistMilestonePlanParams): void {
     depends_on: params.dependsOn ?? [],
   });
 
+  // No `status` here: insertMilestone above already writes the create-time
+  // status, and a re-plan changes the plan, not the Milestone lifecycle
+  // projection (same rule as the slices below). The generic status writer
+  // refuses rows without a canonical lifecycle row, so a re-plan of a fresh
+  // milestone must not funnel a status through it.
   upsertMilestonePlanning(params.milestoneId, {
     title: params.title,
-    status: params.status ?? "active",
     depends_on: params.dependsOn ?? [],
     vision: params.vision,
     successCriteria: params.successCriteria,
@@ -233,7 +237,6 @@ function persistPlanOperation(
   return executePlanningDomainOperation({
     operationType: "workflow.milestone.plan",
     invocation,
-    actorId: params.actorName,
     payload: planningOperationPayload(params),
     event: {
       eventType: "workflow.milestone.planned",
@@ -263,34 +266,37 @@ function persistPlanOperation(
       if (guardError) throw new PlanningGuardError(guardError);
       writePlanRows(params);
       adoptPlanLifecycles(context, params);
+      // The plan's status promotion is a canonical-backed projection: the
+      // generic status writer refuses rows without a canonical lifecycle row,
+      // so a disagreeing legacy shadow fails the operation here instead.
+      projectCanonicalStatusToLegacy(context, {
+        entity: "milestone",
+        milestoneId: params.milestoneId,
+        status: params.status ?? "active",
+      });
     },
   });
 }
 
+/**
+ * Render ROADMAP.md and return its path, or null when the render failed. The
+ * plan is committed (#1634): the DB is the authority, so a failed render never
+ * fails the tool. Its Projection Work stays pending and the Projection Worker
+ * renders the file again.
+ */
 async function renderPlanArtifacts(
   basePath: string,
   params: PersistMilestonePlanParams,
-): Promise<string | { error: string }> {
+): Promise<string | null> {
   try {
     const renderResult = await renderRoadmapFromDb(basePath, params.milestoneId);
-    // renderRoadmapFromDb only skips for unplanned milestones (zero slices +
-    // empty vision); persistMilestonePlan always populates both via writePlanRows
-    // before this render, so the skipped branch is unreachable here. Fall back to
-    // resolving the projected path so a future invariant still surfaces a clear
-    // render failure rather than an undefined dereference.
-    if ("skipped" in renderResult) {
-      return { error: `render skipped: milestone ${params.milestoneId} has no planned slices` };
-    }
+    // renderRoadmapFromDb skips only an unplanned milestone (zero slices and an
+    // empty vision). writePlanRows sets both before this render.
+    if ("skipped" in renderResult) throw new Error(`milestone ${params.milestoneId} has no planned slices`);
     return renderResult.roadmapPath;
   } catch (renderErr) {
-    // #1634: DB rows stay committed on purpose — the DB is the authority and
-    // ROADMAP.md is only a projection. The roadmap-missing drift handler
-    // detects the absent file and re-renders it on the next reconciliation
-    // pass, so a failed render is transient drift, never a permanently
-    // orphaned milestone.
-    logWarning("tool", `plan_milestone — render failed (DB plan kept; roadmap-missing drift repair re-renders ROADMAP.md on the next reconciliation pass): ${(renderErr as Error).message}`);
-    invalidateStateCache();
-    return { error: `render failed: ${(renderErr as Error).message}. The milestone plan is saved in the DB; ROADMAP.md will be re-rendered by drift reconciliation on the next dispatch (or run /gsd sync).` };
+    logWarning("projection", `plan_milestone render failed for ${params.milestoneId}; the plan stays committed`, { error: (renderErr as Error).message });
+    return null;
   }
 }
 
@@ -326,12 +332,11 @@ export async function persistMilestonePlan(
   try {
     operationStatus = persistPlanOperation(params, invocation).status;
   } catch (err) {
-    if (err instanceof PlanningGuardError) return { error: err.message };
+    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 
   const roadmapPath = await renderPlanArtifacts(basePath, params);
-  if (typeof roadmapPath !== "string") return roadmapPath;
 
   invalidateStateCache();
   clearParseCache();
@@ -340,6 +345,7 @@ export async function persistMilestonePlan(
 
   return {
     milestoneId: params.milestoneId,
-    roadmapPath,
+    roadmapPath: roadmapPath ?? "",
+    ...(roadmapPath === null ? { stale: true as const } : {}),
   };
 }

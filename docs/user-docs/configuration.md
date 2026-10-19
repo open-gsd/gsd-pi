@@ -97,6 +97,7 @@ This opens an interactive wizard showing which keys are configured and which are
 |------|---------------------|---------|-----------|
 | Tavily Search | `TAVILY_API_KEY` | Web search for non-Anthropic models | [tavily.com/app/api-keys](https://tavily.com/app/api-keys) |
 | Brave Search | `BRAVE_API_KEY` | Web search for non-Anthropic models | [brave.com/search/api](https://brave.com/search/api) |
+| Firecrawl Search | `FIRECRAWL_API_KEY` | Web search and page extraction for non-Anthropic models | [firecrawl.dev](https://firecrawl.dev) |
 | Context7 Docs | `CONTEXT7_API_KEY` | Library documentation lookup | [context7.com/dashboard](https://context7.com/dashboard) |
 
 ### How it works
@@ -122,6 +123,8 @@ If both files exist, server names are merged and the first definition found wins
 
 - `.mcp.json` for repo-shared MCP configuration you may want to commit
 - `.gsd/mcp.json` for local-only MCP configuration you do **not** want to share
+
+For existing GSD projects, GSD also auto-prepares the repo-shared `.mcp.json` on session startup. The auto-prep runs regardless of the selected model provider, but only when the project root already contains `.gsd/`; non-GSD repositories are left untouched. It writes the managed `gsd-workflow` entry and, unless `GSD_BROWSER_MCP_ENABLED=0`, the managed `gsd-browser` entry for external MCP clients such as Claude Code.
 
 ### Supported transports
 
@@ -219,7 +222,7 @@ Recommended verification order:
 - If a server depends on machine-local paths, personal services, or local-only secrets, prefer `.gsd/mcp.json`.
 - For the built-in `gsd-workflow` server, set `GSD_WORKFLOW_PROJECT_ROOT` to the canonical project root when launching from a worktree or wrapper. The packaged server uses it for workflow tool paths and the per-project stale-process registry at `$GSD_HOME/mcp-instances.json`.
 - The packaged `gsd-workflow` MCP server exposes canonical workflow tool names by default. Set `GSD_MCP_ADVERTISE_ALIASES=1` only for clients that still call legacy alias names. Native in-process GSD tools use `GSD_ADVERTISE_TOOL_ALIASES=1` instead.
-- Custom clients calling `gsd_plan_milestone`, `gsd_plan_slice`, `gsd_plan_task`, `gsd_replan_slice`, `gsd_replan_task`, `gsd_reassess_roadmap`, or `gsd_task_recovery_resume` must send a nonblank private `_meta["io.opengsd/idempotency-key"]` value and reuse it for retries. This is transport metadata, not a public tool parameter; missing identity fails before mutation.
+- Custom clients calling `gsd_plan_milestone`, `gsd_plan_slice`, `gsd_plan_task`, `gsd_replan_slice`, `gsd_replan_task`, `gsd_reassess_roadmap`, `gsd_decision_save` (alias `gsd_save_decision`), `gsd_requirement_save`, `gsd_requirement_update`, `gsd_save_gate_result`, `gsd_rework_brief_save`, `gsd_capture_thought`, `gsd_summary_save` (alias `gsd_save_summary`), `gsd_uat_result_save`, or `gsd_task_recovery_resume` must send a nonblank private `_meta["io.opengsd/idempotency-key"]` value and reuse it for retries. This is transport metadata, not a public tool parameter; missing identity fails before mutation.
 - Claude Code sessions that require GSD workflow tools are fail-closed: GSD preflights the same inline `mcpServers.gsd-workflow` entry passed to the Claude SDK, and if `gsd-workflow` is absent, still pending, failed, disabled, missing required tools at startup, or cannot be probed, GSD aborts the unit before the first model turn and retries instead of allowing tool calls against an incomplete surface. Timeout diagnostics include the last MCP probe error when available.
 
 ### Per-Model MCP Filtering
@@ -293,6 +296,7 @@ With this configuration, a Haiku-4-5 subagent sees only `gsd-workflow` and `goog
 | `GSD_PROJECT_ID` | (auto-hash) | Override the automatic project identity hash. Per-project state goes to `$GSD_HOME/projects/<GSD_PROJECT_ID>/` instead of the computed hash. Useful for CI/CD or sharing state across clones of the same repo. |
 | `GSD_STATE_DIR` | `$GSD_HOME` | Per-project state root. Controls where `projects/<repo-hash>/` directories are created. Takes precedence over `GSD_HOME` for project state. |
 | `GSD_CODING_AGENT_DIR` | `$GSD_HOME/agent` | Agent directory containing managed resources, extensions, and auth. Takes precedence over `GSD_HOME` for agent paths. |
+| `GSD_AUTHORITY_CUTOVER` | (unset) | Set to literal `0` to stop GSD from running the one-time lifecycle backfill and Authority Epoch cutover when it opens a database made by an older GSD. Unset, GSD writes a verified backup and runs both on the first open. The opt-out is kept for one release. It does not undo a cutover. See [`/gsd db adopt`](commands.md). |
 | `GSD_WORKFLOW_PROJECT_ROOT` | current working directory | Canonical project root for the packaged `gsd-workflow` MCP server. Used by workflow tools and by the stale-process registry key in `$GSD_HOME/mcp-instances.json`. |
 | `GSD_WORKFLOW_EXECUTORS_MODULE` | auto-discovered when possible | Optional absolute path or `file:` URL for the shared workflow executor module used by `gsd-workflow` mutation tools. |
 | `GSD_WORKFLOW_WRITE_GATE_MODULE` | auto-discovered when possible | Optional absolute path or `file:` URL for the shared write-gate module used by `gsd-workflow` mutation tools. |
@@ -408,7 +412,7 @@ models:
     fallbacks:
       - openrouter/z-ai/glm-5
   execution: claude-sonnet-4-6
-  execution_simple: claude-haiku-4-5-20250414
+  execution_simple: claude-haiku-5-5
   completion: claude-sonnet-4-6
   subagent: claude-sonnet-4-6
 ```
@@ -516,11 +520,11 @@ planning_depth: deep
 | Value | Behavior |
 |-------|----------|
 | `light` | Default. Uses the normal milestone discussion flow that writes milestone context and roadmap artifacts. |
-| `deep` | Runs staged project discovery first: workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, a research decision marker, and optional project research before milestone planning. |
+| `deep` | Runs staged project discovery first: workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, and optional project research before milestone planning. |
 
 Enable deep mode for the current project with `/gsd new-project --deep` or `/gsd new-milestone --deep`; both write `planning_depth: deep` to `.gsd/PREFERENCES.md`. You can also set it manually in project or global preferences.
 
-In deep mode, `research-decision` writes `.gsd/runtime/research-decision.json` with `research` or `skip`. A `research` decision dispatches `research-project`, which writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`; a `skip` decision proceeds directly to milestone work.
+In deep mode, the research decision (`research` or `skip`) is recorded in the database with `gsd_research_decision_save`. Ask for research during the project or requirements discussion to record `research`; no decision means `skip`, and a `.gsd/runtime/research-decision.json` file from an older version is not read. A `research` decision dispatches `research-project`, which writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`; a `skip` decision proceeds directly to milestone work.
 
 ### `workspace`
 
@@ -551,7 +555,7 @@ workspace:
 
 ### `reactive_execution`
 
-Controls automatic parallel task dispatch inside a slice. This is enabled by default and only dispatches when task-plan IO annotations produce a non-ambiguous graph with enough ready, non-conflicting tasks.
+Controls automatic parallel task dispatch inside a slice. This is enabled by default and only dispatches when the planned inputs and expected output on the task rows produce a non-ambiguous graph with enough ready, non-conflicting tasks. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch; see [Reactive Task Execution](./auto-mode.md#reactive-task-execution).
 
 ```yaml
 reactive_execution:
@@ -608,6 +612,7 @@ auto_supervisor:
   idle_timeout_minutes: 10    # detect stalls
   hard_timeout_minutes: 30    # pause auto mode
   stalled_tool_timeout_minutes: 5  # recover a tool that hangs mid-call (default: 5)
+  global_idle_timeout_minutes: 0   # notify when no unit is in flight this long (default: 0 = off)
 ```
 
 Long-running coordination tools (`subagent` and its `Task` alias) and bounded execution
@@ -619,6 +624,11 @@ limits: `gsd_exec` and `gsd_uat_exec` use the 600-second exec sandbox clamp;
 and `bg_shell` has bounded per-action timeouts. All exempt tools remain subject to
 `hard_timeout_minutes` and do not re-arm that timeout. Other non-interactive tools
 remain subject to the stalled-tool budget.
+
+`global_idle_timeout_minutes` (#2373) watches the whole session rather than a unit:
+if auto mode is active but no unit has been in flight for this many minutes, it
+emits one notification per idle period. It is notification-only — nothing is
+dispatched, retried, or changed. The default `0` disables it.
 
 ### `min_request_interval_ms`
 
@@ -681,7 +691,7 @@ tool_call_loop_guard:
       - ctx_search
 ```
 
-Omitted fields fall back to built-in defaults, so existing installs keep their current behavior. `exempt_tools` is merged with the built-in exempt set (`find`, `glob`, `grep`, `ls`, `read`, `search_and_read`) rather than replacing it. Every field can also be overridden with `GSD_TOOL_LOOP_*` environment variables (see [Environment Variables](#environment-variables)), which win over the preferences file. When a call is blocked, the message names the active cap and the relevant config key. Applies to both interactive sessions and `/gsd auto`.
+Omitted fields fall back to built-in defaults, so existing installs keep their current behavior. `exempt_tools` is merged with the built-in exempt set (the read-only navigation tools `find`, `glob`, `grep`, `ls`, `read`, `search_and_read` and the read-only workflow query tools `gsd_decision_get`, `gsd_decision_list`, `gsd_requirement_get`, `gsd_requirement_list`, `gsd_project_snapshot`, `gsd_milestone_status`, `gsd_journal_query`, `gsd_exec_search`, `gsd_resume`, `memory_query`/`gsd_memory_query`, `gsd_graph`/`gsd_memory_graph`) rather than replacing it. Every field can also be overridden with `GSD_TOOL_LOOP_*` environment variables (see [Environment Variables](#environment-variables)), which win over the preferences file. When a call is blocked, the message names the active cap and the relevant config key. Applies to both interactive sessions and `/gsd auto`.
 
 ### `uat_dispatch`
 
@@ -704,6 +714,9 @@ verification_commands:
 verification_auto_fix: true       # auto-retry runnable failures (default: true)
 verification_max_retries: 2       # max retry attempts (default: 2)
 verification_timeout_ms: 120000   # host verification and verification-oriented gsd_exec default (default: 120000)
+verification_source_exclude_paths: # git pathspecs skipped by source-revision hashing (default: [])
+  - artifacts/**
+  - fixtures/**
 ```
 
 | Field | Type | Default | Description |
@@ -712,6 +725,7 @@ verification_timeout_ms: 120000   # host verification and verification-oriented 
 | `verification_auto_fix` | boolean | `true` | Auto-retry runnable verification failures |
 | `verification_max_retries` | number | `2` | Maximum auto-fix retry attempts for runnable failures |
 | `verification_timeout_ms` | number | `120000` | Per-command host-verification timeout in milliseconds and the default timeout for verification-oriented `gsd_exec` workloads. Unset keeps the 120s host-verification default. A timeout is reported as `failureClass: timeout`, never as exit 127. |
+| `verification_source_exclude_paths` | string[] | `[]` | Git pathspecs excluded from the verification source-revision snapshot. Each entry becomes a `:(exclude)` pathspec on the `git ls-files` passes, in addition to the built-in `.gsd/**` and `receipts/**` exclusions. Global and project lists merge additively — a project list adds to the global list and cannot clear it. Use for large non-evidence trees (historical test artifacts, committed fixtures) that would otherwise be re-hashed on every dispatch. Changes under excluded paths no longer invalidate recorded verification evidence, so exclude only trees verification evidence never depends on. |
 
 For missing-command handling and the task-evidence exception, see [Auto Mode — Verification Enforcement](./auto-mode.md#verification-enforcement).
 
@@ -849,9 +863,9 @@ git:
   main_branch: main           # primary branch name
   merge_strategy: squash      # how worktree branches merge: "squash" or "merge"
   isolation: none             # git isolation: "none" (default), "worktree", or "branch"
-  commit_docs: true           # commit .gsd/ artifacts to git (set false to keep local)
   manage_gitignore: true      # set false to prevent GSD from modifying .gitignore
   worktree_post_create: .gsd/hooks/post-worktree-create  # script to run after worktree creation
+  preserve_worktree_on_stop: false  # keep an in-progress milestone worktree on stop instead of removing it
   auto_pr: false              # create a PR on milestone completion (requires push_branches)
   pr_target_branch: develop   # target branch for auto-created PRs (default: main branch)
 ```
@@ -867,9 +881,9 @@ git:
 | `main_branch` | string | `"main"` | Primary branch name |
 | `merge_strategy` | string | `"squash"` | How worktree branches merge: `"squash"` (combine all commits) or `"merge"` (preserve individual commits) |
 | `isolation` | string | `"none"` | Auto-mode isolation: `"none"` (no isolation — commits on current branch, no worktree or milestone branch), `"worktree"` (separate directory), or `"branch"` (work in project root — useful for submodule-heavy repos). `worktree` requires a committed `HEAD`; zero-commit repos temporarily run as `none` until the first commit exists |
-| `commit_docs` | boolean | `true` | Commit `.gsd/` planning artifacts to git. Set `false` to keep local-only |
 | `manage_gitignore` | boolean | `true` | When `false`, GSD will not modify `.gitignore` at all — no baseline patterns, no self-healing. Use if you manage your own `.gitignore` |
 | `worktree_post_create` | string | (none) | Script to run after worktree creation. Receives `SOURCE_DIR` and `WORKTREE_DIR` env vars |
+| `preserve_worktree_on_stop` | boolean | `false` | When `true`, a stop with an in-progress milestone keeps the milestone worktree directory on disk alongside the preserved branch instead of removing it. Covers attempt-death teardown (liveness backstop, recovery abort) and manual stops. `/gsd auto` re-enters an existing worktree on resume |
 | `auto_pr` | boolean | `false` | Automatically create a pull request when a milestone completes. Requires `auto_push: true` and `gh` CLI installed and authenticated |
 | `pr_target_branch` | string | (main branch) | Target branch for auto-created PRs (e.g. `develop`, `qa`). Defaults to `main_branch` if not set |
 
@@ -898,6 +912,18 @@ ln -sf "$SOURCE_DIR/assets" "$WORKTREE_DIR/assets"
 ```
 
 The path can be absolute or relative to the project root. The script runs with a 30-second timeout. Failure is non-fatal — GSD logs a warning and continues.
+
+#### `.gsd/worktree-files.json`
+
+Declarative alternative to the post-create hook for plain file copies: a JSON array of repo-relative paths copied from the main checkout into each new worktree right after creation. Useful for gitignored-but-required files that `git worktree add` never populates (for example Rails' `config/master.key` alongside the tracked `config/credentials.yml.enc`).
+
+```json
+["config/master.key", ".env.local"]
+```
+
+- Absent or empty file → no behavior change.
+- Paths must stay inside the repository; missing sources are warned and skipped.
+- Copies are logged as warnings for auditability. GSD never copies secrets on its own — every path here is an explicit repo-owner choice.
 
 #### `git.auto_pr`
 
@@ -1148,7 +1174,7 @@ custom_instructions:
   - "Prefer functional patterns over classes"
 ```
 
-For project-specific knowledge, use the GSD knowledge and memory surfaces instead. `.gsd/KNOWLEDGE.md` is a hybrid projection: manually maintained Rules stay in the file, while generated Patterns and Lessons are backed by the `memories` table and rendered back into the file for review. Add durable operating rules with `/gsd knowledge rule <description>`; agent-discovered patterns and lessons are stored as memories and selected for prompt injection automatically.
+For project-specific knowledge, use the GSD knowledge and memory surfaces instead. `.gsd/KNOWLEDGE.md` is rendered from the database: Rules, Patterns and Lessons are `memories` rows, and the file is rendered from them after each capture for review. Add durable operating rules with `/gsd knowledge rule <description>`; agent-discovered patterns and lessons are stored as memories and selected for prompt injection automatically.
 
 ### `RUNTIME.md` — Runtime Context
 
@@ -1185,7 +1211,7 @@ dynamic_routing:
   enabled: true
   capability_routing: true          # score models by task capability
   tier_models:
-    light: claude-haiku-4-5
+    light: claude-haiku-5-5
     standard: claude-sonnet-4-6
     heavy: claude-opus-4-6
   escalate_on_failure: true
@@ -1283,7 +1309,7 @@ models:
     fallbacks:
       - openrouter/z-ai/glm-5
   execution: claude-sonnet-4-6
-  execution_simple: claude-haiku-4-5-20250414
+  execution_simple: claude-haiku-5-5
   completion: claude-sonnet-4-6
 
 # Token optimization
@@ -1310,7 +1336,6 @@ git:
   auto_push: true
   merge_strategy: squash
   isolation: none             # "none" (default), "worktree", or "branch"
-  commit_docs: true
 
 # Skills
 skill_discovery: suggest

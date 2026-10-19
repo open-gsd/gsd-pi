@@ -32,7 +32,7 @@ import { createAutoWorktree } from "../auto-worktree-creation.ts";
 import { mergeMilestoneToMain } from "../auto-worktree-merge.ts";
 import { _resetServiceCache } from "../worktree.ts";
 import { _clearGsdRootCache } from "../paths.ts";
-import { seedMergeReadyMilestone } from "./merge-ready-fixture.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 import { closeDatabase } from "../gsd-db.ts";
 
 // Isolate from user's global preferences (which may have git.main_branch set)
@@ -185,7 +185,6 @@ test("#2505: mergeMilestoneToMain preserves queued CONTEXT files (not swept into
   const repo = createTempRepo();
   try {
     const wtPath = createAutoWorktree(repo, "M015");
-    seedMergeReadyMilestone(repo, "M015");
     const normalizedPath = wtPath.replaceAll("\\", "/");
     const worktreeName = normalizedPath.split("/").pop() || "M015";
     const sliceBranch = `slice/${worktreeName}/S01`;
@@ -221,6 +220,10 @@ test("#2505: mergeMilestoneToMain preserves queued CONTEXT files (not swept into
       statusBefore.includes("?? .gsd/milestones/"),
       "M013 directory is untracked before merge (precondition)",
     );
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M015", { sourceTree: wtPath });
 
     const roadmap = makeRoadmap("M015", "App Feature", [
       { id: "S01", title: "Feature" },
@@ -292,7 +295,6 @@ test("#2505: pre-merge stash handles symlinked .gsd without traversing it", () =
   const { repo, stateDir } = createTempRepoWithSymlinkedGsd();
   try {
     const wtPath = createAutoWorktree(repo, "M016");
-    seedMergeReadyMilestone(repo, "M016");
     const normalizedPath = wtPath.replaceAll("\\", "/");
     const worktreeName = normalizedPath.split("/").pop() || "M016";
     const sliceBranch = `slice/${worktreeName}/S01`;
@@ -310,6 +312,10 @@ test("#2505: pre-merge stash handles symlinked .gsd without traversing it", () =
     // Trigger the pre-merge stash with both tracked and untracked project files.
     writeFileSync(join(repo, "README.md"), "# test\n\nDirty change.\n");
     writeFileSync(join(repo, "local-note.txt"), "local scratch\n");
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M016", { sourceTree: wtPath });
 
     const result = mergeMilestoneToMain(repo, "M016", makeRoadmap("M016", "App Feature", [
       { id: "S01", title: "Feature" },
@@ -331,7 +337,6 @@ test("#2505: back-to-back merges preserve queued CONTEXT files", () => {
   try {
     // ── First milestone: M015 ──
     const wt1 = createAutoWorktree(repo, "M015");
-    seedMergeReadyMilestone(repo, "M015");
     const wt1Name = wt1.replaceAll("\\", "/").split("/").pop() || "M015";
     const slice1 = `slice/${wt1Name}/S01`;
     run(`git checkout -b "${slice1}"`, wt1);
@@ -352,6 +357,10 @@ test("#2505: back-to-back merges preserve queued CONTEXT files", () => {
     // Dirty tracked file to trigger stash
     writeFileSync(join(repo, "README.md"), "# test\n\nDirty for M015.\n");
 
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M015", { sourceTree: wt1 });
+
     mergeMilestoneToMain(repo, "M015", makeRoadmap("M015", "Feature 1", [
       { id: "S01", title: "Feature 1" },
     ]));
@@ -363,7 +372,6 @@ test("#2505: back-to-back merges preserve queued CONTEXT files", () => {
 
     // ── Second milestone: M016 ──
     const wt2 = createAutoWorktree(repo, "M016");
-    seedMergeReadyMilestone(repo, "M016");
     const wt2Name = wt2.replaceAll("\\", "/").split("/").pop() || "M016";
     const slice2 = `slice/${wt2Name}/S01`;
     run(`git checkout -b "${slice2}"`, wt2);
@@ -375,6 +383,10 @@ test("#2505: back-to-back merges preserve queued CONTEXT files", () => {
 
     // Dirty tracked file again
     writeFileSync(join(repo, "README.md"), "# test\n\nDirty for M016.\n");
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M016", { sourceTree: wt2 });
 
     mergeMilestoneToMain(repo, "M016", makeRoadmap("M016", "Feature 2", [
       { id: "S01", title: "Feature 2" },
@@ -416,7 +428,6 @@ test("#4573: gitignored .gsd symlink does not break pre-merge stash", () => {
     run("git branch -M main", repo);
 
     const wtPath = createAutoWorktree(repo, "M001");
-    seedMergeReadyMilestone(repo, "M001");
     const worktreeName = wtPath.replaceAll("\\", "/").split("/").pop() || "M001";
     const sliceBranch = `slice/${worktreeName}/S01`;
     run(`git checkout -b "${sliceBranch}"`, wtPath);
@@ -428,6 +439,10 @@ test("#4573: gitignored .gsd symlink does not break pre-merge stash", () => {
 
     // Dirty a tracked file so the pre-merge stash branch actually runs.
     writeFileSync(join(repo, "README.md"), "# test\n\nDirty.\n");
+
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the final worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M001", { sourceTree: wtPath });
 
     const result = mergeMilestoneToMain(
       repo,

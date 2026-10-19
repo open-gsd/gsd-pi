@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createWorkspace, scopeMilestone } from "../workspace.ts";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 import {
   verifyExpectedArtifactForScope,
   resolveExpectedArtifactPathForScope,
@@ -224,41 +225,41 @@ describe("validator-scope-parity: scope uses canonical projectRoot not worktree 
     );
   });
 
-  test("verifyExpectedArtifactForScope uses projectRoot: returns false for non-existent artifact", () => {
-    const ws = createWorkspace(base);
-    const scope = scopeMilestone(ws, "M001");
-
-    // The artifact does not exist on disk yet
-    const ready = verifyExpectedArtifactForScope(scope, "plan-milestone", "M001");
-    assert.equal(
-      ready,
-      false,
-      "verifyExpectedArtifactForScope should return false when artifact is absent",
-    );
-  });
-
-  test("verifyExpectedArtifactForScope rejects zero-slice scoped plan-milestone roadmaps", () => {
+  test("verifyExpectedArtifactForScope: a roadmap file with slices does not verify a milestone with no slice rows", (t) => {
+    openDatabase(":memory:");
+    t.after(() => closeDatabase());
+    insertMilestone({ id: "M001", title: "Scoped", status: "active" });
     const ws = createWorkspace(base);
     const scope = scopeMilestone(ws, "M001");
 
     writeFileSync(scope.roadmapFile(), [
-      "# M001: Placeholder",
+      "# M001: Scoped roadmap",
       "",
       "## Slices",
       "",
-      "_TBD_",
+      "- [ ] **S01: First slice** `risk:low` `depends:[]`",
       "",
     ].join("\n"));
 
-    const ready = verifyExpectedArtifactForScope(scope, "plan-milestone", "M001");
     assert.equal(
-      ready,
+      verifyExpectedArtifactForScope(scope, "plan-milestone", "M001"),
       false,
-      "scoped plan-milestone verification must parse roadmap content, not only check existence",
+      "scoped plan-milestone verification reads slice rows, not the roadmap file",
     );
   });
 
-  test("verifyExpectedArtifactForScope verifies the scoped plan-milestone roadmap path", () => {
+  test("verifyExpectedArtifactForScope: slice rows verify plan-milestone with no roadmap file", (t) => {
+    openDatabase(":memory:");
+    t.after(() => closeDatabase());
+    insertMilestone({ id: "M001", title: "Scoped", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First slice", status: "pending" });
+    const ws = createWorkspace(base);
+    const scope = scopeMilestone(ws, "M001");
+
+    assert.equal(verifyExpectedArtifactForScope(scope, "plan-milestone", "M001"), true);
+  });
+
+  test("resolveExpectedArtifactPathForScope takes the plan-milestone path from scope.roadmapFile()", () => {
     const ws = createWorkspace(base);
     const realScope = scopeMilestone(ws, "M001");
     const scopedRoadmap = join(base, "scoped-M001-ROADMAP.md");
@@ -267,25 +268,10 @@ describe("validator-scope-parity: scope uses canonical projectRoot not worktree 
       roadmapFile: () => scopedRoadmap,
     };
 
-    writeFileSync(scopedRoadmap, [
-      "# M001: Scoped roadmap",
-      "",
-      "## Slices",
-      "",
-      "- [ ] **S01: First slice** `risk:low` `depends:[]`",
-      "  > After this: a real slice exists.",
-      "",
-    ].join("\n"));
-
     assert.equal(
       resolveExpectedArtifactPathForScope(scope, "plan-milestone", "M001"),
       scopedRoadmap,
       "scoped plan-milestone artifact path must come from scope.roadmapFile()",
-    );
-    assert.equal(
-      verifyExpectedArtifactForScope(scope, "plan-milestone", "M001"),
-      true,
-      "scoped plan-milestone verification must read the roadmap from scope.roadmapFile()",
     );
   });
 });

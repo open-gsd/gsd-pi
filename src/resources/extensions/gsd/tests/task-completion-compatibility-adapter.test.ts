@@ -29,26 +29,33 @@ import {
   insertArtifact,
   openDatabase,
 } from "../gsd-db.js";
+import { readCompatMarker, writeCompatMarker } from "../compat/compat-marker.js";
 import { stripProjectionStamp } from "../markdown-renderer.js";
-import { clearPathCache } from "../paths.js";
+import { clearPathCache, targetTaskFile } from "../paths.js";
 import {
   claimTaskAttempt,
   readLatestTaskAttempt,
   settleTaskAttempt,
 } from "../task-execution-domain-operation.js";
 import { reopenTask } from "../task-lifecycle-domain-operation.js";
+import { executeSummarySave, executeTaskReopen } from "../tools/workflow-tool-executors.js";
+import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
+import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 import {
   recordFailureAndSelectRecovery,
   resumeTaskRecovery,
 } from "../task-recovery-domain-operation.js";
 import { resolveTaskCompletionAuthority } from "../task-completion-compatibility-adapter.js";
 import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.js";
+import { recordExecRun } from "../db/writers/exec-runs.js";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.js";
 import {
+  adoptOrTransitionLifecycle,
   appendKernelCheckpoint,
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.js";
 import { checkEngineHealth } from "../doctor-engine-checks.js";
+import { clearGSDPreferencesCache } from "../preferences.js";
 import type { DoctorIssue } from "../doctor-types.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import {
@@ -102,12 +109,14 @@ interface StagedTaskCompletionReceipt {
   resultId: string;
   summaryPath: string;
   nextStage: "verify" | "route";
+  stale?: true;
 }
 
 interface PublishedTaskCompletionReceipt {
   status: "committed" | "replayed";
   attemptId: string;
   summaryPath: string;
+  stale?: true;
 }
 
 interface TaskCompletionCompatibilityAdapter {
@@ -221,9 +230,18 @@ function activateExactMergedClosure(basePath: string): string {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: basePath, encoding: "utf8" }).trim();
 }
 
-function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeCommit: string): void {
+/**
+ * Record the exact-merged evidence of the Task: a successful gsd_uat_exec run,
+ * the saved passing run-uat run `savedRunId`, and the host verdict that cites
+ * the exec run. The exec run is recorded in run-uat attempt 1.
+ */
+function recordExactMergedUatVerdict(
+  basePath: string,
+  attemptId: string,
+  mergeCommit: string,
+  savedRunId = "uat:M001:S01:attempt-1",
+): void {
   const evidenceId = "exact-merged-uat";
-  const runId = "uat:M001:S01:attempt-2";
   const source = captureVerificationSourceSnapshot([{ id: "project", cwd: basePath }]);
   assert.equal(source.ok, true, source.ok ? undefined : source.error);
   const environment = {
@@ -233,15 +251,9 @@ function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeC
     localMergeCommit: mergeCommit,
     sourceContentRevision: source.snapshot.aggregateRevision,
   };
+  // ASSESSMENT text that names every value. The text decides nothing.
   const assessment = [
-    "---",
-    "sliceId: S01",
-    "uatType: runtime-executable",
-    "verdict: PASS",
-    "attempt: 2",
-    `runId: ${runId}`,
-    "---",
-    "",
+    `runId: ${savedRunId}`,
     `gsd_uat_exec:${evidenceId}`,
     mergeCommit,
     source.snapshot.aggregateRevision,
@@ -249,22 +261,23 @@ function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeC
     CAPSTONE_HASH,
     "",
   ].join("\n");
-  const execDir = join(basePath, ".gsd", "exec");
-  mkdirSync(execDir, { recursive: true });
-  writeFileSync(join(execDir, `${evidenceId}.meta.json`), JSON.stringify({
+  recordExecRun({
+    kind: "uat_exec",
+    milestoneId: TASK.milestoneId,
+    sliceId: TASK.sliceId,
+    checkId: "exact-merge-capstone",
     id: evidenceId,
+    runtime: "bash",
+    command: "node capstone.js",
+    cwd: basePath,
     exit_code: 0,
     signal: null,
-    timed_out: false,
+    timedOut: false,
     aborted: false,
-    metadata: {
-      kind: "uat_exec",
-      milestoneId: TASK.milestoneId,
-      sliceId: TASK.sliceId,
-      checkId: "exact-merge-capstone",
-      intent: "uat-runtime-check",
-    },
-  }));
+    started_at: "2026-07-12T00:02:00.000Z",
+    duration_ms: 1,
+    output_hash: "sha256:test",
+  });
   db().prepare(`
     INSERT INTO assessments (
       path, milestone_id, slice_id, status, scope, full_content, created_at
@@ -290,9 +303,9 @@ function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeC
     ) VALUES (
       'uat:M001:S01', :run_id, 'UAT', 'uat', 'run-uat', 'run-uat:M001/S01',
       'M001', 'S01', 'pass', 'none', 'Exact-merged UAT passed.',
-      :findings, 2, 2, 0, '2026-07-12T00:03:00.000Z'
+      :findings, 1, 1, 0, '2026-07-12T00:03:00.000Z'
     )
-  `).run({ ":run_id": runId, ":findings": assessment });
+  `).run({ ":run_id": savedRunId, ":findings": assessment });
   recordTaskTechnicalVerdict({
     invocation: invocation(`pi:exact-merged-verification:${attemptId}`),
     attemptId,
@@ -788,6 +801,89 @@ test("#1983: an unreopened pending Task SUMMARY with no Attempt lineage stays fa
   );
 });
 
+function taskSummaryArtifactRows(): number {
+  return Number(row(`
+    SELECT COUNT(*) AS count FROM artifacts
+    WHERE artifact_type = 'SUMMARY' AND milestone_id = 'M001' AND slice_id = 'S01' AND task_id = 'T01'
+  `).count);
+}
+
+test("a Task reopened after verified publication keeps no SUMMARY that claims completion", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  recordPassingHostVerdict(basePath, attemptId);
+  await publishVerifiedTaskCompletion(publishInput(basePath, attemptId));
+  assert.equal(taskState().status, "complete");
+  assert.equal(taskSummaryArtifactRows(), 1, "the real completion path records the Task SUMMARY artifact row");
+
+  const reopened = await executeTaskReopen(
+    { ...TASK, reason: "slice closeout found a regression" },
+    basePath,
+    invocation("task-completion/reopen-published"),
+  );
+  assert.notEqual(reopened.isError, true, JSON.stringify(reopened.content));
+
+  assert.equal(taskState().status, "pending");
+  assert.equal(taskSummaryArtifactRows(), 0, "the SUMMARY artifact row of the voided completion is removed");
+  assert.equal(existsSync(staged.summaryPath), false, "the SUMMARY projection of the voided completion is gone");
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "a reopened Task must be dispatchable",
+  );
+  const reopenPayload = JSON.parse(String(row(`
+    SELECT payload_json FROM workflow_domain_events WHERE event_type = 'task.reopened'
+  `).payload_json)) as { invalidatedEvidence: { artifacts: Array<{ path: string; full_content: string }> } };
+  assert.deepEqual(
+    reopenPayload.invalidatedEvidence.artifacts.map((artifact) => artifact.path),
+    ["phases/01-test/S01-T01-SUMMARY.md"],
+    "the reopen event keeps the removed SUMMARY row",
+  );
+  assert.match(reopenPayload.invalidatedEvidence.artifacts[0]!.full_content, /Implemented the compatibility seam/);
+});
+
+test("a Task reopened inside a milestone worktree is not artifact/DB drift at the project root", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, planPath, attemptId } = createFixture();
+  writeFileSync(join(basePath, ".git", "info", "exclude"), ".gsd-worktrees/\n");
+  const worktreePath = join(basePath, ".gsd-worktrees", "M001");
+  const worktreePhaseDir = join(worktreePath, ".gsd", "phases", "01-test");
+  mkdirSync(worktreePhaseDir, { recursive: true });
+  writeFileSync(join(worktreePhaseDir, "01-01-PLAN.md"), readFileSync(planPath, "utf8"));
+  await stageTaskCompletion(stageInput(worktreePath));
+  recordPassingHostVerdict(basePath, attemptId);
+  const published = await publishVerifiedTaskCompletion(publishInput(worktreePath, attemptId));
+  const { resolveTaskFile } = await import("../paths.js");
+  const rootSummary = resolveTaskFile(basePath, "M001", "S01", "T01", "SUMMARY");
+  assert.ok(rootSummary, "publication writes the project-root SUMMARY");
+  assert.equal(existsSync(published.summaryPath), true, "publication writes the worktree SUMMARY");
+
+  // The complete-slice unit runs in the milestone worktree and reopens there.
+  const reopened = await executeTaskReopen(
+    { ...TASK, reason: "slice closeout found a regression" },
+    worktreePath,
+    invocation("task-completion/reopen-published-worktree"),
+  );
+  assert.notEqual(reopened.isError, true, JSON.stringify(reopened.content));
+  assert.equal(taskState().status, "pending");
+
+  // The next /gsd auto runs the pre-dispatch drift guard at the project root.
+  clearPathCache();
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "the reopened Task must be dispatchable from the project root",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(worktreePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "the reopened Task must be dispatchable from the milestone worktree",
+  );
+  assert.equal(existsSync(published.summaryPath), false, "the worktree SUMMARY is removed");
+  assert.equal(existsSync(rootSummary), false, "the project-root SUMMARY is removed");
+});
+
 test("#1763: staging from a milestone worktree dual-writes the SUMMARY to the project root", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath } = createFixture();
@@ -833,6 +929,123 @@ test("#1763: verified publication from a milestone worktree restores both SUMMAR
     readFileSync(published.summaryPath, "utf8"),
     "the project-root and worktree copies are byte-identical",
   );
+});
+
+function revertLifecycleToReadyFixture(): void {
+  // in_progress → ready is not a canonical transition, so the #2417 side-door
+  // shadow cannot exist on one legal edge. Build it the way real databases
+  // reached it — a sequence of fenced lifecycle writes that each satisfy the
+  // transition trigger (in_progress → paused → ready).
+  for (const status of ["paused", "ready"] as const) {
+    const fence = readDomainOperationFence();
+    executeDomainOperation({
+      operationType: "test.task.side-door-revert",
+      idempotencyKey: `fixture/2417-revert-${status}`,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: "test",
+      sourceTransport: "test",
+      payload: { taskId: "T01", to: status },
+    }, (context) => {
+      adoptOrTransitionLifecycle(context, {
+        itemKind: "task",
+        milestoneId: "M001",
+        sliceId: "S01",
+        taskId: "T01",
+        lifecycleStatus: status,
+      });
+      return {
+        events: [{
+          eventType: "test.task.side-door-revert",
+          entityType: "task",
+          entityId: "M001/S01/T01",
+          payload: { to: status },
+          destinations: ["test"],
+        }],
+        projections: [{
+          projectionKey: "test/m001/s01/t01",
+          projectionKind: "test",
+          rendererVersion: "1",
+        }],
+      };
+    });
+  }
+}
+
+test("#2417: publication commits from a reverted ready lifecycle shadow", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+  recordPassingHostVerdict(basePath, attemptId);
+
+  revertLifecycleToReadyFixture();
+
+  const published = await publishVerifiedTaskCompletion(publishInput(basePath, attemptId));
+
+  assert.equal(published.status, "committed");
+  assert.equal(
+    row(`SELECT lifecycle_status AS s FROM workflow_item_lifecycles WHERE item_kind = 'task' AND task_id = 'T01'`).s,
+    "completed",
+    "publication re-adopts the reverted shadow to completed",
+  );
+  assert.equal(row(`SELECT status AS s FROM tasks WHERE id = 'T01'`).s, "complete");
+});
+
+test("#2417: a ready lifecycle shadow without a passing verdict stays fail-closed", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+  revertLifecycleToReadyFixture();
+
+  await assert.rejects(
+    () => publishVerifiedTaskCompletion(publishInput(basePath, attemptId)),
+    /passing host Technical Verdict/,
+  );
+  assert.equal(
+    row(`SELECT lifecycle_status AS s FROM workflow_item_lifecycles WHERE item_kind = 'task' AND task_id = 'T01'`).s,
+    "ready",
+    "a refused publication must not move the lifecycle",
+  );
+});
+
+test("#2417: doctor reports a settled succeeded verify-stage Attempt on a non-terminal Task", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+
+  const issues: DoctorIssue[] = [];
+  await checkEngineHealth(basePath, issues, []);
+
+  const stranded = issues.filter((issue) => issue.code === "unpublished_succeeded_attempt");
+  assert.equal(stranded.length, 1);
+  assert.equal(stranded[0].unitId, "M001/S01/T01");
+  assert.match(stranded[0].message, new RegExp(attemptId));
+});
+
+test("after the Cutover doctor reports a stranded succeeded Attempt of a Task that only the legacy row closes", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+  // Only the legacy row closes the Task. Its lifecycle row stays open.
+  db().exec("UPDATE tasks SET status = 'complete' WHERE id = 'T01'");
+  const adopted = new Set(
+    db().prepare("SELECT item_kind FROM workflow_item_lifecycles").all().map((item) => item["item_kind"]),
+  );
+  seedLifecycles("stranded-attempt", [
+    { itemKind: "milestone" as const, milestoneId: "M001", lifecycleStatus: "ready" as const },
+    { itemKind: "slice" as const, milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" as const },
+  ].filter((lifecycle) => !adopted.has(lifecycle.itemKind)));
+  const stranded = async () => {
+    const issues: DoctorIssue[] = [];
+    await checkEngineHealth(basePath, issues, []);
+    return issues.filter((issue) => issue.code === "unpublished_succeeded_attempt").map((issue) => issue.unitId);
+  };
+
+  assert.deepEqual(await stranded(), [], "before the Cutover the legacy row answers that the Task is terminal");
+
+  cutOver();
+
+  assert.deepEqual(await stranded(), ["M001/S01/T01"]);
 });
 
 test("#1677: inside a worktree the classifier falls back to the project-root copy", async () => {
@@ -979,6 +1192,772 @@ test("#1726: an interrupted retry quarantines its abandoned staged SUMMARY witho
   );
 });
 
+// ─── Trailing-newline stamp separator (issue #2427) ────────────────────────
+//
+// The stamper inserts a "\n" separator before the stamp when the render intent
+// does not end with a newline, and stripProjectionStamp cannot remove it (at
+// strip time it is indistinguishable from the content's own trailing newline).
+// Stamp-insensitive comparisons must therefore also be trailing-newline-
+// insensitive, or newline-less DB intents can never compare equal to their
+// own stamped projections.
+
+function stagedArtifactAndTask(): {
+  artifact: { path: string; fullContent: string };
+  task: { status: string; fullSummaryMd: string };
+} {
+  const artifact = row(
+    "SELECT path, full_content FROM artifacts WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'",
+  );
+  const taskRow = row("SELECT status, full_summary_md FROM tasks WHERE id = 'T01'");
+  return {
+    artifact: {
+      path: String(artifact.path),
+      fullContent: String(artifact.full_content),
+    },
+    task: {
+      status: String(taskRow.status),
+      fullSummaryMd: String(taskRow.full_summary_md),
+    },
+  };
+}
+
+function forgetProjectionInCompatMarker(basePath: string): void {
+  const marker = readCompatMarker(basePath);
+  marker.projections = {};
+  writeCompatMarker(basePath, marker);
+}
+
+function interruptedRetryFixture(basePath: string, attemptId: string): void {
+  db().prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      'trace-dispatch-2', 'turn-dispatch-2', 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed', 2, '2026-07-12T00:10:00.000Z'
+    )
+  `).run();
+  const retry = claimTaskAttempt({
+    invocation: invocation("task-completion/interrupted-retry-claim"),
+    task: TASK,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id),
+    retryOfAttemptId: attemptId,
+  });
+  settleTaskAttempt({
+    invocation: invocation("task-completion/interrupted-retry-settle"),
+    attemptId: retry.attemptId,
+    outcome: "interrupted",
+    failureClass: "operator-cancelled",
+    summary: "The retry was cancelled",
+    output: { cancelled: true },
+  });
+}
+
+/**
+ * #2855: the kill window between staging and publication. The re-dispatch
+ * Attempt is claimed but never settles: the coordination row is canceled
+ * first (the #2850 pause/stop settlement window), so the Attempt stays
+ * `running` with no live runner able to settle it. `dispatchStatus` pins the
+ * final row status ("canceled" unless the test overrides it).
+ */
+function orphanedRetryFixture(
+  attemptId: string,
+  label: string,
+  dispatchStatus: string = "canceled",
+): string {
+  db().prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      :trace_id, :turn_id, 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed',
+      (SELECT COALESCE(MAX(attempt_n), 0) + 1 FROM unit_dispatches WHERE unit_id = 'M001/S01/T01'),
+      '2026-07-12T00:10:00.000Z'
+    )
+  `).run({ ":trace_id": `trace-dispatch-${label}`, ":turn_id": `turn-dispatch-${label}` });
+  const dispatchId = Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id);
+  const retry = claimTaskAttempt({
+    invocation: invocation(`task-completion/${label}-claim`),
+    task: TASK,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: dispatchId,
+    retryOfAttemptId: attemptId,
+  });
+  db().prepare(
+    "UPDATE unit_dispatches SET status = :status, ended_at = '2026-07-12T00:11:00.000Z' WHERE id = :id",
+  ).run({ ":status": dispatchStatus, ":id": dispatchId });
+  return retry.attemptId;
+}
+
+/**
+ * The staged SUMMARY with its publication blocked by the failing host
+ * Technical Verdict, routed for retry — the state the #2855 kill interrupts.
+ */
+async function stageWithBlockedPublication(
+  basePath: string,
+  attemptId: string,
+  label: string,
+): Promise<{ summaryPath: string; resultId: string }> {
+  const { stageTaskCompletion } = await subject();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  recordFailingHostVerdict(basePath, attemptId);
+  const routed = recordFailureAndSelectRecovery({
+    invocation: invocation(`task-completion/${label}-route-closeout`),
+    attemptId,
+    resultId: staged.resultId,
+    owner: "agent",
+    classification: { failureKind: "reconciliation-drift" },
+    summary: "Verified Task publication requires a passing host Technical Verdict",
+    evidence: { source: "agent-end-recovery" },
+    rationale: "publication blocked by the failing host Technical Verdict",
+  });
+  assert.equal(routed.action, "repair");
+  return { summaryPath: staged.summaryPath, resultId: staged.resultId };
+}
+
+test("#2427: a staged SUMMARY whose DB intent lost its trailing newline stays canonical", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+
+  // Rewrite the DB render intent without its trailing newline — the stamped
+  // projection keeps the separator newline the stamper inserted.
+  const { artifact, task } = stagedArtifactAndTask();
+  const trimmed = task.fullSummaryMd.replace(/\n+$/u, "");
+  assert.notEqual(trimmed, task.fullSummaryMd, "fixture staged summary ends with a newline");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": trimmed });
+
+  const { isCanonicalStagedTaskSummaryProjection } = await import(
+    "../task-summary-projection-classification.js"
+  );
+  assert.equal(
+    isCanonicalStagedTaskSummaryProjection(basePath, {
+      path: artifact.path,
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      fullContent: artifact.fullContent,
+    }, {
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      status: "in_progress",
+      fullSummaryMd: trimmed,
+    }),
+    true,
+    "a trailing-newline-only difference must not declassify the staged SUMMARY",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "doctor and reconciliation must accept the newline-less staged SUMMARY",
+  );
+});
+
+test("#2427: genuinely changed DB intent still classifies a staged SUMMARY as drift", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+
+  const changed = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md)
+    .replace("Implemented the compatibility seam", "Implemented an entirely different seam");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": changed });
+
+  const { artifact } = stagedArtifactAndTask();
+  const { isCanonicalStagedTaskSummaryProjection } = await import(
+    "../task-summary-projection-classification.js"
+  );
+  assert.equal(
+    isCanonicalStagedTaskSummaryProjection(basePath, {
+      path: artifact.path,
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      fullContent: artifact.fullContent,
+    }, {
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      status: "in_progress",
+      fullSummaryMd: changed,
+    }),
+    false,
+    "an interior content change is still classified as non-canonical",
+  );
+});
+
+test("#2427: an abandoned staged SUMMARY matches a newline-less DB intent without a blocker", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  const stagedMd = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md);
+
+  interruptedRetryFixture(basePath, attemptId);
+  assert.equal(existsSync(staged.summaryPath), true, "the abandoned disk projection awaits quarantine");
+
+  // Restore a DB intent that matches the projection except for the trailing
+  // newline, and forget the projection in the compat marker so the content
+  // comparison is the only acceptance path left.
+  const trimmed = stagedMd.replace(/\n+$/u, "");
+  assert.notEqual(trimmed, stagedMd, "fixture staged summary ends with a newline");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": trimmed });
+  forgetProjectionInCompatMarker(basePath);
+
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.equal(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }),
+    null,
+    "a trailing-newline-only difference must not fail-closed the abandoned staged SUMMARY",
+  );
+});
+
+test("#2427: an abandoned staged SUMMARY with genuinely different DB intent still blocks", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  const stagedMd = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md);
+
+  interruptedRetryFixture(basePath, attemptId);
+  assert.equal(existsSync(staged.summaryPath), true);
+
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({
+    ":md": stagedMd.replace(
+      "Implemented the compatibility seam",
+      "Implemented an entirely different seam",
+    ),
+  });
+  forgetProjectionInCompatMarker(basePath);
+
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+    "genuinely different content must stay fail-closed",
+  );
+});
+
+test("after the Cutover the abandoned staged SUMMARY repair takes the in-progress Task from the lifecycle row", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  interruptedRetryFixture(basePath, attemptId);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  // Only the lifecycle row says that the Task is in progress.
+  db().exec("UPDATE tasks SET status = 'pending' WHERE id = 'T01'");
+  seedLifecycles("abandoned-staged-summary", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+  ]);
+
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+    "before the Cutover the legacy row answers that the Task is pending",
+  );
+
+  cutOver();
+
+  assert.equal(describeArtifactDbDriftBlocker(drift, { basePath, state }), null);
+  await repairArtifactDbDrift(drift, { basePath, state });
+  assert.equal(existsSync(staged.summaryPath), false, "the repair moves the abandoned projection to quarantine");
+});
+
+test("#2855: an orphaned running retry does not unstage a killed SUMMARY publication", async () => {
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageWithBlockedPublication(basePath, attemptId, "2855-orphan");
+
+  // The kill lands during the finalize-retry re-dispatch, canceling its
+  // dispatch row before the Attempt settles.
+  orphanedRetryFixture(attemptId, "2855-orphan-1");
+
+  assert.equal(existsSync(staged.summaryPath), true, "the staged projection survives the kill");
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).filter((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.deepEqual(
+    drift,
+    [],
+    "the orphaned running retry must not fail-close the staged SUMMARY",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "doctor and reconciliation must see the canonical staged SUMMARY through the orphaned attempt",
+  );
+});
+
+test("#2855: a stale-interrupted retry behind a second orphaned retry is abandoned bookkeeping", async () => {
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageWithBlockedPublication(basePath, attemptId, "2855-double");
+
+  // First re-entry: the cutover interrupts the orphaned retry as stale and
+  // routes the failure, then claims the next retry — which is killed the same
+  // way: dispatch canceled, Attempt never settles.
+  const firstOrphan = orphanedRetryFixture(attemptId, "2855-double-1");
+  const staleSettlement = settleTaskAttempt({
+    invocation: invocation("task-completion/2855-double-stale-settle"),
+    attemptId: firstOrphan,
+    outcome: "interrupted",
+    failureClass: "stale-worker",
+    summary: "Replaced stale Task Attempt during same-session re-dispatch",
+    output: {},
+  });
+  recordFailureAndSelectRecovery({
+    invocation: invocation("task-completion/2855-double-route-stale"),
+    attemptId: firstOrphan,
+    resultId: staleSettlement.resultId,
+    owner: "agent",
+    classification: { failureKind: "stale-worker" },
+    summary: "Replaced stale Task Attempt during same-session re-dispatch",
+    evidence: { source: "agent-end-recovery" },
+    rationale: "stale interrupt",
+  });
+  orphanedRetryFixture(firstOrphan, "2855-double-2");
+
+  assert.equal(existsSync(staged.summaryPath), true);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  // The newest settled Attempt is the stale interrupt, so the staged SUMMARY
+  // is abandoned bookkeeping: the auto-quarantine repair must be offered, not
+  // a fail-closed blocker.
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence", "the staged debris is still detected");
+  assert.equal(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }),
+    null,
+    "the abandoned staged SUMMARY must be repairable through the orphaned retry",
+  );
+  await repairArtifactDbDrift(drift, { basePath, state });
+  const stateAfter = reconciliationState();
+  assert.deepEqual(
+    detectArtifactDbDrift(stateAfter, { basePath, state: stateAfter }).filter((record) =>
+      record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+    ),
+    [],
+    "the quarantine clears the drift at both detection roots",
+  );
+});
+
+test("#2855: a re-dispatch that can still settle its Attempt keeps the guard fail-closed", async () => {
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageWithBlockedPublication(basePath, attemptId, "2855-live");
+
+  // Same kill sequence, but the coordination row stays claimed: a live runner
+  // may still act on the Attempt, so nothing may be exempted yet.
+  db().prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      'trace-dispatch-live', 'turn-dispatch-live', 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed', 2, '2026-07-12T00:10:00.000Z'
+    )
+  `).run();
+  claimTaskAttempt({
+    invocation: invocation("task-completion/2855-live-claim"),
+    task: TASK,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id),
+    retryOfAttemptId: attemptId,
+  });
+
+  assert.equal(existsSync(staged.summaryPath), true);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).filter((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(
+    drift.length > 0,
+    "a dispatch that can still settle its Attempt must not exempt the staged SUMMARY",
+  );
+  assert.match(
+    describeArtifactDbDriftBlocker(drift[0]!, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+  );
+});
+
+test("#2855: changed DB intent behind an orphaned running retry still blocks", async () => {
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageWithBlockedPublication(basePath, attemptId, "2855-changed");
+  orphanedRetryFixture(attemptId, "2855-changed-orphan");
+
+  const changed = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md)
+    .replace("Implemented the compatibility seam", "Implemented an entirely different seam");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": changed });
+
+  assert.equal(existsSync(staged.summaryPath), true);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+    "the orphan exemption must stay gated on the staged content matching the DB intent",
+  );
+});
+
+test("#2855: only explicitly terminal dispatch rows orphan the running Attempt", async () => {
+  const exempting = ["canceled", "completed", "failed", "stuck", "paused"];
+  for (const [index, dispatchStatus] of exempting.entries()) {
+    const label = `2855-terminal-${index}`;
+    const { basePath, attemptId } = createFixture();
+    const staged = await stageWithBlockedPublication(basePath, attemptId, label);
+    orphanedRetryFixture(attemptId, `${label}-orphan`, dispatchStatus);
+    assert.equal(existsSync(staged.summaryPath), true);
+    const state = reconciliationState();
+    assert.deepEqual(
+      detectArtifactDbDrift(state, { basePath, state }).filter((record) =>
+        record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+      ),
+      [],
+      `a ${dispatchStatus} dispatch row cannot settle its Attempt, so the staged SUMMARY stays canonical`,
+    );
+  }
+
+  // The status column is unconstrained TEXT: an unknown value must stay
+  // fail-closed — the exemption requires proving that no live runner exists.
+  {
+    const label = "2855-unknown";
+    const { basePath, attemptId } = createFixture();
+    const staged = await stageWithBlockedPublication(basePath, attemptId, label);
+    orphanedRetryFixture(attemptId, `${label}-orphan`, "teleported");
+    assert.equal(existsSync(staged.summaryPath), true);
+    const state = reconciliationState();
+    const drift = detectArtifactDbDrift(state, { basePath, state }).filter((record) =>
+      record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+    );
+    assert.ok(
+      drift.length > 0,
+      "an unknown dispatch status must not exempt the staged SUMMARY",
+    );
+    assert.match(
+      describeArtifactDbDriftBlocker(drift[0]!, { basePath, state }) ?? "",
+      /Artifact\/DB status drift/,
+    );
+
+    // A missing dispatch row (unreadable status) and a non-running Attempt
+    // also stay fail-closed at the orphan predicate itself.
+    const { isTaskExecutionAttemptOrphaned } = await import(
+      "../task-execution-domain-operation.js"
+    );
+    assert.equal(
+      isTaskExecutionAttemptOrphaned({ state: "running", coordinationDispatchId: 424242 }),
+      false,
+      "a missing dispatch row must not orphan the Attempt",
+    );
+    assert.equal(
+      isTaskExecutionAttemptOrphaned({ state: "settled", coordinationDispatchId: 424242 }),
+      false,
+      "only a running Attempt can be orphaned",
+    );
+    assert.equal(isTaskExecutionAttemptOrphaned(null), false);
+  }
+});
+
+// ─── #2864: the finalizer verification pause vs. the staged-SUMMARY drift ──
+//
+// The finalize verification pause (#2334) leaves the exact shape the staged-
+// SUMMARY policy exempts: legacy in_progress, Attempt settled succeeded at the
+// verify stage, staged SUMMARY row + DB intent on file. When projection-worker
+// quarantines the disk copy, the exemption's byte-exact disk match fails, the
+// row drift fires on every resume, and the only repair branch rejected the
+// succeeded outcome by construction — a permanent pre-dispatch wedge whose
+// blocker named exits that cannot clear it. The repair must consume the
+// receipt-gated pause state (and only it: without the durable
+// `task.verification.paused` receipt the state stays fail-closed), and the
+// guidance must name the settle exit that actually releases the Task.
+
+async function stageWithVerificationPause(
+  basePath: string,
+  attemptId: string,
+): Promise<string> {
+  const { stageTaskCompletion } = await subject();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  assert.equal(staged.nextStage, "verify");
+  const { recordTaskVerificationPause } = await import("../task-settle.js");
+  assert.equal(
+    recordTaskVerificationPause(TASK),
+    attemptId,
+    "the pause receipt binds to the settled Attempt",
+  );
+  return staged.summaryPath;
+}
+
+function stagedTaskSummaryDrift(basePath: string, state: GSDState) {
+  return detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+}
+
+test("#2864: a verification-paused staged SUMMARY whose projection was quarantined is receipt-gated repairable bookkeeping", async () => {
+  const { basePath, attemptId } = createFixture();
+  const summaryPath = await stageWithVerificationPause(basePath, attemptId);
+
+  // projection-worker quarantine: the disk copy is gone, the artifacts row and
+  // the DB intent remain — the wedge state.
+  unlinkSync(summaryPath);
+  clearPathCache();
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence", "the lost copy is still detected");
+  assert.equal(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }),
+    null,
+    "the receipt-gated pause state must be auto-repairable, not a permanent blocker",
+  );
+  await repairArtifactDbDrift(drift, { basePath, state });
+
+  const stateAfter = reconciliationState();
+  assert.deepEqual(
+    detectArtifactDbDrift(stateAfter, { basePath, state: stateAfter }).filter((record) =>
+      record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+    ),
+    [],
+    "the repair clears the wedge at both detection roots",
+  );
+  assert.equal(
+    Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'").count),
+    0,
+    "the stale staged row is cleared",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "doctor and reconciliation must accept the Task after the repair",
+  );
+});
+
+test("#2864: without the pause receipt the same state stays fail-closed", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  assert.equal(staged.nextStage, "verify");
+
+  unlinkSync(staged.summaryPath);
+  clearPathCache();
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  const blocker = describeArtifactDbDriftBlocker(drift, { basePath, state });
+  assert.match(
+    blocker ?? "",
+    /Artifact\/DB status drift/,
+    "a missing pause receipt must not become a quarantine path (#2334)",
+  );
+  assert.doesNotMatch(
+    blocker ?? "",
+    /reconcile-lifecycle/,
+    "the settle exit refuses without the receipt, so the guidance must not offer it",
+  );
+  await assert.rejects(() => repairArtifactDbDrift(drift, { basePath, state }));
+  assert.equal(
+    Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'").count),
+    1,
+    "the staged row survives a refused repair",
+  );
+});
+
+test("#2864: the blocker names the receipt-gated settle exit when the staged content no longer matches the DB intent", async () => {
+  const { basePath, attemptId } = createFixture();
+  const summaryPath = await stageWithVerificationPause(basePath, attemptId);
+
+  db().prepare(
+    "UPDATE artifacts SET full_content = 'tampered' WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'",
+  ).run();
+  unlinkSync(summaryPath);
+  clearPathCache();
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /reconcile-lifecycle/,
+    "guidance must name the exit that actually releases the verification-paused Task",
+  );
+});
+
+test("#2864: a diverged DB intent behind a receipt is not cleared — the marker baseline is not proof for the pause", async () => {
+  const { basePath, attemptId } = createFixture();
+  const summaryPath = await stageWithVerificationPause(basePath, attemptId);
+
+  // The Task's own intent changes after the pause; the disk copy and its
+  // projection marker still hold what staging wrote. The marker vouches for
+  // the staging bytes, never for the new intent — a destructive repair must
+  // not consume the Task's summary behind it.
+  const changed = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md)
+    .replace("Implemented the compatibility seam", "Implemented an entirely different seam");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": changed });
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence", "the changed intent is still drift");
+  const blocker = describeArtifactDbDriftBlocker(drift, { basePath, state });
+  assert.match(blocker ?? "", /reconcile-lifecycle/, "the Task state is still the settle exit's to release");
+  await assert.rejects(() => repairArtifactDbDrift(drift, { basePath, state }));
+  assert.equal(
+    Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'").count),
+    1,
+    "the staged row survives a refused repair",
+  );
+  assert.equal(
+    row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md,
+    changed,
+    "the changed DB intent is left in place",
+  );
+  assert.equal(existsSync(summaryPath), true, "the projection copy is left in place");
+});
+
+test("#2864: behind an orphaned running retry the guidance falls back — the settle exit refuses a running Attempt", async () => {
+  const { basePath, attemptId } = createFixture();
+  const summaryPath = await stageWithVerificationPause(basePath, attemptId);
+  orphanedRetryFixture(attemptId, "2864-orphan");
+
+  db().prepare(
+    "UPDATE artifacts SET full_content = 'tampered' WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'",
+  ).run();
+  unlinkSync(summaryPath);
+  clearPathCache();
+
+  const state = reconciliationState();
+  const drift = stagedTaskSummaryDrift(basePath, state);
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  const blocker = describeArtifactDbDriftBlocker(drift, { basePath, state });
+  assert.doesNotMatch(
+    blocker ?? "",
+    /reconcile-lifecycle/,
+    "the settle exit refuses while an Attempt is running, so the guidance must not offer it",
+  );
+  assert.match(blocker ?? "", /Artifact\/DB status drift/, "the divergence itself stays fail-closed");
+});
+
+function quarantinedTaskSummaries(root: string): string[] {
+  const quarantineRoot = join(root, ".gsd", "quarantine", "projections");
+  if (!existsSync(quarantineRoot)) return [];
+  return readdirSync(quarantineRoot, { recursive: true })
+    .map(String)
+    .filter((path) => path.endsWith("T01-SUMMARY.md"));
+}
+
+test("#2714: a SUMMARY saved in a milestone worktree by an interrupted Attempt is quarantined at both roots", async () => {
+  const { basePath, planPath, attemptId } = createFixture();
+  // After the Cutover only the lifecycle row, which the Attempt claim wrote,
+  // says that the Task is in progress. No completion was staged.
+  db().exec("UPDATE tasks SET status = 'pending' WHERE id = 'T01'");
+  seedLifecycles("2714-worktree-summary", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+  ]);
+  cutOver();
+  writeFileSync(join(basePath, ".git", "info", "exclude"), ".gsd-worktrees/\n");
+  const worktreePath = join(basePath, ".gsd-worktrees", "M001");
+  const worktreePhaseDir = join(worktreePath, ".gsd", "phases", "01-test");
+  mkdirSync(worktreePhaseDir, { recursive: true });
+  writeFileSync(join(worktreePhaseDir, "01-01-PLAN.md"), readFileSync(planPath, "utf8"));
+
+  // The execute-task unit runs in the milestone worktree and saves its SUMMARY there.
+  const saved = await executeSummarySave(
+    {
+      milestone_id: "M001",
+      slice_id: "S01",
+      task_id: "T01",
+      artifact_type: "SUMMARY",
+      content: "# T01 Summary\n\nThe executor wrote this before the unit was stopped.\n",
+    },
+    worktreePath,
+    invocation("task-completion/2714-summary-save"),
+  );
+  assert.notEqual(saved.isError, true, JSON.stringify(saved.content));
+  const { resolveTaskFile } = await import("../paths.js");
+  const rootSummary = resolveTaskFile(basePath, "M001", "S01", "T01", "SUMMARY");
+  const worktreeSummary = resolveTaskFile(worktreePath, "M001", "S01", "T01", "SUMMARY");
+  assert.ok(rootSummary && existsSync(rootSummary), "the save writes the project-root SUMMARY");
+  assert.ok(worktreeSummary && existsSync(worktreeSummary), "the save copies the SUMMARY into the worktree");
+  assert.notEqual(worktreeSummary, rootSummary);
+  assert.equal(readFileSync(worktreeSummary, "utf8"), readFileSync(rootSummary, "utf8"));
+
+  // The unit is force-stopped before completion: its first Attempt settles without success.
+  settleTaskAttempt({
+    invocation: invocation("task-completion/2714-interrupted-settle"),
+    attemptId,
+    outcome: "interrupted",
+    failureClass: "stale-worker",
+    summary: "The unit was force-stopped",
+    output: { forceStopped: true },
+  });
+  assert.equal(taskSummaryArtifactRows(), 0, "settlement removes the SUMMARY artifact row");
+  assert.equal(existsSync(rootSummary), true, "settlement leaves the project-root file");
+  assert.equal(existsSync(worktreeSummary), true, "settlement leaves the worktree file");
+
+  // The pre-dispatch drift guard of auto-mode runs at the milestone worktree.
+  clearPathCache();
+  const state = reconciliationState();
+  const ctx = { basePath: worktreePath, state };
+  const drift = detectArtifactDbDrift(state, ctx).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.equal(drift.dbStatus, "in_progress", "the interrupted Task stays in progress");
+  assert.equal(
+    describeArtifactDbDriftBlocker(drift, ctx),
+    null,
+    "the abandoned worktree copy is auto-repairable",
+  );
+  await repairArtifactDbDrift(drift, ctx);
+
+  assert.equal(existsSync(worktreeSummary), false, "the worktree SUMMARY is moved away");
+  assert.equal(existsSync(rootSummary), false, "the project-root SUMMARY is moved away");
+  assert.equal(quarantinedTaskSummaries(worktreePath).length, 1, "the worktree copy is kept in quarantine");
+  assert.equal(quarantinedTaskSummaries(basePath).length, 1, "the project-root copy is kept in quarantine");
+  clearPathCache();
+  assert.deepEqual(
+    await taskSummaryDivergence(worktreePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "the Task must be dispatchable from the milestone worktree",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "the Task must be dispatchable from the project root",
+  );
+  assert.equal(taskSummaryArtifactRows(), 0, "the repair imports no SUMMARY row from the file");
+  assert.equal(taskState().full_summary_md, "", "the repair imports no summary text from the file");
+  assert.equal(
+    row(`SELECT lifecycle_status AS s FROM workflow_item_lifecycles WHERE item_kind = 'task' AND task_id = 'T01'`).s,
+    "in_progress",
+    "the repair does not complete the Task",
+  );
+});
+
 test("staging normalizes a pending legacy Task and clears its stale completion timestamp", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath } = createFixture();
@@ -1046,7 +2025,7 @@ test("changed stage replay payload conflicts without restaging Task metadata or 
   assert.deepEqual(settlementState(), before);
 });
 
-test("a summary projection failure leaves the immutable Result and staged legacy state intact for replay repair", async () => {
+test("a summary projection failure returns the committed staging receipt with a stale flag", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath, attemptId } = createFixture();
   _setManagedMutationBoundaryForTest((boundary, target) => {
@@ -1055,7 +2034,12 @@ test("a summary projection failure leaves the immutable Result and staged legacy
     }
   });
 
-  await assert.rejects(stageTaskCompletion(stageInput(basePath)), /projection|summary/i);
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  assert.equal(staged.status, "committed");
+  assert.equal(staged.attemptId, attemptId);
+  assert.equal(staged.nextStage, "verify");
+  assert.equal(staged.stale, true);
+  assert.equal(staged.summaryPath, "");
 
   assert.deepEqual(row("SELECT attempt_state, settle_outcome FROM workflow_execution_attempts"), {
     attempt_state: "settled",
@@ -1071,9 +2055,14 @@ test("a summary projection failure leaves the immutable Result and staged legacy
   assert.equal(count("verification_evidence"), 1);
 
   _setManagedMutationBoundaryForTest(null);
+  await assertWorkerRendersStaleProjection(
+    basePath,
+    targetTaskFile(basePath, "M001", "S01", "T01", "SUMMARY", "Compatibility adapter"),
+  );
   const replayed = await stageTaskCompletion(stageInput(basePath));
   assert.equal(replayed.status, "replayed");
   assert.equal(replayed.attemptId, attemptId);
+  assert.equal(replayed.stale, undefined);
   assert.equal(existsSync(replayed.summaryPath), true);
   assert.equal(count("workflow_attempt_results"), 1);
   assert.equal(count("verification_evidence"), 1);
@@ -1183,6 +2172,23 @@ test("exact-merged UAT evidence authorizes dossier task publication", async () =
   assert.equal(published.status, "committed");
   assert.equal(taskState().status, "complete");
   assert.equal(row("SELECT lifecycle_status FROM workflow_item_lifecycles").lifecycle_status, "completed");
+});
+
+test("an exec run outside the saved passing UAT run does not authorize dossier task publication", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const mergeCommit = activateExactMergedClosure(basePath);
+  await stageTaskCompletion(stageInput(basePath));
+  // The ASSESSMENT text names the exec run, the merge commit and the hashes,
+  // but the saved passing run is another run than the one the exec run is in.
+  recordExactMergedUatVerdict(basePath, attemptId, mergeCommit, "uat:M001:S01:attempt-2");
+
+  await assert.rejects(
+    publishVerifiedTaskCompletion(publishInput(basePath, attemptId)),
+    /passing canonical exact-merged UAT gate receipt/,
+  );
+
+  assert.equal(taskState().status, "in_progress");
 });
 
 test("verified publication atomically closes only its task gates from durable Attempt evidence", async () => {
@@ -1487,7 +2493,7 @@ test("exact stage and publication replay repair projections without duplicate fa
   }, beforeReplay);
 });
 
-test("auto publication replays a committed Task completion after PLAN projection failure", async () => {
+test("auto publication commits the Task completion when the PLAN projection fails, and a replay renders it", async () => {
   const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
   const { publishVerifiedTaskExecution } = await import("../auto/task-execution-cutover.js");
   const { basePath, planPath, attemptId } = createFixture();
@@ -1508,10 +2514,7 @@ test("auto publication replays a committed Task completion after PLAN projection
   };
   const dependencies = { readLatestTaskAttempt, publishVerifiedTaskCompletion };
 
-  await assert.rejects(
-    publishVerifiedTaskExecution(input, dependencies),
-    /PLAN projection failed/i,
-  );
+  await publishVerifiedTaskExecution(input, dependencies);
   assert.equal(taskState().status, "complete");
   assert.equal(
     readLatestTaskAttempt(TASK)?.nextStage,
@@ -1526,6 +2529,7 @@ test("auto publication replays a committed Task completion after PLAN projection
   };
 
   _setManagedMutationBoundaryForTest(null);
+  await assertWorkerRendersStaleProjection(basePath, planPath);
   await publishVerifiedTaskExecution(input, dependencies);
 
   assert.match(readFileSync(planPath, "utf8"), /\[x\][^\n]*\*\*T01/i);
@@ -1536,7 +2540,7 @@ test("auto publication replays a committed Task completion after PLAN projection
   }, beforeReplay);
 });
 
-test("#1973: attempt-gate rejection names the settled outcome and recovery lever; blocker reports bypass the gate", () => {
+test("#1973: attempt-gate rejection names the settled outcome and recovery lever", () => {
   const { attemptId } = createFixture();
   const settlement = settleTaskAttempt({
     invocation: invocation("task-completion/settle-provider-failure"),
@@ -1573,12 +2577,56 @@ test("#1973: attempt-gate rejection names the settled outcome and recovery lever
     },
   );
 
-  assert.equal(
-    resolveTaskCompletionAuthority(TASK, undefined, { blockerReport: true }),
-    "legacy",
-    "blockerDiscovered reports must route to the legacy durable write instead of dead-ending on the gate",
+  // A blocker report rides the same canonical gate: there is no legacy write
+  // path to bypass it with.
+  assert.throws(
+    () => resolveTaskCompletionAuthority(TASK, undefined),
+    (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      return /no running Attempt/.test(message);
+    },
   );
 });
+
+test("#2793: a terminal replan route names its /gsd auto exit in the attempt-gate rejection", () => {
+  const { attemptId } = createFixture();
+  const settlement = settleTaskAttempt({
+    invocation: invocation("task-completion/settle-missing-result"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "missing-executor-result",
+    summary: "execute-task ended without a succeeded executor Result",
+    output: {},
+  });
+  const routed = recordFailureAndSelectRecovery({
+    invocation: invocation("task-completion/route-missing-result"),
+    attemptId,
+    resultId: settlement.resultId,
+    owner: "agent",
+    classification: { failureKind: "lifecycle-progression" },
+    summary: "execute-task ended without a succeeded executor Result",
+    evidence: { source: "reconcile" },
+    rationale: "Supersede the plan before another execution attempt.",
+  });
+  assert.equal(routed.action, "replan");
+
+  assert.throws(
+    () => resolveTaskCompletionAuthority(TASK),
+    (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      assert.match(message, /no running Attempt/);
+      assert.ok(message.includes(routed.recoveryActionId));
+      assert.match(message, /\(replan\)/);
+      assert.match(message, /rerun `\/gsd auto`/i);
+      assert.match(message, /replan-task/);
+      return true;
+    },
+  );
+});
+
+function planPathOf(basePath: string): string {
+  return join(basePath, ".gsd", "phases", "01-test", "01-01-PLAN.md");
+}
 
 test("settled remediate recovery resumes through a fresh verified completion", async () => {
   const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();

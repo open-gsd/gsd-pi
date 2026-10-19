@@ -6,6 +6,7 @@ import {
   type DomainJsonValue,
 } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
+import { readExecRun } from "./db/writers/exec-runs.js";
 import {
   appendKernelCheckpoint,
   readDomainOperationFence,
@@ -169,6 +170,23 @@ export function readTaskTechnicalVerdict(attemptId: string): TaskTechnicalVerdic
   };
 }
 
+/**
+ * An evidence reference must resolve when it is stored. A `db://<kind>/<attemptId>`
+ * reference names the evidence row of the Attempt under verification. Any
+ * other reference is the id of a host-recorded exec run.
+ */
+function requireResolvableOutputRef(durableOutputRef: string, attemptId: string): void {
+  if (durableOutputRef.startsWith("db://")) {
+    if (durableOutputRef.split("/")[3] === attemptId) return;
+    throw new Error(
+      `Host verification evidence reference ${durableOutputRef} does not name Attempt ${attemptId}`,
+    );
+  }
+  if (!readExecRun(durableOutputRef)) {
+    throw new Error(`Host verification evidence reference ${durableOutputRef} names no host-recorded exec run`);
+  }
+}
+
 export function isPendingTaskHumanReviewVerdict(attemptId: string, verdictId: string): boolean {
   const stored = getDb().prepare(`
     SELECT 1 AS pending
@@ -195,6 +213,7 @@ export function recordTaskTechnicalVerdict(
   if (Object.keys(input.evidence.environment).length === 0) {
     throw new Error("Host verification evidence environment must not be empty");
   }
+  requireResolvableOutputRef(input.evidence.durableOutputRef, input.attemptId);
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
   let recorded: StoredVerdict | undefined;
   const operation = executeDomainOperation({
@@ -278,6 +297,7 @@ export function invalidateTaskTechnicalPass(
   if (Object.keys(input.evidence.environment).length === 0) {
     throw new Error("Host verification evidence environment must not be empty");
   }
+  requireResolvableOutputRef(input.evidence.durableOutputRef, input.attemptId);
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
   let recorded: StoredVerdict | undefined;
   const operation = executeDomainOperation({

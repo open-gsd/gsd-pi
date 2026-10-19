@@ -91,7 +91,7 @@ test("timeout recovery finalizes only a canonically succeeded Task Attempt", asy
       basePath,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     },
   );
 
@@ -136,7 +136,7 @@ test("exhausted task timeout recovery writes diagnostics outside the SUMMARY pro
       basePath,
       verbose: false,
       currentUnitStartedAt: startedAt,
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     },
   );
 
@@ -175,4 +175,64 @@ test("exhausted task timeout recovery writes diagnostics outside the SUMMARY pro
     true,
     "a genuine disk SUMMARY for a pending Task must remain fail-closed",
   );
+});
+
+test("timeout recovery record and steering follow the database when PLAN and STATE.md contradict it", async (t) => {
+  const basePath = mkdtempSync(join(tmpdir(), "gsd-timeout-task-db-status-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(basePath, { recursive: true, force: true });
+  });
+  mkdirSync(join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
+  // The projections say T01 is done and T02 is the open task. The database says the opposite.
+  writeFileSync(
+    join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"),
+    "# S01\n\n## Tasks\n\n- [x] **T01: First** `est:10m`\n- [ ] **T02: Second** `est:10m`\n",
+  );
+  writeFileSync(join(basePath, ".gsd", "STATE.md"), "## Next Action\nExecute T02 for S01: Second\n");
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "in_progress" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "First", status: "pending" });
+  insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", title: "Second", status: "complete" });
+
+  const startedAt = Date.now();
+  const recover = async (taskId: string): Promise<{ recovery: Record<string, unknown>; steering: string }> => {
+    const messages: Array<{ content: string }> = [];
+    const result = await recoverTimedOutUnit(
+      { ui: { notify() {} } } as never,
+      { sendMessage(message: { content: string }) { messages.push(message); } } as never,
+      "execute-task",
+      `M001/S01/${taskId}`,
+      "idle",
+      { basePath, verbose: false, currentUnitStartedAt: startedAt, unclaimedUnitBudgets: new Map() },
+    );
+    assert.equal(result, "recovered");
+    assert.equal(messages.length, 1, "an unsettled Attempt gets one steering message");
+    const runtime = JSON.parse(readFileSync(
+      join(basePath, ".gsd", "runtime", "units", `execute-task-M001-S01-${taskId}.json`),
+      "utf-8",
+    ));
+    return { recovery: runtime.recovery, steering: messages[0]!.content };
+  };
+
+  const open = await recover("T01");
+  assert.equal(open.recovery["dbComplete"], false, "a checked PLAN box does not close a pending DB task");
+  assert.match(open.steering, /DB task status is not closed/u);
+
+  // A second timeout of the same run is the final escalation.
+  writeUnitRuntimeRecord(basePath, "execute-task", "M001/S01/T02", startedAt, { recoveryAttempts: 1 });
+  const closed = await recover("T02");
+  assert.equal(closed.recovery["dbComplete"], true, "an unchecked PLAN box and STATE.md do not reopen a closed DB task");
+  assert.match(closed.steering, /DB task status is closed/u);
+  assert.match(closed.steering, /gsd_task_complete/u, "final steering names the completion tool");
+
+  for (const { recovery, steering } of [open, closed]) {
+    assert.deepEqual(
+      Object.keys(recovery),
+      ["dbComplete"],
+      "the record carries no PLAN, SUMMARY or STATE.md field",
+    );
+    assert.doesNotMatch(steering, /checkbox|next action|\[x\]|summary missing|must-have/iu, "steering never points at projection text");
+  }
 });

@@ -1,10 +1,9 @@
 // Project/App: gsd-pi
 // File Purpose: Tests for reassess-roadmap dispatch detection.
 //
-// `checkNeedsReassessment` reads slice state from the DB (post-cutover there is
-// no roadmap-markdown fallback), and reads ASSESSMENT/SUMMARY artifacts from
-// disk. Every fixture therefore seeds slice rows; the markdown files decide
-// only whether the last completed slice has already been assessed.
+// `checkNeedsReassessment` reads only the DB: slice rows, and the roadmap
+// assessment row that reassess-roadmap records. ASSESSMENT and SUMMARY files
+// are projections and decide nothing (ADR-046).
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,6 +16,7 @@ import { checkNeedsReassessment } from "../auto-prompts.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
   closeDatabase,
+  insertAssessment,
   insertMilestone,
   insertSlice,
   isDbAvailable,
@@ -73,11 +73,11 @@ const dummyState: GSDState = {
   registry: [{ id: "M001", title: "Test", status: "active" }],
 };
 
-// ─── checkNeedsReassessment: returns null when assessment exists ─────────
-// Discriminating because the SUMMARY is present and S02 is still open: drop the
-// ASSESSMENT check and this fixture dispatches { sliceId: "S01" }.
+// ─── checkNeedsReassessment: an ASSESSMENT file is not a reassessment ────
+// Only the roadmap assessment row records a reassessment. A slice ASSESSMENT.md
+// on disk (a run-uat projection, or a hand-written file) must not suppress it.
 
-test("checkNeedsReassessment returns null when assessment file exists", async () => {
+test("checkNeedsReassessment still returns sliceId when only an ASSESSMENT file exists", async () => {
   const base = makeTmpBase();
   try {
     invalidateAllCaches();
@@ -86,7 +86,7 @@ test("checkNeedsReassessment returns null when assessment file exists", async ()
     writeAssessment(base, "S01");
 
     const result = await checkNeedsReassessment(base, "M001", dummyState);
-    assert.strictEqual(result, null, "should return null when assessment exists");
+    assert.deepStrictEqual(result, { sliceId: "S01" }, "an ASSESSMENT file with no roadmap row is not a reassessment");
   } finally {
     cleanup(base);
   }
@@ -109,63 +109,56 @@ test("checkNeedsReassessment returns sliceId when assessment is missing", async 
   }
 });
 
-// ─── checkNeedsReassessment: returns null when no summary exists ─────────
-// Discriminating because everything else is dispatch-ready: drop the SUMMARY
-// requirement and this fixture dispatches { sliceId: "S01" }.
+// ─── checkNeedsReassessment: a missing SUMMARY file does not block ───────
+// The slice row says S01 is complete. A missing SUMMARY projection must not
+// stop the reassessment.
 
-test("checkNeedsReassessment returns null when summary is missing", async () => {
+test("checkNeedsReassessment returns sliceId when the SUMMARY file is missing", async () => {
   const base = makeTmpBase();
   try {
     invalidateAllCaches();
     seedSlices("complete", "pending");
-    // No summary, no assessment
+    // No summary file, no assessment
 
     const result = await checkNeedsReassessment(base, "M001", dummyState);
-    assert.strictEqual(result, null, "should return null — can't reassess without summary");
+    assert.deepStrictEqual(result, { sliceId: "S01" });
   } finally {
     cleanup(base);
   }
 });
 
-// ─── checkNeedsReassessment: detects assessment written after cache ──────
-// This is the core regression test for #1112: the assessment file is written
-// to disk AFTER the path cache was populated (simulating the worktree race
-// condition where readdirSync doesn't see a freshly written file).
+// ─── checkNeedsReassessment: sees a reassessment recorded after a first check ─
+// #1112: a reassessment recorded after a first check must stop the next
+// dispatch. The roadmap assessment row is read on every call, so no path
+// cache can hide it.
 
-test("checkNeedsReassessment detects assessment written after initial cache population", async () => {
+test("checkNeedsReassessment detects a roadmap assessment recorded after a first check", async () => {
   const base = makeTmpBase();
   try {
     seedSlices("complete", "pending");
-    writeSummary(base, "S01");
 
-    // First call: no assessment exists — populates internal caches
-    invalidateAllCaches();
     const before = await checkNeedsReassessment(base, "M001", dummyState);
     assert.deepStrictEqual(before, { sliceId: "S01" }, "should need reassessment initially");
 
-    // Now write the assessment — after the first pass already cached the slice
-    // directory listing. This is the #1112 worktree race: the reassess unit's
-    // agent writes ASSESSMENT.md directly, so nothing in the path layer knows.
-    writeAssessment(base, "S01");
+    insertAssessment({
+      path: ".gsd/milestones/M001/M001-ROADMAP-ASSESSMENT.md",
+      milestoneId: "M001",
+      sliceId: "S01",
+      status: "no-changes",
+      scope: "roadmap",
+      fullContent: "No changes needed.",
+    });
 
-    // The auto loop clears the path caches once per completed unit
-    // (`auto-post-unit.ts:1474`), which is what unblocks the race in
-    // production; mirror exactly that and nothing more.
-    invalidateAllCaches();
-
-    // Second pass must now see the assessment and stop dispatching reassess —
-    // a detection that memoized the first answer, or a cache invalidation that
-    // missed the directory-entry cache, still returns { sliceId: "S01" }.
     const after = await checkNeedsReassessment(base, "M001", dummyState);
-    assert.strictEqual(after, null, "should return null — assessment exists on disk (fallback check)");
+    assert.strictEqual(after, null, "should return null — the reassessment is recorded");
   } finally {
     cleanup(base);
   }
 });
 
 // ─── checkNeedsReassessment: returns null when all slices done ───────────
-// Discriminating because S02 is the last completed slice and has a SUMMARY but
-// no ASSESSMENT: drop the "milestone still has open slices" guard and this
+// Discriminating because S02 is the last completed slice and has no roadmap
+// assessment row: drop the "milestone still has open slices" guard and this
 // fixture dispatches { sliceId: "S02" }.
 
 test("checkNeedsReassessment returns null when all slices are complete", async () => {
@@ -180,4 +173,68 @@ test("checkNeedsReassessment returns null when all slices are complete", async (
   } finally {
     cleanup(base);
   }
+});
+
+// ─── checkNeedsReassessment: a deferred slice is not open work ───────────
+// Discriminating because S01 is complete with no roadmap assessment row: count
+// deferred S02 as open and this fixture dispatches { sliceId: "S01" }.
+
+test("checkNeedsReassessment returns null when the only other slice is deferred", async () => {
+  const base = makeTmpBase();
+  try {
+    invalidateAllCaches();
+    seedSlices("complete", "deferred");
+    writeSummary(base, "S01");
+
+    const result = await checkNeedsReassessment(base, "M001", dummyState);
+    assert.strictEqual(result, null, "should return null — a deferred slice leaves nothing to run");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ─── checkNeedsReassessment: reads the durable roadmap assessment row ─────
+// #2344: reassess-roadmap persists its verdict as a roadmap-scoped assessments
+// row and never writes a slice ASSESSMENT.md, so a completed reassessment must
+// satisfy dispatch through the DB or the rule re-selects the unit every cycle.
+
+test("checkNeedsReassessment returns null when a roadmap assessment row exists for the last completed slice", async (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  invalidateAllCaches();
+  seedSlices("complete", "pending");
+  writeSummary(base, "S01");
+  // No slice ASSESSMENT.md on disk — only the durable row reassess-roadmap writes.
+  insertAssessment({
+    path: ".gsd/milestones/M001/M001-ROADMAP-ASSESSMENT.md",
+    milestoneId: "M001",
+    sliceId: "S01",
+    status: "no-changes",
+    scope: "roadmap",
+    fullContent: "No changes needed.",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  const result = await checkNeedsReassessment(base, "M001", dummyState);
+  assert.strictEqual(result, null, "roadmap-scoped row must satisfy dispatch without a slice ASSESSMENT.md");
+});
+
+test("checkNeedsReassessment ignores roadmap assessment rows for other slices", async (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  invalidateAllCaches();
+  seedSlices("complete", "pending");
+  writeSummary(base, "S01");
+  insertAssessment({
+    path: ".gsd/milestones/M001/M001-ROADMAP-ASSESSMENT.md",
+    milestoneId: "M001",
+    sliceId: "S02",
+    status: "no-changes",
+    scope: "roadmap",
+    fullContent: "No changes needed.",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  const result = await checkNeedsReassessment(base, "M001", dummyState);
+  assert.deepStrictEqual(result, { sliceId: "S01" }, "a row recorded against a different slice must not suppress dispatch");
 });

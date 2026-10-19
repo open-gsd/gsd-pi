@@ -68,12 +68,14 @@ edits only.
 ## Scope
 
 **In scope**:
+
 - `AGENTS.md`
 - `docs/agents/domain.md`
 - `docs/user-docs/configuration.md`
 - `CONTRIBUTING.md`
 
 **Out of scope** (do NOT touch):
+
 - Moving the actual ADR files (they are correctly cross-referenced by full path
   in `CONTEXT.md` as `docs/dev/ADR-*.md`; only the `docs/adr/` pointers are wrong).
 - The `docs/adr/.gitkeep` placeholder — leave it (removing it is a separate call;
@@ -156,6 +158,7 @@ No code tests — documentation only. Verification is the grep checks above plus
 ## STOP conditions
 
 Stop and report if:
+
 - `AGENTS.md` / `domain.md` no longer contain `docs/adr/` (someone already fixed
   it — verify and mark this sub-task done).
 - A grep for one of the env vars shows it is actually a production var (not

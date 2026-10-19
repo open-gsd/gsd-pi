@@ -7,15 +7,13 @@
 import { deriveState, invalidateStateCache } from "./derive/index.js";
 import { ensureExistingWorkflowDbOpen } from "./derive/db-open.js";
 import {
-  getHierarchyCompletionCounts,
-  getInFlightSliceCount,
   getProgressHierarchyDetails,
-  getMilestoneStatusCounts,
   getProjectAuthorityVersion,
   isDbAvailable,
   _getAdapter,
   readTransaction,
 } from "../gsd-db.js";
+import { readOpenBlockers, readProgressCounts, type OpenBlockerRow, type ProgressCounts } from "../db/lifecycle-read.js";
 import type { ProjectProgressReadMetadata } from "@opengsd/contracts";
 import type { GSDState } from "../types.js";
 
@@ -41,6 +39,12 @@ export interface DbProgressResult {
   tasks: { total: number; done: number; pending: number };
   requirements: { active: number; validated: number; deferred: number; outOfScope: number } | null;
   blockers: string[];
+  /**
+   * The open canonical blocker rows at the revision of this read — the same
+   * rows the project snapshot returns, so progress and snapshot give equal
+   * blockers at one revision. The projection fallback never sets it.
+   */
+  blockerRows?: OpenBlockerRow[];
   nextAction: string;
   readMetadata?: ProjectProgressReadMetadata;
 }
@@ -65,12 +69,6 @@ export interface DbProjectProgressResult extends DbProgressResult {
 
 function toRef(value: { id: string; title: string } | null): { id: string; title: string } | null {
   return value ? { id: value.id, title: value.title } : null;
-}
-
-interface ProgressHierarchy {
-  counts: ReturnType<typeof getHierarchyCompletionCounts>;
-  milestones: ReturnType<typeof getMilestoneStatusCounts>;
-  slicesActive: number;
 }
 
 interface ProgressStabilityToken {
@@ -98,40 +96,17 @@ function stabilityTokensMatch(
     && before.dataVersion === after.dataVersion;
 }
 
-function readProgressHierarchy(): ProgressHierarchy {
-  return readTransaction(() => ({
-    counts: getHierarchyCompletionCounts(),
-    milestones: getMilestoneStatusCounts(),
-    slicesActive: getInFlightSliceCount(),
-  }));
-}
-
 function buildProgressResult(
   state: GSDState,
-  hierarchy: ReturnType<typeof readProgressHierarchy>,
+  counts: ProgressCounts,
+  blockerRows: OpenBlockerRow[],
 ): DbProgressResult {
-  const slicesDone = hierarchy.counts.slices;
-  const slicesTotal = hierarchy.counts.slicesTotal;
-  const tasksDone = hierarchy.counts.tasks;
-  const tasksTotal = hierarchy.counts.tasksTotal;
-
   return {
     activeMilestone: toRef(state.activeMilestone),
     activeSlice: toRef(state.activeSlice),
     activeTask: toRef(state.activeTask),
     phase: state.phase,
-    milestones: hierarchy.milestones,
-    slices: {
-      total: slicesTotal,
-      done: slicesDone,
-      active: hierarchy.slicesActive,
-      pending: slicesTotal - slicesDone - hierarchy.slicesActive,
-    },
-    tasks: {
-      total: tasksTotal,
-      done: tasksDone,
-      pending: tasksTotal - tasksDone,
-    },
+    ...counts,
     requirements:
       state.requirements && state.requirements.total > 0
         ? {
@@ -142,6 +117,7 @@ function buildProgressResult(
           }
         : null,
     blockers: [...state.blockers],
+    blockerRows: [...blockerRows],
     nextAction: state.nextAction,
     readMetadata: { ...DB_READ_METADATA },
   };
@@ -152,20 +128,23 @@ async function readProgressFromDbInternal(
   includeHierarchyDetails: boolean,
   throwOnOpenFailure: boolean,
 ): Promise<DbProgressResult | DbProjectProgressResult | null> {
-  // Read-only surface: never mutate. The queue-order projection sync stays a
-  // runtime derive/dispatch repair (see docs/user-docs/auto-mode.md); read
-  // paths report the DB-authoritative order as-is even when the file is newer.
   const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath, {
     throwOnOpenFailure,
-    syncQueueOrder: false,
   });
   if (!openedRequestedDb || !isDbAvailable()) return null;
 
   invalidateStateCache();
   for (let attempt = 1; ; attempt++) {
     const before = readProgressStabilityToken();
-    const state = await deriveState(basePath, { syncQueueOrder: false });
-    const progress = buildProgressResult(state, readProgressHierarchy());
+    const state = await deriveState(basePath);
+    // The counts and the canonical blocker rows come out of one read
+    // transaction, so a progress result and a snapshot at the same revision
+    // give the same counts and the same blockers.
+    const { counts, blockerRows } = readTransaction(() => ({
+      counts: readProgressCounts(),
+      blockerRows: readOpenBlockers(),
+    }));
+    const progress = buildProgressResult(state, counts, blockerRows);
     const details = includeHierarchyDetails ? getProgressHierarchyDetails() : undefined;
     const result: DbProgressResult | DbProjectProgressResult = details
       ? {
@@ -190,10 +169,7 @@ async function readProgressFromDbInternal(
  * come from the read seam, since `deriveState` may be execution-scoped while
  * `ProgressResult` buckets are project-wide.
  *
- * Note: the derive open path runs pending migrations when required, but this
- * read suppresses the milestone queue-order projection sync — reads never
- * mutate; the runtime derive path owns that repair (same as `gsd headless
- * status`).
+ * Note: the derive open path runs pending migrations when required.
  * Results are bound to stable authority and data-version tokens; under
  * sustained concurrent commits or same-process interleaved writes, a snapshot
  * may still straddle revisions.

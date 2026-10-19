@@ -59,6 +59,7 @@ files; T034 repaired those two; nobody swept for the rest.
   conclusion is consistent with what I measured.
 
 Warnings (non-blocking):
+
 - The coder's disclosed side finding is **confirmed, not refuted** — see
   "Unowned item 4" below.
 
@@ -227,6 +228,7 @@ the four files run in CI (`pnpm run test:integration`, `.github/workflows/ci.yml
 Cycle-2 verdicts spot-checked, not re-derived. `verify-artifact-tightened` (11),
 `recovery-verify-logs` + `integration/idle-recovery` (40),
 `auto-prompts-fallback` (10), `state-reconciliation-drift` + `markdown-renderer`
+
 + `artifact-db-drift-memo` + `reactive-graph` + `visualizer-data` +
 `visualizer-critical-path` + `parsers-legacy-importers` and 40 other wave-3-adjacent
 files: **702 tests / 673 pass / 14 fail / 15 skipped** — every failure is one of

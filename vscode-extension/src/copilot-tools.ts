@@ -3,7 +3,10 @@
 
 import * as vscode from "vscode";
 import type { GsdClient } from "./gsd-client.js";
-import { assertActiveWorkspaceRoot, assertEmptyToolInput, awaitWithCancellation } from "./copilot-tools-guards.js";
+import {
+	assertActiveWorkspaceRoot, assertEmptyToolInput, awaitWithCancellation,
+	assertCanonicalProjectProgress, assertCanonicalProjectSnapshot,
+} from "./copilot-tools-guards.js";
 
 interface EmptyToolInput {
 	[key: string]: never;
@@ -15,8 +18,36 @@ function toJsonToolResult(value: unknown): vscode.LanguageModelToolResult {
 	]);
 }
 
-function assertEmptyInput(input: unknown): void {
+async function readForChat(
+	client: GsdClient,
+	input: unknown,
+	token: vscode.CancellationToken,
+	operation: () => Promise<unknown>,
+	assertPayload: (value: unknown) => void,
+): Promise<vscode.LanguageModelToolResult> {
 	assertEmptyToolInput(input);
+	const root = client.projectRoot;
+	assertWorkspaceRootMatchesClient(root);
+	const generation = client.projectContextGeneration;
+	if (!client.isConnected || !client.isProjectContextTrusted) {
+		throw new Error("GSD project context is not connected or trusted. Restart the GSD agent for this workspace, then retry.");
+	}
+	let value: unknown;
+	try {
+		value = await awaitWithCancellation(operation, token);
+	} catch {
+		if (token.isCancellationRequested) throw new Error("GSD project read was cancelled.");
+		throw new Error("GSD project read failed. Restart the agent and retry; update the runtime and extension if the problem persists.");
+	}
+	// The awaited read can cross a workspace change, reconnect, or session mutation.
+	if (token.isCancellationRequested) throw new Error("GSD project read was cancelled.");
+	assertWorkspaceRootMatchesClient(client.projectRoot);
+	if (client.projectRoot !== root || !client.isConnected || !client.isProjectContextTrusted
+		|| client.projectContextGeneration !== generation) {
+		throw new Error("GSD project context changed during the read. Restart the agent for this workspace, then retry.");
+	}
+	assertPayload(value);
+	return toJsonToolResult(value);
 }
 
 function assertWorkspaceRootMatchesClient(projectRoot: string): void {
@@ -48,12 +79,8 @@ export class ProjectProgressTool implements vscode.LanguageModelTool<EmptyToolIn
 		options: vscode.LanguageModelToolInvocationOptions<EmptyToolInput>,
 		token: vscode.CancellationToken,
 	): Promise<vscode.LanguageModelToolResult> {
-		assertEmptyInput(options.input);
-		assertWorkspaceRootMatchesClient(this.client.projectRoot);
-		if (!this.client.isConnected) {
-			throw new Error("GSD agent is not connected. Start the GSD agent, then retry the project progress read.");
-		}
-		return toJsonToolResult(await awaitWithCancellation(() => this.client.getProjectProgress(), token));
+		return readForChat(this.client, options.input, token,
+			() => this.client.getProjectProgress(), assertCanonicalProjectProgress);
 	}
 }
 
@@ -74,12 +101,8 @@ export class ProjectSnapshotTool implements vscode.LanguageModelTool<EmptyToolIn
 		options: vscode.LanguageModelToolInvocationOptions<EmptyToolInput>,
 		token: vscode.CancellationToken,
 	): Promise<vscode.LanguageModelToolResult> {
-		assertEmptyInput(options.input);
-		assertWorkspaceRootMatchesClient(this.client.projectRoot);
-		if (!this.client.isConnected) {
-			throw new Error("GSD agent is not connected. Start the GSD agent, then retry the project snapshot read.");
-		}
-		return toJsonToolResult(await awaitWithCancellation(() => this.client.getProjectSnapshot(), token));
+		return readForChat(this.client, options.input, token,
+			() => this.client.getProjectSnapshot(), assertCanonicalProjectSnapshot);
 	}
 }
 

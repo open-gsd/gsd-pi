@@ -27,6 +27,7 @@
 - [验证你的配置](#verifying-your-setup)
 
 <a id="quick-reference"></a>
+
 ## 快速参考
 
 | Provider | 认证方式 | 环境变量 | 配置文件 |
@@ -49,11 +50,13 @@
 ---
 
 <a id="built-in-providers"></a>
+
 ## 内置 Providers
 
 内置 providers 的 models 已经预注册在 GSD 里。你只需要提供认证信息。
 
 <a id="anthropic-claude"></a>
+
 ### Anthropic（Claude）
 
 **推荐。** Anthropic models 集成最深，支持内置 Web 搜索、extended thinking 和 prompt caching。
@@ -89,7 +92,7 @@ GSD 会检测你本地的 Claude Code 安装，并把它作为已认证的 Anthr
 
 **自动配置（推荐）**
 
-当 GSD 在启动时检测到 Claude Code model，它会自动在项目根目录写入一个带有 GSD workflow MCP server 配置的 `.mcp.json` 文件。无需手动步骤，只要以 Claude Code 作为 provider 启动一次 GSD，配置就会自动生成。
+对于已有的 GSD 项目，MCP 自动准备不再依赖当前 provider。只要项目根目录已经包含 `.gsd/`，GSD 就会在启动时写入或更新 `.mcp.json`，其中包含 GSD workflow 和 `gsd-browser` MCP server；即使当前 GSD 会话使用 OpenAI、Codex、Cursor Agent 或其它 provider 也是如此。这样项目会自动准备好供 Claude Code 或直接的 `claude` CLI 使用，同时不会弄脏普通的非 GSD 仓库。
 
 你也可以在 GSD 会话中手动触发：
 
@@ -146,6 +149,7 @@ MCP server 会暴露 GSD 的完整 workflow 工具面：milestone planning、tas
 ```
 
 <a id="openai"></a>
+
 ### OpenAI
 
 ```bash
@@ -157,6 +161,7 @@ export OPENAI_API_KEY="sk-..."
 **获取 key：** [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 
 <a id="google-gemini"></a>
+
 ### Google Gemini
 
 ```bash
@@ -166,6 +171,7 @@ export GEMINI_API_KEY="..."
 **获取 key：** [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
 
 <a id="openrouter"></a>
+
 ### OpenRouter
 
 OpenRouter 通过单个 API key 聚合了多个 providers 的 200+ models。
@@ -238,6 +244,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 ```
 
 <a id="groq"></a>
+
 ### Groq
 
 ```bash
@@ -247,6 +254,7 @@ export GROQ_API_KEY="gsk_..."
 **获取 key：** [console.groq.com/keys](https://console.groq.com/keys)
 
 <a id="xai-grok"></a>
+
 ### xAI（Grok）
 
 ```bash
@@ -256,6 +264,7 @@ export XAI_API_KEY="xai-..."
 **获取 key：** [console.x.ai](https://console.x.ai)
 
 <a id="mistral"></a>
+
 ### Mistral
 
 ```bash
@@ -265,6 +274,7 @@ export MISTRAL_API_KEY="..."
 **获取 key：** [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys)
 
 <a id="github-copilot"></a>
+
 ### GitHub Copilot
 
 使用 OAuth，通过浏览器登录：
@@ -277,6 +287,7 @@ gsd config
 要求你拥有有效的 GitHub Copilot 订阅。
 
 <a id="amazon-bedrock"></a>
+
 ### Amazon Bedrock
 
 Bedrock 使用 AWS IAM 凭据，而不是 API key。下面任意一种都可以：
@@ -297,6 +308,7 @@ export AWS_BEARER_TOKEN_BEDROCK="..."
 ECS task roles 和 IRSA（Kubernetes）也会被自动检测。
 
 <a id="anthropic-on-vertex-ai"></a>
+
 ### Vertex AI 上的 Anthropic
 
 使用 Google Cloud Application Default Credentials：
@@ -311,6 +323,7 @@ export ANTHROPIC_VERTEX_PROJECT_ID="my-project-id"
 支持的 Claude-on-Vertex models 会内置注册，并在 Vertex auth 配置完成后自动出现。除非你要覆盖 metadata 或通过代理路由，否则不需要添加 `models.json`。
 
 <a id="azure-openai"></a>
+
 ### Azure OpenAI
 
 ```bash
@@ -320,6 +333,7 @@ export AZURE_OPENAI_API_KEY="..."
 ---
 
 <a id="local-providers"></a>
+
 ## 本地 Providers
 
 本地 providers 运行在你的机器上。因为 GSD 需要知道 endpoint URL 和可用 models，所以它们都要求配置 `models.json`。
@@ -329,6 +343,7 @@ export AZURE_OPENAI_API_KEY="..."
 每次打开 `/model` 时，这个文件都会自动重新加载，无需重启。
 
 <a id="ollama"></a>
+
 ### Ollama
 
 **第 1 步：安装并启动 Ollama**
@@ -383,6 +398,7 @@ ollama pull qwen2.5-coder:7b
 - 如果未显式指定，`contextWindow` 和 `maxTokens` 默认分别为 128K / 16K。若模型能力不同，请手动覆盖
 
 <a id="lm-studio"></a>
+
 ### LM Studio
 
 **第 1 步：安装 LM Studio**
@@ -428,6 +444,7 @@ ollama pull qwen2.5-coder:7b
 - 如果模型支持更大的上下文，记得上调 `contextWindow` 和 `maxTokens`
 
 <a id="vllm"></a>
+
 ### vLLM
 
 ```json
@@ -457,6 +474,7 @@ ollama pull qwen2.5-coder:7b
 model `id` 必须与 `vllm serve` 启动时传入的 `--model` 参数完全一致。
 
 <a id="sglang"></a>
+
 ### SGLang
 
 ```json
@@ -483,6 +501,7 @@ model `id` 必须与 `vllm serve` 启动时传入的 `--model` 参数完全一�
 ---
 
 <a id="custom-openai-compatible-endpoints"></a>
+
 ## 自定义 OpenAI-Compatible Endpoints
 
 任何实现了 OpenAI Chat Completions API 的 server 都可以和 GSD 配合使用。这包括代理（LiteLLM、Portkey、Helicone）、自托管推理服务，以及新出现的 providers。
@@ -560,6 +579,7 @@ gsd config
 ---
 
 <a id="common-pitfalls"></a>
+
 ## 常见坑点
 
 ### 使用有效 key 仍提示 “Authentication failed”
@@ -651,19 +671,23 @@ ollama pull llama3.1:8b
 ---
 
 <a id="verifying-your-setup"></a>
+
 ## 验证你的配置
 
 完成 provider 配置后：
 
 1. **启动 GSD：**
+
    ```bash
    gsd
    ```
 
 2. **检查可用 models：**
+
    ```
    /model
    ```
+
    列表里应该能看到该 provider 的 models。
 
 3. **切换到对应 model：**

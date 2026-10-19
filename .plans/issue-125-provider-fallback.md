@@ -1,4 +1,5 @@
 # Issue #125: Provider Fallback When Multiple Providers Configured
+
 # Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 ## Overview
@@ -10,6 +11,7 @@ user-configured fallback chain of different models).
 ## Current State
 
 The codebase already supports:
+
 - **Multi-credential per provider** — round-robin or session-sticky selection
 - **Per-credential backoff tracking** — rate_limit (30s), quota_exhausted (30min), server_error (20s)
 - **Credential rotation on error** — `markUsageLimitReached()` backs off one key and returns
@@ -53,6 +55,7 @@ interface FallbackSettings {
 ```
 
 **Files to modify:**
+
 - `packages/pi-coding-agent/src/core/settings-manager.ts` — add `getFallbackSettings()`,
   `setFallbackChain()`, `removeFallbackChain()`, getter/setter for `fallback.enabled`
 
@@ -63,12 +66,14 @@ Stored in the existing `~/.pi/agent/settings.json` under a new `fallback` key.
 #### 1.3 — CLI Configuration Commands
 
 Add subcommands to the existing settings CLI:
+
 - `pi settings fallback enable/disable`
 - `pi settings fallback add-chain <name> --provider <p> --model <m> --priority <n>`
 - `pi settings fallback remove-chain <name>`
 - `pi settings fallback list`
 
 **Files to modify:**
+
 - `packages/pi-coding-agent/src/cli/commands/settings.ts` (or equivalent CLI entry point)
 
 ---
@@ -88,6 +93,7 @@ private providerBackoff: Map<string, number> = new Map();
 ```
 
 **New methods:**
+
 ```typescript
 markProviderExhausted(provider: string, errorType: UsageLimitErrorType): void
 isProviderAvailable(provider: string): boolean
@@ -99,6 +105,7 @@ are backed off), also mark the provider itself as backed off with the longest re
 credential backoff duration.
 
 **Files to modify:**
+
 - `packages/pi-coding-agent/src/core/auth-storage.ts`
 
 ---
@@ -170,6 +177,7 @@ fallback chain before giving up or doing exponential backoff.
 #### 4.1 — Modify `_handleRetryableError()` (`agent-session.ts`)
 
 Current flow:
+
 ```
 1. Classify error
 2. Try credential rotation within provider → if success, retry immediately
@@ -178,6 +186,7 @@ Current flow:
 ```
 
 New flow:
+
 ```
 1. Classify error
 2. Try credential rotation within provider → if success, retry immediately
@@ -230,6 +239,7 @@ The `getApiKey` callback in `AgentOptions` already takes a provider string, so t
 should work naturally.
 
 **Files to modify:**
+
 - `packages/pi-coding-agent/src/core/agent-session.ts`
 - `packages/pi-ai/src/agent.ts` or `packages/pi-ai/src/agent-loop.ts`
 
@@ -259,6 +269,7 @@ if (this.fallbackResolver) {
 #### 5.2 — Quota Reset Awareness (Future Enhancement)
 
 For now, rely on backoff expiry times. A future enhancement could:
+
 - Parse rate limit headers for reset timestamps
 - Store per-provider quota windows (5-hour, daily, weekly, monthly)
 - Predict when quota will restore based on usage patterns
@@ -283,11 +294,13 @@ type FallbackEvent =
 #### 6.2 — TUI Integration
 
 Display a brief notification in the TUI when fallback occurs:
+
 - `⚡ Switched from zai/glm-5 → alibaba/glm-5 (rate limit)`
 - `✓ Restored to zai/glm-5 (quota available)`
 - `⚠ All providers in chain "coding" exhausted`
 
 **Files to modify:**
+
 - `packages/pi-tui/src/` — event handler for new fallback events
 - Status bar or notification area in the TUI
 
@@ -312,28 +325,33 @@ Steps 1 and 2 can be done in parallel. Steps 6 and 7 can be done in parallel.
 ## Key Design Decisions
 
 ### 1. Explicit chains vs automatic model equivalence
+
 **Decision:** Explicit user-configured chains.
 **Why:** Automatic equivalence is unreliable — models with the same name from different
 providers may have different capabilities, limits, or pricing. Users should explicitly
 opt in to which models they consider interchangeable.
 
 ### 2. Where fallback sits in the retry flow
+
 **Decision:** After credential rotation, before exponential backoff.
 **Why:** Provider fallback is a better recovery than waiting and retrying the same
 exhausted provider. If the fallback also fails, exponential backoff still kicks in.
 
 ### 3. Model swap vs new agent
+
 **Decision:** Swap model on existing agent mid-conversation.
 **Why:** Creating a new agent would lose conversation context. The agent's `streamFn`
 already accepts model as a parameter, and `getApiKey` resolves per-provider, so
 swapping is straightforward.
 
 ### 4. Restoration strategy
+
 **Decision:** Check before each request (lazy check on backoff expiry).
 **Why:** No background timers needed. The cost of one `isProviderAvailable()` check
 per request is negligible. More sophisticated quota tracking can be added later.
 
 ### 5. Scope of fallback
+
 **Decision:** Per-session, not per-agent-type (initially).
 **Why:** The issue mentions per-agent-type toggle, but the simpler initial implementation
 is a global fallback chain that applies to any session using a model in the chain.

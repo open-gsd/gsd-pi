@@ -47,7 +47,7 @@ const GUARD_SANCTIONED_EXITS: Record<string, string> = {
   "finalize-break":
     "Closeout failed terminally for this unit. Inspect it with `/gsd status`, repair state with `/gsd doctor fix`, then re-run `/gsd auto`.",
   "finalize-retry":
-    "Closeout verification failed twice with identical inputs. Re-project the missing artifact with `/gsd rebuild markdown`, confirm with `/gsd status`, then re-run `/gsd auto`.",
+    "Closeout verification failed twice with identical inputs. First check for a `*-VERIFICATION-FAILED.md` or `*-CLOSEOUT-VERIFICATION-FAILED.md` report — if present, closeout was deliberately refused and no summary is missing. Otherwise re-project the missing artifact with `/gsd rebuild markdown`, confirm with `/gsd status`, then re-run `/gsd auto`.",
   "orchestration-skip":
     "The orchestrator skipped the same state twice without advancing. Inspect it with `/gsd status` and repair with `/gsd doctor fix` (`/gsd rebuild markdown` for projection drift), then re-run `/gsd auto`.",
   "orchestration-stale-active-unit":
@@ -71,11 +71,11 @@ const GUARD_SANCTIONED_EXITS: Record<string, string> = {
   "dispatch-claim-skip":
     "The unit dispatch claim was refused twice for the same reason. Inspect concurrent workers with `/gsd status`, repair the ledger with `/gsd doctor fix`, then re-run `/gsd auto`.",
   "custom-engine-dispatch-stop":
-    "The custom engine refused to produce a dispatch. Fix its GRAPH.yaml, confirm the derived phase with `/gsd status`, then re-run `/gsd auto`.",
+    "The custom engine refused to produce a dispatch; the stop reason names the step. GRAPH.yaml is a render and edits to it are not read. Check the run with `/gsd workflow list`, then resume it with `/gsd workflow resume <name>/<timestamp>` when the cause is gone, or start a new run with `/gsd workflow run <name>`.",
   "custom-engine-dispatch-skip":
-    "The custom engine skipped dispatch twice from the same state. Fix its GRAPH.yaml, confirm the derived phase with `/gsd status`, then re-run `/gsd auto`.",
+    "The custom engine skipped dispatch twice from the same state. GRAPH.yaml is a render and edits to it are not read. Check the run with `/gsd workflow list`, then resume it with `/gsd workflow resume <name>/<timestamp>` or start a new run with `/gsd workflow run <name>`.",
   "custom-engine-dispatch-mismatch":
-    "The custom engine returned a dispatch the loop cannot run. Fix its GRAPH.yaml, then re-run `/gsd auto`; `/gsd forensics` carries the mismatch detail.",
+    "The custom engine returned a dispatch the loop cannot run. GRAPH.yaml is a render and edits to it are not read. Start a new run with `/gsd workflow run <name>`; `/gsd forensics` carries the mismatch detail.",
   "custom-engine-task-replan":
     "The replanned task artifact never became durable. Re-project it with `/gsd rebuild markdown`, confirm with `/gsd status`, then re-run `/gsd auto`.",
   "custom-engine-task-verify":

@@ -553,3 +553,199 @@ test("subjective UAT replay rejects shape-valid option binding corruption", () =
     /subjective UAT receipt.*options.*invalid|corrupt/i,
   );
 });
+
+test("prepare supersedes a stale criterion by ID and the replacement inherits its key (#2341)", () => {
+  setup();
+  const stale = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/stale"),
+    description: "The guided flow felt natural on the older revision.",
+  });
+
+  const replacement = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/replacement"),
+    description: "The guided flow feels natural and clear on the current revision.",
+    supersedesCriterionId: stale.criterionId,
+  });
+  assert.notEqual(replacement.criterionId, stale.criterionId);
+  assert.equal(
+    db().prepare(`
+      SELECT criterion_key FROM workflow_acceptance_criteria
+      WHERE criterion_id = :criterion_id
+    `).get({ ":criterion_id": replacement.criterionId })?.["criterion_key"],
+    "guided-flow",
+    "the replacement inherits the superseded criterion key",
+  );
+  assert.equal(
+    db().prepare(`
+      SELECT supersedes_criterion_id FROM workflow_acceptance_criteria
+      WHERE criterion_id = :criterion_id
+    `).get({ ":criterion_id": replacement.criterionId })?.["supersedes_criterion_id"],
+    stale.criterionId,
+  );
+  // The stale criterion's open question is withdrawn; only the replacement's
+  // question stays open.
+  assert.equal(
+    db().prepare(
+      "SELECT COUNT(*) AS c FROM workflow_open_questions WHERE question_status = 'open'",
+    ).get()?.["c"],
+    1,
+    "the superseded question must not stay open",
+  );
+
+  // Re-preparing the unchanged description against the current head resolves
+  // to the replacement criterion (no duplicate row); its still-open question
+  // at the same revision then rejects a second prepare, exactly like the
+  // same-key path does.
+  const beforeRepeat = count("workflow_acceptance_criteria");
+  assert.throws(
+    () => prepareMilestoneSubjectiveUat({
+      ...prepareInput("subjective/prepare/supersede/repeat"),
+      description: "The guided flow feels natural and clear on the current revision.",
+      supersedesCriterionId: replacement.criterionId,
+    }),
+    /already has an open question/,
+  );
+  assert.equal(count("workflow_acceptance_criteria"), beforeRepeat);
+});
+
+test("prepare rejects a supersedesCriterionId whose key differs from the passed criterionKey (#2341)", () => {
+  setup();
+  const stale = prepareMilestoneSubjectiveUat(prepareInput("subjective/prepare/supersede/mismatch/stale"));
+  const before = count("workflow_acceptance_criteria");
+
+  assert.throws(
+    () => prepareMilestoneSubjectiveUat({
+      ...prepareInput("subjective/prepare/supersede/mismatch"),
+      criterionKey: "other-flow",
+      supersedesCriterionId: stale.criterionId,
+    }),
+    /criterionKey "guided-flow"/,
+  );
+  assert.equal(count("workflow_acceptance_criteria"), before, "a rejected supersession writes nothing");
+});
+
+test("prepare inherits the superseded criterion's requirementId (#2341)", () => {
+  setup();
+  db().prepare(`
+    INSERT INTO requirements (id, description)
+    VALUES ('R-001', 'Fixture requirement')
+  `).run();
+  const stale = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/requirement/stale"),
+    requirementId: "R-001",
+    description: "Stale requirement-bound description.",
+  });
+
+  // A mismatched requirement on the still-current target is rejected with the
+  // inherited requirement named, before anything is written.
+  const before = count("workflow_acceptance_criteria");
+  assert.throws(
+    () => prepareMilestoneSubjectiveUat({
+      ...prepareInput("subjective/prepare/supersede/requirement/mismatch"),
+      requirementId: "R-002",
+      description: "Mismatched requirement description.",
+      supersedesCriterionId: stale.criterionId,
+    }),
+    /requirementId R-001/,
+  );
+  assert.equal(count("workflow_acceptance_criteria"), before);
+
+  const replacement = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/requirement/replacement"),
+    description: "Replacement requirement-bound description.",
+    supersedesCriterionId: stale.criterionId,
+  });
+  assert.equal(
+    db().prepare(`
+      SELECT requirement_id FROM workflow_acceptance_criteria
+      WHERE criterion_id = :criterion_id
+    `).get({ ":criterion_id": replacement.criterionId })?.["requirement_id"],
+    "R-001",
+    "the replacement inherits the superseded criterion's requirement",
+  );
+});
+
+test("an exact supersede retry replays the stored receipt after the first commit (#2341)", () => {
+  setup();
+  const stale = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/retry/stale"),
+    description: "Stale description.",
+  });
+  const firstInput = {
+    ...prepareInput("subjective/prepare/supersede/retry"),
+    description: "Replacement description.",
+    supersedesCriterionId: stale.criterionId,
+  };
+  const first = prepareMilestoneSubjectiveUat(firstInput);
+
+  // Exact retry of the committed request (same idempotency key): the stored
+  // receipt must replay even though the target is now superseded.
+  const replayed = prepareMilestoneSubjectiveUat(firstInput);
+  assert.equal(replayed.status, "replayed");
+  assert.equal(replayed.criterionId, first.criterionId);
+  assert.equal(count("workflow_acceptance_criteria"), 2);
+});
+
+test("prepare rejects a supersede target that a prior replacement already superseded (#2341)", () => {
+  setup();
+  const stale = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/obsolete/stale"),
+    description: "Stale description.",
+  });
+  const replacement = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/obsolete/replacement"),
+    description: "Replacement description.",
+    supersedesCriterionId: stale.criterionId,
+  });
+  assert.notEqual(replacement.criterionId, stale.criterionId);
+  const openBefore = db().prepare(
+    "SELECT COUNT(*) AS c FROM workflow_open_questions WHERE question_status = 'open'",
+  ).get()?.["c"];
+  const before = count("workflow_acceptance_criteria");
+
+  // Targeting the obsolete criterion with its own unchanged description must
+  // not silently reuse it or withdraw the replacement's open question — the
+  // supersede resolution (and the writer's own re-check) only accept the
+  // current head.
+  assert.throws(
+    () => prepareMilestoneSubjectiveUat({
+      ...prepareInput("subjective/prepare/supersede/obsolete/again"),
+      description: "Stale description.",
+      supersedesCriterionId: stale.criterionId,
+    }),
+    /not a current subjective UAT criterion of milestone M001/,
+  );
+  assert.equal(count("workflow_acceptance_criteria"), before);
+  assert.equal(
+    db().prepare(
+      "SELECT COUNT(*) AS c FROM workflow_open_questions WHERE question_status = 'open'",
+    ).get()?.["c"],
+    openBefore,
+    "the replacement's open question must survive",
+  );
+});
+
+test("prepare rejects an already-superseded supersedesCriterionId (#2341)", () => {
+  setup();
+  const stale = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/chained/stale"),
+    description: "Stale description.",
+  });
+  const replacement = prepareMilestoneSubjectiveUat({
+    ...prepareInput("subjective/prepare/supersede/chained/replacement"),
+    description: "Replacement description.",
+    supersedesCriterionId: stale.criterionId,
+  });
+  assert.notEqual(replacement.criterionId, stale.criterionId);
+  const before = count("workflow_acceptance_criteria");
+
+  assert.throws(
+    () => prepareMilestoneSubjectiveUat({
+      ...prepareInput("subjective/prepare/supersede/chained/second"),
+      description: "Another replacement description.",
+      supersedesCriterionId: stale.criterionId,
+    }),
+    /not a current subjective UAT criterion/i,
+  );
+  assert.equal(count("workflow_acceptance_criteria"), before);
+});

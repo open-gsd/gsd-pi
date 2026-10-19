@@ -108,6 +108,7 @@ bootstrap, not a 2000-line yaml no one will maintain.
    to a feature branch and watch the run.
 
 4. **Commit atomically:**
+
    ```
    ci: add GitHub Actions pipeline (lint, test, build)
    ```

@@ -13,6 +13,7 @@ import {
   nativeIsAncestor,
 } from "./native-git-bridge.js";
 import { cleanupMergedMilestoneWorktree } from "./auto-worktree-merge-cleanup.js";
+import { settleMilestoneMerge } from "./milestone-closeout-effects.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { pushIntegrationBranchIfAhead } from "./publication.js";
 import { logWarning } from "./workflow-logger.js";
@@ -35,6 +36,23 @@ export interface AlreadyMergedMilestoneResult {
   codeFilesChanged: true;
 }
 
+/**
+ * True when the milestone branch tip is reachable from the integration branch.
+ * Throws when it is reachable but milestone-touched code is no longer there.
+ */
+export function isMilestoneBranchMerged(request: {
+  projectRoot: string;
+  milestoneBranch: string;
+  mainBranch: string;
+  previousCwd: string;
+}): boolean {
+  if (!nativeIsAncestor(request.projectRoot, request.milestoneBranch, request.mainBranch)) {
+    return false;
+  }
+  assertNoUnanchoredRegularMergeCodeChanges(request);
+  return true;
+}
+
 export function finalizeAlreadyMergedMilestoneIfReachable(
   request: AlreadyMergedMilestoneRequest,
 ): AlreadyMergedMilestoneResult | null {
@@ -47,16 +65,25 @@ export function finalizeAlreadyMergedMilestoneIfReachable(
     commitMessage,
   } = request;
 
-  if (!nativeIsAncestor(projectRoot, milestoneBranch, mainBranch)) {
+  if (!isMilestoneBranchMerged({ projectRoot, milestoneBranch, mainBranch, previousCwd })) {
     return null;
   }
 
-  assertNoUnanchoredRegularMergeCodeChanges({
-    projectRoot,
-    milestoneBranch,
-    mainBranch,
-    previousCwd,
-  });
+  // The work is already on the integration branch: recognize the merge effect
+  // of the Closeout Plan and complete the Milestone before the branch goes.
+  try {
+    settleMilestoneMerge({
+      projectRoot,
+      milestoneId,
+      milestoneBranch,
+      integrationBranch: mainBranch,
+      recognized: true,
+      codeFilesChanged: true,
+    });
+  } catch (err) {
+    process.chdir(previousCwd);
+    throw err;
+  }
 
   debugLog("mergeMilestoneToMain", {
     action: "skip-squash-already-merged",

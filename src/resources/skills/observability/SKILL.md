@@ -13,6 +13,7 @@ gsd-pi's `VISION.md` lists "agent-first observability" as a principle, and the s
 This skill is the thinking process for adding it. Not "add logs everywhere" — add the *right* signals at the *right* decision points.
 
 Invocation points:
+
 - Building auto-mode-style code (loops, dispatch, guards, retries)
 - Adding a background job, watcher, or scheduled task
 - Writing a server or long-running process
@@ -65,6 +66,7 @@ log.info({
 Use the project's existing logger if one exists. In gsd-pi, follow the patterns in `src/resources/extensions/gsd/activity-log.ts` and `src/resources/extensions/gsd/journal.ts` — structured JSONL, one event per line, with `ts`, `event`, and domain-specific fields.
 
 Avoid:
+
 - `console.log("here")` — what does "here" mean in six months?
 - Logging secrets, tokens, or PII — ever.
 - Formatting structured data into a prose string — it can't be grepped or filtered.
@@ -124,12 +126,14 @@ The caller now knows the failure happened, gets an error type it can branch on, 
 ## Step 6: Remove the scaffolding
 
 Before shipping, cull the ad-hoc instrumentation you used while debugging. Keep only:
+
 - Decision-point logs that a future agent would use
 - Persistent failure state
 - Health/status surfaces
 - Explicit failure modes
 
 Drop:
+
 - Temporary `console.log` debug lines
 - Spammy per-iteration logs that no one will read
 - Metrics that were "might be useful someday"

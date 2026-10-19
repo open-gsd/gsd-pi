@@ -1,16 +1,14 @@
 import { resolve } from "node:path";
 import { clearParseCache } from "../files.js";
-import { isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { readMilestone, readSlice, readSliceTasks } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import {
   adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
-  getMilestone,
-  getSlice,
   getSliceTasks,
   insertTask,
-  normalizeLegacyLifecycleStatus,
   projectCanonicalStatusToLegacy,
   upsertSlicePlanning,
   upsertTaskPlanning,
@@ -93,6 +91,8 @@ export interface PlanSliceResult {
   sliceId: string;
   planPath: string;
   taskPlanPaths: string[];
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 function validateRepositoryTargetIds(
@@ -466,7 +466,6 @@ export async function handlePlanSlice(
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.slice.plan",
       invocation,
-      actorId: params.actorName,
       payload: planningOperationPayload(params),
       event: {
         eventType: "workflow.slice.planned",
@@ -497,21 +496,17 @@ export async function handlePlanSlice(
           : []),
       ],
       mutate(context) {
-        const parentMilestone = getMilestone(params.milestoneId);
+        const parentMilestone = readMilestone(params.milestoneId);
         if (!parentMilestone) {
           throw new PlanningGuardError(`milestone not found: ${params.milestoneId}`);
         }
-        if (isClosedStatus(parentMilestone.status)) {
+        if (parentMilestone.closed) {
           throw new PlanningGuardError(`cannot plan slice in a closed milestone: ${params.milestoneId} (status: ${parentMilestone.status})`);
         }
-        const legacyMilestoneLifecycle = normalizeLegacyLifecycleStatus(parentMilestone.status);
-        const milestoneLifecycleStatus = legacyMilestoneLifecycle === "completed" || legacyMilestoneLifecycle === "cancelled"
-          ? legacyMilestoneLifecycle
-          : "ready";
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "milestone",
           milestoneId: params.milestoneId,
-          lifecycleStatus: milestoneLifecycleStatus,
+          lifecycleStatus: adoptionLifecycleStatus(`milestone ${params.milestoneId}`, parentMilestone.status, "ready"),
         });
         if (milestoneLifecycle.lifecycleStatus === "completed" || milestoneLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -519,25 +514,18 @@ export async function handlePlanSlice(
           );
         }
 
-        const parentSlice = getSlice(params.milestoneId, params.sliceId);
+        const parentSlice = readSlice(params.milestoneId, params.sliceId);
         if (!parentSlice) {
           throw new PlanningGuardError(`missing parent slice: ${params.milestoneId}/${params.sliceId}`);
         }
-        if (isClosedStatus(parentSlice.status)) {
+        if (parentSlice.closed) {
           throw new PlanningGuardError(`cannot re-plan slice ${params.sliceId}: it is already complete — use gsd_slice_reopen first`);
-        }
-        const legacySliceLifecycle = normalizeLegacyLifecycleStatus(parentSlice.status);
-        let sliceLifecycleStatus: "pending" | "ready" | "completed" | "cancelled" = hasTaskPayload
-          ? "ready"
-          : "pending";
-        if (legacySliceLifecycle === "completed" || legacySliceLifecycle === "cancelled") {
-          sliceLifecycleStatus = legacySliceLifecycle;
         }
         const sliceLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
-          lifecycleStatus: sliceLifecycleStatus,
+          lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${params.sliceId}`, parentSlice.status, hasTaskPayload ? "ready" : "pending"),
         });
         if (sliceLifecycle.lifecycleStatus === "completed" || sliceLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -546,7 +534,7 @@ export async function handlePlanSlice(
         }
 
         const newTaskIds = new Set(taskPayload.map((task) => task.taskId));
-        const existingTasks = getSliceTasks(params.milestoneId, params.sliceId);
+        const existingTasks = readSliceTasks(params.milestoneId, params.sliceId);
         // #2217 scope guard: only a re-dispatch over a slice whose task rows
         // are ALL still pending reconciles in place. First-run planning (no
         // existing rows) and replans that touch non-pending rows keep the
@@ -581,8 +569,7 @@ export async function handlePlanSlice(
         );
         if (hasTaskPayload) {
           for (const task of existingTasks) {
-            const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
-            const observedLifecycleStatus = legacyLifecycleStatus ?? "ready";
+            const observedLifecycleStatus = adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${task.id}`, task.status);
             const omitted = !matchedRowIds.has(task.id);
             const lifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",
@@ -616,7 +603,7 @@ export async function handlePlanSlice(
         const omittedTasks = hasTaskPayload
           ? existingTasks.filter((task) => !matchedRowIds.has(task.id))
           : [];
-        const completedOmission = omittedTasks.find((task) => isClosedStatus(task.status) && task.status !== "skipped");
+        const completedOmission = omittedTasks.find((task) => task.done && task.status !== "skipped");
         if (completedOmission) {
           throw new PlanningGuardError(`cannot remove completed task ${completedOmission.id}`);
         }
@@ -747,10 +734,14 @@ export async function handlePlanSlice(
       });
     }
   } catch (err) {
-    if (err instanceof PlanningGuardError) return { error: err.message };
+    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 
+  // The plan is committed. A failed render must not fail the tool: its
+  // Projection Work stays pending and the Projection Worker renders it again.
+  let renderResult = { planPath: "", taskPlanPaths: [] as string[] };
+  let stale = false;
   try {
     const allSliceTasks = getSliceTasks(params.milestoneId, params.sliceId);
     const sliceTasks = allSliceTasks.filter((task) => task.status !== "skipped");
@@ -765,43 +756,42 @@ export async function handlePlanSlice(
         removeOwnedPlanProjection(basePath, slicePlanPath);
       }
     }
-    const hasClosedTasks = sliceTasks.some((task) => isClosedStatus(task.status));
-    const renderResult = sliceTasks.length === 0
-      ? { planPath: "", taskPlanPaths: [] as string[] }
-      : await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
-    if (sliceTasks.length > 0 && hasClosedTasks) {
-      await renderPlanCheckboxes(basePath, params.milestoneId, params.sliceId);
-    }
-    invalidateStateCache();
-    clearParseCache();
-
-    // ── Post-mutation hook: manifest, event log ─────────────────────────
-    try {
-      await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
-      await writeManifestAndFlush(basePath);
-      if (operationStatus === "committed") {
-        appendEvent(basePath, {
-          cmd: "plan-slice",
-          params: { milestoneId: params.milestoneId, sliceId: params.sliceId },
-          ts: new Date().toISOString(),
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
+    if (sliceTasks.length > 0) {
+      renderResult = await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
+      if (sliceTasks.some((task) => isClosedStatus(task.status))) {
+        await renderPlanCheckboxes(basePath, params.milestoneId, params.sliceId);
       }
-    } catch (hookErr) {
-      logWarning("tool", `plan-slice post-mutation hook warning: ${(hookErr as Error).message}`);
     }
-
-    return {
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      planPath: renderResult.planPath ? normalizeRealPath(renderResult.planPath) : "",
-      taskPlanPaths: renderResult.taskPlanPaths.map(normalizeRealPath),
-    };
   } catch (renderErr) {
-    logWarning("tool", `plan_slice — render failed (DB rows preserved for debugging): ${(renderErr as Error).message}`);
-    invalidateStateCache();
-    return { error: `render failed: ${(renderErr as Error).message}` };
+    stale = true;
+    logWarning("projection", `plan_slice render failed for ${params.milestoneId}/${params.sliceId}; the plan stays committed`, { error: (renderErr as Error).message });
   }
+  invalidateStateCache();
+  clearParseCache();
+
+  // ── Post-mutation hook: manifest, event log ─────────────────────────
+  try {
+    await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
+    await writeManifestAndFlush(basePath);
+    if (operationStatus === "committed") {
+      appendEvent(basePath, {
+        cmd: "plan-slice",
+        params: { milestoneId: params.milestoneId, sliceId: params.sliceId },
+        ts: new Date().toISOString(),
+        actor: "agent",
+        actor_name: params.actorName,
+        trigger_reason: params.triggerReason,
+      });
+    }
+  } catch (hookErr) {
+    logWarning("tool", `plan-slice post-mutation hook warning: ${(hookErr as Error).message}`);
+  }
+
+  return {
+    milestoneId: params.milestoneId,
+    sliceId: params.sliceId,
+    planPath: renderResult.planPath ? normalizeRealPath(renderResult.planPath) : "",
+    taskPlanPaths: renderResult.taskPlanPaths.map(normalizeRealPath),
+    ...(stale ? { stale: true as const } : {}),
+  };
 }

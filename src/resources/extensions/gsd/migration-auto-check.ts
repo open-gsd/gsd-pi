@@ -215,8 +215,8 @@ export function scanMarkdownHierarchy(basePath: string): HierarchyScan {
 
     for (const slice of roadmap.slices) {
       scan.slices.add(`${milestoneId}/${slice.id}`);
-      // Sketch slices carry only a stub PLAN until refined; match migrateHierarchyToDb
-      // and do not count placeholder tasks from the <tasks> block (#1286).
+      // Sketch slices carry only a stub PLAN until refined; do not count
+      // placeholder tasks from the <tasks> block (#1286).
       if (slice.isSketch) continue;
       const planPath = resolveSliceFile(basePath, milestoneId, slice.id, "PLAN");
       if (!planPath || !existsSync(planPath)) continue;

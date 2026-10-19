@@ -20,38 +20,9 @@ mode: team
 
 你也可以不使用 mode，而是单独配置每一项设置（详见 [Git 策略](git-strategy.md)）。
 
-### 2. 配置 `.gitignore`
+### 2. 了解哪些内容会共享
 
-共享规划产物（milestones、roadmaps、decisions），同时把运行时文件保留在本地：
-
-```bash
-# ── GSD：运行时 / 临时文件（按开发者、按会话隔离）──────
-.gsd/auto.lock
-.gsd/completed-units.json
-.gsd/STATE.md
-.gsd/metrics.json
-.gsd/activity/
-.gsd/runtime/
-.gsd/worktrees/
-.gsd-worktrees/
-.gsd/phases/**/continue.md
-.gsd/phases/**/*-CONTINUE.md
-.gsd/milestones/**/continue.md
-.gsd/milestones/**/*-CONTINUE.md
-```
-
-**会共享的内容**（提交到 git）：
-
-- `.gsd/PREFERENCES.md`：项目偏好
-- `.gsd/PROJECT.md`：持续维护的项目描述
-- `.gsd/REQUIREMENTS.md`：需求契约
-- `.gsd/DECISIONS.md`：架构决策
-- `.gsd/phases/`：flat-phase roadmaps、plans、summaries 和 research
-- `.gsd/milestones/`：尚未迁移项目中的 legacy milestone 产物
-
-**仅保留本地的内容**（gitignore）：
-
-- 锁文件、指标、状态缓存、运行时记录、worktrees、活动日志
+工作流数据库不会提交到 git，每个 checkout 都有自己的数据库。提交到 git 的 `.gsd/` markdown 只是供阅读和评审的导出内容，不是共享的权威状态：它只能通过显式的 `/gsd recover` 导入进入数据库。GSD 会自动把运行时文件排除在 git 之外。checkout 绑定规则以及 clone 或 pull 之后的导入流程，见[权威团队指南](../../user-docs/working-in-teams.md#2-know-what-is-shared)。
 
 ### 3. 提交偏好设置
 
@@ -60,25 +31,15 @@ git add .gsd/PREFERENCES.md
 git commit -m "chore: enable GSD team workflow"
 ```
 
-## `commit_docs: false`
-
-如果团队里只有部分成员使用 GSD，或者公司策略要求仓库保持干净：
-
-```yaml
-git:
-  commit_docs: false
-```
-
-这会把整个 `.gsd/` 加入 `.gitignore`，让所有产物都保留在本地。这样使用 GSD 的开发者仍然能获得结构化规划的好处，而不会影响不使用 GSD 的同事。
-
 ## 迁移现有项目
 
 如果你当前项目里对 `.gsd/` 做了整目录忽略：
 
 1. 确保当前没有进行中的 milestones（工作区状态干净）
-2. 按上面的选择性规则更新 `.gitignore`
+2. 停止忽略你想共享的 `.gsd/` markdown；GSD 会继续忽略自己的运行时文件
 3. 在 `.gsd/PREFERENCES.md` 中添加 `unique_milestone_ids: true`
 4. 如有需要，重命名现有 milestones 以使用唯一 ID：
+
    ```
    I have turned on unique milestone ids, please update all old milestone
    ids to use this new format e.g. M001-abc123 where abc123 is a random
@@ -86,6 +47,7 @@ git:
    .gsd file contents, file names and directory names. Validate your work
    once done to ensure referential integrity.
    ```
+
 5. 提交修改
 
 ## 并行开发

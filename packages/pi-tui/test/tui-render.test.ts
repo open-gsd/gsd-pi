@@ -2,7 +2,8 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { deleteKittyImage, encodeKitty } from "../src/terminal-image.ts";
-import { type Component, TUI } from "../src/tui.ts";
+import type { MouseEvent } from "../src/mouse.ts";
+import { CURSOR_MARKER, type Component, TUI } from "../src/tui.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class TestComponent implements Component {
@@ -136,10 +137,10 @@ describe("TUI Kitty image cleanup", () => {
 
 		const writes = terminal.getWrites();
 		const deleteIndex = writes.indexOf(deleteKittyImage(77));
-		const clearIndex = writes.indexOf("\x1b[2J");
+		const eraseIndex = writes.indexOf("\x1b[2K");
 		assert.ok(deleteIndex >= 0, "previous image should be deleted during full redraw");
-		assert.ok(clearIndex >= 0, "full redraw should clear the screen");
-		assert.ok(deleteIndex < clearIndex, "old image should be deleted before the screen is cleared");
+		assert.ok(eraseIndex >= 0, "full redraw should erase lines (#2415: per-line erase, not \\x1b[2J)");
+		assert.ok(deleteIndex < eraseIndex, "old image should be deleted before the screen is erased");
 
 		tui.stop();
 	});
@@ -402,15 +403,1125 @@ describe("TUI mid-buffer reflow", () => {
 			"same-length reflow reaching into committed scrollback must trigger a full repaint",
 		);
 
-		const currentFrame = terminal.getScrollBuffer().slice(-reflowedLines.length);
-		assert.deepStrictEqual(currentFrame, reflowedLines);
+		// The repaint is viewport-bounded (#2307): the flushed scrollback prefix is
+		// frozen — it keeps the pre-reflow snapshot and gains no re-committed
+		// copies — while the live region shows exactly the bottom of the reflowed
+		// frame, with the moved boundary line present exactly once.
 		assert.strictEqual(
-			currentFrame.filter((line) => line === "BOUNDARY").length,
+			terminal.getScrollBuffer().length,
+			reflowedLines.length,
+			"repaint must not append re-committed history to the scroll buffer",
+		);
+		assert.deepStrictEqual(terminal.getViewport(), reflowedLines.slice(-5));
+		assert.strictEqual(
+			terminal.getViewport().filter((line) => line === "BOUNDARY").length,
 			1,
-			"moved boundary line should not be duplicated across the current frame",
+			"moved boundary line should not be duplicated in the live region",
 		);
 
 		tui.stop();
+	});
+});
+
+describe("TUI full repaint scrollback safety (issues #2307 / #2415)", () => {
+	// A transcript taller than the screen has a committed scrollback prefix.
+	// A clean repaint that rewrites the transcript from its first row scrolls
+	// the terminal and re-commits the flushed prefix as duplicates (issue
+	// #2307), while one that erases in place below the flushed prefix destroys
+	// lines that were never written (issue #2415). Clean repaints therefore
+	// start at the flushed high-water mark: never above it (no duplicates),
+	// never erasing below it (no loss). A real width change re-wraps the
+	// transcript and invalidates the mark — there the tradeoff is explicit:
+	// loss-free, accepting one bounded re-commit of the prefix.
+
+	function tallLines(): string[] {
+		return ["Line 0", "MARKER", ...Array.from({ length: 10 }, (_, i) => `Line ${i + 2}`)];
+	}
+
+	async function setupTallTranscript(): Promise<{
+		terminal: VirtualTerminal;
+		tui: TUI;
+		component: TestComponent;
+	}> {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = tallLines();
+		tui.start();
+		await terminal.waitForRender();
+		return { terminal, tui, component };
+	}
+
+	function countMarker(terminal: VirtualTerminal): number {
+		return terminal.getScrollBuffer().filter((line) => line === "MARKER").length;
+	}
+
+	it("repeated mid-buffer reflows never re-commit flushed scrollback", async () => {
+		const { terminal, tui, component } = await setupTallTranscript();
+		assert.strictEqual(
+			countMarker(terminal),
+			1,
+			"sanity: first render commits the marker to scrollback exactly once",
+		);
+
+		let lines = tallLines();
+		for (let round = 1; round <= 3; round++) {
+			const redrawsBefore = tui.fullRedraws;
+			// Re-insert a line inside committed scrollback (index 2 < viewportTop),
+			// the streaming word-wrap scenario from issue #2307.
+			lines = [...lines.slice(0, 2), `FENCE ${round}`, ...lines.slice(2)];
+			component.lines = lines;
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			assert.ok(tui.fullRedraws > redrawsBefore, `round ${round}: reflow must take the clean-repaint path`);
+			assert.strictEqual(
+				countMarker(terminal),
+				1,
+				`round ${round}: repaint must not re-commit flushed scrollback`,
+			);
+		}
+
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 11"),
+			"latest content stays visible after bounded repaints",
+		);
+
+		tui.stop();
+	});
+
+	it("width resize in a tall transcript repaints loss-free with bounded duplicates", async () => {
+		const { terminal, tui } = await setupTallTranscript();
+		assert.strictEqual(countMarker(terminal), 1);
+
+		const redrawsBefore = tui.fullRedraws;
+		terminal.resize(60, 5);
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > redrawsBefore, "width change must still take the clean-repaint path");
+		// #2415: the re-wrapped lines correspond to nothing in scrollback, so
+		// the repaint re-emits the whole transcript — the pre-resize MARKER copy
+		// stays frozen above and the re-wrapped copy is committed exactly once.
+		// Loss-free beats duplicate-free here: a destroyed line is unrecoverable,
+		// a duplicated one is merely redundant.
+		assert.ok(countMarker(terminal) >= 1, "resize must never destroy flushed scrollback");
+		assert.strictEqual(countMarker(terminal), 2, "re-wrapped prefix re-commits at most once (bounded duplicates)");
+		assert.ok(terminal.getViewport().join("\n").includes("Line 11"), "content stays visible after resize");
+
+		tui.stop();
+	});
+
+	it("width change before a grown buffer is flushed keeps the top of the response recoverable", async () => {
+		// The #2415 reproducer: the response outgrows the terminal and a width
+		// change forces a clean repaint in the same frame. Nothing above the
+		// viewport was ever written, so the old \x1b[2J erase destroyed it —
+		// neither on screen nor in scrollback. The repaint must scroll the
+		// unflushed prefix into scrollback instead.
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["prompt", "assistant:"];
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(
+			terminal.getScrollBuffer().filter((line) => line !== "").length,
+			2,
+			"sanity: short transcript is fully on screen, nothing flushed yet",
+		);
+
+		// Grow past the bottom and change width before any of it is flushed.
+		component.lines = ["prompt", "assistant:", ...Array.from({ length: 18 }, (_, i) => `response ${i}`)];
+		terminal.resize(60, 5);
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		assert.ok(scrollback.includes("assistant:"), `top of the response must survive in scrollback: ${JSON.stringify(scrollback)}`);
+		assert.ok(scrollback.includes("response 0"), `unflushed prefix must scroll into scrollback: ${JSON.stringify(scrollback)}`);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("response 17"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		tui.stop();
+	});
+
+	it("mid-buffer reflow over unflushed growth keeps the unflushed prefix recoverable", async () => {
+		// The reflow fallback repaints when a change crosses the viewport top.
+		// If the buffer grew in the same frame, part of that prefix was never
+		// flushed — the repaint must start at the flushed mark, not the viewport
+		// top, or the never-written lines are erased by the old \x1b[2J.
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		// 3 lines on screen (height 5) — nothing flushed.
+		component.lines = ["Line 0", "Line 1", "Line 2"];
+		tui.start();
+		await terminal.waitForRender();
+
+		// Append past the bottom: 9 lines, differential append flushes 0..3.
+		component.lines = Array.from({ length: 9 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+		const bufferAfterAppend = terminal.getScrollBuffer();
+		const scrollbackAfterAppend = bufferAfterAppend.slice(0, bufferAfterAppend.length - 5);
+		assert.ok(
+			scrollbackAfterAppend.includes("Line 3"),
+			"sanity: append path flushed the prefix (Line 3 in scrollback)",
+		);
+		assert.ok(
+			!scrollbackAfterAppend.includes("Line 4"),
+			"sanity: Line 4 was appended but never flushed",
+		);
+
+		const redrawsBefore = tui.fullRedraws;
+		// Reword a line above the viewport top (index 1 < viewportTop 4) and
+		// grow the buffer in the same frame → clean repaint over unflushed lines.
+		const reflowed = ["Line 0", "Line 1 reflowed", "Line 2", ...Array.from({ length: 17 }, (_, i) => `Line ${i + 3}`)];
+		component.lines = reflowed;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > redrawsBefore, "reflow crossing the viewport top must take the clean-repaint path");
+		const scrollback = terminal.getScrollBuffer();
+		assert.ok(scrollback.includes("Line 10"), `never-flushed lines must scroll into scrollback: ${JSON.stringify(scrollback)}`);
+		assert.strictEqual(
+			scrollback.filter((line) => line === "Line 3").length,
+			1,
+			"already-flushed lines must not be re-committed by the repaint",
+		);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 19"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		tui.stop();
+	});
+
+	it("forced render after an uncaptured width change still invalidates the mark", async () => {
+		// resize + requestRender(true) coalesce into one frame; the forced
+		// render's -1 sentinels overwrite previousWidth, so the flushed mark
+		// must carry its own record of which dimensions produced it.
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["prompt", "assistant:"];
+		tui.start();
+		await terminal.waitForRender();
+
+		component.lines = ["prompt", "assistant:", ...Array.from({ length: 18 }, (_, i) => `response ${i}`)];
+		terminal.resize(60, 5);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		assert.ok(scrollback.includes("assistant:"), `top of the response must survive in scrollback: ${JSON.stringify(scrollback)}`);
+		assert.ok(scrollback.includes("response 0"), `unflushed prefix must scroll into scrollback: ${JSON.stringify(scrollback)}`);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("response 17"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		tui.stop();
+	});
+
+	it("height resize of a tall transcript repaints loss-free", async () => {
+		const { terminal, tui } = await setupTallTranscript();
+		assert.strictEqual(countMarker(terminal), 1);
+
+		terminal.resize(40, 8);
+		await terminal.waitForRender();
+
+		// The viewport/scrollback boundary itself moves on a height change, so
+		// the mark is invalidated: the transcript is re-committed exactly once
+		// (bounded duplicates) and nothing is destroyed.
+		assert.strictEqual(countMarker(terminal), 2, "height resize re-commits the prefix exactly once (bounded duplicates)");
+		assert.ok(terminal.getViewport().join("\n").includes("Line 11"), "content stays visible after height resize");
+
+		tui.stop();
+	});
+
+	it("shrink demotes the flushed mark so replacement content is not skipped", async () => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		// Shrink: deletions shift the positional meaning of the mark.
+		component.lines = Array.from({ length: 6 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		// Replacement content grows past the bottom with a forced repaint: the
+		// demoted mark must not skip the new lines at the old boundary.
+		component.lines = [
+			...Array.from({ length: 6 }, (_, i) => `Line ${i}`),
+			...Array.from({ length: 6 }, (_, i) => `NEW ${i}`),
+		];
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		assert.ok(scrollback.includes("NEW 0"), `replacement content must be recoverable: ${JSON.stringify(scrollback)}`);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("NEW 5"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		tui.stop();
+	});
+
+	it("forced render with content on screen repaints only the viewport", async () => {
+		const { terminal, tui } = await setupTallTranscript();
+		assert.strictEqual(countMarker(terminal), 1);
+
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		assert.strictEqual(countMarker(terminal), 1, "forced repaint must not re-commit flushed scrollback");
+		assert.ok(terminal.getViewport().join("\n").includes("Line 11"), "content stays visible after forced render");
+
+		tui.stop();
+	});
+});
+
+describe("TUI shrink scrollback safety (issue #2541)", () => {
+	// GSD tears down its pinned "Latest Output" zone at the end of a tool-using
+	// turn, shrinking a frame taller than the screen by a few lines. Repainting
+	// from the new viewport top re-writes the overlap — lines already committed
+	// to scrollback — a second time. When the flushed prefix is untouched and
+	// the overlap is small, the repaint must keep the flushed mark as the
+	// screen top and leave the freed rows blank at the bottom instead.
+
+	async function setupTallFrameWithPinnedBlock(): Promise<{
+		terminal: VirtualTerminal;
+		tui: TUI;
+		component: TestComponent;
+	}> {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = [
+			...Array.from({ length: 10 }, (_, i) => `Line ${i}`),
+			...Array.from({ length: 2 }, (_, i) => `PIN ${i}`),
+		];
+		tui.start();
+		await terminal.waitForRender();
+		return { terminal, tui, component };
+	}
+
+	function assertEachLineOnce(terminal: VirtualTerminal, last: number): void {
+		const buffer = terminal.getScrollBuffer();
+		for (let i = 0; i <= last; i++) {
+			assert.strictEqual(
+				buffer.filter((row) => row === `Line ${i}`).length,
+				1,
+				`Line ${i} must appear exactly once in the terminal buffer`,
+			);
+		}
+	}
+
+	class MouseRecordingComponent implements Component {
+		lines: string[] = [];
+		lastRow: number | null = null;
+		render(_width: number): string[] {
+			return this.lines;
+		}
+		invalidate(): void {}
+		handleMouse(event: MouseEvent): void {
+			this.lastRow = event.y;
+		}
+	}
+
+	it("forced shrink keeps the flushed top instead of re-emitting scrollback", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+		assertEachLineOnce(terminal, 9); // sanity: transcript committed exactly once
+
+		// Teardown: the pinned block disappears and a forced render is requested
+		// (tearDownPinnedZone({ realignViewport: true })).
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		assertEachLineOnce(terminal, 9);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		// The freed rows fill normally with later output.
+		component.lines = [...Array.from({ length: 10 }, (_, i) => `Line ${i}`), "Line 10", "Line 11"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertEachLineOnce(terminal, 11);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 11"),
+			`appended content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("unforced tall-to-tall shrink keeps the flushed top instead of re-emitting scrollback", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+		assertEachLineOnce(terminal, 9);
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertEachLineOnce(terminal, 9);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("forced repaint after a kept-flushed-top shrink stays duplicate-free", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		assertEachLineOnce(terminal, 9);
+
+		// A later forced repaint of the unchanged (still blank-padded) frame
+		// must not drop below the flushed mark and re-commit the overlap.
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		assertEachLineOnce(terminal, 9);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("edit above the kept flushed top falls back to a safe repaint", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		assertEachLineOnce(terminal, 9);
+
+		// Edit a line inside the overlap: index 6 sits above the retained
+		// screen top (flushed mark 7) but at/below the length-based viewport
+		// estimate, so a stale boundary would aim the differential cursor at
+		// the wrong screen row. The repaint must fall back safely and keep
+		// every line correct.
+		const edited = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		edited[6] = "EDITED 6";
+		component.lines = edited;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		assert.ok(buffer.includes("EDITED 6"), `edited line must be rendered: ${JSON.stringify(buffer)}`);
+		assert.strictEqual(
+			buffer.filter((row) => row === "Line 7").length,
+			1,
+			`line 7 must survive exactly once: ${JSON.stringify(buffer)}`,
+		);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		// A later forced repaint of the unchanged frame must not paint from the
+		// stale flushed mark (which would erase the edit from the screen and
+		// lose it entirely — the edit lives below the mark now).
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const bufferAfterForced = terminal.getScrollBuffer();
+		assert.ok(
+			bufferAfterForced.includes("EDITED 6"),
+			`edited line must survive the later forced repaint: ${JSON.stringify(bufferAfterForced)}`,
+		);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("mouse hit-testing follows the kept-flushed-top screen layout", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		t.after(() => tui.stop());
+		const component = new MouseRecordingComponent();
+		tui.addChild(component);
+		component.lines = [
+			...Array.from({ length: 10 }, (_, i) => `Line ${i}`),
+			...Array.from({ length: 2 }, (_, i) => `PIN ${i}`),
+		];
+		tui.start();
+		await terminal.waitForRender();
+
+		// Shrink with a kept flushed top: screen row 0 now shows Line 7.
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		(tui as unknown as { dispatchMouse(event: { x: number; y: number; type: string }): void }).dispatchMouse({
+			x: 1,
+			y: 1,
+			type: "press",
+		});
+		assert.strictEqual(component.lastRow, 7, `screen row 0 must map to content row 7, got ${component.lastRow}`);
+
+		// An ordinary same-length edit keeps the physical layout: the mapping
+		// must not fall back to the bottom-aligned length estimate (5).
+		const edited = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		edited[8] = "EDITED 8";
+		component.lines = edited;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		(tui as unknown as { dispatchMouse(event: { x: number; y: number; type: string }): void }).dispatchMouse({
+			x: 1,
+			y: 1,
+			type: "press",
+		});
+		assert.strictEqual(component.lastRow, 7, `mapping must persist across edits, got ${component.lastRow}`);
+	});
+
+	it("shrink larger than half the screen still refills the viewport", async (t) => {
+		// #613: a big shrink repaints from the new viewport top so the screen
+		// never goes mostly blank. The overlap bound preserves that contract;
+		// the re-committed overlap on this path is the accepted refill behavior.
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 6 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.every((row) => row.trim() !== ""),
+			`viewport must be fully repainted: ${JSON.stringify(viewport)}`,
+		);
+		assert.ok(viewport.join("\n").includes("Line 5"), "latest content stays visible");
+	});
+
+	it("overlays composite at the bottom of a kept-flushed-top screen", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		t.after(() => tui.stop());
+		const component = new MouseRecordingComponent();
+		tui.addChild(component);
+		component.lines = [
+			...Array.from({ length: 10 }, (_, i) => `Line ${i}`),
+			...Array.from({ length: 2 }, (_, i) => `PIN ${i}`),
+		];
+		tui.start();
+		await terminal.waitForRender();
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		// Open a one-line overlay: it must render inside the viewport (at the
+		// bottom of the physical screen) and receive clicks at that row.
+		const overlay = new MouseRecordingComponent();
+		overlay.lines = ["OVERLAY"];
+		tui.showOverlay(overlay, { anchor: "bottom-left" });
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((row) => row.includes("OVERLAY")),
+			`overlay must render on screen: ${JSON.stringify(viewport)}`,
+		);
+		const overlayRow = viewport.findIndex((row) => row.includes("OVERLAY"));
+		(overlay as { lastRow: number | null }).lastRow = null;
+		(tui as unknown as { dispatchMouse(event: { x: number; y: number; type: string }): void }).dispatchMouse({
+			x: 1,
+			y: overlayRow + 1,
+			type: "press",
+		});
+		assert.strictEqual(overlay.lastRow, 0, `click on overlay row ${overlayRow} must hit the overlay`);
+	});
+
+	it("cursor marker above the retained top does not corrupt later edits", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		assertEachLineOnce(terminal, 9);
+
+		// A cursor marker appears on line 6 — above the retained screen top
+		// (7). It is not on screen, so cursor tracking must not record an
+		// unreachable position; a later edit of line 8 must land on line 8.
+		const withMarker = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		withMarker[6] = `Line 6${CURSOR_MARKER}`;
+		component.lines = withMarker;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const edited = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		edited[6] = "Line 6";
+		edited[8] = "EDITED 8";
+		component.lines = edited;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		assert.ok(buffer.includes("EDITED 8"), `edited line 8 must be rendered: ${JSON.stringify(buffer)}`);
+		assert.strictEqual(
+			buffer.filter((row) => row === "Line 9").length,
+			1,
+			`line 9 must appear exactly once: ${JSON.stringify(buffer)}`,
+		);
+	});
+
+	it("forced render with a marker above the kept top does not corrupt later edits", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		assertEachLineOnce(terminal, 9);
+
+		// A cursor marker above the retained screen top (7) must not pull the
+		// recorded cursor row above the screen during the kept-top repaint.
+		const withMarker = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		withMarker[6] = `Line 6${CURSOR_MARKER}`;
+		component.lines = withMarker;
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const edited = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		edited[6] = "Line 6";
+		edited[8] = "EDITED 8";
+		component.lines = edited;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		assert.ok(buffer.includes("EDITED 8"), `edited line 8 must be rendered: ${JSON.stringify(buffer)}`);
+		const viewport = terminal.getViewport();
+		assert.strictEqual(
+			viewport[0],
+			"Line 7",
+			`screen row 0 must still show Line 7: ${JSON.stringify(viewport)}`,
+		);
+		assert.strictEqual(
+			viewport[1],
+			"EDITED 8",
+			`screen row 1 must show the edit: ${JSON.stringify(viewport)}`,
+		);
+		assert.strictEqual(
+			viewport[2],
+			"Line 9",
+			`screen row 2 must still show Line 9: ${JSON.stringify(viewport)}`,
+		);
+		assert.strictEqual(
+			buffer.filter((row) => row === "Line 7").length,
+			1,
+			`line 7 must appear exactly once: ${JSON.stringify(buffer)}`,
+		);
+		assert.strictEqual(
+			buffer.filter((row) => row === "Line 9").length,
+			1,
+			`line 9 must appear exactly once: ${JSON.stringify(buffer)}`,
+		);
+	});
+});
+
+describe("TUI shrink scrollback safety follow-ups (issues #2582 / #2635)", () => {
+	function countInBuffer(terminal: VirtualTerminal, line: string): number {
+		return terminal.getScrollBuffer().filter((row) => row === line).length;
+	}
+
+	function assertExactlyOnce(terminal: VirtualTerminal, lines: string[]): void {
+		const buffer = terminal.getScrollBuffer();
+		for (const line of lines) {
+			assert.strictEqual(
+				countInBuffer(terminal, line),
+				1,
+				`${JSON.stringify(line)} must appear exactly once in the terminal buffer: ${JSON.stringify(buffer)}`,
+			);
+		}
+	}
+
+	// #2582: GSD finalizes the reply header (adds its timestamp) in the same
+	// frame that tears down the pinned zone. A line above the retained screen
+	// top is already in scrollback under both layouts and no render path can
+	// repaint it, so the change must not send the shrink back to the path that
+	// re-emits the overlap. "Line 4" sits just above the overlap (Line 5,
+	// Line 6) — the case a fixed boundary window got wrong.
+	const scrollbackChanges: Array<[string, string]> = [
+		["the header", "HEADER"],
+		["a line above the overlap", "Line 4"],
+	];
+	for (const [where, changed] of scrollbackChanges) {
+		for (const forced of [true, false]) {
+			it(`${forced ? "forced" : "unforced"} shrink keeps the flushed top when ${where} changed in scrollback`, async (t) => {
+				const terminal = new VirtualTerminal(40, 5);
+				const tui = new TUI(terminal);
+				const component = new TestComponent();
+				tui.addChild(component);
+				const transcript = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+				component.lines = ["HEADER", ...transcript, "PIN 0", "PIN 1"];
+				tui.start();
+				await terminal.waitForRender();
+				t.after(() => tui.stop());
+				assertExactlyOnce(terminal, transcript);
+
+				const finalized = ["HEADER", ...transcript].map((line) =>
+					line === changed ? `${line} 10:56` : line,
+				);
+				component.lines = finalized;
+				tui.requestRender(forced);
+				await terminal.waitForRender();
+
+				assertExactlyOnce(
+					terminal,
+					transcript.filter((line) => line !== changed),
+				);
+				assert.ok(
+					terminal.getViewport().join("\n").includes("Line 9"),
+					`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+				);
+
+				component.lines = [...finalized, "Line 10", "Line 11"];
+				tui.requestRender();
+				await terminal.waitForRender();
+
+				assertExactlyOnce(
+					terminal,
+					[...transcript.filter((line) => line !== changed), "Line 10", "Line 11"],
+				);
+				assert.ok(
+					terminal.getViewport().join("\n").includes("Line 11"),
+					`appended content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+				);
+			});
+		}
+	}
+
+	// #2635: small non-forced shrinks inside the visible window leave
+	// flushedLineCount / previousViewportTop at the old screen top. A later
+	// forced render whose own change is a deletion inside the overlap then
+	// fails the unchanged-overlap check, repaints from the new viewport top,
+	// and re-emits lines that are already in scrollback. Minimized by delta
+	// debugging from a random-event fuzzer (13 events).
+	it("forced repaint after small in-window shrinks keeps the flushed top", async (t) => {
+		const rows = 40;
+		const terminal = new VirtualTerminal(100, rows);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		let nextId = 0;
+		const body: number[] = Array.from({ length: 50 }, () => nextId++);
+		const lineFor = (id: number): string => `T${String(id).padStart(4, "0")} transcript line`;
+		component.render = (_width: number) => [
+			...body.map(lineFor),
+			"EDITOR 1",
+			"EDITOR 2",
+			"EDITOR 3",
+			"FOOTER 1",
+			"FOOTER 2",
+		];
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		const lastBodyId = () => body[body.length - 1];
+
+		const steps: Array<"append" | { fromEnd: number; count: number; force?: boolean }> = [
+			"append",
+			"append",
+			{ fromEnd: 16, count: 3 },
+			{ fromEnd: 3, count: 3 },
+			"append",
+			"append",
+			{ fromEnd: 8, count: 4 },
+			"append",
+			{ fromEnd: 18, count: 3 },
+			"append",
+			{ fromEnd: 7, count: 4 },
+			"append",
+			{ fromEnd: 24, count: 1, force: true },
+		];
+		for (const step of steps) {
+			if (step === "append") {
+				body.push(nextId++);
+			} else {
+				body.splice(Math.max(0, body.length - step.fromEnd), step.count);
+			}
+			tui.requestRender(step !== "append" && step.force === true);
+			await terminal.waitForRender();
+		}
+
+		// Nothing already flushed may be re-emitted...
+		const buffer = terminal.getScrollBuffer();
+		const counts = new Map<string, number>();
+		for (const line of buffer) {
+			if (/^T\d{4} transcript line$/.test(line)) {
+				counts.set(line, (counts.get(line) ?? 0) + 1);
+			}
+		}
+		const duplicated = [...counts].filter(([, n]) => n > 1).map(([line]) => line);
+		assert.deepStrictEqual(duplicated, [], `duplicated transcript lines: ${duplicated.join(", ")}`);
+		// ...and every line of the final frame must have survived exactly once.
+		for (const id of body) {
+			assert.strictEqual(
+				counts.get(lineFor(id)) ?? 0,
+				1,
+				`${lineFor(id)} must appear exactly once in the terminal buffer: ${JSON.stringify(buffer)}`,
+			);
+		}
+		assert.ok(
+			terminal.getViewport().join("\n").includes(lineFor(lastBodyId())),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		// Growth after the aligned repaint: the flushed mark must follow the
+		// aligned screen top, or a later clean/forced repaint would skip the
+		// screen-top row and destroy it.
+		for (let i = 0; i < 3; i++) {
+			body.push(nextId++);
+			tui.requestRender();
+			await terminal.waitForRender();
+		}
+		body.push(nextId++);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const bufferAfterGrowth = terminal.getScrollBuffer();
+		const countsAfterGrowth = new Map<string, number>();
+		for (const line of bufferAfterGrowth) {
+			if (/^T\d{4} transcript line$/.test(line)) {
+				countsAfterGrowth.set(line, (countsAfterGrowth.get(line) ?? 0) + 1);
+			}
+		}
+		const duplicatedAfterGrowth = [...countsAfterGrowth].filter(([, n]) => n > 1).map(([line]) => line);
+		assert.deepStrictEqual(
+			duplicatedAfterGrowth,
+			[],
+			`duplicated transcript lines after growth: ${duplicatedAfterGrowth.join(", ")}`,
+		);
+		for (const id of body) {
+			assert.strictEqual(
+				countsAfterGrowth.get(lineFor(id)) ?? 0,
+				1,
+				`${lineFor(id)} must appear exactly once after growth: ${JSON.stringify(bufferAfterGrowth)}`,
+			);
+		}
+		assert.ok(
+			terminal.getViewport().join("\n").includes(lineFor(lastBodyId())),
+			`latest content stays visible after growth: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	// The aligned repaint must verify the shift is confined below an identical,
+	// non-blank block. Repeated content must not let the seam pair with the
+	// wrong occurrence: this shape has two valid-looking seams, and only the
+	// shallow one keeps every B visible.
+	it("does not align the kept top through repeated content", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const before = ["X", "A", "B1", "B2", "B3", "C", "D", "E"];
+		component.lines = before;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// Delete X and A above the screen (kept top 3): the frame shifts by two.
+		// The shift cannot be verified here — an aligned top that keeps all
+		// three B lines visible would fall at the viewport top itself, outside
+		// the overlap bound — so the renderer must fall back to the bounded
+		// refill rather than align through repeated content. No surviving line
+		// may be lost.
+		const after = ["B1", "B2", "B3", "C", "D", "E"];
+		component.lines = after;
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		for (const line of after) {
+			assert.ok(
+				buffer.includes(line),
+				`${JSON.stringify(line)} must survive the shift: ${JSON.stringify(buffer)}`,
+			);
+		}
+		assert.ok(
+			terminal.getViewport().join("\n").includes("E"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	// Repetition must not let a shift hide inside an overlap of identical
+	// lines: same-index equality then cannot rule out a shift, and keeping the
+	// retained top would abandon rows whose occurrences the scrollback cannot
+	// back. The renderer must fall back to the bounded refill, which shows
+	// every occurrence of the repeated value the final frame holds.
+	it("does not keep the flushed top through a repeated-line window", async (t) => {
+		const terminal = new VirtualTerminal(40, 6);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const before = ["X", "Y", "C", "B", "D", "B", "B", "E", "F", "G", "H"];
+		component.lines = before;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// Delete X and Y above the screen; the B rows around the boundary would
+		// let a shift masquerade as an unchanged overlap.
+		const after = ["C", "B", "D", "B", "B", "E", "F", "G", "H"];
+		component.lines = after;
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		const expectedCounts = new Map<string, number>([
+			["C", 1],
+			["B", 3],
+			["D", 1],
+			["E", 1],
+			["F", 1],
+			["G", 1],
+			["H", 1],
+		]);
+		for (const [line, expected] of expectedCounts) {
+			assert.ok(
+				buffer.filter((row) => row === line).length >= expected,
+				`${JSON.stringify(line)} must appear at least ${expected} time(s): ${JSON.stringify(buffer)}`,
+			);
+		}
+		assert.ok(
+			terminal.getViewport().join("\n").includes("H"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	// Periodic content (an alternating two-line pattern) must not let a
+	// two-row shift masquerade as an unchanged overlap either: the window
+	// then matches at shift 2, and keeping the retained top would show fewer
+	// A/B copies than the final frame holds. Applies to forced and unforced
+	// renders alike.
+	for (const forced of [true, false]) {
+		it(`${forced ? "forced" : "unforced"} render does not keep the flushed top through a periodic window`, async (t) => {
+			const terminal = new VirtualTerminal(40, 8);
+			const tui = new TUI(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const before = ["X", "Y", "A", "B", "A", "B", "A", "B", "C", "D", "E", "F"];
+			component.lines = before;
+			tui.start();
+			await terminal.waitForRender();
+			t.after(() => tui.stop());
+
+			// Delete X and Y above the screen: the A/B window matches itself at
+			// shift 2, so retention must be rejected and the bounded refill
+			// must show every occurrence the final frame holds.
+			const after = ["A", "B", "A", "B", "A", "B", "C", "D", "E", "F"];
+			component.lines = after;
+			tui.requestRender(forced);
+			await terminal.waitForRender();
+
+			const buffer = terminal.getScrollBuffer();
+			for (const [line, expected] of new Map<string, number>([
+				["A", 3],
+				["B", 3],
+				["C", 1],
+				["D", 1],
+				["E", 1],
+				["F", 1],
+			])) {
+				assert.ok(
+					buffer.filter((row) => row === line).length >= expected,
+					`${JSON.stringify(line)} must appear at least ${expected} time(s): ${JSON.stringify(buffer)}`,
+				);
+			}
+			assert.ok(
+				terminal.getViewport().join("\n").includes("F"),
+				`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+			);
+		});
+	}
+
+	// An above-screen edit poisons the cache relative to physical scrollback
+	// (the edit is hidden by design). A later shrink must not treat the
+	// poisoned cache as provenance for occurrence backing: the accepted path
+	// here is the bounded refill, which re-shows every value the final frame
+	// holds.
+	it("does not retain through a cache poisoned by a prior above-screen edit", async (t) => {
+		const terminal = new VirtualTerminal(40, 10);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const ts = Array.from({ length: 6 }, (_, i) => `t${i} tail line`);
+		component.lines = ["X", "D", "D", "D", "C", "D", "D", "C", "D", "D", ...ts];
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// Turn 1: the first row gains its timestamp (above-screen edit) while
+		// the frame also shrinks — the accepted keep-flushed-top case.
+		component.lines = ["C(t)", "D", "D", "D", "C", "D", "D", "C", "D", "D", ...ts.slice(0, 5)];
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		// Turn 2: delete the first three rows and shrink again. Neither
+		// retention path may anchor on the poisoned cache.
+		for (const forced of [true, false]) {
+			component.lines = ["C", "D", "D", "C", "D", "D", "C", "D", "D", ...ts.slice(0, 5)];
+			tui.requestRender(forced);
+			await terminal.waitForRender();
+
+			const buffer = terminal.getScrollBuffer();
+			assert.ok(
+				buffer.filter((row) => row === "C").length >= 2,
+				`both C rows must survive a ${forced ? "forced" : "unforced"} render: ${JSON.stringify(buffer)}`,
+			);
+			// "C(t)" is the turn-1 above-screen edit: hidden by design (#2582).
+			// t5 was removed in turn 1 as well.
+			for (const line of ts.slice(0, 5)) {
+				assert.ok(
+					buffer.includes(line),
+					`${JSON.stringify(line)} must survive: ${JSON.stringify(buffer)}`,
+				);
+			}
+			assert.ok(
+				terminal.getViewport().join("\n").includes("t4"),
+				`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+			);
+		}
+	});
+});
+
+describe("TUI retireScreenToScrollback (issue #2637)", () => {
+	function assertInScrollbackOnce(terminal: VirtualTerminal, lines: string[]): void {
+		const buffer = terminal.getScrollBuffer();
+		for (const line of lines) {
+			assert.strictEqual(
+				buffer.filter((row) => row === line).length,
+				1,
+				`${JSON.stringify(line)} must survive exactly once in scrollback: ${JSON.stringify(buffer)}`,
+			);
+		}
+	}
+
+	it("scrolls the previous screen into scrollback when the transcript is discarded", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const summary = Array.from({ length: 8 }, (_, i) => `S${String(i).padStart(2, "0")} summary line`);
+		component.lines = summary;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// New session: the transcript is discarded and the next frame is short.
+		// Both happen before the coalesced render fires.
+		tui.retireScreenToScrollback();
+		component.lines = ["New session"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertInScrollbackOnce(terminal, summary);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("New session"),
+			`new frame renders after the retire: ${JSON.stringify(terminal.getViewport())}`,
+		);
+		assert.ok(
+			!terminal.getViewport().join("\n").includes("S0"),
+			`previous content must not stay on screen: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("keeps a short frame that never overflowed the screen", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const summary = Array.from({ length: 3 }, (_, i) => `S${String(i).padStart(2, "0")} short line`);
+		component.lines = summary;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		tui.retireScreenToScrollback();
+		component.lines = ["New session"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertInScrollbackOnce(terminal, summary);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("New session"),
+			`new frame renders after the retire: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("is a no-op when nothing was rendered, and the TUI keeps working", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		t.after(() => tui.stop());
+
+		tui.retireScreenToScrollback();
+
+		component.lines = ["After"];
+		tui.start();
+		await terminal.waitForRender();
+		assert.ok(
+			terminal.getViewport().join("\n").includes("After"),
+			`TUI renders normally after a no-op retire: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("retires a screen whose forced render is still pending", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		const summary = Array.from({ length: 8 }, (_, i) => `S${String(i).padStart(2, "0")} summary line`);
+		component.lines = summary;
+		tui.start();
+		await terminal.waitForRender();
+		t.after(() => tui.stop());
+
+		// A forced render empties previousLines immediately while the painted
+		// screen stays up until the next tick; retiring in that window must
+		// still scroll the painted rows into scrollback.
+		tui.requestRender(true);
+		tui.retireScreenToScrollback();
+		component.lines = ["New session"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertInScrollbackOnce(terminal, summary);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("New session"),
+			`new frame renders after the retire: ${JSON.stringify(terminal.getViewport())}`,
+		);
 	});
 });
 

@@ -795,16 +795,59 @@ function cleanupBundledSkillsFromEcosystemDir(): void {
 
   for (const entry of readdirSync(bundledSkillsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
+    const bundledSkillDir = join(bundledSkillsDir, entry.name)
     const targetPath = join(ecosystemDir, entry.name)
     if (!existsSync(targetPath)) continue
 
     try {
       if (lstatSync(targetPath).isSymbolicLink()) continue
+      // Only reclaim byte-exact bundled copies; anything else in the shared
+      // ecosystem dir is user-owned and must never be deleted (#2286).
+      if (!isExactDirectoryCopy(targetPath, bundledSkillDir)) {
+        console.error(`[gsd] WARN: Left user-owned skill in place: ${targetPath} (only exact unmodified bundled skill copies are reclaimed from ${ecosystemDir})`)
+        continue
+      }
       makeTreeWritable(targetPath)
       rmSync(targetPath, { recursive: true, force: true })
     } catch {
       // Non-fatal: never let cleanup of the shared ecosystem dir block startup.
     }
+  }
+}
+
+/**
+ * True only when candidateDir has the same relative file set as referenceDir
+ * with byte-identical file contents. Entry types are checked with lstat
+ * semantics (Dirents), so symlinks on either side are never followed and
+ * non-regular entries (FIFOs, sockets, devices) are rejected before any read —
+ * reading a FIFO would block forever. Any read error or type mismatch counts
+ * as NOT an exact copy: deletion is never allowed on uncertainty.
+ */
+function isExactDirectoryCopy(candidateDir: string, referenceDir: string): boolean {
+  try {
+    const candidateEntries = readdirSync(candidateDir, { withFileTypes: true })
+    const referenceEntries = readdirSync(referenceDir, { withFileTypes: true })
+    if (candidateEntries.length !== referenceEntries.length) return false
+
+    const referenceEntriesByName = new Map(referenceEntries.map((entry) => [entry.name, entry]))
+    for (const candidateEntry of candidateEntries) {
+      const referenceEntry = referenceEntriesByName.get(candidateEntry.name)
+      if (!referenceEntry) return false
+      if (candidateEntry.isSymbolicLink() || referenceEntry.isSymbolicLink()) return false
+      if (candidateEntry.isDirectory() !== referenceEntry.isDirectory()) return false
+
+      const candidatePath = join(candidateDir, candidateEntry.name)
+      const referencePath = join(referenceDir, referenceEntry.name)
+      if (candidateEntry.isDirectory()) {
+        if (!isExactDirectoryCopy(candidatePath, referencePath)) return false
+        continue
+      }
+      if (!candidateEntry.isFile() || !referenceEntry.isFile()) return false
+      if (!readFileSync(candidatePath).equals(readFileSync(referencePath))) return false
+    }
+    return true
+  } catch {
+    return false
   }
 }
 

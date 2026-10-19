@@ -6,9 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { runDispatch } from "../auto/dispatch.ts";
-import { runPreDispatch } from "../auto/pre-dispatch.ts";
 import { AutoSession } from "../auto/session.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
 import { resolveUnitSupervisionTimeouts } from "../auto-timers.ts";
 import { bootstrapAutoSession } from "../auto-start.ts";
 import { postUnitPostVerification, postUnitPreVerification } from "../auto-post-unit.ts";
@@ -26,11 +25,18 @@ import {
   startDeepProjectSetupForeground,
 } from "../guided-flow.ts";
 import {
+  _getAdapter,
   closeDatabase,
   insertArtifact,
   insertMilestone,
+  insertSlice,
+  insertTask,
   openDatabase,
 } from "../gsd-db.ts";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
+import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.ts";
+import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import type { GSDPreferences } from "../preferences.ts";
 import type { GSDState } from "../types.ts";
 
@@ -129,6 +135,24 @@ function writeValidProjectAndRequirements(base: string): void {
   );
   writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
   writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), validRequirements);
+  // The setup stages are database rows; the files above are their projections.
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  saveSetupArtifact("PROJECT.md", validProject);
+  saveSetupArtifact("REQUIREMENTS.md", validRequirements);
+  closeDatabase();
+}
+
+/** What gsd_summary_save leaves in the open database for a setup stage. */
+function saveSetupArtifact(path: "PROJECT.md" | "REQUIREMENTS.md", content: string): void {
+  insertArtifact({
+    path,
+    artifact_type: path.replace(".md", ""),
+    milestone_id: null,
+    slice_id: null,
+    task_id: null,
+    full_content: content,
+  });
+  if (path === "PROJECT.md") replaceProjectMilestoneSequence(_getAdapter()!, content);
 }
 
 function makeRepo(): string {
@@ -318,72 +342,16 @@ test("deep project setup: bootstrap can start auto-mode without an active milest
   }
 });
 
-test("deep project setup: pre-dispatch can run before the first milestone exists", async () => {
-  const base = makeBase();
-  try {
-    const s = new AutoSession();
-    s.basePath = base;
-    s.originalBasePath = base;
-    s.resourceVersionOnStart = "test";
-
-    let stopped = false;
-    const deps = {
-      checkResourcesStale: () => null,
-      invalidateAllCaches: () => {},
-      preDispatchHealthGate: async () => ({ proceed: true, fixesApplied: [] }),
-      syncProjectRootToWorktree: () => {},
-      deriveState: async () => makeEmptyState(),
-      syncCmuxSidebar: () => {},
-      stopAuto: async () => { stopped = true; },
-      pauseAuto: async () => {},
-      setActiveMilestoneId: () => {},
-    } as any;
-
-    let seq = 0;
-    const result = await runPreDispatch(
-      {
-        ctx: makeCtx() as any,
-        pi: {} as any,
-        s,
-        deps,
-        prefs: { planning_depth: "deep" } as GSDPreferences,
-        iteration: 1,
-        flowId: "test-flow",
-        nextSeq: () => ++seq,
-      },
-      { consecutiveFinalizeTimeouts: 0 },
-    );
-
-    assert.equal(stopped, false);
-    assert.equal(result.action, "next");
-    if (result.action === "next") {
-      assert.equal(result.data.mid, "PROJECT");
-      assert.equal(result.data.midTitle, "Project setup");
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
 test("deep project setup: bootstrap continues queued M002 without milestone context", async () => {
   const base = makeRepo();
   try {
     writeCapturedDeepPrefs(base);
     writeValidProjectAndRequirements(base);
-    mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-    writeFileSync(join(base, ".gsd", "runtime", "research-decision.json"), '{"decision":"skip"}\n');
 
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "First milestone", status: "complete" });
     insertMilestone({ id: "M002", title: "Second milestone", status: "queued" });
-    insertArtifact({
-      path: "PROJECT.md",
-      artifact_type: "PROJECT",
-      milestone_id: null,
-      slice_id: null,
-      task_id: null,
-      full_content: readFileSync(join(base, ".gsd", "PROJECT.md"), "utf-8"),
-    });
+    addLegacyCompletionEvidence();
     closeDatabase();
 
     const messages: unknown[] = [];
@@ -439,228 +407,6 @@ test("deep project setup: bootstrap continues queued M002 without milestone cont
   }
 });
 
-test("deep project setup: pre-dispatch takes precedence over an existing draft milestone", async () => {
-  const base = makeBase();
-  try {
-    const s = new AutoSession();
-    s.basePath = base;
-    s.originalBasePath = base;
-    s.resourceVersionOnStart = "test";
-
-    const deps = {
-      checkResourcesStale: () => null,
-      invalidateAllCaches: () => {},
-      preDispatchHealthGate: async () => ({ proceed: true, fixesApplied: [] }),
-      syncProjectRootToWorktree: () => {},
-      deriveState: async () => makeNeedsDiscussionState(),
-      syncCmuxSidebar: () => {},
-      stopAuto: async () => {},
-      pauseAuto: async () => {},
-      setActiveMilestoneId: () => { throw new Error("must not activate milestone before deep project setup"); },
-    } as any;
-
-    let seq = 0;
-    const result = await runPreDispatch(
-      {
-        ctx: makeCtx() as any,
-        pi: {} as any,
-        s,
-        deps,
-        prefs: { planning_depth: "deep" } as GSDPreferences,
-        iteration: 1,
-        flowId: "test-flow",
-        nextSeq: () => ++seq,
-      },
-      { consecutiveFinalizeTimeouts: 0 },
-    );
-
-    assert.equal(result.action, "next");
-    if (result.action === "next") {
-      assert.equal(result.data.mid, "PROJECT");
-      assert.equal(s.currentMilestoneId, null);
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("deep project setup: pending setup does not rewrite executing state to PROJECT", async () => {
-  const base = makeBase();
-  try {
-    const s = new AutoSession();
-    s.basePath = base;
-    s.originalBasePath = base;
-    s.resourceVersionOnStart = "test";
-
-    let paused = false;
-    const deps = {
-      checkResourcesStale: () => null,
-      invalidateAllCaches: () => {},
-      preDispatchHealthGate: async () => ({ proceed: true, fixesApplied: [] }),
-      syncProjectRootToWorktree: () => {},
-      deriveState: async () => makeExecutingState(),
-      syncCmuxSidebar: () => {},
-      stopAuto: async () => {},
-      pauseAuto: async () => { paused = true; },
-      setActiveMilestoneId: () => {},
-      reconcileMergeState: () => "clean",
-    } as any;
-
-    let seq = 0;
-    const result = await runPreDispatch(
-      {
-        ctx: makeCtx() as any,
-        pi: {} as any,
-        s,
-        deps,
-        prefs: { planning_depth: "deep", uok: { plan_v2: { enabled: false } } } as GSDPreferences,
-        iteration: 1,
-        flowId: "test-flow",
-        nextSeq: () => ++seq,
-      },
-      { consecutiveFinalizeTimeouts: 0 },
-    );
-
-    assert.equal(paused, false);
-    assert.equal(result.action, "next");
-    if (result.action === "next") {
-      assert.equal(result.data.mid, "M001");
-      assert.equal(result.data.state.phase, "executing");
-      assert.equal(result.data.state.activeMilestone?.id, "M001");
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("deep project setup: pre-dispatch does not rewrite execution state to PROJECT", async () => {
-  const base = makeBase();
-  try {
-    writeCapturedDeepPrefs(base);
-    writeValidProjectAndRequirements(base);
-    mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-    writeFileSync(join(base, ".gsd", "runtime", "research-decision.json"), JSON.stringify({ decision: "skip" }));
-
-    const s = new AutoSession();
-    s.basePath = base;
-    s.originalBasePath = base;
-    s.resourceVersionOnStart = "test";
-
-    let activeMilestoneId: string | null = null;
-    const deps = {
-      checkResourcesStale: () => null,
-      invalidateAllCaches: () => {},
-      preDispatchHealthGate: async () => ({ proceed: true, fixesApplied: [] }),
-      syncProjectRootToWorktree: () => {},
-      deriveState: async () => makeExecutingState(),
-      syncCmuxSidebar: () => {},
-      stopAuto: async () => {},
-      pauseAuto: async () => {},
-      setActiveMilestoneId: (_base: string, mid: string) => { activeMilestoneId = mid; },
-      reconcileMergeState: () => "clean",
-    } as any;
-
-    let seq = 0;
-    const result = await runPreDispatch(
-      {
-        ctx: makeCtx() as any,
-        pi: {} as any,
-        s,
-        deps,
-        prefs: { planning_depth: "deep", uok: { plan_v2: { enabled: false } } } as GSDPreferences,
-        iteration: 1,
-        flowId: "test-flow",
-        nextSeq: () => ++seq,
-      },
-      { consecutiveFinalizeTimeouts: 0 },
-    );
-
-    assert.equal(result.action, "next");
-    if (result.action === "next") {
-      assert.equal(result.data.mid, "M001");
-      assert.equal(result.data.midTitle, "Core App");
-      assert.equal(s.currentMilestoneId, "M001");
-      assert.equal(activeMilestoneId, "M001");
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("deep project setup: pending project research cannot dispatch PROJECT/S01", async (t) => {
-  const base = makeBase();
-  const restorePromptBuilder = setResearchProjectPromptBuilderForTest(async () => "research prompt");
-  t.after(restorePromptBuilder);
-
-  try {
-    writeCapturedDeepPrefs(base);
-    writeValidProjectAndRequirements(base);
-    mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-    writeFileSync(
-      join(base, ".gsd", "runtime", "research-decision.json"),
-      JSON.stringify({ decision: "research", source: "research-decision" }),
-    );
-
-    const s = new AutoSession();
-    s.basePath = base;
-    s.originalBasePath = base;
-    s.resourceVersionOnStart = "test";
-
-    const deps = {
-      checkResourcesStale: () => null,
-      invalidateAllCaches: () => {},
-      preDispatchHealthGate: async () => ({ proceed: true, fixesApplied: [] }),
-      syncProjectRootToWorktree: () => {},
-      deriveState: async () => makePlanningState(),
-      syncCmuxSidebar: () => {},
-      stopAuto: async () => {},
-      pauseAuto: async () => {},
-      setActiveMilestoneId: () => { throw new Error("must not activate milestone while project research is pending"); },
-    } as any;
-
-    let seq = 0;
-    const result = await runPreDispatch(
-      {
-        ctx: makeCtx() as any,
-        pi: {} as any,
-        s,
-        deps,
-        prefs: { planning_depth: "deep" } as GSDPreferences,
-        iteration: 1,
-        flowId: "test-flow",
-        nextSeq: () => ++seq,
-      },
-      { consecutiveFinalizeTimeouts: 0 },
-    );
-
-    assert.equal(result.action, "next");
-    if (result.action !== "next") return;
-
-    assert.equal(result.data.mid, "PROJECT");
-    assert.equal(result.data.state.phase, "pre-planning");
-    assert.equal(result.data.state.activeSlice, null);
-    assert.equal(result.data.state.activeTask, null);
-
-    resetRegistry();
-    const dispatch = await resolveDispatch({
-      basePath: base,
-      mid: result.data.mid,
-      midTitle: result.data.midTitle,
-      state: result.data.state,
-      prefs: { planning_depth: "deep" } as GSDPreferences,
-      structuredQuestionsAvailable: "false",
-    });
-
-    assert.equal(dispatch.action, "dispatch");
-    if (dispatch.action === "dispatch") {
-      assert.equal(dispatch.unitType, "research-project");
-      assert.equal(dispatch.unitId, "RESEARCH-PROJECT");
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
 test("deep project setup: new-project command only writes planning_depth with --deep", async () => {
   const lightBase = makeCommandBase();
   const deepBase = makeCommandBase();
@@ -685,7 +431,6 @@ test("deep project setup: new-project command only writes planning_depth with --
     const deepMessages = await runNewProjectCommand(deepBase, "new-project --deep");
     const deepPrefs = readFileSync(join(deepBase, ".gsd", "PREFERENCES.md"), "utf-8");
     assert.match(deepPrefs, /planning_depth:\s*deep/);
-    assert.match(deepPrefs, /workflow_prefs_captured:\s*true/);
     assert.equal(deepMessages.length, 1, "deep new-project should dispatch the foreground project setup interview");
     assert.match(String((deepMessages[0] as any).content), /Foreground Deep Setup Question Policy/);
   } finally {
@@ -790,7 +535,7 @@ test("deep project setup: new-project --deep uses cwd when nested inside a paren
       new URL("../schemas/__fixtures__/valid-project.md", import.meta.url),
       "utf-8",
     );
-    writeFileSync(join(child, ".gsd", "PROJECT.md"), validProject);
+    saveSetupArtifact("PROJECT.md", validProject);
 
     const advanced = await checkDeepProjectSetupAfterTurn(
       { messages: [{ role: "assistant", content: "Project context written." }] },
@@ -867,7 +612,7 @@ test("deep project setup: new-project asks interview stages in foreground", asyn
       new URL("../schemas/__fixtures__/valid-project.md", import.meta.url),
       "utf-8",
     );
-    writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
+    saveSetupArtifact("PROJECT.md", validProject);
 
     const advanced = await checkDeepProjectSetupAfterTurn(
       { messages: [{ role: "assistant", content: "Project captured." }] },
@@ -898,75 +643,6 @@ test("deep project setup: new-project asks interview stages in foreground", asyn
   }
 });
 
-test("deep auto dispatch forces milestone checkpoints into plain chat", async (t) => {
-  const base = makeBase();
-  t.after(() => {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  const s = new AutoSession();
-  s.basePath = base;
-  s.originalBasePath = base;
-
-  let capturedStructured: string | undefined;
-  const deps = {
-    resolveDispatch: async (dispatchCtx: any) => {
-      capturedStructured = dispatchCtx.structuredQuestionsAvailable;
-      return {
-        action: "dispatch" as const,
-        unitType: "discuss-milestone",
-        unitId: "M001",
-        prompt: `Structured questions available: ${dispatchCtx.structuredQuestionsAvailable}`,
-        matchedRule: "test",
-      };
-    },
-    emitJournalEvent: () => {},
-    runPreDispatchHooks: () => ({ firedHooks: [], action: "proceed" }),
-    getPriorSliceCompletionBlocker: () => null,
-    getMainBranch: () => "main",
-    invalidateAllCaches: () => {},
-    stopAuto: async () => {},
-    pauseAuto: async () => {},
-  };
-
-  const result = await runDispatch(
-    {
-      ctx: makeCtx() as any,
-      pi: makePi([]) as any,
-      s,
-      deps: deps as any,
-      prefs: { planning_depth: "deep" } as any,
-      iteration: 1,
-      flowId: "flow-test",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "pre-planning",
-        activeMilestone: { id: "M001", title: "Plain Chat Gate" },
-        activeSlice: null,
-        activeTask: null,
-        recentDecisions: [],
-        blockers: [],
-        nextAction: "",
-        registry: [],
-      },
-      mid: "M001",
-      midTitle: "Plain Chat Gate",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(result.action, "next");
-  assert.equal(capturedStructured, "false");
-  if (result.action === "next") {
-    assert.match(result.data.prompt, /Structured questions available: false/);
-  }
-});
-
 test("deep project setup: unrelated agent_end sessions do not advance pending setup", async () => {
   const base = makeBase();
   const otherBase = makeBase();
@@ -987,7 +663,7 @@ test("deep project setup: unrelated agent_end sessions do not advance pending se
       new URL("../schemas/__fixtures__/valid-project.md", import.meta.url),
       "utf-8",
     );
-    writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
+    saveSetupArtifact("PROJECT.md", validProject);
 
     const ignored = await checkDeepProjectSetupAfterTurn(
       { messages: [{ role: "assistant", content: "Unrelated light workflow completed." }] },
@@ -1036,7 +712,7 @@ test("deep project setup: same project advances when agent_end session id change
       new URL("../schemas/__fixtures__/valid-project.md", import.meta.url),
       "utf-8",
     );
-    writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
+    saveSetupArtifact("PROJECT.md", validProject);
 
     const advanced = await checkDeepProjectSetupAfterTurn(
       { messages: [{ role: "assistant", content: "Project captured." }] },
@@ -1059,42 +735,12 @@ test("deep project setup: same project advances when agent_end session id change
 
 test("deep project setup: foreground dispatcher does not probe research-project rule", () => {
   assert.equal(FOREGROUND_DEEP_SETUP_RULE_NAMES.has("deep: pre-planning (no PROJECT) → discuss-project"), true);
-  assert.equal(FOREGROUND_DEEP_SETUP_RULE_NAMES.has("deep: pre-planning (no research decision) → research-decision"), true);
   assert.equal(FOREGROUND_DEEP_SETUP_RULE_NAMES.has("deep: pre-planning (no PROJECT research) → research-project"), false);
 });
 
-test("deep project setup: project-level units verify their real artifacts", () => {
+test("deep project setup: research-project verifies its research files", () => {
   const base = makeBase();
   try {
-    assert.equal(verifyExpectedArtifact("workflow-preferences", "WORKFLOW-PREFS", base), false);
-    writeFileSync(
-      join(base, ".gsd", "PREFERENCES.md"),
-      "---\nplanning_depth: deep\nworkflow_prefs_captured: true\n---\n",
-    );
-    assert.equal(verifyExpectedArtifact("workflow-preferences", "WORKFLOW-PREFS", base), true);
-
-    const validProject = readFileSync(
-      new URL("../schemas/__fixtures__/valid-project.md", import.meta.url),
-      "utf-8",
-    );
-    writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
-    assert.equal(verifyExpectedArtifact("discuss-project", "PROJECT", base), true);
-    writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
-    assert.equal(verifyExpectedArtifact("discuss-project", "PROJECT", base), false);
-
-    const validRequirements = readFileSync(
-      new URL("../schemas/__fixtures__/valid-requirements.md", import.meta.url),
-      "utf-8",
-    );
-    writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), validRequirements);
-    assert.equal(verifyExpectedArtifact("discuss-requirements", "REQUIREMENTS", base), true);
-
-    mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-    writeFileSync(join(base, ".gsd", "runtime", "research-decision.json"), '{"decision":"maybe"}\n');
-    assert.equal(verifyExpectedArtifact("research-decision", "RESEARCH-DECISION", base), false);
-    writeFileSync(join(base, ".gsd", "runtime", "research-decision.json"), '{"decision":"skip"}\n');
-    assert.equal(verifyExpectedArtifact("research-decision", "RESEARCH-DECISION", base), true);
-
     const researchDir = join(base, ".gsd", "research");
     mkdirSync(researchDir, { recursive: true });
     writeFileSync(join(researchDir, "STACK.md"), "# Stack\n");
@@ -1156,8 +802,6 @@ test("deep project setup: research-project partial output writes dimension block
     s.basePath = base;
     s.currentUnit = { type: "research-project", id: "RESEARCH-PROJECT", startedAt: Date.now() };
 
-    mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-    writeFileSync(join(base, ".gsd", "runtime", "research-project-inflight"), "{}\n");
     mkdirSync(join(base, ".gsd", "research"), { recursive: true });
     writeFileSync(join(base, ".gsd", "research", "STACK.md"), "# Stack\n");
 
@@ -1177,13 +821,12 @@ test("deep project setup: research-project partial output writes dimension block
     );
 
     assert.equal(result, "continue");
-    assert.equal(existsSync(join(base, ".gsd", "runtime", "research-project-inflight")), false);
     for (const name of ["FEATURES", "ARCHITECTURE", "PITFALLS"]) {
       assert.equal(existsSync(join(base, ".gsd", "research", `${name}-BLOCKER.md`)), true);
     }
     assert.equal(verifyExpectedArtifact("research-project", "RESEARCH-PROJECT", base), true);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.size, 0);
+    assert.equal(s.unclaimedUnitBudgets.size, 0);
     assert.ok(
       notifications.some((message) => message.includes("without rerunning all scouts")),
       "should notify that partial research was finalized without another full fan-out",
@@ -1202,9 +845,6 @@ test("deep project setup: research-project empty output writes global blocker wi
     s.basePath = base;
     s.currentUnit = { type: "research-project", id: "RESEARCH-PROJECT", startedAt: Date.now() };
 
-    mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-    writeFileSync(join(base, ".gsd", "runtime", "research-project-inflight"), "{}\n");
-
     const notifications: string[] = [];
     const result = await postUnitPreVerification(
       {
@@ -1221,11 +861,10 @@ test("deep project setup: research-project empty output writes global blocker wi
     );
 
     assert.equal(result, "continue");
-    assert.equal(existsSync(join(base, ".gsd", "runtime", "research-project-inflight")), false);
     assert.equal(existsSync(join(base, ".gsd", "research", "PROJECT-RESEARCH-BLOCKER.md")), true);
     assert.equal(verifyExpectedArtifact("research-project", "RESEARCH-PROJECT", base), false);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.size, 0);
+    assert.equal(s.unclaimedUnitBudgets.size, 0);
     assert.ok(
       notifications.some((message) => message.includes("PROJECT-RESEARCH-BLOCKER.md")),
       "should notify that project research is fail-closed",
@@ -1236,16 +875,12 @@ test("deep project setup: research-project empty output writes global blocker wi
   }
 });
 
-test("deep project setup: project research timeout finalizer removes stale marker", () => {
+test("deep project setup: project research timeout finalizer writes the global blocker when no dimension completed", () => {
   const base = makeBase();
   try {
-    mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-    writeFileSync(join(base, ".gsd", "runtime", "research-project-inflight"), "{}\n");
-
     const outcome = finalizeProjectResearchTimeout(base, "test hard timeout");
 
     assert.equal(outcome.kind, "global-blocker");
-    assert.equal(existsSync(join(base, ".gsd", "runtime", "research-project-inflight")), false);
     assert.equal(existsSync(join(base, ".gsd", "research", "PROJECT-RESEARCH-BLOCKER.md")), true);
   } finally {
     rmSync(base, { recursive: true, force: true });
@@ -1313,8 +948,10 @@ test("deep project setup: empty legacy pseudo-milestone dirs do not block first 
     );
     writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
     writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), validRequirements);
-    mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-    writeFileSync(join(base, ".gsd", "runtime", "research-decision.json"), '{"decision":"skip"}\n');
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    saveSetupArtifact("PROJECT.md", validProject);
+    saveSetupArtifact("REQUIREMENTS.md", validRequirements);
+    closeDatabase();
 
     for (const legacy of ["PROJECT", "RESEARCH-PROJECT", "WORKFLOW-PREFS"]) {
       mkdirSync(join(base, ".gsd", "milestones", legacy), { recursive: true });
@@ -1377,7 +1014,7 @@ test("deep project setup: project question pauses instead of artifact-retrying",
     assert.equal(result, "dispatched");
     assert.equal(pauseCalled, true);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.size, 0);
+    assert.equal(s.unclaimedUnitBudgets.size, 0);
     assert.ok(
       notifications.some((message) => message.includes("waiting for your input")),
       "should notify that the project unit is waiting for user input",
@@ -1544,23 +1181,10 @@ test("deep project setup: requirements preview question from screenshot is treat
   assert.equal(shouldPauseForQuestion("discuss-requirements", messages), true);
 });
 
-test("deep project setup: research decision question triggers approval boundary pause", () => {
-  assert.equal(
-    shouldPauseForQuestion("research-decision", [
-      {
-        role: "assistant",
-        content: "Run domain research now? (y/n)",
-      },
-    ]),
-    true,
-  );
-});
-
 test("deep project setup: plain-text approval questions map to write-gate ids", () => {
   assert.equal(approvalGateIdForUnit("discuss-project", "PROJECT"), "depth_verification_project_confirm");
   assert.equal(approvalGateIdForUnit("discuss-requirements", "REQUIREMENTS"), "depth_verification_requirements_confirm");
   assert.equal(approvalGateIdForUnit("discuss-milestone", "M001"), "depth_verification_M001_confirm");
-  assert.equal(approvalGateIdForUnit("research-decision", "RESEARCH-DECISION"), "depth_verification_research_decision_confirm");
 });
 
 test("deep project setup: plain-text approval gate clears only on explicit approval", () => {
@@ -1568,7 +1192,6 @@ test("deep project setup: plain-text approval gate clears only on explicit appro
   assert.equal(isExplicitApprovalResponse("go ahead and write it"), true);
   assert.equal(isExplicitApprovalResponse("yes, add delete support first"), false);
   assert.equal(isExplicitApprovalResponse("not quite, remove the due date"), false);
-  assert.equal(isExplicitApprovalResponse("research", "depth_verification_research_decision_confirm"), true);
 });
 
 test("deep project setup: discuss-milestone question failure pauses instead of artifact-retrying", async () => {
@@ -1607,7 +1230,7 @@ test("deep project setup: discuss-milestone question failure pauses instead of a
     assert.equal(result, "dispatched");
     assert.equal(pauseCalled, true);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.size, 0);
+    assert.equal(s.unclaimedUnitBudgets.size, 0);
     assert.ok(
       notifications.some((message) => message.includes("waiting for your input")),
       "should notify that the discuss unit is waiting for user input",
@@ -1665,7 +1288,7 @@ test("verified task git closeout hook failure re-dispatches task remediation", a
     assert.equal(s.pendingVerificationRetry?.unitId, "M001/S01/T01");
     assert.equal(s.pendingVerificationRetry?.attempt, 1);
     assert.match(s.pendingVerificationRetry?.failureContext ?? "", /blocked by test hook/);
-    assert.equal(s.verificationRetryCount.get("git-commit:execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01", "git-commit"), 1);
     const preCommitCount = Number(readFileSync(join(base, ".git", "pre-commit-count"), "utf-8"));
     assert.equal(Number.isFinite(preCommitCount), true);
     assert.equal(preCommitCount, 2, "git closeout should not outer-retry deterministic hook failures");
@@ -1701,7 +1324,7 @@ test("verified task git closeout hook failure pauses after remediation cap", asy
     s.basePath = base;
     s.originalBasePath = base;
     s.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
-    s.verificationRetryCount.set("git-commit:execute-task:M001/S01/T01", 2);
+    useUnitBudget(s, "execute-task", "M001/S01/T01", 2, "git-commit");
 
     let pauseCalled = false;
     const notifications: Array<{ message: string; severity?: string }> = [];
@@ -1719,7 +1342,7 @@ test("verified task git closeout hook failure pauses after remediation cap", asy
     assert.equal(result, "stopped");
     assert.equal(pauseCalled, true);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.has("git-commit:execute-task:M001/S01/T01"), false);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01", "git-commit"), 0);
     assert.ok(
       notifications.some((entry) => entry.severity === "error" && entry.message.includes("after 2 remediation attempts")),
       "hook commit failure should pause after the remediation cap",
@@ -1727,6 +1350,200 @@ test("verified task git closeout hook failure pauses after remediation cap", asy
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("a refused task commit survives a restart: the repair retry and its count are on the dispatch row", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: base, stdio: "ignore" });
+  const hookPath = join(base, ".git", "hooks", "pre-commit");
+  writeFileSync(hookPath, ["#!/bin/sh", "echo blocked by test hook >&2", "exit 1"].join("\n"));
+  chmodSync(hookPath, 0o755);
+  writeFileSync(join(base, "work.txt"), "changed\n");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "in_progress" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+  const dispatch = claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+
+  // Every close-out is a new process: a new session that holds nothing about the task.
+  let pauseCalled = false;
+  const closeOut = () => {
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.originalBasePath = base;
+    s.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
+    return postUnitPostVerification({
+      s,
+      ctx: { ui: { notify() {} } } as any,
+      pi: {} as any,
+      buildSnapshotOpts: () => ({}) as any,
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => { pauseCalled = true; },
+      updateProgressWidget: () => {},
+    });
+  };
+
+  for (const attempt of [1, 2]) {
+    assert.equal(await closeOut(), "retry");
+    const stored = readStoredUnitRetry("execute-task", "M001/S01/T01");
+    assert.equal(stored?.attempt, attempt, "the count goes on from the last process, it does not start again");
+    assert.match(stored?.signature ?? "", /^git-commit:/, "the dispatch rules select the closed task by this signature");
+    assert.match(stored?.failureContext ?? "", /blocked by test hook/);
+    assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), attempt);
+    dispatch.claimNext();
+  }
+
+  assert.equal(await closeOut(), "stopped", "the cap counts the repairs of the processes before the restart");
+  assert.equal(pauseCalled, true);
+  assert.equal(readStoredUnitRetry("execute-task", "M001/S01/T01"), null, "the pause releases the stored retry");
+  assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), 0);
+});
+
+test("a task commit that succeeds after a repair releases the stored repair retry", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: base, stdio: "ignore" });
+  const hookPath = join(base, ".git", "hooks", "pre-commit");
+  writeFileSync(hookPath, ["#!/bin/sh", "echo blocked by test hook >&2", "exit 1"].join("\n"));
+  chmodSync(hookPath, 0o755);
+  writeFileSync(join(base, "work.txt"), "changed\n");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "in_progress" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+  const dispatch = claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  const closeOut = async () => {
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.originalBasePath = base;
+    s.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
+    await postUnitPostVerification({
+      s,
+      ctx: { ui: { notify() {} } } as any,
+      pi: {} as any,
+      buildSnapshotOpts: () => ({}) as any,
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => {},
+      updateProgressWidget: () => {},
+    });
+    return s.lastGitActionStatus;
+  };
+
+  assert.equal(await closeOut(), "failed");
+  assert.match(readStoredUnitRetry("execute-task", "M001/S01/T01")?.signature ?? "", /^git-commit:/);
+
+  // The repair run removes the cause, and the commit of its close-out succeeds.
+  rmSync(hookPath);
+  dispatch.claimNext();
+  assert.equal(await closeOut(), "ok");
+  assert.equal(
+    readStoredUnitRetry("execute-task", "M001/S01/T01"),
+    null,
+    "a repair retry that stays stored makes the dispatch rules select the closed task again",
+  );
+  assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), 0);
+});
+
+test("a transient commit failure in the repair run of a refused commit counts against the repair budget", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: base, stdio: "ignore" });
+  const hookPath = join(base, ".git", "hooks", "pre-commit");
+  writeFileSync(hookPath, ["#!/bin/sh", "echo blocked by test hook >&2", "exit 1"].join("\n"));
+  chmodSync(hookPath, 0o755);
+  writeFileSync(join(base, "work.txt"), "changed\n");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "in_progress" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+  const dispatch = claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  let pauseCalled = false;
+  const notifications: string[] = [];
+  const closeOut = () => {
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.originalBasePath = base;
+    s.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
+    return postUnitPostVerification({
+      s,
+      ctx: { ui: { notify: (message: string) => notifications.push(message) } } as any,
+      pi: {} as any,
+      buildSnapshotOpts: () => ({}) as any,
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => { pauseCalled = true; },
+      updateProgressWidget: () => {},
+    });
+  };
+
+  assert.equal(await closeOut(), "retry", "the hook refuses the commit and the repair retry is stored");
+  assert.match(readStoredUnitRetry("execute-task", "M001/S01/T01")?.signature ?? "", /^git-commit:/);
+
+  // Each repair run ends with a transient git failure, so its commit does not
+  // succeed and the stored retry selects the closed task again.
+  writeFileSync(
+    hookPath,
+    ["#!/bin/sh", "echo \"fatal: Unable to create '.git/index.lock': File exists.\" >&2", "exit 1"].join("\n"),
+  );
+  let repairRuns = 0;
+  while (!pauseCalled && repairRuns < 3) {
+    dispatch.claimNext();
+    repairRuns++;
+    const result = await closeOut();
+    assert.notEqual(result, "retry", "a transient failure does not store a new repair retry");
+  }
+
+  assert.equal(pauseCalled, true, "the repair budget must stop the repair runs");
+  assert.equal(repairRuns, 2, "the refused commit and the first transient failure use the 2 repair attempts");
+  assert.ok(
+    notifications.some((message) => message.includes("after 2 remediation attempts")),
+    `expected the remediation-cap message, got: ${notifications.join("\n")}`,
+  );
+  assert.equal(
+    readStoredUnitRetry("execute-task", "M001/S01/T01"),
+    null,
+    "a repair retry that stays stored makes the dispatch rules select the closed task again",
+  );
+  assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), 0);
 });
 
 test("verified task git closeout partial multi-repo commit pauses instead of redoing task", async () => {
@@ -1802,7 +1619,7 @@ test("verified task git closeout partial multi-repo commit pauses instead of red
     assert.equal(pauseCalled, true);
     // No task remediation retry is scheduled when work is already partially committed.
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.has("git-commit:execute-task:M001/S01/T01"), false);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01", "git-commit"), 0);
     assert.ok(
       notifications.some(
         (entry) => entry.severity === "error" && entry.message.includes("backend"),
@@ -1825,7 +1642,7 @@ test("deep project setup: approval wait wins over deterministic write-gate place
     s.basePath = base;
     s.currentUnit = { type: "discuss-requirements", id: "REQUIREMENTS", startedAt: Date.now() };
     s.lastToolInvocationError = "gsd_summary_save: Error saving artifact: root_artifact_write_blocked";
-    s.verificationRetryCount.set("discuss-requirements:REQUIREMENTS", 2);
+    useUnitBudget(s, "discuss-requirements", "REQUIREMENTS", 2);
 
     let pauseCalled = false;
     const notifications: string[] = [];

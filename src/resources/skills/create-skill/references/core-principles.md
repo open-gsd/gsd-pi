@@ -10,6 +10,7 @@ Skills use pure XML structure for consistent parsing, efficient token usage, and
 <why_xml>
 <consistency>
 XML enforces consistent structure across all skills. All skills use the same tag names for the same purposes:
+
 - `<objective>` always defines what the skill does
 - `<quick_start>` always provides immediate guidance
 - `<success_criteria>` always defines completion
@@ -31,21 +32,25 @@ Markdown headings are just visual formatting. Claude must infer meaning from hea
 XML tags are more efficient than markdown headings:
 
 **Markdown headings**:
+
 ```markdown
 ## Quick start
 ## Workflow
 ## Advanced features
 ## Success criteria
 ```
+
 Total: ~20 tokens, no semantic meaning to Claude
 
 **XML tags**:
+
 ```xml
 <quick_start>
 <workflow>
 <advanced_features>
 <success_criteria>
 ```
+
 Total: ~15 tokens, semantic meaning built-in
 
 Savings compound across all skills in the ecosystem.
@@ -53,6 +58,7 @@ Savings compound across all skills in the ecosystem.
 
 <claude_performance>
 Claude performs better with pure XML because:
+
 - Unambiguous section boundaries reduce parsing errors
 - Semantic tags convey intent directly (no inference needed)
 - Nested tags create clear hierarchies
@@ -69,6 +75,7 @@ Pure XML structure is not just a style preference—it's a performance optimizat
 
 <required_tags>
 Every skill MUST have:
+
 - `<objective>` - What the skill does and why it matters
 - `<quick_start>` - Immediate, actionable guidance
 - `<success_criteria>` or `<when_successful>` - How to know it worked
@@ -93,6 +100,7 @@ Assume Claude is smart. Don't explain obvious concepts.
 
 <concise_example>
 **Concise** (~50 tokens):
+
 ```xml
 <quick_start>
 Extract PDF text with pdfplumber:
@@ -103,7 +111,9 @@ import pdfplumber
 with pdfplumber.open("file.pdf") as pdf:
     text = pdf.pages[0].extract_text()
 ```
+
 </quick_start>
+
 ```
 
 **Verbose** (~150 tokens):
@@ -120,6 +130,7 @@ with pdfplumber.open("file.pdf") as pdf:
 
 This code opens the PDF and extracts text from the first page.
 </quick_start>
+
 ```
 
 The concise version assumes Claude knows what PDFs are, understands Python imports, and can read code. All those assumptions are correct.
@@ -179,6 +190,7 @@ Claude has freedom to adapt the review based on what the code needs.
 
 <medium_freedom>
 <when>
+
 - A preferred pattern exists
 - Some variation is acceptable
 - Configuration affects behavior
@@ -200,13 +212,16 @@ def generate_report(data, format="markdown", include_charts=True):
     # Generate output in specified format
     # Optionally include visualizations
 ```
+
 </report_template>
 
 <success_criteria>
+
 - Report includes all required sections
 - Format matches user preference
 - Data accurately represented
 </success_criteria>
+
 ```
 
 Claude can customize the template based on requirements.
@@ -238,10 +253,12 @@ python scripts/migrate.py --verify --backup
 </workflow>
 
 <success_criteria>
+
 - Migration completes without errors
 - Backup created before migration
 - Verification confirms data integrity
 </success_criteria>
+
 ```
 
 Claude must follow the exact command with no variation.
@@ -334,6 +351,7 @@ with pdfplumber.open("file.pdf") as pdf:
 
 For scanned PDFs requiring OCR, use pdf2image with pytesseract instead.
 </quick_start>
+
 ```
 
 This works for all models:
@@ -349,14 +367,17 @@ Use pdfplumber for text extraction.
 ```
 
 **Too verbose for Opus**:
+
 ```xml
 <quick_start>
 PDF files are documents that contain text. To extract that text, we use a library called pdfplumber. First, import the library at the top of your Python file. Then, open the PDF file using the pdfplumber.open() method. This returns a PDF object. Access the pages attribute to get a list of pages. Each page has an extract_text() method that returns the text content...
 </quick_start>
 ```
+
 </balancing_across_models>
 
 <iterative_improvement>
+
 1. Start with medium detail level
 2. Test with target models
 3. Observe where models struggle or succeed

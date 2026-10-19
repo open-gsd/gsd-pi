@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### Sequential Requests (Should Be Batched/Parallel)
+
 ```
 fetch\(.*\n.*fetch\(           (sequential fetch calls)
 axios\.\w+\(.*\n.*axios\.     (sequential axios calls)
@@ -13,6 +14,7 @@ http\.\w+\(.*\n.*http\.       (sequential Node http calls)
 ```
 
 ### Missing Batching
+
 ```
 # Individual API calls in loops
 for.*\n.*fetch\(               (fetch in loop)
@@ -26,6 +28,7 @@ for.*\n.*requests\.            (requests in loop)
 ```
 
 ### No Request Deduplication
+
 ```
 # Same endpoint called multiple times
 fetch\(['"]([^'"]+)['"]\)      (check for duplicate URLs)
@@ -34,6 +37,7 @@ useQuery\(.*['"]([^'"]+)['"]  (check for duplicate query keys)
 ```
 
 ### Missing Compression
+
 ```
 # Large payload without compression
 Content-Type.*application/json  (check if gzip/br enabled)
@@ -43,6 +47,7 @@ express\(\).*without.*compression
 ```
 
 ### Inefficient Serialization
+
 ```
 JSON\.stringify\(.*large        (stringifying large objects)
 JSON\.parse\(.*JSON\.stringify  (deep clone via JSON - use structuredClone)
@@ -51,6 +56,7 @@ yaml\.dump\(.*yaml\.load\(     (YAML round-trip - slow for data exchange)
 ```
 
 ### Missing Streaming
+
 ```
 \.readFile\(                   (read entire file vs createReadStream)
 \.readFileSync\(               (sync + entire file)
@@ -61,6 +67,7 @@ response\.data                 (entire response buffered)
 ```
 
 ### Missing Caching Headers
+
 ```
 # API responses without caching
 res\.json\(.*without.*cache-control
@@ -70,6 +77,7 @@ express\.static\(.*without.*maxAge
 ```
 
 ### Retry Without Backoff
+
 ```
 retry.*count                   (check if exponential backoff exists)
 while.*retry                   (retry loop without delay increase)

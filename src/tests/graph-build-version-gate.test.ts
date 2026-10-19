@@ -1,7 +1,7 @@
 // gsd-pi · graph build version gate (T003 spike, projection-write side)
 //
-// `gsd graph build` bypasses the DB and writes `.gsd/graphs/graph.json`
-// directly, so without a version gate a project cut over by a NEWER gsd-pi
+// `gsd graph build` writes `.gsd/graphs/graph.json` from the workflow
+// database, so without a version gate a project cut over by a NEWER gsd-pi
 // silently gets a fresh empty graph with exit 0 (silent divergence). The CLI
 // consults the schema stamp through the extension's
 // openExistingWorkflowDatabase: `graph build` refuses with the exact engine
@@ -12,19 +12,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   _getAdapter,
   closeDatabase,
+  insertMilestone,
   openDatabase,
 } from "../resources/extensions/gsd/gsd-db.ts";
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
 
-const V50_MESSAGE =
-  "gsd.db schema is v50, newer than the v49 this gsd-pi supports. " +
+const V51_MESSAGE =
+  "gsd.db schema is v52, newer than the v51 this gsd-pi supports. " +
   "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
 
 function makeProject(version: "current" | "newer" | "missing"): string {
@@ -36,7 +37,7 @@ function makeProject(version: "current" | "newer" | "missing"): string {
       if (version === "newer") {
         const db = _getAdapter();
         assert.ok(db);
-        recordSchemaVersion(db, 50);
+        recordSchemaVersion(db, 52);
       }
     } finally {
       closeDatabase();
@@ -81,7 +82,7 @@ test("graph build on a newer-schema project refuses without writing graph.json",
 
   assert.equal(run.status, 1, `refusal must exit non-zero:\n${run.stderr}`);
   assert.ok(
-    run.stderr.includes(V50_MESSAGE),
+    run.stderr.includes(V51_MESSAGE),
     `stderr must carry the exact refuse-newer message:\n${run.stderr}`,
   );
   assert.equal(
@@ -102,6 +103,24 @@ test("graph build on a current-schema project keeps the exit-0 build path", (t) 
   assert.equal(existsSync(join(base, ".gsd", "graphs", "graph.json")), true);
 });
 
+test("graph build takes the milestone from the database when no projection file exists", (t) => {
+  const base = makeProject("current");
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: "M001", title: "Database only", status: "active" });
+  closeDatabase();
+
+  const run = runGraph(base, ["build"]);
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /\(source: database\)/);
+  const graph = JSON.parse(readFileSync(join(base, ".gsd", "graphs", "graph.json"), "utf8"));
+  assert.deepEqual(
+    graph.nodes.filter((node: { type: string }) => node.type === "milestone").map((node: { id: string; label: string }) => [node.id, node.label]),
+    [["milestone:M001", "M001: Database only"]],
+  );
+});
+
 test("graph build with a missing gsd.db keeps the previous behavior", (t) => {
   const base = makeProject("missing");
   t.after(() => rmSync(base, { recursive: true, force: true }));
@@ -109,7 +128,7 @@ test("graph build with a missing gsd.db keeps the previous behavior", (t) => {
   const run = runGraph(base, ["build"]);
 
   assert.equal(run.status, 0, `missing DB must keep the previous build path:\n${run.stderr}`);
-  assert.match(run.stdout, /Graph built:/);
+  assert.match(run.stdout, /Graph built: .*\(source: projection\)/);
 });
 
 test("graph status on a newer-schema project warns with the exact message but stays read-only", (t) => {
@@ -120,7 +139,7 @@ test("graph status on a newer-schema project warns with the exact message but st
 
   assert.equal(run.status, 0, `read-only status must keep exit 0:\n${run.stderr}`);
   assert.ok(
-    run.stderr.includes(V50_MESSAGE),
+    run.stderr.includes(V51_MESSAGE),
     `status must warn with the exact refuse-newer message:\n${run.stderr}`,
   );
   assert.equal(

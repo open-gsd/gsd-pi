@@ -58,7 +58,7 @@ Optional fields:
 | `model` | all modes | Model override for the child process |
 | `cwd` | single, task, or chain step | Working directory for that child |
 | `context` | all modes, task, or chain step | `"fresh"` or `"fork"`; default is `"fresh"` |
-| `background` | single mode | Return immediately and persist progress for later `status` checks |
+| `background` | all modes | Return immediately and persist progress for later `status` checks |
 | `isolated` | launch | Run through the configured filesystem isolation backend before merging patches back |
 
 ## Context Modes
@@ -73,7 +73,7 @@ When a project has a [project-local runtime contract](./local-runtime-contract.m
 
 ## Background Runs
 
-For a long single-agent task, launch in the background:
+Any valid dispatch — single, parallel, or chain — can launch in the background. For a long single-agent task:
 
 ```json
 {
@@ -82,6 +82,8 @@ For a long single-agent task, launch in the background:
   "background": true
 }
 ```
+
+Batches work the same way: pass `background: true` alongside `tasks` (parallel) or `chain` (sequential). The children run detached — they outlive the dispatching turn — and one completion wake summarizes the batch with per-child success or failure.
 
 The tool returns a run id:
 

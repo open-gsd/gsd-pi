@@ -2,6 +2,7 @@
 
 <required_reading>
 **Read these reference files NOW:**
+
 1. references/recommended-structure.md
 2. references/workflows-and-validation.md
 </required_reading>
@@ -25,12 +26,14 @@ Determine `{skill-path}`: use `.agents/skills/{skill-name}` (project-local) if f
 ## Step 2: Analyze Current Structure
 
 Read the skill:
+
 ```bash
 cat {skill-path}/SKILL.md
 ls {skill-path}/workflows/ 2>/dev/null
 ```
 
 Determine:
+
 - **Simple skill?** → May need to upgrade to router pattern first
 - **Already has workflows/?** → Good, can add directly
 - **What workflows exist?** → Avoid duplication
@@ -40,6 +43,7 @@ Report current structure to user.
 ## Step 3: Gather Workflow Requirements
 
 Ask using AskUserQuestion or direct question:
+
 - What should this workflow do?
 - When would someone use it vs existing workflows?
 - What references would it need?
@@ -51,6 +55,7 @@ Ask using AskUserQuestion or direct question:
 Ask: "This skill needs to be upgraded to the router pattern first. Should I restructure it?"
 
 If yes:
+
 1. Create workflows/ directory
 2. Move existing process content to workflows/main.md
 3. Rewrite SKILL.md as router with intake + routing
@@ -98,6 +103,7 @@ Add the new workflow to:
 ## Step 7: Create References (if needed)
 
 If the workflow needs domain knowledge that doesn't exist:
+
 1. Create `references/{reference-name}.md`
 2. Add to reference_index in SKILL.md
 3. Reference it in the workflow's required_reading
@@ -105,6 +111,7 @@ If the workflow needs domain knowledge that doesn't exist:
 ## Step 8: Test
 
 Invoke the skill:
+
 - Does the new option appear in intake?
 - Does selecting it route to the correct workflow?
 - Does the workflow load the right references?
@@ -115,6 +122,7 @@ Report results to user.
 
 <success_criteria>
 Workflow addition is complete when:
+
 - [ ] Skill upgraded to router pattern (if needed)
 - [ ] Workflow file created with required_reading, process, success_criteria
 - [ ] SKILL.md intake updated with new option

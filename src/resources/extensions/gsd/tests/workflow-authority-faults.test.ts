@@ -13,7 +13,6 @@ import {
   getTask,
   insertSlice,
   insertTask,
-  updateTaskStatus,
 } from "../gsd-db.js";
 import { relSliceFile } from "../paths.js";
 import {
@@ -26,7 +25,10 @@ import {
   type ExecutionInvocation,
 } from "../execution-invocation.js";
 import { seedSliceCompletionAuthority } from "./slice-completion-fixture.js";
-import { createWorkflowAuthorityFixture } from "./workflow-authority-fixture.js";
+import {
+  createWorkflowAuthorityFixture,
+  seedPrerequisiteCompletionEvidence,
+} from "./workflow-authority-fixture.js";
 import {
   createWorkflowFaultHarness,
   type WorkflowFaultHarness,
@@ -37,6 +39,8 @@ import { discardProjectionEvidence } from "./projection-evidence-helpers.js";
 interface FaultScenario {
   point: WorkflowFaultPoint;
   committed: boolean;
+  /** The write the database abort hits; the default is the Slice status write. */
+  abort?: "carriers";
 }
 
 interface AuthoritySnapshot {
@@ -61,7 +65,8 @@ interface ReplayProcessResult {
 
 const SCENARIOS: FaultScenario[] = [
   { point: "before-transaction-commit", committed: false },
-  { point: "after-db-commit-before-render", committed: true },
+  // The SUMMARY and UAT carriers commit with the completion: a failed carrier write undoes it.
+  { point: "before-transaction-commit", abort: "carriers", committed: false },
   { point: "during-projection-write", committed: true },
   { point: "before-independent-reopen", committed: true },
   { point: "after-independent-reopen", committed: true },
@@ -89,7 +94,10 @@ function handleCompleteSlice(
 }
 
 function seedCompletionBoundary(): void {
-  updateTaskStatus("M001", "S02", "T01", "complete", "2026-07-11T00:00:00.000Z");
+  seedPrerequisiteCompletionEvidence();
+  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+  // writer refuses rows without a canonical lifecycle row.
+  _getAdapter()!.prepare("UPDATE tasks SET status = 'complete', completed_at = :ts WHERE milestone_id = 'M001' AND slice_id = 'S02' AND id = 'T01'").run({ ":ts": "2026-07-11T00:00:00.000Z" });
   seedSliceCompletionAuthority({
     milestoneId: "M001",
     sliceId: "S02",
@@ -147,14 +155,14 @@ function writeContradictoryProjection(root: string, committed: boolean): void {
 }
 
 function armProductionFault(
-  point: WorkflowFaultPoint,
+  { point, abort }: FaultScenario,
   harness: WorkflowFaultHarness,
   root: string,
 ): void {
-  if (point === "before-transaction-commit") {
-    harness.armDatabaseAbort("status", "NEW.status = 'complete' AND OLD.status <> 'complete'");
-  } else if (point === "after-db-commit-before-render") {
+  if (point === "before-transaction-commit" && abort === "carriers") {
     harness.armDatabaseAbort("full_summary_md", "NEW.full_summary_md IS NOT OLD.full_summary_md");
+  } else if (point === "before-transaction-commit") {
+    harness.armDatabaseAbort("status", "NEW.status = 'complete' AND OLD.status <> 'complete'");
   } else if (point === "during-projection-write") {
     const summaryPath = join(root, relSliceFile(root, "M001", "S02", "SUMMARY"));
     harness.obstructProjection(summaryPath);
@@ -341,12 +349,12 @@ function parseReplayResult(replay: SpawnSyncReturns<string>): ReplayProcessResul
 }
 
 for (const scenario of SCENARIOS) {
-  test(`database authority remains coherent at ${scenario.point}`, async (t) => {
+  test(`database authority remains coherent at ${scenario.point}${scenario.abort ? ` (${scenario.abort})` : ""}`, async (t) => {
     const fixture = await createWorkflowAuthorityFixture();
     t.after(() => fixture.cleanup());
     seedCompletionBoundary();
     const harness = createWorkflowFaultHarness(scenario.point);
-    armProductionFault(scenario.point, harness, fixture.root);
+    armProductionFault(scenario, harness, fixture.root);
 
     let completionError: unknown;
     let completionStale = false;
@@ -359,10 +367,7 @@ for (const scenario of SCENARIOS) {
       completionError = error;
     }
 
-    if (
-      scenario.point === "after-db-commit-before-render"
-      || scenario.point === "during-projection-write"
-    ) {
+    if (scenario.point === "during-projection-write") {
       assert.equal(completionError, undefined, "post-commit projection failures must not undo completion");
       assert.equal(completionStale, true, "the production renderer must surface a stale projection");
     } else if (scenario.point === "after-independent-reopen") {
@@ -450,6 +455,8 @@ test("fresh-process exact replay repairs an obstructed Slice cancellation projec
   const idempotencyKey = "test/workflow-authority-faults/fresh-process-cancel-repair";
   const invocation = internalExecutionInvocation(idempotencyKey);
   const statePath = join(fixture.root, ".gsd", "STATE.md");
+  // The fixture's requirement and decision saves rendered STATE.md; obstruct it with a directory.
+  rmSync(statePath, { force: true });
   mkdirSync(statePath, { recursive: true });
 
   const committed = await executeSkipSlice(params, fixture.root, invocation);

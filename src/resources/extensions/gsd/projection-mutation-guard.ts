@@ -10,8 +10,15 @@ import { isValidCompatMarker } from "./compat/compat-marker-validation.js";
 
 type ProjectionRoot = ".gsd" | ".planning";
 
+/**
+ * Find the projection root that holds the file. `gsdDir` is the state
+ * directory: it holds the compat marker and the quarantine. With external
+ * state, writers pass the real path under `~/.gsd/projects/<hash>` (the target
+ * of the project's `.gsd` symlink). That path has no `.gsd` segment for the
+ * project, so the state directory is also recognised by its `gsd.db`.
+ */
 function projectionLocation(filePath: string): {
-  basePath: string;
+  gsdDir: string;
   rootName: ProjectionRoot;
   relPath: string;
 } | null {
@@ -19,13 +26,12 @@ function projectionLocation(filePath: string): {
   let current = dirname(absolutePath);
   while (current !== dirname(current)) {
     const name = basename(current).toLocaleLowerCase("en-US");
-    if (name === ".gsd" || name === ".planning") {
-      const rootName = name as ProjectionRoot;
-      return {
-        basePath: dirname(current),
-        rootName,
-        relPath: relative(current, absolutePath).replace(/\\/g, "/"),
-      };
+    const relPath = relative(current, absolutePath).replace(/\\/g, "/");
+    if (name === ".planning") {
+      return { gsdDir: join(dirname(current), ".gsd"), rootName: ".planning", relPath };
+    }
+    if (name === ".gsd" || existsSync(join(current, "gsd.db"))) {
+      return { gsdDir: current, rootName: ".gsd", relPath };
     }
     current = dirname(current);
   }
@@ -43,13 +49,13 @@ function isPlanningPassthrough(relPath: string): boolean {
 }
 
 function baselineSha(
-  basePath: string,
+  gsdDir: string,
   rootName: ProjectionRoot,
   relPath: string,
 ): string | undefined {
   let marker: unknown;
   try {
-    marker = JSON.parse(readFileSync(join(basePath, ".gsd", ".compat.json"), "utf-8"));
+    marker = JSON.parse(readFileSync(join(gsdDir, ".compat.json"), "utf-8"));
   } catch {
     return undefined;
   }
@@ -58,9 +64,9 @@ function baselineSha(
   return marker.planning?.projections[relPath]?.sha;
 }
 
-function uniqueQuarantinePath(basePath: string, rootName: ProjectionRoot, relPath: string): string {
+function uniqueQuarantinePath(gsdDir: string, rootName: ProjectionRoot, relPath: string): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const path = join(basePath, ".gsd", "quarantine", "projections", stamp, rootName.slice(1), relPath);
+  const path = join(gsdDir, "quarantine", "projections", stamp, rootName.slice(1), relPath);
   if (!existsSync(path)) return path;
   let suffix = 2;
   while (existsSync(`${path}.${suffix}`)) suffix += 1;
@@ -83,6 +89,7 @@ export function preserveManagedProjectionBeforeMutation(
   const location = projectionLocation(filePath);
   if (!location || extname(location.relPath).toLocaleLowerCase("en-US") !== ".md") return false;
   if (location.rootName === ".gsd") {
+    if (location.relPath.toLocaleLowerCase("en-US") === "state.md") return false;
     if (classifyGsdLogicalPath(location.relPath) !== "managed") return false;
   } else if (isPlanningPassthrough(location.relPath)) {
     return false;
@@ -92,9 +99,9 @@ export function preserveManagedProjectionBeforeMutation(
   const current = readFileSync(filePath);
   const currentSha = computeProjectionSha(current.toString("utf-8"));
   if (nextContent && currentSha === computeProjectionSha(nextContent.toString("utf-8"))) return false;
-  if (currentSha === baselineSha(location.basePath, location.rootName, location.relPath)) return false;
+  if (currentSha === baselineSha(location.gsdDir, location.rootName, location.relPath)) return false;
 
-  const target = uniqueQuarantinePath(location.basePath, location.rootName, location.relPath);
+  const target = uniqueQuarantinePath(location.gsdDir, location.rootName, location.relPath);
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, current);
   return true;

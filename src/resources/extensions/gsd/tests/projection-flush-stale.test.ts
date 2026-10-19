@@ -8,11 +8,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  _getAdapter,
   closeDatabase,
   insertMilestone,
   insertSlice,
   openDatabase,
-  reopenMilestoneCascade,
 } from "../gsd-db.ts";
 import {
   _setProjectionFlushAfterRenderForTest,
@@ -99,7 +99,11 @@ test("superseded projection flush repairs shell output from current DB state", a
   let current = true;
   _setProjectionFlushAfterRenderForTest(() => {
     _setProjectionFlushAfterRenderForTest(null);
-    assert.equal(reopenMilestoneCascade("M001").ok, true);
+    // Simulate a concurrent reopen of the milestone mid-render. The raw UPDATE
+    // is the fixture: the generic status writer refuses unadopted rows.
+    _getAdapter()!.prepare(
+      "UPDATE milestones SET status = 'active', completed_at = NULL WHERE id = 'M001'",
+    ).run();
     current = false;
   });
 

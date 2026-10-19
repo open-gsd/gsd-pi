@@ -1,6 +1,5 @@
 # File Reference — Documentation
 
-
 All paths relative to the `@gsd/pi-coding-agent` package root (e.g., `<pi-install-dir>/`).
 
 | File | What It Covers |

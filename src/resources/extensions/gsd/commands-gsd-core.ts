@@ -12,9 +12,12 @@ import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { loadPrompt } from "./prompt-loader.js";
+import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 import { currentDirectoryRoot, GSDNoProjectError, projectRoot, withCommandCwd } from "./commands/context.js";
+import { deriveState } from "./state.js";
 import { getUnmergedMilestoneBlockMessageForBase } from "./unmerged-milestone-guard.js";
 import { getValidationBlockMessageForBase } from "./validation-block-guard.js";
+import { buildActiveResumeSection } from "./work-checkpoint.js";
 
 /**
  * Catalog entries for commands IMPLEMENTED natively in this module.
@@ -859,10 +862,32 @@ export async function handlePauseWork(args: string, ctx: ExtensionCommandContext
   );
 }
 
+/** The handoff of the active unit, read from its Work Checkpoint rows. */
+async function resolveResumeState(ctx: ExtensionCommandContext): Promise<string> {
+  try {
+    return await withCommandCwd(ctx.cwd, async () => {
+      const base = projectRoot();
+      if (!(await ensureDbOpen(base))) {
+        return "## Resume State\n- The GSD database could not be opened, so no Work Checkpoint was read.";
+      }
+      const state = await deriveState(base);
+      return buildActiveResumeSection({
+        milestoneId: state.activeMilestone?.id,
+        sliceId: state.activeSlice?.id,
+        taskId: state.activeTask?.id,
+      });
+    });
+  } catch (err) {
+    if (err instanceof GSDNoProjectError) return buildActiveResumeSection({});
+    throw err;
+  }
+}
+
 /** /gsd resume-work */
 export async function handleResumeWork(_args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+  const resumeState = await resolveResumeState(ctx);
   dispatchPrompt(
-    { prompt: "resume-work", customType: "gsd-resume-work", verb: "Resume work" },
+    { prompt: "resume-work", customType: "gsd-resume-work", verb: "Resume work", vars: { resumeState } },
     ctx,
     pi,
   );
@@ -1134,8 +1159,19 @@ export async function handleProfileUser(args: string, ctx: ExtensionCommandConte
 
 /** /gsd settings */
 export async function handleSettings(_args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+  const { formatConfigText, buildCollectConfigOptions } = await import("./config-overlay.js");
+  const { getPreferencesReferencePath } = await import("./prompt-loader.js");
+  const configOptions = buildCollectConfigOptions(ctx, projectRoot());
   dispatchPrompt(
-    { prompt: "settings", customType: "gsd-settings", verb: "Settings" },
+    {
+      prompt: "settings",
+      customType: "gsd-settings",
+      verb: "Settings",
+      vars: {
+        effectiveConfig: formatConfigText(configOptions),
+        preferencesReferencePath: getPreferencesReferencePath(),
+      },
+    },
     ctx,
     pi,
   );

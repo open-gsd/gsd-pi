@@ -2,6 +2,7 @@
 
 <required_reading>
 **Read these reference files NOW:**
+
 1. references/recommended-structure.md
 2. references/skill-structure.md
 3. references/use-xml-tags.md
@@ -14,6 +15,7 @@
 **DO NOT use AskUserQuestion** - there may be many skills.
 
 Enumerate skills from both directories:
+
 ```bash
 echo "=== Global skills ==="
 ls ~/.agents/skills/ 2>/dev/null || echo "(none)"
@@ -23,6 +25,7 @@ ls .agents/skills/ 2>/dev/null || echo "(none)"
 ```
 
 Present as:
+
 ```
 Available skills:
 
@@ -41,6 +44,7 @@ Ask: "Which skill would you like to audit? (enter number or name)"
 ## Step 2: Read the Skill
 
 After user selects, read the full skill structure:
+
 ```bash
 # Read main file
 cat {skill-path}/SKILL.md
@@ -56,6 +60,7 @@ ls {skill-path}/references/ 2>/dev/null
 Evaluate against each criterion:
 
 ### YAML Frontmatter
+
 - [ ] Has `name:` field (lowercase-with-hyphens)
 - [ ] Name matches directory name
 - [ ] Has `description:` field
@@ -63,6 +68,7 @@ Evaluate against each criterion:
 - [ ] Description is third person ("Use when...")
 
 ### Structure
+
 - [ ] SKILL.md under 500 lines
 - [ ] Pure XML structure (no markdown headings # in body)
 - [ ] All XML tags properly closed
@@ -70,6 +76,7 @@ Evaluate against each criterion:
 - [ ] Has success_criteria
 
 ### Router Pattern (if complex skill)
+
 - [ ] Essential principles inline in SKILL.md (not in separate file)
 - [ ] Has intake question
 - [ ] Has routing table
@@ -77,12 +84,14 @@ Evaluate against each criterion:
 - [ ] All referenced reference files exist
 
 ### Workflows (if present)
+
 - [ ] Each has required_reading section
 - [ ] Each has process section
 - [ ] Each has success_criteria section
 - [ ] Required reading references exist
 
 ### Content Quality
+
 - [ ] Principles are actionable (not vague platitudes)
 - [ ] Steps are specific (not "do the thing")
 - [ ] Success criteria are verifiable
@@ -114,17 +123,20 @@ If issues found, ask:
 "Would you like me to fix these issues?"
 
 Options:
+
 1. **Fix all** - Apply all recommended fixes
 2. **Fix one by one** - Review each fix before applying
 3. **Just the report** - No changes needed
 
 If fixing:
+
 - Make each change
 - Verify file validity after each change
 - Report what was fixed
 </process>
 
 <audit_anti_patterns>
+
 ## Common Anti-Patterns to Flag
 
 **Skippable principles**: Essential principles in separate file instead of inline
@@ -140,6 +152,7 @@ If fixing:
 
 <success_criteria>
 Audit is complete when:
+
 - [ ] Skill fully read and analyzed
 - [ ] All checklist items evaluated
 - [ ] Report presented to user

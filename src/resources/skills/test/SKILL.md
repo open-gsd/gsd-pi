@@ -7,6 +7,7 @@ description: Generate or run tests. Auto-detects test framework, generates compr
 Generate or run tests for the current project. This skill auto-detects the test framework in use, generates comprehensive tests for source files, or runs existing test suites and analyzes failures.
 
 Accepts optional arguments:
+
 - A file path: generate tests for that source file
 - `run`: run the existing test suite and analyze results
 - No arguments: suggest what to test based on recent changes
@@ -65,12 +66,14 @@ Check these sources in order:
 **Generate tests for the specified source file.**
 
 **A. Read and analyze the source file:**
+
 - Identify all exported/public functions, classes, methods, and types
 - Understand each function's parameters, return types, and side effects
 - Note error handling patterns (throws, returns null, returns Result, etc.)
 - Identify dependencies that will need mocking
 
 **B. Read existing test files in the project (1-2 files minimum):**
+
 - Match their import style exactly
 - Match their describe/it or test block structure
 - Match their assertion patterns
@@ -97,10 +100,12 @@ Check these sources in order:
    - Verify correct interaction with dependencies (called with right args)
 
 **D. Place the test file correctly:**
+
 - Follow the project's existing convention for test file location
 - Use the project's naming convention (`.test.ts`, `.spec.js`, `_test.go`, `test_*.py`, etc.)
 
 **E. Run the generated tests immediately to verify they pass.**
+
 - If tests fail, read the error output carefully
 - Fix the test code (not the source code)
 - Re-run until all tests pass
@@ -112,6 +117,7 @@ Check these sources in order:
 **Run the existing test suite and analyze results.**
 
 **A. Determine the test command:**
+
 - Check `package.json` `scripts.test` for Node projects
 - Use `pytest` for Python projects
 - Use `go test ./...` for Go projects
@@ -119,10 +125,12 @@ Check these sources in order:
 - Fall back to the detected framework's CLI
 
 **B. Run the tests:**
+
 - Execute the test command
 - Capture full output including failures and errors
 
 **C. Analyze results:**
+
 - Report total passed, failed, skipped counts
 - For each failure:
   - Identify the failing test name and file
@@ -159,6 +167,7 @@ Failures:
 - Filter to source files (exclude configs, docs, lockfiles)
 
 **B. Check test coverage gaps:**
+
 - Find source files that have no corresponding test file
 - Prioritize files that were recently modified
 
@@ -194,6 +203,7 @@ Run `/test run` to run the existing test suite.
 <success_criteria>
 
 Before completing:
+
 - [ ] Test framework and conventions were detected correctly
 - [ ] Generated tests match the project's existing test style
 - [ ] All generated tests pass when run

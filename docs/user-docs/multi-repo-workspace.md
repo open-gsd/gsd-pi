@@ -16,7 +16,7 @@ If your project is a single git repository (or a monorepo with one `.git`), you 
 
 Parent workspace mode requires child repositories to be **nested inside the project root**. Sibling-repo layouts are not supported.
 
-```
+```text
 my-product/              ← run GSD here (the project root)
 ├── .gsd/                ← single GSD state directory
 ├── frontend/            ← child repo (its own .git)

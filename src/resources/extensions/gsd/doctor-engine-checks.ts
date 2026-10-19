@@ -1,11 +1,11 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 
-import type { DoctorIssue } from "./doctor-types.js";
+import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
 import {
-  deleteArtifactByPath,
   getAllMilestones,
+  getMilestoneLifecycleShadowSnapshot,
   getMilestoneSlices,
   getSliceTasks,
   findWrongKindLifecycleProjectionHeads,
@@ -13,9 +13,18 @@ import {
   isMemoriesFtsAvailable,
   repairWrongKindLifecycleProjections,
   _getAdapter,
+  listUnappliedLegacyEscalations,
+  pruneArtifactRows,
 } from "./gsd-db.js";
 import { MEMORIES_FTS_REBUILT_KEY } from "./db-memory-fts-schema.js";
-import { isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
+import {
+  completedEventCoversDispatch,
+  isAfter,
+  latestExplicitReopenAt,
+  legacyReopenImportGuidance,
+  recordLegacyMilestoneEvents,
+  unimportedLegacyMilestoneEvents,
+} from "./milestone-reopen-events.js";
 import {
   gsdProjectionRoot,
   gsdRoot,
@@ -25,17 +34,29 @@ import {
   resolveSliceFile,
   resolveTaskFile,
 } from "./paths.js";
-import { deriveState } from "./state.js";
-import { isClosedStatus } from "./status-guards.js";
-import { workflowEventLogPath } from "./workflow-event-ledger.js";
-import { readEvents } from "./workflow-events.js";
-import { flushWorkflowProjections } from "./projection-flush.js";
+import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
+import {
+  listOrphanableRunningAttempts,
+  listUnpublishedSucceededAttempts,
+  type DoctorRunningAttemptRow,
+} from "./db/lifecycle-queries.js";
+import { readMilestones, readSlice, readTask, type MilestoneRead } from "./db/lifecycle-read.js";
+import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
+import { importFileOverrides, unimportedFileOverrides, type FileOverride } from "./overrides.js";
+import { importFileCaptures, unimportedFileCaptures } from "./captures.js";
+import { importFileBacklogItems, unimportedFileBacklogItems } from "./backlog.js";
+import { formatCost, unimportedLedgerUnits } from "./metrics.js";
+import { recordUnitMetricsRows } from "./db/writers/unit-metrics.js";
+import { convertResolvedLegacyEscalation, readConvertibleLegacyEscalation } from "./escalation.js";
+import { isUnplannedMilestone, milestoneRenderArtifactPaths } from "./markdown-renderer.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
 import { parseProjectionPlan } from "./schemas/parsers.js";
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { isCanonicalStagedTaskSummaryProjection } from "./task-summary-projection-classification.js";
-import { isMilestoneLifecycleAdopted, readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
+import { readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
+import { isDeadLocalAutoWorker } from "./db/auto-workers.js";
+import { countUnadoptedHierarchyRows, previewLifecycleBackfill } from "./lifecycle-backfill-domain-operation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
   captureMilestoneVerificationSourceRevision,
@@ -51,39 +72,46 @@ import {
   inspectWorkflowDbLockHolders,
   terminateDormantWorkflowDbLockHolders,
 } from "./workflow-db-locks.js";
+import { readTerminalTaskRecoveryAbort, taskAttemptArtifactReadiness } from "./artifact-verification.js";
+import { readLatestTaskAttempt } from "./task-execution-domain-operation.js";
+import { applyTaskSettle } from "./task-settle.js";
+import { getProjectAuthorityRow } from "./db/queries.js";
 
 const USER_AUTHORED_ARTIFACT_TYPES = new Set(["CONTEXT", "RESEARCH"]);
 
-interface RunningAttemptRow {
-  attempt_id: string;
-  worker_id: string | null;
-  milestone_lease_token: number | null;
-  milestone_id: string;
-  slice_id: string;
-  task_id: string;
+/** Canonical lifecycle statuses with no forward transition (#2778): completed, cancelled, blocker-accepted. */
+const TERMINAL_LIFECYCLE_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "cancelled",
+  "blocker-accepted",
+]);
+
+/** Canonical lifecycle statuses that still have a forward path (#2778). */
+const OPEN_LIFECYCLE_STATUSES: ReadonlySet<string> = new Set(["pending", "in_progress", "paused"]);
+
+function isTerminalLifecycleStatus(status: string | null): boolean {
+  return status !== null && TERMINAL_LIFECYCLE_STATUSES.has(status);
 }
+
+type RunningAttemptRow = DoctorRunningAttemptRow;
 
 /**
  * A running Attempt is orphaned when no live process can settle it: its
  * milestone lease is not currently held, or the lease-holding worker's OS
  * process is gone (#1749). Mirrors the lease/liveness semantics auto-mode uses
- * for dead lease holders, but reports instead of interrupting.
+ * for dead lease holders. Detected on every run; under `--fix` the Attempt is
+ * settled as `interrupted` through applyTaskSettle (#2889) — the same
+ * fail-closed gate as `gsd_task_settle`: it refuses a live worker or a
+ * replacement lease, and it never publishes or reconciles the lifecycle.
  */
-function reportOrphanedRunningAttempts(
+async function reportOrphanedRunningAttempts(
   adapter: ReturnType<typeof _getAdapter> & object,
   basePath: string,
   issues: DoctorIssue[],
-): void {
-  const running = adapter.prepare(`
-    SELECT attempt.attempt_id, attempt.worker_id, attempt.milestone_lease_token,
-           lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
-    FROM workflow_execution_attempts attempt
-    JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.lifecycle_id = attempt.lifecycle_id
-     AND lifecycle.project_id = attempt.project_id
-    WHERE attempt.attempt_state = 'running'
-      AND lifecycle.item_kind = 'task'
-  `).all() as unknown as RunningAttemptRow[];
+  fixesApplied: string[],
+  repair: boolean,
+): Promise<void> {
+  const running = listOrphanableRunningAttempts(adapter);
   if (running.length === 0) return;
 
   let projectRoot = basePath;
@@ -132,14 +160,140 @@ function reportOrphanedRunningAttempts(
       if (!processDead) continue;
     }
     const unitId = `${attempt.milestone_id}/${attempt.slice_id}/${attempt.task_id}`;
+    const detected =
+      `Task ${unitId} has an orphaned running Attempt (${attempt.attempt_id}) with no live process or lease.`;
+    if (!repair) {
+      issues.push({
+        severity: "error",
+        code: "orphaned_running_attempt",
+        scope: "task",
+        unitId,
+        message:
+          detected +
+          " Run `/gsd doctor --fix` to settle it as interrupted, or settle it with " +
+          "gsd_task_settle (dry-run first, then apply: true).",
+        file: ".gsd/gsd.db",
+        fixable: true,
+      });
+      continue;
+    }
+    // #2889: the operator consented via --fix; the settle itself is the
+    // operator tool's own writer, so a live worker or a replacement lease is
+    // refused and the Attempt is only ever settled, never published.
+    try {
+      const result = await applyTaskSettle({
+        invocation: {
+          idempotencyKey: `cli:doctor:task.settle:${attempt.attempt_id}`,
+          sourceTransport: "internal",
+          actorType: "user",
+        },
+        task: {
+          milestoneId: attempt.milestone_id,
+          sliceId: attempt.slice_id,
+          taskId: attempt.task_id,
+        },
+        reason: "doctor --fix: orphaned running Attempt with no live process or lease",
+        basePath,
+      });
+      if (result.settled) {
+        fixesApplied.push(
+          `settled orphaned running Attempt ${attempt.attempt_id} as interrupted (${unitId})`,
+        );
+        continue;
+      }
+      issues.push({
+        severity: "error",
+        code: "orphaned_running_attempt",
+        scope: "task",
+        unitId,
+        message:
+          detected + " Automatic settle found no running Attempt to settle (state changed during the run); " +
+          "re-run doctor or settle it with gsd_task_settle (dry-run first, then apply: true).",
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      issues.push({
+        severity: "error",
+        code: "orphaned_running_attempt",
+        scope: "task",
+        unitId,
+        message:
+          detected + ` Automatic settle refused: ${detail} Settle it with ` +
+          "gsd_task_settle (dry-run first, then apply: true).",
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+    }
+  }
+}
+
+/**
+ * A settled succeeded Attempt at the verify stage whose Task is not terminal
+ * (#2417): the durable success never published, and with no running Attempt
+ * and no recovery route head nothing re-drives publication on its own.
+ * Reports the wedge; re-entering `/gsd auto` resumes publication, and
+ * `gsd_task_settle` apply publishes the verified completion. Auto-fix must
+ * never publish — publication is evidence-gated, not a repair judgment call.
+ */
+function reportUnpublishedSucceededAttempts(
+  adapter: ReturnType<typeof _getAdapter> & object,
+  issues: DoctorIssue[],
+): void {
+  const stranded = listUnpublishedSucceededAttempts(adapter);
+
+  for (const row of stranded) {
+    // The read interface answers whether the Task is terminal: from the
+    // legacy row before the Cutover, from the lifecycle row after it.
+    if (readTask(row.milestone_id, row.slice_id, row.task_id)?.done) continue;
+    const unitId = `${row.milestone_id}/${row.slice_id}/${row.task_id}`;
     issues.push({
-      severity: "error",
-      code: "orphaned_running_attempt",
+      severity: "warning",
+      code: "unpublished_succeeded_attempt",
       scope: "task",
       unitId,
       message:
-        `Task ${unitId} has an orphaned running Attempt (${attempt.attempt_id}) with no live process or lease. ` +
-        "Settle it with gsd_task_settle (dry-run first, then apply: true) — doctor --fix will not settle it for you.",
+        `Task ${unitId} has a settled succeeded Attempt (${row.attempt_id}) at the verify stage but is not ` +
+        `terminal (lifecycle ${row.lifecycle_status}, tasks.status ${row.legacy_status || "unknown"}). If auto-mode ` +
+        "is not mid-publication this is a stranded success: re-enter `/gsd auto` to resume publication, or " +
+        "apply gsd_task_settle (dry-run first) to publish — it fails closed until a passing host Technical " +
+        "Verdict is recorded.",
+      file: ".gsd/gsd.db",
+      fixable: false,
+    });
+  }
+}
+
+/**
+ * A held, non-expired milestone lease whose holder worker's local process is
+ * verifiably dead blocks gsd_plan_milestone with no live reclaimer (#2375).
+ * Reports the wedge; re-running gsd_plan_milestone reclaims the lease via the
+ * dead-holder reclaim path.
+ */
+function reportOrphanedMilestoneLeases(
+  adapter: ReturnType<typeof _getAdapter> & object,
+  basePath: string,
+  issues: DoctorIssue[],
+): void {
+  const held = adapter.prepare(`
+    SELECT milestone_id, worker_id
+    FROM milestone_leases
+    WHERE status = 'held'
+      AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    ORDER BY milestone_id
+  `).all() as unknown as Array<{ milestone_id: string; worker_id: string }>;
+
+  for (const lease of held) {
+    if (!isDeadLocalAutoWorker(lease.worker_id, basePath)) continue;
+    issues.push({
+      severity: "error",
+      code: "orphaned_milestone_lease",
+      scope: "milestone",
+      unitId: lease.milestone_id,
+      message:
+        `Milestone ${lease.milestone_id} is leased by worker ${lease.worker_id} whose local process is dead. ` +
+        "Re-running gsd_plan_milestone for this milestone reclaims the lease automatically.",
       file: ".gsd/gsd.db",
       fixable: false,
     });
@@ -201,6 +355,11 @@ function reportCheckboxDbStatusDivergence(
     file: relativeFile(basePath, filePath),
     fixable: false,
   });
+}
+
+/** Every Milestone of the read interface (db/lifecycle-read.ts) by id. */
+function readMilestonesById(): Map<string, MilestoneRead> {
+  return new Map(readMilestones().map((milestone) => [milestone.id, milestone]));
 }
 
 function bareDuplicateMilestoneId(milestoneId: string): string | null {
@@ -280,21 +439,19 @@ function checkProjectionCheckboxDbStatus(basePath: string, milestoneIds: string[
   }
 }
 
-function isClearedByMilestoneShellProjectionFlush(
+function isClearedByMilestoneReRender(
   basePath: string,
   issue: DoctorIssue,
   reRenderedMilestoneIds: Set<string>,
 ): boolean {
-  if (issue.code !== "checkbox_db_status_divergence") return false;
-  if (issue.scope !== "slice") return false;
-
+  if (issue.code === "artifact_file_missing") {
+    return Boolean(issue.file) && artifactExistsOnDisk(basePath, issue.file!);
+  }
+  if (issue.code !== "checkbox_db_status_divergence" || issue.scope !== "slice") return false;
   const milestoneId = issue.unitId.split("/")[0] ?? "";
   if (!reRenderedMilestoneIds.has(milestoneId)) return false;
-
   const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
-  if (!roadmapPath || !issue.file) return false;
-
-  return issue.file === relativeFile(basePath, roadmapPath);
+  return Boolean(roadmapPath && issue.file) && issue.file === relativeFile(basePath, roadmapPath!);
 }
 
 function artifactExistsOnDisk(basePath: string, artifactPath: string, row?: ArtifactRow): boolean {
@@ -523,6 +680,12 @@ export function createValidationSourceDriftDoctorIssue(
   const recovery = drift.autoCommitDetected
     ? " GSD's pre-merge auto-commit is the current HEAD. If it captured unintended files, run `git reset --mixed HEAD^` to preserve them as working-tree changes, remove or ignore unwanted files, then retry."
     : " Restore or remove unintended working-tree changes before retrying.";
+  // The only caller, reportMilestoneValidationSourceDrift, inspects closed
+  // milestones only — but /gsd validate-milestone requires a ready or
+  // in_progress lifecycle, so the old "run /gsd validate-milestone, then
+  // /gsd auto" remediation was unexecutable by construction (#2439). State the
+  // truth: the pinned receipt is unreachable for a terminal milestone until a
+  // re-pin path exists, so the issue is not doctor-fixable.
   return {
     severity: "error",
     code: "validation_source_revision_mismatch",
@@ -531,15 +694,15 @@ export function createValidationSourceDriftDoctorIssue(
     message:
       `Milestone ${milestoneId} validation source revision does not match the current tree ` +
       `(expected ${mismatch.expectedSourceRevision}; tested ${mismatch.testedSourceRevision}).${paths}${recovery} ` +
-      `If the current content is intended, run \`/gsd validate-milestone ${milestoneId}\`, then \`/gsd auto\`.`,
+      `The milestone is closed, so its pinned validation receipt is unreachable: \`/gsd validate-milestone ${milestoneId}\` requires a ready or in_progress lifecycle, and no re-pin path for closed milestones exists yet.`,
     file: drift.paths[0],
-    fixable: true,
+    fixable: false,
   };
 }
 
 export function reportMilestoneValidationSourceDrift(basePath: string, issues: DoctorIssue[]): void {
-  for (const milestone of getAllMilestones()) {
-    if (!isClosedStatus(milestone.status) || !isMilestoneLifecycleAdopted(milestone.id)) continue;
+  for (const milestone of readMilestones()) {
+    if (!milestone.closed) continue;
     const sourceRoot = resolveCanonicalMilestoneRoot(basePath, milestone.id);
     const preferences = loadEffectiveGSDPreferences(sourceRoot)?.preferences;
     const source = captureMilestoneVerificationSourceRevision(sourceRoot, preferences);
@@ -561,6 +724,130 @@ export function reportMilestoneValidationSourceDrift(basePath: string, issues: D
   }
 }
 
+/**
+ * #2440: legacy/canonical lifecycle shadow drift was invisible — a hierarchy
+ * row whose legacy status went terminal while its canonical lifecycle row stayed
+ * `ready` fails every terminal-parity check (complete/validate/reopen) with an
+ * opaque "canonical and legacy lifecycle mismatch", and doctor reported nothing.
+ * This check surfaces the drift itself via the engine's own comparator.
+ * Evidence-backed drift converges through the shadow repair on the reopen path;
+ * unverifiable drift must be resolved by an operator (#2313 tracks the
+ * free-text verification-result classification gap).
+ *
+ * #2778: the comparison alone cannot distinguish harmful from benign drift.
+ * Task claim moves the canonical lifecycle to `in_progress` without writing
+ * legacy `tasks.status`, so every claimed-but-unclosed task reads legacy
+ * `pending` vs canonical `in_progress` — the normal shape of an in-flight
+ * attempt, and of a resumable recovery abort that the dispatch guard already
+ * routes through `/gsd recover`. Only the legacy-terminal direction (the #2440
+ * shape) lacks a forward-convergence writer; canonical-ahead task drift is
+ * downgraded when attempt/recovery state proves the path forward.
+ */
+export function reportMilestoneLifecycleShadowDrift(issues: DoctorIssue[]): void {
+  if (!isDbAvailable()) return;
+  // Attempt/recovery evidence lookups must not read a foreign project's
+  // imported rows that happen to share the milestone/slice/task identity (#2778).
+  const projectId = getProjectAuthorityRow()?.projectId;
+  const evidenceScope = projectId ? { projectId } : undefined;
+  for (const milestone of getAllMilestones()) {
+    const snapshot = getMilestoneLifecycleShadowSnapshot(milestone.id);
+    if (snapshot.queryError) continue;
+    for (const item of snapshot.items) {
+      if (item.classification !== "status_mismatch") continue;
+      const identity = item.itemIdentity;
+      const { taskId, sliceId } = identity;
+      const unitId = [
+        identity.milestoneId,
+        sliceId,
+        taskId,
+      ].filter(Boolean).join("/");
+      const statusPair =
+        `Legacy status "${item.rawLegacyStatus ?? "null"}" does not match canonical lifecycle ` +
+        `"${item.rawCanonicalStatus ?? "null"}" for ${unitId}.`;
+      const canonicalAheadTask = taskId !== null && sliceId !== null &&
+        OPEN_LIFECYCLE_STATUSES.has(item.normalizedLegacyStatus ?? "") &&
+        !isTerminalLifecycleStatus(item.normalizedCanonicalStatus) &&
+        (item.normalizedCanonicalStatus === "in_progress" || item.normalizedCanonicalStatus === "paused");
+      if (taskId !== null && sliceId !== null && canonicalAheadTask) {
+        // Same signal the dispatch guard refuses re-dispatch on (#1622/#1754):
+        // an agent-owned abort that is still resume-eligible and unresumed.
+        const terminalAbort = readTerminalTaskRecoveryAbort(
+          identity.milestoneId,
+          sliceId,
+          taskId,
+          evidenceScope,
+        );
+        if (terminalAbort) {
+          issues.push({
+            severity: "warning",
+            code: "lifecycle_shadow_mismatch",
+            scope: "task",
+            unitId,
+            message:
+              `${statusPair} The canonical Task Attempt recovery has aborted ` +
+              `(recoveryActionId: ${terminalAbort.recoveryActionId}) and the dispatch guard refuses ` +
+              `re-dispatch until it is resumed. Run \`/gsd recover ${terminalAbort.recoveryActionId}\` ` +
+              `to converge the drift.`,
+            file: ".gsd/gsd.db",
+            fixable: false,
+          });
+          continue;
+        }
+        const attempt = readLatestTaskAttempt(
+          { milestoneId: identity.milestoneId, sliceId, taskId },
+          evidenceScope,
+        );
+        if (attempt?.state === "running") continue;
+        const readiness = taskAttemptArtifactReadiness(attempt);
+        if (readiness) {
+          issues.push({
+            severity: "warning",
+            code: "lifecycle_shadow_mismatch",
+            scope: "task",
+            unitId,
+            message:
+              `${statusPair} The latest canonical Task Attempt has a settled Result awaiting ` +
+              `${readiness === "verify" ? "verification publication" : "a recovery route"}, which ` +
+              `converges the drift when the normal task flow continues.`,
+            file: ".gsd/gsd.db",
+            fixable: false,
+          });
+          continue;
+        }
+        issues.push({
+          severity: "error",
+          code: "lifecycle_shadow_mismatch",
+          scope: "task",
+          unitId,
+          message:
+            `${statusPair} ` +
+            (attempt
+              ? `The latest Task Attempt (#${attempt.attemptNumber}) is settled with no actionable ` +
+                `verification or route head`
+              : `No Task Attempt evidence backs the canonical state`) +
+            `, so no forward path converges the drift; resolve it manually.`,
+          file: ".gsd/gsd.db",
+          fixable: false,
+        });
+        continue;
+      }
+      issues.push({
+        severity: "error",
+        code: "lifecycle_shadow_mismatch",
+        scope: identity.taskId ? "task" : identity.sliceId ? "slice" : "milestone",
+        unitId,
+        message:
+          `${statusPair} Terminal-parity checks refuse ` +
+          `completion, validation, and reopen for this row. Reopen path converges drift backed by ` +
+          `durable completion evidence via the lifecycle shadow repair; drift without evidence ` +
+          `must be resolved manually.`,
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+    }
+  }
+}
+
 export async function checkEngineHealth(
   basePath: string,
   issues: DoctorIssue[],
@@ -568,6 +855,8 @@ export async function checkEngineHealth(
   options?: {
     repair?: boolean;
     repairDbLock?: boolean;
+    /** With `repair`: import OVERRIDES.md blocks, CAPTURES.md sections, BACKLOG.md items and event-log.jsonl milestone events the database does not hold. Set only for a doctor run the operator asked for. */
+    importFileOverrides?: boolean;
     lockRecovery?: {
       inspectHolders: typeof inspectWorkflowDbLockHolders;
       terminateHolders: typeof terminateDormantWorkflowDbLockHolders;
@@ -663,6 +952,20 @@ export async function checkEngineHealth(
     }
   }
 
+  // Before the reopen checks below, so that they read what this run imports.
+  try {
+    if (isDbAvailable()) {
+      checkUnimportedLegacyMilestoneEvents(
+        basePath,
+        issues,
+        fixesApplied,
+        options?.repair === true && options.importFileOverrides === true,
+      );
+    }
+  } catch {
+    // Non-fatal — the legacy milestone event check must never block doctor
+  }
+
   // ── DB constraint violation detection (full doctor only, not pre-dispatch per D-10) ──
   try {
     if (isDbAvailable()) {
@@ -706,6 +1009,48 @@ export async function checkEngineHealth(
         reportMilestoneValidationSourceDrift(basePath, issues);
       } catch {
         // Non-fatal — closeout source drift diagnostics failed
+      }
+
+      try {
+        reportMilestoneLifecycleShadowDrift(issues);
+      } catch {
+        // Non-fatal — lifecycle shadow drift diagnostics failed
+      }
+
+      try {
+        const unadopted = countUnadoptedHierarchyRows();
+        if (unadopted > 0) {
+          issues.push({
+            severity: "warning",
+            code: "lifecycle_missing_shadow",
+            scope: "project",
+            unitId: "project",
+            message:
+              `${unadopted} milestone, slice or task row(s) have no canonical lifecycle row. ` +
+              "Run /gsd db adopt to preview the one-time backfill, then /gsd db adopt --apply.",
+            file: ".gsd/gsd.db",
+            fixable: false,
+          });
+        }
+        // /gsd db adopt and the opt-in Authority Epoch cutover on open stop on these rows.
+        const unmappable = previewLifecycleBackfill().unknownStatuses;
+        if (unmappable.length > 0) {
+          issues.push({
+            severity: "error",
+            code: "lifecycle_unmappable_status",
+            scope: "project",
+            unitId: "project",
+            message:
+              `${unmappable.length} milestone, slice or task row(s) have a legacy status with no lifecycle mapping, ` +
+              "so the lifecycle backfill and the Authority Epoch cutover cannot run: " +
+              `${unmappable.map((entry) => `${entry.row}=${JSON.stringify(entry.rawStatus)}`).join(", ")}. ` +
+              "Fix each status, then run /gsd db adopt.",
+            file: ".gsd/gsd.db",
+            fixable: false,
+          });
+        }
+      } catch {
+        // Non-fatal — lifecycle coverage diagnostics failed
       }
 
       // a. Orphaned tasks (task.slice_id points to non-existent slice)
@@ -758,29 +1103,6 @@ export async function checkEngineHealth(
         // Non-fatal — orphaned slice check failed
       }
 
-      // c. Tasks marked complete without summaries
-      try {
-        const doneTasks = adapter
-          .prepare(
-            `SELECT id, slice_id, milestone_id FROM tasks
-             WHERE status = 'done' AND (summary IS NULL OR summary = '')`,
-          )
-          .all() as Array<{ id: string; slice_id: string; milestone_id: string }>;
-
-        for (const row of doneTasks) {
-          issues.push({
-            severity: "warning",
-            code: "db_done_task_no_summary",
-            scope: "task",
-            unitId: `${row.milestone_id}/${row.slice_id}/${row.id}`,
-            message: `Task ${row.id} is marked done but has no summary in the database`,
-            fixable: false,
-          });
-        }
-      } catch {
-        // Non-fatal — done-task-no-summary check failed
-      }
-
       // d. Duplicate entity IDs (safety check)
       try {
         const dupMilestones = adapter
@@ -830,50 +1152,75 @@ export async function checkEngineHealth(
 
       // e. Orphaned running Task Attempts (#1749): a running Attempt whose
       // milestone lease is gone or whose worker process is dead wedges every
-      // downstream lifecycle operation ("running Attempt descendant"). The
-      // operator repair is gsd_task_settle; doctor --fix must never settle on
-      // its own — settling is a human judgment call.
+      // downstream lifecycle operation ("running Attempt descendant").
+      // Detected always; under --fix it is settled as interrupted through
+      // applyTaskSettle (#2889) — the operator tool's own fail-closed writer,
+      // so a live worker or a replacement lease is never disturbed.
       try {
-        reportOrphanedRunningAttempts(adapter, basePath, issues);
+        await reportOrphanedRunningAttempts(
+          adapter,
+          basePath,
+          issues,
+          fixesApplied,
+          options?.repair === true,
+        );
       } catch {
         // Non-fatal — orphaned running Attempt check failed
+      }
+
+      // Settled succeeded Attempts stranded before publication (#2417): the
+      // Task is not terminal and nothing re-drives the verify→publish chain.
+      try {
+        reportUnpublishedSucceededAttempts(adapter, issues);
+      } catch {
+        // Non-fatal — unpublished succeeded Attempt check failed
+      }
+
+      // Held, non-expired milestone leases whose holder worker process is
+      // dead (#2375): report only — the planning tool reclaims on its next run.
+      try {
+        reportOrphanedMilestoneLeases(adapter, basePath, issues);
+      } catch {
+        // Non-fatal — orphaned milestone lease check failed
       }
 
       // e. Completed milestone dispatch history but DB reopened without an explicit reopen event.
       try {
         const reopened = adapter
           .prepare(
-            `SELECT m.id, m.status, ud.started_at, ud.ended_at
+            `SELECT m.id, ud.started_at, ud.ended_at
              FROM milestones m
              JOIN unit_dispatches ud ON ud.milestone_id = m.id
-             WHERE m.status NOT IN ('complete', 'done', 'skipped', 'closed')
-               AND ud.unit_type = 'complete-milestone'
+             WHERE ud.unit_type = 'complete-milestone'
                AND ud.unit_id = m.id
                AND ud.status = 'completed'
-               AND ud.id = (
-                 SELECT latest.id
-                 FROM unit_dispatches latest
-                 WHERE latest.milestone_id = m.id
-                   AND latest.unit_type = 'complete-milestone'
-                   AND latest.unit_id = m.id
-                   AND latest.status = 'completed'
-                 ORDER BY COALESCE(latest.ended_at, latest.started_at) DESC, latest.id DESC
-                 LIMIT 1
-               )
-             ORDER BY m.id`,
+             ORDER BY m.id, COALESCE(ud.ended_at, ud.started_at) DESC, ud.id DESC`,
           )
-          .all() as Array<{ id: string; status: string; started_at: string | null; ended_at: string | null }>;
+          .all() as Array<{ id: string; started_at: string | null; ended_at: string | null }>;
 
+        // #2398: the dispatch row alone is not completion proof — require a
+        // covering milestone.completed event (mirrors the drift detector gate
+        // in state-reconciliation/drift/artifact-db.ts). Evaluate every
+        // completed dispatch newest-first so a later receiptless row cannot
+        // hide an earlier event-backed completion; at most one issue per
+        // milestone.
+        const milestoneReads = readMilestonesById();
+        const flagged = new Set<string>();
         for (const row of reopened) {
+          if (flagged.has(row.id)) continue;
+          const milestone = milestoneReads.get(row.id);
+          if (!milestone || milestone.closed) continue;
           const completedAt = row.ended_at ?? row.started_at ?? null;
-          const reopenAt = latestExplicitReopenAt(basePath, row.id);
+          if (!completedEventCoversDispatch(row.id, row.started_at)) continue;
+          const reopenAt = latestExplicitReopenAt(row.id);
           if (reopenAt && (!completedAt || Date.parse(reopenAt) > Date.parse(completedAt))) continue;
+          flagged.add(row.id);
           issues.push({
             severity: "error",
             code: "completed_milestone_reopened",
             scope: "milestone",
             unitId: row.id,
-            message: `Milestone ${row.id} has completed complete-milestone dispatch history but DB status is ${row.status}. Explicitly reopen or recover before planning it again.`,
+            message: `Milestone ${row.id} has completed complete-milestone dispatch history but DB status is ${milestone.status}. Explicitly reopen or recover before planning it again.`,
             fixable: false,
           });
         }
@@ -893,16 +1240,19 @@ export async function checkEngineHealth(
           )
           .all() as ArtifactRow[];
 
+        const discardedMilestoneIds = new Set(
+          readMilestones()
+            .filter((milestone) => milestone.discarded)
+            .map((milestone) => milestone.id),
+        );
+        const staleRows: ArtifactRow[] = [];
         for (const row of artifactRows) {
+          if (row.milestone_id && discardedMilestoneIds.has(row.milestone_id)) continue;
           const unitId = artifactUnitId(row);
           const issuePath = artifactPathRelativeToGsd(row.path);
           if (artifactExistsOnDisk(basePath, row.path)) continue;
           if (options?.repair && staleArtifactRowFixable(basePath, row, artifactRows)) {
-            // Route the write through the Single Writer owner (gsd-db.ts) instead
-            // of issuing raw DELETE SQL here — doctor is a read-only consumer and
-            // the single-writer invariant forbids write SQL outside the allowlist.
-            deleteArtifactByPath(row.path);
-            fixesApplied.push(staleArtifactPruneMessage(row));
+            staleRows.push(row);
             continue;
           }
           if (artifactExistsOnDisk(basePath, row.path, row)) continue;
@@ -930,6 +1280,26 @@ export async function checkEngineHealth(
             fixable: staleArtifactRowFixable(basePath, row, artifactRows),
           });
         }
+        // One Domain Operation deletes every stale row, so the prune has an
+        // operation row and a revision.
+        try {
+          pruneArtifactRows({ name: "doctor", actorType: "operator" }, staleRows.map((row) => row.path));
+          fixesApplied.push(...staleRows.map(staleArtifactPruneMessage));
+        } catch (err) {
+          // A refused prune (stale view, revision conflict) leaves the rows: report each one.
+          for (const row of staleRows) {
+            const issuePath = artifactPathRelativeToGsd(row.path);
+            issues.push({
+              severity: "error",
+              code: "artifact_file_missing",
+              scope: artifactScope(row),
+              unitId: artifactUnitId(row),
+              message: `Artifact ${issuePath} has a stale database row and the prune was refused: ${err instanceof Error ? err.message : String(err)}`,
+              file: issuePath,
+              fixable: true,
+            });
+          }
+        }
       } catch {
         // Non-fatal — artifact file existence check failed
       }
@@ -947,16 +1317,9 @@ export async function checkEngineHealth(
           .prepare(
             `SELECT a.path, a.artifact_type, a.milestone_id, a.slice_id, a.task_id,
                     a.full_content, a.imported_at,
-                    m.status AS milestone_status,
-                    s.status AS slice_status,
-                    t.status AS task_status, t.full_summary_md AS task_full_summary_md,
                     (SELECT COUNT(*) FROM tasks tt WHERE tt.milestone_id = a.milestone_id AND tt.slice_id = a.slice_id) AS task_count
              FROM artifacts a
-             JOIN milestones m ON m.id = a.milestone_id
-             LEFT JOIN slices s ON s.milestone_id = a.milestone_id AND s.id = a.slice_id
-             LEFT JOIN tasks t ON t.milestone_id = a.milestone_id AND t.slice_id = a.slice_id AND t.id = a.task_id
-             WHERE a.artifact_type = 'SUMMARY'
-               AND m.status NOT IN ('complete', 'done', 'skipped', 'closed')`,
+             WHERE a.artifact_type = 'SUMMARY'`,
           )
           .all() as Array<{
             path: string;
@@ -966,23 +1329,25 @@ export async function checkEngineHealth(
             task_id: string | null;
             full_content: string;
             imported_at: string | null;
-            slice_status: string | null;
-            task_status: string | null;
-            task_full_summary_md: string | null;
             task_count: number;
           }>;
 
+        const milestoneReads = readMilestonesById();
         const seen = new Set<string>();
         for (const row of rows) {
+          const milestone = milestoneReads.get(row.milestone_id);
+          if (!milestone || milestone.closed) continue;
           if (!artifactExistsOnDisk(basePath, row.path, row)) continue;
-          const reopenAt = latestExplicitReopenAt(basePath, row.milestone_id);
+          const reopenAt = latestExplicitReopenAt(row.milestone_id);
           if (!isAfter(row.imported_at, reopenAt)) continue;
-          const isSliceSummary = row.slice_id && !row.task_id && row.slice_status && !["complete", "done", "skipped", "closed"].includes(row.slice_status);
-          const isTaskSummary = row.slice_id && row.task_id && (!row.task_status || !["complete", "done", "skipped", "closed"].includes(row.task_status));
+          const slice = row.slice_id ? readSlice(row.milestone_id, row.slice_id) : null;
+          const task = row.slice_id && row.task_id ? readTask(row.milestone_id, row.slice_id, row.task_id) : null;
+          const isSliceSummary = row.slice_id && !row.task_id && slice && !slice.done;
+          const isTaskSummary = row.slice_id && row.task_id && !task?.done;
           const isTaskArtifactWithoutDbTasks = row.slice_id && row.task_id && Number(row.task_count) === 0;
           if (
             isTaskSummary &&
-            row.task_status &&
+            task &&
             row.slice_id &&
             row.task_id &&
             isCanonicalStagedTaskSummaryProjection(basePath, {
@@ -995,8 +1360,8 @@ export async function checkEngineHealth(
               milestoneId: row.milestone_id,
               sliceId: row.slice_id,
               taskId: row.task_id,
-              status: row.task_status,
-              fullSummaryMd: row.task_full_summary_md ?? "",
+              status: task.status,
+              fullSummaryMd: task.full_summary_md ?? "",
             })
           ) {
             continue;
@@ -1015,7 +1380,10 @@ export async function checkEngineHealth(
             code: "artifact_db_status_divergence",
             scope: row.task_id ? "task" : row.slice_id ? "slice" : "milestone",
             unitId,
-            message: `Completion artifact ${row.path} exists while DB state for ${unitId} is still open or missing. Runtime will not import it silently; run explicit recovery/repair after review.`,
+            message: `Completion artifact ${row.path} exists while DB state for ${unitId} is still open or missing. ${
+              legacyReopenImportGuidance(basePath, row.milestone_id, row.imported_at) ??
+              "Runtime will not import it silently; run explicit recovery/repair after review."
+            }`,
             fixable: false,
           });
         }
@@ -1027,7 +1395,7 @@ export async function checkEngineHealth(
     // Non-fatal — DB constraint checks failed entirely
   }
 
-  // Checkbox-vs-DB divergence detection runs before projection drift auto-fix
+  // Checkbox-vs-DB divergence detection runs before Projection Work repair
   // so stale re-renders cannot overwrite manually edited markdown first. Runs
   // inside its own try/catch: getAllMilestones / getMilestoneSlices /
   // getSliceTasks issue prepared queries that can throw on a corrupt or locked
@@ -1045,64 +1413,451 @@ export async function checkEngineHealth(
     // Non-fatal: checkbox-vs-DB divergence check must never block doctor
   }
 
-  // ── Projection drift detection ──────────────────────────────────────────
-  // If the DB is available, check whether markdown projections are stale
-  // relative to the event log and re-render them.
-  const reRenderedMilestoneIds: string[] = [];
+  // ── Projection Work ─────────────────────────────────────────────────────
+  // Durable Projection Work is the staleness record, not file times. Repair
+  // wakes the Projection Worker; then every current row that is not rendered
+  // is reported.
   try {
     if (isDbAvailable()) {
-      const eventLogPath = workflowEventLogPath(basePath);
-      const events = readEvents(eventLogPath);
-      if (events.length > 0) {
-        const lastEventTs = new Date(events[events.length - 1]!.ts).getTime();
-        const state = await deriveState(basePath);
-        for (const milestone of state.registry) {
-          if (milestone.status === "complete") continue;
-          const roadmapPath = resolveMilestoneFile(basePath, milestone.id, "ROADMAP");
-          if (!roadmapPath || !existsSync(roadmapPath)) {
-            try {
-              const flushed = await flushWorkflowProjections(basePath, { milestoneId: milestone.id });
-              if (!flushed.stale) {
-                fixesApplied.push(`re-rendered missing projections for ${milestone.id}`);
-                reRenderedMilestoneIds.push(milestone.id);
-              }
-            } catch {
-              // Non-fatal — projection re-render failed
-            }
-            continue;
-          }
-          const projectionMtime = statSync(roadmapPath).mtimeMs;
-          if (lastEventTs > projectionMtime) {
-            try {
-              const flushed = await flushWorkflowProjections(basePath, { milestoneId: milestone.id });
-              if (!flushed.stale) {
-                fixesApplied.push(`re-rendered stale projections for ${milestone.id}`);
-                reRenderedMilestoneIds.push(milestone.id);
-              }
-            } catch {
-              // Non-fatal — projection re-render failed
-            }
-          }
-        }
-      }
+      await checkProjectionWork(basePath, issues, fixesApplied, options?.repair === true);
     }
   } catch {
-    // Non-fatal — projection drift check must never block doctor
+    // Non-fatal — the Projection Work check must never block doctor
   }
 
-  if (reRenderedMilestoneIds.length > 0) {
-    const reRendered = new Set(reRenderedMilestoneIds);
-    for (let i = issues.length - 1; i >= 0; i--) {
-      const issue = issues[i]!;
-      // flushWorkflowProjections re-renders milestone shell projections (not
-      // slice PLAN.md files), so only clear stale ROADMAP checkbox diagnostics.
-      if (isClearedByMilestoneShellProjectionFlush(basePath, issue, reRendered)) {
-        issues.splice(i, 1);
-        continue;
-      }
-      if (issue.code === "artifact_file_missing" && issue.file && artifactExistsOnDisk(basePath, issue.file)) {
-        issues.splice(i, 1);
-      }
+  if (isDbAvailable()) {
+    checkUnimportedOverrides(
+      basePath,
+      issues,
+      fixesApplied,
+      options?.repair === true && options.importFileOverrides === true,
+    );
+    const importFileRows = options?.repair === true && options.importFileOverrides === true;
+    const captures = unimportedFileCaptures(basePath);
+    checkUnimportedFileRows(issues, fixesApplied, importFileRows, {
+      file: "CAPTURES.md",
+      code: "capture_file_entry_unimported",
+      rows: captures.map((capture) => ({ id: capture.id, label: `capture ${capture.id} ("${capture.text}", ${capture.status})` })),
+      unread: "is not read by triage or the stop guard",
+      importRows: () => importFileCaptures(basePath, captures),
+    });
+    const backlogItems = unimportedFileBacklogItems(basePath);
+    checkUnimportedFileRows(issues, fixesApplied, importFileRows, {
+      file: "BACKLOG.md",
+      code: "backlog_file_item_unimported",
+      rows: backlogItems.map((item) => ({ id: item.id, label: `item ${item.id} ("${item.title}")` })),
+      unread: "is not listed and cannot be promoted",
+      importRows: () => importFileBacklogItems(basePath, backlogItems),
+    });
+    const ledgerUnits = unimportedLedgerUnits(basePath);
+    const ledgerCost = ledgerUnits.reduce((sum, unit) => sum + unit.cost, 0);
+    checkUnimportedFileRows(issues, fixesApplied, importFileRows, {
+      file: "metrics.json",
+      code: "metrics_ledger_units_unimported",
+      rows: ledgerUnits.length === 0 ? [] : [{
+        id: `${ledgerUnits.length} unit run(s)`,
+        label: `ledger of ${ledgerUnits.length} unit run(s) (${formatCost(ledgerCost)})`,
+      }],
+      unread: "is not counted by the budget ceiling",
+      importRows: () => recordUnitMetricsRows(ledgerUnits),
+    });
+    checkUnappliedLegacyEscalations(basePath, issues, fixesApplied, options?.repair === true);
+  }
+}
+
+/** Rows of a rendered file that the database does not hold are not read. Report each one; import them on request. */
+function checkUnimportedFileRows(
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  doImport: boolean,
+  source: {
+    file: string;
+    code: DoctorIssueCode;
+    rows: Array<{ id: string; label: string }>;
+    /** What the workflow does not do with a row while it is not imported. */
+    unread: string;
+    importRows: () => void;
+  },
+): void {
+  if (source.rows.length === 0) return;
+  let importError = "";
+  if (doImport) {
+    try {
+      source.importRows();
+      fixesApplied.push(`imported ${source.rows.length} row(s) from ${source.file}: ${source.rows.map((row) => row.id).join(", ")}`);
+      return;
+    } catch (err) {
+      importError = ` The import failed: ${(err as Error).message}.`;
     }
   }
+  for (const row of source.rows) {
+    issues.push({
+      severity: "warning",
+      code: source.code,
+      scope: "project",
+      unitId: "project",
+      message: `${source.file} ${row.label} is not in the database and ${source.unread}. Run \`/gsd doctor --fix\` to import it.${importError}`,
+      file: `.gsd/${source.file}`,
+      fixable: true,
+    });
+  }
+}
+
+/**
+ * An escalation the user resolved before the database stored escalations has
+ * its response only in a T##-ESCALATION.json file, so the next task does not
+ * receive it. Report each one; under repair, store it in the database.
+ */
+function checkUnappliedLegacyEscalations(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  repair: boolean,
+): void {
+  for (const task of listUnappliedLegacyEscalations()) {
+    const unitId = `${task.milestone_id}/${task.slice_id}/${task.id}`;
+    const legacy = readConvertibleLegacyEscalation(basePath, task);
+    let convertError = "";
+    if (repair && legacy) {
+      try {
+        convertResolvedLegacyEscalation(basePath, legacy);
+        fixesApplied.push(`stored the escalation response of ${unitId} in the database; the next task of ${task.slice_id} receives it`);
+        continue;
+      } catch (err) {
+        convertError = ` The conversion failed: ${(err as Error).message}.`;
+      }
+    }
+    issues.push({
+      severity: "warning",
+      code: "escalation_legacy_response_unapplied",
+      scope: "task",
+      unitId,
+      message: legacy
+        ? `The user's response to the escalation of ${unitId} is from before escalations were stored in the database and is not carried into the next task. Run \`/gsd doctor --fix\` to store it.${convertError}`
+        : `The user's response to the escalation of ${unitId} is from before escalations were stored in the database and is not carried into the next task. It cannot be converted: the file is missing or has no valid response. Give the decision to the next task yourself.`,
+      ...(task.escalation_artifact_path ? { file: task.escalation_artifact_path } : {}),
+      fixable: legacy !== null,
+    });
+  }
+}
+
+/** OVERRIDES.md blocks the database does not hold are not active. Report each one; import the valid ones on request. */
+function checkUnimportedOverrides(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  doImport: boolean,
+): void {
+  const importable = (block: FileOverride) => block.scope === "active" || block.scope === "resolved";
+  const blocks = unimportedFileOverrides(basePath);
+  let imported: FileOverride[] = [];
+  let importError = "";
+  if (doImport) {
+    try {
+      imported = blocks.filter(importable);
+      importFileOverrides(basePath, imported);
+      if (imported.length > 0) {
+        fixesApplied.push(`imported ${imported.length} override(s) from OVERRIDES.md: ${imported.map((block) => block.timestamp).join(", ")}`);
+      }
+    } catch (err) {
+      imported = [];
+      importError = ` The import failed: ${(err as Error).message}.`;
+    }
+  }
+  for (const block of blocks) {
+    if (imported.includes(block)) continue;
+    issues.push({
+      severity: "warning",
+      code: "override_file_block_unimported",
+      scope: "project",
+      unitId: "project",
+      message: importable(block)
+        ? `OVERRIDES.md override ${block.timestamp} ("${block.change}", ${block.scope}) is not in the database and is not active. Run \`/gsd doctor --fix\` to import it.${importError}`
+        : `OVERRIDES.md override ${block.timestamp} ("${block.change}") has unknown scope "${block.scope}" and cannot be imported. Set its scope to active or resolved, then run \`/gsd doctor --fix\`.`,
+      file: ".gsd/OVERRIDES.md",
+      fixable: importable(block),
+    });
+  }
+}
+
+/**
+ * Milestone reopens and completions that only event-log.jsonl holds are not
+ * read by drift detection. Report each one; import them on request.
+ */
+function checkUnimportedLegacyMilestoneEvents(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  doImport: boolean,
+): void {
+  const events = unimportedLegacyMilestoneEvents(basePath);
+  if (events.length === 0) return;
+  let importError = "";
+  if (doImport) {
+    try {
+      recordLegacyMilestoneEvents(events, "operator");
+      fixesApplied.push(
+        `imported ${events.length} milestone event(s) from event-log.jsonl: ${events.map((event) => `${event.milestoneId} ${event.kind}`).join(", ")}`,
+      );
+      return;
+    } catch (err) {
+      importError = ` The import failed: ${(err as Error).message}.`;
+    }
+  }
+  for (const event of events) {
+    issues.push({
+      severity: "warning",
+      code: "legacy_milestone_event_unimported",
+      scope: "milestone",
+      unitId: event.milestoneId,
+      message: `event-log.jsonl says milestone ${event.milestoneId} was ${event.kind} at ${event.occurredAt}, but the database has no such event and the file is not read. Run \`/gsd doctor --fix\` to import it.${importError}`,
+      file: ".gsd/event-log.jsonl",
+      fixable: true,
+    });
+  }
+}
+
+function roadmapOnDisk(basePath: string, milestoneId: string): boolean {
+  const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
+  return Boolean(roadmapPath) && existsSync(roadmapPath!);
+}
+
+/** The missing-artifact issues of the milestone whose file the milestone render writes. */
+function restorableArtifactIssues(basePath: string, issues: DoctorIssue[], milestoneId: string): DoctorIssue[] {
+  const missing = issues.filter((issue) =>
+    issue.code === "artifact_file_missing" && issue.unitId.split("/")[0] === milestoneId);
+  if (missing.length === 0) return missing;
+  const rendered = milestoneRenderArtifactPaths(basePath, milestoneId);
+  return missing.filter((issue) => Boolean(issue.file) && rendered.has(issue.file!));
+}
+
+/**
+ * Milestones with a file that the milestone render restores: an open, planned
+ * milestone whose ROADMAP file is not on disk, or a milestone that owns a
+ * database artifact whose missing file the render writes. Any other missing
+ * artifact stays reported and is not a reason to render.
+ */
+function milestonesWithMissingFiles(
+  basePath: string,
+  issues: DoctorIssue[],
+): Array<{ id: string; roadmapMissing: boolean; restorable: DoctorIssue[] }> {
+  return getAllMilestones()
+    .filter((milestone) => !isDiscardedMilestoneStatus(milestone.status))
+    .map((milestone) => ({
+      id: milestone.id,
+      roadmapMissing: !isClosedStatus(milestone.status)
+        && !isUnplannedMilestone(milestone)
+        && !roadmapOnDisk(basePath, milestone.id),
+      restorable: restorableArtifactIssues(basePath, issues, milestone.id),
+    }))
+    .filter(({ roadmapMissing, restorable }) => roadmapMissing || restorable.length > 0);
+}
+
+/**
+ * Report current Projection Work that is not rendered. Under repair, first
+ * requeue dead-lettered work and the file set of each milestone with a missing
+ * file, drain, and clear the issues the render fixed. Exported for direct testing.
+ */
+export async function checkProjectionWork(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  repair: boolean,
+): Promise<void> {
+  if (repair) {
+    const missing = milestonesWithMissingFiles(basePath, issues);
+    const drained = await repairProjectionWork(basePath, missing.map(({ id }) => id));
+    if (drained.delivered > 0) fixesApplied.push(`delivered ${drained.delivered} Projection Work row(s)`);
+    const reRendered = new Set(missing
+      .filter(({ id, roadmapMissing, restorable }) =>
+        (roadmapMissing && roadmapOnDisk(basePath, id))
+        || restorable.some((issue) => artifactExistsOnDisk(basePath, issue.file!)))
+      .map(({ id }) => id));
+    for (const id of reRendered) fixesApplied.push(`re-rendered missing projections for ${id}`);
+    for (let i = issues.length - 1; i >= 0; i--) {
+      if (isClearedByMilestoneReRender(basePath, issues[i]!, reRendered)) issues.splice(i, 1);
+    }
+  }
+  const unowned = new Map<string, number>();
+  for (const entry of readProjectionWorkBacklog(basePath)) {
+    const where = entry.root ? ` at ${entry.root}` : "";
+    if (!entry.hasRenderer) {
+      unowned.set(entry.projectionKind, (unowned.get(entry.projectionKind) ?? 0) + 1);
+      continue;
+    }
+    if (entry.deliveryState === "dead_letter") {
+      issues.push({
+        severity: "warning",
+        code: "projection_work_dead_letter",
+        scope: "project",
+        unitId: entry.projectionKey,
+        message: `Projection ${entry.projectionKey} (${entry.projectionKind})${where} stopped retrying after ${entry.attemptCount} failed attempt(s): ${entry.lastError}. Its files stay stale until the next change to it, a doctor repair, or \`/gsd rebuild markdown\`.`,
+        file: ".gsd/gsd.db",
+        fixable: true,
+      });
+      continue;
+    }
+    issues.push({
+      severity: entry.attemptCount > 0 ? "warning" : "info",
+      code: "projection_work_pending",
+      scope: "project",
+      unitId: entry.projectionKey,
+      message: entry.attemptCount > 0
+        ? `Projection ${entry.projectionKey} (${entry.projectionKind})${where} failed ${entry.attemptCount} time(s): ${entry.lastError}. Next attempt at ${entry.nextAttemptAt}.`
+        : `Projection ${entry.projectionKey} (${entry.projectionKind}) is ${entry.deliveryState} and not rendered yet.`,
+      file: ".gsd/gsd.db",
+      fixable: entry.attemptCount === 0,
+    });
+  }
+  if (unowned.size > 0) {
+    const kinds = [...unowned].map(([kind, count]) => `${kind}: ${count}`).join(", ");
+    issues.push({
+      severity: "info",
+      code: "projection_work_unrendered",
+      scope: "project",
+      unitId: "projection-work",
+      message: `Projection Work with no registered renderer stays pending (${kinds}). These rows are never reported as rendered.`,
+      file: ".gsd/gsd.db",
+      fixable: false,
+    });
+  }
+}
+
+/**
+ * Surface lifecycle-shadow observation-loss audit events whose loss accounting
+ * names `primary_sink_failed` (#2442). When the canonical lifecycle shadow
+ * cannot be persisted to its primary sink, the loss event is written outside
+ * the DB (audit projection, retry spool, or emergency journal) and nothing
+ * else in doctor looked at it — a run could lose shadow observations
+ * silently. The incident audit lived in the milestone WORKTREE projection, so
+ * every on-disk worktree audit projection is scanned too, registered or not.
+ * Matching is structural: only the loss accounting fields decide. Best-effort:
+ * missing files, unreadable lines, and a closed database are all skipped;
+ * events seen on several surfaces (projection mirrors the DB) count once.
+ */
+export function checkLifecycleShadowObservationLoss(basePath: string, issues: DoctorIssue[]): void {
+  const projectGsd = gsdRoot(basePath);
+  const surfaces: Array<{ label: string; path: string }> = [
+    { label: "audit projection", path: join(projectGsd, "audit", "events.jsonl") },
+    { label: "loss retry spool", path: join(projectGsd, "runtime", "lifecycle-shadow-observation-loss.jsonl") },
+    { label: "emergency loss journal", path: join(projectGsd, "lifecycle-shadow-observation-loss.jsonl") },
+  ];
+  // Milestone worktrees keep their own audit projections (the #2442 incident
+  // recorded its loss event in .gsd-worktrees/<MID>/.gsd/audit/events.jsonl).
+  // Scan the on-disk containers directly so unregistered directories count.
+  for (const container of [join(basePath, ".gsd-worktrees"), join(basePath, ".gsd", "worktrees")]) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(container);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      surfaces.push({
+        label: `worktree ${entry} audit projection`,
+        path: join(container, entry, ".gsd", "audit", "events.jsonl"),
+      });
+    }
+  }
+
+  const seenEventIds = new Set<string>();
+  let total = 0;
+  let latestTs = "";
+  let firstHitPath = "";
+  const surfacesHit: string[] = [];
+  for (const surface of surfaces) {
+    if (!existsSync(surface.path)) continue;
+    let content: string;
+    try {
+      content = readFileSync(surface.path, "utf-8");
+    } catch {
+      continue;
+    }
+    let count = 0;
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) continue;
+      let event: { eventId?: unknown; type?: unknown; ts?: unknown; payload?: unknown };
+      try {
+        event = JSON.parse(trimmed) as typeof event;
+      } catch {
+        continue;
+      }
+      if (event.type !== "lifecycle-shadow-observation-loss") continue;
+      if (!primarySinkLossReason(event.payload)) continue;
+      const dedupeKey = typeof event.eventId === "string" ? event.eventId : "";
+      if (dedupeKey && seenEventIds.has(dedupeKey)) continue;
+      if (dedupeKey) seenEventIds.add(dedupeKey);
+      count += 1;
+      if (typeof event.ts === "string" && event.ts > latestTs) latestTs = event.ts;
+      if (!firstHitPath) firstHitPath = surface.path;
+    }
+    if (count > 0) {
+      total += count;
+      surfacesHit.push(`${count} in ${surface.label} (${surface.path})`);
+    }
+  }
+
+  if (isDbAvailable()) {
+    try {
+      const adapter = _getAdapter();
+      const rows = adapter?.prepare(`
+        SELECT event_id, ts, payload_json
+        FROM audit_events
+        WHERE type = 'lifecycle-shadow-observation-loss'
+          AND payload_json LIKE '%primary_sink_failed%'
+      `)?.all() as Array<{ event_id?: unknown; ts?: unknown; payload_json?: unknown }> | undefined;
+      for (const row of rows ?? []) {
+        let payload: unknown;
+        try {
+          payload = JSON.parse(String(row.payload_json ?? "null"));
+        } catch {
+          continue;
+        }
+        if (!primarySinkLossReason(payload)) continue;
+        const dedupeKey = typeof row.event_id === "string" ? row.event_id : "";
+        if (dedupeKey && seenEventIds.has(dedupeKey)) continue;
+        if (dedupeKey) seenEventIds.add(dedupeKey);
+        total += 1;
+        if (typeof row.ts === "string" && row.ts > latestTs) latestTs = row.ts;
+        if (!firstHitPath) firstHitPath = ".gsd/gsd.db";
+      }
+    } catch {
+      // Older schemas may not carry the audit_events table; the file surfaces
+      // above still cover the outside-the-DB loss paths.
+    }
+  }
+
+  if (total > 0) {
+    issues.push({
+      severity: "error",
+      code: "lifecycle_shadow_observation_loss",
+      scope: "project",
+      unitId: "project",
+      message:
+        `${total} lifecycle-shadow observation${total === 1 ? " was" : "s were"} lost to a failed primary sink` +
+        `${latestTs ? ` (latest at ${latestTs})` : ""}: ${surfacesHit.join("; ")}. ` +
+        "Canonical shadow observations could not be persisted — inspect the loss accounting for the underlying sink error.",
+      file: firstHitPath || ".gsd/audit/events.jsonl",
+      fixable: false,
+    });
+  }
+}
+
+/**
+ * Structural match on the loss accounting only: the top-level reason or any
+ * recorded cause must name the primary sink. A payload that merely mentions
+ * "primary_sink_failed" in unrelated content must not match.
+ */
+function primarySinkLossReason(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const accounting = (payload as { observationLossAccounting?: unknown }).observationLossAccounting;
+  if (!accounting || typeof accounting !== "object" || Array.isArray(accounting)) return false;
+  const record = accounting as { reason?: unknown; causes?: unknown };
+  if (record.reason === "primary_sink_failed") return true;
+  if (!Array.isArray(record.causes)) return false;
+  return record.causes.some((cause) =>
+    Boolean(cause) && typeof cause === "object" &&
+    (cause as { reason?: unknown }).reason === "primary_sink_failed",
+  );
 }

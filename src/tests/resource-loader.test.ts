@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, parse } from "node:path";
 import { tmpdir } from "node:os";
@@ -352,6 +353,237 @@ test("initResources syncs bundled skills to the GSD agent dir by default", async
     existsSync(join(tmp, ".agents", "skills", "lint", "SKILL.md")),
     false,
     "initResources should not write bundled skills to ~/.agents/skills by default",
+  );
+});
+
+// The bundled agent-browser skill has nested directories, so an exact copy of
+// it exercises the recursive comparison in the ecosystem-dir cleanup (#2286).
+function bundledAgentBrowserSkillDir(): string {
+  return join(bundledSkillsDir(), "agent-browser");
+}
+
+test("initResources leaves a user-modified same-named skill in ~/.agents/skills untouched", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-resource-loader-ecosystem-user-"));
+  const fakeAgentDir = join(tmp, ".gsd", "agent");
+  const ecosystemSkillDir = join(tmp, ".agents", "skills", "agent-browser");
+  const restoreHomeEnv = overrideHomeEnv(tmp);
+
+  t.after(() => {
+    restoreHomeEnv();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  cpSync(bundledAgentBrowserSkillDir(), ecosystemSkillDir, { recursive: true });
+  const userContent = "---\nname: agent-browser\ndescription: my local tweaks\n---\n";
+  writeFileSync(join(ecosystemSkillDir, "SKILL.md"), userContent);
+
+  const { initResources } = await import("../resource-loader.ts");
+  initResources(fakeAgentDir);
+
+  assert.equal(
+    existsSync(ecosystemSkillDir),
+    true,
+    "a user-modified same-named skill must not be deleted from ~/.agents/skills",
+  );
+  assert.equal(
+    readFileSync(join(ecosystemSkillDir, "SKILL.md"), "utf-8"),
+    userContent,
+    "the user's modified SKILL.md must survive initResources",
+  );
+  assert.equal(
+    existsSync(join(ecosystemSkillDir, "references", "commands.md")),
+    true,
+    "the user's nested skill files must survive initResources",
+  );
+});
+
+test("initResources reclaims an exact bundled skill copy from ~/.agents/skills", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-resource-loader-ecosystem-exact-"));
+  const fakeAgentDir = join(tmp, ".gsd", "agent");
+  const ecosystemSkillDir = join(tmp, ".agents", "skills", "agent-browser");
+  const restoreHomeEnv = overrideHomeEnv(tmp);
+
+  t.after(() => {
+    restoreHomeEnv();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  cpSync(bundledAgentBrowserSkillDir(), ecosystemSkillDir, { recursive: true });
+
+  const { initResources } = await import("../resource-loader.ts");
+  initResources(fakeAgentDir);
+
+  assert.equal(
+    existsSync(ecosystemSkillDir),
+    false,
+    "an exact unmodified bundled skill copy should be reclaimed from ~/.agents/skills",
+  );
+});
+
+test("initResources leaves a symlinked ecosystem skill entry untouched", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-resource-loader-ecosystem-symlink-"));
+  const fakeAgentDir = join(tmp, ".gsd", "agent");
+  const symlinkTargetDir = join(tmp, "my-own-skills", "agent-browser");
+  const ecosystemSkillDir = join(tmp, ".agents", "skills", "agent-browser");
+  const restoreHomeEnv = overrideHomeEnv(tmp);
+
+  t.after(() => {
+    restoreHomeEnv();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  cpSync(bundledAgentBrowserSkillDir(), symlinkTargetDir, { recursive: true });
+  mkdirSync(join(tmp, ".agents", "skills"), { recursive: true });
+  symlinkSync(symlinkTargetDir, ecosystemSkillDir);
+
+  const { initResources } = await import("../resource-loader.ts");
+  initResources(fakeAgentDir);
+
+  assert.equal(
+    existsSync(ecosystemSkillDir),
+    true,
+    "a symlinked ecosystem skill entry must not be removed",
+  );
+  assert.equal(
+    lstatSync(ecosystemSkillDir).isSymbolicLink(),
+    true,
+    "the symlink itself must survive initResources",
+  );
+  assert.equal(
+    existsSync(join(symlinkTargetDir, "SKILL.md")),
+    true,
+    "the symlink target directory must survive initResources",
+  );
+});
+
+test("initResources emits a diagnostic when skipping a user-modified ecosystem skill", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-resource-loader-ecosystem-warn-"));
+  const fakeAgentDir = join(tmp, ".gsd", "agent");
+  const ecosystemSkillDir = join(tmp, ".agents", "skills", "lint");
+  const restoreHomeEnv = overrideHomeEnv(tmp);
+
+  const consoleErrors = t.mock.method(console, "error", () => {});
+
+  t.after(() => {
+    consoleErrors.mock.restore();
+    restoreHomeEnv();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  cpSync(join(bundledSkillsDir(), "lint"), ecosystemSkillDir, { recursive: true });
+  writeFileSync(join(ecosystemSkillDir, "SKILL.md"), "user modified\n");
+
+  const { initResources } = await import("../resource-loader.ts");
+  initResources(fakeAgentDir);
+
+  assert.equal(
+    existsSync(ecosystemSkillDir),
+    true,
+    "the user-modified skill must survive initResources",
+  );
+  assert.ok(
+    consoleErrors.mock.calls.some((call) =>
+      call.arguments.some((arg) => {
+        const message = String(arg);
+        return message.includes("WARN") && message.includes(ecosystemSkillDir);
+      }),
+    ),
+    `initResources should emit a WARN diagnostic naming ${ecosystemSkillDir}`,
+  );
+});
+
+test("initResources leaves an ecosystem skill with a nested symlink entry untouched", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-resource-loader-ecosystem-nested-link-"));
+  const fakeAgentDir = join(tmp, ".gsd", "agent");
+  const ecosystemSkillDir = join(tmp, ".agents", "skills", "agent-browser");
+  const restoreHomeEnv = overrideHomeEnv(tmp);
+
+  const consoleErrors = t.mock.method(console, "error", () => {});
+
+  t.after(() => {
+    consoleErrors.mock.restore();
+    restoreHomeEnv();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  cpSync(bundledAgentBrowserSkillDir(), ecosystemSkillDir, { recursive: true });
+  // Same relative file set, and the link target is byte-identical to the
+  // bundled file — only the entry itself being a symlink makes it user-owned.
+  const linkedName = join("references", "commands.md");
+  rmSync(join(ecosystemSkillDir, linkedName));
+  symlinkSync(
+    join(bundledAgentBrowserSkillDir(), linkedName),
+    join(ecosystemSkillDir, linkedName),
+  );
+
+  const { initResources } = await import("../resource-loader.ts");
+  initResources(fakeAgentDir);
+
+  assert.equal(
+    existsSync(ecosystemSkillDir),
+    true,
+    "a skill tree containing a nested symlink must not be deleted from ~/.agents/skills",
+  );
+  assert.equal(
+    lstatSync(join(ecosystemSkillDir, linkedName)).isSymbolicLink(),
+    true,
+    "the nested symlink itself must survive initResources",
+  );
+  assert.ok(
+    consoleErrors.mock.calls.some((call) =>
+      call.arguments.some((arg) => String(arg).includes(ecosystemSkillDir)),
+    ),
+    `initResources should emit a WARN diagnostic naming ${ecosystemSkillDir}`,
+  );
+});
+
+test("initResources leaves an ecosystem skill containing a FIFO untouched without hanging", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("mkfifo is not available on Windows");
+    return;
+  }
+
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-resource-loader-ecosystem-fifo-"));
+  const fakeAgentDir = join(tmp, ".gsd", "agent");
+  const ecosystemSkillDir = join(tmp, ".agents", "skills", "agent-browser");
+  const restoreHomeEnv = overrideHomeEnv(tmp);
+
+  const consoleErrors = t.mock.method(console, "error", () => {});
+
+  t.after(() => {
+    consoleErrors.mock.restore();
+    restoreHomeEnv();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  cpSync(bundledAgentBrowserSkillDir(), ecosystemSkillDir, { recursive: true });
+  // Same relative file set as the bundle, but the entry is a FIFO — reading it
+  // would block forever, so the compare must reject it before any read.
+  const fifoRelPath = join("references", "commands.md");
+  const fifoPath = join(ecosystemSkillDir, fifoRelPath);
+  rmSync(fifoPath);
+  const mkfifo = spawnSync("mkfifo", [fifoPath]);
+  assert.equal(mkfifo.status, 0, `mkfifo failed: ${mkfifo.stderr?.toString()}`);
+  assert.equal(statSync(fifoPath).isFIFO(), true, "test setup should create a FIFO");
+
+  const { initResources } = await import("../resource-loader.ts");
+  initResources(fakeAgentDir);
+
+  assert.equal(
+    existsSync(ecosystemSkillDir),
+    true,
+    "a skill tree containing a FIFO must not be deleted from ~/.agents/skills",
+  );
+  assert.equal(
+    statSync(fifoPath).isFIFO(),
+    true,
+    "the FIFO itself must survive initResources",
+  );
+  assert.ok(
+    consoleErrors.mock.calls.some((call) =>
+      call.arguments.some((arg) => String(arg).includes(ecosystemSkillDir)),
+    ),
+    `initResources should emit a WARN diagnostic naming ${ecosystemSkillDir}`,
   );
 });
 
@@ -830,7 +1062,7 @@ test("initResources removes exact bundled skill orphans from the ecosystem dir",
   );
 });
 
-test("initResources removes non-symlink ecosystem skill name collisions", async (t) => {
+test("initResources preserves user-owned non-symlink ecosystem skill name collisions", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-resource-loader-skills-ambiguous-"));
   const fakeAgentDir = join(tmp, ".gsd", "agent");
   const ecosystemLintDir = join(tmp, ".agents", "skills", "lint");
@@ -852,8 +1084,13 @@ test("initResources removes non-symlink ecosystem skill name collisions", async 
 
   assert.equal(
     existsSync(ecosystemLintFile),
-    false,
-    "non-symlink ecosystem skill collisions should be removed",
+    true,
+    "user-owned ecosystem skill collisions that are not exact bundled copies must be preserved",
+  );
+  assert.equal(
+    readFileSync(ecosystemLintFile, "utf-8").includes("# Custom lint"),
+    true,
+    "the user-owned collision's content must be untouched",
   );
 });
 

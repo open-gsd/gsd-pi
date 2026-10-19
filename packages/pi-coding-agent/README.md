@@ -106,6 +106,7 @@ For each built-in provider, pi maintains a list of tool-capable models, updated 
 **Subscriptions:** See [docs/providers.md#subscriptions](docs/providers.md#subscriptions) for the current providers and setup details.
 
 **API keys:**
+
 - Anthropic
 - OpenAI
 - Azure OpenAI
@@ -295,6 +296,7 @@ Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations desc
 ## Context Files
 
 Pi loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
+
 - `~/.pi/agent/AGENTS.md` (global)
 - Parent directories (walking up from cwd)
 - Current directory
@@ -356,6 +358,7 @@ export default function (pi: ExtensionAPI) {
 The default export can also be `async`. pi waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
 
 **What's possible:**
+
 - Custom tools (or replace built-in tools entirely)
 - Sub-agents and plan mode
 - Custom compaction and summarization

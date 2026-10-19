@@ -9,6 +9,8 @@ import { Container } from "@gsd/pi-tui";
 import {
 	handleCtrlC,
 	handlePastedImagePath,
+	setupKeyHandlers,
+	shutdown,
 	toggleThinkingBlockVisibility,
 } from "./interactive-key-handlers.js";
 import {
@@ -148,6 +150,162 @@ test("handlePastedImagePath: unsupported extensions list is correct", () => {
 	assert.equal(MIME_BY_EXT["xyz"], undefined, "xyz must not be supported");
 });
 
+// ── shutdown hard-exit watchdog (#2515) ──────────────────────────────
+
+type TeardownEvent =
+	| { kind: "exit"; code: number }
+	| { kind: "kill"; pid: number; signal: string }
+	| { kind: "terminal-stop" };
+
+interface ProcessTeardownRecorder {
+	events: TeardownEvent[];
+}
+
+/**
+ * Stub process.exit/process.kill to record into one ordered event log
+ * instead of terminating/signaling; restored via t.after.
+ */
+function recordProcessTeardown(t: { after: (fn: () => void) => void }): ProcessTeardownRecorder {
+	const recorder: ProcessTeardownRecorder = { events: [] };
+	const originalExit = process.exit;
+	const originalKill = process.kill;
+	(process as unknown as { exit: (code?: number) => never }).exit = ((exitCode?: number) => {
+		recorder.events.push({ kind: "exit", code: exitCode ?? 0 });
+		return undefined as never;
+	}) as never;
+	(process as unknown as { kill: (pid: number, signal?: string) => unknown }).kill = (pid: number, signal?: string) => {
+		recorder.events.push({ kind: "kill", pid, signal: signal ?? "SIGTERM" });
+		return true;
+	};
+	t.after(() => {
+		process.exit = originalExit;
+		process.kill = originalKill;
+	});
+	return recorder;
+}
+
+test("shutdown force-exits when an extension session_shutdown handler hangs", async (t) => {
+	const orphanPid = process.pid + 987_654;
+	const host = makeHost({
+		stop() {},
+		session: {
+			extensionRunner: {
+				hasHandlers: () => true,
+				// runner.emit awaits handlers with no deadline; a wedged handler
+				// (dead MCP child, hung parallel-worker stop) never resolves.
+				emit: () => new Promise(() => {}),
+			},
+		},
+	});
+	const recorder = recordProcessTeardown(t);
+	host.ui.terminal.stop = () => {
+		recorder.events.push({ kind: "terminal-stop" });
+	};
+
+	const pending = shutdown(host, {
+		hardExitMs: 50,
+		listDescendants: () => [orphanPid],
+	});
+	pending.catch(() => {});
+	await new Promise((resolve) => setTimeout(resolve, 500));
+	// One ordered log proves terminal cleanup and the SIGKILL both land
+	// BEFORE the forced exit.
+	assert.deepEqual(recorder.events, [
+		{ kind: "terminal-stop" },
+		{ kind: "kill", pid: orphanPid, signal: "SIGKILL" },
+		{ kind: "exit", code: 0 },
+	]);
+});
+
+test("exit_process shutdown completes and exits exactly once", async (t) => {
+	const host = makeHost({ stop() {} });
+	let stopCalled = false;
+	host.stop = () => {
+		stopCalled = true;
+	};
+	const recorder = recordProcessTeardown(t);
+
+	await shutdown(host, { hardExitMs: 100, listDescendants: () => [] });
+	assert.equal(stopCalled, true, "graceful teardown must still run host.stop()");
+	assert.deepEqual(recorder.events, [{ kind: "exit", code: 0 }]);
+	// Past the (shortened) watchdog deadline nothing further may fire — the
+	// graceful completion must have cancelled the timer.
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	assert.deepEqual(recorder.events, [{ kind: "exit", code: 0 }]);
+});
+
+test("stop_ui shutdown rethrows teardown errors without exiting", async (t) => {
+	const host = makeHost({
+		stop() {},
+		options: { shutdownBehavior: "stop_ui" },
+	});
+	host.stop = () => {
+		throw new Error("widget disposer exploded");
+	};
+	const recorder = recordProcessTeardown(t);
+
+	await assert.rejects(
+		shutdown(host, { hardExitMs: 5_000, listDescendants: () => [] }),
+		/widget disposer exploded/,
+		"stop_ui must propagate the original teardown error",
+	);
+	assert.deepEqual(recorder.events, [], "stop_ui must never terminate the embedding process");
+});
+
+test("stop_ui shutdown never arms the hard-exit watchdog", async (t) => {
+	const host = makeHost({
+		stop() {},
+		options: { shutdownBehavior: "stop_ui" },
+	});
+	// Hang a teardown step: the pre-fix unconditional watchdog fired
+	// process.exit(0) inside the embedding process from this exact state.
+	host.settingsManager.flush = () => new Promise(() => {});
+	let stopCalled = false;
+	host.stop = () => {
+		stopCalled = true;
+	};
+	const recorder = recordProcessTeardown(t);
+
+	const pending = shutdown(host, { hardExitMs: 20 });
+	pending.catch(() => {});
+	// Regression guard for an unconditional-watchdog variant of this fix
+	// (review round 1): it armed a process.exit(0) timer even for stop_ui and
+	// fired it here while the flush hung, killing the embedding process.
+	// Post-fix no timer is armed for stop_ui, so the window records nothing.
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	assert.deepEqual(recorder.events, [], "stop_ui must never terminate the embedding process");
+	assert.equal(stopCalled, false, "hung flush must not be raced by a forced stop");
+});
+
+test("shutdown still exits when a teardown step throws", async (t) => {
+	const orphanPid = process.pid + 987_654;
+	const host = makeHost({});
+	let stopCalled = false;
+	host.stop = () => {
+		stopCalled = true;
+		throw new Error("widget disposer exploded");
+	};
+	const recorder = recordProcessTeardown(t);
+	host.ui.terminal.stop = () => {
+		recorder.events.push({ kind: "terminal-stop" });
+	};
+
+	const pending = shutdown(host, { hardExitMs: 5_000, listDescendants: () => [orphanPid] });
+	pending.catch(() => {});
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	assert.equal(stopCalled, true, "the throwing teardown step must have been reached");
+	// Full ordered sequence for the forced-exit catch path: terminal cleanup,
+	// then the orphan SIGKILL, then exit. The recording stub returns where
+	// real process.exit terminates, so the catch falls through to the final
+	// exit — the first exit(0) is the guarantee, the second is stub fallout.
+	assert.deepEqual(recorder.events, [
+		{ kind: "terminal-stop" },
+		{ kind: "kill", pid: orphanPid, signal: "SIGKILL" },
+		{ kind: "exit", code: 0 },
+		{ kind: "exit", code: 0 },
+	]);
+});
+
 test("handlePastedImagePath: logic flow for known extension — valid PNG", () => {
 	// matchesImageSignature requires buf.length >= 12
 	const pngBuffer = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52]);
@@ -245,4 +403,50 @@ test("toggleThinkingBlockVisibility: re-adds streaming component when present", 
 	assert.equal(host.streamingComponent, mockComponent);
 	assert.equal(host.streamingComponent?.setHideThinkingBlock?.called, undefined);
 	// The key assertion is that no error is thrown and the component survives the rebuild
+});
+
+// ── Escape ───────────────────────────────────────────────────────────
+
+/** Host with the editor surface `setupKeyHandlers` wires, recording interrupt requests. */
+function makeEscapeHost(extra: Record<string, unknown> = {}): any {
+	const interrupts: Array<{ abort?: boolean } | undefined> = [];
+	const host = makeHost({
+		defaultEditor: { onAction() {} },
+		editor: { getText: () => "", setText() {} },
+		settingsManager: { getDoubleEscapeAction: () => "none" },
+		restoreQueuedMessagesToEditor(options?: { abort?: boolean }) {
+			interrupts.push(options);
+			return 0;
+		},
+		...extra,
+	});
+	host.session.isBashRunning = false;
+	setupKeyHandlers(host);
+	return { host, interrupts };
+}
+
+test("Escape interrupts the turn while the default loader is shown", () => {
+	const { host, interrupts } = makeEscapeHost({ loadingAnimation: { stop() {} } });
+
+	host.defaultEditor.onEscape();
+
+	assert.deepEqual(interrupts, [{ abort: true }]);
+});
+
+test("Escape interrupts the turn when an extension replaced the loader with the activity indicator", () => {
+	// GSD auto-mode calls setWorkingMessage(null) for every unit: the default
+	// loader is gone and only the activity indicator marks the turn in flight.
+	const { host, interrupts } = makeEscapeHost({ loadingAnimation: undefined, activityLoader: { stop() {} } });
+
+	host.defaultEditor.onEscape();
+
+	assert.deepEqual(interrupts, [{ abort: true }]);
+});
+
+test("Escape interrupts nothing when no turn is in flight", () => {
+	const { host, interrupts } = makeEscapeHost();
+
+	host.defaultEditor.onEscape();
+
+	assert.deepEqual(interrupts, []);
 });

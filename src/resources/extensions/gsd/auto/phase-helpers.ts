@@ -2,15 +2,46 @@
 // File Purpose: Shared helpers used across auto-loop phase modules.
 
 import { debugLog } from "../debug-logger.js";
+import { readPreviousUnitRetry, releaseUnitRetry } from "../db/unit-dispatch-retries.js";
+import { recordUnitEnd } from "../unit-runtime.js";
 import { resolveWorktreeProjectRoot, normalizeWorktreePathForCompare } from "../worktree-root.js";
-import { decideVerificationRetry, verificationRetryKey } from "./verification-retry-policy.js";
+import { decideVerificationRetry, hashVerificationFailureContext } from "./verification-retry-policy.js";
 import type { AutoSession } from "./session.js";
-import type { IterationContext, IterationData, LoopState, PhaseResult } from "./types.js";
+import type { IterationContext, LoopState, PhaseResult } from "./types.js";
 import type { Phase } from "../types.js";
+import type { EnterResult } from "../worktree-lifecycle.js";
 
 /** Compare two paths for physical identity, tolerating trailing slashes and symlinks. */
 export function isSamePathLocal(a: string, b: string): boolean {
   return normalizeWorktreePathForCompare(a) === normalizeWorktreePathForCompare(b);
+}
+
+/**
+ * Which enterMilestone failures must STOP the auto-mode resume instead of
+ * degrading to project root. Resuming after a lease conflict or a stale
+ * worktree registration (#2317) would run every subsequent operation against
+ * the wrong tree. Returns null when the resume may continue.
+ */
+export function autoResumeEnterFailureStop(
+  enterResult: EnterResult,
+  milestoneId: string,
+): { notify: string; detail: string } | null {
+  if (enterResult.ok) return null;
+  if (enterResult.reason === "lease-conflict") {
+    return {
+      notify: `Cannot resume milestone ${milestoneId}: lease is held by another worker.`,
+      detail: "lease-conflict during resume",
+    };
+  }
+  if (enterResult.reason === "stale-worktree-registration") {
+    return {
+      notify:
+        `Cannot resume milestone ${milestoneId}: a stale git worktree registration still claims the milestone branch. ` +
+        `Follow the remediation in the worktree warning above (git worktree unlock + git worktree prune), then run /gsd auto to resume.`,
+      detail: "stale worktree registration during resume",
+    };
+  }
+  return null;
 }
 
 export function isIsolatedWorktreeSession(s: AutoSession): boolean {
@@ -26,22 +57,26 @@ export async function applyVerificationRetryPolicy(
 ): Promise<PhaseResult | null> {
   const { ctx, pi, s, deps } = ic;
   const retryInfo = s.pendingVerificationRetry;
-  const key = unitType && retryInfo
-    ? verificationRetryKey(unitType, retryInfo.unitId)
-    : undefined;
   // Task host verification only returns retry after durable recovery authorizes it.
   // Repeated evidence belongs to that policy, not this legacy loop guard.
   const durableTaskRetry = unitType === "execute-task" && phase === "verification-retry";
+  // ADR-048: the failure before this one is the retry that an earlier dispatch
+  // of the unit stored, so a restart does not lose the comparison.
+  const previousRetry = !durableTaskRetry && unitType && retryInfo
+    ? readPreviousUnitRetry(unitType, retryInfo.unitId)
+    : null;
   const decision = decideVerificationRetry({
     unitType,
     retryInfo,
-    previousFailureHash: !durableTaskRetry && key
-      ? s.verificationRetryFailureHashes.get(key)
+    previousFailureHash: previousRetry
+      ? hashVerificationFailureContext(previousRetry.signature ?? previousRetry.failureContext)
       : undefined,
   });
 
   if (decision.action === "pause") {
     s.pendingVerificationRetry = null;
+    // The pause hands the unit to a person, so its stored retry is released.
+    if (unitType && retryInfo) releaseUnitRetry(unitType, retryInfo.unitId);
     debugLog("autoLoop", {
       phase: `${phase}-paused`,
       reason: decision.reason,
@@ -55,11 +90,10 @@ export async function applyVerificationRetryPolicy(
         : "Verification retry requested without retry context. Pausing auto-mode instead of re-dispatching.",
       "warning",
     );
-    await deps.pauseAuto(ctx, pi);
+    await deps.pauseAuto(ctx, pi, "machine_fixable");
     return { action: "break", reason: decision.reason };
   }
 
-  s.verificationRetryFailureHashes.set(decision.key, decision.failureHash);
   debugLog("autoLoop", {
     phase: `${phase}-backoff`,
     iteration: ic.iteration,
@@ -72,23 +106,6 @@ export async function applyVerificationRetryPolicy(
   });
   await new Promise<void>((resolve) => setTimeout(resolve, decision.delayMs));
   return null;
-}
-
-export function rememberRetryDispatch(
-  s: AutoSession,
-  unit: { type: string; id: string } | null,
-  iterData: IterationData,
-): void {
-  if (!unit) return;
-  s.pendingVerificationRetryDispatch = {
-    unitType: unit.type,
-    unitId: unit.id,
-    prompt: iterData.prompt,
-    pauseAfterUatDispatch: iterData.pauseAfterUatDispatch,
-    state: iterData.state,
-    mid: iterData.mid,
-    midTitle: iterData.midTitle,
-  };
 }
 
 /**
@@ -134,6 +151,11 @@ export async function emitCancelledUnitEnd(
   unitStartSeq: number,
   errorContext?: { message: string; category: string; stopReason?: string; isTransient?: boolean; retryAfterMs?: number },
 ): Promise<void> {
+  recordUnitEnd(ic.s.basePath, unitType, unitId, {
+    status: "cancelled",
+    artifactVerified: false,
+    ...(errorContext ? { error: errorContext.message } : {}),
+  });
   ic.deps.emitJournalEvent({
     ts: new Date().toISOString(),
     flowId: ic.flowId,

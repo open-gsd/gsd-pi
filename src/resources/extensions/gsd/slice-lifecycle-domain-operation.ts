@@ -1,7 +1,10 @@
 // Project/App: gsd-pi
 // File Purpose: Replay-safe Slice lifecycle Domain Operations.
 
+import { createHash } from "node:crypto";
+
 import {
+  canonicalDomainJson,
   executeDomainOperation,
   type DomainJsonValue,
   type DomainOperationRequest,
@@ -15,6 +18,7 @@ import {
   completeSliceHierarchy,
   grantSliceCancellationWaiver,
   reopenSliceHierarchy,
+  setSliceCompletionCarriers,
   SliceLifecycleValidationError,
   type SliceCancellationHierarchyResult,
   type SliceCancellationInterruption,
@@ -241,6 +245,7 @@ export function reopenSlice(input: {
           audit,
           reopenedTaskIds: result.reopenedTaskIds,
           revokedWaiverIds: result.revokedWaiverIds,
+          invalidatedEvidence: result.invalidatedEvidence,
           lifecycleShadowComparisons: shadowPayload(result),
         },
         destinations: ["projection"],
@@ -392,6 +397,18 @@ export function isCurrentSliceReopenOperation(
   });
 }
 
+/**
+ * One hash over the tested source revision of every completed Task of the
+ * Slice, in Task id order. It identifies the source set the Slice was
+ * completed on; it changes when a Task is verified on another revision.
+ */
+export function testedSourceSetHash(proofs: readonly SliceCompletionProof[]): string {
+  const sourceSet = proofs
+    .map((proof) => [proof.taskId, proof.testedSourceRevision])
+    .sort(([left], [right]) => (left! < right! ? -1 : left! > right! ? 1 : 0));
+  return `sha256:${createHash("sha256").update(canonicalDomainJson(sourceSet)).digest("hex")}`;
+}
+
 export function isCurrentSliceCompletionOperation(
   operationId: string,
   slice: SliceLifecycleIdentity,
@@ -404,6 +421,8 @@ export function completeSlice(input: {
   slice: SliceLifecycleIdentity;
   closeout: SliceCompletionCloseout;
   audit?: SliceLifecycleAudit;
+  /** Renders the SUMMARY and UAT carriers of the Slice row for the completion time. */
+  carriers?: (completedAt: string) => { summaryMd: string; uatMd: string };
 }): SliceCompletionReceipt {
   const slice = {
     milestoneId: requireText(input.slice.milestoneId, "milestoneId"),
@@ -418,6 +437,7 @@ export function completeSlice(input: {
       ...slice,
       operationalReadiness: input.closeout.operationalReadiness,
     });
+    if (input.carriers) setSliceCompletionCarriers({ ...slice, ...input.carriers(result.completedAt) });
     return {
       events: [{
         eventType: "slice.completed",
@@ -429,6 +449,7 @@ export function completeSlice(input: {
           completedTaskIds: result.completedTaskIds,
           cancelledTaskIds: result.cancelledTaskIds,
           proofs: result.proofs.map((proof) => ({ ...proof })),
+          testedSourceSetHash: testedSourceSetHash(result.proofs),
           q8Verdict: result.q8Verdict,
           closeout: input.closeout as unknown as DomainJsonValue,
           audit,

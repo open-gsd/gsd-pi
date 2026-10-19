@@ -56,6 +56,7 @@ When you run `/gsd debug continue <slug>`, dispatch behavior adapts to persisted
 - **Specialist review metadata** (when present): carries prior specialist context into the resumed session.
 
 Checkpoint types persisted in session artifacts:
+
 - `human-verify`
 - `human-action`
 - `decision`

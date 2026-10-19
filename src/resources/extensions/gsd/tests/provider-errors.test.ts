@@ -104,6 +104,20 @@ test("classifyError treats extra-usage phrasing as transient rate-limit (#4397)"
   assert.ok("retryAfterMs" in result && result.retryAfterMs === 60_000);
 });
 
+test("classifyError treats Anthropic subscription extra-usage 400 as transient rate-limit (#2314)", () => {
+  const result = classifyError(
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going."}}',
+  );
+  assert.ok(isTransient(result));
+  assert.equal(result.kind, "rate-limit");
+  assert.ok("retryAfterMs" in result && result.retryAfterMs === 60_000);
+});
+
+test("classifyError does not treat benign usage prose as rate-limit (#2314)", () => {
+  const result = classifyError("Review extra usage stats in the dashboard.");
+  assert.notEqual(result.kind, "rate-limit");
+});
+
 test("classifyError treats OpenRouter affordability errors as transient rate-limit class", () => {
   const result = classifyError(
     "402 This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 329.",
@@ -371,7 +385,7 @@ test("isTransientNetworkError rejects non-network errors", () => {
 
 test("getNextFallbackModel selects next fallback if current is a fallback", () => {
   const modelConfig = { primary: "model-a", fallbacks: ["model-b", "model-c"] };
-  assert.equal(getNextFallbackModel("model-b", modelConfig), "model-c");
+  assert.equal(getNextFallbackModel("model-b", modelConfig)?.id, "model-c");
 });
 
 test("getNextFallbackModel returns undefined if fallbacks exhausted", () => {
@@ -381,17 +395,45 @@ test("getNextFallbackModel returns undefined if fallbacks exhausted", () => {
 
 test("getNextFallbackModel finds current model with provider prefix", () => {
   const modelConfig = { primary: "p/model-a", fallbacks: ["p/model-b"] };
-  assert.equal(getNextFallbackModel("model-a", modelConfig), "p/model-b");
+  assert.equal(getNextFallbackModel("model-a", modelConfig)?.id, "p/model-b");
 });
 
 test("getNextFallbackModel returns primary if current is unknown", () => {
   const modelConfig = { primary: "model-a", fallbacks: ["model-b", "model-c"] };
-  assert.equal(getNextFallbackModel("model-x", modelConfig), "model-a");
+  assert.equal(getNextFallbackModel("model-x", modelConfig)?.id, "model-a");
 });
 
 test("getNextFallbackModel returns primary if current is undefined", () => {
   const modelConfig = { primary: "model-a", fallbacks: ["model-b", "model-c"] };
-  assert.equal(getNextFallbackModel(undefined, modelConfig), "model-a");
+  assert.equal(getNextFallbackModel(undefined, modelConfig)?.id, "model-a");
+});
+
+// ── getNextFallbackModel per-entry thinking (#1270) ──────────────────────────
+
+test("getNextFallbackModel surfaces the object entry's per-entry thinking (#1270)", () => {
+  const modelConfig = {
+    primary: "model-a",
+    fallbacks: ["model-b", { model: "model-c", thinking: "high" as const }],
+  };
+  assert.deepEqual(
+    getNextFallbackModel("model-a", modelConfig),
+    { id: "model-b" },
+    "plain-string entry carries no thinking",
+  );
+  assert.deepEqual(
+    getNextFallbackModel("model-b", modelConfig),
+    { id: "model-c", thinking: "high" },
+    "object entry carries its per-entry level",
+  );
+});
+
+test("getNextFallbackModel matches current model inside object entries (#1270)", () => {
+  const modelConfig = {
+    primary: "model-a",
+    fallbacks: [{ model: "model-b", thinking: "low" as const }, "model-c"],
+  };
+  assert.deepEqual(getNextFallbackModel("model-b", modelConfig), { id: "model-c" });
+  assert.deepEqual(getNextFallbackModel("model-c", modelConfig), undefined, "chain still exhausts after object entries");
 });
 
 // ── pauseAutoForProviderError ────────────────────────────────────────────────
@@ -1307,6 +1349,54 @@ test("classifyError: 'partial response received' alone is transient network", ()
   const result = classifyError("partial response received");
   assert.ok(isTransient(result), "partial response received must be transient");
   assert.equal(result.kind, "network");
+});
+
+// ── Bare status-only 400 (no diagnostic body) ────────────────────────────────
+// Observed 2026-09-11: GitHub Copilot's model router rejected an otherwise-valid
+// kimi-k3 request with a status-only "400 Bad Request" and empty body; the same
+// session succeeded on retry. The status-only form must be transient (bounded
+// same-model retry), not the `unknown` hard-pause.
+
+test("classifyError treats a status-only '400 Bad Request' as transient network", () => {
+  for (const message of ["400 Bad Request", "400 Bad Request\n", "  400  Bad Request  "]) {
+    const result = classifyError(message);
+    assert.ok(isTransient(result), `${JSON.stringify(message)} must be transient`);
+    assert.equal(result.kind, "network");
+  }
+});
+
+// Regression (2026-09-11): when the turn's errorMessage is empty/useless the
+// recovery path classifies the assistant content text, which arrives with the
+// provider adapter's "Provider error:" prefix baked in ("Provider error: 400 Bad
+// Request\n"). The anchored bare-400 regex must tolerate that wrapper (and the
+// adapter's "Provider error: : …" stray-colon form) or the status-only 400 falls
+// through to `unknown` and hard-pauses auto-mode — the exact wedge W-a8123253.
+test("classifyError treats a provider-prefixed status-only '400 Bad Request' as transient network", () => {
+  for (const message of [
+    "Provider error: 400 Bad Request",
+    "Provider error: 400 Bad Request\n",
+    "Provider error: : 400 Bad Request",
+    ": 400 Bad Request",
+  ]) {
+    const result = classifyError(message);
+    assert.ok(isTransient(result), `${JSON.stringify(message)} must be transient`);
+    assert.equal(result.kind, "network");
+  }
+});
+
+test("classifyError keeps 400 with diagnostic body on the non-transient path", () => {
+  // Known request-shape rejection phrasing stays model-error (fallback-eligible).
+  const withInvalidParams = classifyError('400 {"error":{"message":"invalid params: max_tokens"}}');
+  assert.equal(withInvalidParams.kind, "model-error");
+  // An unrecognized 400 body keeps the conservative unknown pause.
+  const unknown400 = classifyError('400 {"error":{"message":"some unrecognized rejection"}}');
+  assert.equal(unknown400.kind, "unknown");
+  assert.ok(!isTransient(unknown400), "400 with body must not be auto-retried");
+});
+
+test("classifyError keeps bare 401/403 status lines permanent", () => {
+  assert.equal(classifyError("401 Unauthorized").kind, "permanent");
+  assert.equal(classifyError("403 Forbidden").kind, "permanent");
 });
 
 // ── Context overflow / context window exceeded (#4528) ───────────────────────

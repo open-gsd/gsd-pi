@@ -6,7 +6,7 @@
  * and unknown step ID in contextFrom.
  */
 
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +14,17 @@ import { tmpdir } from "node:os";
 import { stringify } from "yaml";
 import { injectContext } from "../context-injector.ts";
 import type { WorkflowDefinition } from "../definition-loader.ts";
+import { initializeGraph, writeGraph } from "../graph.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { importRunDirectory } from "../run-manager.ts";
+
+before(() => {
+  assert.equal(openDatabase(":memory:"), true);
+});
+
+after(() => {
+  closeDatabase();
+});
 
 /** Create a temp run directory with the given definition and optional files. */
 function makeTempRun(
@@ -31,6 +42,10 @@ function makeTempRun(
       writeFileSync(absPath, content, "utf-8");
     }
   }
+
+  // The run is database rows: import the run directory.
+  writeGraph(runDir, initializeGraph(def));
+  importRunDirectory(runDir);
 
   return runDir;
 }
@@ -302,12 +317,12 @@ describe("unknown step in contextFrom", () => {
 // ─── error handling ─────────────────────────────────────────────────────
 
 describe("error handling", () => {
-  it("throws when DEFINITION.yaml is missing", () => {
+  it("throws when the run has no database rows", () => {
     const runDir = mkdtempSync(join(tmpdir(), "ci-test-nodef-"));
 
     assert.throws(
       () => injectContext(runDir, "step-1", "Some prompt"),
-      /ENOENT/,
+      /has no database rows/,
     );
   });
 });

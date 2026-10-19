@@ -2,22 +2,10 @@
 // File Purpose: Workflow DB open helpers for state derivation.
 
 import type { GSDState } from '../../types.js';
-import { getAllMilestones, isDbAvailable, isSchemaTooNewError, setMilestoneQueueOrder } from '../../gsd-db.js';
+import { isDbAvailable, isSchemaTooNewError } from '../../gsd-db.js';
 import { getWorkflowDatabasePath as getDbPath, openExistingWorkflowDatabase, resolveProjectRootDbPath, type WorkflowDatabaseOpenResult } from '../../db-workspace.js';
-import { loadQueueOrder, sortByQueueOrder } from '../../queue-order.js';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
-
-export function syncQueueOrderProjectionToDb(basePath: string): void {
-  const queueOrder = loadQueueOrder(basePath);
-  if (!queueOrder) return;
-
-  const currentIds = getAllMilestones().map((m) => m.id);
-  const desiredIds = sortByQueueOrder(currentIds, queueOrder);
-  if (currentIds.length === desiredIds.length && currentIds.every((id, i) => id === desiredIds[i])) return;
-
-  setMilestoneQueueOrder(desiredIds);
-}
 
 /**
  * Compare DB paths by canonical form: resolveProjectRootDbPath canonicalizes
@@ -40,11 +28,9 @@ function isSameOpenDatabase(currentDbPath: string | null, requestedDbPath: strin
 
 export function ensureExistingWorkflowDbOpen(
   basePath: string,
-  options: { throwOnOpenFailure?: boolean; syncQueueOrder?: boolean } = {},
+  options: { throwOnOpenFailure?: boolean } = {},
 ): boolean {
-  const syncQueueOrder = options.syncQueueOrder !== false;
   if (isDbAvailable() && isSameOpenDatabase(getDbPath(), resolveProjectRootDbPath(basePath))) {
-    if (syncQueueOrder) syncQueueOrderProjectionToDb(basePath);
     return true;
   }
   let result: WorkflowDatabaseOpenResult;
@@ -66,7 +52,6 @@ export function ensureExistingWorkflowDbOpen(
   if (!result.ok && options.throwOnOpenFailure && result.reason !== "missing-database" && result.reason !== "missing-gsd-dir") {
     throw result.error ?? new Error(`Unable to open the GSD database: ${result.reason}`);
   }
-  if (result.ok && syncQueueOrder) syncQueueOrderProjectionToDb(basePath);
   return result.ok;
 }
 

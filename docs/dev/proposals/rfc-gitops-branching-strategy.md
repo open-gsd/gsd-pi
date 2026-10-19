@@ -280,15 +280,19 @@ This can be adopted incrementally:
 ## Alternatives Considered
 
 ### Trunk-Based (Current)
+
 Pros: Simple, fast. Cons: No release stabilization, no hotfix path.
 
 ### Full Git-Flow
+
 Pros: Maximum control. Cons: Heavy — `develop`, `release`, `hotfix`, `feature` branches with strict merge rules. Overkill for a team this size.
 
 ### GitHub Flow + Release Tags
+
 Pros: Simple branching, release via tags only. Cons: No stabilization period, same forward-only problem as current.
 
 ### Release Please / Semantic Release
+
 Pros: Fully automated versioning. Cons: Less control over release timing, doesn't solve the hotfix branch problem.
 
 ## Feedback Requested

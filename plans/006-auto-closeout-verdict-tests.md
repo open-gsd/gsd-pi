@@ -63,6 +63,7 @@ export function closeUnit(request: UnitCloseoutRequest, deps: UnitCloseoutDeps =
 ```
 
 Repo conventions:
+
 - Tests use `node:test` and `node:assert/strict`.
 - Use temp directories with `mkdtempSync` and `t.after()` cleanup.
 - Git fixtures are acceptable; use the repo's git helper functions if available.
@@ -78,10 +79,12 @@ Repo conventions:
 ## Scope
 
 **In scope**:
+
 - `src/resources/extensions/gsd/tests/auto-unit-closeout.test.ts` — extend to cover `closeUnit()`.
 - Minimal test-only exports or helpers in `src/resources/extensions/gsd/unit-closeout.ts` if required.
 
 **Out of scope**:
+
 - Re-seating the Auto Closeout adapter (that is a larger refactor, plan 008 territory).
 - Changing `closeUnit()` behavior.
 - Modifying `auto-post-unit.ts` or `auto/phases.ts`.
@@ -173,6 +176,7 @@ Run `pnpm run test:unit` to ensure no regressions.
 ## STOP conditions
 
 Stop and report back if:
+
 - `closeUnit` is not exported from `unit-closeout.ts` and exporting it creates a circular dependency.
 - Creating git fixtures in the test environment fails (e.g., `git` not on PATH).
 - The test requires changes to `autoCommitCurrentBranch` or other production code.

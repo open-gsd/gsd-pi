@@ -31,6 +31,7 @@ import { deriveState, invalidateStateCache } from '../state.ts';
 import { claimTaskAttempt, settleTaskAttempt } from '../task-execution-domain-operation.ts';
 import { recordTaskTechnicalVerdict } from '../task-verification-domain-operation.ts';
 import { completeSlice } from '../slice-lifecycle-domain-operation.ts';
+import { assertWorkerRendersStaleProjection } from './projection-render-failure-gate.ts';
 
 function handlePlanSlice(
   params: Parameters<typeof handlePlanSliceWithInvocation>[0],
@@ -494,7 +495,7 @@ test('handlePlanSlice renders plan artifacts under worktree-local .gsd while usi
     const worktreePlan = join(worktree, '.gsd', 'phases', '01-test', '01-02-PLAN.md');
     const projectPlan = join(base, '.gsd', 'phases', '01-test', '01-02-PLAN.md');
     assert.ok(existsSync(worktreePlan), 'slice plan should be rendered to worktree-local .gsd');
-    assert.ok(!existsSync(projectPlan), 'slice plan should not be rendered to project .gsd');
+    assert.ok(existsSync(projectPlan), 'the Projection Worker also renders the project root, so it is not left stale');
     assert.equal(result.planPath, realpathSync(worktreePlan));
   } finally {
     cleanup(base);
@@ -650,8 +651,8 @@ test('handlePlanSlice commits sketch refinement when render fails before artifac
     mkdirSync(join(base, '.gsd', 'phases', '01-test', '01-02-PLAN.md'), { recursive: true });
 
     const result = await handlePlanSlice(validParams(), base);
-    assert.ok('error' in result);
-    assert.match(result.error, /render failed:/);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
     assert.equal(getSlice('M001', 'S02')?.is_sketch, 0, 'projection failure must not compensate committed planning authority');
   } finally {
     cleanup(base);
@@ -1000,7 +1001,7 @@ test('handlePlanSlice rejects missing parent slice', async () => {
   }
 });
 
-test('handlePlanSlice surfaces render failures without changing parse-visible task-plan state for the failing task', async () => {
+test('handlePlanSlice returns the committed plan with a stale flag when the render fails', async () => {
   const base = makeTmpBase();
   openDatabase(join(base, '.gsd', 'gsd.db'));
 
@@ -1013,11 +1014,15 @@ test('handlePlanSlice surfaces render failures without changing parse-visible ta
     mkdirSync(failingTaskPlanPath, { recursive: true });
 
     const result = await handlePlanSlice(validParams(), base);
-    assert.ok('error' in result);
-    assert.match(result.error, /render failed:/);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
+    assert.equal(result.planPath, '');
 
     assert.ok(existsSync(failingTaskPlanPath), 'failing task plan path should remain the blocking directory');
     assert.equal(getTask('M001', 'S02', 'T01')?.description, 'Implement the slice planning handler.');
+
+    rmSync(failingTaskPlanPath, { recursive: true });
+    await assertWorkerRendersStaleProjection(base, failingTaskPlanPath);
   } finally {
     cleanup(base);
   }
@@ -1208,6 +1213,47 @@ test('handlePlanSlice rejects omitted completed tasks without changing slice or 
     assert.deepEqual(getSliceTasks('M001', 'S02'), tasksBefore);
     assert.deepEqual(getGateResults('M001', 'S02', 'task'), gatesBefore);
     assert.match(readFileSync(slicePlanPathR, 'utf-8'), /T04/, 'completed task T04 should remain in plan after rejected replan');
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('an override rewrite on a slice with a completed task uses gsd_plan_task and a task-free gsd_plan_slice', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+    const { tasks, ...sliceFields } = validParams();
+    const first = await handlePlanSlice({ ...sliceFields, tasks }, base);
+    assert.ok(!('error' in first), `unexpected error: ${'error' in first ? first.error : ''}`);
+    completeTask('T01', '2026-05-12T00:00:00.000Z');
+    const completedBefore = getTask('M001', 'S02', 'T01');
+
+    // This is the path the rewrite-docs prompt names: slice fields without a
+    // task list, then one gsd_plan_task call per rewritten or new task.
+    const slice = await handlePlanSlice({ ...sliceFields, goal: 'Goal after the override.' }, base);
+    assert.ok(!('error' in slice), `unexpected error: ${'error' in slice ? slice.error : ''}`);
+    const pendingTask = { milestoneId: 'M001', sliceId: 'S02', ...tasks[1] };
+    const rewritten = await handlePlanTask({ ...pendingTask, title: 'Task after the override' }, base);
+    assert.ok(!('error' in rewritten), `unexpected error: ${'error' in rewritten ? rewritten.error : ''}`);
+    const added = await handlePlanTask({ ...pendingTask, taskId: 'T03', title: 'New task from the override' }, base);
+    assert.ok(!('error' in added), `unexpected error: ${'error' in added ? added.error : ''}`);
+
+    assert.equal(getSlice('M001', 'S02')?.goal, 'Goal after the override.');
+    assert.deepEqual(getSliceTasks('M001', 'S02').map((task) => [task.id, task.title, task.status]), [
+      ['T01', 'Write slice handler', 'complete'],
+      ['T02', 'Task after the override', 'pending'],
+      ['T03', 'New task from the override', 'pending'],
+    ]);
+    assert.deepEqual(getTask('M001', 'S02', 'T01'), completedBefore, 'the completed task must stay as it was');
+
+    // A task list is refused whether it keeps or drops the completed task.
+    for (const taskList of [tasks, [tasks[1]]]) {
+      const refused = await handlePlanSlice({ ...sliceFields, tasks: taskList }, base);
+      assert.ok('error' in refused, 'a task list must be refused when a task is complete');
+      assert.match(refused.error, /completed task T01/);
+    }
   } finally {
     cleanup(base);
   }
@@ -1481,7 +1527,7 @@ function runTaskToCompleted(taskId: string): void {
       endedAt: '2026-09-10T00:01:01.000Z',
       exitCode: 0,
       observation: 'passed',
-      durableOutputRef: `db://fixture/${taskId}/verification`,
+      durableOutputRef: `db://host-verification/${attemptId}`,
       environment: { runner: 'node-test', fixture: 'plan-slice-replay' },
     },
   });

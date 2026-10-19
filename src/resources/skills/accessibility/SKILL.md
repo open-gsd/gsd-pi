@@ -35,6 +35,7 @@ Comprehensive accessibility guidelines based on WCAG 2.1 and Lighthouse accessib
 ### Text alternatives (1.1)
 
 **Images require alt text:**
+
 ```html
 <!-- ❌ Missing alt -->
 <img src="chart.png">
@@ -56,6 +57,7 @@ Comprehensive accessibility guidelines based on WCAG 2.1 and Lighthouse accessib
 ```
 
 **Icon buttons need accessible names:**
+
 ```html
 <!-- ❌ No accessible name -->
 <button><svg><!-- menu icon --></svg></button>
@@ -73,6 +75,7 @@ Comprehensive accessibility guidelines based on WCAG 2.1 and Lighthouse accessib
 ```
 
 **Visually hidden class:**
+
 ```css
 .visually-hidden {
   position: absolute;
@@ -116,6 +119,7 @@ Comprehensive accessibility guidelines based on WCAG 2.1 and Lighthouse accessib
 ```
 
 **Don't rely on color alone:**
+
 ```html
 <!-- ❌ Only color indicates error -->
 <input class="error-border">
@@ -158,6 +162,7 @@ Comprehensive accessibility guidelines based on WCAG 2.1 and Lighthouse accessib
 ### Keyboard accessible (2.1)
 
 **All functionality must be keyboard accessible:**
+
 ```javascript
 // ❌ Only handles click
 element.addEventListener('click', handleAction);
@@ -173,6 +178,7 @@ element.addEventListener('keydown', (e) => {
 ```
 
 **No keyboard traps:**
+
 ```javascript
 // Modal focus management
 function openModal(modal) {
@@ -399,6 +405,7 @@ form.addEventListener('submit', (e) => {
 ### ARIA usage (4.1.2)
 
 **Prefer native elements:**
+
 ```html
 <!-- ❌ ARIA role on div -->
 <div role="button" tabindex="0">Click me</div>
@@ -414,6 +421,7 @@ form.addEventListener('submit', (e) => {
 ```
 
 **When ARIA is needed:**
+
 ```html
 <!-- Custom tabs component -->
 <div role="tablist" aria-label="Product information">
@@ -460,6 +468,7 @@ function showNotification(message, type = 'polite') {
 ## Testing checklist
 
 ### Automated testing
+
 ```bash
 # Lighthouse accessibility audit
 npx lighthouse https://example.com --only-categories=accessibility
@@ -494,6 +503,7 @@ axe https://example.com
 ## Common issues by impact
 
 ### Critical (fix immediately)
+
 1. Missing form labels
 2. Missing image alt text
 3. Insufficient color contrast
@@ -501,6 +511,7 @@ axe https://example.com
 5. No focus indicators
 
 ### Serious (fix before launch)
+
 1. Missing page language
 2. Missing heading structure
 3. Non-descriptive link text
@@ -508,6 +519,7 @@ axe https://example.com
 5. Missing skip links
 
 ### Moderate (fix soon)
+
 1. Missing ARIA labels on icons
 2. Inconsistent navigation
 3. Missing error identification

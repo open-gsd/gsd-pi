@@ -1,6 +1,6 @@
 // GSD MCP Server — .gsd/ directory resolution
 
-import { existsSync, statSync, readdirSync } from 'node:fs';
+import { existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -85,18 +85,19 @@ function readWithMtimeCache<V>(
 }
 
 const milestoneIdsCache = new Map<string, MtimeEntry<string[]>>();
+const phaseIdsCache = new Map<string, MtimeEntry<string[]>>();
 const milestoneDirCache = new Map<string, MtimeEntry<string | null>>();
 const sliceIdsCache = new Map<string, MtimeEntry<string[]>>();
 const sliceDirCache = new Map<string, MtimeEntry<string | null>>();
-const taskFilesCache = new Map<string, MtimeEntry<Array<{ id: string; hasPlan: boolean; hasSummary: boolean }>>>();
+const taskFilesCache = new Map<string, MtimeEntry<Array<{ id: string; hasPlan: boolean; hasSummary: boolean; done?: boolean }>>>();
 
 function cloneStringArray(value: string[]): string[] {
   return Array.from(value);
 }
 
 function cloneTaskFiles(
-  value: Array<{ id: string; hasPlan: boolean; hasSummary: boolean }>,
-): Array<{ id: string; hasPlan: boolean; hasSummary: boolean }> {
+  value: Array<{ id: string; hasPlan: boolean; hasSummary: boolean; done?: boolean }>,
+): Array<{ id: string; hasPlan: boolean; hasSummary: boolean; done?: boolean }> {
   return value.map((task) => ({ ...task }));
 }
 
@@ -104,6 +105,7 @@ function cloneTaskFiles(
 export function _resetReaderCaches(): void {
   gsdRootCache.clear();
   milestoneIdsCache.clear();
+  phaseIdsCache.clear();
   milestoneDirCache.clear();
   sliceIdsCache.clear();
   sliceDirCache.clear();
@@ -174,30 +176,85 @@ export function milestonesDir(gsdRoot: string): string {
 }
 
 /**
- * Find all milestone directory IDs (M001, M002, etc.).
- * Handles both bare (M001/) and descriptor (M001-FLIGHT-SIM/) naming.
+ * Numeric phase for a milestone id ("M001" → 1, "M010" → 10). Mirrors the
+ * extension's milestoneIdToPhaseNum (src/resources/extensions/gsd/layout-policy.ts)
+ * so both tools read the same phases/NN-slug/ layout.
  */
-export function findMilestoneIds(gsdRoot: string): string[] {
-  const dir = milestonesDir(gsdRoot);
-  if (!existsSync(dir)) return [];
-
-  return readWithMtimeCache(milestoneIdsCache, dir, dir, () => {
-    const entries = readdirSync(dir, { withFileTypes: true });
-    const ids: string[] = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const match = entry.name.match(/^(M\d+)/);
-      if (match) ids.push(match[1]);
-    }
-    return ids.sort();
-  }, cloneStringArray, cloneStringArray);
+function milestonePhaseNum(milestoneId: string): number | null {
+  const m = milestoneId.match(/^M0*(\d+)/i);
+  return m ? Number.parseInt(m[1]!, 10) : null;
 }
 
 /**
- * Resolve the actual directory name for a milestone ID.
- * M001 might live in M001/ or M001-SOME-DESCRIPTOR/.
+ * Find all milestone directory IDs (M001, M002, etc.).
+ * Scans both layouts the product writes:
+ *   * legacy milestones/ — bare (M001/) and descriptor (M001-FLIGHT-SIM/) dirs
+ *   * flat-phase phases/ — NN-slug dirs ("01-foundation" → "M001")
+ */
+export function findMilestoneIds(gsdRoot: string): string[] {
+  const ids = new Set<string>();
+
+  const dir = milestonesDir(gsdRoot);
+  if (existsSync(dir)) {
+    for (const id of readWithMtimeCache(milestoneIdsCache, dir, dir, () => {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      const found: string[] = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const match = entry.name.match(/^(M\d+)/);
+        if (match) found.push(match[1]);
+      }
+      return found;
+    }, cloneStringArray, cloneStringArray)) {
+      ids.add(id);
+    }
+  }
+
+  const phasesDir = join(gsdRoot, 'phases');
+  if (existsSync(phasesDir)) {
+    for (const id of readWithMtimeCache(phaseIdsCache, phasesDir, phasesDir, () => {
+      const entries = readdirSync(phasesDir, { withFileTypes: true });
+      const found: string[] = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const match = entry.name.match(/^(\d+)-/);
+        if (match) found.push(`M${match[1]!.padStart(3, '0')}`);
+      }
+      return found;
+    }, cloneStringArray, cloneStringArray)) {
+      ids.add(id);
+    }
+  }
+
+  return Array.from(ids).sort();
+}
+
+/**
+ * Resolve the actual directory for a milestone ID across both layouts.
+ * Flat-phase (phases/NN-slug/) wins over legacy (milestones/M001/), mirroring
+ * the extension resolver's priority — a milestone present in both during a
+ * partial migration resolves to its phases/ dir.
  */
 export function resolveMilestoneDir(gsdRoot: string, milestoneId: string): string | null {
+  const phaseNum = milestonePhaseNum(milestoneId);
+  if (phaseNum !== null) {
+    const phasesDir = join(gsdRoot, 'phases');
+    if (existsSync(phasesDir)) {
+      const flat = readWithMtimeCache(milestoneDirCache, `${phasesDir} ${milestoneId}`, phasesDir, () => {
+        const entries = readdirSync(phasesDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const m = entry.name.match(/^(\d+)-/);
+          if (m && Number.parseInt(m[1]!, 10) === phaseNum) {
+            return join(phasesDir, entry.name);
+          }
+        }
+        return null;
+      });
+      if (flat) return flat;
+    }
+  }
+
   const dir = milestonesDir(gsdRoot);
   if (!existsSync(dir)) return null;
 
@@ -219,8 +276,8 @@ export function resolveMilestoneDir(gsdRoot: string, milestoneId: string): strin
 }
 
 /**
- * Resolve a milestone-level file (M001-ROADMAP.md, M001-CONTEXT.md, etc.).
- * Handles various naming conventions.
+ * Resolve a milestone-level file (M001-ROADMAP.md, 01-ROADMAP.md, etc.).
+ * Handles both layouts' naming conventions.
  */
 export function resolveMilestoneFile(gsdRoot: string, milestoneId: string, suffix: string): string | null {
   const mDir = resolveMilestoneDir(gsdRoot, milestoneId);
@@ -228,17 +285,49 @@ export function resolveMilestoneFile(gsdRoot: string, milestoneId: string, suffi
 
   const dirName = basename(mDir);
 
-  // Try: M001-ROADMAP.md, then DIRNAME-ROADMAP.md
+  // Try: M001-ROADMAP.md, DIRNAME-ROADMAP.md, flat-phase 01-ROADMAP.md, ROADMAP.md
   const candidates = [
     join(mDir, `${milestoneId}-${suffix}.md`),
     join(mDir, `${dirName}-${suffix}.md`),
-    join(mDir, `${suffix}.md`),
   ];
+  const phaseNum = milestonePhaseNum(milestoneId);
+  if (phaseNum !== null) {
+    candidates.push(join(mDir, `${String(phaseNum).padStart(2, '0')}-${suffix}.md`));
+  }
+  candidates.push(join(mDir, `${suffix}.md`));
 
   for (const c of candidates) {
     if (existsSync(c)) return c;
   }
   return null;
+}
+
+/**
+ * Slice segment inside flat-phase plan file names ("01" for S01, "R01" for a
+ * remediation slice). Mirrors the extension's slicePlanSegment
+ * (src/resources/extensions/gsd/layout-policy.ts) so both read the same files.
+ */
+function slicePlanSegment(sliceId: string): string {
+  const m = sliceId.match(/^S0*(\d+)(?:-.*)?$/i);
+  if (m) return String(Number.parseInt(m[1]!, 10)).padStart(2, '0');
+  if (/^\d+$/.test(sliceId)) return String(Number.parseInt(sliceId, 10)).padStart(2, '0');
+  return sliceId;
+}
+
+/** Inverse of slicePlanSegment: flat-phase file segment back to a slice id. */
+function sliceSegmentToId(segment: string): string {
+  return /^\d+$/.test(segment) ? `S${segment}` : canonicalSliceId(segment);
+}
+
+/**
+ * Canonical slice id ("s1" → "S01", "S01-replan" → "S01-replan" is NOT
+ * canonicalized beyond case). Mirrors the writer, which pads canonical
+ * S-ids to two digits, so filename-derived ids from different sources
+ * (plan segments vs artifact prefixes) reconcile to one slice.
+ */
+function canonicalSliceId(id: string): string {
+  const m = id.match(/^S0*(\d+)$/i);
+  return m ? `S${m[1]!.padStart(2, '0')}` : id.toUpperCase();
 }
 
 /** Find all slice IDs within a milestone (S01, S02, etc.) */
@@ -247,17 +336,34 @@ export function findSliceIds(gsdRoot: string, milestoneId: string): string[] {
   if (!mDir) return [];
 
   const slicesDir = join(mDir, 'slices');
-  if (!existsSync(slicesDir)) return [];
+  if (existsSync(slicesDir)) {
+    return readWithMtimeCache(sliceIdsCache, slicesDir, slicesDir, () => {
+      const entries = readdirSync(slicesDir, { withFileTypes: true });
+      const ids: string[] = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const match = entry.name.match(/^(S\d+)/);
+        if (match) ids.push(match[1]);
+      }
+      return ids.sort();
+    }, cloneStringArray, cloneStringArray);
+  }
 
-  return readWithMtimeCache(sliceIdsCache, slicesDir, slicesDir, () => {
-    const entries = readdirSync(slicesDir, { withFileTypes: true });
-    const ids: string[] = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const match = entry.name.match(/^(S\d+)/);
-      if (match) ids.push(match[1]);
+  // Flat-phase layout: slice plan/summary files (NN-MM-SUFFIX.md) and task
+  // artifacts (SS-TNN-SUFFIX.md) sit directly under the milestone dir.
+  return readWithMtimeCache(sliceIdsCache, `${slicesDir} flat`, mDir, () => {
+    const ids = new Set<string>();
+    for (const entry of readdirSync(mDir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const plan = entry.name.match(/^\d+-(\d{2,}|[A-Z]\d*)-(?:PLAN|SUMMARY)\.md$/i);
+      if (plan) {
+        ids.add(sliceSegmentToId(plan[1]!));
+        continue;
+      }
+      const task = entry.name.match(/^([A-Z]\d+)-T\d+-(?:PLAN|SUMMARY)\.md$/i);
+      if (task) ids.add(canonicalSliceId(task[1]!));
     }
-    return ids.sort();
+    return Array.from(ids).sort();
   }, cloneStringArray, cloneStringArray);
 }
 
@@ -287,18 +393,33 @@ export function resolveSliceDir(gsdRoot: string, milestoneId: string, sliceId: s
 export function resolveSliceFile(
   gsdRoot: string, milestoneId: string, sliceId: string, suffix: string,
 ): string | null {
-  const sDir = resolveSliceDir(gsdRoot, milestoneId, sliceId);
-  if (!sDir) return null;
+  const mDir = resolveMilestoneDir(gsdRoot, milestoneId);
+  if (!mDir) return null;
 
-  const dirName = basename(sDir);
-  const candidates = [
-    join(sDir, `${sliceId}-${suffix}.md`),
-    join(sDir, `${dirName}-${suffix}.md`),
-    join(sDir, `${suffix}.md`),
-  ];
+  const slicesDir = join(mDir, 'slices');
+  if (existsSync(slicesDir)) {
+    const sDir = resolveSliceDir(gsdRoot, milestoneId, sliceId);
+    if (!sDir) return null;
 
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
+    const dirName = basename(sDir);
+    const candidates = [
+      join(sDir, `${sliceId}-${suffix}.md`),
+      join(sDir, `${dirName}-${suffix}.md`),
+      join(sDir, `${suffix}.md`),
+    ];
+
+    for (const c of candidates) {
+      if (existsSync(c)) return c;
+    }
+    return null;
+  }
+
+  // Flat-phase layout: NN-MM-SUFFIX.md directly under the milestone dir
+  // (mirrors the extension's slicePlanFileName).
+  const phaseNum = milestonePhaseNum(milestoneId);
+  if (phaseNum !== null) {
+    const flat = join(mDir, `${String(phaseNum).padStart(2, '0')}-${slicePlanSegment(sliceId)}-${suffix}.md`);
+    if (existsSync(flat)) return flat;
   }
   return null;
 }
@@ -306,25 +427,94 @@ export function resolveSliceFile(
 /** Find all task files in a slice's tasks/ directory */
 export function findTaskFiles(
   gsdRoot: string, milestoneId: string, sliceId: string,
-): Array<{ id: string; hasPlan: boolean; hasSummary: boolean }> {
-  const sDir = resolveSliceDir(gsdRoot, milestoneId, sliceId);
-  if (!sDir) return [];
+): Array<{ id: string; hasPlan: boolean; hasSummary: boolean; done?: boolean }> {
+  const mDir = resolveMilestoneDir(gsdRoot, milestoneId);
+  if (!mDir) return [];
 
-  const tasksDir = join(sDir, 'tasks');
-  if (!existsSync(tasksDir)) return [];
+  const slicesDir = join(mDir, 'slices');
+  if (existsSync(slicesDir)) {
+    const sDir = resolveSliceDir(gsdRoot, milestoneId, sliceId);
+    if (!sDir) return [];
+    const tasksDir = join(sDir, 'tasks');
+    if (!existsSync(tasksDir)) return [];
 
-  return readWithMtimeCache(taskFilesCache, tasksDir, tasksDir, () => {
-    const files = readdirSync(tasksDir);
-    const taskMap = new Map<string, { hasPlan: boolean; hasSummary: boolean }>();
+    return readWithMtimeCache(taskFilesCache, tasksDir, tasksDir, () => {
+      const files = readdirSync(tasksDir);
+      const taskMap = new Map<string, { hasPlan: boolean; hasSummary: boolean }>();
 
-    for (const f of files) {
-      const match = f.match(/^(T\d+).*-(PLAN|SUMMARY)\.md$/i);
+      for (const f of files) {
+        const match = f.match(/^(T\d+).*-(PLAN|SUMMARY)\.md$/i);
+        if (!match) continue;
+        const [, id, type] = match;
+        const existing = taskMap.get(id) ?? { hasPlan: false, hasSummary: false };
+        if (type.toUpperCase() === 'PLAN') existing.hasPlan = true;
+        if (type.toUpperCase() === 'SUMMARY') existing.hasSummary = true;
+        taskMap.set(id, existing);
+      }
+
+      return Array.from(taskMap.entries())
+        .map(([id, info]) => ({ id, ...info }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }, cloneTaskFiles, cloneTaskFiles);
+  }
+
+  // Flat-phase layout: task artifacts (SS-TNN-SUFFIX.md) sit directly under
+  // the milestone dir, prefixed with the slice id. The slice's plan file is
+  // the task state carrier (tasks are checkboxes inside it, not separate
+  // files), so checkbox tasks are merged into the inventory — consumers
+  // counting only artifact files would report pending tasks as absent and
+  // half-done slices as done. `done` carries the checkbox state so
+  // artifact-less completed tasks are not miscounted as pending.
+  const sliceKey = canonicalSliceId(sliceId);
+  let planKey = '';
+  const phaseNum = milestonePhaseNum(milestoneId);
+  const planPath = phaseNum !== null
+    ? join(mDir, `${String(phaseNum).padStart(2, '0')}-${slicePlanSegment(sliceId)}-PLAN.md`)
+    : null;
+  if (planPath && existsSync(planPath)) {
+    // Plan content edits do not touch the directory mtime — fold the plan
+    // file's own mtime into the cache key so edits invalidate.
+    try {
+      planKey = ` plan:${statSync(planPath).mtimeMs}`;
+    } catch {
+      planKey = '';
+    }
+  }
+  return readWithMtimeCache(taskFilesCache, `${mDir} ${sliceKey} flat${planKey}`, mDir, () => {
+    const taskMap = new Map<string, { hasPlan: boolean; hasSummary: boolean; done?: boolean }>();
+
+    for (const f of readdirSync(mDir)) {
+      const match = f.match(/^(.+?)-(T\d+)-(PLAN|SUMMARY)\.md$/i);
       if (!match) continue;
-      const [, id, type] = match;
+      if (canonicalSliceId(match[1]!) !== sliceKey) continue;
+      const id = match[2]!.toUpperCase();
+      const type = match[3]!.toUpperCase();
       const existing = taskMap.get(id) ?? { hasPlan: false, hasSummary: false };
-      if (type.toUpperCase() === 'PLAN') existing.hasPlan = true;
-      if (type.toUpperCase() === 'SUMMARY') existing.hasSummary = true;
+      if (type === 'PLAN') existing.hasPlan = true;
+      if (type === 'SUMMARY') existing.hasSummary = true;
       taskMap.set(id, existing);
+    }
+
+    // Merge checkbox tasks from the slice's flat plan file (NN-MM-PLAN.md).
+    // Renderer plans carry tasks in an authoritative <tasks> block — scope
+    // the scan to it when present so task-shaped lines elsewhere in the
+    // document cannot add phantom tasks or flip checked state. Legacy plans
+    // have no block; scan the whole file for their checkbox lines.
+    if (planPath && existsSync(planPath)) {
+      const plan = readFileSync(planPath, 'utf-8');
+      const block = plan.match(/<tasks>\s*\n([\s\S]*?)\n\s*<\/tasks>/);
+      const scan = block ? block[1]! : plan;
+      // Both task line shapes: renderer "- [x] **T01**: Title" and legacy
+      // "- [x] **T01: Title**" — id and checked state are all that is needed.
+      const taskRe = /^-\s+\[([ xX])\]\s+\*\*(T\d+)(?:\*\*|:)/gm;
+      let match: RegExpExecArray | null;
+      while ((match = taskRe.exec(scan)) !== null) {
+        const id = match[2]!.toUpperCase();
+        const existing = taskMap.get(id) ?? { hasPlan: false, hasSummary: false };
+        existing.hasPlan = true;
+        existing.done = match[1] !== ' ';
+        taskMap.set(id, existing);
+      }
     }
 
     return Array.from(taskMap.entries())

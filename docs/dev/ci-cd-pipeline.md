@@ -90,10 +90,11 @@ docker run --rm -v $(pwd):/workspace ghcr.io/open-gsd/gsd-pi:<version> --version
 **CI refactor (2026-05):** Single `fast-gates` job, Linux build/test consolidation, path-gated Windows/Docker checks, and coverage moved out of the core CI path. Local parity: `verify:fast`, `verify:pr` (fast loop), **`verify:merge`** (PR blocking). See [Test confidence stack](./test-confidence-stack.md).
 
 **Publish workflow hardening:**
+
 - **Shallow clones** — downstream jobs use shallow checkout + shared build artifacts
 - **pnpm cache** — the prerelease publish, prerelease verify, and production release jobs in `npm-publish.yml` use `cache: pnpm` on `setup-node`, saving ~1-2 min per job on repeat runs
-- **Exponential backoff** — npm registry propagation waits use exponential backoff (10s → 20s → 40s → 60s cap in `npm-publish.yml`; 5s → 30s cap for native package verification) instead of fixed sleeps
-- **Concurrent-publish guard** — every `npm publish` step treats "cannot publish over the previously published version" as an idempotent skip, but only after re-reading the dist-tag; if the tag does not point at the expected version the job fails loudly
+- **Bounded propagation wait** — the shared publisher waits up to 20 minutes for transient metadata, tarball, or dist-tag visibility, with 5s exponential backoff capped at 30s and progress logs. `NPM_PUBLISH_VERIFY_TIMEOUT_MS` can configure the deadline. Each verification npm call is limited to the remaining budget (at most five minutes). Authentication errors, invalid identity metadata, integrity mismatches, and different downloaded bytes remain terminal. The loop never republishes.
+- **Artifact identity guard** — main, prerelease, workspace, and native packages are packed once with lifecycle scripts disabled and published from that exact tarball. `scripts/publish-npm-package.mjs` accepts an existing version or concurrent publish only when the requested dist-tag, registry SHA-512 integrity, and downloaded tarball bytes all match the intended artifact. Fresh publishes pass the same check. Registry errors are not treated as absence; missing or ambiguous integrity fails closed. `gitHead` and provenance source metadata are not substitutes for artifact identity. A rebuilt artifact that differs, even at the same source commit, requires a new release version.
 - **dist-tag mutation is not automated** — npm trusted publishing authenticates `npm publish`, not dist-tag moves. When a version already exists and the tag points elsewhere, the workflow stops and prints the manual escape hatch: `npm dist-tag add @opengsd/gsd-pi@<version> <channel>`
 - **Security hardening** — `${{ }}` expressions are passed through `env:` variables rather than interpolated directly into `run:` blocks, to prevent command injection vectors
 - **Merge-queue PR uses `RELEASE_PAT`** — `GITHUB_TOKEN` cannot create PRs on this repo. The GitHub Release is created after the tag and before that PR so a PR-create failure cannot leave npm published with no GitHub Release
@@ -154,7 +155,7 @@ Content inside fenced code blocks (` ``` `) is excluded — patterns in code exa
 - **Native platform packages** (`npm run verify:native-platform-packages`) and **package validation** (`npm run validate-pack`)
 - **Live regression tests** (`npm run test:live-regression`) — against the installed prerelease binary, and again against the release build in `prod-release`
 - **Auto-mode acceptance bed** (`npm run test:auto-acceptance`) — a blocking `prerelease-verify` gate against the globally installed published binary; `channel=latest` must pass this gate on `@dev` before production release planning can begin
-- **Live LLM tests** (`npm run test:live`, `npm run test:live-workflow`) — `prod-release` only, `continue-on-error: true` (non-blocking warnings)
+- **Live LLM tests** — `prod-release` only, opt-in with `run_live_tests=true`. `npm run test:live` (provider round trips) is `continue-on-error: true` (non-blocking warnings). `npm run test:live-workflow` (a real agent through the built release) blocks the release when it fails; it runs before any production publish step
 - **Release verification** (`node scripts/verify-npm-release.mjs <version>`) — final gate confirming the main, engine, and workspace packages are all on npm at the release version before the tag is pushed
 
 ### Publishing a Prerelease (`@dev` / `@next`)
@@ -206,7 +207,7 @@ For `@dev` or `@next`, roll back the same way (`npm dist-tag add`) or re-run **N
 | Secret: `NPM_TOKEN` | Not required for trusted publishing; set for token-fallback bootstrap/manual native publishes (`publish_auth=token`) |
 | Secret: `RELEASE_PAT` | Prod release checkout, tag push, and the merge-queue version-bump PR when branch rules reject a direct push to `main`. `GITHUB_TOKEN` cannot create PRs on this repo. |
 | Secret: `ANTHROPIC_API_KEY` | Prod environment only (non-blocking live LLM tests) |
-| Secret: `OPENAI_API_KEY` | Prod environment only (non-blocking live LLM tests) |
+| Secret: `OPENAI_API_KEY` | Prod environment only (non-blocking provider round-trip step and blocking live workflow step) |
 | Secret: `DISCORD_CHANGELOG_WEBHOOK` | Optional — release announcement; the step tolerates a missing webhook |
 | GHCR | Enabled for the `open-gsd` org |
 
@@ -228,7 +229,7 @@ Use this when any `@opengsd/engine-*` package is missing from npm (today: `@open
 5. **Then** configure trusted publishing on each package as described below.
 6. Re-run **NPM Publish** with the desired channel.
 
-The publish step skips packages already on npm and attempts all five platforms before failing, so one error does not leave the rest unpublished.
+The publish step reuses only byte-identical packages already on npm and attempts all five platforms before failing, so one error does not leave the rest unattempted. An identity mismatch blocks the release; do not move a tag to bless different bytes.
 
 #### Trusted publishing (after first publish)
 
@@ -277,3 +278,13 @@ The prerelease version stamp is produced by `npm run pipeline:version-stamp`;
 platform package versions are synced by `npm run sync-platform-versions`.
 
 Old `-dev.` versions are removed weekly by `cleanup-dev-versions.yml` (30-day retention).
+
+Paid live-provider release tests are opt-in: dispatch **NPM Publish** with `run_live_tests=true` only when those calls are authorized. The default is false; deterministic release regression and acceptance checks still run.
+
+### Recover a dev artifact after registry validation
+
+If a successful upload outlives the verification deadline, do not republish the version. Once npm exposes it, `resume_prerelease_run` selects a separate verification-only path for `channel=latest`. It requires the original completed main workflow attempt, actual checkout and stamped version evidence, and current main at the same full source SHA. GitHub CLI cryptographically verifies the downloaded tarball's npm Sigstore provenance, certificate source/workflow/run identity, subject SHA-512, and signed invocation. Missing, ambiguous, or mismatched evidence fails closed.
+
+The recovered tarball and evidence are retained for 14 days. The normal prerelease tests install that exact tarball; production planning must still use the recovered source, and the production approval and source guards remain. No comparison against the lost original runner tarball is claimed. This path never calls the publication helper or changes its exact-byte retry contract.
+
+For a one-time continuation whose workflow code is on a reviewed branch, leave main at the authenticated application source and dispatch `npm-publish.yml` on that branch after its required CI passes. Do not merge the continuation branch before completing the pinned release. The `registry_verification_timeout_ms` input allows a bounded two-hour wait (7200000) for subsequent newly published packages undergoing npm validation; it never triggers another publication attempt. Paid provider tests remain opt-in.

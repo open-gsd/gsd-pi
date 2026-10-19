@@ -10,9 +10,12 @@ import {
   getTask,
   isDbAvailable,
   openDatabase,
+  pruneArtifactRows,
+  readDomainOperationFence,
   _setStartupSchemaDetectionForTest,
 } from "../gsd-db.ts";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { noteSessionRead, runInToolSession } from "../db/domain-operation.ts";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { filterDoctorIssues } from "../doctor-format.ts";
@@ -20,7 +23,7 @@ import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import { runGSDDoctor } from "../doctor.ts";
 import { MEMORIES_FTS_REBUILT_KEY } from "../db-memory-fts-schema.ts";
 import { getProjectGSDPreferencesPath } from "../preferences.ts";
-import { appendEvent } from "../workflow-events.ts";
+import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.ts";
 import { renderPlanFromDb, renderRoadmapFromDb } from "../markdown-renderer.ts";
 import { openWorkflowDatabase } from "../db-workspace.ts";
 
@@ -238,92 +241,6 @@ test("checkEngineHealth reports checkbox divergence against DB status", async (t
   );
 });
 
-test("checkEngineHealth keeps PLAN checkbox divergence after stale projection flush", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-checkbox-plan-drift-"));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-
-  const gsdDir = join(base, ".gsd");
-  mkdirSync(gsdDir, { recursive: true });
-
-  openDatabase(join(gsdDir, "gsd.db"));
-  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [], sequence: 1 });
-  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task", status: "complete", sequence: 1 });
-
-  const roadmap = await renderRoadmapFromDb(base, "M001");
-  if ("skipped" in roadmap) assert.fail("planned milestone should render a roadmap");
-  const plan = await renderPlanFromDb(base, "M001", "S01");
-
-  writeFileSync(roadmap.roadmapPath, readFileSync(roadmap.roadmapPath, "utf-8").replace("- [ ] **S01:", "- [x] **S01:"), "utf-8");
-  writeFileSync(plan.planPath, readFileSync(plan.planPath, "utf-8").replace("- [x] **T01**:", "- [ ] **T01**:"), "utf-8");
-  appendEvent(base, {
-    cmd: "complete-task",
-    params: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
-    ts: "2999-01-01T00:00:00.000Z",
-    actor: "agent",
-  });
-
-  const issues: any[] = [];
-  const fixes: string[] = [];
-  await checkEngineHealth(base, issues, fixes);
-
-  const divergences = issues.filter((issue) => issue.code === "checkbox_db_status_divergence");
-  assert.deepEqual(
-    divergences.map((issue) => issue.unitId),
-    ["M001/S01/T01"],
-    "stale ROADMAP divergence is cleared after re-render, but stale PLAN task divergence remains",
-  );
-  assert.ok(fixes.includes("re-rendered stale projections for M001"));
-  assert.match(readFileSync(plan.planPath, "utf-8"), /- \[ \] \*\*T01\*\*:/);
-});
-
-test("checkEngineHealth retains ROADMAP divergence when projection repair remains stale", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-roadmap-repair-stale-"));
-  const gsdDir = join(base, ".gsd");
-  mkdirSync(gsdDir, { recursive: true });
-  openDatabase(join(gsdDir, "gsd.db"));
-  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
-  insertSlice({
-    id: "S01",
-    milestoneId: "M001",
-    title: "Slice",
-    status: "pending",
-    risk: "low",
-    depends: [],
-    sequence: 1,
-  });
-  const roadmap = await renderRoadmapFromDb(base, "M001");
-  if ("skipped" in roadmap) assert.fail("planned milestone should render a roadmap");
-  writeFileSync(
-    roadmap.roadmapPath,
-    readFileSync(roadmap.roadmapPath, "utf-8").replace("- [ ] **S01:", "- [x] **S01:"),
-    "utf-8",
-  );
-  appendEvent(base, {
-    cmd: "complete-slice",
-    params: { milestoneId: "M001", sliceId: "S01" },
-    ts: "2999-01-01T00:00:00.000Z",
-    actor: "agent",
-  });
-
-  const roadmapDir = dirname(roadmap.roadmapPath);
-  chmodSync(roadmapDir, 0o555);
-  t.after(() => {
-    chmodSync(roadmapDir, 0o755);
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  const issues: any[] = [];
-  const fixes: string[] = [];
-  await checkEngineHealth(base, issues, fixes);
-
-  assert.deepEqual(
-    issues.filter((issue) => issue.code === "checkbox_db_status_divergence").map((issue) => issue.unitId),
-    ["M001/S01"],
-  );
-  assert.equal(fixes.includes("re-rendered stale projections for M001"), false);
-});
-
 test("checkEngineHealth ignores stale suffixed flat-phase duplicate when bare milestone exists", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-doctor-checkbox-flat-duplicate-"));
   t.after(() => rmSync(base, { recursive: true, force: true }));
@@ -467,12 +384,16 @@ test("checkEngineHealth reads canonical reopen events from worktree bases", asyn
     "2026-01-01T00:00:00.000Z",
     "2026-01-01T00:00:01.000Z",
   );
-  appendEvent(base, {
-    cmd: "reopen-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-01-01T00:00:02.000Z",
-    actor: "agent",
-  });
+  // #2398: the doctor gate requires the completion receipt before the reopen
+  // comparison — seed it so this test still exercises the reopen exemption.
+  recordLegacyMilestoneEvents(
+    [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:00.500Z" }],
+    "operator",
+  );
+  recordLegacyMilestoneEvents(
+    [{ kind: "reopened", milestoneId: "M001", occurredAt: "2026-01-01T00:00:02.000Z" }],
+    "operator",
+  );
 
   const issues: any[] = [];
   await checkEngineHealth(worktree, issues, []);
@@ -505,12 +426,16 @@ test("checkEngineHealth treats explicit reopen as authoritative when dispatch ti
       unit_type, unit_id, status, attempt_n, started_at, ended_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run("trace-1", "worker-1", 1, "M001", "complete-milestone", "M001", "completed", 1, "", "");
-  appendEvent(base, {
-    cmd: "reopen-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-01-01T00:00:02.000Z",
-    actor: "agent",
-  });
+  // #2398: with dispatch timestamps missing, the completion event itself is
+  // the proof — seed it so this test still exercises the reopen exemption.
+  recordLegacyMilestoneEvents(
+    [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:01.000Z" }],
+    "operator",
+  );
+  recordLegacyMilestoneEvents(
+    [{ kind: "reopened", milestoneId: "M001", occurredAt: "2026-01-01T00:00:02.000Z" }],
+    "operator",
+  );
 
   const issues: any[] = [];
   await checkEngineHealth(base, issues, []);
@@ -519,6 +444,102 @@ test("checkEngineHealth treats explicit reopen as authoritative when dispatch ti
     issues.some((issue) => issue.code === "completed_milestone_reopened"),
     false,
     "explicit reopen should exempt reopened milestone even when completion dispatch timestamps are absent",
+  );
+});
+
+test("checkEngineHealth still flags completion history backed by a covering milestone.completed event (#2398)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-completion-receipt-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  mkdirSync(gsdDir, { recursive: true });
+
+  openDatabase(join(gsdDir, "gsd.db"));
+  insertMilestone({ id: "M001", title: "Reopened", status: "active" });
+  const db = _getAdapter()!;
+  db.prepare(
+    `INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run("worker-1", "localhost", 1, "2026-01-01T00:00:00.000Z", "test", "2026-01-01T00:00:00.000Z", "stopped", base);
+  db.prepare(
+    `INSERT INTO unit_dispatches (
+      trace_id, worker_id, milestone_lease_token, milestone_id,
+      unit_type, unit_id, status, attempt_n, started_at, ended_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "trace-1",
+    "worker-1",
+    1,
+    "M001",
+    "complete-milestone",
+    "M001",
+    "completed",
+    1,
+    "2026-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:01.000Z",
+  );
+  // Receipt minted inside the closeout: after started_at, before ended_at.
+  recordLegacyMilestoneEvents(
+    [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:00.500Z" }],
+    "operator",
+  );
+
+  const issues: any[] = [];
+  await checkEngineHealth(base, issues, []);
+
+  assert.equal(
+    issues.some((issue) => issue.code === "completed_milestone_reopened"),
+    true,
+    "genuine completion history without an explicit reopen must still be flagged",
+  );
+});
+
+test("checkEngineHealth ignores a completion receipt older than the dispatch row (#2398)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-stale-receipt-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  mkdirSync(gsdDir, { recursive: true });
+
+  openDatabase(join(gsdDir, "gsd.db"));
+  insertMilestone({ id: "M001", title: "Active", status: "active" });
+  const db = _getAdapter()!;
+  db.prepare(
+    `INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run("worker-1", "localhost", 1, "2026-01-01T00:00:00.000Z", "test", "2026-01-01T00:00:00.000Z", "stopped", base);
+  db.prepare(
+    `INSERT INTO unit_dispatches (
+      trace_id, worker_id, milestone_lease_token, milestone_id,
+      unit_type, unit_id, status, attempt_n, started_at, ended_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "trace-1",
+    "worker-1",
+    1,
+    "M001",
+    "complete-milestone",
+    "M001",
+    "completed",
+    1,
+    "2026-01-01T02:00:00.000Z",
+    "2026-01-01T02:00:01.000Z",
+  );
+  // A receipt from an earlier completion cycle predates this receiptless row.
+  recordLegacyMilestoneEvents(
+    [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:30.000Z" }],
+    "operator",
+  );
+
+  const issues: any[] = [];
+  await checkEngineHealth(base, issues, []);
+
+  assert.equal(
+    issues.some((issue) => issue.code === "completed_milestone_reopened"),
+    false,
+    "a receipt that predates the dispatch row is closeout debris, not completion history",
   );
 });
 
@@ -686,6 +707,60 @@ test("checkEngineHealth repair prunes stale phases artifact rows with present mi
     .prepare("SELECT path FROM artifacts ORDER BY path")
     .all() as Array<{ path: string }>;
   assert.deepEqual(rows.map((row) => row.path), []);
+
+  // The prune is one Domain Operation: it has an operation row, a new
+  // revision and an event that lists the deleted path.
+  const operations = _getAdapter()!
+    .prepare("SELECT operation_id, operation_type, expected_revision, resulting_revision FROM workflow_operations")
+    .all();
+  assert.equal(operations.length, 1);
+  assert.equal(operations[0]!["operation_type"], "artifact.rows.prune");
+  assert.equal(operations[0]!["resulting_revision"], Number(operations[0]!["expected_revision"]) + 1);
+  const event = _getAdapter()!
+    .prepare("SELECT event_type, payload_json FROM workflow_domain_events WHERE operation_id = :id")
+    .get({ ":id": operations[0]!["operation_id"] });
+  assert.equal(event?.["event_type"], "artifact.rows.pruned");
+  assert.deepEqual(JSON.parse(String(event?.["payload_json"])), { source: "doctor", paths: [stalePath] });
+});
+
+test("checkEngineHealth repair reports a stale artifact row when the prune is refused", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-prune-refused-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  const stalePath = "phases/01-m001/01-01-PLAN.md";
+  const replacementPath = "milestones/M001/slices/S01/S01-PLAN.md";
+  mkdirSync(join(gsdDir, "milestones", "M001", "slices", "S01"), { recursive: true });
+  writeFileSync(join(gsdDir, replacementPath), "# Plan\n", "utf-8");
+
+  openDatabase(join(gsdDir, "gsd.db"));
+  insertArtifact({
+    path: stalePath,
+    artifact_type: "PLAN",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: null,
+    full_content: "# stale plan\n",
+  });
+
+  // The session reads the project, then another writer advances the revision.
+  const session = "doctor-prune-refused";
+  runInToolSession(session, () => noteSessionRead(readDomainOperationFence().revision));
+  pruneArtifactRows({ name: "other-writer", actorType: "system" }, ["phases/other.md"]);
+
+  const issues: any[] = [];
+  const fixes: string[] = [];
+  await runInToolSession(session, () => checkEngineHealth(base, issues, fixes, { repair: true }));
+
+  const issue = issues.find((candidate) => candidate.code === "artifact_file_missing" && candidate.file === stalePath);
+  assert.ok(issue, "a refused prune reports the stale row");
+  assert.equal(issue.fixable, true);
+  assert.match(issue.message, /stale view/);
+  assert.deepEqual(fixes.filter((fix) => fix.startsWith("pruned ")), []);
+  assert.deepEqual(
+    _getAdapter()!.prepare("SELECT path FROM artifacts").all().map((row) => row["path"]),
+    [stalePath],
+  );
 });
 
 test("checkEngineHealth repair prunes stale phases artifact rows with renamed flat-phase files", async (t) => {
@@ -1201,55 +1276,4 @@ test("checkEngineHealth reports missing CONTEXT and RESEARCH artifacts as user-c
     fixes.some((fix) => fix === "skipped user-authored RESEARCH artifact milestones/M002/M002-RESEARCH.md (content cannot be regenerated from the database)"),
     "repair output should explain skipped RESEARCH content",
   );
-});
-
-test("checkEngineHealth clears artifact_file_missing after projection re-render recreates the file", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-stale-missing-artifact-"));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-
-  const gsdDir = join(base, ".gsd");
-  mkdirSync(gsdDir, { recursive: true });
-
-  openDatabase(join(gsdDir, "gsd.db"));
-  insertMilestone({ id: "M001", title: "Foundation", status: "active", planning: { vision: "Ship the foundation." } });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [], sequence: 1 });
-  insertArtifact({
-    path: "phases/01-foundation/01-ROADMAP.md",
-    artifact_type: "ROADMAP",
-    milestone_id: "M001",
-    slice_id: null,
-    task_id: null,
-    full_content: "# stale row only\n",
-  });
-  // CONTEXT is not re-rendered by flushWorkflowProjections, so its missing-file
-  // diagnostic must survive the post-re-render cleanup (guards against the
-  // clearing logic over-broadening to artifacts the same run did not recreate).
-  insertArtifact({
-    path: "phases/01-foundation/01-CONTEXT.md",
-    artifact_type: "CONTEXT",
-    milestone_id: "M001",
-    slice_id: null,
-    task_id: null,
-    full_content: "# stale context row only\n",
-  });
-  appendEvent(base, {
-    cmd: "plan-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2999-01-01T00:00:00.000Z",
-    actor: "agent",
-  });
-
-  const issues: any[] = [];
-  const fixes: string[] = [];
-  await checkEngineHealth(base, issues, fixes);
-
-  assert.ok(fixes.includes("re-rendered missing projections for M001"));
-  assert.equal(
-    issues.some((issue) => issue.code === "artifact_file_missing" && issue.file === "phases/01-foundation/01-ROADMAP.md"),
-    false,
-    "doctor should not report a missing artifact that projection repair recreated in the same run",
-  );
-  const contextIssue = issues.find((issue) => issue.code === "artifact_user_content_missing" && issue.file === "phases/01-foundation/01-CONTEXT.md");
-  assert.ok(contextIssue, "doctor should still report missing user content that projection repair did not recreate");
-  assert.equal(contextIssue.severity, "warning");
 });

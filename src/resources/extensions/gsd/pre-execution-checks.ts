@@ -24,7 +24,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import type { TaskRow } from "./db-task-slice-rows.js";
 import type { PreExecutionCheckJSON } from "./verification-evidence.ts";
 import { validateVerificationCommand } from "./verification-gate.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isClosedStatus, normalizeLegacyLifecycleStatus } from "./status-guards.js";
 import { FRAMEWORK_METADATA_DIRS, PLANNING_ARTIFACT_NAME_RE } from "./paths.js";
 
 const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -534,6 +534,14 @@ function toComparisonPath(filePath: string, basePath: string): string {
 }
 
 /**
+ * A task that already ran to completion. Task rows carry the legacy status
+ * vocabulary ("complete"), so the comparison goes through the shared map.
+ */
+function isCompletedTask(task: TaskRow): boolean {
+  return normalizeLegacyLifecycleStatus(task.status) === "completed";
+}
+
+/**
  * Build a set of files that will be created by tasks up to (but not including) taskIndex.
  * Also includes outputs of completed tasks at any position — a completed task has already
  * run and its outputs are available regardless of sequence position or disk state (#4071).
@@ -544,7 +552,7 @@ function getExpectedOutputsUpTo(tasks: TaskRow[], taskIndex: number): Set<string
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
     // Include prior tasks (i < taskIndex) OR completed tasks at any position
-    if (i < taskIndex || task.status === "completed") {
+    if (i < taskIndex || isCompletedTask(task)) {
       for (const file of task.expected_output) {
         outputs.add(normalizeFilePath(file));
       }
@@ -771,12 +779,12 @@ export function checkTaskOrdering(
     for (const file of task.expected_output) {
       const normalizedFile = toComparisonPath(file, basePath);
       const existing = fileCreators.get(normalizedFile);
-      if (!existing || (!existing.completed && task.status === "completed")) {
+      if (!existing || (!existing.completed && isCompletedTask(task))) {
         fileCreators.set(normalizedFile, {
           taskId: task.id,
           index: i,
           originalPath: file,
-          completed: task.status === "completed",
+          completed: isCompletedTask(task),
         });
       }
     }

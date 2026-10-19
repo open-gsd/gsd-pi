@@ -115,6 +115,30 @@ export function rollbackToCheckpoint(
 }
 
 /**
+ * Roll back to a checkpoint, then render every projection again from the
+ * database. The reset can revert git-tracked `.gsd` projections, while the
+ * database keeps what the failed unit committed; without the render the files
+ * would contradict it. A render failure is logged and does not undo the
+ * rollback.
+ */
+export async function rollbackToCheckpointAndRebuild(
+  basePath: string,
+  unitId: string,
+  sha: string,
+): Promise<boolean> {
+  if (!rollbackToCheckpoint(basePath, unitId, sha)) return false;
+  try {
+    // Lazy import: the Projection Worker loads the renderers and the database.
+    const { rebuildMarkdownProjectionsFromDb } = await import("../projection-worker.js");
+    const rebuilt = await rebuildMarkdownProjectionsFromDb(basePath);
+    for (const error of rebuilt.errors) logWarning("projection", `render after rollback failed: ${error}`);
+  } catch (e) {
+    logWarning("projection", `rebuild after rollback failed: ${(e as Error).message}`);
+  }
+  return true;
+}
+
+/**
  * Remove a checkpoint ref after successful unit completion.
  */
 export function cleanupCheckpoint(basePath: string, unitId: string): void {

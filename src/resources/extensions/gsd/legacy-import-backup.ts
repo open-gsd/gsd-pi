@@ -41,6 +41,7 @@ import {
   captureLegacyImportBaseSnapshot,
   captureCurrentLegacyImportBaseSnapshot,
   createLegacyImportBaseSnapshotSource,
+  legacyImportBaseSnapshotAtVersion,
   LegacyImportBaseSnapshotError,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
@@ -2198,19 +2199,33 @@ function runIndependentVerification(
       requireOnlyMainDatabase(db, connection.openedPath ?? expectedPath);
       requireExactlyOk(db, "quick_check");
       requireExactlyOk(db, "integrity_check");
-      if (db.prepare("PRAGMA foreign_key_check").all().length !== 0) {
+      const foreignKeyViolations = db.prepare("PRAGMA foreign_key_check").all();
+      if (foreignKeyViolations.length !== 0) {
         verificationFail(
           "LEGACY_IMPORT_BACKUP_FOREIGN_KEY_FAILED",
           "legacy import backup contains foreign-key violations",
+          {
+            violation_count: foreignKeyViolations.length,
+            // PRAGMA foreign_key_check rows: { table, rowid, parent, fkid }.
+            // Cap what we attach so a badly-drifted DB doesn't produce an
+            // unbounded error payload; the count above still reports the
+            // true total.
+            violations: foreignKeyViolations.slice(0, 50).map((row) => ({
+                table: String((row as Record<string, unknown>).table ?? ""),
+                rowid: Number((row as Record<string, unknown>).rowid ?? 0),
+                parent: String((row as Record<string, unknown>).parent ?? ""),
+                fkid: Number((row as Record<string, unknown>).fkid ?? 0),
+              })),
+          },
         );
       }
       requireSchemaAnchors(db);
       let independentBase: LegacyImportBaseSnapshot;
       try {
-        independentBase = captureLegacyImportBaseSnapshot({
+        independentBase = legacyImportBaseSnapshotAtVersion(captureLegacyImportBaseSnapshot({
           readTransaction: (fn) => fn(),
           source: createLegacyImportBaseSnapshotSource(db),
-        });
+        }), expectedBase.snapshot_schema_version);
       } catch (error) {
         verificationFail(
           "LEGACY_IMPORT_BACKUP_SCHEMA_INVALID",

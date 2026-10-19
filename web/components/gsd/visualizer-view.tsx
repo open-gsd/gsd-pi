@@ -1161,7 +1161,7 @@ function HealthTab({ data }: { data: VisualizerData }) {
                 <p className="text-sm text-muted-foreground">No skill report available.</p>
               ) : (
                 <div className="rounded-lg bg-muted/50 px-3 py-3">
-                  <p className="text-sm font-medium">{health.skillSummary.total} skills tracked</p>
+                  <p className="text-sm font-medium">{health.skillSummary.total} skills tracked (availability)</p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {health.skillSummary.criticalCount} critical · {health.skillSummary.warningCount} warning
                   </p>

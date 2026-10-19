@@ -92,7 +92,10 @@ const TOGETHER_REASONING_ONLY_MODELS = new Set([
 	"MiniMaxAI/MiniMax-M2.7",
 ]);
 const TOGETHER_REASONING_EFFORT_MODELS = new Set(["openai/gpt-oss-20b", "openai/gpt-oss-120b"]);
-const TOGETHER_TOGGLE_REASONING_EFFORT_MODELS = new Set(["deepseek-ai/DeepSeek-V4-Pro"]);
+const TOGETHER_TOGGLE_REASONING_EFFORT_MODELS = new Set([
+	"deepseek-ai/DeepSeek-V4-Pro", // retired upstream; kept in case Together restores the id
+	"deepseek-ai/DeepSeek-V4-Pro-0813", // renamed successor, same toggle+effort(low/high/max) surface
+]);
 const TOGETHER_FIXED_REASONING_LEVEL_MAP = {
 	off: null,
 	minimal: null,
@@ -203,12 +206,73 @@ function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
 		modelId.includes("sonnet-5") ||
 		modelId.includes("sonnet.5") ||
 		modelId.includes("sonnet-4-6") ||
-		modelId.includes("sonnet-4.6")
+		modelId.includes("sonnet-4.6") ||
+		modelId.includes("haiku-5-5") ||
+		modelId.includes("haiku-5.5")
 	);
+}
+
+function isSonnet55Model(modelId: string): boolean {
+	return modelId.includes("sonnet-5-5") || modelId.includes("sonnet-5.5");
+}
+
+/**
+ * Claude 5.x models with Sonnet 5.5's full strict request surface (#2645):
+ * they reject `thinking: {type: "disabled"}`, `temperature`, `top_p`/`top_k`,
+ * and forced `tool_choice`.
+ */
+function isClaude55StrictRequestModel(modelId: string): boolean {
+	return (
+		isSonnet55Model(modelId) ||
+		modelId.includes("opus-5-5") ||
+		modelId.includes("opus-5.5") ||
+		modelId.includes("fable-5-1") ||
+		modelId.includes("fable-5.1") ||
+		modelId.includes("fable.5.1")
+	);
+}
+
+/**
+ * Claude Fable 5 (base): rejects `thinking: {type: "disabled"}` and
+ * `temperature` but still accepts forced `tool_choice` (#2645), so it gets
+ * the granular compat flags instead of the strictRequestParams umbrella.
+ */
+function isFable5BaseModel(modelId: string): boolean {
+	return (
+		(modelId.includes("fable-5") || modelId.includes("fable.5")) &&
+		!modelId.includes("fable-5-1") &&
+		!modelId.includes("fable-5.1") &&
+		!modelId.includes("fable.5.1")
+	);
+}
+
+/**
+ * Claude 5.x ids that reject `temperature` when relayed over an
+ * OpenAI-compatible endpoint (Copilot, OpenRouter) (#2645, #2701).
+ */
+function isClaude55RelayTemperatureRejectionModel(modelId: string): boolean {
+	return (
+		modelId.includes("claude") &&
+		(isClaude55StrictRequestModel(modelId) || isFable5BaseModel(modelId) || isHaiku55Model(modelId))
+	);
+}
+
+/**
+ * Claude Haiku 5.5: adaptive-thinking only (`budget_tokens` 400s) and rejects
+ * non-default sampling params (#2701). Unlike the Sonnet/Opus/Fable 5.x tier
+ * it still accepts `thinking: {type: "disabled"}` and forced `tool_choice`,
+ * so it only gets the granular temperature flag, never the strict umbrella.
+ */
+function isHaiku55Model(modelId: string): boolean {
+	return modelId.includes("haiku-5-5") || modelId.includes("haiku-5.5");
 }
 
 function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
 	model.compat = { ...(model.compat as AnthropicMessagesCompat | undefined), ...compat };
+}
+
+function mergeOpenAICompletionsCompat(model: Model<Api>, compat: OpenAICompletionsCompat): void {
+	model.compat = { ...(model.compat as OpenAICompletionsCompat | undefined), ...compat };
 }
 
 function normalizeAnthropicVertexModelId(modelId: string): string {
@@ -272,6 +336,46 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		isAnthropicAdaptiveThinkingModel(model.id)
 	) {
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
+	}
+	if (
+		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
+		isClaude55StrictRequestModel(model.id)
+	) {
+		// Sonnet 5.5 rejects the legacy request surface with 400s (#2500):
+		// thinking {type:"disabled"} (use "between_tools"), temperature,
+		// top_p/top_k, and forced tool_choice. Opus 5.5 and Fable 5.1 share
+		// the same surface (#2645).
+		mergeAnthropicMessagesCompat(model, { strictRequestParams: true });
+	}
+	if (
+		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
+		isFable5BaseModel(model.id)
+	) {
+		// Fable 5 rejects thinking {type:"disabled"} and temperature but still
+		// accepts forced tool_choice (#2645) — granular flags, not the umbrella.
+		mergeAnthropicMessagesCompat(model, { thinkingOffMode: "between_tools", rejectsTemperature: true });
+	}
+	if (
+		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
+		isHaiku55Model(model.id)
+	) {
+		// Haiku 5.5 is adaptive-thinking only and rejects non-default sampling
+		// params, but still accepts thinking {type:"disabled"} and forced
+		// tool_choice (#2701) — granular temperature flag only.
+		mergeAnthropicMessagesCompat(model, { rejectsTemperature: true });
+	}
+	if (
+		model.api === "openai-completions" &&
+		isClaude55RelayTemperatureRejectionModel(model.id)
+	) {
+		// Claude 5.x relayed through OpenAI-compatible endpoints (Copilot,
+		// OpenRouter) rejects temperature, and the 5.5/5.1 tier also rejects a
+		// forced tool_choice (#2645).
+		const full = isClaude55StrictRequestModel(model.id);
+		mergeOpenAICompletionsCompat(model, {
+			rejectsTemperature: true,
+			...(full ? { rejectsForcedToolChoice: true } : {}),
+		});
 	}
 	if (
 		(model.provider === "minimax" || model.provider === "minimax-cn") &&
@@ -1081,9 +1185,13 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		// Process Kimi For Coding models. models.dev renamed the provider key to
+		// region-scoped "kimi-code-plan-*" entries; the global plan is the one
+		// served at api.kimi.com/coding. Prefer the legacy key if upstream
+		// restores it.
+		const kimiProviderSource = data["kimi-for-coding"] ?? data["kimi-code-plan-global"];
+		if (kimiProviderSource?.models) {
+			const kimiModels = kimiProviderSource.models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
@@ -1470,6 +1578,75 @@ async function generateModels() {
 					output: 25,
 					cacheRead: 0.5,
 					cacheWrite: 6.25,
+				},
+				contextWindow: 1000000,
+				maxTokens: 128000,
+			});
+		}
+	}
+
+	// Add missing Claude Opus 5.5 until models.dev includes it.
+	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-5-5")) {
+		allModels.push({
+			id: "claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "anthropic-messages",
+			baseUrl: "https://api.anthropic.com",
+			provider: "anthropic",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 4,
+				output: 20,
+				cacheRead: 0.2,
+				cacheWrite: 5,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		});
+	}
+
+	// Add missing Claude Opus 5.5 on Vertex until models.dev includes it.
+	if (!allModels.some(m => m.provider === "anthropic-vertex" && m.id === "claude-opus-5-5")) {
+		allModels.push({
+			id: "claude-opus-5-5",
+			name: "Claude Opus 5.5 (Vertex)",
+			api: "anthropic-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			provider: "anthropic-vertex",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 4,
+				output: 20,
+				cacheRead: 0.2,
+				cacheWrite: 5,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		});
+	}
+
+	// Add missing Claude Opus 5.5 Bedrock profiles until models.dev includes them.
+	for (const [bedrockId, regionLabel] of [
+		["anthropic.claude-opus-5-5", ""],
+		["us.anthropic.claude-opus-5-5", " (US)"],
+		["global.anthropic.claude-opus-5-5", " (Global)"],
+	] as const) {
+		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
+			allModels.push({
+				id: bedrockId,
+				name: `Claude Opus 5.5${regionLabel}`,
+				api: "bedrock-converse-stream",
+				baseUrl: getBedrockBaseUrl(bedrockId),
+				provider: "amazon-bedrock",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: {
+					input: 4,
+					output: 20,
+					cacheRead: 0.2,
+					cacheWrite: 5,
 				},
 				contextWindow: 1000000,
 				maxTokens: 128000,
@@ -2066,6 +2243,18 @@ async function generateModels() {
 				tiers: [{ inputTokensAbove: 272000, input: 2, output: 9, cacheRead: 0.2, cacheWrite: 0 }],
 			},
 			contextWindow: 372000,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 0 },
+			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emitJournalEvent } from "../journal.ts";
@@ -9,6 +9,7 @@ import { saveActivityLog } from "../activity-log.ts";
 import { initMetrics, resetMetrics, snapshotUnitMetrics } from "../metrics.ts";
 import { setLogBasePath, logWarning } from "../workflow-logger.ts";
 import { setUnifiedAuditEnabled } from "../uok/audit-toggle.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 function readAuditEvents(basePath: string): Array<Record<string, unknown>> {
   const file = join(basePath, ".gsd", "audit", "events.jsonl");
@@ -31,6 +32,9 @@ function makeMockContext(entries: unknown[]): any {
 test("unified audit plane bridges journal/activity/metrics/workflow logger into audit envelope log", () => {
   const basePath = mkdtempSync(join(tmpdir(), "gsd-uok-audit-"));
   setUnifiedAuditEnabled(true);
+  // Audit events are DB rows first; the JSONL is their projection (ADR-046).
+  mkdirSync(join(basePath, ".gsd"), { recursive: true });
+  openDatabase(join(basePath, ".gsd", "gsd.db"));
   try {
     emitJournalEvent(basePath, {
       ts: new Date().toISOString(),
@@ -85,6 +89,7 @@ test("unified audit plane bridges journal/activity/metrics/workflow logger into 
     assert.ok(types.has("unit-metrics-snapshot"));
     assert.ok(types.has("workflow-log-warn"));
   } finally {
+    closeDatabase();
     setUnifiedAuditEnabled(false);
     resetMetrics();
     rmSync(basePath, { recursive: true, force: true });

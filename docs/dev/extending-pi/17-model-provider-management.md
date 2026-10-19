@@ -1,6 +1,5 @@
 # Model & Provider Management
 
-
 ### Switching Models
 
 ```typescript

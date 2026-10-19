@@ -25,6 +25,7 @@ User-accepted fix-doc item (DOCS-AUDIT.md remediation rows 11–15, ruled
 2026-08-01): "an ADR labeled Implemented that the auditor can't find is
 worse than one honestly labeled Accepted, partially landed". The audit
 verdict for each of the five is `unverifiable` from code at HEAD:
+
 - ADR-004 `Status: Implemented (Phase 2)` — capability-routing greps
   inconclusive.
 - ADR-009 `Status: Accepted (implemented; emergency legacy fallback

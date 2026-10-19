@@ -3,7 +3,7 @@
  *
  * Parallel workers must only commit files belonging to their locked milestone.
  * When GSD_MILESTONE_LOCK is set, smartStage() must exclude .gsd/milestones/<M>/
- * directories for milestones other than the locked one.
+ * and .gsd/phases/<NN-slug>/ directories for milestones other than the locked one.
  *
  * Without the fix, a worker for M033 can stage and commit fabricated artifacts
  * under .gsd/milestones/M032/, causing cross-milestone pollution.
@@ -160,5 +160,25 @@ describe("parallel commit scope (#1991)", () => {
     assert.ok(!committed.includes(".gsd/milestones/M034/"), "M034 excluded");
 
     rmSync(repo, { recursive: true, force: true });
+  });
+
+  test("autoCommit excludes other milestones in the flat phases/ layout", (t) => {
+    const repo = initTempRepo();
+    t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+    process.env.GSD_MILESTONE_LOCK = "M033";
+    process.env.GSD_PARALLEL_WORKER = "1";
+
+    createFile(repo, ".gsd/phases/32-other-milestone/32-SUMMARY.md", "Fabricated by the M033 worker");
+    createFile(repo, ".gsd/phases/33-own-milestone/33-01-SUMMARY.md", "Own summary");
+    createFile(repo, "src/feature.ts", "export const x = 1;");
+
+    const svc = new GitServiceImpl(repo);
+    assert.ok(svc.autoCommit("execute-task", "M033/S01/T01") !== null, "autoCommit should produce a commit");
+
+    const committed = gitRun(["show", "--name-only", "HEAD"], repo);
+    assert.ok(committed.includes("src/feature.ts"), "source files are committed");
+    assert.ok(committed.includes(".gsd/phases/33-own-milestone/"), "own phase files are committed");
+    assert.ok(!committed.includes(".gsd/phases/32-other-milestone/"), "the other milestone's phase files are not committed");
   });
 });

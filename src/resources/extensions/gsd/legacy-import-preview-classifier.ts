@@ -14,9 +14,10 @@ import {
   type LegacyImportTarget,
   type LegacyImportValue,
 } from "./legacy-import-contract.js";
-import type {
-  LegacyImportBaseRowSet,
-  LegacyImportBaseSnapshot,
+import {
+  isLegacyImportBaseSnapshotSchemaVersion,
+  type LegacyImportBaseRowSet,
+  type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
 import type {
   LegacyImportCompleteRowSet,
@@ -27,7 +28,11 @@ import {
   LEGACY_IMPORT_BOOLEAN_COLUMNS,
   LEGACY_IMPORT_COMPLETE_TARGET_KINDS,
   LEGACY_IMPORT_JSON_COLUMNS,
+  LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND,
   LEGACY_IMPORT_TARGET_ADAPTERS,
+  legacyImportKnowledgeCell,
+  legacyImportKnowledgeMemoryRowCells,
+  legacyImportKnowledgeRow,
   legacyImportTargetIdentity,
   type LegacyImportTargetAdapter,
 } from "./legacy-import-preview-classifier-targets.js";
@@ -35,6 +40,7 @@ import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
 } from "./legacy-import-preview.js";
+import { splitPipeRow } from "./knowledge-parser.js";
 import {
   compareLifecycleShadow,
   normalizeCanonicalLifecycleStatus,
@@ -234,7 +240,7 @@ function normalizeStoredValue(rowSet: LegacyImportBaseRowSet, field: string, val
 
 function validateBase(base: LegacyImportBaseSnapshot): void {
   if (
-    base.snapshot_schema_version !== 1
+    !isLegacyImportBaseSnapshotSchemaVersion(base.snapshot_schema_version)
     || base.database_schema_version !== LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION
     || hashLegacyImportValue(base.rows) !== base.relevant_rows_hash
   ) {
@@ -368,7 +374,9 @@ function buildBaseRows(base: LegacyImportBaseSnapshot): Map<string, JsonRecord> 
     if (rows.has(key)) {
       fail("LEGACY_IMPORT_CLASSIFICATION_BASE_INCONSISTENT", "legacy import base row identity is duplicated");
     }
-    const value = { ...row.value };
+    const value = row.row_set === "knowledge_memories"
+      ? legacyImportKnowledgeRow(row.value)
+      : { ...row.value };
     rows.set(key, value);
     if (row.row_set === "decisions") decisionRows.set(String(value.id), value);
   }
@@ -718,6 +726,110 @@ function ambiguityFor(
   );
 }
 
+const KNOWLEDGE_ROW_CONFLICT_MESSAGE = "A KNOWLEDGE.md table row is not imported into the database: the database row with its id has different content. The database row is kept, so the next render replaces the row in the file.";
+
+/**
+ * The loss report for a KNOWLEDGE.md row that the database row with its id
+ * wins over. The database content is never lost to file text without the
+ * explicit choice of the operator (`knowledgeFileRows`), so the Preview plans
+ * no change for the row and says that the file row is lost: a forgotten id
+ * stays forgotten, and an active row with other content is kept.
+ */
+/** The reason code of a milestone CONTEXT or RESEARCH file candidate. */
+const MILESTONE_NARRATIVE_REASON = "milestone-narrative-artifact";
+
+/** The id that names a milestone CONTEXT or RESEARCH document in a `--choice=<id>.use-file` option. */
+export function legacyImportNarrativeFileRowId(normalized: LegacyImportValue): string {
+  const row = normalized as JsonRecord;
+  return `${String(row["milestone_id"])}-${String(row["artifact_type"])}`;
+}
+
+/**
+ * The loss report for a milestone CONTEXT or RESEARCH file whose text differs
+ * from its database artifact row. As for a KNOWLEDGE.md row, the database row
+ * is kept unless the operator chose the file text explicitly.
+ */
+function narrativeRowConflict(
+  candidate: LegacyImportInterpretationCandidate,
+): { diagnosis: LegacyImportPreviewDiagnosis; resolution: LegacyImportPreviewResolution } {
+  const diagnosisValue = {
+    code: "artifact-row-conflict",
+    severity: "warning" as const,
+    source_id: candidate.raw.source_id,
+    locator: candidate.raw.locator,
+    raw_value: candidate.raw.value,
+    message: `${legacyImportNarrativeFileRowId(candidate.normalized)} file text is not imported into the database: the database artifact row ${candidate.target.key} has different text. The database row is kept.`,
+  };
+  const diagnosis = { diagnosis_id: hashLegacyImportValue(diagnosisValue), ...diagnosisValue };
+  return { diagnosis, resolution: { diagnosis_id: diagnosis.diagnosis_id, disposition: "preserved" } };
+}
+
+function knowledgeRowLoss(
+  candidate: LegacyImportInterpretationCandidate,
+  forgotten: boolean,
+): { diagnosis: LegacyImportPreviewDiagnosis; resolution: LegacyImportPreviewResolution } {
+  const diagnosisValue = {
+    code: forgotten ? "knowledge-row-not-imported" : "knowledge-row-conflict",
+    severity: "warning" as const,
+    source_id: candidate.raw.source_id,
+    locator: candidate.raw.locator,
+    raw_value: candidate.raw.value,
+    message: forgotten
+      ? "A KNOWLEDGE.md table row is not imported into the database: the database row with its id was forgotten, so the next render removes the row from the file."
+      : KNOWLEDGE_ROW_CONFLICT_MESSAGE,
+  };
+  const diagnosis = { diagnosis_id: hashLegacyImportValue(diagnosisValue), ...diagnosisValue };
+  return { diagnosis, resolution: { diagnosis_id: diagnosis.diagnosis_id, disposition: "preserved" } };
+}
+
+/**
+ * The diagnoses and resolutions of the interpretation, with the report for a
+ * KNOWLEDGE.md memory-id row decided against the active database memory that
+ * has its id. The same cells give an info report: the row is a render of the
+ * memory, so nothing is lost. Other cells give the conflict report of a
+ * K/P/L row. With no such memory the not-imported warning stays.
+ */
+function knowledgeMemoryRowReports(
+  base: LegacyImportBaseSnapshot,
+  interpretation: LegacyImportInterpretation,
+): { diagnoses: LegacyImportPreviewDiagnosis[]; resolutions: LegacyImportPreviewResolution[] } {
+  const databaseCells = new Map(base.rows
+    .filter((row) => row.row_set === "knowledge_memory_rows")
+    .map((row) => [String(row.value["id"]), canonicalLegacyImportJson(legacyImportKnowledgeMemoryRowCells(row.value))]));
+  const memoryIds = new Map<string, string>();
+  for (const resolution of interpretation.resolutions) {
+    if (resolution.target?.kind === LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND) {
+      memoryIds.set(resolution.diagnosis_id, resolution.target.key);
+    }
+  }
+  const decided = new Map<string, string>();
+  const diagnoses = interpretation.diagnoses.map((diagnosis) => {
+    const memoryId = memoryIds.get(diagnosis.diagnosis_id);
+    const cells = memoryId === undefined ? undefined : databaseCells.get(memoryId);
+    if (cells === undefined) return diagnosis;
+    const fileCells = splitPipeRow(String(diagnosis.raw_value).trim()).slice(1).map(legacyImportKnowledgeCell);
+    const same = canonicalLegacyImportJson(fileCells) === cells;
+    const diagnosisValue = {
+      code: same ? "knowledge-memory-row-not-imported" : "knowledge-row-conflict",
+      severity: same ? "info" as const : "warning" as const,
+      source_id: diagnosis.source_id,
+      locator: diagnosis.locator,
+      raw_value: diagnosis.raw_value,
+      message: same
+        ? "A KNOWLEDGE.md table row with a memory id is not imported into the database: an active database memory has that id and the same content, so the row is already in the database."
+        : KNOWLEDGE_ROW_CONFLICT_MESSAGE,
+    };
+    const diagnosisId = hashLegacyImportValue(diagnosisValue);
+    decided.set(diagnosis.diagnosis_id, diagnosisId);
+    return { diagnosis_id: diagnosisId, ...diagnosisValue };
+  });
+  const resolutions = interpretation.resolutions.map((resolution) => {
+    const diagnosisId = decided.get(resolution.diagnosis_id);
+    return diagnosisId === undefined ? resolution : { ...resolution, diagnosis_id: diagnosisId };
+  });
+  return { diagnoses, resolutions };
+}
+
 function valuesMatch(rowSet: LegacyImportBaseRowSet, current: JsonRecord, patch: JsonRecord): boolean {
   return Object.entries(patch).every(([field, value]) => (
     canonicalLegacyImportJson(normalizeStoredValue(rowSet, field, current[field] ?? null))
@@ -763,6 +875,60 @@ function lifecycleMatches(
   const shadow = compareLifecycleShadow(legacyStatus, normalizedCanonical);
   return desired === normalizedCanonical
     && (shadow.kind === "match" || shadow.kind === "semantic_match_exact_delta");
+}
+
+/**
+ * An Import Application keeps the legacy status of an existing hierarchy row
+ * aligned with its lifecycle row. This reads a row candidate that changes the
+ * status of such a row. A row with no lifecycle row is adopted together with
+ * the status change (`adoption`). A row whose lifecycle row disagrees with the
+ * new status is not imported (`conflict`): the lifecycle row is the authority,
+ * and only a workflow Domain Operation moves it. A status that the lifecycle
+ * row agrees with gives neither.
+ */
+function existingRowStatusChange(
+  base: LegacyImportBaseSnapshot,
+  { candidate, address, patch }: PreparedCandidate,
+  current: JsonRecord,
+  rows: ReadonlyMap<string, JsonRecord>,
+): {
+  lifecycleRow: string;
+  adoption?: Omit<LegacyImportPreviewChange, "change_id">;
+  conflict?: ReturnType<typeof ambiguityFromEvidence>;
+} | undefined {
+  const itemKind = asHierarchyKind(candidate.target.kind);
+  const status = patch.status;
+  if (
+    itemKind === undefined
+    || typeof status !== "string"
+    || valuesMatch(address.rowSet, current, { status })
+    // The plan refuses an unknown status, so it gets no lifecycle claim here.
+    || (normalizeCanonicalLifecycleStatus(status) ?? normalizeLegacyLifecycleStatus(status)) === null
+  ) return undefined;
+  const statusCandidate = {
+    ...candidate,
+    target: { kind: `${itemKind}-status`, key: candidate.target.key },
+    normalized: status,
+  };
+  const lifecycleRow = rowAddress("item_lifecycles", targetAddress(base, statusCandidate).address.identity);
+  const lifecycle = rows.get(lifecycleRow);
+  if (lifecycle === undefined) {
+    return { lifecycleRow, adoption: makeChange("create", statusCandidate, "existing-row-status-change") };
+  }
+  const shadow = compareLifecycleShadow(
+    status,
+    typeof lifecycle.lifecycle_status === "string" ? lifecycle.lifecycle_status : null,
+  ).kind;
+  if (shadow === "match" || shadow === "semantic_match_exact_delta") return { lifecycleRow };
+  return {
+    lifecycleRow,
+    conflict: ambiguityFromEvidence(
+      [{ raw: candidate.raw, stableId: candidate.candidate_id }],
+      candidate.target,
+      "status-change-contradicts-lifecycle",
+      "The source gives this row a status that disagrees with its lifecycle row in the database. The import does not change the status of a row that has a lifecycle row; a workflow command changes it.",
+    ),
+  };
 }
 
 function makeChange(
@@ -1012,9 +1178,16 @@ function derivedCounts(
   };
 }
 
+/**
+ * `knowledgeFileRows` holds the ids that the operator chose explicitly: a
+ * knowledge id (K/P/L###) or a milestone document id (M###-CONTEXT,
+ * M###-RESEARCH). For these, the file text replaces a differing active
+ * database row as an `update` change. A forgotten knowledge id stays forgotten.
+ */
 export function classifyLegacyImportChanges(
   baseInput: LegacyImportBaseSnapshot,
   interpretationInput: LegacyImportInterpretation,
+  knowledgeFileRows: ReadonlySet<string> = new Set(),
 ): LegacyImportClassification {
   const base = structuredClone(baseInput);
   const interpretation = structuredClone(interpretationInput);
@@ -1040,8 +1213,28 @@ export function classifyLegacyImportChanges(
     completeSetsByRowSet.set(complete.row_set, rowSets);
   }
 
+  // One document has one artifact row. /gsd migrate stored a milestone CONTEXT
+  // or RESEARCH row under the '.gsd/'-prefixed path, so the file targets that
+  // row when the database has no row at the gsd_summary_save path.
+  const artifactPaths = new Set(base.rows
+    .filter((row) => row.row_set === "artifacts")
+    .map((row) => String(row.value["path"])));
+  for (const candidate of interpretation.candidates) {
+    const stored = `.gsd/${candidate.target.key}`;
+    if (
+      candidate.reason_code !== MILESTONE_NARRATIVE_REASON
+      || artifactPaths.has(candidate.target.key)
+      || !artifactPaths.has(stored)
+    ) continue;
+    (candidate.target as { key: string }).key = stored;
+    (candidate.normalized as JsonRecord)["path"] = stored;
+  }
+
   const rows = buildBaseRows(base);
   const originalRows = new Map([...rows].map(([key, row]) => [key, { ...row }]));
+  const forgottenKnowledge = new Set(base.rows
+    .filter((row) => row.row_set === "knowledge_memories" && row.value["superseded_by"] != null)
+    .map((row) => rowAddress(row.row_set, row.identity)));
   const preserves = interpretation.candidates.filter((candidate) => candidate.classification === "preserve");
   const prepared = interpretation.candidates
     .filter((candidate) => candidate.classification === "compare")
@@ -1050,8 +1243,7 @@ export function classifyLegacyImportChanges(
     validateCompleteMemberCandidates(complete, prepared);
   }
 
-  const diagnoses = [...interpretation.diagnoses];
-  const resolutions = [...interpretation.resolutions];
+  const { diagnoses, resolutions } = knowledgeMemoryRowReports(base, interpretation);
   const excludedTargets = unresolvedTargets(resolutions);
   const excludedRows = new Set<string>();
 
@@ -1144,6 +1336,11 @@ export function classifyLegacyImportChanges(
     resolutions.push(ambiguity.resolution);
   }
 
+  // The lifecycle rows that a candidate claims by itself. The source decides
+  // those, so the status rule of an existing row below leaves them alone.
+  const claimedLifecycles = new Set(prepared
+    .filter(({ address }) => address.rowSet === "item_lifecycles")
+    .map(({ address }) => rowAddress(address.rowSet, address.identity)));
   const pendingChanges: Array<Omit<LegacyImportPreviewChange, "change_id">> = [];
   const orderedCandidates = [...prepared].sort((left, right) => {
     const fieldOrder = Number(left.address.field !== undefined) - Number(right.address.field !== undefined);
@@ -1163,6 +1360,30 @@ export function classifyLegacyImportChanges(
     }
     const key = rowAddress(address.rowSet, address.identity);
     const current = rows.get(key);
+    if (
+      address.rowSet === "knowledge_memories"
+      && current !== undefined
+      && (
+        forgottenKnowledge.has(key)
+        || (!valuesMatch(address.rowSet, current, patch) && !knowledgeFileRows.has(candidate.target.key))
+      )
+    ) {
+      const loss = knowledgeRowLoss(candidate, forgottenKnowledge.has(key));
+      diagnoses.push(loss.diagnosis);
+      resolutions.push(loss.resolution);
+      continue;
+    }
+    if (
+      candidate.reason_code === MILESTONE_NARRATIVE_REASON
+      && current !== undefined
+      && !valuesMatch(address.rowSet, current, { full_content: patch["full_content"] })
+      && !knowledgeFileRows.has(legacyImportNarrativeFileRowId(candidate.normalized))
+    ) {
+      const loss = narrativeRowConflict(candidate);
+      diagnoses.push(loss.diagnosis);
+      resolutions.push(loss.resolution);
+      continue;
+    }
     const complete = completeSetsByRowSet.get(address.rowSet)?.[0];
     const completeMember = complete?.member_keys.includes(address.memberKey) === true;
     if (current === undefined) {
@@ -1176,6 +1397,16 @@ export function classifyLegacyImportChanges(
       ));
       rows.set(key, { ...patch });
       continue;
+    }
+    const statusChange = existingRowStatusChange(base, preparedCandidate, current, rows);
+    if (statusChange !== undefined && !claimedLifecycles.has(statusChange.lifecycleRow)) {
+      if (statusChange.conflict !== undefined) {
+        diagnoses.push(statusChange.conflict.diagnosis);
+        resolutions.push(statusChange.conflict.resolution);
+        excludedRows.add(preparedAuthorityRow(preparedCandidate));
+        continue;
+      }
+      if (statusChange.adoption !== undefined) pendingChanges.push(statusChange.adoption);
     }
     const equal = address.rowSet === "item_lifecycles"
       ? lifecycleMatches(preparedCandidate, current, rows)

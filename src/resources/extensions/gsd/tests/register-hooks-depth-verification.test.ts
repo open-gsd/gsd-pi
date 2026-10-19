@@ -9,14 +9,16 @@ import {
   clearPendingAutoStart,
   setPendingAutoStart,
 } from "../guided-flow.ts";
-import { closeDatabase, getMilestone } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, getMilestone, openDatabase } from "../gsd-db.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import {
+  applyWriteGateSessionBoundary,
+  childWriteGateAdapter,
   getPendingGate,
   loadWriteGateSnapshot,
   markApprovalGateVerified,
   markDepthVerified,
-  resetWriteGateState,
+  clearDiscussionFlowState,
   setPendingGate,
   shouldBlockContextArtifactSave,
   shouldBlockContextWrite,
@@ -90,11 +92,11 @@ test("register-hooks keeps depth-gate reason model-facing and adds displayReason
   const dir = makeTempDir("display-reason");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -134,11 +136,11 @@ test("register-hooks unlocks milestone depth verification from question id witho
   const dir = makeTempDir("manual");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -206,11 +208,11 @@ test("register-hooks canonicalizes lower-case milestone ids in depth-verificatio
   const dir = makeTempDir("lowercase-mid");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -276,16 +278,16 @@ test("register-hooks canonicalizes lower-case milestone ids in depth-verificatio
   );
 });
 
-test("register-hooks persists first structured question round for new milestone re-entry", async (t) => {
+test("an answered question round is captured into the database under an external engine", async (t) => {
   const dir = makeTempDir("question-draft");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
       closeDatabase();
     } finally {
@@ -333,52 +335,352 @@ test("register-hooks persists first structured question round for new milestone 
     },
   ];
 
-  for (const handler of handlers.get("tool_result") ?? []) {
-    await handler({
-      toolName: "ask_user_questions",
-      input: { questions },
-      details: {
-        response: {
-          answers: {
-            m004_shape: { selected: "Planning metadata (Recommended)" },
-            boundary: { selected: "No new dependencies (Recommended)" },
-          },
-        },
-      },
-    }, ctx);
-  }
+  // An external engine runs the tool in the workflow MCP server. The host sees
+  // only tool_execution_start and tool_execution_end; the MCP structured
+  // content arrives as the result details. tool_call and tool_result never fire.
+  let callSeq = 0;
+  const externalRound = async (
+    details: Record<string, unknown>,
+    args: Record<string, unknown> = { questions: details.questions },
+  ): Promise<void> => {
+    const toolCallId = `call-${++callSeq}`;
+    const toolName = "mcp__gsd-workflow__ask_user_questions";
+    for (const handler of handlers.get("tool_execution_start") ?? []) {
+      await handler({ toolCallId, toolName, args }, ctx);
+    }
+    for (const handler of handlers.get("tool_execution_end") ?? []) {
+      await handler({
+        toolCallId,
+        toolName,
+        isError: false,
+        result: { content: [{ type: "text", text: "answered" }], details },
+      }, ctx);
+    }
+  };
 
   // Flat-phase: ensureMilestoneShell creates phases/04-new-milestone-m004/ for M004
   const milestoneDir = join(dir, ".gsd", "phases", "04-new-milestone-m004");
   const draftPath = join(milestoneDir, "04-CONTEXT-DRAFT.md");
   const discussionPath = join(milestoneDir, "04-DISCUSSION.md");
+  const artifactContent = (type: string): string | undefined =>
+    _getAdapter()?.prepare(
+      "SELECT full_content FROM artifacts WHERE milestone_id = 'M004' AND artifact_type = :type",
+    ).get({ ":type": type })?.["full_content"] as string | undefined;
 
-  assert.equal(existsSync(draftPath), true, "first answer round should create a resumable context draft");
-  assert.equal(existsSync(discussionPath), true, "first answer round should create a discussion log");
+  await externalRound({ questions, response: null, cancelled: true });
+  assert.equal(existsSync(draftPath), false, "a cancelled round is not captured");
 
-  const draft = readFileSync(draftPath, "utf-8");
-  assert.match(draft, /What are you picturing for M004\?/);
-  assert.match(draft, /Planning metadata \(Recommended\)/);
-  assert.match(draft, /No new dependencies \(Recommended\)/);
+  await externalRound({
+    questions,
+    cancelled: false,
+    response: {
+      answers: {
+        m004_shape: { selected: "Planning metadata (Recommended)" },
+        boundary: { selected: "No new dependencies (Recommended)" },
+      },
+    },
+  });
+
+  for (const type of ["CONTEXT-DRAFT", "DISCUSSION"]) {
+    const content = artifactContent(type) ?? "";
+    assert.match(content, /What are you picturing for M004\?/, `${type} row holds the question`);
+    assert.match(content, /Planning metadata \(Recommended\)/, `${type} row holds the answer`);
+    assert.match(content, /No new dependencies \(Recommended\)/, `${type} row holds the answer`);
+  }
+  assert.equal(readFileSync(draftPath, "utf-8"), artifactContent("CONTEXT-DRAFT"), "the draft file is a render of the row");
+  assert.equal(readFileSync(discussionPath, "utf-8"), artifactContent("DISCUSSION"), "the log file is a render of the row");
+
+  // Each question and its answer is also an Open Question on the Milestone
+  // lifecycle with a presented interaction and an accepted Answer. The
+  // cancelled round above stored nothing.
+  assert.deepEqual(
+    _getAdapter()!.prepare(`
+      SELECT lifecycle.milestone_id, question.question_text, question.question_status,
+             interaction.interaction_kind, answer.response_kind, selected.label AS selected_label
+      FROM workflow_open_questions question
+      JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = question.lifecycle_id
+      JOIN workflow_interactions interaction ON interaction.question_id = question.question_id
+      LEFT JOIN workflow_answers answer ON answer.answer_id = question.accepted_answer_id
+      LEFT JOIN workflow_interaction_options selected
+        ON selected.interaction_id = answer.interaction_id AND selected.option_id = answer.selected_option_id
+      ORDER BY question.question_text
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        milestone_id: "M004",
+        question_text: "What are you picturing for M004?",
+        question_status: "answered",
+        interaction_kind: "choice",
+        response_kind: "answer",
+        selected_label: "Planning metadata (Recommended)",
+      },
+      {
+        milestone_id: "M004",
+        question_text: "Which boundary should I plan around?",
+        question_status: "answered",
+        interaction_kind: "choice",
+        response_kind: "answer",
+        selected_label: "No new dependencies (Recommended)",
+      },
+    ],
+    "the round is stored as question, interaction and answer rows",
+  );
 
   const row = getMilestone("M004");
   assert.equal(row?.status, "queued", "new milestone shell should be registered in the DB");
+  assert.deepEqual(
+    _getAdapter()!.prepare(`
+      SELECT event.entity_id, json_extract(event.payload_json, '$.source') AS source
+      FROM workflow_operations operation
+      JOIN workflow_domain_events event ON event.operation_id = operation.operation_id
+      WHERE operation.operation_type = 'milestone.register'
+    `).all().map((event) => ({ ...event })),
+    [{ entity_id: "M004", source: "discussion-capture" }],
+    "the shell row is written by one milestone.register Domain Operation",
+  );
 
   invalidateStateCache();
   const state = await deriveState(dir);
   assert.equal(state.activeMilestone?.id, "M004");
   assert.equal(state.phase, "needs-discussion");
+
+  // The next round is built from the database rows, not from the files.
+  rmSync(draftPath);
+  rmSync(discussionPath);
+  await externalRound({
+    questions: [{
+      id: "scope",
+      header: "Scope",
+      question: "What is out of scope?",
+      options: [
+        { label: "Sync (Recommended)", description: "No sync in this milestone." },
+        { label: "Nothing", description: "Everything is in scope." },
+      ],
+    }],
+    cancelled: false,
+    response: { answers: { scope: { selected: "Sync (Recommended)" } } },
+  });
+
+  for (const [type, path] of [["CONTEXT-DRAFT", draftPath], ["DISCUSSION", discussionPath]] as const) {
+    const content = artifactContent(type) ?? "";
+    assert.match(content, /What are you picturing for M004\?/, `${type} row keeps the first round`);
+    assert.match(content, /What is out of scope\?/, `${type} row holds the second round`);
+    assert.equal(readFileSync(path, "utf-8"), content, `${type} file is rendered again from the row`);
+  }
+
+  // The provider result shape (#1894) has answers and no questions field: the
+  // questions come from the tool call input.
+  const providerQuestions = [{
+    id: "storage",
+    header: "Storage",
+    question: "Where is the data stored?",
+    options: [
+      { label: "Local file (Recommended)", description: "One file on disk." },
+      { label: "Server", description: "A remote store." },
+    ],
+  }];
+  await externalRound(
+    { answers: { storage: { answers: ["Local file (Recommended)"] } } },
+    { questions: providerQuestions },
+  );
+  for (const type of ["CONTEXT-DRAFT", "DISCUSSION"]) {
+    const content = artifactContent(type) ?? "";
+    assert.match(content, /Where is the data stored\?/, `${type} row holds the question from the tool input`);
+    assert.match(content, /Local file \(Recommended\)/, `${type} row holds the provider-shape answer`);
+  }
+
+  // A result with answers and no questions anywhere is not written as an empty round.
+  const before = { draft: artifactContent("CONTEXT-DRAFT"), log: artifactContent("DISCUSSION") };
+  await externalRound({ answers: { storage: { answers: ["Server"] } } }, {});
+  assert.equal(artifactContent("CONTEXT-DRAFT"), before.draft, "a round with no questions does not change the draft");
+  assert.equal(artifactContent("DISCUSSION"), before.log, "a round with no questions does not change the log");
+});
+
+test("a confirmed depth question survives a restart: the CONTEXT save is allowed and the consent answer row exists", async (t) => {
+  const dir = makeTempDir("depth-answer-row");
+  const originalCwd = process.cwd();
+  process.chdir(dir);
+  clearDiscussionFlowState(dir);
+  clearPendingAutoStart(dir);
+
+  t.after(() => {
+    try {
+      clearDiscussionFlowState(dir);
+      clearPendingAutoStart(dir);
+      closeDatabase();
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  assert.equal(openDatabase(join(dir, ".gsd", "gsd.db")), true);
+  const { handlers, pi } = makeHookHarness();
+  const ctx = { cwd: dir, ui: { notify: () => undefined } } as any;
+  registerHooks(pi, []);
+  setPendingAutoStart(dir, {
+    basePath: dir,
+    milestoneId: "M006",
+    ctx,
+    pi: { sendMessage: () => undefined } as any,
+  });
+
+  const confirm = "Yes, you got it (Recommended)";
+  const questions = [{
+    id: "depth_verification_M006_confirm",
+    header: "Depth Check",
+    question: "Did I capture the depth right?",
+    options: [
+      { label: confirm, description: "The summary matches what you want." },
+      { label: "Not quite", description: "Let me clarify." },
+    ],
+  }];
+  const event = { toolCallId: "call-depth", toolName: "ask_user_questions" };
+  const result = {
+    content: [{ type: "text", text: "answered" }],
+    details: {
+      questions,
+      cancelled: false,
+      response: { answers: { depth_verification_M006_confirm: { selected: confirm } } },
+    },
+  };
+  for (const handler of handlers.get("tool_execution_start") ?? []) {
+    await handler({ ...event, args: { questions } }, ctx);
+  }
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M006", null, dir).block, true, "the gate blocks until the answer");
+  for (const handler of handlers.get("tool_result") ?? []) {
+    await handler({ ...event, input: { questions }, details: result.details }, ctx);
+  }
+  for (const handler of handlers.get("tool_execution_end") ?? []) {
+    await handler({ ...event, isError: false, result }, ctx);
+  }
+
+  // The process that took the answer is gone: no discussion state in memory,
+  // no open database. The next session start applies this boundary.
+  clearPendingAutoStart(dir);
+  closeDatabase();
+  applyWriteGateSessionBoundary("start", dir);
+
+  assert.equal(
+    shouldBlockContextArtifactSave("CONTEXT", "M006", null, dir).block,
+    false,
+    "the CONTEXT save is allowed after the restart",
+  );
+  assert.deepEqual(
+    _getAdapter()!.prepare(`
+      SELECT lifecycle.milestone_id, question.question_text, question.question_status,
+             interaction.interaction_kind, answer.response_kind, answer.verbatim_response,
+             answer.answer_disposition
+      FROM workflow_answers answer
+      JOIN workflow_open_questions question ON question.accepted_answer_id = answer.answer_id
+      JOIN workflow_interactions interaction ON interaction.interaction_id = answer.interaction_id
+      JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = question.lifecycle_id
+    `).all().map((row) => ({ ...row })),
+    [{
+      milestone_id: "M006",
+      question_text: "Did I capture the depth right?",
+      question_status: "answered",
+      interaction_kind: "consent",
+      response_kind: "consent",
+      verbatim_response: confirm,
+      answer_disposition: "accepted",
+    }],
+    "the depth question and the user's consent are database rows",
+  );
+});
+
+test("the first captured round keeps a draft and a discussion log that have no database row", async (t) => {
+  const dir = makeTempDir("question-adopt");
+  const originalCwd = process.cwd();
+  process.chdir(dir);
+  clearDiscussionFlowState(dir);
+  clearPendingAutoStart(dir);
+
+  t.after(() => {
+    try {
+      clearDiscussionFlowState(dir);
+      clearPendingAutoStart(dir);
+      closeDatabase();
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The triage defer seed and a discussion started before the rows existed
+  // both leave files with no artifact row in an existing project database.
+  const milestoneDir = join(dir, ".gsd", "milestones", "M005");
+  const draftPath = join(milestoneDir, "M005-CONTEXT-DRAFT.md");
+  const discussionPath = join(milestoneDir, "M005-DISCUSSION.md");
+  mkdirSync(milestoneDir, { recursive: true });
+  assert.equal(openDatabase(join(dir, ".gsd", "gsd.db")), true);
+  writeFileSync(draftPath, "# M005: Deferred Work\n\n## Deferred Captures\n\n- **CAP-1:** export the report as CSV\n");
+  writeFileSync(discussionPath, "# M005 Discussion Log\n\n## Exchange — earlier\n\nWhich format comes first?\n\n---\n\n");
+
+  const handlers = new Map<string, Array<(event: any, ctx?: any) => Promise<void> | void>>();
+  const pi = {
+    on(event: string, handler: (event: any, ctx?: any) => Promise<void> | void) {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+    },
+  } as any;
+  const ctx = { cwd: dir, ui: { notify: () => undefined } } as any;
+
+  registerHooks(pi, []);
+  setPendingAutoStart(dir, {
+    basePath: dir,
+    milestoneId: "M005",
+    ctx,
+    pi: { sendMessage: () => undefined } as any,
+  });
+
+  for (const handler of handlers.get("tool_execution_end") ?? []) {
+    await handler({
+      toolCallId: "call-1",
+      toolName: "ask_user_questions",
+      isError: false,
+      result: {
+        content: [{ type: "text", text: "answered" }],
+        details: {
+          questions: [{
+            id: "scope",
+            header: "Scope",
+            question: "What is out of scope?",
+            options: [
+              { label: "Sync (Recommended)", description: "No sync in this milestone." },
+              { label: "Nothing", description: "Everything is in scope." },
+            ],
+          }],
+          cancelled: false,
+          response: { answers: { scope: { selected: "Sync (Recommended)" } } },
+        },
+      },
+    }, ctx);
+  }
+
+  const seeds = [
+    ["CONTEXT-DRAFT", draftPath, /export the report as CSV/],
+    ["DISCUSSION", discussionPath, /Which format comes first\?/],
+  ] as const;
+  for (const [type, path, seed] of seeds) {
+    const content = _getAdapter()?.prepare(
+      "SELECT full_content FROM artifacts WHERE milestone_id = 'M005' AND artifact_type = :type",
+    ).get({ ":type": type })?.["full_content"] as string | undefined;
+    assert.match(content ?? "", seed, `${type} row keeps the text that was only on disk`);
+    assert.match(content ?? "", /What is out of scope\?/, `${type} row holds the new round`);
+    assert.equal(readFileSync(path, "utf-8"), content, `${type} file is a render of the row`);
+  }
 });
 
 test("register-hooks clears depth gate when remote (Telegram/Slack/Discord) answer is normalized (#4406)", async (t) => {
   const dir = makeTempDir("remote");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -441,11 +743,11 @@ test("register-hooks returns hard blocker when depth question is cancelled", asy
   const dir = makeTempDir("cancelled");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -513,11 +815,11 @@ test("register-hooks clears deferred approval gate after depth confirmation (hea
   const dir = makeTempDir("deferred-clear");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -596,11 +898,11 @@ test("register-hooks recovers from a cancelled depth question via re-asked ask_u
   const dir = makeTempDir("recovery");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -691,11 +993,11 @@ test("register-hooks gates MCP ask_user_questions cancellation before requiremen
   const dir = makeTempDir("mcp-cancelled");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -805,13 +1107,13 @@ test("register-hooks message_update does NOT pause while an interactive elicitat
   const dir = makeTempDir("elicitation-pause-guard");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
   clearInFlightTools();
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
       clearInFlightTools();
     } finally {
@@ -882,28 +1184,20 @@ test("register-hooks message_update does NOT pause while an interactive elicitat
   );
 });
 
-test("register-hooks agent_end does not re-arm deferred gate after workflow MCP verified write-gate on disk", async (t) => {
-  const dir = makeTempDir("mcp-disk-sync");
+test("register-hooks agent_end does not re-arm deferred gate after workflow MCP verified the gate", async (t) => {
+  const dir = makeTempDir("mcp-verified-sync");
   const originalCwd = process.cwd();
-  const originalEnv = process.env.GSD_PERSIST_WRITE_GATE_STATE;
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
-  process.env.GSD_PERSIST_WRITE_GATE_STATE = "1";
 
   const gateId = "depth_verification_M005_confirm";
-  const statePath = join(dir, ".gsd", "runtime", "write-gate-state.json");
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
     } finally {
-      if (originalEnv === undefined) {
-        delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-      } else {
-        process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
-      }
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
@@ -944,13 +1238,9 @@ test("register-hooks agent_end does not re-arm deferred gate after workflow MCP 
   }
 
   setPendingGate(gateId, dir);
-  mkdirSync(join(dir, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(statePath, JSON.stringify({
-    verifiedDepthMilestones: ["M005"],
-    verifiedApprovalGates: [gateId],
-    activeQueuePhase: false,
-    pendingGateId: null,
-  }, null, 2), "utf-8");
+  // The workflow MCP child records the user's answer.
+  childWriteGateAdapter.markApprovalGateVerified(gateId, dir);
+  childWriteGateAdapter.markDepthVerified("M005", dir);
 
   for (const handler of handlers.get("agent_end") ?? []) {
     await handler({ messages: [] }, ctx);
@@ -970,28 +1260,20 @@ test("register-hooks agent_end does not re-arm deferred gate after workflow MCP 
   });
 });
 
-test("register-hooks message_update uses in-memory write-gate snapshot instead of disk reconcile", async (t) => {
-  const dir = makeTempDir("message-update-memory-snapshot");
+test("register-hooks message_update does not arm the approval pause for a milestone the workflow MCP verified", async (t) => {
+  const dir = makeTempDir("message-update-verified");
   const originalCwd = process.cwd();
-  const originalEnv = process.env.GSD_PERSIST_WRITE_GATE_STATE;
   process.chdir(dir);
-  process.env.GSD_PERSIST_WRITE_GATE_STATE = "1";
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
 
   const gateId = "depth_verification_M012_confirm";
-  const statePath = join(dir, ".gsd", "runtime", "write-gate-state.json");
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
     } finally {
-      if (originalEnv === undefined) {
-        delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-      } else {
-        process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
-      }
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1020,13 +1302,10 @@ test("register-hooks message_update uses in-memory write-gate snapshot instead o
     pi: { sendMessage: () => undefined } as any,
   });
 
-  mkdirSync(join(dir, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(statePath, JSON.stringify({
-    verifiedDepthMilestones: ["M012"],
-    verifiedApprovalGates: [gateId],
-    activeQueuePhase: false,
-    pendingGateId: null,
-  }, null, 2), "utf-8");
+  // The workflow MCP child records the user's answer. The host has no copy
+  // of gate state, so the streaming hook reads the same verification.
+  childWriteGateAdapter.markApprovalGateVerified(gateId, dir);
+  childWriteGateAdapter.markDepthVerified("M012", dir);
 
   const approvalMessage = {
     role: "assistant",
@@ -1040,21 +1319,21 @@ test("register-hooks message_update uses in-memory write-gate snapshot instead o
   }
 
   assert.equal(
-    notices.some((n) => /discuss-milestone M012 is waiting for your approval - pausing/.test(n.text)),
-    true,
-    "streaming hook must not suppress the pause from a disk-only verification",
+    notices.some((n) => /waiting for your approval - pausing/.test(n.text)),
+    false,
+    "approval-looking text after the verification must not pause the turn",
   );
   assert.equal(
     shouldBlockContextArtifactSave("CONTEXT", "M012", null, dir).block,
-    true,
-    "streaming hook must not reconcile disk-only verification into the in-memory snapshot",
+    false,
+    "the verified milestone context write stays unlocked",
   );
 
   for (const handler of handlers.get("agent_end") ?? []) {
     await handler({ messages: [] }, ctx);
   }
 
-  assert.equal(getPendingGate(dir), null, "agent_end still reconciles disk and suppresses durable re-arm");
+  assert.equal(getPendingGate(dir), null, "agent_end must not arm a gate for the verified milestone");
 });
 
 // ── External-engine post-hoc gate replay (write-gate two-process sync) ──────
@@ -1081,9 +1360,9 @@ function makeHookHarness(): {
 
 test("tool_execution_start does not re-arm a depth gate the MCP child already verified", async (t) => {
   const dir = makeTempDir("posthoc-no-rearm");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1119,9 +1398,9 @@ test("tool_execution_start does not re-arm a depth gate the MCP child already ve
 
 test("tool_execution_start still arms an unverified depth gate", async (t) => {
   const dir = makeTempDir("live-arm");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1142,9 +1421,9 @@ test("tool_execution_start still arms an unverified depth gate", async (t) => {
 
 test("tool_result verifies the gate from result.structuredContent when event.details is missing", async (t) => {
   const dir = makeTempDir("structured-fallback");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1188,9 +1467,9 @@ test("tool_result verifies the gate from result.structuredContent when event.det
 
 test("tool_result normalizes provider answers shape before verifying a depth gate (#1894)", async (t) => {
   const dir = makeTempDir("provider-answers");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1248,9 +1527,9 @@ test("tool_result normalizes provider answers shape before verifying a depth gat
 
 test("tool_result without details or structured content leaves the gate pending without crashing", async (t) => {
   const dir = makeTempDir("no-details");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 

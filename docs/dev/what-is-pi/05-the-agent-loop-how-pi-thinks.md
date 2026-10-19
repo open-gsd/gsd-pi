@@ -36,6 +36,7 @@ User sends prompt
 **Key insight:** The loop keeps going until the LLM decides to stop calling tools. A single user prompt might trigger 1 turn or 50 turns depending on the task complexity. Each turn is a complete LLM call → response → tool execution cycle.
 
 **Stop reasons the LLM can produce:**
+
 - `stop` — Normal completion, the LLM is done
 - `toolUse` — The LLM wants to call tools (triggers another turn)
 - `length` — Hit the output token limit

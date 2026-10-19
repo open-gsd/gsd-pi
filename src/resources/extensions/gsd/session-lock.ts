@@ -437,7 +437,7 @@ export function acquireSessionLock(basePath: string): SessionLockResult {
   // crash diagnostics do not keep surfacing it as active.
   const existingPreflight = readExistingLockData(lp);
   if (existingPreflight?.pid && !isPidAlive(existingPreflight.pid)) {
-    markWorkerStoppingByPid(normalizeRealPath(basePath), existingPreflight.pid);
+    markDeadWorkerStopping(basePath, existingPreflight.pid);
   }
 
   let lockfile: ProperLockfileApi;
@@ -456,7 +456,7 @@ export function acquireSessionLock(basePath: string): SessionLockResult {
   if (existsSync(lockDir)) {
     const existingData = readExistingLockData(lp);
     const deadPid = existingData?.pid && !isPidAlive(existingData.pid) ? existingData.pid : null;
-    if (deadPid) markWorkerStoppingByPid(normalizeRealPath(basePath), deadPid);
+    if (deadPid) markDeadWorkerStopping(basePath, deadPid);
     const isOrphan = !existingData || !!deadPid;
     if (isOrphan) {
       try {
@@ -501,7 +501,7 @@ export function acquireSessionLock(basePath: string): SessionLockResult {
     const existingData = readExistingLockData(lp);
     const existingPid = existingData?.pid;
     if (existingPid && !isPidAlive(existingPid)) {
-      markWorkerStoppingByPid(normalizeRealPath(basePath), existingPid);
+      markDeadWorkerStopping(basePath, existingPid);
     }
 
     // If no lock file or no alive process, try to clean up and re-acquire (#1245)
@@ -891,5 +891,18 @@ function isPidAlive(pid: number): boolean {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EPERM") return true;
     return false;
+  }
+}
+
+/**
+ * Mark the worker row of a dead lock-holder PID as stopping. Best-effort: the
+ * session lock is taken before the workflow DB is opened, so a missing DB is
+ * logged and the lock acquisition continues.
+ */
+function markDeadWorkerStopping(basePath: string, pid: number): void {
+  try {
+    markWorkerStoppingByPid(normalizeRealPath(basePath), pid);
+  } catch (err) {
+    logWarning("session", `dead worker ${pid} not marked stopping: ${err instanceof Error ? err.message : String(err)}`);
   }
 }

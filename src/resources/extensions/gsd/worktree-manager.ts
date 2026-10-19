@@ -19,9 +19,9 @@
  *   4. remove()  — git worktree remove + branch cleanup
  */
 
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { GSDError, GSD_PARSE_ERROR, GSD_STALE_STATE, GSD_LOCK_HELD, GSD_GIT_ERROR, GSD_MERGE_CONFLICT } from "./errors.js";
 import { logError, logWarning } from "./workflow-logger.js";
 import {
@@ -425,36 +425,58 @@ export function pruneEphemeralGhostWorktreeDirectories(basePath: string): string
   return removed;
 }
 
+const STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS = [20, 50, 100];
+const STALE_WORKTREE_SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepStaleWorktreeRetry(ms: number): void {
+  Atomics.wait(STALE_WORKTREE_SLEEP_VIEW, 0, 0, ms);
+}
+
 export function removeStaleWorktreeDirectory(
   wtPath: string,
   name: string,
   removeDirectory: typeof rmSync = rmSync,
+  sleep: (ms: number) => void = sleepStaleWorktreeRetry,
 ): void {
   logWarning(
     "reconcile",
     `Removing stale worktree directory (not registered with git): ${wtPath}`,
     { worktree: name },
   );
-  try {
-    removeDirectory(wtPath, { recursive: true, force: true });
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === "EACCES") {
-      throw new GSDError(
-        GSD_GIT_ERROR,
-        `Cannot remove stale worktree directory at ${wtPath} (EACCES: permission denied). It may contain files owned by another user, such as files created with sudo or by a container. Fix the directory ownership or permissions, or remove it manually, then retry.`,
-        { cause: error as Error },
-      );
+  const attempts = STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      removeDirectory(wtPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      // Windows/OneDrive lock errors are routinely transient (#1987).
+      if ((code === "EPERM" || code === "EBUSY") && attempt < STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS.length) {
+        sleep(STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS[attempt]!);
+        continue;
+      }
+      throwStaleWorktreeRemovalError(wtPath, error);
     }
-    if (code === "EPERM" || code === "EBUSY") {
-      throw new GSDError(
-        GSD_GIT_ERROR,
-        `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path and retry.`,
-        { cause: error as Error },
-      );
-    }
-    throw error;
   }
+}
+
+function throwStaleWorktreeRemovalError(wtPath: string, error: unknown): never {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code === "EACCES") {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Cannot remove stale worktree directory at ${wtPath} (EACCES: permission denied). It may contain files owned by another user, such as files created with sudo or by a container. Fix the directory ownership or permissions, or remove it manually, then retry.`,
+      { cause: error as Error },
+    );
+  }
+  if (code === "EPERM" || code === "EBUSY") {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path and retry.`,
+      { cause: error as Error },
+    );
+  }
+  throw error;
 }
 
 /**
@@ -545,6 +567,186 @@ export function buildManualValidationGuidance(
 // ─── Core Operations ───────────────────────────────────────────────────────
 
 /**
+ * Verify the target branch/path is actually free before `git worktree add`.
+ *
+ * After removing a stale worktree directory, git's `.git/worktrees/<name>`
+ * admin metadata can still claim the branch (e.g. a locked entry the prune
+ * skips). The add then fails with "already in use" and callers degrade to
+ * project-root, silently routing every subsequent operation for the milestone
+ * to the wrong base (#2317). Any stale registration (directory missing)
+ * triggers one prune retry — prune is idempotent and harmless, and libgit2's
+ * list can report an empty branch for a missing directory, so the trigger
+ * must not pre-filter by branch/path. Only a surviving registration that can
+ * still block THIS add fails loud: our branch, our canonical path, or an
+ * undeterminable registration inside the GSD worktrees containers. Live
+ * worktrees (directory present) keep their existing handling in
+ * createWorktree.
+ *
+ * `bridge` is injectable for tests; defaults to the same native-git bridge
+ * used by prune/add.
+ */
+export function verifyBranchFreeForWorktreeAdd(
+  basePath: string,
+  name: string,
+  branch: string,
+  wtPath: string,
+  bridge: { list: typeof nativeWorktreeList; prune: typeof nativeWorktreePrune } = {
+    list: nativeWorktreeList,
+    prune: nativeWorktreePrune,
+  },
+): void {
+  const staleRegistrations = (): { path: string; branch: string }[] =>
+    bridge
+      .list(basePath)
+      .filter((entry) => !existsSync(entry.path))
+      .map((entry) => ({ path: entry.path, branch: entry.branch }));
+
+  if (staleRegistrations().length === 0) return;
+
+  bridge.prune(basePath);
+
+  const blocking = staleRegistrations().find((entry) =>
+    entry.branch === branch ||
+    normalizePathForComparison(entry.path) === normalizePathForComparison(wtPath) ||
+    (entry.branch === "" && isInsideWorktreesDir(basePath, entry.path)),
+  );
+  if (!blocking) return; // the retry prune cleared everything that could block this add
+
+  const unlockFirst = `git worktree unlock ${blocking.path}`;
+  const clearRegistration = `git worktree prune (or git worktree remove --force ${blocking.path})`;
+  logError(
+    "worktree",
+    `Worktree creation blocked for ${name}: stale git worktree registration at ${blocking.path} survived a prune retry. ` +
+      `Remediation: ${unlockFirst}, then ${clearRegistration}, then re-enter the milestone.`,
+    { worktree: name, branch, path: blocking.path },
+  );
+  throw new GSDError(
+    GSD_LOCK_HELD,
+    `Branch "${branch}" is still claimed by a stale worktree registration at "${blocking.path}" ` +
+      `(directory missing; prune did not clear it — the entry may be locked). ` +
+      `Fix: ${unlockFirst}, then ${clearRegistration}, then re-enter the milestone.`,
+  );
+}
+
+/** True when err is the fail-loud stale-registration error from verifyBranchFreeForWorktreeAdd (#2317). */
+export function isStaleWorktreeRegistrationError(err: unknown): boolean {
+  return err instanceof GSDError
+    && err.code === GSD_LOCK_HELD
+    && err.message.includes("stale worktree registration");
+}
+
+/** Opt-in allowlist file listing repo-relative paths copied into new worktrees (#2386). */
+const WORKTREE_FILES_ALLOWLIST = join(".gsd", "worktree-files.json");
+
+export interface WorktreeFileCopyOutcome {
+  copied: string[];
+  skipped: { path: string; reason: string }[];
+}
+
+/**
+ * Read the opt-in `.gsd/worktree-files.json` allowlist (#2386): an array of
+ * repo-relative paths copied from the main checkout into each new worktree.
+ * Returns null when the file is absent (no behavior change), [] when present
+ * but empty or invalid (invalid shape is warned, never fatal).
+ */
+export function readWorktreeFilesAllowlist(basePath: string): string[] | null {
+  const configPath = join(basePath, WORKTREE_FILES_ALLOWLIST);
+  if (!existsSync(configPath)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch (err) {
+    logWarning(
+      "worktree",
+      `.gsd/worktree-files.json is not valid JSON; ignoring allowlist: ${(err as Error).message}`,
+      { file: WORKTREE_FILES_ALLOWLIST },
+    );
+    return [];
+  }
+  if (parsed === null || !Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    logWarning(
+      "worktree",
+      ".gsd/worktree-files.json must be an array of repo-relative path strings; ignoring allowlist",
+      { file: WORKTREE_FILES_ALLOWLIST },
+    );
+    return [];
+  }
+  return parsed as string[];
+}
+
+/**
+ * Copy allowlisted files from the main checkout into a freshly created
+ * worktree (#2386). `git worktree add` only populates tracked files, so
+ * gitignored-but-required config never reaches the worktree; the repo owner
+ * opts in per path via .gsd/worktree-files.json. GSD never provisions secrets
+ * on its own — nothing is hardcoded here. Paths must be repo-relative and
+ * stay inside the repository (source and destination are both contained);
+ * symlinked sources are skipped (use the post-create hook for symlink
+ * fan-out). Missing sources and copy failures are warned and skipped — a
+ * bad entry never fails worktree creation and never aborts later entries.
+ */
+export function copyWorktreeFilesIntoWorktree(basePath: string, wtPath: string, allowlist: string[]): WorktreeFileCopyOutcome {
+  const outcome: WorktreeFileCopyOutcome = { copied: [], skipped: [] };
+  const resolvedBase = resolve(basePath);
+  const resolvedWt = resolve(wtPath);
+
+  for (const rawEntry of allowlist) {
+    const rel = rawEntry.trim();
+    if (!rel) continue;
+
+    if (isAbsolute(rel)) {
+      outcome.skipped.push({ path: rel, reason: "absolute path" });
+      logWarning("worktree", ".gsd/worktree-files.json entry is absolute; must be repo-relative; skipped", { file: rel });
+      continue;
+    }
+
+    const source = resolve(resolvedBase, rel);
+    const sourceInsideRepo = source !== resolvedBase && source.startsWith(resolvedBase + sep);
+    const dest = join(resolvedWt, rel);
+    const destInsideWorktree = dest.startsWith(resolvedWt + sep);
+    if (!sourceInsideRepo || !destInsideWorktree) {
+      outcome.skipped.push({ path: rel, reason: "outside repository" });
+      logWarning("worktree", ".gsd/worktree-files.json entry resolves outside the repository; skipped", { file: rel });
+      continue;
+    }
+
+    let sourceStat;
+    try {
+      sourceStat = lstatSync(source);
+    } catch {
+      outcome.skipped.push({ path: rel, reason: "source missing" });
+      logWarning("worktree", ".gsd/worktree-files.json source missing; skipped", { file: rel });
+      continue;
+    }
+    if (sourceStat.isSymbolicLink()) {
+      outcome.skipped.push({ path: rel, reason: "symlinked source" });
+      logWarning("worktree", ".gsd/worktree-files.json source is a symlink; skipped", { file: rel });
+      continue;
+    }
+    if (!sourceStat.isFile()) {
+      outcome.skipped.push({ path: rel, reason: "source missing" });
+      logWarning("worktree", ".gsd/worktree-files.json source missing; skipped", { file: rel });
+      continue;
+    }
+
+    try {
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(source, dest);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      outcome.skipped.push({ path: rel, reason: `copy failed: ${msg}` });
+      logWarning("worktree", `.gsd/worktree-files.json copy failed; skipped: ${msg}`, { file: rel });
+      continue;
+    }
+    outcome.copied.push(rel);
+    logWarning("worktree", "copied allowlisted file into new worktree", { file: rel, worktree: wtPath });
+  }
+
+  return outcome;
+}
+
+/**
  * Create a new git worktree under .gsd/worktrees/<name>/ with branch worktree/<name>.
  * The branch is created from the current HEAD of the main branch.
  *
@@ -587,6 +789,12 @@ export function createWorktree(basePath: string, name: string, opts: { branch?: 
 
   // Prune any stale worktree entries from a previous removal
   nativeWorktreePrune(basePath);
+
+  // #2317 — the prune above is not guaranteed to clear git's worktree admin
+  // metadata. Verify the branch/path is actually free before the add so a
+  // lingering registration fails loudly here instead of the add failing and
+  // the session silently degrading to project-root.
+  verifyBranchFreeForWorktreeAdd(basePath, name, branch, wtPath);
 
   // Use the explicit start point (e.g. integration branch) if provided,
   // otherwise fall back to the repo's detected main branch.
@@ -655,6 +863,14 @@ export function createWorktree(basePath: string, name: string, opts: { branch?: 
     nativeWorktreeAdd(basePath, wtPath, branch, true, startPoint);
   }
 
+  // #2386 — copy the opt-in .gsd/worktree-files.json allowlist from the main
+  // checkout into the fresh worktree. Absent/empty allowlist → no behavior
+  // change; copy problems are warned, never fatal to creation.
+  const allowlist = readWorktreeFilesAllowlist(basePath);
+  if (allowlist && allowlist.length > 0) {
+    copyWorktreeFilesIntoWorktree(basePath, wtPath, allowlist);
+  }
+
   return {
     name,
     path: wtPath,
@@ -708,11 +924,15 @@ export function listWorktrees(basePath: string): WorktreeInfo[] {
       entryVariants.push(realpathSync(entryPath));
     }
     const normalizedEntryVariants = [...new Set(entryVariants.map(normalizePathForComparison))];
+    // The comparison form is lower-cased on Windows. The name is read from
+    // the path as git registered it, so `M007` is not listed as `m007`.
+    const registeredLeaf = entryVariants[0].replaceAll("\\", "/").replace(/\/+$/, "").split("/").pop() ?? "";
     const matchedRoot = worktreeRoots.find(root =>
       normalizedEntryVariants.some(entryVariant => entryVariant.startsWith(`${root.normalized}/`)),
     );
-    const matchesBranchLeaf = branchWorktreeName
-      ? normalizedEntryVariants.some(entryVariant => entryVariant.split("/").pop() === branchWorktreeName)
+    const normalizedBranchLeaf = branchWorktreeName ? normalizePathForComparison(branchWorktreeName) : null;
+    const matchesBranchLeaf = normalizedBranchLeaf
+      ? normalizedEntryVariants.some(entryVariant => entryVariant.split("/").pop() === normalizedBranchLeaf)
       : false;
 
     // Only include worktrees under .gsd/worktrees/
@@ -730,6 +950,7 @@ export function listWorktrees(basePath: string): WorktreeInfo[] {
     }
 
     if (!name || name.includes("/")) continue;
+    if (normalizePathForComparison(registeredLeaf) === name) name = registeredLeaf;
 
     const resolvedEntryPath = existsSync(entryPath) ? realpathSync(entryPath) : resolve(entryPath);
 
@@ -842,15 +1063,75 @@ export function findNestedGitDirs(rootPath: string): string[] {
   return results;
 }
 
+export interface RemoveWorktreeOptions {
+  deleteBranch?: boolean;
+  force?: boolean;
+  branch?: string;
+}
+
+/**
+ * Outcome of a worktree removal.
+ *   - `removed`: git no longer tracks the worktree and its directory is gone.
+ *   - `preserved`: the worktree holds uncommitted work that could not be
+ *     quarantined, so nothing was removed.
+ *   - `partial`: the directory is still on disk after every removal attempt.
+ *     Windows refuses to delete a directory that is the working directory of
+ *     a running process or holds an open file. `cleanupCommand` is absent
+ *     when the directory lies outside the worktrees containers, where nothing
+ *     is deleted by force (#2365).
+ */
+export type WorktreeRemovalResult =
+  | { status: "removed"; path: string }
+  | { status: "preserved"; path: string }
+  | { status: "partial"; path: string; cleanupCommand?: string };
+
+/** Shell command that deletes a leftover worktree directory on this platform. */
+export function worktreeManualCleanupCommand(
+  dirPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "win32") {
+    return `Remove-Item -Recurse -Force -LiteralPath '${dirPath.replaceAll("'", "''")}'`;
+  }
+  return `rm -rf "${dirPath}"`;
+}
+
+function defaultRemoveDirectoryTree(dirPath: string): void {
+  rmSync(dirPath, { recursive: true, force: true });
+}
+
+let removeDirectoryTree = defaultRemoveDirectoryTree;
+
+/** Test-only seam for a directory the operating system refuses to delete. */
+export function _setRemoveDirectoryTreeForTests(override: ((dirPath: string) => void) | null): void {
+  removeDirectoryTree = override ?? defaultRemoveDirectoryTree;
+}
+
 /**
  * Remove a worktree and optionally delete its branch.
  * If the process is currently inside the worktree, chdir out first.
+ *
+ * Returns false only when the worktree was kept to preserve uncommitted work.
+ * A true result does not say the directory is gone: use
+ * `removeWorktreeDetailed` to tell a full removal from a partial one.
  */
 export function removeWorktree(
   basePath: string,
   name: string,
-  opts: { deleteBranch?: boolean; force?: boolean; branch?: string } = {},
+  opts: RemoveWorktreeOptions = {},
 ): boolean {
+  return removeWorktreeDetailed(basePath, name, opts).status !== "preserved";
+}
+
+/**
+ * Remove a worktree and optionally delete its branch, and report whether the
+ * directory is really gone.
+ */
+export function removeWorktreeDetailed(
+  basePath: string,
+  name: string,
+  opts: RemoveWorktreeOptions = {},
+): WorktreeRemovalResult {
   basePath = normalizeBasePathForWorktreeOps(basePath);
 
   let wtPath = worktreePath(basePath, name);
@@ -862,8 +1143,8 @@ export function removeWorktree(
   // The computed path may differ when .gsd/ is (or was) a symlink to an
   // external state directory — git resolves symlinks at worktree creation
   // time, so its registered path points to the resolved external location.
-  // If syncStateToProjectRoot later creates a real .gsd/ directory that
-  // shadows the symlink, the computed path diverges from git's record.
+  // If a real .gsd/ directory later shadows the symlink, the computed path
+  // diverges from git's record.
   let gitReportedPath: string | null = null;
   try {
     const entries = nativeWorktreeList(basePath);
@@ -912,7 +1193,7 @@ export function removeWorktree(
     if (deleteBranchAfterRemoval) {
       deleteBranchIfPresent(basePath, branch, "nativeBranchDelete failed");
     }
-    return true;
+    return { status: "removed", path: resolvedWtPath };
   }
 
   // Submodule safety (#2337): detect submodules with uncommitted changes
@@ -1012,13 +1293,13 @@ export function removeWorktree(
         dirtyState.status,
       );
       if (!quarantinePath) {
-        return false;
+        return { status: "preserved", path: resolvedWtPath };
       }
 
       deleteBranchAfterRemoval = false;
       if (!existsSync(resolvedWtPath)) {
         nativeWorktreePrune(basePath);
-        return true;
+        return { status: "removed", path: resolvedWtPath };
       }
     }
   }
@@ -1047,15 +1328,16 @@ export function removeWorktree(
         if (existsSync(wtInternalDir)) {
           rmSync(wtInternalDir, { recursive: true, force: true });
         }
-        rmSync(resolvedWtPath, { recursive: true, force: true });
+        removeDirectoryTree(resolvedWtPath);
         if (wtPath !== resolvedWtPath && existsSync(wtPath)) {
-          rmSync(wtPath, { recursive: true, force: true });
+          removeDirectoryTree(wtPath);
         }
-      } catch {
+      } catch (e) {
         logWarning(
           "reconcile",
-          `Worktree directory could not be removed after git internal cleanup: ${resolvedWtPath}. ` +
-            `Manual cleanup: rm -rf "${resolvedWtPath.replaceAll("\\", "/")}"`,
+          `Worktree directory could not be removed after git internal cleanup: ${resolvedWtPath} ` +
+            `(${e instanceof Error ? e.message : String(e)}). ` +
+            `Manual cleanup: ${worktreeManualCleanupCommand(resolvedWtPath)}`,
           { worktree: name },
         );
       }
@@ -1076,7 +1358,16 @@ export function removeWorktree(
   if (deleteBranchAfterRemoval) {
     deleteBranchIfPresent(basePath, branch, "final branch delete failed");
   }
-  return true;
+
+  const leftoverPath = [resolvedWtPath, wtPath].find((candidate) => existsSync(candidate));
+  if (leftoverPath) {
+    return {
+      status: "partial",
+      path: leftoverPath,
+      ...(resolvedPathSafe ? { cleanupCommand: worktreeManualCleanupCommand(leftoverPath) } : {}),
+    };
+  }
+  return { status: "removed", path: resolvedWtPath };
 }
 
 /**
@@ -1095,6 +1386,12 @@ const SKIP_PATHS = [
   ".gsd/forensics/",
   ".gsd/parallel/",
   ".gsd/journal/",
+  ".gsd/exec/",
+  ".gsd/safety/",
+  ".gsd/graphs/",
+  ".gsd/migration/projection-mutations/",
+  ".gsd/migration/quarantined-control-publications/",
+  ".gsd/migration/native-projection-evidence/",
 ];
 const SKIP_EXACT = [
   ".gsd/STATE.md",
@@ -1104,11 +1401,20 @@ const SKIP_EXACT = [
   ".gsd/state.json",
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
+  ".gsd/notifications.jsonl",
+  ".gsd/notifications.lock",
+  ".gsd/hook-state.json",
+  ".gsd/audit-log.jsonl",
+  ".gsd/lifecycle-shadow-observation-loss.jsonl",
+  ".gsd/git-action-failures.log",
+  ".gsd/migration/managed-outputs.json",
+  ".gsd/migration/unbound-projection-evidence.json",
 ];
 /** File prefixes to skip (for wildcard patterns like completed-units*.json, gsd.db*). */
 const SKIP_PREFIXES = [
   ".gsd/completed-units",
   ".gsd/gsd.db",
+  ".gsd/notifications.jsonl.tmp.",
 ];
 
 function shouldSkipPath(filePath: string): boolean {
@@ -1201,19 +1507,6 @@ export function diffWorktreeNumstat(
     stats.push({ file: entry.path, added: entry.added, removed: entry.removed });
   }
   return stats;
-}
-
-/**
- * Get the full diff content for .gsd/ between the worktree branch and main.
- * Returns the raw unified diff for LLM consumption.
- */
-export function getWorktreeGSDDiff(basePath: string, name: string, mainBranchOverride?: string): string {
-  basePath = normalizeBasePathForWorktreeOps(basePath);
-
-  const branch = worktreeBranchName(name);
-  const mainBranch = mainBranchOverride ?? nativeDetectMainBranch(basePath);
-
-  return nativeDiffContent(basePath, mainBranch, branch, ".gsd/", undefined, true);
 }
 
 /**

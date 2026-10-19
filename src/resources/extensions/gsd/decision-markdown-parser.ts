@@ -2,8 +2,8 @@ import type { Decision } from "./types.js";
 
 const VALID_MADE_BY = new Set(["human", "agent", "collaborative"]);
 
-export function parseDecisionsTable(content: string): Omit<Decision, "seq">[] {
-  const results: Omit<Decision, "seq">[] = [];
+export function parseDecisionsTable(content: string): Omit<Decision, "seq" | "amends" | "impacts">[] {
+  const results: Omit<Decision, "seq" | "amends" | "impacts">[] = [];
   const amendsMap = new Map<string, string>();
 
   for (const line of content.split("\n")) {

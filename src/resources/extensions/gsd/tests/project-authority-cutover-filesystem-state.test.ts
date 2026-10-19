@@ -1,14 +1,13 @@
 // Project/App: gsd-pi
 // File Purpose: Filesystem-state (markdown) authority cutover end-to-end:
 // EXCLUSIVE-claim commit, idempotent replay, loud epoch/key refusal,
-// verified-backup rollback, and writer-contention fencing.
+// and writer-contention fencing.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
-  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -299,7 +298,6 @@ test("filesystem-state cutover commits inside the startup EXCLUSIVE claim with a
   writeFileSync(legacyFile, "# M001: Legacy Markdown\n\nUser-owned legacy state.\n", "utf8");
   const evidence = seedApplication();
   assert.equal(evidence.databaseSchemaVersion, SCHEMA_VERSION);
-  assert.equal(evidence.backupQuickCheck, "ok");
   assert.equal(evidence.projectRevision, 1);
   assert.equal(evidence.authorityEpoch, 0);
 
@@ -404,47 +402,7 @@ test("wrong-epoch and conflicting-key cutover invocations fail loudly without mu
   assert.deepEqual(durableSnapshot(), afterCommit);
 });
 
-// (d) Rollback: restoring the verified same-directory backup returns the
-// project to the pre-cutover schema and authority head.
-test("restoring the verified backup rolls the project back to the pre-cutover state", (t) => {
-  const databasePath = openFixture(t);
-  const evidence = seedApplication();
-  const backupPath = `${databasePath}.backup-v${SCHEMA_VERSION}`;
-  snapshotDatabaseFile(databasePath, backupPath);
-
-  const receipt = cutoverProjectAuthority(input(evidence));
-  assert.equal(receipt.status, "committed");
-  assert.deepEqual(row("SELECT revision, authority_epoch FROM project_authority"), {
-    revision: 2,
-    authority_epoch: 1,
-  });
-  assert.equal(row("SELECT COUNT(*) AS count FROM workflow_authority_cutovers").count, 1);
-
-  closeDatabase();
-  copyFileSync(backupPath, databasePath);
-  // Defensive: the last close usually checkpoints and removes the WAL
-  // sidecars; any stragglers must not shadow the restored file.
-  rmSync(`${databasePath}-wal`, { force: true });
-  rmSync(`${databasePath}-shm`, { force: true });
-  assert.equal(openDatabase(databasePath), true);
-
-  assert.equal(
-    Number(row("SELECT MAX(version) AS version FROM schema_version").version),
-    SCHEMA_VERSION,
-    "the restored backup carries the pre-cutover schema version",
-  );
-  assert.deepEqual(row("SELECT revision, authority_epoch FROM project_authority"), {
-    revision: evidence.projectRevision,
-    authority_epoch: evidence.authorityEpoch,
-  });
-  assert.equal(
-    row("SELECT COUNT(*) AS count FROM workflow_authority_cutovers").count,
-    0,
-    "the cutover receipt is gone after rollback",
-  );
-});
-
-// (e) Writer contention: a live foreign database-maintenance owner fences the
+// (d) Writer contention: a live foreign database-maintenance owner fences the
 // cutover with PROJECT_AUTHORITY_CUTOVER_WRITER_CONTENTION before any
 // mutation; once the foreign owner dies, the retry adopts the stale claim and
 // commits inside a fresh EXCLUSIVE claim.

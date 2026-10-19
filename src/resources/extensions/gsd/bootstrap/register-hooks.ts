@@ -12,14 +12,15 @@ import { ALWAYS_PRESERVED_SHIM_TOOL_NAMES } from "@gsd/pi-ai";
 import type { GSDEcosystemBeforeAgentStartHandler } from "../ecosystem/gsd-extension-api.js";
 import { updateSnapshot } from "../ecosystem/gsd-extension-api.js";
 
-import { buildMilestoneFileName, canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "../paths.js";
-import { applyAskUserQuestionsGateResult, clearDiscussionFlowState, currentWriteGateSnapshot, formatPendingAskUserQuestionsGateMessage, formatTimedOutAskUserQuestionsGateMessage, hostWriteGateAdapter, isApprovalGateVerifiedInSnapshot, isDepthConfirmationAnswer, isMilestoneDepthVerifiedInSnapshot, isQueuePhaseActive, resetWriteGateState, shouldBlockContextWrite, shouldBlockPlanningUnit, shouldBlockQueueExecution, shouldBlockWorktreeBash, shouldBlockWorktreeWrite, isGateQuestionId, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId, type WriteGateSnapshot } from "./write-gate.js";
+import { canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestoneFile, resolveMilestonePath } from "../paths.js";
+import { applyAskUserQuestionsGateResult, applyWriteGateSessionBoundary, formatPendingAskUserQuestionsGateMessage, formatTimedOutAskUserQuestionsGateMessage, hostWriteGateAdapter, isApprovalGateVerifiedInSnapshot, isDepthConfirmationAnswer, isMilestoneDepthVerifiedInSnapshot, isQueuePhaseActive, loadWriteGateSnapshot, shouldBlockContextWrite, shouldBlockPlanningUnit, shouldBlockQueueExecution, shouldBlockWorktreeBash, shouldBlockWorktreeWrite, isGateQuestionId, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId, type WriteGateSnapshot } from "./write-gate.js";
 import { canonicalToolName } from "../engine-hook-contract.js";
 import { resolveManifest } from "../unit-context-manifest.js";
 import { getIsolationMode, resolveEffectiveUnitIsolationMode } from "../preferences.js";
-import { isBlockedStateFile, isBashWriteToStateFile, BLOCKED_WRITE_ERROR } from "../write-intercept.js";
-import { loadFile, saveFile, formatContinue } from "../files.js";
+import { blockedWriteReason, blockedBashWriteReason } from "../write-intercept.js";
+import { loadFile } from "../files.js";
 import {
+  autoSession,
   clearAutoCompletionStopInProgress,
   clearToolInvocationError,
   getAutoRuntimeSnapshot,
@@ -34,20 +35,24 @@ import {
   recordToolInvocationError,
 } from "../auto-runtime-state.js";
 import {
+  hasInteractiveToolInFlight,
   isDeterministicPolicyError,
   isQueuedUserMessageSkip,
   isToolSchemaValidationError,
   isToolInvocationError,
   isToolUnavailableError,
 } from "../auto-tool-tracking.js";
+import { TurnStatusTracker, type TurnStatusUi } from "../turn-status.js";
 import { applyProviderPayloadPolicy } from "../provider-payload-policy.js";
 
-import { checkToolCallLoop, configureToolCallLoopGuard, recordToolCallLoopMutation, resetToolCallLoopGuard } from "./tool-call-loop-guard.js";
+import { checkToolCallLoop, configureToolCallLoopGuard, noteLoopGuardModelResponse, recordToolCallLoopMutation, resetToolCallLoopGuard } from "./tool-call-loop-guard.js";
 import { MINIMAL_AUTO_BASE_TOOL_NAMES } from "./core-session-tools.js";
 import { maybePauseAutoForApprovalGate, resetPendingGatePauseGuard } from "./pending-gate-pause.js";
+import { maybeAbortAutoUnitForLoopGuard, resetLoopGuardAbortGuard } from "./loop-guard-abort.js";
 import { saveActivityLog } from "../activity-log.js";
 import { recordToolCall as safetyRecordToolCall, recordToolResult as safetyRecordToolResult, saveEvidenceToDisk } from "../safety/evidence-collector.js";
 import { parseUnitId } from "../unit-id.js";
+import { stripIdPrefix } from "../strip-id-prefix.js";
 import { classifyCommand } from "../safety/destructive-guard.js";
 import {
   confirmDestructiveCommand,
@@ -65,6 +70,7 @@ import { initNotificationWidget } from "../notification-widget.js";
 import { notifyPreferenceDiagnostics } from "../preferences-diagnostics.js";
 import { resolveEffectivePlanningToolsPolicy } from "../planning-subagent-policy.js";
 import { resolveWorktreeProjectRoot } from "../worktree-root.js";
+import { getPendingLlmMerge } from "../worktree-session-state.js";
 import { extractSubagentAgentClasses } from "./subagent-input.js";
 import {
   approvalGateIdForUnit,
@@ -89,6 +95,7 @@ import { resolveWorkflowToolBasePath } from "./dynamic-tools.js";
 import { getRequiredWorkflowToolsForUnit } from "../unit-tool-contracts.js";
 import { flushAllManifests } from "../workflow-manifest.js";
 import { clearUnitHarnessAbort, recordUnitHarnessAbort, type UnitHarnessAbortRecord } from "../unit-runtime.js";
+import { captureAssistantRoutingStart, clearPendingModelRouting, consumeAssistantRoutingEnd } from "../model-attribution.js";
 import { clearNativeMilestoneStatusSourceRevisions } from "./query-tools.js";
 
 let approvalQuestionAbortInFlight = false;
@@ -120,8 +127,17 @@ function clearCurrentUnitToolErrorHarnessAbort(toolName: string): void {
   );
 }
 
+type WelcomeProjectState = { milestone?: string; phase?: string; slice?: string; nextAction?: string };
+
 type WelcomeScreenModule = {
-  buildWelcomeScreenLines(opts: { version: string; remoteChannel?: string; width?: number }): string[];
+  buildWelcomeScreenLines(opts: {
+    version: string;
+    remoteChannel?: string;
+    width?: number;
+    state?: WelcomeProjectState;
+  }): string[];
+  /** Optional: resolve GSD_MILESTONE_LOCK before the first sync render (#2360). */
+  primeMilestoneLock?: () => Promise<void>;
 };
 
 async function loadWelcomeScreenModule(): Promise<WelcomeScreenModule | undefined> {
@@ -151,12 +167,41 @@ async function loadWelcomeScreenModule(): Promise<WelcomeScreenModule | undefine
   return undefined;
 }
 
-async function installWelcomeHeader(ctx: ExtensionContext): Promise<void> {
+/**
+ * Project status for the welcome header, read from the database. Undefined
+ * means there is no database or it could not be opened; only then does the
+ * welcome screen fall back to the STATE.md projection.
+ */
+async function readWelcomeStateFromDb(basePath: string): Promise<WelcomeProjectState | undefined> {
+  try {
+    const { readProgressFromDb } = await import("../state/progress-from-db.js");
+    const progress = await readProgressFromDb(basePath);
+    if (!progress) return undefined;
+    const label = (ref: { id: string; title: string } | null): string | undefined =>
+      ref ? `${ref.id}: ${stripIdPrefix(ref.title, ref.id)}` : undefined;
+    return {
+      milestone: label(progress.activeMilestone),
+      slice: label(progress.activeSlice),
+      phase: progress.phase,
+      nextAction: progress.nextAction || undefined,
+    };
+  } catch {
+    // The header is cosmetic: a database that cannot be read falls back to the projection.
+    return undefined;
+  }
+}
+
+async function installWelcomeHeader(ctx: ExtensionContext, basePath: string): Promise<void> {
   if (!ctx.hasUI || typeof ctx.ui?.setHeader !== "function") return;
 
   try {
     const welcome = await loadWelcomeScreenModule();
     if (!welcome) return;
+
+    // Resolve the milestone lock up front — the header render itself is sync.
+    // Older welcome-screen builds without priming simply skip this.
+    await welcome.primeMilestoneLock?.();
+    const state = await readWelcomeStateFromDb(basePath);
 
     let remoteChannel: string | undefined;
     try {
@@ -175,6 +220,7 @@ async function installWelcomeHeader(ctx: ExtensionContext): Promise<void> {
             version: process.env.GSD_VERSION || "0.0.0",
             remoteChannel,
             width,
+            state,
           });
           cachedWidth = width;
           return cachedLines;
@@ -206,6 +252,7 @@ function suppressWelcomeHeader(ctx: ExtensionContext): void {
  * are bounded — cleared on activation, session boundaries, and verification.
  */
 const deferredApprovalGates = new Map<string, string>();
+const askUserQuestionsInputByCallId = new Map<string, unknown>();
 const deferredDestructiveConfirmationPauses = new Set<string>();
 
 export const MINIMAL_GSD_TOOL_NAMES = [
@@ -213,6 +260,7 @@ export const MINIMAL_GSD_TOOL_NAMES = [
   "gsd_exec_search",
   "gsd_resume",
   "gsd_milestone_status",
+  "gsd_project_snapshot",
   "gsd_checkpoint_db",
   "gsd_plan_milestone",
   "memory_query",
@@ -749,10 +797,10 @@ function isDestructiveConfirmationBlocking(basePath: string): boolean {
 }
 
 function deferApprovalGate(gateId: string, basePath: string): void {
-  // Verified-on-disk wins (same adapter policy as activation/re-arm): if the
+  // Verified wins (same adapter policy as activation/re-arm): if the
   // workflow MCP child already verified this gate, deferring would block
   // tools for a gate that can never legitimately arm.
-  const snapshot = hostWriteGateAdapter.readState(basePath);
+  const snapshot = loadWriteGateSnapshot(basePath);
   deferApprovalGateFromSnapshot(gateId, basePath, snapshot);
 }
 
@@ -765,6 +813,26 @@ function deferApprovalGateFromSnapshot(gateId: string, basePath: string, snapsho
 
 function contextBasePath(ctx?: { cwd?: string }): string {
   return typeof ctx?.cwd === "string" ? ctx.cwd : process.cwd();
+}
+
+/** Turn-status tracker for the persistent "gsd-turn" footer status (#2374). */
+let turnStatus: TurnStatusTracker | null = null;
+
+/** True while any interactive human boundary is active (question or interactive tool). */
+function isUserBoundaryPending(): boolean {
+  return isInteractiveElicitationInFlight() || hasInteractiveToolInFlight();
+}
+
+/**
+ * Extract the setStatus/notify UI channel from an event ctx (null when
+ * headless — ctx.hasUI is false or no setStatus capability).
+ */
+function extractTurnStatusUi(ctx: unknown): TurnStatusUi | null {
+  const ctxRecord = ctx as { ui?: unknown; hasUI?: boolean } | undefined;
+  if (ctxRecord?.hasUI === false) return null;
+  const ui = ctxRecord?.ui;
+  if (!ui || typeof (ui as TurnStatusUi).setStatus !== "function") return null;
+  return ui as TurnStatusUi;
 }
 
 const LOOP_GUARD_INTERACTIVE_INSTRUCTIONS = [
@@ -904,14 +972,21 @@ function activateDeferredApprovalGate(basePath: string): void {
   const gateId = deferredApprovalGates.get(basePath);
   if (gateId === undefined) return;
   deferredApprovalGates.delete(basePath);
-  // hostWriteGateAdapter.setPending applies the verified-on-disk-wins merge
-  // policy: it refuses to arm (and thereby clobber) a gate the workflow MCP
-  // child already verified on disk.
+  // hostWriteGateAdapter.setPending applies the verified-wins policy: it
+  // refuses to arm (and thereby clobber) a gate the workflow MCP child
+  // already verified.
   hostWriteGateAdapter.setPending(gateId, basePath);
 }
 
+// External engines / MCP relays may pass ask_user_questions arguments in odd
+// shapes (#2530): `?? []` only guards null/undefined, so a string or object
+// reaches array methods and throws. Treat any non-array `questions` as absent.
+function asQuestionArray(value: unknown): Array<{ id?: unknown }> {
+  return Array.isArray(value) ? (value as Array<{ id?: unknown }>) : [];
+}
+
 function extractGateQuestionId(input: unknown): string | undefined {
-  const questions: Array<{ id?: unknown }> = (input as { questions?: unknown })?.questions as Array<{ id?: unknown }> ?? [];
+  const questions = asQuestionArray((input as { questions?: unknown })?.questions);
   const match = questions.find((question) => typeof question?.id === "string" && isGateQuestionId(question.id));
   return typeof match?.id === "string" ? match.id : undefined;
 }
@@ -1010,7 +1085,7 @@ function formatQuestionExchange(
   return lines.join("\n");
 }
 
-async function ensureMilestoneShell(basePath: string, milestoneId: string): Promise<string> {
+async function ensureMilestoneShell(basePath: string, milestoneId: string): Promise<void> {
   // When no milestone dir exists yet, prefer the legacy container when it has
   // at least one milestone subdirectory; an empty milestones/ dir (e.g. one
   // created by an old bootstrapGsdProject) is not a real legacy layout.
@@ -1032,83 +1107,116 @@ async function ensureMilestoneShell(basePath: string, milestoneId: string): Prom
   try {
     const { ensureDbOpen } = await import("./dynamic-tools.js");
     if (await ensureDbOpen(basePath)) {
-      const { getMilestone, insertMilestone } = await import("../gsd-db.js");
+      const { getMilestone } = await import("../gsd-db.js");
       if (!getMilestone(milestoneId)) {
-        insertMilestone({
-          id: milestoneId,
-          title: `New milestone ${milestoneId}`,
-          status: "queued",
-        });
+        const { registerMilestones } = await import("../milestone-registration.js");
+        registerMilestones([{ id: milestoneId, title: `New milestone ${milestoneId}` }], "discussion-capture");
       }
     }
   } catch (err) {
     safetyLogWarning("guided", `failed to persist milestone shell for ${milestoneId}: ${(err as Error).message}`);
   }
-
-  return milestoneDir;
 }
 
+/**
+ * Append one answered question round to the milestone's DISCUSSION log and
+ * CONTEXT-DRAFT. Both are database artifact rows: the next round is built from
+ * the row, and the files are rendered from it. A file with no row (a triage
+ * seed, or a discussion started before the rows existed) is adopted into the
+ * row by the first round. Returns false when there is no database to write to.
+ */
 async function saveDiscussionQuestionRound(
   basePath: string,
   milestoneId: string,
   questions: StructuredQuestion[],
   details: any,
-): Promise<void> {
-  const milestoneDir = await ensureMilestoneShell(basePath, milestoneId);
-  const answers = details?.response?.answers;
+): Promise<boolean> {
+  await ensureMilestoneShell(basePath, milestoneId);
+  const { ensureDbOpen } = await import("./dynamic-tools.js");
+  if (!(await ensureDbOpen(basePath))) {
+    safetyLogWarning("guided", `question round for ${milestoneId} was not captured: the GSD database is unavailable`);
+    return false;
+  }
+  const { getArtifact } = await import("../gsd-db.js");
+  const { saveArtifactToDbByScope } = await import("../db-writer.js");
+  const { createWorkspace, scopeMilestone } = await import("../workspace.js");
+  const scope = scopeMilestone(createWorkspace(basePath), milestoneId);
   const timestamp = new Date().toISOString();
-  const exchange = formatQuestionExchange(questions, answers);
+  const exchange = formatQuestionExchange(questions, details?.response?.answers);
 
-  // Layout-aware filename: legacy dirs use MID-SUFFIX.md; flat-phase use NN-SUFFIX.md.
-  const legacyBase = legacyMilestonesDir(basePath);
-  const isLegacyDir = milestoneDir.startsWith(legacyBase + "/") || milestoneDir.startsWith(legacyBase + "\\");
-  const milestoneFileName = (suffix: string): string =>
-    isLegacyDir ? `${milestoneId}-${suffix}.md` : buildMilestoneFileName(milestoneId, suffix);
+  const appendRound = async (artifactType: string, build: (existing: string | null) => string): Promise<void> => {
+    const path = relMilestoneFile(basePath, milestoneId, artifactType).replace(/^\.gsd\//, "");
+    const file = resolveMilestoneFile(basePath, milestoneId, artifactType);
+    await saveArtifactToDbByScope(scope, {
+      path,
+      artifact_type: artifactType,
+      content: build(getArtifact(path)?.full_content ?? (file ? await loadFile(file) : null)),
+      milestone_id: milestoneId,
+    });
+  };
 
-  const discussionPath = join(milestoneDir, milestoneFileName("DISCUSSION"));
-  const existingDiscussion = await loadFile(discussionPath) ?? `# ${milestoneId} Discussion Log\n\n`;
-  await saveFile(
-    discussionPath,
-    `${existingDiscussion}## Exchange — ${timestamp}\n\n${exchange}---\n\n`,
-  );
+  await appendRound("DISCUSSION", (existing) =>
+    `${existing ?? `# ${milestoneId} Discussion Log\n\n`}## Exchange — ${timestamp}\n\n${exchange}---\n\n`);
+  await appendRound("CONTEXT-DRAFT", (existing) => {
+    const draftHeader = existing
+      ?? [
+        `# ${milestoneId}: New milestone ${milestoneId}`,
+        "",
+        "This draft was captured automatically from structured question responses.",
+        "Use it so `/gsd` can resume the in-flight milestone discussion.",
+        "",
+      ].join("\n");
+    return `${draftHeader.trimEnd()}\n\n## Captured Question Round — ${timestamp}\n\n${exchange}`;
+  });
+  return true;
+}
 
-  const draftPath = join(milestoneDir, milestoneFileName("CONTEXT-DRAFT"));
-  const existingDraft = await loadFile(draftPath);
-  const draftHeader = existingDraft
-    ?? [
-      `# ${milestoneId}: New milestone ${milestoneId}`,
-      "",
-      "This draft was captured automatically from structured question responses.",
-      "Use it so `/gsd` can resume the in-flight milestone discussion.",
-      "",
-    ].join("\n");
-  const draftContent = `${draftHeader.trimEnd()}\n\n## Captured Question Round — ${timestamp}\n\n${exchange}`;
-  await saveFile(draftPath, draftContent);
-
-  try {
-    const { ensureDbOpen } = await import("./dynamic-tools.js");
-    if (await ensureDbOpen(basePath)) {
-      const { insertArtifact } = await import("../gsd-db.js");
-      insertArtifact({
-        path: relMilestoneFile(basePath, milestoneId, "CONTEXT-DRAFT").replace(/^\.gsd\//, ""),
-        artifact_type: "CONTEXT-DRAFT",
-        milestone_id: milestoneId,
-        slice_id: null,
-        task_id: null,
-        full_content: draftContent,
-      });
-    }
-  } catch (err) {
-    safetyLogWarning("guided", `failed to persist CONTEXT-DRAFT artifact for ${milestoneId}: ${(err as Error).message}`);
+/**
+ * Capture an answered ask_user_questions round of a milestone discussion: the
+ * exchange text in the DISCUSSION log and CONTEXT-DRAFT, and each question and
+ * its answer as Open Question, interaction and Answer rows.
+ * Called from tool_execution_end, so it also runs under external engines,
+ * which never fire tool_result.
+ */
+async function captureAnsweredQuestionRound(
+  basePath: string,
+  toolCallId: string,
+  inputQuestions: unknown,
+  result: unknown,
+): Promise<void> {
+  const details = resolveAskUserQuestionsGateDetails({
+    details: (result as { details?: unknown } | undefined)?.details,
+    result,
+  });
+  if (!details?.response) return;
+  const questions = asQuestionArray(Array.isArray(inputQuestions) ? inputQuestions : details.questions) as StructuredQuestion[];
+  const outcome = evaluateAskUserQuestionsRound(questions, details);
+  if (outcome === "cancelled" || outcome === "timeout" || outcome === "waiting") return;
+  const milestoneId = await getDiscussionMilestoneIdFor(basePath);
+  if (!milestoneId) return;
+  if (questions.length === 0) {
+    safetyLogWarning("guided", `question round for ${milestoneId} was not captured: the result has answers but no questions`);
+    return;
+  }
+  if (!(await saveDiscussionQuestionRound(basePath, milestoneId, questions, details))) return;
+  const { recordAnsweredQuestionRound } = await import("../conversation-domain-operation.js");
+  const { skipped } = recordAnsweredQuestionRound({
+    milestoneId,
+    toolCallId,
+    questions,
+    answers: details.response.answers ?? {},
+  });
+  for (const { id, reason } of skipped) {
+    safetyLogWarning("guided", `question "${id}" of ${milestoneId} is not stored as an Open Question: ${reason}`);
   }
 }
 
-function withDepthGateDisplayReason<T extends { block: boolean; reason?: string }>(
+function withDepthGateDisplayReason<T extends { block: boolean; reason?: string; displayReason?: string }>(
   result: T,
   displayReason = "Depth confirmation is waiting for your answer.",
 ): T & { displayReason?: string } {
   if (!result.block) return result;
-  return { ...result, displayReason };
+  return { ...result, displayReason: result.displayReason ?? displayReason };
 }
 
 function shouldBlockDeferredApprovalTool(
@@ -1177,9 +1285,10 @@ export function registerHooks(
       const { initHealthWidget } = await import("../health-widget.js");
       initHealthWidget(ctx);
     }
-    resetWriteGateState(basePath);
+    applyWriteGateSessionBoundary("start", basePath);
     resetToolCallLoopGuard();
     clearNativeMilestoneStatusSourceRevisions();
+    clearPendingModelRouting();
     await applyToolCallLoopGuardConfig(basePath);
     approvalQuestionAbortInFlight = false;
     clearDeferredApprovalGate();
@@ -1200,18 +1309,28 @@ export function registerHooks(
         const { needsFlatPhaseMigration } = await import("../flat-phase-migration.js");
         if (needsFlatPhaseMigration(basePath)) {
           const { ensureDbOpen } = await import("./dynamic-tools.js");
-          const opened = await ensureDbOpen(basePath);
-          if (opened) {
-            const { migrateToFlatPhase } = await import("../flat-phase-migration.js");
+          const { migrateToFlatPhase, FlatPhaseRecoveryRequiredError } = await import("../flat-phase-migration.js");
+          const { isAuthorityMissingError } = await import("../db-workspace.js");
+          try {
+            if (!(await ensureDbOpen(basePath))) {
+              safetyLogWarning(
+                "bootstrap",
+                "flat-phase migration required: legacy .gsd/milestones/ layout detected but the workflow database could not be opened — fix database access before starting GSD",
+              );
+              throw new Error(
+                "flat-phase migration required but the workflow database could not be opened; fix database access before starting GSD",
+              );
+            }
             await migrateToFlatPhase(basePath);
-          } else {
-            safetyLogWarning(
-              "bootstrap",
-              "flat-phase migration required: legacy .gsd/milestones/ layout detected but the workflow database could not be opened — fix database access before starting GSD",
-            );
-            throw new Error(
-              "flat-phase migration required but the workflow database could not be opened; fix database access before starting GSD",
-            );
+          } catch (err) {
+            // Legacy markdown holds state the DB lacks, or the DB is missing or
+            // empty beside it. That is not a broken migration: the session must
+            // start so the operator can run the explicit import. No database
+            // was created and nothing was touched on disk.
+            if (!(err instanceof FlatPhaseRecoveryRequiredError) && !isAuthorityMissingError(err)) throw err;
+            const message = (err as Error).message;
+            safetyLogWarning("bootstrap", message);
+            ctx.ui.notify(message, "warning");
           }
         }
       }
@@ -1219,20 +1338,6 @@ export function registerHooks(
       const message = err instanceof Error ? err.message : String(err);
       safetyLogWarning("bootstrap", `flat-phase migration failed: ${message}`);
       throw new Error(`flat-phase migration failed: ${message}`);
-    }
-
-    try {
-      const projectRoot = resolveWorktreeProjectRoot(basePath);
-      const { pruneStaleFlatPhaseBackups } = await import("../flat-phase-migration.js");
-      const pruned = pruneStaleFlatPhaseBackups(projectRoot);
-      if (pruned > 0) {
-        safetyLogWarning(
-          "bootstrap",
-          `pruned ${pruned} stale flat-phase migration backup(s) from .gsd-backups/ (retention exceeded)`,
-        );
-      }
-    } catch (err) {
-      safetyLogWarning("bootstrap", `flat-phase backup pruning: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Apply show_token_cost preference (#1515)
@@ -1248,7 +1353,7 @@ export function registerHooks(
       if (isAutoActive() || isAutoPaused()) {
         suppressWelcomeHeader(ctx);
       } else {
-        await installWelcomeHeader(ctx);
+        await installWelcomeHeader(ctx, basePath);
       }
     }
     await loadToolApiKeysForSession();
@@ -1272,14 +1377,14 @@ export function registerHooks(
     const basePath = contextBasePath(ctx);
     const preserveCloseoutSurface = isAutoCompletionStopInProgress();
     initSessionNotifications(ctx);
-    resetWriteGateState(basePath);
     resetToolCallLoopGuard();
     clearNativeMilestoneStatusSourceRevisions();
+    clearPendingModelRouting();
     await applyToolCallLoopGuardConfig(basePath);
     clearDeferredApprovalGate();
     clearDeferredDestructiveConfirmationPause();
     await resetAskUserQuestionsTurnCache();
-    clearDiscussionFlowState(basePath);
+    applyWriteGateSessionBoundary(event.reason === "new" ? "new" : "resume", basePath);
     // /clear or /new destroys the conversation holding a discuss interview, so
     // its pending discuss→auto handoff can never be answered — clear it. Resume
     // restores the interview transcript, so the entry survives. Auto-mode's own
@@ -1305,6 +1410,7 @@ export function registerHooks(
   pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
     clearAutoCompletionStopInProgress();
     resetPendingGatePauseGuard();
+    resetLoopGuardAbortGuard();
     applyMinimalGsdToolSurface(pi);
 
     // Wait for ecosystem loader to finish (no-op after first turn).
@@ -1397,6 +1503,8 @@ export function registerHooks(
     recordRetryableTurnAbort(event);
     resetToolCallLoopGuard();
     resetPendingGatePauseGuard();
+    resetLoopGuardAbortGuard();
+    clearPendingModelRouting();
     await resetAskUserQuestionsTurnCache();
     const { handleAgentEnd } = await import("./agent-end-recovery.js");
     const agentEndBasePath = contextBasePath(ctx);
@@ -1434,6 +1542,22 @@ export function registerHooks(
     }
   });
 
+  // ADR-049 (#2208): snapshot the auto unit's routing at assistant message
+  // start so a unit transition mid-stream cannot relabel the in-flight
+  // response, then attach it on the matching message_end.
+  pi.on("message_start", async (event) => {
+    // Model-response boundary for the loop guard's escalation streak (#2877):
+    // a block can only escalate once the model has seen it, i.e. a new
+    // ASSISTANT response started after it fired. Tool-result messages also
+    // emit message_start (agent-loop sequential execution emits each result
+    // before preparing the next call), so they must not count — otherwise a
+    // single response's whole tool batch would escalate.
+    if ((event.message as { role?: unknown } | undefined)?.role === "assistant") {
+      noteLoopGuardModelResponse();
+    }
+    captureAssistantRoutingStart(event.message, autoSession.currentUnitRouting, isAutoActive());
+  });
+
   pi.on("message_end", async (event) => {
     const { suppressTerminalDeletedWorktreeMessageEnd } = await import("./agent-end-recovery.js");
     suppressTerminalDeletedWorktreeMessageEnd(event);
@@ -1441,19 +1565,78 @@ export function registerHooks(
       const { sanitizePrematureCloseoutMessageEnd } = await import("../auto-closeout-messaging.js");
       sanitizePrematureCloseoutMessageEnd(event);
     }
+    const attributed = consumeAssistantRoutingEnd(event.message);
+    if (attributed) {
+      return { message: attributed };
+    }
+  });
+
+  // After an LLM-guided `/worktree merge` commits, render the project-root
+  // projections from the database. A merged `.gsd` file is not authority.
+  pi.on("agent_end", async (_event, ctx: ExtensionContext) => {
+    if (!getPendingLlmMerge()) return;
+    try {
+      const { renderProjectionsAfterLlmMerge } = await import("../worktree-command.js");
+      await renderProjectionsAfterLlmMerge();
+    } catch (err) {
+      ctx.ui.notify(
+        `Projections were not rendered after the merge: ${err instanceof Error ? err.message : String(err)}. Run /gsd rebuild markdown.`,
+        "warning",
+      );
+    }
+  });
+
+  // Per-turn housekeeping: drop native milestone status source revisions so
+  // each turn re-reads them fresh.
+  pi.on("turn_end", () => {
+    clearNativeMilestoneStatusSourceRevisions();
   });
 
   // Squash-merge quick-task branch back to the original branch after the
-  // agent turn completes (#2668). cleanupQuickBranch is a no-op when no
-  // quick-return state is pending, so this is safe to call on every turn.
-  pi.on("turn_end", async () => {
-    clearNativeMilestoneStatusSourceRevisions();
+  // agent run completes (#2668). cleanupQuickBranch is a no-op when no
+  // quick-return state is pending, so this is safe to call on every run.
+  // Keyed on agent_end, NOT turn_end (#2791): turn_end fires after every
+  // tool round inside one agent run, which merged and deleted the quick
+  // branch mid-task for providers that execute tools in the agent loop
+  // (e.g. openai-codex). agent_end brackets the whole run for every
+  // provider; headless quick tasks already resolve on the same signal.
+  pi.on("agent_end", async () => {
     try {
       const { cleanupQuickBranch } = await import("../quick.js");
       cleanupQuickBranch();
     } catch {
       // Best-effort: don't break the turn lifecycle if cleanup fails.
     }
+  });
+
+  // Persistent turn-state indicator (#2374): "working" → "⏸ waiting on you"
+  // while the turn is parked on an elicitation/interactive tool or a write
+  // gate → "✅ turn done" flash. Written to the "gsd-turn" status key the
+  // footer already renders; headless contexts (no UI) are a no-op.
+  //
+  // Boundaries are the AGENT events: turn_start/turn_end fire between tool
+  // rounds inside one user turn, before_agent_start/agent_end bracket it.
+  // Registered AFTER the recovery agent_end above so a deferred approval
+  // gate armed in its finally-block is visible to the fresh predicate read.
+  pi.on("before_agent_start", async (_event, ctx) => {
+    const ui = extractTurnStatusUi(ctx);
+    if (!turnStatus) {
+      turnStatus = new TurnStatusTracker({
+        ui,
+        isQuestionPending: isUserBoundaryPending,
+        getPendingGateId: () => getPendingGate(contextBasePath(ctx)),
+      });
+    } else {
+      turnStatus.rebindUi(ui);
+    }
+    turnStatus.turnStarted();
+  });
+
+  pi.on("agent_end", async (event, ctx) => {
+    turnStatus?.turnEnded({
+      willRetry: event.willRetry === true,
+      waitingNow: isUserBoundaryPending() || getPendingGate(contextBasePath(ctx)) !== null,
+    });
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -1495,41 +1678,41 @@ export function registerHooks(
     // that would be lost on compaction (#4258).
     // if (state.phase !== "executing") return;
 
-    const sliceDir = resolveSlicePath(basePath, state.activeMilestone.id, state.activeSlice.id);
-    if (!sliceDir) return;
+    const { readWorkCheckpoint, saveWorkCheckpoint } = await import("../work-checkpoint.js");
+    const scope = {
+      milestoneId: state.activeMilestone.id,
+      sliceId: state.activeSlice.id,
+      taskId: state.activeTask?.id,
+    };
+    // An earlier checkpoint of this unit (for example an agent handoff) says
+    // more than this one can; it stays the head.
+    if (readWorkCheckpoint(scope)) return;
 
-    const existingFile = resolveSliceFile(basePath, state.activeMilestone.id, state.activeSlice.id, "CONTINUE");
-    if (existingFile && await loadFile(existingFile)) return;
-    const legacyContinue = join(sliceDir, "continue.md");
-    if (await loadFile(legacyContinue)) return;
-
-    const continuePath = join(sliceDir, `${state.activeSlice.id}-CONTINUE.md`);
     const taskId = state.activeTask?.id ?? "none";
     const taskTitle = state.activeTask?.title ?? "";
     const phaseLabel = state.phase.replace(/-/g, " ");
 
-    await saveFile(continuePath, formatContinue({
-      frontmatter: {
-        milestone: state.activeMilestone.id,
-        slice: state.activeSlice.id,
-        task: taskId,
-        step: 0,
-        totalSteps: 0,
-        status: "compacted" as const,
-        savedAt: new Date().toISOString(),
-      },
-      completedWork: state.activeTask
-        ? `Task ${taskId} (${taskTitle}) was in progress when compaction occurred.`
-        : `Slice ${state.activeSlice.id} was in ${phaseLabel} phase when compaction occurred.`,
-      remainingWork: state.activeTask
-        ? "Check the task plan for remaining steps."
-        : "Continue this slice from the latest planning/research/discussion artifacts.",
-      decisions: "Check task summary files for prior decisions.",
-      context: "Session was auto-compacted by Pi. Resume with /gsd.",
-      nextAction: state.activeTask
-        ? `Resume task ${taskId}: ${taskTitle}.`
-        : `Resume ${phaseLabel} work for slice ${state.activeSlice.id}.`,
-    }));
+    try {
+      saveWorkCheckpoint({
+        ...scope,
+        kind: "pause",
+        confirmedContext: state.activeTask
+          ? `Task ${taskId} (${taskTitle}) was in progress when the session was auto-compacted.`
+          : `Slice ${state.activeSlice.id} was in ${phaseLabel} phase when the session was auto-compacted.`,
+        unresolved: state.activeTask
+          ? "Check the task plan for remaining steps."
+          : "Continue this slice from the latest planning/research/discussion artifacts.",
+        nextAction: state.activeTask
+          ? `Resume task ${taskId}: ${taskTitle}.`
+          : `Resume ${phaseLabel} work for slice ${state.activeSlice.id}.`,
+      });
+      const { renderWorkCheckpoint } = await import("../markdown-renderer.js");
+      await renderWorkCheckpoint(basePath, scope.milestoneId, scope.sliceId);
+    } catch (err) {
+      // Compaction must go on. The row is the resume state; without it the
+      // next session starts from the task plan.
+      safetyLogWarning("bootstrap", `compaction checkpoint was not saved: ${(err as Error).message}`);
+    }
   });
 
   pi.on("message_update", async (event, ctx: ExtensionContext) => {
@@ -1576,7 +1759,7 @@ export function registerHooks(
     const gateId = approvalGateIdForUnit(unitType, unitId);
     if (gateId) {
       const basePath = contextBasePath(ctx);
-      const gateSnapshot = currentWriteGateSnapshot(basePath);
+      const gateSnapshot = loadWriteGateSnapshot(basePath);
       // Skip the gate if this milestone is already depth-verified — the approval
       // pattern matched again on post-verification text (a false-positive re-trigger).
       // Without this guard, the second firing blocks gsd_plan_milestone in the same
@@ -1601,6 +1784,8 @@ export function registerHooks(
   });
 
   pi.on("session_shutdown", async (_event, ctx: ExtensionContext) => {
+    clearPendingModelRouting();
+    turnStatus?.dispose();
     const { isParallelActive, shutdownParallel } = await import("../parallel-orchestrator.js");
     if (isParallelActive()) {
       try {
@@ -1620,9 +1805,11 @@ export function registerHooks(
   // NATIVE_ONLY_TOOL_HOOKS — it never fires under external engines
   // (claude-code-cli pre-executes tools). The guards below (loop guard,
   // pending/deferred gate blocks, queue guard, planning-unit tools policy,
-  // worktree write gate, STATE.md single-writer, context-write depth gate)
-  // are therefore native-engine enforcement only. The write-gate arming
-  // concern has a universal mirror at tool_execution_start below.
+  // worktree write gate, context-write depth gate) are therefore native-engine
+  // enforcement only. The STATE.md/projection write block is mirrored for
+  // claude-code-cli by its PreToolUse hook (projection-write-guard.ts). The
+  // write-gate arming concern has a universal mirror at tool_execution_start
+  // below.
   pi.on("tool_call", async (event, ctx) => {
     const discussionBasePath = contextBasePath(ctx);
     const toolName = canonicalToolName(event.toolName);
@@ -1635,7 +1822,27 @@ export function registerHooks(
         toolName,
         count: loopCheck.count,
       });
-      return { block: true, reason: formatLoopGuardBlockReason(loopCheck.reason) };
+      const formattedReason = formatLoopGuardBlockReason(loopCheck.reason);
+      const blockReasonText =
+        formattedReason ?? loopCheck.reason ?? "Tool-call loop guard blocked a repeated tool call.";
+      // #2877: a second consecutive block of the same tool means the model
+      // ignored the first explicit block (and the per-tool cap's worth of
+      // calls). Escalate to the sanctioned pause path — abort the turn and
+      // land the unit in the pause/repair state — instead of returning yet
+      // another error toolResult the model may keep retrying.
+      if (
+        loopCheck.escalate &&
+        await maybeAbortAutoUnitForLoopGuard(ctx, pi, toolName, blockReasonText, loopCheck.count)
+      ) {
+        return {
+          block: true,
+          reason:
+            `Auto-mode paused: this tool was blocked again after an explicit loop-guard block, ` +
+            `so the turn is aborted and the unit waits in the pause/repair state (/gsd auto resumes it). ` +
+            blockReasonText,
+        };
+      }
+      return { block: true, reason: formattedReason };
     }
 
     const deferredGateGuard = shouldBlockDeferredApprovalTool(
@@ -1805,37 +2012,31 @@ export function registerHooks(
       }
     }
 
-    // ── Single-writer engine: block direct writes to STATE.md ──────────
-    // Covers write, edit, and bash tools to prevent bypass vectors.
+    // ── Depth gate: an unverified milestone CONTEXT write gets the depth
+    // question first; the projection block below then names the save tool.
     if (isToolCallEventType("write", event)) {
-      if (isBlockedStateFile(event.input.path)) {
-        return { block: true, reason: BLOCKED_WRITE_ERROR };
+      const result = shouldBlockContextWrite(
+        event.toolName,
+        event.input.path,
+        await getDiscussionMilestoneIdFor(discussionBasePath),
+        isQueuePhaseActive(discussionBasePath),
+        discussionBasePath,
+      );
+      if (result.block) {
+        return withDepthGateDisplayReason(result, "Depth check required before writing milestone context.");
       }
     }
 
-    if (isToolCallEventType("edit", event)) {
-      if (isBlockedStateFile(event.input.path)) {
-        return { block: true, reason: BLOCKED_WRITE_ERROR };
-      }
+    // ── Single-writer engine: block direct writes to STATE.md, gsd.db and
+    // managed projections. Covers write, edit, and bash to prevent bypass vectors.
+    if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
+      const reason = blockedWriteReason(event.input.path);
+      if (reason) return { block: true, reason };
     }
 
     if (isToolCallEventType("bash", event)) {
-      if (isBashWriteToStateFile(event.input.command)) {
-        return { block: true, reason: BLOCKED_WRITE_ERROR };
-      }
-    }
-
-    if (!isToolCallEventType("write", event)) return;
-
-    const result = shouldBlockContextWrite(
-      event.toolName,
-      event.input.path,
-      await getDiscussionMilestoneIdFor(discussionBasePath),
-      isQueuePhaseActive(discussionBasePath),
-      discussionBasePath,
-    );
-    if (result.block) {
-      return withDepthGateDisplayReason(result, "Depth check required before writing milestone context.");
+      const reason = blockedBashWriteReason(event.input.command);
+      if (reason) return { block: true, reason };
     }
   });
 
@@ -1955,7 +2156,8 @@ export function registerHooks(
 
     const details = resolveAskUserQuestionsGateDetails(event);
 
-    const questions: any[] = (event.input as any)?.questions ?? details?.questions ?? [];
+    const inputQuestions: unknown = (event.input as any)?.questions;
+    const questions: any[] = Array.isArray(inputQuestions) ? inputQuestions : asQuestionArray(details?.questions);
     const gateResult = applyAskUserQuestionsGateResult({
       basePath,
       questions,
@@ -2081,9 +2283,6 @@ export function registerHooks(
         break;
       }
     }
-
-    if (!milestoneId) return;
-    await saveDiscussionQuestionRound(basePath, milestoneId, questions, details);
   });
 
   // Engine hook contract: tool_execution_start is UNIVERSAL_TOOL_HOOKS — the
@@ -2093,6 +2292,7 @@ export function registerHooks(
     const basePath = contextBasePath(ctx);
     const toolName = canonicalToolName(event.toolName);
     if (toolName === "ask_user_questions") {
+      askUserQuestionsInputByCallId.set(event.toolCallId, (event.args as { questions?: unknown } | undefined)?.questions);
       const questionId = extractGateQuestionId(event.args);
       if (typeof questionId === "string") {
         // External engines (claude-code-cli) ingest the SDK turn's tool blocks
@@ -2101,9 +2301,9 @@ export function registerHooks(
         // verifiedDepthMilestones/verifiedApprovalGates, so an unconditional
         // re-arm here would wipe the child's verification and leave the
         // discuss→auto handoff permanently blocked. hostWriteGateAdapter
-        // .setPending applies the verified-on-disk-wins policy and skips the
+        // .setPending applies the verified-wins policy and skips the
         // re-arm in that case. Stale verified state cannot leak into a later
-        // re-discussion: a successful handoff deletes the snapshot via
+        // re-discussion: a successful handoff deletes the gate rows via
         // clearDiscussionFlowState.
         hostWriteGateAdapter.setPending(questionId, basePath);
         clearDeferredApprovalGate(basePath);
@@ -2130,9 +2330,16 @@ export function registerHooks(
   // Engine hook contract: tool_execution_end is UNIVERSAL_TOOL_HOOKS — fires
   // for every finalized tool call on every engine, so error classification
   // and evidence persistence here cover external engines that skip tool_result.
-  pi.on("tool_execution_end", async (event) => {
+  pi.on("tool_execution_end", async (event, ctx) => {
     const toolName = canonicalToolName(event.toolName);
     markToolEnd(event.toolCallId);
+    const inputQuestions = askUserQuestionsInputByCallId.get(event.toolCallId);
+    askUserQuestionsInputByCallId.delete(event.toolCallId);
+    if (toolName === "ask_user_questions" && !event.isError) {
+      // A failed capture must not skip the error classification below.
+      await captureAnsweredQuestionRound(contextBasePath(ctx), event.toolCallId, inputQuestions, event.result).catch((err) =>
+        safetyLogWarning("guided", `question round capture failed: ${err instanceof Error ? err.message : String(err)}`));
+    }
     // #2883/#4974: Capture deterministic invocation/policy errors
     // so postUnitPreVerification can break the retry loop instead of re-dispatching.
     if (event.isError) {

@@ -1,11 +1,13 @@
 # File Reference — Example Extensions with UI
 
 All paths relative to:
+
 ```
 ~/.nvm/versions/node/v22.20.0/lib/node_modules/@gsd/pi-coding-agent/examples/extensions/
 ```
 
 ### Full Custom Components
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `snake.ts` | **Game** — Timer loop, keyboard handling, WASD + arrows, render caching, session persistence, pause/resume |
@@ -16,6 +18,7 @@ All paths relative to:
 | `rainbow-editor.ts` | **Custom editor** — Animated text effects |
 
 ### Dialogs and Selection
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `preset.ts` | `SelectList` with `DynamicBorder`, complex multi-value presets |
@@ -24,12 +27,14 @@ All paths relative to:
 | `timed-confirm.ts` | Dialogs with `timeout` and `AbortSignal` |
 
 ### Overlays
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `overlay-test.ts` | Basic overlay compositing with inline inputs |
 | `overlay-qa-tests.ts` | **Comprehensive** — All 9 anchors, margins, offsets, stacking, responsive visibility, animation at ~30 FPS, percentage sizing, max-height |
 
 ### Persistent UI
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `plan-mode/` | `setStatus` + `setWidget` for progress tracking, reactive updates |
@@ -39,6 +44,7 @@ All paths relative to:
 | `custom-header.ts` | `setHeader` for custom startup header |
 
 ### Tool Rendering
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `todo.ts` | **Complete example** — `renderCall` and `renderResult` with expanded/collapsed views, state in details |
@@ -46,17 +52,20 @@ All paths relative to:
 | `minimal-mode.ts` | Override rendering for minimal display |
 
 ### Message Rendering
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `message-renderer.ts` | `registerMessageRenderer` with colors and expandable details |
 
 ### Async Operations
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `qna.ts` | `BorderedLoader` for async LLM calls with cancel |
 | `summarize.ts` | Summarize conversation with transient UI |
 
 ### Notifications and Status
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `notify.ts` | Desktop notifications via OSC 777 (Ghostty, iTerm2, WezTerm) |
@@ -64,6 +73,7 @@ All paths relative to:
 | `model-status.ts` | React to model changes with `setStatus` |
 
 ### Documentation References
+
 | File | What It Covers |
 |------|---------------|
 | `docs/tui.md` | Full TUI component API, all patterns, performance, theming |
@@ -82,6 +92,7 @@ Captures the raw ANSI stream for debugging rendering issues.
 ---
 
 *This document was generated from Pi's TUI and extension documentation. Source files:*
+
 ```
 ~/.nvm/versions/node/v22.20.0/lib/node_modules/@gsd/pi-coding-agent/docs/tui.md
 ~/.nvm/versions/node/v22.20.0/lib/node_modules/@gsd/pi-coding-agent/docs/extensions.md
@@ -89,5 +100,6 @@ Captures the raw ANSI stream for debugging rendering issues.
 ```
 
 *Companion documents on Desktop:*
+
 - **Pi-What-It-Is-And-How-It-Works.md** — What Pi is and how it works
 - **Pi-Extensions-Complete-Guide.md** — Full extensions API reference

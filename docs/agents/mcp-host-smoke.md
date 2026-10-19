@@ -13,9 +13,19 @@ node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental
 
 `build:core` is required (not just `build:mcp-server`): the workflow-tool bridge warm-up loads the GSD runtime from the checkout's root `dist/`, and a fresh checkout has none.
 
-- Exits 0 with a PASS per check when the packaged server advertises and serves both tools with the exact response keysets.
+- Exits 0 when the packaged server advertises both tools and their responses pass the current required-field, provenance, envelope, bounded-output, and parity assertions. Harmless additive fields are accepted.
 - Pass `--project <absolute dir>` to probe a real project instead of the seeded fixture.
-- If any check fails, stop: that is a GSD contract defect, not a host issue. File it with the probe output before touching host configuration.
+- If a response fails an assertion, treat it as a GSD server/probe-contract defect and preserve the named failure before changing host configuration. The probe does not claim that a host can start, discover, or correctly render the server.
+
+## What the probe proves
+
+The probe is evidence for one built `gsd-pi` MCP server process over stdio. It checks that:
+
+- `gsd_progress` returns a valid JSON object with database provenance (`readMetadata.source: "database"` and `readMetadata.authority: "db-authoritative"`);
+- `gsd_project_snapshot` returns the current authority fields, read operation, matching envelope revision, truncation metadata, 50-item output caps, and equal values in text and structured content (object key order is irrelevant); and
+- MCP error envelopes, missing or malformed text, null payloads, array payloads, missing fields, and wrong field types fail with named nonzero checks.
+
+This is server-side contract evidence only. It does not prove VS Code Copilot, Cursor, Claude Code, or Codex compatibility, and it does not prove snapshot atomicity, token-budget guarantees, or correctness of downstream consumer policy.
 
 ## Per-host checklist
 
@@ -67,8 +77,8 @@ args = ["<repo>/packages/mcp-server/dist/cli.js"]
 
 ## Classification rules
 
-- Probe green + host failure → host configuration. Fix belongs in host docs or the host's config; record the difference here.
-- Probe failure → GSD contract defect. File an issue with the probe output; do not work around it in host config.
+- Probe green + host failure → investigate the host route or host-specific configuration; record the observed host and version here rather than treating the probe as host-E2E evidence.
+- Probe failure → investigate the named GSD server/probe contract failure first; do not work around it in host config.
 - A host that cannot run stdio servers in your configuration → record that explicitly; never silently omit the host.
 
 ## Results template

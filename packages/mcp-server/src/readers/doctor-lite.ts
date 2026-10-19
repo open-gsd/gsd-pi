@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { ProjectProgressReadMetadata } from '@opengsd/contracts';
 import {
   resolveGsdRoot,
   resolveRootFile,
@@ -12,6 +14,7 @@ import {
   resolveSliceFile,
   findTaskFiles,
 } from './paths.js';
+import { parseRoadmapTable } from './roadmap.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,7 +35,26 @@ export interface DoctorResult {
   ok: boolean;
   issues: DoctorIssue[];
   counts: { error: number; warning: number; info: number };
+  readMetadata?: ProjectProgressReadMetadata;
 }
+
+const PROJECTION_READ_METADATA: ProjectProgressReadMetadata = {
+  source: 'projection',
+  authority: 'projection-fallback',
+};
+
+/**
+ * These files are projections the workflow database re-renders (#2651). The
+ * projection-fallback checker cannot read the database — a DB-complete
+ * milestone (e.g. a worktree milestone merged outside GSD) looks identical to
+ * real file loss here — so projection-gap findings name the repair instead of
+ * reporting a dead end. The hint is conditional: these findings also fire
+ * when the data itself is genuinely missing, which this file-only checker
+ * cannot distinguish.
+ */
+const RENDER_HINT = ' — if the database holds this content, run /gsd sync (or gsd doctor --fix) to re-render it';
+/** Flat layout carries task state as checkboxes in the slice PLAN (#2651). */
+const TASK_PLAN_HINT = ' — if the database holds this task, run /gsd sync (or gsd doctor --fix) to re-render its slice plan';
 
 // ---------------------------------------------------------------------------
 // Check implementations
@@ -108,25 +130,43 @@ function checkMilestoneLevel(gsdRoot: string, mid: string, issues: DoctorIssue[]
         code: 'missing_roadmap',
         scope: 'milestone',
         unitId: mid,
-        message: `${mid} has ${sliceIds.length} slices but no ROADMAP.md`,
+        message: `${mid} has ${sliceIds.length} slices but no ROADMAP.md${RENDER_HINT}`,
       });
     }
   }
 
-  // Check if all slices done but no SUMMARY
+  // Check if all slices done but no SUMMARY. The slice inventory is the union
+  // of filesystem slices and ROADMAP-table rows — a slice declared in the
+  // roadmap but not yet planned has no files and must not be skipped, or a
+  // half-planned milestone reads as fully complete.
   if (sliceIds.length > 0) {
-    const allDone = sliceIds.every((sid) => {
+    const knownSliceIds = new Set(sliceIds);
+    const roadmapPath = resolveMilestoneFile(gsdRoot, mid, 'ROADMAP');
+    if (roadmapPath && existsSync(roadmapPath)) {
+      for (const entry of parseRoadmapTable(readFileSync(roadmapPath, 'utf-8'))) {
+        knownSliceIds.add(entry.id);
+      }
+    }
+    const allDone = Array.from(knownSliceIds).every((sid) => {
       const tasks = findTaskFiles(gsdRoot, mid, sid);
-      return tasks.length > 0 && tasks.every((t) => t.hasSummary);
+      // Flat-phase inventories carry the plan checkbox state in `done`;
+      // an explicit unchecked box means staged-not-verified.
+      return tasks.length > 0 && tasks.every((t) =>
+        t.done === true ? true : t.done === false ? false : t.hasSummary,
+      );
     });
     const summaryPath = resolveMilestoneFile(gsdRoot, mid, 'SUMMARY');
     if (allDone && (!summaryPath || !existsSync(summaryPath))) {
+      // Info, not error: this file-only checker cannot know whether the
+      // database holds a milestone closeout. A milestone imported (or
+      // recorded) complete has no closeout to render, so the missing SUMMARY
+      // is expected there and must not fail the doctor forever (#2729).
       issues.push({
-        severity: 'error',
+        severity: 'info',
         code: 'all_slices_done_missing_summary',
         scope: 'milestone',
         unitId: mid,
-        message: `${mid} has all slices completed but no SUMMARY.md`,
+        message: `${mid} has all slices completed but no SUMMARY.md${RENDER_HINT}`,
       });
     }
   }
@@ -136,6 +176,7 @@ function checkSliceLevel(
   gsdRoot: string, mid: string, sid: string, issues: DoctorIssue[],
 ): void {
   const unitId = `${mid}/${sid}`;
+  const mDir = resolveMilestoneDir(gsdRoot, mid);
 
   // PLAN.md should exist
   const planPath = resolveSliceFile(gsdRoot, mid, sid, 'PLAN');
@@ -145,12 +186,16 @@ function checkSliceLevel(
       code: 'missing_slice_plan',
       scope: 'slice',
       unitId,
-      message: `${unitId} has no PLAN.md`,
+      message: `${unitId} has no PLAN.md${RENDER_HINT}`,
     });
   }
 
-  // Tasks should have plans
+  // Tasks should have plans. In the legacy layout a task plan is its own
+  // tasks/Txx-PLAN.md file, which the renderer deliberately does not
+  // re-render — only the flat layout's slice-plan checkboxes are restored by
+  // a re-render, so only that layout gets the hint (#2651).
   const tasks = findTaskFiles(gsdRoot, mid, sid);
+  const legacyTaskPlans = mDir !== null && existsSync(join(mDir, 'slices'));
   for (const task of tasks) {
     const taskUnitId = `${unitId}/${task.id}`;
     if (!task.hasPlan) {
@@ -159,7 +204,7 @@ function checkSliceLevel(
         code: 'missing_task_plan',
         scope: 'task',
         unitId: taskUnitId,
-        message: `${taskUnitId} has a summary but no plan file`,
+        message: `${taskUnitId} has a summary but no plan file${legacyTaskPlans ? '' : TASK_PLAN_HINT}`,
       });
     }
   }
@@ -195,6 +240,7 @@ export function runDoctorLite(projectDir: string, scope?: string): DoctorResult 
         message: 'No .gsd/ directory found — project not initialized',
       }],
       counts: { error: 0, warning: 0, info: 1 },
+      readMetadata: PROJECTION_READ_METADATA,
     };
   }
 
@@ -221,5 +267,5 @@ export function runDoctorLite(projectDir: string, scope?: string): DoctorResult 
     info: issues.filter((i) => i.severity === 'info').length,
   };
 
-  return { ok: counts.error === 0, issues, counts };
+  return { ok: counts.error === 0, issues, counts, readMetadata: PROJECTION_READ_METADATA };
 }

@@ -4,7 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -475,6 +475,14 @@ describe("tiny milestone completion e2e (fake LLM)", () => {
 		}, null, 2) + "\n");
 
 		ensureGitignore(project.dir);
+		// Workflow-MCP auto-prep (#731) writes .claude/settings.local.json into
+		// the project root when the run starts. Left untracked, that file enters
+		// the fail-closed verification-source hash scope (#1819 includes
+		// untracked scratch) and shifts the revision between the evidence label
+		// captured here and the gate's mid-run recomputation at validation. The
+		// fixture ignores it up front, matching the baseline treatment of the
+		// other MCP runtime files (.mcp.json, .bg-shell/).
+		appendFileSync(join(project.dir, ".gitignore"), ".claude/\n");
 		writeFileSync(join(project.dir, "src/answer.js"), READY_ANSWER);
 		const source = captureVerificationSourceSnapshot([{ id: "project", cwd: project.dir }]);
 		assert.ok(source.ok, `expected source snapshot, got ${source.ok ? "" : source.error}`);
@@ -517,6 +525,14 @@ describe("tiny milestone completion e2e (fake LLM)", () => {
 			`expected exit 0, got code=${result.code} signal=${result.signal} timedOut=${result.timedOut}. stderr artifact: ${artifacts.dir}`,
 		);
 		assert.ok(!result.timedOut, "headless milestone run must not time out");
+		// Pin the regression condition: auto-prep must have written the local
+		// settings file the fixture ignores. If this ever stops being true, the
+		// .gitignore line above is dead weight and the gate divergence story
+		// needs re-checking.
+		assert.ok(
+			existsSync(join(project.dir, ".claude/settings.local.json")),
+			"workflow MCP auto-prep must write .claude/settings.local.json during the run",
+		);
 
 		const events = parseJsonEvents(result.stdoutClean);
 		const outcome = new WorkflowOutcomeProbe(project.dir, events);
@@ -549,6 +565,20 @@ describe("tiny milestone completion e2e (fake LLM)", () => {
 				tid: "T01",
 			}),
 			"complete",
+		);
+
+		// P35: the closeout wrote canonical authority rows, not just legacy projections.
+		assert.equal(
+			scalar(db, "SELECT COUNT(*) AS value FROM workflow_item_lifecycles l JOIN project_authority a ON a.project_id = l.project_id AND a.singleton = 1 WHERE l.item_kind = 'milestone' AND l.milestone_id = :mid AND l.lifecycle_status = 'completed'", { mid: "M001" }),
+			"1",
+		);
+		assert.equal(
+			scalar(db, "SELECT COUNT(*) AS value FROM workflow_operations WHERE operation_type = 'milestone.complete'"),
+			"1",
+		);
+		assert.equal(
+			scalar(db, "SELECT COUNT(*) AS value FROM workflow_operations WHERE operation_type = 'milestone.validate'"),
+			"1",
 		);
 	});
 });

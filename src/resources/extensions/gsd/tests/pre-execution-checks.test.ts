@@ -916,6 +916,21 @@ describe("checkVerificationCommands", () => {
     assert.deepEqual(results, []);
   });
 
+  test("accepts repo-relative binstub and env-prefixed Rails Verify commands (issue #2664)", () => {
+    const results = checkVerificationCommands([
+      createTask({
+        id: "T01",
+        verify: "bin/rails test test/integration/a_test.rb test/integration/b_test.rb test/integration/c_test.rb",
+      }),
+      createTask({
+        id: "T02",
+        verify: "RUN_SYSTEM_TESTS=1 bin/rails test test/system/a_test.rb test/system/b_test.rb",
+      }),
+    ]);
+
+    assert.deepEqual(results, []);
+  });
+
   test("rejects piped pytest Verify command", () => {
     const results = checkVerificationCommands([
       createTask({
@@ -1939,7 +1954,7 @@ describe("checkTaskOrdering false positive for pre-execution refs (#4071)", () =
       createTask({
         id: "T_SETUP",
         sequence: 5,
-        status: "completed",
+        status: "complete",
         inputs: [],
         expected_output: ["artifacts/setup.json"],
       }),
@@ -2017,7 +2032,7 @@ describe("checkTaskOrdering false positive for pre-execution refs (#4071)", () =
       createTask({
         id: "T_COMPLETED_PRODUCER",
         sequence: 2,
-        status: "completed",
+        status: "complete",
         inputs: [],
         expected_output: ["shared/artifact.json"],
       }),
@@ -2052,7 +2067,7 @@ describe("checkTaskOrdering false positive for pre-execution refs (#4071)", () =
       createTask({
         id: "T_INIT",
         sequence: 10,
-        status: "completed",
+        status: "complete",
         inputs: [],
         expected_output: ["generated/config.json"],
       }),
@@ -2088,7 +2103,7 @@ describe("checkFilePathConsistency completed-task output exemption (#4071)", () 
       createTask({
         id: "T_SETUP",
         sequence: 10,
-        status: "completed",
+        status: "complete",
         inputs: [],
         expected_output: ["artifacts/config.json"],
       }),

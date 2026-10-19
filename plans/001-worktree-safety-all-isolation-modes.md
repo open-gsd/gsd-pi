@@ -86,6 +86,7 @@ if (!expectedRoots.some((expectedRoot) => samePath(unitRoot, expectedRoot))) {
 ```
 
 Repo conventions:
+
 - TypeScript with NodeNext resolution, strict mode.
 - Use the existing `failure()`/`success()` helpers in `worktree-safety.ts`.
 - Match the discriminated-result style already used by `validateUnitRoot`.
@@ -106,12 +107,14 @@ Repo conventions:
 ## Scope
 
 **In scope**:
+
 - `src/resources/extensions/gsd/auto/orchestrator.ts` — remove the non-worktree skip and pass lease state.
 - `src/resources/extensions/gsd/worktree-safety.ts` — ensure branch/none mode validation is complete and reachably exercised.
 - `src/resources/extensions/gsd/auto/phases.ts` — mirror the orchestrator change in the legacy `runGuards` path.
 - `src/resources/extensions/gsd/tests/worktree-safety.test.ts` — add tests for branch/none mode validation and lease-lost detection.
 
 **Out of scope**:
+
 - Refactoring the rest of `auto/phases.ts` (covered by plan 008).
 - Changing worktree creation/placement logic.
 - Modifying the Phase Transition Invariant.
@@ -165,6 +168,7 @@ Find the equivalent Worktree Safety call in `src/resources/extensions/gsd/auto/p
 ### Step 4: Verify `worktree-safety.ts` branch/none validation is complete
 
 Open `src/resources/extensions/gsd/worktree-safety.ts`. Confirm that for `isolationMode === "branch"` or `"none"`:
+
 - `expectedRoots` is `[projectRoot]` (line 164-166).
 - The `invalid-root` failure message covers branch/none (line 170-175).
 - The `.git` marker and registered-worktree checks run for all modes where `unitRoot` exists and is expected to be a git checkout. If branch/none mode is meant to validate project-root git state, these checks are appropriate. If they should be skipped for `none` (e.g., a non-git project), add an early `return success(...)` when `isolationMode === "none"` and the project root is not a git repo. Do not skip them for `branch` mode.
@@ -176,6 +180,7 @@ If a gap is found (e.g., branch mismatch not checked for `branch` mode because `
 ### Step 5: Add regression tests
 
 Open `src/resources/extensions/gsd/tests/worktree-safety.test.ts`. Add tests that:
+
 1. Reject source-writing unit under `branch` isolation when `unitRoot` is not the project root.
 2. Reject source-writing unit under `branch` isolation when the current branch does not match `expectedBranch`.
 3. Accept source-writing unit under `none` isolation when `unitRoot === projectRoot`.
@@ -214,6 +219,7 @@ Run the compiled unit tests to catch regressions in the orchestrator and safety 
 ## STOP conditions
 
 Stop and report back if:
+
 - The code at the cited line ranges does not match the excerpts (drift occurred).
 - `AutoSession` does not expose `milestoneLeaseToken` or `workerId` — report the actual field names instead of guessing.
 - Removing the skip causes existing orchestrator tests to fail in a way that reveals a deliberate non-worktree bypass (e.g., a test that asserts `not-required` is returned).

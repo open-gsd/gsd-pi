@@ -14,7 +14,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
-import { gsdRoot } from "./paths.js";
+import { gsdProjectionRoot, gsdRoot, resolveMilestonePath } from "./paths.js";
+import {
+  getRecordedIntegrationBranch,
+  recordIntegrationBranch,
+} from "./db/writers/milestone-integration-branch.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { logWarning } from "./workflow-logger.js";
@@ -45,6 +49,7 @@ import {
 } from "./native-git-bridge.js";
 import { GSDError, GSD_MERGE_CONFLICT, GSD_GIT_ERROR } from "./errors.js";
 import { getErrorMessage } from "./error-utils.js";
+import { buildScriptCommand, detectPackageManager } from "./package-manager.js";
 import { isInfrastructureError } from "./auto/infra-errors.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -109,6 +114,15 @@ export interface GitPreferences {
    *  Default: true when collapse_cadence is "slice", ignored otherwise.
    */
   milestone_resquash?: boolean;
+  /** #2888 — when true, a stop with an in-progress milestone (attempt death
+   *  via liveness backstop or recovery abort, manual stop, graceful exit)
+   *  leaves the milestone worktree directory on disk alongside the preserved
+   *  branch instead of removing it. On the default path (false) the worktree
+   *  is removed; git-visible uncommitted work is quarantined under
+   *  `.gsd/quarantine/worktrees/` first. `/gsd auto` re-enters an existing
+   *  worktree on resume. Default: false.
+   */
+  preserve_worktree_on_stop?: boolean;
 }
 
 export const VALID_BRANCH_NAME = /^[a-zA-Z0-9_\-\/.]+$/;
@@ -369,11 +383,24 @@ export const RUNTIME_EXCLUSION_PATHS: readonly string[] = [
   ".gsd/audit/",
   ".gsd/backups/**",
   ".gsd/forensics/",
+  // Runtime control roots under migration/ — NOT the whole directory:
+  // MIGRATION.md, manifest.json and legacy/ (preserved legacy .planning copy)
+  // are one-time migration outputs a team may deliberately keep tracked.
+  // Trailing-slash directory form: the native index cleanup matches literal
+  // files and directory prefixes, not wildcards.
+  ".gsd/migration/projection-mutations/",
+  ".gsd/migration/quarantined-control-publications/",
+  ".gsd/migration/native-projection-evidence/",
+  ".gsd/migration/managed-outputs.json",
+  ".gsd/migration/unbound-projection-evidence.json",
   ".gsd/migration-applications/**",
   ".gsd/recovery-applications/**",
   ".gsd/runtime/",
   ".gsd/worktrees/",
   ".gsd/parallel/",
+  ".gsd/exec/", // gsd_exec/gsd_uat_exec stdout, stderr and meta.json evidence store
+  ".gsd/safety/", // session-scoped safety evidence (evidence-*.json, blocked/)
+  ".gsd/graphs/", // knowledge-graph build output (graph.json, .last-build-snapshot.json)
   ".gsd/auto.lock",
   ".gsd/metrics.json",
   ".gsd/completed-units*.json", // covers completed-units.json and archived completed-units-{MID}.json
@@ -384,7 +411,16 @@ export const RUNTIME_EXCLUSION_PATHS: readonly string[] = [
   ".gsd/journal/",
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
+  ".gsd/audit-log.jsonl", // error-severity audit entries (workflow-logger)
+  ".gsd/notifications.jsonl", // persistent notifications (notification-store)
+  ".gsd/notifications.lock", // notification-store rewrite lock (crash remnant)
+  ".gsd/notifications.jsonl.tmp.*", // atomic-rewrite temp file (crash remnant)
+  ".gsd/hook-state.json", // diagnostic copy of the hook-state database row
+  ".gsd/lifecycle-shadow-observation-loss.jsonl", // emergency observation-loss journal (uok/audit)
+  ".gsd/git-action-failures.log", // git action retry/failure log (auto-post-unit)
   ".gsd/DISCUSSION-MANIFEST.json",
+  ".gsd/.compat.json",
+  ".gsd/quarantine/",
 ];
 
 const runtimeFilesCleanedUpRepos = new Set<string>();
@@ -405,11 +441,26 @@ function legacyMilestoneMetaPath(basePath: string, milestoneId: string): string 
   return join(gsdRoot(basePath), "milestones", milestoneId, `${milestoneId}-META.json`);
 }
 
+function validIntegrationBranch(branch: unknown): string | null {
+  return typeof branch === "string" && branch.trim() !== "" && VALID_BRANCH_NAME.test(branch)
+    ? branch
+    : null;
+}
+
 /**
  * Read the integration branch recorded for a milestone.
- * Returns null if no metadata file exists or the branch isn't set.
+ *
+ * The database row is the authority; the META.json file is a rendered copy
+ * and is not read when the row exists. The file is read only for a milestone
+ * recorded before the row existed, or when no database is open.
  */
 export function readIntegrationBranch(basePath: string, milestoneId: string): string | null {
+  const recorded = getRecordedIntegrationBranch(milestoneId);
+  if (recorded) return validIntegrationBranch(recorded);
+  return readIntegrationBranchFile(basePath, milestoneId);
+}
+
+function readIntegrationBranchFile(basePath: string, milestoneId: string): string | null {
   try {
     let metaFile = milestoneMetaPath(basePath, milestoneId);
     if (!existsSync(metaFile)) {
@@ -418,11 +469,7 @@ export function readIntegrationBranch(basePath: string, milestoneId: string): st
       metaFile = legacy;
     }
     const data = JSON.parse(readFileSync(metaFile, "utf-8"));
-    const branch = data?.integrationBranch;
-    if (typeof branch === "string" && branch.trim() !== "" && VALID_BRANCH_NAME.test(branch)) {
-      return branch;
-    }
-    return null;
+    return validIntegrationBranch(data?.integrationBranch);
   } catch {
     return null;
   }
@@ -439,7 +486,8 @@ export { QUICK_BRANCH_RE, WORKFLOW_BRANCH_RE } from "./branch-patterns.js";
  * branch. Idempotent when the branch matches; updates the record when the
  * user starts from a different branch.
  *
- * The file is committed immediately so the metadata is persisted in git.
+ * The record is a database row. The META.json file is rendered from the same
+ * value for readers that have no database.
  */
 export function writeIntegrationBranch(
   basePath: string,
@@ -461,11 +509,14 @@ export function writeIntegrationBranch(
   if (WORKFLOW_BRANCH_RE.test(branch)) return;
   // Validate
   if (!VALID_BRANCH_NAME.test(branch)) return;
-  // Skip if already recorded with the same branch (idempotent across restarts).
-  // If recorded with a different branch, update it — the user started auto-mode
-  // from a new branch and expects slices to merge back there (#300).
-  const existingBranch = readIntegrationBranch(basePath, milestoneId);
-  if (existingBranch === branch) return;
+  // Record the branch in the database: that row is what the merge reads. If a
+  // different branch is recorded, update it — the user started auto-mode from
+  // a new branch and expects slices to merge back there (#300).
+  if (getRecordedIntegrationBranch(milestoneId) !== branch) {
+    recordIntegrationBranch(milestoneId, branch);
+  }
+  // Render the file copy. Skip when it already matches (idempotent across restarts).
+  if (readIntegrationBranchFile(basePath, milestoneId) === branch) return;
 
   const metaFile = milestoneMetaPath(basePath, milestoneId);
   // Ensure the flat .gsd/ root exists (never milestones/<MID>/ — that would
@@ -834,12 +885,8 @@ export class GitServiceImpl {
     // committed but the second half doesn't (#1326).
     const cleanupRepoKey = resolve(this.basePath);
     if (!runtimeFilesCleanedUpRepos.has(cleanupRepoKey)) {
-      let cleaned = false;
-      for (const exclusion of RUNTIME_EXCLUSION_PATHS) {
-        const removed = nativeRmCached(this.basePath, [exclusion]);
-        if (removed.length > 0) cleaned = true;
-      }
-      if (cleaned) {
+      const removed = nativeRmCached(this.basePath, [...RUNTIME_EXCLUSION_PATHS]);
+      if (removed.length > 0) {
         nativeCommit(this.basePath, "chore: untrack .gsd/ runtime files from git index", { allowEmpty: false });
       }
       runtimeFilesCleanedUpRepos.add(cleanupRepoKey);
@@ -869,19 +916,26 @@ export class GitServiceImpl {
     // must only commit files belonging to its own milestone. Exclude all other
     // milestone directories from staging to prevent cross-milestone pollution
     // (e.g., an M033 worker fabricating M032 artifacts in the same commit).
+    // The directories are read from the tree that this commit stages (the
+    // worktree's `.gsd` in a worktree), in both the legacy `milestones/`
+    // layout and the flat `phases/` layout.
     const milestoneLock = process.env.GSD_MILESTONE_LOCK;
     if (milestoneLock) {
-      const msDir = join(gsdRoot(this.basePath), "milestones");
-      if (existsSync(msDir)) {
+      const projectionRoot = gsdProjectionRoot(this.basePath);
+      const ownDir = resolveMilestonePath(this.basePath, milestoneLock);
+      for (const layout of ["milestones", "phases"] as const) {
+        const layoutDir = join(projectionRoot, layout);
+        if (!existsSync(layoutDir)) continue;
         try {
-          const entries = readdirSync(msDir, { withFileTypes: true });
-          for (const entry of entries) {
-            if (entry.isDirectory() && entry.name !== milestoneLock) {
-              allExclusions.push(`.gsd/milestones/${entry.name}/`);
-            }
+          for (const entry of readdirSync(layoutDir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const own = layout === "milestones"
+              ? entry.name === milestoneLock
+              : join(layoutDir, entry.name) === ownDir;
+            if (!own) allExclusions.push(`.gsd/${layout}/${entry.name}/`);
           }
         } catch {
-          // Best-effort — if we can't read the milestones dir, proceed without scoping
+          // Best-effort — if we can't read the layout dir, proceed without scoping
         }
       }
     }
@@ -1224,12 +1278,15 @@ export class GitServiceImpl {
     if (typeof this.prefs.pre_merge_check === "string") {
       command = this.prefs.pre_merge_check;
     } else {
-      // Auto-detect: look for package.json with a test script
+      // Auto-detect: look for package.json with a test script, then build the
+      // command with the project's own package manager (lockfile /
+      // packageManager detection — same helper as verification-gate, #2870).
       try {
         const pkg = readFileSync(join(this.basePath, "package.json"), "utf-8");
         const parsed = JSON.parse(pkg);
         if (parsed.scripts?.test) {
-          command = "npm test";
+          const pm = detectPackageManager(this.basePath) ?? "npm";
+          command = buildScriptCommand(pm, "test");
         } else {
           return { passed: true, skipped: true };
         }

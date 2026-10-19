@@ -1,9 +1,8 @@
 // Project/App: gsd-pi
-// File Purpose: Observe external .gsd edits and retain the opt-in legacy drift handler.
+// File Purpose: Observe external .gsd edits.
 //
 // gsd-pi's DB is canonical, while .gsd/*.md is a readable projection. External
-// modeled edits are reported to the Projection Worker for preservation. Runtime
-// reconciliation does not register the legacy blocker handler below.
+// modeled edits are reported to the Projection Worker for preservation.
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -16,8 +15,7 @@ import {
 } from "../../compat/compat-marker.js";
 import { _getAdapter } from "../../gsd-db.js";
 import { logWarning } from "../../workflow-logger.js";
-import type { GSDState } from "../../types.js";
-import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
+import type { DriftRecord } from "../types.js";
 
 type ExternalMarkdownEditDrift = Extract<
   DriftRecord,
@@ -121,18 +119,50 @@ function dbProjectionMatches(
 }
 
 /**
+ * Whether the on-disk bytes of a derived root projection (DECISIONS.md,
+ * REQUIREMENTS.md) already match the render the database derives now. These
+ * files have no artifacts row, so dbProjectionMatches cannot vouch for them;
+ * a stale baseline would otherwise quarantine a byte-identical re-render
+ * (#2728). Null for any other projection path.
+ */
+async function derivedProjectionMatches(
+  basePath: string,
+  projectionPath: string,
+  actualSha: string,
+): Promise<boolean | null> {
+  const name = basename(projectionPath).toLowerCase();
+  if (name !== "decisions.md" && name !== "requirements.md") return null;
+  try {
+    const { readDecisionsProjectionIntent, readRequirementsProjectionIntent } =
+      await import("../../db-writer.js");
+    const intent = name === "decisions.md"
+      ? await readDecisionsProjectionIntent(basePath)
+      : await readRequirementsProjectionIntent(basePath);
+    if (!intent) return null;
+    return computeProjectionSha(intent.content) === actualSha;
+  } catch {
+    // A fault of the derived check is not proof: fall back to the drift
+    // record, the same treatment dbProjectionMatches gives a DB fault.
+    return null;
+  }
+}
+
+/**
  * Detect sha drift between the marker baseline and current file contents.
  *
  * - Missing marker → no records (the broader /gsd recover flow handles a
  *   cold-start; this handler only fires when we have a baseline to compare).
  * - Missing file on disk → no record (other handlers cover missing artifacts).
  * - Sha match → no record (gsd-pi's own write or no change).
- * - Sha mismatch → one record per drifted file, scoped to its recorded entities.
+ * - Sha mismatch → one record per drifted file, scoped to its recorded entities,
+ *   unless the file already matches what the database derives now (a stale
+ *   baseline on an artifact row or a derived DECISIONS.md/REQUIREMENTS.md
+ *   render); then the baseline is refreshed and no record is emitted.
  */
-export function observeExternalMarkdownEdits(
+export async function observeExternalMarkdownEdits(
   basePath: string,
   dryRun = false,
-): ExternalMarkdownEditDrift[] {
+): Promise<ExternalMarkdownEditDrift[]> {
   const marker = readCompatMarker(basePath, {
     healInvalidKeys: !dryRun,
     quarantineInvalid: !dryRun,
@@ -143,11 +173,24 @@ export function observeExternalMarkdownEdits(
   const records: ExternalMarkdownEditDrift[] = [];
   let markerChanged = false;
   for (const [projectionPath, entry] of entries) {
+    // STATE.md is fully derived: the next render overwrites a hand edit.
+    if (projectionPath === "STATE.md") continue;
+    // KNOWLEDGE.md can hold content the database does not: rows that
+    // `/gsd recover` has not imported yet, and sections the import does not
+    // model. Moving or holding it would lose that content. Its render carries
+    // a changed file forward, and the
+    // write-time guard copies the changed bytes to quarantine. The compare
+    // ignores case because the legacy file name is `knowledge.md`.
+    if (projectionPath.toLowerCase() === "knowledge.md") continue;
     const abs = join(basePath, ".gsd", projectionPath);
     if (!existsSync(abs)) continue;
     const actual = computeProjectionSha(readFileSync(abs, "utf-8"));
     if (actual === entry.sha) continue;
-    if (dbProjectionMatches(projectionPath, entry, actual)) {
+    const matchesDb = await (async (): Promise<boolean> => {
+      if (dbProjectionMatches(projectionPath, entry, actual)) return true;
+      return (await derivedProjectionMatches(basePath, projectionPath, actual)) === true;
+    })();
+    if (matchesDb) {
       if (!dryRun) {
         marker.projections[projectionPath] = {
           sha: actual,
@@ -185,29 +228,3 @@ export function observeExternalMarkdownEdits(
   }
   return records;
 }
-
-function externalMarkdownEditBlocker(record: ExternalMarkdownEditDrift): string {
-  return [
-    `External modeled edit detected in \`.gsd/${record.projectionPath}\`.`,
-    "The database is authoritative, so GSD paused before importing or overwriting this projection.",
-    "Recommended: run `/gsd rebuild markdown` to restore the database projection.",
-    "If this edit should replace database state, review it first, then run `/gsd recover` and approve its exact hash through the explicit Preview/Application flow.",
-  ].join(" ");
-}
-
-function repairExternalMarkdownEdit(
-  record: ExternalMarkdownEditDrift,
-  _ctx: DriftContext,
-): never {
-  throw new Error(
-    `Invariant violation: modeled projection repair must remain blocked for .gsd/${record.projectionPath}`,
-  );
-}
-
-export const externalMarkdownEditHandler: DriftHandler<ExternalMarkdownEditDrift> = {
-  kind: "external-markdown-edit",
-  detect: (_state: GSDState, ctx: DriftContext) =>
-    observeExternalMarkdownEdits(ctx.basePath, ctx.dryRun),
-  blocker: externalMarkdownEditBlocker,
-  repair: repairExternalMarkdownEdit,
-};

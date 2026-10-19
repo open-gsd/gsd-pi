@@ -26,6 +26,7 @@ T011 AC3/AC4 pass without running them either. Verbatim:
 
 > ❌ T011 AC3 and AC4 (suite green) — three tests are RED at review base, in two
 > files neither T011 nor T030 listed:
+>
 > - `reassess-detection.test.ts:77` "checkNeedsReassessment returns sliceId when
 >   assessment is missing" — `actual: null, expected: { sliceId: 'S01' }`.
 > - `reassess-detection.test.ts:113` "checkNeedsReassessment detects assessment

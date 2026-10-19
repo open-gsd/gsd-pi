@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { normalizePythonCommand, detectPythonExecutable, resolveVenvInterpreter, normalizeVerifyCommandForVenv, venvPythonCandidates } from "../python-resolver.ts";
+import { normalizePythonCommand, detectPythonExecutable, resolveVenvInterpreter, normalizeVerifyCommandForVenv, venvPythonCandidates, formatPythonInvocation } from "../python-resolver.ts";
 import { discoverCommands, runVerificationGate } from "../verification-gate.ts";
 
 describe("normalizePythonCommand", () => {
@@ -109,6 +109,22 @@ describe("normalizePythonCommand", () => {
   });
 });
 
+describe("formatPythonInvocation", () => {
+  test("posix style turns a Windows venv path into forward slashes for bash (#2399)", () => {
+    assert.equal(
+      formatPythonInvocation("D:\\proj\\.venv\\Scripts\\python.exe", "posix"),
+      "D:/proj/.venv/Scripts/python.exe",
+    );
+    assert.equal(
+      formatPythonInvocation("D:\\my proj\\.venv\\Scripts\\python.exe", "posix"),
+      '"D:/my proj/.venv/Scripts/python.exe"',
+    );
+    assert.equal(formatPythonInvocation("D:\\proj\\.venv\\Scripts\\python.exe"), "D:\\proj\\.venv\\Scripts\\python.exe");
+    assert.equal(formatPythonInvocation("py -3", "posix"), "py -3");
+    assert.equal(formatPythonInvocation("/usr/bin/python3", "posix"), "/usr/bin/python3");
+  });
+});
+
 describe("detectPythonExecutable", () => {
   test("returns a string or null — never throws", () => {
     let result: string | null | undefined;
@@ -200,7 +216,7 @@ describe("venv awareness (#1700 / #1784)", () => {
     }
   });
 
-  test("verification child PATH prepends the venv bin directory", () => {
+  test("verification child PATH prepends the venv bin directory", async () => {
     const { dir, python } = makeProject("posix");
     const previous = process.env.VIRTUAL_ENV;
     delete process.env.VIRTUAL_ENV;
@@ -209,7 +225,7 @@ describe("venv awareness (#1700 / #1784)", () => {
         join(dir, "probe.js"),
         "process.stdout.write(process.env.PATH || '');\n",
       );
-      const result = runVerificationGate({
+      const result = await runVerificationGate({
         cwd: dir,
         preferenceCommands: ["node probe.js"],
       });

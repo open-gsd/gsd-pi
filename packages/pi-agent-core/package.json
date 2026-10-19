@@ -1,6 +1,6 @@
 {
   "name": "@gsd/pi-agent-core",
-  "version": "1.19.0",
+  "version": "1.22.0",
   "description": "General-purpose agent with transport abstraction, state management, and attachment support",
   "type": "module",
   "gsd": {
@@ -60,6 +60,6 @@
     "@types/node": "24.12.4",
     "@vitest/coverage-v8": "3.2.4",
     "typescript": "5.9.3",
-    "vitest": "4.1.0"
+    "vitest": "4.1.11"
   }
 }

@@ -184,6 +184,8 @@ export const PLANNING_ARTIFACT_SUFFIXES: readonly string[] = [
   "SUMMARY",
   "RESEARCH",
   "UI-SPEC",
+  "AI-SPEC",
+  "SPEC",
   "VALIDATION",
   "ASSESSMENT",
   "UAT",
@@ -191,8 +193,30 @@ export const PLANNING_ARTIFACT_SUFFIXES: readonly string[] = [
   "EVAL-REVIEW",
   "PARKED",
   "VERIFICATION-FAILED",
+  "CLOSEOUT-VERIFICATION-FAILED",
   "CONTINUE",
 ];
+
+/** Deliberate verification-refusal markers; probe in order (#2033). */
+export const VERIFICATION_FAILURE_SUFFIXES = [
+  "VERIFICATION-FAILED",
+  "CLOSEOUT-VERIFICATION-FAILED",
+] as const;
+
+/**
+ * Return the first on-disk verification-failure marker for a suffix list,
+ * or the canonical default path when none exist yet.
+ */
+export function resolveVerificationFailureMarker(
+  resolveExisting: (suffix: string) => string | null,
+  defaultPathForSuffix: (suffix: string) => string,
+): string {
+  for (const suffix of VERIFICATION_FAILURE_SUFFIXES) {
+    const existing = resolveExisting(suffix);
+    if (existing) return existing;
+  }
+  return defaultPathForSuffix("VERIFICATION-FAILED");
+}
 
 /** Matches a bare planning-artifact file name, e.g. "M001-CONTEXT.md", "S01-PLAN.md". */
 export const PLANNING_ARTIFACT_NAME_RE = new RegExp(
@@ -666,8 +690,6 @@ function legacyMilestonesHasSubdirs(basePath: string): boolean {
  * (`milestones/<MID>/<MID>-CONTEXT.md` instead of `phases/NN-slug/NN-CONTEXT.md`),
  * trapping the unit in a finalize-retry loop (#852 follow-up).
  *
- * See the matching TODO in markdown-renderer.ts detectStaleRenders, which
- * disabled stale-render detection for the same reason.
  */
 const LEGACY_MILESTONE_RUNTIME_DIRS = new Set(["anchors"]);
 
@@ -878,7 +900,7 @@ export function resolveMilestonePath(basePath: string, milestoneId: string): str
  * create the milestone directory early, so a queued milestone in normal
  * in-flight planning would otherwise look like an orphan. Use this to decide
  * whether a milestone directory is truly absent (no directory at all) vs merely
- * empty. See doctor-runtime-checks.ts orphan_milestone_db (#1524).
+ * empty.
  */
 export function milestoneDirExists(basePath: string, milestoneId: string): boolean {
   // Flat-phase dirs (and content-bearing legacy dirs) resolve directly.

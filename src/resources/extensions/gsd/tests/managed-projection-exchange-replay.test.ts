@@ -1,0 +1,472 @@
+// Journaled exchange replay convergence tests.
+// File Purpose: Verifies that resumeProjectionExchange reconciles persisted
+// exchange state against current disk state before replaying it, and that
+// deterministic replay failures degrade to retained evidence instead of
+// wedging the journal (#2193, #2108).
+
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+import {
+  acquireProjectionRootIdentityLock,
+  isProjectionRootIdentityLockAvailable,
+  type ProjectionRootIdentityLock,
+} from "@gsd/native/file-identity";
+
+import {
+  _recoverManagedProjectionMutationsForTest,
+  beginManagedProjectionMutation,
+  loadManagedProjectionPaths,
+  loadUnboundProjectionEvidence,
+} from "../managed-projection-history.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
+
+interface ExchangeFixture {
+  base: string;
+  rootPath: string;
+  logicalPath: string;
+  temporaryPath: string;
+  replacementPath: string;
+  guardPath: string;
+  journalPath: string;
+  placeholderIdentity: string;
+  temporaryIdentity: string;
+  replacementIdentity: string;
+  guardIdentity: string;
+}
+
+// Builds the on-disk state of a write mutation interrupted between its two
+// journaled exchanges: the canonical target holds the empty placeholder from
+// the first swap, the displaced canonical content sits in the replacement
+// slot, and the staging temp holds the intended content. The journal claims
+// the second swap (left = target placeholder, right = staging temp) is still
+// in flight.
+function prepareExchangeFixture(prefix: string): ExchangeFixture {
+  const base = mkdtempSync(join(tmpdir(), prefix));
+  const rootPath = join(base, ".gsd");
+  mkdirSync(join(rootPath, "notes"), { recursive: true });
+  assert.equal(openDatabase(join(rootPath, "gsd.db")), true);
+  const logicalPath = "notes/result.md";
+  const temporaryPath = "notes/.gsd-projection-tmp-00000000-0000-0000-0000-000000000001";
+  const replacementPath = `${temporaryPath}.replaced`;
+  const guardPath = "notes/.gsd-projection-exchange-00000000-0000-0000-0000-000000000002";
+  const journalPath = join(
+    rootPath,
+    "migration",
+    "projection-mutations",
+    "00000000-0000-0000-0000-000000000003.json",
+  );
+  const stat = lstatSync(rootPath, { bigint: true });
+  const handle = acquireProjectionRootIdentityLock(rootPath, stat.dev.toString(), stat.ino.toString());
+  try {
+    const placeholderIdentity = handle.prepareFileTemporary(logicalPath, Buffer.alloc(0));
+    const scratch = join(rootPath, "notes", ".gsd-projection-tmp-00000000-0000-0000-0000-000000000004");
+    writeFileSync(scratch, "reviewed\n");
+    renameSync(scratch, join(rootPath, replacementPath));
+    const replacementIdentity = handle.pathIdentity(replacementPath);
+    const temporaryIdentity = handle.prepareFileTemporary(temporaryPath, Buffer.from("replacement\n"));
+    const guardIdentity = handle.prepareFileTemporary(guardPath, Buffer.alloc(0));
+    return {
+      base,
+      rootPath,
+      logicalPath,
+      temporaryPath,
+      replacementPath,
+      guardPath,
+      journalPath,
+      placeholderIdentity,
+      temporaryIdentity,
+      replacementIdentity,
+      guardIdentity,
+    };
+  } finally {
+    handle.close();
+  }
+}
+
+function cleanupFixture(base: string): void {
+  closeDatabase();
+  rmSync(base, { recursive: true, force: true });
+}
+
+function writeExchangeJournal(
+  fixture: ExchangeFixture,
+  overrides: {
+    temporaryPath?: string;
+    temporaryIdentity?: string;
+    exchangeState?: Record<string, string>;
+  } = {},
+): void {
+  const temporaryPath = overrides.temporaryPath ?? fixture.temporaryPath;
+  const temporaryIdentity = overrides.temporaryIdentity ?? fixture.temporaryIdentity;
+  mkdirSync(join(fixture.rootPath, "migration", "projection-mutations"), { recursive: true });
+  writeFileSync(fixture.journalPath, `${JSON.stringify({
+    logicalPath: fixture.logicalPath,
+    operation: "write",
+    legacyCleanup: false,
+    content: Buffer.from("replacement\n").toString("base64"),
+    encoding: "base64",
+    temporaryPath,
+    temporaryIdentity,
+    replacementPath: `${fixture.temporaryPath}.replaced`,
+    replacementIdentity: fixture.replacementIdentity,
+    quarantinePath: null,
+    quarantineIdentity: null,
+    placeholderIdentity: fixture.placeholderIdentity,
+    exchangeGuardPath: fixture.guardPath,
+    exchangeGuardIdentity: fixture.guardIdentity,
+    exchangeState: overrides.exchangeState ?? {
+      leftPath: fixture.logicalPath,
+      rightPath: temporaryPath,
+      leftIdentity: fixture.placeholderIdentity,
+      rightIdentity: temporaryIdentity,
+      guardPath: fixture.guardPath,
+      guardIdentity: fixture.guardIdentity,
+    },
+  })}\n`);
+}
+
+// A real identity-lock handle whose exchangePaths fails with the given error,
+// exactly as the native engine reports a deterministic or transient exchange
+// failure. Every other operation is forwarded to the real handle so evidence
+// retention, journal writes, and digests run against real disk state.
+function handleFailingExchangePaths(
+  rootPath: string,
+  fault: Error,
+): ProjectionRootIdentityLock {
+  const stat = lstatSync(rootPath, { bigint: true });
+  const real = acquireProjectionRootIdentityLock(rootPath, stat.dev.toString(), stat.ino.toString());
+  return new Proxy(real, {
+    get(target, property): unknown {
+      if (property === "exchangePaths") return () => { throw fault; };
+      const value = Reflect.get(target, property) as unknown;
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+}
+
+test("converged journaled exchange replay retires the entry without re-exchanging", (t) => {
+  const fixture = prepareExchangeFixture("gsd-exchange-replay-converged-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // The swap already landed on disk; only the clearing persist never ran. A
+  // racer then placed an unexpected occupant on the (normally consumed) guard
+  // path, so a blind replay would fail on the guard identity.
+  const stat = lstatSync(fixture.rootPath, { bigint: true });
+  const handle = acquireProjectionRootIdentityLock(fixture.rootPath, stat.dev.toString(), stat.ino.toString());
+  try {
+    handle.exchangePaths(
+      fixture.logicalPath,
+      fixture.temporaryPath,
+      fixture.placeholderIdentity,
+      fixture.temporaryIdentity,
+      fixture.guardPath,
+      fixture.guardIdentity,
+    );
+  } finally {
+    handle.close();
+  }
+  writeFileSync(join(fixture.rootPath, fixture.guardPath), "racing occupant\n");
+  writeExchangeJournal(fixture);
+
+  assert.ok(loadManagedProjectionPaths(fixture.base).includes(fixture.logicalPath));
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), "replacement\n");
+  assert.equal(existsSync(fixture.journalPath), false);
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+});
+
+test("journaled exchange replay re-binds drifted staging identity when content matches", (t) => {
+  const fixture = prepareExchangeFixture("gsd-exchange-replay-rebind-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // Same staging content under a new identity (the volume-serial flip shape).
+  const scratch = join(fixture.rootPath, "notes", ".gsd-projection-tmp-00000000-0000-0000-0000-000000000005");
+  writeFileSync(scratch, "replacement\n");
+  renameSync(scratch, join(fixture.rootPath, fixture.temporaryPath));
+  writeExchangeJournal(fixture);
+
+  assert.ok(loadManagedProjectionPaths(fixture.base).includes(fixture.logicalPath));
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), "replacement\n");
+  assert.equal(existsSync(fixture.journalPath), false);
+  assert.equal(existsSync(join(fixture.rootPath, fixture.temporaryPath)), false);
+  assert.equal(existsSync(join(fixture.rootPath, fixture.replacementPath)), false);
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+});
+
+test("journaled exchange replay re-stages diverged staging content under a fresh path", (t) => {
+  const fixture = prepareExchangeFixture("gsd-exchange-replay-restage-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // Staging content diverged: the journal cannot prove what the temp holds.
+  const scratch = join(fixture.rootPath, "notes", ".gsd-projection-tmp-00000000-0000-0000-0000-000000000005");
+  writeFileSync(scratch, "tampered\n");
+  renameSync(scratch, join(fixture.rootPath, fixture.temporaryPath));
+  writeExchangeJournal(fixture);
+
+  assert.ok(loadManagedProjectionPaths(fixture.base).includes(fixture.logicalPath));
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), "replacement\n");
+  assert.equal(existsSync(fixture.journalPath), false);
+  // The diverged staging artifact and the displaced replacement stay on disk
+  // as reviewable evidence instead of being silently discarded.
+  assert.equal(existsSync(join(fixture.rootPath, fixture.temporaryPath)), true);
+  assert.deepEqual(
+    loadUnboundProjectionEvidence(fixture.base).map((entry) => entry.evidencePath).sort(),
+    [fixture.temporaryPath, fixture.replacementPath].sort(),
+  );
+});
+
+test("deterministic journaled exchange failure retains evidence and retires the entry on first failure", (t) => {
+  const fixture = prepareExchangeFixture("gsd-exchange-replay-identity-changed-");
+  t.after(() => cleanupFixture(fixture.base));
+  writeExchangeJournal(fixture);
+
+  const fault = new Error("projection identity changed during journaled exchange");
+  // The retirement converges the entry (rows recorded, journal removed), so
+  // recovery finishes the pass instead of re-failing every later managed open
+  // one throw at a time (#2879).
+  _recoverManagedProjectionMutationsForTest(
+    () => handleFailingExchangePaths(fixture.rootPath, fault),
+    fixture.base,
+  );
+  assert.equal(existsSync(fixture.journalPath), false);
+  assert.deepEqual(
+    loadUnboundProjectionEvidence(fixture.base).map((entry) => entry.evidencePath).sort(),
+    [fixture.logicalPath, fixture.temporaryPath, fixture.replacementPath, fixture.guardPath].sort(),
+  );
+
+  // The write path still fails loud for the retired target — through the
+  // unresolved-evidence conflict gate, without adding any rows.
+  const before = loadUnboundProjectionEvidence(fixture.base).length;
+  assert.throws(
+    () => beginManagedProjectionMutation(
+      join(fixture.base, ".gsd", fixture.logicalPath),
+      "write",
+      "next attempt\n",
+      "utf8",
+    ),
+    /managed projection target has unresolved recovery evidence/u,
+  );
+  assert.equal(loadUnboundProjectionEvidence(fixture.base).length, before);
+});
+
+test("transient journaled exchange failure keeps the entry and propagates for retry", (t) => {
+  const fixture = prepareExchangeFixture("gsd-exchange-replay-transient-");
+  t.after(() => cleanupFixture(fixture.base));
+  writeExchangeJournal(fixture);
+
+  const fault = new Error("projection root operation failed: sharing violation (os error 32)");
+  assert.throws(
+    () => _recoverManagedProjectionMutationsForTest(
+      () => handleFailingExchangePaths(fixture.rootPath, fault),
+      fixture.base,
+    ),
+    (error: unknown) => error === fault,
+  );
+  assert.equal(existsSync(fixture.journalPath), true);
+  const replayed = JSON.parse(readFileSync(fixture.journalPath, "utf8")) as { exchangeState: unknown };
+  assert.notEqual(replayed.exchangeState, null);
+
+  // The retained entry stays owned by the existing retry schedule: the next
+  // recovery pass without the fault converges and retires it.
+  assert.ok(loadManagedProjectionPaths(fixture.base).includes(fixture.logicalPath));
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), "replacement\n");
+  assert.equal(existsSync(fixture.journalPath), false);
+});
+
+test("repeatedly transient exchange replay retires the entry after three failures across restarts", (t) => {
+  const fixture = prepareExchangeFixture("gsd-exchange-replay-transient-escalation-");
+  t.after(() => cleanupFixture(fixture.base));
+  writeExchangeJournal(fixture);
+
+  const fault = new Error("projection root operation failed: sharing violation (os error 32)");
+  const replay = (): unknown => _recoverManagedProjectionMutationsForTest(
+    () => handleFailingExchangePaths(fixture.rootPath, fault),
+    fixture.base,
+  );
+  // The first two transient failures keep the entry (outer retry schedules
+  // keep ownership) with the failure count persisted for the next process.
+  assert.throws(replay, (error: unknown) => error === fault);
+  assert.equal(existsSync(fixture.journalPath), true);
+  assert.equal(
+    (JSON.parse(readFileSync(fixture.journalPath, "utf8")) as { replayFailureCount?: number }).replayFailureCount,
+    1,
+  );
+  assert.throws(replay, (error: unknown) => error === fault);
+  assert.equal(existsSync(fixture.journalPath), true);
+  assert.equal(
+    (JSON.parse(readFileSync(fixture.journalPath, "utf8")) as { replayFailureCount?: number }).replayFailureCount,
+    2,
+  );
+
+  // The third failure escalates: participants are retained as reviewable
+  // evidence and the journal entry is removed. The retirement has converged
+  // the entry, so recovery finishes the pass instead of throwing (#2879) —
+  // the raw transient fault no longer surfaces from this open.
+  replay();
+  assert.equal(existsSync(fixture.journalPath), false);
+  assert.deepEqual(
+    loadUnboundProjectionEvidence(fixture.base).map((entry) => entry.evidencePath).sort(),
+    [fixture.logicalPath, fixture.temporaryPath, fixture.replacementPath, fixture.guardPath].sort(),
+  );
+
+  // The next open succeeds (the entry no longer replays); the affected
+  // target regenerates from the DB once its retained evidence is resolved
+  // through the standard /gsd doctor review flow.
+  assert.deepEqual(loadManagedProjectionPaths(fixture.base), []);
+});
+
+interface PendingExchangeEntry {
+  readonly slot: string;
+  readonly target: string;
+  readonly uuid: string;
+  readonly drifted: boolean;
+}
+
+// Seeds pending journaled write exchanges for the given targets. A drifted
+// target is replaced after the exchange is prepared, so the journaled left
+// identity no longer matches — exactly what a later successful write does to a
+// pending exchange on the reported store. The lock closes before recovery.
+function seedPendingExchangeJournals(
+  rootPath: string,
+  entries: readonly PendingExchangeEntry[],
+): void {
+  mkdirSync(join(rootPath, "notes"), { recursive: true });
+  mkdirSync(join(rootPath, "migration", "projection-mutations"), { recursive: true });
+  const stat = lstatSync(rootPath, { bigint: true });
+  const handle = acquireProjectionRootIdentityLock(rootPath, stat.dev.toString(), stat.ino.toString());
+  try {
+    for (const entry of entries) {
+      const temporaryPath = `notes/.gsd-projection-tmp-${entry.uuid}1`;
+      const guardPath = `notes/.gsd-projection-exchange-${entry.uuid}2`;
+      const placeholderIdentity = handle.prepareFileTemporary(entry.target, Buffer.alloc(0));
+      const temporaryIdentity = handle.prepareFileTemporary(temporaryPath, Buffer.from(`replacement ${entry.slot}\n`));
+      const guardIdentity = handle.prepareFileTemporary(guardPath, Buffer.alloc(0));
+      if (entry.drifted) {
+        // Replace the target so the left identity drifts on every filesystem
+        // (an in-place rewrite keeps the inode on Linux).
+        const rewritten = join(rootPath, `notes/.gsd-projection-tmp-${entry.uuid}3`);
+        writeFileSync(rewritten, `rewritten ${entry.slot}\n`);
+        rmSync(join(rootPath, entry.target));
+        renameSync(rewritten, join(rootPath, entry.target));
+      }
+      writeFileSync(join(rootPath, "migration", "projection-mutations", `${entry.uuid.slice(0, -1)}0${entry.slot}.json`), `${JSON.stringify({
+        logicalPath: entry.target,
+        operation: "write",
+        legacyCleanup: false,
+        content: Buffer.from(`replacement ${entry.slot}\n`).toString("base64"),
+        encoding: "base64",
+        temporaryPath,
+        temporaryIdentity,
+        replacementPath: `${temporaryPath}.replaced`,
+        replacementIdentity: null,
+        quarantinePath: null,
+        quarantineIdentity: null,
+        placeholderIdentity,
+        exchangeGuardPath: guardPath,
+        exchangeGuardIdentity: guardIdentity,
+        exchangeState: {
+          leftPath: entry.target,
+          rightPath: temporaryPath,
+          leftIdentity: placeholderIdentity,
+          rightIdentity: temporaryIdentity,
+          guardPath,
+          guardIdentity,
+        },
+      })}\n`);
+    }
+  } finally {
+    handle.close();
+  }
+}
+
+// The contradiction is replayed by the native journal recovery, so this needs
+// the identity lock.
+test("a contradictory entry retires without blocking the remaining entries in the same pass (#2879)", { skip: !isProjectionRootIdentityLockAvailable() }, (t) => {
+  // The reported store: a rebuild leaves several pending exchanges, and later
+  // writes move the targets, so every managed open replays one entry, retires
+  // it, and re-fails — one retirement per pass, with the retained evidence
+  // never assessable. A retirement throw means the entry is already converged
+  // (participant rows recorded, journal removed), so the pass must continue.
+  const base = mkdtempSync(join(tmpdir(), "gsd-exchange-replay-drain-"));
+  t.after(() => cleanupFixture(base));
+  const rootPath = join(base, ".gsd");
+  // Slot "a" is the contradictory entry. Slot "b" is healthy: replay publishes it.
+  seedPendingExchangeJournals(rootPath, [
+    { slot: "a", target: "notes/result.md", uuid: "00000000-0000-0000-0000-0000000000a", drifted: true },
+    { slot: "b", target: "notes/other.md", uuid: "00000000-0000-0000-0000-0000000000b", drifted: false },
+  ]);
+  assert.equal(openDatabase(join(rootPath, "gsd.db")), true);
+
+  // One pass converges both entries: the drifted one retires into retained
+  // evidence, the healthy one publishes, and neither re-fails the open.
+  assert.deepEqual(loadManagedProjectionPaths(base), ["notes/other.md"]);
+  assert.equal(existsSync(join(rootPath, "migration", "projection-mutations", "00000000-0000-0000-0000-00000000000a.json")), false);
+  assert.equal(existsSync(join(rootPath, "migration", "projection-mutations", "00000000-0000-0000-0000-00000000000b.json")), false);
+  assert.equal(readFileSync(join(rootPath, "notes", "other.md"), "utf8"), "replacement b\n");
+
+  // The retired participants are plain retained rows of the standard review
+  // shape — no in-flight resolution, real identity, digest over the bytes.
+  const evidence = loadUnboundProjectionEvidence(base);
+  assert.deepEqual(
+    evidence.map((entry) => entry.evidencePath).sort(),
+    [
+      "notes/.gsd-projection-exchange-00000000-0000-0000-0000-0000000000a2",
+      "notes/.gsd-projection-tmp-00000000-0000-0000-0000-0000000000a1",
+      "notes/result.md",
+    ].sort(),
+  );
+  for (const record of evidence) {
+    assert.equal(record.transition, "retained");
+    assert.equal(record.resolution, undefined);
+    assert.equal(typeof record.evidenceIdentity, "string");
+    assert.match(record.contentDigest, /^sha256:[0-9a-f]{64}$/u);
+  }
+  assert.equal(readFileSync(join(rootPath, "notes", "result.md"), "utf8"), "rewritten a\n");
+
+  // A second pass neither adds rows nor re-fails: nothing is pending anymore.
+  assert.deepEqual(loadManagedProjectionPaths(base), ["notes/other.md"]);
+  assert.deepEqual(
+    loadUnboundProjectionEvidence(base).map((entry) => entry.evidencePath).sort(),
+    evidence.map((entry) => entry.evidencePath).sort(),
+  );
+});
+
+test("a transient error quoting the retirement phrase in a path is not a retirement (#2879)", (t) => {
+  const fixture = prepareExchangeFixture("gsd-exchange-replay-phrase-in-path-");
+  t.after(() => cleanupFixture(fixture.base));
+  writeExchangeJournal(fixture);
+
+  // The retirement classifier matches the two exact retirement messages, so a
+  // native error that merely embeds the phrase in a managed path stays a
+  // transient failure: the entry remains pending for the retry schedule
+  // instead of being skipped without recording any evidence.
+  const fault = new Error(
+    "projection root operation failed: sharing violation on notes/managed projection target identity changed;"
+    + " recovery evidence retained.md (os error 32)",
+  );
+  assert.throws(
+    () => _recoverManagedProjectionMutationsForTest(
+      () => handleFailingExchangePaths(fixture.rootPath, fault),
+      fixture.base,
+    ),
+    (error: unknown) => error === fault,
+  );
+  assert.equal(existsSync(fixture.journalPath), true);
+  assert.equal(
+    (JSON.parse(readFileSync(fixture.journalPath, "utf8")) as { replayFailureCount?: number }).replayFailureCount,
+    1,
+  );
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+});

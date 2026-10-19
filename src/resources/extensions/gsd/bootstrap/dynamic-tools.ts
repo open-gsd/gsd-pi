@@ -7,12 +7,15 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@gsd/pi-coding-agent";
 
+import { runInToolSession } from "../db/domain-operation.js";
+import { getRecoveryActionMilestoneId } from "../db/lifecycle-queries.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   getWorkflowDatabaseStatus,
   openWorkflowDatabaseIsolated,
   openWorkflowDatabase,
   resolveProjectRootDbPath,
+  type OpenWorkflowDatabaseOptions,
   type WorkflowDatabaseOpenResult,
   type WorkflowDatabaseStatus,
 } from "../db-workspace.js";
@@ -29,6 +32,16 @@ export function safeWorkspaceCwd(): string {
     if (projectRoot && existsSync(projectRoot)) return projectRoot;
     return homedir();
   }
+}
+
+/**
+ * Run one Pi tool call in its transport session, so a mutation is checked
+ * against the revision that the session last read.
+ */
+export function runInPiToolSession<T>(ctx: unknown, run: () => T): T {
+  const sessionId = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)
+    ?.sessionManager?.getSessionId?.();
+  return runInToolSession(`pi:${typeof sessionId === "string" ? sessionId : "default"}`, run);
 }
 
 export function resolveCtxCwd(ctx?: unknown): string {
@@ -82,15 +95,7 @@ function recoveryActionMilestoneId(projectRoot: string, recoveryActionId: string
   const database = openWorkflowDatabaseIsolated(resolveProjectRootDbPath(projectRoot));
   if (!database) return null;
   try {
-    const row = database.prepare(`
-      SELECT lifecycle.milestone_id
-      FROM workflow_recovery_actions action
-      JOIN workflow_item_lifecycles lifecycle
-        ON lifecycle.project_id = action.project_id
-       AND lifecycle.lifecycle_id = action.lifecycle_id
-      WHERE action.recovery_action_id = :recovery_action_id
-    `).get({ ":recovery_action_id": recoveryActionId });
-    return typeof row?.["milestone_id"] === "string" ? row["milestone_id"] : null;
+    return getRecoveryActionMilestoneId(database, recoveryActionId);
   } catch {
     return null;
   } finally {
@@ -133,7 +138,6 @@ function dbOpenPhaseHint(status: WorkflowDatabaseStatus): string {
   if (status.lastPhase === "locked") return "The database is locked by another process";
   if (status.lastPhase === "open") return "The database file could not be opened";
   if (status.lastPhase === "initSchema") return "The database schema could not be initialized";
-  if (status.lastPhase === "vacuum-recovery") return "Corruption recovery (VACUUM) failed";
   if (status.attempted) return "The database could not be opened";
   return "The database provider could not be loaded";
 }
@@ -145,6 +149,10 @@ export function formatWorkflowDatabaseOpenFailure(
 ): string {
   if (result.reason === "missing-gsd-dir") {
     return `ensureDbOpen failed — no .gsd directory found at ${result.location.projectGsd}`;
+  }
+
+  if (result.reason === "authority-missing" || result.reason === "checkout-unbound") {
+    return `ensureDbOpen failed — ${result.error.message}`;
   }
 
   if (result.reason === "missing-database") {
@@ -160,11 +168,19 @@ export function formatWorkflowDatabaseOpenFailure(
   );
 }
 
-export async function ensureDbOpen(basePath: string = safeWorkspaceCwd()): Promise<boolean> {
-  const result = openWorkflowDatabase(basePath);
+export async function ensureDbOpen(
+  basePath: string = safeWorkspaceCwd(),
+  options: OpenWorkflowDatabaseOptions = {},
+): Promise<boolean> {
+  const result = openWorkflowDatabase(basePath, options);
   if (result.ok) return true;
 
   logWarning("bootstrap", formatWorkflowDatabaseOpenFailure(result));
+  // A too-new schema, a lost authority or another checkout's database is not
+  // generic unavailability: throw the typed error so callers cannot degrade.
+  if (result.reason === "schema-too-new" || result.reason === "authority-missing" || result.reason === "checkout-unbound") {
+    throw result.error;
+  }
   return false;
 }
 

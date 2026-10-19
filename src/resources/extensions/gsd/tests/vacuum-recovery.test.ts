@@ -107,6 +107,15 @@ describe('openDatabase VACUUM recovery on corrupt freelist', () => {
       'schema_version should have a positive version after recovery',
     );
 
+    // The pre-repair bytes are kept: the copy still carries the corrupt
+    // freelist trunk pointer (page 2) that VACUUM removed from the live file.
+    const copies = fs.readdirSync(path.dirname(dbPath)).filter((f) => /^test\.db\.corrupt-[^.]+$/.test(f) && !f.endsWith('-wal'));
+    assert.equal(copies.length, 1, 'VACUUM recovery must keep one pre-repair copy');
+    const copyBytes = fs.readFileSync(path.join(path.dirname(dbPath), copies[0]!));
+    assert.equal(copyBytes.readUInt32BE(32), 2);
+    assert.equal(copyBytes.readUInt32BE(36), 10);
+    assert.deepEqual(adapter.prepare('PRAGMA integrity_check').all(), [{ integrity_check: 'ok' }]);
+
     cleanup(dbPath);
   });
 

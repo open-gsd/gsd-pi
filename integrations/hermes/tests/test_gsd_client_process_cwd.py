@@ -20,3 +20,9 @@ def test_ensure_process_starts_server_in_project_cwd(tmp_path) -> None:
     assert proc is fake_proc
     initialize.assert_called_once_with()
     assert popen.call_args.kwargs["cwd"] == str(tmp_path)
+    assert popen.call_args.kwargs["env"]["GSD_MCP_CLIENT_MANAGED"] == "1"
+
+
+def test_env_marks_mcp_sidecar_client_managed() -> None:
+    client = GsdMcpClient(GsdConfig())
+    assert client._env()["GSD_MCP_CLIENT_MANAGED"] == "1"

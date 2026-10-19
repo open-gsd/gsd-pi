@@ -11,14 +11,16 @@
  * and source artifact files — no mocks.
  */
 
-import { describe, it, afterEach } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify } from "yaml";
 
-import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
+import { CustomWorkflowEngine, stepIdOfUnit } from "../custom-workflow-engine.ts";
+import { runCustomVerificationWithEvidence } from "../custom-verification.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import {
   writeGraph,
   readGraph,
@@ -36,6 +38,16 @@ function makeTmpDir(): string {
   tmpDirs.push(dir);
   return dir;
 }
+
+before(() => {
+  assert.equal(openDatabase(":memory:"), true);
+});
+
+after(() => {
+  closeDatabase();
+});
+
+const runDirs = new Map<CustomWorkflowEngine, string>();
 
 afterEach(() => {
   for (const d of tmpDirs) {
@@ -74,7 +86,9 @@ function makeTempRun(
     }
   }
 
-  return { runDir, engine: new CustomWorkflowEngine(runDir) };
+  const engine = new CustomWorkflowEngine(runDir);
+  runDirs.set(engine, runDir);
+  return { runDir, engine };
 }
 
 /** Shorthand to build a GraphStep. */
@@ -94,9 +108,10 @@ async function dispatch(engine: CustomWorkflowEngine) {
   return engine.resolveDispatch(state, { basePath: "/unused" });
 }
 
-/** Drive a full deriveState→reconcile cycle for a given unitId. */
+/** Drive a full deriveState→verify→reconcile cycle for a given unitId. */
 async function reconcile(engine: CustomWorkflowEngine, unitId: string) {
   const state = await engine.deriveState("/unused");
+  runCustomVerificationWithEvidence(runDirs.get(engine)!, unitId.slice(unitId.indexOf("/") + 1));
   return engine.reconcile(state, {
     unitType: "custom-step",
     unitId,
@@ -137,7 +152,7 @@ describe("iterate expansion — basic", () => {
     // Should dispatch the first instance step
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "iter-wf/iter-step--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "iter-step--001");
       assert.equal(result.step.prompt, "Process Alpha");
     }
 
@@ -185,7 +200,7 @@ describe("iterate expansion — full dispatch→reconcile sequence", () => {
     let result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "seq-wf/fan--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--001");
       assert.equal(result.step.prompt, "Handle One");
     }
 
@@ -194,7 +209,7 @@ describe("iterate expansion — full dispatch→reconcile sequence", () => {
     result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "seq-wf/fan--002");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--002");
       assert.equal(result.step.prompt, "Handle Two");
     }
 
@@ -203,7 +218,7 @@ describe("iterate expansion — full dispatch→reconcile sequence", () => {
     result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "seq-wf/fan--003");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--003");
       assert.equal(result.step.prompt, "Handle Three");
     }
 
@@ -254,7 +269,7 @@ describe("iterate expansion — downstream blocking", () => {
     let result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "block-wf/fan--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--001");
     }
 
     // Verify downstream dep was rewritten: merge now depends on fan--001, fan--002
@@ -269,7 +284,7 @@ describe("iterate expansion — downstream blocking", () => {
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
       // Should get fan--002, not merge
-      assert.equal(result.step.unitId, "block-wf/fan--002");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--002");
     }
 
     // Complete instance 2 — now merge should be dispatchable
@@ -277,7 +292,7 @@ describe("iterate expansion — downstream blocking", () => {
     result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "block-wf/merge");
+      assert.equal(stepIdOfUnit(result.step.unitId), "merge");
       assert.equal(result.step.prompt, "Merge all results");
     }
 
@@ -339,7 +354,7 @@ describe("iterate expansion — zero matches", () => {
     // Let's check what actually happened:
     if (result.action === "dispatch") {
       // The re-query found "after" step (since its deps were rewritten to [])
-      assert.equal(result.step.unitId, "zero-wf/after");
+      assert.equal(stepIdOfUnit(result.step.unitId), "after");
     } else {
       // The engine returned stop for zero instances
       assert.equal(result.action, "stop");
@@ -409,7 +424,7 @@ describe("iterate expansion — idempotency", () => {
     let result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "idem-wf/fan--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--001");
     }
 
     // Second dispatch without reconciling: should return the same instance
@@ -418,7 +433,7 @@ describe("iterate expansion — idempotency", () => {
     result = await dispatch(engine);
     assert.equal(result.action, "dispatch");
     if (result.action === "dispatch") {
-      assert.equal(result.step.unitId, "idem-wf/fan--001");
+      assert.equal(stepIdOfUnit(result.step.unitId), "fan--001");
     }
 
     // Verify no double-expansion: still only 2 instances

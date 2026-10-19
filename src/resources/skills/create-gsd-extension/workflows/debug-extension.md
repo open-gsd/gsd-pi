@@ -1,4 +1,5 @@
 <required_reading>
+
 1. references/key-rules-gotchas.md
 2. references/extension-lifecycle.md
 </required_reading>
@@ -33,6 +34,7 @@ gsd -e ./path/to/extension.ts
 ## Step 3: Verify File Location
 
 Community extensions must be in auto-discovery paths:
+
 - `~/.pi/agent/extensions/*.ts`
 - `~/.pi/agent/extensions/*/index.ts`
 - `.gsd/extensions/*.ts`
@@ -61,6 +63,7 @@ pi.on("session_start", async (_event, ctx) => {
 ## Step 6: Fix and Reload
 
 Apply the fix and test:
+
 ```
 /reload
 ```
@@ -69,6 +72,7 @@ Apply the fix and test:
 
 <success_criteria>
 Debugging is complete when:
+
 - [ ] Root cause identified
 - [ ] Fix applied
 - [ ] Extension loads and functions correctly after `/reload`

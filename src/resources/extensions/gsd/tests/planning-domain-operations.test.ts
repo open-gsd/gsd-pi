@@ -653,6 +653,23 @@ test("planning events durably record lifecycle shadow comparisons", async () => 
   ]);
 });
 
+test("planning provenance comes from the transport invocation, not the model-supplied actorName", async () => {
+  const { base } = makeFixture();
+  seedPlanningParents();
+  const { actorId: _actorId, ...withoutActor } = invocation("plan-task/actor-provenance");
+  assertSuccess(await invoke<PlanTaskParams, PlanTaskResult>(
+    handlePlanTask as PlanningHandler<PlanTaskParams, PlanTaskResult>,
+    { ...taskParams(), actorName: "model-claimed-actor" },
+    base,
+    withoutActor,
+  ));
+
+  assert.equal(
+    row("SELECT actor_id FROM workflow_operations WHERE operation_type = 'workflow.task.plan'")["actor_id"],
+    null,
+  );
+});
+
 test("slice planning promotes only pending lifecycle state and rejects cancelled identity without residue", async () => {
   const { base } = makeFixture();
   seedPlanningParents();
@@ -1003,7 +1020,7 @@ test("task replanning preserves lifecycle provenance while recording ordered his
   }, afterCommit, "changed semantics under the same invocation key must leave no residue");
 });
 
-test("task replanning adopts legacy lifecycle statuses through the shared normalizer", async () => {
+test("task replanning adopts legacy in-flight rows as ready, not in_progress", async () => {
   const { base } = makeFixture();
   insertMilestone({ id: "M001", title: "Existing milestone", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Active slice", status: "active" });
@@ -1021,8 +1038,8 @@ test("task replanning adopts legacy lifecycle statuses through the shared normal
     FROM workflow_item_lifecycles
     ORDER BY item_kind
   `), [
-    { item_kind: "slice", lifecycle_status: "in_progress", state_version: 0 },
-    { item_kind: "task", lifecycle_status: "in_progress", state_version: 0 },
+    { item_kind: "slice", lifecycle_status: "ready", state_version: 0 },
+    { item_kind: "task", lifecycle_status: "ready", state_version: 0 },
   ]);
 });
 
@@ -1179,6 +1196,29 @@ test("slice replanning cancels removed pending work durably instead of deleting 
     FROM workflow_item_lifecycles
     WHERE item_kind = 'task' AND task_id = 'T03'
   `), { lifecycle_status: "ready", state_version: 0 });
-  assert.equal(count("workflow_operations"), operationCountBeforeReplan + 1);
-  assertNoInventedExecutionHistory();
+  // #2346: a replan with removals commits the replan operation plus the
+  // fenced workflow.slice.plan.authorization operation recording the removed
+  // tasks' waived dispositions.
+  // #2346: a replan with removals commits the replan operation plus the
+  // fenced workflow.slice.plan.authorization operation recording the removed
+  // tasks' waived dispositions.
+  assert.equal(count("workflow_operations"), operationCountBeforeReplan + 2);
+  // #2346: the removed tasks' plan-reconciliation authorizations are the one
+  // legitimate planning-time Waiver pair; invented execution history stays
+  // empty.
+  for (const table of [
+    "workflow_execution_attempts",
+    "workflow_attempt_results",
+    "workflow_kernel_checkpoints",
+    "workflow_blockers",
+  ]) {
+    assert.equal(count(table), 0, `${table} must remain empty during planning adoption`);
+  }
+  assert.deepEqual(rows(`
+    SELECT scope, waiver_status FROM workflow_waivers ORDER BY scope
+  `), [
+    { scope: "task:M001/S01/T02", waiver_status: "active" },
+    { scope: "task:M001/S01/T04", waiver_status: "active" },
+  ]);
+  assert.equal(count("workflow_requirement_dispositions"), 2);
 });

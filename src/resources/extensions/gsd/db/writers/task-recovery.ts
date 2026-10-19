@@ -423,6 +423,7 @@ export function appendRecoveryWorkCheckpoint(
     "task.recovery.resume",
     "task.reopen",
     "task.cancel",
+    "checkpoint.save",
   ]);
   const scopeKey = normalizedKey(input.scopeKey, "scopeKey");
   const head = getDb().prepare(`
@@ -558,7 +559,7 @@ export function grantRecoveryWaiver(
   return { waiverId, waiverStatus: "active" };
 }
 
-function currentDispositionHead(requirementId: string): string | null {
+export function currentDispositionHead(requirementId: string): string | null {
   const head = getDb().prepare(`
     SELECT disposition.disposition_id
     FROM workflow_requirement_dispositions disposition
@@ -575,7 +576,7 @@ export function recordRequirementDisposition(
   context: Readonly<DomainOperationContext>,
   input: RecordRequirementDispositionInput,
 ): { dispositionId: string; disposition: RecordRequirementDispositionInput["disposition"] } {
-  requireOperation(context, ["task.disposition.record", "task.waiver.terminate", "milestone.reopen"]);
+  requireOperation(context, ["task.disposition.record", "task.waiver.terminate", "milestone.reopen", "task.reopen"]);
   const requirementId = requireText(input.requirementId, "requirementId");
   const currentHead = currentDispositionHead(requirementId);
   const suppliedHead = input.supersedesDispositionId ?? null;

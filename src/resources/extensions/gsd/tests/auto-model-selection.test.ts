@@ -477,6 +477,81 @@ test("selectAndApplyModel skips a rate-limited primary until its reset time", as
   }
 });
 
+// #1270 — a fallbacks[] object entry may carry its own `thinking`, applied at
+// failover in place of the phase-level level; the primary keeps its own.
+test("selectAndApplyModel applies a fallback entry's per-entry thinking at failover (#1270)", async (t) => {
+  const originalCwd = process.cwd();
+  const originalGsdHome = process.env.GSD_HOME;
+  const tempProject = makeTempDir("gsd-entry-thinking-project-");
+  const tempGsdHome = makeTempDir("gsd-entry-thinking-home-");
+  t.after(() => {
+    clearTemporaryModelBlocksForTest();
+    process.chdir(originalCwd);
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    rmSync(tempProject, { recursive: true, force: true });
+    rmSync(tempGsdHome, { recursive: true, force: true });
+  });
+  const setModelCalls: string[] = [];
+  const thinkingLevels: Array<string | null | undefined> = [];
+
+  const makePi = () => ({
+    setModel: async (model: { provider: string; id: string }) => {
+      setModelCalls.push(`${model.provider}/${model.id}`);
+      return true;
+    },
+    setThinkingLevel: (level: string | null | undefined) => {
+      thinkingLevels.push(level);
+    },
+    emitBeforeModelSelect: async () => undefined,
+    getActiveTools: () => [],
+    emitAdjustToolSet: async () => undefined,
+    setActiveTools: () => {},
+  } as any);
+  const ctx = {
+    modelRegistry: { getAvailable: () => [
+      { id: "gpt-5.5", provider: "openai-codex", api: "responses" },
+      { id: "claude-sonnet-4-6", provider: "anthropic", api: "anthropic-messages" },
+    ] },
+    sessionManager: { getSessionId: () => "test-session" },
+    ui: { notify: () => {} },
+    model: { provider: "openai-codex", id: "gpt-5.5", api: "responses" },
+  } as any;
+
+  mkdirSync(join(tempProject, ".gsd"), { recursive: true });
+  writeFileSync(
+    join(tempProject, ".gsd", "PREFERENCES.md"),
+    [
+      "---",
+      "models:",
+      "  execution:",
+      "    model: gpt-5.5",
+      "    provider: openai-codex",
+      "    thinking: medium",
+      "    fallbacks:",
+      "      - model: anthropic/claude-sonnet-4-6",
+      "        thinking: high",
+      "---",
+    ].join("\n"),
+    "utf-8",
+  );
+  process.env.GSD_HOME = tempGsdHome;
+  process.chdir(tempProject);
+
+  // Healthy primary: the phase-level level applies, not the fallback's.
+  await selectAndApplyModel(ctx, makePi(), "execute-task", "M001/S01/T01", tempProject, undefined, false, { provider: "openai-codex", id: "gpt-5.5" }, undefined, true);
+
+  // Blocked primary: failover engages and the entry's level applies.
+  blockModelUntil(tempProject, "openai-codex", "gpt-5.5", Date.now() + 60_000, "session limit");
+  await selectAndApplyModel(ctx, makePi(), "execute-task", "M001/S01/T02", tempProject, undefined, false, { provider: "openai-codex", id: "gpt-5.5" }, undefined, true);
+
+  assert.deepEqual(setModelCalls, [
+    "openai-codex/gpt-5.5",
+    "anthropic/claude-sonnet-4-6",
+  ]);
+  assert.deepEqual(thinkingLevels, ["medium", "high"]);
+});
+
 test("selectAndApplyModel lets explicit unit models bypass stale cross-provider lock (#116)", async () => {
   const originalCwd = process.cwd();
   const originalGsdHome = process.env.GSD_HOME;

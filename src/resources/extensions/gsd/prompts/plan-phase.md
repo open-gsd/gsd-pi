@@ -22,7 +22,7 @@ You are running the GSD **plan-phase** workflow — create a detailed plan for a
 
 5. **Verification loop.** Self-review the plan for gaps: missing tasks, unclear acceptance, orphaned requirements, unrealistic ordering. Revise until the plan is internally consistent.
 
-6. **Write the plan** to the milestone/slice's plan artifact in `.gsd/` only after required RESEARCH/UI-SPEC inputs are saved or explicitly skipped. Record durable decisions via `/gsd knowledge rule`.
+6. **Save the plan** with `gsd_plan_milestone` (milestone roadmap) or `gsd_plan_slice` (slice and its tasks) only after required RESEARCH/UI-SPEC inputs are saved or explicitly skipped. Do not write plan files in `.gsd/`; the tools render them. Record durable decisions with `gsd_decision_save`.
 
 7. **Route.** Recommend `/gsd dispatch execute` (or `/gsd next`).
 

@@ -3,6 +3,7 @@ import type { AssistantMessage, Model } from "@gsd/pi-ai";
 import { clampThinkingLevel, getSupportedThinkingLevels, modelsAreEqual, streamSimple } from "@gsd/pi-ai";
 import { formatNoApiKeyFoundMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
 import { DEFAULT_THINKING_LEVEL } from "@gsd/pi-coding-agent/core/defaults.js";
+import { findInitialModel } from "@gsd/pi-coding-agent/core/model-resolver.js";
 import type { ModelCycleResult } from "./agent-session-types.js";
 import { THINKING_LEVELS } from "./agent-session-types.js";
 import type { AgentSessionHost } from "./agent-session-host.js";
@@ -75,10 +76,78 @@ export class AgentSessionModelModule {
 			this.host.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 		}
 
-		// Re-clamp thinking level for new model's capabilities
-		this.host.setThinkingLevel(thinkingLevel);
+		// Re-clamp thinking level for new model's capabilities. A non-persisting
+		// model switch must not persist the re-clamped level either (#2828).
+		this.host.setThinkingLevel(thinkingLevel, { persist: options?.persist !== false });
 
 		await this.emitModelSelect(model, previousModel, "set");
+	}
+
+	/**
+	 * Re-resolve the session model when it is still the `unknown/unknown`
+	 * placeholder (#2782). Extensions that register providers on
+	 * `session_start` (e.g. the bundled ollama extension) only become visible
+	 * to the registry after `bindExtensions()`, while the initial model was
+	 * already picked in `createAgentSession()` before that. The repair runs
+	 * after `session_start` and again lazily before the first prompt. It is
+	 * non-destructive: it completes the startup resolution without touching
+	 * persisted model/thinking defaults or session history, never overwrites
+	 * an already-resolved model (including a mid-repair user choice), and an
+	 * unreachable registry is a no-op.
+	 */
+	async repairPlaceholderModel(): Promise<void> {
+		const current = this.host.model;
+		if (current && !(current.provider === "unknown" && current.api === "unknown")) {
+			return;
+		}
+
+		// Prefer the model recorded in the session being resumed: startup
+		// could not restore it before registration, but it should win over
+		// the settings default once its provider registers.
+		let resolved: Model<any> | undefined;
+		try {
+			const recorded = this.host.sessionManager.buildSessionContext().model;
+			if (recorded) {
+				const restored = this.host.modelRegistry.find(recorded.provider, recorded.modelId);
+				if (restored && this.host.modelRegistry.hasConfiguredAuth(restored)) {
+					resolved = restored;
+				}
+			}
+		} catch {
+			// No restorable session context — fall through to settings default.
+		}
+
+		if (!resolved) {
+			const result = await findInitialModel({
+				scopedModels: [],
+				isContinuing: false,
+				defaultProvider: this.host.settingsManager.getDefaultProvider(),
+				defaultModelId: this.host.settingsManager.getDefaultModel(),
+				defaultThinkingLevel: this.host.settingsManager.getDefaultThinkingLevel(),
+				modelRegistry: this.host.modelRegistry,
+			});
+			resolved = result.model;
+		}
+
+		// The registry lookup above can await — re-check so a model selected
+		// in the meantime (user choice or a concurrent repair) is kept.
+		const latest = this.host.model;
+		if (latest && !(latest.provider === "unknown" && latest.api === "unknown")) {
+			return;
+		}
+		if (!resolved) {
+			return;
+		}
+
+		// Apply the way createAgentSession applies a startup model: a direct
+		// state assignment plus the model_select notification. No settings or
+		// session-history writes; the session thinking level is clamped to the
+		// repaired model's capabilities in memory only ("off" is not valid for
+		// every model — thinkingLevelMap.off === null excludes it).
+		const previousModel = current;
+		this.host.agent.state.model = resolved;
+		this.host.agent.state.thinkingLevel = clampThinkingLevel(resolved, this.host.thinkingLevel) as ThinkingLevel;
+		await this.emitModelSelect(resolved, previousModel, "set");
 	}
 
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
@@ -142,21 +211,28 @@ export class AgentSessionModelModule {
 		return { model: nextModel, thinkingLevel: this.host.thinkingLevel, isScoped: false };
 	}
 
-	setThinkingLevel(level: ThinkingLevel): void {
+	setThinkingLevel(level: ThinkingLevel, options?: { persist?: boolean }): void {
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this.clampThinkingLevel(level, availableLevels);
 
-		// Only persist if actually changing
 		const previousLevel = this.host.agent.state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
 
 		this.host.agent.state.thinkingLevel = effectiveLevel;
 
-		if (isChanging) {
-			this.host.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (this.supportsThinking() || effectiveLevel !== "off") {
+		// Persisting calls sync the stored default whenever it drifted from the
+		// session level (e.g. an explicit re-select of a temporary level, or a
+		// re-clamp from a persisting model switch). Non-persisting calls —
+		// auto-mode dispatches and restores (#2828) — never write it.
+		if (options?.persist !== false && (this.supportsThinking() || effectiveLevel !== "off")) {
+			const storedDefault = this.host.settingsManager.getDefaultThinkingLevel();
+			if (storedDefault !== effectiveLevel) {
 				this.host.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
+		}
+
+		if (isChanging) {
+			this.host.sessionManager.appendThinkingLevelChange(effectiveLevel);
 			this.host.emit({ type: "thinking_level_changed", level: effectiveLevel });
 			void this.host._extensionRunner.emit({
 				type: "thinking_level_select",

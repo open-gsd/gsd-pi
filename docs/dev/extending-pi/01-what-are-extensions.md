@@ -1,6 +1,5 @@
 # What Are Extensions?
 
-
 Extensions are TypeScript modules that hook into pi's runtime to extend its behavior. They can:
 
 - **Register custom tools** the LLM can call (via `pi.registerTool()`)

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
-import { renderPlanFromDb, renderRoadmapFromDb, renderAssessmentFromDb, renderReplanFromDb } from "../markdown-renderer.ts";
+import { renderPlanFromDb, renderRoadmapFromDb, renderReplanFromDb } from "../markdown-renderer.ts";
 import { clearPathCache } from "../paths.ts";
 import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask } from "../gsd-db.ts";
 
@@ -107,22 +107,3 @@ test("renderReplanFromDb writes to the phase root even when a stray slices/SID/ 
 // Regression for #1190: a stray slices/SID/ subdir inside a flat-phase milestone
 // must not divert the ASSESSMENT write into slices/SID/ (a hybrid path that
 // auto-mode verification cannot find). It must land at the phase root.
-test("renderAssessmentFromDb writes to the phase root even when a stray slices/SID/ dir exists", async () => {
-  const base = makeTmp();
-  const plan = await renderPlanFromDb(base, "M001", "S01");
-  const phaseDir = plan.planPath.slice(0, plan.planPath.lastIndexOf("01-01-PLAN.md"));
-
-  // Simulate the anomaly: an earlier planning step created slices/S01/ inside
-  // the flat-phase dir.
-  mkdirSync(join(phaseDir, "slices", "S01"), { recursive: true });
-  clearPathCache();
-
-  const result = await renderAssessmentFromDb(base, "M001", "S01", {
-    verdict: "on-track",
-    assessment: "Roadmap is on track.",
-  });
-
-  assert.match(result.assessmentPath, /phases[/\\]01-[^/\\]+[/\\]01-01-ASSESSMENT\.md$/);
-  assert.ok(!result.assessmentPath.includes(join("slices", "S01")), "must not write under slices/S01/");
-  assert.ok(existsSync(result.assessmentPath), "assessment file should exist at the phase root");
-});

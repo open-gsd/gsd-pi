@@ -174,6 +174,10 @@ describe("continue-here", () => {
     it("AutoUnitRuntimeRecord includes continueHereFired with default false", async (t) => {
       // Import writeUnitRuntimeRecord to verify the field is present and defaults
       const { writeUnitRuntimeRecord, readUnitRuntimeRecord, clearUnitRuntimeRecord } = await import("../../unit-runtime.js");
+      // The runtime record is a database row.
+      const { openDatabase, closeDatabase } = await import("../../gsd-db.js");
+      openDatabase(":memory:");
+      t.after(() => closeDatabase());
       const fs = await import("node:fs");
       const path = await import("node:path");
       const os = await import("node:os");
@@ -189,7 +193,7 @@ describe("continue-here", () => {
 
       assert.equal(record.continueHereFired, false, "default continueHereFired should be false");
 
-      // Verify it persists to disk
+      // Verify it persists
       const read = readUnitRuntimeRecord(tmpDir, "execute-task", "M007/S02/T02");
       assert.ok(read, "record should be readable");
       assert.equal(read!.continueHereFired, false);
@@ -212,6 +216,10 @@ describe("continue-here", () => {
   describe("context-pressure monitor integration", () => {
     it("should fire wrap-up when context >= threshold and mark continueHereFired", async (t) => {
       const { writeUnitRuntimeRecord, readUnitRuntimeRecord, clearUnitRuntimeRecord } = await import("../../unit-runtime.js");
+      // The runtime record is a database row.
+      const { openDatabase, closeDatabase } = await import("../../gsd-db.js");
+      openDatabase(":memory:");
+      t.after(() => closeDatabase());
       const fs = await import("node:fs");
       const path = await import("node:path");
       const os = await import("node:os");

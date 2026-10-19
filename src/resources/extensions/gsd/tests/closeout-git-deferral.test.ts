@@ -3,11 +3,16 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { postUnitPreVerification, shouldDeferCloseoutGitAction, type PostUnitContext } from "../auto-post-unit.ts";
 import { AutoSession } from "../auto/session.ts";
+import { DISPATCH_RULES } from "../auto-dispatch.ts";
+import { invalidateAllCaches } from "../cache.ts";
+import { storeUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { executeDomainOperation } from "../db/domain-operation.ts";
+import { appendKernelCheckpoint, readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -35,6 +40,7 @@ import {
   readTaskTechnicalVerdict,
   recordTaskTechnicalVerdict,
 } from "../task-verification-domain-operation.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import { cleanup, git, makeTempRepo } from "./test-utils.ts";
 
 function settleCanonicalTaskForHostVerification(basePath: string): void {
@@ -98,6 +104,95 @@ test("non execute-task units keep pre-verification closeout git action", () => {
   assert.equal(shouldDeferCloseoutGitAction("plan-slice"), false);
   assert.equal(shouldDeferCloseoutGitAction("complete-slice"), false);
 });
+
+for (const turnAction of ["status-only", "snapshot"] as const) {
+  test(`a ${turnAction} closeout of a planner keeps its stored pre-execution retry`, async (t) => {
+    const base = makeTempRepo("gsd-closeout-keeps-planner-retry-");
+    const originalCwd = process.cwd();
+    t.after(() => {
+      process.chdir(originalCwd);
+      closeDatabase();
+      invalidateAllCaches();
+      cleanup(base);
+    });
+    writeFileSync(join(base, ".gitignore"), ".gsd/\n");
+    git(base, "add", ".gitignore");
+    git(base, "commit", "-m", "chore: ignore gsd runtime");
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    writeFileSync(
+      join(base, ".gsd", "PREFERENCES.md"),
+      `---\nuok: ${JSON.stringify({ gitops: { enabled: true, turn_action: turnAction } })}\n---\n`,
+    );
+    // The closeout reads the preferences of the working directory.
+    process.chdir(base);
+    invalidateAllCaches();
+
+    openDatabase(":memory:");
+    insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active" });
+    const dispatch = claimTestDispatch(base, {
+      milestoneId: "M001",
+      sliceId: "S01",
+      unitType: "plan-slice",
+      unitId: "M001/S01",
+    });
+    storeUnitRetry("plan-slice", {
+      unitId: "M001/S01",
+      failureContext: "task T01 reads a file that no task creates",
+      signature: "pre-execution:1",
+      attempt: 1,
+    });
+    // The planner runs again on a new dispatch row.
+    dispatch.claimNext();
+
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.currentUnit = { type: "plan-slice", id: "M001/S01", startedAt: Date.now() };
+    await postUnitPreVerification({
+      s,
+      ctx: { ui: { notify: () => {} } } as unknown as PostUnitContext["ctx"],
+      pi: {} as PostUnitContext["pi"],
+      buildSnapshotOpts: () => ({}),
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => {},
+      updateProgressWidget: () => {},
+    }, { skipSettleDelay: true, skipWorktreeSync: true });
+    assert.equal(s.lastGitActionStatus, "ok", `the ${turnAction} git action must have run`);
+
+    // The process is killed here, before the pre-execution check of the new
+    // plan. The task rows of the refused plan put the slice in "executing".
+    let selected: { rule: string; unitType: string | null } | null = null;
+    for (const rule of DISPATCH_RULES) {
+      const result = await rule.match({
+        basePath: base,
+        mid: "M001",
+        midTitle: "Milestone",
+        state: {
+          activeMilestone: { id: "M001", title: "Milestone" },
+          activeSlice: { id: "S01", title: "Slice" },
+          activeTask: { id: "T01", title: "Task" },
+          phase: "executing",
+          recentDecisions: [],
+          blockers: [],
+          nextAction: "",
+          registry: [],
+        },
+        prefs: undefined,
+      });
+      if (result) {
+        selected = { rule: rule.name, unitType: result.action === "dispatch" ? result.unitType : null };
+        break;
+      }
+    }
+    assert.deepEqual(
+      selected,
+      { rule: "stored retry → plan-slice / refine-slice", unitType: "plan-slice" },
+      "the plan is still refused, so a restart must send the slice back to the planner",
+    );
+  });
+}
 
 test("blocking evidence-xref routes recovery and clears evidence before pausing", async () => {
   const base = makeTempRepo("gsd-evidence-xref-commit-before-pause-");
@@ -249,7 +344,7 @@ test("deferred closeout source recapture invalidates a stale passing verdict", (
         endedAt: "2026-07-12T00:02:01.000Z",
         exitCode: 0,
         observation: "passed",
-        durableOutputRef: "db://host-verification/attempt-1",
+        durableOutputRef: `db://host-verification/${attempt.attemptId}`,
         environment: { runner: "node-test", platform: "test" },
       },
     });
@@ -265,4 +360,118 @@ test("deferred closeout source recapture invalidates a stale passing verdict", (
     closeDatabase();
     cleanup(base);
   }
+});
+
+test("deferred closeout source recapture keeps a settled published attempt intact (#2647)", (t) => {
+  const base = makeTempRepo("gsd-source-recapture-settled-");
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  writeFileSync(join(base, ".gitignore"), ".gsd/\n");
+  writeFileSync(join(base, "tracked.txt"), "verified\n");
+  git(base, "add", ".gitignore", "tracked.txt");
+  git(base, "commit", "-m", "fixture");
+
+  openDatabase(":memory:");
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active" });
+  insertTask({
+    id: "T01",
+    sliceId: "S01",
+    milestoneId: "M001",
+    title: "Add app entrypoint",
+    status: "in_progress",
+  });
+  settleCanonicalTaskForHostVerification(base);
+  const attempt = readLatestTaskAttempt({ milestoneId: "M001", sliceId: "S01", taskId: "T01" });
+  assert.ok(attempt);
+  assert.equal(attempt.nextStage, "verify");
+  const source = captureVerificationSourceSnapshot([{ id: "root", cwd: base }]);
+  assert.equal(source.ok, true, source.ok ? undefined : source.error);
+  recordTaskTechnicalVerdict({
+    invocation: {
+      idempotencyKey: "fixture:source-recapture-settled:verdict",
+      sourceTransport: "internal",
+      actorType: "agent",
+    },
+    attemptId: attempt.attemptId,
+    testedSourceRevision: source.snapshot.aggregateRevision,
+    verdict: "pass",
+    rationale: "Host verification passed before deferred closeout git.",
+    evidence: {
+      evidenceClass: "command",
+      commandOrTool: "npm test",
+      workingDirectory: base,
+      startedAt: "2026-07-12T00:02:00.000Z",
+      endedAt: "2026-07-12T00:02:01.000Z",
+      exitCode: 0,
+      observation: "passed",
+      durableOutputRef: `db://host-verification/${attempt.attemptId}`,
+      environment: { runner: "node-test", platform: "test" },
+    },
+  });
+
+  // Publication advanced the kernel checkpoint chain past verify/route to
+  // closeout and settled (#2647 production trace): the Attempt is settled,
+  // succeeded, and out of reach of invalidateTaskTechnicalPass.
+  const verdictBefore = readTaskTechnicalVerdict(attempt.attemptId);
+  assert.ok(verdictBefore);
+  const db = _getAdapter();
+  assert.ok(db, "DB should be open");
+  const head = db.prepare(`
+    SELECT checkpoint.kernel_checkpoint_id, checkpoint.lifecycle_id
+    FROM workflow_kernel_checkpoints checkpoint
+    WHERE checkpoint.attempt_id = ?
+    ORDER BY checkpoint.sequence DESC
+    LIMIT 1
+  `).get(attempt.attemptId) as { kernel_checkpoint_id: string; lifecycle_id: string };
+  const publicationKey = "fixture:publication:M001-S01-T01";
+  const fence = readDomainOperationFence(publicationKey);
+  executeDomainOperation({
+    operationType: "task.settle.publication-fixture",
+    idempotencyKey: publicationKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "agent",
+    sourceTransport: "internal",
+    payload: { attemptId: attempt.attemptId },
+  }, (context) => {
+    let previous = head.kernel_checkpoint_id;
+    for (const stage of ["route", "closeout", "settled"] as const) {
+      const checkpoint = appendKernelCheckpoint(context, {
+        lifecycleId: head.lifecycle_id,
+        attemptId: attempt.attemptId,
+        nextStage: stage,
+        previousKernelCheckpointId: previous,
+      });
+      previous = checkpoint.kernelCheckpointId;
+    }
+    return {
+      events: [{
+        eventType: "task.settle.publication-fixture",
+        entityType: "task",
+        entityId: "M001/S01/T01",
+        payload: { attemptId: attempt.attemptId },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: "verification/m001/s01/t01",
+        projectionKind: "task-verification",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  assert.equal(readLatestTaskAttempt({ milestoneId: "M001", sliceId: "S01", taskId: "T01" })?.nextStage, "settled");
+
+  writeFileSync(join(base, "tracked.txt"), "rewritten by pre-commit hook\n");
+  assert.equal(recaptureVerifiedSourceAfterDeferredCloseout({
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    basePath: base,
+  }), "unchanged");
+  const published = readTaskTechnicalVerdict(attempt.attemptId);
+  assert.equal(published?.verdict, "pass");
+  assert.equal(published?.verdictId, verdictBefore.verdictId);
+  assert.equal(published?.testedSourceRevision, verdictBefore.testedSourceRevision);
 });

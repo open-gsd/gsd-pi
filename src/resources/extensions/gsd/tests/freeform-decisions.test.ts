@@ -10,7 +10,7 @@ import {
 } from '../gsd-db.ts';
 import {
   parseDecisionsTable,
-} from '../md-importer.ts';
+} from './helpers/md-importer.ts';
 import {
   saveDecisionToDb,
 } from '../db-writer.ts';

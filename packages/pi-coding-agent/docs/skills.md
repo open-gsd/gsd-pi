@@ -34,6 +34,7 @@ Pi loads skills from:
 - CLI: `--skill <path>` (repeatable, additive even with `--no-skills`)
 
 Discovery rules:
+
 - In `~/.pi/agent/skills/` and `.pi/skills/`, direct root `.md` files are discovered as individual skills
 - In all skill locations, directories containing `SKILL.md` are discovered recursively
 - In `~/.agents/skills/` and project `.agents/skills/`, root `.md` files are ignored
@@ -169,6 +170,7 @@ Invalid: `PDF-Processing`, `-pdf`, `pdf--processing`
 The description determines when the agent loads the skill. Be specific.
 
 Good:
+
 ```yaml
 description: Extracts text and tables from PDF files, fills PDF forms, and merges multiple PDFs. Use when working with PDF documents.
 ```
@@ -182,6 +184,7 @@ description: >
 ```
 
 Poor:
+
 ```yaml
 description: Helps with PDFs.
 ```
@@ -210,6 +213,7 @@ brave-search/
 ```
 
 **SKILL.md:**
+
 ````markdown
 ---
 name: brave-search

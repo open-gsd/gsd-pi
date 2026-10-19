@@ -10,7 +10,8 @@ import {
 
 describe("moonshot tool schema sanitizer", () => {
 	it("detects Moonshot and Kimi providers", () => {
-		expect(requiresMoonshotToolSchemaSanitization(getModel("moonshotai", "kimi-k2.5")!)).toBe(true);
+		// models.dev 2026-09 refresh: moonshotai dropped kimi-k2.5; kimi-k2.6 is the surviving direct-provider entry.
+		expect(requiresMoonshotToolSchemaSanitization(getModel("moonshotai", "kimi-k2.6")!)).toBe(true);
 		expect(requiresMoonshotToolSchemaSanitization(getModel("openrouter", "moonshotai/kimi-k2.5")!)).toBe(true);
 		expect(requiresMoonshotToolSchemaSanitization(getModel("openai", "gpt-4.1")!)).toBe(false);
 		expect(requiresMoonshotToolSchemaSanitizationAnthropic(getModel("kimi-coding", "kimi-for-coding")!)).toBe(

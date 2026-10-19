@@ -395,28 +395,6 @@ export function formatContext(milestoneId: string): string {
   return `# ${milestoneId} Context\n\nMigrated milestone — no upstream dependencies.\n`;
 }
 
-/**
- * Format STATE.md.
- * deriveState() does not read STATE.md — it recomputes from scratch.
- * Write a minimal stub that will be overwritten on first /gsd status.
- */
-export function formatState(milestones: GSDMilestone[]): string {
-  const lines: string[] = [];
-  lines.push('# GSD State');
-  lines.push('');
-  lines.push('<!-- Auto-generated. Updated by deriveState(). -->');
-  lines.push('');
-  for (const m of milestones) {
-    const doneSlices = m.slices.filter(s => s.done).length;
-    const totalSlices = m.slices.length;
-    lines.push(`## ${m.id}: ${m.title}`);
-    lines.push('');
-    lines.push(`- Slices: ${doneSlices}/${totalSlices}`);
-    lines.push('');
-  }
-  return lines.join('\n');
-}
-
 // ─── Directory Writer Orchestrator ─────────────────────────────────────────
 
 /**
@@ -456,12 +434,6 @@ export async function writeGSDDirectory(
   const decisionsPath = join(gsdDir, 'DECISIONS.md');
   await saveFile(decisionsPath, formatDecisions(project.decisionsContent));
   paths.push(decisionsPath);
-  counts.other++;
-
-  const statePath = join(gsdDir, 'STATE.md');
-  await saveFile(statePath, formatState(project.milestones));
-  paths.push(statePath);
-  artifactPaths.push(statePath);
   counts.other++;
 
   if (project.requirements.length > 0) {

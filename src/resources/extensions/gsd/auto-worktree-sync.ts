@@ -12,42 +12,19 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import {
-  _isSamePath as isSamePath,
-  _shouldReconcileWorktreeDb,
-} from "./auto-worktree-cleanup.js";
+import { _isSamePath as isSamePath } from "./auto-worktree-cleanup.js";
 import { dirIsContentBearingLegacyMilestone, resolveGsdPathContract } from "./paths.js";
 import type { MilestoneScope } from "./workspace.js";
-import { WorktreeStateProjection } from "./worktree-state-projection.js";
+import { refreshRootProjectionsInWorktree, WorktreeStateProjection } from "./worktree-state-projection.js";
 import { logWarning } from "./workflow-logger.js";
 
 const PROJECT_PREFERENCES_FILE = "PREFERENCES.md";
 const LEGACY_PROJECT_PREFERENCES_FILE = "preferences.md";
 
 /**
- * Root-level .gsd/ projections copied from project root into worktrees for
- * compatibility. Project root remains the canonical state/projection root.
- */
-const ROOT_STATE_FILES = [
-  "DECISIONS.md",
-  "REQUIREMENTS.md",
-  "PROJECT.md",
-  "KNOWLEDGE.md",
-  "OVERRIDES.md",
-  "QUEUE.md",
-  "completed-units.json",
-  "metrics.json",
-  "mcp.json",
-  // NOTE: project preferences are intentionally NOT in ROOT_STATE_FILES.
-  // Forward-sync (main → worktree) is handled explicitly in syncGsdStateToWorktree().
-  // Back-sync (worktree → main) must NEVER overwrite the project root's copy
-  // because the project root is authoritative for preferences (#2684).
-] as const;
-
-/**
  * Path-string entry point to WorktreeStateProjection.projectRootToWorktree.
  * Production code goes through the Module class; this delegator survives so
- * the projection-invariant tests (#1886, #2184, #2478, #2821) can exercise
+ * the projection-invariant tests (#1886, #2184, #2478) can exercise
  * the bodies with raw paths.
  */
 export function syncProjectRootToWorktree(
@@ -58,23 +35,6 @@ export function syncProjectRootToWorktree(
   new WorktreeStateProjection().projectRootToWorktreePaths(
     projectRoot,
     worktreePath_,
-    milestoneId,
-  );
-}
-
-/**
- * Path-string entry point to WorktreeStateProjection.projectWorktreeToRoot.
- * Production code goes through the Module class; this delegator survives so
- * the projection-invariant tests can exercise the body with raw paths.
- */
-export function syncStateToProjectRoot(
-  worktreePath_: string,
-  projectRoot: string,
-  milestoneId: string | null,
-): void {
-  new WorktreeStateProjection().projectWorktreeToRootPaths(
-    worktreePath_,
-    projectRoot,
     milestoneId,
   );
 }
@@ -111,13 +71,14 @@ export function syncGsdStateToWorktreeByScope(
  * repo and worktree share the same directory — no sync needed.
  *
  * When .gsd/ is a real directory (e.g., git-tracked or manage_gitignore:false),
- * the worktree has its own copy that may be stale. This function copies
- * missing milestones, CONTEXT, ROADMAP, DECISIONS, REQUIREMENTS, and
- * PROJECT files from the main repo's .gsd/ into the worktree's .gsd/.
+ * the worktree has its own copy that may be stale. This function refreshes
+ * the root projections (DECISIONS, REQUIREMENTS, PROJECT, KNOWLEDGE, OVERRIDES,
+ * QUEUE) from the project-root render and copies missing milestone files and
+ * preferences from the main repo's .gsd/ into the worktree's .gsd/.
  *
- * Only adds missing content — never overwrites existing files in the worktree.
- * Worktree files are compatibility projections; DB/project root remains
- * authoritative for runtime state.
+ * Milestone files and preferences are only added — an existing worktree file
+ * is not overwritten. Worktree files are projections; the project DB remains
+ * authoritative for workflow state.
  * @deprecated Use syncGsdStateToWorktreeByScope instead.
  * TODO(C-future): remove once all callers migrated.
  */
@@ -134,33 +95,11 @@ export function syncGsdStateToWorktree(
   if (!existsSync(mainGsd)) return { synced };
 
   mkdirSync(wtGsd, { recursive: true });
-  syncRootStateFiles(mainGsd, wtGsd, synced);
+  synced.push(...refreshRootProjectionsInWorktree(mainBasePath, worktreePath_));
   syncProjectPreferences(mainGsd, wtGsd, synced);
   syncMilestoneLayouts(mainGsd, wtGsd, synced);
 
   return { synced };
-}
-
-function syncRootStateFiles(
-  mainGsd: string,
-  wtGsd: string,
-  synced: string[],
-): void {
-  for (const file of ROOT_STATE_FILES) {
-    const src = join(mainGsd, file);
-    const dst = join(wtGsd, file);
-    if (!existsSync(src) || existsSync(dst)) continue;
-
-    try {
-      cpSync(src, dst);
-      synced.push(file);
-    } catch (err) {
-      logWarning(
-        "worktree",
-        `file copy failed (${file}): ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
 }
 
 function syncProjectPreferences(
@@ -348,30 +287,3 @@ function syncSlicesDirectory(
     }
   }
 }
-
-/**
- * Sync compatibility artifacts from worktree back to the main external state
- * directory. Canonical workflow state lives in the project DB; worktree .gsd
- * content is legacy projection/diagnostic data only.
- *
- * Syncs:
- *   1. Legacy worktree DBs are reconciled into the canonical project DB.
- *   2. Runtime diagnostic files may be copied for operator visibility.
- *
- * Markdown milestone directories are projections and are not copied from
- * worktrees into the project root. Current workflow state must arrive through
- * the shared project DB or the pre-upgrade DB reconciliation path above.
- */
-export function syncWorktreeStateBack(
-  mainBasePath: string,
-  worktreePath: string,
-  milestoneId: string,
-): { synced: string[] } {
-  return new WorktreeStateProjection().finalizeProjectionForMergePaths(
-    mainBasePath,
-    worktreePath,
-    milestoneId,
-  );
-}
-
-export { _shouldReconcileWorktreeDb } from "./auto-worktree-cleanup.js";

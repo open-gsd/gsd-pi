@@ -45,7 +45,7 @@ describe('readProgress', () => {
 
 **Active Milestone:** M002: Auth System
 **Active Slice:** S01: Login flow
-**Phase:** execution
+**Phase:** executing
 **Requirements Status:** 5 active · 2 validated · 1 deferred · 0 out of scope
 
 ## Milestone Registry
@@ -88,9 +88,9 @@ Execute T02 in S01 — implement token refresh.
     assert.deepEqual(result.activeSlice, { id: 'S01', title: 'Login flow' });
   });
 
-  it('parses phase', () => {
+  it('reads the phase as written', () => {
     const result = readProgress(projectDir);
-    assert.equal(result.phase, 'execute');
+    assert.equal(result.phase, 'executing');
   });
 
   it('parses milestone counts from registry', () => {
@@ -223,6 +223,304 @@ Build the foundation for the project.
   it('filters by milestoneId', () => {
     const result = readRoadmap(projectDir, 'M999');
     assert.equal(result.milestones.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readRoadmap flat-phase layout tests (issue #2424)
+// ---------------------------------------------------------------------------
+
+describe('readRoadmap flat-phase layout', () => {
+  let projectDir: string;
+
+  before(() => {
+    projectDir = tmpProject();
+
+    // Flat-phase project: phases/NN-slug/ with NN-MM-SUFFIX.md slice files and
+    // SS-TNN-SUFFIX.md task files directly under the milestone dir. No
+    // slices/ or tasks/ subdirs. Plan tasks use the renderer's <tasks> block
+    // format. 02-SUMMARY.md is a failed verification record — the milestone
+    // is NOT done despite the file existing.
+    writeFixture(projectDir, '.gsd/phases/02-contract-closure/02-CONTEXT.md', '# M002: CONTEXT heading\n');
+    writeFixture(projectDir, '.gsd/phases/02-contract-closure/02-ROADMAP.md', `# M002: Contract closure
+
+## Vision
+
+Close the v0 contract.
+
+## Slice Overview
+
+| ID | Slice | Risk | Depends | Done | After this |
+|----|-------|------|---------|------|------------|
+| S01 | Informed review contract | high | — | ☑ | Review loop |
+| S02 | Human cancellation integrity | high | S01 | ⬜ | Cancel path |
+| R01 | Remediation pass | medium | — | ☑ | Fix-ups |
+`);
+    writeFixture(projectDir, '.gsd/phases/02-contract-closure/02-SUMMARY.md', `# M002 Summary
+
+**Verification:** FAILED — 02-VERIFICATION-FAILED.md
+`);
+    writeFixture(projectDir, '.gsd/phases/02-contract-closure/02-01-PLAN.md', `# S01: Informed review contract
+
+<tasks>
+- [x] **T01**: Review loop _(2h)_
+  - Files: \`src/review.ts\`
+- [x] **T02**: Contract checks
+</tasks>
+`);
+    writeFixture(projectDir, '.gsd/phases/02-contract-closure/S01-T01-SUMMARY.md', '# T01 done');
+    writeFixture(projectDir, '.gsd/phases/02-contract-closure/02-02-PLAN.md', `# S02: Human cancellation integrity
+
+<tasks>
+- [ ] **T01**: Cancel path
+</tasks>
+`);
+  });
+
+  after(() => rmSync(projectDir, { recursive: true, force: true }));
+
+  it('prefers the ROADMAP H1 for the title', () => {
+    const result = readRoadmap(projectDir, 'M002');
+    assert.equal(result.milestones[0].title, 'Contract closure');
+  });
+
+  it('discovers slices and tasks in the flat layout', () => {
+    const result = readRoadmap(projectDir, 'M002');
+    const slices = result.milestones[0].slices;
+    assert.deepEqual(slices.map((s) => s.id), ['R01', 'S01', 'S02']);
+    assert.equal(slices[1].tasks.length, 2);
+    assert.equal(slices[2].tasks.length, 1);
+  });
+
+  it('parses renderer-format <tasks> blocks with titles', () => {
+    const result = readRoadmap(projectDir, 'M002');
+    const s01 = result.milestones[0].slices.find((s) => s.id === 'S01');
+    assert.deepEqual(
+      s01!.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status })),
+      [
+        { id: 'T01', title: 'Review loop', status: 'done' },
+        { id: 'T02', title: 'Contract checks', status: 'done' },
+      ],
+    );
+  });
+
+  it('derives slice statuses from flat files, checkboxes, and table marks', () => {
+    const result = readRoadmap(projectDir, 'M002');
+    const slices = result.milestones[0].slices;
+    const byId = new Map(slices.map((s) => [s.id, s]));
+    assert.equal(byId.get('S01')!.status, 'done');
+    assert.equal(byId.get('S02')!.status, 'pending');
+    // R01 has no plan/task files — status falls back to the table's .done mark.
+    assert.equal(byId.get('R01')!.status, 'done');
+    assert.equal(byId.get('R01')!.title, 'Remediation pass');
+  });
+
+  it('derives milestone status from slice content, not SUMMARY existence', () => {
+    const result = readRoadmap(projectDir, 'M002');
+    // S01 + R01 done, S02 pending → active, even though 02-SUMMARY.md exists.
+    assert.equal(result.milestones[0].status, 'active');
+  });
+});
+
+describe('readRoadmap milestone status fallbacks', () => {
+  it('reports done for a zero-slice milestone with a SUMMARY', (t) => {
+    const projectDir = tmpProject();
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    writeFixture(projectDir, '.gsd/phases/03-solo/03-ROADMAP.md', '# M003: Solo\n');
+    writeFixture(projectDir, '.gsd/phases/03-solo/03-SUMMARY.md', '# M003 done\n');
+    const result = readRoadmap(projectDir, 'M003');
+    assert.equal(result.milestones[0].status, 'done');
+  });
+
+  it('reports pending when all slices are pending despite a SUMMARY', (t) => {
+    const projectDir = tmpProject();
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    writeFixture(projectDir, '.gsd/phases/04-stuck/04-ROADMAP.md', `# M004: Stuck
+
+## Slice Overview
+
+| ID | Slice | Risk | Depends | Done | After this |
+|----|-------|------|---------|------|------------|
+| S01 | Never started | low | — | ⬜ | — |
+`);
+    writeFixture(projectDir, '.gsd/phases/04-stuck/04-SUMMARY.md', '# M004\n');
+    const result = readRoadmap(projectDir, 'M004');
+    assert.equal(result.milestones[0].status, 'pending');
+  });
+
+  it('reports staged (summary-but-unchecked) tasks as pending', (t) => {
+    const projectDir = tmpProject();
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    writeFixture(projectDir, '.gsd/phases/05-staged/05-ROADMAP.md', '# M005: Staged\n');
+    writeFixture(projectDir, '.gsd/phases/05-staged/05-01-PLAN.md', `# S01
+
+<tasks>
+- [ ] **T01**: Candidate result
+</tasks>
+`);
+    writeFixture(projectDir, '.gsd/phases/05-staged/S01-T01-SUMMARY.md', '# staged\n');
+    const result = readRoadmap(projectDir, 'M005');
+    const s01 = result.milestones[0].slices[0]!;
+    assert.equal(s01.tasks[0]!.status, 'pending');
+    assert.equal(s01.status, 'pending');
+    assert.equal(result.milestones[0].status, 'pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Flat-phase shared readers: gsd_progress + gsd_doctor (issue #2424)
+// ---------------------------------------------------------------------------
+
+describe('flat-phase shared readers', () => {
+  let projectDir: string;
+
+  before(() => {
+    projectDir = tmpProject();
+    // S03 exists only as a roadmap-table row — no plan or artifact files.
+    // A filesystem-only inventory would read the milestone as fully complete.
+    writeFixture(projectDir, '.gsd/phases/02-x/02-ROADMAP.md', `# Roadmap
+
+## Slice Overview
+
+| ID | Slice | Risk | Depends | Done | After this |
+|----|-------|------|---------|------|------------|
+| S01 | Partial slice | high | — | ⬜ | — |
+| S02 | Checkbox-done slice | medium | S01 | ⬜ | — |
+| S03 | Table-only slice | low | S02 | ⬜ | — |
+`);
+    writeFixture(projectDir, '.gsd/STATE.md', '# GSD State\n');
+    // S01: T01 done (checkbox + artifact), T02 pending (checkbox only).
+    // An artifact-only task inventory would report the slice done.
+    writeFixture(projectDir, '.gsd/phases/02-x/02-01-PLAN.md', `# S01
+
+<tasks>
+- [x] **T01**: Review loop
+- [ ] **T02**: Contract checks
+</tasks>
+`);
+    writeFixture(projectDir, '.gsd/phases/02-x/S01-T01-SUMMARY.md', '# T01 done\n');
+    // S02: T01 checked in the plan but no summary artifact — must still count
+    // as done (the plan checkbox is the flat layout's task state carrier).
+    writeFixture(projectDir, '.gsd/phases/02-x/02-02-PLAN.md', `# S02
+
+<tasks>
+- [x] **T01**: Cancel path
+</tasks>
+`);
+  });
+
+  after(() => rmSync(projectDir, { recursive: true, force: true }));
+
+  it('gsd_progress counts pending checkbox tasks', () => {
+    const result = readProgress(projectDir);
+    assert.equal(result.tasks.total, 3);
+    assert.equal(result.tasks.done, 2);
+  });
+
+  it('gsd_doctor does not report half-done slices as all-done', () => {
+    const result = runDoctorLite(projectDir);
+    const issue = result.issues.find((i) => i.code === 'all_slices_done_missing_summary');
+    assert.equal(issue, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gsd_doctor projection-gap repair hints (issue #2651)
+// ---------------------------------------------------------------------------
+
+describe('gsd_doctor projection-gap repair hints (#2651)', () => {
+  let projectDir: string;
+
+  before(() => {
+    projectDir = tmpProject();
+    // M008, flat-phase: S01 is planned and done (checkbox in its slice plan),
+    // S02 has only a task summary artifact — the exact shape of a worktree
+    // milestone whose rendered markdown never reached this .gsd (slice
+    // plans/SUMMARY files missing, task summaries present).
+    writeFixture(projectDir, '.gsd/phases/08-z/08-01-PLAN.md', `# S01
+
+<tasks>
+- [x] **T01**: Done unit
+</tasks>
+`);
+    writeFixture(projectDir, '.gsd/phases/08-z/S01-T01-SUMMARY.md', '# T01 done\n');
+    writeFixture(projectDir, '.gsd/phases/08-z/S02-T01-SUMMARY.md', '# T01 done\n');
+  });
+
+  after(() => rmSync(projectDir, { recursive: true, force: true }));
+
+  it('every projection-gap finding names the conditional re-render repair', () => {
+    const result = runDoctorLite(projectDir);
+    const codes = ['all_slices_done_missing_summary', 'missing_slice_plan', 'missing_roadmap', 'missing_task_plan'];
+    for (const code of codes) {
+      const issue = result.issues.find((i) => i.code === code);
+      assert.ok(issue, `${code} should be reported for this fixture`);
+      assert.match(issue.message, /\/gsd sync/, `${code} must name the repair`);
+      assert.match(issue.message, /if the database holds/, `${code} must not promise recovery the fallback cannot verify`);
+    }
+    // The flat slice plan is the task state carrier: S02's plan gap is
+    // reported once as a slice finding and once per task.
+    assert.equal(result.issues.find((i) => i.code === 'missing_slice_plan')?.unitId, 'M008/S02');
+    assert.equal(result.issues.find((i) => i.code === 'missing_task_plan')?.unitId, 'M008/S02/T01');
+  });
+
+  it('keeps the fallback severities and provenance unchanged', () => {
+    const result = runDoctorLite(projectDir);
+    assert.equal(result.ok, false);
+    assert.equal(result.readMetadata?.authority, 'projection-fallback');
+    // A missing milestone SUMMARY is info: the file-only checker cannot know
+    // whether the database holds a closeout, and an imported-complete
+    // milestone has none to render (#2729).
+    assert.equal(result.issues.find((i) => i.code === 'all_slices_done_missing_summary')?.severity, 'info');
+    assert.equal(result.issues.find((i) => i.code === 'missing_slice_plan')?.severity, 'error');
+    assert.equal(result.issues.find((i) => i.code === 'missing_roadmap')?.severity, 'warning');
+    assert.equal(result.issues.find((i) => i.code === 'missing_task_plan')?.severity, 'warning');
+    // S01 is planned and done: no findings for it.
+    assert.equal(result.issues.find((i) => i.code === 'missing_slice_plan' && i.unitId === 'M008/S01'), undefined);
+    assert.equal(result.issues.find((i) => i.code === 'missing_task_plan' && i.unitId === 'M008/S01/T01'), undefined);
+  });
+
+  it('a complete milestone with no SUMMARY does not fail the doctor (#2729)', () => {
+    // The imported-complete shape, alone: every slice done, no SUMMARY.md,
+    // nothing else missing — the exact state that reported ok:false forever.
+    const projectDir = tmpProject();
+    writeFixture(projectDir, '.gsd/PROJECT.md', '# Project');
+    writeFixture(projectDir, '.gsd/STATE.md', '# State');
+    writeFixture(projectDir, '.gsd/phases/09-i/09-01-PLAN.md', `# S01
+
+<tasks>
+- [x] **T01**: Done unit
+</tasks>
+`);
+    writeFixture(projectDir, '.gsd/phases/09-i/S01-T01-SUMMARY.md', '# T01 done\n');
+    const result = runDoctorLite(projectDir);
+    const issue = result.issues.find((i) => i.code === 'all_slices_done_missing_summary');
+    assert.ok(issue, 'the missing milestone SUMMARY is still reported');
+    assert.equal(issue.severity, 'info');
+    assert.equal(result.ok, true, 'an imported-complete milestone must not fail the doctor');
+    assert.equal(result.counts.error, 0);
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+});
+
+describe('gsd_doctor legacy layout gets no task-plan re-render hint (#2651)', () => {
+  let projectDir: string;
+
+  before(() => {
+    projectDir = tmpProject();
+    // Legacy layout: task plans are their own tasks/T01-PLAN.md file, which
+    // the renderer deliberately does not re-render — the hint must not
+    // advertise a repair that cannot restore it.
+    writeFixture(projectDir, '.gsd/milestones/M002/slices/S01/tasks/T01-SUMMARY.md', '# T01 done\n');
+  });
+
+  after(() => rmSync(projectDir, { recursive: true, force: true }));
+
+  it('missing_task_plan carries no re-render hint in the legacy layout', () => {
+    const result = runDoctorLite(projectDir);
+    const issue = result.issues.find((i) => i.code === 'missing_task_plan');
+    assert.ok(issue, 'missing_task_plan should be reported for this fixture');
+    assert.doesNotMatch(issue.message, /\/gsd sync/);
   });
 });
 
@@ -425,6 +723,31 @@ describe('readKnowledge', () => {
     assert.equal(k001.type, 'rule');
     assert.equal(k001.scope, 'auth');
     assert.ok(k001.content.includes('bcrypt'));
+  });
+
+  it('reads a row that has only a memory id, typed by its section', () => {
+    const dir = tmpProject();
+    mkdirSync(join(dir, '.gsd'), { recursive: true });
+    writeFileSync(
+      join(dir, '.gsd', 'KNOWLEDGE.md'),
+      [
+        '# Project Knowledge',
+        '',
+        '## Patterns',
+        '',
+        '| # | Pattern | Where | Notes |',
+        '|---|---------|-------|-------|',
+        '| P001 | Captured pattern | src | — |',
+        '| MEM042 | Extracted pattern | src | — |',
+        '',
+      ].join('\n'),
+    );
+
+    const result = readKnowledge(dir);
+
+    assert.deepEqual(result.entries.map((entry) => [entry.id, entry.type]), [['P001', 'pattern'], ['MEM042', 'pattern']]);
+    assert.equal(result.counts.patterns, 2);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('returns empty for missing KNOWLEDGE.md', () => {

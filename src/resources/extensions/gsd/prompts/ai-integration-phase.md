@@ -18,7 +18,7 @@ You are running the GSD **ai-integration-phase** workflow — produce an AI desi
 
 3. **Risk register.** Hallucination/grounding, prompt injection, data leakage, cost runaway, model deprecation. For each, the mitigation.
 
-4. **Write the AI-SPEC** to the milestone/slice artifact in `.gsd/`. Recommend `/gsd plan-phase` or `/gsd spike` for high-uncertainty model behaviors.
+4. **Save the AI-SPEC with `gsd_summary_save`** (`artifact_type: "AI-SPEC"`, plus `milestone_id` and `slice_id` when the contract is slice-scoped): the tool computes the artifact path and renders `.gsd/`. Do not write the AI-SPEC file directly. Recommend `/gsd plan-phase` or `/gsd spike` for high-uncertainty model behaviors.
 
 ## Success criteria
 

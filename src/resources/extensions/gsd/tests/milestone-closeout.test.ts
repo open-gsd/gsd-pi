@@ -12,6 +12,7 @@ import {
   readFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.js";
 import {
@@ -36,6 +37,10 @@ import { _setCompleteMilestoneProjectionInterleaveForTest } from "../tools/compl
 import { _setManagedMutationBoundaryForTest } from "../atomic-write.js";
 import { targetMilestoneFile } from "../paths.js";
 import type { DispatchContext } from "../auto-dispatch.js";
+import {
+  completeValidatedMilestone,
+  seedValidatedMilestone,
+} from "./helpers/canonical-milestone.ts";
 
 /** Build a minimal DispatchContext for the dispatch-policy branches under test. */
 function makeDispatchCtx(base: string, phase: string, mid = "M001"): DispatchContext {
@@ -174,47 +179,32 @@ test.after(() => {
 });
 
 test("isMilestoneCloseoutSettled requires DB closed and summary artifact", async () => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-milestone-closeout-"));
-  tmpDirs.push(base);
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Done", status: "complete" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-  insertAssessment({
-    path: "milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
-  const milestoneDir = join(base, ".gsd", "milestones", "M001");
-  mkdirSync(milestoneDir, { recursive: true });
-  writeFileSync(join(milestoneDir, "M001-SUMMARY.md"), "# Milestone Summary\n");
+  const fixture = await seedValidatedMilestone("milestone-closeout/settled");
+  tmpDirs.push(fixture.basePath);
+  await completeValidatedMilestone(fixture, "milestone-closeout/settled");
 
-  const settled = await isMilestoneCloseoutSettled("M001", base);
+  const settled = await isMilestoneCloseoutSettled(fixture.milestoneId, fixture.basePath);
   assert.equal(settled, true);
 });
 
 test("isMilestoneCloseoutSettled accepts summary artifacts in a live milestone worktree", async () => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-milestone-closeout-worktree-"));
+  // A real registered git worktree: validation and completion run inside it
+  // and the durable SUMMARY lands in the worktree, not the project root. The
+  // worktree is detached so no milestone branch merge effect is planned.
+  const fixture = await seedValidatedMilestone("milestone-closeout/worktree");
+  const base = fixture.basePath;
   tmpDirs.push(base);
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Done", status: "complete" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-  insertAssessment({
-    path: "milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
-
   const worktreeRoot = join(base, ".gsd", "worktrees", "M001");
-  const milestoneDir = join(worktreeRoot, ".gsd", "milestones", "M001");
-  mkdirSync(milestoneDir, { recursive: true });
-  writeFileSync(join(worktreeRoot, ".git"), `gitdir: ${join(base, ".git", "worktrees", "M001")}\n`);
-  writeFileSync(join(milestoneDir, "M001-SUMMARY.md"), "# Milestone Summary\n");
+  execFileSync("git", ["worktree", "add", "--detach", worktreeRoot, "HEAD"], { cwd: base, stdio: "ignore" });
+  await completeValidatedMilestone(fixture, "milestone-closeout/worktree");
+  const worktreeSummary = targetMilestoneFile(worktreeRoot, "M001", "SUMMARY", "Canonical Milestone");
+  const rootSummary = targetMilestoneFile(base, "M001", "SUMMARY", "Canonical Milestone");
+  assert.notEqual(worktreeSummary, rootSummary, "the fixture resolves two distinct projection roots");
+  assert.equal(
+    existsSync(worktreeSummary),
+    true,
+    "the completion projects its SUMMARY into the live milestone worktree",
+  );
 
   const settled = await isMilestoneCloseoutSettled("M001", base);
   assert.equal(settled, true);
@@ -292,29 +282,18 @@ test("isCompletedMilestoneTerminal accepts validation-pass with all slices close
 test("evaluateCompleteMilestoneDispatch repairs missing SUMMARY when DB is closed", async () => {
   const base = mkdtempSync(join(tmpdir(), "gsd-dispatch-repair-summary-"));
   tmpDirs.push(base);
-  const m008Dir = join(base, ".gsd", "milestones", "M008");
-  mkdirSync(m008Dir, { recursive: true });
-  // A content-bearing legacy milestone dir requires at least one non-META file
-  // (dirIsContentBearingLegacyMilestone) so the layout sniffer treats it as a
-  // real legacy milestone rather than a metadata-only placeholder.
-  writeFileSync(join(m008Dir, "M008-CONTEXT.md"), "# M008\n");
+  mkdirSync(join(base, ".gsd"), { recursive: true });
   openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M008", title: "Live Text Search", status: "complete" });
-  insertSlice({ id: "S01", milestoneId: "M008", title: "Slice", status: "complete" });
-  insertAssessment({
-    path: "milestones/M008/M008-VALIDATION.md",
-    milestoneId: "M008",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
+  // A canonically completed milestone whose SUMMARY projection is missing:
+  // the durable completion event is the repair source.
+  seedAdoptedCompletedMilestone("M008");
 
   const action = await evaluateCompleteMilestoneDispatch(
     makeDispatchCtx(base, "completing-milestone", "M008"),
   );
   assert.equal(action?.action, "skip");
   assert.ok(
-    existsSync(join(base, ".gsd", "milestones", "M008", "M008-SUMMARY.md")),
+    existsSync(targetMilestoneFile(base, "M008", "SUMMARY", "Live Text Search")),
     "repair should write the missing milestone SUMMARY projection",
   );
 });
@@ -329,12 +308,12 @@ test("repairMissingMilestoneSummaryProjection succeeds when milestone dir does n
   tmpDirs.push(base);
   mkdirSync(join(base, ".gsd"), { recursive: true });
   openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M042", title: "Done", status: "complete" });
+  seedAdoptedCompletedMilestone("M042");
 
   const repair = await repairMissingMilestoneSummaryProjection(base, "M042");
   assert.equal(repair.ok, true, "repair should report success when handler creates the SUMMARY");
   assert.ok(
-    existsSync(targetMilestoneFile(base, "M042", "SUMMARY", "Done")),
+    existsSync(targetMilestoneFile(base, "M042", "SUMMARY", "Durable Closeout")),
     "repair should write the SUMMARY artifact to the canonical projection path",
   );
 });

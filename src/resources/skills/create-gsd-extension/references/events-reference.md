@@ -21,6 +21,7 @@ Complete event reference with handler signatures, return types, and type narrowi
 </event_categories>
 
 <handler_signature>
+
 ```typescript
 pi.on("event_name", async (event, ctx: ExtensionContext) => {
   // event — typed payload for this event
@@ -28,11 +29,13 @@ pi.on("event_name", async (event, ctx: ExtensionContext) => {
   // Return undefined for no action, or a typed response
 });
 ```
+
 </handler_signature>
 
 <key_events>
 
 **before_agent_start** — Fired after user prompt, before agent loop. Primary hook for context injection and system prompt modification.
+
 ```typescript
 pi.on("before_agent_start", async (event, ctx) => {
   // event.prompt — user's prompt text
@@ -46,6 +49,7 @@ pi.on("before_agent_start", async (event, ctx) => {
 ```
 
 **tool_call** — Fired before tool executes. Can block.
+
 ```typescript
 import { isToolCallEventType } from "@gsd/pi-coding-agent";
 
@@ -60,6 +64,7 @@ pi.on("tool_call", async (event, ctx) => {
 ```
 
 **tool_result** — Fired after tool executes. Can modify result. Handlers chain like middleware.
+
 ```typescript
 import { isToolResultEventType } from "@gsd/pi-coding-agent";
 
@@ -73,6 +78,7 @@ pi.on("tool_result", async (event, ctx) => {
 ```
 
 **context** — Fired before each LLM call. Modify messages non-destructively.
+
 ```typescript
 pi.on("context", async (event, ctx) => {
   // event.messages is a deep copy — safe to modify
@@ -82,6 +88,7 @@ pi.on("context", async (event, ctx) => {
 ```
 
 **input** — Fired when user input is received, before skill/template expansion.
+
 ```typescript
 pi.on("input", async (event, ctx) => {
   // event.text — raw input
@@ -93,6 +100,7 @@ pi.on("input", async (event, ctx) => {
 ```
 
 **model_select** — Fired when model changes.
+
 ```typescript
 pi.on("model_select", async (event, ctx) => {
   // event.model, event.previousModel, event.source ("set"|"cycle"|"restore")
@@ -118,9 +126,11 @@ if (isToolResultEventType("bash", event)) { /* event.details: BashToolDetails */
 ```
 
 For custom tools, export your input type and use explicit type params:
+
 ```typescript
 if (isToolCallEventType<"my_tool", MyToolInput>("my_tool", event)) {
   event.input.action; // typed
 }
 ```
+
 </type_narrowing>

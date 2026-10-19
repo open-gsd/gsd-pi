@@ -12,7 +12,7 @@
  *   - worktree-merged            worktree merge back to main completed
  *   - worktree-orphaned          audit detected an orphaned branch/worktree
  *   - auto-exit                  auto-mode exited (pause/stop/blocked/error)
- *   - worktree-sync              syncStateToProjectRoot snapshot
+ *   - worktree-sync              worktree projection sync snapshot
  *   - canonical-root-redirect    resolveCanonicalMilestoneRoot redirected
  *
  * These events are purely observational. They never block, never throw,

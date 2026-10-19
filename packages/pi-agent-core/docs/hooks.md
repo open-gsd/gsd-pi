@@ -12,22 +12,22 @@ Events carry their result type as a type-only phantom:
 declare const HookResult: unique symbol;
 
 interface HookEvent<TType extends string, TResult = void> {
-	type: TType;
-	readonly [HookResult]?: TResult;
+ type: TType;
+ readonly [HookResult]?: TResult;
 }
 
 type ResultOf<E> = E extends { readonly [HookResult]?: infer R } ? R : void;
 
 type HookHandler<E, Ctx> = (
-	event: E,
-	ctx: Ctx,
-	signal?: AbortSignal,
+ event: E,
+ ctx: Ctx,
+ signal?: AbortSignal,
 ) => ResultOf<E> | void | Promise<ResultOf<E> | void>;
 
 type HookObserver<E, Ctx> = (
-	event: E,
-	ctx: Ctx,
-	signal?: AbortSignal,
+ event: E,
+ ctx: Ctx,
+ signal?: AbortSignal,
 ) => void | Promise<void>;
 ```
 
@@ -35,19 +35,19 @@ Example:
 
 ```ts
 interface ContextEvent extends HookEvent<"context", { messages?: AgentMessage[] }> {
-	type: "context";
-	messages: AgentMessage[];
+ type: "context";
+ messages: AgentMessage[];
 }
 
 interface ToolCallEvent extends HookEvent<"tool_call", { block?: boolean; reason?: string }> {
-	type: "tool_call";
-	toolName: string;
-	input: Record<string, unknown>;
+ type: "tool_call";
+ toolName: string;
+ input: Record<string, unknown>;
 }
 
 interface MessageEndEvent extends HookEvent<"message_end"> {
-	type: "message_end";
-	message: AgentMessage;
+ type: "message_end";
+ message: AgentMessage;
 }
 ```
 
@@ -57,26 +57,26 @@ No result map. No spec table. The event type defines its own result.
 
 ```ts
 interface AgentHarnessHooks<E extends HookEvent<string, unknown>, Ctx> {
-	context: Ctx;
+ context: Ctx;
 
-	setContext(ctx: Ctx): void;
+ setContext(ctx: Ctx): void;
 
-	observe(handler: HookObserver<E, Ctx>): () => void;
+ observe(handler: HookObserver<E, Ctx>): () => void;
 
-	on<TType extends E["type"]>(
-		type: TType,
-		handler: HookHandler<Extract<E, { type: TType }>, Ctx>,
-	): () => void;
+ on<TType extends E["type"]>(
+  type: TType,
+  handler: HookHandler<Extract<E, { type: TType }>, Ctx>,
+ ): () => void;
 
-	emit<TEvent extends E>(
-		event: TEvent,
-		signal?: AbortSignal,
-	): Promise<ResultOf<TEvent> | undefined>;
+ emit<TEvent extends E>(
+  event: TEvent,
+  signal?: AbortSignal,
+ ): Promise<ResultOf<TEvent> | undefined>;
 
-	addCleanup(cleanup: () => void | Promise<void>): () => void;
+ addCleanup(cleanup: () => void | Promise<void>): () => void;
 
-	clear(): Promise<void>;
-	dispose(): Promise<void>;
+ clear(): Promise<void>;
+ dispose(): Promise<void>;
 }
 ```
 
@@ -91,62 +91,62 @@ Important split:
 
 ```ts
 class DefaultAgentHarnessHooks<E extends HookEvent<string, unknown>, Ctx>
-	implements AgentHarnessHooks<E, Ctx> {
-	context: Ctx;
+ implements AgentHarnessHooks<E, Ctx> {
+ context: Ctx;
 
-	private observers = new Set<HookObserver<E, Ctx>>();
-	private handlers = new Map<string, Set<HookHandler<any, Ctx>>>();
-	private cleanups = new Set<() => void | Promise<void>>();
+ private observers = new Set<HookObserver<E, Ctx>>();
+ private handlers = new Map<string, Set<HookHandler<any, Ctx>>>();
+ private cleanups = new Set<() => void | Promise<void>>();
 
-	constructor(ctx: Ctx) {
-		this.context = ctx;
-	}
+ constructor(ctx: Ctx) {
+  this.context = ctx;
+ }
 
-	setContext(ctx: Ctx): void {
-		this.context = ctx;
-	}
+ setContext(ctx: Ctx): void {
+  this.context = ctx;
+ }
 
-	observe(handler: HookObserver<E, Ctx>): () => void {
-		this.observers.add(handler);
-		return () => this.observers.delete(handler);
-	}
+ observe(handler: HookObserver<E, Ctx>): () => void {
+  this.observers.add(handler);
+  return () => this.observers.delete(handler);
+ }
 
-	on(type, handler): () => void {
-		let handlers = this.handlers.get(type);
-		if (!handlers) {
-			handlers = new Set();
-			this.handlers.set(type, handlers);
-		}
-		handlers.add(handler);
-		return () => handlers.delete(handler);
-	}
+ on(type, handler): () => void {
+  let handlers = this.handlers.get(type);
+  if (!handlers) {
+   handlers = new Set();
+   this.handlers.set(type, handlers);
+  }
+  handlers.add(handler);
+  return () => handlers.delete(handler);
+ }
 
-	async emit(event, signal?) {
-		for (const observer of this.observers) {
-			await observer(event, this.context, signal);
-		}
+ async emit(event, signal?) {
+  for (const observer of this.observers) {
+   await observer(event, this.context, signal);
+  }
 
-		switch (event.type) {
-			case "context":
-				return this.emitContext(event, signal);
-			case "before_provider_request":
-				return this.emitBeforeProviderRequest(event, signal);
-			case "before_provider_payload":
-				return this.emitBeforeProviderPayload(event, signal);
-			case "before_agent_start":
-				return this.emitBeforeAgentStart(event, signal);
-			case "tool_call":
-				return this.emitToolCall(event, signal);
-			case "tool_result":
-				return this.emitToolResult(event, signal);
-			case "session_before_compact":
-			case "session_before_tree":
-				return this.emitFirstCancelOrLast(event, signal);
-			default:
-				await this.emitObservationHandlers(event, signal);
-				return undefined;
-		}
-	}
+  switch (event.type) {
+   case "context":
+    return this.emitContext(event, signal);
+   case "before_provider_request":
+    return this.emitBeforeProviderRequest(event, signal);
+   case "before_provider_payload":
+    return this.emitBeforeProviderPayload(event, signal);
+   case "before_agent_start":
+    return this.emitBeforeAgentStart(event, signal);
+   case "tool_call":
+    return this.emitToolCall(event, signal);
+   case "tool_result":
+    return this.emitToolResult(event, signal);
+   case "session_before_compact":
+   case "session_before_tree":
+    return this.emitFirstCancelOrLast(event, signal);
+   default:
+    await this.emitObservationHandlers(event, signal);
+    return undefined;
+  }
+ }
 }
 ```
 
@@ -170,10 +170,10 @@ Handlers run in order. Each sees current messages.
 let current = event;
 
 for (const handler of handlers("context")) {
-	const result = await handler(current, ctx, signal);
-	if (result?.messages) {
-		current = { ...current, messages: result.messages };
-	}
+ const result = await handler(current, ctx, signal);
+ if (result?.messages) {
+  current = { ...current, messages: result.messages };
+ }
 }
 
 return current.messages === event.messages ? undefined : { messages: current.messages };
@@ -187,10 +187,10 @@ Sequential transform. Each handler sees previous output.
 let current = event;
 
 for (const handler of handlers("before_provider_payload")) {
-	const result = await handler(current, ctx, signal);
-	if (result !== undefined) {
-		current = { ...current, payload: result.payload };
-	}
+ const result = await handler(current, ctx, signal);
+ if (result !== undefined) {
+  current = { ...current, payload: result.payload };
+ }
 }
 
 return changed ? { payload: current.payload } : undefined;
@@ -205,14 +205,14 @@ let systemPrompt = event.systemPrompt;
 const messages = [];
 
 for (const handler of handlers("before_agent_start")) {
-	const result = await handler({ ...event, systemPrompt }, ctx, signal);
-	if (result?.messages) messages.push(...result.messages);
-	if (result?.systemPrompt !== undefined) systemPrompt = result.systemPrompt;
+ const result = await handler({ ...event, systemPrompt }, ctx, signal);
+ if (result?.messages) messages.push(...result.messages);
+ if (result?.systemPrompt !== undefined) systemPrompt = result.systemPrompt;
 }
 
 return messages.length || systemPrompt !== event.systemPrompt
-	? { messages, systemPrompt }
-	: undefined;
+ ? { messages, systemPrompt }
+ : undefined;
 ```
 
 ### Tool call
@@ -221,8 +221,8 @@ Sequential, early exit on block.
 
 ```ts
 for (const handler of handlers("tool_call")) {
-	const result = await handler(event, ctx, signal);
-	if (result?.block) return result;
+ const result = await handler(event, ctx, signal);
+ if (result?.block) return result;
 }
 ```
 
@@ -235,22 +235,22 @@ let current = event;
 let modified = false;
 
 for (const handler of handlers("tool_result")) {
-	const result = await handler(current, ctx, signal);
-	if (!result) continue;
+ const result = await handler(current, ctx, signal);
+ if (!result) continue;
 
-	current = {
-		...current,
-		content: result.content ?? current.content,
-		details: result.details ?? current.details,
-		isError: result.isError ?? current.isError,
-	};
+ current = {
+  ...current,
+  content: result.content ?? current.content,
+  details: result.details ?? current.details,
+  isError: result.isError ?? current.isError,
+ };
 
-	modified = true;
+ modified = true;
 }
 
 return modified
-	? { content: current.content, details: current.details, isError: current.isError }
-	: undefined;
+ ? { content: current.content, details: current.details, isError: current.isError }
+ : undefined;
 ```
 
 ### Session-before events
@@ -261,10 +261,10 @@ Sequential, early exit on cancel.
 let last;
 
 for (const handler of handlers(event.type)) {
-	const result = await handler(event, ctx, signal);
-	if (!result) continue;
-	last = result;
-	if (result.cancel) return result;
+ const result = await handler(event, ctx, signal);
+ if (!result) continue;
+ last = result;
+ if (result.cancel) return result;
 }
 
 return last;
@@ -293,9 +293,9 @@ Context is a normal object, not rebuilt per emit.
 
 ```ts
 const hooks = new CodingAgentHooks({
-	harness: harnessFacade,
-	session: sessionFacade,
-	ui: noUiFacade,
+ harness: harnessFacade,
+ session: sessionFacade,
+ ui: noUiFacade,
 });
 ```
 
@@ -303,8 +303,8 @@ Later:
 
 ```ts
 hooks.setContext({
-	...hooks.context,
-	ui: tuiFacade,
+ ...hooks.context,
+ ui: tuiFacade,
 });
 ```
 
@@ -312,10 +312,10 @@ For dynamic state, prefer stable facades/methods over getter maze:
 
 ```ts
 interface CodingAgentHookContext {
-	harness: HarnessFacade;
-	session: SessionFacade;
-	ui: UiFacade;
-	models: ModelFacade;
+ harness: HarnessFacade;
+ session: SessionFacade;
+ ui: UiFacade;
+ models: ModelFacade;
 }
 ```
 
@@ -327,9 +327,9 @@ Extension loading can live next to harness and construct hooks:
 
 ```ts
 const hooks = await loadExtensions({
-	paths,
-	context,
-	hooks: new CodingAgentHooks(context),
+ paths,
+ context,
+ hooks: new CodingAgentHooks(context),
 });
 const harness = new AgentHarness({ ..., hooks });
 ```

@@ -2,12 +2,12 @@
 // File Purpose: Central UAT mode policy for dispatch, tool presentation, and result validation.
 
 import { hasBrowserContractPrefix } from "../shared/browser-contract.js";
-import { extractUatType, UAT_TYPE_KEYWORDS } from "./files.js";
-import type { UatType } from "./files.js";
+import { extractUatType } from "./files.js";
+import { UAT_TYPE_KEYWORDS, type UatType } from "./uat-types.js";
 import { hasBrowserRequiredText } from "./browser-evidence.js";
 import { parseMcpToolName } from "./mcp-tool-name.js";
 
-export type { UatType } from "./files.js";
+export type { UatType } from "./uat-types.js";
 
 export type UatVerdict = "PASS" | "FAIL" | "PARTIAL";
 export type UatCheckResult = "PASS" | "FAIL" | "NEEDS-HUMAN";

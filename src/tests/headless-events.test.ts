@@ -316,16 +316,6 @@ test('un-showable menu notifications are terminal and blocked (#1294)', () => {
   assert.equal(isBlockedNotification(picker), true)
 })
 
-test('verdict notifications are terminal and rejected verdicts are blocked (#1373)', () => {
-  const recorded = makeNotify('Verdict recorded: Milestone M001 verdict: needs-attention -> pass')
-  assert.equal(isTerminalNotification(recorded), true)
-  assert.equal(isBlockedNotification(recorded), false)
-
-  const rejected = makeNotify('Verdict rejected: No milestone validation found for M001. Run /gsd auto to validate first, then retry /gsd verdict.')
-  assert.equal(isTerminalNotification(rejected), true)
-  assert.equal(isBlockedNotification(rejected), true)
-})
-
 test('isInteractiveHeadlessTool: ask_user_questions is interactive', () => {
   assert.equal(isInteractiveHeadlessTool('ask_user_questions'), true)
 })

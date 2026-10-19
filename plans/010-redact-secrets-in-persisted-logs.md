@@ -79,12 +79,14 @@ extension live under `src/resources/extensions/gsd/`. Redaction must be
 ## Scope
 
 **In scope**:
+
 - `src/resources/extensions/gsd/redact-secrets.ts` (create — the shared helper)
 - `src/resources/extensions/gsd/activity-log.ts` (apply at the write loop)
 - `src/resources/extensions/gsd/exec-sandbox.ts` (apply before persisting output)
 - `src/resources/extensions/gsd/tests/redact-secrets.test.ts` (create)
 
 **Out of scope** (do NOT touch):
+
 - `workflow-logger.ts` `_sanitizeForAudit` — different shape, leave it.
 - `scripts/secret-scan.mjs` — reuse its patterns by copying the regexes into the
   new helper; do not refactor the script to export them (it runs standalone).
@@ -161,6 +163,7 @@ any `*.test.ts` in `src/resources/extensions/gsd/tests/`). Cases:
 ## STOP conditions
 
 Stop and report if:
+
 - The activity-log write loop or exec-sandbox persist path no longer matches the
   excerpts (drifted).
 - You cannot locate a distinct "persist to `.gsd/exec/`" write in exec-sandbox

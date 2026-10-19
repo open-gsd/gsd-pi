@@ -1,17 +1,39 @@
-import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import childProcess, { spawn } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, test } from 'node:test';
 
 import {
+  type McpInstanceEntry,
   readMcpRegistry,
   registerMcpInstance,
   signalAutoLockPid,
   sweepProjectOrphanMcpServers,
   unregisterMcpInstance,
-  type McpInstanceEntry,
 } from './pid-registry.js';
+
+// Failed spawns may emit error without exit. Resolve both outcomes without an
+// early rejected promise, and use close so all child handles have finished.
+function waitForWriter(child: ReturnType<typeof spawn>) {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; error: Error | null }>((resolve) => {
+    child.once('error', (error) => resolve({ code: null, signal: null, error }));
+    child.once('close', (code, signal) => resolve({ code, signal, error: null }));
+  });
+}
 
 let tmp: string;
 let registryPath: string;
@@ -23,6 +45,22 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
+});
+
+test('writer completion settles when spawning fails without an exit event', async () => {
+  const child = spawn(join(tmp, 'nonexistent-writer'), [], { stdio: 'ignore' });
+  const result = await waitForWriter(child);
+  assert.ok(result.error);
+  assert.equal((result.error as NodeJS.ErrnoException).code, 'ENOENT');
+  assert.equal(result.code, null);
+});
+
+test('writer completion reports a failed workload exit instead of accepting it', async () => {
+  const child = spawn(process.execPath, ['-e', 'process.exit(7)'], { stdio: 'ignore' });
+  const result = await waitForWriter(child);
+  assert.equal(result.error, null);
+  assert.equal(result.signal, null);
+  assert.equal(result.code, 7);
 });
 
 // registerMcpInstance keys the registry by a normalized (forward-slash) project
@@ -388,6 +426,52 @@ describe('registerMcpInstance', () => {
 
     assert.deepEqual(signals, [{ pid: 9200, signal: 0 }]);
     assert.equal(readOwnEntry(registryPath, tmp)?.pid, 9200);
+  });
+
+  test('refusal for a live unverified holder carries pid, cwd, startedAt, liveness, and the remedy', () => {
+    // Regression for #2361: a healthy holder whose cwd is a project subdirectory
+    // (and whose command line omits the project root) can never be verified, so
+    // the refusal must name the blocking process and the way out instead of
+    // leaving the operator to out-of-band process archaeology.
+    writeFileSync(registryPath, JSON.stringify({
+      [tmp]: { pid: 9300, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' },
+    }));
+
+    const signals: Array<{ pid: number; signal: NodeJS.Signals | 0 | undefined }> = [];
+    const outcome = registerMcpInstance(tmp, registryPath, {
+      kill(pid, signal) {
+        signals.push({ pid, signal });
+      },
+      getProcessCommand() {
+        return 'node /usr/local/bin/gsd-mcp-server';
+      },
+      // Live holder rooted in a project subdirectory; the command omits the
+      // project path, so identity verification fails and startup is refused.
+      getProcessCwd() {
+        return join(tmp, 'subdir');
+      },
+      getProcessStartTime() {
+        return Date.parse('2025-12-31T23:59:59.000Z');
+      },
+    });
+
+    assert.ok(
+      typeof outcome === 'object' && outcome !== null && outcome.refused,
+      'expected a refusal result for the unverified holder',
+    );
+    assert.match(outcome.detail, /holder pid=9300/);
+    assert.ok(
+      outcome.detail.includes(`cwd=${join(tmp, 'subdir')}`),
+      `expected refusal detail to name the holder cwd, got: ${outcome.detail}`,
+    );
+    assert.match(outcome.detail, /startedAt=2026-01-01T00:00:00\.000Z/);
+    assert.match(outcome.detail, /still running/);
+    assert.match(outcome.detail, /kill pid 9300/);
+    assert.match(outcome.detail, /GSD_MCP_CLIENT_MANAGED=1/);
+
+    // Probe only: the unverified holder is never signalled and keeps its entry.
+    assert.ok(signals.every((s) => s.pid === 9300 && s.signal === 0));
+    assert.equal(readOwnEntry(registryPath, tmp)?.pid, 9300);
   });
 
   test('terminates a matching Windows local MCP command path when cwd is unavailable', () => {
@@ -867,7 +951,48 @@ describe('signalAutoLockPid', () => {
     assert.ok(signals.some((s) => s.signal === 'SIGTERM'));
   });
 
-  test('tolerates unknown cwd when the start time matches', () => {
+  for (const { name, startMs, cwd } of [
+    { name: 'unknown start and cwd', startMs: null, cwd: null },
+    { name: 'unknown start with matching cwd', startMs: null, cwd: '/tmp/project' },
+    { name: 'NaN start', startMs: NaN, cwd: '/tmp/project' },
+    { name: 'infinite start', startMs: Infinity, cwd: '/tmp/project' },
+    { name: 'negative infinite start', startMs: -Infinity, cwd: '/tmp/project' },
+    { name: 'zero start', startMs: 0, cwd: '/tmp/project' },
+    { name: 'negative start', startMs: -1, cwd: '/tmp/project' },
+  ]) {
+    test(`refuses ${name} without SIGTERM`, () => {
+      const { signals, opts } = probes({ startMs, cwd });
+      assert.equal(signalAutoLockPid(lock(7, new Date().toISOString()), '/tmp/project', opts), 'unverified');
+      // A signal-0 liveness probe is allowed; it does not establish identity.
+      assert.deepEqual(signals, [{ pid: 7, signal: 0 }]);
+    });
+  }
+
+  for (const cwd of [null, '/tmp/project']) {
+    test(`refuses ETIMEDOUT start probe with ${cwd === null ? 'unknown' : 'matching'} cwd`, (t) => {
+      const { signals, opts } = probes({ cwd });
+      const startProbe = t.mock.method(childProcess, 'execFileSync', () => {
+        const error = new Error('process identity query timed out') as NodeJS.ErrnoException;
+        error.code = 'ETIMEDOUT';
+        throw error;
+      });
+      // Update the named builtin binding used by the production start getter.
+      syncBuiltinESMExports();
+      try {
+        assert.equal(signalAutoLockPid(lock(7, new Date().toISOString()), '/tmp/project', {
+          kill: opts.kill,
+          ...(cwd === null ? {} : { getProcessCwd: opts.getProcessCwd }),
+        }), 'unverified');
+        assert.ok(startProbe.mock.callCount() > 0, 'must exercise the default process query');
+        assert.deepEqual(signals, [{ pid: 7, signal: 0 }]);
+      } finally {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+      }
+    });
+  }
+
+  test('tolerates unknown cwd when a finite positive start time matches', () => {
     const recorded = Date.now() - 1_000;
     const { opts, signals } = probes({ startMs: recorded, cwd: null });
     assert.equal(signalAutoLockPid(lock(7, new Date(recorded).toISOString()), '/tmp/project', opts), 'signaled');
@@ -889,3 +1014,239 @@ describe('signalAutoLockPid', () => {
     assert.deepEqual(res, { error: 'EPERM' });
   });
 });
+
+describe('writeMcpRegistry atomicity', () => {
+  // writeMcpRegistry is not exported — these tests drive it indirectly via
+  // registerMcpInstance/unregisterMcpInstance, which is the only way the
+  // module's public surface writes the registry file.
+
+  test('a concurrent reader never observes a truncated/invalid registry file during a write', async () => {
+    // Regression: a reader racing an in-flight write of the registry
+    // file must only ever observe either the previous complete JSON payload
+    // or the new complete JSON payload — never a partially-flushed
+    // (truncated) one. Before the fix, writeMcpRegistry() called
+    // writeFileSync(registryPath, ...) directly, truncating the target file
+    // in place before the new bytes were fully written; a reader racing that
+    // write could observe a truncated byte sequence and fail to JSON.parse
+    // it. This asserts directly against raw readFileSync + JSON.parse (not
+    // readMcpRegistry(), which deliberately swallows and quarantines corrupt
+    // files as a forensics feature — that recovery path must not be
+    // triggered by an ordinary write race in the first place).
+    const writerCode = `
+      import { registerMcpInstance } from ${JSON.stringify(new URL('./pid-registry.js', import.meta.url).href)};
+      const registryPath = ${JSON.stringify(registryPath)};
+      const projectDir = ${JSON.stringify(tmp)};
+      // Every call rewrites the whole registry file via the module's
+      // internal writeMcpRegistry(). Registering many distinct large-keyed
+      // projects widens each write's byte count (and thus the race window)
+      // while keeping every write going through the real production path.
+      for (let i = 0; i < 400; i++) {
+        const fakeProjectDir = projectDir + '/sibling-' + 'x'.repeat(2_000) + '-' + i;
+        registerMcpInstance(fakeProjectDir, registryPath, {
+          kill: () => {},
+          getProcessCommand: () => null,
+        });
+      }
+      process.stdout.write('done\\n');
+    `;
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', writerCode], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    const exited = waitForWriter(child);
+
+    let parseFailures = 0;
+    let successfulReads = 0;
+    const firstFailureMessages: string[] = [];
+    const deadline = Date.now() + 4_000;
+    while (Date.now() < deadline) {
+      if (existsSync(registryPath)) {
+        try {
+          JSON.parse(readFileSync(registryPath, 'utf8'));
+          successfulReads++;
+        } catch (err) {
+          parseFailures++;
+          if (firstFailureMessages.length < 3) {
+            firstFailureMessages.push(err instanceof Error ? err.message : String(err));
+          }
+        }
+      }
+      if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) break;
+      // Allow child close/error delivery while the reader observes publication.
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    const { code, signal, error: spawnError } = await exited;
+
+    // A spawn error, non-zero exit, or abnormal termination signal means the
+    // writer never completed its full workload — successfulReads being
+    // positive in that case would only prove a *partial* run was readable,
+    // not that the writer finished. Fail closed instead of trusting reads
+    // alone.
+    assert.equal(spawnError, null, `writer process failed to spawn: ${String(spawnError)}`);
+    assert.equal(signal, null, `writer process was terminated by signal ${String(signal)}`);
+    assert.equal(code, 0, `writer process exited with non-zero code ${String(code)}`);
+
+    assert.equal(
+      parseFailures,
+      0,
+      `expected zero parse failures from a concurrent reader, saw ${parseFailures} (successful reads: ${successfulReads}; sample errors: ${firstFailureMessages.join(' | ')})`,
+    );
+    assert.ok(successfulReads > 0, 'expected at least one successful concurrent read');
+
+    // readMcpRegistry()'s corrupt-file quarantine must never have fired —
+    // that would mean a reader using the public API observed and discarded a
+    // genuinely torn write.
+    const corruptBackups = readdirSync(tmp).filter((f) => f.includes('.corrupt-'));
+    assert.deepEqual(corruptBackups, [], `expected no corrupt-file quarantine backups, found: ${corruptBackups.join(', ')}`);
+  });
+
+  test('a failed write leaves the original registry intact and removes the temp file', {
+    skip: process.platform === 'win32' ? 'POSIX directory write permissions are not enforced by Windows chmod' : false,
+  }, () => {
+    // Regression for review comment: the previous version pointed the failing
+    // write at a *different* path (blockedPath) while asserting against
+    // registryPath — an operation the failure never touched, so it could not
+    // detect loss or truncation of the live registry at all. Inject the
+    // failure directly against the SAME seeded registryPath by revoking write
+    // permission on its containing directory: writeMcpRegistry derives its
+    // temp file from `dirname(registryPath)`, so openSync('wx') for that temp
+    // file fails with EACCES in-place, and the original file at registryPath
+    // is never touched by a successful rename.
+    // An unverified foreign PID is refused before writing. Seed our own PID
+    // so this regression actually reaches the filesystem failure under test.
+    const originalEntry = { pid: process.pid, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
+    const originalBytes = JSON.stringify({ [tmp]: originalEntry });
+    writeFileSync(registryPath, originalBytes);
+
+    chmodSync(tmp, 0o500);
+    try {
+      assert.throws(
+        () => registerMcpInstance(tmp, registryPath, { kill: () => {}, getProcessCommand: () => null }),
+        /EACCES|EPERM/,
+        'expected the write failure to propagate unmasked',
+      );
+    } finally {
+      // Restore so afterEach's rmSync(tmp, { recursive: true }) can clean up.
+      chmodSync(tmp, 0o700);
+    }
+
+    // The seeded registry file — the SAME path the failing write targeted —
+    // retains its exact original bytes: no truncation, no empty file, no
+    // partial write.
+    assert.equal(readFileSync(registryPath, 'utf8'), originalBytes);
+    assert.deepEqual(readMcpRegistry(registryPath)[tmp], originalEntry);
+
+    // No leaked temp file owned by this invocation remains in the registry's
+    // own directory.
+    const leaked = readdirSync(tmp).filter((f) => f.includes('.mcp-instances.json.tmp'));
+    assert.deepEqual(leaked, [], `expected no leaked temp files, found: ${leaked.join(', ')}`);
+  });
+
+  test('EEXIST from a pre-existing foreign temp file is never deleted by this invocation (collision safety through the real writer)', () => {
+    // Regression for review comment: the previous collision test only drove
+    // writeFileSync('wx') directly and never exercised writeMcpRegistry's own
+    // cleanup branch. Use the tempFileNameForTest seam to force a genuine
+    // name collision at the exact path writeMcpRegistry will derive, seeded
+    // with a foreign file this invocation never created. openSync('wx') must
+    // fail with EEXIST, the error must propagate unmasked, and — the actual
+    // bug under test — the foreign file must survive untouched because this
+    // invocation's openSync call never returned a valid fd for it.
+    const collisionName = '.collision-fixed-name.mcp-instances.json.tmp';
+    const collisionPath = join(tmp, collisionName);
+    const foreignBytes = 'not owned by this invocation';
+    writeFileSync(collisionPath, foreignBytes);
+
+    // Keep the live registry owned by this process; otherwise refusal of an
+    // unverified foreign holder would bypass the intended O_EXCL collision.
+    const originalEntry = { pid: process.pid, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' };
+    const originalBytes = JSON.stringify({ [tmp]: originalEntry });
+    writeFileSync(registryPath, originalBytes);
+
+    assert.throws(
+      () => registerMcpInstance(tmp, registryPath, {
+        kill: () => {},
+        getProcessCommand: () => null,
+        tempFileNameForTest: collisionName,
+      }),
+      /EEXIST/,
+    );
+
+    // The foreign file at the colliding path is untouched — this invocation
+    // never created it, so it must never be cleaned up.
+    assert.equal(readFileSync(collisionPath, 'utf8'), foreignBytes);
+    // The live registry is also untouched — no partial publish occurred.
+    assert.equal(readFileSync(registryPath, 'utf8'), originalBytes);
+  });
+
+  test(
+    'the registry file is written with owner-only permissions (0o600)',
+    { skip: process.platform === 'win32' ? 'Windows has no POSIX owner/group/other permission bits; statSync synthesizes them' : false },
+    () => {
+      // The registry holds PIDs and absolute project directory paths. It must
+      // not be group/world-readable on shared/multi-user filesystems — mirrors
+      // env-writer.ts's 0o600 convention for the same reason. This assertion
+      // is POSIX-only: Node does not implement separate owner/group/other bits
+      // on Windows, so statSync().mode there is synthesized and this check
+      // does not apply.
+      registerMcpInstance(tmp, registryPath, { kill: () => {}, getProcessCommand: () => null });
+      const mode = statSync(registryPath).mode & 0o777;
+      assert.equal(mode, 0o600, `expected mode 0o600, got ${mode.toString(8)}`);
+    },
+  );
+
+  function canCreateSymlinks(): boolean {
+    // Skip options run during suite definition, before beforeEach initializes
+    // tmp. Own this probe's directory instead of borrowing the test fixture.
+    const probeDir = mkdtempSync(join(tmpdir(), 'mcp-pid-symlink-probe-'));
+    const probeTarget = join(probeDir, 'target');
+    const probeLink = join(probeDir, 'link');
+    try {
+      writeFileSync(probeTarget, 'probe');
+      symlinkSync(probeTarget, probeLink);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      rmSync(probeDir, { recursive: true, force: true });
+    }
+  }
+
+  // Evaluate during suite registration, not in a callback where beforeEach
+  // would conceal the uninitialized-fixture defect.
+  const suiteTimeSymlinkCapability = canCreateSymlinks();
+  test('symlink capability can be evaluated before fixture hooks run', () => {
+    assert.equal(typeof suiteTimeSymlinkCapability, 'boolean');
+  });
+
+  test(
+    'a pre-existing symlink at the temp-file path is not followed (collision safety)',
+    { skip: !canCreateSymlinks() ? 'symlink creation unavailable on this host (e.g. Windows without Developer Mode/admin privileges)' : false },
+    () => {
+      // writeMcpRegistry derives tempPath from a fresh randomUUID() each call,
+      // so a real collision at that path is not realistically reachable in
+      // practice — randomUUID() is not mockable from outside the module
+      // (it's imported directly from node:crypto, not via a seam). What *is*
+      // directly testable and load-bearing is the write flag itself: writing
+      // with flag 'wx' (used by writeMcpRegistry) must refuse to follow a
+      // pre-existing symlink at the target path rather than writing through it
+      // — this is the actual mechanism that would protect the real temp path
+      // if a collision (or a future weakening of the write flag back to 'w')
+      // ever put a symlink there. Symlink creation can fail with EPERM on
+      // Windows hosts lacking symlink privileges/Developer Mode, so capability
+      // is probed first and the test is skipped (not failed) when unavailable.
+      const evilTarget = join(tmp, 'evil-target');
+      writeFileSync(evilTarget, 'not a registry');
+      const collisionPath = join(tmp, 'collision.tmp');
+      symlinkSync(evilTarget, collisionPath);
+
+      assert.throws(
+        () => writeFileSync(collisionPath, 'attempted overwrite', { flag: 'wx', mode: 0o600 }),
+        /EEXIST/,
+      );
+
+      // The symlink's target must be untouched — the write must never have
+      // followed it.
+      assert.equal(readFileSync(evilTarget, 'utf8'), 'not a registry');
+    },
+  );
+});
+

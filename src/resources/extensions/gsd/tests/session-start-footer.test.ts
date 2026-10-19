@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { autoSession } from "../auto-runtime-state.ts";
 import { registerHooks } from "../bootstrap/register-hooks.ts";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 import { _resetPreferenceDiagnosticNotificationsForTests } from "../preferences-diagnostics.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -303,6 +304,88 @@ test("session_start installs the welcome screen as the TUI header", async (t) =>
   const rendered = header.render(123).join("\n");
   assert.match(rendered, /No active GSD project/);
   assert.doesNotMatch(rendered, /Project\s+None/);
+});
+
+test("session_start welcome header follows the database when STATE.md contradicts it", async (t) => {
+  const dir = join(
+    tmpdir(),
+    `gsd-welcome-header-db-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  mkdirSync(join(dir, "dist"), { recursive: true });
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  // The projection names a milestone and a phase that the database does not have.
+  writeFileSync(
+    join(dir, ".gsd", "STATE.md"),
+    [
+      "**Active Milestone:** M001: Stale projection milestone",
+      "**Active Slice:** S09: Stale projection slice",
+      "**Phase:** stale-projection-phase",
+      "",
+      "## Next Action",
+      "Stale projection next action",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+  assert.equal(openDatabase(join(dir, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: "M002", title: "M002: Payments platform", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M002", title: "Refund flow", status: "pending" });
+  closeDatabase();
+
+  const welcomeModuleUrl = pathToFileURL(
+    join(__dirname, "..", "..", "..", "..", "welcome-screen.ts"),
+  ).href;
+  writeFileSync(
+    join(dir, "dist", "welcome-screen.js"),
+    `export { buildWelcomeScreenLines } from ${JSON.stringify(welcomeModuleUrl)};\n`,
+    "utf-8",
+  );
+
+  const originalCwd = process.cwd();
+  const originalGsdPkgRoot = process.env.GSD_PKG_ROOT;
+  const originalGsdBinPath = process.env.GSD_BIN_PATH;
+  process.chdir(dir);
+  process.env.GSD_PKG_ROOT = dir;
+  delete process.env.GSD_BIN_PATH;
+  t.after(() => {
+    closeDatabase();
+    process.chdir(originalCwd);
+    if (originalGsdPkgRoot === undefined) delete process.env.GSD_PKG_ROOT;
+    else process.env.GSD_PKG_ROOT = originalGsdPkgRoot;
+    if (originalGsdBinPath !== undefined) process.env.GSD_BIN_PATH = originalGsdBinPath;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  const handlers = new Map<string, (event: unknown, ctx: any) => Promise<void> | void>();
+  registerHooks({
+    on(event: string, handler: (event: unknown, ctx: any) => Promise<void> | void) {
+      handlers.set(event, handler);
+    },
+  } as any, []);
+
+  let headerFactory: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined;
+  await handlers.get("session_start")!({}, {
+    hasUI: true,
+    ui: {
+      notify: () => {},
+      setStatus: () => {},
+      setFooter: () => {},
+      setHeader: (factory: typeof headerFactory) => {
+        headerFactory = factory;
+      },
+      setWorkingMessage: () => {},
+      onTerminalInput: () => () => {},
+      setWidget: () => {},
+    },
+    sessionManager: { getSessionId: () => null },
+    model: null,
+    setCompactionThresholdOverride: () => {},
+  } as any);
+
+  assert.equal(typeof headerFactory, "function", "session_start should install a header factory");
+  const rendered = headerFactory!({}, {}).render(200).join("\n");
+  assert.match(rendered, /Project\s+M002: Payments platform/, "the header names the database's active milestone");
+  assert.doesNotMatch(rendered, /M001|Stale projection|stale-projection-phase/, "nothing from STATE.md is shown");
 });
 
 test("session_start suppresses the welcome header while auto-mode is active", async (t) => {

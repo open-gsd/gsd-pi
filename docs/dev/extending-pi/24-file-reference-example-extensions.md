@@ -1,15 +1,16 @@
 # File Reference — Example Extensions
 
-
 All paths relative to `<pi-install-dir>/examples/extensions/`.
 
 ### Lifecycle & Safety
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `protected-paths.ts` | Blocking writes to `.env`, `.git/`, `node_modules/` via `tool_call` |
 | `dirty-repo-guard.ts` | Preventing session changes with uncommitted git changes |
 
 ### Custom Tools
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `todo.ts` | **Best example** — Stateful tool with persistence, custom rendering, command |
@@ -23,6 +24,7 @@ All paths relative to `<pi-install-dir>/examples/extensions/`.
 | `ssh.ts` | Full SSH remote execution with pluggable operations |
 
 ### Commands & UI
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `commands.ts` | Basic command registration |
@@ -39,6 +41,7 @@ All paths relative to `<pi-install-dir>/examples/extensions/`.
 | `overlay-qa-tests.ts` | Comprehensive overlay tests: anchors, margins, stacking |
 
 ### System Prompt & Context
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `pirate.ts` | `before_agent_start` system prompt modification |
@@ -48,6 +51,7 @@ All paths relative to `<pi-install-dir>/examples/extensions/`.
 | `inline-bash.ts` | Expanding `!{command}` patterns in prompts |
 
 ### Compaction & Sessions
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `custom-compaction.ts` | Custom compaction summary via `session_before_compact` |
@@ -57,6 +61,7 @@ All paths relative to `<pi-install-dir>/examples/extensions/`.
 | `session-name.ts` | Naming sessions for selector display |
 
 ### UI Components
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `custom-footer.ts` | `setFooter` with git branch and token stats |
@@ -70,12 +75,14 @@ All paths relative to `<pi-install-dir>/examples/extensions/`.
 | `mac-system-theme.ts` | Auto-sync theme with macOS dark/light mode |
 
 ### Providers
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `custom-provider-anthropic/` | Custom Anthropic provider with OAuth |
 | `custom-provider-gitlab-duo/` | GitLab Duo via proxy |
 
 ### Communication
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `event-bus.ts` | Inter-extension communication via `pi.events` |
@@ -85,6 +92,7 @@ All paths relative to `<pi-install-dir>/examples/extensions/`.
 | `file-trigger.ts` | File watcher injecting messages via `sendMessage` |
 
 ### Misc
+
 | File | What It Demonstrates |
 |------|---------------------|
 | `with-deps/` | Extension with its own `package.json` and npm dependencies |
@@ -121,6 +129,7 @@ All paths relative to `<pi-install-dir>/examples/extensions/`.
 ---
 
 *This document was generated from the Pi extension documentation and examples. Source docs are at:*
+
 ```
 <pi-install-dir>/docs/
 <pi-install-dir>/examples/extensions/

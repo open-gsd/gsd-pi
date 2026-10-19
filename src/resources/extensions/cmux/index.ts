@@ -37,6 +37,21 @@ export interface CmuxSidebarProgress {
 
 export type CmuxLogLevel = "info" | "progress" | "success" | "warning" | "error";
 
+/**
+ * `cmux new-split` prints `OK surface:<id> workspace:<id>` (current CLI) or,
+ * on older builds, the bare surface id with no prefix. Without extracting the
+ * id from the `OK ...` line, the caller falls back to running the agent
+ * in-process while the freshly split cmux pane is left empty forever.
+ */
+function parseCreatedSurfaceId(stdout: string | null): string | null {
+  const text = stdout?.trim() ?? "";
+  if (!text || text.toLowerCase() === "ok") return null;
+  const match = text.match(/surface:\S+/);
+  if (match) return match[0];
+  if (/\s/.test(text)) return null;
+  return text;
+}
+
 export function detectCmuxEnvironment(
   env: NodeJS.ProcessEnv = process.env,
   socketExists: (path: string) => boolean = existsSync,
@@ -295,7 +310,7 @@ export class CmuxClient {
   }
 
   async listSurfaceIds(): Promise<string[]> {
-    const stdout = await this.runAsync(this.appendWorkspace(["list-surfaces", "--json", "--id-format", "both"]));
+    const stdout = await this.runAsync(this.appendWorkspace(["list-pane-surfaces", "--json", "--id-format", "both"]));
     const parsed = stdout ? parseJson(stdout) : null;
     return extractSurfaceIds(parsed);
   }
@@ -312,7 +327,8 @@ export class CmuxClient {
     const before = new Set(await this.listSurfaceIds());
     const args = ["new-split", direction];
     const scopedArgs = this.appendSurface(this.appendWorkspace(args), sourceSurfaceId);
-    await this.runAsync(scopedArgs);
+    const created = parseCreatedSurfaceId(await this.runAsync(scopedArgs));
+    if (created) return created;
     const after = await this.listSurfaceIds();
     for (const id of after) {
       if (!before.has(id)) return id;
@@ -371,13 +387,13 @@ export class CmuxClient {
 
   async sendSurface(surfaceId: string, text: string): Promise<boolean> {
     const payload = text.endsWith("\n") ? text : `${text}\n`;
-    const stdout = await this.runAsync(["send-surface", "--surface", surfaceId, payload]);
+    const stdout = await this.runAsync(["send", "--surface", surfaceId, payload]);
     return stdout !== null;
   }
 
   // Send Ctrl-C (ETX) to a surface to interrupt the running command.
   async sendInterrupt(surfaceId: string): Promise<boolean> {
-    const stdout = await this.runAsync(["send-surface", "--surface", surfaceId, "\x03"]);
+    const stdout = await this.runAsync(["send", "--surface", surfaceId, "\x03"]);
     return stdout !== null;
   }
 }
@@ -443,11 +459,20 @@ function extractSurfaceIds(value: unknown): string[] {
     if (!node || typeof node !== "object") return;
 
     for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
-      if (
-        typeof child === "string"
-        && (key === "surface_id" || key === "surface" || (key === "id" && child.includes("surface")))
-      ) {
-        found.add(child);
+      if (typeof child === "string") {
+        // Current `cmux list-pane-surfaces --json` nests surfaces under
+        // surfaces[].ref as "surface:<n>" (e.g. {"ref":"surface:1000040003"}),
+        // not a top-level "surface_id"/"surface" key. Without matching `ref`,
+        // every created surface id resolves to undefined and the caller falls
+        // back to running the agent in-process, leaving the pane empty.
+        if (
+          key === "surface_id"
+          || key === "surface"
+          || (key === "id" && child.includes("surface"))
+          || (key === "ref" && child.startsWith("surface:"))
+        ) {
+          found.add(child);
+        }
       }
       visit(child);
     }

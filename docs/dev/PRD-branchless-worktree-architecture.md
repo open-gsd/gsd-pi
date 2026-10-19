@@ -117,6 +117,7 @@ Agent writes file → on milestone branch → handleAgentEnd → auto-commit on 
 ### `.gsd/` Tracking (Proposed — Coherent)
 
 **Tracked (travels with branch):**
+
 ```
 .gsd/milestones/**/*.md    (except CONTINUE markers)
 .gsd/milestones/**/*.json  (META.json integration records)
@@ -127,6 +128,7 @@ Agent writes file → on milestone branch → handleAgentEnd → auto-commit on 
 ```
 
 **Gitignored (ephemeral):**
+
 ```
 .gsd/auto.lock
 .gsd/completed-units.json
@@ -162,11 +164,13 @@ Agent writes file → on milestone branch → handleAgentEnd → auto-commit on 
    - Add explicit runtime-only ignores (see proposed list above)
 
 2. Force-add existing planning artifacts on current branch:
+
    ```
    git add --force .gsd/milestones/ .gsd/PROJECT.md .gsd/DECISIONS.md .gsd/REQUIREMENTS.md .gsd/QUEUE.md
    ```
 
 3. Ensure runtime files are NOT tracked:
+
    ```
    git rm --cached -r .gsd/runtime/ .gsd/activity/ .gsd/STATE.md .gsd/metrics.json .gsd/completed-units.json .gsd/auto.lock
    ```
@@ -212,6 +216,7 @@ Agent writes file → on milestone branch → handleAgentEnd → auto-commit on 
 **Goal:** Milestone→main merge is clean and minimal.
 
 The function becomes:
+
 1. Auto-commit any dirty state in worktree
 2. `process.chdir(originalBasePath)` — back to main repo
 3. `git checkout main`
@@ -309,6 +314,7 @@ Codex's analysis confirms the tracked-artifact approach but recommends treating 
 Scenario: M001 and M002 both modify `src/auth.ts`. M001 squash-merges first.
 
 Resolution: Before M002 squash-merges, rebase onto updated `main`:
+
 ```
 cd .gsd/worktrees/M002
 git fetch origin main
@@ -324,6 +330,7 @@ This is standard git workflow. GSD can automate the rebase step as a pre-merge c
 Scenario: Power loss during `git commit` on the milestone branch.
 
 Resolution: Git's internal journaling protects the object store. On restart:
+
 - If commit completed: state is consistent
 - If commit didn't complete: working directory has uncommitted changes, `handleAgentEnd` auto-commits on next dispatch
 - No branch to be "stuck between" — single branch means no split-brain state

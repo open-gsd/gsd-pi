@@ -101,21 +101,25 @@ bug, overflow, leak) · **P2** design smell / inconsistency · **P3** dead code.
 ### P2 — Design smell / inconsistency
 
 **Three competing visual languages** a user sees in sequence:
+
 - Rail-style — `assistant-message.ts` / `user-message.ts`, `┃` rail + bg fill (`transcript-design.ts:51`).
 - Framed — `chat-frame.ts` / `transcript-design.ts`, rounded `╭╮╰╯` boxes.
 - Box-background — `custom-message.ts` / `branch-summary-message.ts`, filled `Box`, no border.
 
 **Two-and-a-half style frameworks:**
+
 - `pi-tui/src/style.ts` — `TerminalStyle` builder.
 - `components/tui-style-kit.ts` — `roundedPanel()` + `badge`/`keyValue`.
 - Hand-rolled inline borders in `chat-frame.ts:16-88` and `transcript-design.ts:90-122` (third dialect, duplicated logic).
 
 **No shared component patterns:**
+
 - No `CollapsibleMessage` base — `custom-message`, `compaction-summary-message`, `skill-invocation-message`, `branch-summary-message` each re-implement `expanded` + `setExpanded()` + rebuild.
 - No `AnimatedComponent` base — `armin.ts` and `daxnuts.ts` hand-roll identical `interval/tick/cachedLines/cachedVersion` machinery.
 - Caching inconsistent — `armin`/`daxnuts` cache renders; `assistant-message`/`user-message`/`custom-message` rebuild every call.
 
 **Keyboard / hints:**
+
 - Convention drift — `scoped-models-selector.ts` mixes raw `Key.ctrl()` with `matchesKey()`; `extension-selector.ts:124,133,142` mixes `kb.matches()` with raw `keyData === "k"`; `extension-input.ts:78` raw `"\n"`; `custom-editor.ts:76` hardcoded `\x1b\r`.
 - `tree-selector.ts:869` binds two key names to one action.
 - Missing keyboard-hint footers — `theme-selector`, `thinking-selector`, `show-images-selector`, `oauth-selector`, `user-message-selector`.
@@ -124,6 +128,7 @@ bug, overflow, leak) · **P2** design smell / inconsistency · **P3** dead code.
 - `renderCursor()` helper (`tree-render-utils.ts:56`) exists but `oauth-selector.ts:56` / `user-message-selector.ts:56` duplicate it.
 
 **Misc:**
+
 - `login-dialog.ts:149` — hardcoded OSC 8 hyperlink escapes; bleed into output on no-color terminals.
 - `theme-schema.ts:74-85` — semantic tokens optional with no validation that a fallback source exists.
 - `themes.ts` — builtin themes hardcoded as JS objects; no JSON parity with custom themes.

@@ -33,11 +33,22 @@ export const GSD_RUNTIME_PATTERNS = [
   ".gsd/audit/",
   ".gsd/backups/",
   ".gsd/forensics/",
+  // Runtime control roots under migration/ — NOT the whole directory:
+  // MIGRATION.md, manifest.json and legacy/ (preserved legacy .planning copy)
+  // are one-time migration outputs a team may deliberately keep tracked.
+  ".gsd/migration/projection-mutations/",
+  ".gsd/migration/quarantined-control-publications/",
+  ".gsd/migration/native-projection-evidence/",
+  ".gsd/migration/managed-outputs.json",
+  ".gsd/migration/unbound-projection-evidence.json",
   ".gsd/migration-applications/",
   ".gsd/recovery-applications/",
   ".gsd/runtime/",
   ".gsd/worktrees/",
   ".gsd/parallel/",
+  ".gsd/exec/", // gsd_exec/gsd_uat_exec stdout, stderr and meta.json evidence store
+  ".gsd/safety/", // session-scoped safety evidence (evidence-*.json, blocked/)
+  ".gsd/graphs/", // knowledge-graph build output (graph.json, .last-build-snapshot.json)
   ".gsd/auto.lock",
   ".gsd/metrics.json",
   ".gsd/completed-units*.json", // covers completed-units.json and archived completed-units-{MID}.json
@@ -48,7 +59,16 @@ export const GSD_RUNTIME_PATTERNS = [
   ".gsd/journal/",
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
+  ".gsd/audit-log.jsonl", // error-severity audit entries (workflow-logger)
+  ".gsd/notifications.jsonl", // persistent notifications (notification-store)
+  ".gsd/notifications.lock", // notification-store rewrite lock (crash remnant)
+  ".gsd/notifications.jsonl.tmp.*", // atomic-rewrite temp file (crash remnant)
+  ".gsd/hook-state.json", // diagnostic copy of the hook-state database row
+  ".gsd/lifecycle-shadow-observation-loss.jsonl", // emergency observation-loss journal (uok/audit)
+  ".gsd/git-action-failures.log", // git action retry/failure log (auto-post-unit)
   ".gsd/DISCUSSION-MANIFEST.json",
+  ".gsd/.compat.json", // local render baseline; a pulled copy would hide teammates' edits
+  ".gsd/quarantine/",
   ".gsd/milestones/**/*-CONTINUE.md",
   ".gsd/milestones/**/continue.md",
 ] as const;
@@ -63,6 +83,11 @@ const BASELINE_PATTERNS = [
   ".gsd-id",
   ".mcp.json",
   ".bg-shell/",
+  // Workflow-MCP auto-prep (#731) writes .claude/settings.local.json at startup;
+  // keep it out of the fail-closed verification-source scope (#2509), same class
+  // as .mcp.json. Narrow on purpose: durable .claude/ content (skills/, commands/,
+  // settings.json — see workflow-templates/spike.md) is real source and must stay hashed.
+  ".claude/settings.local.json",
 
   // ── OS junk ──
   ".DS_Store",
@@ -274,16 +299,16 @@ export function ensureGitignore(
  * version control.
  */
 export function untrackRuntimeFiles(basePath: string): void {
-  const runtimePaths = GSD_RUNTIME_PATTERNS;
-
-  for (const pattern of runtimePaths) {
-    // Use -r for directory patterns (trailing slash), strip the slash for the command
-    const target = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
-    try {
-      nativeRmCached(basePath, [target]);
-    } catch {
-      // File not tracked or doesn't exist — expected, ignore
-    }
+  // Use -r for directory patterns (trailing slash), strip the slash for the command
+  const targets = GSD_RUNTIME_PATTERNS.map((pattern) =>
+    pattern.endsWith("/") ? pattern.slice(0, -1) : pattern,
+  );
+  try {
+    // One call for the whole list: a git child process per pattern blocked
+    // `/gsd auto` start-up for about a second on Windows.
+    nativeRmCached(basePath, targets);
+  } catch {
+    // File not tracked or doesn't exist — expected, ignore
   }
 }
 

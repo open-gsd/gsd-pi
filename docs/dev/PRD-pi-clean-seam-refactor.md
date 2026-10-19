@@ -55,6 +55,7 @@ GSD's code is clearly separated from pi's code at the module system level. The v
 A new workspace package at `packages/gsd-agent-core/` that owns all GSD session orchestration logic. It depends on `@gsd/pi-coding-agent`, `@gsd/pi-agent-core`, and `@gsd/pi-ai`. Nothing in the vendored pi packages depends on it.
 
 Must contain:
+
 - `agent-session.ts` and all `AgentSession` types
 - `compaction/` (orchestrator, branch summarization, utilities)
 - `system-prompt.ts`
@@ -73,6 +74,7 @@ Must contain:
 A new workspace package at `packages/gsd-agent-modes/` that owns all run-mode and CLI code. It depends on `@gsd/agent-core`, `@gsd/pi-coding-agent`, and `@gsd/pi-tui`. It is the layer the top-level `gsd-pi` binary entry point assembles.
 
 Must contain:
+
 - `modes/interactive/` (full TUI interactive mode and all components)
 - `modes/rpc/` (RPC server, RPC client, JSON protocol)
 - `modes/print/` (print/headless mode)
@@ -82,6 +84,7 @@ Must contain:
 ### R3 — `pi-coding-agent` contains only upstream code and the extension system
 
 After the migration, the vendored `pi-coding-agent` source must not contain files that:
+
 - Import from `@gsd/agent-core` or `@gsd/agent-modes`
 - Contain GSD business logic (compaction, session management, run modes, CLI)
 
@@ -90,12 +93,14 @@ The extension system (`src/core/extensions/`) remains in `pi-coding-agent` becau
 ### R4 — Public API surfaces are explicit
 
 Each new package must have an `index.ts` that declares its public API. Internal files must not be imported by path from outside the package. Specifically:
+
 - `web/bridge-service.ts` currently imports `AgentSessionEvent` from an internal path in `pi-coding-agent` — this must be fixed to use the public export from `@gsd/agent-core`
 - Any other internal-path imports identified during migration must be fixed
 
 ### R5 — Build order is updated
 
 The workspace build script must be updated to build packages in dependency order:
+
 1. `@gsd/pi-agent-core`, `@gsd/pi-ai`, `@gsd/pi-tui` (parallel, no dependencies between them)
 2. `@gsd/pi-coding-agent`
 3. `@gsd/agent-core`

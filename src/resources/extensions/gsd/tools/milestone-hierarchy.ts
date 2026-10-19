@@ -1,0 +1,189 @@
+// Project/App: gsd-pi
+// File Purpose: Executors for the milestone hierarchy tools: generate id, park, unpark, discard, reorder and set dependencies.
+
+import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
+import { invalidateAllCaches } from "../cache.js";
+import type { ExecutionInvocation } from "../execution-invocation.js";
+import { getMilestone } from "../gsd-db.js";
+import { discardMilestone, parkMilestone, unparkMilestone } from "../milestone-actions.js";
+import { nextMilestoneIdReserved } from "../milestone-id-reservation.js";
+import { claimReservedId, findMilestoneIds } from "../milestone-ids.js";
+import { readMilestoneRegistration, registerMilestones } from "../milestone-registration.js";
+import { loadEffectiveGSDPreferences } from "../preferences.js";
+import { reorderMilestones, setMilestoneDependencies } from "../queue-order.js";
+import { logError } from "../workflow-logger.js";
+import { renderStateProjection } from "../workflow-projections.js";
+import type { ToolExecutionResult } from "./context-mode-tool-result.js";
+
+export interface MilestoneParkExecutorParams {
+  milestoneId: string;
+  reason: string;
+}
+
+export interface MilestoneUnparkExecutorParams {
+  milestoneId: string;
+}
+
+export interface MilestoneDiscardExecutorParams {
+  milestoneId: string;
+  reason: string;
+}
+
+export interface MilestoneReorderExecutorParams {
+  order: string[];
+}
+
+export interface MilestoneSetDependenciesExecutorParams {
+  milestoneId: string;
+  dependsOn: string[];
+}
+
+function failure(operation: string, error: string): ToolExecutionResult {
+  return {
+    content: [{ type: "text", text: `Error: ${error}` }],
+    details: { operation, error },
+    isError: true,
+  };
+}
+
+/**
+ * Open the database, run one hierarchy Domain Operation and report it. The
+ * action returns the success text, or throws with the reason it was refused.
+ */
+async function runHierarchyTool(
+  operation: string,
+  basePath: string,
+  details: Record<string, unknown>,
+  action: () => string | Promise<string>,
+): Promise<ToolExecutionResult> {
+  if (!(await ensureDbOpen(basePath))) {
+    return failure(operation, "GSD database is not available.");
+  }
+  try {
+    const text = await action();
+    invalidateAllCaches();
+    return { content: [{ type: "text", text }], details: { operation, ...details } };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logError("tool", `${operation} tool failed: ${message}`, { tool: `gsd_${operation}` });
+    return failure(operation, message);
+  }
+}
+
+/** Why a park or unpark changed nothing, from the milestone row. */
+function refusal(milestoneId: string, verb: string): Error {
+  const status = getMilestone(milestoneId)?.status;
+  return new Error(status === undefined
+    ? `milestone ${milestoneId} does not exist`
+    : `milestone ${milestoneId} cannot be ${verb} (status: ${status})`);
+}
+
+/**
+ * Allocate the next milestone id and register its row in one
+ * milestone.register Domain Operation. A retry of the same tool call returns
+ * the id that the first call registered. The id shown by a guided-flow
+ * preview is claimed first. Milestone directory names are read only to avoid
+ * an id that an unregistered directory already uses.
+ */
+export async function executeMilestoneGenerateId(
+  basePath: string,
+  invocation: ExecutionInvocation,
+): Promise<ToolExecutionResult> {
+  try {
+    // Milestone ids are allocated against database rows; with no database,
+    // refuse before a preview reservation is consumed (ADR-046).
+    if (!(await ensureDbOpen(basePath))) throw new Error("workflow DB is unavailable");
+    let id = readMilestoneRegistration(invocation.idempotencyKey)?.[0];
+    if (!id) {
+      id = claimReservedId();
+      if (!id) {
+        // No preview is waiting, so the reservation set is empty: reserve the
+        // next id and claim it at once.
+        const uniqueEnabled = !!loadEffectiveGSDPreferences(basePath)?.preferences?.unique_milestone_ids;
+        nextMilestoneIdReserved(findMilestoneIds(basePath), uniqueEnabled, basePath);
+        id = claimReservedId()!;
+      }
+      registerMilestones([{ id }], "generate-id", invocation);
+      invalidateAllCaches();
+      await renderStateProjection(basePath);
+    }
+    return {
+      content: [{ type: "text", text: id }],
+      details: { operation: "generate_milestone_id", id },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      content: [{ type: "text", text: `Error generating milestone ID: ${message}` }],
+      details: { operation: "generate_milestone_id", error: message },
+      isError: true,
+    };
+  }
+}
+
+export function executeMilestonePark(
+  params: MilestoneParkExecutorParams,
+  basePath: string,
+  invocation: ExecutionInvocation,
+): Promise<ToolExecutionResult> {
+  const { milestoneId, reason } = params;
+  return runHierarchyTool("milestone_park", basePath, { milestoneId, reason }, async () => {
+    if (!(await parkMilestone(basePath, milestoneId, reason, { invocation }))) throw refusal(milestoneId, "parked");
+    return `Parked milestone ${milestoneId}. Reason: ${reason}`;
+  });
+}
+
+export function executeMilestoneUnpark(
+  params: MilestoneUnparkExecutorParams,
+  basePath: string,
+  invocation: ExecutionInvocation,
+): Promise<ToolExecutionResult> {
+  const { milestoneId } = params;
+  return runHierarchyTool("milestone_unpark", basePath, { milestoneId }, async () => {
+    if (!(await unparkMilestone(basePath, milestoneId, invocation))) throw refusal(milestoneId, "unparked");
+    return `Unparked milestone ${milestoneId}.`;
+  });
+}
+
+export function executeMilestoneDiscard(
+  params: MilestoneDiscardExecutorParams,
+  basePath: string,
+  invocation: ExecutionInvocation,
+): Promise<ToolExecutionResult> {
+  const { milestoneId, reason } = params;
+  return runHierarchyTool("milestone_discard", basePath, { milestoneId, reason }, async () => {
+    if (!(await discardMilestone(basePath, milestoneId, { reason, invocation }))) throw refusal(milestoneId, "discarded");
+    return `Discarded milestone ${milestoneId}. Its open work is cancelled and its files are removed. Reason: ${reason}`;
+  });
+}
+
+export function executeMilestoneReorder(
+  params: MilestoneReorderExecutorParams,
+  basePath: string,
+  invocation: ExecutionInvocation,
+): Promise<ToolExecutionResult> {
+  const { order } = params;
+  return runHierarchyTool("milestone_reorder", basePath, { order }, async () => {
+    const committed = reorderMilestones(basePath, order, [], invocation);
+    await renderStateProjection(basePath);
+    return [
+      `Queue order is now: ${committed.order.join(" → ")}`,
+      ...committed.warnings.map((warning) => `Warning: ${warning}`),
+    ].join("\n");
+  });
+}
+
+export function executeMilestoneSetDependencies(
+  params: MilestoneSetDependenciesExecutorParams,
+  basePath: string,
+  invocation: ExecutionInvocation,
+): Promise<ToolExecutionResult> {
+  const { milestoneId, dependsOn } = params;
+  return runHierarchyTool("milestone_set_dependencies", basePath, { milestoneId, dependsOn }, async () => {
+    setMilestoneDependencies(milestoneId, dependsOn, invocation);
+    await renderStateProjection(basePath);
+    return dependsOn.length > 0
+      ? `Milestone ${milestoneId} now depends on: ${dependsOn.join(", ")}`
+      : `Milestone ${milestoneId} now has no dependencies.`;
+  });
+}

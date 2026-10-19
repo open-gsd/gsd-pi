@@ -52,7 +52,7 @@ const PERMANENT_RE = /auth|unauthorized|forbidden|invalid.*key|invalid.*api|bill
 // - "You've reached your limit"
 // - "usage limit" / "quota reached"
 // - "out of extra usage"
-const RATE_LIMIT_RE = /rate.?limit|too many requests|429|(?:hit|reached) your (?:\w+ )?limit|(?:usage|session|weekly|daily|monthly|quota) limit|out of extra usage|quota (?:reached|hit)|limit.*resets?/i;
+const RATE_LIMIT_RE = /rate.?limit|too many requests|429|(?:hit|reached) your (?:\w+ )?limit|(?:usage|session|weekly|daily|monthly|quota) limit|(?:out of|from your) extra usage|claude\.ai\/settings\/usage|quota (?:reached|hit)|limit.*resets?/i;
 // OpenRouter affordability-style quota errors should be treated as transient
 // so core retry logic can lower maxTokens and continue in-session.
 const AFFORDABILITY_RE = /requires more credits|can only afford|insufficient credits|not enough credits|fewer max_tokens/i;
@@ -96,6 +96,25 @@ const MODEL_ERROR_RE =
 // Genuine auth rejections (401 unauthorized, forbidden, …) still classify as
 // permanent earlier and keep precedence.
 const NO_API_KEY_RE = /no api key (?:available )?(?:for|found)(?: provider)?:?/i;
+// Bare status-line 400 with no diagnostic body — the message is effectively
+// "400 Bad Request" (plus whitespace/newline), OPTIONALLY wrapped by the
+// provider adapter's generic "Provider error:" prefix. Gateways (observed:
+// GitHub Copilot's model router, 2026-09-11) occasionally reject an otherwise-
+// valid kimi-k3 request with a status-only 400 and an empty body; the identical
+// request then succeeds on retry. When the turn's errorMessage is empty/useless,
+// the recovery path classifies the assistant content text instead, which arrives
+// as "Provider error: 400 Bad Request\n" — so the prefix (and a stray leading
+// colon, as in the adapter's "Provider error: : …" timeout form) MUST be
+// tolerated or the status-only 400 is misclassified as `unknown` and hard-pauses
+// auto-mode. Genuine request-shape rejections carry a JSON error body, so they
+// either match MODEL_ERROR_RE above or keep the conservative `unknown` pause
+// below (the anchored `$` after "Bad Request" rejects any trailing body). Only
+// the status-only form is treated as transient: the bounded same-model retry
+// (MAX_NETWORK_RETRIES) disambiguates — a deterministic 400 re-fails cheaply and
+// still reaches the fallback/pause path, while a gateway hiccup recovers on the
+// first retry.
+const BARE_400_STATUS_RE =
+  /^\s*(?:provider error\s*:?\s*)?:?\s*400\s+Bad Request\s*$/i;
 
 // Provider-side model entitlement rejection: the SDK accepted the model switch,
 // but the provider refused at request time because the current account/plan/tier
@@ -213,6 +232,12 @@ export function classifyError(errorMsg: string, retryAfterMs?: number): ErrorCla
   //    Both are fallback-eligible, not same-model transient.
   if (MODEL_ERROR_RE.test(errorMsg) || NO_API_KEY_RE.test(errorMsg)) {
     return { kind: "model-error" };
+  }
+
+  // 7b. Status-only 400 (no diagnostic body) — transient gateway rejection.
+  //     Bounded same-model retry disambiguates from a deterministic rejection.
+  if (BARE_400_STATUS_RE.test(errorMsg)) {
+    return { kind: "network", retryAfterMs: retryAfterMs ?? 3_000 };
   }
 
   // 8. Unknown

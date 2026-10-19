@@ -19,7 +19,7 @@ import { routePausedSessionResume } from "../auto.ts";
 
 test("#1643: paused milestone open but superseded by a different active milestone routes to adopt-active", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M018-6b0xxe",
@@ -29,7 +29,7 @@ test("#1643: paused milestone open but superseded by a different active mileston
 
 test("#1643: adopt-active is skipped when derived state has no active milestone (restore as before)", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: null,
@@ -41,7 +41,7 @@ test("#1643: adopt-active is skipped when derived state has no active milestone 
 
 test("#1643: paused milestone identical to active milestone routes to restore", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M016-5b17xo",
@@ -53,7 +53,7 @@ test("#1643: paused milestone identical to active milestone routes to restore", 
 // false-mismatch — the same normalization the dispatch guard applies.
 test("#1643/#1317: bare paused id vs suffixed active id of the same milestone routes to restore", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016",
     activeMilestoneId: "M016-5b17xo",
@@ -63,7 +63,7 @@ test("#1643/#1317: bare paused id vs suffixed active id of the same milestone ro
 
 test("#1643/#1317: suffixed paused id vs bare active id of the same milestone routes to restore", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M016",
@@ -71,11 +71,11 @@ test("#1643/#1317: suffixed paused id vs bare active id of the same milestone ro
   assert.deepEqual(route, { route: "restore" });
 });
 
-// ─── (c) closed / missing-dir paused milestone → existing behavior unchanged ─
+// ─── (c) closed / missing paused milestone → existing behavior unchanged ─
 
-test("#1643: missing milestone dir still routes to discard(missing), even when superseded", () => {
+test("#1643: a milestone with no row still routes to discard(missing), even when superseded", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: false,
+    milestoneExists: false,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M018-6b0xxe",
@@ -85,12 +85,80 @@ test("#1643: missing milestone dir still routes to discard(missing), even when s
 
 test("#1643: terminal (closed) paused milestone still routes to discard(terminal), even when superseded", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: true,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M018-6b0xxe",
   });
   assert.deepEqual(route, { route: "discard", reason: "terminal" });
+});
+
+// ─── (d) the recorded Recovery Classifier route of a machine_fixable pause ──
+
+test("a machine_fixable pause whose recorded route is retry routes to machine-retry", () => {
+  const route = routePausedSessionResume({
+    milestoneExists: true,
+    summaryIsTerminal: false,
+    pausedMilestoneId: "M016-5b17xo",
+    activeMilestoneId: "M016-5b17xo",
+    machineAction: "retry",
+  });
+  assert.deepEqual(route, { route: "machine-retry" });
+});
+
+test("a recorded escalate route stays a human restore", () => {
+  const route = routePausedSessionResume({
+    milestoneExists: true,
+    summaryIsTerminal: false,
+    pausedMilestoneId: "M016-5b17xo",
+    activeMilestoneId: "M016-5b17xo",
+    machineAction: "escalate",
+  });
+  assert.deepEqual(route, { route: "restore" });
+});
+
+test("no recorded route (a human pause or an older row) stays a human restore", () => {
+  const route = routePausedSessionResume({
+    milestoneExists: true,
+    summaryIsTerminal: false,
+    pausedMilestoneId: "M016-5b17xo",
+    activeMilestoneId: "M016-5b17xo",
+    machineAction: null,
+  });
+  assert.deepEqual(route, { route: "restore" });
+});
+
+test("the machine retry does not outrank the stale-pin exits", () => {
+  assert.deepEqual(
+    routePausedSessionResume({
+      milestoneExists: false,
+      summaryIsTerminal: false,
+      pausedMilestoneId: "M016-5b17xo",
+      activeMilestoneId: null,
+      machineAction: "retry",
+    }),
+    { route: "discard", reason: "missing" },
+  );
+  assert.deepEqual(
+    routePausedSessionResume({
+      milestoneExists: true,
+      summaryIsTerminal: true,
+      pausedMilestoneId: "M016-5b17xo",
+      activeMilestoneId: null,
+      machineAction: "retry",
+    }),
+    { route: "discard", reason: "terminal" },
+  );
+  assert.deepEqual(
+    routePausedSessionResume({
+      milestoneExists: true,
+      summaryIsTerminal: false,
+      pausedMilestoneId: "M016-5b17xo",
+      activeMilestoneId: "M018-6b0xxe",
+      machineAction: "retry",
+    }),
+    { route: "adopt-active", activeMilestoneId: "M018-6b0xxe" },
+  );
 });
 
 // ─── Wiring: the resume path in auto.ts consumes the route ──────────────────
@@ -105,6 +173,7 @@ test("#1643: auto.ts resume path wires adopt-active — clears stale row, adopts
     fs.readFile(new URL("../auto.ts", import.meta.url), "utf-8"),
   );
   assert.ok(source.includes("const resumeRoute = routePausedSessionResume({"));
+  assert.ok(source.includes("machineAction: recordedMachinePauseAction(meta),"));
   assert.ok(source.includes("activeMilestoneId: freshStartAssessment.state?.activeMilestone?.id ?? null"));
   assert.ok(source.includes('clearPausedSession("paused-session DB cleanup failed (milestone superseded)")'));
   assert.ok(source.includes("s.currentMilestoneId = resumeRoute.activeMilestoneId;"));

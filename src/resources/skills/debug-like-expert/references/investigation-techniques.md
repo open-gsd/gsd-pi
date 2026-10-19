@@ -3,7 +3,6 @@
 These are systematic approaches to narrowing down bugs. Each technique is a tool in your debugging toolkit. The skill is knowing which tool to use when.
 </overview>
 
-
 <technique name="binary_search">
 **When to use**: Large codebase, long execution path, or many possible failure points.
 
@@ -41,13 +40,13 @@ You just eliminated 90% of the code in 4 tests.
 **Warning**: Only works for code you can safely comment out. Don't use for initialization code.
 </technique>
 
-
 <technique name="rubber_duck">
 **When to use**: You're stuck, confused, or your mental model doesn't match reality.
 
 **How it works**: Explain the problem out loud (to a rubber duck, a colleague, or in writing) in complete detail.
 
 **Why it works**: Articulating forces you to:
+
 - Make assumptions explicit
 - Notice gaps in your understanding
 - Hear how convoluted your explanation sounds
@@ -56,6 +55,7 @@ You just eliminated 90% of the code in 4 tests.
 **In practice**:
 
 Write or say out loud:
+
 1. "The system should do X"
 2. "Instead it does Y"
 3. "I think this is because Z"
@@ -70,13 +70,13 @@ Often you'll spot the bug mid-explanation: "Wait, I never actually verified that
 </example>
 </technique>
 
-
 <technique name="minimal_reproduction">
 **When to use**: Complex system, many moving parts, unclear which part is failing.
 
 **How it works**: Strip away everything until you have the smallest possible code that reproduces the bug.
 
 **Why it works**:
+
 - Removes distractions
 - Isolates the actual issue
 - Often reveals the bug during the stripping process
@@ -96,6 +96,7 @@ Often you'll spot the bug mid-explanation: "Wait, I never actually verified that
 Start with: 500-line React component with 15 props, 8 hooks, 3 contexts
 
 End with:
+
 ```jsx
 function MinimalRepro() {
   const [count, setCount] = useState(0);
@@ -111,7 +112,6 @@ function MinimalRepro() {
 The bug was hidden in complexity. Minimal reproduction made it obvious.
 </example>
 </technique>
-
 
 <technique name="working_backwards">
 **When to use**: You know what the correct output should be, but don't know why you're not getting it.
@@ -132,6 +132,7 @@ The bug was hidden in complexity. Minimal reproduction made it obvious.
 Problem: UI shows "User not found" when user exists
 
 Trace backwards:
+
 1. UI displays: `user.error` → Is this the right value to display? YES
 2. Component receives: `user.error = "User not found"` → Is this correct? NO, should be null
 3. API returns: `{ error: "User not found" }` → Why?
@@ -142,7 +143,6 @@ Working backwards revealed the bug was in how the ID was passed to the query.
 </example>
 </technique>
 
-
 <technique name="differential_debugging">
 **When to use**: Something used to work and now doesn't. A feature works in one environment but not another.
 
@@ -151,12 +151,14 @@ Working backwards revealed the bug was in how the ID was passed to the query.
 **Questions to ask**:
 
 **Time-based** (it worked, now it doesn't):
+
 - What changed in the code since it worked?
 - What changed in the environment? (Node version, OS, dependencies)
 - What changed in the data? (Database schema, API responses)
 - What changed in the configuration?
 
 **Environment-based** (works in dev, fails in prod):
+
 - What's different between environments?
 - Configuration values
 - Environment variables
@@ -175,6 +177,7 @@ Working backwards revealed the bug was in how the ID was passed to the query.
 Works locally, fails in CI:
 
 Differences:
+
 - Node version: Same ✓
 - Environment variables: Same ✓
 - Timezone: Different! ✗
@@ -186,7 +189,6 @@ Result: Now fails locally too
 </example>
 </technique>
 
-
 <technique name="observability_first">
 **When to use**: Always. Before making any fix.
 
@@ -195,6 +197,7 @@ Result: Now fails locally too
 **Approaches**:
 
 **1. Strategic logging**
+
 ```javascript
 // Not this (useless):
 console.log('in function');
@@ -206,6 +209,7 @@ console.log('[handleSubmit] API response:', response);
 ```
 
 **2. Assertion checks**
+
 ```javascript
 function processUser(user) {
   console.assert(user !== null, 'User is null!');
@@ -215,6 +219,7 @@ function processUser(user) {
 ```
 
 **3. Timing measurements**
+
 ```javascript
 console.time('Database query');
 const result = await db.query(sql);
@@ -222,11 +227,13 @@ console.timeEnd('Database query');
 ```
 
 **4. Stack traces at key points**
+
 ```javascript
 console.log('[updateUser] Called from:', new Error().stack);
 ```
 
 **The workflow**:
+
 1. **Add logging/instrumentation** at suspected points
 2. **Run the code**
 3. **Observe the output**
@@ -235,7 +242,6 @@ console.log('[updateUser] Called from:', new Error().stack);
 
 Don't code in the dark. Light up the execution path first.
 </technique>
-
 
 <technique name="comment_out_everything">
 **When to use**: Many possible interactions, unclear which code is causing the issue.
@@ -261,9 +267,9 @@ app.use(bodyParser.json({ limit: '50mb' })); // Uncomment, test → BREAKS
 
 // Found it: Body size limit too high causes memory issues
 ```
+
 </example>
 </technique>
-
 
 <technique name="git_bisect">
 **When to use**: Feature worked in the past, broke at some unknown commit.
@@ -295,7 +301,6 @@ Git bisect: 7 commits to check
 Time saved: Massive
 </example>
 </technique>
-
 
 <decision_tree>
 **Large codebase, many files**:

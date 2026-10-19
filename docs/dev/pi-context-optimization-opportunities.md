@@ -13,6 +13,7 @@
 **Opportunity**: Anthropic's KV cache delivers 90% cost reduction on cached tokens (0.1x input rate). Claude Code achieves 92–98% cache hit rates by placing stable content before volatile content.
 
 **Where to instrument** (`packages/pi-ai/src/providers/anthropic.ts`):
+
 - Set `cache_control: { type: "ephemeral" }` on the last tool definition block
 - Set `cache_control` after the static system prompt sections (base boilerplate + context files)
 - Leave the per-turn user message uncached
@@ -30,11 +31,13 @@
 **Current state**: `agent-loop.ts` passes the full `context.messages` array to the LLM on every turn. Tool results from 50 turns ago are re-read in full on every subsequent call. The `transformContext` hook exists on `AgentContext` and fires before every LLM call, but has no default implementation — extensions are responsible for any pruning.
 
 **Opportunity**: Replace old tool result content with lightweight placeholders after N turns. JetBrains Research tested this on SWE-bench Verified (500 tasks, up to 250-turn trajectories) and found:
+
 - 50%+ cost reduction vs. unmanaged history
 - Performance matched or slightly exceeded LLM summarization
 - Zero overhead (no extra LLM call required)
 
 **Proposed implementation** (default `transformContext` in `pi-agent-core`):
+
 ```typescript
 // Keep last KEEP_RECENT_TURNS verbatim; mask older tool results
 const KEEP_RECENT_TURNS = 8;
@@ -58,6 +61,7 @@ function defaultObservationMask(messages: AgentMessage[]): AgentMessage[] {
 ## 3. Earlier Compaction Threshold
 
 **Current state** (`packages/pi-coding-agent/src/core/constants.ts`):
+
 ```typescript
 COMPACTION_RESERVE_TOKENS = 16_384   // triggers at contextWindow - 16K
 COMPACTION_KEEP_RECENT_TOKENS = 20_000
@@ -95,6 +99,7 @@ COMPACTION_RESERVE_TOKENS = contextWindow * (1 - COMPACTION_THRESHOLD_PERCENT)
 ## 5. Context File Deduplication and Trim
 
 **Current state** (`packages/pi-coding-agent/src/core/resource-loader.ts`, lines 84–109):
+
 - Searches from `~/.gsd/agent/` → ancestor dirs → cwd
 - Deduplicates by *file path* but not by *content*
 - Entire file content concatenated verbatim into system prompt — no trimming, no summarization
@@ -102,6 +107,7 @@ COMPACTION_RESERVE_TOKENS = contextWindow * (1 - COMPACTION_THRESHOLD_PERCENT)
 **Anti-pattern**: A project with AGENTS.md at 3 ancestor levels (repo root, workspace, home) injects all three in full. If they share common boilerplate, that content is re-injected multiple times.
 
 **Opportunities**:
+
 1. **Content deduplication**: Hash paragraph-level chunks; skip any chunk already seen in a previously-loaded file
 2. **Section-aware loading**: Parse `## ` headings in AGENTS.md; only include sections relevant to the current task type (e.g., `## Testing` section only when running tests)
 3. **Token budget enforcement**: If total context files exceed N tokens, summarize oldest/most-distant file rather than including verbatim
@@ -113,6 +119,7 @@ COMPACTION_RESERVE_TOKENS = contextWindow * (1 - COMPACTION_THRESHOLD_PERCENT)
 **Current state**: When `/skill:name` is invoked, the full skill file content is injected inline as `<skill>...</skill>` in the user message. No chunking, no summarization. A 10KB skill file adds ~2,500 tokens to that turn.
 
 **Opportunity**:
+
 - **Cached skill injection**: If the same skill is used across multiple turns (rare but possible), it's re-injected each time. Cache with `cache_control` after first injection.
 - **Skill digest mode**: Inject a 200-token summary of the skill on first reference; full content only if the model requests it via a `get_skill_detail` tool call. Reduces cost for skills that don't end up being followed.
 - **Skill prefetching**: Before a known long session (e.g., auto-mode start), pre-inject all likely skills with `cache_control` so they're cached for the entire session.
@@ -124,6 +131,7 @@ COMPACTION_RESERVE_TOKENS = contextWindow * (1 - COMPACTION_THRESHOLD_PERCENT)
 **Current state** (`compaction.ts`, line 216): `chars / 4` heuristic. This overestimates token count for English prose (~3.5 chars/token) and underestimates for code with short identifiers or Unicode.
 
 **Opportunity**: Use a proper tokenizer.
+
 - `@anthropic-ai/tokenizer` (tiktoken-compatible, ships with the SDK) — accurate but ~5ms per call
 - Tiered approach: use chars/4 for display; use proper tokenizer only for compaction threshold decisions (where accuracy matters)
 
@@ -138,6 +146,7 @@ COMPACTION_RESERVE_TOKENS = contextWindow * (1 - COMPACTION_THRESHOLD_PERCENT)
 **Findings**: XML tags carry 15–40% more tokens than equivalent Markdown for the same semantic content, due to paired open/close tags. However, Claude was optimized for XML and shows higher accuracy on tasks requiring precise section parsing.
 
 **Recommendation**: Audit XML usage in the pipeline and convert to Markdown where the content is:
+
 - Non-nested (flat instructions, status messages)
 - Human-readable rather than machine-parsed by the model
 - Not requiring precise boundary detection
@@ -153,6 +162,7 @@ Keep XML for: few-shot examples with ambiguous boundaries, skill content (requir
 **Current state**: All tool definitions are included in every LLM request. Tool descriptions consume 60–80% of input tokens in static configurations. As new extensions register tools, the baseline grows linearly.
 
 **Opportunity** (higher complexity): Implement the three-function Dynamic Toolset pattern:
+
 1. `search_tools(query)` — semantic search over tool catalog
 2. `describe_tools(ids[])` — fetch full schemas on demand
 3. `execute_tool(id, params)` — unchanged execution
@@ -168,6 +178,7 @@ Speakeasy measured 91–97% token reduction with 100% task success rate. Trade-o
 **Current state**: `SessionManager.getUsageTotals()` accumulates cost across the entire session. No per-phase or per-agent breakdown is stored. Cost visibility is limited to the footer total and `GSD_SHOW_TOKEN_COST=1` per-turn display.
 
 **Opportunity**: Emit structured cost events that extensions can subscribe to:
+
 ```typescript
 interface CostCheckpointEvent {
   type: "cost_checkpoint";

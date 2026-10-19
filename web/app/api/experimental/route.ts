@@ -1,60 +1,15 @@
-import { homedir } from "node:os"
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
-import { join, dirname } from "node:path"
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml"
+import { readGlobalPreferencesFile, writeGlobalPreferencesFile } from "../../../lib/gsd-preferences-file"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 const NO_STORE = { "Cache-Control": "no-store" } as const
 
-// ─── Helpers (same pattern as remote-questions/route.ts) ─────────────────────
-
-function getPreferencesPath(): string {
-  return join(homedir(), ".gsd", "PREFERENCES.md")
-}
-
-function parseFrontmatter(content: string): { data: Record<string, unknown>; body: string } {
-  const startMarker = content.startsWith("---\r\n") ? "---\r\n" : "---\n"
-  if (!content.startsWith(startMarker)) return { data: {}, body: content }
-  const searchStart = startMarker.length
-  const endIdx = content.indexOf("\n---", searchStart)
-  if (endIdx === -1) return { data: {}, body: content }
-  const block = content.slice(searchStart, endIdx)
-  const afterFrontmatter = content.slice(endIdx + 4)
-  try {
-    const parsed = parseYaml(block.replace(/\r/g, ""))
-    const data = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {}
-    return { data, body: afterFrontmatter }
-  } catch {
-    return { data: {}, body: content }
-  }
-}
-
-function writeFrontmatter(data: Record<string, unknown>, body: string): string {
-  const yamlStr = stringifyYaml(data, { lineWidth: 0 }).trimEnd()
-  return `---\n${yamlStr}\n---${body}`
-}
-
-function readPrefs(): { data: Record<string, unknown>; body: string } {
-  const path = getPreferencesPath()
-  if (!existsSync(path)) return { data: {}, body: "\n" }
-  const content = readFileSync(path, "utf-8")
-  return parseFrontmatter(content)
-}
-
-function writePrefs(data: Record<string, unknown>, body: string): void {
-  const path = getPreferencesPath()
-  const dir = dirname(path)
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(path, writeFrontmatter(data, body), "utf-8")
-}
-
 // ─── GET — read current experimental flags ───────────────────────────────────
 
 export async function GET(): Promise<Response> {
   try {
-    const { data } = readPrefs()
+    const { data } = readGlobalPreferencesFile()
     const exp = typeof data.experimental === "object" && data.experimental !== null
       ? (data.experimental as Record<string, unknown>)
       : {}
@@ -88,7 +43,7 @@ export async function PATCH(request: Request): Promise<Response> {
       )
     }
 
-    const { data, body: mdBody } = readPrefs()
+    const { data, body: mdBody } = readGlobalPreferencesFile()
 
     // Merge into experimental block
     const existing = typeof data.experimental === "object" && data.experimental !== null
@@ -97,7 +52,7 @@ export async function PATCH(request: Request): Promise<Response> {
     existing[flag] = enabled
     data.experimental = existing
 
-    writePrefs(data, mdBody)
+    writeGlobalPreferencesFile(data, mdBody)
 
     return Response.json({ [flag]: enabled }, { headers: NO_STORE })
   } catch (err) {

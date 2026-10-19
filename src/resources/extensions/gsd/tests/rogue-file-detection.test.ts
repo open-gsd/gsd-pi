@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { detectRogueFileWrites } from "../auto-post-unit.ts";
-import { openDatabase, closeDatabase, isDbAvailable, insertMilestone, insertSlice, insertTask, updateSliceStatus, upsertMilestonePlanning } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, isDbAvailable, insertMilestone, insertSlice, insertTask, _getAdapter, upsertMilestonePlanning } from "../gsd-db.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -189,7 +189,11 @@ test("rogue detection: slice summary on disk, DB row with status 'complete' → 
       title: "Test Slice",
       status: "complete",
     });
-    updateSliceStatus("M001", "S01", "complete", new Date().toISOString());
+    // Fixture stamp on the unadopted milestone: raw SQL, the generic status
+    // writer refuses rows without a canonical lifecycle row.
+    _getAdapter()!.prepare(
+      "UPDATE slices SET status = 'complete', completed_at = :ts WHERE milestone_id = 'M001' AND id = 'S01'",
+    ).run({ ":ts": new Date().toISOString() });
 
     const rogues = detectRogueFileWrites("complete-slice", "M001/S01", basePath);
     assert.equal(rogues.length, 0, "Should NOT detect rogue when slice DB row is complete");

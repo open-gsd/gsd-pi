@@ -7,6 +7,8 @@
  * without explicit dependencies use sequential ordering as an implicit constraint.
  */
 
+import type { SliceRead } from "./db/lifecycle-read.js";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface SliceInput {
@@ -70,4 +72,19 @@ export function getEligibleSlices(
   }
 
   return eligible;
+}
+
+/**
+ * Eligibility from the Slices of the read interface (`readMilestoneSlices`).
+ * The interface decides which Slice needs no further work and which Slice
+ * releases its dependents, so this answer agrees with deriveState and the
+ * dispatch guard before and after the Cutover.
+ */
+export function getEligibleSlicesFromRows(
+  rows: ReadonlyArray<Pick<SliceRead, "id" | "done" | "satisfiesDependents" | "depends">>,
+): EligibleSlice[] {
+  return getEligibleSlices(
+    rows.map(row => ({ id: row.id, done: row.done, depends: row.depends })),
+    new Set(rows.filter(row => row.satisfiesDependents).map(row => row.id)),
+  );
 }

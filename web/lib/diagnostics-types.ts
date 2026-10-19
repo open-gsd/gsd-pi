@@ -159,4 +159,6 @@ export interface SkillHealthReport {
   staleSkills: string[]
   decliningSkills: string[]
   suggestions: SkillHealSuggestion[]
+  /** True when per-skill counts reflect availability (skills attached to units), not SKILL.md reads (#2495). */
+  availabilityBased: boolean
 }

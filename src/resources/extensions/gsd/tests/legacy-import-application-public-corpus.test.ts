@@ -85,7 +85,6 @@ const ELIGIBLE_CASES = new Set([
 const PRESERVE_ONLY_CASES = new Set([
   "custom-workflow",
   "jsonl-history",
-  "knowledge-graph",
   "root-external-boundaries",
   "synthetic-smoke",
 ]);
@@ -338,7 +337,11 @@ function expectedInstructionResults(
           || row.value["depends_on_slice_id"] === instruction.sliceId)).length;
       return { ...identity, expectedAffectedRows: 0, affectedRows: deleted };
     }
-    if (instruction.action === "preserve") {
+    if (
+      instruction.action === "preserve"
+      // A slice imported as completed gets no Q8 gate row.
+      || (instruction.action === "seed-quality-gate" && instruction.gateStatus === "complete")
+    ) {
       return { ...identity, expectedAffectedRows: 0, affectedRows: 0 };
     }
     return { ...identity, expectedAffectedRows: 1, affectedRows: 1 };
@@ -516,6 +519,56 @@ test("public Application commits and exactly replays all 12 eligible fresh corpu
         assert.equal(db().prepare(`SELECT lifecycle_status FROM workflow_item_lifecycles
           WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = 'S01' AND task_id = 'T01'`)
           .get()?.["lifecycle_status"], "completed");
+      }
+      if (entry.name === "knowledge-graph") {
+        // Each KNOWLEDGE.md row is one active memories row that carries its knowledge id and cells.
+        assert.deepEqual(rows(`SELECT category, content, scope, superseded_by, structured_fields
+          FROM memories ORDER BY category`).map((row) => ({
+          ...row,
+          structured_fields: JSON.parse(String(row["structured_fields"])),
+        })), [
+          {
+            category: "gotcha",
+            content: "A snapshot drifted",
+            scope: "import",
+            superseded_by: null,
+            structured_fields: {
+              sourceKnowledgeTable: "lessons",
+              whatHappened: "A snapshot drifted",
+              rootCause: "It was treated as truth",
+              fix: "Preserve source evidence",
+              scopeText: "import",
+              sourceKnowledgeId: "L001",
+            },
+          },
+          {
+            category: "pattern",
+            content: "Derived views are replaceable",
+            scope: "project",
+            superseded_by: null,
+            structured_fields: {
+              sourceKnowledgeTable: "patterns",
+              pattern: "Derived views are replaceable",
+              where: "projections",
+              notes: "Rebuild only outside import.",
+              sourceKnowledgeId: "P001",
+            },
+          },
+          {
+            category: "rule",
+            content: "Use database authority.",
+            scope: "authority",
+            superseded_by: null,
+            structured_fields: {
+              sourceKnowledgeTable: "rules",
+              scopeText: "authority",
+              rule: "Use database authority.",
+              why: "Prevent projection drift.",
+              added: "M001",
+              sourceKnowledgeId: "K001",
+            },
+          },
+        ]);
       }
       if (entry.name === "gsd-nested") {
         assert.deepEqual(rows(`SELECT slice_id, depends_on_slice_id FROM slice_dependencies

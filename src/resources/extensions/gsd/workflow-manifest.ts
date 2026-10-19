@@ -4,7 +4,6 @@
 import {
   _getAdapter,
   readTransaction,
-  restoreManifest,
 } from "./gsd-db.js";
 import type { ArtifactRow, MilestoneRow } from "./db-milestone-artifact-rows.js";
 import type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
@@ -16,11 +15,9 @@ import {
   getAllDecisionsFromMemories,
   getDeletedDecisionIdsFromMemories,
 } from "./context-store.js";
-import { backfillDecisionsToMemories } from "./memory-backfill.js";
-import { invalidateAllCaches } from "./cache.js";
 import { logWarning } from "./workflow-logger.js";
 import { readFileSync, existsSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 // ─── Manifest Types ──────────────────────────────────────────────────────
 
@@ -556,56 +553,4 @@ export function readManifest(basePath: string): StateManifest | null {
   }
 
   return parsed;
-}
-
-function stripGsdPrefix(path: string): string {
-  return path.startsWith(".gsd/") ? path.slice(".gsd/".length) : path;
-}
-
-function artifactProjectionPath(basePath: string, artifactPath: string): string {
-  const gsdDir = resolve(basePath, ".gsd");
-  const fullPath = resolve(gsdDir, stripGsdPrefix(artifactPath));
-  const rel = relative(gsdDir, fullPath);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`Malformed manifest: artifact path escapes .gsd: ${artifactPath}`);
-  }
-  return fullPath;
-}
-
-function restoreArtifactProjections(basePath: string, manifest: StateManifest): void {
-  if (manifest.artifacts === undefined) return;
-
-  for (const artifact of manifest.artifacts) {
-    const content = artifact.full_content ?? "";
-    if (content === "") continue;
-
-    atomicWriteSync(
-      artifactProjectionPath(basePath, artifact.path),
-      content,
-    );
-  }
-}
-
-// ─── bootstrapFromManifest ──────────────────────────────────────────────
-
-/**
- * Read state-manifest.json and restore DB state from it.
- * Rehydrates artifact projection files for restored artifacts so file-based
- * fallback paths see the same evidence as the DB.
- * Re-mirrors restored legacy decisions into memories so the ADR-013
- * memory-backed decision readers see bootstrapped decisions immediately.
- * Returns true if bootstrap succeeded, false if manifest file doesn't exist.
- */
-export function bootstrapFromManifest(basePath: string): boolean {
-  const manifest = readManifest(basePath);
-
-  if (!manifest) {
-    return false;
-  }
-
-  restoreManifest(manifest);
-  restoreArtifactProjections(basePath, manifest);
-  backfillDecisionsToMemories();
-  invalidateAllCaches();
-  return true;
 }

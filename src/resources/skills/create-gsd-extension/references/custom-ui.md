@@ -3,6 +3,7 @@ Complete custom UI reference — dialogs, persistent elements, custom components
 </overview>
 
 <ui_architecture>
+
 ```
 ┌─────────────────────────────────────────────────┐
 │  Custom Header (ctx.ui.setHeader)               │
@@ -55,6 +56,7 @@ interface Component {
 ```
 
 **Render contract:**
+
 - Return array of strings, one per line
 - Each string MUST NOT exceed `width` in visible characters
 - ANSI escape codes don't count toward visible width
@@ -62,6 +64,7 @@ interface Component {
 - Return `[]` for zero-height component
 
 **Invalidation contract:**
+
 - Clear ALL cached render output
 - Clear any pre-baked themed strings
 - Call `super.invalidate()` if extending a built-in component
@@ -87,9 +90,11 @@ const ok = await ctx.ui.confirm("Timed", "Auto-cancels in 5s", { signal: control
 clearTimeout(timeoutId);
 if (controller.signal.aborted) { /* timed out */ }
 ```
+
 </dialogs>
 
 <persistent_ui>
+
 ```typescript
 // Footer status (multiple extensions can set independent entries)
 ctx.ui.setStatus("my-ext", "● Active");
@@ -140,6 +145,7 @@ const themes = ctx.ui.getAllThemes();
 ctx.ui.setTheme("light");
 ctx.ui.theme.fg("accent", "text");  // Access current theme
 ```
+
 </persistent_ui>
 
 <custom_components>
@@ -155,6 +161,7 @@ ctx.ui.theme.fg("accent", "text");  // Access current theme
 | `done` | `(value: T) => void` | Close component and return value |
 
 **Inline pattern:**
+
 ```typescript
 const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => ({
   render(width: number): string[] {
@@ -169,6 +176,7 @@ const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done
 ```
 
 **Class-based pattern (recommended for complex UI):**
+
 ```typescript
 class MyComponent {
   private selected = 0;
@@ -210,6 +218,7 @@ const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) =>
 ```
 
 **Composing with built-in components:**
+
 ```typescript
 const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
   const container = new Container();
@@ -234,6 +243,7 @@ const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
   };
 });
 ```
+
 </custom_components>
 
 <overlays>
@@ -262,6 +272,7 @@ const result = await ctx.ui.custom<string | null>(
 ```
 
 **Anchor positions:**
+
 ```
 top-left      top-center      top-right
 left-center      center      right-center
@@ -323,6 +334,7 @@ ctx.ui.setEditorComponent(undefined);  // Restore default
 | `Editor` | `new Editor(tui, editorTheme)` | Multi-line editor with undo |
 
 **SelectList usage:**
+
 ```typescript
 const items: SelectItem[] = [
   { value: "opt1", label: "Option 1", description: "First option" },
@@ -340,6 +352,7 @@ selectList.onCancel = () => { /* escape pressed */ };
 ```
 
 **SettingsList usage:**
+
 ```typescript
 const items: SettingItem[] = [
   { id: "verbose", label: "Verbose mode", currentValue: "off", values: ["on", "off"] },
@@ -362,6 +375,7 @@ const settings = new SettingsList(items, 15, getSettingsListTheme(),
 </built_in_components>
 
 <keyboard_input>
+
 ```typescript
 import { matchesKey, Key } from "@gsd/pi-tui";
 
@@ -393,6 +407,7 @@ handleInput(data: string) {
 ```
 
 **handleInput contract:**
+
 1. Check for your keys
 2. Update state
 3. Call `this.invalidate()` if render output changes
@@ -437,6 +452,7 @@ class CachedComponent {
 **Update cycle:** State changes → `invalidate()` → `tui.requestRender()` → `render(width)` called
 
 **Game loop pattern** (real-time updates):
+
 ```typescript
 this.interval = setInterval(() => {
   this.tick();
@@ -447,6 +463,7 @@ this.interval = setInterval(() => {
 // Clean up in dispose()
 clearInterval(this.interval);
 ```
+
 </performance_caching>
 
 <theme_colors>
@@ -469,14 +486,17 @@ Always use theme from callback params, never import directly.
 **All background colors:** `selectedBg`, `userMessageBg`, `customMessageBg`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`
 
 **Syntax highlighting:**
+
 ```typescript
 import { highlightCode, getLanguageFromPath } from "@gsd/pi-coding-agent";
 const lang = getLanguageFromPath("/file.rs");  // "rust"
 const highlighted = highlightCode(code, lang, theme);
 ```
+
 </theme_colors>
 
 <common_mistakes>
+
 1. **Lines exceed width** → Visual corruption. Use `truncateToWidth()` on every line.
 2. **Forgetting `tui.requestRender()`** → UI doesn't update. Call after invalidate().
 3. **Importing theme directly** → Wrong colors after theme switch. Use theme from callback.

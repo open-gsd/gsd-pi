@@ -134,7 +134,7 @@ export class GSDNotificationOverlay {
       matchesKey(data, Key.escape) ||
       matchesKey(data, Key.ctrl("c")) ||
       matchesKey(data, Key.ctrlAlt("n")) ||
-      matchesKey(data, Key.ctrlShift("n"))
+      matchesKey(data, Key.alt("n"))
     ) {
       this.dispose();
       this.onClose();

@@ -63,6 +63,7 @@ keyHint("selectConfirm", "to select")
 // Raw key hint (always shows literal key)
 rawKeyHint("Ctrl+O", "to expand")
 ```
+
 </key_hints>
 
 <message_rendering>
@@ -88,18 +89,22 @@ pi.sendMessage({
   details: { foo: "bar" },
 });
 ```
+
 </message_rendering>
 
 <syntax_highlighting>
+
 ```typescript
 import { highlightCode, getLanguageFromPath } from "@gsd/pi-coding-agent";
 
 const lang = getLanguageFromPath("/path/to/file.rs");  // "rust"
 const highlighted = highlightCode(code, lang, theme);
 ```
+
 </syntax_highlighting>
 
 <best_practices>
+
 - Return `Text` with padding `(0, 0)` — the wrapping `Box` handles padding
 - Support `expanded` for detail on demand
 - Handle `isPartial` for streaming progress

@@ -117,15 +117,19 @@ This milestone is complete only when all are true:
 ### S01 → S02
 
 Produces:
+
 - {{concreteOutput — API, type, data shape, interface, or invariant}}
 
 Consumes:
+
 - nothing (first slice)
 
 ### S01 → S03
 
 Produces:
+
 - {{concreteOutput — API, type, data shape, interface, or invariant}}
 
 Consumes:
+
 - nothing (first slice)

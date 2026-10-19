@@ -12,9 +12,9 @@
 import { readFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { createProjectionDirectorySync, removeProjectionFileSync } from "./atomic-write.js";
 import { logWarning } from "./workflow-logger.js";
-import { isClosedStatus, isHiddenFromRoadmap, toStatus } from "./status-guards.js";
+import { isClosedStatus, isDiscardedMilestoneStatus, isHiddenFromRoadmap, toStatus } from "./status-guards.js";
 import { isCanonicalStagedTaskSummaryState } from "./task-summary-projection-policy.js";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   getAllMilestones,
   getMilestone,
@@ -27,15 +27,19 @@ import {
   getSlice,
   insertArtifact,
   deleteArtifactByPath,
+  getArtifact,
+  getArtifactContentHash,
   getGateResults,
+  getLatestAssessmentByScope,
+  getLatestWorkflowDomainEvent,
   getDbOrNull,
   isDbAvailable,
 } from "./gsd-db.js";
+import { createHash } from "node:crypto";
 import type { MilestoneRow, ArtifactRow } from "./db-milestone-artifact-rows.js";
 import type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
 import type { GateRow } from "./types.js";
 import {
-  resolveDir,
   resolveFile,
   resolveSliceFile,
   resolveSlicePath,
@@ -49,12 +53,23 @@ import {
   buildTaskFileName,
   buildSliceFileName,
 } from "./paths.js";
-import { saveFile, clearParseCache, registerCacheClearCallback } from "./files.js";
+import { clearParseCache, registerCacheClearCallback } from "./files.js";
 import { parseProjectionRoadmap } from "./schemas/parsers.js";
 import { stripIdPrefix } from "./strip-id-prefix.js";
+import { renderMilestoneParkedMarker } from "./milestone-park-projection.js";
+import {
+  readLatestSliceWorkCheckpoint,
+  readWorkCheckpoint,
+  renderWorkCheckpointMarkdown,
+} from "./work-checkpoint.js";
 import { invalidateStateCache } from "./state.js";
 import { clearPathCache, milestonesDir, legacyMilestonesDir, isLegacyMilestonesLayout, resolveMilestonePath, relSliceFile, canonicalPhaseDirName } from "./paths.js";
-import { readCompatMarker, writeCompatMarker, computeProjectionSha, deriveCompatProjectionKey } from "./compat/compat-marker.js";
+import {
+  readCompatMarker,
+  deriveCompatProjectionKey,
+  writeProjectionFile,
+  writeProjectionFileSync,
+} from "./compat/compat-marker.js";
 import type { RiskLevel } from "./types.js";
 import {
   phaseDirName,
@@ -64,62 +79,6 @@ import {
   readMilestoneCompletionProjection,
   renderMilestoneSummaryMarkdown,
 } from "./milestone-summary-projection.js";
-
-// ─── Compat marker invalidation ───────────────────────────────────────────
-// Every successful projection write pushes its (basePath, projectionPath,
-// entities) here; invalidateCaches() drains it and refreshes .gsd/.compat.json
-// so the next reconcile pass sees gsd-pi's own writes as expected. This is the
-// feedback-loop-prevention mechanism for cross-tool compatibility.
-const _pendingProjectionWrites: Array<{
-  basePath: string;
-  projectionPath: string;
-  entities: string[];
-  sha: string;
-}> = [];
-
-function recordProjectionWrite(
-  basePath: string,
-  projectionPath: string,
-  entities: string[],
-  content: string,
-): void {
-  _pendingProjectionWrites.push({
-    basePath,
-    projectionPath,
-    entities,
-    sha: computeProjectionSha(content),
-  });
-}
-
-function flushProjectionWritesToMarker(): void {
-  if (_pendingProjectionWrites.length === 0) return;
-  // Group by basePath (defensive — multiple projects are unusual but possible).
-  const byBase = new Map<string, Map<string, { entities: string[]; sha: string }>>();
-  for (const w of _pendingProjectionWrites) {
-    let bucket = byBase.get(w.basePath);
-    if (!bucket) { bucket = new Map(); byBase.set(w.basePath, bucket); }
-    bucket.set(w.projectionPath, { entities: w.entities, sha: w.sha });
-  }
-  _pendingProjectionWrites.length = 0;
-
-  for (const [basePath, writes] of byBase) {
-    try {
-      const marker = readCompatMarker(basePath);
-      for (const [projectionPath, write] of writes) {
-        marker.projections[projectionPath] = {
-          sha: write.sha,
-          entities: write.entities,
-        };
-      }
-      marker.lastWriter = "gsd-pi";
-      marker.lastProjectedAt = new Date().toISOString();
-      writeCompatMarker(basePath, marker);
-    } catch (e) {
-      // Marker I/O must never break projection. Reconcile will heal on next run.
-      logWarning("renderer", `compat marker flush failed: ${(e as Error).message}`);
-    }
-  }
-}
 
 // ─── State-version stamp ──────────────────────────────────────────────────
 // Every projection written by this renderer carries an additive trailing
@@ -186,6 +145,17 @@ export function stripProjectionStamp(content: string): string {
 }
 
 /**
+ * Comparable form of projection content for drift judgment: stamp-insensitive
+ * and trailing-newline-insensitive. The stamp separator adds a newline to
+ * newline-less render intent — indistinguishable from the content's own
+ * trailing newline at strip time — and trailing newline runs carry no semantic
+ * content, so neither can constitute drift (issue #2427).
+ */
+export function comparableProjectionContent(content: string): string {
+  return stripProjectionStamp(content).replace(/(?:\r\n|\r|\n)+$/u, "");
+}
+
+/**
  * Append the state-version stamp at the fixed end-of-file position. Any prior
  * trailing stamp is replaced, so re-renders of replayed artifact content stay
  * byte-stable instead of accumulating stamp lines.
@@ -212,7 +182,6 @@ function toArtifactPath(absPath: string, basePath: string): string {
  * Invalidate all caches after a disk write.
  */
 function invalidateCaches(): void {
-  flushProjectionWritesToMarker();
   invalidateStateCache();
   clearPathCache();
   clearParseCache();
@@ -266,18 +235,62 @@ function sanitizeInlineRoadmapText(value: string | null | undefined): string {
     .trim();
 }
 
-function isMilestoneFlatPhaseLayout(basePath: string, milestoneId: string): boolean {
-  const existing = resolveMilestonePath(basePath, milestoneId);
-  const legacyBase = legacyMilestonesDir(basePath);
-  return existing
-    ? !(existing.startsWith(legacyBase + "/") || existing.startsWith(legacyBase + "\\"))
-    : !isLegacyMilestonesLayout(basePath);
+// ─── Skip-if-unchanged (#2349) ────────────────────────────────────────────
+// A zero-drift rebuild previously rewrote every projection: an fsync'd
+// saveFile plus a full-content artifact row plus invalidateCaches() per file,
+// which takes hours on large projects. writeAndStore therefore short-circuits
+// only when ALL three baselines already match this render — on-disk bytes and
+// the compat-marker entry (sha AND entity scope), both checked by
+// writeProjectionFile, and the DB artifact row (content AND
+// artifact_type/milestone/slice/task scope). Any single mismatch — a drifted
+// file, a missing/diverged/mis-scoped row, an absent/mis-scoped marker entry —
+// is repaired, so drift repair is never skipped.
+function projectionEntities(opts: {
+  milestone_id: string;
+  slice_id?: string;
+  task_id?: string;
+}): string[] {
+  const entities: string[] = [];
+  if (opts.milestone_id) entities.push(opts.milestone_id);
+  if (opts.milestone_id && opts.slice_id) entities.push(`${opts.milestone_id}/${opts.slice_id}`);
+  if (opts.milestone_id && opts.slice_id && opts.task_id) entities.push(`${opts.milestone_id}/${opts.slice_id}/${opts.task_id}`);
+  return entities;
+}
+
+/** True when the artifacts row already stores exactly these rendered bytes. */
+function artifactRowHoldsRender(
+  artifactPath: string,
+  stamped: string,
+  opts: {
+    artifact_type: string;
+    milestone_id: string;
+    slice_id?: string;
+    task_id?: string;
+  },
+): boolean {
+  const artifact = getArtifact(artifactPath);
+  if (
+    !artifact ||
+    artifact.full_content !== stamped ||
+    artifact.artifact_type !== opts.artifact_type ||
+    artifact.milestone_id !== opts.milestone_id ||
+    (artifact.slice_id ?? null) !== (opts.slice_id ?? null) ||
+    (artifact.task_id ?? null) !== (opts.task_id ?? null)
+  ) {
+    return false;
+  }
+  // insertArtifact recomputes content_hash on every write; a row whose hash
+  // diverged (NULL or stale) must be repaired, not skipped (#2349).
+  return getArtifactContentHash(artifactPath) === createHash("sha256").update(stamped).digest("hex");
 }
 
 /**
  * Write rendered content to disk and update the artifacts table.
  * The content is stamped with the current DB state version before writing;
  * disk bytes, artifact content, and the returned string are identical.
+ * The file and its marker baseline go through writeProjectionFile, the one
+ * write rule of a projection file. When every baseline already matches
+ * (#2349), nothing is written and the stamped content is still returned.
  */
 async function writeAndStore(
   absPath: string,
@@ -292,17 +305,23 @@ async function writeAndStore(
   basePath: string,
 ): Promise<string> {
   const stamped = stampProjectionContent(content);
-  await saveFile(absPath, stamped);
+  const written = await writeProjectionFile(basePath, absPath, stamped, projectionEntities(opts));
 
+  let stored = false;
   try {
-    insertArtifact({
-      path: artifactPath,
-      artifact_type: opts.artifact_type,
-      milestone_id: opts.milestone_id,
-      slice_id: opts.slice_id ?? null,
-      task_id: opts.task_id ?? null,
-      full_content: stamped,
-    });
+    // A repair of a changed or deleted file re-renders bytes the row already
+    // holds; that render must not write the database.
+    if (!artifactRowHoldsRender(artifactPath, stamped, opts)) {
+      insertArtifact({
+        path: artifactPath,
+        artifact_type: opts.artifact_type,
+        milestone_id: opts.milestone_id,
+        slice_id: opts.slice_id ?? null,
+        task_id: opts.task_id ?? null,
+        full_content: stamped,
+      });
+      stored = true;
+    }
   } catch (error) {
     // Disk is a rebuildable projection, but callers must not report success
     // without its authoritative artifact lineage. The unstored disk copy is
@@ -315,18 +334,7 @@ async function writeAndStore(
     );
   }
 
-  // Record the projection write so invalidateCaches() can refresh the compat
-  // marker. basePath is optional only to avoid forcing every caller; when
-  // present, the marker gets updated. artifactPath is already .gsd/-relative.
-  if (basePath) {
-    const entities: string[] = [];
-    if (opts.milestone_id) entities.push(opts.milestone_id);
-    if (opts.milestone_id && opts.slice_id) entities.push(`${opts.milestone_id}/${opts.slice_id}`);
-    if (opts.milestone_id && opts.slice_id && opts.task_id) entities.push(`${opts.milestone_id}/${opts.slice_id}/${opts.task_id}`);
-    recordProjectionWrite(basePath, artifactPath, entities, stamped);
-  }
-
-  invalidateCaches();
+  if (written || stored) invalidateCaches();
   return stamped;
 }
 
@@ -681,6 +689,29 @@ export async function renderTaskPlanFromDb(
   return { taskPlanPath: absPath, content: stamped };
 }
 
+function isUnplanned(milestone: MilestoneRow, roadmapSlices: SliceRow[]): boolean {
+  return roadmapSlices.length === 0 && !milestone.vision.trim();
+}
+
+/** True when the milestone was never planned (zero roadmap slices, empty vision); it has no ROADMAP by design. */
+export function isUnplannedMilestone(milestone: MilestoneRow): boolean {
+  return isUnplanned(
+    milestone,
+    getMilestoneSlices(milestone.id).filter((slice) => !isHiddenFromRoadmap(slice.status)),
+  );
+}
+
+/**
+ * ROADMAP.md content of a milestone, rendered from its database rows. Returns
+ * null when the milestone is not in the database or was never planned.
+ */
+export function renderRoadmapContentFromDb(milestoneId: string): string | null {
+  const milestone = getMilestone(milestoneId);
+  if (!milestone) return null;
+  const slices = getMilestoneSlices(milestoneId).filter((slice) => !isHiddenFromRoadmap(slice.status));
+  return isUnplanned(milestone, slices) ? null : renderRoadmapMarkdown(milestone, slices);
+}
+
 export async function renderRoadmapFromDb(
   basePath: string,
   milestoneId: string,
@@ -697,7 +728,7 @@ export async function renderRoadmapFromDb(
   );
 
   // Refuse to render a stub ROADMAP for an unplanned milestone (#852).
-  // A milestone row created by gsd_milestone_generate_id / ensureMilestoneDbRow
+  // A milestone row created by gsd_milestone_generate_id (milestone.register)
   // starts with title="" / vision="" and zero slices. Rendering that produces a
   // 38-byte stub (`# M015: M015\n\n**Vision:** \n\n## Slices`) which passes
   // existsSync but fails the plan-milestone "zero slices" content check —
@@ -706,7 +737,7 @@ export async function renderRoadmapFromDb(
   // least one slice, so zero-slice + empty-vision is a reliable "never planned"
   // signal. Skip the write so verification sees a genuinely missing file (a
   // clear "write the ROADMAP" failure) instead of a misleading stub.
-  if (slices.length === 0 && !milestone.vision.trim()) {
+  if (isUnplanned(milestone, slices)) {
     logWarning(
       "projection",
       `renderRoadmapFromDb skipped unplanned milestone ${milestoneId} (zero slices, empty vision) — refusing to write a stub ROADMAP`,
@@ -737,6 +768,29 @@ export async function renderRoadmapFromDb(
   return { roadmapPath: absPath, content: stamped };
 }
 
+/**
+ * Render the milestone ROADMAP to disk WITHOUT writing the artifacts table
+ * (P35): a completion operation already enqueued the projection work whose
+ * drain stores the row. A tool handler rendering between the operation and
+ * the drain must not write a workflow table outside it.
+ */
+export async function renderRoadmapToDisk(
+  basePath: string,
+  milestoneId: string,
+): Promise<boolean> {
+  const milestone = getMilestone(milestoneId);
+  if (!milestone) return false;
+  const slices = getMilestoneSlices(milestoneId).filter(
+    (slice) => !isHiddenFromRoadmap(slice.status),
+  );
+  if (isUnplanned(milestone, slices)) return false;
+  const absPath = targetMilestoneFile(basePath, milestoneId, "ROADMAP", milestone.title);
+  const content = renderRoadmapMarkdown(milestone, slices);
+  const stamped = stampProjectionContent(content);
+  await writeProjectionFile(basePath, absPath, stamped, [milestoneId]);
+  return true;
+}
+
 // ─── Roadmap Checkbox Rendering ───────────────────────────────────────────
 
 /**
@@ -763,34 +817,200 @@ export async function renderMilestoneArtifactsFromDb(
   basePath: string,
   milestoneId: string,
 ): Promise<boolean> {
-  const artifacts = getMilestoneScopedArtifacts(milestoneId);
-  if (artifacts.length === 0) return false;
-
-  const milestone = getMilestone(milestoneId);
-  const milestoneComplete = toStatus(milestone?.status ?? "") === "complete";
-
-  let wrote = false;
-  for (const artifact of artifacts) {
-    if (artifact.artifact_type === "ROADMAP") continue;
-    if (artifact.artifact_type.toUpperCase() === "SUMMARY" && !milestoneComplete) continue;
-    if (!artifact.full_content.trim()) continue;
-
-    const absPath = targetMilestoneFile(
-      basePath,
-      milestoneId,
-      artifact.artifact_type,
-      milestone?.title,
-    );
+  const writes = milestoneArtifactWrites(basePath, milestoneId);
+  for (const { absPath, artifactPath, artifact } of writes) {
     mkdirSync(dirname(absPath), { recursive: true });
-    const artifactPath = toArtifactPath(absPath, basePath);
     await writeAndStore(absPath, artifactPath, artifact.full_content, {
       artifact_type: artifact.artifact_type,
       milestone_id: milestoneId,
     }, basePath);
-    wrote = true;
   }
+  return writes.length > 0;
+}
 
-  return wrote;
+interface ArtifactWrite {
+  absPath: string;
+  artifactPath: string;
+  artifact: ArtifactRow;
+}
+
+/**
+ * Absolute projection path for a milestone-scoped artifact row's stored
+ * location, or null when the row carries no usable path. Stored paths are
+ * projection-root-relative; some legacy rows keep a ".gsd/" prefix.
+ */
+function milestoneArtifactStoredPath(basePath: string, artifact: ArtifactRow): string | null {
+  if (!artifact.path) return null;
+  const rel = artifact.path.replace(/^\.gsd[/\\]/, "");
+  if (rel.startsWith("/") || rel.startsWith("\\") || rel.split(/[/\\]/).includes("..")) return null;
+  return join(gsdProjectionRoot(basePath), rel);
+}
+
+/**
+ * Per-row projection targets for milestone-scoped artifact rows (#2535).
+ *
+ * Rows sharing an artifact_type live at different files: a milestone
+ * ASSESSMENT at NN-ASSESSMENT.md and the gsd_reassess_roadmap row (also
+ * stored as artifact_type ASSESSMENT) at NN-ROADMAP-ASSESSMENT.md. Deriving
+ * every target from artifact_type alone collapses the group onto one file —
+ * the render overwrites one row's content with the other's, and the drift
+ * check diffs the wrong file, emitting a stale-render reason no repair branch
+ * handles.
+ *
+ * Within a type group exactly one row owns the canonical target — the row
+ * whose stored path already is the canonical file, else the row whose stored
+ * basename matches it, else the first row in path order. Every other row
+ * keeps its own filename in the canonical milestone directory, which also
+ * carries rows through a phase-dir rename without resurrecting the old
+ * directory. Single-row groups resolve to the canonical target unchanged
+ * (legacy-compat filenames still heal, and flat-phase migration still renders
+ * flat-phase rows).
+ */
+function resolveMilestoneArtifactTargets(
+  basePath: string,
+  milestoneId: string,
+  artifacts: ArtifactRow[],
+  milestoneTitle?: string,
+): Map<string, string> {
+  const targets = new Map<string, string>();
+  const groupByType = new Map<string, ArtifactRow[]>();
+  for (const artifact of artifacts) {
+    const group = groupByType.get(artifact.artifact_type) ?? [];
+    group.push(artifact);
+    groupByType.set(artifact.artifact_type, group);
+  }
+  for (const artifact of artifacts) {
+    const canonical = targetMilestoneFile(basePath, milestoneId, artifact.artifact_type, milestoneTitle);
+    const group = groupByType.get(artifact.artifact_type)!;
+    if (group.length === 1) {
+      targets.set(artifact.path, canonical);
+      continue;
+    }
+    const canonicalOwner =
+      group.find((row) => milestoneArtifactStoredPath(basePath, row) === canonical)
+      ?? group.find((row) => {
+        const stored = milestoneArtifactStoredPath(basePath, row);
+        return stored !== null && basename(stored) === basename(canonical);
+      })
+      // Foreign basenames (e.g. legacy M001-*.md rows rendered into a flat
+      // phase dir during migration): the first row in path order owns the
+      // canonical name so the siblings still keep their own filenames and
+      // their content survives layout translation.
+      ?? group[0];
+    if (canonicalOwner === artifact) {
+      targets.set(artifact.path, canonical);
+      continue;
+    }
+    const stored = milestoneArtifactStoredPath(basePath, artifact);
+    targets.set(artifact.path, stored ? join(dirname(canonical), basename(stored)) : canonical);
+  }
+  return targets;
+}
+
+/**
+ * Milestone artifact types whose file is rendered from a structured source,
+ * so the artifact row is not a render input: the roadmap, and each assessment
+ * kind that has its assessment row.
+ */
+function structuredMilestoneArtifactTypes(milestoneId: string): Set<string> {
+  const types = new Set(["ROADMAP"]);
+  if (getLatestAssessmentByScope(milestoneId, "roadmap")) types.add("ROADMAP-ASSESSMENT");
+  if (getLatestAssessmentByScope(milestoneId, "milestone-validation")) types.add("VALIDATION");
+  if (readWorkCheckpoint({ milestoneId })) types.add("CONTINUE");
+  return types;
+}
+
+/** The milestone-scoped artifact rows that the render writes, each with its target file. */
+function milestoneArtifactWrites(basePath: string, milestoneId: string): ArtifactWrite[] {
+  const milestone = getMilestone(milestoneId);
+  const milestoneComplete = toStatus(milestone?.status ?? "") === "complete";
+  const structured = structuredMilestoneArtifactTypes(milestoneId);
+  const rows = getMilestoneScopedArtifacts(milestoneId);
+  const targets = resolveMilestoneArtifactTargets(basePath, milestoneId, rows, milestone?.title);
+  return rows
+    .filter((artifact) =>
+      !structured.has(artifact.artifact_type.toUpperCase())
+      && !(artifact.artifact_type.toUpperCase() === "SUMMARY" && !milestoneComplete)
+      && artifact.full_content.trim() !== "")
+    .map((artifact) => {
+      const absPath = targets.get(artifact.path)
+        ?? targetMilestoneFile(basePath, milestoneId, artifact.artifact_type, milestone?.title);
+      return { absPath, artifactPath: toArtifactPath(absPath, basePath), artifact };
+    });
+}
+
+/** The slice-scoped artifact rows that the render writes, each with its target file. */
+function sliceArtifactWrites(basePath: string, milestoneId: string, sliceId: string): ArtifactWrite[] {
+  const slice = getSlice(milestoneId, sliceId);
+  const sliceComplete = toStatus(slice?.status ?? "") === "complete";
+  const replanned = latestSliceReplan(milestoneId, sliceId) !== null;
+  const checkpointed = readLatestSliceWorkCheckpoint(milestoneId, sliceId) !== null;
+  return getSliceScopedArtifacts(milestoneId, sliceId)
+    .filter((artifact) => {
+      const artifactType = artifact.artifact_type.toUpperCase();
+      if (!artifact.full_content.trim()) return false;
+      // The replan event is the structured source of REPLAN; its row is not replayed.
+      if (artifactType === "REPLAN" && replanned) return false;
+      // The Work Checkpoint row is the structured source of CONTINUE (renderWorkCheckpoint).
+      if (artifactType === "CONTINUE" && checkpointed) return false;
+      if ((artifactType === "SUMMARY" || artifactType === "UAT") && !sliceComplete) return false;
+      // The slice row is the structured source of SUMMARY and UAT (renderSliceSummary).
+      // A replay can also resolve to the milestone SUMMARY file: for S01 of M001,
+      // the plan-number-only name 01-SUMMARY.md is the milestone file name.
+      if (artifactType === "SUMMARY" && slice?.full_summary_md) return false;
+      if (artifactType === "UAT" && slice?.full_uat_md) return false;
+      return !(artifactType === "PLAN" && isAutoRecoveryPlaceholderPlan(artifact.full_content));
+    })
+    .map((artifact) => {
+      const absPath = join(
+        basePath,
+        relSliceFile(basePath, milestoneId, sliceId, artifact.artifact_type.toUpperCase()),
+      );
+      return { absPath, artifactPath: toArtifactPath(absPath, basePath), artifact };
+    });
+}
+
+/**
+ * Artifact paths (relative to the projection root) of the files that the
+ * milestone render writes from the database: the ROADMAP of a planned
+ * milestone, each milestone and slice artifact row that is not skipped, the
+ * slice PLAN that lists the tasks, the slice SUMMARY and UAT, and each task
+ * SUMMARY.
+ */
+export function milestoneRenderArtifactPaths(basePath: string, milestoneId: string): Set<string> {
+  const paths = new Set<string>();
+  const milestone = getMilestone(milestoneId);
+  if (!milestone) return paths;
+  if (!isUnplannedMilestone(milestone)) {
+    paths.add(toArtifactPath(targetMilestoneFile(basePath, milestoneId, "ROADMAP", milestone.title), basePath));
+  }
+  for (const write of milestoneArtifactWrites(basePath, milestoneId)) paths.add(write.artifactPath);
+  if (getLatestAssessmentByScope(milestoneId, "roadmap")) {
+    paths.add(toArtifactPath(resolveRoadmapAssessmentProjectionPath(basePath, milestoneId), basePath));
+  }
+  if (getLatestAssessmentByScope(milestoneId, "milestone-validation")) {
+    paths.add(toArtifactPath(targetMilestoneFile(basePath, milestoneId, "VALIDATION", milestone.title), basePath));
+  }
+  for (const slice of getMilestoneSlices(milestoneId)) {
+    for (const write of sliceArtifactWrites(basePath, milestoneId, slice.id)) paths.add(write.artifactPath);
+    if (latestSliceReplan(milestoneId, slice.id)) {
+      paths.add(toArtifactPath(targetSliceFile(basePath, milestoneId, slice.id, "REPLAN", milestone.title), basePath));
+    }
+    if (getActivePlanTasks(milestoneId, slice.id).length > 0) {
+      paths.add(toArtifactPath(planProjectionPath(basePath, milestoneId, slice.id), basePath));
+    }
+    for (const target of sliceSummaryTargets(basePath, milestoneId, slice.id)) {
+      paths.add(toArtifactPath(target.absPath, basePath));
+    }
+    for (const task of getSliceTasks(milestoneId, slice.id)) {
+      if (!taskSummaryIsProjected(milestoneId, slice.id, task)) continue;
+      paths.add(toArtifactPath(
+        targetTaskFile(basePath, milestoneId, slice.id, task.id, "SUMMARY", milestone.title),
+        basePath,
+      ));
+    }
+  }
+  return paths;
 }
 
 /** Render the canonical Milestone closeout from its immutable completion event. */
@@ -819,6 +1039,35 @@ export async function renderMilestoneSummary(
 }
 
 /**
+ * Render the CONTINUE file of a milestone or a slice from its Work Checkpoint
+ * row: the head checkpoint of the milestone, or the newest checkpoint of the
+ * slice and its tasks. The file is a one-way render; resume reads the row.
+ * Returns false when no checkpoint exists.
+ */
+export async function renderWorkCheckpoint(
+  basePath: string,
+  milestoneId: string,
+  sliceId?: string,
+): Promise<boolean> {
+  const checkpoint = sliceId
+    ? readLatestSliceWorkCheckpoint(milestoneId, sliceId)
+    : readWorkCheckpoint({ milestoneId });
+  if (!checkpoint) return false;
+  const title = getMilestone(milestoneId)?.title;
+  const absPath = sliceId
+    ? join(basePath, relSliceFile(basePath, milestoneId, sliceId, "CONTINUE", title))
+    : targetMilestoneFile(basePath, milestoneId, "CONTINUE", title);
+  createProjectionDirectorySync(dirname(absPath));
+  await writeProjectionFile(
+    basePath,
+    absPath,
+    stampProjectionContent(renderWorkCheckpointMarkdown(checkpoint)),
+    projectionEntities({ milestone_id: milestoneId, slice_id: sliceId }),
+  );
+  return true;
+}
+
+/**
  * Slice-scoped artifacts (CONTEXT, RESEARCH, CONTINUE, etc.) must survive
  * layout migration. PLAN is normally regenerated from task rows, but a real
  * imported PLAN can still be replayed as a fallback; known recovery stubs are
@@ -829,29 +1078,16 @@ export async function renderSliceArtifactsFromDb(
   milestoneId: string,
   sliceId: string,
 ): Promise<boolean> {
-  const artifacts = getSliceScopedArtifacts(milestoneId, sliceId);
-  if (artifacts.length === 0) return false;
-  const sliceComplete = toStatus(getSlice(milestoneId, sliceId)?.status ?? "") === "complete";
-
-  let wrote = false;
-  for (const artifact of artifacts) {
-    const artifactType = artifact.artifact_type.toUpperCase();
-    if (!artifact.full_content.trim()) continue;
-    if ((artifactType === "SUMMARY" || artifactType === "UAT") && !sliceComplete) continue;
-    if (artifactType === "PLAN" && isAutoRecoveryPlaceholderPlan(artifact.full_content)) continue;
-
-    const absPath = join(basePath, relSliceFile(basePath, milestoneId, sliceId, artifactType));
+  const writes = sliceArtifactWrites(basePath, milestoneId, sliceId);
+  for (const { absPath, artifactPath, artifact } of writes) {
     createProjectionDirectorySync(dirname(absPath));
-    const artifactPath = toArtifactPath(absPath, basePath);
     await writeAndStore(absPath, artifactPath, artifact.full_content, {
-      artifact_type: artifactType,
+      artifact_type: artifact.artifact_type.toUpperCase(),
       milestone_id: milestoneId,
       slice_id: sliceId,
     }, basePath);
-    wrote = true;
   }
-
-  return wrote;
+  return writes.length > 0;
 }
 
 function isAutoRecoveryPlaceholderPlan(content: string): boolean {
@@ -886,6 +1122,11 @@ export async function renderPlanCheckboxes(
     if (!isDbAvailable()) {
       throw new Error(`database unavailable while rendering plan checkboxes for ${milestoneId}/${sliceId}`);
     }
+    // A skipped slice's tasks are all terminal (filtered by getActivePlanTasks),
+    // so an empty active list is valid historical state — nothing to project (#2335).
+    if (toStatus(getSlice(milestoneId, sliceId)?.status ?? "") === "skipped") {
+      return false;
+    }
     process.stderr.write(
       `markdown-renderer: no tasks found for ${milestoneId}/${sliceId}\n`,
     );
@@ -897,6 +1138,16 @@ export async function renderPlanCheckboxes(
 }
 
 // ─── Task Summary Rendering ───────────────────────────────────────────────
+
+/** True when the task has a summary that the render writes: published, or a canonical staged one. */
+function taskSummaryIsProjected(milestoneId: string, sliceId: string, task: TaskRow): boolean {
+  if (!task.full_summary_md) return false;
+  const status = toStatus(task.status);
+  // Published completions keep projecting.
+  if (status === "complete") return true;
+  return status === "in_progress"
+    && isCanonicalStagedTaskSummaryState({ milestoneId, sliceId, taskId: task.id });
+}
 
 /**
  * Render a task summary from DB to disk.
@@ -911,18 +1162,7 @@ export async function renderTaskSummary(
   taskId: string,
 ): Promise<boolean> {
   const task = getTask(milestoneId, sliceId, taskId);
-  const status = task ? toStatus(task.status) : null;
-  if (!task || !task.full_summary_md) {
-    return false;
-  }
-  if (status === "complete") {
-    // Published completions keep projecting.
-  } else if (
-    status !== "in_progress" ||
-    !isCanonicalStagedTaskSummaryState({ milestoneId, sliceId, taskId })
-  ) {
-    return false;
-  }
+  if (!task || !taskSummaryIsProjected(milestoneId, sliceId, task)) return false;
 
   await writeTaskSummaryProjection(
     basePath,
@@ -972,41 +1212,34 @@ export async function renderSliceSummary(
   milestoneId: string,
   sliceId: string,
 ): Promise<boolean> {
+  const targets = sliceSummaryTargets(basePath, milestoneId, sliceId);
+  for (const { artifactType, absPath, content } of targets) {
+    mkdirSync(dirname(absPath), { recursive: true });
+    await writeAndStore(absPath, toArtifactPath(absPath, basePath), content, {
+      artifact_type: artifactType,
+      milestone_id: milestoneId,
+      slice_id: sliceId,
+    }, basePath);
+  }
+  return targets.length > 0;
+}
+
+/** The SUMMARY and UAT files that the render writes for a complete slice. */
+function sliceSummaryTargets(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+): Array<{ artifactType: "SUMMARY" | "UAT"; absPath: string; content: string }> {
   const slice = getSlice(milestoneId, sliceId);
-  if (!slice || toStatus(slice.status) !== "complete") {
-    return false; // No slice data — skip silently
-  }
-
+  if (!slice || toStatus(slice.status) !== "complete") return [];
   const milestoneTitle = getMilestone(milestoneId)?.title;
-  let wrote = false;
-
-  if (slice.full_summary_md) {
-    const summaryAbs = targetSliceFile(basePath, milestoneId, sliceId, "SUMMARY", milestoneTitle);
-    mkdirSync(dirname(summaryAbs), { recursive: true });
-    const summaryArtifact = toArtifactPath(summaryAbs, basePath);
-
-    await writeAndStore(summaryAbs, summaryArtifact, slice.full_summary_md, {
-      artifact_type: "SUMMARY",
-      milestone_id: milestoneId,
-      slice_id: sliceId,
-    }, basePath);
-    wrote = true;
-  }
-
-  if (slice.full_uat_md) {
-    const uatAbs = targetSliceFile(basePath, milestoneId, sliceId, "UAT", milestoneTitle);
-    mkdirSync(dirname(uatAbs), { recursive: true });
-    const uatArtifact = toArtifactPath(uatAbs, basePath);
-
-    await writeAndStore(uatAbs, uatArtifact, slice.full_uat_md, {
-      artifact_type: "UAT",
-      milestone_id: milestoneId,
-      slice_id: sliceId,
-    }, basePath);
-    wrote = true;
-  }
-
-  return wrote;
+  return ([["SUMMARY", slice.full_summary_md], ["UAT", slice.full_uat_md]] as const)
+    .filter(([, content]) => Boolean(content))
+    .map(([artifactType, content]) => ({
+      artifactType,
+      absPath: targetSliceFile(basePath, milestoneId, sliceId, artifactType, milestoneTitle),
+      content,
+    }));
 }
 
 // ─── Render All From DB ───────────────────────────────────────────────────
@@ -1037,100 +1270,49 @@ export async function renderAllFromDb(basePath: string): Promise<RenderAllResult
   const tasksBySlice = getTasksBySliceIds(slicePairs);
 
   for (const milestone of milestones) {
-    // Render roadmap checkboxes
-    try {
-      const ok = await renderRoadmapCheckboxes(basePath, milestone.id);
-      if (ok) result.rendered++;
-      else result.skipped++;
-    } catch (err) {
-      result.errors.push(`roadmap ${milestone.id}: ${(err as Error).message}`);
+    // A cancelled (discarded) milestone keeps its rows as a tombstone but has
+    // no projection tree; rendering one would bring removed files back.
+    if (isDiscardedMilestoneStatus(milestone.status)) {
+      result.skipped++;
+      continue;
     }
-
-    try {
-      const ok = await renderMilestoneArtifactsFromDb(basePath, milestone.id);
-      if (ok) result.rendered++;
-      else result.skipped++;
-    } catch (err) {
-      result.errors.push(`milestone artifacts ${milestone.id}: ${(err as Error).message}`);
-    }
+    await renderMilestoneRows(
+      basePath,
+      milestone.id,
+      slicesByMilestone.get(milestone.id) ?? [],
+      tasksBySlice,
+      result,
+    );
 
     try {
-      const ok = await renderMilestoneSummary(basePath, milestone.id);
-      if (ok) result.rendered++;
+      if (renderMilestoneParkedMarker(basePath, milestone.id)) result.rendered++;
       else result.skipped++;
     } catch (err) {
-      result.errors.push(`milestone summary ${milestone.id}: ${(err as Error).message}`);
-    }
-
-    // Iterate slices (pre-fetched above)
-    const slices = slicesByMilestone.get(milestone.id) ?? [];
-    for (const slice of slices) {
-      // Preserve slice-scoped artifacts imported from disk, including real PLAN
-      // fallback content when task rows cannot regenerate it.
-      try {
-        const ok = await renderSliceArtifactsFromDb(basePath, milestone.id, slice.id);
-        if (ok) result.rendered++;
-        else result.skipped++;
-      } catch (err) {
-        result.errors.push(
-          `slice artifacts ${milestone.id}/${slice.id}: ${(err as Error).message}`,
-        );
-      }
-
-      // Render plan checkboxes
-      try {
-        const ok = await renderPlanCheckboxes(basePath, milestone.id, slice.id);
-        if (ok) result.rendered++;
-        else result.skipped++;
-      } catch (err) {
-        result.errors.push(
-          `plan ${milestone.id}/${slice.id}: ${(err as Error).message}`,
-        );
-      }
-
-      // Render slice summary
-      try {
-        const ok = await renderSliceSummary(basePath, milestone.id, slice.id);
-        if (ok) result.rendered++;
-        else result.skipped++;
-      } catch (err) {
-        result.errors.push(
-          `slice summary ${milestone.id}/${slice.id}: ${(err as Error).message}`,
-        );
-      }
-
-      // Iterate tasks (batched above)
-      const tasks = tasksBySlice.get(`${milestone.id}\0${slice.id}`) ?? [];
-      for (const task of tasks) {
-        try {
-          const ok = await renderTaskSummary(
-            basePath,
-            milestone.id,
-            slice.id,
-            task.id,
-          );
-          if (ok) result.rendered++;
-          else result.skipped++;
-        } catch (err) {
-          result.errors.push(
-            `task summary ${milestone.id}/${slice.id}/${task.id}: ${(err as Error).message}`,
-          );
-        }
-      }
+      result.errors.push(`parked marker ${milestone.id}: ${(err as Error).message}`);
     }
   }
 
-  // Re-project root DECISIONS.md from the authoritative decision records so a
-  // full DB → markdown re-projection (rebuild or reconcile) also heals decisions
-  // drift — e.g. a worktree merge that accepted one branch's DECISIONS.md while
-  // the DB holds the union of both branches' decisions.
-  try {
-    const { regenerateDecisionsMarkdown } = await import("./db-writer.js");
-    await regenerateDecisionsMarkdown(basePath);
-    result.rendered++;
-  } catch (err) {
-    result.errors.push(`decisions: ${(err as Error).message}`);
-  }
+  // Root projections: each file at the root of .gsd is rendered from its
+  // rows, so a full rebuild restores every one of them. DECISIONS.md also
+  // heals decisions drift — e.g. a worktree merge that accepted one branch's
+  // DECISIONS.md while the DB holds the union of both branches' decisions.
+  // Dynamic imports avoid a static-import cycle.
+  const rootWriters = await import("./db-writer.js");
+  const { renderTopLevelQueueFromDb, renderTopLevelRoadmapFromDb } = await import("./workflow-projections.js");
+  await renderStep(result, "root roadmap", async () => {
+    renderTopLevelRoadmapFromDb(basePath);
+    return true;
+  });
+  await renderStep(result, "queue", async () => {
+    renderTopLevelQueueFromDb(basePath);
+    return true;
+  });
+  await renderStep(result, "requirements", () => rootWriters.regenerateRequirementsMarkdown(basePath));
+  await renderStep(result, "decisions", async () => {
+    await rootWriters.regenerateDecisionsMarkdown(basePath);
+    return true;
+  });
+  await renderStep(result, "root artifacts", () => rootWriters.regenerateRootArtifactsMarkdown(basePath));
 
   // Project to .planning/ if the compat marker says it's active. Dynamic
   // import for writePlanningDirectory avoids a static-import cycle. Gated on
@@ -1156,6 +1338,117 @@ export async function renderAllFromDb(basePath: string): Promise<RenderAllResult
   }
 
   return result;
+}
+
+/** Render one milestone's roadmap, artifacts, plans, and summaries from the DB. */
+export async function renderMilestoneFromDb(
+  basePath: string,
+  milestoneId: string,
+): Promise<RenderAllResult> {
+  const result: RenderAllResult = { rendered: 0, skipped: 0, errors: [] };
+  const slices = getMilestoneSlices(milestoneId);
+  const tasksBySlice = getTasksBySliceIds(slices.map((slice) => ({ milestoneId, sliceId: slice.id })));
+  await renderMilestoneRows(basePath, milestoneId, slices, tasksBySlice, result);
+  return result;
+}
+
+/** Render the files of the milestone row itself: roadmap, milestone artifacts, and milestone summary. */
+export async function renderMilestoneFilesFromDb(
+  basePath: string,
+  milestoneId: string,
+): Promise<RenderAllResult> {
+  const result: RenderAllResult = { rendered: 0, skipped: 0, errors: [] };
+  await renderMilestoneFiles(basePath, milestoneId, result);
+  return result;
+}
+
+/** Render the files of one slice: its roadmap line, slice artifacts, plan, and slice summary. */
+export async function renderSliceFilesFromDb(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+): Promise<RenderAllResult> {
+  const result: RenderAllResult = { rendered: 0, skipped: 0, errors: [] };
+  await renderStep(result, `roadmap ${milestoneId}`, () => renderRoadmapCheckboxes(basePath, milestoneId));
+  await renderSliceFiles(basePath, milestoneId, sliceId, result);
+  return result;
+}
+
+/** Render the files of one task: its line in the slice plan, and the task summary. */
+export async function renderTaskFilesFromDb(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+): Promise<RenderAllResult> {
+  const result: RenderAllResult = { rendered: 0, skipped: 0, errors: [] };
+  await renderStep(result, `plan ${milestoneId}/${sliceId}`, () => renderPlanCheckboxes(basePath, milestoneId, sliceId));
+  await renderStep(result, `task summary ${milestoneId}/${sliceId}/${taskId}`, () =>
+    renderTaskSummary(basePath, milestoneId, sliceId, taskId));
+  return result;
+}
+
+async function renderStep(
+  result: RenderAllResult,
+  label: string,
+  render: () => Promise<boolean>,
+): Promise<void> {
+  try {
+    if (await render()) result.rendered++;
+    else result.skipped++;
+  } catch (err) {
+    result.errors.push(`${label}: ${(err as Error).message}`);
+  }
+}
+
+async function renderMilestoneFiles(
+  basePath: string,
+  milestoneId: string,
+  result: RenderAllResult,
+): Promise<void> {
+  await renderStep(result, `roadmap ${milestoneId}`, () => renderRoadmapCheckboxes(basePath, milestoneId));
+  await renderStep(result, `roadmap assessment ${milestoneId}`, async () =>
+    (await renderRoadmapAssessment(basePath, milestoneId)) !== null);
+  await renderStep(result, `validation ${milestoneId}`, async () => renderMilestoneValidation(basePath, milestoneId));
+  await renderStep(result, `milestone artifacts ${milestoneId}`, () => renderMilestoneArtifactsFromDb(basePath, milestoneId));
+  await renderStep(result, `milestone summary ${milestoneId}`, () => renderMilestoneSummary(basePath, milestoneId));
+  await renderStep(result, `checkpoint ${milestoneId}`, () => renderWorkCheckpoint(basePath, milestoneId));
+}
+
+async function renderSliceFiles(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  result: RenderAllResult,
+): Promise<void> {
+  // Preserve slice-scoped artifacts imported from disk, including real PLAN
+  // fallback content when task rows cannot regenerate it.
+  await renderStep(result, `slice artifacts ${milestoneId}/${sliceId}`, () =>
+    renderSliceArtifactsFromDb(basePath, milestoneId, sliceId));
+  await renderStep(result, `plan ${milestoneId}/${sliceId}`, () => renderPlanCheckboxes(basePath, milestoneId, sliceId));
+  await renderStep(result, `replan ${milestoneId}/${sliceId}`, async () =>
+    (await renderSliceReplan(basePath, milestoneId, sliceId)) !== null);
+  await renderStep(result, `slice summary ${milestoneId}/${sliceId}`, () => renderSliceSummary(basePath, milestoneId, sliceId));
+  await renderStep(result, `checkpoint ${milestoneId}/${sliceId}`, () => renderWorkCheckpoint(basePath, milestoneId, sliceId));
+}
+
+async function renderMilestoneRows(
+  basePath: string,
+  milestoneId: string,
+  slices: SliceRow[],
+  tasksBySlice: ReturnType<typeof getTasksBySliceIds>,
+  result: RenderAllResult,
+): Promise<void> {
+  await renderMilestoneFiles(basePath, milestoneId, result);
+  for (const slice of slices) {
+    await renderSliceFiles(basePath, milestoneId, slice.id, result);
+    // Iterate tasks (batched by the caller)
+    const tasks = tasksBySlice.get(`${milestoneId}\0${slice.id}`) ?? [];
+    for (const task of tasks) {
+      await renderStep(result, `task summary ${milestoneId}/${slice.id}/${task.id}`, () =>
+        renderTaskSummary(basePath, milestoneId, slice.id, task.id));
+    }
+  }
 }
 
 // ─── Stale Detection ──────────────────────────────────────────────────────
@@ -1187,9 +1480,15 @@ export interface StaleEntry {
 // by reconcileBeforeDispatch repairs), so a changed file always re-parses.
 interface CachedProjection { mtimeMs: number; size: number; parsed: unknown }
 const _projectionParseCache = new Map<string, CachedProjection>();
-registerCacheClearCallback(() => _projectionParseCache.clear());
+let _projectionCacheClearRegistered = false;
+function ensureProjectionCacheClearRegistered(): void {
+  if (_projectionCacheClearRegistered) return;
+  registerCacheClearCallback(() => _projectionParseCache.clear());
+  _projectionCacheClearRegistered = true;
+}
 
 function parseProjectionByIdentity(path: string, parse: (content: string) => unknown): unknown {
+  ensureProjectionCacheClearRegistered();
   let st: ReturnType<typeof statSync> | null = null;
   try { st = statSync(path); } catch { st = null; }
   if (st) {
@@ -1219,27 +1518,6 @@ interface ProjectionRenderIntent {
   reason: string;
 }
 
-function planRenderIntentDrift(
-  basePath: string,
-  milestoneId: string,
-  slice: SliceRow,
-  tasks: TaskRow[],
-): StaleEntry | null {
-  const planPath = resolveSliceFile(basePath, milestoneId, slice.id, "PLAN");
-  if (!planPath || !existsSync(planPath)) return null;
-  const intent = renderSlicePlanMarkdown(
-    slice,
-    tasks,
-    getGateResults(milestoneId, slice.id, "slice"),
-  );
-  const actual = readFileSync(planPath, "utf-8");
-  if (stripProjectionStamp(actual) === stripProjectionStamp(intent)) return null;
-  return {
-    path: planPath,
-    reason: `plan for ${milestoneId}/${slice.id} differs from DB render intent (content drift in plan)`,
-  };
-}
-
 function projectionRenderIntents(basePath: string): ProjectionRenderIntent[] {
   const intents = new Map<string, ProjectionRenderIntent>();
   const record = (path: string, content: string, reason: string): void => {
@@ -1258,13 +1536,18 @@ function projectionRenderIntents(basePath: string): ProjectionRenderIntent[] {
     }
 
     const milestoneComplete = toStatus(milestone.status) === "complete";
-    for (const artifact of getMilestoneScopedArtifacts(milestone.id)) {
+    const milestoneArtifacts = getMilestoneScopedArtifacts(milestone.id);
+    const artifactTargets = resolveMilestoneArtifactTargets(basePath, milestone.id, milestoneArtifacts, milestone.title);
+    // The render does not replay these rows, so they are not render intent.
+    const structured = structuredMilestoneArtifactTypes(milestone.id);
+    for (const artifact of milestoneArtifacts) {
       const artifactType = artifact.artifact_type.toUpperCase();
-      if (artifact.artifact_type === "ROADMAP") continue;
+      if (structured.has(artifactType)) continue;
       if (artifactType === "SUMMARY" && !milestoneComplete) continue;
       if (!artifact.full_content.trim()) continue;
       record(
-        targetMilestoneFile(basePath, milestone.id, artifact.artifact_type, milestone.title),
+        artifactTargets.get(artifact.path)
+          ?? targetMilestoneFile(basePath, milestone.id, artifact.artifact_type, milestone.title),
         artifact.full_content,
         `${artifactType} for ${milestone.id} differs from DB render intent`,
       );
@@ -1353,7 +1636,8 @@ function projectionRenderIntents(basePath: string): ProjectionRenderIntent[] {
 
 /**
  * Detect content drift between renderer-owned on-disk projections and current
- * DB render intent. State-version stamps do not participate in the comparison.
+ * DB render intent. Comparison uses comparableProjectionContent: state-version
+ * stamps and trailing newline runs do not participate.
  */
 export function detectProjectionDrift(basePath: string): StaleEntry[] {
   const stale: StaleEntry[] = [];
@@ -1361,7 +1645,7 @@ export function detectProjectionDrift(basePath: string): StaleEntry[] {
     if (!existsSync(intent.path)) continue;
     try {
       const actual = readFileSync(intent.path, "utf-8");
-      if (stripProjectionStamp(actual) !== stripProjectionStamp(intent.content)) {
+      if (comparableProjectionContent(actual) !== comparableProjectionContent(intent.content)) {
         stale.push({ path: intent.path, reason: intent.reason });
       }
     } catch (e) {
@@ -1371,16 +1655,50 @@ export function detectProjectionDrift(basePath: string): StaleEntry[] {
   return stale;
 }
 
+function preferStaleRenderReason(current: string, candidate: string): string {
+  const repairable = (reason: string) =>
+    reason.includes("in roadmap") ||
+    reason.includes("in plan") ||
+    reason.includes("SUMMARY.md missing") ||
+    reason.includes("UAT.md missing");
+  if (repairable(candidate) && !repairable(current)) return candidate;
+  return current;
+}
+
 export function detectStaleRenders(basePath: string): StaleEntry[] {
-  // TODO(flat-phase): stale-render detection is temporarily fully disabled.
-  // The isLegacyMilestonesLayout gate is unreliable: git-service.ts creates
-  // milestones/<mid>/ directories for integration-branch metadata even in
-  // flat-phase projects, making the gate fire true and then producing false
-  // stale-render drift in the second reconcile cycle → ReconciliationFailedError
-  // → auto-mode blocked (exit 10) for multi-slice/remediation e2e scenarios.
-  // Re-enable after path construction is unified and the metadata dir is
-  // decoupled from the layout-detection signal.
-  return [];
+  const byPath = new Map<string, StaleEntry>();
+
+  const record = (entry: StaleEntry): void => {
+    const existing = byPath.get(entry.path);
+    if (!existing) {
+      byPath.set(entry.path, entry);
+      return;
+    }
+    const reason = preferStaleRenderReason(existing.reason, entry.reason);
+    if (reason !== existing.reason) {
+      byPath.set(entry.path, { path: entry.path, reason });
+    }
+  };
+
+  // Roadmap drift is owned by the roadmap-divergence handler, which applies
+  // readiness/skipped-slice guards that a blind DB-vs-render-intent compare
+  // does not. Stale-render covers plans, summaries, and missing files only.
+  for (const entry of detectProjectionDrift(basePath)) {
+    if (entry.reason.includes("in roadmap")) continue;
+    record(entry);
+  }
+  for (const entry of detectStaleRendersImpl(basePath)) record(entry);
+
+  const stale = [...byPath.values()];
+  if (stale.length > 0) {
+    process.stderr.write(
+      `markdown-renderer: detected ${stale.length} stale render(s):\n`,
+    );
+    for (const entry of stale) {
+      process.stderr.write(`  - ${entry.path}: ${entry.reason}\n`);
+    }
+  }
+  return stale;
 }
 
 function detectStaleRendersImpl(basePath: string): StaleEntry[] {
@@ -1389,79 +1707,32 @@ function detectStaleRendersImpl(basePath: string): StaleEntry[] {
   // both packaged (.js) and source (.ts via the strip-types loader) contexts —
   // the same form a dozen other modules already use.
   const stale: StaleEntry[] = [];
-  const milestones = getAllMilestones();
+  const milestones = getAllMilestones().filter((milestone) => !isDiscardedMilestoneStatus(milestone.status));
 
   for (const milestone of milestones) {
     const slices = getMilestoneSlices(milestone.id);
-    const isFlatPhase = isMilestoneFlatPhaseLayout(basePath, milestone.id);
 
-    // ── Check roadmap checkbox state ──────────────────────────────────
-    // TODO(flat-phase): roadmap checkbox parsing may not match flat-phase
-    // roadmap format, causing false-positive drift loops. Skip during transition.
-    /*
-    const roadmapPath = targetMilestoneFile(basePath, milestone.id, "ROADMAP", milestone.title);
-    if (existsSync(roadmapPath)) {
-      try {
-        const parsed = parseProjectionByIdentity(roadmapPath, parseProjectionRoadmap) as ReturnType<typeof parseProjectionRoadmap>;
+    // Plan and roadmap checkbox drift is handled by detectProjectionDrift
+    // (DB-vs-render-intent). This pass only checks for missing on-disk files.
 
-        for (const slice of slices) {
-          const isCompleteInDb = isClosedStatus(slice.status);
-          const roadmapSlice = parsed.slices.find((s: { id: string }) => s.id === slice.id);
-          if (!roadmapSlice) continue;
-
-          if (isCompleteInDb && !roadmapSlice!.done) {
-            stale.push({
-              path: roadmapPath,
-              reason: `${slice.id} is closed in DB but unchecked in roadmap`,
-            });
-          } else if (!isCompleteInDb && roadmapSlice!.done) {
-            stale.push({
-              path: roadmapPath,
-              reason: `${slice.id} is not closed in DB but checked in roadmap`,
-            });
-          }
-        }
-      } catch (e) {
-        logWarning("renderer", `roadmap parse failed: ${(e as Error).message}`);
-      }
-    }
-    */
-
-    // ── Check plan checkbox state and summaries for each slice ────────
     for (const slice of slices) {
       const tasks = getActivePlanTasks(milestone.id, slice.id);
 
-      if (!isFlatPhase) {
-        // Check plan content against the DB render intent (T008): the
-        // projection file is never parsed — staleness is judged
-        // DB-vs-render-intent via a stamp-insensitive byte comparison.
-        if (tasks.length > 0) {
-          try {
-            const entry = planRenderIntentDrift(basePath, milestone.id, slice, tasks);
-            if (entry) stale.push(entry);
-          } catch (e) {
-            logWarning("renderer", `plan render-intent check failed: ${(e as Error).message}`);
-          }
-        }
-      }
-
-      // Check missing task summary files (legacy layout only — flat-phase keeps
-      // task state in plan <tasks> blocks and does not project Txx-SUMMARY.md)
-      if (!isFlatPhase) {
-        for (const task of tasks) {
-          if (isClosedStatus(task.status) && task.full_summary_md) {
-            const slicePath = resolveSlicePath(basePath, milestone.id, slice.id);
-            if (slicePath) {
-              const fileName = buildTaskFileName(task.id, "SUMMARY");
-              const summaryAbsPath = join(slicePath, fileName);
-
-              if (!existsSync(summaryAbsPath)) {
-                stale.push({
-                  path: summaryAbsPath,
-                  reason: `${task.id} is complete with summary in DB but SUMMARY.md missing on disk`,
-                });
-              }
-            }
+      for (const task of tasks) {
+        if (isClosedStatus(task.status) && task.full_summary_md) {
+          const summaryAbsPath = targetTaskFile(
+            basePath,
+            milestone.id,
+            slice.id,
+            task.id,
+            "SUMMARY",
+            milestone.title,
+          );
+          if (!existsSync(summaryAbsPath)) {
+            stale.push({
+              path: summaryAbsPath,
+              reason: `${task.id} is complete with summary in DB but SUMMARY.md missing on disk`,
+            });
           }
         }
       }
@@ -1491,15 +1762,6 @@ function detectStaleRendersImpl(basePath: string): StaleEntry[] {
           }
         }
       }
-    }
-  }
-
-  if (stale.length > 0) {
-    process.stderr.write(
-      `markdown-renderer: detected ${stale.length} stale render(s):\n`,
-    );
-    for (const entry of stale) {
-      process.stderr.write(`  - ${entry.path}: ${entry.reason}\n`);
     }
   }
 
@@ -1539,36 +1801,6 @@ export interface AssessmentData {
   createdAt?: string;
 }
 
-function existingLegacySliceAssessmentPath(
-  basePath: string,
-  milestoneId: string,
-  sliceId: string,
-): string | null {
-  if (!isLegacyMilestonesLayout(basePath)) return null;
-  const legacyBase = legacyMilestonesDir(basePath);
-  const milestoneDirName = resolveDir(legacyBase, milestoneId);
-  if (!milestoneDirName) return null;
-  const slicesDir = join(legacyBase, milestoneDirName, "slices");
-  const sliceDirName = resolveDir(slicesDir, sliceId);
-  if (!sliceDirName) return null;
-  return join(slicesDir, sliceDirName, `${sliceId}-ASSESSMENT.md`);
-}
-
-export function resolveAssessmentProjectionPath(
-  basePath: string,
-  milestoneId: string,
-  sliceId: string,
-): string {
-  return existingLegacySliceAssessmentPath(basePath, milestoneId, sliceId)
-    ?? targetSliceFile(
-      basePath,
-      milestoneId,
-      sliceId,
-      "ASSESSMENT",
-      getMilestone(milestoneId)?.title,
-    );
-}
-
 export function resolveRoadmapAssessmentProjectionPath(
   basePath: string,
   milestoneId: string,
@@ -1583,6 +1815,35 @@ export function resolveRoadmapAssessmentProjectionPath(
     "ROADMAP-ASSESSMENT",
     getMilestone(milestoneId)?.title,
   );
+}
+
+/** The latest durable replan of a slice, or null when it was never replanned. */
+function latestSliceReplan(milestoneId: string, sliceId: string): ReplanData | null {
+  const event = getLatestWorkflowDomainEvent("workflow.slice.replanned", "slice", `${milestoneId}/${sliceId}`);
+  if (!event) return null;
+  const { blockerTaskId, blockerDescription, whatChanged } = event.payload;
+  if (
+    typeof blockerTaskId !== "string" ||
+    typeof blockerDescription !== "string" ||
+    typeof whatChanged !== "string"
+  ) {
+    return null;
+  }
+  return { blockerTaskId, blockerDescription, whatChanged, createdAt: event.createdAt };
+}
+
+/**
+ * Render the slice REPLAN file from the latest durable replan event. The tool
+ * and the full rebuild both call this. Returns null when the slice has no
+ * replan event with projection data.
+ */
+export async function renderSliceReplan(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+): Promise<{ replanPath: string; content: string } | null> {
+  const replan = latestSliceReplan(milestoneId, sliceId);
+  return replan ? renderReplanFromDb(basePath, milestoneId, sliceId, replan) : null;
 }
 
 export async function renderReplanFromDb(
@@ -1629,41 +1890,44 @@ export async function renderReplanFromDb(
   return { replanPath: absPath, content: stamped };
 }
 
-export async function renderAssessmentFromDb(
+/**
+ * Render the milestone ROADMAP-ASSESSMENT file from the latest roadmap
+ * assessment row. The row is found by milestone and scope, not by file path.
+ * The tool and the full rebuild both call this. Returns null when the
+ * milestone has no roadmap assessment.
+ */
+export async function renderRoadmapAssessment(
   basePath: string,
   milestoneId: string,
-  sliceId: string,
-  assessmentData: AssessmentData,
-): Promise<{ assessmentPath: string; content: string }> {
-  const absPath = resolveAssessmentProjectionPath(basePath, milestoneId, sliceId);
-  mkdirSync(dirname(absPath), { recursive: true });
-  const artifactPath = toArtifactPath(absPath, basePath);
+): Promise<{ assessmentPath: string; content: string } | null> {
+  const row = getLatestAssessmentByScope(milestoneId, "roadmap");
+  if (!row) return null;
+  return renderRoadmapAssessmentFromDb(basePath, milestoneId, {
+    verdict: String(row["status"]),
+    assessment: String(row["full_content"]),
+    ...(typeof row["slice_id"] === "string" ? { completedSliceId: row["slice_id"] } : {}),
+    createdAt: String(row["created_at"]),
+  });
+}
 
-  const lines: string[] = [];
-  lines.push(`# ${sliceId} Assessment`);
-  lines.push("");
-  lines.push(`**Milestone:** ${milestoneId}`);
-  lines.push(`**Slice:** ${sliceId}`);
-  if (assessmentData.completedSliceId) {
-    lines.push(`**Completed Slice:** ${assessmentData.completedSliceId}`);
-  }
-  lines.push(`**Verdict:** ${assessmentData.verdict}`);
-  lines.push(`**Created:** ${assessmentData.createdAt ?? new Date().toISOString()}`);
-  lines.push("");
-  lines.push("## Assessment");
-  lines.push("");
-  lines.push(assessmentData.assessment);
-  lines.push("");
-
-  const content = `${lines.join("\n").trimEnd()}\n`;
-
-  const stamped = await writeAndStore(absPath, artifactPath, content, {
-    artifact_type: "ASSESSMENT",
-    milestone_id: milestoneId,
-    slice_id: sliceId,
-  }, basePath);
-
-  return { assessmentPath: absPath, content: stamped };
+/**
+ * Render the milestone VALIDATION file from the latest validation assessment
+ * row, which holds the file content. The row is found by milestone and scope,
+ * not by file path. Every writer of the file and the full rebuild call this,
+ * after the row is committed. Nothing is written when the file and its
+ * baseline already hold the content.
+ *
+ * @returns true when the milestone has a validation assessment
+ */
+export function renderMilestoneValidation(
+  basePath: string,
+  milestoneId: string,
+): boolean {
+  const content = getLatestAssessmentByScope(milestoneId, "milestone-validation")?.["full_content"];
+  if (typeof content !== "string" || !content.trim()) return false;
+  const absPath = targetMilestoneFile(basePath, milestoneId, "VALIDATION", getMilestone(milestoneId)?.title);
+  if (writeProjectionFileSync(basePath, absPath, content, [milestoneId])) invalidateCaches();
+  return true;
 }
 
 export async function renderRoadmapAssessmentFromDb(
@@ -1689,8 +1953,9 @@ export async function renderRoadmapAssessmentFromDb(
     "",
   ];
   const content = `${lines.join("\n").trimEnd()}\n`;
+  // The type names the file, so the rebuild targets this file and no other.
   const stamped = await writeAndStore(absPath, artifactPath, content, {
-    artifact_type: "ASSESSMENT",
+    artifact_type: "ROADMAP-ASSESSMENT",
     milestone_id: milestoneId,
   }, basePath);
 

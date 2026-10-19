@@ -43,7 +43,18 @@ declare module "@opengsd/mcp-server" {
   }
 
   export function resolveGsdRoot(projectDir: string): string;
-  export function buildGraph(projectDir: string): Promise<KnowledgeGraph>;
+  export function buildGraph(
+    projectDir: string,
+    database?: {
+      state: string;
+      knowledge: string;
+      milestones: Array<{
+        id: string;
+        title: string;
+        slices: Array<{ id: string; title: string; tasks: Array<{ id: string; title: string }> }>;
+      }>;
+    },
+  ): Promise<KnowledgeGraph>;
   export function writeGraph(gsdRoot: string, graph: KnowledgeGraph): Promise<void>;
   export function graphStatus(projectDir: string): Promise<GraphStatusResult>;
   export function graphQuery(projectDir: string, term: string): Promise<GraphQueryResult>;

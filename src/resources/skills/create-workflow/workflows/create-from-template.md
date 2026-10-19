@@ -3,6 +3,7 @@ Guide the user through creating a workflow definition by customizing an existing
 
 <required_reading>
 Before starting, read these references for schema details:
+
 - `../references/yaml-schema-v1.md` — all fields, types, and constraints
 - `../references/verification-policies.md` — the four verify policies
 - `../references/feature-patterns.md` — context_from, iterate, params patterns
@@ -65,6 +66,7 @@ Once the user approves:
 </phase>
 
 <success_criteria>
+
 - A valid YAML file exists at `.gsd/workflow-defs/<name>.yaml`
 - The definition is a meaningful customization of the template, not a copy
 - The user has reviewed and approved the definition

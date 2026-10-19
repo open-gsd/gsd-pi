@@ -11,7 +11,8 @@ import {
 } from "../paths.js";
 import { deriveCompatProjectionKey } from "../compat/compat-marker.js";
 import { clearParseCache } from "../files.js";
-import { isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
+import { readMilestone, readMilestoneSlices, readSlice, readSliceTasks } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import {
@@ -19,8 +20,6 @@ import {
   adoptOrTransitionLifecycle,
   getMilestone,
   getMilestoneSlices,
-  getAssessment,
-  getSlice,
   getSliceTasks,
   insertSlice,
   normalizeLegacyLifecycleStatus,
@@ -34,7 +33,7 @@ import {
 import { invalidateStateCache } from "../state.js";
 import {
   renderRoadmapFromDb,
-  renderRoadmapAssessmentFromDb,
+  renderRoadmapAssessment,
   resolveRoadmapAssessmentProjectionPath,
 } from "../markdown-renderer.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
@@ -99,6 +98,8 @@ export interface ReassessRoadmapResult {
   completedSliceId: string;
   assessmentPath: string;
   roadmapPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 function assessmentDbPathForRenderedFile(basePath: string, absPath: string): string {
@@ -299,7 +300,6 @@ export async function handleReassessRoadmap(
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.roadmap.reassess",
       invocation,
-      actorId: params.actorName,
       payload: planningOperationPayload(params),
       event: {
         eventType: "workflow.roadmap.reassessed",
@@ -338,17 +338,17 @@ export async function handleReassessRoadmap(
         ];
       },
       mutate(context) {
-        const milestone = getMilestone(params.milestoneId);
+        const milestone = readMilestone(params.milestoneId);
         if (!milestone) {
           throw new PlanningGuardError(`milestone not found: ${params.milestoneId}`);
         }
-        if (isClosedStatus(milestone.status) && !isMetadataOnlyCorrection) {
+        if (milestone.closed && !isMetadataOnlyCorrection) {
           throw new PlanningGuardError(`cannot reassess a closed milestone: ${params.milestoneId} (status: ${milestone.status})`);
         }
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "milestone",
           milestoneId: params.milestoneId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(milestone.status) ?? "ready",
+          lifecycleStatus: adoptionLifecycleStatus(`milestone ${params.milestoneId}`, milestone.status),
         });
         if (milestoneLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(`cannot reassess a closed milestone: ${params.milestoneId} (canonical status: ${milestoneLifecycle.lifecycleStatus})`);
@@ -357,28 +357,29 @@ export async function handleReassessRoadmap(
           throw new PlanningGuardError(`cannot reassess a closed milestone: ${params.milestoneId} (canonical status: ${milestoneLifecycle.lifecycleStatus})`);
         }
 
-        const completedSlice = getSlice(params.milestoneId, params.completedSliceId);
+        const completedSlice = readSlice(params.milestoneId, params.completedSliceId);
         if (!completedSlice) {
           throw new PlanningGuardError(`completedSliceId not found: ${params.milestoneId}/${params.completedSliceId}`);
         }
-        if (!isClosedStatus(completedSlice.status)) {
+        if (!completedSlice.closed) {
           throw new PlanningGuardError(`completedSliceId ${params.completedSliceId} is not complete (status: ${completedSlice.status}) — reassess can only be called after a slice finishes`);
         }
         const completedSliceLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.completedSliceId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(completedSlice.status) ?? "completed",
+          lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${params.completedSliceId}`, completedSlice.status),
         });
         if (completedSliceLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(`completedSliceId ${params.completedSliceId} is canonically cancelled and is not a valid completed slice`);
         }
 
-        const existingSlices = getMilestoneSlices(params.milestoneId);
+        const existingSlices = readMilestoneSlices(params.milestoneId);
         const existingSliceById = new Map(existingSlices.map((slice) => [slice.id, slice]));
         const completedSliceIds = new Set<string>();
         for (const slice of existingSlices) {
-          if (slice.status !== "skipped" && isClosedStatus(slice.status)) completedSliceIds.add(slice.id);
+          // After the Cutover a deferred Slice is closed (cancelled); it is still not a completed one.
+          if (slice.status !== "skipped" && slice.status !== "deferred" && slice.closed) completedSliceIds.add(slice.id);
         }
 
         for (const correction of params.metadataCorrections?.completedSlices ?? []) {
@@ -393,7 +394,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: correction.sliceId,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(existing.status) ?? "completed",
+            lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${correction.sliceId}`, existing.status),
           });
           if (lifecycle.lifecycleStatus !== "completed") {
             throw new PlanningGuardError(`metadata correction target ${correction.sliceId} is canonically ${lifecycle.lifecycleStatus}, not completed`);
@@ -423,7 +424,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: modifiedSlice.sliceId,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(existing.status) ?? "ready",
+            lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${modifiedSlice.sliceId}`, existing.status),
           });
           if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
             throw new PlanningGuardError(
@@ -439,8 +440,7 @@ export async function handleReassessRoadmap(
           if (!existing) {
             throw new PlanningGuardError(`cannot remove missing slice ${removedId}`);
           }
-          const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(existing.status);
-          const observedLifecycleStatus = legacyLifecycleStatus ?? "ready";
+          const observedLifecycleStatus = adoptionLifecycleStatus(`slice ${params.milestoneId}/${removedId}`, existing.status);
           const lifecycle = adoptLifecycleIfMissing(context, {
             itemKind: "slice",
             milestoneId: params.milestoneId,
@@ -451,9 +451,9 @@ export async function handleReassessRoadmap(
           if (lifecycle.lifecycleStatus === "completed") {
             throw new PlanningGuardError(`cannot remove completed slice ${removedId}`);
           }
-          for (const task of getSliceTasks(params.milestoneId, removedId)) {
+          for (const task of readSliceTasks(params.milestoneId, removedId)) {
             const legacyTaskLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
-            const observedTaskLifecycleStatus = legacyTaskLifecycleStatus ?? "ready";
+            const observedTaskLifecycleStatus = adoptionLifecycleStatus(`task ${params.milestoneId}/${removedId}/${task.id}`, task.status);
             const taskLifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",
               milestoneId: params.milestoneId,
@@ -504,7 +504,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: added.sliceId,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(existing.status) ?? "ready",
+            lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${added.sliceId}`, existing.status),
           });
           if (existing.status === "skipped" || lifecycle.lifecycleStatus === "cancelled") {
             throw new PlanningGuardError(`cannot reuse cancelled slice ${added.sliceId} — use gsd_slice_reopen first`);
@@ -561,13 +561,12 @@ export async function handleReassessRoadmap(
 
         for (const removedId of params.sliceChanges.removed) {
           for (const task of getSliceTasks(params.milestoneId, removedId)) {
-            const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
             const lifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",
               milestoneId: params.milestoneId,
               sliceId: removedId,
               taskId: task.id,
-              lifecycleStatus: legacyLifecycleStatus ?? "ready",
+              lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${removedId}/${task.id}`, task.status),
             });
             if (lifecycle.lifecycleStatus === "completed") continue;
             if (lifecycle.lifecycleStatus !== "cancelled") {
@@ -591,7 +590,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: removedId,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(existingSliceById.get(removedId)?.status ?? null) ?? "ready",
+            lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${removedId}`, existingSliceById.get(removedId)?.status ?? null),
           });
           if (lifecycle.lifecycleStatus !== "cancelled") {
             adoptOrTransitionLifecycle(context, {
@@ -625,80 +624,79 @@ export async function handleReassessRoadmap(
     });
     operationStatus = receipt.status;
   } catch (err) {
-    if (err instanceof PlanningGuardError) return { error: err.message };
+    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 
   removeSlicePlanProjections(basePath, params.milestoneId, params.sliceChanges.removed);
 
   // ── Render artifacts ──────────────────────────────────────────────
+  // The reassessment is committed. A failed render must not fail the tool: its
+  // Projection Work stays pending and the Projection Worker renders it again.
+  let roadmapPath = "";
+  let renderedAssessmentPath = "";
+  let stale = false;
   try {
     const roadmapResult = await renderRoadmapFromDb(basePath, params.milestoneId);
-    if ("skipped" in roadmapResult) {
-      return { error: `roadmap render skipped: milestone ${params.milestoneId} has no planned slices` };
-    }
-    const durableAssessment = getAssessment(
-      assessmentDbPathForRenderedFile(basePath, assessmentPath),
-    );
-    if (!durableAssessment) throw new Error("durable roadmap assessment not found");
-    const assessmentResult = await renderRoadmapAssessmentFromDb(basePath, params.milestoneId, {
-      verdict: String(durableAssessment["status"]),
-      assessment: String(durableAssessment["full_content"]),
-      completedSliceId: params.completedSliceId,
-      createdAt: String(durableAssessment["created_at"]),
-    });
-
-    // ── Remove stale VALIDATION file from disk (#2957) ────────────
-    if (invalidatesMilestoneValidation) {
-      const milestoneDir = resolveMilestonePath(basePath, params.milestoneId);
-      const validationFiles = new Set([
-        resolveMilestoneFile(basePath, params.milestoneId, "VALIDATION"),
-        targetMilestoneFile(
-          basePath,
-          params.milestoneId,
-          "VALIDATION",
-          getMilestone(params.milestoneId)?.title,
-        ),
-        milestoneDir ? join(milestoneDir, `${params.milestoneId}-VALIDATION.md`) : null,
-      ].filter((file): file is string => Boolean(file)));
-      for (const validationFile of validationFiles) {
-        try {
-          if (existsSync(validationFile)) removeProjectionFileSync(validationFile);
-        } catch (e) {
-          logWarning("tool", `validation file cleanup failed: ${(e as Error).message}`);
-        }
-      }
-    }
-
-    // ── Invalidate caches ─────────────────────────────────────────
-    invalidateStateCache();
-    clearParseCache();
-
-    // ── Post-mutation hook: projections, manifest, event log ─────
-    try {
-      await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
-      await writeManifestAndFlush(basePath);
-      if (operationStatus === "committed") {
-        appendEvent(basePath, {
-          cmd: "reassess-roadmap",
-          params: { milestoneId: params.milestoneId, completedSliceId: params.completedSliceId },
-          ts: new Date().toISOString(),
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
-      }
-    } catch (hookErr) {
-      logWarning("tool", `reassess-roadmap post-mutation hook warning: ${(hookErr as Error).message}`);
-    }
-
-    return {
-      milestoneId: params.milestoneId,
-      completedSliceId: params.completedSliceId,
-      assessmentPath: assessmentResult.assessmentPath,
-      roadmapPath: roadmapResult.roadmapPath,
-    };
+    if ("skipped" in roadmapResult) throw new Error(`milestone ${params.milestoneId} has no planned slices`);
+    roadmapPath = roadmapResult.roadmapPath;
+    const assessmentResult = await renderRoadmapAssessment(basePath, params.milestoneId);
+    if (!assessmentResult) throw new Error("durable roadmap assessment not found");
+    renderedAssessmentPath = assessmentResult.assessmentPath;
   } catch (err) {
-    return { error: `render failed: ${(err as Error).message}` };
+    stale = true;
+    logWarning("projection", `reassess_roadmap render failed for ${params.milestoneId}; the reassessment stays committed`, { error: (err as Error).message });
   }
+
+  // ── Remove stale VALIDATION file from disk (#2957) ────────────
+  if (invalidatesMilestoneValidation) {
+    const milestoneDir = resolveMilestonePath(basePath, params.milestoneId);
+    const validationFiles = new Set([
+      resolveMilestoneFile(basePath, params.milestoneId, "VALIDATION"),
+      targetMilestoneFile(
+        basePath,
+        params.milestoneId,
+        "VALIDATION",
+        getMilestone(params.milestoneId)?.title,
+      ),
+      milestoneDir ? join(milestoneDir, `${params.milestoneId}-VALIDATION.md`) : null,
+    ].filter((file): file is string => Boolean(file)));
+    for (const validationFile of validationFiles) {
+      try {
+        if (existsSync(validationFile)) removeProjectionFileSync(validationFile);
+      } catch (e) {
+        logWarning("tool", `validation file cleanup failed: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  // ── Invalidate caches ─────────────────────────────────────────
+  invalidateStateCache();
+  clearParseCache();
+
+  // ── Post-mutation hook: projections, manifest, event log ─────
+  try {
+    await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
+    await writeManifestAndFlush(basePath);
+    if (operationStatus === "committed") {
+      appendEvent(basePath, {
+        cmd: "reassess-roadmap",
+        params: { milestoneId: params.milestoneId, completedSliceId: params.completedSliceId },
+        ts: new Date().toISOString(),
+        actor: "agent",
+        actor_name: params.actorName,
+        trigger_reason: params.triggerReason,
+      });
+    }
+  } catch (hookErr) {
+    logWarning("tool", `reassess-roadmap post-mutation hook warning: ${(hookErr as Error).message}`);
+  }
+
+  return {
+    milestoneId: params.milestoneId,
+    completedSliceId: params.completedSliceId,
+    assessmentPath: renderedAssessmentPath,
+    roadmapPath,
+    ...(stale ? { stale: true as const } : {}),
+  };
 }

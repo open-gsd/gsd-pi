@@ -16,6 +16,7 @@ import {
   insertSlice,
   isDbAvailable,
   openDatabase,
+  setSliceSummaryMd,
 } from "../gsd-db.ts";
 
 type DispatchRuleEntry = (typeof DISPATCH_RULES)[number];
@@ -40,10 +41,10 @@ function makeState(): GSDState {
 }
 
 /**
- * Seed the slice rows the run-uat dispatch gate reads. Post-cutover the gate
- * derives completed-slice candidates from DB rows only (`getMilestoneSlices`),
- * so the ROADMAP checkboxes this fixture writes are projection context; these
- * rows are the dispatch input.
+ * Seed the slice rows the run-uat dispatch gate reads. The gate derives
+ * completed-slice candidates, the UAT spec and the slice summary from DB rows
+ * only, so the ROADMAP checkboxes this fixture writes are projection context;
+ * these rows are the dispatch input.
  */
 function seedSliceRows(): void {
   openDatabase(":memory:");
@@ -58,6 +59,15 @@ function seedSliceRows(): void {
     depends: [],
     sequence: 1,
   });
+  setSliceSummaryMd("M001", "S01", "# S01 Summary\n\nDone.\n", [
+    "# S01 UAT",
+    "",
+    "## UAT Type",
+    "- UAT mode: human-experience",
+    "",
+    "Open the app in a browser and verify the completed user flow.",
+    "",
+  ].join("\n"));
   insertSlice({
     milestoneId: "M001",
     id: "S02",
@@ -84,17 +94,7 @@ function scaffoldRunUatProject(basePath: string): void {
     "",
   ].join("\n"), "utf-8");
 
-  writeFileSync(join(sliceDir, "S01-SUMMARY.md"), "# S01 Summary\n\nDone.\n", "utf-8");
   seedSliceRows();
-  writeFileSync(join(sliceDir, "S01-UAT.md"), [
-    "# S01 UAT",
-    "",
-    "## UAT Type",
-    "- UAT mode: human-experience",
-    "",
-    "Open the app in a browser and verify the completed user flow.",
-    "",
-  ].join("\n"), "utf-8");
 }
 
 function makeContext(basePath: string, overrides: Partial<DispatchContext> = {}): DispatchContext {

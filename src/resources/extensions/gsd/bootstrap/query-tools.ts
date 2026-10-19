@@ -4,7 +4,7 @@
 
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { ensureDbOpen, resolveCtxCwd } from "./dynamic-tools.js";
+import { ensureDbOpen, resolveCtxCwd, runInPiToolSession } from "./dynamic-tools.js";
 import { checkpointWorkflowDatabase } from "../db-workspace.js";
 import { autoSession } from "../auto-runtime-state.js";
 import { getGuidedUnitContext } from "../guided-unit-context.js";
@@ -145,11 +145,11 @@ export function registerQueryTools(
       const basePath = resolveCtxCwd(ctx);
       const { executeMilestoneStatus } = await import("../tools/workflow-tool-executors.js");
       const sessionId = contextSessionId(ctx);
-      const result = await executeMilestoneStatus(
+      const result = await runInPiToolSession(ctx, () => executeMilestoneStatus(
         params,
         basePath,
         nativeMilestoneStatusContext(basePath, toolCallId, sessionId, captureSourceRevision),
-      );
+      ));
       if (result.details?.error === "db_unavailable") {
         return {
           content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot read milestone status." }],
@@ -165,12 +165,12 @@ export function registerQueryTools(
     label: "Checkpoint GSD Database",
     description:
       "Flush the SQLite WAL (Write-Ahead Log) into the base gsd.db file. " +
-      "Call this before `git add .gsd/gsd.db` to ensure the committed database " +
-      "contains current milestone/slice/task state rather than stale pre-session content. " +
+      "Reports failure when the checkpoint did not complete. " +
+      "gsd.db is git-ignored runtime state: do not stage or commit it. " +
       "Safe to call at any time while GSD is running.",
-    promptSnippet: "Flush WAL into gsd.db so git add stages current state",
+    promptSnippet: "Flush WAL into gsd.db",
     promptGuidelines: [
-      "Call gsd_checkpoint_db immediately before staging .gsd/gsd.db with git add.",
+      "Do not stage or commit .gsd/gsd.db — it is git-ignored runtime state.",
       "Do not use sqlite3 or shell commands to checkpoint — they are blocked. Use this tool instead.",
     ],
     parameters: Type.Object({}),
@@ -182,9 +182,15 @@ export function registerQueryTools(
           details: { operation: "checkpoint_db", error: "db_unavailable" },
         };
       }
-      checkpointWorkflowDatabase();
+      if (!checkpointWorkflowDatabase()) {
+        return {
+          content: [{ type: "text", text: "Error: WAL checkpoint did not complete. Another connection may hold the database; retry later." }],
+          details: { operation: "checkpoint_db", error: "checkpoint_incomplete" },
+          isError: true,
+        };
+      }
       return {
-        content: [{ type: "text", text: "WAL checkpoint complete. gsd.db is now up to date and safe to stage with git add." }],
+        content: [{ type: "text", text: "WAL checkpoint complete. gsd.db is now up to date." }],
         details: { operation: "checkpoint_db", status: "ok" },
       };
     },

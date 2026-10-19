@@ -1,20 +1,24 @@
 /**
  * custom-verification.ts — Step verification for custom workflows.
  *
- * Reads the frozen DEFINITION.yaml from a run directory, finds the step's
- * `verify` policy, and dispatches to the appropriate handler. Four policies:
+ * Reads the frozen definition of a run, finds the step's `verify` policy, and
+ * dispatches to the appropriate handler. Four policies:
  *
  *   - content-heuristic: file existence + optional minSize + optional pattern match
  *   - shell-command: spawnSync with 30s timeout, exit 0 → continue, else retry
  *   - prompt-verify: always "pause" (defers to agent)
  *   - human-review: always "pause" (waits for manual inspection)
- *   - (no policy): returns "continue" (passthrough)
+ *   - (no policy): returns "continue" with verdict "inconclusive" and a waiver
+ *
+ * The file checks are the runner. The result of each run is stored as an
+ * evidence row of the step (custom_workflow_step_verifications); the engine
+ * completes a step from that row.
  *
  * Observability:
  * - Return value is the typed verification outcome ("continue" | "retry" | "pause" | "abort").
  * - shell-command captures stderr from spawnSync — callers can inspect on retry.
  * - content-heuristic logs the specific failure (missing file, below minSize, pattern mismatch).
- * - The frozen DEFINITION.yaml on disk is the single source of truth for step policies.
+ * - The frozen definition of the run is the single source of truth for step policies.
  */
 
 import { logWarning } from "./workflow-logger.js";
@@ -23,6 +27,10 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { StepDefinition, VerifyPolicy } from "./definition-loader.js";
+import { customWorkflowRunId } from "./db/custom-workflow-runs.js";
+import type { DomainJsonValue } from "./db/domain-operation.js";
+import { insertCustomWorkflowStepVerification } from "./db/writers/custom-workflow-runs.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import { readFrozenDefinition } from "./custom-workflow-engine.js";
 import { rewriteCommandWithRtk } from "../shared/rtk.js";
 
@@ -32,26 +40,38 @@ export type VerificationOutcome = "continue" | "retry" | "pause" | "abort";
 export interface CustomVerificationResult {
   outcome: VerificationOutcome;
   inputPayload: string;
+  /** What the checks proved. "continue" with "inconclusive" means nothing was checked. */
+  verdict: "pass" | "fail" | "inconclusive";
+  /** Why a step with an inconclusive verdict may still advance. Null when it may not. */
+  waiverRationale: string | null;
 }
 
 function verificationResult(
   outcome: VerificationOutcome,
   evidence: Record<string, unknown>,
 ): CustomVerificationResult {
-  return { outcome, inputPayload: JSON.stringify(evidence) };
+  const verdict = outcome === "continue"
+    ? "pass"
+    : outcome === "retry" || "failure" in evidence ? "fail" : "inconclusive";
+  return { outcome, inputPayload: JSON.stringify(evidence), verdict, waiverRationale: null };
+}
+
+/** The step advances although no check could pass or fail it. */
+function waivedResult(evidence: Record<string, unknown>, waiverRationale: string): CustomVerificationResult {
+  return { outcome: "continue", inputPayload: JSON.stringify(evidence), verdict: "inconclusive", waiverRationale };
 }
 
 /**
  * Run custom verification for a specific step in a workflow run.
  *
- * Reads the frozen DEFINITION.yaml from `runDir`, finds the step with the
+ * Reads the frozen definition of the run in `runDir`, finds the step with the
  * given `stepId`, and dispatches to the appropriate verification handler
  * based on the step's `verify.policy` field.
  *
  * @param runDir — absolute path to the workflow run directory
  * @param stepId — the step ID to verify (e.g. "step-1")
  * @returns "continue" if verification passes, "retry" if it should retry, or "pause" if it needs review
- * @throws Error if DEFINITION.yaml is missing or unreadable
+ * @throws Error if the run has no frozen definition
  */
 export function runCustomVerification(
   runDir: string,
@@ -64,17 +84,35 @@ export function runCustomVerificationWithEvidence(
   runDir: string,
   stepId: string,
 ): CustomVerificationResult {
+  const result = verifyStep(runDir, stepId);
+  insertCustomWorkflowStepVerification({
+    fence: readDomainOperationFence(),
+    runId: customWorkflowRunId(runDir),
+    stepId,
+    verdict: result.verdict,
+    evidence: JSON.parse(result.inputPayload) as { [key: string]: DomainJsonValue },
+    waiverRationale: result.waiverRationale,
+  });
+  return result;
+}
+
+function verifyStep(runDir: string, stepId: string): CustomVerificationResult {
   const def = readFrozenDefinition(runDir);
 
   const step = def.steps.find((s: StepDefinition) => s.id === stepId);
   if (!step) {
-    // Step not found in definition — nothing to verify, continue
-    return verificationResult("continue", { policy: "none", reason: "step-not-found", stepId });
+    // Step not found in definition (an iterate instance) — nothing to verify
+    return waivedResult(
+      { policy: "none", reason: "step-not-found", stepId },
+      "The step is not in the frozen definition, so it has no verify policy.",
+    );
   }
 
   if (!step.verify) {
-    // No verification policy configured — passthrough
-    return verificationResult("continue", { policy: "none", reason: "not-configured", stepId });
+    return waivedResult(
+      { policy: "none", reason: "not-configured", stepId },
+      "The step has no verify policy.",
+    );
   }
 
   return dispatchPolicy(runDir, step, step.verify);
@@ -111,7 +149,8 @@ function dispatchPolicy(
  * 3. If `pattern` is set, check that file content matches the regex
  *
  * Returns "continue" if all checks pass, "pause" if any fail.
- * If `produces` is empty or undefined, returns "continue" (nothing to check).
+ * If `produces` is empty or undefined, returns "continue" with verdict
+ * "inconclusive" and a waiver (nothing to check).
  */
 function handleContentHeuristic(
   runDir: string,
@@ -120,7 +159,10 @@ function handleContentHeuristic(
 ): CustomVerificationResult {
   const produces = step.produces;
   if (!produces || produces.length === 0) {
-    return verificationResult("continue", { policy: "content-heuristic", reason: "no-outputs" });
+    return waivedResult(
+      { policy: "content-heuristic", reason: "no-outputs" },
+      "The content-heuristic policy has no produced files to check.",
+    );
   }
 
   // ADR-047 §3: the block signature hashes the inputs this guard actually read,
@@ -213,7 +255,7 @@ function handleContentHeuristic(
  * and a 30-second timeout. Returns "continue" if exit code 0,
  * "retry" otherwise (including timeout/signal kills).
  *
- * SECURITY: The command string comes from a frozen DEFINITION.yaml written
+ * SECURITY: The command string comes from the definition frozen
  * at run-creation time. The trust boundary is the workflow definition author.
  * Commands run with the same privileges as the GSD process. Only use
  * shell-command verification with definitions you trust.

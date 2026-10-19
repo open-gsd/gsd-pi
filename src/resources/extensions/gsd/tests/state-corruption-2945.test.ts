@@ -19,12 +19,11 @@ import {
   closeDatabase,
   insertMilestone,
   insertSlice,
-  insertTask,
-  getMilestoneSlices,
   getSliceTasks,
   getGateResults,
 } from "../gsd-db.ts";
 import { renderRoadmapContent } from "../workflow-projections.ts";
+import { seedLifecycles } from "./helpers/authority-cutover.ts";
 import type { MilestoneRow, SliceRow } from "../gsd-db.ts";
 import type { AutoSession } from "../auto/session.ts";
 
@@ -196,69 +195,6 @@ describe("#2945 Bug 1: ROADMAP table cell corruption by UAT content", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Bug 2: complete-milestone event replay bypasses task validation
-// ═══════════════════════════════════════════════════════════════════════════════
-
-describe("#2945 Bug 2: workflow-reconcile bypasses task validation for complete_slice", () => {
-  let dbPath: string;
-
-  beforeEach(() => {
-    dbPath = tempDbPath();
-    openDatabase(dbPath);
-  });
-
-  afterEach(() => {
-    cleanupDb(dbPath);
-  });
-
-  test("replaySliceComplete must not mark slice done when tasks are pending", async () => {
-    // Set up: M001 with S01 that has 2 tasks, one pending
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
-    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", status: "complete", title: "Done task" });
-    insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", status: "pending", title: "Pending task" });
-
-    // Import and call replaySliceComplete directly
-    const { replaySliceComplete } = await import("../workflow-reconcile.ts");
-    replaySliceComplete("M001", "S01", new Date().toISOString());
-
-    // The slice should NOT be marked done because T02 is still pending
-    const slices = getMilestoneSlices("M001");
-    const s01 = slices.find(s => s.id === "S01");
-    assert.ok(s01, "S01 should exist");
-    assert.notStrictEqual(
-      s01!.status,
-      "done",
-      "replaySliceComplete must not mark slice as done when tasks are pending",
-    );
-    assert.notStrictEqual(
-      s01!.status,
-      "complete",
-      "replaySliceComplete must not mark slice as complete when tasks are pending",
-    );
-  });
-
-  test("replaySliceComplete marks slice done when all tasks are complete", async () => {
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
-    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", status: "complete", title: "Done task" });
-    insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", status: "done", title: "Also done" });
-
-    const { replaySliceComplete } = await import("../workflow-reconcile.ts");
-    replaySliceComplete("M001", "S01", new Date().toISOString());
-
-    const slices = getMilestoneSlices("M001");
-    const s01 = slices.find(s => s.id === "S01");
-    assert.ok(s01, "S01 should exist");
-    assert.strictEqual(
-      s01!.status,
-      "done",
-      "replaySliceComplete should mark slice as done when all tasks are complete",
-    );
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // Bug 3: Worktree directory not cleaned up after mergeAndExit
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -356,10 +292,36 @@ describe("#2945 Bug 4: validate-milestone must persist quality_gates records", (
     try { rmSync(basePath, { recursive: true, force: true }); } catch {}
   });
 
-  test("handleValidateMilestone persists quality_gates records in DB", async () => {
-    // Set up milestone with slices
+  // Canonical validation records only for an adopted Milestone, and it binds
+  // the receipt to a verification source snapshot of the project repository —
+  // so the fixture commits the hierarchy rows and adopts their lifecycles.
+  function seedAdoptedMilestone(key: string): void {
+    writeFileSync(join(basePath, "source.ts"), "export const fixture = 'validate-milestone';\n");
+    execFileSync("git", ["init"], { cwd: basePath, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: basePath });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: basePath });
+    execFileSync("git", ["add", "source.ts"], { cwd: basePath });
+    execFileSync("git", ["commit", "-m", "fixture"], { cwd: basePath, stdio: "ignore" });
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
+    seedLifecycles(`state-corruption-2945/${key}`, [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
+  }
+
+  function validationInvocation(key: string) {
+    return {
+      invocation: {
+        idempotencyKey: `state-corruption-2945/${key}`,
+        sourceTransport: "internal" as const,
+        actorType: "agent" as const,
+      },
+    };
+  }
+
+  test("handleValidateMilestone persists quality_gates records in DB", async () => {
+    seedAdoptedMilestone("persist-gates");
 
     const { handleValidateMilestone } = await import("../tools/validate-milestone.ts");
 
@@ -372,7 +334,7 @@ describe("#2945 Bug 4: validate-milestone must persist quality_gates records", (
       crossSliceIntegration: "Integration verified",
       requirementCoverage: "100% coverage",
       verdictRationale: "All checks pass",
-    }, basePath);
+    }, basePath, validationInvocation("persist-gates"));
 
     assert.ok(!("error" in result), `handler should succeed, got: ${JSON.stringify(result)}`);
 
@@ -390,8 +352,7 @@ describe("#2945 Bug 4: validate-milestone must persist quality_gates records", (
   });
 
   test("handleValidateMilestone records verdict correctly in quality_gates", async () => {
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
+    seedAdoptedMilestone("verdict-gates");
 
     const { handleValidateMilestone } = await import("../tools/validate-milestone.ts");
 
@@ -405,7 +366,7 @@ describe("#2945 Bug 4: validate-milestone must persist quality_gates records", (
       requirementCoverage: "50% coverage",
       verdictRationale: "Needs work",
       remediationPlan: "Fix S01",
-    }, basePath);
+    }, basePath, validationInvocation("verdict-gates"));
 
     const adapter = (await import("../gsd-db.ts"))._getAdapter()!;
     const gates = adapter.prepare(

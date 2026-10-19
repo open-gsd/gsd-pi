@@ -46,6 +46,7 @@ SPEC
 ```
 
 **Spec quality matters.** Vague specs produce vague results. Include:
+
 - What the user can DO when it's done (not what code to write)
 - Technical constraints (language, framework, Node version)
 - What's out of scope (prevents scope creep)
@@ -53,6 +54,7 @@ SPEC
 ### Step 3: Launch the build
 
 **Fire-and-forget (simplest — GSD does everything):**
+
 ```bash
 cd "$PROJECT_DIR"
 RESULT=$(gsd headless --output-format json --timeout 0 --context spec.md new-milestone --auto 2>/dev/null)
@@ -62,12 +64,14 @@ EXIT=$?
 `--timeout 0` disables the timeout for long builds. `--auto` chains milestone creation into execution.
 
 **With budget limit:**
+
 ```bash
 # Use step-by-step mode with budget checks instead of auto
 # See workflows/step-by-step.md
 ```
 
 **For CI or ecosystem runs (no user config):**
+
 ```bash
 RESULT=$(gsd headless --bare --output-format json --timeout 0 --context spec.md new-milestone --auto 2>/dev/null)
 EXIT=$?

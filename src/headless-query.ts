@@ -190,7 +190,8 @@ async function runHeadlessQueryUnsafe(
     }
   }
 
-  // Aggregate parallel worker costs
+  // Aggregate parallel worker costs. This is runtime telemetry from the session
+  // status files, not workflow state: nothing here reads or writes the database.
   const statuses = readAllSessionStatuses(basePath)
   const workers = statuses.map((s) => ({
     milestoneId: s.milestoneId,

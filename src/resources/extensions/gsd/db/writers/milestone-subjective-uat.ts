@@ -29,6 +29,71 @@ export interface PrepareMilestoneSubjectiveUatWriteInput {
   recommendationConfidence: number;
   required: boolean;
   requirementId?: string;
+  /**
+   * Explicit supersession (#2341): the new criterion replaces this criterion
+   * ID. The caller-provided criterionKey/requirementId must already be the
+   * superseded criterion's own (resolved via
+   * resolveSubjectiveUatSupersedeTarget), because the schema trigger only
+   * accepts supersession within the same key/requirement scope.
+   */
+  supersedesCriterionId?: string;
+}
+
+export interface SubjectiveUatSupersedeTarget {
+  criterionId: string;
+  criterionKey: string;
+  requirementId: string | null;
+}
+
+/**
+ * Read-only resolution of an explicit supersede target (#2341): the criterion
+ * must exist in this milestone's lifecycle, be subjective-UAT kind, and still
+ * be the current head (not yet superseded). Callers use the returned key and
+ * requirement identity to address the replacement criterion.
+ */
+export function resolveSubjectiveUatSupersedeTarget(
+  milestoneId: string,
+  supersedesCriterionId: string,
+): SubjectiveUatSupersedeTarget {
+  const row = getDb().prepare(`
+    SELECT criterion.criterion_id,
+           criterion.criterion_key,
+           criterion.requirement_id,
+           criterion.criterion_kind
+    FROM workflow_acceptance_criteria criterion
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = criterion.lifecycle_id
+     AND lifecycle.project_id = criterion.project_id
+    WHERE criterion.criterion_id = :criterion_id
+      AND lifecycle.item_kind = 'milestone'
+      AND lifecycle.milestone_id = :milestone_id
+      AND lifecycle.slice_id IS NULL
+      AND lifecycle.task_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_acceptance_criteria successor
+        WHERE successor.supersedes_criterion_id = criterion.criterion_id
+      )
+  `).get({
+    ":criterion_id": supersedesCriterionId,
+    ":milestone_id": milestoneId,
+  }) as Record<string, unknown> | undefined;
+  if (!row) {
+    throw new Error(
+      `supersedesCriterionId ${supersedesCriterionId} is not a current subjective UAT criterion of milestone ${milestoneId}`,
+    );
+  }
+  if (row["criterion_kind"] !== "subjective_uat") {
+    throw new Error(
+      `supersedesCriterionId ${supersedesCriterionId} is not a subjective UAT criterion`,
+    );
+  }
+  return {
+    criterionId: String(row["criterion_id"]),
+    criterionKey: String(row["criterion_key"]),
+    requirementId: row["requirement_id"] === null || row["requirement_id"] === undefined
+      ? null
+      : String(row["requirement_id"]),
+  };
 }
 
 export interface PreparedMilestoneSubjectiveUat {
@@ -173,12 +238,58 @@ function ensureSubjectiveCriterion(
   input: PrepareMilestoneSubjectiveUatWriteInput,
   createdAt: string,
 ): string {
-  const current = currentCriterion(
+  let current = currentCriterion(
     context,
     lifecycleId,
     input.criterionKey,
     input.requirementId,
   );
+  if (input.supersedesCriterionId !== undefined) {
+    // #2341: explicit by-ID supersession. Re-validate the target inside the
+    // transaction — it must still be the current head of its key/requirement
+    // scope, and the caller's key/requirement identity must be the target's
+    // own (the schema trigger only accepts same-scope supersession).
+    const target = getDb().prepare(`
+      SELECT criterion.criterion_id, criterion.criterion_key, criterion.requirement_id,
+             criterion.criterion_kind, criterion.required, criterion.description
+      FROM workflow_acceptance_criteria criterion
+      WHERE criterion.project_id = :project_id
+        AND criterion.lifecycle_id = :lifecycle_id
+        AND criterion.criterion_id = :criterion_id
+        AND NOT EXISTS (
+          SELECT 1 FROM workflow_acceptance_criteria successor
+          WHERE successor.supersedes_criterion_id = criterion.criterion_id
+        )
+    `).get({
+      ":project_id": context.projectId,
+      ":lifecycle_id": lifecycleId,
+      ":criterion_id": input.supersedesCriterionId,
+    }) as Record<string, unknown> | undefined;
+    if (!target) {
+      throw new Error(
+        `supersedesCriterionId ${input.supersedesCriterionId} is not a current criterion of this Milestone`,
+      );
+    }
+    if (target["criterion_kind"] !== "subjective_uat") {
+      throw new Error("Subjective UAT criterion identity conflicts with a technical criterion");
+    }
+    if (
+      String(target["criterion_key"]) !== input.criterionKey ||
+      (target["requirement_id"] ?? null) !== (input.requirementId ?? null)
+    ) {
+      throw new Error(
+        `supersedesCriterionId ${input.supersedesCriterionId} carries criterionKey "${String(target["criterion_key"])}"` +
+        ` — prepare the replacement under that key`,
+      );
+    }
+    current = {
+      criterion_id: String(target["criterion_id"]),
+      criterion_kind: String(target["criterion_kind"]),
+      evidence_class: "human",
+      required: Number(target["required"] ?? 0),
+      description: String(target["description"] ?? ""),
+    };
+  }
   if (current && current.criterion_kind !== "subjective_uat") {
     throw new Error("Subjective UAT criterion identity conflicts with a technical criterion");
   }

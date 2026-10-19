@@ -42,5 +42,8 @@ export async function prepareModelRegistryForListing(
 	if (options.afterLoad) {
 		await options.afterLoad(modelRegistry);
 	}
+	// External-CLI providers report "not ready" until their first async
+	// probe lands; wait for it so the listing reflects real readiness.
+	await modelRegistry.settleProviderReadiness();
 	return modelRegistry;
 }

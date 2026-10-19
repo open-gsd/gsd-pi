@@ -880,11 +880,17 @@ export function readTaskRecoveryRoute(attemptId: string): TaskRecoveryRouteSnaps
 }
 
 /** Every Attempt that ever committed a recovery action for this Task, newest first. */
-export function readTaskRecoveryAttemptIds(task: {
-  milestoneId: string;
-  sliceId: string;
-  taskId: string;
-}): string[] {
+export function readTaskRecoveryAttemptIds(
+  task: {
+    milestoneId: string;
+    sliceId: string;
+    taskId: string;
+  },
+  options?: { projectId?: string },
+): string[] {
+  // #2778: identity columns alone can match a foreign project's imported row;
+  // callers that hold the project scope (e.g. the shadow-snapshot reader) pass it here.
+  const projectId = options?.projectId ?? null;
   const rows = getDb().prepare(`
     SELECT observation.attempt_id, MAX(action.project_revision) AS latest_project_revision
     FROM workflow_failure_observations observation
@@ -899,6 +905,7 @@ export function readTaskRecoveryAttemptIds(task: {
       AND lifecycle.milestone_id = :milestone_id
       AND lifecycle.slice_id = :slice_id
       AND lifecycle.task_id = :task_id
+      AND (:project_id IS NULL OR lifecycle.project_id = :project_id)
       AND observation.attempt_id IS NOT NULL
     GROUP BY observation.attempt_id
     ORDER BY latest_project_revision DESC
@@ -906,6 +913,7 @@ export function readTaskRecoveryAttemptIds(task: {
     ":milestone_id": task.milestoneId,
     ":slice_id": task.sliceId,
     ":task_id": task.taskId,
+    ":project_id": projectId,
   }) as Array<Record<string, unknown>>;
   return rows.map((row) => String(row["attempt_id"]));
 }

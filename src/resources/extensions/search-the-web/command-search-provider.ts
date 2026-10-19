@@ -15,17 +15,19 @@ import {
   getTavilyApiKey,
   getBraveApiKey,
   getOllamaApiKey,
+  getFirecrawlApiKey,
   getSearchProviderPreference,
   setSearchProviderPreference,
   resolveSearchProvider,
   type SearchProviderPreference,
 } from './provider.js'
 
-const VALID_PREFERENCES: SearchProviderPreference[] = ['tavily', 'brave', 'ollama', 'auto']
+const VALID_PREFERENCES: SearchProviderPreference[] = ['tavily', 'brave', 'ollama', 'firecrawl', 'auto']
 
-function keyStatus(provider: 'tavily' | 'brave' | 'ollama'): string {
+function keyStatus(provider: 'tavily' | 'brave' | 'ollama' | 'firecrawl'): string {
   if (provider === 'tavily') return getTavilyApiKey() ? '✓' : '✗'
   if (provider === 'ollama') return getOllamaApiKey() ? '✓' : '✗'
+  if (provider === 'firecrawl') return getFirecrawlApiKey() ? '✓' : '✗'
   return getBraveApiKey() ? '✓' : '✗'
 }
 
@@ -34,6 +36,7 @@ function buildSelectOptions(): string[] {
     `tavily (key: ${keyStatus('tavily')})`,
     `brave (key: ${keyStatus('brave')})`,
     `ollama (key: ${keyStatus('ollama')})`,
+    `firecrawl (key: ${keyStatus('firecrawl')})`,
     `auto`,
   ]
 }
@@ -42,12 +45,13 @@ function parseSelectChoice(choice: string): SearchProviderPreference {
   if (choice.startsWith('tavily')) return 'tavily'
   if (choice.startsWith('brave')) return 'brave'
   if (choice.startsWith('ollama')) return 'ollama'
+  if (choice.startsWith('firecrawl')) return 'firecrawl'
   return 'auto'
 }
 
 export function registerSearchProviderCommand(pi: ExtensionAPI): void {
   pi.registerCommand('search-provider', {
-    description: 'Switch search provider (tavily, brave, ollama, auto)',
+    description: 'Switch search provider (tavily, brave, ollama, firecrawl, auto)',
 
     getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
       const trimmed = prefix.trim().toLowerCase()
@@ -56,7 +60,7 @@ export function registerSearchProviderCommand(pi: ExtensionAPI): void {
         .map((p) => {
           let description: string
           if (p === 'auto') {
-            description = `Auto-select (tavily: ${keyStatus('tavily')}, brave: ${keyStatus('brave')}, ollama: ${keyStatus('ollama')})`
+            description = `Auto-select (tavily: ${keyStatus('tavily')}, brave: ${keyStatus('brave')}, ollama: ${keyStatus('ollama')}, firecrawl: ${keyStatus('firecrawl')})`
           } else {
             description = `key: ${keyStatus(p)}`
           }

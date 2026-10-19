@@ -57,6 +57,7 @@ import { basename, join, resolve } from 'node:path';
 import { describe, it, beforeEach, afterEach, after, type TestContext } from 'node:test';
 
 import { RpcClient } from '@opengsd/rpc-client';
+import { WORKFLOW_OUTCOME_CUSTOM_TYPE } from '../../packages/contracts/src/index.js';
 
 import { SessionManager as DaemonSessionManager } from '../../packages/daemon/src/session-manager.js';
 import { MAX_EVENTS as DAEMON_MAX_EVENTS, INIT_TIMEOUT_MS as DAEMON_INIT_TIMEOUT_MS } from '../../packages/daemon/src/types.js';
@@ -726,6 +727,48 @@ function registerSharedScenarios(create: (workDir: string) => Promise<Harness>):
       assert.equal(session.status, 'paused', `expected paused for ${JSON.stringify(event)}`);
       assert.equal(session.pendingBlocker, null);
     }
+  });
+
+  it('the typed blocked outcome leaves the session blocked and resumable, not terminal', async () => {
+    const dir = join(workDir, 'typed-blocked');
+    const session = h.sessionById(await h.start(dir))!;
+
+    h.emit(session, {
+      type: 'message_end',
+      message: {
+        customType: WORKFLOW_OUTCOME_CUSTOM_TYPE,
+        content: JSON.stringify({ type: 'workflow_outcome', status: 'blocked', exitCode: 10, reason: 'needs a person' }),
+      },
+    });
+
+    // A pause is not a completion: the run is blocked for a person, the
+    // subscription stays live, and later events still transition the session.
+    assert.equal(session.status, 'blocked');
+    assert.equal(session.pendingBlocker?.message, 'needs a person');
+    h.emit(session, { type: 'extension_ui_request', id: 'n-late', method: 'notify', message: 'Auto-mode stopped: done' });
+    assert.equal(session.status, 'completed', 'a later terminal event still transitions the session');
+  });
+
+  it('the typed completed outcome is terminal exactly like the non-blocking pause notice is', async () => {
+    const dir = join(workDir, 'typed-completed');
+    const session = h.sessionById(await h.start(dir))!;
+
+    h.emit(session, {
+      type: 'message_end',
+      message: {
+        customType: WORKFLOW_OUTCOME_CUSTOM_TYPE,
+        content: JSON.stringify({ type: 'workflow_outcome', status: 'completed', exitCode: 0 }),
+      },
+    });
+
+    // The only pause emitted as completed is the non-blocking pause notice,
+    // and the text path already ends the run for it (the pinned behavior
+    // above): parity keeps that rule on the typed path.
+    assert.equal(session.status, 'completed');
+    const eventCount = session.events.length;
+    h.emit(session, { type: 'extension_ui_request', id: 'late', method: 'notify', message: 'Auto-mode stopped: done' });
+    assert.equal(session.status, 'completed', 'post-completion events must not change status');
+    assert.equal(session.events.length, eventCount, 'post-completion events must not be buffered');
   });
 
   it('never blocks on fire-and-forget UI methods', async () => {

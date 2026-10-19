@@ -31,6 +31,7 @@ Then assess whether the remaining roadmap still makes sense given what was just 
 **Bias strongly toward "roadmap is fine."** Most of the time, the plan is still good. Only rewrite if you have concrete evidence that remaining slices need to change. Don't rewrite for cosmetic reasons, minor optimization, or theoretical improvements.
 
 Ask yourself:
+
 - Did this slice retire the risk it was supposed to? If not, does a remaining slice need to address it?
 - Did new risks or unknowns emerge that should change slice ordering?
 - Are the boundary contracts in the boundary map still accurate given what was actually built?

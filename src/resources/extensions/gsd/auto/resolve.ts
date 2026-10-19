@@ -168,6 +168,16 @@ export function _hasPendingResolveForTest(): boolean {
 }
 
 /**
+ * Read-only access to the pending unit resolver. Only exported for tests —
+ * lets a test settle the in-flight unit promise with an arbitrary UnitResult
+ * (e.g. status "error", which resolveAgentEnd/resolveAgentEndCancelled never
+ * produce). Production code should never call this.
+ */
+export function _getCurrentResolveForTest(): ((result: UnitResult) => void) | null {
+  return _currentResolve;
+}
+
+/**
  * No-op for backward compatibility with tests that previously set the
  * active session. The module no longer holds a session reference.
  */

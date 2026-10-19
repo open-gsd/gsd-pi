@@ -5,6 +5,7 @@
 ## Problem
 
 Ollama support in gsd-pi currently requires manual `models.json` configuration. Users must:
+
 1. Know the OpenAI-compatibility endpoint (`localhost:11434/v1`)
 2. Manually list every model they want to use
 3. Set compat flags (`supportsDeveloperRole: false`, etc.)
@@ -19,6 +20,7 @@ Make Ollama the easiest way to use gsd-pi — zero config when Ollama is running
 ## Architecture
 
 Everything is a self-contained extension under `src/resources/extensions/ollama/`. The extension:
+
 - Auto-detects Ollama on startup via health check
 - Discovers and registers local models with the model registry
 - Provides native Ollama API streaming (not OpenAI shim)
@@ -48,6 +50,7 @@ src/resources/extensions/ollama/
 **What:** Extension that auto-detects Ollama, discovers models, registers them using the existing `openai-completions` API provider. Zero config needed.
 
 **Extension files:**
+
 - `ollama/index.ts` — Main entry. On `session_start`:
   1. Probe `localhost:11434` (or `OLLAMA_HOST`) with 1.5s timeout
   2. If reachable, discover models via `/api/tags`
@@ -80,6 +83,7 @@ src/resources/extensions/ollama/
 - `ollama/types.ts` — Ollama API response types
 
 **Core changes (minimal):**
+
 - `packages/pi-ai/src/types.ts` — Add `"ollama"` to `KnownProvider`
 - `packages/pi-ai/src/env-api-keys.ts` — Add `"ollama"` key resolution (returns `"ollama"` placeholder — no real key needed)
 - `src/onboarding.ts` — Add `"ollama"` to provider selection list
@@ -87,6 +91,7 @@ src/resources/extensions/ollama/
 
 **Model registration details:**
 Each discovered model registers as:
+
 ```typescript
 {
   id: "llama3.1:8b",           // from /api/tags
@@ -109,6 +114,7 @@ Each discovered model registers as:
 ```
 
 **Behavior:**
+
 - `gsd --list-models` shows all locally-pulled Ollama models automatically
 - `/model ollama/llama3.1:8b` works without any config file
 - If Ollama isn't running, extension is silent — no errors, no models listed
@@ -119,6 +125,7 @@ Each discovered model registers as:
 **What:** A dedicated streaming provider that talks Ollama's native protocol instead of the OpenAI compatibility shim.
 
 **Extension files:**
+
 - `ollama/ollama-provider.ts` — Native `/api/chat` streaming:
   - Registers `"ollama-chat"` API with `registerApiProvider()`
   - Implements `stream()` and `streamSimple()`:
@@ -137,11 +144,13 @@ Each discovered model registers as:
   - Vision support: converts image content to base64 for multimodal models
 
 **Core changes:**
+
 - `packages/pi-ai/src/types.ts` — Add `"ollama-chat"` to `KnownApi`
 
 **Phase 1 models switch to `api: "ollama-chat"` by default.** Users can force OpenAI-compat via `models.json` override if needed.
 
 **Why native over OpenAI-compat:**
+
 - Full `keep_alive` / `num_ctx` control
 - Better error messages (Ollama-native vs generic OpenAI)
 - More reliable tool calling on Ollama's native format
@@ -153,8 +162,10 @@ Each discovered model registers as:
 **What:** `/ollama` slash commands and an LLM tool for model management.
 
 **Extension files:**
+
 - `ollama/ollama-commands.ts` — Slash commands registered via `pi.registerCommand()`:
   - `/ollama` — Status overview:
+
     ```
     Ollama v0.5.7 — running (localhost:11434)
 
@@ -166,6 +177,7 @@ Each discovered model registers as:
       qwen2.5-coder:7b  (4.4 GB)
       deepseek-r1:8b    (4.9 GB)
     ```
+
   - `/ollama pull <model>` — Pull with streaming progress via `ctx.ui.setWidget()`
   - `/ollama list` — List all local models with sizes and families
   - `/ollama remove <model>` — Delete a model (with confirmation)
@@ -176,6 +188,7 @@ Each discovered model registers as:
   - Use case: agent detects it needs a model, pulls it automatically
 
 **UX Flow:**
+
 ```
 $ gsd
 > /ollama

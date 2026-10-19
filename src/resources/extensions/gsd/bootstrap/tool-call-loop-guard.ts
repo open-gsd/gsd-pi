@@ -11,7 +11,11 @@
  * arguments. State resets at Agent Turn boundaries (session_start,
  * agent_end) and the identical-signature streak also resets when a
  * different tool call breaks the streak. Block messages instruct the model
- * to stop tooling for the rest of that turn and answer in text.
+ * to stop tooling for the rest of that turn and answer in text. A second
+ * consecutive block of the same tool additionally returns `escalate: true`
+ * (#2877): the model already ignored one explicit block, so the auto-mode
+ * hook aborts the turn through the sanctioned pause path instead of
+ * returning another error toolResult.
  *
  * The per-tool-name check (#783 Brief C) tracks call counts within a
  * turn regardless of args, decaying after successful state-progressing tools.
@@ -40,7 +44,66 @@ import { canonicalToolName, canonicalWorkflowToolName } from "../engine-hook-con
 const DEFAULT_MAX_CONSECUTIVE_IDENTICAL_CALLS = 4;
 const DEFAULT_PER_TOOL_DEFAULT_CAP = 6;
 const DEFAULT_PER_TOOL_REPEATABLE_CAP = 15;
-const DEFAULT_PER_TOOL_CAP_EXEMPT_TOOLS = ["find", "glob", "grep", "ls", "read", "search_and_read"] as const;
+
+/**
+ * Consecutive blocks of the same tool that turn into a turn abort (#2877).
+ *
+ * A first block already proves the model exhausted the per-tool cap (or the
+ * identical-args streak) while ignoring every block message; a second block in
+ * a row proves it ignored the first explicit block too — but only once a new
+ * model response started between the two, so the first block was actually
+ * delivered as feedback (a single response's tool batch never escalates).
+ * Blocks below this threshold stay error toolResults so a legitimate turn that
+ * hits the cap gets its one signal; the auto-mode hook escalates only
+ * `escalate` results to the sanctioned pause path (see
+ * bootstrap/loop-guard-abort.ts).
+ */
+const CONSECUTIVE_SAME_TOOL_BLOCK_ABORT_THRESHOLD = 2;
+
+/**
+ * Tools exempt from Guard 2 (per-tool-name cap), exported so tests and tooling
+ * can inspect the defaults. User-supplied `exempt_tools` are additive to this
+ * set.
+ *
+ * Read-only navigation tools (#1093, #1095) and read-only workflow query tools
+ * (#2753) are normal context gathering: a planning turn legitimately looks up
+ * many different decisions/requirements, and these tools never record
+ * mutations so their counts would never decay. Guard 1's identical-args streak
+ * still catches a genuine reread loop of the same ID.
+ *
+ * The workflow names mirror the pure-lookup members of the contracts'
+ * `writePolicy: "read"` set (packages/contracts/src/workflow.ts). Where the
+ * pi-native and MCP surfaces spell a tool differently both names are listed
+ * (`memory_query`/`gsd_memory_query`, `gsd_graph`/`gsd_memory_graph`).
+ * Accepted nuance: `memory_query`/`gsd_memory_query` with `reinforce_hits`
+ * bump persistent hit counts — ranking telemetry only, no workflow state, and
+ * distinct-arg reinforced queries are legitimate, so they stay exempt (Guard 1
+ * still blocks an identical-args hammer). Side-effecting read-policy tools
+ * stay capped: `gsd_checkpoint_db` flushes the SQLite WAL.
+ */
+export const DEFAULT_PER_TOOL_CAP_EXEMPT_TOOLS = [
+  // Read-only navigation (#1093, #1095).
+  "find",
+  "glob",
+  "grep",
+  "ls",
+  "read",
+  "search_and_read",
+  // Read-only workflow queries (#2753).
+  "gsd_decision_get",
+  "gsd_decision_list",
+  "gsd_requirement_get",
+  "gsd_requirement_list",
+  "gsd_project_snapshot",
+  "gsd_milestone_status",
+  "gsd_journal_query",
+  "gsd_exec_search",
+  "gsd_resume",
+  "memory_query",
+  "gsd_memory_query",
+  "gsd_graph",
+  "gsd_memory_graph",
+] as const;
 
 /** Interactive/user-facing tools where even 1 duplicate is confusing. */
 const STRICT_LOOP_TOOLS = new Set(["ask_user_questions"]);
@@ -230,6 +293,48 @@ const perToolCounts = new Map<string, number>();
 let mutationEpoch = 0;
 const perToolLastMutationEpoch = new Map<string, number>();
 
+/**
+ * Consecutive loop-guard blocks of the same tool within the current turn
+ * (#2877). Allowed calls reset the streak: only a tight re-issue loop (the
+ * model retrying a blocked tool back-to-back) escalates to a turn abort.
+ */
+let blockedStreakToolName = "";
+let blockedStreakCount = 0;
+
+/**
+ * Model-response boundary counter (#2877). One assistant response can carry a
+ * whole tool batch (executeToolCallsParallel prepares every call before any
+ * result reaches the model), so adjacent blocks inside one response prove only
+ * that the batch blew the cap — the model has not seen any block yet. The
+ * streak may only escalate once a new model response started after the
+ * previous block, i.e. the block was actually delivered as feedback.
+ */
+let modelResponseSeq = 0;
+let blockedStreakResponseSeq = 0;
+
+/** Bump the model-response boundary. Call from the message_start hook. */
+export function noteLoopGuardModelResponse(): void {
+  modelResponseSeq += 1;
+}
+
+function noteGuardBlock(toolName: string): boolean {
+  const freshStreak = blockedStreakToolName !== toolName;
+  const sawPreviousBlock = !freshStreak && modelResponseSeq > blockedStreakResponseSeq;
+  if (freshStreak) {
+    blockedStreakToolName = toolName;
+    blockedStreakCount = 1;
+  } else {
+    blockedStreakCount += 1;
+  }
+  blockedStreakResponseSeq = modelResponseSeq;
+  return blockedStreakCount >= CONSECUTIVE_SAME_TOOL_BLOCK_ABORT_THRESHOLD && sawPreviousBlock;
+}
+
+function noteGuardAllowed(): void {
+  blockedStreakToolName = "";
+  blockedStreakCount = 0;
+}
+
 /** Hash tool name + args into a compact signature for comparison. */
 function hashToolCall(toolName: string, args: Record<string, unknown>): string {
   const h = createHash("sha256");
@@ -251,6 +356,10 @@ function hashToolCall(toolName: string, args: Record<string, unknown>): string {
  *
  * Returns `{ block: false }` for allowed calls.
  * Returns `{ block: true, reason }` when the loop threshold is exceeded.
+ * A block that repeats the immediately preceding block of the same tool also
+ * carries `escalate: true` (#2877) — the auto-mode hook aborts the turn
+ * through the sanctioned pause path instead of returning another error
+ * toolResult that the model may ignore.
  *
  * Two independent guards run; whichever trips first blocks:
  *  1. Identical-signature streak (config.maxConsecutiveIdentical, strict for
@@ -265,7 +374,7 @@ function hashToolCall(toolName: string, args: Record<string, unknown>): string {
 export function checkToolCallLoop(
   toolName: string,
   args: Record<string, unknown>,
-): { block: boolean; reason?: string; count?: number } {
+): { block: boolean; reason?: string; count?: number; escalate?: boolean } {
   if (!enabled || !config.guardEnabled) return { block: false, count: 0 };
 
   const sig = hashToolCall(toolName, args);
@@ -284,6 +393,7 @@ export function checkToolCallLoop(
     : config.maxConsecutiveIdentical;
 
   if (config.identicalEnabled && consecutiveCount > threshold) {
+    const escalate = noteGuardBlock(toolName);
     return {
       block: true,
       reason:
@@ -293,6 +403,7 @@ export function checkToolCallLoop(
         `(or GSD_TOOL_LOOP_IDENTICAL_MAX) if this is expected. ` +
         `Do not retry this tool or call other tools this turn — stop and respond to the user in text.`,
       count: consecutiveCount,
+      escalate,
     };
   }
 
@@ -308,17 +419,24 @@ export function checkToolCallLoop(
   perToolLastMutationEpoch.set(toolName, mutationEpoch);
 
   // Read-only navigation tools are normal context gathering; Guard 1 still
-  // catches true reread loops with identical arguments. Browser Automation
-  // Contract tools (browser_*) are the same shape: a browser-backed UAT makes
-  // many distinct-arg calls (read a message, count edits, inspect a card, …),
-  // so the arg-independent per-tool cap misfires on legitimate verification;
-  // Guard 1's identical-signature streak still catches a genuinely stuck
-  // browser loop.
+  // catches true reread loops with identical arguments. Read-only workflow DB
+  // query tools are the same shape (#2753): a planning turn legitimately looks
+  // up many different decisions/requirements, and those lookups never record
+  // mutations, so the arg-independent per-tool cap would misfire. Exempt names
+  // are matched both exactly (preserving user-configured MCP-prefixed
+  // `exempt_tools` entries) and against the canonical (MCP-prefix-stripped)
+  // tool name — the way the Browser Automation Contract exemption below works —
+  // so MCP-surfaced variants (mcp__<server>__gsd_decision_get, …) are covered
+  // too. Browser Automation Contract tools (browser_*) are likewise a
+  // distinct-arg-heavy, read-mostly surface (#1120).
+  const canonicalName = canonicalToolName(toolName);
   if (
     !config.repeatedEnabled ||
     config.perToolExempt.has(toolName) ||
-    hasBrowserContractPrefix(canonicalToolName(toolName))
+    config.perToolExempt.has(canonicalName) ||
+    hasBrowserContractPrefix(canonicalName)
   ) {
+    noteGuardAllowed();
     return { block: false, count: consecutiveCount };
   }
 
@@ -327,6 +445,7 @@ export function checkToolCallLoop(
     : config.perToolDefaultCap;
 
   if (perToolCount > perToolCap) {
+    const escalate = noteGuardBlock(toolName);
     return {
       block: true,
       reason:
@@ -338,9 +457,11 @@ export function checkToolCallLoop(
         `(or GSD_TOOL_LOOP_REPEATED_* / GSD_TOOL_LOOP_EXEMPT_TOOLS) if this is expected. ` +
         `Do not retry this tool or pivot to other tools this turn — stop and respond to the user in text.`,
       count: perToolCount,
+      escalate,
     };
   }
 
+  noteGuardAllowed();
   return { block: false, count: consecutiveCount };
 }
 
@@ -380,6 +501,9 @@ export function resetToolCallLoopGuard(): void {
   perToolCounts.clear();
   mutationEpoch = 0;
   perToolLastMutationEpoch.clear();
+  noteGuardAllowed();
+  modelResponseSeq = 0;
+  blockedStreakResponseSeq = 0;
 }
 
 /** Disable the guard (e.g. during shutdown). */
@@ -391,6 +515,9 @@ export function disableToolCallLoopGuard(): void {
   perToolCounts.clear();
   mutationEpoch = 0;
   perToolLastMutationEpoch.clear();
+  noteGuardAllowed();
+  modelResponseSeq = 0;
+  blockedStreakResponseSeq = 0;
 }
 
 /** Get current consecutive count for diagnostics. */

@@ -1,5 +1,6 @@
 // Project/App: gsd-pi
-// File Purpose: Regression tests for milestone validation persistence and evidence gates.
+// File Purpose: Regression tests for milestone validation persistence and the
+// structured browser-evidence gate.
 
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -7,10 +8,13 @@ import { mkdirSync, existsSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 
-import { handleValidateMilestone } from "../tools/validate-milestone.js";
+import { handleValidateMilestone, type ValidateMilestoneParams } from "../tools/validate-milestone.js";
+import { captureMilestoneVerificationSourceRevision } from "../verification-source-integrity.js";
 import { verifyExpectedArtifact } from "../auto-recovery.js";
 import { openDatabase, closeDatabase, _getAdapter, insertMilestone, insertSlice, insertArtifact } from "../gsd-db.js";
+import { seedLifecycles } from "./helpers/authority-cutover.js";
 import { clearPathCache } from "../paths.js";
 import { clearParseCache } from "../files.js";
 
@@ -18,11 +22,102 @@ function makeTmpBase(): string {
   const base = join(tmpdir(), `gsd-val-handler-${randomUUID()}`);
   const mDir = join(base, ".gsd", "milestones", "M001");
   mkdirSync(mDir, { recursive: true });
-  // A content-bearing legacy milestone dir requires at least one non-META file
-  // (dirIsContentBearingLegacyMilestone) so the layout sniffer treats it as a
-  // real legacy milestone rather than a metadata-only placeholder.
+  writeFileSync(join(base, ".gitignore"), ".gsd/\n");
   writeFileSync(join(mDir, "M001-CONTEXT.md"), "# M001\n");
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: base });
+  execFileSync("git", ["add", ".gitignore"], { cwd: base });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: base, stdio: "ignore" });
   return base;
+}
+
+/** Open the DB and adopt the fixture rows so the canonical validation records. */
+function seedAdoptedMilestone(
+  projectBase: string,
+  planning?: Record<string, unknown>,
+  slices: Array<Parameters<typeof insertSlice>[0]> = [{ id: "S01", milestoneId: "M001" }],
+): void {
+  openDatabase(join(projectBase, ".gsd", "gsd.db"));
+  insertMilestone({
+    id: "M001",
+    title: "Validation",
+    ...(planning ? { planning } : {}),
+  } as Parameters<typeof insertMilestone>[0]);
+  for (const slice of slices) insertSlice(slice);
+  seedLifecycles(`validate-write-order/${randomUUID()}`, [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    ...slices.map((slice) => ({
+      itemKind: "slice" as const,
+      milestoneId: "M001",
+      sliceId: slice.id,
+      lifecycleStatus: "completed" as const,
+    })),
+  ]);
+}
+
+function invocation(key: string) {
+  return {
+    invocation: {
+      idempotencyKey: `test/validate-write-order/${key}`,
+      sourceTransport: "internal" as const,
+      actorType: "agent" as const,
+    },
+  };
+}
+
+const uatEvidence = (sliceId: string, evidenceClass: "browser" | "runtime" = "browser") => ({
+  verificationClass: "UAT" as const,
+  evidenceClass,
+  commandOrTool: evidenceClass === "runtime" ? "gsd_uat_exec" : "browser acceptance journey",
+  workingDirectory: ".",
+  startedAt: "2026-07-14T10:00:00.000Z",
+  endedAt: "2026-07-14T10:01:00.000Z",
+  observation: "passed" as const,
+  durableOutputRef: "artifact://uat/evidence",
+  environment: { evidence: "artifact://uat/evidence" },
+  sliceId,
+  rationale: "Verified.",
+  testedSourceRevision: "sha256:fixture",
+});
+
+const classEvidence = (className: "Contract" | "Integration" | "Operational" | "UAT") => ({
+  verificationClass: className,
+  evidenceClass: "command" as const,
+  commandOrTool: "check",
+  workingDirectory: ".",
+  startedAt: "2026-07-14T10:00:00.000Z",
+  endedAt: "2026-07-14T10:01:00.000Z",
+  exitCode: 0,
+  observation: "passed" as const,
+  durableOutputRef: "artifact://class/evidence",
+  environment: { evidence: "artifact://class/evidence" },
+  rationale: "Verified.",
+  testedSourceRevision: "sha256:fixture",
+});
+
+async function validate(projectBase: string, params: Partial<ValidateMilestoneParams>, key = "default") {
+  // Structured evidence must be tested against the current source revision.
+  const source = captureMilestoneVerificationSourceRevision(projectBase, undefined);
+  assert.ok(source.ok, "fixture must be able to capture its source revision");
+  const evidence = (params.verificationEvidence ?? []).map((entry) => ({
+    ...entry,
+    testedSourceRevision: source.sourceRevision,
+  }));
+  if (process.env.GSD_DEBUG_EVIDENCE) console.log("EVIDENCE", JSON.stringify(evidence));
+  return handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] All pass",
+    sliceDeliveryAudit: "| S01 | delivered |",
+    crossSliceIntegration: "No issues",
+    requirementCoverage: "All covered",
+    verificationClasses: "- Contract: covered\n- Integration: covered\n- Operational: gap noted",
+    verdictRationale: "Everything checks out",
+    ...params,
+    ...(params.verificationEvidence ? { verificationEvidence: evidence } : {}),
+  }, projectBase, invocation(key));
 }
 
 const VALID_PARAMS = {
@@ -38,7 +133,7 @@ const VALID_PARAMS = {
 };
 
 describe("handleValidateMilestone write ordering (#2725)", () => {
-  let base: string;
+  let base: string | undefined;
 
   afterEach(() => {
     clearPathCache();
@@ -47,19 +142,28 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
     if (base) {
       try { rmSync(base, { recursive: true, force: true }); } catch { /* */ }
     }
+    base = undefined;
   });
 
-  it("writes DB row and disk file on success", async () => {
+  it("requires canonical invocation identity", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
+    openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
 
     const result = await handleValidateMilestone(VALID_PARAMS, base);
+    assert.ok("error" in result);
+    assert.match(result.error, /canonical invocation identity/);
+  });
+
+  it("writes DB row and disk file on success", async () => {
+    base = makeTmpBase();
+    seedAdoptedMilestone(base);
+
+    const result = await validate(base, {});
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
 
-    // DB row exists
+    // DB row exists (the canonical operation records the assessment row)
     const adapter = _getAdapter()!;
     const row = adapter.prepare(
       `SELECT status, scope FROM assessments WHERE milestone_id = 'M001' AND scope = 'milestone-validation'`,
@@ -78,15 +182,9 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
 
   it("omits verification class section when no verification classes are supplied", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
+    seedAdoptedMilestone(base);
 
-    const result = await handleValidateMilestone(
-      { ...VALID_PARAMS, verificationClasses: undefined },
-      base,
-    );
+    const result = await validate(base, { verificationClasses: undefined });
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
 
     const filePath = join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
@@ -96,10 +194,7 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
 
   it("keeps DB row and reports stale projection when disk write fails", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
+    seedAdoptedMilestone(base);
 
     // Force disk write failure by replacing the milestone directory with a
     // regular file. saveFile() will fail because it cannot write inside a
@@ -111,7 +206,7 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
     // "phases" so mkdir("phases/01-m001", {recursive:true}) throws ENOTDIR.
     writeFileSync(join(base, ".gsd", "phases"), "not-a-directory");
 
-    const result = await handleValidateMilestone(VALID_PARAMS, base);
+    const result = await validate(base, {});
 
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(result.stale, true, "result should report stale projection");
@@ -131,15 +226,13 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
 
   it("persists milestone validation gate_runs rows when UOK gates are enabled", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
+    seedAdoptedMilestone(base);
 
     const result = await handleValidateMilestone(VALID_PARAMS, base, {
       uokGatesEnabled: true,
       traceId: "trace-val-1",
       turnId: "turn-val-1",
+      ...invocation("uok"),
     });
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
 
@@ -170,20 +263,13 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
 
   it("rejects verificationClasses that omit planned Operational class", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        verificationOperational: "Camoufox subprocess lifecycle/cleanup proof",
-      },
+    seedAdoptedMilestone(base, {
+      verificationOperational: "Camoufox subprocess lifecycle/cleanup proof",
     });
-    insertSlice({ id: "S01", milestoneId: "M001" });
 
-    const result = await handleValidateMilestone(
-      { ...VALID_PARAMS, verificationClasses: "| Check | Result |\n| --- | --- |\n| Generic verification | PASS |" },
-      base,
-    );
+    const result = await validate(base, {
+      verificationClasses: "| Check | Result |\n| --- | --- |\n| Generic verification | PASS |",
+    });
     assert.ok("error" in result, "expected validation to fail");
     assert.match(result.error, /must include canonical row "Operational"/);
 
@@ -196,22 +282,15 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
 
   it("reports all missing planned verification class rows at once", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        verificationContract: "Contract command exits 0",
-        verificationOperational: "Process lifecycle proof",
-        verificationUat: "Browser-observable UAT proof",
-      },
+    seedAdoptedMilestone(base, {
+      verificationContract: "Contract command exits 0",
+      verificationOperational: "Process lifecycle proof",
+      verificationUat: "Browser-observable UAT proof",
     });
-    insertSlice({ id: "S01", milestoneId: "M001" });
 
-    const result = await handleValidateMilestone(
-      { ...VALID_PARAMS, verificationClasses: "| Check | Result |\n| --- | --- |\n| Generic verification | PASS |" },
-      base,
-    );
+    const result = await validate(base, {
+      verificationClasses: "| Check | Result |\n| --- | --- |\n| Generic verification | PASS |",
+    });
     assert.ok("error" in result, "expected validation to fail");
     assert.match(result.error, /canonical rows "Contract", "Operational", "UAT"/);
     assert.match(result.error, /planned contract, operational, uat verification/);
@@ -225,59 +304,38 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
 
   it("accepts verificationClasses when planned Operational class is present", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        verificationOperational: "Camoufox subprocess lifecycle/cleanup proof",
-      },
+    seedAdoptedMilestone(base, {
+      verificationOperational: "Camoufox subprocess lifecycle/cleanup proof",
     });
-    insertSlice({ id: "S01", milestoneId: "M001" });
 
-    const result = await handleValidateMilestone(
-      {
-        ...VALID_PARAMS,
-        verificationClasses:
-          "| Class | Planned Check | Evidence | Verdict |\n| --- | --- | --- | --- |\n| Operational | Camoufox subprocess lifecycle/cleanup proof | S01 + process-death evidence | NEEDS-ATTENTION |",
-      },
-      base,
-    );
+    const result = await validate(base, {
+      verificationClasses:
+        "| Class | Planned Check | Evidence | Verdict |\n| --- | --- | --- | --- |\n| Operational | Camoufox subprocess lifecycle/cleanup proof | S01 + process-death evidence | NEEDS-ATTENTION |",
+      verificationEvidence: [classEvidence("Operational")],
+    }, "operational-present");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
   });
 
   it("treats 'not required - ...' verification values as not applicable", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        verificationOperational: "not required - backend-only",
-      },
+    seedAdoptedMilestone(base, {
+      verificationOperational: "not required - backend-only",
     });
-    insertSlice({ id: "S01", milestoneId: "M001" });
 
-    const result = await handleValidateMilestone(
-      { ...VALID_PARAMS, verificationClasses: "| Check | Result |\n| --- | --- |\n| Generic verification | PASS |" },
-      base,
-    );
+    const result = await validate(base, {
+      verificationClasses: "| Check | Result |\n| --- | --- |\n| Generic verification | PASS |",
+    }, "not-required");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
   });
 
-  it("downgrades pass to needs-attention when browser criteria lack browser evidence", async () => {
+  it("rejects pass when browser criteria lack qualifying browser evidence", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        successCriteria: [
-          "Clicking Mark All Complete sets all todos completed",
-          "Reload keeps completed state",
-        ],
-        verificationUat: "Open index.html in a browser and click the Mark All Complete button.",
-      },
+    seedAdoptedMilestone(base, {
+      successCriteria: [
+        "Clicking Mark All Complete sets all todos completed",
+        "Reload keeps completed state",
+      ],
+      verificationUat: "Open index.html in a browser and click the Mark All Complete button.",
     });
     insertSlice({
       id: "S01",
@@ -285,43 +343,26 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
       demo: "Open index.html, add todos, click Mark All Complete, reload the page.",
     });
 
-    const result = await handleValidateMilestone(
-      {
-        ...VALID_PARAMS,
-        verificationClasses:
-          `${VALID_PARAMS.verificationClasses}\n- UAT: Browser flow still needs evidence`,
-      },
-      base,
-    );
+    const result = await validate(base, {
+      verificationClasses:
+        `${VALID_PARAMS.verificationClasses}\n- UAT: Browser flow still needs evidence`,
+    }, "browser-missing");
 
-    assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
-    assert.equal(result.verdict, "needs-attention");
-
-    const adapter = _getAdapter()!;
-    const row = adapter.prepare(
-      `SELECT status FROM assessments WHERE milestone_id = 'M001' AND scope = 'milestone-validation'`,
-    ).get() as { status: string } | undefined;
-    assert.equal(row?.status, "needs-attention");
-
-    const filePath = join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
-    const validationMd = readFileSync(filePath, "utf-8");
-    assert.match(validationMd, /verdict: needs-attention/);
-    assert.match(validationMd, /Browser evidence gate/);
+    assert.ok("error" in result, "browser-required pass without evidence must be rejected");
+    if ("error" in result) {
+      assert.match(result.error, /browser-required acceptance needs passed UAT browser\/runtime evidence/);
+      assert.match(result.error, /Missing: S01\./);
+    }
   });
 
   it("does not require browser evidence for visible in non-browser prose", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        successCriteria: [
-          "Priority scores visible in EmpireMemory",
-          "Profitability visible in haul task creation",
-        ],
-        verificationUat: "Run CLI checks and inspect memory state.",
-      },
+    seedAdoptedMilestone(base, {
+      successCriteria: [
+        "Priority scores visible in EmpireMemory",
+        "Profitability visible in haul task creation",
+      ],
+      verificationUat: "Run CLI checks and inspect memory state.",
     });
     insertSlice({
       id: "S01",
@@ -333,32 +374,23 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
       },
     });
 
-    const result = await handleValidateMilestone(
-      {
-        ...VALID_PARAMS,
-        verificationClasses:
-          `${VALID_PARAMS.verificationClasses}\n- UAT: CLI memory inspection complete`,
-      },
-      base,
-    );
-
+    const result = await validate(base, {
+      verificationClasses:
+        `${VALID_PARAMS.verificationClasses}\n- UAT: CLI memory inspection complete`,
+      verificationEvidence: [uatEvidence("S01")],
+    }, "non-browser");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(result.verdict, "pass");
   });
 
-  it("keeps pass when browser criteria have persisted browser evidence", async () => {
+  it("keeps pass when browser criteria have persisted structured browser evidence", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        successCriteria: [
-          "Clicking Mark All Complete sets all todos completed",
-          "Reload keeps completed state",
-        ],
-        verificationUat: "Open index.html in a browser and click the Mark All Complete button.",
-      },
+    seedAdoptedMilestone(base, {
+      successCriteria: [
+        "Clicking Mark All Complete sets all todos completed",
+        "Reload keeps completed state",
+      ],
+      verificationUat: "Open index.html in a browser and click the Mark All Complete button.",
     });
     insertSlice({
       id: "S01",
@@ -375,21 +407,19 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
         "---",
         "# UAT Result",
         "",
-        "Browser session opened file://index.html, clicked Mark All Complete, asserted the item count text was 0 item(s) left, reloaded, and captured a screenshot.",
+        "| Check | Mode | Result | Evidence |",
+        "| --- | --- | --- | --- |",
+        "| Mark All Complete | browser | PASS | browser:.artifacts/browser/session/todos.json |",
         "",
       ].join("\n"),
       "utf-8",
     );
 
-    const result = await handleValidateMilestone(
-      {
-        ...VALID_PARAMS,
-        verificationClasses:
-          `${VALID_PARAMS.verificationClasses}\n- UAT: Browser flow verified by S01 assessment`,
-      },
-      base,
-    );
-
+    const result = await validate(base, {
+      verificationClasses:
+        `${VALID_PARAMS.verificationClasses}\n- UAT: Browser flow verified by S01 assessment`,
+      verificationEvidence: [uatEvidence("S01")],
+    }, "persisted-file");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(result.verdict, "pass");
 
@@ -402,17 +432,12 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
 
   it("keeps pass when browser evidence is persisted in the DB artifact", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        successCriteria: [
-          "Clicking Mark All Complete sets all todos completed",
-          "Reload keeps completed state",
-        ],
-        verificationUat: "Open index.html in a browser and click the Mark All Complete button.",
-      },
+    seedAdoptedMilestone(base, {
+      successCriteria: [
+        "Clicking Mark All Complete sets all todos completed",
+        "Reload keeps completed state",
+      ],
+      verificationUat: "Open index.html in a browser and click the Mark All Complete button.",
     });
     insertSlice({
       id: "S01",
@@ -431,30 +456,25 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
         "---",
         "# UAT Result",
         "",
-        "Browser session opened file://index.html, clicked Mark All Complete, verified the remaining-count text was visible, and captured a screenshot.",
+        "| Check | Mode | Result | Evidence |",
+        "| --- | --- | --- | --- |",
+        "| Mark All Complete | browser | PASS | browser:.artifacts/browser/session/todos.json |",
         "",
       ].join("\n"),
     });
 
-    const result = await handleValidateMilestone(
-      {
-        ...VALID_PARAMS,
-        verificationClasses:
-          `${VALID_PARAMS.verificationClasses}\n- UAT: Browser flow verified by S01 assessment`,
-      },
-      base,
-    );
-
+    const result = await validate(base, {
+      verificationClasses:
+        `${VALID_PARAMS.verificationClasses}\n- UAT: Browser flow verified by S01 assessment`,
+      verificationEvidence: [uatEvidence("S01")],
+    }, "persisted-db");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(result.verdict, "pass");
   });
 
   it("keeps pass when persisted browser evidence references a successful batch timeline", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
+    seedAdoptedMilestone(base, {
       planning: { verificationUat: "Navigate through the browser acceptance check." },
     });
     insertSlice({
@@ -480,86 +500,65 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
       "---",
       "verdict: PASS",
       "---",
-      `Browser evidence: browser:${timelineRef}`,
+      "",
+      "| Check | Mode | Result | Evidence |",
+      "| --- | --- | --- | --- |",
+      `| Stats response | browser | PASS | browser:${timelineRef} |`,
       "",
     ].join("\n"));
 
-    const result = await handleValidateMilestone({
-      ...VALID_PARAMS,
+    const result = await validate(base, {
       verificationClasses: `${VALID_PARAMS.verificationClasses}\n- UAT: persisted batch timeline`,
-    }, base);
-
+      verificationEvidence: [uatEvidence("S01")],
+    }, "timeline");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(result.verdict, "pass");
   });
 
-  it("keeps pass when browser-like criteria are verified by runtime-executable UAT", async () => {
+  it("keeps pass when browser-like criteria are verified by bound runtime-executable UAT evidence", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        successCriteria: [
-          "Clicking Mark All Complete sets all todos completed",
-          "Reload keeps completed state",
-        ],
-        verificationUat: "Run the Node.js DOM-state script against the static app source.",
-      },
+    seedAdoptedMilestone(base, {
+      successCriteria: [
+        "Clicking Mark All Complete sets all todos completed",
+        "Reload keeps completed state",
+      ],
+      verificationUat: "Run the Node.js DOM-state script against the static app source.",
     });
     insertSlice({
       id: "S01",
       milestoneId: "M001",
       // Uses localhost so hasBrowserRequiredText returns true and the gate is
-      // actually triggered before the runtime evidence bypasses it.
+      // actually exercised before the bound runtime evidence satisfies it.
       demo: "Visit localhost:3000 to verify DOM state after clicking Mark All Complete.",
     });
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(sliceDir, { recursive: true });
-    writeFileSync(
-      join(sliceDir, "S01-ASSESSMENT.md"),
-      [
-        "---",
-        "sliceId: S01",
-        "uatType: runtime-executable",
-        "verdict: PASS",
-        "attempt: 1",
-        "---",
-        "# UAT Result - S01",
-        "",
-        "## Checks",
-        "",
-        "| Check | Mode | Result | Evidence | Notes |",
-        "|-------|------|--------|----------|-------|",
-        "| DOM-state script | runtime | PASS | gsd_uat_exec:.gsd/evidence/uat/M001/S01/dom-state.json | Runtime assertion verified completed state and reload persistence. |",
-        "",
-      ].join("\n"),
-      "utf-8",
-    );
 
-    const result = await handleValidateMilestone(
-      {
-        ...VALID_PARAMS,
-        verificationClasses:
-          `${VALID_PARAMS.verificationClasses}\n| UAT | Runtime executable UAT verified static-app behavior. |`,
-      },
-      base,
-    );
-
+    const result = await validate(base, {
+      verificationClasses:
+        `${VALID_PARAMS.verificationClasses}\n| UAT | Runtime executable UAT verified static-app behavior. |`,
+      verificationEvidence: [{
+        verificationClass: "UAT",
+        evidenceClass: "runtime",
+        commandOrTool: "gsd_uat_exec",
+        workingDirectory: ".",
+        startedAt: "2026-07-14T10:00:00.000Z",
+        endedAt: "2026-07-14T10:01:00.000Z",
+        observation: "passed",
+        durableOutputRef: "artifact://uat/dom-state",
+        environment: { evidence: "artifact://uat/dom-state" },
+        sliceId: "S01",
+        rationale: "DOM-state script asserted completed state and reload persistence.",
+        testedSourceRevision: "sha256:fixture",
+      }],
+    }, "runtime-bound");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(result.verdict, "pass");
   });
 
   it("keeps pass for a Contract-only API milestone even when its endpoint is browser-reachable", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        successCriteria: ["The SSE stats endpoint is reachable at localhost:58081."],
-        verificationContract: "Contract-check the SSE response schema and streaming behavior.",
-      },
+    seedAdoptedMilestone(base, {
+      successCriteria: ["The SSE stats endpoint is reachable at localhost:58081."],
+      verificationContract: "Contract-check the SSE response schema and streaming behavior.",
     });
     insertSlice({
       id: "S01",
@@ -570,75 +569,53 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
       },
     });
 
-    const result = await handleValidateMilestone({
-      ...VALID_PARAMS,
+    const result = await validate(base, {
       verificationClasses: "| Contract | SSE response schema and streaming checks passed. |",
-    }, base);
-
+      verificationEvidence: [classEvidence("Contract")],
+    }, "contract-only");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(result.verdict, "pass");
   });
 
-  it("downgrades to needs-attention when only one of two browser-requiring slices has runtime evidence", async () => {
+  it("rejects pass when only one of two browser-requiring slices has qualifying evidence", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({ id: "M001" });
-    insertSlice({
-      id: "S01",
-      milestoneId: "M001",
-      demo: "Visit localhost:3000 to verify DOM state.",
-    });
-    insertSlice({
-      id: "S02",
-      milestoneId: "M001",
-      demo: "Visit localhost:3000 to confirm persistence after reload.",
-    });
-    // S01 has runtime-executable evidence; S02 has none.
-    mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-ASSESSMENT.md"),
-      [
-        "---",
-        "sliceId: S01",
-        "uatType: runtime-executable",
-        "verdict: PASS",
-        "---",
-        "| DOM check | runtime | PASS | gsd_uat_exec:.gsd/evidence/uat/M001/S01/dom.json | Verified. |",
-        "",
-      ].join("\n"),
-      "utf-8",
-    );
+    seedAdoptedMilestone(base, {}, [
+      { id: "S01", milestoneId: "M001", demo: "Visit localhost:3000 to verify DOM state." },
+      { id: "S02", milestoneId: "M001", demo: "Visit localhost:3000 to confirm persistence after reload." },
+    ]);
 
-    const result = await handleValidateMilestone(
-      {
-        ...VALID_PARAMS,
-        verificationClasses: `${VALID_PARAMS.verificationClasses}\n| UAT | S01 runtime verified; S02 still needs evidence. |`,
-      },
-      base,
-    );
+    const result = await validate(base, {
+      verificationClasses: `${VALID_PARAMS.verificationClasses}\n| UAT | S01 runtime verified; S02 still needs evidence. |`,
+      verificationEvidence: [{
+        verificationClass: "UAT",
+        evidenceClass: "runtime",
+        commandOrTool: "gsd_uat_exec",
+        workingDirectory: ".",
+        startedAt: "2026-07-14T10:00:00.000Z",
+        endedAt: "2026-07-14T10:01:00.000Z",
+        observation: "passed",
+        durableOutputRef: "artifact://uat/dom-check",
+        environment: { evidence: "artifact://uat/dom-check" },
+        sliceId: "S01",
+        rationale: "DOM check verified.",
+        testedSourceRevision: "sha256:fixture",
+      }],
+    }, "partial-evidence");
 
-    assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
-    assert.equal(
-      result.verdict,
-      "needs-attention",
-      "S01 runtime evidence must not bypass the gate for S02 which has browser requirements but no evidence",
-    );
+    assert.ok("error" in result, "uncovered browser-required slices must reject a pass");
+    if ("error" in result) {
+      assert.match(result.error, /Missing: S02\./);
+    }
   });
 
   it("ignores slice full_uat_md planning text for browser requirement detection", async () => {
     base = makeTmpBase();
-    const dbPath = join(base, ".gsd", "gsd.db");
-    openDatabase(dbPath);
-    insertMilestone({
-      id: "M001",
-      planning: {
-        successCriteria: [
-          "CLI command exits zero",
-          "Unit tests pass",
-        ],
-        verificationUat: "Run CLI checks and inspect logs.",
-      },
+    seedAdoptedMilestone(base, {
+      successCriteria: [
+        "CLI command exits zero",
+        "Unit tests pass",
+      ],
+      verificationUat: "Run CLI checks and inspect logs.",
     });
     insertSlice({
       id: "S01",
@@ -659,15 +636,11 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
       ].join("\n"),
     });
 
-    const result = await handleValidateMilestone(
-      {
-        ...VALID_PARAMS,
-        verificationClasses:
-          `${VALID_PARAMS.verificationClasses}\n- UAT: CLI-only checks complete`,
-      },
-      base,
-    );
-
+    const result = await validate(base, {
+      verificationClasses:
+        `${VALID_PARAMS.verificationClasses}\n- UAT: CLI-only checks complete`,
+      verificationEvidence: [uatEvidence("S01")],
+    }, "full-uat-md");
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(result.verdict, "pass");
   });

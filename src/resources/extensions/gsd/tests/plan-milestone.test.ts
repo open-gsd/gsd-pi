@@ -10,7 +10,6 @@ import { tmpdir } from 'node:os';
 import {
   adoptOrTransitionLifecycle,
   closeDatabase,
-  deleteSlice,
   executeDomainOperation,
   getMilestone,
   getMilestoneSlices,
@@ -24,6 +23,9 @@ import { handlePlanMilestone as handlePlanMilestoneWithInvocation } from '../too
 import { internalPlanningInvocation } from '../planning-invocation.ts';
 import { parseProjectionRoadmap as parseRoadmap } from '../schemas/parsers.ts';
 import { canonicalPhaseDirName } from '../paths.ts';
+import { readMilestone } from '../db/lifecycle-read.ts';
+import { readMilestoneLifecycleStatus } from '../db/milestone-closeout-readiness.ts';
+import { assertWorkerRendersStaleProjection } from './projection-render-failure-gate.ts';
 
 function expectedRoadmapPath(base: string, title: string, milestoneId = 'M001'): string {
   return join(base, '.gsd', 'phases', canonicalPhaseDirName(milestoneId, title), '01-ROADMAP.md');
@@ -184,33 +186,50 @@ test('handlePlanMilestone rejects invalid payloads', async () => {
   }
 });
 
-test('handlePlanMilestone rejects delimiter characters in milestone and slice titles', async () => {
+test('handlePlanMilestone normalizes delimiter characters in milestone and slice titles (#2588)', async () => {
   const base = makeTmpBase();
   const dbPath = join(base, '.gsd', 'gsd.db');
   openDatabase(dbPath);
 
   try {
-    const milestoneResult = await handlePlanMilestone({ ...validParams(), title: 'Client/Server split' }, base);
-    assert.ok('error' in milestoneResult);
-    assert.match(milestoneResult.error, /validation failed: title is invalid: .*forward slash/);
-    assert.equal(getMilestone('M001'), null, 'invalid milestone title must not persist');
-
-    const sliceResult = await handlePlanMilestone({
+    const result = await handlePlanMilestone({
       ...validParams(),
+      title: 'Client/Server split — Time Zones',
       slices: [
         validParams().slices[0],
         { ...validParams().slices[1], title: 'Client/Server migration' },
       ],
     }, base);
-    assert.ok('error' in sliceResult);
-    assert.match(sliceResult.error, /validation failed: slices\[1\]\.title is invalid: .*forward slash/);
-    assert.equal(getMilestoneSlices('M001').length, 0, 'invalid slice title must not persist partial roadmap state');
+    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+    assert.equal(result.titleNormalized, true, 'normalization must be surfaced to the caller');
+
+    const milestone = getMilestone('M001');
+    assert.ok(milestone, 'a delimiter-carrying title must not be rejected');
+    assert.equal(milestone?.title, 'Client-Server split - Time Zones');
+
+    const slices = getMilestoneSlices('M001');
+    assert.equal(slices.length, 2);
+    assert.equal(slices[1]?.title, 'Client-Server migration', 'slice titles must be normalized too');
   } finally {
     cleanup(base);
   }
 });
 
-test('handlePlanMilestone surfaces render failures and does not clear parse-visible state on failure', async () => {
+test('handlePlanMilestone omits titleNormalized when titles are already clean', async () => {
+  const base = makeTmpBase();
+  const dbPath = join(base, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+
+  try {
+    const result = await handlePlanMilestone(validParams(), base);
+    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+    assert.equal('titleNormalized' in result, false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handlePlanMilestone returns the committed plan with a stale flag when the render fails', async () => {
   const base = makeTmpBase();
   const dbPath = join(base, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -223,13 +242,13 @@ test('handlePlanMilestone surfaces render failures and does not clear parse-visi
     mkdirSync(fallbackRoadmapPath, { recursive: true });
 
     const result = await handlePlanMilestone({ ...validParams(), milestoneId: 'M999' }, base);
-    assert.ok('error' in result);
-    assert.match(result.error, /render failed:/);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
+    assert.equal(result.roadmapPath, '');
+    assert.ok(getMilestoneSlices('M999').length > 0, 'the plan is committed');
 
-    const existingRoadmapPath = join(base, '.gsd', 'phases', '01-test', '01-ROADMAP.md');
-    writeFileSync(existingRoadmapPath, '# M001: Cached roadmap\n\n**Vision:** old value\n\n## Slices\n\n', 'utf-8');
-    const cachedAfter = parseRoadmap(readFileSync(existingRoadmapPath, 'utf-8'));
-    assert.equal(cachedAfter.vision, 'old value');
+    rmSync(fallbackRoadmapPath, { recursive: true });
+    await assertWorkerRendersStaleProjection(base, fallbackRoadmapPath);
   } finally {
     cleanup(base);
   }
@@ -384,26 +403,35 @@ test('plan-milestone re-plan preserves in-progress status and updates slice fiel
   }
 });
 
-test('handlePlanMilestone promotes pre-existing queued milestone to active (#3022)', async () => {
+test('handlePlanMilestone adopts a pre-existing queued milestone into the open lifecycle (#3022)', async () => {
   const base = makeTmpBase();
   const dbPath = join(base, '.gsd', 'gsd.db');
   openDatabase(dbPath);
 
   try {
     // Simulate ensureMilestoneDbRow: pre-create row with status "queued"
-    // (this is what gsd_milestone_generate_id does)
+    // (this is what gsd_milestone_generate_id does). Epoch-0 import shape:
+    // a raw hierarchy stamp with no canonical lifecycle row yet.
     insertMilestone({ id: 'M001', status: 'queued' });
 
     const before = getMilestone('M001');
     assert.equal(before?.status, 'queued', 'pre-condition: milestone should start as queued');
 
-    // Now plan the milestone — status should be promoted to "active"
+    // Now plan the milestone. The planning Domain Operation adopts the
+    // reservation into the open (ready) lifecycle — the promotion that
+    // replaces the old legacy queued→active rewrite. The legacy row keeps
+    // its epoch-0 raw stamp: the aligned shadow is never rewritten, the
+    // lifecycle row owns the state.
     const result = await handlePlanMilestone(validParams(), base);
     assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
 
     const after = getMilestone('M001');
-    assert.equal(after?.status, 'active', 'milestone status should be promoted from queued to active');
     assert.equal(after?.title, 'DB-backed planning', 'milestone title should be set');
+    assert.equal(after?.status, 'queued', 'the legacy label keeps its epoch-0 raw stamp');
+    assert.equal(readMilestoneLifecycleStatus('M001'), 'ready',
+      'planning must adopt the queued reservation into the open (ready) lifecycle');
+    assert.equal(readMilestone('M001')?.queuedShell, false,
+      'a planned milestone is no longer a queued shell (#3022)');
   } finally {
     cleanup(base);
   }
@@ -429,7 +457,11 @@ test('handlePlanMilestone updates depends_on when a queued milestone row already
 
     const after = getMilestone('M002');
     assert.deepEqual(after?.depends_on, ['M001'], 'depends_on should be updated from planning params');
-    assert.equal(after?.status, 'active', 'queued milestone should still be promoted to active');
+    assert.equal(after?.status, 'queued', 'the legacy label keeps its epoch-0 raw stamp');
+    assert.equal(readMilestoneLifecycleStatus('M002'), 'ready',
+      'planning must adopt the queued reservation into the open (ready) lifecycle');
+    assert.equal(readMilestone('M002')?.queuedShell, false,
+      'a planned milestone is no longer a queued shell (#3022)');
   } finally {
     cleanup(base);
   }

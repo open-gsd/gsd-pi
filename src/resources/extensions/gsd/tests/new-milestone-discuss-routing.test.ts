@@ -11,7 +11,6 @@ test("dispatchNewMilestoneDiscuss uses discuss.md only on greenfield projects", 
   const source = readFileSync(join(__dirname, "..", "guided-flow.ts"), "utf-8");
   const fnBody = extractSourceRegion(source, "async function dispatchNewMilestoneDiscuss(");
 
-  assert.match(fnBody, /findMilestoneIds\(basePath\)\.length === 0/);
   assert.match(fnBody, /prepareAndBuildDiscussPrompt/);
   assert.match(fnBody, /buildDiscussMilestonePrompt/);
   assert.match(

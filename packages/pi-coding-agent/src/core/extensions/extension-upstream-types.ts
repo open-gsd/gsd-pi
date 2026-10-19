@@ -73,6 +73,7 @@ import type {
 	ToolPreparationErrorsTurnEventResult,
 	UnitEndEvent,
 	UnitStartEvent,
+	PhaseChangeEvent,
 	VerifyFailure,
 	VerifyResultEvent,
 } from "../gsd-extension-types.js";
@@ -166,6 +167,8 @@ export interface GsdProgressState {
 	eta?: string;
 	/** Fully-qualified dispatched model ID (provider/id) auto-mode is currently running, if any. */
 	model?: string;
+	/** Dynamic-routing tier that classified the active unit, when dynamic routing applied (#2395). */
+	dynamicRoutingTier?: "light" | "standard" | "heavy";
 	healthSummary?: string;
 	path?: string;
 	widgetMode?: GsdProgressWidgetMode;
@@ -701,6 +704,10 @@ export interface BeforeAgentStartEvent {
 	systemPrompt: string;
 	/** Structured options used to build the system prompt. Extensions can inspect this to understand what Pi loaded without re-discovering resources. */
 	systemPromptOptions: BuildSystemPromptOptions;
+	/** Unit type being dispatched by the embedding host, if known (e.g. a gsd auto-mode unit). Absent for ordinary user-initiated turns. */
+	unitType?: string;
+	/** GSD phase being dispatched by the embedding host, if known (e.g. "executing"). Absent for ordinary user-initiated turns. */
+	phase?: string;
 }
 
 /** Fired when an agent loop starts */
@@ -1226,6 +1233,7 @@ export interface ExtensionAPI {
 	on(event: "milestone_end", handler: ExtensionHandler<MilestoneEndEvent>): void;
 	on(event: "unit_start", handler: ExtensionHandler<UnitStartEvent>): void;
 	on(event: "unit_end", handler: ExtensionHandler<UnitEndEvent>): void;
+	on(event: "phase_change", handler: ExtensionHandler<PhaseChangeEvent>): void;
 	on(event: "before_model_select", handler: ExtensionHandler<BeforeModelSelectEvent, BeforeModelSelectResult>): void;
 	on(event: "adjust_tool_set", handler: ExtensionHandler<AdjustToolSetEvent, AdjustToolSetResult>): void;
 	on(event: "bash_transform", handler: ExtensionHandler<BashTransformEvent, BashTransformEventResult>): void;
@@ -1355,8 +1363,12 @@ export interface ExtensionAPI {
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel;
 
-	/** Set thinking level (clamped to model capabilities). */
-	setThinkingLevel(level: ThinkingLevel): void;
+	/**
+	 * Set thinking level (clamped to model capabilities). Pass
+	 * `{ persist: false }` to keep the change in memory only — restores and
+	 * per-unit dispatches must not rewrite the stored default (#2828).
+	 */
+	setThinkingLevel(level: ThinkingLevel, options?: { persist?: boolean }): void;
 
 	retryLastTurn(): void;
 	getVisibleSkills(): string[] | undefined;
@@ -1464,8 +1476,18 @@ export interface ProviderConfig {
 	authHeader?: boolean;
 	/** How this provider authenticates requests (overrides auto-detection). */
 	authMode?: "apiKey" | "oauth" | "externalCli" | "none";
-	/** Optional readiness check before accepting requests. */
+	/**
+	 * Optional readiness check before accepting requests. Called synchronously,
+	 * once per model, from UI code: it must not block (no sync child processes
+	 * or I/O). Answer from a cache and refresh it in the background.
+	 */
 	isReady?: () => boolean;
+	/**
+	 * Optional async companion to `isReady()`: resolves once `isReady()`
+	 * reflects a current readiness probe. Awaited at startup and before
+	 * readiness-gated actions so a cold cache is not mistaken for "not ready".
+	 */
+	settleReadiness?: () => Promise<unknown>;
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
 	/** OAuth provider for /login support. The `id` is set automatically from the provider name. */
@@ -1575,7 +1597,7 @@ export type SetModelHandler = (model: Model<any>, options?: { persist?: boolean 
 
 export type GetThinkingLevelHandler = () => ThinkingLevel;
 
-export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
+export type SetThinkingLevelHandler = (level: ThinkingLevel, options?: { persist?: boolean }) => void;
 
 export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
 

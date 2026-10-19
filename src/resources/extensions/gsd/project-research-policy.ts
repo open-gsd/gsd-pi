@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { atomicWriteSync } from "./atomic-write.js";
@@ -12,7 +12,6 @@ import { parseProject, parseRequirements } from "./schemas/parsers.js";
 
 export const PROJECT_RESEARCH_DIMENSIONS = ["STACK", "FEATURES", "ARCHITECTURE", "PITFALLS"] as const;
 export const PROJECT_RESEARCH_BLOCKER = "PROJECT-RESEARCH-BLOCKER.md";
-export const PROJECT_RESEARCH_INFLIGHT_MARKER = "research-project-inflight";
 
 export type ProjectResearchDimension = typeof PROJECT_RESEARCH_DIMENSIONS[number];
 
@@ -50,14 +49,6 @@ export type ProjectResearchFinalizeOutcome =
 
 function researchDir(basePath: string): string {
   return join(gsdRoot(basePath), "research");
-}
-
-function runtimeDir(basePath: string): string {
-  return join(gsdRoot(basePath), "runtime");
-}
-
-function researchDecisionPath(basePath: string): string {
-  return join(runtimeDir(basePath), "research-decision.json");
 }
 
 function clearResearchCaches(): void {
@@ -170,36 +161,11 @@ export function getProjectResearchStatus(basePath: string): ProjectResearchStatu
   };
 }
 
-export function writeProjectResearchAutoSkipDecision(
-  basePath: string,
-  classification: ProjectResearchClassification,
-): void {
-  atomicWriteSync(
-    researchDecisionPath(basePath),
-    JSON.stringify({
-      decision: "skip",
-      decided_at: new Date().toISOString(),
-      source: "project-research-fast-path",
-      previous_source: "workflow-preferences",
-      reason: "trivial-static-local-project",
-      classifier_variant: classification.variant,
-      classifier_reasons: classification.reasons,
-    }, null, 2) + "\n",
-    "utf-8",
-  );
-}
-
-export function clearProjectResearchInflightMarker(basePath: string): void {
-  const marker = join(runtimeDir(basePath), PROJECT_RESEARCH_INFLIGHT_MARKER);
-  if (existsSync(marker)) unlinkSync(marker);
-}
-
 export function finalizeProjectResearchTimeout(
   basePath: string,
   reason: string,
 ): ProjectResearchFinalizeOutcome {
   const dir = researchDir(basePath);
-  clearProjectResearchInflightMarker(basePath);
 
   const before = getProjectResearchStatus(basePath);
   const written: string[] = [];

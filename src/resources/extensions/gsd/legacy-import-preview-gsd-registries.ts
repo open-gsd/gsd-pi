@@ -50,7 +50,8 @@ function byteOffset(text: string, characterOffset: number): number {
 function tableCells(text: string, lineStart: number): Cell[] {
   const pipes: number[] = [];
   for (let index = 0; index < text.length; index += 1) {
-    if (text[index] === "|") pipes.push(index);
+    // generateDecisionsMd writes a pipe inside a cell as `\|`.
+    if (text[index] === "|" && text[index - 1] !== "\\") pipes.push(index);
   }
   const cells: Cell[] = [];
   for (let index = 0; index + 1 < pipes.length; index += 1) {
@@ -62,7 +63,8 @@ function tableCells(text: string, lineStart: number): Cell[] {
     const startCharacter = from + leading;
     const endCharacter = Math.max(startCharacter, to - trailing);
     cells.push({
-      value: value.trim(),
+      // Undo the cell encoding of generateDecisionsMd: `\|` is a pipe, `<br>` a newline.
+      value: value.trim().replace(/\\\|/g, "|").replace(/<br>/g, "\n"),
       start: lineStart + byteOffset(text, startCharacter),
       end: lineStart + byteOffset(text, endCharacter),
     });
@@ -80,7 +82,11 @@ function decisionValue(row: DecisionRow, madeBy: "agent" | "human", supersededBy
     id: id.value,
     when_context: whenContext.value,
     scope: scope.value,
-    decision: decision.value,
+    // The register render re-emits the stored supersede as a trailing
+    // "(amends D###)" cell suffix. Strip that suffix so the candidate
+    // compares equal to the stored decision text; the relationship itself
+    // travels in the superseded_by map built below.
+    decision: decision.value.replace(/\s*\(amends\s+D\d+\)$/i, ""),
     choice: choice.value,
     rationale: rationale.value,
     revisable: revisable.value,
@@ -286,6 +292,8 @@ function normalizedFieldName(name: string): string | undefined {
   }
 }
 
+const MULTI_LINE_REQUIREMENT_FIELDS = new Set(["description", "why", "validation", "notes"]);
+
 function categoryStatus(heading: string): string | undefined {
   switch (heading.trim().toLowerCase()) {
     case "active": return "active";
@@ -324,6 +332,8 @@ function requirementSections(file: LegacyImportDecodedSourceFile): RequirementSe
     const fields = new Map<string, Cell>();
     let usedUnderscoreAlias = false;
     let end = line.end;
+    let last: Cell | undefined;
+    let blanks = 0;
     for (const candidate of file.lines) {
       if (candidate.start <= line.start || candidate.start >= boundary) continue;
       if (/^##\s+/.test(candidate.text)) break;
@@ -333,16 +343,36 @@ function requirementSections(file: LegacyImportDecodedSourceFile): RequirementSe
         if (file.bytes[end] === 10) end += 1;
       }
       const match = candidate.text.match(/^-\s+([^:]+):\s*(.*)$/);
-      if (match === null) continue;
-      const name = normalizedFieldName(match[1]);
-      if (name === undefined) continue;
+      const name = match === null ? undefined : normalizedFieldName(match[1]);
+      if (match === null || name === undefined) {
+        const text = candidate.text;
+        if (text.trim() === "") {
+          blanks += 1;
+          continue;
+        }
+        // generateRequirementsMd indents the later lines of a multi-line value.
+        // Plain wrapped text continues the value only directly below its bullet;
+        // each other line ends the value and is not imported.
+        if (last !== undefined && /^(?: {2}|\t)/.test(text)) {
+          last.value += "\n".repeat(blanks + 1) + text.replace(/^(?: {2}|\t)/, "");
+        } else if (last !== undefined && blanks === 0 && !/^(?:[-*#]|_{3,}\s*$)/.test(text)) {
+          last.value += `\n${text}`;
+        } else {
+          last = undefined;
+        }
+        blanks = 0;
+        continue;
+      }
+      blanks = 0;
       usedUnderscoreAlias ||= match[1].includes("_");
       const valueCharacter = candidate.text.length - match[2].length;
-      fields.set(name, {
+      const cell = {
         value: match[2].trim(),
         start: candidate.start + byteOffset(candidate.text, valueCharacter),
         end: candidate.start + byteOffset(candidate.text, candidate.text.length),
-      });
+      };
+      last = MULTI_LINE_REQUIREMENT_FIELDS.has(name) ? cell : undefined;
+      fields.set(name, cell);
     }
     return {
       start: line.start,

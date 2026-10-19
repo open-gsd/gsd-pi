@@ -19,6 +19,7 @@ pi.on("before_agent_start", async (event, ctx) => {
   };
 });
 ```
+
 </per_turn_modification>
 
 <context_manipulation>
@@ -31,6 +32,7 @@ pi.on("context", async (event, ctx) => {
   return { messages: filtered };
 });
 ```
+
 </context_manipulation>
 
 <tool_specific_prompts>
@@ -49,4 +51,5 @@ pi.registerTool({
   // ...
 });
 ```
+
 </tool_specific_prompts>

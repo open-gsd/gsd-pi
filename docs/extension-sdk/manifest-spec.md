@@ -1,6 +1,5 @@
 # Extension Manifest Spec
 
-
 Every directory-based extension can include an `extension-manifest.json` file at its root. The manifest declares what the extension provides, what it depends on, and which tier it belongs to. The registry uses manifests to control enable/disable state, enforce load order, and validate compatibility.
 
 Extensions without manifests still load (backwards compatible), but they cannot be managed through the registry and always load before manifest-bearing extensions.
@@ -73,6 +72,7 @@ The default tier for new features that ship with GSD. Users can disable bundled 
 ### Community
 
 User-installed extensions loaded from:
+
 - `~/.gsd/agent/extensions/<name>/` — global (all projects)
 - `.gsd/extensions/<name>/` — project-local
 
@@ -282,11 +282,13 @@ The registry (`registry.json`) tracks enable/disable state separately from manif
 ## Validation Rules Summary
 
 A manifest is **valid** when:
+
 - `id`, `name`, `version`, and `tier` are all strings
 - The file is valid JSON
 - The file is named `extension-manifest.json` in the extension's root directory
 
 A manifest is **invalid** (treated as missing) when:
+
 - Any of the four required fields is missing or not a string
 - The JSON cannot be parsed
 - The file does not exist

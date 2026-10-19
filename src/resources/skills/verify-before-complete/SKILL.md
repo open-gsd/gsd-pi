@@ -12,6 +12,7 @@ Enforce the GSD "work is not done when code compiles; work is done when verifica
 GSD's system prompt sets the expectation; `complete-slice.md` and `auto-verification.ts` enforce it at the slice boundary. But between slice boundaries — mid-task, mid-debug, mid-review — an agent can drift into "I think it works" mode and ship broken work. This skill is the ritual to break that pattern at any completion point.
 
 Invocation points:
+
 - About to toggle a checkbox from `[ ]` to `[x]` via a `gsd_*` tool
 - About to commit, push, or open a PR
 - About to summarize a task or slice as complete

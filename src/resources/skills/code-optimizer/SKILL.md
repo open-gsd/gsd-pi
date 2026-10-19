@@ -30,6 +30,7 @@ better alternatives. Instead, each agent:
 ### Step 1: Detect Stack
 
 Use Glob to identify the project's tech stack:
+
 - `**/package.json` → Node.js/JS/TS (check for React, Next.js, Express, etc.)
 - `**/requirements.txt`, `**/pyproject.toml`, `**/setup.py` → Python
 - `**/go.mod` → Go
@@ -43,6 +44,7 @@ Use Glob to identify the project's tech stack:
 ### Step 2: Spawn 13 Parallel Agents
 
 Launch ALL agents simultaneously using the Agent tool. Each agent receives:
+
 - Its domain name and reference file path
 - The detected tech stack (so it can focus on relevant patterns)
 - The project root path
@@ -67,6 +69,7 @@ Launch ALL agents simultaneously using the Agent tool. Each agent receives:
 | 13 | Security-Performance | `references/security-performance.md` | Crypto misuse, missing rate limiting, ReDoS, SQL injection vectors |
 
 **Optional agents** (spawn if relevant to detected stack):
+
 - Logging & Observability (`references/logging-observability.md`) — if logging framework detected
 - Config & Infrastructure (`references/config-infra.md`) — if Docker/deployment config detected
 

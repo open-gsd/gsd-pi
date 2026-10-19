@@ -8,9 +8,10 @@ import {
   markActiveForWorkerCanceled,
   markCanceled,
 } from "../db/unit-dispatches.js";
-import { isDeadLocalAutoWorker, markWorkerCrashed } from "../db/auto-workers.js";
+import { getAutoWorker, isDeadLocalAutoWorker, markWorkerCrashed } from "../db/auto-workers.js";
 import { forceReleaseLeasesForWorker } from "../db/milestone-leases.js";
 import { debugLog } from "../debug-logger.js";
+import { MILESTONE_ID_RE } from "../milestone-ids.js";
 import { parseUnitId } from "../unit-id.js";
 import type { GSDState } from "../types.js";
 import type { UnitRef } from "./contracts.js";
@@ -64,6 +65,12 @@ export function iterationDataForClaim(
   session: AutoSession,
 ): IterationData {
   const parsed = parseUnitId(unitId);
+  // A project-level unit id (RESEARCH-PROJECT, REQUIREMENTS) names a setup
+  // stage, not a milestones row. The milestone lease needs a milestones parent
+  // row, so the unit claims under the active milestone.
+  const unitMilestone = parsed.milestone && !MILESTONE_ID_RE.test(parsed.milestone)
+    ? state.activeMilestone?.id
+    : parsed.milestone;
   return {
     unitType,
     unitId,
@@ -71,7 +78,7 @@ export function iterationDataForClaim(
     finalPrompt: "",
     pauseAfterUatDispatch: false,
     state,
-    mid: parsed.milestone || session.currentMilestoneId || undefined,
+    mid: unitMilestone || session.currentMilestoneId || undefined,
     midTitle: state.activeMilestone?.title,
     isRetry: false,
     previousTier: undefined,
@@ -102,6 +109,19 @@ export const UNIT_RUN_CLAIM_FAIL_LOG: OpenDispatchClaimDeps["logClaimFailed"] = 
 
 export const IS_DISPATCH_OWNER_DEAD: NonNullable<OpenDispatchClaimDeps["isDispatchOwnerDead"]> =
   isDeadLocalAutoWorker;
+
+/**
+ * The takeover test of a run claim (a custom workflow step). No milestone
+ * lease fences that claim, so a holder that is marked stopping or crashed
+ * also gives it up: a session that stops while its step runs cannot settle
+ * the row, and its process stays alive.
+ */
+export const IS_RUN_DISPATCH_OWNER_GONE: NonNullable<OpenDispatchClaimDeps["isDispatchOwnerDead"]> =
+  (workerId, projectRootRealpath) => {
+    const worker = getAutoWorker(workerId);
+    return (worker !== null && worker.status !== "active")
+      || isDeadLocalAutoWorker(workerId, projectRootRealpath);
+  };
 
 export const RECLAIM_DEAD_DISPATCH_OWNER: NonNullable<OpenDispatchClaimDeps["reclaimDeadDispatchOwner"]> =
   (workerId) => {
@@ -138,17 +158,48 @@ export function claimUnitRun(input: {
     if (lease.kind === "degraded") {
       return { kind: "degraded" as const, reason: lease.reason };
     }
-    const claim = openDispatchClaim(
+    const claimDeps = {
+      isDispatchOwnerDead: IS_DISPATCH_OWNER_DEAD,
+      reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
+      ...input.claimDeps,
+    };
+    let claim = openDispatchClaim(
       input.session,
       input.flowId,
       input.turnId,
       input.iterData,
-      {
-        isDispatchOwnerDead: IS_DISPATCH_OWNER_DEAD,
-        reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
-        ...input.claimDeps,
-      },
+      claimDeps,
     );
+    if (claim.kind === "skip" && claim.reason === "stale-lease") {
+      // The cached in-memory lease token (ensureDispatchLease's fast path
+      // above skips the DB re-check when a token is already cached) can go
+      // stale if the TTL (60s) elapses between iterations without an
+      // intervening heartbeat refresh — e.g. a long post-unit-finalize step.
+      // The same live worker almost always still owns the milestone at this
+      // point, so force-reclaim once and retry, mirroring the recovery the
+      // inline loop.ts dispatch path already performs (#2199/#2265 lineage).
+      // Only a genuine takeover by another live worker should surface as a
+      // terminal blocked/conflict outcome.
+      const leaseRecovery = ensureDispatchLease(
+        input.session,
+        input.iterData.mid,
+        input.leaseDeps,
+        { forceReclaim: true },
+      );
+      if (leaseRecovery.kind === "ready") {
+        claim = openDispatchClaim(
+          input.session,
+          input.flowId,
+          input.turnId,
+          input.iterData,
+          claimDeps,
+        );
+      } else if (leaseRecovery.kind === "blocked" || leaseRecovery.kind === "failed") {
+        return { kind: "blocked" as const, reason: leaseRecovery.reason };
+      } else {
+        return { kind: "degraded" as const, reason: leaseRecovery.reason };
+      }
+    }
     if (claim.kind === "opened") return claim;
     if (claim.kind === "skip") return { kind: "skip" as const, reason: claim.reason };
     return { kind: "degraded" as const, reason: claim.reason };

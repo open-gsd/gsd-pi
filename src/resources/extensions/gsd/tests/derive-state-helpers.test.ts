@@ -25,6 +25,9 @@ import {
   setMilestoneQueueOrder,
   transaction,
   updateTaskStatus,
+  adoptOrTransitionLifecycle,
+  executeDomainOperation,
+  readDomainOperationFence,
 } from '../gsd-db.ts';
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
@@ -474,8 +477,8 @@ describe('derive-state-helpers', () => {
     }
   });
 
-  // ─── Queue order: explicit file order repairs stale DB sequence ─────
-  test('deriveStateFromDb syncs QUEUE-ORDER.json into DB sequence', async () => {
+  // ─── Queue order: QUEUE-ORDER.json is a render and never changes DB sequence ─────
+  test('deriveStateFromDb ignores a contradicting QUEUE-ORDER.json and leaves DB sequence unchanged', async () => {
     const base = createFixtureBase();
     try {
       const queueOrder = JSON.stringify({ order: ['M003', 'M001', 'M002'], updatedAt: new Date().toISOString() });
@@ -485,7 +488,6 @@ describe('derive-state-helpers', () => {
       writeFile(base, 'milestones/M003/M003-CONTEXT.md', '# M003\n\nContext.');
 
       openDatabase(':memory:');
-      // Insert in natural order, then store the authoritative DB sequence.
       insertMilestone({ id: 'M001', title: 'First', status: 'active' });
       insertMilestone({ id: 'M002', title: 'Second', status: 'active' });
       insertMilestone({ id: 'M003', title: 'Third', status: 'active' });
@@ -494,52 +496,9 @@ describe('derive-state-helpers', () => {
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
 
-      assert.equal(state.activeMilestone?.id, 'M003', 'queue-order: QUEUE-ORDER.json chooses M003');
-      assert.equal(state.registry[0]?.id, 'M003', 'queue-order: registry[0] follows QUEUE-ORDER.json');
-      assert.deepEqual(getAllMilestones().map(m => m.id), ['M003', 'M001', 'M002'], 'queue-order: DB sequence is repaired');
-    } finally {
-      closeDatabase();
-      cleanup(base);
-    }
-  });
-
-  // ─── Queue order: milestone absent from file gets explicit sequence (idempotency) ─
-  test('deriveStateFromDb sync is idempotent when a milestone is omitted from QUEUE-ORDER.json', async () => {
-    const base = createFixtureBase();
-    try {
-      // QUEUE-ORDER.json lists only M002 and M001; M003 is absent.
-      const queueOrder = JSON.stringify({ order: ['M002', 'M001'], updatedAt: new Date().toISOString() });
-      writeFileSync(join(base, '.gsd', 'QUEUE-ORDER.json'), queueOrder);
-      writeFile(base, 'milestones/M001/M001-CONTEXT.md', '# M001\n\nContext.');
-      writeFile(base, 'milestones/M002/M002-CONTEXT.md', '# M002\n\nContext.');
-      writeFile(base, 'milestones/M003/M003-CONTEXT.md', '# M003\n\nContext.');
-
-      openDatabase(':memory:');
-      insertMilestone({ id: 'M001', title: 'First', status: 'active' });
-      insertMilestone({ id: 'M002', title: 'Second', status: 'active' });
-      insertMilestone({ id: 'M003', title: 'Third', status: 'active' });
-      // DB starts with natural order M001→M002→M003 (stale vs the file's M002→M001).
-
-      invalidateStateCache();
-      const state = await deriveStateFromDb(base);
-
-      // After sync, M002 leads (per file), M003 is appended at the end.
-      assert.equal(state.activeMilestone?.id, 'M002', 'omitted-milestone: QUEUE-ORDER.json chooses M002 as active');
-      assert.deepEqual(
-        getAllMilestones().map(m => m.id),
-        ['M002', 'M001', 'M003'],
-        'omitted-milestone: DB sequence is M002, M001, M003 with M003 appended',
-      );
-
-      // Second derive must not re-write the DB (idempotency guard holds).
-      invalidateStateCache();
-      const state2 = await deriveStateFromDb(base);
-      assert.equal(state2.activeMilestone?.id, 'M002', 'omitted-milestone: second derive still picks M002');
-      assert.deepEqual(
-        getAllMilestones().map(m => m.id),
-        ['M002', 'M001', 'M003'],
-        'omitted-milestone: DB sequence unchanged on second call',
-      );
+      assert.equal(state.activeMilestone?.id, 'M002', 'queue-order: DB sequence chooses M002');
+      assert.equal(state.registry[0]?.id, 'M002', 'queue-order: registry[0] follows DB sequence');
+      assert.deepEqual(getAllMilestones().map(m => m.id), ['M002', 'M001', 'M003'], 'queue-order: DB sequence is unchanged');
     } finally {
       closeDatabase();
       cleanup(base);
@@ -624,6 +583,39 @@ describe('derive-state-helpers', () => {
     }
   });
 
+  function adoptMilestoneForTest(milestoneId: string): void {
+    const fence = readDomainOperationFence();
+    executeDomainOperation({
+      operationType: 'test.milestone.adopt',
+      idempotencyKey: `test/${milestoneId}/adopt`,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: 'test',
+      sourceTransport: 'test',
+      payload: { milestoneId },
+    }, (context) => {
+      adoptOrTransitionLifecycle(context, {
+        itemKind: 'milestone',
+        milestoneId,
+        lifecycleStatus: 'ready',
+      });
+      return {
+        events: [{
+          eventType: 'test.milestone.adopted',
+          entityType: 'milestone',
+          entityId: milestoneId,
+          payload: { milestoneId },
+          destinations: ['test'],
+        }],
+        projections: [{
+          projectionKey: `test/${milestoneId}/adopt`.toLowerCase(),
+          projectionKind: 'test',
+          rendererVersion: '1',
+        }],
+      };
+    });
+  }
+
   // ─── handleAllSlicesDone: needs-remediation + all slices done → blocked (#4506) ──
   test('handleAllSlicesDone: needs-remediation with all slices done returns blocked', async () => {
     const base = createFixtureBase();
@@ -662,6 +654,51 @@ describe('derive-state-helpers', () => {
         'remediation-stuck: blocker message does not expose the internal tool name',
       );
     } finally {
+      closeDatabase();
+      cleanup(base);
+    }
+  });
+
+  test('handleAllSlicesDone: adopted needs-attention blocker omits legacy /gsd verdict override', async () => {
+    const base = createFixtureBase();
+    const previousCwd = process.cwd();
+    try {
+      const doneRoadmap = `# M001: Attention Test\n\n**Vision:** Test.\n\n## Slices\n\n- [x] **S01: Done** \`risk:low\` \`depends:[]\`\n  > Done.\n`;
+      writeFile(base, 'milestones/M001/M001-ROADMAP.md', doneRoadmap);
+      writeFile(base, 'milestones/M001/M001-VALIDATION.md',
+        '---\nverdict: needs-attention\n---\n\n# Validation\nNeeds attention.');
+
+      process.chdir(base);
+      openDatabase(join(base, '.gsd', 'gsd.db'));
+      insertMilestone({ id: 'M001', title: 'Attention Test', status: 'active' });
+      insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Done', status: 'complete', risk: 'low', depends: [] });
+      insertAssessment({
+        path: 'milestones/M001/M001-VALIDATION.md',
+        milestoneId: 'M001',
+        status: 'needs-attention',
+        scope: 'milestone-validation',
+        fullContent: 'verdict: needs-attention',
+      });
+      adoptMilestoneForTest('M001');
+
+      invalidateStateCache();
+      const state = await deriveStateFromDb(base);
+
+      assert.equal(state.phase, 'blocked');
+      assert.ok(
+        state.blockers.some((b) => b.includes('needs-attention') && b.includes('M001')),
+        'blocker mentions milestone and verdict',
+      );
+      assert.ok(
+        state.blockers.every((b) => !b.includes('/gsd verdict')),
+        'adopted milestone blockers must not advertise legacy verdict override',
+      );
+      assert.ok(
+        state.blockers.some((b) => b.includes('current structured evidence')),
+        'blocker should point to canonical re-validation',
+      );
+    } finally {
+      process.chdir(previousCwd);
       closeDatabase();
       cleanup(base);
     }

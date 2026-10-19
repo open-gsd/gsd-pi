@@ -22,7 +22,7 @@ export {
   _gitPathspecForWorktreePath,
   _isExpectedWorktreeUnlinkError,
   _isSamePath,
-  _shouldReconcileWorktreeDb,
+  _hasWorktreeLocalDb,
 } from "./auto-worktree-cleanup.js";
 
 export {
@@ -63,8 +63,6 @@ export {
   syncGsdStateToWorktree,
   syncGsdStateToWorktreeByScope,
   syncProjectRootToWorktree,
-  syncStateToProjectRoot,
-  syncWorktreeStateBack,
 } from "./auto-worktree-sync.js";
 
 export { teardownAutoWorktree } from "./auto-worktree-teardown.js";

@@ -4,6 +4,7 @@ ExtensionContext (`ctx`) — available in all event handlers (except `session_di
 
 <ui_methods>
 **Dialogs (blocking — wait for user response):**
+
 ```typescript
 const choice = await ctx.ui.select("Pick one:", ["A", "B", "C"]);
 const ok = await ctx.ui.confirm("Delete?", "This cannot be undone");
@@ -15,6 +16,7 @@ const ok = await ctx.ui.confirm("Auto-confirm?", "Proceeds in 5s", { timeout: 50
 ```
 
 **Non-blocking UI:**
+
 ```typescript
 ctx.ui.notify("Done!", "info");                     // Toast: "info" | "warning" | "error"
 ctx.ui.setStatus("my-ext", "● Active");             // Footer status
@@ -26,6 +28,7 @@ ctx.ui.setEditorText("Prefill");                    // Set editor content
 ctx.ui.setWorkingMessage("Analyzing...");           // Working message during streaming
 ctx.ui.setToolsExpanded(true);                      // Expand tool output
 ```
+
 </ui_methods>
 
 <ctx_properties>
@@ -43,6 +46,7 @@ ctx.ui.setToolsExpanded(true);                      // Expand tool output
 </ctx_properties>
 
 <session_manager>
+
 ```typescript
 ctx.sessionManager.getEntries()       // All entries
 ctx.sessionManager.getBranch()        // Current branch
@@ -50,4 +54,5 @@ ctx.sessionManager.getLeafId()        // Current leaf entry ID
 ctx.sessionManager.getSessionFile()   // Session JSONL path
 ctx.sessionManager.getLabel(entryId)  // Entry label
 ```
+
 </session_manager>

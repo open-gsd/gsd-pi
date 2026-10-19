@@ -45,6 +45,7 @@ pi.on("input", async (event, ctx) => {
 ```
 
 **Edge cases:**
+
 - Extension commands (`/mycommand`) are checked **before** `input` fires. If it matches, `input` never fires.
 - Built-in commands (`/new`, `/model`, etc.) are checked **after** `input` transforms. So `input` can transform text into a built-in command, or transform a built-in command into something else.
 - Images can be replaced via `transform`. Omitting `images` in the transform result preserves the original images.
@@ -60,6 +61,7 @@ pi.on("input", async (event, ctx) => {
 **Fires:** Once per user prompt. Does NOT fire on subsequent turns within the same agent run.
 
 **Chaining:**
+
 - **System prompt:** Chains. Extension A modifies `event.systemPrompt`, Extension B sees that modified version. If no extension returns a `systemPrompt`, the base prompt is used (resetting any previous turn's modifications).
 - **Messages:** Accumulate. All `message` results are collected into an array. Each becomes a separate `CustomMessage` with `role: "custom"` injected after the user message.
 
@@ -155,6 +157,7 @@ pi.on("context", async (event, ctx) => {
 ```
 
 **What `event.messages` contains:**
+
 - All roles: `user`, `assistant`, `toolResult`, `custom`, `bashExecution`, `compactionSummary`, `branchSummary`
 - The user message from the current prompt
 - Custom messages injected by `before_agent_start`
@@ -163,6 +166,7 @@ pi.on("context", async (event, ctx) => {
 - Historical messages from the session (including compaction summaries)
 
 **What it does NOT contain:**
+
 - The system prompt (use `before_agent_start` for that)
 - Tool definitions (use `pi.setActiveTools()` for that)
 
@@ -224,6 +228,7 @@ pi.on("tool_call", async (event, ctx) => {
 ```
 
 **Type narrowing:**
+
 ```typescript
 import { isToolCallEventType } from "@gsd/pi-coding-agent";
 
@@ -461,9 +466,11 @@ pi.on("user_bash", async (event, ctx) => {
 All hooks iterate through extensions in **load order** (project-local first, then global, then explicitly configured via `-e`). Within each extension, handlers for the same event run in registration order.
 
 For hooks that chain (e.g., `context`, `before_agent_start.systemPrompt`, `input`, `tool_result`):
+
 - Extension A's handler runs first, Extension B sees A's output
 - Load order determines priority
 
 For hooks that short-circuit (e.g., `tool_call` with `block`, `input` with `handled`, session `cancel`):
+
 - First extension to return the short-circuit value wins
 - Remaining handlers are skipped

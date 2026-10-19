@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### Unoptimized Build Config
+
 ```
 # Webpack
 mode:\s*['"]development['"]        (dev mode in production build)
@@ -17,6 +18,7 @@ sideEffects.*true                   (prevents tree shaking)
 ```
 
 ### Development-Only Code in Production
+
 ```
 console\.log\(                     (debug logging)
 console\.debug\(                   (debug logging)
@@ -29,6 +31,7 @@ __DEV__                             (React Native dev flag)
 ```
 
 ### Missing Optimization Flags
+
 ```
 # TypeScript
 "strict":\s*false                  (strict mode disabled)
@@ -45,6 +48,7 @@ COPY\s+\.\s+\.                     (copying entire context)
 ```
 
 ### Large/Slow Imports at Startup
+
 ```
 # Top-level heavy imports that could be lazy
 import.*tensorflow                  (heavy ML library at top)
@@ -57,6 +61,7 @@ ImportError.*circular               (circular import errors)
 ```
 
 ### Missing Caching in CI/CD
+
 ```
 # No caching steps
 npm install(?!.*cache)              (npm install without cache)
@@ -66,6 +71,7 @@ docker build(?!.*cache)             (docker build without layer cache)
 ```
 
 ### Slow Test Suite
+
 ```
 # Real I/O in tests
 fetch\(.*test                       (real network calls in tests)

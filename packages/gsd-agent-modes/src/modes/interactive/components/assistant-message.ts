@@ -1,13 +1,54 @@
 // Project/App: gsd-pi
 // File Purpose: Assistant message rail renderer for interactive terminal sessions.
 import type { AssistantMessage } from "@gsd/pi-ai";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@gsd/pi-tui";
+import { Container, Markdown, type MarkdownTheme, Spacer, Text, visibleWidth } from "@gsd/pi-tui";
 import { getMarkdownTheme, theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { type TimestampFormat } from "./timestamp.js";
 import { formatTimestamp } from "./timestamp.js";
 import { RenderCache } from "./render-cache.js";
-import { renderPlainSpeakerMessage } from "./transcript-design.js";
+import { CHAT_CORNER_TOP_LEFT, renderPlainSpeakerMessage } from "./transcript-design.js";
 import { asServerToolUse, asWebSearchResult, isToolContentBlock } from "../gsd-content-blocks.js";
+
+const ASSISTANT_HEADER_LABEL = "GSD";
+// Visible prefix of the speaker header line, ahead of the model meta.
+const ASSISTANT_HEADER_PREFIX = `${CHAT_CORNER_TOP_LEFT}${ASSISTANT_HEADER_LABEL} · `;
+
+/**
+ * Model + routing provenance for the assistant header, derived only from the
+ * stored message (ADR-049). Shows the provider-reported effective model first
+ * (`effective ← requested`) when `responseModel` is non-empty and differs,
+ * plus the GSD dynamic-routing tier snapshot when present.
+ */
+export function formatAssistantModelMeta(message: AssistantMessage): string {
+	const requested = typeof message.model === "string" ? message.model.trim() : "";
+	const reported = typeof message.responseModel === "string" ? message.responseModel.trim() : "";
+	const parts: string[] = [];
+	if (requested.length > 0 && reported.length > 0 && reported !== requested) {
+		parts.push(`${reported} ← ${requested}`);
+	} else if (reported.length > 0) {
+		parts.push(reported);
+	} else if (requested.length > 0) {
+		parts.push(requested);
+	}
+	if (message.modelRouting?.source === "gsd-dynamic") {
+		parts.push(`(dynamic/${message.modelRouting.tier})`);
+	}
+	return parts.join(" ");
+}
+
+/** The same meta without the lower-priority requested-alias clause. */
+function formatAssistantModelMetaCompact(message: AssistantMessage): string {
+	const meta = formatAssistantModelMeta(message);
+	const aliasIdx = meta.indexOf(" ← ");
+	if (aliasIdx === -1) return meta;
+	const tail = meta.slice(aliasIdx);
+	const tierIdx = tail.indexOf(" (dynamic/");
+	return tierIdx === -1 ? meta.slice(0, aliasIdx) : meta.slice(0, aliasIdx) + tail.slice(tierIdx);
+}
+
+function headerMetaFits(meta: string, frameWidth: number): boolean {
+	return visibleWidth(ASSISTANT_HEADER_PREFIX) + visibleWidth(meta) <= frameWidth;
+}
 
 export interface ContentRange {
 	startIndex: number;
@@ -290,17 +331,41 @@ export class AssistantMessageComponent extends Container {
 		const frameWidth = Math.max(20, width);
 		const lines = super.render(frameWidth);
 		if (lines.length === 0) return [];
-		const metaParts = [];
-		if (this.lastMessage?.model) metaParts.push(this.lastMessage.model);
-		if (this.showMetadata && this.lastMessage?.timestamp != null) {
-			metaParts.push(formatTimestamp(this.lastMessage.timestamp, this.timestampFormat));
-		}
 		const rendered = renderPlainSpeakerMessage(lines, frameWidth, {
-			label: "GSD",
-			meta: metaParts.length > 0 ? metaParts.join(" · ") : undefined,
+			label: ASSISTANT_HEADER_LABEL,
+			meta: this.renderHeaderMeta(frameWidth),
 			tone: "assistant",
 		});
 		return this.renderCache.set(`${width}:${this.renderVersion}`, rendered);
+	}
+
+	/**
+	 * Header metadata, derived only from the stored message. Provenance
+	 * (effective model, dynamic tier) is metadata: it rides the same
+	 * metadata-bearing final segment as the timestamp, while streaming or
+	 * non-final segments show the requested model alone. At constrained widths
+	 * the effective model and dynamic tier are preserved ahead of
+	 * lower-priority requested-alias and timestamp details (ADR-049); whatever
+	 * remains overflows into the existing hard truncation.
+	 */
+	private renderHeaderMeta(frameWidth: number): string | undefined {
+		if (!this.lastMessage?.model) return undefined;
+		const provenanceMeta = this.showMetadata ? formatAssistantModelMeta(this.lastMessage) : "";
+		const baseMeta = this.showMetadata ? provenanceMeta : this.lastMessage.model;
+		const timestamp =
+			this.showMetadata && this.lastMessage?.timestamp != null
+				? formatTimestamp(this.lastMessage.timestamp, this.timestampFormat)
+				: undefined;
+		const compactMeta = this.showMetadata ? formatAssistantModelMetaCompact(this.lastMessage) : baseMeta;
+		const candidates = [
+			baseMeta && timestamp ? `${baseMeta} · ${timestamp}` : "",
+			baseMeta,
+			compactMeta,
+		];
+		for (const candidate of candidates) {
+			if (candidate && headerMetaFits(candidate, frameWidth)) return candidate;
+		}
+		return baseMeta || undefined;
 	}
 
 	private clearRenderCache(): void {

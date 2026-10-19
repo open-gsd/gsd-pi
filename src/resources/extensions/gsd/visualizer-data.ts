@@ -1,13 +1,12 @@
 // Data loader for workflow visualizer overlay — aggregates state + metrics.
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deriveState } from './state.js';
-import { parseSummary, loadFile } from './files.js';
-import { isDbAvailable, getMilestoneSlices, getSliceTasks } from './gsd-db.js';
+import { parseSummary } from './files.js';
+import { isDbAvailable, getMilestoneScopedArtifacts, getMilestoneSlices, getSlice, getSliceTasks } from './gsd-db.js';
 import { openExistingWorkflowDatabase } from './db-workspace.js';
-import { findMilestoneIds } from './milestone-ids.js';
-import { resolveMilestoneFile, resolveSliceFile, resolveGsdRootFile, gsdRoot } from './paths.js';
+import { resolveGsdRootFile, gsdRoot } from './paths.js';
 import {
   getLedger,
   getProjectTotals,
@@ -28,6 +27,7 @@ import { runEnvironmentChecks, type EnvironmentCheckResult } from './doctor-envi
 import { computeProgressScore } from './progress-score.js';
 import { getHealthHistory } from './doctor-proactive.js';
 import { getActiveMemories, getActiveMemoriesRanked } from './memory-store.js';
+import { readKnowledgeEntries } from './knowledge-projection.js';
 
 import type { Phase } from './types.js';
 import type { CaptureEntry } from './captures.js';
@@ -488,14 +488,13 @@ function loadAgentActivity(units: UnitMetrics[], milestones: VisualizerMilestone
 
 // ─── Changelog & Verifications ────────────────────────────────────────────────
 
-const changelogCache = new Map<string, { mtime: number; entry: ChangelogEntry; verification: SliceVerification }>();
-
 interface ChangelogAndVerifications {
   changelog: ChangelogInfo;
   verifications: SliceVerification[];
 }
 
-async function loadChangelogAndVerifications(basePath: string, milestones: VisualizerMilestone[]): Promise<ChangelogAndVerifications> {
+/** Changelog and verification of each done Slice, from the summary stored on the slice row. */
+function loadChangelogAndVerifications(milestones: VisualizerMilestone[]): ChangelogAndVerifications {
   const entries: ChangelogEntry[] = [];
   const verifications: SliceVerification[] = [];
 
@@ -503,26 +502,7 @@ async function loadChangelogAndVerifications(basePath: string, milestones: Visua
     for (const sl of ms.slices) {
       if (!sl.done) continue;
 
-      const summaryFile = resolveSliceFile(basePath, ms.id, sl.id, 'SUMMARY');
-      if (!summaryFile) continue;
-
-      const cacheKey = `${ms.id}/${sl.id}`;
-      const cached = changelogCache.get(cacheKey);
-
-      let mtime = 0;
-      try {
-        mtime = statSync(summaryFile).mtimeMs;
-      } catch {
-        continue;
-      }
-
-      if (cached && cached.mtime === mtime) {
-        entries.push(cached.entry);
-        verifications.push(cached.verification);
-        continue;
-      }
-
-      const content = await loadFile(summaryFile);
+      const content = getSlice(ms.id, sl.id)?.full_summary_md;
       if (!content) continue;
 
       const summary = parseSummary(content);
@@ -552,7 +532,6 @@ async function loadChangelogAndVerifications(basePath: string, milestones: Visua
         })),
       };
 
-      changelogCache.set(cacheKey, { mtime, entry, verification });
       entries.push(entry);
       verifications.push(verification);
     }
@@ -566,45 +545,15 @@ async function loadChangelogAndVerifications(basePath: string, milestones: Visua
 // ─── Knowledge Loader ─────────────────────────────────────────────────────────
 
 function loadKnowledge(basePath: string): KnowledgeInfo {
-  const knowledgePath = resolveGsdRootFile(basePath, 'KNOWLEDGE');
-  if (!existsSync(knowledgePath)) {
-    return { rules: [], patterns: [], lessons: [], exists: false };
-  }
-
-  let content: string;
-  try {
-    content = readFileSync(knowledgePath, 'utf-8');
-  } catch {
-    return { rules: [], patterns: [], lessons: [], exists: false };
-  }
-
-  const rules: { id: string; scope: string; content: string }[] = [];
-  const patterns: { id: string; content: string }[] = [];
-  const lessons: { id: string; content: string }[] = [];
-
-  const lines = content.split('\n');
-  let currentSection = '';
-
-  for (const line of lines) {
-    if (line.startsWith('## Rules')) { currentSection = 'rules'; continue; }
-    if (line.startsWith('## Patterns')) { currentSection = 'patterns'; continue; }
-    if (line.startsWith('## Lessons')) { currentSection = 'lessons'; continue; }
-    if (line.startsWith('## ')) { currentSection = ''; continue; }
-
-    if (!line.startsWith('| ') || line.startsWith('| ---') || line.startsWith('| ID')) continue;
-    const cols = line.split('|').map(c => c.trim()).filter(c => c.length > 0);
-    if (cols.length < 2) continue;
-
-    if (currentSection === 'rules' && cols.length >= 3) {
-      rules.push({ id: cols[0], scope: cols[1], content: cols[2] });
-    } else if (currentSection === 'patterns' && cols.length >= 2) {
-      patterns.push({ id: cols[0], content: cols[1] });
-    } else if (currentSection === 'lessons' && cols.length >= 2) {
-      lessons.push({ id: cols[0], content: cols[1] });
-    }
-  }
-
-  return { rules, patterns, lessons, exists: true };
+  // Knowledge comes from the database (readKnowledgeEntries), not the file on disk.
+  if (!isDbAvailable()) return { rules: [], patterns: [], lessons: [], exists: false };
+  const entries = readKnowledgeEntries(basePath);
+  const rules = entries.rules.map(([id = '', scope = '', content = '']) => ({ id, scope, content }));
+  const patterns = entries.patterns.map(([id = '', content = '']) => ({ id, content }));
+  const lessons = entries.lessons.map(([id = '', content = '']) => ({ id, content }));
+  const exists = rules.length + patterns.length + lessons.length > 0
+    || existsSync(resolveGsdRootFile(basePath, 'KNOWLEDGE'));
+  return { rules, patterns, lessons, exists };
 }
 
 // ─── Memory Loader ────────────────────────────────────────────────────────────
@@ -678,9 +627,12 @@ function loadHealth(units: UnitMetrics[], totals: ProjectTotals | null, basePath
     const criticals = report.suggestions.filter(s => s.severity === "critical");
     skillSummary = {
       total: report.skills.length,
-      warningCount: warnings.length,
+      // #2495: causation heal suggestions no longer fire on availability-only
+      // data, so surface the report's own flags instead of implying "all
+      // healthy" when suggestions are quiet.
+      warningCount: warnings.length + report.decliningSkills.length,
       criticalCount: criticals.length,
-      topIssue: report.suggestions[0]?.message ?? null,
+      topIssue: report.suggestions[0]?.message ?? report.skills.find(s => s.flagged)?.flagReason ?? null,
     };
   } catch { /* non-fatal */ }
 
@@ -771,38 +723,28 @@ function buildVisualizerStats(
   };
 }
 
-function loadDiscussionState(
-  basePath: string,
-  milestones: VisualizerMilestone[],
-): VisualizerDiscussionState[] {
+function loadDiscussionState(milestones: VisualizerMilestone[]): VisualizerDiscussionState[] {
   const states: VisualizerDiscussionState[] = [];
 
   for (const ms of milestones) {
-    const contextPath = resolveMilestoneFile(basePath, ms.id, "CONTEXT");
-    const draftPath = resolveMilestoneFile(basePath, ms.id, "CONTEXT-DRAFT");
-    const state: DiscussionState = contextPath
+    // The saved artifact rows decide; the CONTEXT projections are not read.
+    const saved = getMilestoneScopedArtifacts(ms.id).filter(a => a.full_content.trim() !== "");
+    const context = saved.find(a => a.artifact_type === "CONTEXT");
+    // The draft row stays after the final CONTEXT is saved, so it counts only without one.
+    const draft = context ? undefined : saved.find(a => a.artifact_type === "CONTEXT-DRAFT");
+    const state: DiscussionState = context
       ? "discussed"
-      : draftPath
+      : draft
         ? "draft"
         : "undiscussed";
-
-    let lastUpdated: string | null = null;
-    const target = contextPath ?? draftPath;
-    if (target) {
-      try {
-        lastUpdated = new Date(statSync(target).mtimeMs).toISOString();
-      } catch {
-        lastUpdated = null;
-      }
-    }
 
     states.push({
       milestoneId: ms.id,
       title: ms.title,
       state,
-      hasContext: !!contextPath,
-      hasDraft: !!draftPath,
-      lastUpdated,
+      hasContext: !!context,
+      hasDraft: !!draft,
+      lastUpdated: (context ?? draft)?.imported_at ?? null,
     });
   }
 
@@ -814,14 +756,15 @@ function loadDiscussionState(
 export async function loadVisualizerData(basePath: string): Promise<VisualizerData> {
   ensureVisualizerDb(basePath);
   const state = await deriveState(basePath);
-  const milestoneIds = findMilestoneIds(basePath);
 
   const milestones: VisualizerMilestone[] = [];
 
-  for (const mid of milestoneIds) {
-    const entry = state.registry.find(r => r.id === mid);
-    const status = entry?.status ?? 'pending';
-    const dependsOn = entry?.dependsOn ?? [];
+  // The Milestone list is the registry, which deriveState builds from database
+  // rows. A Milestone directory with no row is not a Milestone.
+  for (const entry of state.registry) {
+    const mid = entry.id;
+    const status = entry.status;
+    const dependsOn = entry.dependsOn ?? [];
 
     const slices: VisualizerSlice[] = [];
 
@@ -835,20 +778,13 @@ export async function loadVisualizerData(basePath: string): Promise<VisualizerDa
           state.activeMilestone?.id === mid &&
           state.activeSlice?.id === s.id;
 
-        const tasks: VisualizerTask[] = [];
-
-        if (isActiveSlice) {
-          const dbTasks = getSliceTasks(mid, s.id);
-          for (const t of dbTasks) {
-            tasks.push({
-              id: t.id,
-              title: t.title,
-              done: t.status === 'complete' || t.status === 'done',
-              active: state.activeTask?.id === t.id,
-              estimate: t.estimate || undefined,
-            });
-          }
-        }
+        const tasks: VisualizerTask[] = getSliceTasks(mid, s.id).map(t => ({
+          id: t.id,
+          title: t.title,
+          done: t.status === 'complete' || t.status === 'done',
+          active: isActiveSlice && state.activeTask?.id === t.id,
+          estimate: t.estimate || undefined,
+        }));
 
         slices.push({
           id: s.id,
@@ -864,7 +800,7 @@ export async function loadVisualizerData(basePath: string): Promise<VisualizerDa
 
     milestones.push({
       id: mid,
-      title: entry?.title ?? mid,
+      title: entry.title,
       status,
       dependsOn,
       slices,
@@ -903,7 +839,7 @@ export async function loadVisualizerData(basePath: string): Promise<VisualizerDa
   }
 
   const agentActivity = loadAgentActivity(units, milestones, state.activeMilestone?.id);
-  const { changelog, verifications: sliceVerifications } = await loadChangelogAndVerifications(basePath, milestones);
+  const { changelog, verifications: sliceVerifications } = loadChangelogAndVerifications(milestones);
 
   const knowledge = loadKnowledge(basePath);
   const memories = loadMemories();
@@ -917,7 +853,7 @@ export async function loadVisualizerData(basePath: string): Promise<VisualizerDa
 
   const health = loadHealth(units, totals, basePath);
   const stats = buildVisualizerStats(milestones, changelog.entries);
-  const discussion = loadDiscussionState(basePath, milestones);
+  const discussion = loadDiscussionState(milestones);
 
   return {
     milestones,

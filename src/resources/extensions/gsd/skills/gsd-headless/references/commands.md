@@ -15,7 +15,7 @@ Session startup flags such as `--model ID` and `--thinking LEVEL` can be supplie
 | `new-milestone` | Create milestone from specification (requires `--context`) |
 | `dispatch <phase>` | Force-dispatch: research, plan, execute, complete, reassess, uat, replan |
 | `discuss` | Start guided milestone/slice discussion |
-| `discard-milestone <ids...> --orphan-only` | Atomically discard DB-only orphan reservations after fail-closed preflight; emits before/after JSON |
+| `discard-milestone <ids...> --orphan-only` | Atomically delete DB-only orphan reservations that have no lifecycle row, after fail-closed preflight; emits before/after JSON. A milestone registered by `gsd_milestone_generate_id` has a lifecycle row and is refused: cancel it with `/gsd discard <id>` |
 
 ## State Inspection
 

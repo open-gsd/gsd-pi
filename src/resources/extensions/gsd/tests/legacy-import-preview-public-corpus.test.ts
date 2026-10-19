@@ -40,7 +40,7 @@ const DEVIATIONS = {
   "action-matrix": {
     reason: "state-narrative-preservation",
     counts: [1, 1, 1, 1, 0, 0],
-    semantic_hash: "sha256:f023faf1fb883d9bafdd2883aef8c674a01e8a355e8ee63d1e821d0c8f16c631",
+    semantic_hash: "sha256:e4c8b6b030474c9b5f761b8ec170b70424b6d939c2076c40206713d0132fe1d2",
   },
   "assessment-matrix": {
     reason: "empty-base-create",
@@ -49,13 +49,13 @@ const DEVIATIONS = {
   },
   "composite-capstone": {
     reason: "multi-target-completeness",
-    counts: [5, 0, 0, 5, 3, 5],
-    semantic_hash: "sha256:3989cd22a325b8c776c62a47965d13e03b968eefc3c71aaf5af3f7c1246ce5a8",
+    counts: [6, 0, 0, 5, 3, 5],
+    semantic_hash: "sha256:522dcd88992a7c2b64423d3578b665732d7522bd384ffbdd7e93c55d374d3e88",
   },
   "db-target-matrix": {
     reason: "multi-target-ambiguity",
     counts: [0, 0, 0, 0, 2, 3],
-    semantic_hash: "sha256:0a9166bad172e40e8f7a4a15697d45ab77557bb8f99997967f15cec0f6b97fa4",
+    semantic_hash: "sha256:b81183fd3fa7a27bd1420b72eddc1c69756d3892a8bb0544c5033ab7dd578e00",
   },
   "gsd-flat": {
     reason: "empty-base-create-instead-of-update",
@@ -65,7 +65,7 @@ const DEVIATIONS = {
   "lifecycle-truth-matrix": {
     reason: "t06-conflicting-completeness",
     counts: [7, 0, 0, 7, 2, 11],
-    semantic_hash: "sha256:dc53a5babd1be69644dfe8ab3ae8c203d395196ed7c3d37be0a95b3b2d17da3e",
+    semantic_hash: "sha256:9bdea97eef1aca1b7d273912ed67b99c12ad0a5e155f0c59cf371e544ceca910",
   },
   "planning-flat-complete": {
     reason: "empty-base-create-instead-of-update",
@@ -253,6 +253,7 @@ test("public legacy Preview returns deterministic read-only artifacts for every 
   ]);
   assert.deepEqual(actionKeys(results.get("composite-capstone")!), [
     "create:assessment:M702/S01/run-uat",
+    "create:knowledge:K701",
     "create:milestone-status:M702",
     "create:milestone:M702",
     "create:requirement:R701",

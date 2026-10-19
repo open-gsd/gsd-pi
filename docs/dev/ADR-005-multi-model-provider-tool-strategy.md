@@ -59,17 +59,20 @@ GSD installs its observer during bootstrap. Each non-empty report is surfaced in
 ## Consequences
 
 ### Positive
+
 - Eliminates silent tool failures when routing to incompatible providers
 - Makes cross-provider routing safe by default
 - Provider knowledge becomes queryable (registry vs scattered code)
 - Cross-provider context loss becomes visible via `ProviderSwitchReport`
 
 ### Negative
+
 - More metadata to maintain (provider capabilities, tool compatibility)
 - Tool filtering adds a pipeline step (sub-millisecond, O(models × tools))
 - Risk of over-filtering (mitigated: opt-in per tool, permissive defaults)
 
 ### Neutral
+
 - Existing behavior unchanged without metadata
 - ADR-004 scoring is unmodified
 - Provider implementations simplify over time as registry replaces scattered workarounds

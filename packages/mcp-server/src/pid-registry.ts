@@ -4,9 +4,19 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, renameSync, realpathSync } from 'node:fs';
+import {
+  readFileSync,
+  mkdirSync,
+  renameSync,
+  realpathSync,
+  rmSync,
+  openSync,
+  writeSync,
+  closeSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export interface McpInstanceEntry {
   pid: number;
@@ -22,6 +32,24 @@ export interface RegisterMcpInstanceOptions {
   getProcessCwd?: (pid: number) => string | null;
   getProcessStartTime?: (pid: number) => number | null;
   waitForExit?: () => void;
+  /**
+   * Test-only seam: overrides the random temp-file name segment normally
+   * derived from randomUUID(). Lets tests force a genuine name collision at
+   * writeMcpRegistry's temp path against a real pre-existing foreign file,
+   * to prove that invocation never deletes a file it did not create (the
+   * EEXIST-from-openSync('wx') branch). Not used in production.
+   */
+  tempFileNameForTest?: string;
+}
+
+/**
+ * Returned by {@link registerMcpInstance} when a live registry holder could not
+ * be verified as this project's server. Carries the holder detail surfaced in
+ * the refusal stderr line and the startup-failure error (#2361).
+ */
+export interface McpInstanceRefusal {
+  refused: true;
+  detail: string;
 }
 
 export interface McpProcessSnapshot {
@@ -55,6 +83,23 @@ const REGISTRY_PATH = join(
 // clock granularity / start-vs-register delay). A PID that started materially
 // later has been recycled by a different process and must not be signalled.
 const STALE_PID_START_SKEW_MS = 60_000;
+
+// Every process-introspection helper below (`ps`/`lsof`/`pwdx` on POSIX,
+// `powershell.exe`/WMI-CIM on Windows) runs synchronously and blocks the
+// whole event loop until it returns. Without a bound, WMI/CIM enumeration,
+// AV/EDR interception, or a wedged shell can stall registerMcpInstance /
+// sweepProjectOrphanMcpServers indefinitely (observed as a 180s+ CI hang).
+// 5s is a generous bound even for the slowest observed path (the Windows
+// Add-Type/C# PEB-read query, measured at ~3.5s cold) while still failing
+// fast relative to a multi-minute wedge. killSignal is forced to SIGKILL —
+// a wedged WMI/CIM call inside powershell.exe is exactly the kind of stuck
+// in-kernel-wait that may not honor SIGTERM, so the default killSignal is
+// not strong enough to guarantee the timeout is actually enforced.
+const PROCESS_QUERY_TIMEOUT_MS = 5_000;
+const PROCESS_QUERY_EXEC_OPTIONS = {
+  timeout: PROCESS_QUERY_TIMEOUT_MS,
+  killSignal: 'SIGKILL' as const,
+};
 
 export function readMcpRegistry(registryPath = REGISTRY_PATH): McpInstanceRegistry {
   let raw: string;
@@ -98,9 +143,114 @@ export function readMcpRegistry(registryPath = REGISTRY_PATH): McpInstanceRegist
   }
 }
 
-function writeMcpRegistry(registry: McpInstanceRegistry, registryPath = REGISTRY_PATH): void {
-  mkdirSync(dirname(registryPath), { recursive: true });
-  writeFileSync(registryPath, JSON.stringify(registry, null, 2), 'utf8');
+// Writes the registry atomically: a concurrent reader must only ever observe
+// either the previous complete file or the new complete file, never a
+// partially-written one. writeFileSync(registryPath, ...) in place does not
+// guarantee this — it can truncate the existing file before the new bytes are
+// flushed, so a reader racing the write can see an empty or truncated payload
+// and fail to parse it (#2666). Write the new content to a unique temporary
+// file in the same directory (same filesystem, so renameSync is atomic on
+// POSIX and Windows), then rename it over the target. If any step fails, the
+// original registry file is left untouched and the temp file is cleaned up —
+// the original error is rethrown unmasked.
+function writeMcpRegistry(
+  registry: McpInstanceRegistry,
+  registryPath = REGISTRY_PATH,
+  tempFileNameForTest?: string,
+): void {
+  const dir = dirname(registryPath);
+  mkdirSync(dir, { recursive: true });
+  const tempPath = join(dir, tempFileNameForTest ?? `.${randomUUID()}.mcp-instances.json.tmp`);
+
+  // 'wx' (O_CREAT|O_EXCL|O_WRONLY) refuses to follow a pre-existing path —
+  // including a symlink — at tempPath, and mode 0o600 keeps the registry
+  // (PIDs + project directory paths) private to the current user on
+  // shared/multi-user filesystems, matching env-writer.ts's convention.
+  //
+  // Open exclusively first and only mark tempPath as "owned by this
+  // invocation" once that open call has actually returned a live fd — a
+  // UUID collision (or a foreign file placed at the same path by something
+  // else) makes the open fail with EEXIST, and that failure must NOT trigger
+  // cleanup of a file this invocation never created. Only an fd obtained by
+  // *this* openSync call authorizes removing tempPath afterwards.
+  let fd: number;
+  try {
+    fd = openSync(tempPath, 'wx', 0o600);
+  } catch (err) {
+    // Never created tempPath — nothing to clean up, and no write/rename was
+    // attempted against the real registry. Propagate the original error.
+    throw err;
+  }
+
+  // From here on, this invocation owns tempPath: any failure must clean up
+  // exactly (and only) the file it created.
+  try {
+    writeSync(fd, Buffer.from(JSON.stringify(registry, null, 2), 'utf8'));
+  } catch (err) {
+    try {
+      closeSync(fd);
+    } catch {
+      // Best-effort — do not let a close failure mask the write error below.
+    }
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Best-effort cleanup only — do not let a cleanup failure mask the
+      // original write error below.
+    }
+    throw err;
+  }
+
+  try {
+    closeSync(fd);
+  } catch (err) {
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Best-effort cleanup only — do not let a cleanup failure mask the
+      // original close error below.
+    }
+    throw err;
+  }
+
+  try {
+    renameRegistrySnapshotWithRetry(tempPath, registryPath);
+  } catch (err) {
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Best-effort cleanup only — do not let a cleanup failure mask the
+      // original rename error below.
+    }
+    throw err;
+  }
+}
+
+/**
+ * Windows can temporarily refuse replacement while a reader or scanner holds
+ * the destination. Retry only the atomic rename, never unlink/truncate/copy the
+ * previous snapshot. Ten attempts, at most 450ms of synchronous backoff, keep
+ * genuine permission errors bounded and preserve the final original error.
+ */
+function renameRegistrySnapshotWithRetry(tempPath: string, registryPath: string): void {
+  let waitState: Int32Array | undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(tempPath, registryPath);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (
+        process.platform !== 'win32' ||
+        attempt >= 9 ||
+        (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY')
+      ) {
+        throw err;
+      }
+      waitState ??= new Int32Array(new SharedArrayBuffer(4));
+      Atomics.wait(waitState, 0, 0, 10 * (attempt + 1));
+    }
+  }
 }
 
 function defaultGetProcessCommand(pid: number): string | null {
@@ -116,7 +266,7 @@ function defaultGetProcessCommand(pid: number): string | null {
           '-Command',
           `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...PROCESS_QUERY_EXEC_OPTIONS },
       ).trim();
       return out || null;
     }
@@ -124,6 +274,7 @@ function defaultGetProcessCommand(pid: number): string | null {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     }).trim();
     return command || null;
   } catch {
@@ -142,7 +293,7 @@ function defaultGetProcessStartTime(pid: number): number | null {
           '-Command',
           `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { [int64](($p.CreationDate.ToUniversalTime() - [datetime]'1970-01-01T00:00:00Z').TotalMilliseconds) }`,
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...PROCESS_QUERY_EXEC_OPTIONS },
       ).trim();
       const ms = Number(out);
       return Number.isFinite(ms) && ms > 0 ? ms : null;
@@ -153,6 +304,7 @@ function defaultGetProcessStartTime(pid: number): number | null {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     }).trim();
     if (!lstart) return null;
     const ms = new Date(lstart).getTime();
@@ -200,7 +352,7 @@ public static class GsdProcCwd{
 }
 '@;Add-Type -TypeDefinition $t -ErrorAction Stop;[GsdProcCwd]::G($pid)`,
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...PROCESS_QUERY_EXEC_OPTIONS },
       ).trim();
       if (!out) return null;
       return normalizeProcessCwd(out);
@@ -214,6 +366,7 @@ public static class GsdProcCwd{
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     });
     const cwd = out.split('\n').find((line) => line.startsWith('n'))?.slice(1).trim();
     if (cwd) return cwd;
@@ -225,6 +378,7 @@ public static class GsdProcCwd{
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     }).trim();
     const match = /^\d+:\s+(.+)$/.exec(out);
     return match?.[1]?.trim() || null;
@@ -258,7 +412,7 @@ function defaultListProcesses(): McpProcessSnapshot[] {
           '-Command',
           'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress',
         ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...PROCESS_QUERY_EXEC_OPTIONS },
       ).trim();
       if (!out) return [];
       const parsed = JSON.parse(out) as unknown;
@@ -282,6 +436,7 @@ function defaultListProcesses(): McpProcessSnapshot[] {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       env: { ...process.env, LC_ALL: 'C' },
+      ...PROCESS_QUERY_EXEC_OPTIONS,
     });
     return out.split('\n').flatMap((line) => {
       const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
@@ -503,6 +658,7 @@ export type SignalAutoLockPidResult =
   | 'signaled'
   | 'already-dead'
   | 'stale-lock'
+  | 'unverified'
   | 'foreign-cwd'
   | 'invalid-lock'
   | { error: string };
@@ -512,11 +668,13 @@ export type SignalAutoLockPidResult =
  *
  * The lock only records `pid` + `startedAt`; between write and read that PID
  * can be recycled by an unrelated process. Mirrors the killPid() policy above:
- * refuse to signal unless the live process's start time is no later than the
- * recorded one (within STALE_PID_START_SKEW_MS) and its cwd is rooted in the
- * project directory. An unknown cwd is tolerated (start time is the primary
- * identity); an unparseable `startedAt` invalidates the lock — a foreign or
- * corrupt lock must not authorize a signal.
+ * refuse to signal unless the live process's start time is finite, positive,
+ * and no later than the recorded one (within STALE_PID_START_SKEW_MS), and its
+ * known cwd is rooted in the project directory. An unknown or invalid live
+ * start time is unverified even when cwd matches. An unknown cwd is still
+ * tolerated when the start identity is verified (the existing policy);
+ * an unparseable `startedAt` invalidates the lock — a foreign or corrupt
+ * lock must not authorize a signal.
  */
 export function signalAutoLockPid(
   lock: unknown,
@@ -543,7 +701,10 @@ export function signalAutoLockPid(
   }
 
   const actualStartMs = getProcessStartTime(pid);
-  if (actualStartMs !== null && actualStartMs > recordedMs + STALE_PID_START_SKEW_MS) {
+  if (actualStartMs === null || !Number.isFinite(actualStartMs) || actualStartMs <= 0) {
+    return 'unverified';
+  }
+  if (actualStartMs > recordedMs + STALE_PID_START_SKEW_MS) {
     return 'stale-lock';
   }
 
@@ -574,7 +735,7 @@ export function registerMcpInstance(
   projectDir: string,
   registryPath = REGISTRY_PATH,
   options: RegisterMcpInstanceOptions = {},
-): boolean {
+): boolean | McpInstanceRefusal {
   const registry = readMcpRegistry(registryPath);
   const keys = projectRegistryKeys(projectDir);
   const key = keys[0];
@@ -595,7 +756,24 @@ export function registerMcpInstance(
             ? `ignored unverified stale pid=${existing.pid}`
             : `failed to kill pid=${existing.pid}: ${result.error}`;
     process.stderr.write(`[gsd-mcp-server] ${label} for ${key}\n`);
-    if (result === 'unverified') return false;
+    if (result === 'unverified') {
+      // Name the blocking process and the way out instead of leaving the
+      // operator to out-of-band process archaeology (#2361). Liveness needs no
+      // extra probe: killPid only returns 'unverified' after its own signal-0
+      // probe succeeded, so the holder was running when it was verified. The
+      // cwd lookup may observe a slightly later snapshot — close enough for a
+      // diagnostic line.
+      const cwd = (options.getProcessCwd ?? defaultGetProcessCwd)(existing.pid);
+      const detail = [
+        `holder pid=${existing.pid}`,
+        `cwd=${cwd ?? 'unknown'}`,
+        `startedAt=${existing.startedAt || 'unknown'}`,
+        'still running',
+        `remedy: kill pid ${existing.pid} if it is stale, or restart with GSD_MCP_CLIENT_MANAGED=1 to skip the per-project registry`,
+      ].join(', ');
+      process.stderr.write(`[gsd-mcp-server] refusal detail: ${detail}\n`);
+      return { refused: true, detail };
+    }
   }
   if (existingKey && existingKey !== key) delete registry[existingKey];
 
@@ -604,7 +782,7 @@ export function registerMcpInstance(
     projectDir: key,
     startedAt: new Date().toISOString(),
   };
-  writeMcpRegistry(registry, registryPath);
+  writeMcpRegistry(registry, registryPath, options.tempFileNameForTest);
   return true;
 }
 

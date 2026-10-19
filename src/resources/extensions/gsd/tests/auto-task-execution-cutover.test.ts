@@ -20,6 +20,7 @@ import {
   adoptOrTransitionLifecycle,
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.js";
+import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.js";
 import { ReconciliationFailedError } from "../state-reconciliation.js";
 import {
   claimTaskAttempt,
@@ -71,6 +72,7 @@ interface AttemptSnapshot {
   coordinationDispatchId: number;
   workerId: string;
   milestoneLeaseToken: number;
+  startedAt?: string;
 }
 
 interface CutoverInput {
@@ -110,6 +112,11 @@ interface CutoverDeps {
     operationId: string;
     resultingRevision: number;
   } | null;
+  resolveHeldMilestoneLeaseToken?(milestoneId: string, workerId: string): number | null;
+  readLatestUserPauseForUnit?(
+    unitType: string,
+    unitId: string,
+  ): { pausedAt: string } | null;
   claimTaskAttempt(input: {
     invocation: {
       idempotencyKey: string;
@@ -464,6 +471,11 @@ function canonicalDeps(): CutoverDeps {
     readTaskTechnicalVerdict,
     claimTaskAttempt,
     settleTaskAttempt,
+    readGrantedResumeGrace: (attemptId: string): boolean =>
+      getRuntimeKv<boolean>("global", attemptId, "task-recovery-resume-grace") === true,
+    markResumeGraceGranted: (attemptId: string): void => {
+      setRuntimeKv("global", attemptId, "task-recovery-resume-grace", true);
+    },
     routeTaskFailure(route) {
       return recordFailureAndSelectRecovery(
         route as Parameters<typeof recordFailureAndSelectRecovery>[0],
@@ -630,7 +642,7 @@ test("agent remediation of a failed Technical Verdict runs in a lineage-linked A
       endedAt: "2026-07-12T00:02:01.000Z",
       exitCode: 1,
       observation: "failed",
-      durableOutputRef: "db://host-verification/attempt-1",
+      durableOutputRef: `db://host-verification/${firstAttempt.attemptId}`,
       environment: { runner: "node-test", platform: "test" },
     },
   });
@@ -718,7 +730,7 @@ test("agent remediation of a failed Technical Verdict runs in a lineage-linked A
       endedAt: "2026-07-12T00:04:01.000Z",
       exitCode: 0,
       observation: "passed",
-      durableOutputRef: "db://host-verification/attempt-2",
+      durableOutputRef: `db://host-verification/${secondAttempt.attemptId}`,
       environment: { runner: "node-test", platform: "test" },
     },
   });
@@ -1152,6 +1164,81 @@ for (const phaseResult of [
     ]);
   });
 }
+
+// `/gsd pause` cancels the unit with no error context, so the unit phase breaks
+// with a pause-origin reason. A pause is not a Task failure: the next
+// `/gsd auto` must run the Task again with no `/gsd recover` step.
+for (const pauseReason of ["pause-during-setup", "paused"] as const) {
+  test(`a user pause (${pauseReason}) in execute-task lets the next dispatch run the Task again`, async () => {
+    const { runWithTaskExecutionAttempt } = await subject();
+    const firstDispatchId = seedCanonicalTask();
+    const userPause = { action: "break", reason: pauseReason } as const;
+
+    const pausedResult = await runWithTaskExecutionAttempt(input({
+      dispatchId: firstDispatchId,
+    }), async () => userPause, canonicalDeps());
+
+    assert.deepEqual(pausedResult, userPause, "the loop stops with the pause reason, not a recovery abort");
+    assert.equal(
+      readTerminalTaskRecoveryAbort("M001", "S01", "T01"),
+      null,
+      "the dispatch guard must not see a terminal recovery abort after a user pause",
+    );
+
+    let resumedRuns = 0;
+    const resumedResult = await runWithTaskExecutionAttempt(input({
+      dispatchId: insertClaimedDispatch(2),
+    }), async () => {
+      resumedRuns += 1;
+      return userPause;
+    }, canonicalDeps());
+
+    assert.equal(resumedRuns, 1, "the next dispatch must run the Task again");
+    assert.deepEqual(resumedResult, userPause, "a second pause must stay resumable");
+    const firstAttempt = database().prepare(`
+      SELECT attempt_id FROM workflow_execution_attempts WHERE attempt_number = 1
+    `).get() as { attempt_id: string };
+    assert.deepEqual(database().prepare(`
+      SELECT attempt_number, retry_of_attempt_id
+      FROM workflow_execution_attempts
+      ORDER BY attempt_number
+    `).all(), [
+      { attempt_number: 1, retry_of_attempt_id: null },
+      { attempt_number: 2, retry_of_attempt_id: firstAttempt.attempt_id },
+    ]);
+    assert.deepEqual(database().prepare(`
+      SELECT observation.failure_kind, action.action
+      FROM workflow_failure_observations observation
+      JOIN workflow_recovery_actions action
+        ON action.failure_observation_id = observation.failure_observation_id
+      ORDER BY observation.project_revision
+    `).all(), [
+      { failure_kind: "user-pause", action: "retry" },
+      { failure_kind: "user-pause", action: "retry" },
+    ]);
+  });
+}
+
+test("a user pause does not use the retry budget of transient execution failures", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const firstDispatchId = seedCanonicalTask();
+  const userPause: UnitPhaseResult = { action: "break", reason: "pause-during-setup" };
+  const transientFailure: UnitPhaseResult = { action: "break", reason: "session-timeout" };
+  const transientRetry: UnitPhaseResult = { action: "retry", reason: "task-recovery-retry" };
+  const steps = [
+    { phaseResult: userPause, expected: userPause },
+    { phaseResult: userPause, expected: userPause },
+    { phaseResult: transientFailure, expected: transientRetry },
+    { phaseResult: transientFailure, expected: transientRetry },
+  ];
+
+  for (const [index, step] of steps.entries()) {
+    const result = await runWithTaskExecutionAttempt(input({
+      dispatchId: index === 0 ? firstDispatchId : insertClaimedDispatch(index + 1),
+    }), async () => step.phaseResult, canonicalDeps());
+    assert.deepEqual(result, step.expected, `dispatch ${index + 1}`);
+  }
+});
 
 test("a durable abort overrides an executor retry", async () => {
   const { runWithTaskExecutionAttempt } = await subject();
@@ -1786,6 +1873,257 @@ test("an explicitly resumed verification abort claims one lineage-linked Attempt
   assert.equal(domain.claims[0].retryOfAttemptId, "attempt-1");
 });
 
+test("a just-claimed resumed successor survives its first reconcile pass without a staged result (#2416)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const firstDispatchId = seedCanonicalTask();
+  const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+  const first = claimTaskAttempt({
+    invocation: { idempotencyKey: "grace/claim/1", sourceTransport: "internal", actorType: "agent" },
+    task,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: firstDispatchId,
+  });
+  const settled = settleTaskAttempt({
+    invocation: { idempotencyKey: "grace/settle/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    outcome: "failed",
+    failureClass: "fatal",
+    summary: "fatal execution failure",
+    output: {},
+  });
+  const abort = recordFailureAndSelectRecovery({
+    invocation: { idempotencyKey: "grace/route/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    resultId: settled.resultId,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "fatal execution failure",
+    evidence: { source: "test" },
+    rationale: "abort",
+  });
+  assert.equal(abort.action, "abort");
+  resumeTaskRecovery({
+    invocation: { idempotencyKey: "grace/resume/1", sourceTransport: "internal", actorType: "user", actorId: "user-1" },
+    recoveryActionId: abort.recoveryActionId,
+    repairSummary: "The fatal condition was repaired.",
+    evidence: { verification: "operator confirmed the repair" },
+  });
+
+  // The next dispatch claims the resumed successor, but its executor turn ends
+  // without staging a succeeded Result — the incident's first pass (#2416).
+  let ran = false;
+  const result = await runWithTaskExecutionAttempt(input({
+    dispatchId: insertClaimedDispatch(2),
+  }), async () => {
+    ran = true;
+    return { action: "next", data: {} };
+  }, canonicalDeps());
+
+  assert.equal(ran, true);
+  assert.equal(result.action, "retry");
+  const graceReason = (result as { reason?: string }).reason ?? "";
+  assert.ok(
+    graceReason.startsWith("task-recovery-resumed-claim-grace"),
+    "the first pass must be graced instead of settling missing-executor-result",
+  );
+  assert.match(
+    graceReason,
+    /doctor --fix or gsd_task_settle/,
+    "the grace reason must name the orphan cause and the sanctioned remedies (#2889)",
+  );
+  const successor = readLatestTaskAttempt(task);
+  assert.notEqual(successor?.attemptId, first.attemptId);
+  assert.equal(successor?.retryOfAttemptId, first.attemptId);
+  assert.equal(
+    successor?.state,
+    "running",
+    "the just-claimed resumed successor must survive its first reconcile pass",
+  );
+  assert.equal(
+    readTaskRecoveryRoute(successor!.attemptId),
+    null,
+    "no failure route may be recorded over the consumed authorization on the graced pass",
+  );
+  assert.equal(
+    readTaskRecoveryRoute(first.attemptId)?.resumeEligibility?.failedGuard,
+    "already-resumed",
+    "the resume marker must stay diagnosable for the next pass",
+  );
+});
+
+test("a same-dispatch claim replay after the grace re-enters ordinary settlement (#2416)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const firstDispatchId = seedCanonicalTask();
+  const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+  const first = claimTaskAttempt({
+    invocation: { idempotencyKey: "grace3/claim/1", sourceTransport: "internal", actorType: "agent" },
+    task,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: firstDispatchId,
+  });
+  const settled = settleTaskAttempt({
+    invocation: { idempotencyKey: "grace3/settle/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    outcome: "failed",
+    failureClass: "fatal",
+    summary: "fatal execution failure",
+    output: {},
+  });
+  const abort = recordFailureAndSelectRecovery({
+    invocation: { idempotencyKey: "grace3/route/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    resultId: settled.resultId,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "fatal execution failure",
+    evidence: { source: "test" },
+    rationale: "abort",
+  });
+  resumeTaskRecovery({
+    invocation: { idempotencyKey: "grace3/resume/1", sourceTransport: "internal", actorType: "user", actorId: "user-1" },
+    recoveryActionId: abort.recoveryActionId,
+    repairSummary: "The fatal condition was repaired.",
+    evidence: { verification: "operator confirmed the repair" },
+  });
+
+  const replayDispatch = insertClaimedDispatch(2);
+  const inputForReplay = { dispatchId: replayDispatch };
+  const graced = await runWithTaskExecutionAttempt(input(inputForReplay), async () => ({
+    action: "next",
+    data: {},
+  }), canonicalDeps());
+  assert.ok(
+    ((graced as { reason?: string }).reason ?? "").startsWith("task-recovery-resumed-claim-grace"),
+  );
+  const successor = readLatestTaskAttempt(task);
+  assert.equal(successor?.state, "running");
+
+  // The exact same dispatch re-enters (claim replay). The grace must not
+  // apply twice: the ordinary missing-executor-result settlement runs.
+  const replayed = await runWithTaskExecutionAttempt(input(inputForReplay), async () => ({
+    action: "next",
+    data: {},
+  }), canonicalDeps());
+
+  assert.equal(replayed.action, "retry");
+  assert.notEqual(
+    (replayed as { reason?: string }).reason,
+    "task-recovery-resumed-claim-grace",
+    "the grace must be bounded to one pass per Attempt",
+  );
+  const settledSuccessor = readLatestTaskAttempt(task);
+  assert.equal(settledSuccessor?.state, "settled");
+  assert.equal(settledSuccessor?.outcome, "failed");
+});
+
+test("the pass after the resumed-successor grace interrupts repairably, not as lifecycle-progression (#2416)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const firstDispatchId = seedCanonicalTask();
+  const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+  const first = claimTaskAttempt({
+    invocation: { idempotencyKey: "grace2/claim/1", sourceTransport: "internal", actorType: "agent" },
+    task,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: firstDispatchId,
+  });
+  const settled = settleTaskAttempt({
+    invocation: { idempotencyKey: "grace2/settle/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    outcome: "failed",
+    failureClass: "fatal",
+    summary: "fatal execution failure",
+    output: {},
+  });
+  const abort = recordFailureAndSelectRecovery({
+    invocation: { idempotencyKey: "grace2/route/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    resultId: settled.resultId,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "fatal execution failure",
+    evidence: { source: "test" },
+    rationale: "abort",
+  });
+  resumeTaskRecovery({
+    invocation: { idempotencyKey: "grace2/resume/1", sourceTransport: "internal", actorType: "user", actorId: "user-1" },
+    recoveryActionId: abort.recoveryActionId,
+    repairSummary: "The fatal condition was repaired.",
+    evidence: { verification: "operator confirmed the repair" },
+  });
+
+  // First pass: grace retry leaves the successor running (mirrors the prior test).
+  const gracedDispatch = insertClaimedDispatch(2);
+  const graced = await runWithTaskExecutionAttempt(input({
+    dispatchId: gracedDispatch,
+  }), async () => ({ action: "next", data: {} }), canonicalDeps());
+  assert.ok(
+    ((graced as { reason?: string }).reason ?? "").startsWith("task-recovery-resumed-claim-grace"),
+  );
+
+  // The graced dispatch stays active for the unit; terminalize it so the
+  // retry dispatch claim does not hit the one-active-dispatch-per-unit rule.
+  database().prepare(`UPDATE unit_dispatches SET status = 'failed' WHERE id = ?`).run(gracedDispatch);
+
+  // Second pass: the running successor is interrupted same-session; the routed
+  // recovery is the bounded stale-worker repair, not terminal
+  // lifecycle-progression over the consumed authorization.
+  const repairDispatch = insertClaimedDispatch(3);
+  const result = await runWithTaskExecutionAttempt(input({
+    dispatchId: repairDispatch,
+  }), async () => ({ action: "next", data: {} }), canonicalDeps());
+
+  assert.equal(result.action, "retry");
+  assert.equal(
+    (result as { reason?: string }).reason,
+    "task-recovery-repair",
+    "the interrupt must route the bounded stale-worker repair action",
+  );
+  const latest = readLatestTaskAttempt(task);
+  assert.equal(latest?.state, "settled");
+  assert.equal(latest?.outcome, "interrupted");
+  const route = readTaskRecoveryRoute(latest!.attemptId);
+  assert.equal(route?.action, "repair");
+  assert.equal(
+    readTerminalTaskRecoveryAbort("M001", "S01", "T01"),
+    null,
+    "the repair route must supersede the older abort as the sanctioned exit",
+  );
+
+  // The repair pass returned before claiming, so its dispatch row is closed by
+  // the loop's iteration closeout in production; mirror that here.
+  database().prepare(`UPDATE unit_dispatches SET status = 'failed' WHERE id = ?`).run(repairDispatch);
+
+  // Third pass: the replayed repair route authorizes the replacement claim,
+  // and a real executor turn completes host verification.
+  let ranThird = false;
+  const third = await runWithTaskExecutionAttempt(input({
+    dispatchId: insertClaimedDispatch(4),
+  }), async () => {
+    ranThird = true;
+    const claimed = readLatestTaskAttempt(task);
+    assert.ok(claimed && claimed.attemptId !== latest!.attemptId);
+    settleTaskAttempt({
+      invocation: { idempotencyKey: "grace2/settle/3", sourceTransport: "internal", actorType: "agent" },
+      attemptId: claimed.attemptId,
+      outcome: "succeeded",
+      failureClass: "none",
+      summary: "repaired execution finished",
+      output: {},
+    });
+    return { action: "next", data: {} };
+  }, canonicalDeps());
+
+  assert.equal(third.action, "next");
+  assert.equal(ranThird, true);
+  const completed = readLatestTaskAttempt(task);
+  assert.equal(completed?.state, "settled");
+  assert.equal(completed?.outcome, "succeeded");
+  assert.equal(completed?.nextStage, "verify");
+});
+
 test("a user-owned verification route resumes verification without executing again", async () => {
   const { runWithTaskExecutionAttempt } = await subject();
   const domain = fakeDomain();
@@ -1866,6 +2204,81 @@ test("a retry claim links the immediately preceding settled Attempt", async () =
   assert.equal(domain.claims[0].retryOfAttemptId, undefined);
   assert.equal(domain.claims[1].retryOfAttemptId, "attempt-1");
   assert.equal(domain.claims[1].invocation.idempotencyKey, "internal:auto:attempt.claim:42");
+});
+
+test("a finalize retry claims under the currently held lease token (#2443)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const domain = fakeDomain();
+  domain.attempts.push({
+    attemptId: "attempt-1",
+    attemptNumber: 1,
+    state: "running",
+    nextStage: "execute",
+    coordinationDispatchId: 41,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+  });
+
+  let runs = 0;
+  const result = await runWithTaskExecutionAttempt(input({
+    // The finalize-retry iteration re-dispatches the same worker under a new
+    // dispatch, but the held lease was re-armed to token 9 after the session
+    // cached token 7 (the lease TTL elapsed during finalize).
+    dispatchId: 42,
+  }), async () => {
+    runs += 1;
+    domain.completeSucceeded("attempt-2");
+    return { action: "next", data: {} };
+  }, {
+    ...domain.deps,
+    resolveHeldMilestoneLeaseToken() {
+      return 9;
+    },
+  });
+
+  assert.deepEqual(result, { action: "next", data: {} });
+  assert.equal(runs, 1);
+  // The interrupt settlement and the retry claim both carry the held token,
+  // so no later attempt transition can abort on lease fencing (#2443).
+  assert.equal(domain.settlements[0]?.outcome, "interrupted");
+  assert.equal(domain.settlements[0]?.recovery?.milestoneLeaseToken, 9);
+  assert.equal(domain.claims[0]?.milestoneLeaseToken, 9);
+  assert.equal(domain.claims[0]?.workerId, "worker-1");
+  assert.equal(domain.claims[0]?.retryOfAttemptId, "attempt-1");
+});
+
+test("a claim without a resolvable held lease keeps the cached session token (#2443)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const domain = fakeDomain();
+  domain.attempts.push({
+    attemptId: "attempt-1",
+    attemptNumber: 1,
+    state: "running",
+    nextStage: "execute",
+    coordinationDispatchId: 41,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+  });
+
+  let runs = 0;
+  await runWithTaskExecutionAttempt(input({
+    dispatchId: 42,
+  }), async () => {
+    runs += 1;
+    domain.completeSucceeded("attempt-2");
+    return { action: "next", data: {} };
+  }, {
+    ...domain.deps,
+    resolveHeldMilestoneLeaseToken() {
+      return null;
+    },
+  });
+
+  assert.equal(runs, 1);
+  // Same lease generation: the same-session interrupt keeps its plain
+  // settlement (no replacement recovery) and the claim keeps token 7.
+  assert.equal(domain.settlements[0]?.recovery, undefined);
+  assert.equal(domain.claims[0]?.milestoneLeaseToken, 7);
 });
 
 test("a replacement lease routes a stale running Attempt and redispatches before claiming its retry", async () => {
@@ -1952,6 +2365,179 @@ test("a replacement lease routes a stale running Attempt and redispatches before
   assert.equal(resumed.action, "next");
   assert.equal(runs, 1);
   assert.equal(domain.claims[0].retryOfAttemptId, "attempt-1");
+});
+
+test("a user-paused running Attempt settles as the budgeted user-pause retry, not stale-worker (#2787)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const domain = fakeDomain();
+  domain.attempts.push({
+    attemptId: "attempt-1",
+    attemptNumber: 1,
+    state: "running",
+    nextStage: "execute",
+    coordinationDispatchId: 41,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    startedAt: "2026-10-14T09:00:00.000Z",
+  });
+
+  let runs = 0;
+  let routeCalls = 0;
+  const deps = {
+    ...domain.deps,
+    readLatestUserPauseForUnit(unitType: string, unitId: string) {
+      assert.equal(unitType, "execute-task");
+      assert.equal(unitId, "M001/S01/T01");
+      // Boundary: a pause recorded exactly at the Attempt start still counts.
+      return { pausedAt: "2026-10-14T09:00:00.000Z" };
+    },
+    routeTaskFailure(route: Parameters<CutoverDeps["routeTaskFailure"]>[0]) {
+      routeCalls += 1;
+      domain.routes.push(route);
+      return {
+        status: routeCalls === 1 ? "committed" as const : "replayed" as const,
+        action: "retry" as const,
+        recoveryActionId: "recovery-action-1",
+      };
+    },
+  };
+
+  const result = await runWithTaskExecutionAttempt(input({
+    dispatchId: 42,
+    workerId: "worker-2",
+    milestoneLeaseToken: 8,
+  }), async () => {
+    runs += 1;
+    return { action: "next", data: {} };
+  }, deps);
+
+  assert.deepEqual(result, { action: "retry", reason: "task-recovery-retry" });
+  assert.equal(runs, 0, "the user-pause retry must re-dispatch, not run inside the replaced dispatch");
+  assert.equal(domain.settlements[0]?.failureClass, "user-pause");
+  assert.equal(domain.settlements[0]?.summary, "Replaced Task Attempt paused by the user");
+  assert.deepEqual(domain.routes[0]?.classification, { failureKind: "user-pause", action: "retry" });
+
+  // The next pass claims the paused Attempt's successor and runs the unit.
+  const resumed = await runWithTaskExecutionAttempt(input({
+    dispatchId: 43,
+    workerId: "worker-2",
+    milestoneLeaseToken: 8,
+  }), async () => {
+    runs += 1;
+    domain.completeSucceeded("attempt-2");
+    return { action: "next", data: {} };
+  }, deps);
+
+  assert.equal(resumed.action, "next");
+  assert.equal(runs, 1);
+  assert.equal(domain.claims[0]?.retryOfAttemptId, "attempt-1");
+  // The re-route of the persisted user-pause class (the fake domain stores no
+  // recovery payload) classifies as user-pause again, not through the generic
+  // failure classifier.
+  assert.deepEqual(domain.routes[1]?.classification, { failureKind: "user-pause", action: "retry" });
+});
+
+test("a user pause that predates the running Attempt keeps the stale-worker classification (#2787)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const domain = fakeDomain();
+  domain.attempts.push({
+    attemptId: "attempt-1",
+    attemptNumber: 1,
+    state: "running",
+    nextStage: "execute",
+    coordinationDispatchId: 41,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    startedAt: "2026-10-14T09:00:00.000Z",
+  });
+
+  const deps = {
+    ...domain.deps,
+    // The latest user pause is for an earlier attempt that a resume already
+    // replaced: this orphan is a genuine stale worker.
+    readLatestUserPauseForUnit() {
+      return { pausedAt: "2026-10-14T08:00:00.000Z" };
+    },
+    routeTaskFailure(route: Parameters<CutoverDeps["routeTaskFailure"]>[0]) {
+      domain.routes.push(route);
+      return { status: "committed" as const, action: "repair" as const, recoveryActionId: "recovery-action-1" };
+    },
+  };
+
+  const result = await runWithTaskExecutionAttempt(input({
+    dispatchId: 42,
+    workerId: "worker-2",
+    milestoneLeaseToken: 8,
+  }), async () => ({ action: "next" as const, data: {} }), deps);
+
+  assert.deepEqual(result, { action: "retry", reason: "task-recovery-repair" });
+  assert.equal(domain.settlements[0]?.failureClass, "stale-worker");
+  assert.match(domain.settlements[0]?.summary ?? "", /stale Task Attempt/);
+  assert.equal(domain.routes[0]?.classification.failureKind, "stale-worker");
+});
+
+test("a crash-recovery stale settlement behind a user pause routes as user-pause at the next dispatch (#2787)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const domain = fakeDomain();
+  // Settlement shape left by settleRunningAttemptsForWorker: interrupted at
+  // route with failureClass stale-worker and no stored recovery.
+  domain.attempts.push({
+    attemptId: "attempt-1",
+    attemptNumber: 1,
+    state: "settled",
+    outcome: "interrupted",
+    nextStage: "route",
+    resultId: "result-1",
+    resultFailureClass: "stale-worker",
+    resultSummary: "Interrupted running Task Attempt during stale worker cleanup",
+    coordinationDispatchId: 41,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    startedAt: "2026-10-14T09:00:00.000Z",
+  });
+
+  const deps = {
+    ...domain.deps,
+    readLatestUserPauseForUnit() {
+      return { pausedAt: "2026-10-14T10:00:00.000Z" };
+    },
+    routeTaskFailure(route: Parameters<CutoverDeps["routeTaskFailure"]>[0]) {
+      domain.routes.push(route);
+      return { status: "committed" as const, action: "retry" as const, recoveryActionId: "recovery-action-1" };
+    },
+  };
+
+  const result = await runWithTaskExecutionAttempt(input(), async () => {
+    throw new Error("must not run before the route decision");
+  }, deps);
+
+  assert.deepEqual(result, { action: "retry", reason: "task-recovery-retry" });
+  assert.deepEqual(domain.routes[0]?.classification, { failureKind: "user-pause", action: "retry" });
+  assert.equal(domain.claims.length, 0, "a committed route returns before the replacement claim");
+
+  // A pause older than the settled Attempt (an earlier attempt's pause)
+  // keeps the crash-recovery settlement's stale-worker route.
+  const staleDeps = {
+    ...domain.deps,
+    readLatestUserPauseForUnit() {
+      return { pausedAt: "2026-10-14T08:00:00.000Z" };
+    },
+    routeTaskFailure(route: Parameters<CutoverDeps["routeTaskFailure"]>[0]) {
+      domain.routes.push(route);
+      return { status: "replayed" as const, action: "repair" as const, recoveryActionId: "recovery-action-2" };
+    },
+  };
+  const staleResult = await runWithTaskExecutionAttempt(input({
+    dispatchId: 43,
+    workerId: "worker-2",
+    milestoneLeaseToken: 8,
+  }), async () => ({ action: "next" as const, data: {} }), staleDeps);
+  assert.deepEqual(staleResult, { action: "retry", reason: "task-recovery-repair" });
+  assert.notEqual(
+    domain.routes.at(-1)?.classification.failureKind,
+    "user-pause",
+    "an older pause must not re-classify the crash-settled Attempt as a user pause",
+  );
 });
 
 test("a same-lease running Attempt is interrupted through the same-session recovery path (#1740)", async () => {

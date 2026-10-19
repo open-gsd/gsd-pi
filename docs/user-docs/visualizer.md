@@ -4,7 +4,7 @@ The workflow visualizer is an interactive view for project progress, execution h
 
 ## Opening the Visualizer
 
-```
+```bash
 /gsd visualize
 ```
 
@@ -22,7 +22,7 @@ Switch tabs with `Tab`, `Shift+Tab`, or `1`-`9` and `0`.
 
 A tree view of milestones, slices, and tasks with completion status:
 
-```
+```text
 M001: User Management                        3/6 tasks ⏳
   ✅ S01: Auth module                         3/3 tasks
     ✅ T01: Core types
@@ -52,7 +52,7 @@ Chronological execution history showing:
 
 An ASCII dependency graph showing slice relationships:
 
-```
+```text
 S01 ──→ S02 ──→ S04
   └───→ S03 ──↗
 ```
@@ -84,7 +84,7 @@ Completed slice summaries, modified files, verification decisions, and establish
 
 ### 8. Knowledge
 
-Persistent project rules, patterns, and lessons from `.gsd/KNOWLEDGE.md`, plus active memory-store entries ranked by confidence and usage. Memory rows show their ID, category, scope, confidence, hit count, tags, and truncated content.
+Persistent project rules, patterns, and lessons read from the database (the rows that `.gsd/KNOWLEDGE.md` is rendered from), plus active memory-store entries ranked by confidence and usage. Memory rows show their ID, category, scope, confidence, hit count, tags, and truncated content.
 
 ### 9. Captures
 

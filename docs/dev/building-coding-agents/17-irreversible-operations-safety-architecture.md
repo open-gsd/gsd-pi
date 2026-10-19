@@ -20,6 +20,7 @@
 | **Deployment** | Produce artifacts, verify in staging | Trigger production deployment |
 
 ### The Classification Must Be:
+
 - **Static and deterministic** (not left to the agent's judgment)
 - **Conservative** (if there's doubt, classify as irreversible)
 - **Enforced by the orchestrator** (the agent never encounters an irreversible operation without interception)

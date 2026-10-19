@@ -1,12 +1,11 @@
 // gsd-pi — Worktree DB reconciliation log coverage.
 //
-// `reconcileWorktreeDb` / `copyWorktreeDb` in db/writers/reconcile.ts ATTACH-
-// and-merge a worktree's gsd.db back into the project-root DB. Each failure
+// `reconcileWorktreeDb` in db/writers/reconcile.ts ATTACH-
+// and-merges a worktree's gsd.db back into the project-root DB. Each failure
 // branch logs a `db` error/warning so a failed merge never silently drops
 // worktree state — these logs are the only record that worktree-only decisions
 // were lost. The existing worktree-db tests assert only the merge RESULT counts;
 // none asserts any of the failure-path logs. This file pins them:
-//   - copyWorktreeDb failed              (reconcile.ts:22)
 //   - realpathSync failed                 (reconcile.ts:71)
 //   - unsafe characters in path           (reconcile.ts:76)
 //   - cannot open main DB                 (reconcile.ts:82)
@@ -21,12 +20,12 @@ import * as os from "node:os";
 
 import {
   closeDatabase,
-  copyWorktreeDb,
   openDatabase,
   reconcileWorktreeDb,
   insertDecision,
 } from "../gsd-db.ts";
 import { _setMainDbOpenerFnForTests } from "../db/writers/reconcile.ts";
+import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 import {
   drainLogs,
   peekLogs,
@@ -72,31 +71,6 @@ function seedDb(dbPath: string): void {
   });
   closeDatabase();
 }
-
-test("copyWorktreeDb logs a db error when the source DB cannot be read", () => {
-  const srcDir = tempDir();
-  const destDir = tempDir();
-  const srcDb = path.join(srcDir, "gsd.db");
-  const destDb = path.join(destDir, "gsd.db");
-  try {
-    seedDb(srcDb);
-    // Make the source unreadable so copyFileSync throws EACCES.
-    fs.chmodSync(srcDb, 0o000);
-
-    const { result, logs } = captureLogs(() => copyWorktreeDb(srcDb, destDb));
-
-    assert.equal(result, false, "copy must report failure");
-    const err = dbLogs(logs).find((e) => e.severity === "error");
-    assert.ok(err, "a db error must be logged");
-    assert.match(err!.message, /failed to copy DB to worktree/u);
-    assert.ok(err!.context?.error, "the underlying error must be captured in context");
-  } finally {
-    // Restore perms so cleanup can delete the file.
-    try { fs.chmodSync(srcDb, 0o644); } catch { /* already gone */ }
-    fs.rmSync(srcDir, { recursive: true, force: true });
-    fs.rmSync(destDir, { recursive: true, force: true });
-  }
-});
 
 test("reconcileWorktreeDb logs a db error for an unsafe path (rejected before ATTACH)", () => {
   const mainDir = tempDir();

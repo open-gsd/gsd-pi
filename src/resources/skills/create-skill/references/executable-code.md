@@ -1,5 +1,6 @@
 <when_to_use_scripts>
 Even if Claude could write a script, pre-made scripts offer advantages:
+
 - More reliable than generated code
 - Save tokens (no need to include code in context)
 - Save time (no code generation required)
@@ -7,6 +8,7 @@ Even if Claude could write a script, pre-made scripts offer advantages:
 
 <execution_vs_reference>
 Make clear whether Claude should:
+
 - **Execute the script** (most common): "Run `analyze_form.py` to extract fields"
 - **Read it as reference** (for complex logic): "See `analyze_form.py` for the extraction algorithm"
 
@@ -15,6 +17,7 @@ For most utility scripts, execution is preferred.
 
 <how_scripts_work>
 When Claude executes a script via bash:
+
 1. Script code never enters context window
 2. Only script output consumes tokens
 3. Far more efficient than having Claude generate equivalent code
@@ -37,6 +40,7 @@ skill-name/
 ```
 
 **Benefits**:
+
 - Keeps skill root clean and organized
 - Clear separation between documentation and executable code
 - Consistent pattern across all skills
@@ -47,11 +51,13 @@ skill-name/
 ```bash
 python ~/.agents/skills/skill-name/scripts/analyze.py input.har
 ```
+
 </scripts_directory>
 </file_organization>
 
 <utility_scripts_pattern>
 <example>
+
 ## Utility scripts
 
 **analyze_form.py**: Extract all form fields from PDF
@@ -61,6 +67,7 @@ python scripts/analyze_form.py input.pdf > fields.json
 ```
 
 Output format:
+
 ```json
 {
   "field_name": { "type": "text", "x": 100, "y": 200 },
@@ -80,6 +87,7 @@ python scripts/validate_boxes.py fields.json
 ```bash
 python scripts/fill_form.py input.pdf fields.json output.pdf
 ```
+
 </example>
 </utility_scripts_pattern>
 
@@ -121,7 +129,9 @@ Document configuration parameters to avoid "voodoo constants":
 REQUEST_TIMEOUT = 30
 
 # Three retries balances reliability vs speed
+
 MAX_RETRIES = 3
+
 ```
 </example>
 
@@ -130,6 +140,7 @@ MAX_RETRIES = 3
 TIMEOUT = 47  # Why 47?
 RETRIES = 5   # Why 5?
 ```
+
 </example>
 </configuration_values>
 </solve_dont_punt>
@@ -137,6 +148,7 @@ RETRIES = 5   # Why 5?
 <package_dependencies>
 <runtime_constraints>
 Skills run in code execution environment with platform-specific limitations:
+
 - **claude.ai**: Can install packages from npm and PyPI
 - **Anthropic API**: No network access and no runtime package installation
 </runtime_constraints>
@@ -153,6 +165,7 @@ Then use it:
 from pypdf import PdfReader
 reader = PdfReader("file.pdf")
 ```
+
 </example>
 
 <example type="bad">

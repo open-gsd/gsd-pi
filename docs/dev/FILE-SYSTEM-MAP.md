@@ -1,4 +1,5 @@
 # gsd-pi File System Map
+
 # Maps every source file to its system/subsystem labels
 
 ---
@@ -122,7 +123,7 @@
 | src/web/history-service.ts | Web Mode | Loads metrics ledger, aggregates history views |
 | src/web/hooks-service.ts | Web Mode | Manages git hook registration and shell integration |
 | src/web/inspect-service.ts | Web Mode | Detailed inspection of project state and traces |
-| src/web/knowledge-service.ts | Web Mode | Reads and parses KNOWLEDGE.md |
+| src/web/knowledge-service.ts | Web Mode | Reads project knowledge from the workflow database through a child process |
 | src/web/onboarding-service.ts | Web Mode, Onboarding, Auth/OAuth | Manages onboarding state, auth refresh, lock reasons |
 | src/web/project-discovery-service.ts | Web Mode | Discovers and catalogs projects in filesystem |
 | src/web/recovery-diagnostics-service.ts | Web Mode | Recovery suggestions for error states/blockers |
@@ -506,7 +507,7 @@
 | gsd/state/derive/cache.ts | State Machine | Derive-state cache and telemetry |
 | gsd/state/derive/db-open.ts | State Machine | Workflow DB opening and DB-unavailable state construction |
 | gsd/db/domain-operation.ts | Database, State Machine | Revision-checked Domain Operation transaction and durable replay receipt boundary |
-| gsd/db/lifecycle-shadow-comparison.ts | Database, State Machine | Pure legacy-to-canonical lifecycle normalization and semantic shadow comparison |
+| gsd/db/lifecycle-shadow-comparison.ts | Database, State Machine | Pure semantic shadow comparison over the legacy-to-canonical status map in `status-guards.ts` |
 | gsd/db/writers/lifecycle-commands.ts | Database, State Machine | Transaction-bound lifecycle adoption/transition, Attempt, Result, replay-fence, and Kernel checkpoint writers; planning handlers use the lifecycle and fence subset |
 | gsd/db/writers/slice-companion-state.ts | Database, State Machine | Transaction-bound owner of the taskless Q8 companion gate required by Slice planning and reopen lifecycle operations |
 | gsd/db-required-schema.ts | Database, Loader/Bootstrap | Registry and shared completeness checks for non-versioned schema features required on every database open |

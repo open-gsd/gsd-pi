@@ -386,9 +386,9 @@ function createExtensionAPI(
 			return runtime.getThinkingLevel();
 		},
 
-		setThinkingLevel(level) {
+		setThinkingLevel(level, options) {
 			runtime.assertActive();
-			runtime.setThinkingLevel(level);
+			runtime.setThinkingLevel(level, options);
 		},
 
 		retryLastTurn() {
@@ -568,6 +568,10 @@ function readPiManifest(packageJsonPath: string): PiManifest | null {
 }
 
 function isExtensionFile(name: string): boolean {
+	// TypeScript declaration files are never loadable extensions; without this
+	// guard a stray `.d.ts` (e.g. from a declaration-emitting build) is picked up
+	// and fails with a spurious "does not export a valid factory function" error.
+	if (name.endsWith(".d.ts")) return false;
 	return name.endsWith(".ts") || name.endsWith(".js");
 }
 

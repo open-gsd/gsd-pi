@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 
 import { computeProgressScore, formatProgressLine } from "../../progress-score.js";
 import { isRepositoryDirty } from "../../git-service.js";
-import { loadEffectiveGSDPreferences, getGlobalGSDPreferencesPath, getProjectGSDPreferencesPath, availableModelIdsFromRegistry, modelIdsForProfileResolution, resolveProfileAnchorProvider, resolveDisabledModelProvidersFromPreferences } from "../../preferences.js";
+import { loadEffectiveGSDPreferences, getGlobalGSDPreferencesPath, getProjectGSDPreferencesPath } from "../../preferences.js";
 import { createRepositoryRegistryFromPreferences } from "../../repository-registry.js";
 import { ensurePreferencesFile, handlePrefs, handlePrefsMode, handlePrefsWizard, handleLanguage } from "../../commands-prefs-wizard.js";
 import { runEnvironmentChecks } from "../../doctor-environment.js";
@@ -19,6 +19,7 @@ import { buildVisualBriefPrompt, parseVisualBriefArgs, VISUAL_BRIEF_USAGE } from
 import { GSD_CORE_IMPLEMENTED_CATALOG } from "../../commands-gsd-core.js";
 import { GSD_CORE_ALIAS_CATALOG } from "../gsd-core-aliases.js";
 import { readCurrentTaskRecoveryRoute } from "../../task-recovery-domain-operation.js";
+import { readProjectionWorkBacklog } from "../../projection-worker.js";
 
 export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
   const summaryLines = [
@@ -86,7 +87,7 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd new-project    Bootstrap a new project (use --deep for staged project-level discovery)",
     "  /gsd quick          Quick task  [--discuss] [--research] [--validate] [--full]",
     "  /gsd dispatch       Dispatch a specific phase directly  [research|plan|execute|complete|validate|reassess|uat|replan]",
-    "  /gsd verdict <v>    Override unadopted compatibility validation  [pass|needs-attention|needs-remediation] [--milestone Mxxx] [--rationale \"...\"]",
+    "  /gsd uat-answer     Answer an open subjective UAT question  [accept|reject] --rationale \"...\" [--question <id>]",
     "  /gsd parallel       Parallel milestone orchestration  [start|status|stop|pause|resume|merge|watch]",
     "  /gsd workflow       Custom workflow lifecycle  [new|run|list|validate|pause|resume]",
     "",
@@ -121,7 +122,7 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd undo           Revert last completed unit  [--force]",
     "  /gsd undo-task      Reset a specific task's completion state  [DB + markdown]",
     "  /gsd reset-slice    Reset a slice and all its tasks  [DB + markdown]",
-    "  /gsd rate           Rate last unit's model tier  [over|ok|under]",
+    "  /gsd rate           Rate last unit's model tier  [over|ok|under|reset]",
     "  /gsd rethink        Conversational project reorganization — reorder, park, discard, add milestones",
     "  /gsd park [id]      Park a milestone — skip without deleting  [reason]",
     "  /gsd unpark [id]    Reactivate a parked milestone",
@@ -168,11 +169,11 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd cleanup        Remove merged branches or snapshots  [branches|snapshots]",
     "  /gsd closeout       Recover failed git closeout actions  [status|retry|resolve] [unit-id]",
     "  /gsd rebuild markdown  Rebuild markdown projections from the canonical DB",
-    "  /gsd rebuild database  Reserved for DB-native rebuilds; does not import markdown",
     "  /gsd recover           Preview an evidence-bound DB import after loss/corruption",
     "  /gsd recover <id>      Resume one repaired Task recovery abort (prompts for repair evidence)",
     "  /gsd db restore-backup List or restore a verified pre-migration database backup (destructive)",
-    "  /gsd task settle  Settle an orphaned running task Attempt (dry-run first)  <M001/S01/T01> --reason \"...\" [--apply] [--reconcile-lifecycle]",
+    "  /gsd db prune-quarantine List, or with --apply delete, quarantined projection copies (destructive)",
+    "  /gsd task settle  Settle an orphaned running task Attempt (dry-run first)  <M001/S01/T01> --reason \"...\" [--apply] [--reconcile-lifecycle] [--blocker-accepted]",
     "  /gsd worktree       Manage worktrees from the TUI  [list|merge|clean|remove]",
     "  /gsd migrate        Migrate .planning/ (v1) to DB-backed .gsd/ with backup + audit",
     "  /gsd remote         Control remote auto-mode  [slack|discord|status|disconnect]",
@@ -211,8 +212,31 @@ function buildAdditionalCommandsHelpLines(): string[] {
 export async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {
   const basePath = projectRoot();
   // Open DB in cold sessions so status uses DB-backed state, not filesystem fallback (#3385)
-  const { ensureDbOpen } = await import("../../bootstrap/dynamic-tools.js");
-  await ensureDbOpen();
+  const { openWorkflowDatabase } = await import("../../db-workspace.js");
+  const { formatWorkflowDatabaseOpenFailure } = await import("../../bootstrap/dynamic-tools.js");
+  const opened = openWorkflowDatabase(basePath);
+  // No .gsd dir means no project yet. Any other open failure is reported,
+  // never shown as "no milestones" (ADR-046).
+  if (!opened.ok && opened.reason !== "missing-gsd-dir") {
+    // A live GSD process holding the workflow DB is a lock-holder situation,
+    // not a broken store: report the holder like auto-mode does instead of a
+    // raw open error (#2712).
+    if (opened.reason === "locked") {
+      const { formatLockedWorkflowDatabaseNotice, listWorkflowDbLockHolderPids } =
+        await import("../../workflow-db-locks.js");
+      const { resolveProjectRootDbPath } = await import("../../db-workspace.js");
+      ctx.ui.notify(
+        formatLockedWorkflowDatabaseNotice(
+          listWorkflowDbLockHolderPids(resolveProjectRootDbPath(basePath)),
+          "Cannot read GSD status",
+        ),
+        "error",
+      );
+      return;
+    }
+    ctx.ui.notify(`Cannot read GSD status: ${formatWorkflowDatabaseOpenFailure(opened)}`, "error");
+    return;
+  }
   const state = await deriveState(basePath);
 
   if (state.registry.length === 0) {
@@ -586,16 +610,8 @@ export async function handleCoreCommand(
     return true;
   }
   if (trimmed === "show-config") {
-    const { GSDConfigOverlay, formatConfigText } = await import("../../config-overlay.js");
-    const basePath = projectRoot();
-    const anchorProvider = resolveProfileAnchorProvider(ctx.model?.provider);
-    const disabledProviders = resolveDisabledModelProvidersFromPreferences();
-    const availableModelIds = modelIdsForProfileResolution(ctx.modelRegistry, anchorProvider, disabledProviders);
-    const configOptions = {
-      basePath,
-      ...(availableModelIds && availableModelIds.length > 0 ? { availableModelIds } : {}),
-      ...(ctx.model ? { preferredModelId: `${ctx.model.provider}/${ctx.model.id}` } : {}),
-    };
+    const { GSDConfigOverlay, formatConfigText, buildCollectConfigOptions } = await import("../../config-overlay.js");
+    const configOptions = buildCollectConfigOptions(ctx, projectRoot());
     const result = await ctx.ui.custom<boolean>(
       (tui, theme, _kb, done) => new GSDConfigOverlay(tui, theme, () => done(true), configOptions),
       {
@@ -676,6 +692,20 @@ export function formatTextStatus(state: GSDState, basePath?: string): string {
       // Status remains available for legacy/incomplete databases that do not
       // yet have the canonical Task recovery tables.
     }
+  }
+  try {
+    const backlog = readProjectionWorkBacklog(basePath);
+    if (backlog.length > 0) {
+      const owned = backlog.filter((entry) => entry.hasRenderer);
+      const dead = owned.filter((entry) => entry.deliveryState === "dead_letter").length;
+      const retrying = owned.filter((entry) => entry.deliveryState !== "dead_letter" && entry.attemptCount > 0).length;
+      lines.push(
+        `Projection Work not rendered: ${owned.length - dead - retrying} pending, ${retrying} retrying, ` +
+        `${dead} dead-lettered, ${backlog.length - owned.length} with no renderer`,
+      );
+    }
+  } catch {
+    // Status remains available for databases without the Projection Work table.
   }
   if (state.registry.length > 0) {
     lines.push("");

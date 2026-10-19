@@ -22,6 +22,7 @@ GSD persists a lot of runtime evidence under `.gsd/`:
 The `/gsd forensics` command pre-computes a forensic report with anomalies flagged. This skill is the manual investigation that goes deeper, or runs when the automated report isn't enough.
 
 Invocation points:
+
 - `/gsd forensics` has been run and user wants deeper analysis
 - Auto-mode exited unexpectedly, no obvious cause
 - Same unit dispatched multiple times (stuck loop suspected)
@@ -52,12 +53,14 @@ Read what's in `.gsd/`:
 ## Step 2: Reconstruct the failure from the activity log
 
 Activity JSONL format:
+
 - Each line is `{type: "message", message: {...}}`.
 - `message.role: "assistant"` → `content[]` with `type: "text"` reasoning and `type: "toolCall"` invocations.
 - `message.role: "toolResult"` → `{toolCallId, toolName, isError, content}`.
 - `usage` on assistant messages tracks tokens and cost.
 
 To trace a failure:
+
 1. Search for `isError: true` tool results in the last activity log. That's usually the proximate symptom.
 2. Walk backwards to the assistant message that made the call. Read the `text` content — that's the agent's reasoning at the moment of failure.
 3. Keep walking back. Find where the agent's model of the state diverged from reality.
@@ -65,6 +68,7 @@ To trace a failure:
 ## Step 3: Cross-reference the journal
 
 For each symptom from the activity log, find the matching journal events:
+
 - `stuck-detected` + same `flowId` → the loop detected repetition. `data.reason` says why.
 - `guard-block` → a dispatch guard refused to run a unit. Check `data.reason` and trace to `dispatch-guard.ts` logic.
 - `unit-end` followed by another `unit-start` for the same `unitId` → re-dispatch. If tied to `stuck-detected`, the artifact verification failed after the unit succeeded.
@@ -75,6 +79,7 @@ Use `flowId` to reconstruct one iteration; use `causedBy` to follow causal chain
 ## Step 4: Name the root cause
 
 A good root cause is:
+
 - Specific: a function, a state transition, a missing guard.
 - Falsifiable: if we changed X, would the failure go away?
 - Sourced: cites a file and (where applicable) a line number.
@@ -86,6 +91,7 @@ Consult the source map in `src/resources/extensions/gsd/prompts/forensics.md` to
 ## Step 5: Propose a fix
 
 For the root cause:
+
 - Which file and function holds the bug?
 - What minimal change would eliminate it?
 - What test would have caught it? Can one be added?

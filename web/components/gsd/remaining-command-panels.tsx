@@ -478,8 +478,13 @@ export function UndoPanel() {
                 <div className="rounded-lg border border-warning/20 bg-warning/5 px-3 py-2.5 space-y-2">
                   <div className="flex items-center gap-2 text-xs text-warning">
                     <AlertTriangle className="h-3.5 w-3.5" />
-                    <span className="font-medium">This will revert the last unit and its git commits.</span>
+                    <span className="font-medium">Undo of {data.lastUnitType} will:</span>
                   </div>
+                  <ul className="list-disc pl-5 text-[11px] text-muted-foreground">
+                    {data.effects.map((effect) => (
+                      <li key={effect}>{effect}</li>
+                    ))}
+                  </ul>
                   <div className="flex gap-2">
                     <Button
                       type="button"

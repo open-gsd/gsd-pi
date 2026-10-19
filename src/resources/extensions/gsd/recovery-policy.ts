@@ -22,9 +22,17 @@ export type HumanBlockerKind =
   | "ambiguous_intent"
   | "subjective_uat"
   | "user_limit";
+/**
+ * Why auto-mode paused. A HumanBlockerKind is a pause for a person (ADR-046
+ * invariant 9). "user_request" is a pause the user asked for. "machine_fixable"
+ * is a failure that ADR-046 does not list as human-only: it still pauses today
+ * and belongs to a Recovery Action.
+ */
+export type AutoPauseBlockerKind = HumanBlockerKind | "user_request" | "machine_fixable";
 export type TaskFailureKind =
   | RecoveryFailureKind
   | "transient-execution"
+  | "user-pause"
   | "verification-failed"
   | "objective-uat"
   | "plan-invalid"
@@ -109,6 +117,9 @@ function budgetedRule(
   switch (classification.failureKind) {
     case "transient-execution":
     case "tool-unavailable":
+    // A pause the user asked for is not a failure. Its own kind keeps its own
+    // budget row, so a pause does not use the retries of a real failure.
+    case "user-pause":
       return { action: "retry", policyClass: "transient-execution", maxUses: 2 };
     case "projection-lock-transient":
       return {

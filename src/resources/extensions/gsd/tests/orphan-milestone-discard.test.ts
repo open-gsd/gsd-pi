@@ -3,11 +3,12 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 
+import { piExecutionInvocation } from "../execution-invocation.ts";
 import {
   closeDatabase,
   getDbOrNull,
@@ -16,12 +17,15 @@ import {
   insertSlice,
   openDatabase,
 } from "../gsd-db.ts";
+import { discardMilestone } from "../milestone-actions.ts";
 import { discardOrphanMilestoneReservations } from "../orphan-milestone-discard.ts";
+import { executeMilestoneGenerateId } from "../tools/workflow-tool-executors.ts";
 
 let base = "";
 
 function makeBase(): string {
-  const dir = mkdtempSync(join(tmpdir(), "gsd-orphan-discard-"));
+  // The resolved path, so a tool does not reopen the database under another name.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "gsd-orphan-discard-")));
   mkdirSync(join(dir, ".gsd"), { recursive: true });
   execFileSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir, stdio: "ignore" });
@@ -67,6 +71,23 @@ describe("discardOrphanMilestoneReservations", () => {
     assert.match(result.errors.join("\n"), /M002.*slices/i);
     assert.ok(getMilestone("M001"), "the clean target must not be partially deleted");
     assert.ok(getMilestone("M002"), "the rejected target must remain");
+  });
+
+  test("refuses a reservation from gsd_milestone_generate_id and names the discard that cancels it", async () => {
+    base = makeBase();
+    const generated = await executeMilestoneGenerateId(base, piExecutionInvocation("gsd_milestone_generate_id", "call-1"));
+    assert.equal(generated.content[0]!.text, "M001");
+
+    const result = discardOrphanMilestoneReservations(base, ["M001"]);
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.errors, [
+      "M001: the milestone has a lifecycle row, which is durable history and cannot be deleted; cancel it with /gsd discard M001",
+    ]);
+    assert.equal(getMilestone("M001")?.status, "queued", "the refused reservation stays as it was");
+
+    assert.equal(await discardMilestone(base, "M001"), true, "the named discard accepts the reservation");
+    assert.equal(getMilestone("M001")?.status, "skipped");
   });
 
   test("refuses dependent milestone references", () => {

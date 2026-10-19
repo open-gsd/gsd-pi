@@ -30,6 +30,7 @@ function insertRawEvidence(values: {
   exitCode: unknown;
   verdict: string;
   durationMs: unknown;
+  createdAt?: string;
 }): void {
   transaction(() =>
     _getAdapter()!.prepare(
@@ -44,7 +45,7 @@ function insertRawEvidence(values: {
       ":exit_code": values.exitCode,
       ":verdict": values.verdict,
       ":duration_ms": values.durationMs,
-      ":created_at": new Date().toISOString(),
+      ":created_at": values.createdAt ?? new Date().toISOString(),
     }),
   );
 }
@@ -115,18 +116,36 @@ describe("getTaskVerificationEvidence: unknown exit codes", () => {
     assert.equal(hasQualifyingTaskEvidence(getTaskVerificationEvidence(MID, SID, TID)), true);
   });
 
-  test("one unknown exit_code no longer disqualifies an otherwise passing set (#2213)", () => {
+  test("getTaskVerificationEvidence returns only the latest completion batch (#2259)", () => {
     if (!isDbAvailable()) return;
-    insertVerificationEvidence({
-      taskId: TID,
-      sliceId: SID,
-      milestoneId: MID,
+    insertRawEvidence({
+      command: "pnpm test",
+      exitCode: 1,
+      verdict: "fail",
+      durationMs: 10,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    insertRawEvidence({
       command: "pnpm test",
       exitCode: 0,
       verdict: "pass",
-      durationMs: 10,
+      durationMs: 20,
+      createdAt: "2026-01-02T00:00:00.000Z",
     });
-    insertRawEvidence({ command: "pnpm lint", exitCode: null, verdict: "pass", durationMs: null });
+
+    const evidence = getTaskVerificationEvidence(MID, SID, TID);
+    assert.equal(evidence.length, 1);
+    assert.equal(evidence[0]?.exitCode, 0);
+    assert.equal(hasQualifyingTaskEvidence(evidence), true);
+  });
+
+  test("one unknown exit_code no longer disqualifies an otherwise passing set (#2213)", () => {
+    if (!isDbAvailable()) return;
+    // Both rows share one created_at: the reader returns only the latest
+    // completion batch (#2259), so two wall-clock stamps would split the set.
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    insertRawEvidence({ command: "pnpm test", exitCode: 0, verdict: "pass", durationMs: 10, createdAt });
+    insertRawEvidence({ command: "pnpm lint", exitCode: null, verdict: "pass", durationMs: null, createdAt });
 
     const evidence = getTaskVerificationEvidence(MID, SID, TID);
 
@@ -266,9 +285,84 @@ describe("hasQualifyingTaskEvidence: lenient verdict matching (#2014)", () => {
     assert.equal(hasQualifyingTaskEvidence([record("", 1)]), false);
   });
 
+  test("commandless records remain distinct instead of collapsing to one latest row (#2338)", () => {
+    assert.equal(hasQualifyingTaskEvidence([
+      { command: "", exitCode: 1, verdict: "", durationMs: 10 },
+      { command: "", exitCode: 0, verdict: "", durationMs: 10 },
+    ]), false);
+  });
+
   test("one decorated failing record disqualifies an otherwise passing set", () => {
     assert.equal(
       hasQualifyingTaskEvidence([record("✅ pass"), record("❌ fail")]),
+      false,
+    );
+  });
+
+  test("an earlier FAIL row does not poison a set that ends passing (#2338)", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("FAIL - 12 passed, 1 failed"),
+        record("PASS - 13 passed, 28 assertions"),
+      ]),
+      true,
+    );
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("PASS - 13 passed"),
+        record("FAIL - regression"),
+      ]),
+      false,
+    );
+  });
+});
+
+describe("hasQualifyingTaskEvidence: re-run history (#2338)", () => {
+  const pest = "vendor/bin/pest tests/Unit/Models/BookingTest.php";
+  const record = (command: string, verdict: string, exitCode: number): TaskVerificationEvidence => ({
+    command,
+    exitCode,
+    verdict,
+    durationMs: 10,
+  });
+
+  test("a command that failed and was then re-run green qualifies", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record(pest, "FAIL - 12 passed, 1 failed", 1),
+        record(pest, "PASS - 13 passed, 28 assertions", 0),
+      ]),
+      true,
+    );
+  });
+
+  test("re-runs match on whitespace-normalized command text", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([record(pest, "fail", 1), record(`  ${pest.replace(" ", "   ")} `, "pass", 0)]),
+      true,
+    );
+  });
+
+  test("whitespace inside quotes distinguishes commands, so a different pattern is not a re-run", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("grep -q 'a  b' file", "fail", 1),
+        record("grep -q 'a b' file", "pass", 0),
+      ]),
+      false,
+    );
+  });
+
+  test("a command whose latest run failed still disqualifies", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([record(pest, "pass", 0), record(pest, "fail", 1)]),
+      false,
+    );
+  });
+
+  test("a failing distinct command cannot be laundered by an unrelated passing one", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([record("npm run lint", "fail", 1), record(pest, "pass", 0)]),
       false,
     );
   });

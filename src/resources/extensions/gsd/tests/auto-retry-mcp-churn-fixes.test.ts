@@ -114,16 +114,16 @@ describe("evidence-collector: toolCallId-based matching (A-3)", () => {
     assert.equal(entries[1].command, "pnpm lint");
   });
 
-  it("treats any workflow MCP gsd_exec server namespace as execution evidence", () => {
+  it("treats workflow MCP gsd_exec as execution evidence but not the read-only search (#2513)", () => {
     recordToolCall("tc-default", "mcp__gsd-workflow__gsd_exec", { command: "pnpm test" });
+    // gsd_exec_search is a read-only lookup over past runs; its `query` is not
+    // a command and its result embeds OLD runs' exit codes (#2513).
     recordToolCall("tc-custom", "mcp__custom-workflow__gsd_exec_search", { query: "rg TODO" });
 
     const entries = getEvidence() as readonly BashEvidence[];
-    assert.equal(entries.length, 2);
+    assert.equal(entries.length, 1, "only the real execution call records evidence");
     assert.equal(entries[0].kind, "bash");
     assert.equal(entries[0].command, "pnpm test");
-    assert.equal(entries[1].kind, "bash");
-    assert.equal(entries[1].command, "rg TODO");
   });
 
   it("skips byte-identical evidence file rewrites", async (t) => {

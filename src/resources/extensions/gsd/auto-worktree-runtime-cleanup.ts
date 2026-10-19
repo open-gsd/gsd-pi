@@ -12,6 +12,8 @@ import {
   projectRootFromWorktreePath,
 } from "./worktree-root.js";
 import { logWarning } from "./workflow-logger.js";
+import { deleteUnitRuntimeRow, listUnitRuntimeRows } from "./db/writers/runtime-control.js";
+import { unitRuntimeFileName } from "./unit-runtime.js";
 
 const LEGACY_DEEP_SETUP_RUNTIME_UNIT_FILES = new Set([
   "workflow-preferences-WORKFLOW-PREFS.json",
@@ -60,16 +62,33 @@ export function escapeStaleWorktree(base: string): string {
 }
 
 /**
- * Clean stale runtime unit files for completed milestones.
+ * Clean stale unit runtime records for completed milestones.
  *
- * After restart, stale runtime/units/*.json from prior milestones can
- * cause deriveState to resume the wrong milestone (#887). Removes files
- * for milestones that have a SUMMARY (fully complete).
+ * After restart, stale records from prior milestones can cause deriveState
+ * to resume the wrong milestone (#887). Removes the database rows (in every
+ * work root) and the runtime/units/*.json diagnostic copies for milestones
+ * that have a SUMMARY (fully complete). Returns the number of files removed.
  */
 export function cleanStaleRuntimeUnits(
   gsdRootPath: string,
   hasMilestoneSummary: (mid: string) => boolean,
 ): number {
+  // The database rows are the records that are read; the files below are
+  // their diagnostic copies. Both are cleared by the same rule. A closed
+  // milestone has no live unit, so its rows are cleared in every work root.
+  try {
+    for (const row of listUnitRuntimeRows()) {
+      if (shouldRemoveRuntimeUnit(unitRuntimeFileName(row.unit_type, row.unit_id), hasMilestoneSummary)) {
+        deleteUnitRuntimeRow(row.work_root, row.unit_type, row.unit_id);
+      }
+    }
+  } catch (err) {
+    logWarning(
+      "worktree",
+      `stale runtime unit row cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   const runtimeUnitsDir = join(gsdRootPath, "runtime", "units");
   if (!existsSync(runtimeUnitsDir)) return 0;
 

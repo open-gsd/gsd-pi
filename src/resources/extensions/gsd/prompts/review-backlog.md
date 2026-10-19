@@ -11,7 +11,7 @@ You are running the GSD **review-backlog** workflow — review backlog items and
 
 3. **Present the triage** grouped by recommendation, with the reasoning for each. Let the developer confirm promotions and discards.
 
-4. **Act on confirmation**: promote selected items via `/gsd backlog promote` (then `/gsd new-milestone` to scope them), and archive discards. Do not promote or discard without explicit confirmation.
+4. **Act on confirmation**: promote selected items via `/gsd backlog promote <id>` (it registers a queued milestone for the item), and remove discards via `/gsd backlog remove <id>`. Do not edit `.gsd/BACKLOG.md` item lines; they are rendered from the database. Do not promote or discard without explicit confirmation.
 
 ## Success criteria
 

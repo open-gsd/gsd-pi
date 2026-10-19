@@ -303,6 +303,13 @@ export interface Usage {
 	cacheRead: number;
 	cacheWrite: number;
 	totalTokens: number;
+	/**
+	 * Live prompt-side context of the final per-call API response, set only by
+	 * adapters whose terminal usage is cumulative across an internal loop
+	 * (claude-code). Consumers that approximate live context should prefer this
+	 * when it is present and > 0, and fall back to the derived totals otherwise.
+	 */
+	liveContextTokens?: number;
 	cost: {
 		input: number;
 		output: number;
@@ -320,6 +327,25 @@ export interface UserMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+/** GSD pre-request dynamic-routing provenance recorded per assistant message (ADR-049). */
+export type ModelRoutingSource = "gsd-dynamic";
+
+/** Complexity tier of a GSD dynamic-routing decision. */
+export type ModelRoutingTier = "light" | "standard" | "heavy";
+
+/**
+ * GSD dynamic-routing snapshot in effect when an assistant message started
+ * (ADR-049). Values are copied at capture time; provider-side routing is
+ * represented by `responseModel` and is never duplicated here.
+ */
+export interface ModelRouting {
+	source: ModelRoutingSource;
+	/** Unit classification in effect when the assistant message started. */
+	tier: ModelRoutingTier;
+	/** True when dynamic routing selected a cheaper model than the configured primary. */
+	modelDowngraded: boolean;
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (TextContent | ThinkingContent | ToolCall | ServerToolUse | WebSearchResult)[];
@@ -327,6 +353,7 @@ export interface AssistantMessage {
 	provider: Provider;
 	model: string;
 	responseModel?: string; // Concrete `chunk.model` when different from the requested `model` (e.g. OpenRouter `auto` -> `anthropic/...`)
+	modelRouting?: ModelRouting; // GSD dynamic-routing provenance in effect when this response started (ADR-049).
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
 	usage: Usage;
@@ -465,6 +492,19 @@ export interface OpenAICompletionsCompat {
 	sendSessionAffinityHeaders?: boolean;
 	/** Whether the provider supports long prompt cache retention (`prompt_cache_retention: "24h"` or Anthropic-style `cache_control.ttl: "1h"`, depending on format). Default: true. */
 	supportsLongCacheRetention?: boolean;
+	/**
+	 * Whether the upstream model rejects `temperature` with 400s. The provider
+	 * omits `temperature` when set. Claude 5.x entries on relaying
+	 * OpenAI-compatible providers (Copilot, OpenRouter) set this (#2645).
+	 * Default: false.
+	 */
+	rejectsTemperature?: boolean;
+	/**
+	 * Whether the upstream model rejects a forced `tool_choice` (`"required"`
+	 * / named function) with 400s. The provider omits forced tool choice when
+	 * set; `"auto"` / `"none"` still pass through. Default: false.
+	 */
+	rejectsForcedToolChoice?: boolean;
 }
 
 /** Compatibility settings for OpenAI Responses APIs. */
@@ -513,6 +553,30 @@ export interface AnthropicMessagesCompat {
 	 * Default: false.
 	 */
 	forceAdaptiveThinking?: boolean;
+	/**
+	 * Whether the model rejects the legacy request surface with 400s:
+	 * `thinking: {type: "disabled"}` (the API requires
+	 * `{type: "between_tools"}` to turn thinking off), `temperature`,
+	 * `top_p` / `top_k`, and forced `tool_choice` (`any` / named tool).
+	 * Claude Sonnet 5.5 sets this in generated metadata (#2500).
+	 * Implies `thinkingOffMode: "between_tools"` and `rejectsTemperature`.
+	 * Default: false.
+	 */
+	strictRequestParams?: boolean;
+	/**
+	 * Thinking-off representation for models that reject
+	 * `thinking: {type: "disabled"}` with 400s: the provider sends
+	 * `thinking: {type: "between_tools"}` instead. Implied by
+	 * `strictRequestParams`. Claude Fable 5 sets this without the full strict
+	 * umbrella because it still accepts forced `tool_choice` (#2645).
+	 * Default: `thinking: {type: "disabled"}` is sent.
+	 */
+	thinkingOffMode?: "between_tools";
+	/**
+	 * Whether the model rejects `temperature` outright, even with thinking
+	 * off. Implied by `strictRequestParams`. Default: false.
+	 */
+	rejectsTemperature?: boolean;
 }
 
 /**

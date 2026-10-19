@@ -16,7 +16,7 @@ import {
 import {
   parseDecisionsTable,
   parseRequirementsSections,
-} from '../md-importer.ts';
+} from './helpers/md-importer.ts';
 import {
   generateDecisionsMd,
   generateRequirementsMd,
@@ -25,7 +25,6 @@ import {
   saveRequirementToDb,
   updateRequirementInDb,
   saveArtifactToDb,
-  extractDeferredSliceRef,
 } from '../db-writer.ts';
 import { getAllDecisionsFromMemories } from '../context-store.ts';
 import type { Decision, Requirement } from '../types.ts';
@@ -208,6 +207,123 @@ describe('db-writer', () => {
     // Should not break the table — pipe in decision text should be escaped
     const parsed = parseDecisionsTable(md);
     assert.ok(parsed.length >= 1, 'pipe-containing decision parses without breaking table');
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Newline handling in table cells (#2422)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  test('generateDecisionsMd keeps multi-line rationale inside one table row (#2422)', () => {
+    const multiline: Decision = {
+      seq: 1,
+      id: 'D001',
+      when_context: 'M001',
+      scope: 'arch',
+      decision: 'Storage engine',
+      choice: 'SQLite',
+      rationale: ['para one.', '', 'para two | with pipe.'].join('\n'),
+      revisable: 'No',
+      made_by: 'agent',
+      superseded_by: null,
+    };
+    const md = generateDecisionsMd([multiline]);
+
+    const rowLines = md.split('\n').filter(l => l.startsWith('| D001 |'));
+    assert.deepStrictEqual(rowLines.length, 1, 'multi-line rationale emits exactly one table row');
+
+    const row = rowLines[0]!;
+    const structuralPipes = (row.replace(/\\\|/g, '').match(/\|/g) ?? []).length;
+    assert.deepStrictEqual(structuralPipes, 9, 'row keeps exactly 9 structural pipes for its 8 cells');
+    assert.ok(
+      row.includes('para one.<br><br>para two \\| with pipe.'),
+      'blank line becomes <br><br> and the pipe stays escaped',
+    );
+
+    const parsed = parseDecisionsTable(md);
+    assert.deepStrictEqual(parsed.length, 1, 'multi-line decision still parses as exactly one row');
+  });
+
+  test('generateDecisionsMd round-trips a newline-only decision field-by-field through parseDecisionsTable (#2422)', () => {
+    const multiline: Decision = {
+      ...SAMPLE_DECISIONS[0]!,
+      rationale: ['para one.', '', 'para two.'].join('\n'),
+      revisable: 'No',
+    };
+    const md = generateDecisionsMd([multiline]);
+
+    const [parsed] = parseDecisionsTable(md);
+    assert.ok(parsed, 'multi-line decision parses back as one row');
+    assert.deepStrictEqual(parsed!.id, multiline.id);
+    assert.deepStrictEqual(parsed!.when_context, multiline.when_context);
+    assert.deepStrictEqual(parsed!.scope, multiline.scope);
+    assert.deepStrictEqual(parsed!.decision, multiline.decision);
+    assert.deepStrictEqual(parsed!.choice, multiline.choice);
+    assert.deepStrictEqual(parsed!.rationale, 'para one.<br><br>para two.', 'rationale round-trips with <br> encoding, all columns aligned');
+    assert.deepStrictEqual(parsed!.revisable, 'No', 'revisable column is not shifted by the multi-line rationale');
+    assert.deepStrictEqual(parsed!.made_by, multiline.made_by);
+  });
+
+  test('generateDecisionsMd keeps the table contiguous when an earlier decision has a multi-line field (#2422)', () => {
+    const first: Decision = { ...SAMPLE_DECISIONS[0]!, rationale: ['para one.', '', 'para two.'].join('\n') };
+    const second: Decision = { ...SAMPLE_DECISIONS[1]! };
+    const md = generateDecisionsMd([first, second]);
+
+    const lines = md.split('\n');
+    const sepIdx = lines.findIndex(l => l.startsWith('| --- |'));
+    assert.ok(sepIdx >= 0, 'separator row present');
+    const afterSep = lines.slice(sepIdx + 1, -1); // drop trailing empty string from final \n
+    assert.deepStrictEqual(afterSep.length, 2, 'both decision rows follow the separator');
+    assert.ok(
+      afterSep.every(l => l.startsWith('| ')),
+      'no blank line terminates the table — every line after the separator is a row',
+    );
+  });
+
+  test('generateDecisionsMd converts CRLF to a single <br> with no stray carriage returns (#2422)', () => {
+    const crlf: Decision = { ...SAMPLE_DECISIONS[0]!, rationale: 'para one.\r\npara two' };
+    const md = generateDecisionsMd([crlf]);
+    assert.ok(md.includes('para one.<br>para two'), 'CRLF becomes a single <br>');
+    assert.ok(!md.includes('\r'), 'no stray \\r in output');
+  });
+
+  test('generateDecisionsMd escapes pipes before converting newlines (#2422)', () => {
+    const preBr: Decision = { ...SAMPLE_DECISIONS[0]!, rationale: 'a | b<br>c' };
+    const md = generateDecisionsMd([preBr]);
+    const row = md.split('\n').find(l => l.startsWith('| D001 |'));
+    assert.ok(row, 'decision row present');
+    assert.ok(row!.includes('a \\| b<br>c'), 'pipe stays escaped and pre-existing <br> survives untouched');
+    assert.ok(!row!.includes('<br><br>'), 'pre-existing <br> is not doubled');
+  });
+
+  test('freeform append block keeps a multi-line rationale inside one table row (#2422)', async t => {
+    const tmpDir = makeTmpDir();
+    openDatabase(path.join(tmpDir, '.gsd', 'gsd.db'));
+    t.after(() => {
+      closeDatabase();
+      cleanupDir(tmpDir);
+    });
+
+    fs.writeFileSync(
+      path.join(tmpDir, '.gsd', 'DECISIONS.md'),
+      '# Project Notes\n\nFreeform notes that must be preserved.\n',
+    );
+
+    await saveDecisionToDb({
+      scope: 'arch',
+      decision: 'Storage engine',
+      choice: 'SQLite',
+      rationale: ['para one.', '', 'para two | with pipe.'].join('\n'),
+      when_context: 'M001',
+    }, tmpDir);
+
+    const md = fs.readFileSync(path.join(tmpDir, '.gsd', 'DECISIONS.md'), 'utf-8');
+    assert.ok(md.includes('Freeform notes that must be preserved.'), 'freeform content preserved');
+    const rowLines = md.split('\n').filter(l => l.startsWith('| D001 |'));
+    assert.deepStrictEqual(rowLines.length, 1, 'append block emits exactly one row for the decision');
+    assert.ok(
+      rowLines[0]!.includes('para one.<br><br>para two \\| with pipe.'),
+      'appended row encodes newlines as <br> and escapes pipes',
+    );
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -636,7 +752,7 @@ describe('db-writer', () => {
     }
   });
 
-  test('saveArtifactToDb — shrinkage guard preserves larger existing file', async () => {
+  test('saveArtifactToDb — a smaller save replaces a larger existing file and keeps its bytes in quarantine', async () => {
     const tmpDir = makeTmpDir();
     const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
     openDatabase(dbPath);
@@ -651,7 +767,7 @@ describe('db-writer', () => {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, fullContent);
 
-      // Call saveArtifactToDb with abbreviated content — should trigger shrinkage guard
+      // The DB row is the authority: the file follows it, whatever the size.
       await saveArtifactToDb({
         path: relPath,
         artifact_type: 'RESEARCH',
@@ -659,15 +775,19 @@ describe('db-writer', () => {
         milestone_id: 'M001',
       }, tmpDir);
 
-      // Disk file should be preserved (not overwritten)
       assert.deepStrictEqual(
         fs.readFileSync(filePath, 'utf-8'),
-        fullContent,
-        'disk file preserved — shrinkage guard prevented overwrite',
+        abbreviatedContent,
+        'disk file has the saved content',
       );
 
-      // DB should keep the caller-provided content. The larger disk file is a
-      // stale projection, not runtime authority.
+      // The larger file was written outside GSD, so its bytes are kept as evidence.
+      const quarantineRoot = path.join(tmpDir, '.gsd', 'quarantine', 'projections');
+      const kept = (fs.readdirSync(quarantineRoot, { recursive: true }) as string[])
+        .map((entry) => path.join(quarantineRoot, entry))
+        .filter((entry) => fs.statSync(entry).isFile());
+      assert.deepStrictEqual(kept.map((entry) => fs.readFileSync(entry, 'utf-8')), [fullContent]);
+
       const adapter = _getAdapter();
       const row = adapter!
         .prepare('SELECT full_content FROM artifacts WHERE path = ?')
@@ -909,84 +1029,5 @@ describe('db-writer', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  extractDeferredSliceRef
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  describe('extractDeferredSliceRef', () => {
-    const fields = (scope: string, choice: string, decision: string) => ({
-      scope,
-      choice,
-      decision,
-    });
-
-    test('detects deferral in scope when the scope names the slice', () => {
-      const result = extractDeferredSliceRef(
-        fields('deferral of slice M001/S03', 'Move low-priority work to backlog', ''),
-      );
-      assert.deepStrictEqual(result, { milestoneId: 'M001', sliceId: 'S03' });
-    });
-
-    test('detects deferral in choice field', () => {
-      const result = extractDeferredSliceRef(
-        fields('slice prioritization', 'defer M002/S01 until next sprint', ''),
-      );
-      assert.deepStrictEqual(result, { milestoneId: 'M002', sliceId: 'S01' });
-    });
-
-    test('detects deferral in decision field', () => {
-      const result = extractDeferredSliceRef(
-        fields('resource constraints', '', 'deferred M010/S12 pending review'),
-      );
-      assert.deepStrictEqual(result, { milestoneId: 'M010', sliceId: 'S12' });
-    });
-
-    test('returns null when no M###/S## pattern is present', () => {
-      const result = extractDeferredSliceRef(
-        fields('deferral of work', 'will revisit later', 'deferred indefinitely'),
-      );
-      assert.strictEqual(result, null);
-    });
-
-    test('recognises "deferring" variant', () => {
-      const result = extractDeferredSliceRef(
-        fields('slice prioritization', 'deferring M005/S02 until later', ''),
-      );
-      assert.deepStrictEqual(result, { milestoneId: 'M005', sliceId: 'S02' });
-    });
-
-    test('recognises "defers" variant', () => {
-      const result = extractDeferredSliceRef(
-        fields('slice prioritization', 'team defers slice M100/S10', ''),
-      );
-      assert.deepStrictEqual(result, { milestoneId: 'M100', sliceId: 'S10' });
-    });
-
-    test('returns first M###/S## match when multiple patterns exist', () => {
-      const result = extractDeferredSliceRef(
-        fields('', 'defer M003/S01 and M003/S02', ''),
-      );
-      assert.deepStrictEqual(result, { milestoneId: 'M003', sliceId: 'S01' });
-    });
-
-    test('does not treat a planning scope reference as a deferred slice', () => {
-      const result = extractDeferredSliceRef(
-        fields(
-          'planning',
-          'Plan S01 as the happy-path money loop only; Defer full duplicate/replay idempotency + polling reconciliation backstop (R006).',
-          'M003/S01 scope boundary for the BTC money loop (which requirements land in the first slice vs deferred follow-on slices).',
-        ),
-      );
-      assert.strictEqual(result, null);
-    });
-
-    test('returns null when no deferral keyword is present', () => {
-      const result = extractDeferredSliceRef(
-        fields('approved work', 'M001/S01 is ready', 'proceed with M001/S01'),
-      );
-      assert.strictEqual(result, null);
-    });
-  });
 
 });

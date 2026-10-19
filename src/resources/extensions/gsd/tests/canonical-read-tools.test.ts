@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -12,6 +12,8 @@ process.env.GSD_WORKFLOW_EXECUTORS_MODULE = new URL(
 
 import { registerDbTools } from "../bootstrap/db-tools.ts";
 import { registerWorkflowTools } from "../../../../../packages/mcp-server/src/workflow-tools.ts";
+import { assertSnapshotResult, assertSuccessEnvelope } from "../../../../../scripts/mcp-host-smoke.mjs";
+import { createMemory } from "../memory-store.ts";
 import {
   closeDatabase,
   getDb,
@@ -92,6 +94,13 @@ function readError(result: Record<string, unknown>): string | undefined {
   // structuredContent (see adaptExecutorResult). Native passes details through.
   const details = (result.structuredContent ?? result.details) as Record<string, unknown> | undefined;
   return typeof details?.error === "string" ? (details.error as string) : undefined;
+}
+
+function readTextContent(result: Record<string, unknown>): string {
+  const content = result.content as Array<{ type?: string; text?: string }> | undefined;
+  const text = content?.find((entry) => entry.type === "text")?.text;
+  assert.ok(typeof text === "string", "result must carry a text content entry");
+  return text;
 }
 
 function seedRequirement(id: string, description: string): void {
@@ -280,6 +289,155 @@ test("canonical read parity: empty valid DB returns consistent empty list semant
     cleanup([base]);
   }
 });
+
+test("canonical read parity: decision get/list render choice and rationale into model-visible content (#2445)", async (t) => {
+  const base = makeProjectBase("gsd-canonical-decision-content");
+  t.after(() => cleanup([base]));
+  const native = makeNativeTools();
+  const mcp = makeMcpTools();
+
+  assert.ok(openDatabase(resolveProjectRootDbPath(base)), "fixture database should open successfully");
+  createMemory({
+    category: "architecture",
+    content: "decision memory fixture",
+    scope: "global",
+    confidence: 0.85,
+    structuredFields: {
+      sourceDecisionId: "D001",
+      when_context: "slice planning",
+      scope: "global",
+      decision: "Mirror read payloads over MCP",
+      choice: "structuredContent",
+      rationale: "the details field is dropped by the MCP transport",
+      made_by: "agent",
+      revisable: "yes",
+      superseded_by: null,
+    },
+  });
+
+  const nativeGet = await nativeTool(native, "gsd_decision_get").execute(
+    "call-7",
+    { id: "D001" },
+    undefined,
+    undefined,
+    { cwd: base },
+  );
+  const mcpGet = await mcpTool(mcp, "gsd_decision_get").handler({ projectDir: base, id: "D001" });
+  const nativeGetText = readTextContent(nativeGet);
+  const mcpGetText = readTextContent(mcpGet);
+  // The two surfaces must not drift.
+  assert.equal(nativeGetText, mcpGetText);
+  // Model-visible content must include the full row (#2445).
+  assert.match(nativeGetText, /Decision D001: Mirror read payloads over MCP/);
+  assert.match(nativeGetText, /Choice: structuredContent/);
+  assert.match(nativeGetText, /Rationale: the details field is dropped by the MCP transport/);
+  assert.match(nativeGetText, /Scope: global/);
+  assert.match(nativeGetText, /When: slice planning/);
+  assert.match(nativeGetText, /Made by: agent/);
+  assert.match(nativeGetText, /Source: discussion/);
+  assert.match(nativeGetText, /Revisable: yes/);
+  assert.match(nativeGetText, /Superseded by: none/);
+
+  const nativeList = await nativeTool(native, "gsd_decision_list").execute(
+    "call-8",
+    { limit: 20 },
+    undefined,
+    undefined,
+    { cwd: base },
+  );
+  const mcpList = await mcpTool(mcp, "gsd_decision_list").handler({ projectDir: base, limit: 20 });
+  const nativeListText = readTextContent(nativeList);
+  const mcpListText = readTextContent(mcpList);
+  assert.equal(nativeListText, mcpListText);
+  assert.match(nativeListText, /Found 1 decision/);
+  assert.match(nativeListText, /D001 \[global\] Mirror read payloads over MCP \| choice: structuredContent/);
+  assert.match(nativeListText, /rationale: the details field is dropped by the MCP transport/);
+});
+
+test("canonical read parity: decision list lines stay one physical line per row (#2445)", async (t) => {
+  const base = makeProjectBase("gsd-canonical-decision-lines");
+  t.after(() => cleanup([base]));
+  const native = makeNativeTools();
+  const mcp = makeMcpTools();
+
+  assert.ok(openDatabase(resolveProjectRootDbPath(base)), "fixture database should open successfully");
+  const longMultilineRationale = `first reason\nsecond reason ${"x".repeat(200)}`;
+  createMemory({
+    category: "architecture",
+    content: "decision memory fixture",
+    scope: "global",
+    confidence: 0.85,
+    structuredFields: {
+      sourceDecisionId: "D001",
+      when_context: "slice planning",
+      scope: "global",
+      decision: "Mirror read payloads over MCP",
+      choice: "structuredContent",
+      rationale: longMultilineRationale,
+      made_by: "agent",
+      revisable: "yes",
+      superseded_by: null,
+    },
+  });
+  createMemory({
+    category: "architecture",
+    content: "superseded decision fixture",
+    scope: "global",
+    confidence: 0.85,
+    structuredFields: {
+      sourceDecisionId: "D002",
+      when_context: "earlier planning",
+      scope: "global",
+      decision: "Keep details-only payloads",
+      choice: "details",
+      rationale: "superseded by D001",
+      made_by: "agent",
+      revisable: "yes",
+      superseded_by: "D001",
+    },
+  });
+
+  // get preserves the original multiline rationale verbatim (full-row fidelity).
+  const nativeGet = await nativeTool(native, "gsd_decision_get").execute(
+    "call-9",
+    { id: "D001" },
+    undefined,
+    undefined,
+    { cwd: base },
+  );
+  const mcpGet = await mcpTool(mcp, "gsd_decision_get").handler({ projectDir: base, id: "D001" });
+  assert.equal(readTextContent(nativeGet), readTextContent(mcpGet));
+  assert.match(readTextContent(nativeGet), /first reason\nsecond reason/);
+
+  // list with superseded rows included: one physical line per row.
+  const nativeList = await nativeTool(native, "gsd_decision_list").execute(
+    "call-10",
+    { limit: 20, includeSuperseded: true },
+    undefined,
+    undefined,
+    { cwd: base },
+  );
+  const mcpList = await mcpTool(mcp, "gsd_decision_list").handler({
+    projectDir: base,
+    limit: 20,
+    includeSuperseded: true,
+  });
+  const nativeListText = readTextContent(nativeList);
+  assert.equal(nativeListText, readTextContent(mcpList));
+  const lines = nativeListText.split("\n");
+  assert.equal(lines.length, 3, `expected header + one line per row, got:\n${nativeListText}`);
+  assert.match(lines[0], /Found 2 decision/);
+  // Rows are ordered seq DESC: D002 (superseded) first, D001 (multiline rationale) second.
+  assert.match(lines[1], /D002 \[global\] Keep details-only payloads \| choice: details/);
+  assert.match(lines[1], /\(superseded by D001\)/);
+  assert.ok(lines[2].includes("D001 [global] Mirror read payloads over MCP"));
+  assert.ok(lines[2].includes("first reason second reason"), "newline must be collapsed in list lines");
+  assert.ok(lines[2].includes("…"), "long rationale must be excerpt-bounded");
+  const rationaleSegment = (lines[2].split("rationale: ")[1] ?? "").trim();
+  assert.ok(rationaleSegment.length <= DECISION_EXCERPT_BOUND_FOR_TEST, `excerpt must stay bounded, got ${rationaleSegment.length}`);
+});
+
+const DECISION_EXCERPT_BOUND_FOR_TEST = 120 + "…".length;
 
 test("canonical read parity: unknown ID returns not_found for native and MCP", async () => {
   const base = makeProjectBase("gsd-canonical-unknown-id");
@@ -562,4 +720,73 @@ test("canonical read parity: missing project_authority row classifies as db_unav
   } finally {
     cleanup([base]);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Composition with the production canonical smoke assertions (#2669): real
+// registered snapshot tool results feed the same assertions the MCP host
+// smoke probe enforces.
+// ---------------------------------------------------------------------------
+
+test("canonical read tools compose: valid registered snapshot passes the production smoke assertion", async (t) => {
+  const base = makeProjectBase("gsd-canonical-compose-valid");
+  t.after(() => cleanup([base]));
+  const mcp = makeMcpTools();
+
+  openDatabase(resolveProjectRootDbPath(base));
+  insertMilestone({ id: "M001", title: "Authority Fixture", status: "active" });
+
+  const result = await mcpTool(mcp, "gsd_project_snapshot").handler({ projectDir: base });
+  const snapshot = assertSnapshotResult(result as Parameters<typeof assertSnapshotResult>[0]);
+  assert.equal(snapshot.current.activeMilestone?.id, "M001");
+  assert.equal(snapshot.current.activeMilestone?.title, "Authority Fixture");
+  assert.ok(snapshot.authority.projectId.length > 0);
+});
+
+test("canonical read tools compose: a valid empty real DB passes with DB authority and no projection data", async (t) => {
+  const base = makeProjectBase("gsd-canonical-compose-empty");
+  writeFileSync(
+    join(base, ".gsd", "STATE.md"),
+    "# Project State\n\n**Active Milestone:** M999: Projection Only\n**Phase:** planning\n",
+  );
+  t.after(() => cleanup([base]));
+  const mcp = makeMcpTools();
+
+  openDatabase(resolveProjectRootDbPath(base));
+
+  const result = await mcpTool(mcp, "gsd_project_snapshot").handler({ projectDir: base });
+  const snapshot = assertSnapshotResult(result as Parameters<typeof assertSnapshotResult>[0]);
+  assert.equal(snapshot.current.activeMilestone, null, "empty DB must not surface STATE.md projection data");
+  assert.equal(snapshot.milestones.items.length, 0);
+});
+
+test("canonical read tools compose: missing DB and query failure envelopes reject canonical validation", async (t) => {
+  const missingBase = makeProjectBase("gsd-canonical-compose-missing");
+  const queryBase = makeProjectBase("gsd-canonical-compose-query-error");
+  t.after(() => cleanup([missingBase, queryBase]));
+  const mcp = makeMcpTools();
+
+  const missingResult = await mcpTool(mcp, "gsd_project_snapshot").handler({ projectDir: missingBase });
+    assert.equal(
+      (missingResult as { structuredContent?: { error?: string } }).structuredContent?.error,
+      "db_unavailable",
+    );
+    assert.throws(
+      () => assertSuccessEnvelope(missingResult as Parameters<typeof assertSuccessEnvelope>[0]),
+      /MCP error envelope|structured canonical error/,
+      "canonical smoke validation must reject the db_unavailable envelope",
+    );
+
+    openDatabase(resolveProjectRootDbPath(queryBase));
+    getDb().prepare("DROP TABLE milestones").run();
+    const queryResult = await mcpTool(mcp, "gsd_project_snapshot").handler({ projectDir: queryBase });
+    assert.equal(
+      (queryResult as { structuredContent?: { error?: string } }).structuredContent?.error,
+      "query_error",
+    );
+    assert.throws(
+      () => assertSuccessEnvelope(queryResult as Parameters<typeof assertSuccessEnvelope>[0]),
+      /MCP error envelope|structured canonical error/,
+      "canonical smoke validation must reject the query_error envelope",
+    );
 });

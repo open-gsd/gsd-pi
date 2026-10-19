@@ -16,23 +16,92 @@ import chalk from 'chalk'
 import stripAnsi from 'strip-ansi'
 
 import { GSD_PI_BRAND, GSD_PI_LOGO } from './logo.js'
+import { stripIdPrefix } from './resources/extensions/gsd/strip-id-prefix.js'
 
-interface GsdState {
+/** Project status shown in the header. */
+export interface WelcomeProjectState {
   milestone?: string
   phase?: string
   slice?: string
   nextAction?: string
 }
 
-function readGsdState(): GsdState | undefined {
+/**
+ * The milestone row named by GSD_MILESTONE_LOCK, resolved once per process by
+ * primeMilestoneLock(). Null means the lock is unset or could not be resolved
+ * (no DB, unexpected schema, unknown id) — the STATE.md projection renders.
+ * Undefined means not yet primed; the projection renders.
+ */
+let lockedMilestone: string | null | undefined
+
+/**
+ * Resolve GSD_MILESTONE_LOCK against .gsd/gsd.db so the header can announce
+ * the milestone this process is actually bound to — the STATE.md projection
+ * carries no writer identity, so it can lag the lock. When the lock resolves
+ * it wins outright and the projection's slice/phase/next-action (which belong
+ * to a different milestone) are suppressed. Fail-open by design: any error
+ * leaves the projection-based rendering untouched. Never throws. The DB
+ * engine is dynamic-imported so the welcome screen stays light when no lock
+ * needs resolving (same pattern as register-shortcuts).
+ */
+export async function primeMilestoneLock(): Promise<void> {
+  if (lockedMilestone !== undefined) return
+  const lock = process.env.GSD_MILESTONE_LOCK?.trim()
+  if (!lock) {
+    lockedMilestone = null
+    return
+  }
+  try {
+    const { openIsolatedDatabase } = await import('./resources/extensions/gsd/db/engine.js')
+    // Isolated read-only connection: never displaces the session's own DB handle,
+    // and a missing file fails the open instead of creating one.
+    const db = openIsolatedDatabase(join(process.cwd(), '.gsd', 'gsd.db'))
+    if (!db) {
+      lockedMilestone = null
+      return
+    }
+    let resolved: string | null
+    try {
+      const row = db.prepare('SELECT id, title FROM milestones WHERE id = ?').get(lock)
+      const id = typeof row?.id === 'string' ? row.id : undefined
+      if (!id) {
+        resolved = null
+      } else {
+        const title = typeof row?.title === 'string' ? stripIdPrefix(row.title, id) : ''
+        resolved = title ? `${id}: ${title}` : id
+      }
+    } finally {
+      // A throwing close propagates to the catch below, so the override is
+      // only published after the connection was released cleanly.
+      db.close()
+    }
+    lockedMilestone = resolved
+  } catch {
+    // Fail-open: a missing/corrupt DB, unexpected schema, unknown id, or any
+    // other error renders the projection as before.
+    lockedMilestone = null
+  }
+}
+
+/** Test hook: forget a resolved lock so a later prime re-reads it. */
+export function _resetMilestoneLockForTest(): void {
+  lockedMilestone = undefined
+}
+
+function readGsdState(dbState: WelcomeProjectState | undefined): WelcomeProjectState | undefined {
+  // A resolved lock is the authority for what this session is bound to.
+  if (lockedMilestone) return { milestone: lockedMilestone }
+  // The caller read the database: STATE.md is not consulted.
+  if (dbState) return dbState
   try {
     const raw = readFileSync(join(process.cwd(), '.gsd', 'STATE.md'), 'utf-8')
-    const state: GsdState = {}
+    const state: WelcomeProjectState = {}
     const milestone = raw.match(/^\*\*Active Milestone:\*\*\s*(.+)$/m)
     const activeMilestone = milestone?.[1].trim()
     if (activeMilestone && activeMilestone !== 'None') state.milestone = activeMilestone
     const slice = raw.match(/^\*\*Active Slice:\*\*\s*(.+)$/m)
-    if (slice) state.slice = slice[1].trim()
+    const activeSlice = slice?.[1].trim()
+    if (activeSlice && activeSlice !== 'None') state.slice = activeSlice
     const phase = raw.match(/^\*\*Phase:\*\*\s*(.+)$/m)
     if (phase) state.phase = phase[1].trim()
     // Accept both template shapes: inline "**Next Action:** ..." and the
@@ -75,6 +144,12 @@ export interface WelcomeScreenOptions {
   provider?: string
   remoteChannel?: string
   width?: number
+  /**
+   * Project status the caller read from the database. When set, the header
+   * shows it and does not read STATE.md. Leave unset only when the database
+   * is missing or cannot be opened.
+   */
+  state?: WelcomeProjectState
 }
 
 function getShortCwd(): string {
@@ -139,7 +214,7 @@ export function buildWelcomeScreenLines(opts: WelcomeScreenOptions): string[] {
   // "Welcome back" context lines — GSD state if available, else hint.
   // Intentionally avoids data already shown in the footer (model, provider,
   // pwd, branch).
-  const state = readGsdState()
+  const state = readGsdState(opts.state)
   let projectText = 'No active GSD project'
   let commandText = '/gsd start'
   let modeText = 'manual'

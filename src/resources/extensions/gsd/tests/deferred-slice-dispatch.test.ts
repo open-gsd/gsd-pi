@@ -1,10 +1,10 @@
 /**
  * Regression test for #2661: Auto-mode dispatches deferred slices.
  *
- * When a decision defers a slice, the dispatcher must skip it and advance
- * to the next eligible slice. This tests both:
+ * A deferred slice is skipped by the dispatcher, and decision text alone
+ * never changes slice status:
  *   1. deriveStateFromDb skips slices with status "deferred"
- *   2. saveDecisionToDb updates the slice status when the decision is a deferral
+ *   2. saveDecisionToDb leaves slice status unchanged for deferral prose
  */
 
 import { describe, test } from "node:test";
@@ -141,7 +141,7 @@ describe("deferred-slice-dispatch (#2661)", () => {
     }
   });
 
-  test("deriveStateFromDb does not count deferred slices as done for progress", async () => {
+  test("deriveStateFromDb counts a deferred slice as needing no further work", async () => {
     const base = createFixtureBase();
     try {
       openDatabase(":memory:");
@@ -162,9 +162,10 @@ describe("deferred-slice-dispatch (#2661)", () => {
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
 
-      // Deferred slices should not count as "done" in progress
-      // Only S01 (complete) counts as done
-      assert.equal(state.progress?.slices?.done, 1, "only 1 slice (S01) should be done");
+      // Deferred is terminal in the read model: S01 (complete) and S02
+      // (deferred) need no further work, so only S03 remains.
+      assert.equal(state.progress?.slices?.done, 2, "S01 and deferred S02 need no further work");
+      assert.equal(state.activeSlice?.id, "S03", "S03 is the remaining slice");
       // Total should still be 3 (deferred slices are still part of the milestone)
       assert.equal(state.progress?.slices?.total, 3, "all 3 slices counted in total");
 
@@ -175,7 +176,7 @@ describe("deferred-slice-dispatch (#2661)", () => {
     }
   });
 
-  test("all slices deferred results in blocked state", async () => {
+  test("all slices deferred does not block milestone closeout", async () => {
     const base = createFixtureBase();
     try {
       openDatabase(":memory:");
@@ -193,9 +194,12 @@ describe("deferred-slice-dispatch (#2661)", () => {
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
 
-      // No eligible slice — should be blocked
+      // No slice is left to run, and deferred slices do not block closeout:
+      // the milestone moves on to its closeout phases instead of stalling.
       assert.equal(state.activeSlice, null, "no active slice when all deferred");
-      assert.equal(state.phase, "blocked", "phase should be blocked when all slices deferred");
+      assert.equal(state.activeMilestone?.id, "M001");
+      assert.notEqual(state.phase, "blocked", "deferred slices must not block the milestone");
+      assert.deepEqual(state.blockers, [], "no dependency blocker is reported");
 
       closeDatabase();
     } finally {
@@ -204,125 +208,33 @@ describe("deferred-slice-dispatch (#2661)", () => {
     }
   });
 
-  test("saveDecisionToDb marks slice as deferred when decision is a deferral", async () => {
-    const base = createFixtureBase();
-    try {
+  // Decision prose is narrative only: a slice leaves the run only through its
+  // own cancellation Domain Operation (gsd_skip_slice), never by regex on text.
+  for (const adopted of [false, true]) {
+    test(`decision text 'defer M001/S03' saves the decision and leaves the ${adopted ? "adopted" : "legacy"} slice status unchanged`, async (t) => {
+      const base = createFixtureBase();
+      t.after(() => {
+        closeDatabase();
+        cleanup(base);
+      });
       openDatabase(":memory:");
-
       insertMilestone({ id: "M001", title: "Test", status: "active" });
       insertSlice({ id: "S03", milestoneId: "M001", title: "Target Slice", status: "active", risk: "low", depends: [] });
-
-      writeFile(base, "milestones/M001/M001-ROADMAP.md", `# M001
-## Slices
-- [ ] **S03: Target Slice** \`risk:low\` \`depends:[]\`
-`);
+      if (adopted) adoptSlice("M001", "S03");
 
       const { saveDecisionToDb } = await import("../db-writer.ts");
-
-      // Save a deferral decision that references M001/S03
       await saveDecisionToDb(
         {
           scope: "deferral",
-          decision: "Defer S03 to focus on higher priority work",
+          decision: "M001/S03 is deferred",
           choice: "defer M001/S03",
           rationale: "Not ready yet",
         },
         base,
       );
 
-      // The slice status should now be "deferred"
-      const slice = getSlice("M001", "S03");
-      assert.equal(slice?.status, "deferred", "slice status should be updated to 'deferred' after deferral decision");
-
-      closeDatabase();
-    } finally {
-      closeDatabase();
-      cleanup(base);
-    }
-  });
-
-  test("saveDecisionToDb rejects a deferral for a missing slice without persisting the decision", async () => {
-    const base = createFixtureBase();
-    try {
-      openDatabase(":memory:");
-      insertMilestone({ id: "M001", title: "Test", status: "active" });
-
-      const { saveDecisionToDb } = await import("../db-writer.ts");
-
-      await assert.rejects(
-        saveDecisionToDb(
-          {
-            scope: "deferral",
-            decision: "Defer a slice that does not exist",
-            choice: "defer M001/S99",
-            rationale: "Invalid target",
-          },
-          base,
-        ),
-        /slice M001\/S99 does not exist/i,
-      );
-
-      assert.equal(_getAdapter()?.prepare("SELECT COUNT(*) AS count FROM memories").get()?.["count"], 0);
-    } finally {
-      closeDatabase();
-      cleanup(base);
-    }
-  });
-
-  test("saveDecisionToDb normalizes lowercase deferral references", async () => {
-    const base = createFixtureBase();
-    try {
-      openDatabase(":memory:");
-      insertMilestone({ id: "M001", title: "Test", status: "active" });
-      insertSlice({ id: "S03", milestoneId: "M001", title: "Target Slice", status: "active", risk: "low", depends: [] });
-
-      const { saveDecisionToDb } = await import("../db-writer.ts");
-      await saveDecisionToDb(
-        {
-          scope: "deferral",
-          decision: "Defer S03 to focus on higher priority work",
-          choice: "defer m001/s03",
-          rationale: "Not ready yet",
-        },
-        base,
-      );
-
-      assert.equal(getSlice("M001", "S03")?.status, "deferred");
-      assert.equal(_getAdapter()?.prepare("SELECT COUNT(*) AS count FROM memories").get()?.["count"], 1);
-    } finally {
-      closeDatabase();
-      cleanup(base);
-    }
-  });
-
-  test("saveDecisionToDb rejects adopted deferral without persisting the decision", async () => {
-    const base = createFixtureBase();
-    try {
-      openDatabase(":memory:");
-      insertMilestone({ id: "M001", title: "Test", status: "active" });
-      insertSlice({ id: "S03", milestoneId: "M001", title: "Target Slice", status: "active", risk: "low", depends: [] });
-      adoptSlice("M001", "S03");
-
-      const { saveDecisionToDb } = await import("../db-writer.ts");
-
-      await assert.rejects(
-        saveDecisionToDb(
-          {
-            scope: "deferral",
-            decision: "Defer S03 to focus on higher priority work",
-            choice: "defer M001/S03",
-            rationale: "Not ready yet",
-          },
-          base,
-        ),
-        /canonical lifecycle operation/i,
-      );
-
       assert.equal(getSlice("M001", "S03")?.status, "active");
-      assert.equal(_getAdapter()?.prepare("SELECT COUNT(*) AS count FROM memories").get()?.["count"], 0);
-    } finally {
-      closeDatabase();
-      cleanup(base);
-    }
-  });
+      assert.equal(_getAdapter()?.prepare("SELECT COUNT(*) AS count FROM memories").get()?.["count"], 1);
+    });
+  }
 });

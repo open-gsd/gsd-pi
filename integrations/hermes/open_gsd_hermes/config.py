@@ -21,6 +21,7 @@ class GsdConfig:
     cache_ttl_seconds: int = 45
     mcp_read_timeout_seconds: float = 60.0
     notification_level: str = "normal"
+    stall_minutes: int = 20
     gsd_version_min: str = "2.53"
     gsd_version_max: str = "3.0"
     hermes_memory_path: str | None = None
@@ -38,6 +39,7 @@ class GsdConfig:
             cache_ttl_seconds=int(gsd.get("cache_ttl_seconds", 45)),
             mcp_read_timeout_seconds=float(gsd.get("mcp_read_timeout_seconds", 60.0)),
             notification_level=str(gsd.get("notification_level", "normal")),
+            stall_minutes=int(gsd.get("stall_minutes", 20)),
             gsd_version_min=str(gsd.get("gsd_version_min", "2.53")),
             gsd_version_max=str(gsd.get("gsd_version_max", "3.0")),
             hermes_memory_path=gsd.get("hermes_memory_path"),

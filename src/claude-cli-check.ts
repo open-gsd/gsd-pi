@@ -2,10 +2,14 @@
 // Lightweight check used at onboarding time (before extensions load).
 // The full readiness check with caching lives in the claude-code-cli extension.
 //
+// The probes run on asynchronous child processes so the onboarding UI is
+// never frozen while `claude --version` / `claude auth status` run (seconds
+// on Windows, where each spawn goes through cmd.exe).
+//
 // Set GSD_CLAUDE_DEBUG=1 to log probe output to stderr. Useful when
 // diagnosing platform-specific detection failures (Issue #4997).
 
-import { execFileSync } from 'node:child_process'
+import { keepEventLoopAlive, runCliProbe } from './resources/extensions/shared/cli-readiness.js'
 
 /**
  * Spawn the Claude CLI without triggering Node's DEP0190.
@@ -27,16 +31,16 @@ export function buildClaudeSpawnInvocation(
   return { command, args }
 }
 
-function spawnClaude(command: string, args: string[], opts: { timeout: number; stdio: 'pipe' }): Buffer {
+function spawnClaude(command: string, args: string[], timeout: number): Promise<string> {
   const invocation = buildClaudeSpawnInvocation(command, args)
-  return execFileSync(invocation.command, invocation.args, opts)
+  return runCliProbe(invocation.command, invocation.args, timeout)
 }
 
 /**
  * Platform-correct binary name for the Claude Code CLI.
  *
  * On Windows, npm-global binaries are installed as `.cmd` shims and
- * `execFileSync` does not auto-resolve the extension — calling bare
+ * `execFile` does not auto-resolve the extension — calling bare
  * `claude` would fail with ENOENT even when the CLI is installed and
  * authenticated. Mirrors the `NPM_COMMAND` pattern in
  * `src/resources/extensions/gsd/pre-execution-checks.ts`.
@@ -81,13 +85,10 @@ function debugLog(...parts: unknown[]): void {
  * the error code to decide "try next". Treat any failure as "try next"
  * for the version probe.
  */
-function findWorkingCommand(): string | null {
+async function findWorkingCommand(): Promise<string | null> {
   for (const command of CLAUDE_COMMAND_CANDIDATES) {
     try {
-      spawnClaude(command, ['--version'], {
-        timeout: VERSION_TIMEOUT_MS,
-        stdio: 'pipe',
-      })
+      await spawnClaude(command, ['--version'], VERSION_TIMEOUT_MS)
       debugLog('version probe ok via', command)
       return command
     } catch (error) {
@@ -130,13 +131,10 @@ export function parseAuthStatus(output: string): boolean | null {
   return null
 }
 
-function probeAuth(command: string): boolean | null {
+async function probeAuth(command: string): Promise<boolean | null> {
   // Try --json first (newer CLIs).
   try {
-    const out = spawnClaude(command, ['auth', 'status', '--json'], {
-      timeout: AUTH_TIMEOUT_MS,
-      stdio: 'pipe',
-    }).toString()
+    const out = await spawnClaude(command, ['auth', 'status', '--json'], AUTH_TIMEOUT_MS)
     debugLog('auth status --json output:', out.slice(0, 200))
     const parsed = parseAuthStatus(out)
     if (parsed !== null) return parsed
@@ -146,10 +144,7 @@ function probeAuth(command: string): boolean | null {
 
   // Fallback: plain `auth status` (older CLIs that don't accept --json).
   try {
-    const out = spawnClaude(command, ['auth', 'status'], {
-      timeout: AUTH_TIMEOUT_MS,
-      stdio: 'pipe',
-    }).toString()
+    const out = await spawnClaude(command, ['auth', 'status'], AUTH_TIMEOUT_MS)
     debugLog('auth status output:', out.slice(0, 200))
     return parseAuthStatus(out)
   } catch (error) {
@@ -161,15 +156,19 @@ function probeAuth(command: string): boolean | null {
 /**
  * Check if the `claude` binary is installed (regardless of auth state).
  */
-export function isClaudeBinaryInstalled(): boolean {
-  return findWorkingCommand() !== null
+export function isClaudeBinaryInstalled(): Promise<boolean> {
+  return keepEventLoopAlive(findWorkingCommand().then((command) => command !== null))
 }
 
 /**
  * Check if the `claude` CLI is installed AND authenticated.
  */
-export function isClaudeCliReady(): boolean {
-  const command = findWorkingCommand()
-  if (!command) return false
-  return probeAuth(command) === true
+export function isClaudeCliReady(): Promise<boolean> {
+  return keepEventLoopAlive(
+    (async () => {
+      const command = await findWorkingCommand()
+      if (!command) return false
+      return (await probeAuth(command)) === true
+    })(),
+  )
 }

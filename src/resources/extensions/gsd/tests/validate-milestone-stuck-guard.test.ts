@@ -8,6 +8,8 @@ import { join } from "node:path";
 
 import { runPostUnitVerification, type VerificationContext } from "../auto-verification.ts";
 import { AutoSession } from "../auto/session.ts";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import { clearPathCache } from "../paths.ts";
 import {
   openDatabase,
@@ -175,7 +177,7 @@ function writeCanonicalValidation(verdict: "fail" | "inconclusive"): void {
       actorType: "agent",
     },
     milestoneId: "M001",
-    testedSourceRevision: "sha256:source",
+    testedSourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     policyId: "test",
     policyVersion: "1",
     verdict,
@@ -209,7 +211,7 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
   beforeEach(() => setupTestEnvironment());
   afterEach(() => cleanupTestEnvironment());
 
-  test("pauses when verdict=needs-remediation and all slices are closed", async () => {
+  test("retries when verdict=needs-remediation and all slices are closed", async () => {
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Slice 2", status: "done" });
@@ -222,15 +224,14 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
-    assert.equal(result, "pause");
-    assert.equal(pauseAutoMock.mock.callCount(), 1);
-    assert.equal(ctx.ui.notify.mock.callCount(), 1);
-    const notifyArgs = ctx.ui.notify.mock.calls[0].arguments;
-    assert.match(notifyArgs[0], /needs-remediation/);
-    assert.equal(notifyArgs[1], "error");
+    // Remediation stays agent-owned for every milestone: the loop retries
+    // until the agent queues remediation slices.
+    assert.equal(result, "retry");
+    assert.equal(pauseAutoMock.mock.callCount(), 0);
+    assert.match(s.pendingVerificationRetry?.failureContext ?? "", /gsd_reassess_roadmap/i);
   });
 
-  test("pauses when verdict=needs-attention", async () => {
+  test("retries the first needs-attention occurrence for any milestone", async () => {
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
     writeValidationFile("needs-attention");
@@ -242,12 +243,11 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
-    assert.equal(result, "pause");
-    assert.equal(pauseAutoMock.mock.callCount(), 1);
-    assert.equal(ctx.ui.notify.mock.callCount(), 1);
-    const notifyArgs = ctx.ui.notify.mock.calls[0].arguments;
-    assert.match(notifyArgs[0], /needs-attention/);
-    assert.equal(notifyArgs[1], "error");
+    // The bounded objective re-validation applies to every milestone; the
+    // human pause happens only when the verdict recurs (covered below).
+    assert.equal(result, "retry");
+    assert.equal(pauseAutoMock.mock.callCount(), 0);
+    assert.match(s.pendingVerificationRetry?.failureContext ?? "", /objective evidence/i);
   });
 
   test("retries adopted objective needs-attention without pausing for a user", async () => {
@@ -265,6 +265,38 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
     assert.equal(result, "retry");
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.match(s.pendingVerificationRetry?.failureContext ?? "", /objective evidence/i);
+  });
+
+  test("a restart does not grant the bounded needs-attention retry again: the count is on the dispatch row", async (t) => {
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
+    writeCanonicalValidation("inconclusive");
+    writeValidationFile("needs-attention");
+    const dispatch = claimTestDispatch(tempDir, { milestoneId: "M001", unitType: "validate-milestone", unitId: "M001" });
+    const pauseAutoMock = mock.fn(async () => {});
+    const stderrWrite = mock.method(process.stderr, "write", () => true);
+    t.after(() => stderrWrite.mock.restore());
+
+    const first = makeMockSession(tempDir, "validate-milestone", "M001");
+    assert.equal(
+      await runPostUnitVerification({ s: first, ctx: makeMockCtx(), pi: makeMockPi() } as VerificationContext, pauseAutoMock),
+      "retry",
+    );
+    const stored = readStoredUnitRetry("validate-milestone", "M001");
+    assert.equal(stored?.attempt, 1);
+    assert.match(stored?.failureContext ?? "", /objective evidence/i);
+
+    // The process is killed. The next one has a new session and a new dispatch.
+    dispatch.claimNext();
+    const restarted = makeMockSession(tempDir, "validate-milestone", "M001");
+    assert.equal(
+      await runPostUnitVerification({ s: restarted, ctx: makeMockCtx(), pi: makeMockPi() } as VerificationContext, pauseAutoMock),
+      "pause",
+      "the retry the last process used must count",
+    );
+
+    assert.equal(pauseAutoMock.mock.callCount(), 1);
+    assert.equal(readStoredUnitRetry("validate-milestone", "M001"), null, "the pause releases the stored retry");
   });
 
   test("pauses with a manual-attention gate when adopted needs-attention recurs after the bounded retry", async () => {
@@ -318,7 +350,7 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
       recommendedDisposition: "accepted",
       recommendationRationale: "Automated checks passed.",
       recommendationEvidence: "Current objective evidence.",
-      testedSourceRevision: "sha256:source",
+      testedSourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
     const ctx = makeMockCtx();
     const pi = makeMockPi();
@@ -362,8 +394,25 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
-    assert.equal(result, "pause");
-    assert.equal(pauseAutoMock.mock.callCount(), 1);
+    assert.equal(result, "retry");
+    assert.equal(pauseAutoMock.mock.callCount(), 0);
+  });
+
+  test("does not count a deferred slice as queued remediation work", async () => {
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Slice 2", status: "deferred" });
+    writeValidationFile("needs-remediation");
+
+    const ctx = makeMockCtx();
+    const pi = makeMockPi();
+    const pauseAutoMock = mock.fn(async () => {});
+    const s = makeMockSession(tempDir, "validate-milestone", "M001");
+
+    const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
+
+    assert.equal(result, "retry");
+    assert.equal(pauseAutoMock.mock.callCount(), 0);
   });
 
   test("continues when verdict=needs-remediation but a queued remediation slice exists", async () => {
@@ -524,37 +573,79 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
     assert.equal(s.pendingVerificationRetry!.attempt, 1);
   });
 
-  test("continues when same-turn roadmap reassessment invalidated the validation artifact", async () => {
+  /** The row that gsd_reassess_roadmap records. */
+  function recordRoadmapReassessment(createdAt?: string): void {
+    insertAssessment({
+      path: ".gsd/milestones/M001/M001-ROADMAP-ASSESSMENT.md",
+      milestoneId: "M001",
+      sliceId: "S01",
+      status: "roadmap-changed",
+      scope: "roadmap",
+      fullContent: "Added a remediation slice.",
+      ...(createdAt ? { createdAt } : {}),
+    });
+  }
+
+  test("continues when a roadmap reassessment recorded in this unit left open slices", async () => {
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Remediation", status: "queued" });
-
-    const path = join(tempDir, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
-    writeFileSync(path, "", "utf-8");
-    invalidateAllCaches();
 
     const ctx = makeMockCtx();
     const pi = makeMockPi();
     const pauseAutoMock = mock.fn(async () => {});
     const s = makeMockSession(tempDir, "validate-milestone", "M001");
-    s.lastUnitAgentEndMessages = [
-      {
-        role: "assistant",
-        content: [
-          { type: "toolCall", name: "gsd_reassess_roadmap" },
-        ],
-      },
-      {
-        role: "toolResult",
-        toolName: "gsd_reassess_roadmap",
-        isError: false,
-      },
-    ];
+    recordRoadmapReassessment();
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
     assert.equal(result, "continue");
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.equal(s.pendingVerificationRetry, null);
+  });
+
+  test("retries when the reassessment is only named in messages, an activity log or an ASSESSMENT file", async () => {
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Remediation", status: "queued" });
+
+    const sliceDir = join(tempDir, ".gsd", "milestones", "M001", "slices", "S01");
+    mkdirSync(sliceDir, { recursive: true });
+    writeFileSync(join(sliceDir, "S01-ASSESSMENT.md"), "# Assessment\n", "utf-8");
+    mkdirSync(join(tempDir, ".gsd", "activity"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".gsd", "activity", "001-validate-milestone-M001.jsonl"),
+      JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "gsd_reassess_roadmap" } }) + "\n",
+      "utf-8",
+    );
+
+    const s = makeMockSession(tempDir, "validate-milestone", "M001");
+    s.lastUnitAgentEndMessages = [
+      { role: "assistant", content: [{ type: "toolCall", name: "gsd_reassess_roadmap" }] },
+      { role: "toolResult", toolName: "gsd_reassess_roadmap", isError: false },
+    ];
+
+    const result = await runPostUnitVerification(
+      { s, ctx: makeMockCtx(), pi: makeMockPi() } as VerificationContext,
+      mock.fn(async () => {}),
+    );
+
+    assert.equal(result, "retry", "with no roadmap assessment row the unit recorded no outcome");
+  });
+
+  test("retries when the only roadmap reassessment was recorded before this unit started", async () => {
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Remediation", status: "queued" });
+    recordRoadmapReassessment("2020-01-01T00:00:00.000Z");
+
+    const s = makeMockSession(tempDir, "validate-milestone", "M001");
+
+    const result = await runPostUnitVerification(
+      { s, ctx: makeMockCtx(), pi: makeMockPi() } as VerificationContext,
+      mock.fn(async () => {}),
+    );
+
+    assert.equal(result, "retry");
   });
 });

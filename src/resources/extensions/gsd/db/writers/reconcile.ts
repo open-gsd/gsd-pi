@@ -1,16 +1,22 @@
 // Project/App: gsd-pi
 // File Purpose: Worktree DB reconciliation writers for the single-writer layer.
-// Owns copyWorktreeDb + reconcileWorktreeDb: the ATTACH-and-merge of an
-// auto-worktree's gsd.db back into the project-root DB, with conflict
-// detection. Reads the shared engine handle via getDbOrNull(); opens the
-// project-root DB via the engine's openDatabase().
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+// Owns reconcileWorktreeDb: the ATTACH-and-merge of a worktree-local gsd.db
+// into the project-root DB, with conflict detection. Its only production
+// caller is the explicit `/worktree import-db` command; no merge, teardown or
+// projection path calls it. Reads the shared engine handle via getDbOrNull();
+// opens the project-root DB via the engine's openDatabase().
+import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { GSDError, GSD_STALE_STATE } from "../../errors.js";
 import { logError, logWarning } from "../../workflow-logger.js";
-import { getDbOrNull, openDatabase, snapshotDatabaseFile, transaction } from "../engine.js";
+import { getDbOrNull, openDatabase, transaction } from "../engine.js";
 import { TERMINAL_STATUS_SQL } from "../sql-constants.js";
+import { LifecycleCoverageRefusedError } from "../../db-lifecycle-coverage-schema.js";
+import {
+  LifecycleBackfillRefusedError,
+  mergeLegacyRowsWithAdoption,
+} from "../../lifecycle-backfill-domain-operation.js";
 
 export class CanonicalWorktreeDivergenceError extends GSDError {
   constructor(surfaces: readonly string[]) {
@@ -45,19 +51,6 @@ function openMainDb(mainDbPath: string): boolean {
   return _mainDbOpenerFn ? _mainDbOpenerFn(mainDbPath) : openDatabase(mainDbPath);
 }
 
-export function copyWorktreeDb(srcDbPath: string, destDbPath: string): boolean {
-  try {
-    if (!existsSync(srcDbPath)) return false;
-    const destDir = dirname(destDbPath);
-    mkdirSync(destDir, { recursive: true });
-    snapshotDatabaseFile(srcDbPath, destDbPath);
-    return true;
-  } catch (err) {
-    logError("db", "failed to copy DB to worktree", { error: (err as Error).message });
-    return false;
-  }
-}
-
 export interface ReconcileResult {
   decisions: number;
   requirements: number;
@@ -74,11 +67,44 @@ export interface ReconcileResult {
   gate_runs: number;
   milestone_commit_attributions: number;
   conflicts: string[];
+  /** Legacy status changes that the adoption of merged rows made (only after the Cutover). */
+  adoptionStatusChanges: string[];
+  /** Every milestone, slice and task whose status the merge and the adoption set or change. */
+  statusChanges: string[];
+  /** Set when the merge did not run or failed. The counts are then zero. */
+  error?: string;
 }
 
+/** The statement that gives one hierarchy row (`kind M/S/T`) of a worktree database a known status. */
+function knownStatusSql(row: string): string {
+  const [kind, label = ""] = row.split(" ");
+  const [milestoneId, sliceId, taskId] = label.split("/").map((id) => `'${id.replaceAll("'", "''")}'`);
+  if (kind === "task") {
+    return `UPDATE tasks SET status = 'pending' WHERE milestone_id = ${milestoneId} AND slice_id = ${sliceId} AND id = ${taskId}`;
+  }
+  if (kind === "slice") return `UPDATE slices SET status = 'pending' WHERE milestone_id = ${milestoneId} AND id = ${sliceId}`;
+  return `UPDATE milestones SET status = 'queued' WHERE id = ${milestoneId}`;
+}
+
+/** Thrown inside the merge transaction of a preview, so that every row change rolls back. */
+class ReconcilePreviewRollback extends Error {
+  readonly result: ReconcileResult;
+  constructor(result: ReconcileResult) {
+    super("worktree DB reconciliation preview");
+    this.result = result;
+  }
+}
+
+/**
+ * Merge the rows of a worktree-local gsd.db into the project DB.
+ * With `preview`, returns the same counts, conflicts and status changes and
+ * changes no row. With `confirmed`, the merge commits only when its result
+ * equals that preview; if not, nothing is written and `error` is set.
+ */
 export function reconcileWorktreeDb(
   mainDbPath: string,
   worktreeDbPath: string,
+  options: { preview?: boolean; confirmed?: ReconcileResult } = {},
 ): ReconcileResult {
   const zero: ReconcileResult = {
     decisions: 0,
@@ -96,6 +122,8 @@ export function reconcileWorktreeDb(
     gate_runs: 0,
     milestone_commit_attributions: 0,
     conflicts: [],
+    adoptionStatusChanges: [],
+    statusChanges: [],
   };
   if (!existsSync(worktreeDbPath)) return zero;
   // Guard: bail when both paths resolve to the same physical file.
@@ -108,13 +136,13 @@ export function reconcileWorktreeDb(
   // so we use strict allowlist validation instead.
   if (/['";\x00]/.test(worktreeDbPath)) {
     logError("db", "worktree DB reconciliation failed: path contains unsafe characters");
-    return zero;
+    return { ...zero, error: "path contains unsafe characters" };
   }
   if (!getDbOrNull()!) {
     const opened = openMainDb(mainDbPath);
     if (!opened) {
       logError("db", "worktree DB reconciliation failed: cannot open main DB");
-      return zero;
+      return { ...zero, error: "cannot open main DB" };
     }
   }
   const adapter = getDbOrNull()!!;
@@ -204,9 +232,10 @@ export function reconcileWorktreeDb(
       const authorityDiverged = worktreeAuthorityIsAhead();
       const operationsDiverged = worktreeRowsMissingFromMain("workflow_operations");
       const lifecyclesDiverged = worktreeLifecycleIsAheadOrMismatched();
-      // Legacy writers can advance project_authority without recording a
-      // canonical operation. Treat authority as corroborating evidence only;
-      // blocking on it alone would reject valid pre-adoption worktrees.
+      // A worktree database from an older release can hold an authority
+      // revision that its legacy writers advanced with no canonical operation.
+      // Authority alone is corroborating evidence only; blocking on it would
+      // refuse the import of a valid pre-adoption worktree database.
       if (operationsDiverged || lifecyclesDiverged) {
         const divergentSurfaces = [
           authorityDiverged ? "authority" : null,
@@ -309,7 +338,18 @@ export function reconcileWorktreeDb(
         for (const row of reqConf) conflicts.push(`requirement ${(row as Record<string, unknown>)["id"]}: modified in both`);
       }
 
-      const merged: Omit<ReconcileResult, "conflicts"> = {
+      function hierarchyStatuses(): Map<string, string> {
+        return new Map(adapter.prepare(`
+          SELECT 'milestone ' || id AS item, status FROM main.milestones
+          UNION ALL SELECT 'slice ' || milestone_id || '/' || id, status FROM main.slices
+          UNION ALL SELECT 'task ' || milestone_id || '/' || slice_id || '/' || id, status FROM main.tasks
+          ORDER BY 1
+        `).all().map((row) => [String(row["item"]), String(row["status"])]));
+      }
+      const statusesBefore = hierarchyStatuses();
+      let statusChanges: string[] = [];
+
+      const merged: Omit<ReconcileResult, "conflicts" | "adoptionStatusChanges" | "statusChanges"> = {
         decisions: 0,
         requirements: 0,
         artifacts: 0,
@@ -340,7 +380,11 @@ export function reconcileWorktreeDb(
            END`
         : "COALESCE(m.target_repositories, '[]')";
 
-      transaction(() => {
+      // One Domain Operation: the merge commits with a revision bump, and
+      // the hierarchy rows it inserts get their lifecycle rows with it. A preview
+      // throws after the adoption, so it reports every status change and the
+      // operation rolls back and writes nothing.
+      const adoptionStatusChanges = mergeLegacyRowsWithAdoption("worktree-reconcile", () => transaction(() => {
         // Join the target decisions so we can prefer an existing main.source
         // when the worktree predates v16 — otherwise a write-through reconcile
         // would clobber 'escalation'-sourced decisions with the literal default.
@@ -721,15 +765,48 @@ export function reconcileWorktreeDb(
           `).run());
         }
 
+        return { ...merged };
+      }), (adopted) => {
+        statusChanges = [...hierarchyStatuses()]
+          .filter(([item, status]) => statusesBefore.get(item) !== status)
+          .map(([item, status]) => {
+            const before = statusesBefore.get(item);
+            return `${item}: ${before === undefined ? "new row" : JSON.stringify(before)} -> ${JSON.stringify(status)}`;
+          });
+        const result = { ...merged, conflicts, adoptionStatusChanges: adopted, statusChanges };
+        if (options.preview) throw new ReconcilePreviewRollback(result);
+        if (options.confirmed && !isDeepStrictEqual(result, options.confirmed)) {
+          throw new Error("the import no longer equals the confirmed preview; nothing was imported");
+        }
       });
-      return { ...merged, conflicts };
+      if (adoptionStatusChanges.length > 0) {
+        logWarning(
+          "db",
+          `worktree DB reconciliation changed the legacy status of ${adoptionStatusChanges.length} merged row(s) ` +
+            `to adopt them:\n  ${adoptionStatusChanges.join("\n  ")}`,
+        );
+      }
+      return { ...merged, conflicts, adoptionStatusChanges, statusChanges };
     } finally {
       try { adapter.exec("DETACH DATABASE wt"); } catch (e) { logWarning("db", `detach worktree DB failed: ${(e as Error).message}`); }
     }
   } catch (err) {
+    if (err instanceof ReconcilePreviewRollback) return err.result;
     if (err instanceof CanonicalWorktreeDivergenceError) throw err;
+    // A merged row that cannot be adopted stays in the worktree database.
+    if (err instanceof LifecycleBackfillRefusedError) {
+      throw new CanonicalWorktreeDivergenceError([
+        `${err.message}. Nothing was merged. Give each row a known legacy status in the worktree database, ` +
+          `then merge again: ${
+            err.unknownRows.map((row) => `sqlite3 '${worktreeDbPath}' "${knownStatusSql(row)}"`).join("; ")
+          }`,
+      ]);
+    }
+    if (err instanceof LifecycleCoverageRefusedError) {
+      throw new CanonicalWorktreeDivergenceError([`${err.message} Nothing was merged`]);
+    }
     logError("db", "worktree DB reconciliation failed", { error: (err as Error).message });
-    return { ...zero, conflicts };
+    return { ...zero, conflicts, error: (err as Error).message };
   }
 }
 

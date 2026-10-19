@@ -15,7 +15,8 @@ import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { mergeMilestoneToMain } from "../auto-worktree-merge.ts";
-import { closeDatabase, insertAssessment, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { seedCanonicalMergeReadyMilestone } from "./merge-ready-fixture.ts";
 import { GIT_NO_PROMPT_ENV } from "../git-constants.js";
 import { _clearGsdRootCache } from "../paths.ts";
 import { _resetServiceCache } from "../worktree.ts";
@@ -146,13 +147,10 @@ test("mergeMilestoneToMain keeps the Windows DB cycle closed through squash merg
     assert.equal(openDatabase(join(repo, ".gsd", "gsd.db")), true);
     insertMilestone({ id: "M001", title: "Windows DB cycle", status: "complete" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-    insertAssessment({
-      path: "milestones/M001/M001-VALIDATION.md",
-      milestoneId: "M001",
-      status: "pass",
-      scope: "milestone-validation",
-      fullContent: "verdict: pass",
-    });
+    // The merge guards read canonical closeout state bound to the tree the
+    // milestone ran in, so the receipt is recorded against the worktree.
+    seedCanonicalMergeReadyMilestone(repo, "M001", { sourceTree: worktree });
+    openDatabase(join(repo, ".gsd", "gsd.db"));
     assert.equal(existsSync(join(repo, ".gsd", "gsd.db-shm")), true);
 
     withPlatform("win32", () => {

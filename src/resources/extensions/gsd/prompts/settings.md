@@ -1,10 +1,20 @@
 You are running the GSD **settings** workflow — configure GSD workflow toggles and the model profile.
 
+## Effective configuration (authoritative)
+
+The current effective configuration is embedded below. Use this block as the source of truth — do not search for or read package docs under `pkg/README.md`, `pkg/docs`, or `pkg/examples` (those paths are not shipped in the published npm package).
+
+```
+{{effectiveConfig}}
+```
+
+For preference field documentation, read `{{preferencesReferencePath}}` only when you need to explain a specific key.
+
 ## Process
 
 This is the settings flow: present the current effective configuration and let the developer change it.
 
-1. **Show effective settings.** Display the current configuration: active provider/model, model profile, auto-mode toggles, commit granularity, review depth, isolation mode, language, and any feature flags. Pull these from gsd-pi's config overlay, not memory.
+1. **Show effective settings.** Display the embedded configuration above: active provider/model, model profile, auto-mode toggles, commit granularity, review depth, isolation mode, language, and any feature flags.
 
 2. **Offer changes**, grouped:
    - **LLM**: provider, model, default tier — `/gsd setup llm` / `/gsd model`.

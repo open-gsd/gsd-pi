@@ -77,12 +77,14 @@ If `.gsd/SYSTEM.md` (project) or `~/.gsd/agent/SYSTEM.md` (global) exists, its c
 Project takes precedence over global. Only one SYSTEM.md is used (first found wins).
 
 **What still gets appended even with a custom SYSTEM.md:**
+
 - APPEND_SYSTEM.md content
 - Project context files (AGENTS.md / CLAUDE.md)
 - Skills listing (if the `read` tool is active)
 - Date/time and cwd
 
 **What you lose:**
+
 - The entire default prompt structure
 - Built-in tool descriptions and guidelines
 - Pi documentation pointers
@@ -97,6 +99,7 @@ Each active tool gets a line in "Available tools":
 ```
 
 The description is determined by priority:
+
 1. `promptSnippet` from the tool registration (if provided)
 2. Built-in description from `toolDescriptions` map (for read, bash, edit, write, grep, find, ls)
 3. The tool's `name` as fallback

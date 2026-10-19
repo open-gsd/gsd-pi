@@ -422,7 +422,7 @@ export function SkillHealthPanel() {
           <div className="flex flex-wrap gap-2">
             <StatPill label="Skills" value={data.skills.length} />
             {data.staleSkills.length > 0 && <StatPill label="Stale" value={data.staleSkills.length} variant="warning" />}
-            {data.decliningSkills.length > 0 && <StatPill label="Declining" value={data.decliningSkills.length} variant="error" />}
+            {data.decliningSkills.length > 0 && <StatPill label="Flagged" value={data.decliningSkills.length} variant="error" />}
             <StatPill label="Total units" value={data.totalUnitsWithSkills} />
           </div>
 
@@ -435,12 +435,12 @@ export function SkillHealthPanel() {
                   <thead>
                     <tr className="border-b border-border/50 bg-card/50">
                       <th className="px-2.5 py-1.5 text-left font-medium text-muted-foreground">Skill</th>
-                      <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Uses</th>
-                      <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Success</th>
-                      <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Tokens</th>
+                      <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Units</th>
+                      <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Unit Success</th>
+                      <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Avg Unit Tokens</th>
                       <th className="px-2.5 py-1.5 text-center font-medium text-muted-foreground">Trend</th>
                       <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Stale</th>
-                      <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Cost</th>
+                      <th className="px-2.5 py-1.5 text-right font-medium text-muted-foreground">Avg Unit Cost</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -478,6 +478,11 @@ export function SkillHealthPanel() {
                   </tbody>
                 </table>
               </div>
+              {data.availabilityBased && (
+                <p className="text-[11px] text-muted-foreground">
+                  Counts reflect skills available to each unit, not SKILL.md reads (per-skill read telemetry is a follow-up — #2495).
+                </p>
+              )}
             </div>
           )}
 
@@ -493,10 +498,10 @@ export function SkillHealthPanel() {
             </div>
           )}
 
-          {/* Declining skills */}
+          {/* Flagged skills */}
           {data.decliningSkills.length > 0 && (
             <div className="space-y-1.5">
-              <h4 className="text-xs font-medium text-muted-foreground">Declining Skills</h4>
+              <h4 className="text-xs font-medium text-muted-foreground">Flagged Skills</h4>
               <div className="flex flex-wrap gap-1.5">
                 {data.decliningSkills.map((name) => (
                   <Badge key={name} variant="destructive" className="text-[10px] font-mono">{name}</Badge>

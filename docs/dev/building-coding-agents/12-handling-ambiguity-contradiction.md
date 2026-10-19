@@ -36,6 +36,7 @@ The human reviews these at **milestones, not in real-time** — preserving speed
 #### Layer 3: Contradiction Detection Pass
 
 Before execution begins, a **dedicated reasoning pass** (separate from planning) scans for conflicts:
+
 - Do requirements contradict each other?
 - Do acceptance criteria conflict with stated architecture?
 - Are there implicit assumptions in one requirement that violate another?

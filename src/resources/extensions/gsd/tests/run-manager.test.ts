@@ -2,7 +2,7 @@
  * run-manager.test.ts — Tests for run directory creation and listing.
  *
  * Uses real temp directories with actual definition YAML files and
- * GRAPH.yaml persistence — no mocks.
+ * a real project database — no mocks.
  */
 
 import { describe, it, afterEach } from "node:test";
@@ -20,19 +20,24 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 
+import { closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
 import { createRun, listRuns } from "../run-manager.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 const tmpDirs: string[] = [];
 
+/** A project directory with its database open: a run is database rows. */
 function makeTmpBase(): string {
   const dir = mkdtempSync(join(tmpdir(), "run-mgr-test-"));
   tmpDirs.push(dir);
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  openDatabase(join(dir, ".gsd", "gsd.db"));
   return dir;
 }
 
 afterEach(() => {
+  if (isDbAvailable()) closeDatabase();
   for (const d of tmpDirs) {
     try { rmSync(d, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* Windows EPERM */ }
   }
@@ -150,6 +155,15 @@ describe("createRun", () => {
     );
   });
 
+  it("refuses to create a run when no database is open", () => {
+    const base = makeTmpBase();
+    writeDefinition(base, "test-workflow", SIMPLE_DEF);
+    closeDatabase();
+
+    assert.throws(() => createRun(base, "test-workflow"), /requires the GSD database/);
+    assert.ok(!existsSync(join(base, ".gsd", "workflow-runs")), "no run directory is written");
+  });
+
   it("uses filesystem-safe timestamp directory names", () => {
     const base = makeTmpBase();
     writeDefinition(base, "test-workflow", SIMPLE_DEF);
@@ -225,5 +239,7 @@ describe("listRuns", () => {
     assert.equal(runs.length, 2);
     // First should be the newer one (the one we just created)
     assert.ok(runs[0].timestamp > runs[1].timestamp, "should be sorted newest-first");
+    // A run directory with no run row is listed, labelled as not imported.
+    assert.deepEqual(runs.map((run) => run.imported), [true, false]);
   });
 });

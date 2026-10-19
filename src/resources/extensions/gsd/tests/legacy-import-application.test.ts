@@ -36,6 +36,7 @@ import {
   canonicalLegacyImportJson,
   createLegacyImportPreview,
   hashLegacyImportValue,
+  resolveLegacyImportPreview,
   type LegacyImportPreviewArtifact,
 } from "../legacy-import-preview.ts";
 import {
@@ -47,6 +48,8 @@ import {
   executeDomainOperation,
   type DomainOperationResult,
 } from "../db/domain-operation.ts";
+import { readMilestone, readMilestoneSlices, readSliceTasks } from "../db/lifecycle-read.ts";
+import { compareLifecycleShadow } from "../db/lifecycle-shadow-comparison.ts";
 import {
   adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
@@ -104,6 +107,7 @@ function prepareCase(
   caseName: "gsd-nested" | "custom-workflow",
   seed?: () => void,
   mutateSource?: (sourceDirectory: string) => void,
+  resolvePreview: (preview: LegacyImportPreviewArtifact) => LegacyImportPreviewArtifact = (preview) => preview,
 ): PreparedApplicationCase {
   applicationSequence += 1;
   const workspace = mkdtempSync(join(tmpdir(), `gsd-legacy-application-${caseName}-`));
@@ -123,7 +127,7 @@ function prepareCase(
   const roots = createLegacyImportCorpusSourceRoots(source);
   const previewInput = { roots };
   const base = captureCurrentLegacyImportBaseSnapshot();
-  const preview = createLegacyImportPreview(previewInput);
+  const preview = resolvePreview(createLegacyImportPreview(previewInput));
   assert.equal(preview.preview.base_project_revision, base.authority.revision);
   assert.equal(preview.preview.base_authority_epoch, base.authority.authority_epoch);
   assert.equal(preview.preview.base_database_schema_version, base.database_schema_version);
@@ -157,7 +161,10 @@ function prepareCase(
     preview,
     backup,
     input,
-    plan: compileLegacyImportApplicationPlan(preview),
+    // Compiled on use: a Preview that needs a user choice has no plan.
+    get plan() {
+      return compileLegacyImportApplicationPlan(preview);
+    },
   };
 }
 
@@ -232,7 +239,11 @@ function expectedInstructionResults(prepared: PreparedApplicationCase): Array<Re
           || row.value["depends_on_slice_id"] === instruction.sliceId)).length;
       return { ...identity, expectedAffectedRows: 0, affectedRows: deleted };
     }
-    if (instruction.action === "preserve") {
+    if (
+      instruction.action === "preserve"
+      // A slice imported as completed gets no Q8 gate row.
+      || (instruction.action === "seed-quality-gate" && instruction.gateStatus === "complete")
+    ) {
       return { ...identity, expectedAffectedRows: 0, affectedRows: 0 };
     }
     return { ...identity, expectedAffectedRows: 1, affectedRows: 1 };
@@ -1128,5 +1139,203 @@ test("terminal coordination statuses do not falsely block Application", () => {
     held_leases: 0,
     active_dispatches: 0,
     active_attempts: 0,
+  });
+});
+
+/** The three hierarchy rows of the nested source that it marks: M001 active, S01 and its Task complete. */
+function seedFoundationRows(statuses: { milestone: string; slice: string; task: string }): void {
+  db().prepare("INSERT INTO milestones (id, title, status) VALUES ('M001', 'Foundation', :status)")
+    .run({ ":status": statuses.milestone });
+  db().prepare("INSERT INTO slices (milestone_id, id, title, status) VALUES ('M001', 'S01', 'Core setup', :status)")
+    .run({ ":status": statuses.slice });
+  db().prepare(`INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+    VALUES ('M001', 'S01', 'T01', 'Create the project skeleton', :status)`).run({ ":status": statuses.task });
+}
+
+/** The same rows, each with a lifecycle row, in a database whose Authority Epoch is above 0. */
+function seedCutOverFoundation(
+  legacy: { milestone: string; slice: string; task: string },
+  lifecycleStatus: "ready" | "completed",
+): void {
+  executeFixtureOperation("test.foundation.adopt", (context) => {
+    seedFoundationRows(legacy);
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus,
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus,
+    });
+    return {
+      events: [{
+        eventType: "test.foundation.adopt",
+        entityType: "milestone",
+        entityId: "M001",
+        payload: { lifecycleStatus },
+        destinations: ["test"],
+      }],
+      projections: [{ projectionKey: "test/foundation/adopt", projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+  // The statement the cutover Domain Operation commits with.
+  db().prepare("UPDATE project_authority SET authority_epoch = authority_epoch + 1 WHERE singleton = 1").run();
+}
+
+/** Every hierarchy row whose lifecycle row is missing or disagrees with its legacy status. */
+function shadowDisagreements(): string[] {
+  return rows(`
+    SELECT 'milestone ' || item.id AS label, item.status, lifecycle.lifecycle_status
+    FROM milestones item
+    LEFT JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = item.id
+    UNION ALL
+    SELECT 'slice ' || item.milestone_id || '/' || item.id, item.status, lifecycle.lifecycle_status
+    FROM slices item
+    LEFT JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = item.milestone_id
+        AND lifecycle.slice_id = item.id
+    UNION ALL
+    SELECT 'task ' || item.milestone_id || '/' || item.slice_id || '/' || item.id, item.status,
+      lifecycle.lifecycle_status
+    FROM tasks item
+    LEFT JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'task' AND lifecycle.milestone_id = item.milestone_id
+        AND lifecycle.slice_id = item.slice_id AND lifecycle.task_id = item.id
+  `).flatMap((entry) => {
+    const canonical = entry["lifecycle_status"];
+    const { kind } = compareLifecycleShadow(String(entry["status"]), canonical === null ? null : String(canonical));
+    return kind === "match" || kind === "semantic_match_exact_delta" ? [] : [`${String(entry["label"])}: ${kind}`];
+  });
+}
+
+/** What the read interface answers for the Slice and Task that the nested source marks complete. */
+function foundationRead(): Record<string, unknown> {
+  const slice = readMilestoneSlices("M001").find((entry) => entry.id === "S01");
+  const task = readSliceTasks("M001", "S01").find((entry) => entry.id === "T01");
+  return {
+    milestone: readMilestone("M001")?.status,
+    slice: slice?.status,
+    sliceDone: slice?.done,
+    task: task?.status,
+    taskDone: task?.done,
+  };
+}
+
+function foundationLifecycles(): Array<Record<string, unknown>> {
+  return rows(`SELECT item_kind, lifecycle_status, state_version FROM workflow_item_lifecycles
+    WHERE milestone_id = 'M001' AND (slice_id IS NULL OR slice_id = 'S01')
+    ORDER BY CASE item_kind WHEN 'milestone' THEN 0 WHEN 'slice' THEN 1 ELSE 2 END`);
+}
+
+test("an Application that changes the status of rows with no lifecycle row adopts them", () => {
+  const applyLegacyImport = getApplyLegacyImport();
+  // Rows of an older build at Authority Epoch 0: no lifecycle row. The source
+  // marks S01 and its Task complete and S02 open, and gives M001 no other status.
+  const prepared = prepareCase("gsd-nested", () => {
+    seedFoundationRows({ milestone: "active", slice: "pending", task: "pending" });
+    db().exec("INSERT INTO slices (milestone_id, id, title, status) VALUES ('M001', 'S02', 'API wiring', 'complete')");
+  });
+
+  const result = applyLegacyImport(prepared.input);
+
+  assertCommittedResult(prepared, result);
+  assert.deepEqual(foundationLifecycles(), [
+    { item_kind: "slice", lifecycle_status: "completed", state_version: 0 },
+    { item_kind: "task", lifecycle_status: "completed", state_version: 0 },
+  ]);
+  // Open work is adopted as ready, as for a row that the import creates.
+  assert.deepEqual(rows(`SELECT slices.status, lifecycle.lifecycle_status
+    FROM slices JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = slices.milestone_id
+        AND lifecycle.slice_id = slices.id
+    WHERE slices.milestone_id = 'M001' AND slices.id = 'S02'`), [{ status: "pending", lifecycle_status: "ready" }]);
+  // The import does not change M001, so the Cutover adopts it later.
+  assert.deepEqual(shadowDisagreements(), ["milestone M001: missing_shadow"]);
+  assert.deepEqual(foundationRead(), {
+    milestone: "active", slice: "complete", sliceDone: true, task: "complete", taskDone: true,
+  });
+});
+
+test("a status change that disagrees with the lifecycle row of an existing row stops the Application", () => {
+  const applyLegacyImport = getApplyLegacyImport();
+  // The database is cut over and holds S01 and its Task as open work. The
+  // source marks both complete.
+  const prepared = prepareCase("gsd-nested", () => {
+    seedCutOverFoundation({ milestone: "active", slice: "pending", task: "pending" }, "ready");
+  });
+  const before = applicationSnapshot();
+
+  assert.equal(prepared.preview.preview.counts.unresolved, 2);
+  assert.deepEqual(
+    prepared.preview.preview.resolutions
+      .filter((resolution) => resolution.disposition === "requires-user")
+      .map((resolution) => resolution.target)
+      .sort((left, right) => String(left?.key).localeCompare(String(right?.key))),
+    [{ kind: "slice", key: "M001/S01" }, { kind: "task", key: "M001/S01/T01" }],
+  );
+  assert.deepEqual(
+    [...new Set(prepared.preview.preview.diagnoses.map((diagnosis) => diagnosis.code))],
+    ["status-change-contradicts-lifecycle"],
+  );
+  expectApplicationError(() => applyLegacyImport(prepared.input), {
+    stage: "preview",
+    code: "LEGACY_IMPORT_APPLICATION_PREVIEW_UNRESOLVED",
+    retryable: false,
+  });
+
+  assert.deepEqual(applicationSnapshot(), before);
+  assert.deepEqual(shadowDisagreements(), []);
+  assert.deepEqual(foundationRead(), {
+    milestone: "active", slice: "pending", sliceDone: false, task: "pending", taskDone: false,
+  });
+});
+
+test("an Application that keeps the database status of an adopted row leaves the row as it is", () => {
+  const applyLegacyImport = getApplyLegacyImport();
+  // The operator chooses to keep the two rows that the source disagrees on.
+  const prepared = prepareCase("gsd-nested", () => {
+    seedCutOverFoundation({ milestone: "active", slice: "pending", task: "pending" }, "ready");
+  }, undefined, (preview) => resolveLegacyImportPreview(
+    preview,
+    preview.preview.resolutions
+      .filter((resolution) => resolution.disposition === "requires-user")
+      .map((resolution) => ({ diagnosis_id: resolution.diagnosis_id, disposition: "preserved" as const })),
+  ));
+
+  const result = applyLegacyImport(prepared.input);
+
+  assertCommittedResult(prepared, result);
+  assert.deepEqual(foundationLifecycles(), [
+    { item_kind: "milestone", lifecycle_status: "ready", state_version: 0 },
+    { item_kind: "slice", lifecycle_status: "ready", state_version: 0 },
+    { item_kind: "task", lifecycle_status: "ready", state_version: 0 },
+  ]);
+  assert.deepEqual(shadowDisagreements(), []);
+  assert.deepEqual(foundationRead(), {
+    milestone: "active", slice: "pending", sliceDone: false, task: "pending", taskDone: false,
+  });
+  // The rest of the import is applied: the source has three more Slices of M001.
+  assert.deepEqual(readMilestoneSlices("M001").map((slice) => slice.id), ["S01", "S02", "S03", "S04"]);
+});
+
+test("a status change that agrees with the lifecycle row of an existing row is applied", () => {
+  const applyLegacyImport = getApplyLegacyImport();
+  // The lifecycle rows are completed. The legacy rows name that with another
+  // word than the source does.
+  const prepared = prepareCase("gsd-nested", () => {
+    seedCutOverFoundation({ milestone: "active", slice: "done", task: "done" }, "completed");
+  });
+
+  const result = applyLegacyImport(prepared.input);
+
+  assertCommittedResult(prepared, result);
+  assert.deepEqual(foundationLifecycles(), [
+    { item_kind: "milestone", lifecycle_status: "ready", state_version: 0 },
+    { item_kind: "slice", lifecycle_status: "completed", state_version: 0 },
+    { item_kind: "task", lifecycle_status: "completed", state_version: 0 },
+  ]);
+  assert.deepEqual(shadowDisagreements(), []);
+  assert.deepEqual(foundationRead(), {
+    milestone: "active", slice: "complete", sliceDone: true, task: "complete", taskDone: true,
   });
 });

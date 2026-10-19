@@ -5,12 +5,14 @@ Pi does not have a separate built-in concept of "nested slash commands" like `/w
 Instead, this UX is built by registering a single slash command and using **argument completions** to make the first argument behave like a subcommand.
 
 This is the pattern used by the built-in worktree command:
+
 - `/wt`
 - `/wt list`
 - `/wt create my-branch`
 - `/wt switch my-branch`
 
 The key API is:
+
 - `pi.registerCommand(name, options)`
 - `getArgumentCompletions(prefix)`
 - `handler(args, ctx)`
@@ -139,6 +141,7 @@ if (parts.length <= 1) {
 ```
 
 This handles both:
+
 - completely empty input after the command
 - partially typed first arguments
 

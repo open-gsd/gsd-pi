@@ -32,6 +32,7 @@ PLAN → IMPLEMENT → TEST → DEBUG → VERIFY → DOCUMENT
 ```
 
 **Critical transitions that matter:**
+
 - **Task completion:** Defined by automated tests passing + acceptance criteria met
 - **Stuck detection:** Triggered by repeated failed attempts or missing information
 - **Plan revision:** Triggered when completed tasks reveal wrong assumptions

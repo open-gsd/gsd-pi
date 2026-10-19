@@ -14,6 +14,7 @@ import { nativeParseRoadmap, nativeParsePlanFile } from '../native-parser-bridge
 import { debugTime, debugCount } from '../debug-logger.js';
 import { CACHE_MAX } from '../constants.js';
 import { parseRoadmapSlices } from '../roadmap-slices.js';
+import { parseMilestoneSequence, splitH2Sections } from './project-sequence.js';
 
 import type {
   Roadmap, BoundaryMapEntry,
@@ -81,41 +82,9 @@ export interface ParsedRoadmap {
 }
 
 const TEMPLATE_TOKEN_RE = /\{\{[^}]+\}\}/;
-const H2_RE = /^##\s+(.+)$/gm;
 const H3_RE = /^###\s+(.+)$/gm;
-// A milestone line is single-line by construction. Every inter-token gap uses
-// horizontal-whitespace classes (`[^\S\n]`) rather than `\s`, because `\s`
-// matches newlines: a line missing a valid separator would otherwise let the
-// `\s+(?:—|--|-)\s+` clause "bridge" onto the NEXT bullet's `- `, consuming it
-// as the separator and silently swallowing the following well-formed milestone.
-const MILESTONE_LINE_RE = /^-[^\S\n]+\[([ x])\][^\S\n]+(M\d{3}):[^\S\n]+(.+?)[^\S\n]+(?:—|--|-)[^\S\n]+(.+)$/gm;
 const SLICE_HEADER_RE = /^###\s+(S\d{2})\s*(?:—|--|-)\s+(.+)$/m;
 const REQUIREMENT_HEADER_RE = /^###\s+(R\d{3})\s*(?:—|--|-)\s+(.+)$/m;
-
-function splitH2Sections(content: string): { sections: Record<string, string>; order: string[] } {
-  const sections: Record<string, string> = {};
-  const order: string[] = [];
-  const headerMatches: Array<{ name: string; index: number; lineEnd: number }> = [];
-
-  for (const m of content.matchAll(H2_RE)) {
-    if (m.index === undefined) continue;
-    headerMatches.push({
-      name: m[1].trim(),
-      index: m.index,
-      lineEnd: m.index + m[0].length,
-    });
-  }
-
-  for (let i = 0; i < headerMatches.length; i++) {
-    const start = headerMatches[i].lineEnd;
-    const end = i + 1 < headerMatches.length ? headerMatches[i + 1].index : content.length;
-    const body = content.slice(start, end).trim();
-    sections[headerMatches[i].name] = body;
-    order.push(headerMatches[i].name);
-  }
-
-  return { sections, order };
-}
 
 function detectTemplateTokens(sections: Record<string, string>): { has: boolean; flagged: string[] } {
   const flagged: string[] = [];
@@ -129,16 +98,7 @@ export function parseProject(content: string): ParsedProject {
   const { sections, order } = splitH2Sections(content);
   const tokens = detectTemplateTokens(sections);
 
-  const milestones: ParsedProject["milestones"] = [];
-  const sequenceBody = sections["Milestone Sequence"] ?? "";
-  for (const m of sequenceBody.matchAll(MILESTONE_LINE_RE)) {
-    milestones.push({
-      done: m[1] === "x",
-      id: m[2],
-      title: m[3].trim(),
-      oneLiner: m[4].trim(),
-    });
-  }
+  const milestones = parseMilestoneSequence(sections);
 
   return {
     sections,
@@ -388,6 +348,7 @@ function cacheKey(content: string): string {
 const _parseCache = new Map<string, unknown>();
 
 function cachedParse<T>(content: string, tag: string, parseFn: (c: string) => T): T {
+  ensureCacheClearRegistered();
   const key = tag + '|' + cacheKey(content);
   if (_parseCache.has(key)) return _parseCache.get(key) as T;
   if (_parseCache.size >= CACHE_MAX) _parseCache.clear();
@@ -401,8 +362,12 @@ export function clearLegacyParseCache(): void {
   _parseCache.clear();
 }
 
-// Register with files.ts so clearParseCache() also clears our cache
-registerCacheClearCallback(clearLegacyParseCache);
+let _cacheClearRegistered = false;
+function ensureCacheClearRegistered(): void {
+  if (_cacheClearRegistered) return;
+  registerCacheClearCallback(clearLegacyParseCache);
+  _cacheClearRegistered = true;
+}
 
 // ─── Roadmap Parser ────────────────────────────────────────────────────────
 

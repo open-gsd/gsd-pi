@@ -26,6 +26,14 @@ test("legacy telemetry exposes every Phase 8 cleanup counter", () => {
     "legacy.mcpAliasUsed",
     "legacy.componentFormatUsed",
     "legacy.providerDefaultUsed",
+    // ADR-046 cutover counters: the five zero-gated bridges plus the mirror
+    // write the replan gate still reads.
+    "legacy.importApplied",
+    "legacy.fileOverridesImported",
+    "legacy.fileCapturesImported",
+    "legacy.restoreExecuted",
+    "legacy.migrateImported",
+    "legacy.legacyTaskStatusWrite",
   ]);
 });
 
@@ -87,28 +95,50 @@ test("legacy telemetry can persist an opt-in snapshot file", () => {
 });
 
 test("legacy telemetry can persist a zero-use snapshot for deletion gates", () => {
+  const previousStderr = setStderrLoggingEnabled(false);
   const previousOutput = process.env.GSD_LEGACY_TELEMETRY_FILE;
   const base = mkdtempSync(join(tmpdir(), "gsd-legacy-zero-telemetry-"));
   const outputPath = join(base, "legacy-telemetry.json");
   try {
     resetLegacyTelemetry();
+    _resetLogs();
     process.env.GSD_LEGACY_TELEMETRY_FILE = outputPath;
 
+    // Persistence merges with the file, so a fresh process with nothing fired
+    // still lands an all-zero snapshot: the deletion gates must be able to
+    // prove zero.
     persistLegacyTelemetrySnapshot();
 
-    const report = JSON.parse(readFileSync(outputPath, "utf-8")) as ReturnType<typeof getLegacyTelemetryReport>;
-    assert.equal(typeof report.ts, "string");
-    assert.deepEqual(report.counters, {
+    const zeroReport = JSON.parse(readFileSync(outputPath, "utf-8")) as ReturnType<typeof getLegacyTelemetryReport>;
+    assert.equal(typeof zeroReport.ts, "string");
+    assert.deepEqual(zeroReport.counters, {
       "legacy.workflowEngineUsed": 0,
       "legacy.uokFallbackUsed": 0,
       "legacy.mcpAliasUsed": 0,
       "legacy.componentFormatUsed": 0,
       "legacy.providerDefaultUsed": 0,
+      "legacy.importApplied": 0,
+      "legacy.fileOverridesImported": 0,
+      "legacy.fileCapturesImported": 0,
+      "legacy.restoreExecuted": 0,
+      "legacy.migrateImported": 0,
+      "legacy.legacyTaskStatusWrite": 0,
     });
+
+    // A later persist merges this process's counts on top of the zero snapshot
+    // instead of hiding behind last-writer-wins overwrite.
+    incrementLegacyTelemetry("legacy.importApplied", 2);
+    persistLegacyTelemetrySnapshot();
+
+    const mergedReport = JSON.parse(readFileSync(outputPath, "utf-8")) as ReturnType<typeof getLegacyTelemetryReport>;
+    assert.equal(mergedReport.counters["legacy.importApplied"], 2);
+    assert.equal(mergedReport.counters["legacy.restoreExecuted"], 0);
   } finally {
     if (previousOutput === undefined) delete process.env.GSD_LEGACY_TELEMETRY_FILE;
     else process.env.GSD_LEGACY_TELEMETRY_FILE = previousOutput;
+    _resetLogs();
     resetLegacyTelemetry();
+    setStderrLoggingEnabled(previousStderr);
     rmSync(base, { recursive: true, force: true });
   }
 });

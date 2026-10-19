@@ -6,20 +6,24 @@ GSD-specific skill ecosystem details: directory conventions, discovery mechanics
 GSD supports these skill directories, checked in order:
 
 **Bundled (GSD-managed):** `~/.gsd/agent/skills/`
+
 - Synced by GSD during install/update
 - Highest priority when names collide
 - Not the target for user-authored skills
 
 **User-scope (global):** `~/.agents/skills/`
+
 - Available in every GSD session regardless of working directory
 - Installed via [skills.sh](https://skills.sh) or manually
 
 **Project-scope (local):** `.agents/skills/`
+
 - Available only when GSD runs inside the project directory
 - Committable to version control so team members share the same skill set
 - Ideal for project-specific workflows, deploy scripts, or conventions
 
 **Claude Code compatibility:** `~/.claude/skills/` and `.claude/skills/`
+
 - Read after the standard Agent Skills directories
 - Useful for compatibility with existing Claude Code skill installs
 

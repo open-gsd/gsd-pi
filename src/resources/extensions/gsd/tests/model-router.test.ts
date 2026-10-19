@@ -431,9 +431,9 @@ test("resolveModelForComplexity: wasDowngraded is false when preferred session m
 test("resolveModelForTier: returns canonical Anthropic model when no available models", () => {
   try {
     resetLegacyTelemetry();
-    assert.equal(resolveModelForTier("heavy", []), "claude-opus-4-6");
+    assert.equal(resolveModelForTier("heavy", []), "claude-opus-5-5");
     assert.equal(resolveModelForTier("standard", []), "claude-sonnet-4-6");
-    assert.equal(resolveModelForTier("light", []), "claude-haiku-4-5");
+    assert.equal(resolveModelForTier("light", []), "claude-haiku-5-5");
     assert.equal(getLegacyTelemetry()["legacy.providerDefaultUsed"], 3);
   } finally {
     resetLegacyTelemetry();
@@ -1473,6 +1473,42 @@ describe("getModelTier unknown default", () => {
     assert.equal(warnings.length, 1, "unknown routing warnings should be deduplicated by canonical ID");
     assert.match(warnings[0] ?? "", /safe defaults.*standard tier.*neutral capabilities.*expensive cost/i);
   });
+
+  test("disabled routing resolves unknown models with safe defaults and no warning", (t) => {
+    // Token-profile defaults resolve a tier model on every preferences load,
+    // also when dynamic_routing.enabled is false. A provider with many
+    // unregistered models (cursor-agent) must not print one line per model.
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => warnings.push(message));
+    const unknownModels = [
+      "cursor-agent/quiet-unknown-a",
+      "cursor-agent/quiet-unknown-b",
+      "cursor-agent/quiet-unknown-c",
+    ];
+    const config: DynamicRoutingConfig = { enabled: false };
+
+    assert.equal(resolveModelForTier("standard", unknownModels, config), "cursor-agent/quiet-unknown-a");
+    assert.deepEqual(getEligibleModels("standard", unknownModels, config), unknownModels);
+    assert.deepEqual(getEligibleModels("light", unknownModels, config), []);
+    assert.equal(
+      resolveModelForTier("standard", unknownModels, { ...config, cross_provider: false }, undefined, unknownModels[1]),
+      "cursor-agent/quiet-unknown-b",
+    );
+    assert.deepEqual(warnings, []);
+  });
+
+  test("enabled routing reports the same unknown model one time", (t) => {
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (message: string) => warnings.push(message));
+    const config: DynamicRoutingConfig = { enabled: true };
+
+    for (let call = 0; call < 3; call++) {
+      resolveModelForTier("standard", ["cursor-agent/loud-unknown-a"], config);
+    }
+
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /does not recognize model "cursor-agent\/loud-unknown-a"/);
+  });
 });
 
 // --- claude-sonnet-5 catalog regression (v1.12.0 gap) ---
@@ -1821,5 +1857,50 @@ describe("Phase J routing safety", () => {
 
     assert.equal(result.modelId, "brand-new-unreleased-model-pinned", "an explicit tier_models pin must be honored even without a capability profile");
     assert.equal(result.selectionMethod, "tier-only");
+  });
+});
+
+describe("Copilot GPT-5.6 family tier classification (regression, 2026-09-20)", () => {
+  // GitHub Copilot documents gpt-5.6-luna as the cheap/fast tier ("fast help
+  // with simple or repetitive tasks") and gpt-5.6-terra as the balanced
+  // everyday tier ("general-purpose coding and agent tasks"), with gpt-5.6-sol
+  // reserved for deep reasoning/long-running agentic work. All three were
+  // previously misclassified as "heavy", which defeated dynamic-routing
+  // downgrade for any project pinning gpt-5.6-sol as its heavy ceiling.
+  test("gpt-5.6-luna canonicalizes to the light tier", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["gpt-5-6-luna"], "light");
+  });
+
+  test("gpt-5.6-terra canonicalizes to the standard tier", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["gpt-5-6-terra"], "standard");
+  });
+
+  test("gpt-5.6-sol remains the heavy tier", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["gpt-5-6-sol"], "heavy");
+  });
+
+  test("dotted Copilot IDs canonicalize onto the corrected tiers", () => {
+    assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-luna"), "gpt-5-6-luna");
+    assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-terra"), "gpt-5-6-terra");
+    assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-sol"), "gpt-5-6-sol");
+  });
+
+  // #2701 — Haiku 5.5 joins the light tier so tier routing recognizes it
+  // instead of silently bypassing it (#1612). Canonical default stays
+  // claude-haiku-4-5 (owner decision, out of scope).
+  test("claude-haiku-5-5 is a known light-tier model", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["claude-haiku-5-5"], "light");
+    const result = resolveModelForComplexity(
+      makeClassification("light"),
+      { primary: "claude-opus-4-6", fallbacks: [] },
+      { ...defaultRoutingConfig(), enabled: true },
+      ["claude-opus-4-6", "claude-haiku-5-5"],
+    );
+    assert.equal(result.modelId, "claude-haiku-5-5");
+    assert.equal(result.wasDowngraded, true);
+  });
+
+  test("claude-haiku-5-5 has a curated capability profile", () => {
+    assert.equal(getModelProfileConfidence("claude-haiku-5-5"), "curated");
   });
 });

@@ -32,6 +32,7 @@ import {
   detectProjectionDrift,
   getCurrentProjectStateVersion,
   readProjectionStateVersion,
+  comparableProjectionContent,
 } from '../markdown-renderer.ts';
 import { clearParseCache } from '../files.ts';
 import { clearPathCache, _clearGsdRootCache } from '../paths.ts';
@@ -261,4 +262,111 @@ test('projection-fidelity: stamp-only difference is not treated as content drift
     closeDatabase();
     cleanupDir(tmpDir);
   }
+});
+
+// ─── Trailing-newline stamp separator (issue #2427) ────────────────────────
+//
+// stampProjectionContent inserts a "\n" separator before the stamp when the
+// render intent does not end with a newline. stripProjectionStamp removes only
+// the stamp line, so for newline-less DB content the stamped file strips to
+// DB content + "\n" — a guaranteed 1-byte phantom drift. detectProjectionDrift
+// must normalize trailing newlines on both sides before comparing.
+
+function seedTaskWithSummary(taskId: string, summaryMd: string): void {
+  insertTask({
+    id: taskId, sliceId: 'S01', milestoneId: 'M001',
+    title: `Task ${taskId}`, status: 'done', fullSummaryMd: summaryMd,
+  });
+}
+
+function taskSummaryAbs(tmpDir: string, taskId: string): string {
+  return path.join(tmpDir, '.gsd', 'phases', '01-test', `S01-${taskId}-SUMMARY.md`);
+}
+
+test('projection-fidelity: DB intent without a trailing newline does not drift after stamping', async (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  openDatabase(path.join(tmpDir, '.gsd', 'gsd.db'));
+  clearAllCaches();
+
+  seedFixtureProject(tmpDir);
+  // T02's summary deliberately lacks the trailing newline; T03's carries an
+  // extra one. Both normalize to the same content as their projections.
+  seedTaskWithSummary('T02', [
+    '# T02: No Trailing Newline',
+    '',
+    'Last line without a newline.',
+  ].join('\n'));
+  seedTaskWithSummary('T03', [
+    '# T03: Extra Trailing Newlines',
+    '',
+    'Ends with two newlines.',
+    '',
+    '',
+  ].join('\n'));
+
+  const result = await renderAllFromDb(tmpDir);
+  assert.deepStrictEqual(result.errors, [], 'renderAllFromDb had no errors');
+
+  // The projections went through the real stamping path.
+  for (const taskId of ['T01', 'T02', 'T03']) {
+    const abs = taskSummaryAbs(tmpDir, taskId);
+    assert.ok(fs.existsSync(abs), `S01-${taskId}-SUMMARY.md was rendered`);
+    assert.match(
+      fs.readFileSync(abs, 'utf-8'),
+      /<!-- gsd:state-version=\d+:\d+ -->\n$/,
+      `S01-${taskId}-SUMMARY.md carries the state-version stamp`,
+    );
+  }
+
+  assert.deepStrictEqual(
+    detectProjectionDrift(tmpDir),
+    [],
+    'newline-less DB intent does not produce phantom drift; newline-terminated and extra-newline intents stay drift-free',
+  );
+});
+
+test('projection-fidelity: genuine content drift beyond trailing newlines is still detected', async (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  openDatabase(path.join(tmpDir, '.gsd', 'gsd.db'));
+  clearAllCaches();
+
+  seedFixtureProject(tmpDir);
+  const result = await renderAllFromDb(tmpDir);
+  assert.deepStrictEqual(result.errors, [], 'renderAllFromDb had no errors');
+
+  // Change the DB render intent by more than a trailing newline. Mutate the
+  // stored value itself (no regeneration) so the drift can only come from the
+  // intended sentence change.
+  const current = (_getAdapter()!.prepare(
+    "SELECT full_summary_md FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+  ).get() as { full_summary_md: string }).full_summary_md;
+  const mutated = current.replace('Built the test feature.', 'Built the test feature differently.');
+  assert.notEqual(mutated, current, 'fixture mutation actually changed the stored intent');
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET full_summary_md = ? WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'",
+  ).run(mutated + '\n');
+
+  const drift = detectProjectionDrift(tmpDir);
+  const summaryAbs = taskSummaryAbs(tmpDir, 'T01');
+  assert.ok(
+    drift.some((entry) => pathsEqual(entry.path, summaryAbs)),
+    'interior content change is still detected as stale',
+  );
+});
+
+test('projection-fidelity: comparableProjectionContent treats all trailing newline forms as inert (#2427)', () => {
+  // A trailing bare CR on the DB side must not resurrect the phantom: the
+  // stamped file ends "...\r\n<!-- stamp -->\n", whose normalization consumes
+  // the CRLF pair, so the bare-CR DB intent must normalize the same way.
+  assert.equal(comparableProjectionContent('abc'), comparableProjectionContent('abc\n'));
+  assert.equal(comparableProjectionContent('abc'), comparableProjectionContent('abc\r\n'));
+  assert.equal(comparableProjectionContent('abc'), comparableProjectionContent('abc\r'));
+  assert.equal(comparableProjectionContent('abc'), comparableProjectionContent('abc\n\n\n'));
+  assert.equal(comparableProjectionContent('abc'), comparableProjectionContent('abc\r\n\r\n'));
+  // Interior differences and trailing non-newline whitespace stay byte-exact.
+  assert.notEqual(comparableProjectionContent('abc'), comparableProjectionContent('abd'));
+  assert.notEqual(comparableProjectionContent('abc'), comparableProjectionContent('abc\nx\n'));
+  assert.notEqual(comparableProjectionContent('abc '), comparableProjectionContent('abc'));
 });

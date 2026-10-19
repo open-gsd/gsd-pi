@@ -697,3 +697,26 @@ test("legacy import backup verification rejects non-exact input before independe
   assert.equal(opens, 0);
   assert.ok(lstatSync(fixture.stagingDirectory).isDirectory(), "contract rejection does not claim ownership");
 });
+
+test("legacy import backup verification attaches the actual foreign-key violation rows to the error context", (t) => {
+  const { testVerify } = verificationApi();
+  const fixture = snapshotFixture(t);
+  const violationRows = [
+    { table: "workflow_item_lifecycles", rowid: 49, parent: "milestones", fkid: 3 },
+    { table: "workflow_item_lifecycles", rowid: 50, parent: "slices", fkid: 2 },
+    { table: "quality_gates", rowid: 7, parent: "milestones", fkid: 0 },
+  ];
+  const err = expectVerificationError(
+    () => testVerify(fixture.input, {
+      openReadOnly: (path) => interceptedConnection(path, {
+        rows: (sql, rows) => sql.toLowerCase().includes("pragma foreign_key_check")
+          ? violationRows.map((row) => ({ ...row }))
+          : rows,
+      }),
+    }),
+    "verification",
+    "LEGACY_IMPORT_BACKUP_FOREIGN_KEY_FAILED",
+  );
+  assert.equal(err.context.violation_count, 3);
+  assert.deepEqual(err.context.violations, violationRows);
+});

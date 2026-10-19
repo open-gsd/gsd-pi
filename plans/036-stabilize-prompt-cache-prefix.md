@@ -181,6 +181,7 @@ turns", keep "last N + (turnCount mod N)" turns so the masked region only
 grows when a full block of N new turns has accumulated.
 
 Invariants that must hold (assert in tests):
+
 - At least `keepRecentTurns` most-recent turns are always unmasked.
 - At most `2 * keepRecentTurns - 1` turns are unmasked (bounded memory cost).
 - For a fixed conversation prefix, adding one new turn does NOT change the
@@ -240,6 +241,7 @@ setting reaches `streamOptions.cacheRetention`.
 ### Step 5: Boundary gates and full pass
 
 **Verify**:
+
 - `pnpm run verify:pi-boundary && pnpm run verify:pi-patches` → exit 0
 - `pnpm run typecheck:extensions` → exit 0
 - `node scripts/verify-changed-src-tests.mjs` → pass

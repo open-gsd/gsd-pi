@@ -37,6 +37,7 @@ You never write application code yourself — GSD does that.
 </mental_model>
 
 <critical_rules>
+
 - **Flags before command.** `gsd headless [--flags] [command] [args]`. Flags after the command are ignored.
 - **Redirect stderr.** JSON output goes to stdout. Progress goes to stderr. Always `2>/dev/null` when parsing JSON.
 - **Check exit codes.** 0=success, 1=error, 10=blocked (needs you), 11=cancelled.
@@ -70,6 +71,7 @@ Read `references/commands.md` — full command reference with flags and examples
 <quick_reference>
 
 **Launch a full build (spec to working code):**
+
 ```bash
 mkdir -p /tmp/my-project && cd /tmp/my-project && git init
 cat > spec.md << 'EOF'
@@ -80,18 +82,21 @@ gsd headless --output-format json --context spec.md new-milestone --auto 2>/dev/
 ```
 
 **Check project state (instant, free):**
+
 ```bash
 cd /path/to/project
 gsd headless query | jq '{phase: .state.phase, progress: .state.progress, cost: .cost.total}'
 ```
 
 **Resume work on an existing project:**
+
 ```bash
 cd /path/to/project
 gsd headless --output-format json auto 2>/dev/null
 ```
 
 **Run one step at a time:**
+
 ```bash
 RESULT=$(gsd headless --output-format json next 2>/dev/null)
 echo "$RESULT" | jq '{status: .status, phase: .phase, cost: .cost.total}'
@@ -103,19 +108,20 @@ echo "$RESULT" | jq '{status: .status, phase: .phase, cost: .cost.total}'
 | Code | Meaning | Your action |
 |------|---------|-------------|
 | `0`  | Success | Check deliverables, verify output, report completion |
-| `1`  | Error or timeout | Inspect stderr, check `.gsd/STATE.md`, retry or escalate |
+| `1`  | Error or timeout | Inspect stderr, check `gsd headless query`, retry or escalate |
 | `10` | Blocked | Query state for blocker details, steer around it or escalate to human |
 | `11` | Cancelled | Process was interrupted — resume with `--resume <sessionId>` or restart |
 </exit_codes>
 
 <project_structure>
-GSD creates and manages all state in `.gsd/`:
+GSD keeps all state in its database (`.gsd/gsd.db`) and renders these files from it in `.gsd/`:
+
 ```
 .gsd/
   PROJECT.md          # What this project is
   REQUIREMENTS.md     # Capability contract
-  DECISIONS.md        # Architectural decisions (append-only)
-  KNOWLEDGE.md        # Persistent project knowledge (manual rules, memory-projected patterns/lessons)
+  DECISIONS.md        # Architectural decisions
+  KNOWLEDGE.md        # Persistent project knowledge (rules, patterns and lessons rendered from the database)
   STATE.md            # Current phase and next action
   milestones/
     M001-xxxxx/
@@ -130,7 +136,7 @@ GSD creates and manages all state in `.gsd/`:
           T01-SUMMARY.md       # Task completion summary
 ```
 
-State is derived from files on disk — checkboxes in ROADMAP.md and PLAN.md are the source of truth for completion. You never need to edit these files. GSD manages them. But you can read them to understand progress.
+The database is the source of truth. These files are renders: read them to understand progress, but never edit them — an edit does not change state and the next render discards it. For current state use `gsd headless query`.
 </project_structure>
 
 <flags>

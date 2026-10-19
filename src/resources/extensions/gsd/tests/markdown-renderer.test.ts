@@ -36,13 +36,14 @@ import {
   renderPlanFromDb,
   renderTaskPlanFromDb,
   renderRoadmapFromDb,
+  renderMilestoneArtifactsFromDb,
   detectStaleRenders,
   detectProjectionDrift,
   getCurrentProjectStateVersion,
   stripProjectionStamp,
 } from '../markdown-renderer.ts';
 import { repairStaleRenders } from '../state-reconciliation/drift/stale-render.ts';
-import { migrateHierarchyToDb } from '../md-importer.ts';
+import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import {
   parseProjectionRoadmap as parseRoadmap,
   parseProjectionPlan as parsePlan,
@@ -493,6 +494,90 @@ test('── markdown-renderer: renderPlanCheckboxes bidirectional ──', asyn
     closeDatabase();
     cleanupDir(tmpDir);
   }
+});
+
+test('── markdown-renderer: renderPlanCheckboxes silently skips a skipped slice ──', async (t) => {
+  // Regression (#2335): a skipped slice's tasks are all terminal, so
+  // getActivePlanTasks() legitimately returns an empty list. That is valid
+  // historical state — nothing to project — not a "no tasks found" diagnostic.
+  const tmpDir = makeTmpDir();
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  let stderr = '';
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  t.after(() => { process.stderr.write = originalWrite; });
+  t.after(() => { closeDatabase(); cleanupDir(tmpDir); });
+
+  scaffoldDirs(tmpDir, 'M001', ['S01']);
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Slice', status: 'skipped' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Only task', status: 'skipped' });
+
+  const ok = await renderPlanCheckboxes(tmpDir, 'M001', 'S01');
+  assert.ok(!ok, 'skipped slice projects nothing (returns false)');
+  assert.doesNotMatch(stderr, /no tasks found/, 'no "no tasks found" diagnostic for a skipped slice');
+});
+
+test('── markdown-renderer: renderPlanCheckboxes still warns on a non-skipped slice with no tasks ──', async (t) => {
+  // Control for #2335: a non-skipped slice with a genuinely empty task list
+  // keeps the existing diagnostic.
+  const tmpDir = makeTmpDir();
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  let stderr = '';
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  t.after(() => { process.stderr.write = originalWrite; });
+  t.after(() => { closeDatabase(); cleanupDir(tmpDir); });
+
+  scaffoldDirs(tmpDir, 'M001', ['S01']);
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Slice', status: 'pending' });
+  // No tasks inserted — genuinely empty.
+
+  const ok = await renderPlanCheckboxes(tmpDir, 'M001', 'S01');
+  assert.ok(!ok, 'returns false when there is nothing to project');
+  assert.match(stderr, /no tasks found/, 'diagnostic preserved for a non-skipped empty slice');
+});
+
+test('── markdown-renderer: renderPlanCheckboxes warns when every task is skipped but the slice is not ──', async (t) => {
+  // Coverage for the #2335 guard: suppression depends on the slice status,
+  // not task content. A non-skipped slice whose tasks are ALL skipped has no
+  // active work and no projection target — the diagnostic must still fire.
+  const tmpDir = makeTmpDir();
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  let stderr = '';
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  t.after(() => { process.stderr.write = originalWrite; });
+  t.after(() => { closeDatabase(); cleanupDir(tmpDir); });
+
+  scaffoldDirs(tmpDir, 'M001', ['S01']);
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Slice', status: 'pending' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'First task', status: 'skipped' });
+  insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', title: 'Second task', status: 'skipped' });
+
+  const ok = await renderPlanCheckboxes(tmpDir, 'M001', 'S01');
+  assert.ok(!ok, 'returns false when there is nothing to project');
+  assert.match(stderr, /no tasks found/, 'slice status, not task content, controls suppression');
 });
 
 test('── markdown-renderer: renderPlanFromDb creates parse-compatible slice plan + task plan files ──', { skip: true }, async () => {
@@ -1254,7 +1339,7 @@ test('── markdown-renderer: stderr warning on missing content ──', async
 // Stale Detection — Plan Checkbox Mismatch
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('── markdown-renderer: detectStaleRenders finds plan checkbox mismatch ──', { skip: true }, () => {
+test('── markdown-renderer: detectStaleRenders finds plan checkbox mismatch ──', () => {
   const tmpDir = makeTmpDir();
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -1286,9 +1371,9 @@ test('── markdown-renderer: detectStaleRenders finds plan checkbox mismatch 
     const stale = detectStaleRenders(tmpDir);
 
     assert.ok(stale.length > 0, 'detectStaleRenders should find stale entries');
-    const t02Stale = stale.find(s => s.reason.includes('T02'));
-    assert.ok(!!t02Stale, 'should detect T02 as stale (done in DB, unchecked in plan)');
-    assert.ok(t02Stale!.reason.includes('done in DB but unchecked'), 'reason should explain the mismatch');
+    const t02Stale = stale.find(s => s.reason.includes('in plan'));
+    assert.ok(!!t02Stale, 'should detect plan as stale (done in DB, unchecked in plan)');
+    assert.ok(t02Stale!.reason.includes('in plan'), 'reason should keep the repair-dispatch "in plan" marker');
 
     // T01 should NOT be stale — it's checked and done
     const t01Stale = stale.find(s => s.reason.includes('T01'));
@@ -1303,7 +1388,7 @@ test('── markdown-renderer: detectStaleRenders finds plan checkbox mismatch 
 // Stale Repair — Plan Checkbox
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('── markdown-renderer: repairStaleRenders fixes plan and second detect returns empty ──', { skip: true }, async () => {
+test('── markdown-renderer: repairStaleRenders fixes plan and second detect returns empty ──', async () => {
   const tmpDir = makeTmpDir();
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -1354,7 +1439,7 @@ test('── markdown-renderer: repairStaleRenders fixes plan and second detect 
 // Stale Detection — Roadmap Checkbox Mismatch
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('── markdown-renderer: detectStaleRenders finds roadmap checkbox mismatch ──', { skip: true }, () => {
+test('── markdown-renderer: detectProjectionDrift finds roadmap checkbox mismatch ──', () => {
   const tmpDir = makeTmpDir();
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -1376,11 +1461,11 @@ test('── markdown-renderer: detectStaleRenders finds roadmap checkbox mismat
     fs.writeFileSync(roadmapPath, roadmapContent);
     clearAllCaches();
 
-    const stale = detectStaleRenders(tmpDir);
-    const s01Stale = stale.find(s => s.reason.includes('S01'));
-    assert.ok(!!s01Stale, 'should detect S01 as stale (complete in DB, unchecked in roadmap)');
+    const stale = detectProjectionDrift(tmpDir);
+    const s01Stale = stale.find(s => s.reason.includes('in roadmap'));
+    assert.ok(!!s01Stale, 'should detect roadmap as stale (complete in DB, unchecked in roadmap)');
 
-    const s02Stale = stale.find(s => s.reason.includes('S02'));
+    const s02Stale = stale.find(s => s.reason.includes('in roadmap') && s.reason.includes('S02'));
     assert.deepStrictEqual(s02Stale, undefined, 'S02 should not be stale (pending and unchecked — matches)');
   } finally {
     closeDatabase();
@@ -1388,7 +1473,273 @@ test('── markdown-renderer: detectStaleRenders finds roadmap checkbox mismat
   }
 });
 
-test('── markdown-renderer: repairStaleRenders reads worktree roadmap projection ──', { skip: true }, async () => {
+test('── markdown-renderer: milestone ASSESSMENT and ROADMAP-ASSESSMENT rows drift-check their own files (#2535) ──', (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  const assessmentContent = '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n';
+  const roadmapAssessmentContent = '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n';
+  const assessmentPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md');
+  const roadmapAssessmentPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ROADMAP-ASSESSMENT.md');
+  fs.writeFileSync(assessmentPath, assessmentContent);
+  fs.writeFileSync(roadmapAssessmentPath, roadmapAssessmentContent);
+  // Both rows are milestone-scoped with artifact_type ASSESSMENT — the
+  // gsd_reassess_roadmap row stores the same type at a different path.
+  insertArtifact({
+    path: 'phases/01-test/01-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: assessmentContent,
+  });
+  insertArtifact({
+    path: 'phases/01-test/01-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: roadmapAssessmentContent,
+  });
+  clearAllCaches();
+
+  assert.deepStrictEqual(
+    detectProjectionDrift(tmpDir),
+    [],
+    'each milestone-scoped ASSESSMENT row matches its own file — no drift (#2535)',
+  );
+
+  fs.writeFileSync(assessmentPath, assessmentContent + '\nEXTERNAL_EDIT\n');
+  clearAllCaches();
+  assert.ok(
+    detectProjectionDrift(tmpDir).some(s => pathsEqual(s.path, assessmentPath) && s.reason.includes('ASSESSMENT for M001 differs')),
+    'a real edit to NN-ASSESSMENT.md is still detected',
+  );
+
+  fs.writeFileSync(assessmentPath, assessmentContent);
+  fs.writeFileSync(roadmapAssessmentPath, roadmapAssessmentContent + '\nEXTERNAL_EDIT\n');
+  clearAllCaches();
+  assert.ok(
+    detectProjectionDrift(tmpDir).some(s => pathsEqual(s.path, roadmapAssessmentPath) && s.reason.includes('ASSESSMENT for M001 differs')),
+    'NN-ROADMAP-ASSESSMENT.md is drift-checked against its own row (#2535)',
+  );
+});
+
+test('── markdown-renderer: missing ROADMAP-ASSESSMENT file does not flag the ASSESSMENT file as drifted (#2535) ──', (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  const assessmentContent = '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n';
+  const assessmentPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md');
+  fs.writeFileSync(assessmentPath, assessmentContent);
+  // The roadmap row's projection was deleted from disk; its DB row remains.
+  insertArtifact({
+    path: 'phases/01-test/01-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: assessmentContent,
+  });
+  insertArtifact({
+    path: 'phases/01-test/01-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n',
+  });
+  clearAllCaches();
+
+  assert.deepStrictEqual(
+    detectProjectionDrift(tmpDir),
+    [],
+    'the missing roadmap row file must not collapse onto NN-ASSESSMENT.md and flag false drift (#2535)',
+  );
+});
+
+test('── markdown-renderer: renderMilestoneArtifactsFromDb writes milestone ASSESSMENT rows to their own paths (#2535) ──', async (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  insertArtifact({
+    path: 'phases/01-test/01-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n',
+  });
+  insertArtifact({
+    path: 'phases/01-test/01-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n',
+  });
+  clearAllCaches();
+
+  await renderMilestoneArtifactsFromDb(tmpDir, 'M001');
+
+  const assessmentContent = fs.readFileSync(
+    path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md'), 'utf-8');
+  assert.ok(
+    assessmentContent.includes('PLAIN-ASSESSMENT-CONTENT') && !assessmentContent.includes('ROADMAP-REASSESS-CONTENT'),
+    'NN-ASSESSMENT.md keeps its own row content (#2535)',
+  );
+  const roadmapAssessmentContent = fs.readFileSync(
+    path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ROADMAP-ASSESSMENT.md'), 'utf-8');
+  assert.ok(
+    roadmapAssessmentContent.includes('ROADMAP-REASSESS-CONTENT') && !roadmapAssessmentContent.includes('PLAIN-ASSESSMENT-CONTENT'),
+    'NN-ROADMAP-ASSESSMENT.md is re-rendered from its own row (#2535)',
+  );
+
+  const storedAssessment = getArtifact('phases/01-test/01-ASSESSMENT.md');
+  assert.ok(
+    storedAssessment && storedAssessment.full_content.includes('PLAIN-ASSESSMENT-CONTENT') && !storedAssessment.full_content.includes('ROADMAP-REASSESS-CONTENT'),
+    'the NN-ASSESSMENT.md row is not overwritten by the roadmap row (#2535)',
+  );
+  const storedRoadmapAssessment = getArtifact('phases/01-test/01-ROADMAP-ASSESSMENT.md');
+  assert.ok(
+    storedRoadmapAssessment && storedRoadmapAssessment.full_content.includes('ROADMAP-REASSESS-CONTENT') && !storedRoadmapAssessment.full_content.includes('PLAIN-ASSESSMENT-CONTENT'),
+    'the NN-ROADMAP-ASSESSMENT.md row keeps its own content (#2535)',
+  );
+});
+
+test('── markdown-renderer: stale phase-dir rows render into the canonical dir without recreating the old one (#2535) ──', async (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  // The phase dir was renamed on disk; the rows still point at the old name.
+  const assessmentContent = '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n';
+  const roadmapAssessmentContent = '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n';
+  fs.writeFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md'), assessmentContent);
+  fs.writeFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ROADMAP-ASSESSMENT.md'), roadmapAssessmentContent);
+  insertArtifact({
+    path: 'phases/01-old/01-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: assessmentContent,
+  });
+  insertArtifact({
+    path: 'phases/01-old/01-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: roadmapAssessmentContent,
+  });
+  clearAllCaches();
+
+  await renderMilestoneArtifactsFromDb(tmpDir, 'M001');
+
+  assert.ok(
+    !fs.existsSync(path.join(tmpDir, '.gsd', 'phases', '01-old')),
+    'the obsolete phase directory is not recreated (#2535)',
+  );
+  assert.ok(
+    fs.readFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md'), 'utf-8').includes('PLAIN-ASSESSMENT-CONTENT'),
+    'the canonical-dir ASSESSMENT file is rendered from its row',
+  );
+  assert.ok(
+    fs.readFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ROADMAP-ASSESSMENT.md'), 'utf-8').includes('ROADMAP-REASSESS-CONTENT'),
+    'the roadmap reassessment keeps its own filename in the canonical dir (#2535)',
+  );
+
+  clearAllCaches();
+  assert.deepStrictEqual(
+    detectProjectionDrift(tmpDir),
+    [],
+    'renamed-dir rows are drift-checked against their translated canonical-dir files (#2535)',
+  );
+});
+
+test('── markdown-renderer: legacy-named ASSESSMENT rows keep both contents when rendered into a flat phase dir (#2535) ──', async (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  // Flat-phase layout on disk (legacy milestones/ tree already moved aside by
+  // migration) while the rows still carry legacy basenames. Neither basename
+  // matches the canonical 01-ASSESSMENT.md, so the resolver's first-in-path
+  // order owner fallback applies.
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  const assessmentContent = '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n';
+  const roadmapAssessmentContent = '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n';
+  insertArtifact({
+    path: 'milestones/M001/M001-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: assessmentContent,
+  });
+  insertArtifact({
+    path: 'milestones/M001/M001-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: roadmapAssessmentContent,
+  });
+  clearAllCaches();
+
+  await renderMilestoneArtifactsFromDb(tmpDir, 'M001');
+
+  const assessmentPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md');
+  assert.ok(
+    fs.readFileSync(assessmentPath, 'utf-8').includes('PLAIN-ASSESSMENT-CONTENT')
+      && !fs.readFileSync(assessmentPath, 'utf-8').includes('ROADMAP-REASSESS-CONTENT'),
+    'the canonical flat file carries the plain assessment content, not the roadmap reassessment (#2535)',
+  );
+  assert.ok(
+    fs.readFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', 'M001-ROADMAP-ASSESSMENT.md'), 'utf-8').includes('ROADMAP-REASSESS-CONTENT'),
+    'the legacy roadmap reassessment keeps its own filename and content in the flat dir (#2535)',
+  );
+  const storedAssessment = getArtifact('phases/01-test/01-ASSESSMENT.md');
+  assert.ok(
+    storedAssessment && storedAssessment.full_content.includes('PLAIN-ASSESSMENT-CONTENT'),
+    'the flat-phase row for the plain assessment survives (#2535)',
+  );
+  const storedRoadmapAssessment = getArtifact('phases/01-test/M001-ROADMAP-ASSESSMENT.md');
+  assert.ok(
+    storedRoadmapAssessment && storedRoadmapAssessment.full_content.includes('ROADMAP-REASSESS-CONTENT'),
+    'the flat-phase row for the roadmap reassessment survives (#2535)',
+  );
+});
+
+test('── markdown-renderer: renderRoadmapFromDb reads worktree roadmap projection ──', async () => {
   const tmpDir = makeTmpDir();
   const worktreeDir = path.join(tmpDir, '.gsd', 'worktrees', 'M001');
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
@@ -1413,9 +1764,9 @@ test('── markdown-renderer: repairStaleRenders reads worktree roadmap projec
     fs.writeFileSync(projectionRoadmapPath, staleRoadmap);
     clearAllCaches();
 
-    const staleBefore = detectStaleRenders(worktreeDir);
+    const staleBefore = detectProjectionDrift(worktreeDir);
     assert.ok(
-      staleBefore.some(s => pathsEqual(s.path, projectionRoadmapPath) && s.reason.includes('S01')),
+      staleBefore.some(s => pathsEqual(s.path, projectionRoadmapPath) && s.reason.includes('in roadmap')),
       'worktree projection roadmap should be detected as stale',
     );
     assert.ok(
@@ -1423,11 +1774,10 @@ test('── markdown-renderer: repairStaleRenders reads worktree roadmap projec
       'project mirror roadmap should not be used for worktree stale detection',
     );
 
-    const repaired = await repairStaleRenders(worktreeDir);
-    assert.ok(repaired > 0, 'repairStaleRenders should repair the worktree projection');
+    await renderRoadmapFromDb(worktreeDir, 'M001');
 
     clearAllCaches();
-    const staleAfter = detectStaleRenders(worktreeDir);
+    const staleAfter = detectProjectionDrift(worktreeDir);
     assert.deepStrictEqual(staleAfter, [], 'worktree stale roadmap should be clear after repair');
 
     const projectContent = fs.readFileSync(projectRoadmapPath, 'utf-8');
@@ -1440,7 +1790,7 @@ test('── markdown-renderer: repairStaleRenders reads worktree roadmap projec
   }
 });
 
-test('── markdown-renderer: repairStaleRenders handles descriptor roadmap projection dirs ──', { skip: true }, async () => {
+test('── markdown-renderer: renderRoadmapFromDb handles descriptor roadmap projection dirs ──', async () => {
   const tmpDir = makeTmpDir();
   const worktreeDir = path.join(tmpDir, '.gsd', 'worktrees', 'M001');
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
@@ -1461,17 +1811,16 @@ test('── markdown-renderer: repairStaleRenders handles descriptor roadmap pr
     fs.writeFileSync(descriptorRoadmapPath, staleRoadmap);
     clearAllCaches();
 
-    const staleBefore = detectStaleRenders(worktreeDir);
+    const staleBefore = detectProjectionDrift(worktreeDir);
     assert.ok(
-      staleBefore.some(s => pathsEqual(s.path, descriptorRoadmapPath) && s.reason.includes('S01')),
+      staleBefore.some(s => pathsEqual(s.path, descriptorRoadmapPath) && s.reason.includes('in roadmap')),
       'descriptor worktree projection roadmap should be detected as stale',
     );
 
-    const repaired = await repairStaleRenders(worktreeDir);
-    assert.ok(repaired > 0, 'repairStaleRenders should repair the descriptor projection');
+    await renderRoadmapFromDb(worktreeDir, 'M001');
 
     clearAllCaches();
-    const staleAfter = detectStaleRenders(worktreeDir);
+    const staleAfter = detectProjectionDrift(worktreeDir);
     assert.deepStrictEqual(staleAfter, [], 'descriptor stale roadmap should be clear after repair');
 
     const projectionContent = fs.readFileSync(descriptorRoadmapPath, 'utf-8');
@@ -1482,7 +1831,7 @@ test('── markdown-renderer: repairStaleRenders handles descriptor roadmap pr
   }
 });
 
-test('── markdown-renderer: repairStaleRenders handles legacy descriptor roadmap filenames ──', { skip: true }, async () => {
+test('── markdown-renderer: renderRoadmapFromDb handles legacy descriptor roadmap filenames ──', async () => {
   const tmpDir = makeTmpDir();
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -1502,17 +1851,16 @@ test('── markdown-renderer: repairStaleRenders handles legacy descriptor roa
     fs.writeFileSync(legacyRoadmapPath, staleRoadmap);
     clearAllCaches();
 
-    const staleBefore = detectStaleRenders(tmpDir);
+    const staleBefore = detectProjectionDrift(tmpDir);
     assert.ok(
-      staleBefore.some(s => pathsEqual(s.path, legacyRoadmapPath) && s.reason.includes('S01')),
+      staleBefore.some(s => pathsEqual(s.path, legacyRoadmapPath) && s.reason.includes('in roadmap')),
       'legacy descriptor roadmap filename should be detected as stale',
     );
 
-    const repaired = await repairStaleRenders(tmpDir);
-    assert.ok(repaired > 0, 'repairStaleRenders should repair the legacy descriptor roadmap');
+    await renderRoadmapFromDb(tmpDir, 'M001');
 
     clearAllCaches();
-    const staleAfter = detectStaleRenders(tmpDir);
+    const staleAfter = detectProjectionDrift(tmpDir);
     assert.deepStrictEqual(staleAfter, [], 'legacy descriptor roadmap should be clear after repair');
 
     const repairedContent = fs.readFileSync(legacyRoadmapPath, 'utf-8');
@@ -1527,7 +1875,7 @@ test('── markdown-renderer: repairStaleRenders handles legacy descriptor roa
 // Stale Detection — Missing Task Summary
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('── markdown-renderer: detectStaleRenders finds missing task summary ──', { skip: true }, () => {
+test('── markdown-renderer: detectStaleRenders finds missing task summary ──', () => {
   const tmpDir = makeTmpDir();
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -1574,7 +1922,7 @@ test('── markdown-renderer: detectStaleRenders finds missing task summary �
 // Stale Repair — Missing Task Summary
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('── markdown-renderer: repairStaleRenders writes missing task summary ──', { skip: true }, async () => {
+test('── markdown-renderer: repairStaleRenders writes missing task summary ──', async () => {
   const tmpDir = makeTmpDir();
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -1642,12 +1990,8 @@ test('── markdown-renderer: repairStaleRenders idempotency — fully synced 
     insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Slice', status: 'pending' });
     insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Task', status: 'done' });
 
-    // Write plan with T01 checked — matches DB
-    const planContent = makePlanContent('S01', [
-      { id: 'T01', title: 'Task', done: true },
-    ]);
-    const planPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-01-PLAN.md');
-    fs.writeFileSync(planPath, planContent);
+    // Render plan from DB so on-disk bytes match render intent (checkboxes + metadata).
+    await renderPlanFromDb(tmpDir, 'M001', 'S01');
     clearAllCaches();
 
     // No stale entries when everything is in sync (no summary to check since no fullSummaryMd)
@@ -1663,7 +2007,7 @@ test('── markdown-renderer: repairStaleRenders idempotency — fully synced 
 // Stale Detection — Missing Slice Summary + UAT
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('── markdown-renderer: detectStaleRenders finds missing slice summary and UAT ──', { skip: true }, () => {
+test('── markdown-renderer: detectStaleRenders finds missing slice summary and UAT ──', () => {
   const tmpDir = makeTmpDir();
   const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -1818,7 +2162,9 @@ test('── markdown-renderer: renderRoadmapFromDb renders milestone with visio
     // upsertMilestonePlanning sets the vision; insertMilestone leaves it "".
     // Simulate a planned-but-not-yet-sliced milestone via the planning upsert.
     const { upsertMilestonePlanning } = await import('../gsd-db.ts');
-    upsertMilestonePlanning('M017', { vision: 'A slice-less milestone', title: 'Visionary', status: 'active', depends_on: [] });
+    // No status here: insertMilestone already wrote it, and the planning
+    // status write is a canonical-backed projection now.
+    upsertMilestonePlanning('M017', { vision: 'A slice-less milestone', title: 'Visionary', depends_on: [] });
     scaffoldDirs(tmpDir, 'M017', []);
 
     const result = await renderRoadmapFromDb(tmpDir, 'M017');

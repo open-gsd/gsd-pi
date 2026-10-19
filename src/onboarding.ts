@@ -17,8 +17,8 @@ import type { AuthStorage } from '@gsd/pi-coding-agent'
 import { renderGsdPiLogo, GSD_PI_BRAND, GSD_WEBSITE } from './logo.js'
 import { agentDir } from './app-paths.js'
 import { isClaudeCliReady } from './claude-cli-check.js'
-import { isAntigravityCliReady, isGeminiCliReady } from './resources/extensions/google-cli/readiness.js'
-import { isCursorAgentReady } from './resources/extensions/cursor-cli/readiness.js'
+import { settleAntigravityCliReadiness, settleGeminiCliReadiness } from './resources/extensions/google-cli/readiness.js'
+import { settleCursorAgentReadiness } from './resources/extensions/cursor-cli/readiness.js'
 import {
   markOnboardingComplete,
   markStepCompleted,
@@ -395,6 +395,19 @@ export async function runLlmStep(p: ClackModule, pc: PicoModule, authStorage: Au
   // Check if already authenticated
   const existingAuth = LLM_PROVIDER_IDS.find(id => authStorage.hasAuth(id))
 
+  // Detect locally installed CLIs. The probes run concurrently on async child
+  // processes, so the terminal stays responsive while they finish (they used
+  // to run back to back on the main thread and freeze it for seconds on
+  // Windows before the first prompt).
+  const detectSpinner = p.spinner()
+  detectSpinner.start('Checking for installed AI CLIs...')
+  const [claudeCliReady, cursorAgentReady, antigravityCliReady, geminiCliReady] = await Promise.all([
+    isClaudeCliReady(),
+    settleCursorAgentReadiness(),
+    settleAntigravityCliReadiness(),
+    settleGeminiCliReadiness(),
+  ]).finally(() => detectSpinner.stop('Checked for installed AI CLIs'))
+
   // ── Step 1: How do you want to authenticate? ─────────────────────────────
   type AuthOption = { value: string; label: string; hint?: string }
   const authOptions: AuthOption[] = []
@@ -405,23 +418,23 @@ export async function runLlmStep(p: ClackModule, pc: PicoModule, authStorage: Au
 
   // Show Claude Code CLI option at the top when the CLI is installed and authenticated (#3772).
   // This is the only TOS-compliant path for Anthropic subscription users.
-  if (isClaudeCliReady()) {
+  if (claudeCliReady) {
     authOptions.push(
       { value: 'claude-cli', label: 'Use Claude Code CLI', hint: 'uses your existing Claude subscription' },
     )
   }
 
-  if (isCursorAgentReady()) {
+  if (cursorAgentReady) {
     authOptions.push(
       { value: 'cursor-agent-cli', label: 'Use Cursor Agent', hint: 'uses your existing Cursor subscription' },
     )
   }
 
-  if (isAntigravityCliReady()) {
+  if (antigravityCliReady) {
     authOptions.push(
       { value: 'antigravity-cli', label: 'Use Antigravity CLI', hint: 'recommended — replaces Gemini CLI for individuals' },
     )
-  } else if (isGeminiCliReady()) {
+  } else if (geminiCliReady) {
     authOptions.push(
       {
         value: 'gemini-cli',

@@ -15,20 +15,28 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { awaitWorkerResume, sendSignal } from "../session-status-io.ts";
 
-function makeBase(): { base: string; cleanup: () => void } {
+/** A project database: the coordinator and the worker share it. */
+function makeBase(): { cleanup: () => void } {
   const base = mkdtempSync(join(tmpdir(), "gsd-worker-resume-"));
-  mkdirSync(join(base, ".gsd", "parallel"), { recursive: true });
-  return { base, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  return {
+    cleanup: () => {
+      closeDatabase();
+      rmSync(base, { recursive: true, force: true });
+    },
+  };
 }
 
 describe("awaitWorkerResume", () => {
   it("returns 'resume' when the coordinator sends resume", async () => {
-    const { base, cleanup } = makeBase();
+    const { cleanup } = makeBase();
     try {
-      sendSignal(base, "M001", "resume");
-      const outcome = await awaitWorkerResume(base, "M001", { timeoutMs: 500, pollMs: 20 });
+      sendSignal("M001", "resume");
+      const outcome = await awaitWorkerResume("M001", { timeoutMs: 500, pollMs: 20 });
       assert.equal(outcome, "resume");
     } finally {
       cleanup();
@@ -36,10 +44,10 @@ describe("awaitWorkerResume", () => {
   });
 
   it("returns 'stop' when the coordinator sends stop", async () => {
-    const { base, cleanup } = makeBase();
+    const { cleanup } = makeBase();
     try {
-      sendSignal(base, "M001", "stop");
-      const outcome = await awaitWorkerResume(base, "M001", { timeoutMs: 500, pollMs: 20 });
+      sendSignal("M001", "stop");
+      const outcome = await awaitWorkerResume("M001", { timeoutMs: 500, pollMs: 20 });
       assert.equal(outcome, "stop");
     } finally {
       cleanup();
@@ -47,9 +55,9 @@ describe("awaitWorkerResume", () => {
   });
 
   it("returns 'timeout' when no resumer lifts the pause (headless, #1273)", async () => {
-    const { base, cleanup } = makeBase();
+    const { cleanup } = makeBase();
     try {
-      const outcome = await awaitWorkerResume(base, "M001", { timeoutMs: 100, pollMs: 20 });
+      const outcome = await awaitWorkerResume("M001", { timeoutMs: 100, pollMs: 20 });
       assert.equal(outcome, "timeout");
     } finally {
       cleanup();
@@ -57,13 +65,13 @@ describe("awaitWorkerResume", () => {
   });
 
   it("ignores a repeated pause and still resumes when resume arrives", async () => {
-    const { base, cleanup } = makeBase();
+    const { cleanup } = makeBase();
     try {
       // A duplicate pause must not be treated as a resume, nor reset the wait.
-      sendSignal(base, "M001", "pause");
-      const waiting = awaitWorkerResume(base, "M001", { timeoutMs: 1000, pollMs: 20 });
+      sendSignal("M001", "pause");
+      const waiting = awaitWorkerResume("M001", { timeoutMs: 1000, pollMs: 20 });
       // Deliver the resume shortly after the pause is consumed and ignored.
-      setTimeout(() => sendSignal(base, "M001", "resume"), 60);
+      setTimeout(() => sendSignal("M001", "resume"), 60);
       const outcome = await waiting;
       assert.equal(outcome, "resume");
     } finally {

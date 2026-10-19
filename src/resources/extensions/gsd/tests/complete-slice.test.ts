@@ -11,7 +11,6 @@ import {
   insertTask,
   getSlice,
   getMilestone,
-  updateSliceStatus,
   getSliceTasks,
   insertGateRow,
   getGateResults,
@@ -207,9 +206,12 @@ console.log('\n=== complete-slice: getSlice/updateSliceStatus accessors ===');
   const noSlice = getSlice('M001', 'S99');
   assertEq(noSlice, null, 'non-existent slice should return null');
 
-  // updateSliceStatus changes status and completed_at
+  // A status stamp sets status and completed_at. Raw SQL: the fixture
+  // milestone is unadopted, so the generic status writer refuses it.
   const now = new Date().toISOString();
-  updateSliceStatus('M001', 'S01', 'complete', now);
+  _getAdapter()!.prepare(
+    "UPDATE slices SET status = 'complete', completed_at = :completed_at WHERE milestone_id = 'M001' AND id = 'S01'",
+  ).run({ ":completed_at": now });
   const updated = getSlice('M001', 'S01');
   assertEq(updated!.status, 'complete', 'slice status should be updated to complete');
   assertEq(updated!.completed_at, now, 'slice completed_at should be set');
@@ -234,7 +236,9 @@ console.log('\n=== complete-slice: handler happy path ===');
   insertSlice({ id: 'S02', milestoneId: 'M001', title: 'Second Slice', risk: 'low', depends: ['S01'], demo: 'advanced stuff', sequence: 2 });
   insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', status: 'complete', title: 'Task 1' });
   insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', status: 'complete', title: 'Task 2' });
-  insertTask({ id: 'T99', sliceId: 'S02', milestoneId: 'M001', status: 'complete', title: 'Sibling Task' });
+  // The sibling carries durable completion evidence: a legacy completion
+  // without it is an unresolved lifecycle shadow that refuses slice completion.
+  insertTask({ id: 'T99', sliceId: 'S02', milestoneId: 'M001', status: 'complete', title: 'Sibling Task', verificationResult: 'passed', fullSummaryMd: '# T99 summary' });
   seedSliceCompletionAuthority({
     milestoneId: 'M001',
     sliceId: 'S01',

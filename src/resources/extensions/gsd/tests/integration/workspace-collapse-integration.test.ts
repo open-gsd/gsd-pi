@@ -7,6 +7,7 @@ import {
   mkdirSync,
   writeFileSync,
   existsSync,
+  readFileSync,
   rmSync,
   realpathSync,
 } from "node:fs";
@@ -28,10 +29,13 @@ import {
 import { _resetAutoWorktreeOriginalBaseForTests } from "../../auto-worktree-session-registry.ts";
 import { teardownAutoWorktree } from "../../auto-worktree-teardown.ts";
 import {
+  openDatabase,
+  insertMilestone,
   openDatabaseByWorkspace,
   closeAllDatabases,
   _getDbCache,
 } from "../../gsd-db.ts";
+import { renderStateProjection } from "../../workflow-projections.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -141,7 +145,7 @@ describe("workspace-collapse integration: Test 2 — abort teardown clears stale
     rmSync(repoDir, { recursive: true, force: true });
   });
 
-  test("STATE.md and M001-META.json are removed by teardownAutoWorktree", () => {
+  test("M001-META.json is removed and STATE.md keeps the DB render after teardownAutoWorktree", async () => {
     // Phase C pt 2: auto.lock no longer exists as a file — it migrated
     // to the workers + unit_dispatches tables.
     const gsdDir = join(repoDir, ".gsd");
@@ -151,10 +155,14 @@ describe("workspace-collapse integration: Test 2 — abort teardown clears stale
     const stateMd = join(gsdDir, "STATE.md");
     const metaJson = join(milestonesDir, "M001-META.json");
 
-    writeFileSync(stateMd, "# State\nactive\n");
+    // STATE.md is a DB projection: render it from the DB, not by hand.
+    openDatabase(":memory:");
+    insertMilestone({ id: "M001", title: "Collapse", status: "active" });
+    assert.deepEqual(await renderStateProjection(repoDir), { stale: false });
+    const rendered = readFileSync(stateMd, "utf-8");
+    assert.ok(rendered.includes("M001"), "STATE.md holds the DB render before teardown");
     writeFileSync(metaJson, JSON.stringify({ milestoneId: "M001" }));
 
-    assert.ok(existsSync(stateMd), "STATE.md exists before teardown");
     assert.ok(existsSync(metaJson), "M001-META.json exists before teardown");
 
     // teardownAutoWorktree clears state files before the git step; git removal
@@ -165,7 +173,7 @@ describe("workspace-collapse integration: Test 2 — abort teardown clears stale
       // git worktree removal may fail when no worktree was created — non-fatal for this assertion
     }
 
-    assert.ok(!existsSync(stateMd), "STATE.md removed by teardownAutoWorktree (regression: A5)");
+    assert.equal(readFileSync(stateMd, "utf-8"), rendered, "STATE.md stays and equals the DB render after teardownAutoWorktree");
     assert.ok(!existsSync(metaJson), "M001-META.json removed by teardownAutoWorktree (regression: A5)");
   });
 });
@@ -186,9 +194,10 @@ describe("workspace-collapse integration: Test 3 — write-gate snapshot survive
 
   afterEach(() => {
     process.chdir(savedCwd);
-    closeAllDatabases();
     clearDiscussionFlowState(projectDir);
     try { clearDiscussionFlowState(otherDir); } catch { /* best-effort */ }
+    // Gate state is rows of the project database, so the databases close last.
+    closeAllDatabases();
     rmSync(projectDir, { recursive: true, force: true });
     rmSync(otherDir, { recursive: true, force: true });
   });

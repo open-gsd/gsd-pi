@@ -12,6 +12,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+	appendFileSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
@@ -42,6 +43,11 @@ function bedEnv(extra = {}) {
 	for (const [k, v] of Object.entries(process.env)) {
 		if (k.startsWith("GSD_")) continue;
 		base[k] = v;
+	}
+	// The G8 legacy-counter gate rides on the bed: when set, the spawned CLI
+	// merges its counters into the gate's telemetry file.
+	if (process.env.GSD_LEGACY_TELEMETRY_FILE) {
+		base.GSD_LEGACY_TELEMETRY_FILE = process.env.GSD_LEGACY_TELEMETRY_FILE;
 	}
 	base.GSD_NON_INTERACTIVE = "1";
 	base.TMPDIR = canonicalTmpdir();
@@ -249,6 +255,17 @@ async function computeTestedSourceRevision(dir) {
 		pathToFileURL(join(REPO_ROOT, "dist", "resources", "extensions", "gsd", "gitignore.js")).href
 	);
 	gitignoreMod.ensureGitignore(dir);
+	// Workflow-MCP auto-prep (#731) writes .claude/settings.local.json into the
+	// project root when the headless run starts — AFTER this capture. Left
+	// untracked, that file enters the fail-closed verification-source hash scope
+	// (#1819 includes untracked scratch) and shifts the revision between the
+	// evidence label captured here and the gate's mid-run recomputation at
+	// validation (same regression class as the tiny-milestone e2e, PR #2502).
+	// The fixture ignores it up front, matching the baseline treatment of the
+	// other MCP runtime files (.mcp.json, .bg-shell/). ensureGitignore is
+	// append-only/merge-preserving, so the run's own bootstrap call cannot drop
+	// the line.
+	appendFileSync(join(dir, ".gitignore"), ".claude/\n");
 	writeFileSync(join(dir, "src", "answer.js"), READY_ANSWER);
 	const source = mod.captureVerificationSourceSnapshot([{ id: "project", cwd: dir }]);
 	writeFileSync(join(dir, "src", "answer.js"), PENDING_ANSWER);
@@ -480,6 +497,22 @@ async function main() {
 		cpSync(join(projectDir, ".gsd"), join(runDir, "gsd-state"), { recursive: true });
 	} catch {
 		// best-effort forensics copy
+	}
+	// Non-vacuity guard (mirrors the tiny-milestone e2e, PR #2502): if auto-prep
+	// stops writing .claude/settings.local.json, the .claude/ ignore added in
+	// computeTestedSourceRevision stops being exercised and the bed could pass
+	// while no longer protecting the pre-run capture. Only a COMPLETED verdict
+	// is downgraded; a real engine failure keeps its verdict and artifacts.
+	if (
+		verdictBits.result === "COMPLETED" &&
+		!existsSync(join(projectDir, ".claude", "settings.local.json"))
+	) {
+		verdictBits.result = "INCONCLUSIVE";
+		verdictBits.firstBlock = {
+			guard: "non-vacuity: workflow MCP auto-prep did not run",
+			message:
+				".claude/settings.local.json was not written during the headless run, so the fixture's .claude/ ignore is untested and the pre-run capture is unprotected.",
+		};
 	}
 	writeFileSync(join(runDir, "notifications.log"), verdictBits.notifications.join("\n") + "\n");
 

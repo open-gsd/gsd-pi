@@ -1204,6 +1204,43 @@ describe("ModelRegistry", () => {
 					headers: { "x-proxy": "enabled" },
 				});
 			});
+
+			test("models.json provider headers survive refresh (#2114)", async () => {
+				writeRawModelsJson({
+					"custom-proxy": {
+						baseUrl: "https://custom.test/v1",
+						apiKey: "TEST_KEY",
+						api: "openai-completions",
+						headers: { "x-proxy": "enabled" },
+						models: [
+							{
+								id: "custom-a",
+								name: "Custom A",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 100000,
+								maxTokens: 8000,
+							},
+						],
+					},
+				});
+
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				const models = getModelsForProvider(registry, "custom-proxy");
+				expect(await registry.getApiKeyAndHeaders(models[0])).toMatchObject({
+					ok: true,
+					headers: { "x-proxy": "enabled" },
+				});
+
+				registry.refresh();
+
+				const modelsAfter = getModelsForProvider(registry, "custom-proxy");
+				expect(await registry.getApiKeyAndHeaders(modelsAfter[0])).toMatchObject({
+					ok: true,
+					headers: { "x-proxy": "enabled" },
+				});
+			});
 		});
 	});
 

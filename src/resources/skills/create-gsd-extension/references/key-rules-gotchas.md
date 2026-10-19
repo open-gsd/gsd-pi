@@ -3,6 +3,7 @@ Non-negotiable rules and common gotchas when building GSD extensions.
 </overview>
 
 <must_follow>
+
 1. **Use `StringEnum` for string enums** — `Type.Union`/`Type.Literal` breaks Google's API.
 2. **Truncate tool output** — Large output causes context overflow, compaction failures, degraded performance. Limit: 50KB / 2000 lines.
 3. **Use theme from callback** — Don't import theme directly. Use the `theme` parameter from `ctx.ui.custom()` or render functions.
@@ -16,6 +17,7 @@ Non-negotiable rules and common gotchas when building GSD extensions.
 </must_follow>
 
 <common_patterns>
+
 - Rebuild component on `invalidate()` when pre-baking theme colors
 - Check `signal?.aborted` in long-running tool executions
 - Use `pi.exec()` instead of `child_process` for shell commands
@@ -27,6 +29,7 @@ Non-negotiable rules and common gotchas when building GSD extensions.
 
 <gsd_paths>
 **GSD extension paths (community/user-installed extensions):**
+
 - Global: `~/.pi/agent/extensions/*.ts`
 - Global (subdir): `~/.pi/agent/extensions/*/index.ts`
 - Project-local: `.gsd/extensions/*.ts`
