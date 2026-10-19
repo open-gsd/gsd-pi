@@ -165,7 +165,7 @@ test("pause blocker resolution refuses mismatched persisted pause identity witho
   ).get({ ":id": blockerId })?.["blocker_status"], "open");
 });
 
-test("existing exact human blocker is linked to the newly persisted pause", (t) => {
+test("existing exact human blocker is not reused for a distinct pause", (t) => {
   const dir = createProject();
   t.after(() => {
     closeDatabase();
@@ -220,13 +220,18 @@ test("existing exact human blocker is linked to the newly persisted pause", (t) 
     unitId: "M001/S01/T01",
   };
   setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pause);
-  assert.equal(openPauseBlockerForSession({
+  const pauseBlockerId = openPauseBlockerForSession({
     pause,
     blockerKind: "subjective_uat",
     description: "Review required",
     requestedAction: "Review the output",
-  }), existingBlockerId);
+  });
+  assert.ok(pauseBlockerId);
+  assert.notEqual(pauseBlockerId, existingBlockerId);
   assert.equal(db().prepare(
     "SELECT COUNT(*) AS count FROM workflow_blockers WHERE lifecycle_id = :lifecycle_id",
-  ).get({ ":lifecycle_id": lifecycleId })?.["count"], 1);
+  ).get({ ":lifecycle_id": lifecycleId })?.["count"], 2);
+  assert.equal(db().prepare(
+    "SELECT blocker_status FROM workflow_blockers WHERE blocker_id = :id",
+  ).get({ ":id": existingBlockerId })?.["blocker_status"], "open");
 });

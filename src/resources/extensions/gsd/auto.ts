@@ -2529,7 +2529,6 @@ export async function pauseAuto(
           const { blockerId } = openPauseBlockerRow({
             lifecycleId,
             blockerKind,
-            reuseExisting: true,
             description: pauseReasonText ?? `${blockerKind} pause`,
             requestedAction: s.stepMode ? "Run /gsd next after resolving the blocker." : "Run /gsd auto after resolving the blocker.",
             idempotencyKey: `pause-blocker-open:${randomUUID()}`,

@@ -184,7 +184,7 @@ test("resolves the exact open auto-pause blocker and atomically closes its bound
   assert.equal(openPauseRows().length, 0, "the bound pause row is closed");
 });
 
-test("pause persistence reuses an existing exact-lifecycle human blocker", async (t) => {
+test("pause persistence opens a distinct blocker instead of reusing another lifecycle blocker", async (t) => {
   const base = makeProject(t);
   const { blockerId } = openPauseBlockerRow({
     lifecycleId: "lc-m001-s01",
@@ -199,9 +199,12 @@ test("pause persistence reuses an existing exact-lifecycle human blocker", async
     category: "unknown",
   });
 
-  assert.equal(blockerRows().length, 1);
-  assert.equal(openPauseRows()[0]!["blocker_id"], blockerId);
-  assert.equal(resolveAutoPauseBlockerById(resolutionInput(blockerId, "Route chosen")).resolved, true);
+  const pauseBlockerId = openPauseRows()[0]!["blocker_id"];
+  assert.notEqual(pauseBlockerId, blockerId);
+  assert.equal(blockerRows().length, 2);
+  assert.equal(blockerRows().find((row) => row["blocker_id"] === blockerId)?.["blocker_status"], "open");
+  assert.equal(resolveAutoPauseBlockerById(resolutionInput(String(pauseBlockerId), "Route chosen")).resolved, true);
+  assert.equal(blockerRows().find((row) => row["blocker_id"] === blockerId)?.["blocker_status"], "open");
   assert.equal(openPauseRows().length, 0);
 });
 
