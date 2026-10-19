@@ -187,7 +187,7 @@ export function openPauseBlockerForSession(input: {
           blockerId,
           pauseId: input.pause.pauseId,
           blockerKind: input.blockerKind,
-          reusedExistingBlocker: Boolean(existing),
+          reusedExistingBlocker: false,
         },
         destinations: ["projection"],
       }],
