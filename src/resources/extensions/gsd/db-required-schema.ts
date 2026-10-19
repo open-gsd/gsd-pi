@@ -6,6 +6,10 @@ import {
   createLivenessBackstopSchema,
   hasLivenessBackstopSchema,
 } from "./db-liveness-backstop-schema.js";
+import {
+  createPauseBlockerLinkSchema,
+  hasPauseBlockerLinkSchema,
+} from "./db-pause-blocker-link-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -18,6 +22,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "liveness-backstop",
     isPresent: hasLivenessBackstopSchema,
     create: createLivenessBackstopSchema,
+  },
+  {
+    id: "pause-blocker-link",
+    isPresent: hasPauseBlockerLinkSchema,
+    create: createPauseBlockerLinkSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

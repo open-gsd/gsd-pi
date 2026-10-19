@@ -26,6 +26,8 @@ export type InterruptedSessionClassification =
   | "stale";
 
 export interface PausedSessionMetadata {
+  pauseId?: string;
+  pauseBlockerId?: string;
   milestoneId?: string;
   worktreePath?: string | null;
   originalBasePath?: string;
