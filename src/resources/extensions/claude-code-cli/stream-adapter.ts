@@ -752,6 +752,47 @@ export function buildSdkQueryPrompt(
 	};
 }
 
+/**
+ * Wrap an SDK query prompt so the CLI's stdin stays open until `release()`.
+ *
+ * The SDK treats a string prompt as a single-turn query and closes the CLI's
+ * stdin at the first `result` (`isSingleUserTurn`); an iterable prompt gets
+ * the same treatment once it ends. Native Claude Code sends that first
+ * `result` as soon as the main turn ends — while background tasks are still
+ * running (the #2534 deferral keeps reading) — and SDK hook callbacks (the
+ * projection write guard matches `Write|Edit|MultiEdit|NotebookEdit|Bash`)
+ * travel over stdin. With stdin closed, no hook callback can be answered and
+ * the CLI cancels every hook-matched tool call after the first result as its
+ * user-refusal text (#2902). Yielding the prompt's messages and then holding
+ * the iterable open keeps stdin open for the life of the query; the caller
+ * releases in the SDK attempt's `finally` (terminal result, abort, error, or
+ * readiness retry) so the query still ends.
+ */
+export function holdSdkPromptOpen(
+	prompt: string | AsyncIterable<SDKInputUserMessage>,
+): { prompt: AsyncIterable<SDKInputUserMessage>; release: () => void } {
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const messages: AsyncIterable<SDKInputUserMessage> | readonly SDKInputUserMessage[] = typeof prompt === "string"
+		? [{
+				type: "user",
+				message: { role: "user", content: [{ type: "text", text: prompt }] },
+				parent_tool_use_id: null,
+			}]
+		: prompt;
+	return {
+		prompt: {
+			async *[Symbol.asyncIterator]() {
+				yield* messages;
+				await released;
+			},
+		},
+		release: () => release(),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Error helper
 // ---------------------------------------------------------------------------
@@ -2924,8 +2965,12 @@ async function pumpSdkMessages(
 					options.signal.addEventListener("abort", forwardAbort, { once: true });
 				}
 
+				// Keep the CLI's stdin open past the first `result` (hook callbacks
+				// travel over stdin — #2902); one hold per SDK attempt, released in
+				// the attempt's `finally` below.
+				const promptHold = holdSdkPromptOpen(queryPrompt);
 				const queryResult = query({
-					prompt: queryPrompt,
+					prompt: promptHold.prompt,
 					options: {
 						...sdkOpts,
 						abortController: controller,
@@ -3374,6 +3419,10 @@ async function pumpSdkMessages(
 					}
 				}
 				} finally {
+					// End this attempt's prompt hold so the SDK closes the CLI's stdin
+					// (terminal result, abort, error-result close, stream end, or
+					// readiness restart). First, so nothing below can skip it.
+					promptHold.release();
 					options?.signal?.removeEventListener("abort", forwardAbort);
 					clearBackgroundWaitStatus();
 					// Settle native-task dashboard rows that never received a

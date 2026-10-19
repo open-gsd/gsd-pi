@@ -3722,8 +3722,18 @@ describe("stream-adapter — workflow MCP readiness", () => {
 
 				await stream.result();
 
-				assert.equal(typeof capturedPrompt, "string", phase.type);
-				const prompt = capturedPrompt as string;
+				// #2902: the prompt is now a held-open async iterable yielding the
+				// single user message, not the raw string (which the SDK treats as
+				// single-turn and closes stdin on at the first result).
+				assert.ok(capturedPrompt !== null && typeof capturedPrompt === "object", phase.type);
+				const promptTexts: string[] = [];
+				for await (const message of capturedPrompt as AsyncIterable<{ message?: { content?: { type: string; text?: string }[] } }>) {
+					for (const block of message?.message?.content ?? []) {
+						if (block.type === "text" && typeof block.text === "string") promptTexts.push(block.text);
+					}
+				}
+				assert.equal(promptTexts.length, 1, `${phase.type}: exactly one user prompt message`);
+				const prompt = promptTexts[0];
 				assert.ok(capturedAllowedTools?.includes(phase.expectedTool), phase.type);
 				assert.ok(!capturedAllowedTools?.includes("mcp__gsd-workflow__ask_user_questions"), phase.type);
 				assert.ok(!prompt.includes("mcp__gsd-workflow__ask_user_questions"), phase.type);
@@ -6498,5 +6508,450 @@ describe("stream-adapter — background task results (#2534)", () => {
 			"failed",
 			"a task whose notification never arrived must not linger as running",
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #2902 — the query prompt must hold the CLI's stdin open past the first
+// result. The SDK closes stdin at the first `result` for a string prompt
+// (single-turn classification) or for an iterable that ends; native Claude
+// Code keeps the process alive past that result while background tasks run,
+// and SDK hook callbacks (projection write guard matches Bash/Write/Edit)
+// travel over stdin. With stdin closed, every hook-matched tool call after
+// the first result is cancelled as the CLI's user-refusal text.
+// ---------------------------------------------------------------------------
+
+/** Pull every message out of a prompt iterable, bounded so a missing release fails loudly instead of hanging. */
+async function drainPromptIterable(
+	iterable: AsyncIterable<unknown>,
+	onMessage: (message: unknown) => void,
+	deadlineMs = 5_000,
+): Promise<number> {
+	const iterator = (iterable as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+	const deadline = Date.now() + deadlineMs;
+	let count = 0;
+	while (true) {
+		const remaining = deadline - Date.now();
+		let result: IteratorResult<unknown>;
+		try {
+			result = await Promise.race([
+				iterator.next(),
+				new Promise<never>((_, reject) => {
+					const timer = setTimeout(
+						() => reject(new Error(`prompt iterable did not complete within ${deadlineMs}ms (stdin hold never released?)`)),
+						remaining,
+					);
+					if (typeof timer.unref === "function") timer.unref();
+				}),
+			]);
+		} catch (error) {
+			// Stop consuming; terminate the generator so a suspended hold cannot leak.
+			await iterator.return?.(undefined);
+			throw error;
+		}
+		if (result.done) return count;
+		count++;
+		onMessage(result.value);
+	}
+}
+
+describe("stream-adapter — held-open query prompt (#2902)", () => {
+	/**
+	 * The prompt consumer runs on its own microtask cascade; give it a bounded
+	 * window to record `entry` after the stream drained before asserting on it.
+	 * A real hold leak (release never called) exhausts the window and fails the
+	 * ordering assertions below with the full timeline.
+	 */
+	async function waitForTimelineEntry(timeline: string[], entry: string, deadlineMs = 2_000): Promise<void> {
+		const deadline = Date.now() + deadlineMs;
+		while (Date.now() < deadline && !timeline.includes(entry)) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+
+	/** Consume the captured prompt the way the SDK's streamInput does, recording the timeline without escaping errors. */
+	function consumePromptInBackground(
+		getPrompt: () => unknown,
+		timeline: string[],
+		promptMessages: unknown[],
+	): void {
+		void (async () => {
+			try {
+				await drainPromptIterable(getPrompt() as AsyncIterable<unknown>, (message) => {
+					timeline.push("prompt-message");
+					promptMessages.push(message);
+				});
+				timeline.push("prompt-ended");
+			} catch (error) {
+				timeline.push(`prompt-consumer-error: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		})();
+	}
+
+	test("passes an async-iterable prompt that yields the single user message and ends only when the attempt releases it", async () => {
+		const sid = "session-2902a";
+		const timeline: string[] = [];
+		const promptMessages: unknown[] = [];
+		async function* scenario() {
+			timeline.push("terminal-result-yielded");
+			yield makeSdkResult("r1", sid, { result: "PLAIN DONE" });
+		}
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "hello agent" } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: (queryArgs: { prompt: unknown }) => {
+					consumePromptInBackground(() => queryArgs.prompt, timeline, promptMessages);
+					return scenario();
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), false, "plain turn must complete cleanly");
+		assert.equal(events.filter((event) => event.type === "done").length, 1, "plain turn must still end at its result");
+		await waitForTimelineEntry(timeline, "prompt-ended");
+		assert.ok(timeline.some((entry) => entry.startsWith("prompt-consumer-error")) === false, `prompt consumption must not throw; timeline: ${timeline.join(",")}`);
+		assert.equal(
+			promptMessages.length,
+			1,
+			`the prompt iterable must yield exactly one user message, got ${promptMessages.length}`,
+		);
+		const yielded = promptMessages[0] as any;
+		assert.equal(yielded?.type, "user");
+		assert.ok(
+			JSON.stringify(yielded?.message?.content).includes("hello agent"),
+			"the single yielded message must carry the turn's prompt text",
+		);
+		assert.ok(
+			timeline.indexOf("prompt-ended") > timeline.indexOf("terminal-result-yielded"),
+			`the prompt must stay open past the terminal result and end only on release; timeline: ${timeline.join(",")}`,
+		);
+	});
+
+	test("keeps the prompt open across the #2534 background-task wait and releases at the terminal result", async () => {
+		const sid = "session-2902b";
+		const timeline: string[] = [];
+		const promptMessages: unknown[] = [];
+		async function* scenario() {
+			yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: sleep" });
+			timeline.push("deferred-result-yielded");
+			yield makeSdkResult("r1", sid, { result: "WAITING" });
+			timeline.push("deferred-result-delivered");
+			// The #2534 deferral window: the CLI is alive past its first result.
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			timeline.push("deferral-window-elapsed");
+			yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" });
+			timeline.push("terminal-result-yielded");
+			yield makeSdkResult("r2", sid, { result: "FINISHED", num_turns: 2 });
+		}
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: (queryArgs: { prompt: unknown }) => {
+					consumePromptInBackground(() => queryArgs.prompt, timeline, promptMessages);
+					return scenario();
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), false, "background-task deferral must still complete cleanly");
+		assert.equal(events.filter((event) => event.type === "done").length, 1);
+		await waitForTimelineEntry(timeline, "prompt-ended");
+		assert.ok(timeline.some((entry) => entry.startsWith("prompt-consumer-error")) === false, `prompt consumption must not throw (a plain string prompt has no async iterator, #2902); timeline: ${timeline.join(",")}`);
+		assert.equal(promptMessages.length, 1, "exactly one user message must be injected across the whole wait");
+		const endIdx = timeline.indexOf("prompt-ended");
+		assert.ok(
+			endIdx > timeline.indexOf("terminal-result-yielded"),
+			`the prompt hold must span the entire background-task wait and release at the attempt's end; timeline: ${timeline.join(",")}`,
+		);
+		assert.ok(
+			endIdx > timeline.indexOf("deferral-window-elapsed"),
+			`stdin (the prompt iterable) must still be open mid-deferral; timeline: ${timeline.join(",")}`,
+		);
+		const texts = (events.find((event) => event.type === "done")?.message?.content ?? [])
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.ok(texts.includes("FINISHED"), "the follow-up result text must still reach the user");
+	});
+
+	test("holds the images iterable prompt open too, without changing what it yields", async () => {
+		const sid = "session-2902c";
+		const timeline: string[] = [];
+		const promptMessages: unknown[] = [];
+		async function* scenario() {
+			// A dwell before the terminal result: pre-fix the images iterable ends
+			// on its own within microseconds, so prompt-ended deterministically
+			// lands before this marker; post-fix the hold keeps it open until the
+			// attempt's release, strictly after it.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			timeline.push("terminal-result-yielded");
+			yield makeSdkResult("r1", sid, { result: "IMAGE DONE" });
+		}
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "look at this" },
+							{ type: "image", data: "data:image/png;base64,abc123", mimeType: "image/png" },
+						],
+					} as Message,
+				],
+			},
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: (queryArgs: { prompt: unknown }) => {
+					consumePromptInBackground(() => queryArgs.prompt, timeline, promptMessages);
+					return scenario();
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), false);
+		await waitForTimelineEntry(timeline, "prompt-ended");
+		assert.equal(promptMessages.length, 1, "the images prompt must still yield exactly one message");
+		const content = JSON.stringify((promptMessages[0] as any)?.message?.content);
+		assert.ok(content.includes("image"), "the yielded message must keep the image block");
+		assert.ok(content.includes("look at this"), "the yielded message must keep the text block");
+		assert.ok(
+			timeline.indexOf("prompt-ended") > timeline.indexOf("terminal-result-yielded"),
+			`the images prompt must be held open past the result too; timeline: ${timeline.join(",")}`,
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #2902 — characterization at the real vendored-SDK boundary: a string prompt
+// is a single-turn query whose stdin the SDK closes at the first `result`,
+// while a held-open iterable prompt keeps stdin open (hook callbacks answered)
+// until the caller releases it. These pin the SDK contract the adapter's
+// held-open prompt relies on; they speak the stream-json control protocol with
+// a fixture CLI and never touch the network.
+// ---------------------------------------------------------------------------
+
+const STDIN_LIFECYCLE_FIXTURE_SOURCE = [
+	"// Minimal stream-json stand-in for the Claude Code CLI (no network, no model).",
+	"const obs = { hookResponse: null, stdinClosed: false, stdinClosedMs: null };",
+	"let buffer = '';",
+	"let callbackId = null;",
+	"const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');",
+	"const report = () => process.stderr.write('OBS ' + JSON.stringify(obs) + '\\n');",
+	"process.stdin.setEncoding('utf8');",
+	"process.stdin.on('data', (chunk) => {",
+	"  buffer += chunk;",
+	"  let i;",
+	"  while ((i = buffer.indexOf('\\n')) !== -1) { handleLine(buffer.slice(0, i)); buffer = buffer.slice(i + 1); }",
+	"});",
+	"process.stdin.on('end', () => {",
+	"  obs.stdinClosed = true;",
+	"  obs.stdinClosedMs = Math.round(process.uptime() * 1000);",
+	"  report();",
+	"  process.exit(0);",
+	"});",
+	"function handleLine(line) {",
+	"  if (!line.trim()) return;",
+	"  let msg;",
+	"  try { msg = JSON.parse(line); } catch { return; }",
+	"  if (msg.type === 'control_response' && msg.response && msg.response.request_id === 'obs-hook-1') {",
+	"    obs.hookResponse = msg.response.subtype || 'unknown';",
+	"    report();",
+	"    return;",
+	"  }",
+	"  if (msg.type === 'control_request' && msg.request && msg.request.subtype === 'initialize') {",
+	"    const pre = (msg.request.hooks && msg.request.hooks.PreToolUse) || [];",
+	"    callbackId = (pre[0] && pre[0].hookCallbackIds && pre[0].hookCallbackIds[0]) || null;",
+	"    send({ type: 'control_response', response: { subtype: 'success', request_id: msg.request_id, response: {} } });",
+	"  }",
+	"}",
+	"const sleep = (ms) => new Promise((r) => setTimeout(r, ms));",
+	"async function main() {",
+	"  send({ type: 'system', subtype: 'init', session_id: 'fixture', model: 'fixture', tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });",
+	"  await sleep(250);",
+	"  send({ type: 'result', subtype: 'success', is_error: false, duration_ms: 1, duration_api_ms: 1, num_turns: 1, session_id: 'fixture', total_cost_usd: 0, usage: {}, result: 'ok' });",
+	"  await sleep(200);",
+	"  if (obs.stdinClosed || process.stdin.readableEnded) {",
+	"    obs.hookResponse = 'stdin-closed';",
+	"  } else if (callbackId) {",
+	"    send({ type: 'control_request', request_id: 'obs-hook-1', request: { subtype: 'hook_callback', callback_id: callbackId, input: { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'echo hi' } }, tool_use_id: 'tu_fixture' } });",
+	"  } else {",
+	"    obs.hookResponse = 'no-callback-id';",
+	"  }",
+	"  await sleep(1500);",
+	"  if (obs.hookResponse === null) obs.hookResponse = 'timeout';",
+	"  report();",
+	"  process.exit(process.argv[2] === 'held' ? 3 : 0);",
+	"}",
+	"main();",
+].join("\n");
+
+function parseObsLines(stderrLines: string[]): any[] {
+	const observations: any[] = [];
+	for (const line of stderrLines) {
+		for (const candidate of line.split("\n")) {
+			if (!candidate.startsWith("OBS ")) continue;
+			try {
+				observations.push(JSON.parse(candidate.slice(4)));
+			} catch {
+				// Ignore partial stderr writes; the fixture newline-terminates its reports.
+			}
+		}
+	}
+	return observations;
+}
+
+async function waitForObs(
+	stderrLines: string[],
+	accept: (obs: any) => boolean,
+	label: string,
+	deadlineMs = 10_000,
+): Promise<any> {
+	const deadline = Date.now() + deadlineMs;
+	while (Date.now() < deadline) {
+		for (const obs of parseObsLines(stderrLines)) {
+			if (accept(obs)) return obs;
+			if (typeof obs.hookResponse === "string" && obs.hookResponse !== "success" && obs.stdinClosed) {
+				assert.fail(`fixture saw stdin closed before the hook round trip (${label}): ${JSON.stringify(obs)}`);
+			}
+		}
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	assert.fail(`timed out waiting for a fixture observation (${label}); got: ${JSON.stringify(parseObsLines(stderrLines))}`);
+}
+
+async function drainWithDeadline(stream: AsyncIterable<unknown>, deadlineMs: number, label: string): Promise<number> {
+	const deadline = Date.now() + deadlineMs;
+	let count = 0;
+	const iterator = stream[Symbol.asyncIterator]();
+	while (true) {
+		let result: IteratorResult<unknown>;
+		try {
+			result = await Promise.race([
+				iterator.next(),
+				new Promise<never>((_, reject) => {
+					const timer = setTimeout(() => reject(new Error(`SDK query did not end within ${deadlineMs}ms (${label})`)), deadline - Date.now());
+					if (typeof timer.unref === "function") timer.unref();
+				}),
+			]);
+		} catch (error) {
+			await iterator.return?.(undefined);
+			throw error;
+		}
+		if (result.done) return count;
+		count++;
+	}
+}
+
+describe("stream-adapter — SDK stdin lifecycle at the query boundary (#2902)", () => {
+	let fixtureDir: string;
+	let fixturePath: string;
+
+	function writeFixture(): void {
+		fixtureDir = mkdtempSync(join(tmpdir(), "gsd-2902-stdin-"));
+		fixturePath = join(fixtureDir, "fixture-cli.mjs");
+		writeFileSync(fixturePath, STDIN_LIFECYCLE_FIXTURE_SOURCE);
+	}
+
+	test("a string prompt is single-turn: the SDK closes the CLI stdin at the first result", async () => {
+		writeFixture();
+		const { query } = (await import("@anthropic-ai/claude-agent-sdk")) as {
+			query: (args: { prompt: unknown; options: Record<string, unknown> }) => AsyncIterable<unknown>;
+		};
+		const controller = new AbortController();
+		const stderrLines: string[] = [];
+		try {
+			const stream = query({
+				prompt: "say hi",
+				options: {
+					pathToClaudeCodeExecutable: fixturePath,
+					cwd: fixtureDir,
+					stderr: (data: string) => stderrLines.push(data),
+					abortController: controller,
+				},
+			});
+			await drainWithDeadline(stream, 15_000, "string prompt query");
+			const obs = parseObsLines(stderrLines).find((candidate) => candidate.stdinClosed);
+			assert.ok(obs, `the fixture must have observed stdin closing; stderr: ${JSON.stringify(stderrLines)}`);
+			assert.ok(obs.hookResponse !== "success", "no hook callback may be answered after the single-turn stdin close");
+			assert.ok(
+				typeof obs.stdinClosedMs === "number" && obs.stdinClosedMs < 5_000,
+				`stdin must close promptly at the first result, got stdinClosedMs=${obs.stdinClosedMs}`,
+			);
+		} finally {
+			controller.abort();
+		}
+	});
+
+	test("a held-open iterable prompt keeps stdin open (hook callback answered) and release ends the query", async () => {
+		writeFixture();
+		const { query } = (await import("@anthropic-ai/claude-agent-sdk")) as {
+			query: (args: { prompt: unknown; options: Record<string, unknown> }) => AsyncIterable<unknown>;
+		};
+		const controller = new AbortController();
+		const stderrLines: string[] = [];
+		let release!: () => void;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const heldPrompt = {
+			async *[Symbol.asyncIterator]() {
+				yield {
+					type: "user",
+					message: { role: "user", content: [{ type: "text", text: "say hi" }] },
+					parent_tool_use_id: null,
+				};
+				await released;
+			},
+		};
+		try {
+			const stream = query({
+				prompt: heldPrompt,
+				options: {
+					pathToClaudeCodeExecutable: fixturePath,
+					cwd: fixtureDir,
+					stderr: (data: string) => stderrLines.push(data),
+					abortController: controller,
+					hooks: {
+						PreToolUse: [
+							{
+								matcher: "Bash",
+								hooks: [async () => ({ continue: true })],
+							},
+						],
+					},
+				},
+			});
+			// Consume the stream in the background like the adapter's pump does; the
+			// hook round trip happens on the stdin control channel, not the stream.
+			const drained = drainWithDeadline(stream, 15_000, "held prompt query");
+			const obs = await waitForObs(stderrLines, (candidate) => candidate.hookResponse === "success", "hook callback while stdin held open");
+			assert.equal(obs.stdinClosed, false, "stdin must still be open when the hook callback is answered");
+			release();
+			await drained;
+			const closed = parseObsLines(stderrLines).find((candidate) => candidate.stdinClosed);
+			assert.ok(closed, `stdin must close after release; stderr: ${JSON.stringify(stderrLines)}`);
+		} finally {
+			release();
+			controller.abort();
+		}
 	});
 });
