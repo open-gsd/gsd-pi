@@ -110,6 +110,98 @@ describe("subagent parallel card usage subtotal", () => {
 	});
 });
 
+describe("subagent parallel card per-child cost (#2822)", () => {
+	const tool = registerSubagentTool();
+
+	it("shows each child's own cost on its collapsed row, not only the aggregate", () => {
+		const text = renderCard(tool, {
+			content: [{ type: "text", text: "Parallel: 2/2 succeeded" }],
+			details: parallelDetails([
+				{
+					agent: "a",
+					exitCode: 0,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+					stderr: "",
+					startedAt: 1_000_000,
+					completedAt: 1_101_000,
+					usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.25, contextTokens: 0, turns: 3 },
+				},
+				{
+					agent: "b",
+					exitCode: 1,
+					messages: [],
+					stderr: "boom",
+					startedAt: 1_000_000,
+					completedAt: 1_087_000,
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.05, contextTokens: 0, turns: 1 },
+				},
+			]),
+		});
+
+		// Both distinct per-child costs appear on the child rows (the
+		// aggregate Total is $0.3000 — neither per-child value), each riding
+		// the same dim line as the child's identity.
+		assert.match(text, /1m 41s · \$0\.2500/);
+		assert.match(text, /failed after 1m 27s · \$0\.0500/);
+		assert.match(text, /Total: .*\$0\.3000/);
+	});
+
+	it("keeps live per-child cost visible while the batch runs", () => {
+		const text = renderCard(tool, {
+			content: [{ type: "text", text: "Parallel: 0/2 done, 2 running..." }],
+			details: parallelDetails([
+				{
+					agent: "researcher",
+					exitCode: -1,
+					messages: [],
+					stderr: "",
+					usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.5, contextTokens: 0, turns: 2 },
+				},
+				{
+					agent: "implementer",
+					exitCode: -1,
+					messages: [],
+					stderr: "",
+					usage: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0, cost: 0.2, contextTokens: 0, turns: 1 },
+				},
+			]),
+		});
+
+		// Each reported child's cost shows on its own row while running; the
+		// aggregate is the sum, so both row values differ from the Total.
+		assert.match(text, /\$0\.5000/);
+		assert.match(text, /\$0\.2000/);
+		assert.match(text, /Total: .*\$0\.7000/);
+
+		// A child without a first provider report shows no cost token of its
+		// own (it is still counted as pending usage at the batch level).
+		const pendingOnly = renderCard(tool, {
+			content: [{ type: "text", text: "Parallel: 0/1 done, 1 running..." }],
+			details: parallelDetails([{ agent: "a", exitCode: -1, messages: [], stderr: "", usage: zeroUsage() }]),
+		});
+		assert.doesNotMatch(pendingOnly, /\$\d/);
+	});
+
+	it("omits the cost token for non-usable cost values without breaking the row", () => {
+		const text = renderCard(tool, {
+			content: [{ type: "text", text: "Parallel: 1/1 succeeded" }],
+			details: parallelDetails([
+				{
+					agent: "a",
+					exitCode: 0,
+					messages: [],
+					stderr: "",
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: Number.NaN, contextTokens: 0, turns: 1 },
+				},
+			]),
+		});
+
+		assert.doesNotMatch(text, /\$NaN/);
+		assert.doesNotMatch(text, /\$\d/);
+		assert.match(text, /─── a/);
+	});
+});
+
 describe("subagent usage reconciliation into the parent session", () => {
 	const savedAgentDir = process.env.GSD_CODING_AGENT_DIR;
 	const savedBinPath = process.env.GSD_BIN_PATH;

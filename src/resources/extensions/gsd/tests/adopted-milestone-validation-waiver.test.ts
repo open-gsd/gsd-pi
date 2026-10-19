@@ -275,7 +275,7 @@ test("the waiver VALIDATION file written after an invalidated validation is not 
   assert.equal((await rule.match(dispatchContext(basePath)))?.action, "dispatch");
 
   assert.match(readFileSync(validationPath, "utf-8"), /authorization: waived/);
-  assert.deepEqual(observeExternalMarkdownEdits(basePath, true), []);
+  assert.deepEqual(await observeExternalMarkdownEdits(basePath, true), []);
 });
 
 test("waiver persistence is atomic when the Domain Operation faults", async () => {

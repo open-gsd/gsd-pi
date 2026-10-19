@@ -102,6 +102,41 @@ function cleanupFixture(base: string): void {
   rmSync(base, { recursive: true, force: true });
 }
 
+// Seeds a retained canonical evidence record whose evidence IS the live
+// projection file (evidencePath === logicalPath), the shape a retired
+// identity-drifted mutation leaves for a managed projection (#2881).
+function seedCanonicalFixture(prefix: string): EvidenceFixture {
+  const base = mkdtempSync(join(tmpdir(), prefix));
+  const rootPath = join(base, ".gsd");
+  const logicalPath = "state.md";
+  const indexPath = join(rootPath, "migration", "unbound-projection-evidence.json");
+  mkdirSync(join(rootPath, "migration"), { recursive: true });
+  writeFileSync(join(rootPath, logicalPath), REVIEWED);
+  const stat = lstatSync(join(rootPath, logicalPath), { bigint: true });
+  const evidenceId = `evidence:sha256:${createHash("sha256")
+    .update(JSON.stringify({ evidencePath: logicalPath, kind: "canonical", logicalPath, scope: "file" }))
+    .digest("hex")}`;
+  writeFileSync(indexPath, `${JSON.stringify([{
+    evidenceId,
+    evidencePath: logicalPath,
+    evidenceIdentity: `${stat.dev}:${stat.ino}`,
+    contentDigest: `sha256:${createHash("sha256").update(REVIEWED).digest("hex")}`,
+    kind: "canonical",
+    logicalPath,
+    scope: "file",
+    transition: "retained",
+  }])}\n`);
+  return {
+    base,
+    rootPath,
+    logicalPath,
+    evidencePath: logicalPath,
+    evidenceId,
+    contentDigest: `sha256:${createHash("sha256").update(REVIEWED).digest("hex")}`,
+    indexPath,
+  };
+}
+
 function readIndex(base: string): Array<Record<string, unknown>> {
   return JSON.parse(readFileSync(
     join(base, ".gsd", "migration", "unbound-projection-evidence.json"),
@@ -202,6 +237,33 @@ test("degraded preserve retains the reviewed bytes under migration and resolves"
   assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
 });
 
+test("degraded canonical preserve retains a copy and keeps the projection in place (#2881)", (t) => {
+  degradeForTest(t);
+  const fixture = seedCanonicalFixture("gsd-evidence-plainfs-canonical-preserve-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  const preview = previewUnboundProjectionEvidenceResolution(
+    fixture.base,
+    fixture.evidenceId,
+    "preserve",
+  );
+  assert.match(preview.destinationPath ?? "", /^migration\/preserved-projection-evidence\//u);
+  const before = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  resolveUnboundProjectionEvidence(fixture.base, fixture.evidenceId, "preserve", preview.consent);
+  // The evidence IS the projection: preserve retains a verified copy and the
+  // projection itself stays at its logical path, so the next assessment finds
+  // the artifact where the database recorded it instead of reporting it
+  // missing.
+  assert.equal(
+    readFileSync(join(fixture.rootPath, preview.destinationPath!), "utf8"),
+    REVIEWED,
+  );
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+  const after = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+});
+
 test("degraded canonical restore retires the record in place after verification", (t) => {
   degradeForTest(t);
   const base = mkdtempSync(join(tmpdir(), "gsd-evidence-plainfs-canonical-"));
@@ -279,6 +341,46 @@ test("a canonical restore replay keeps the restored bytes in place", (t) => {
   );
   assert.equal(readFileSync(join(rootPath, "state.md"), "utf8"), REVIEWED);
   assert.deepEqual(loadUnboundProjectionEvidence(base), []);
+});
+
+test("a degraded canonical preserve deleting marker replays without removing the projection (#2881)", (t) => {
+  degradeForTest(t);
+  const fixture = seedCanonicalFixture("gsd-evidence-plainfs-canonical-preserve-marker-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // Crash window of a pre-copy-lane canonical preserve: the verified copy is
+  // published, the deleting marker persisted, the source unlink never ran.
+  // The replay retires the record and keeps the projection in place.
+  const destination = `migration/preserved-projection-evidence/${fixture.evidenceId.slice("evidence:sha256:".length)}`;
+  mkdirSync(dirname(join(fixture.rootPath, destination)), { recursive: true });
+  writeFileSync(join(fixture.rootPath, destination), REVIEWED);
+  const stat = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  const entries = readIndex(fixture.base) as Array<Record<string, unknown>>;
+  entries[0]!.transition = "resolving";
+  entries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${stat.dev}:${stat.ino}`,
+    contentDigest: fixture.contentDigest,
+    destinationPath: destination,
+    guardPath: `.gsd-projection-remove-11111111-2222-4333-8444-555555555555`,
+    guardIdentity: null,
+    stagingPath: null,
+    stagingIdentity: null,
+    exchangePath: `.gsd-projection-exchange-11111111-2222-4333-8444-555555555555`,
+    exchangeIdentity: null,
+    phase: "deleting",
+  };
+  writeFileSync(fixture.indexPath, `${JSON.stringify(entries)}\n`);
+
+  resolveUnboundProjectionEvidence(
+    fixture.base,
+    fixture.evidenceId,
+    "preserve",
+    "consent is not re-asked for a replayed deletion",
+  );
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(fixture.rootPath, destination), "utf8"), REVIEWED);
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
 });
 
 test("the in-flight gate roots the exchange artifact under the projection root", (t) => {
@@ -1482,3 +1584,353 @@ for (const action of ["discard", "preserve", "restore"] as const satisfies reado
     assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
   });
 }
+
+test("native canonical preserve retains a copy and keeps the projection in place (#2881)", { skip: !nativeMode }, (t) => {
+  const fixture = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  const preview = previewUnboundProjectionEvidenceResolution(
+    fixture.base,
+    fixture.evidenceId,
+    "preserve",
+  );
+  assert.match(preview.destinationPath ?? "", /^migration\/preserved-projection-evidence\//u);
+  const before = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  resolveUnboundProjectionEvidence(fixture.base, fixture.evidenceId, "preserve", preview.consent);
+  // The preserved copy is byte-identical to the reviewed evidence, the
+  // projection itself never leaves its logical path (same identity — not a
+  // move), and the record retires so the next assessment is clean instead of
+  // reporting the projection missing.
+  assert.equal(readFileSync(join(fixture.rootPath, preview.destinationPath!), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+  const after = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+});
+
+test("an interrupted native canonical preserve replays to a copy without consuming the projection (#2881)", { skip: !nativeMode }, (t) => {
+  const fixture = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-replay-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // Crash between preparing the resolution and the copy: the replay must
+  // publish the verified copy from the still-intact evidence path instead of
+  // running the move protocol that unships the projection.
+  const destination = `migration/preserved-projection-evidence/${fixture.evidenceId.slice("evidence:sha256:".length)}`;
+  const stat = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  const entries = readIndex(fixture.base) as Array<Record<string, unknown>>;
+  entries[0]!.transition = "resolving";
+  entries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${stat.dev}:${stat.ino}`,
+    contentDigest: fixture.contentDigest,
+    destinationPath: destination,
+    phase: "prepared",
+  };
+  writeFileSync(fixture.indexPath, `${JSON.stringify(entries)}\n`);
+
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+  assert.equal(readFileSync(join(fixture.rootPath, destination), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+});
+
+test("a legacy canonical preserve with prepared placeholders copies without leaving them behind (#2881)", { skip: !nativeMode }, (t) => {
+  const fixture = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-legacy-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // A pre-fix attempt persisted its guard/exchange placeholders (empty) and
+  // crashed while the reviewed source was still intact. The copy must
+  // reconcile those placeholders first: a leftover guard at the journaled
+  // path would make a replay of the published phase treat it as the move
+  // protocol's source instead of the completed destination.
+  const guardPath = ".gsd-projection-remove-11111111-2222-4333-8444-555555555555";
+  const exchangePath = ".gsd-projection-exchange-11111111-2222-4333-8444-555555555555";
+  writeFileSync(join(fixture.rootPath, guardPath), "");
+  writeFileSync(join(fixture.rootPath, exchangePath), "");
+  const guardStat = lstatSync(join(fixture.rootPath, guardPath), { bigint: true });
+  const exchangeStat = lstatSync(join(fixture.rootPath, exchangePath), { bigint: true });
+  const sourceStat = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  const destination = `migration/preserved-projection-evidence/${fixture.evidenceId.slice("evidence:sha256:".length)}`;
+  const entries = readIndex(fixture.base) as Array<Record<string, unknown>>;
+  entries[0]!.transition = "resolving";
+  entries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${sourceStat.dev}:${sourceStat.ino}`,
+    contentDigest: fixture.contentDigest,
+    destinationPath: destination,
+    guardPath,
+    guardIdentity: `${guardStat.dev}:${guardStat.ino}`,
+    stagingIdentity: null,
+    exchangePath,
+    exchangeIdentity: `${exchangeStat.dev}:${exchangeStat.ino}`,
+    phase: "prepared",
+  };
+  writeFileSync(fixture.indexPath, `${JSON.stringify(entries)}\n`);
+
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+  assert.equal(existsSync(join(fixture.rootPath, guardPath)), false);
+  assert.equal(existsSync(join(fixture.rootPath, exchangePath)), false);
+  assert.equal(readFileSync(join(fixture.rootPath, destination), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+});
+
+test("a same-inode edit of a prepared canonical preserve returns the record to review, not to the move protocol (#2881)", { skip: !nativeMode }, (t) => {
+  const fixture = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-drift-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // An in-place edit keeps the inode, so the identity gate alone cannot see
+  // the drift: the digest check must return the unconsumed source to review
+  // instead of letting the move protocol consume the projection and re-file
+  // the edited bytes as quarantine evidence.
+  const edited = "edited in place after review\n";
+  writeFileSync(join(fixture.rootPath, fixture.logicalPath), edited);
+  const stat = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  const destination = `migration/preserved-projection-evidence/${fixture.evidenceId.slice("evidence:sha256:".length)}`;
+  const entries = readIndex(fixture.base) as Array<Record<string, unknown>>;
+  entries[0]!.transition = "resolving";
+  entries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${stat.dev}:${stat.ino}`,
+    contentDigest: fixture.contentDigest,
+    destinationPath: destination,
+    phase: "prepared",
+  };
+  writeFileSync(fixture.indexPath, `${JSON.stringify(entries)}\n`);
+
+  const listed = loadUnboundProjectionEvidence(fixture.base);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.transition, "retained");
+  assert.equal(listed[0]!.evidencePath, fixture.logicalPath);
+  assert.equal(listed[0]!.contentDigest, `sha256:${createHash("sha256").update(edited).digest("hex")}`);
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), edited);
+  assert.equal(existsSync(join(fixture.rootPath, destination)), false);
+});
+
+test("companions retained during a replayed canonical preserve survive the recovery pass (#2881)", { skip: !nativeMode }, (t) => {
+  // A guard placeholder holding bytes becomes its own reviewed record during
+  // the copy's reconciliation; a null-identity artifact is quarantined by the
+  // restage. Either way the companion must still be listed after the pass —
+  // the recovery write folds the current index, not the loop's snapshot.
+  const holdsBytes = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-companion-");
+  t.after(() => cleanupFixture(holdsBytes.base));
+  const guardPath = ".gsd-projection-remove-11111111-2222-4333-8444-555555555555";
+  writeFileSync(join(holdsBytes.rootPath, guardPath), "guard bytes\n");
+  const guardStat = lstatSync(join(holdsBytes.rootPath, guardPath), { bigint: true });
+  const sourceStat = lstatSync(join(holdsBytes.rootPath, holdsBytes.logicalPath), { bigint: true });
+  const holdsDestination = `migration/preserved-projection-evidence/${holdsBytes.evidenceId.slice("evidence:sha256:".length)}`;
+  const holdsEntries = readIndex(holdsBytes.base) as Array<Record<string, unknown>>;
+  holdsEntries[0]!.transition = "resolving";
+  holdsEntries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${sourceStat.dev}:${sourceStat.ino}`,
+    contentDigest: holdsBytes.contentDigest,
+    destinationPath: holdsDestination,
+    guardPath,
+    guardIdentity: `${guardStat.dev}:${guardStat.ino}`,
+    phase: "prepared",
+  };
+  writeFileSync(holdsBytes.indexPath, `${JSON.stringify(holdsEntries)}\n`);
+
+  const listed = loadUnboundProjectionEvidence(holdsBytes.base);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.kind, "quarantine");
+  assert.equal(listed[0]!.evidencePath, guardPath);
+  assert.equal(listed[0]!.contentDigest, `sha256:${createHash("sha256").update("guard bytes\n").digest("hex")}`);
+  assert.equal(readFileSync(join(holdsBytes.rootPath, holdsDestination), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(holdsBytes.rootPath, holdsBytes.logicalPath), "utf8"), REVIEWED);
+
+  const nullIdentity = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-companion-null-");
+  t.after(() => cleanupFixture(nullIdentity.base));
+  const nullGuardPath = ".gsd-projection-remove-21111111-2222-4333-8444-555555555555";
+  writeFileSync(join(nullIdentity.rootPath, nullGuardPath), "unacknowledged bytes\n");
+  const nullSourceStat = lstatSync(join(nullIdentity.rootPath, nullIdentity.logicalPath), { bigint: true });
+  const nullDestination = `migration/preserved-projection-evidence/${nullIdentity.evidenceId.slice("evidence:sha256:".length)}`;
+  const nullEntries = readIndex(nullIdentity.base) as Array<Record<string, unknown>>;
+  nullEntries[0]!.transition = "resolving";
+  nullEntries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${nullSourceStat.dev}:${nullSourceStat.ino}`,
+    contentDigest: nullIdentity.contentDigest,
+    destinationPath: nullDestination,
+    guardPath: nullGuardPath,
+    guardIdentity: null,
+    phase: "prepared",
+  };
+  writeFileSync(nullIdentity.indexPath, `${JSON.stringify(nullEntries)}\n`);
+
+  const nullListed = loadUnboundProjectionEvidence(nullIdentity.base);
+  assert.equal(nullListed.length, 1);
+  assert.equal(nullListed[0]!.kind, "quarantine");
+  assert.equal(nullListed[0]!.evidencePath, nullGuardPath);
+  assert.equal(readFileSync(join(nullIdentity.rootPath, nullDestination), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(nullIdentity.rootPath, nullIdentity.logicalPath), "utf8"), REVIEWED);
+});
+
+test("a canonical preserve with an already-referenced guard converges without duplicating it (#2881)", { skip: !nativeMode }, (t) => {
+  const fixture = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-referenced-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // An interrupted restage recorded a companion quarantine row for the guard
+  // placeholder before the preserve was prepared. Reconciliation must keep
+  // the referenced artifact and detach it from the resolution's journaled
+  // path (the published record must replay against an absent guard), and the
+  // companion must neither vanish nor duplicate across passes.
+  const guardPath = ".gsd-projection-remove-11111111-2222-4333-8444-555555555555";
+  writeFileSync(join(fixture.rootPath, guardPath), "");
+  const guardStat = lstatSync(join(fixture.rootPath, guardPath), { bigint: true });
+  const sourceStat = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  const companionId = `evidence:sha256:${createHash("sha256")
+    .update(JSON.stringify({ evidencePath: guardPath, kind: "quarantine", logicalPath: fixture.logicalPath, scope: "file" }))
+    .digest("hex")}`;
+  const destination = `migration/preserved-projection-evidence/${fixture.evidenceId.slice("evidence:sha256:".length)}`;
+  const entries = readIndex(fixture.base) as Array<Record<string, unknown>>;
+  entries.push({
+    evidenceId: companionId,
+    evidencePath: guardPath,
+    evidenceIdentity: `${guardStat.dev}:${guardStat.ino}`,
+    contentDigest: `sha256:${createHash("sha256").update("").digest("hex")}`,
+    kind: "quarantine",
+    logicalPath: fixture.logicalPath,
+    scope: "file",
+    transition: "retained",
+  });
+  entries[0]!.transition = "resolving";
+  entries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${sourceStat.dev}:${sourceStat.ino}`,
+    contentDigest: fixture.contentDigest,
+    destinationPath: destination,
+    guardPath,
+    guardIdentity: `${guardStat.dev}:${guardStat.ino}`,
+    phase: "prepared",
+  };
+  writeFileSync(fixture.indexPath, `${JSON.stringify(entries)}\n`);
+
+  const listed = loadUnboundProjectionEvidence(fixture.base);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.evidenceId, companionId);
+  assert.equal(listed[0]!.evidencePath, guardPath);
+  assert.equal(existsSync(join(fixture.rootPath, guardPath)), true);
+  assert.equal(readFileSync(join(fixture.rootPath, destination), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+
+  const relisted = loadUnboundProjectionEvidence(fixture.base);
+  assert.equal(relisted.length, 1);
+  assert.equal(relisted[0]!.evidenceId, companionId);
+});
+
+test("a published canonical preserve with a detached guard replays without consuming anything (#2881)", { skip: !nativeMode }, (t) => {
+  const fixture = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-published-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // The exact crash state the copy branch persists: the copy is published,
+  // the journaled guard path was detached (randomized, absent) because a
+  // companion row owns the original placeholder, and the index retirement
+  // never ran. The replay must verify the completed destination, leave the
+  // source in place, and retire the record without duplicating the
+  // companion.
+  const guardPath = ".gsd-projection-remove-11111111-2222-4333-8444-555555555555";
+  writeFileSync(join(fixture.rootPath, guardPath), "");
+  const guardStat = lstatSync(join(fixture.rootPath, guardPath), { bigint: true });
+  const sourceStat = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  const companionId = `evidence:sha256:${createHash("sha256")
+    .update(JSON.stringify({ evidencePath: guardPath, kind: "quarantine", logicalPath: fixture.logicalPath, scope: "file" }))
+    .digest("hex")}`;
+  const destination = `migration/preserved-projection-evidence/${fixture.evidenceId.slice("evidence:sha256:".length)}`;
+  mkdirSync(dirname(join(fixture.rootPath, destination)), { recursive: true });
+  writeFileSync(join(fixture.rootPath, destination), REVIEWED);
+  const entries = readIndex(fixture.base) as Array<Record<string, unknown>>;
+  entries.push({
+    evidenceId: companionId,
+    evidencePath: guardPath,
+    evidenceIdentity: `${guardStat.dev}:${guardStat.ino}`,
+    contentDigest: `sha256:${createHash("sha256").update("").digest("hex")}`,
+    kind: "quarantine",
+    logicalPath: fixture.logicalPath,
+    scope: "file",
+    transition: "retained",
+  });
+  entries[0]!.transition = "resolving";
+  entries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${sourceStat.dev}:${sourceStat.ino}`,
+    contentDigest: fixture.contentDigest,
+    destinationPath: destination,
+    guardPath: ".gsd-projection-remove-99999999-8888-4777-8666-555555555555",
+    guardIdentity: null,
+    phase: "published",
+  };
+  writeFileSync(fixture.indexPath, `${JSON.stringify(entries)}\n`);
+
+  const listed = loadUnboundProjectionEvidence(fixture.base);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.evidenceId, companionId);
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(fixture.rootPath, destination), "utf8"), REVIEWED);
+  assert.equal(existsSync(join(fixture.rootPath, guardPath)), true);
+
+  const relisted = loadUnboundProjectionEvidence(fixture.base);
+  assert.equal(relisted.length, 1);
+  assert.equal(relisted[0]!.evidenceId, companionId);
+});
+
+test("a native replay of a canonical preserve deleting marker keeps the projection in place (#2881)", { skip: !nativeMode }, (t) => {
+  const fixture = seedCanonicalFixture("gsd-evidence-native-canonical-preserve-marker-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // Crash window of a degraded canonical preserve: the verified copy is
+  // published, the deleting marker persisted, the source unlink never ran.
+  // The native recovery must retire the record without removing the
+  // projection the marker's unlink step would have consumed.
+  const destination = `migration/preserved-projection-evidence/${fixture.evidenceId.slice("evidence:sha256:".length)}`;
+  mkdirSync(dirname(join(fixture.rootPath, destination)), { recursive: true });
+  writeFileSync(join(fixture.rootPath, destination), REVIEWED);
+  const stat = lstatSync(join(fixture.rootPath, fixture.logicalPath), { bigint: true });
+  const entries = readIndex(fixture.base) as Array<Record<string, unknown>>;
+  entries[0]!.transition = "resolving";
+  entries[0]!.resolution = {
+    action: "preserve",
+    currentIdentity: `${stat.dev}:${stat.ino}`,
+    contentDigest: fixture.contentDigest,
+    destinationPath: destination,
+    phase: "deleting",
+  };
+  writeFileSync(fixture.indexPath, `${JSON.stringify(entries)}\n`);
+
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+  assert.equal(readFileSync(join(fixture.rootPath, destination), "utf8"), REVIEWED);
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+});
+
+test("native preserve of staging evidence still moves the staging artifact (#2881)", { skip: !nativeMode }, (t) => {
+  const fixture = seedEvidenceFixture("gsd-evidence-native-staging-preserve-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // The move stays correct for temporary/quarantine rows: their evidence path
+  // is a protocol staging artifact, not a live projection.
+  const preview = previewUnboundProjectionEvidenceResolution(
+    fixture.base,
+    fixture.evidenceId,
+    "preserve",
+  );
+  resolveUnboundProjectionEvidence(fixture.base, fixture.evidenceId, "preserve", preview.consent);
+  assert.equal(readFileSync(join(fixture.rootPath, preview.destinationPath!), "utf8"), REVIEWED);
+  assert.equal(existsSync(join(fixture.rootPath, fixture.evidencePath)), false);
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+});
+
+test("native canonical restore keeps the projection in place", { skip: !nativeMode }, (t) => {
+  const fixture = seedCanonicalFixture("gsd-evidence-native-canonical-restore-");
+  t.after(() => cleanupFixture(fixture.base));
+
+  // Restore is the non-destructive sibling (#2846 wording): the reviewed
+  // bytes stay at the logical path and only the protecting record retires.
+  const preview = previewUnboundProjectionEvidenceResolution(
+    fixture.base,
+    fixture.evidenceId,
+    "restore",
+  );
+  assert.equal(preview.destinationPath, fixture.logicalPath);
+  resolveUnboundProjectionEvidence(fixture.base, fixture.evidenceId, "restore", preview.consent);
+  assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), REVIEWED);
+  assert.deepEqual(loadUnboundProjectionEvidence(fixture.base), []);
+});

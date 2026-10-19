@@ -54,7 +54,7 @@ budget_enforcement: pause    # default when ceiling is set
 
 Once at least two slices have completed, GSD projects the remaining cost:
 
-```
+```text
 Projected remaining: $12.40 ($6.20/slice avg × 2 remaining)
 ```
 

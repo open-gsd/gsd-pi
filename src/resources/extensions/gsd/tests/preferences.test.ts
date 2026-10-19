@@ -56,6 +56,20 @@ test("git.merge_to_main produces deprecation warning", () => {
   }
 });
 
+test("#2888: git.preserve_worktree_on_stop accepts booleans and rejects other types", () => {
+  const accepted = validatePreferences({ git: { preserve_worktree_on_stop: true } });
+  assert.equal(accepted.errors.length, 0);
+  assert.equal(accepted.preferences.git?.preserve_worktree_on_stop, true);
+
+  const explicitFalse = validatePreferences({ git: { preserve_worktree_on_stop: false } });
+  assert.equal(explicitFalse.errors.length, 0);
+  assert.equal(explicitFalse.preferences.git?.preserve_worktree_on_stop, false);
+
+  const rejected = validatePreferences({ git: { preserve_worktree_on_stop: "yes" } } as any);
+  assert.ok(rejected.errors.length > 0);
+  assert.ok(rejected.errors[0].includes("git.preserve_worktree_on_stop must be a boolean"));
+});
+
 
 test("getIsolationMode defaults to none when preferences have no isolation setting", () => {
   // Validate the default via validatePreferences: when no isolation is set,

@@ -229,7 +229,7 @@ test("changed modeled .gsd projection is observed without importing or advancing
   const markerBefore = markerBytes(base);
   const projectionBefore = projectionTreeSnapshot(join(base, ".gsd"));
 
-  const drift = observeExternalMarkdownEdits(base);
+  const drift = await observeExternalMarkdownEdits(base);
 
   assert.equal(drift.length, 1, "the edited projection is observed");
   assert.deepEqual(durableSnapshot(), databaseBefore, "canonical authority and lineage remain exact");

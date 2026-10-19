@@ -61,7 +61,7 @@ Migration works best with a `ROADMAP.md` file for milestone structure. Without o
 
 After migrating, verify the output with:
 
-```
+```bash
 /gsd doctor
 ```
 
@@ -69,7 +69,7 @@ This checks database and projection integrity and flags any structural issues. U
 
 If an existing project has legacy markdown artifacts that you explicitly want to import into a missing or damaged database, start GSD once so the database opens, then run:
 
-```
+```bash
 /gsd recover
 # Then re-run with the exact --preview=<sha256> printed by the command.
 ```

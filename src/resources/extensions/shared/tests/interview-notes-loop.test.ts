@@ -15,6 +15,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@gsd/pi-tui";
 import { showInterviewRound, type Question, type RoundResult } from "../interview-ui.js";
 
 // Raw terminal sequences that matchesKey() recognises
@@ -56,7 +57,7 @@ function runWithInputs(
 						muted: (t: string) => t,
 						dimmed: (t: string) => t,
 					};
-					const mockKb = {};
+					const mockKb = new KeybindingsManager(TUI_KEYBINDINGS);
 
 					const widget = factory(mockTui, mockTheme, mockKb, (result: RoundResult) => {
 						clearTimeout(timeout);
@@ -178,7 +179,7 @@ describe("interview-ui notes loop regression (#3502)", () => {
 						muted: (t: string) => t,
 						dimmed: (t: string) => t,
 					};
-					widget = factory(mockTui, mockTheme, {}, (result: RoundResult) => {
+					widget = factory(mockTui, mockTheme, new KeybindingsManager(TUI_KEYBINDINGS), (result: RoundResult) => {
 						doneCalls.push(result);
 						resolve(result);
 					});

@@ -6,7 +6,7 @@ Remote questions allow GSD to ask for user input and send informational notifica
 
 ### Discord
 
-```
+```bash
 /gsd remote discord
 ```
 
@@ -31,7 +31,7 @@ The setup wizard:
 
 ### Slack
 
-```
+```bash
 /gsd remote slack
 ```
 
@@ -51,7 +51,7 @@ The setup wizard:
 
 ### Telegram
 
-```
+```bash
 /gsd remote telegram
 ```
 

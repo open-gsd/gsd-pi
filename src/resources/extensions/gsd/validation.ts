@@ -29,6 +29,19 @@ export function validateTitle(title: string): string | null {
 }
 
 /**
+ * Rewrite a milestone or slice title so it cannot carry characters that
+ * conflict with GSD's state document delimiter conventions (see
+ * validateTitle). GSD's own prompts generate such titles routinely, so the
+ * planning tools normalize at the boundary instead of rejecting (#2588);
+ * validateTitle remains the doctor-side check for hand-edited state.
+ */
+export function sanitizeTitle(title: string): string {
+  return title
+    .replace(/[ \t]*[\u2014\u2013][ \t]*/g, " - ") // em/en dash → spaced hyphen
+    .replace(/[ \t]*\/[ \t]*/g, "-"); // forward slash → hyphen
+}
+
+/**
  * Validate that `value` is an array of non-empty strings.
  * Throws with a message referencing `field` on failure.
  * Returns the validated array (narrowed to string[]).

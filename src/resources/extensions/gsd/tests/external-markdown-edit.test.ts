@@ -9,7 +9,9 @@ import { randomUUID } from "node:crypto";
 
 import { observeExternalMarkdownEdits } from "../state-reconciliation/drift/external-markdown-edit.ts";
 import { readCompatMarker, writeCompatMarker, computeProjectionSha } from "../compat/compat-marker.ts";
-import { closeDatabase, insertArtifact, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertArtifact, insertDecision, openDatabase } from "../gsd-db.ts";
+import { readDecisionsProjectionIntent } from "../db-writer.ts";
+import { backfillDecisionsToMemories } from "../memory-backfill.ts";
 
 const tmpDirs: string[] = [];
 
@@ -45,7 +47,7 @@ test("detect returns no drift when file sha matches marker", async () => {
     piVersion: "1.4.0",
   });
 
-  const drift = observeExternalMarkdownEdits(base);
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0);
 });
 
@@ -62,7 +64,7 @@ test("detect returns drift when file content differs from marker", async () => {
     piVersion: "1.4.0",
   });
 
-  const drift = observeExternalMarkdownEdits(base);
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 1);
   assert.equal(drift[0].kind, "external-markdown-edit");
   assert.equal(drift[0].projectionPath, rel);
@@ -94,7 +96,7 @@ test("detect refreshes stale marker when current file already matches DB artifac
     piVersion: "1.9.0",
   });
 
-  const drift = observeExternalMarkdownEdits(base);
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0);
   const marker = readCompatMarker(base);
   assert.equal(marker.projections[rel]?.sha, computeProjectionSha(content));
@@ -111,7 +113,7 @@ test("detect treats missing marker as drift on every tracked projection file", a
   // no-op (the reconcile pipeline's other handlers cover the "import everything"
   // case via the existing /gsd recover flow). This is by design: this handler
   // only fires when we HAVE a baseline to compare.
-  const drift = observeExternalMarkdownEdits(base);
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0);
 });
 
@@ -127,6 +129,82 @@ test("detect ignores files missing from disk (other handlers cover that)", async
   });
   // No file written.
 
-  const drift = observeExternalMarkdownEdits(base);
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0);
+});
+
+test("a DECISIONS.md that matches the database render is not an external edit (#2728)", async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertDecision({
+    id: "D001",
+    when_context: "2026-10-09",
+    scope: "global",
+    decision: "Store projections in SQLite",
+    choice: "SQLite is the authority",
+    rationale: "durable and inspectable",
+    revisable: "Yes",
+    made_by: "human",
+    superseded_by: null,
+  });
+  backfillDecisionsToMemories();
+  const intent = await readDecisionsProjectionIntent(base);
+  assert.ok(intent, "the database derives a DECISIONS.md render");
+  writeFileSync(join(base, ".gsd", "DECISIONS.md"), intent.content, "utf-8");
+  writeCompatMarker(base, {
+    schema: 2,
+    lastWriter: "gsd-pi",
+    lastProjectedAt: "2026-06-21T00:00:00.000Z",
+    projections: { "DECISIONS.md": { sha: "stale000000000000", entities: [] } },
+    planning: { active: false, layout: null, projections: {}, passthrough: {} },
+    piVersion: "1.21.0",
+  });
+
+  const drift = await observeExternalMarkdownEdits(base);
+  assert.equal(drift.length, 0, "a byte-identical render is not an external edit");
+  const marker = readCompatMarker(base);
+  assert.equal(
+    marker.projections["DECISIONS.md"]?.sha,
+    computeProjectionSha(intent.content),
+    "the stale baseline is refreshed",
+  );
+});
+
+test("a DECISIONS.md that diverges from the database render is still an external edit", async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertDecision({
+    id: "D001",
+    when_context: "2026-10-09",
+    scope: "global",
+    decision: "Store projections in SQLite",
+    choice: "SQLite is the authority",
+    rationale: "durable and inspectable",
+    revisable: "Yes",
+    made_by: "human",
+    superseded_by: null,
+  });
+  backfillDecisionsToMemories();
+  const intent = await readDecisionsProjectionIntent(base);
+  assert.ok(intent);
+  const diverged = intent.content.replace("SQLite is the authority", "Postgres is the authority");
+  writeFileSync(join(base, ".gsd", "DECISIONS.md"), diverged, "utf-8");
+  writeCompatMarker(base, {
+    schema: 2,
+    lastWriter: "gsd-pi",
+    lastProjectedAt: "2026-06-21T00:00:00.000Z",
+    projections: { "DECISIONS.md": { sha: computeProjectionSha(intent.content), entities: [] } },
+    planning: { active: false, layout: null, projections: {}, passthrough: {} },
+    piVersion: "1.21.0",
+  });
+
+  const drift = await observeExternalMarkdownEdits(base);
+  assert.equal(drift.length, 1, "a hand edit that the render does not produce still drifts");
+  assert.equal(drift[0].projectionPath, "DECISIONS.md");
+  const marker = readCompatMarker(base);
+  assert.equal(
+    marker.projections["DECISIONS.md"]?.sha,
+    computeProjectionSha(intent.content),
+    "the baseline is left alone",
+  );
 });

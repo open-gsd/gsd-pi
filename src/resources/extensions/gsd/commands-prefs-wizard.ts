@@ -23,6 +23,12 @@ import {
 } from "./preferences.js";
 import { GSD_MODEL_PHASE_KEYS } from "./preferences-types.js";
 import { defaultRoutingConfig } from "./model-router.js";
+import {
+  formatInspectDetail,
+  formatInspectLines,
+  inspectPreferences,
+  type EffectivePreferenceEntry,
+} from "./prefs-inspect.js";
 import { loadFile, saveFile, splitFrontmatter, parseFrontmatterMap } from "./files.js";
 import { runClaudeImportFlow } from "./claude-import.js";
 import { clearSessionModelOverride } from "./session-model-override.js";
@@ -276,7 +282,45 @@ export async function handlePrefs(args: string, ctx: ExtensionCommandContext): P
     return;
   }
 
-  ctx.ui.notify("Usage: /gsd prefs [global|project|status|wizard|setup|import-claude [global|project]]", "info");
+  if (trimmed === "inspect") {
+    await handlePrefsInspect(ctx);
+    return;
+  }
+
+  ctx.ui.notify("Usage: /gsd prefs [global|project|status|inspect|wizard|setup|import-claude [global|project]]", "info");
+}
+
+/**
+ * Read-only effective-preferences inspector (#2397): every known key with its
+ * effective value and provenance (project > global > unset), plus file
+ * diagnostics. Selection drills into full per-file values; Esc closes.
+ * Purely a projection over the loaders — nothing here writes.
+ */
+export async function handlePrefsInspect(ctx: ExtensionCommandContext): Promise<void> {
+  const inspection = inspectPreferences();
+  const lines = formatInspectLines(inspection);
+  const diagnosticCount = inspection.diagnostics.length;
+  const missingFiles = inspection.files.filter((f) => !f.present).map((f) => f.scope);
+  const unknownKeys = inspection.unknownKeys.map((u) => u.key);
+  ctx.ui.notify(
+    `GSD preferences — effective values · source` +
+      (diagnosticCount > 0 ? ` · ${diagnosticCount} diagnostic${diagnosticCount > 1 ? "s" : ""}` : "") +
+      (unknownKeys.length > 0 ? ` · unknown keys ignored: ${unknownKeys.join(", ")}` : "") +
+      (missingFiles.length > 0 ? ` · missing: ${missingFiles.join(", ")}` : "") +
+      ` — select a key for detail, Esc to close`,
+    "info",
+  );
+
+  while (true) {
+    const raw = await ctx.ui.select("GSD Preferences — effective values", lines);
+    const choice = typeof raw === "string" ? raw : "";
+    if (!choice) break;
+    const index = lines.indexOf(choice);
+    if (index === -1) break;
+    const entry: EffectivePreferenceEntry | undefined = inspection.entries[index];
+    if (!entry) break;
+    ctx.ui.notify(formatInspectDetail(inspection, entry), "info");
+  }
 }
 
 export async function handleImportClaude(ctx: ExtensionCommandContext, scope: "global" | "project"): Promise<void> {

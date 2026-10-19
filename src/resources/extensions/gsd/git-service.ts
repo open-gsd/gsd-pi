@@ -114,6 +114,15 @@ export interface GitPreferences {
    *  Default: true when collapse_cadence is "slice", ignored otherwise.
    */
   milestone_resquash?: boolean;
+  /** #2888 — when true, a stop with an in-progress milestone (attempt death
+   *  via liveness backstop or recovery abort, manual stop, graceful exit)
+   *  leaves the milestone worktree directory on disk alongside the preserved
+   *  branch instead of removing it. On the default path (false) the worktree
+   *  is removed; git-visible uncommitted work is quarantined under
+   *  `.gsd/quarantine/worktrees/` first. `/gsd auto` re-enters an existing
+   *  worktree on resume. Default: false.
+   */
+  preserve_worktree_on_stop?: boolean;
 }
 
 export const VALID_BRANCH_NAME = /^[a-zA-Z0-9_\-\/.]+$/;

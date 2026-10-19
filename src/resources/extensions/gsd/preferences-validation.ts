@@ -1603,6 +1603,10 @@ export function validatePreferences(preferences: GSDPreferences): {
         errors.push("git.milestone_resquash must be a boolean");
       }
     }
+    if (g.preserve_worktree_on_stop !== undefined) {
+      if (typeof g.preserve_worktree_on_stop === "boolean") git.preserve_worktree_on_stop = g.preserve_worktree_on_stop;
+      else errors.push("git.preserve_worktree_on_stop must be a boolean");
+    }
 
     if (Object.keys(git).length > 0) {
       validated.git = git as GitPreferences;
