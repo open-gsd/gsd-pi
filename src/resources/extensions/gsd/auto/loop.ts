@@ -1229,7 +1229,17 @@ export async function autoLoop(
             unitId: iterData.unitId,
             inputPayload: verificationInputPayload,
             deps: {
-              pauseAuto: () => deps.pauseAuto(ctx, pi),
+              pauseAuto: () => deps.pauseAuto(
+                ctx,
+                pi,
+                humanReviewPolicy
+                  ? {
+                      message: "Custom-engine verification is waiting for human review",
+                      category: "unknown",
+                      blockerKind: "subjective_uat",
+                    }
+                  : undefined,
+              ),
               stopAuto: reason => deferStopAuto(ctx, pi, reason),
               reportPause: details => phaseReporter.report("custom-engine", "pause", details),
               finishTurn,

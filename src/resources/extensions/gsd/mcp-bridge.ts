@@ -32,6 +32,7 @@ export {
   updateRequirementInDb,
 } from "./db-writer.js";
 export { rebuildState } from "./doctor.js";
+export { resolveAutoPauseBlockerById } from "./pause-blocker-domain-operation.js";
 export { queryJournal } from "./journal.js";
 export {
   claimReservedId,

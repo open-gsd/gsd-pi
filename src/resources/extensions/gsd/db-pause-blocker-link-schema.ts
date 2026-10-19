@@ -20,5 +20,5 @@ export function createPauseBlockerLinkSchema(db: DbAdapter): void {
 export function hasPauseBlockerLinkSchema(db: DbAdapter): boolean {
   return db.prepare(
     "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auto_pause_blocker_links'",
-  ).get() !== undefined;
+  ).get() != null;
 }

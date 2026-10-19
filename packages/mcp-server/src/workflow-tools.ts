@@ -31,6 +31,13 @@ interface GsdMcpBridge {
   shouldBlockQueueExecutionInSnapshot: (...args: any[]) => any;
   ensureDbOpen: (...args: any[]) => any;
   openExistingWorkflowDatabase: (projectDir: string) => WorkflowDatabaseOpenResult;
+  resolveAutoPauseBlockerById: (input: {
+    blockerId: string;
+    rationale: string;
+    invocation: ExecutionInvocation;
+    expectedRevision: number;
+    expectedAuthorityEpoch: number;
+  }) => { resolved: boolean; failure?: string };
   _getAdapter: (...args: any[]) => any;
   checkpointDatabase: (...args: any[]) => any;
   closeDatabase: (...args: any[]) => any;
@@ -1354,7 +1361,35 @@ export async function readProjectProgressViaBridge(projectDir: string): Promise<
       if (opened.reason === "schema-too-new") throw opened.error;
       return null;
     }
+
     return bridge.readProgressFromDb(projectDir);
+  });
+}
+
+export async function resolvePersistedAutoPauseBlockerViaBridge(
+  projectDir: string,
+  blockerId: string,
+  rationale: string,
+  expectedRevision: number,
+  expectedAuthorityEpoch: number,
+  extra?: WorkflowMcpRequestExtra,
+): Promise<{ resolved: boolean; failure?: string }> {
+  if (!rationale.trim()) throw new Error("rationale must not be blank");
+  const validatedProjectDir = validateProjectDir(projectDir);
+  await enforceWorkflowWriteGate("gsd_resolve_blocker", validatedProjectDir);
+  return runSerializedWorkflowOperation(async () => {
+    const bridge = await importBridgeModule();
+    const opened = bridge.openExistingWorkflowDatabase(validatedProjectDir);
+    if (!opened.ok) {
+      throw opened.error ?? new Error(`GSD database is not available (${opened.reason})`);
+    }
+    return bridge.resolveAutoPauseBlockerById({
+      blockerId,
+      rationale,
+      invocation: mcpExecutionInvocation("gsd_resolve_blocker", extra),
+      expectedRevision,
+      expectedAuthorityEpoch,
+    });
   });
 }
 

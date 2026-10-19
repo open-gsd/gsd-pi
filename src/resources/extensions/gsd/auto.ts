@@ -19,6 +19,7 @@ import type {
   ExtensionCommandContext,
   SessionMessageEntry,
 } from "@gsd/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 
 import { deriveState, invalidateStateCache } from "./state.js";
 import {
@@ -351,6 +352,7 @@ import {
   stopNoticeDisplayReason,
 } from "./stop-notice.js";
 import { abortActiveUnitTurn } from "./auto/unit-turn-abort.js";
+import { openPauseBlockerForSession } from "./pause-blocker-domain-operation.js";
 
 // ── ENCAPSULATION INVARIANT ─────────────────────────────────────────────────
 // ALL mutable auto-mode state lives in the AutoSession class (auto/session.ts).
@@ -2278,7 +2280,9 @@ export async function pauseAuto(
       isolationMode: getIsolationMode(s.originalBasePath || s.basePath),
       baseIsAutoWorktree: isInAutoWorktree(s.basePath),
     });
+    const pauseId = randomUUID();
     const pausedMeta: PausedSessionMetadata = {
+      pauseId,
       milestoneId: s.currentMilestoneId ?? undefined,
       worktreePath: pausedWorktreePath,
       originalBasePath: s.originalBasePath,
@@ -2301,6 +2305,16 @@ export async function pauseAuto(
       preExecRetryCount: Object.fromEntries(s.preExecRetryCount),
     };
     setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pausedMeta);
+    if (_errorContext?.blockerKind) {
+      openPauseBlockerForSession({
+        pause: { ...pausedMeta, pauseId },
+        blockerKind: _errorContext.blockerKind,
+        description: _errorContext.message,
+        requestedAction: s.stepMode
+          ? "Run /gsd next after resolving the blocker."
+          : "Run /gsd auto after resolving the blocker.",
+      });
+    }
   } catch (err) {
     // Non-fatal — resume will still work via full bootstrap, just without worktree context
     logWarning("engine", `paused-session DB write failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });

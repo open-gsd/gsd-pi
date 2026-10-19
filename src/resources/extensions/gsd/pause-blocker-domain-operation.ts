@@ -108,31 +108,50 @@ export function openPauseBlockerForSession(input: {
       requestedAction: input.requestedAction,
     },
   }, (context) => {
-    const blockerId = randomUUID();
-    const openedAt = new Date().toISOString();
-    getDb().prepare(`
-      INSERT INTO workflow_blockers (
-        blocker_id, project_id, lifecycle_id, blocker_kind, resolution_owner,
-        blocker_status, description, requested_action, resolution, opened_at,
-        opened_operation_id, opened_project_revision, opened_authority_epoch
-      ) VALUES (
-        :blocker_id, :project_id, :lifecycle_id, :blocker_kind, :resolution_owner,
-        'open', :description, :requested_action, '', :opened_at,
-        :operation_id, :project_revision, :authority_epoch
-      )
-    `).run({
-      ":blocker_id": blockerId,
-      ":project_id": context.projectId,
+    const resolutionOwner = input.blockerKind === "external_dependency" ? "external" : "user";
+    const existing = getDb().prepare(`
+      SELECT blocker.blocker_id FROM workflow_blockers blocker
+      WHERE blocker.lifecycle_id = :lifecycle_id
+        AND blocker.blocker_kind = :blocker_kind
+        AND blocker.resolution_owner = :resolution_owner
+        AND blocker.blocker_status = 'open'
+        AND NOT EXISTS (
+          SELECT 1 FROM auto_pause_blocker_links link WHERE link.blocker_id = blocker.blocker_id
+        )
+      ORDER BY blocker.opened_at DESC, blocker.blocker_id
+      LIMIT 1
+    `).get({
       ":lifecycle_id": lifecycleId,
       ":blocker_kind": input.blockerKind,
-      ":resolution_owner": input.blockerKind === "external_dependency" ? "external" : "user",
-      ":description": input.description.trim(),
-      ":requested_action": input.requestedAction.trim(),
-      ":opened_at": openedAt,
-      ":operation_id": context.operationId,
-      ":project_revision": context.resultingRevision,
-      ":authority_epoch": context.resultingAuthorityEpoch,
-    });
+      ":resolution_owner": resolutionOwner,
+    }) as { blocker_id: string } | undefined;
+    const blockerId = existing?.blocker_id ?? randomUUID();
+    const openedAt = new Date().toISOString();
+    if (!existing) {
+      getDb().prepare(`
+        INSERT INTO workflow_blockers (
+          blocker_id, project_id, lifecycle_id, blocker_kind, resolution_owner,
+          blocker_status, description, requested_action, resolution, opened_at,
+          opened_operation_id, opened_project_revision, opened_authority_epoch
+        ) VALUES (
+          :blocker_id, :project_id, :lifecycle_id, :blocker_kind, :resolution_owner,
+          'open', :description, :requested_action, '', :opened_at,
+          :operation_id, :project_revision, :authority_epoch
+        )
+      `).run({
+        ":blocker_id": blockerId,
+        ":project_id": context.projectId,
+        ":lifecycle_id": lifecycleId,
+        ":blocker_kind": input.blockerKind,
+        ":resolution_owner": resolutionOwner,
+        ":description": input.description.trim(),
+        ":requested_action": input.requestedAction.trim(),
+        ":opened_at": openedAt,
+        ":operation_id": context.operationId,
+        ":project_revision": context.resultingRevision,
+        ":authority_epoch": context.resultingAuthorityEpoch,
+      });
+    }
     getDb().prepare(`
       INSERT INTO auto_pause_blocker_links (
         blocker_id, pause_id, lifecycle_id, milestone_id, unit_type, unit_id, created_at
@@ -169,7 +188,12 @@ export function openPauseBlockerForSession(input: {
         eventType: "pause.blocker.opened",
         entityType: "pause",
         entityId: blockerId,
-        payload: { blockerId, pauseId: input.pause.pauseId, blockerKind: input.blockerKind },
+        payload: {
+          blockerId,
+          pauseId: input.pause.pauseId,
+          blockerKind: input.blockerKind,
+          reusedExistingBlocker: Boolean(existing),
+        },
         destinations: ["projection"],
       }],
       projections: [{
@@ -242,7 +266,12 @@ export function resolveAutoPauseBlockerById(input: {
       sourceTransport: input.invocation.sourceTransport,
       traceId: input.invocation.traceId,
       turnId: input.invocation.turnId,
-      payload: { blockerId: input.blockerId, pauseId: association.pause_id, rationale: input.rationale },
+      payload: {
+        blockerId: input.blockerId,
+        pauseId: association.pause_id,
+        lifecycleId: association.lifecycle_id,
+        rationale: input.rationale.trim(),
+      },
     }, () => { throw new Error("Replayed pause blocker operation unexpectedly mutated"); });
     return { resolved: true };
   }

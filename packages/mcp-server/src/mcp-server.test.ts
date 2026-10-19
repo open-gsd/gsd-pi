@@ -1161,6 +1161,29 @@ describe('createMcpServer tool registration', () => {
     );
   });
 
+  it('gsd_resolve_blocker preserves live sessions and selects persisted pauses explicitly', async () => {
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const tool = (server as any)._registeredTools?.gsd_resolve_blocker;
+    assert.ok(tool, 'gsd_resolve_blocker should be registered');
+
+    const sessionId = await sm.startSession('/tmp/tool-resolve-live', { cliPath: '/usr/bin/gsd' });
+    const liveResult = await tool.handler({ sessionId, response: 'fix' });
+    assert.equal(liveResult.isError, true);
+    assert.match(liveResult.content[0].text, /No pending blocker/);
+
+    const conflictResult = await tool.handler({
+      sessionId,
+      response: 'fix',
+      projectDir: '/tmp/tool-resolve-live',
+      pauseBlockerId: 'persisted-blocker',
+      rationale: 'Human confirmed resolution',
+      expectedRevision: 1,
+      expectedAuthorityEpoch: 1,
+    });
+    assert.equal(conflictResult.isError, true);
+    assert.match(conflictResult.content[0].text, /conflicts with sessionId\/response/);
+  });
+
   it('gsd_result flow returns HeadlessJsonResult shape', async () => {
     const sessionId = await sm.startSession('/tmp/tool-result', { cliPath: '/usr/bin/gsd' });
     const result = sm.getResult(sessionId);

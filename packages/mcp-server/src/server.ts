@@ -35,6 +35,7 @@ import { runDoctorLite } from './readers/doctor-lite.js';
 import {
   hasWorkflowToolBridgeConfiguration,
   readProjectProgressViaBridge,
+  resolvePersistedAutoPauseBlockerViaBridge,
   registerWorkflowTools,
   validateProjectDir,
   warmWorkflowToolBridges,
@@ -1322,14 +1323,60 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_resolve_blocker',
-    'Resolve a pending blocker in a GSD session by sending a response to the UI request.',
+    'Resolve a live session blocker, or clear-only resolve an exact persisted auto-pause blocker with projectDir, pauseBlockerId, rationale, and the observed revision and authority epoch.',
     {
-      sessionId: z.string().describe('Session ID returned from gsd_execute'),
-      response: z.string().describe('Response to send for the pending blocker'),
+      sessionId: z.string().min(1).optional().describe('Session ID returned from gsd_execute'),
+      response: z.string().optional().describe('Response to send for the pending session blocker'),
+      projectDir: z.string().min(1).optional().describe('Absolute project directory for a persisted auto-pause blocker'),
+      pauseBlockerId: z.string().min(1).optional().describe('Exact persisted auto-pause blocker ID from the project snapshot'),
+      rationale: z.string().trim().min(1).optional().describe('Why the human-owned pause is being cleared'),
+      expectedRevision: z.number().int().nonnegative().optional().describe('Project revision observed in the project snapshot'),
+      expectedAuthorityEpoch: z.number().int().nonnegative().optional().describe('Authority epoch observed in the project snapshot'),
     },
-    async (args: Record<string, unknown>) => {
-      const { sessionId, response } = args as { sessionId: string; response: string };
+    async (args: Record<string, unknown>, extra?: McpToolExtra) => {
+      const {
+        sessionId, response, projectDir, pauseBlockerId, rationale,
+        expectedRevision, expectedAuthorityEpoch,
+      } = args as {
+        sessionId?: string;
+        response?: string;
+        projectDir?: string;
+        pauseBlockerId?: string;
+        rationale?: string;
+        expectedRevision?: number;
+        expectedAuthorityEpoch?: number;
+      };
       try {
+        const pauseSelection = pauseBlockerId !== undefined
+          || rationale !== undefined
+          || expectedRevision !== undefined
+          || expectedAuthorityEpoch !== undefined;
+        if (pauseSelection) {
+          if (!projectDir || !pauseBlockerId || !rationale?.trim()) {
+            return errorContent('projectDir, pauseBlockerId, and a nonblank rationale are required for a persisted pause.');
+          }
+          if (
+            sessionId !== undefined
+            || response !== undefined
+            || !Number.isSafeInteger(expectedRevision)
+            || !Number.isSafeInteger(expectedAuthorityEpoch)
+          ) {
+            return errorContent('Persisted pause selection conflicts with sessionId/response and requires safe revision and authority epoch values.');
+          }
+          const result = await resolvePersistedAutoPauseBlockerViaBridge(
+            projectDir,
+            pauseBlockerId,
+            rationale,
+            expectedRevision!,
+            expectedAuthorityEpoch!,
+            extra,
+          );
+          if (!result.resolved) return errorContent(`Auto-pause blocker was not resolved (${result.failure ?? 'unknown'}).`);
+          return jsonContent({ resolved: true });
+        }
+        if (!sessionId || response === undefined) {
+          return errorContent('sessionId and response are required for a live session blocker.');
+        }
         await sessionManager.resolveBlocker(sessionId, response);
         return jsonContent({ resolved: true });
       } catch (err) {
