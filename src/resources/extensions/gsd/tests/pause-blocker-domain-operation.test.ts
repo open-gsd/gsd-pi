@@ -165,6 +165,89 @@ test("pause blocker resolution refuses mismatched persisted pause identity witho
   ).get({ ":id": blockerId })?.["blocker_status"], "open");
 });
 
+test("legacy pause resolution refuses a persisted blocker-kind mismatch without mutation", (t) => {
+  const dir = createProject();
+  t.after(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const pause: PausedSessionMetadata & { pauseId: string } = {
+    pauseId: "pause-kind-mismatch",
+    milestoneId: "M001",
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+  };
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pause);
+  const blockerId = openPauseBlockerForSession({
+    pause,
+    blockerKind: "subjective_uat",
+    description: "Human review",
+    requestedAction: "Review",
+  });
+  assert.ok(blockerId);
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
+    ...pause,
+    pauseBlockerId: blockerId,
+    blockerKind: "machine_fixable",
+  });
+
+  const fence = readDomainOperationFence();
+  const result = resolveAutoPauseBlockerById({
+    blockerId,
+    rationale: "Clear mismatched kind",
+    invocation: internalExecutionInvocation("test/pause-blocker/legacy-kind-mismatch"),
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+  });
+
+  assert.deepEqual(result, { resolved: false, failure: "association-mismatch" });
+  assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY)?.pauseBlockerId, blockerId);
+  assert.equal(db().prepare(
+    "SELECT blocker_status FROM workflow_blockers WHERE blocker_id = :id",
+  ).get({ ":id": blockerId })?.["blocker_status"], "open");
+});
+
+test("legacy pause resolution refuses external-owned blockers without clearing the pause", (t) => {
+  const dir = createProject();
+  t.after(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const pause: PausedSessionMetadata & { pauseId: string } = {
+    pauseId: "pause-external-owner",
+    milestoneId: "M001",
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+    blockerKind: "external_dependency",
+  };
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pause);
+  const blockerId = openPauseBlockerForSession({
+    pause,
+    blockerKind: "external_dependency",
+    description: "External dependency",
+    requestedAction: "Wait for dependency",
+  });
+  assert.ok(blockerId);
+
+  const fence = readDomainOperationFence();
+  const result = resolveAutoPauseBlockerById({
+    blockerId,
+    rationale: "Clear external blocker",
+    invocation: internalExecutionInvocation("test/pause-blocker/legacy-external-owner"),
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+  });
+
+  assert.deepEqual(result, { resolved: false, failure: "association-mismatch" });
+  assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY)?.pauseBlockerId, blockerId);
+  assert.equal(db().prepare(
+    "SELECT blocker_status, resolution_owner FROM workflow_blockers WHERE blocker_id = :id",
+  ).get({ ":id": blockerId })?.["blocker_status"], "open");
+  assert.equal(db().prepare(
+    "SELECT resolution_owner FROM workflow_blockers WHERE blocker_id = :id",
+  ).get({ ":id": blockerId })?.["resolution_owner"], "external");
+});
+
 test("existing exact human blocker is not reused for a distinct pause", (t) => {
   const dir = createProject();
   t.after(() => {

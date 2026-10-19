@@ -465,8 +465,9 @@ function resolveLegacyAutoPauseBlockerById(input: {
     || metadata.milestoneId !== association.milestone_id
     || metadata.unitType !== association.unit_type
     || metadata.unitId !== association.unit_id
+    || (metadata.blockerKind !== undefined && metadata.blockerKind !== association.blocker_kind)
     || !HUMAN_BLOCKER_KINDS.has(association.blocker_kind as HumanBlockerKind)
-    || association.resolution_owner !== (association.blocker_kind === "external_dependency" ? "external" : "user")
+    || association.resolution_owner !== "user"
     || findPauseLifecycleId(metadata) !== association.lifecycle_id
   ) return { resolved: false, failure: "association-mismatch" };
 
@@ -497,6 +498,7 @@ function resolveLegacyAutoPauseBlockerById(input: {
     if (
       liveMetadata.pauseId !== association.pause_id
       || liveMetadata.pauseBlockerId !== input.blockerId
+      || (liveMetadata.blockerKind !== undefined && liveMetadata.blockerKind !== association.blocker_kind)
       || findPauseLifecycleId(liveMetadata) !== association.lifecycle_id
     ) throw new Error("Pause/blocker lifecycle association changed");
     const now = new Date().toISOString();
