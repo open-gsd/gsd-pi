@@ -21,7 +21,7 @@ import { isDispatchExecutionOpen } from "./db/unit-dispatches.js";
 import { closeAutoPause, listOpenAutoPauseScopes, readOpenAutoPause, readOpenAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
-import { resolveAutoPauseBlockerById } from "./pause-blocker-domain-operation.js";
+import { resolveAutoPauseBlockerById, resolvePauseBlockerRow } from "./pause-blocker-domain-operation.js";
 import { logWarning } from "./workflow-logger.js";
 import { readMilestone, readSlice } from "./db/lifecycle-read.js";
 import type { AutoPauseBlockerKind } from "./recovery-policy.js";

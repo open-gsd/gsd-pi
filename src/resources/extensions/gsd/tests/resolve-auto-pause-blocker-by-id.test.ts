@@ -185,19 +185,31 @@ test("resolves the exact open auto-pause blocker and atomically closes its bound
   assert.equal(openPauseRows().length, 0, "the bound pause row is closed");
 });
 
-test("resume cleanup atomically closes the pause and its dedicated blocker", async (t) => {
+test("pause, resume, and pause again closes each exact blocker without duplicates", async (t) => {
   const base = makeProject(t);
-  activateSession(base);
+  const unit = { type: "plan-slice", id: "M001/S01" };
+  activateSession(base, unit);
   await pauseAuto(undefined, undefined, "ambiguous_intent", {
     message: "Wait for the operator",
     category: "unknown",
   });
-  assert.equal(blockerRows().length, 1);
+  const firstBlockerId = String(blockerRows()[0]!["blocker_id"]);
 
   clearPausedSession();
 
   assert.equal(openPauseRows().length, 0);
   assert.equal(blockerRows()[0]!["blocker_status"], "resolved");
+  activateSession(base, unit);
+  await pauseAuto(undefined, undefined, "ambiguous_intent", {
+    message: "Wait for the operator again",
+    category: "unknown",
+  });
+  const secondBlockerId = String(blockerRows().find((row) => row["blocker_status"] === "open")!["blocker_id"]);
+  assert.notEqual(secondBlockerId, firstBlockerId);
+  assert.equal(blockerRows().length, 2);
+  assert.equal(resolveAutoPauseBlockerById(resolutionInput(secondBlockerId, "second pause resolved")).resolved, true);
+  assert.equal(blockerRows().find((row) => row["blocker_id"] === firstBlockerId)?.["blocker_status"], "resolved");
+  assert.equal(openPauseRows().length, 0);
   clearPausedSession();
   assert.equal(openPauseRows().length, 0);
 });
