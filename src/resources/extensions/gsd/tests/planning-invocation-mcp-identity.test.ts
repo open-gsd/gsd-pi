@@ -184,7 +184,7 @@ test("native and packaged MCP identities allow independent planning writes in th
     const changed = await canonical.handler(params(base, "changed native payload"), nativeExtra);
     assert.equal(changed.isError, true, "native identity must still detect changed payloads");
 
-    const writes = operations().slice(1);
+    const writes = operations();
     assert.equal(writes.length, 2, "each transport commits its own mutation, retries commit neither");
     assert.match(String(writes[0]!.idempotency_key), /^mcp-native:gsd_plan_milestone:sha256:[a-f0-9]{64}$/);
     assert.equal(writes[1]!.idempotency_key, `mcp:gsd_plan_milestone:${identity}`);

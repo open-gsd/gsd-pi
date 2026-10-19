@@ -6,6 +6,7 @@
  */
 
 import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1126,9 +1127,6 @@ function mcpInvocation(
   canonicalToolName: string,
   mutationKind: "Planning mutation" | "Task execution mutation" | "Workflow execution mutation",
   extra?: WorkflowMcpRequestExtra,
-<<<<<<< HEAD
-): ExecutionInvocation {
-=======
 ): ExecutionInvocation & { traceId: string } {
   const nativeToolCallId = extra?.[NATIVE_MCP_TOOL_CALL_ID];
   if (nativeToolCallId !== undefined) {
@@ -1144,7 +1142,6 @@ function mcpInvocation(
       traceId: key,
     };
   }
->>>>>>> a8efc824 (fix(mcp-server): isolate trusted native adapter mutation identities)
   const explicitKey = extra?._meta?.[MCP_IDEMPOTENCY_META_KEY];
   const stableExplicitKey = typeof explicitKey === "string" && explicitKey.trim()
     ? explicitKey.trim()

@@ -110,10 +110,7 @@ export async function createWorkflowMcpAdapterToolDefs(
 			execute: async (toolCallId, params, signal) => normalizeMcpToolResult(
 				await handler(params, {
 					requestId: toolCallId,
-<<<<<<< HEAD
-=======
 					[NATIVE_MCP_TOOL_CALL_ID]: toolCallId,
->>>>>>> a8efc824 (fix(mcp-server): isolate trusted native adapter mutation identities)
 					...(signal ? { signal } : {}),
 				}),
 			),
