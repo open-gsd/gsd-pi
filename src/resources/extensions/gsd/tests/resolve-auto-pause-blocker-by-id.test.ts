@@ -30,6 +30,7 @@ import {
   openPauseBlockerRow,
   resolveAutoPauseBlockerById,
 } from "../pause-blocker-domain-operation.ts";
+import { clearPausedSession } from "../interrupted-session.ts";
 import { listOpenEscalations } from "../escalation-resolution.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 import { readOpenAutoPauseByBlockerId } from "../db/writers/auto-pauses.ts";
@@ -182,6 +183,23 @@ test("resolves the exact open auto-pause blocker and atomically closes its bound
   assert.equal(blockers[0]["blocker_status"], "resolved");
   assert.equal(blockers[0]["resolution"], "Operator clarified: route B is correct.");
   assert.equal(openPauseRows().length, 0, "the bound pause row is closed");
+});
+
+test("resume cleanup atomically closes the pause and its dedicated blocker", async (t) => {
+  const base = makeProject(t);
+  activateSession(base);
+  await pauseAuto(undefined, undefined, "ambiguous_intent", {
+    message: "Wait for the operator",
+    category: "unknown",
+  });
+  assert.equal(blockerRows().length, 1);
+
+  clearPausedSession();
+
+  assert.equal(openPauseRows().length, 0);
+  assert.equal(blockerRows()[0]!["blocker_status"], "resolved");
+  clearPausedSession();
+  assert.equal(openPauseRows().length, 0);
 });
 
 test("pause persistence opens a distinct blocker instead of reusing another lifecycle blocker", async (t) => {
