@@ -1324,7 +1324,11 @@ interface PlanningInvocation {
 
 type ExecutionInvocation = PlanningInvocation;
 
+// Only in-process adapters can supply this identity; JSON MCP metadata cannot.
+export const NATIVE_MCP_TOOL_CALL_ID = Symbol("native-mcp-tool-call-id");
+
 interface WorkflowMcpRequestExtra {
+  [NATIVE_MCP_TOOL_CALL_ID]?: string;
   signal?: AbortSignal;
   requestId?: string | number;
   sessionId?: string;
@@ -1381,6 +1385,20 @@ function mcpInvocation(
   mutationKind: "Planning mutation" | "Task execution mutation" | "Workflow execution mutation",
   extra?: WorkflowMcpRequestExtra,
 ): ExecutionInvocation & { traceId: string } {
+  const nativeToolCallId = extra?.[NATIVE_MCP_TOOL_CALL_ID];
+  if (nativeToolCallId !== undefined) {
+    if (typeof nativeToolCallId !== "string" || !nativeToolCallId.trim()) {
+      throw new Error(`${mutationKind} ${canonicalToolName} requires a nonblank native tool-call identity`);
+    }
+    const digest = createHash("sha256").update(nativeToolCallId, "utf8").digest("hex");
+    const key = `mcp-native:${canonicalToolName}:sha256:${digest}`;
+    return {
+      idempotencyKey: key,
+      sourceTransport: "pi-tool",
+      actorType: "agent",
+      traceId: key,
+    };
+  }
   const explicitKey = extra?._meta?.[MCP_IDEMPOTENCY_META_KEY];
   const stableExplicitKey = typeof explicitKey === "string" && explicitKey.trim()
     ? explicitKey.trim()

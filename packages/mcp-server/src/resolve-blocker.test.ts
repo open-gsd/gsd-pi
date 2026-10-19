@@ -3,6 +3,7 @@
 // one exact auto-pause blocker with no live session (including after restart).
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -549,14 +550,14 @@ test("GSD-mode adapter propagates tool-call identity for resolve replay and payl
     SELECT *
     FROM workflow_operations WHERE operation_type = 'pause.blocker.resolve.by-id'
   `).get()!;
-  assert.equal(operation["source_transport"], "workflow-mcp");
+  assert.equal(operation["source_transport"], "pi-tool");
   assert.equal(
     operation["trace_id"],
     derivePrivateMcpTraceId({
       canonicalToolName: "gsd_resolve_blocker",
-      sourceTransport: "workflow-mcp",
+      sourceTransport: "pi-tool",
       actorType: "agent",
-      stableInput: "adapter-resolve-replay",
+      stableInput: `mcp-native:gsd_resolve_blocker:sha256:${createHash("sha256").update("adapter-resolve-replay").digest("hex")}`,
     }),
   );
   assert.equal(
@@ -569,6 +570,46 @@ test("GSD-mode adapter propagates tool-call identity for resolve replay and payl
   );
   assert.doesNotMatch(String(operation["idempotency_key"]), /adapter-resolve-replay/);
 });
+
+for (const nativeFirst of [true, false]) {
+  test(`native and packaged MCP cannot replay each other's pause resolution (${nativeFirst ? "native" : "packaged"} first)`, async (t) => {
+    const selected = await seedProjectWithOpenAutoPause(t);
+    const tools = await createWorkflowMcpAdapterToolDefs(new SessionManager());
+    const native = tools.find((tool) => tool.name === "gsd_resolve_blocker")!;
+    const packaged = await resolveBlockerToolAfterRestart();
+    const identity = `mcp-explicit:v1:sha256:${createHash("sha256").update("private-native-retry").digest("hex")}`;
+    const args = {
+      projectDir: selected.projectDir,
+      pauseBlockerId: selected.blockerId,
+      rationale: "same project, tool, identity string, and payload",
+      expectedRevision: selected.revision,
+      expectedAuthorityEpoch: selected.authorityEpoch,
+    };
+    const nativeCall = () => native.execute(identity, args);
+    const packagedCall = () => packaged(args, {
+      "io.opengsd/idempotency-key": identity,
+      "native-mcp-tool-call-id": identity,
+      sourceTransport: "pi-tool",
+    });
+    const firstCall = nativeFirst ? nativeCall : packagedCall;
+    const secondCall = nativeFirst ? packagedCall : nativeCall;
+    const first = await firstCall();
+    assert.notEqual(first.isError, true, first.content[0]?.text);
+    assert.deepEqual(await firstCall(), first, "same-transport retries still replay");
+    const second = await secondCall();
+    assert.equal(second.isError, true, "the other transport must not replay a closed blocker's receipt");
+    assert.doesNotMatch(second.content[0]?.text ?? "", /idempotency|different request/i);
+    assert.deepEqual(await firstCall(), first);
+
+    openDatabase(join(selected.projectDir, ".gsd", "gsd.db"));
+    const operations = _getAdapter()!.prepare(`
+      SELECT * FROM workflow_operations WHERE operation_type = 'pause.blocker.resolve.by-id'
+    `).all();
+    assert.equal(operations.length, 1, "cross-transport refusal must not write a receipt");
+    assert.equal(operations[0]!["source_transport"], nativeFirst ? "pi-tool" : "workflow-mcp");
+    assert.equal(JSON.stringify(operations).includes("private-native-retry"), false);
+  });
+}
 
 test("GSD-mode adapter rejects empty conflicting selectors without resolving an auto-pause", async (t) => {
   const selected = await seedProjectWithOpenAutoPause(t);
