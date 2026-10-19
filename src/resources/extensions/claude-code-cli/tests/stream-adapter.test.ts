@@ -6955,3 +6955,379 @@ describe("stream-adapter — SDK stdin lifecycle at the query boundary (#2902)",
 		}
 	});
 });
+
+// ---------------------------------------------------------------------------
+// #2904 — the held-open prompt (#2903) switches off the CLI's own wind-down
+// (the print-mode grace and the CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS ceiling
+// only run once the CLI's input is closed), so a deferred `result` (#2534)
+// waits forever on a lost task_notification, an ambient monitor, a completion
+// that starts no follow-up turn, or a stuck task. The fakes below mirror the
+// real held-open binary: alive while the prompt (stdin) is open, exiting once
+// the adapter releases the hold.
+// ---------------------------------------------------------------------------
+
+/** Timings helper env keys, mirroring resolveBackgroundWaitTimings. */
+const BG_WAIT_ENV_KEYS = [
+	"GSD_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS",
+	"GSD_CLAUDE_CODE_BG_SETTLE_MS",
+	"GSD_CLAUDE_CODE_BG_STOP_GRACE_MS",
+] as const;
+
+/** Consume the adapter stream with a per-event deadline so a hang fails loudly instead of stalling the suite. */
+async function collectStreamEventsWithDeadline(
+	stream: AsyncIterable<unknown>,
+	deadlineMs: number,
+	label: string,
+): Promise<unknown[]> {
+	const events: unknown[] = [];
+	const iterator = (stream as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+	while (true) {
+		const result = await Promise.race([
+			iterator.next(),
+			new Promise<never>((_, reject) => {
+				const timer = setTimeout(
+					() => reject(new Error(`${label}: no stream event within ${deadlineMs}ms (background wait hung?)`)),
+					deadlineMs,
+				);
+				if (typeof timer.unref === "function") timer.unref();
+			}),
+		]);
+		if (result.done) return events;
+		events.push(result.value);
+	}
+}
+
+/** Run `fn` after `ms` without holding the event loop open if the test already ended. */
+function delayed(ms: number, fn: () => void): void {
+	const timer = setTimeout(fn, ms);
+	if (typeof timer.unref === "function") timer.unref();
+}
+
+/**
+ * A pushable message stream plus the `stopTask` control the real SDK Query
+ * exposes. `attach` starts a background consumer of the query prompt so the
+ * fake "process" exits exactly when the adapter releases the hold.
+ */
+function makeHeldOpenQuery(initial: unknown[], onStop?: (taskId: string) => void) {
+	const queue: unknown[] = [];
+	let wake: (() => void) | null = null;
+	let ended = false;
+	const push = (message: unknown): void => {
+		queue.push(message);
+		wake?.();
+		wake = null;
+	};
+	const end = (): void => {
+		ended = true;
+		wake?.();
+		wake = null;
+	};
+	for (const message of initial) push(message);
+	const stopCalls: string[] = [];
+	const queryResult = {
+		stopTask: async (taskId: string) => {
+			stopCalls.push(taskId);
+			onStop?.(taskId);
+		},
+		async *[Symbol.asyncIterator]() {
+			while (true) {
+				if (queue.length > 0) {
+					const next = queue.shift();
+					if (next === undefined) throw new Error("FAKE BUG: shifted undefined from queue of length " + queue.length);
+					yield next;
+					continue;
+				}
+				if (ended) return;
+				await new Promise<void>((resolve) => {
+					wake = resolve;
+				});
+			}
+		},
+	};
+	let promptReleased = false;
+	return {
+		queryResult,
+		stopCalls,
+		push,
+		get promptReleased() {
+			return promptReleased;
+		},
+		attach(queryArgs: { prompt: unknown }): unknown {
+			void (async () => {
+				const iterator = (queryArgs.prompt as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+				while (true) {
+					const step = await iterator.next();
+					if (step.done) break;
+				}
+				promptReleased = true;
+				end();
+			})();
+			return queryResult;
+		},
+	};
+}
+
+describe("stream-adapter — background-task wait bounds (#2904)", () => {
+	function withBackgroundWaitEnv(values: Partial<Record<(typeof BG_WAIT_ENV_KEYS)[number], string>>): () => void {
+		const previous: Partial<Record<(typeof BG_WAIT_ENV_KEYS)[number], string | undefined>> = {};
+		for (const key of BG_WAIT_ENV_KEYS) {
+			previous[key] = process.env[key];
+			delete process.env[key];
+		}
+		for (const [key, value] of Object.entries(values)) {
+			process.env[key as (typeof BG_WAIT_ENV_KEYS)[number]] = value;
+		}
+		return () => {
+			for (const key of BG_WAIT_ENV_KEYS) {
+				if (previous[key] === undefined) delete process.env[key];
+				else process.env[key] = previous[key];
+			}
+		};
+	}
+
+	function deferredWaitScenario(sid: string, initial: unknown[], onStop?: (taskId: string) => void) {
+		const fake = makeHeldOpenQuery(initial, onStop);
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: (queryArgs: { prompt: unknown }) => fake.attach(queryArgs),
+			} as any,
+		);
+		return { fake, stream };
+	}
+
+	function doneTexts(events: any[]): string[] {
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1, `exactly one done event, got ${done.length}`);
+		return done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text as string);
+	}
+
+	test("timings resolve from the environment with defaults, overrides and fallback for garbage", async () => {
+		// Dynamic import so a pre-fix tree fails only this test, not the whole
+		// file's module load (the export is part of the fix).
+		const adapter = await import("../stream-adapter.ts") as Record<string, unknown>;
+		const resolve = adapter.resolveBackgroundWaitTimings as ((env?: NodeJS.ProcessEnv) => Record<string, number>) | undefined;
+		assert.equal(typeof resolve, "function", "resolveBackgroundWaitTimings must be exported");
+		const defaults = resolve!({} as NodeJS.ProcessEnv);
+		assert.equal(defaults.idleTimeoutMs, 30 * 60 * 1000);
+		assert.equal(defaults.settleMs, 10_000);
+		assert.equal(defaults.stopGraceMs, 60_000);
+		const overridden = resolve!({
+			GSD_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS: "0",
+			GSD_CLAUDE_CODE_BG_SETTLE_MS: "250",
+			GSD_CLAUDE_CODE_BG_STOP_GRACE_MS: "-5",
+		} as NodeJS.ProcessEnv);
+		assert.equal(overridden.idleTimeoutMs, 0, "idle limit 0 must disable the idle stop");
+		assert.equal(overridden.settleMs, 250);
+		assert.equal(overridden.stopGraceMs, 60_000, "a negative value must fall back to the default");
+	});
+
+	test("a lost task_notification is healed by background_tasks_changed (REPLACE reconcile)", async () => {
+		const sid = "session-2904a";
+		const restore = withBackgroundWaitEnv({ GSD_CLAUDE_CODE_BG_SETTLE_MS: "300" });
+		try {
+			const { fake, stream } = deferredWaitScenario(sid, [
+				makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: lost notification" }),
+				makeSdkResult("r1", sid, { result: "WAITING" }),
+				// The notification for task-1 was lost; the CLI's next membership
+				// change reports the truth: nothing is running any more.
+				makeSdkSystem("background_tasks_changed", sid, { tasks: [] }),
+			]);
+			const events = await collectStreamEventsWithDeadline(stream, 10_000, "reconcile");
+			assert.equal(events.some((event) => (event as any).type === "error"), false);
+			const texts = doneTexts(events);
+			assert.ok(texts.includes("WAITING"), `the deferred result must be reported; got ${JSON.stringify(texts)}`);
+			assert.ok(
+				!texts.some((text) => text.includes("still running")),
+				`the set was healed, no abandonment note expected; got ${JSON.stringify(texts)}`,
+			);
+			assert.deepEqual(fake.stopCalls, [], "reconcile must end the wait without stopping anything");
+		} finally {
+			restore();
+		}
+	});
+
+	test("an ambient monitor is never counted, so the deferred wait settles on its own", async () => {
+		const sid = "session-2904b";
+		const restore = withBackgroundWaitEnv({ GSD_CLAUDE_CODE_BG_SETTLE_MS: "300" });
+		try {
+			const { fake, stream } = deferredWaitScenario(sid, [
+				makeSdkSystem("task_started", sid, { task_id: "monitor-1", description: "ambient monitor", ambient: true }),
+				makeSdkResult("r1", sid, { result: "WAITING" }),
+			]);
+			const events = await collectStreamEventsWithDeadline(stream, 10_000, "ambient");
+			assert.equal(events.some((event) => (event as any).type === "error"), false);
+			const texts = doneTexts(events);
+			assert.ok(texts.includes("WAITING"), `the deferred result must be reported; got ${JSON.stringify(texts)}`);
+			assert.ok(
+				!texts.some((text) => text.includes("still running")),
+				`an ambient monitor must not hold the wait; got ${JSON.stringify(texts)}`,
+			);
+			assert.deepEqual(fake.stopCalls, [], "nothing may be stopped for an ambient-only wait");
+		} finally {
+			restore();
+		}
+	});
+
+	test("a silent task is stopped after the idle limit and the follow-up turn still sees stdin open", async () => {
+		const sid = "session-2904c";
+		const restore = withBackgroundWaitEnv({
+			GSD_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS: "1200",
+			GSD_CLAUDE_CODE_BG_SETTLE_MS: "300",
+			GSD_CLAUDE_CODE_BG_STOP_GRACE_MS: "5000",
+		});
+		try {
+			// The CLI runs a follow-up turn for the stopped task — the fake can
+			// only deliver it while the hold is still open (before its own exit),
+			// so "STOPPED DONE" arriving at all proves stdin stayed open (#2902).
+			let deliverFollowUp: ((taskId: string) => void) | undefined;
+			const { fake, stream } = deferredWaitScenario(
+				sid,
+				[
+					makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: silent" }),
+					makeSdkResult("r1", sid, { result: "WAITING" }),
+				],
+				(taskId) => deliverFollowUp?.(taskId),
+			);
+			deliverFollowUp = (taskId) => {
+				fake.push({
+					type: "assistant",
+					uuid: `a-${taskId}`,
+					session_id: sid,
+					parent_tool_use_id: null,
+					message: {
+						id: `msg-${taskId}`,
+						type: "message",
+						role: "assistant",
+						model: "claude-sonnet-4-6",
+						content: [{ type: "text", text: "STOPPED" }],
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+					},
+				});
+				fake.push(makeSdkResult("r2", sid, { result: "STOPPED DONE", num_turns: 2 }));
+			};
+			const events = await collectStreamEventsWithDeadline(stream, 15_000, "idle stop");
+			assert.equal(events.some((event) => (event as any).type === "error"), false);
+			assert.deepEqual(fake.stopCalls, ["task-1"], "the idle stop must stop the silent task");
+			const texts = doneTexts(events);
+			assert.ok(texts.includes("STOPPED DONE"), `the follow-up turn's result must be delivered; got ${JSON.stringify(texts)}`);
+			assert.ok(
+				texts.some((text) => /Stopped 1 background task\(s\) after .* without progress\./.test(text)),
+				`the stop note must be appended; got ${JSON.stringify(texts)}`,
+			);
+			assert.equal(fake.promptReleased, true, "the hold must release once the turn ends");
+		} finally {
+			restore();
+		}
+	});
+
+	test("a task that ignores the stop gets the hold released after the stop grace", async () => {
+		const sid = "session-2904d";
+		const restore = withBackgroundWaitEnv({
+			GSD_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS: "1000",
+			GSD_CLAUDE_CODE_BG_SETTLE_MS: "250",
+			GSD_CLAUDE_CODE_BG_STOP_GRACE_MS: "700",
+		});
+		try {
+			const { fake, stream } = deferredWaitScenario(sid, [
+				makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: unstopped" }),
+				makeSdkResult("r1", sid, { result: "WAITING" }),
+			]);
+			const events = await collectStreamEventsWithDeadline(stream, 15_000, "stop grace");
+			assert.equal(events.some((event) => (event as any).type === "error"), false);
+			assert.deepEqual(fake.stopCalls, ["task-1"]);
+			assert.equal(fake.promptReleased, true, "the stop grace must release the hold even without notifications");
+			const texts = doneTexts(events);
+			assert.ok(
+				texts.some((text) => text.includes("1 background task(s) were still running")),
+				`the still-running note must be present; got ${JSON.stringify(texts)}`,
+			);
+			assert.ok(
+				texts.some((text) => /Stopped 1 background task\(s\) after .* without progress\./.test(text)),
+				`the stop note must be present; got ${JSON.stringify(texts)}`,
+			);
+		} finally {
+			restore();
+		}
+	});
+
+	test("a quiet follow-up turn is never released mid-turn (no #2902 regression)", async () => {
+		const sid = "session-2904e";
+		const restore = withBackgroundWaitEnv({
+			GSD_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS: "1200",
+			GSD_CLAUDE_CODE_BG_SETTLE_MS: "300",
+			GSD_CLAUDE_CODE_BG_STOP_GRACE_MS: "800",
+		});
+		try {
+			let deliverFollowUp: (() => void) | undefined;
+			const { fake, stream } = deferredWaitScenario(sid, [
+				makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: quick" }),
+				makeSdkResult("r1", sid, { result: "WAITING" }),
+			]);
+			// The completion starts a follow-up turn whose only streamed content
+			// arrives after a quiet 2.6s stretch — longer than the settle, idle
+			// and grace timings above.
+			delayed(200, () => {
+				fake.push(makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" }));
+				fake.push({
+					type: "stream_event",
+					event: { type: "message_start", message: { model: "claude-sonnet-4-6" } },
+					parent_tool_use_id: null,
+					uuid: "p1",
+					session_id: sid,
+				});
+				delayed(2600, () => deliverFollowUp?.());
+			});
+			deliverFollowUp = () => {
+				fake.push({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p1", session_id: sid });
+				fake.push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "LATE FOLLOWUP" } }, parent_tool_use_id: null, uuid: "p1", session_id: sid });
+				fake.push({ type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: null, uuid: "p1", session_id: sid });
+				fake.push(makeSdkResult("r2", sid, { result: "LATE DONE", num_turns: 2 }));
+			};
+			const events = await collectStreamEventsWithDeadline(stream, 15_000, "quiet follow-up");
+			assert.equal(events.some((event) => (event as any).type === "error"), false);
+			assert.deepEqual(fake.stopCalls, [], "a live follow-up turn must never be stopped");
+			const texts = doneTexts(events);
+			assert.ok(texts.includes("LATE FOLLOWUP"), `the quiet follow-up text must survive; got ${JSON.stringify(texts)}`);
+			assert.ok(texts.includes("LATE DONE"));
+			assert.ok(
+				!texts.some((text) => text.includes("without progress") || text.includes("still running")),
+				`no abandonment notes expected; got ${JSON.stringify(texts)}`,
+			);
+		} finally {
+			restore();
+		}
+	});
+
+	test("idle limit 0 disables the idle stop", async () => {
+		const sid = "session-2904f";
+		const restore = withBackgroundWaitEnv({
+			GSD_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS: "0",
+			GSD_CLAUDE_CODE_BG_SETTLE_MS: "250",
+		});
+		try {
+			const { fake, stream } = deferredWaitScenario(sid, [
+				makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: long but alive" }),
+				makeSdkResult("r1", sid, { result: "WAITING" }),
+			]);
+			// Well past where a (disabled) idle stop would have fired, the task
+			// completes and the CLI runs the follow-up turn to its result.
+			delayed(700, () => {
+				fake.push(makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" }));
+				fake.push(makeSdkResult("r2", sid, { result: "FINISHED", num_turns: 2 }));
+			});
+			const events = await collectStreamEventsWithDeadline(stream, 10_000, "idle 0");
+			assert.equal(events.some((event) => (event as any).type === "error"), false);
+			assert.deepEqual(fake.stopCalls, [], "idle limit 0 must disable the idle stop");
+			const texts = doneTexts(events);
+			assert.ok(texts.includes("FINISHED"), `the follow-up result must be delivered; got ${JSON.stringify(texts)}`);
+		} finally {
+			restore();
+		}
+	});
+});

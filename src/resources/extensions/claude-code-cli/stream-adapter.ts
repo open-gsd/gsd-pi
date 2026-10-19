@@ -794,6 +794,134 @@ export function holdSdkPromptOpen(
 }
 
 // ---------------------------------------------------------------------------
+// Background-task wait watchdog (#2904)
+// ---------------------------------------------------------------------------
+
+/** Idle limit while a deferred result waits on background tasks; `0` disables the idle stop. */
+export const CLAUDE_CODE_BG_IDLE_TIMEOUT_MS_ENV = "GSD_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS";
+const DEFAULT_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+/** Quiet time with no pending task and no follow-up turn before the wait ends. */
+const DEFAULT_CLAUDE_CODE_BG_SETTLE_MS = 10_000;
+/** How long stopped tasks get to report before the prompt hold is released anyway. */
+const DEFAULT_CLAUDE_CODE_BG_STOP_GRACE_MS = 60_000;
+
+function readNonNegativeMsEnv(
+	env: NodeJS.ProcessEnv,
+	name: string,
+	fallback: number,
+): number {
+	const raw = env[name]?.trim();
+	if (!raw) return fallback;
+	const value = Number(raw);
+	return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+/** Timings of the background-task wait watchdog, overridable through the environment. */
+export interface BackgroundWaitTimings {
+	idleTimeoutMs: number;
+	settleMs: number;
+	stopGraceMs: number;
+}
+
+export function resolveBackgroundWaitTimings(
+	env: NodeJS.ProcessEnv = process.env,
+): BackgroundWaitTimings {
+	return {
+		idleTimeoutMs: readNonNegativeMsEnv(env, CLAUDE_CODE_BG_IDLE_TIMEOUT_MS_ENV, DEFAULT_CLAUDE_CODE_BG_IDLE_TIMEOUT_MS),
+		settleMs: readNonNegativeMsEnv(env, "GSD_CLAUDE_CODE_BG_SETTLE_MS", DEFAULT_CLAUDE_CODE_BG_SETTLE_MS),
+		stopGraceMs: readNonNegativeMsEnv(env, "GSD_CLAUDE_CODE_BG_STOP_GRACE_MS", DEFAULT_CLAUDE_CODE_BG_STOP_GRACE_MS),
+	};
+}
+
+export interface BackgroundWaitWatchdogOptions {
+	timings: BackgroundWaitTimings;
+	/** True only while a deferred `result` is waiting and no follow-up turn runs. */
+	isWaiting: () => boolean;
+	pendingTaskIds: () => string[];
+	stopTask: (taskId: string) => unknown;
+	release: () => void;
+	/** Called once with the task ids the watchdog is about to stop. */
+	onStopping?: (taskIds: string[]) => void;
+}
+
+/**
+ * Bound the wait on background tasks after a deferred `result` (#2534).
+ *
+ * The held-open prompt (#2902) switches off the CLI's own wind-down, which
+ * only runs once its input is closed, so without this the wait ends only on
+ * the turn's terminal result, Esc or the process exiting. Call `touch()`
+ * after every SDK message. While `isWaiting()`:
+ *   - no pending task for `settleMs` (e.g. a lost task_notification, or a
+ *     completion that started no follow-up turn): release the hold, so the
+ *     CLI exits and the deferred result is reported;
+ *   - pending tasks but no message at all for `idleTimeoutMs`: stop them
+ *     through the SDK (`stopTask`), so the follow-up turn sees them as
+ *     stopped, then release after `stopGraceMs` if nothing settles.
+ * Releasing early never happens while a follow-up turn runs: its hook
+ * callbacks still need the input (#2902).
+ */
+export function createBackgroundWaitWatchdog(options: BackgroundWaitWatchdogOptions): {
+	touch: () => void;
+	dispose: () => void;
+} {
+	const { timings, isWaiting, pendingTaskIds, stopTask, release, onStopping } = options;
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	let stopRequested = false;
+	let finished = false;
+	const clear = (): void => {
+		if (timer !== null) {
+			clearTimeout(timer);
+			timer = null;
+		}
+	};
+	const arm = (ms: number, fire: () => void): void => {
+		clear();
+		timer = setTimeout(() => {
+			timer = null;
+			fire();
+		}, ms);
+		timer.unref?.();
+	};
+	const finish = (): void => {
+		if (finished) return;
+		finished = true;
+		clear();
+		release();
+	};
+	const stopAll = (): void => {
+		const ids = pendingTaskIds();
+		if (ids.length === 0 || stopRequested) {
+			finish();
+			return;
+		}
+		stopRequested = true;
+		onStopping?.(ids);
+		for (const id of ids) {
+			Promise.resolve()
+				.then(() => stopTask(id))
+				.catch((error) => console.warn(`[claude-code] stop_task ${id} failed:`, error));
+		}
+		arm(timings.stopGraceMs, finish);
+	};
+	return {
+		touch() {
+			if (finished) return;
+			if (!isWaiting()) {
+				clear();
+				return;
+			}
+			if (pendingTaskIds().length === 0) arm(timings.settleMs, finish);
+			else if (stopRequested) {
+				// A hard deadline once tasks were stopped: messages do not extend it.
+				if (timer === null) arm(timings.stopGraceMs, finish);
+			} else if (timings.idleTimeoutMs > 0) arm(timings.idleTimeoutMs, stopAll);
+			else clear();
+		},
+		dispose: clear,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Error helper
 // ---------------------------------------------------------------------------
 
@@ -2976,6 +3104,28 @@ async function pumpSdkMessages(
 						abortController: controller,
 					},
 				});
+				// The real SDK Query also carries stopTask (the `stop_task` control
+				// request); test doubles expose the same optional method (#2904).
+				const stoppableQuery = queryResult as typeof queryResult & {
+					stopTask?: (taskId: string) => Promise<void>;
+				};
+				// Bounds the deferred-result wait, which the hold leaves open-ended
+				// (see createBackgroundWaitWatchdog). Set when it had to stop tasks.
+				let backgroundStopNote = "";
+				const backgroundTimings = resolveBackgroundWaitTimings();
+				const backgroundWait = createBackgroundWaitWatchdog({
+					timings: backgroundTimings,
+					isWaiting: () => deferredResult !== null && !followUpTurnStarted,
+					pendingTaskIds: () => [...pendingBackgroundTasks],
+					stopTask: (taskId) => stoppableQuery.stopTask?.(taskId),
+					release: () => promptHold.release(),
+					onStopping: (taskIds) => {
+						const idleMs = backgroundTimings.idleTimeoutMs;
+						const idle = idleMs >= 60_000 ? `${Math.round(idleMs / 60_000)} min` : `${Math.round(idleMs / 1_000)} s`;
+						backgroundStopNote = `\n\n[claude-code] Stopped ${taskIds.length} background task(s) after ${idle} without progress.`;
+						uiContext?.setStatus?.("gsd-step", `Stopping ${taskIds.length} background task(s) after ${idle} without progress`);
+					},
+				});
 
 				try {
 					for await (const msg of queryResult as AsyncIterable<SDKMessage>) {
@@ -2990,6 +3140,18 @@ async function pumpSdkMessages(
 							error: makeAbortedMessage(modelId, lastTextContent),
 						});
 						return;
+					}
+
+					if (
+						deferredResult !== null
+						&& !followUpTurnStarted
+						&& (msg.type === "assistant" || msg.type === "stream_event" || msg.type === "user")
+						&& msg.parent_tool_use_id === null
+					) {
+						// Main-thread output after a deferred result is the follow-up
+						// turn, even if the CLI sent no fresh `init` for it. The
+						// watchdog never releases the hold while one runs (#2904).
+						followUpTurnStarted = true;
 					}
 
 					switch (msg.type) {
@@ -3010,9 +3172,13 @@ async function pumpSdkMessages(
 								task_type?: string;
 								description?: string;
 								status?: string;
+								ambient?: unknown;
+								tasks?: unknown;
 							};
 							if (init.subtype === "task_started" && typeof init.task_id === "string") {
-									pendingBackgroundTasks.add(init.task_id);
+									// An ambient monitor never ends by design: waiting on it
+									// would hold the turn open forever (#2904).
+									if (init.ambient !== true) pendingBackgroundTasks.add(init.task_id);
 									// Best-effort dashboard visibility for native fan-out
 									// children (#2533): a registry failure must never break
 									// the stream, and a duplicate start must not orphan the
@@ -3057,6 +3223,26 @@ async function pumpSdkMessages(
 										uiContext?.setStatus?.("gsd-step", pendingBackgroundTasks.size > 0
 											? `Waiting for ${pendingBackgroundTasks.size} background task(s) to finish (Esc stops them)`
 											: "Background tasks finished; continuing the turn");
+									}
+								} else if (init.subtype === "background_tasks_changed" && Array.isArray(init.tasks)) {
+									// Native Claude Code sends the full set of live background
+									// tasks on every membership change (REPLACE semantics).
+									// Swapping the counted set for the payload's non-ambient
+									// ids heals a lost task_notification, which would
+									// otherwise keep the held-open wait going forever (#2904).
+									// Ambient monitors never end, so they are not waited on.
+									// CLIs that never send the message keep the counted set.
+									pendingBackgroundTasks.clear();
+									for (const task of init.tasks) {
+										if (
+											typeof (task as { task_id?: unknown } | null)?.task_id === "string"
+											&& (task as { ambient?: unknown }).ambient !== true
+										) {
+											pendingBackgroundTasks.add((task as { task_id: string }).task_id);
+										}
+									}
+									if (deferredResult && backgroundWaitStatusShown && pendingBackgroundTasks.size > 0) {
+										uiContext?.setStatus?.("gsd-step", `Waiting for ${pendingBackgroundTasks.size} background task(s) to finish (Esc stops them)`);
 									}
 								}
 							if (init.subtype === "init") {
@@ -3403,6 +3589,9 @@ async function pumpSdkMessages(
 									finalMessage.content.push({ type: "text", text: result.result });
 								}
 							}
+							if (backgroundStopNote) {
+								finalMessage.content.push({ type: "text", text: backgroundStopNote });
+							}
 
 							clearMilestoneStatusObservation();
 							if (result.is_error) {
@@ -3417,8 +3606,12 @@ async function pumpSdkMessages(
 						default:
 							break;
 					}
+					backgroundWait.touch();
 				}
 				} finally {
+					// Stop the watchdog before releasing the hold so a pending timer
+					// cannot fire against an already-torn-down attempt (#2904).
+					backgroundWait.dispose();
 					// End this attempt's prompt hold so the SDK closes the CLI's stdin
 					// (terminal result, abort, error-result close, stream end, or
 					// readiness restart). First, so nothing below can skip it.
@@ -3454,6 +3647,9 @@ async function pumpSdkMessages(
 							type: "text",
 							text: `\n\n[claude-code] The session ended while ${pendingBackgroundTasks.size} background task(s) were still running; their results were not delivered.`,
 						});
+					}
+					if (backgroundStopNote) {
+						finalMessage.content.push({ type: "text", text: backgroundStopNote });
 					}
 					clearMilestoneStatusObservation();
 					stream.push({
