@@ -30,6 +30,7 @@ import {
   openPauseBlockerRow,
   resolveAutoPauseBlockerById,
 } from "../pause-blocker-domain-operation.ts";
+import { clearPausedSession } from "../interrupted-session.ts";
 import { listOpenEscalations } from "../escalation-resolution.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 import { readOpenAutoPauseByBlockerId } from "../db/writers/auto-pauses.ts";
@@ -182,6 +183,59 @@ test("resolves the exact open auto-pause blocker and atomically closes its bound
   assert.equal(blockers[0]["blocker_status"], "resolved");
   assert.equal(blockers[0]["resolution"], "Operator clarified: route B is correct.");
   assert.equal(openPauseRows().length, 0, "the bound pause row is closed");
+});
+
+test("pause, resume, and pause again closes each exact blocker without duplicates", async (t) => {
+  const base = makeProject(t);
+  const unit = { type: "plan-slice", id: "M001/S01" };
+  activateSession(base, unit);
+  await pauseAuto(undefined, undefined, "ambiguous_intent", {
+    message: "Wait for the operator",
+    category: "unknown",
+  });
+  const firstBlockerId = String(blockerRows()[0]!["blocker_id"]);
+
+  clearPausedSession();
+
+  assert.equal(openPauseRows().length, 0);
+  assert.equal(blockerRows()[0]!["blocker_status"], "resolved");
+  activateSession(base, unit);
+  await pauseAuto(undefined, undefined, "ambiguous_intent", {
+    message: "Wait for the operator again",
+    category: "unknown",
+  });
+  const secondBlockerId = String(blockerRows().find((row) => row["blocker_status"] === "open")!["blocker_id"]);
+  assert.notEqual(secondBlockerId, firstBlockerId);
+  assert.equal(blockerRows().length, 2);
+  assert.equal(resolveAutoPauseBlockerById(resolutionInput(secondBlockerId, "second pause resolved")).resolved, true);
+  assert.equal(blockerRows().find((row) => row["blocker_id"] === firstBlockerId)?.["blocker_status"], "resolved");
+  assert.equal(openPauseRows().length, 0);
+  clearPausedSession();
+  assert.equal(openPauseRows().length, 0);
+});
+
+test("pause persistence opens a distinct blocker instead of reusing another lifecycle blocker", async (t) => {
+  const base = makeProject(t);
+  const { blockerId } = openPauseBlockerRow({
+    lifecycleId: "lc-m001-s01",
+    blockerKind: "ambiguous_intent",
+    description: "Clarify the slice",
+    requestedAction: "Choose a route",
+    idempotencyKey: "test/existing-slice-blocker",
+  });
+  activateSession(base, { type: "discuss-slice", id: "M001/S01" });
+  await pauseAuto(undefined, undefined, "ambiguous_intent", {
+    message: "Waiting for the same clarification",
+    category: "unknown",
+  });
+
+  const pauseBlockerId = openPauseRows()[0]!["blocker_id"];
+  assert.notEqual(pauseBlockerId, blockerId);
+  assert.equal(blockerRows().length, 2);
+  assert.equal(blockerRows().find((row) => row["blocker_id"] === blockerId)?.["blocker_status"], "open");
+  assert.equal(resolveAutoPauseBlockerById(resolutionInput(String(pauseBlockerId), "Route chosen")).resolved, true);
+  assert.equal(blockerRows().find((row) => row["blocker_id"] === blockerId)?.["blocker_status"], "open");
+  assert.equal(openPauseRows().length, 0);
 });
 
 test("binds task, slice, and milestone pauses to only their exact lifecycle identity", async (t) => {

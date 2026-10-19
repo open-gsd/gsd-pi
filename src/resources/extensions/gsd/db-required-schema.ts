@@ -7,6 +7,10 @@ import {
   hasLivenessBackstopSchema,
 } from "./db-liveness-backstop-schema.js";
 import {
+  createPauseBlockerLinkSchema,
+  hasPauseBlockerLinkSchema,
+} from "./db-pause-blocker-link-schema.js";
+import {
   createUnitDispatchBudgetSchema,
   hasUnitDispatchBudgetSchema,
 } from "./db-unit-dispatch-budget-schema.js";
@@ -76,6 +80,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "liveness-backstop",
     isPresent: hasLivenessBackstopSchema,
     create: createLivenessBackstopSchema,
+  },
+  {
+    id: "pause-blocker-link",
+    isPresent: hasPauseBlockerLinkSchema,
+    create: createPauseBlockerLinkSchema,
   },
   {
     id: "unit-dispatch-budgets",
