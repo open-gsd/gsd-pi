@@ -82,6 +82,55 @@ test("pause lifecycle lookup requires exact canonical unit type and identity", (
   }
 });
 
+test("slice-prefixed task IDs create and resolve an exact task blocker", (t) => {
+  const dir = createProject();
+  t.after(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  insertTask({ id: "S01-T02", sliceId: "S01", milestoneId: "M001", title: "Prefixed task", status: "pending" });
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.pause-blocker.prefixed-task",
+    idempotencyKey: "test/pause-blocker/prefixed-task",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "S01-T02", lifecycleStatus: "ready",
+    });
+    return {
+      events: [{ eventType: "test.pause-blocker.seeded", entityType: "task", entityId: "S01-T02", payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: "test/pause-blocker/prefixed-task", projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+  const pause = { pauseId: "prefixed-task-pause", milestoneId: "M001", unitType: "execute-task", unitId: "M001/S01/S01-T02" };
+  for (const unitType of ["execute-task", "replan-task"]) {
+    assert.ok(findPauseLifecycleId({ ...pause, unitType }));
+  }
+  assert.equal(findPauseLifecycleId({ ...pause, unitId: "M001/S01/S02-T02" }), null);
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pause);
+  const blockerId = openPauseBlockerForSession({
+    pause, blockerKind: "consent", description: "Approval required", requestedAction: "Review",
+  });
+  assert.ok(blockerId);
+  assert.equal(db().prepare(
+    "SELECT lifecycle_id FROM workflow_blockers WHERE blocker_id = :id",
+  ).get({ ":id": blockerId })?.["lifecycle_id"], findPauseLifecycleId(pause));
+  const currentFence = readDomainOperationFence();
+  assert.deepEqual(resolveAutoPauseBlockerById({
+    blockerId,
+    rationale: "Approved",
+    invocation: internalExecutionInvocation("test/pause-blocker/prefixed-resolve"),
+    expectedRevision: currentFence.revision,
+    expectedAuthorityEpoch: currentFence.authorityEpoch,
+  }), { resolved: true });
+  assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), null);
+});
+
 test("human pause blocker is linked durably and resolves clear-only with stable replay", (t) => {
   const dir = createProject();
   t.after(() => {
@@ -201,7 +250,7 @@ test("legacy pause resolution refuses a persisted blocker-kind mismatch without 
   });
 
   assert.deepEqual(result, { resolved: false, failure: "association-mismatch" });
-  assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY)?.pauseBlockerId, blockerId);
+  assert.equal(getRuntimeKv<PausedSessionMetadata>("global", "", PAUSED_SESSION_KV_KEY)?.pauseBlockerId, blockerId);
   assert.equal(db().prepare(
     "SELECT blocker_status FROM workflow_blockers WHERE blocker_id = :id",
   ).get({ ":id": blockerId })?.["blocker_status"], "open");
@@ -239,7 +288,7 @@ test("legacy pause resolution refuses external-owned blockers without clearing t
   });
 
   assert.deepEqual(result, { resolved: false, failure: "association-mismatch" });
-  assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY)?.pauseBlockerId, blockerId);
+  assert.equal(getRuntimeKv<PausedSessionMetadata>("global", "", PAUSED_SESSION_KV_KEY)?.pauseBlockerId, blockerId);
   assert.equal(db().prepare(
     "SELECT blocker_status, resolution_owner FROM workflow_blockers WHERE blocker_id = :id",
   ).get({ ":id": blockerId })?.["blocker_status"], "open");

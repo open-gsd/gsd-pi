@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { executeDomainOperation, inspectDomainOperationReceipt, type DomainJsonValue } from "./db/domain-operation.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import { insertOpenPauseBlocker, resolveOpenPauseBlocker } from "./db/writers/pause-blockers.js";
-import { closeAutoPauseForBlocker } from "./db/writers/auto-pauses.js";
+import { closeAutoPause, closeAutoPauseForBlocker, readOpenAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
 import { getDb } from "./db/engine.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import { PAUSED_SESSION_KV_KEY, type PausedSessionMetadata } from "./interrupted-session.js";
@@ -62,7 +62,8 @@ export function findPauseLifecycleId(input: {
     TASK_PAUSE_UNIT_TYPES.has(input.unitType ?? "")
     && parts.length === 3
     && SLICE_ID_RE.test(parts[1]!)
-    && TASK_ID_RE.test(parts[2]!)
+    && (TASK_ID_RE.test(parts[2]!)
+      || (parts[2]!.startsWith(`${parts[1]}-`) && TASK_ID_RE.test(parts[2]!.slice(parts[1]!.length + 1))))
   ) {
     row = getDb().prepare(`
       SELECT lifecycle_id FROM workflow_item_lifecycles
@@ -277,12 +278,15 @@ export function openPauseBlockerRow(input: {
 /**
  * Resolve (or dismiss) the open workflow_blockers row of a pause. An unknown
  * or already-resolved blocker resolves nothing and false comes back.
+ * Internal resume/discard can also close the current scope's linked pause
+ * atomically; that path throws if its association can no longer be resolved.
  */
 export function resolvePauseBlockerRow(input: {
   blockerId: string;
   disposition: "resolved" | "dismissed";
   resolution: string;
   idempotencyKey: string;
+  closeCurrentPause?: boolean;
 }): boolean {
   let resolved = false;
   executeDomainOperation(
@@ -290,13 +294,23 @@ export function resolvePauseBlockerRow(input: {
       blockerId: input.blockerId,
       disposition: input.disposition,
       resolution: input.resolution,
+      ...(input.closeCurrentPause ? { closeCurrentPause: true } : {}),
     }),
     (context) => {
+      // Resume/discard owns this scope's persisted association, including
+      // pre-upgrade pauses linked to a parent lifecycle.
+      if (input.closeCurrentPause && readOpenAutoPauseBlockerId() !== input.blockerId) {
+        throw new Error("Current pause/blocker association changed");
+      }
       const settled = resolveOpenPauseBlocker(context, {
         blockerId: input.blockerId,
         disposition: input.disposition,
         resolution: input.resolution,
       });
+      if (input.closeCurrentPause) {
+        if (!settled.resolved) throw new Error("Current pause blocker is no longer open");
+        closeAutoPause();
+      }
       resolved = settled.resolved;
       return {
         events: [{

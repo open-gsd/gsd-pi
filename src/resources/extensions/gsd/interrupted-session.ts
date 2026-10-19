@@ -172,7 +172,15 @@ export function clearPausedSession(): void {
   const blockerId = readOpenAutoPauseBlockerId();
   const legacyBlockerId = readStoredPausedSession()?.pauseBlockerId;
   const associatedBlockerId = blockerId ?? legacyBlockerId;
-  if (associatedBlockerId) {
+  if (blockerId) {
+    resolvePauseBlockerRow({
+      blockerId,
+      disposition: "resolved",
+      resolution: "pause closed: the blocked work resumed or was discarded",
+      idempotencyKey: `pause-blocker-resolve-close:${blockerId}`,
+      closeCurrentPause: true,
+    });
+  } else if (associatedBlockerId) {
     const fence = readDomainOperationFence();
     const result = resolveAutoPauseBlockerById({
       blockerId: associatedBlockerId,
