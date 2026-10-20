@@ -9,6 +9,7 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
 import { resolveCtxCwd } from "./dynamic-tools.js";
+import { renderExecCall, renderExecResult } from "../tools/exec-tool-renderer.js";
 
 
 async function loadContextModePreferences(baseDir: string) {
@@ -37,6 +38,8 @@ export function registerExecTools(pi: ExtensionAPI): void {
       "Every PASS/FAIL check saved by gsd_uat_result_save must reference objective evidence from this tool or another approved GSD evidence path.",
       "Do not install packages, mutate git state, edit source files, or dump credentials during UAT.",
     ],
+    renderCall: renderExecCall,
+    renderResult: renderExecResult,
     parameters: Type.Object({
       milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
       sliceId: Type.String({ description: "Slice ID (e.g. S01)" }),
@@ -93,7 +96,10 @@ export function registerExecTools(pi: ExtensionAPI): void {
       "Write scripts that log the finding (counts, matches, summaries) rather than raw dumps.",
       "The digest is the last ~300 chars of stdout — size your log output accordingly.",
       "Need persisted output? Read the stdout_path returned in details (file on local disk).",
+      "Include a concise English purpose describing why the script is being run; the UI displays it instead of the script.",
     ],
+    renderCall: renderExecCall,
+    renderResult: renderExecResult,
     parameters: Type.Object({
       runtime: Type.Optional(
         Type.String({

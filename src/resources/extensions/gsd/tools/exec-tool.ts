@@ -321,6 +321,7 @@ export async function executeGsdExec(
     isVerificationWorkload(params, script),
   );
   const run = deps.run ?? runExecSandbox;
+  const purpose = typeof params.purpose === "string" ? params.purpose : undefined;
 
   const startedAt = (deps.now ?? (() => new Date()))();
   let result: ExecSandboxResult;
@@ -329,7 +330,7 @@ export async function executeGsdExec(
       {
         runtime,
         script,
-        ...(typeof params.purpose === "string" ? { purpose: params.purpose } : {}),
+        ...(purpose !== undefined ? { purpose } : {}),
         ...(params.metadata && typeof params.metadata === "object" ? { metadata: params.metadata } : {}),
         ...(typeof params.timeout_ms === "number" ? { timeout_ms: params.timeout_ms } : {}),
       },
@@ -343,7 +344,7 @@ export async function executeGsdExec(
       isError: true,
     };
   }
-  const formatted = formatResult(result);
+  const formatted = formatResult(result, purpose);
   const notRecorded = recordRun(deps.baseDir, result, script, startedAt, uat);
   if (notRecorded === null) return formatted;
   return {
@@ -415,7 +416,7 @@ export async function executeUatExec(
   };
 }
 
-function formatResult(result: ExecSandboxResult): ToolExecutionResult {
+function formatResult(result: ExecSandboxResult, purpose: string | undefined): ToolExecutionResult {
   const headerLines = [
     `gsd_exec[${result.id}] runtime=${result.runtime} exit=${formatExit(result)} duration=${result.duration_ms}ms`,
     `  stdout: ${result.stdout_bytes}B${result.stdout_truncated ? " (truncated)" : ""} → ${result.stdout_path}`,
@@ -426,6 +427,8 @@ function formatResult(result: ExecSandboxResult): ToolExecutionResult {
     content: [{ type: "text", text: summary }],
     details: {
       operation: "gsd_exec",
+      ...(purpose !== undefined ? { purpose } : {}),
+      digest: result.digest,
       id: result.id,
       runtime: result.runtime,
       exit_code: result.exit_code,

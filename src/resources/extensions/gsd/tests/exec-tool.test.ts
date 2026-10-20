@@ -1,9 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { registerExecTools } from "../bootstrap/exec-tools.ts";
 import { executeGsdExec, executeUatExec } from "../tools/exec-tool.ts";
 import type { ExecSandboxOptions, ExecSandboxRequest, ExecSandboxResult } from "../exec-sandbox.ts";
+import { renderExecCall, renderExecResult } from "../tools/exec-tool-renderer.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 function makeExecResult(request: ExecSandboxRequest): ExecSandboxResult {
   return {
@@ -51,6 +56,78 @@ test("executeUatExec accepts evidence-mode aliases for intent", async () => {
   assert.equal(result.details?.operation, "gsd_uat_exec");
   assert.equal(result.details?.intent, "uat-artifact-check");
   assert.equal(requests[0]?.metadata?.intent, "uat-artifact-check");
+  assert.equal(result.details.purpose, "UAT M001/S01/UAT-PRE (uat-artifact-check)");
+  assert.equal(requests[0]?.purpose, result.details.purpose);
+  assert.equal(result.details.digest, "check passed");
+});
+
+test("executeGsdExec adds unchanged purpose and digest without changing raw text", async () => {
+  for (const purpose of ["  Inspect counts\nwithout dumping files  ", "", undefined, 42]) {
+    let request: ExecSandboxRequest | undefined;
+    const result = await executeGsdExec(
+      { script: "printf ok", purpose: purpose as string },
+      {
+        baseDir: "/tmp/gsd-exec-purpose-test",
+        preferences: null,
+        run: async (req) => {
+          request = req;
+          return makeExecResult(req);
+        },
+      },
+    );
+    assert.equal(result.details.digest, "check passed");
+    assert.equal(result.details.purpose, typeof purpose === "string" ? purpose : undefined);
+    assert.equal(request?.purpose, typeof purpose === "string" ? purpose : undefined);
+    assert.equal(
+      result.content[0].text,
+      "gsd_exec[exec-1] runtime=bash exit=0 duration=1ms\n" +
+      "  stdout: 12B → .gsd/exec/exec-1.stdout\n" +
+      "  stderr: 0B → .gsd/exec/exec-1.stderr\n--- digest ---\ncheck passed",
+    );
+  }
+});
+
+test("exec registrations share renderers, request UI purpose, and preserve the UAT schema", () => {
+  const tools: any[] = [];
+  registerExecTools({ registerTool: (tool: any) => tools.push(tool) } as any);
+  for (const name of ["gsd_exec", "gsd_uat_exec"]) {
+    const tool = tools.find((entry) => entry.name === name);
+    assert.equal(tool.renderCall, renderExecCall);
+    assert.equal(tool.renderResult, renderExecResult);
+  }
+  const exec = tools.find((entry) => entry.name === "gsd_exec");
+  assert.ok(exec.promptGuidelines.some((line: string) => /concise English purpose/.test(line)));
+  assert.ok(!exec.parameters.required?.includes("purpose"));
+  assert.equal(tools.find((entry) => entry.name === "gsd_uat_exec").parameters.properties.purpose, undefined);
+});
+
+test("purpose and digest survive a recording warning without changing execution success", async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), "gsd-exec-purpose-warning-"));
+  try {
+    mkdirSync(join(baseDir, ".gsd"));
+    openDatabase(join(baseDir, ".gsd", "gsd.db"));
+    const result = await executeGsdExec(
+      { script: "printf ok", purpose: "Inspect output" },
+      {
+        baseDir,
+        preferences: null,
+        run: async (request) => ({
+          ...makeExecResult(request),
+          stdout_path: join(baseDir, "missing.stdout"),
+        }),
+      },
+    );
+    assert.equal(result.isError, false);
+    assert.equal(result.details.exit_code, 0);
+    assert.equal(result.details.purpose, "Inspect output");
+    assert.equal(result.details.digest, "check passed");
+    assert.match(String(result.details.run_not_recorded), /ENOENT/);
+    assert.match(result.content[0].text, /--- warning ---\nThe command ran, but the host did not record this run:/);
+    assert.match(result.content[0].text, /not verification or UAT evidence\. Do not run the command again/);
+  } finally {
+    closeDatabase();
+    rmSync(baseDir, { recursive: true, force: true });
+  }
 });
 
 test("executeGsdExec passes AbortSignal into sandbox options", async () => {
