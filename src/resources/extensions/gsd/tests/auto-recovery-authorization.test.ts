@@ -5,13 +5,16 @@
 // native UI received a real user's approval key. Command/parser tests own that.
 // Verification: NOT RUN locally (operator requires online-only execution).
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { _queueApprovedAutoRecoveryForTest, startAutoDetached } from "../auto.ts";
 import { autoSession } from "../auto-runtime-state.ts";
+import { drainProjectionWork, preserveProjectionChanges, rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
+import { readCompatMarker } from "../compat/compat-marker.ts";
+import { listProjectionWorkHeads } from "../db/writers/projection-work-delivery.ts";
 
 import {
   AUTO_RECOVERY_APPROVAL_TTL_MS,
@@ -66,7 +69,7 @@ function db() {
   return adapter;
 }
 
-function fixture(t: TestContext): void {
+function fixture(t: TestContext): string {
   const dir = mkdtempSync(join(tmpdir(), "gsd-auto-recovery-authorization-"));
   t.after(() => {
     closeDatabase();
@@ -96,6 +99,7 @@ function fixture(t: TestContext): void {
       events: [{ eventType: "test.auto-recovery.seeded", entityType: "project", entityId: "M001", payload: {}, destinations: ["test"] }],
     };
   });
+  return dir;
 }
 
 function approvalInput(authorizationId = RUN_APPROVAL_ID) {
@@ -466,7 +470,7 @@ function attachHost(t: TestContext) {
 test("host schedules one normal resume and forwards the persisted milestone lock", async (t) => {
   fixture(t); approve(); pause({ milestoneLock: "M001" }); attachHost(t);
   const calls: Parameters<typeof startAutoDetached>[] = [];
-  const resume: typeof startAutoDetached = (...args) => { calls.push(args); };
+  const resume: typeof startAutoDetached = (...args) => { calls.push(args); return Promise.resolve(true); };
   const before = protectedState();
   assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, resume), true);
   assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, resume), false);
@@ -482,7 +486,7 @@ test("host schedules one normal resume and forwards the persisted milestone lock
 test("operator stop wins between retry reservation and scheduled callback", async (t) => {
   fixture(t); approve(); pause(); attachHost(t);
   let calls = 0;
-  assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, () => { calls += 1; }), true);
+  assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, () => { calls += 1; return Promise.resolve(true); }), true);
   autoSession.reset();
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
   assert.equal(calls, 0);
@@ -491,7 +495,7 @@ test("operator stop wins between retry reservation and scheduled callback", asyn
 test("changed pause cannot be resumed by a stale scheduled callback", async (t) => {
   fixture(t); approve(); pause(); attachHost(t);
   let calls = 0;
-  assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, () => { calls += 1; }), true);
+  assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, () => { calls += 1; return Promise.resolve(true); }), true);
   pause({ pausedAt: new Date(NOW + 1).toISOString() });
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
   assert.equal(calls, 0);
@@ -500,8 +504,47 @@ test("changed pause cannot be resumed by a stale scheduled callback", async (t) 
 test("closed pause is null-safe and cannot be resumed by the queued callback", async (t) => {
   fixture(t); approve(); pause(); attachHost(t);
   let calls = 0;
-  assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, () => { calls += 1; }), true);
+  assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, () => { calls += 1; return Promise.resolve(true); }), true);
   closeAutoPause();
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
   assert.equal(calls, 0);
+});
+
+test("authorization, reservation and revocation projections actually drain to an audit file", async (t) => {
+  const root = fixture(t);
+  const flush = async (eventType: string) => {
+    const result = await drainProjectionWork(root);
+    assert.deepEqual(result.errors, []);
+    assert.ok(result.delivered > 0, "authorization work must be delivered, not silently skipped");
+    assert.equal(listProjectionWorkHeads(["pending", "claimed", "dead_letter"])
+      .filter((row) => row.projection_kind === "auto-recovery-authorization").length, 0);
+    assert.match(readFileSync(join(root, ".gsd", "AUTO-RECOVERY.md"), "utf-8"), new RegExp(eventType));
+  };
+  approve();
+  await flush("auto.recovery.authorized");
+  const metadata = pause();
+  consumeAutoRecoveryRetry({ authorizationId: RUN_APPROVAL_ID, runId: RUN,
+    pausedAt: metadata.pausedAt, dispatchId: null, classification: RETRY });
+  await flush("auto.recovery.retry-reserved");
+  revokeAutoRecovery(RUN_APPROVAL_ID, RUN);
+  await flush("auto.recovery.revoked");
+});
+
+test("audit projection registers an external-edit preservation baseline", async (t) => {
+  const root = fixture(t); approve();
+  await drainProjectionWork(root);
+  assert.ok(Object.keys(readCompatMarker(root).projections).some((key) => key.endsWith("AUTO-RECOVERY.md")));
+  const path = join(root, ".gsd", "AUTO-RECOVERY.md");
+  appendFileSync(path, "\nOperator note: retain these bytes.\n");
+  const observed = await preserveProjectionChanges(root, true);
+  assert.ok(observed.preserved.some((entry) => entry.sourcePath === path));
+});
+
+test("full canonical rebuild restores the audit without pending authorization work", async (t) => {
+  const root = fixture(t); approve();
+  await drainProjectionWork(root);
+  const path = join(root, ".gsd", "AUTO-RECOVERY.md");
+  unlinkSync(path);
+  await rebuildMarkdownProjectionsFromDb(root);
+  assert.match(readFileSync(path, "utf-8"), /auto\.recovery\.authorized/);
 });

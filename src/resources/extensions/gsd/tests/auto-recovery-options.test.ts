@@ -28,3 +28,14 @@ for (const value of ["--auto-recover=true", "--auto-recover=all", "--auto-recove
 test("an ignore-UAT spelling cannot enable auto-recover", () => {
   assert.equal(parseAutoRecoverFlag("auto --ignore-uat").autoRecover, false);
 });
+
+for (const quotedPath of ['"seed  notes.md"', "'seed  notes.md'", String.raw`"seed  \"quoted\" notes.md"`, '"--auto-recover"']) {
+  test(`quoted YOLO value is preserved without auto-recovery: ${quotedPath}`, () => {
+    const input = `auto --yolo ${quotedPath}`;
+    assert.deepEqual(parseAutoRecoverFlag(input), { autoRecover: false, rest: input });
+  });
+  test(`quoted YOLO value is preserved when removing auto-recovery: ${quotedPath}`, () => {
+    assert.deepEqual(parseAutoRecoverFlag(`auto --auto-recover --yolo ${quotedPath}`),
+      { autoRecover: true, rest: `auto --yolo ${quotedPath}` });
+  });
+}

@@ -1,0 +1,253 @@
+// Project/App: gsd-pi
+// File Purpose: Shared TUI rendering for the gsd_exec / gsd_uat_exec tools (issue #2914 slice 1).
+//
+// Presentation only: display text is sanitized and normalized here, but call
+// arguments, result content, and persisted values are never mutated. All
+// accessors are defensive so legacy rows (historical sessions without the
+// newer `details` fields) render fail-soft instead of throwing.
+
+import { Text } from "@gsd/pi-tui";
+import { stripAnsi } from "../../shared/mod.js";
+
+/** Longest rendered purpose before elision. */
+const PURPOSE_MAX_CHARS = 80;
+/** Digest preview budget: rows and per-row characters (visual-row budgeting at narrow widths is the host frame's job). */
+const DIGEST_PREVIEW_MAX_LINES = 8;
+const DIGEST_PREVIEW_LINE_CHARS = 200;
+/** Cap for the legacy (details-less) content fallback. */
+const LEGACY_FALLBACK_MAX_LINES = 12;
+/** Cap for error-content rendering on execution failures (timeouts, nonzero exits). */
+const ERROR_CONTENT_MAX_LINES = 20;
+
+// C0 controls except \n and \t, plus CR, DEL, and C1 — safe Unicode survives.
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\r\u0080-\u009F]/g;
+// OSC sequences (hyperlinks, window titles) including their payload text.
+const OSC_SEQUENCE = /\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g;
+// CSI sequences (SGR, cursor moves, screen clears like ESC[2J).
+const CSI_SEQUENCE = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+
+interface ThemeLike {
+	fg(color: string, text: string): string;
+	bold(text: string): string;
+	italic?(text: string): string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+	return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function detailString(record: Record<string, unknown> | null, key: string): string | undefined {
+	const value = record?.[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function detailNumber(record: Record<string, unknown> | null, key: string): number | undefined {
+	const value = record?.[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function detailBoolean(record: Record<string, unknown> | null, key: string): boolean {
+	return record?.[key] === true;
+}
+
+/** Strip terminal escapes (OSC/CSI/SGR) and control sequences; keep safe Unicode, \n and \t. */
+export function sanitizeExecDisplayText(text: string): string {
+	return stripAnsi(text.replace(OSC_SEQUENCE, "").replace(CSI_SEQUENCE, "")).replace(CONTROL_CHARS, "");
+}
+
+/**
+ * Display-normalized purpose: whitespace collapsed, control-free, length
+ * bounded. Never mutates the original argument or persisted value. Returns
+ * undefined for omitted, blank, or non-string values.
+ */
+export function normalizeExecPurpose(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const collapsed = sanitizeExecDisplayText(value).replace(/\s+/g, " ").trim();
+	if (collapsed.length === 0) return undefined;
+	return collapsed.length <= PURPOSE_MAX_CHARS ? collapsed : `${collapsed.slice(0, PURPOSE_MAX_CHARS - 1)}…`;
+}
+
+const RUNTIME_LABELS: Record<string, string> = {
+	bash: "Bash",
+	sh: "Bash",
+	shell: "Bash",
+	node: "Node",
+	nodejs: "Node",
+	js: "Node",
+	javascript: "Node",
+	python: "Python",
+	python3: "Python",
+	py: "Python",
+};
+
+/**
+ * English runtime label mirroring the executor's alias handling: omitted,
+ * empty, or whitespace-only means the bash default; unknown values get a
+ * neutral script label. Own-property lookup so exotic strings cannot reach
+ * inherited Object properties.
+ */
+export function execRuntimeLabel(runtime: unknown): string {
+	if (typeof runtime !== "string") {
+		return runtime === undefined || runtime === null ? "Bash" : "Script";
+	}
+	const normalized = runtime.trim().toLowerCase();
+	if (normalized === "") return "Bash";
+	return Object.hasOwn(RUNTIME_LABELS, normalized) ? RUNTIME_LABELS[normalized] : "Script";
+}
+
+function italicize(theme: ThemeLike, text: string): string {
+	return typeof theme.italic === "function" ? theme.italic(text) : text;
+}
+
+/** The purpose the UAT executor synthesizes when none was passed (display only). */
+function uatSynthesizedPurpose(record: Record<string, unknown> | null): string | undefined {
+	const milestoneId = detailString(record, "milestoneId");
+	const sliceId = detailString(record, "sliceId");
+	const checkId = detailString(record, "checkId");
+	const intent = detailString(record, "intent");
+	if (!milestoneId || !sliceId || !checkId || !intent) return undefined;
+	return `UAT ${milestoneId}/${sliceId}/${checkId} (${intent})`;
+}
+
+function buildCallText(label: string, purpose: string | undefined, runtime: unknown, theme: ThemeLike): Text {
+	const runtimeLabel = execRuntimeLabel(runtime);
+	const fallback = runtimeLabel === "Script" ? "script" : `${runtimeLabel} script`;
+	const detail = purpose ?? fallback;
+	const text = `${theme.fg("toolTitle", theme.bold(label))}\n${theme.fg("muted", italicize(theme, detail))}`;
+	return new Text(text, 0, 0);
+}
+
+/** Compact call card for gsd_exec: label plus the explicit purpose (or runtime label). */
+export function renderExecCall(label: string, args: unknown, theme: ThemeLike): Text {
+	const record = asRecord(args);
+	return buildCallText(label, normalizeExecPurpose(record?.purpose), record?.runtime, theme);
+}
+
+/** Compact call card for gsd_uat_exec: derives the running purpose from UAT metadata when streaming. */
+export function renderUatExecCall(args: unknown, theme: ThemeLike): Text {
+	const record = asRecord(args);
+	const purpose = normalizeExecPurpose(record?.purpose) ?? normalizeExecPurpose(uatSynthesizedPurpose(record));
+	return buildCallText("UAT Exec", purpose, record?.runtime, theme);
+}
+
+function resultContentText(result: Record<string, unknown> | null): string {
+	const content = Array.isArray(result?.content) ? result.content : [];
+	return content
+		.map((block) => {
+			const record = asRecord(block);
+			return record && typeof record.text === "string" ? record.text : "";
+		})
+		.filter((text) => text.length > 0)
+		.join("\n");
+}
+
+function boundedLines(text: string, maxLines: number, lineChars = Number.POSITIVE_INFINITY): string {
+	const lines = text.split("\n");
+	const kept = lines.slice(0, maxLines).map((line) => (line.length > lineChars ? `${line.slice(0, lineChars - 1)}…` : line));
+	const suffix = lines.length > maxLines ? `\n… (${lines.length - maxLines} more lines hidden)` : "";
+	return kept.join("\n") + suffix;
+}
+
+function legacyFallback(result: Record<string, unknown> | null, theme: ThemeLike): Text {
+	const content = sanitizeExecDisplayText(resultContentText(result)).trim();
+	if (content.length === 0) return new Text(theme.fg("muted", "gsd_exec run"), 0, 0);
+	return new Text(theme.fg("toolOutput", boundedLines(content, LEGACY_FALLBACK_MAX_LINES)), 0, 0);
+}
+
+/** Execution status text mirroring the executor's formatExit semantics; undefined when details carry none. */
+function execStatusText(details: Record<string, unknown> | null): string | undefined {
+	const hasStatusFields =
+		detailNumber(details, "exit_code") !== undefined ||
+		detailNumber(details, "duration_ms") !== undefined ||
+		detailString(details, "signal") !== undefined ||
+		detailBoolean(details, "timed_out") ||
+		detailBoolean(details, "aborted") ||
+		detailBoolean(details, "force_resolved");
+	if (!hasStatusFields) return undefined;
+
+	const forceResolved = detailBoolean(details, "force_resolved");
+	const aborted = detailBoolean(details, "aborted");
+	const timedOut = detailBoolean(details, "timed_out");
+	const signal = detailString(details, "signal");
+
+	let exit: string;
+	if (aborted && forceResolved) exit = "aborted(force-killed)";
+	else if (aborted) exit = "aborted";
+	else if (forceResolved) exit = "timeout(force-killed)";
+	else if (timedOut) exit = "timeout";
+	else if (signal) exit = `signal:${sanitizeExecDisplayText(signal)}`;
+	else {
+		const exitCode = detailNumber(details, "exit_code");
+		exit = exitCode === undefined ? "exit unknown" : `exit ${exitCode}`;
+	}
+	const duration = detailNumber(details, "duration_ms");
+	return duration === undefined ? exit : `${exit} · ${duration}ms`;
+}
+
+/** One `stdout`/`stderr` row; omitted entirely when the row's metadata is absent (missing ≠ 0B). */
+function outputRow(kind: "stdout" | "stderr", details: Record<string, unknown> | null): string | undefined {
+	const bytes = detailNumber(details, `${kind}_bytes`);
+	const path = detailString(details, `${kind}_path`);
+	if (bytes === undefined && path === undefined) return undefined;
+	const parts = [`${kind} ${bytes ?? "?"}B`];
+	if (detailBoolean(details, `${kind}_truncated`)) parts.push("(truncated)");
+	// Full original path, verbatim modulo display sanitization — no shortening or rewriting.
+	if (path) parts.push(`→ ${sanitizeExecDisplayText(path)}`);
+	return parts.join(" ");
+}
+
+/**
+ * Expanded result card for gsd_exec / gsd_uat_exec. Structured `details` drive
+ * everything (recording state included) — content text is never scanned for
+ * warning markers. Historical rows keep their output visible: results without
+ * `details` fall back to bounded content text, and results with pre-slice
+ * details (status/paths but no `digest` key) keep their content below the
+ * structured rows. Error results show the original content plus the
+ * structured recording warning so a long digest cannot push it out of view.
+ */
+export function renderExecResult(result: unknown, _options: unknown, theme: ThemeLike): Text {
+	const record = asRecord(result);
+	const details = asRecord(record?.details);
+	const content = sanitizeExecDisplayText(resultContentText(record)).trim();
+
+	const notRecorded = detailString(details, "run_not_recorded");
+	const notRecordedRow = notRecorded
+		? theme.fg("warning", `not recorded (${sanitizeExecDisplayText(notRecorded)}) — not verification or UAT evidence`)
+		: undefined;
+
+	if (record?.isError === true) {
+		// Content is the authoritative error text (validation, policy block,
+		// execution failure): show it bounded, then guarantee the structured
+		// recording warning regardless of how long the content is.
+		const errorText = content.length > 0 ? boundedLines(content, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
+		const lines = [theme.fg("error", errorText)];
+		if (notRecordedRow) lines.push(notRecordedRow);
+		return new Text(lines.join("\n"), 0, 0);
+	}
+
+	if (!details) return legacyFallback(record, theme);
+
+	const lines: string[] = [];
+	const status = execStatusText(details);
+	if (status) lines.push(theme.fg("muted", status));
+	const stdoutRow = outputRow("stdout", details);
+	if (stdoutRow) lines.push(theme.fg("toolOutput", stdoutRow));
+	const stderrRow = outputRow("stderr", details);
+	if (stderrRow) lines.push(theme.fg("toolOutput", stderrRow));
+	if (notRecordedRow) lines.push(notRecordedRow);
+
+	const digest = detailString(details, "digest");
+	if (digest) {
+		// Stream-neutral label: the sandbox digest may be a stderr tail when
+		// stdout was empty.
+		lines.push(theme.fg("muted", "output preview — tail of the run's captured output, not the full log:"));
+		lines.push(theme.fg("toolOutput", boundedLines(sanitizeExecDisplayText(digest), DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
+	} else if (content.length > 0) {
+		// Pre-slice structured rows: output (and any genuine recording warning)
+		// lives only in content — keep it visible without interpreting markers.
+		lines.push(theme.fg("toolOutput", boundedLines(content, LEGACY_FALLBACK_MAX_LINES)));
+	}
+
+	if (lines.length === 0) return legacyFallback(record, theme);
+	return new Text(lines.join("\n"), 0, 0);
+}

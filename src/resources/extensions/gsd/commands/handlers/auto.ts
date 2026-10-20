@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { enableDebug } from "../../debug-logger.js";
-import { getAutoDashboardData, isAutoActive, isAutoPaused, pauseAuto, startAutoDetached, stopAuto, stopAutoRemote } from "../../auto.js";
+import { getAutoDashboardData, isAutoActive, isAutoPaused, isAutoStartPending, pauseAuto, startAutoDetached, stopAuto, stopAutoRemote } from "../../auto.js";
 import { parseAutoRecoverFlag } from "../../auto-recovery-options.js";
 import { acknowledgeWedgeStepMode } from "../../auto-liveness-backstop.js";
 import { handleRate } from "../../commands-rate.js";
@@ -254,7 +254,7 @@ export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandCo
   }
 
   if (trimmed === "stop") {
-    if (!isAutoActive() && !isAutoPaused()) {
+    if (!isAutoActive() && !isAutoPaused() && !isAutoStartPending()) {
       const result = stopAutoRemote(projectRoot());
       if (result.found) {
         ctx.ui.notify(`Sent stop signal to auto-mode session (PID ${result.pid}). It will shut down gracefully.`, "info");

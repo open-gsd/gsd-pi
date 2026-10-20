@@ -80,13 +80,16 @@ describe("parseMilestoneTarget", () => {
 describe("auto preference diagnostics", () => {
   it("notifies preference diagnostics before launching auto-mode", () => {
     const source = readFileSync(join(__dirname, "..", "commands", "handlers", "auto.ts"), "utf-8");
-    const autoBlockIndex = source.indexOf('if (trimmed === "auto" || trimmed.startsWith("auto "))');
+    const autoBlockIndex = source.indexOf('if (/^auto(?:\\s|$)/.test(trimmed))');
     assert.ok(autoBlockIndex >= 0, "auto command block should exist");
     const nextBlockIndex = source.indexOf('if (trimmed === "stop")', autoBlockIndex);
+    assert.ok(nextBlockIndex > autoBlockIndex, "stop command should bound the auto block");
     const autoBlock = source.slice(autoBlockIndex, nextBlockIndex);
     const notifyIndex = autoBlock.indexOf("notifyPreferenceDiagnostics");
     assert.ok(notifyIndex >= 0, "auto command should notify preference diagnostics");
-    for (const match of autoBlock.matchAll(/startAutoDetached/g)) {
+    const starts = [...autoBlock.matchAll(/startAutoDetached/g)];
+    assert.ok(starts.length > 0, "auto block should launch through the detached startup boundary");
+    for (const match of starts) {
       assert.ok(
         notifyIndex < match.index!,
         "preference diagnostics should be notified before each auto-mode launch",

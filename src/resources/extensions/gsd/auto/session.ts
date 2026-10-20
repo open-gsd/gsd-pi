@@ -99,6 +99,14 @@ export class AutoSession {
   // ── Lifecycle ────────────────────────────────────────────────────────────
   active = false;
   paused = false;
+  stopInProgress = false;
+  readonly pendingDeferredStarts = new Set<{ cancel: () => void }>();
+  pendingStart: {
+    cancelled: boolean;
+    accepted: boolean;
+    acknowledge: (accepted: boolean) => void;
+    cancelPending?: () => void;
+  } | null = null;
   completionStopInProgress = false;
   preserveStepSurfaceAfterLoopExit = false;
   stepMode = false;
@@ -106,7 +114,11 @@ export class AutoSession {
   // Host-only attachment to an immutable canonical run approval. Never serialized to soft KV.
   autoRecoveryAuthorizationId: string | null = null;
   autoRecoveryRunId: string | null = null;
-  autoRecoveryPending = false;
+  autoRecoveryPending: {
+    cancelled: boolean;
+    outcomeEmitted: boolean;
+    started: boolean;
+  } | null = null;
   activeEngineId: string | null = null;
   activeRunDir: string | null = null;
   cmdCtx: ExtensionCommandContext | null = null;
@@ -335,7 +347,25 @@ export class AutoSession {
   }
 
   reset(): void {
+    const pendingStart = this.pendingStart;
+    const stopInProgress = this.stopInProgress;
+    if (pendingStart) {
+      pendingStart.cancelled = true;
+      pendingStart.acknowledge(false);
+      pendingStart.cancelPending?.();
+    }
+    // A reset cancels queued work, but a refused in-flight startup still owes
+    // its host a terminal outcome unless stop explicitly took ownership.
+    if (this.autoRecoveryPending && !this.autoRecoveryPending.started) {
+      this.autoRecoveryPending.cancelled = true;
+    }
+    for (const pending of this.pendingDeferredStarts) pending.cancel();
+    this.pendingDeferredStarts.clear();
     this.clearTimers();
+
+    // Owning invocations release these barriers in their finally blocks.
+    this.pendingStart = pendingStart;
+    this.stopInProgress = stopInProgress;
 
     // Lifecycle
     this.active = false;
@@ -346,7 +376,7 @@ export class AutoSession {
     this.verbose = false;
     this.autoRecoveryAuthorizationId = null;
     this.autoRecoveryRunId = null;
-    this.autoRecoveryPending = false;
+    this.autoRecoveryPending = null;
     this.activeEngineId = null;
     this.activeRunDir = null;
     this.cmdCtx = null;

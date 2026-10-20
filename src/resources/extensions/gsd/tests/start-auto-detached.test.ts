@@ -144,7 +144,7 @@ test("fresh start registers the auto worker before bootstrap enters worktree flo
   const bootstrapIdx = autoStartSrc.indexOf("export async function bootstrapAutoSession(");
   const bootstrapBody = autoStartSrc.slice(bootstrapIdx);
 
-  const bootstrapCallIdx = startAutoBody.indexOf("const ready = await bootstrapAutoSession(");
+  const bootstrapCallIdx = startAutoBody.indexOf("const ready = await startupOwnership.run(() => bootstrapAutoSession(");
   const preBootstrapBody = startAutoBody.slice(0, bootstrapCallIdx);
   const preBootstrapRegisterIdx = preBootstrapBody.lastIndexOf("registerAutoWorkerForSession(s, base);");
   const resumeSectionIdx = startAutoBody.indexOf("if (s.paused) {");
@@ -196,7 +196,7 @@ test("startAutoDetached reports failures asynchronously (#3733)", () => {
     "auto.ts should export startAutoDetached",
   );
   assert.ok(
-    autoSrc.includes("void withDetachedAutoKeepalive(startAuto(ctx, pi, base, verboseMode, options)).catch"),
+    /void withDetachedAutoKeepalive\(\s*startAutoWithAcknowledgement\(ctx, pi, base, verboseMode, options, resolve\),?\s*\)\.catch/.test(autoSrc),
     "startAutoDetached should launch startAuto without awaiting it and keep the process alive",
   );
   assert.ok(
@@ -208,18 +208,22 @@ test("startAutoDetached reports failures asynchronously (#3733)", () => {
 test("failed auto-start always clears leaked s.active so later /gsd auto is not bricked (#1235)", () => {
   const autoSrc = readGsdFile("auto.ts");
 
-  // 1. startAutoDetached is the single funnel for any exception thrown out of
-  //    startAuto — including a bootstrap throw that escapes before the loop's
-  //    try/finally could run cleanupAfterLoopExit. The failure handler must
-  //    clear leaked activation, or s.active + the on-disk auto lock persist and
-  //    the re-entry guard silently no-ops every later /gsd auto until restart.
+  // 1. Both start entry points share the acknowledgement runner. Its finally
+  //    must clear activation leaked by a pre-loop exception, but only for its
+  //    own pending start and never concurrently with an explicit stop.
   const detachedIdx = autoSrc.indexOf("export function startAutoDetached");
   assert.ok(detachedIdx > -1, "startAutoDetached should exist");
   const detachedBody = autoSrc.slice(detachedIdx, autoSrc.indexOf("\n}", detachedIdx));
+  const acknowledgementIdx = autoSrc.indexOf("async function startAutoWithAcknowledgement(");
+  assert.ok(acknowledgementIdx > -1, "shared startup runner must exist");
+  const acknowledgementBody = autoSrc.slice(acknowledgementIdx, autoSrc.indexOf("\n}", acknowledgementIdx));
   assert.ok(
-    detachedBody.includes("if (s.active)") &&
-      detachedBody.includes("cleanupAfterLoopExit(ctx)"),
-    "startAutoDetached failure handler must run cleanupAfterLoopExit when auto-mode is still active",
+    detachedBody.includes("startAutoWithAcknowledgement(") &&
+      acknowledgementBody.includes("finally {") &&
+      acknowledgementBody.includes("if (!startup.accepted)") &&
+      acknowledgementBody.includes("if (s.pendingStart === startup && s.active && !s.stopInProgress)") &&
+      acknowledgementBody.includes("await cleanupAfterLoopExit(ctx)"),
+    "shared startup finally must clean up a leaked activation only for its owning, unaccepted start",
   );
 
   // 2. bootstrapAutoSession sets s.active = true before some bail-outs return
@@ -329,9 +333,10 @@ test("discussion auto-start waits for the current command context to become idle
     "/tmp/gsd-auto-start-idle-test",
     false,
     { step: true },
-    (...args: unknown[]) => {
+    async (...args: unknown[]) => {
       launches.push(args);
-    },
+      return true;
+    }
   );
 
   await Promise.resolve();

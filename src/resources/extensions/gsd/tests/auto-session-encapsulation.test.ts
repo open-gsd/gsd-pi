@@ -116,54 +116,24 @@ test("auto-runtime-state.ts has exactly one module-level const for AutoSession",
 test("AutoSession.reset() references every instance property", () => {
   const source = getSessionTsSource();
 
-  // Extract property names from class body (lines like `  propName = ...` or `  propName:`)
-  // Skip readonly collections (Maps/Sets) that use .clear() instead of reassignment
-  const propertyPattern = /^\s+(readonly\s+)?(\w+)\s*[:=]/;
-  const properties: string[] = [];
-  let inClass = false;
-  let inMethod = false;
-  let braceDepth = 0;
-
-  for (const line of source.split("\n")) {
-    if (/^export class AutoSession/.test(line)) {
-      inClass = true;
-      braceDepth = 0;
-      continue;
-    }
-    if (!inClass) continue;
-
-    // Track brace depth to distinguish properties from method bodies
-    for (const ch of line) {
-      if (ch === "{") braceDepth++;
-      if (ch === "}") braceDepth--;
-    }
-
-    // Class-level properties are at brace depth 1 (inside the class, outside methods)
-    if (braceDepth === 1 && !inMethod) {
-      const match = line.match(propertyPattern);
-      if (match && match[2]) {
-        const propName = match[2];
-        // Skip method-like names and type-only declarations
-        if (!["constructor", "clearTimers", "resetDispatchCounters", "lockBasePath",
-               "completeCurrentUnit", "reset", "toJSON"].includes(propName)) {
-          properties.push(propName);
-        }
-      }
-    }
-
-    // Detect method start/end
-    if (braceDepth === 1 && /^\s+(get |async )?(\w+)\s*\(/.test(line)) {
-      inMethod = true;
-    }
-    if (braceDepth === 1 && inMethod) {
-      inMethod = false;
-    }
-  }
+  // Enumerate actual instance state, not nested object-type members. The old
+  // brace counter mistook inline type fields for class properties and could
+  // also pass vacuously when no nested type was present.
+  const properties = Object.keys(new AutoSession());
+  assert.ok(properties.length > 0, "reset coverage must inspect real instance state");
 
   // Extract the reset() method body
   const resetMatch = source.match(/reset\(\): void \{([\s\S]*?)^\s{2}\}/m);
   assert.ok(resetMatch, "AutoSession.reset() method not found");
   const resetBody = resetMatch![1]!;
+  const resetSources = [resetBody];
+  for (const method of ["clearTimers", "clearCurrentUnit"]) {
+    assert.ok(resetBody.includes(`this.${method}()`), `reset must invoke ${method}`);
+    const helper = source.match(new RegExp(`${method}\\(\\): void \\{([\\s\\S]*?)^\\s{2}\\}`, "m"));
+    assert.ok(helper, `${method} body must exist`);
+    resetSources.push(helper[1]!);
+  }
+  const resetCoverage = resetSources.join("\n");
 
   const intentionallySkipped = new Set<string>([]);
 
@@ -171,7 +141,7 @@ test("AutoSession.reset() references every instance property", () => {
   for (const prop of properties) {
     if (intentionallySkipped.has(prop)) continue;
     // Check if the property name appears in reset body (as `this.prop` assignment or `.clear()`)
-    if (!resetBody.includes(`this.${prop}`)) {
+    if (!resetCoverage.includes(`this.${prop}`)) {
       missingFromReset.push(prop);
     }
   }

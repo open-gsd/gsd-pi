@@ -377,20 +377,24 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 			...(full ? { rejectsForcedToolChoice: true } : {}),
 		});
 	}
-	if (
-		(model.provider === "minimax" || model.provider === "minimax-cn") &&
+	// The Vercel AI Gateway proxies the same upstream MiniMax-M3.1-Flash over an
+	// Anthropic-compatible route, so the identical request contract applies there
+	// (#2911 follow-up to #2906).
+	const isMinimaxM3DirectAnthropic =
 		model.api === "anthropic-messages" &&
-		(model.id === "MiniMax-M3" || model.id === "MiniMax-M3.1-Flash")
-	) {
+		(((model.provider === "minimax" || model.provider === "minimax-cn") &&
+			(model.id === "MiniMax-M3" || model.id === "MiniMax-M3.1-Flash")) ||
+			(model.provider === "vercel-ai-gateway" && model.id === "minimax/minimax-m3.1-flash"));
+	if (isMinimaxM3DirectAnthropic) {
 		// M3 exposes adaptive and disabled thinking modes over the Anthropic-compatible
 		// endpoint; M3.1-Flash REQUIRES adaptive thinking. Force adaptive for both
 		// instead of the budget-based default.
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
 	}
 	if (
-		(model.provider === "minimax" || model.provider === "minimax-cn") &&
 		model.api === "anthropic-messages" &&
-		model.id === "MiniMax-M3.1-Flash"
+		(((model.provider === "minimax" || model.provider === "minimax-cn") && model.id === "MiniMax-M3.1-Flash") ||
+			(model.provider === "vercel-ai-gateway" && model.id === "minimax/minimax-m3.1-flash"))
 	) {
 		// M3.1-Flash always thinks: thinking {type:"disabled"} returns HTTP 400
 		// (error 2013), and output_config.effort accepts low/medium/high/xhigh/max

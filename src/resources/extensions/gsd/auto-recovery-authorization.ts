@@ -9,7 +9,8 @@ import type { RecoveryClassification } from "./recovery-classification.js";
 
 export const AUTO_RECOVERY_MAX_RETRIES = 3;
 export const AUTO_RECOVERY_APPROVAL_TTL_MS = 30 * 60 * 1000;
-const ENTITY = "auto-recovery-authorization";
+export const AUTO_RECOVERY_AUTHORIZATION_PROJECTION_KIND = "auto-recovery-authorization";
+const ENTITY = AUTO_RECOVERY_AUTHORIZATION_PROJECTION_KIND;
 
 interface RecoveryApproval {
   runId: string;

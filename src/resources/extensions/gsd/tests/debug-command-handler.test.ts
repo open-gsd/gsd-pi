@@ -940,3 +940,13 @@ describe("continue handler — specialist review dispatch", () => {
     }
   });
 });
+
+describe("commands-debug module load", () => {
+  // A duplicate top-level import binding is an ESM SyntaxError at load time,
+  // so this guards the compile/load contract that two concurrent merges broke.
+  test("loads and exposes the command entry points", async () => {
+    const mod = await import("../commands-debug.ts");
+    assert.equal(typeof mod.parseDebugCommand, "function");
+    assert.equal(typeof mod.handleDebug, "function");
+  });
+});

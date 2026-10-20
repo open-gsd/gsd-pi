@@ -5,6 +5,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 
+import { AUTO_RECOVERY_AUTHORIZATION_PROJECTION_KIND } from "./auto-recovery-authorization.js";
+import { renderAutoRecoveryProjection } from "./auto-recovery-projection.js";
 import { renderBacklogProjection } from "./backlog.js";
 import { renderCapturesProjection } from "./captures.js";
 import { collectRenderedProjectionFiles, noteRenderedProjectionFile } from "./compat/compat-marker.js";
@@ -182,6 +184,9 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
   if (HIERARCHY_KINDS.has(kind)) return hierarchyTarget(segments.slice(1));
   if (MILESTONE_KINDS.has(kind)) return hierarchyTarget(segments.slice(1, 2));
   if (STATE_KINDS.has(kind)) return { target: "state", render: renderStateFile };
+  if (kind === AUTO_RECOVERY_AUTHORIZATION_PROJECTION_KIND) {
+    return { target: "auto-recovery", render: async (root: string) => renderAutoRecoveryProjection(root) };
+  }
   if (kind === "queue-order") return { target: "queue-order", render: renderQueueOrderFile };
   if (kind === CUSTOM_WORKFLOW_RUN_PROJECTION_KIND) {
     return {
@@ -528,6 +533,11 @@ async function renderEveryProjection(basePath: string): Promise<RenderAllResult>
     renderBacklogProjection(basePath);
   } catch (err) {
     rendered.errors.push(`backlog: ${(err as Error).message}`);
+  }
+  try {
+    renderAutoRecoveryProjection(basePath);
+  } catch (err) {
+    rendered.errors.push(`auto-recovery: ${(err as Error).message}`);
   }
   return rendered;
 }
