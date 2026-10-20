@@ -9,6 +9,7 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
 import { resolveCtxCwd } from "./dynamic-tools.js";
+import { renderExecCall, renderExecResult, renderUatExecCall } from "../tools/exec-tool-renderer.js";
 
 
 async function loadContextModePreferences(baseDir: string) {
@@ -66,6 +67,12 @@ export function registerExecTools(pi: ExtensionAPI): void {
         }),
       ),
     }),
+    renderCall(args: any, theme: any) {
+      return renderUatExecCall(args, theme);
+    },
+    renderResult(result: any, options: any, theme: any) {
+      return renderExecResult(result, options, theme);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeUatExec } = await import("../tools/exec-tool.js");
       const baseDir = resolveCtxCwd(_ctx);
@@ -105,7 +112,14 @@ export function registerExecTools(pi: ExtensionAPI): void {
       command: Type.Optional(Type.String({ description: "Alias for script; defaults to bash when runtime is omitted." })),
       cmd: Type.Optional(Type.String({ description: "Short alias for script." })),
       code: Type.Optional(Type.String({ description: "Alias for script, useful for node/python snippets." })),
-      purpose: Type.Optional(Type.String({ description: "Short label recorded in meta.json for later review." })),
+      purpose: Type.Optional(
+        Type.String({
+          description:
+            "Short label shown in the UI and recorded in meta.json. Start with an action verb and name the target — " +
+            'e.g. "count failing tests", "grep API routes". Avoid generic labels like "verify": workload ' +
+            "classification also reads this field.",
+        }),
+      ),
       timeout_ms: Type.Optional(
         Type.Number({
           description: "Per-invocation timeout (ms). Capped at 600000. Default from preferences.",
@@ -114,6 +128,12 @@ export function registerExecTools(pi: ExtensionAPI): void {
         }),
       ),
     }),
+    renderCall(args: any, theme: any) {
+      return renderExecCall("Exec (Sandboxed)", args, theme);
+    },
+    renderResult(result: any, options: any, theme: any) {
+      return renderExecResult(result, options, theme);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeGsdExec } = await import("../tools/exec-tool.js");
       const baseDir = resolveCtxCwd(_ctx);
