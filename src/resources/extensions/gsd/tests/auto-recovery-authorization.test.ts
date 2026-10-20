@@ -41,7 +41,7 @@ import {
   openDatabase,
 } from "../gsd-db.ts";
 import type { PausedSessionMetadata } from "../interrupted-session.ts";
-import { openPauseBlockerForSession } from "../pause-blocker-domain-operation.ts";
+import { findPauseLifecycleId, openPauseBlockerRow } from "../pause-blocker-domain-operation.ts";
 import type { RecoveryClassification } from "../recovery-classification.ts";
 import type { AutoPauseBlockerKind, HumanBlockerKind } from "../recovery-policy.ts";
 
@@ -389,10 +389,13 @@ test("a linked real user-owned Blocker cannot be bypassed or closed by a mechani
   fixture(t);
   approve();
   const request = pause();
-  const blockerId = openPauseBlockerForSession({
-    pause: { ...readOpenAutoPause(), pauseId: "pause-test" },
+  const lifecycleId = findPauseLifecycleId({ milestoneId: "M001", unitType: "execute-task", unitId: "M001/S01/T01" });
+  assert.ok(lifecycleId);
+  const { blockerId } = openPauseBlockerRow({
+    lifecycleId,
     blockerKind: "consent", description: "Operator consent required",
     requestedAction: "Confirm the action",
+    idempotencyKey: "test/auto-recovery/human-blocker",
   });
   assert.ok(blockerId, "canonical lifecycle fixture must create a real Blocker");
   setAutoPauseBlockerId(blockerId);
