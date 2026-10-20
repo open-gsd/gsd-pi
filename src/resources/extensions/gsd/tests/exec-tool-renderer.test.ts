@@ -1,224 +1,466 @@
+// Project/App: gsd-pi
+// File Purpose: Regression tests for the shared gsd_exec/gsd_uat_exec TUI rendering (issue #2914 slice 1).
+//
+// Covers: purpose surfacing (explicit, runtime-label fallback, neutral invalid),
+// output-log pointers with full original paths, bounded digest preview labeled
+// as a tail (not the full log), structured run_not_recorded visibility without
+// scanning content for warning markers, legacy fail-soft fallback, control-
+// sequence sanitization, and the additive purpose/digest executor details.
+
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { Theme } from "@gsd/pi-coding-agent";
-import { renderExecCall, renderExecResult } from "../tools/exec-tool-renderer.ts";
 
-const theme = {
-  fg: (_color: string, text: string) => text,
-  italic: (text: string) => text,
-} as Theme;
+import { registerExecTools } from "../bootstrap/exec-tools.ts";
+import { executeGsdExec, executeUatExec } from "../tools/exec-tool.ts";
+import type { ExecSandboxRequest, ExecSandboxResult } from "../exec-sandbox.ts";
 
-function details(overrides: Record<string, unknown> = {}) {
-  return {
-    id: "exec-1", runtime: "bash", exit_code: 0, signal: null,
-    timed_out: false, aborted: false, force_resolved: false, duration_ms: 12,
-    stdout_bytes: 9, stderr_bytes: 0, stdout_truncated: false, stderr_truncated: false,
-    stdout_path: "/tmp/project [copy]/.gsd/exec/run.stdout",
-    stderr_path: "C:\\project [copy]\\exec\\run.stderr",
-    meta_path: "/tmp/project [copy]/.gsd/exec/run.meta.json",
-    digest: "9 matches", ...overrides,
-  };
+function makeMockPi() {
+	const tools: any[] = [];
+	return {
+		registerTool: (tool: any) => tools.push(tool),
+		tools,
+	} as any;
 }
 
-function render(value: unknown, expanded = false, width = 120): string {
-  return renderExecResult(value, { expanded, isPartial: false }, theme)
-    .render(width).map((line) => line.trimEnd()).join("\n");
+const fakeTheme = {
+	fg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+	italic: (text: string) => `<i>${text}</i>`,
+};
+
+function getTool(name: string) {
+	const pi = makeMockPi();
+	registerExecTools(pi);
+	const tool = pi.tools.find((t: any) => t.name === name);
+	assert.ok(tool, `${name} should be registered`);
+	return tool;
 }
 
-test("frame ownership is explicit; standalone and older contexts retain purpose", () => {
-  const args = { purpose: "Inspect once" };
-  for (const context of [undefined, { state: {} }, { state: { gsdExecPurposeInFrame: true } }]) {
-    const owned = context?.state.gsdExecPurposeInFrame === true;
-    const call = renderExecCall(args, theme, context).render(120).join("\n");
-    const result = renderExecResult({ details: details(args) }, { expanded: true }, theme, context)
-      .render(120).join("\n");
-    assert.equal(call.includes("Inspect once"), !owned);
-    assert.equal(result.includes("Inspect once"), !owned);
-    assert.match(result, /exit: 0/);
-  }
+function renderText(component: any): string {
+	assert.ok(component, "renderer should return a component");
+	return component.render(200).join("\n");
+}
+
+function makeExecResult(overrides: Partial<ExecSandboxResult> = {}): ExecSandboxResult {
+	return {
+		id: "exec-1",
+		runtime: "bash",
+		exit_code: 0,
+		signal: null,
+		timed_out: false,
+		aborted: false,
+		force_resolved: false,
+		duration_ms: 12,
+		stdout_bytes: 12,
+		stderr_bytes: 0,
+		stdout_truncated: false,
+		stderr_truncated: false,
+		stdout_path: ".gsd/exec/exec-1.stdout",
+		stderr_path: ".gsd/exec/exec-1.stderr",
+		meta_path: ".gsd/exec/exec-1.meta.json",
+		digest: "check passed",
+		...overrides,
+	};
+}
+
+// ─── renderCall ───────────────────────────────────────────────────────────────
+
+test("gsd_exec renderCall shows an explicit purpose in muted italic", () => {
+	const tool = getTool("gsd_exec");
+	const args = { runtime: "bash", script: "echo hi", purpose: "grep failing tests" };
+	const text = renderText(tool.renderCall(args, fakeTheme));
+	assert.ok(text.includes("Exec (Sandboxed)"), `label missing: ${text}`);
+	assert.ok(text.includes("grep failing tests"), `purpose missing: ${text}`);
+	assert.ok(text.includes("<i>grep failing tests</i>"), `purpose not italic: ${text}`);
 });
 
-test("schema-shaped UAT args synthesize a sanitized display-only purpose", () => {
-  const args = {
-    milestoneId: " \x1b[31mM001\x1b[0m ", sliceId: "S01\n", checkId: "C01\u202e",
-    intent: "uat-runtime-check", script: "echo ready",
-  };
-  const before = structuredClone(args);
-  assert.equal(renderExecCall(args, theme).render(120).join("\n").trim(),
-    "UAT M001/S01/C01 (uat-runtime-check)");
-  assert.match(render({ details: details({ ...args, purpose: undefined }) }), /UAT M001\/S01\/C01/);
-  assert.deepEqual(args, before);
-  for (const field of ["milestoneId", "sliceId", "checkId", "intent"]) {
-    for (const value of [undefined, 42, "\n\u202e"]) {
-      assert.equal(renderExecCall({ ...args, [field]: value }, theme).render(120).join("\n").trim(),
-        "Run a Bash script");
-    }
-  }
+test("gsd_exec renderCall falls back to a runtime label when purpose is omitted", () => {
+	const tool = getTool("gsd_exec");
+	assert.ok(renderText(tool.renderCall({ runtime: "python3", script: "print(1)" }, fakeTheme)).includes("Python script"));
+	assert.ok(renderText(tool.renderCall({ script: "echo hi" }, fakeTheme)).includes("Bash script"));
 });
 
-test("ordinary warning markers stay budgeted without a digest or any metadata", () => {
-  for (const extra of [{}, { id: "exec-1", exit_code: 0 }]) {
-    for (const marker of ["--- warning ---", "The command ran, but the host did not record this run: output only."]) {
-      for (const expanded of [false, true]) {
-        const output = render({ details: extra, content: [{ type: "text", text: `${marker}\n${"x".repeat(400)}` }] }, expanded, 10);
-        assert.ok(output.split("\n").filter((line) => /^x+$/.test(line)).length <= (expanded ? 20 : 6));
-        assert.match(output.replace(/\s/g, ""), /previewrowshidden/);
-        assert.doesNotMatch(output.replace(/\s/g, ""), /notverificationorUATevidence/);
-      }
-    }
-  }
+test("gsd_exec renderCall uses a neutral script label for invalid runtime values", () => {
+	const tool = getTool("gsd_exec");
+	const text = renderText(tool.renderCall({ runtime: "ruby", script: "puts 1" }, fakeTheme));
+	assert.match(text, /\bscript\b/i, `neutral label missing: ${text}`);
+	assert.ok(!text.includes("Ruby"), `invented label for invalid runtime: ${text}`);
 });
 
-test("metadata reason wins without digest; only paired raw historical footers are warnings", () => {
-  const footer = "--- warning ---\nThe command ran, but the host did not record this run: output imitation.";
-  const output = render({ details: { run_not_recorded: "stored database reason" }, content: [{ type: "text", text: footer }] });
-  assert.match(output, /did not record this run: stored database reason/);
-  const legacy = render({ content: [{ type: "text", text: `old preview\n${footer} This run is not verification or UAT evidence. Do not run the command again only to get the output.` }] });
-  assert.match(legacy, /did not record this run: output imitation/);
-  assert.match(legacy, /not verification or UAT evidence/);
-  const recorded = render({ details: { id: "exec-1", exit_code: 0 }, content: [{ type: "text", text: footer }] });
-  assert.doesNotMatch(recorded, /not verification or UAT evidence/);
+test("gsd_exec renderCall treats whitespace-only runtime as the bash default and never leaks prototype names", () => {
+	const tool = getTool("gsd_exec");
+	assert.ok(renderText(tool.renderCall({ runtime: "   ", script: "echo hi" }, fakeTheme)).includes("Bash script"));
+	const proto = renderText(tool.renderCall({ runtime: "constructor", script: "echo hi" }, fakeTheme));
+	assert.ok(!/function|\[object Object\]/.test(proto), `inherited property leaked: ${proto}`);
+	const protoPath = renderText(tool.renderCall({ runtime: "__proto__", script: "echo hi" }, fakeTheme));
+	assert.ok(!/\[object Object\]/.test(protoPath), `prototype leaked: ${protoPath}`);
 });
 
-test("call renders only muted italic purpose, never script or heading", () => {
-  const calls: string[] = [];
-  const styled = {
-    fg: (color: string, text: string) => { calls.push(color); return text; },
-    italic: (text: string) => { calls.push("italic"); return text; },
-  } as Theme;
-  const output = renderExecCall({ purpose: "Count matches", script: "secret script" }, styled).render(80).join("\n");
-  assert.equal(output.trim(), "Count matches");
-  assert.deepEqual(calls, ["italic", "muted"]);
+test("gsd_exec renderCall display-normalizes purpose without mutating args", () => {
+	const tool = getTool("gsd_exec");
+	const args: any = { script: "echo hi", purpose: "  run\t\ntests  " };
+	const text = renderText(tool.renderCall(args, fakeTheme));
+	assert.ok(text.includes("run tests"), `normalized purpose missing: ${text}`);
+	assert.equal(args.purpose, "  run\t\ntests  ", "original args.purpose must not be mutated");
 });
 
-test("call fallbacks match runtime defaults, aliases, unknown and malformed args", () => {
-  for (const [runtime, expected] of [
-    [undefined, "Run a Bash script"], ["", "Run a Bash script"], ["SH", "Run a Bash script"],
-    ["nodejs", "Run a Node.js script"], [" javascript ", "Run a Node.js script"],
-    ["py", "Run a Python script"], ["python3", "Run a Python script"],
-    ["ruby", "Run a script"], [42, "Run a script"],
-  ] as const) {
-    assert.equal(renderExecCall({ runtime, purpose: " \n " }, theme).render(80).join("").trim(), expected);
-  }
-  assert.equal(renderExecCall(null, theme).render(80).join("").trim(), "Run a Bash script");
+test("gsd_uat_exec renderCall derives a running purpose from UAT metadata", () => {
+	const tool = getTool("gsd_uat_exec");
+	const args = { milestoneId: "M001", sliceId: "S01", checkId: "UAT-01", intent: "uat-runtime-check", script: "echo hi" };
+	const text = renderText(tool.renderCall(args, fakeTheme));
+	assert.ok(text.includes("UAT Exec"), `label missing: ${text}`);
+	assert.ok(text.includes("UAT M001/S01/UAT-01 (uat-runtime-check)"), `derived purpose missing: ${text}`);
 });
 
-test("rich result explains logs, bytes, empty/truncated state and preserves exact paths as text", () => {
-  const data = details({ purpose: "Inspect matches", stdout_truncated: true });
-  const output = render({ details: data });
-  for (const expected of [
-    "Inspect matches", "runtime: bash", "exit: 0", "duration: 12ms", "9 matches",
-    "9B captured; truncated on disk", "0B captured; empty",
-    "standard output (command results)", "standard error (diagnostics; not necessarily a failure)",
-    data.stdout_path, data.stderr_path, data.meta_path,
-  ]) assert.ok(output.includes(expected), `missing ${expected}`);
-  assert.doesNotMatch(output, /\x1b|\]\(file:|\]\(https?:/);
+test("gsd_uat_exec renderCall prefers an explicit purpose over the derived one", () => {
+	const tool = getTool("gsd_uat_exec");
+	const args = {
+		milestoneId: "M001",
+		sliceId: "S01",
+		checkId: "UAT-01",
+		intent: "uat-runtime-check",
+		purpose: "probe service health",
+		script: "echo hi",
+	};
+	const text = renderText(tool.renderCall(args, fakeTheme));
+	assert.ok(text.includes("probe service health"), `explicit purpose missing: ${text}`);
 });
 
-test("preview cap is applied after wrapping and never hides facts, paths or recording warnings", () => {
-  const data = details({
-    digest: "x".repeat(400), run_not_recorded: "database unavailable",
-    purpose: "Inspect", exit_code: 2,
-  });
-  for (const expanded of [false, true]) {
-    const lines = render({ details: data }, expanded, 10).split("\n");
-    const previewRows = lines.filter((line) => /^x+$/.test(line));
-    assert.equal(previewRows.length, expanded ? 20 : 6);
-    const joined = lines.join("").replace(/\s/g, "");
-    assert.match(joined, /previewrowshidden/);
-    assert.match(joined, /exit:2/);
-    assert.ok(joined.includes(data.stdout_path.replace(/\s/g, "")));
-    assert.match(joined, /notverificationorUATevidence/);
-    assert.match(joined, /Donotrunthecommandagain/);
-  }
+// ─── renderResult ─────────────────────────────────────────────────────────────
+
+function successResult(details: Record<string, unknown>, contentText?: string) {
+	return {
+		content: [{ type: "text", text: contentText ?? "gsd_exec[exec-1] runtime=bash exit=0\n--- digest ---\ncheck passed" }],
+		details,
+		isError: false,
+	};
+}
+
+test("gsd_exec renderResult shows status, byte counts, and full original output paths", () => {
+	const tool = getTool("gsd_exec");
+	const stdoutPath = "/tmp/gsd exec dir/run é\xff.stdout";
+	const result = successResult({
+		operation: "gsd_exec",
+		id: "exec-1",
+		runtime: "bash",
+		exit_code: 0,
+		signal: null,
+		timed_out: false,
+		duration_ms: 250,
+		stdout_bytes: 1234,
+		stderr_bytes: 0,
+		stdout_truncated: false,
+		stderr_truncated: false,
+		stdout_path: stdoutPath,
+		stderr_path: "/tmp/gsd exec dir/run é.stderr",
+		meta_path: "/tmp/gsd exec dir/run é.meta.json",
+		digest: "check passed",
+	});
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("exit 0"), `status missing: ${text}`);
+	assert.ok(text.includes("1234B"), `stdout bytes missing: ${text}`);
+	assert.ok(text.includes("0B"), `stderr zero-byte count not distinct from missing: ${text}`);
+	assert.ok(text.includes(stdoutPath), `full original stdout path not preserved: ${text}`);
+	assert.ok(text.includes("/tmp/gsd exec dir/run é.stderr"), `full original stderr path not preserved: ${text}`);
+	assert.ok(!text.includes("undefined"), `undefined leaked: ${text}`);
 });
 
-test("warning-like structured output stays within the preview cap without a recording warning", () => {
-  for (const marker of ["--- warning ---", "The command ran, but the host did not record this run"]) {
-    for (const expanded of [false, true]) {
-      const digest = [marker, ...Array.from({ length: 40 }, (_, i) => `output ${i}`)].join("\n");
-      const content = [{ type: "text", text: `header\n--- digest ---\n${digest}` }];
-      const output = render({ details: details({ digest }), content }, expanded, 160);
-      assert.equal(output.split(marker).length - 1, 1);
-      assert.equal(output.split("\n").filter((line) => /^output \d+$/.test(line)).length, expanded ? 19 : 5);
-      assert.match(output, /preview rows hidden/);
-      assert.doesNotMatch(output, /output 39|not verification or UAT evidence|Do not run the command again/);
-    }
-  }
+test("gsd_exec renderResult labels the digest as a bounded tail preview from structured details", () => {
+	const tool = getTool("gsd_exec");
+	const result = successResult(
+		{
+			operation: "gsd_exec",
+			id: "exec-1",
+			exit_code: 0,
+			stdout_bytes: 5000,
+			stderr_bytes: 0,
+			stdout_path: ".gsd/exec/exec-1.stdout",
+			stderr_path: ".gsd/exec/exec-1.stderr",
+			digest: "tail of stdout here",
+		},
+		"gsd_exec[exec-1] runtime=bash exit=0",
+	);
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("tail of stdout here"), `digest preview missing: ${text}`);
+	assert.ok(/preview/i.test(text), `preview not labeled as a preview: ${text}`);
+	assert.ok(/not the full log/i.test(text), `preview not distinguished from the full log: ${text}`);
+	assert.ok(!/tail of stdout,/.test(text), `preview label must be stream-neutral (stderr-tail digests exist): ${text}`);
 });
 
-test("structured recording failure uses its reason rather than warning-like command output", () => {
-  const digest = "The command ran, but the host did not record this run: printed by command.\n--- warning ---";
-  const output = render({
-    details: details({ digest, run_not_recorded: "actual database failure" }),
-    content: [{ type: "text", text: `header\n--- digest ---\n${digest}` }],
-  }, true, 160).replace(/\s+/g, " ");
-  assert.match(output, /Warning: The command ran, but the host did not record this run: actual database failure/);
-  assert.equal(output.split("printed by command").length - 1, 1);
-  assert.equal(output.split("Do not run the command again").length - 1, 1);
+test("gsd_exec renderResult keeps a stderr-tail digest renderable without mislabeling it as stdout", () => {
+	const tool = getTool("gsd_exec");
+	const result = successResult({
+		operation: "gsd_exec",
+		id: "exec-1",
+		exit_code: 0,
+		stdout_bytes: 0,
+		stderr_bytes: 40,
+		stdout_path: ".gsd/exec/exec-1.stdout",
+		stderr_path: ".gsd/exec/exec-1.stderr",
+		digest: "[no stdout — tail of stderr]\nerr line",
+	});
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("err line"), `stderr-tail digest lost: ${text}`);
+	assert.ok(!text.includes("tail of stdout"), `stderr tail mislabeled as stdout: ${text}`);
 });
 
-test("an empty structured digest does not enable legacy warning extraction", () => {
-  const result = {
-    details: details({ digest: "" }),
-    content: [{ type: "text", text: "--- warning ---\nThe command ran, but the host did not record this run" }],
-  };
-  for (const expanded of [false, true]) {
-    const output = render(result, expanded);
-    assert.match(output, /no output preview/);
-    assert.doesNotMatch(output, /--- warning ---|did not record this run/);
-  }
+test("gsd_exec renderResult distinguishes truncated captures from complete ones", () => {
+	const tool = getTool("gsd_exec");
+	const result = successResult({
+		operation: "gsd_exec",
+		id: "exec-1",
+		exit_code: 0,
+		stdout_bytes: 999999,
+		stdout_truncated: true,
+		stderr_bytes: 0,
+		stderr_truncated: false,
+		stdout_path: ".gsd/exec/exec-1.stdout",
+		stderr_path: ".gsd/exec/exec-1.stderr",
+		digest: "partial",
+	});
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("(truncated)"), `truncation flag missing: ${text}`);
 });
 
-test("execution status preserves abort, timeout, force-kill, signal and unknown distinctions", () => {
-  for (const [extra, expected] of [
-    [{ aborted: true }, "aborted"],
-    [{ aborted: true, force_resolved: true }, "aborted (force-killed)"],
-    [{ timed_out: true }, "timeout"],
-    [{ force_resolved: true }, "timeout (force-killed)"],
-    [{ signal: "SIGTERM" }, "signal: SIGTERM"],
-    [{ exit_code: null }, "unknown"],
-  ] as const) assert.ok(render({ details: details(extra) }).includes(`exit: ${expected}`));
+test("gsd_exec renderResult omits output rows when metadata is missing and does not throw", () => {
+	const tool = getTool("gsd_exec");
+	const result = successResult({ operation: "gsd_exec", exit_code: 0 });
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(!text.includes("stdout "), `stdout row invented without metadata: ${text}`);
+	assert.ok(!text.includes("undefined"), `undefined leaked: ${text}`);
 });
 
-test("preview budgets count wide Unicode cells and reflow on width or expansion changes", () => {
-  const component = renderExecResult({ details: details({ digest: "界".repeat(40) }) }, { expanded: false }, theme);
-  assert.equal(component.render(8).filter((line) => /^界+\s*$/.test(line)).length, 6);
-  assert.equal(component.render(80).filter((line) => /^界+\s*$/.test(line)).length, 1);
-  component.invalidate();
-  const expanded = renderExecResult({ details: details({ digest: "界".repeat(40) }) }, { expanded: true }, theme);
-  assert.equal(expanded.render(8).filter((line) => /^界+\s*$/.test(line)).length, 10);
+test("gsd_exec renderResult surfaces run_not_recorded from structured details only", () => {
+	const tool = getTool("gsd_exec");
+	const markerOutput = "all tests passed\n--- warning ---\nmarker-like ordinary output";
+	const withWarning = successResult(
+		{
+			operation: "gsd_exec",
+			exit_code: 0,
+			stdout_bytes: 60,
+			stderr_bytes: 0,
+			stdout_path: ".gsd/exec/exec-1.stdout",
+			stderr_path: ".gsd/exec/exec-1.stderr",
+			digest: markerOutput,
+		},
+		markerOutput,
+	);
+	const clean = renderText(tool.renderResult(withWarning, {}, fakeTheme));
+	assert.ok(!clean.includes("not recorded"), `digest text misclassified as a recording warning: ${clean}`);
+
+	const recorded = successResult(
+		{
+			operation: "gsd_exec",
+			exit_code: 0,
+			stdout_bytes: 12,
+			stderr_bytes: 0,
+			stdout_path: ".gsd/exec/exec-1.stdout",
+			stderr_path: ".gsd/exec/exec-1.stderr",
+			digest: "check passed",
+			run_not_recorded: "workflow database locked",
+		},
+	);
+	const warned = renderText(tool.renderResult(recorded, {}, fakeTheme));
+	assert.ok(warned.includes("not recorded"), `structured warning missing: ${warned}`);
+	assert.ok(warned.includes("workflow database locked"), `warning reason missing: ${warned}`);
 });
 
-test("sanitizes terminal controls and bidi overrides without mutating stored values", () => {
-  const unsafe = "\x1b[2JCount\x1b]8;;https://example.com\x07 matches\x1b]8;;\x07\x00\u202e\x1bPprivate payload\x1b\\";
-  const data = details({ purpose: unsafe, digest: unsafe, stdout_path: "/tmp/\x1b[31mout.stdout" });
-  const output = render({ details: data });
-  assert.doesNotMatch(output, /[\x00-\x08\x1b\u202e]|https:\/\/example.com|private payload/);
-  assert.match(output, /Count matches/);
-  assert.match(output, /\/tmp\/out.stdout/);
-  assert.equal((data as Record<string, unknown>).purpose, unsafe);
-  assert.equal(renderExecCall({ purpose: "Count\n\tmatches" }, theme).render(80).join("").trim(), "Count matches");
+test("gsd_exec renderResult keeps genuine warning visibility for legacy rows without details", () => {
+	const tool = getTool("gsd_exec");
+	const legacyText =
+		"gsd_exec[exec-9] runtime=bash exit=0\n" +
+		"--- warning ---\nThe command ran, but the host did not record this run: workflow database locked.";
+	const result = { content: [{ type: "text", text: legacyText }], isError: false };
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("did not record this run"), `legacy warning lost: ${text}`);
+	assert.ok(!text.includes("undefined"), `undefined leaked: ${text}`);
 });
 
-test("legacy/malformed results fall back to safe text and preserve warnings outside preview caps", () => {
-  for (const value of [null, undefined, {}, { content: [null, { type: "image" }] }, { details: [] }]) {
-    assert.match(render(value), /no output preview/);
-  }
-  const warning = "The command ran, but the host did not record this run: locked. This run is not verification or UAT evidence.";
-  const legacy = { content: [{ type: "text", text: `${"line\n".repeat(100)}--- warning ---\n${warning}` }] };
-  const output = render(legacy);
-  assert.match(output, /preview rows hidden/);
-  assert.ok(output.includes(warning));
-  assert.match(render({ content: [{ type: "text", text: "Error: invalid runtime" }], details: { error: "invalid_params" } }), /Error: invalid runtime/);
-  assert.match(render({ details: details({ digest: undefined }), content: [{ type: "text", text: "header\n--- digest ---\nlegacy preview" }] }), /legacy preview/);
+test("gsd_exec renderResult keeps recorded output visible for historical rows that have details but no digest", () => {
+	const tool = getTool("gsd_exec");
+	// Pre-slice result shape: details already carried status/paths, the output
+	// only existed in content text.
+	const historical = successResult(
+		{
+			operation: "gsd_exec",
+			id: "exec-1",
+			runtime: "bash",
+			exit_code: 0,
+			signal: null,
+			timed_out: false,
+			duration_ms: 5,
+			stdout_bytes: 30,
+			stderr_bytes: 0,
+			stdout_truncated: false,
+			stderr_truncated: false,
+			stdout_path: ".gsd/exec/exec-1.stdout",
+			stderr_path: ".gsd/exec/exec-1.stderr",
+			meta_path: ".gsd/exec/exec-1.meta.json",
+		},
+		"gsd_exec[exec-1] runtime=bash exit=0 duration=5ms\n--- digest ---\nthe actual recorded output",
+	);
+	const text = renderText(tool.renderResult(historical, {}, fakeTheme));
+	assert.ok(text.includes("the actual recorded output"), `historical content dropped: ${text}`);
+	assert.ok(text.includes("exit 0"), `historical status lost: ${text}`);
 });
 
-test("empty digest and unknown stream metadata remain readable", () => {
-  const output = render({ details: details({ digest: "", stdout_bytes: NaN, stderr_path: null, duration_ms: "bad", run_not_recorded: "" }) });
-  assert.match(output, /no output preview/);
-  assert.match(output, /unknown captured/);
-  assert.match(output, /duration: unknown/);
-  assert.match(output, /path unavailable/);
-  assert.match(output, /did not record this run/);
+test("gsd_exec renderResult keeps structured recording warnings visible on execution failures", () => {
+	const tool = getTool("gsd_exec");
+	const longDigest = Array.from({ length: 30 }, (_, i) => `out ${i}`).join("\n");
+	const contentText =
+		`gsd_exec[exec-1] runtime=bash exit=1 duration=9ms\n--- digest ---\n${longDigest}\n` +
+		"--- warning ---\nThe command ran, but the host did not record this run: db locked.";
+	const result = {
+		content: [{ type: "text", text: contentText }],
+		details: {
+			operation: "gsd_exec",
+			id: "exec-1",
+			exit_code: 1,
+			timed_out: false,
+			stdout_bytes: 200,
+			stderr_bytes: 0,
+			stdout_path: ".gsd/exec/exec-1.stdout",
+			stderr_path: ".gsd/exec/exec-1.stderr",
+			run_not_recorded: "db locked",
+		},
+		isError: true,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("not recorded"), `structured warning hidden on failure: ${text}`);
+	assert.ok(text.includes("db locked"), `warning reason hidden on failure: ${text}`);
+	assert.ok(text.includes("exit=1"), `failure content lost: ${text}`);
+});
+
+test("gsd_exec renderResult bounds the legacy content fallback", () => {
+	const tool = getTool("gsd_exec");
+	const longText = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+	const result = { content: [{ type: "text", text: longText }], isError: false };
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	const rows = text.split("\n").length;
+	assert.ok(rows < 40, `legacy fallback not bounded: ${rows} rows`);
+});
+
+test("gsd_exec renderResult shows errors without throwing on missing fields", () => {
+	const tool = getTool("gsd_exec");
+	const result = {
+		content: [{ type: "text", text: "Error: script is required and must be a non-empty string" }],
+		details: { operation: "gsd_exec", error: "invalid_params" },
+		isError: true,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("script is required"), `error text missing: ${text}`);
+	assert.ok(!text.includes("undefined"), `undefined leaked: ${text}`);
+
+	const bare = { content: [], isError: true };
+	const bareText = renderText(tool.renderResult(bare, {}, fakeTheme));
+	assert.ok(!bareText.includes("undefined"), `undefined leaked on bare error: ${bareText}`);
+});
+
+test("gsd_exec renderResult strips terminal escapes and control sequences from displayed text", () => {
+	const tool = getTool("gsd_exec");
+	const dirtyDigest = "\x1b[31mred\x1b[0m output\x07 with\x08controls";
+	const result = successResult({
+		operation: "gsd_exec",
+		exit_code: 0,
+		stdout_bytes: 40,
+		stderr_bytes: 0,
+		stdout_path: ".gsd/exec/exec-1.stdout",
+		stderr_path: ".gsd/exec/exec-1.stderr",
+		digest: dirtyDigest,
+	});
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("red"), `sanitized text content lost: ${JSON.stringify(text)}`);
+	assert.ok(!text.includes("\x1b"), `ANSI escape survived: ${JSON.stringify(text)}`);
+	assert.ok(!text.includes("\x07"), `bell control survived: ${JSON.stringify(text)}`);
+	assert.ok(!text.includes("\x08"), `backspace control survived: ${JSON.stringify(text)}`);
+});
+
+test("gsd_exec renderResult strips OSC and CSI sequence payloads, not just their ESC byte", () => {
+	const tool = getTool("gsd_exec");
+	const dirty = "\u001B]8;;http://evil.example\u0007link\u001B]8;;\u0007 and \u001B[2Jready";
+	const result = successResult({
+		operation: "gsd_exec",
+		exit_code: 0,
+		stdout_bytes: 60,
+		stderr_bytes: 0,
+		stdout_path: ".gsd/exec/exec-1.stdout",
+		stderr_path: ".gsd/exec/exec-1.stderr",
+		digest: dirty,
+	});
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("link"), ` OSC-wrapped text lost: ${JSON.stringify(text)}`);
+	assert.ok(text.includes("ready"), `post-CSI text lost: ${JSON.stringify(text)}`);
+	assert.ok(!text.includes("http://evil.example"), `OSC payload survived: ${JSON.stringify(text)}`);
+	assert.ok(!text.includes("[2J"), `CSI fragment survived: ${JSON.stringify(text)}`);
+});
+
+test("gsd_exec renderResult sanitizes untrusted metadata strings (paths, reasons)", () => {
+	const tool = getTool("gsd_exec");
+	const result = successResult({
+		operation: "gsd_exec",
+		exit_code: 0,
+		stdout_bytes: 4,
+		stderr_bytes: 0,
+		stdout_path: "/tmp/\u001B[31mx/.gsd/exec/exec-1.stdout",
+		stderr_path: ".gsd/exec/exec-1.stderr",
+		digest: "ok",
+		run_not_recorded: "reason\u0007with bell",
+	});
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(!text.includes("\u001B"), `path escape survived: ${JSON.stringify(text)}`);
+	assert.ok(!text.includes("\u0007"), `reason bell survived: ${JSON.stringify(text)}`);
+	assert.ok(text.includes("reasonwith bell"), `sanitized reason text lost: ${JSON.stringify(text)}`);
+});
+
+// ─── executor details (additive purpose/digest) ───────────────────────────────
+
+async function runExecutor(params: any) {
+	let request: ExecSandboxRequest | undefined;
+	const result = await executeGsdExec(params, {
+		baseDir: "/tmp/gsd-exec-renderer-test",
+		preferences: null,
+		run: async (req) => {
+			request = req;
+			return makeExecResult();
+		},
+	});
+	return { result, request };
+}
+
+	test("executeGsdExec records purpose and digest in details without changing content", async () => {
+	const { result, request } = await runExecutor({ runtime: "bash", script: "printf ok", purpose: "grep failing tests" });
+	assert.equal(result.isError, false);
+	assert.equal(result.details?.purpose, "grep failing tests");
+	assert.equal(result.details?.digest, "check passed");
+	assert.equal(request?.purpose, "grep failing tests", "original purpose must be forwarded unchanged");
+	// Byte-for-byte: the summary format must be identical to the pre-slice shape.
+	assert.equal(
+		result.content[0]?.text,
+		"gsd_exec[exec-1] runtime=bash exit=0 duration=12ms\n" +
+			"  stdout: 12B → .gsd/exec/exec-1.stdout\n" +
+			"  stderr: 0B → .gsd/exec/exec-1.stderr\n" +
+			"--- digest ---\n" +
+			"check passed",
+	);
+	assert.ok(!result.content[0]?.text.includes("grep failing tests"), "purpose must not be appended to content text");
+});
+
+test("executeGsdExec omits the purpose detail (absent, not null) when not provided", async () => {
+	const { result } = await runExecutor({ runtime: "bash", script: "printf ok" });
+	assert.equal(result.details?.digest, "check passed");
+	assert.ok(!("purpose" in (result.details ?? {})), `purpose should be absent, got: ${result.details?.purpose}`);
+});
+
+test("executeUatExec records the synthesized purpose in details", async () => {
+	const result = await executeUatExec(
+		{ milestoneId: "M001", sliceId: "S01", checkId: "UAT-PRE", intent: "artifact", runtime: "bash", script: "printf ok" },
+		{
+			baseDir: "/tmp/gsd-uat-renderer-test",
+			preferences: null,
+			run: async (request) => makeExecResult(request),
+		},
+	);
+	assert.equal(result.isError, false);
+	assert.equal(result.details?.purpose, "UAT M001/S01/UAT-PRE (uat-artifact-check)");
+	assert.equal(result.details?.digest, "check passed");
 });

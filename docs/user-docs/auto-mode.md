@@ -186,6 +186,49 @@ context_mode:
 
 You can also tune sandbox behavior with `context_mode.exec_timeout_ms`, `context_mode.exec_stdout_cap_bytes`, `context_mode.exec_digest_chars`, and `context_mode.exec_env_allowlist`. `context_mode.exec_timeout_ms` overrides the timeout for each `gsd_exec` call. When it is unset, verification-oriented workloads such as builds, tests, linting, type checks, and verification commands inherit `verification_timeout_ms` (default: `120000` ms); other `gsd_exec` calls use the sandbox's `30000` ms default.
 
+### gsd_exec Results, Logs, and Evidence
+
+A completed `gsd_exec` or `gsd_uat_exec` run returns three parts: a header line, the captured-output lines, and the digest. Everything below describes the result text the host returns today; renderers and MCP clients show this content in their own way. Failed parameter validation, a disabled Context Mode, or a UAT policy block return a plain error message instead of this format.
+
+```text
+gsd_exec[3f9c2a71-5b6e-4c8d-9a2f-1e7d4b8c6a05] runtime=bash exit=0 duration=4213ms
+  stdout: 152340B → /home/you/my-project/.gsd/exec/3f9c2a71-5b6e-4c8d-9a2f-1e7d4b8c6a05.stdout
+  stderr: 0B → /home/you/my-project/.gsd/exec/3f9c2a71-5b6e-4c8d-9a2f-1e7d4b8c6a05.stderr
+--- digest ---
+(last ~300 characters of captured stdout)
+```
+
+- The header names the run id, the runtime (`bash`, `node`, or `python`), an exit label, and the duration. Exit labels are exact: a number for an exit code, `timeout` when the sandbox stopped the command at its deadline (`timeout(force-killed)` when the command outlived its hard deadline and the host stopped waiting for a child that never closed — recorded as a forced resolution, not an observed exit), `aborted` or `aborted(force-killed)` for a cancelled run, `signal:<name>` for a signal death, `null` when no exit code was observed.
+- The `stdout:` and `stderr:` lines show how many bytes were captured, a `(truncated)` marker when the cap cut the stream off, and the full path of the persisted log. Default caps are 1 MiB for stdout and 256 KiB for stderr; `context_mode.exec_stdout_cap_bytes` tunes the stdout cap. `0B` on the `stderr:` line means nothing was captured on stderr — not that no errors occurred; the exit label, not stderr size, reports failure.
+- The digest is the output preview the agent works from (300 characters by default, tunable with `context_mode.exec_digest_chars`; tuning it to `0` disables the preview). It is the tail of the captured stdout; when stdout is empty it says so and falls back to the tail of stderr or an aborted/timed-out note — it never merges the two streams. It is a convenience preview, not the full log: read the persisted `.stdout`/`.stderr` files when you need everything the host kept.
+- Each run also writes `.gsd/exec/<id>.meta.json` with the runtime, start/finish timestamps, duration, exit code, signal, timeout/abort/force-resolve flags, byte counts and truncation flags, persisted paths, the optional structured metadata, and `purpose` (`null` when the run had none).
+- Output is redacted with GSD's secret scanner before it is written to disk, and persisted logs are capped. The digest preview is built from the raw stream before that redaction, and a spawn failure's diagnostic line is written as-is — the scanner covers captured command output. Captured byte counts are measured after capping but before redaction and truncation markers are added, so they can differ from the persisted file size — treat them as approximate output size, not an exact size promise. Logs are neither unlimited nor unredacted.
+
+Purpose labels describe intent, not success. The optional `purpose` parameter labels why a `gsd_exec` command runs; GSD shows it in the tool UI, records it in the run metadata, and uses it to classify verification-oriented workloads for the longer verification timeout. Start a purpose with an action verb and name the target (for example `count failing tests` or `grep API routes`); avoid generic labels like `verify`, because workload classification also reads the field. A purpose string never means that a check passed. `gsd_uat_exec` does not take a purpose: it generates one from the UAT check the run belongs to, for example `UAT M001/S02/C03 (uat-browser-check)`; its intents are `uat-artifact-check`, `uat-runtime-check`, `uat-browser-check`, `uat-service-start`, and `uat-log-inspection`. `gsd_uat_exec` also rejects scripts matching known mutation patterns during UAT: dependency installs, git mutations, destructive filesystem cleanup, environment dumps, and credential-file reads.
+
+Evidence is recorded by the host, not assumed from an exit code. When a workflow database exists, every run is written to the `exec_runs` table with a hash of the persisted output files and a reference to the Attempt it ran in. A `gsd_uat_exec` run binds to its slice's run-uat attempt; a plain `gsd_exec` run binds to the caller's open Task Attempt, and when no single Attempt matches the caller unambiguously, the run is stored unbound and proves nothing as evidence. Evidence checks read those database rows; they never read `.gsd/exec/<id>.meta.json`. Task verification evidence must cite such a host-recorded run — see [Verification Enforcement](#verification-enforcement): a command that exits 0 by itself is not evidence. If a project database exists but the run cannot be recorded, the result carries an explicit warning:
+
+```text
+--- warning ---
+The command ran, but the host did not record this run: <reason>. This run is not verification or UAT evidence. Do not run the command again only to get the output.
+```
+
+The warning is about recording, not about the command's outcome: it can accompany a failed exit, a timeout, or a cancellation just the same. Take the last line seriously — do not rerun a mutating or long-running command only to get its output into the record. `gsd_exec_search` lists previous runs from `.gsd/exec/*.meta.json` (with a short output preview) so a prior sandboxed run can be found and reused instead of repeated. Runs outside a GSD project (no `.gsd/` workflow database) still write their `.gsd/exec/` logs, but nothing records them in the database and they carry no verification evidence weight.
+
+Display boundaries: the transcript shows one compact row per completed tool call; press `ctrl+o` to expand tool output (the same toggle collapses it again). Expanded, a `gsd_exec`/`gsd_uat_exec` call renders as a small card — the tool label plus the purpose in muted italic text, or a runtime label such as `Bash script` when there is no purpose — and the result renders from the structured fields stored with the run: a status line with the exit label and duration, the `stdout`/`stderr` byte rows, the recording warning when present, and a short output preview labeled as the tail of the captured output, not the full log. A stream row is omitted, not zeroed, when its metadata is missing entirely, and `?B` marks a stored path without a byte count; `0B` in the result text means a genuinely empty capture. Long previews are elided (a trailing `…` for an overlong line, `… (N more lines hidden)` when whole lines are dropped) and display text is stripped of terminal escape sequences. A failed run renders expanded by default, showing bounded original error text with the recording warning, when present, kept visible below it. The renderer does not reopen `.gsd/exec/` metadata files to enrich a result, so an old session renders only what was stored at run time — results without structured fields fall back to bounded raw content and are not retroactively expanded. MCP and other remote clients receive the same raw text content plus additive structured fields (such as run id, `exit_code`, `duration_ms`, `signal`, byte counts and truncation flags, `stdout_path`/`stderr_path`, `meta_path`, `purpose` when one was given, `digest`, and `run_not_recorded` when the warning above fires) and control their own presentation; GSD does not promise that a remote client's styling matches the native TUI.
+
+Illustrative examples with synthetic ids and paths — these show shapes, not live evidence. A normal result is shown above (its `0B` stderr is also the empty-stderr case). A truncated capture marks the capped stream:
+
+```text
+gsd_exec[8d1e0b44-2a7c-4f19-b3c6-9e5a7d2c1f30] runtime=bash exit=0 duration=8801ms
+  stdout: 1048576B (truncated) → /home/you/my-project/.gsd/exec/8d1e0b44-2a7c-4f19-b3c6-9e5a7d2c1f30.stdout
+  stderr: 512B → /home/you/my-project/.gsd/exec/8d1e0b44-2a7c-4f19-b3c6-9e5a7d2c1f30.stderr
+--- digest ---
+(last ~300 characters of captured stdout)
+```
+
+An unrecorded-evidence run appends the warning block shown earlier to the result text, whatever the command's outcome was; its structured fields carry `run_not_recorded`.
+
 ### Git Isolation
 
 GSD isolates milestone work using one of three modes (configured via `git.isolation` in preferences):

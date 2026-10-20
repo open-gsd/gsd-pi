@@ -9,7 +9,7 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
 import { resolveCtxCwd } from "./dynamic-tools.js";
-import { renderExecCall, renderExecResult } from "../tools/exec-tool-renderer.js";
+import { renderExecCall, renderExecResult, renderUatExecCall } from "../tools/exec-tool-renderer.js";
 
 
 async function loadContextModePreferences(baseDir: string) {
@@ -38,8 +38,6 @@ export function registerExecTools(pi: ExtensionAPI): void {
       "Every PASS/FAIL check saved by gsd_uat_result_save must reference objective evidence from this tool or another approved GSD evidence path.",
       "Do not install packages, mutate git state, edit source files, or dump credentials during UAT.",
     ],
-    renderCall: renderExecCall,
-    renderResult: renderExecResult,
     parameters: Type.Object({
       milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
       sliceId: Type.String({ description: "Slice ID (e.g. S01)" }),
@@ -69,6 +67,12 @@ export function registerExecTools(pi: ExtensionAPI): void {
         }),
       ),
     }),
+    renderCall(args: any, theme: any, context: any) {
+      return renderUatExecCall(args, theme, context);
+    },
+    renderResult(result: any, options: any, theme: any, context: any) {
+      return renderExecResult(result, options, theme, context);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeUatExec } = await import("../tools/exec-tool.js");
       const baseDir = resolveCtxCwd(_ctx);
@@ -92,14 +96,12 @@ export function registerExecTools(pi: ExtensionAPI): void {
     promptSnippet:
       "Run a bash/node/python script in a sandbox; capped output is saved to disk and only a digest returns",
     promptGuidelines: [
+      "Include a concise English purpose describing why the script is being run; the UI displays it instead of the script.",
       "Prefer gsd_exec for analyses that would otherwise read >3 files or produce large tool output.",
       "Write scripts that log the finding (counts, matches, summaries) rather than raw dumps.",
       "The digest is the last ~300 chars of stdout — size your log output accordingly.",
       "Need persisted output? Read the stdout_path returned in details (file on local disk).",
-      "Include a concise English purpose describing why the script is being run; the UI displays it instead of the script.",
     ],
-    renderCall: renderExecCall,
-    renderResult: renderExecResult,
     parameters: Type.Object({
       runtime: Type.Optional(
         Type.String({
@@ -111,7 +113,14 @@ export function registerExecTools(pi: ExtensionAPI): void {
       command: Type.Optional(Type.String({ description: "Alias for script; defaults to bash when runtime is omitted." })),
       cmd: Type.Optional(Type.String({ description: "Short alias for script." })),
       code: Type.Optional(Type.String({ description: "Alias for script, useful for node/python snippets." })),
-      purpose: Type.Optional(Type.String({ description: "Short label recorded in meta.json for later review." })),
+      purpose: Type.Optional(
+        Type.String({
+          description:
+            "Short label shown in the UI and recorded in meta.json. Start with an action verb and name the target — " +
+            'e.g. "count failing tests", "grep API routes". Avoid generic labels like "verify": workload ' +
+            "classification also reads this field.",
+        }),
+      ),
       timeout_ms: Type.Optional(
         Type.Number({
           description: "Per-invocation timeout (ms). Capped at 600000. Default from preferences.",
@@ -120,6 +129,12 @@ export function registerExecTools(pi: ExtensionAPI): void {
         }),
       ),
     }),
+    renderCall(args: any, theme: any, context: any) {
+      return renderExecCall("Exec (Sandboxed)", args, theme, context);
+    },
+    renderResult(result: any, options: any, theme: any, context: any) {
+      return renderExecResult(result, options, theme, context);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeGsdExec } = await import("../tools/exec-tool.js");
       const baseDir = resolveCtxCwd(_ctx);

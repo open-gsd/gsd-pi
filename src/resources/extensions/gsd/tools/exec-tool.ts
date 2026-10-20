@@ -321,7 +321,6 @@ export async function executeGsdExec(
     isVerificationWorkload(params, script),
   );
   const run = deps.run ?? runExecSandbox;
-  const purpose = typeof params.purpose === "string" ? params.purpose : undefined;
 
   const startedAt = (deps.now ?? (() => new Date()))();
   let result: ExecSandboxResult;
@@ -330,7 +329,7 @@ export async function executeGsdExec(
       {
         runtime,
         script,
-        ...(purpose !== undefined ? { purpose } : {}),
+        ...(typeof params.purpose === "string" ? { purpose: params.purpose } : {}),
         ...(params.metadata && typeof params.metadata === "object" ? { metadata: params.metadata } : {}),
         ...(typeof params.timeout_ms === "number" ? { timeout_ms: params.timeout_ms } : {}),
       },
@@ -344,7 +343,7 @@ export async function executeGsdExec(
       isError: true,
     };
   }
-  const formatted = formatResult(result, purpose);
+  const formatted = formatResult(result, typeof params.purpose === "string" ? params.purpose : undefined);
   const notRecorded = recordRun(deps.baseDir, result, script, startedAt, uat);
   if (notRecorded === null) return formatted;
   return {
@@ -416,7 +415,7 @@ export async function executeUatExec(
   };
 }
 
-function formatResult(result: ExecSandboxResult, purpose: string | undefined): ToolExecutionResult {
+function formatResult(result: ExecSandboxResult, purpose?: string): ToolExecutionResult {
   const headerLines = [
     `gsd_exec[${result.id}] runtime=${result.runtime} exit=${formatExit(result)} duration=${result.duration_ms}ms`,
     `  stdout: ${result.stdout_bytes}B${result.stdout_truncated ? " (truncated)" : ""} → ${result.stdout_path}`,
@@ -427,8 +426,6 @@ function formatResult(result: ExecSandboxResult, purpose: string | undefined): T
     content: [{ type: "text", text: summary }],
     details: {
       operation: "gsd_exec",
-      ...(purpose !== undefined ? { purpose } : {}),
-      digest: result.digest,
       id: result.id,
       runtime: result.runtime,
       exit_code: result.exit_code,
@@ -444,6 +441,11 @@ function formatResult(result: ExecSandboxResult, purpose: string | undefined): T
       stdout_path: result.stdout_path,
       stderr_path: result.stderr_path,
       meta_path: result.meta_path,
+      // Additive (issue #2914): the purpose forwarded to the run, unchanged, and
+      // the digest tail. `purpose` is absent (never null) when none was given;
+      // renderers display-normalize it without mutating these values.
+      ...(typeof purpose === "string" ? { purpose } : {}),
+      digest: result.digest,
     },
     isError: result.aborted === true || result.timed_out || result.signal !== null || result.exit_code !== 0,
   };

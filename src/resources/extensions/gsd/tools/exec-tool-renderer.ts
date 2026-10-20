@@ -1,131 +1,280 @@
-import { stripVTControlCharacters } from "node:util";
-import type { Theme } from "@gsd/pi-coding-agent";
-import { Text, wrapTextWithAnsi, type Component } from "@gsd/pi-tui";
+// Project/App: gsd-pi
+// File Purpose: Shared TUI rendering for the gsd_exec / gsd_uat_exec tools (issue #2914 slice 1).
+//
+// Presentation only: display text is sanitized and normalized here, but call
+// arguments, result content, and persisted values are never mutated. All
+// accessors are defensive so legacy rows (historical sessions without the
+// newer `details` fields) render fail-soft instead of throwing.
+
+import { Text } from "@gsd/pi-tui";
+import { stripAnsi } from "../../shared/mod.js";
+
+/** Longest rendered purpose before elision. */
+const PURPOSE_MAX_CHARS = 80;
+/** Digest preview budget: rows and per-row characters (visual-row budgeting at narrow widths is the host frame's job). */
+const DIGEST_PREVIEW_MAX_LINES = 8;
+const DIGEST_PREVIEW_LINE_CHARS = 200;
+/** Cap for the legacy (details-less) content fallback. */
+const LEGACY_FALLBACK_MAX_LINES = 12;
+/** Cap for error-content rendering on execution failures (timeouts, nonzero exits). */
+const ERROR_CONTENT_MAX_LINES = 20;
 
 type ExecRendererContext = { state?: Record<string, unknown> };
+const VT_STRING_SEQUENCE = /(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[\s\S]*?(?:\x1b\\|\x9c|$)/g;
+const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/g;
 
-function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
+// C0 controls except \n and \t, plus CR, DEL, and C1 — safe Unicode survives.
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\r\u0080-\u009F]/g;
+// OSC sequences (hyperlinks, window titles) including their payload text.
+const OSC_SEQUENCE = /\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g;
+// CSI sequences (SGR, cursor moves, screen clears like ESC[2J).
+const CSI_SEQUENCE = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+
+interface ThemeLike {
+	fg(color: string, text: string): string;
+	bold(text: string): string;
+	italic?(text: string): string;
 }
 
-function safeText(value: unknown): string {
-  if (typeof value !== "string") return "";
-  return stripVTControlCharacters(value.replace(/(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[\s\S]*?(?:\x1b\\|\x9c|$)/g, ""))
-    .replace(/\r\n?/g, "\n")
-    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "")
-    .replace(/\t/g, "   ");
+function asRecord(value: unknown): Record<string, unknown> | null {
+	return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
 }
 
-function purposeFor(args: Record<string, unknown>): string {
-  const purpose = safeText(args.purpose).replace(/\s+/g, " ").trim();
-  if (purpose) return purpose;
-  const uat = [args.milestoneId, args.sliceId, args.checkId, args.intent]
-    .map(value => safeText(value).replace(/\s+/g, " ").trim());
-  if (uat.every(Boolean)) return `UAT ${uat[0]}/${uat[1]}/${uat[2]} (${uat[3]})`;
-  const runtime = typeof args.runtime === "string" ? args.runtime.trim().toLowerCase() : args.runtime;
-  if (runtime === undefined || runtime === null || ["", "bash", "sh", "shell"].includes(runtime as string)) {
-    return "Run a Bash script";
-  }
-  if (["node", "nodejs", "js", "javascript"].includes(runtime as string)) return "Run a Node.js script";
-  if (["python", "python3", "py"].includes(runtime as string)) return "Run a Python script";
-  return "Run a script";
+function detailString(record: Record<string, unknown> | null, key: string): string | undefined {
+	const value = record?.[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-export function renderExecCall(args: unknown, theme: Theme, context?: ExecRendererContext): Component {
-  // The native host owns the purpose row; standalone/older hosts still need it.
-  const purpose = context?.state?.gsdExecPurposeInFrame === true ? "" : purposeFor(record(args));
-  return new Text(theme.fg("muted", theme.italic(purpose)), 0, 0);
+function detailNumber(record: Record<string, unknown> | null, key: string): number | undefined {
+	const value = record?.[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function exitStatus(details: Record<string, unknown>): string {
-  if (details.aborted === true) return details.force_resolved === true ? "aborted (force-killed)" : "aborted";
-  if (details.force_resolved === true) return "timeout (force-killed)";
-  if (details.timed_out === true) return "timeout";
-  const signal = safeText(details.signal);
-  if (signal) return `signal: ${signal}`;
-  return typeof details.exit_code === "number" && Number.isFinite(details.exit_code)
-    ? String(details.exit_code)
-    : "unknown";
+function detailBoolean(record: Record<string, unknown> | null, key: string): boolean {
+	return record?.[key] === true;
 }
 
-function numberLabel(value: unknown, unit: string): string {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? `${value}${unit}` : "unknown";
+/** Strip terminal escapes (OSC/CSI/SGR) and control sequences; keep safe Unicode, \n and \t. */
+export function sanitizeExecDisplayText(text: string): string {
+	return stripAnsi(text.replace(VT_STRING_SEQUENCE, "").replace(OSC_SEQUENCE, "").replace(CSI_SEQUENCE, ""))
+		.replace(CONTROL_CHARS, "").replace(BIDI_CONTROLS, "");
 }
 
-export function renderExecResult(
-  result: unknown,
-  options: { expanded?: boolean; isPartial?: boolean },
-  theme: Theme,
-  context?: ExecRendererContext,
-): Component {
-  const payload = record(result);
-  const details = record(payload.details);
-  const raw = Array.isArray(payload.content)
-    ? payload.content.map((block) => {
-      const item = record(block);
-      return item.type === "text" ? safeText(item.text) : "";
-    }).filter(Boolean).join("\n")
-    : "";
-  // Metadata is authoritative even when an older structured result has no digest.
-  // Raw-only compatibility requires the historical host footer, not output markers.
-  const legacyWarning = Object.keys(details).length === 0
-    ? /(?:^|\n)--- warning ---\nThe command ran, but the host did not record this run:/.exec(raw)
-    : null;
-  const warningIndex = legacyWarning?.index ?? -1;
-  const rawBody = warningIndex >= 0 ? raw.slice(0, warningIndex).trimEnd() : raw;
-  const rawWarning = warningIndex >= 0 ? raw.slice(warningIndex) : "";
-  const warning = typeof details.run_not_recorded === "string"
-    ? `Warning: The command ran, but the host did not record this run: ${safeText(details.run_not_recorded)}. ` +
-      "This run is not verification or UAT evidence. Do not run the command again only to get the output."
-    : rawWarning;
-  const structured = typeof details.id === "string" && typeof details.runtime === "string";
-  const digestMarker = "--- digest ---\n";
-  const digestIndex = rawBody.indexOf(digestMarker);
-  const preview = typeof details.digest === "string"
-    ? safeText(details.digest)
-    : structured && digestIndex >= 0 ? rawBody.slice(digestIndex + digestMarker.length) : rawBody;
-  const before: string[] = [];
-  const after: string[] = [];
-  if (structured) {
-    if (context?.state?.gsdExecPurposeInFrame !== true) {
-      before.push(theme.fg("muted", theme.italic(purposeFor(details))));
-    }
-    before.push(
-      `Run ${safeText(details.id)} · runtime: ${safeText(details.runtime)} · exit: ${exitStatus(details)} · ` +
-      `duration: ${numberLabel(details.duration_ms, "ms")}`,
-      theme.fg("muted", "Output preview (digest; not the full logs):"),
-    );
-    for (const stream of ["stdout", "stderr"] as const) {
-      const bytes = details[`${stream}_bytes`];
-      const annotations = [
-        `${numberLabel(bytes, "B")} captured`,
-        ...(details[`${stream}_truncated`] === true ? ["truncated on disk"] : []),
-        ...(bytes === 0 ? ["empty"] : []),
-      ].join("; ");
-      after.push(
-        `${stream} — ${stream === "stdout" ? "standard output (command results)" : "standard error (diagnostics; not necessarily a failure)"}: ${annotations}`,
-        `${stream} log: ${safeText(details[`${stream}_path`]) || "(path unavailable)"}`,
-      );
-    }
-    after.push(`Metadata: ${safeText(details.meta_path) || "(path unavailable)"}`);
-  }
-  if (warning) after.push(theme.fg("warning", warning));
+/**
+ * Display-normalized purpose: whitespace collapsed, control-free, length
+ * bounded. Never mutates the original argument or persisted value. Returns
+ * undefined for omitted, blank, or non-string values.
+ */
+export function normalizeExecPurpose(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const collapsed = sanitizeExecDisplayText(value).replace(/\s+/g, " ").trim();
+	if (collapsed.length === 0) return undefined;
+	return collapsed.length <= PURPOSE_MAX_CHARS ? collapsed : `${collapsed.slice(0, PURPOSE_MAX_CHARS - 1)}…`;
+}
 
-  // Cap after wrapping: a single long digest line can occupy many terminal rows.
-  return {
-    invalidate() {},
-    render(width: number): string[] {
-      const columns = Math.max(1, width);
-      const wrapped = wrapTextWithAnsi(preview || "(no output preview)", columns);
-      const cap = options?.expanded ? 20 : 6;
-      const visible = wrapped.slice(0, cap);
-      if (wrapped.length > cap) {
-        visible.push(theme.fg("muted", `… ${wrapped.length - cap} preview rows hidden from display.` +
-          (structured ? " Read the stdout/stderr log paths below for captured output." : "")));
-      }
-      return new Text([...before, ...visible, ...after].join("\n"), 0, 0).render(columns);
-    },
-  };
+const RUNTIME_LABELS: Record<string, string> = {
+	bash: "Bash",
+	sh: "Bash",
+	shell: "Bash",
+	node: "Node",
+	nodejs: "Node",
+	js: "Node",
+	javascript: "Node",
+	python: "Python",
+	python3: "Python",
+	py: "Python",
+};
+
+/**
+ * English runtime label mirroring the executor's alias handling: omitted,
+ * empty, or whitespace-only means the bash default; unknown values get a
+ * neutral script label. Own-property lookup so exotic strings cannot reach
+ * inherited Object properties.
+ */
+export function execRuntimeLabel(runtime: unknown): string {
+	if (typeof runtime !== "string") {
+		return runtime === undefined || runtime === null ? "Bash" : "Script";
+	}
+	const normalized = runtime.trim().toLowerCase();
+	if (normalized === "") return "Bash";
+	return Object.hasOwn(RUNTIME_LABELS, normalized) ? RUNTIME_LABELS[normalized] : "Script";
+}
+
+function italicize(theme: ThemeLike, text: string): string {
+	return typeof theme.italic === "function" ? theme.italic(text) : text;
+}
+
+/** The purpose the UAT executor synthesizes when none was passed (display only). */
+function uatSynthesizedPurpose(record: Record<string, unknown> | null): string | undefined {
+	const [milestoneId, sliceId, checkId, intent] = ["milestoneId", "sliceId", "checkId", "intent"]
+		.map(key => normalizeExecPurpose(detailString(record, key)));
+	if (!milestoneId || !sliceId || !checkId || !intent) return undefined;
+	return `UAT ${milestoneId}/${sliceId}/${checkId} (${intent})`;
+}
+
+function buildCallText(label: string, purpose: string | undefined, runtime: unknown, theme: ThemeLike, context?: ExecRendererContext): Text {
+	// Only this native host opts in; standalone/older hosts retain the call card.
+	if (context?.state?.gsdExecPurposeInFrame === true) return new Text("", 0, 0);
+	const runtimeLabel = execRuntimeLabel(runtime);
+	const fallback = runtimeLabel === "Script" ? "script" : `${runtimeLabel} script`;
+	const detail = purpose ?? fallback;
+	const text = `${theme.fg("toolTitle", theme.bold(label))}\n${theme.fg("muted", italicize(theme, detail))}`;
+	return new Text(text, 0, 0);
+}
+
+/** Compact call card for gsd_exec: label plus the explicit purpose (or runtime label). */
+export function renderExecCall(label: string, args: unknown, theme: ThemeLike, context?: ExecRendererContext): Text {
+	const record = asRecord(args);
+	return buildCallText(label, normalizeExecPurpose(record?.purpose), record?.runtime, theme, context);
+}
+
+/** Compact call card for gsd_uat_exec: derives the running purpose from UAT metadata when streaming. */
+export function renderUatExecCall(args: unknown, theme: ThemeLike, context?: ExecRendererContext): Text {
+	const record = asRecord(args);
+	const purpose = normalizeExecPurpose(record?.purpose) ?? normalizeExecPurpose(uatSynthesizedPurpose(record));
+	return buildCallText("UAT Exec", purpose, record?.runtime, theme, context);
+}
+
+function resultContentText(result: Record<string, unknown> | null): string {
+	const content = Array.isArray(result?.content) ? result.content : [];
+	return content
+		.map((block) => {
+			const record = asRecord(block);
+			return record && typeof record.text === "string" ? record.text : "";
+		})
+		.filter((text) => text.length > 0)
+		.join("\n");
+}
+
+function boundedLines(text: string, maxLines: number, lineChars = Number.POSITIVE_INFINITY): string {
+	const lines = text.split("\n");
+	const kept = lines.slice(0, maxLines).map((line) => (line.length > lineChars ? `${line.slice(0, lineChars - 1)}…` : line));
+	const suffix = lines.length > maxLines ? `\n… (${lines.length - maxLines} more lines hidden)` : "";
+	return kept.join("\n") + suffix;
+}
+
+function previewCard(before: string[], preview: string, warnings: string[], theme: ThemeLike, expanded: boolean): Text {
+	const card = new Text("", 0, 0);
+	card.render = (width: number): string[] => {
+		const columns = Math.max(1, width);
+		const rows = preview ? new Text(preview, 0, 0).render(columns) : [];
+		const limit = expanded ? 20 : 6;
+		return [
+			...(before.length ? new Text(before.join("\n"), 0, 0).render(columns) : []),
+			...rows.slice(0, limit),
+			...(rows.length > limit ? new Text(theme.fg("muted", "(preview rows hidden; open the full logs)"), 0, 0).render(columns) : []),
+			...(warnings.length ? new Text(warnings.join("\n"), 0, 0).render(columns) : []),
+		];
+	};
+	return card;
+}
+
+function legacyFallback(result: Record<string, unknown> | null, theme: ThemeLike): Text {
+	const content = sanitizeExecDisplayText(resultContentText(result)).trim();
+	if (content.length === 0) return new Text(theme.fg("muted", "gsd_exec run"), 0, 0);
+	return new Text(theme.fg("toolOutput", boundedLines(content, LEGACY_FALLBACK_MAX_LINES)), 0, 0);
+}
+
+/** Execution status text mirroring the executor's formatExit semantics; undefined when details carry none. */
+function execStatusText(details: Record<string, unknown> | null): string | undefined {
+	const hasStatusFields =
+		detailNumber(details, "exit_code") !== undefined ||
+		detailNumber(details, "duration_ms") !== undefined ||
+		detailString(details, "signal") !== undefined ||
+		detailBoolean(details, "timed_out") ||
+		detailBoolean(details, "aborted") ||
+		detailBoolean(details, "force_resolved");
+	if (!hasStatusFields) return undefined;
+
+	const forceResolved = detailBoolean(details, "force_resolved");
+	const aborted = detailBoolean(details, "aborted");
+	const timedOut = detailBoolean(details, "timed_out");
+	const signal = detailString(details, "signal");
+
+	let exit: string;
+	if (aborted && forceResolved) exit = "aborted(force-killed)";
+	else if (aborted) exit = "aborted";
+	else if (forceResolved) exit = "timeout(force-killed)";
+	else if (timedOut) exit = "timeout";
+	else if (signal) exit = `signal:${sanitizeExecDisplayText(signal)}`;
+	else {
+		const exitCode = detailNumber(details, "exit_code");
+		exit = exitCode === undefined ? "exit unknown" : `exit ${exitCode}`;
+	}
+	const duration = detailNumber(details, "duration_ms");
+	return duration === undefined ? exit : `${exit} · ${duration}ms`;
+}
+
+/** One `stdout`/`stderr` row; omitted entirely when the row's metadata is absent (missing ≠ 0B). */
+function outputRow(kind: "stdout" | "stderr", details: Record<string, unknown> | null): string | undefined {
+	const bytes = detailNumber(details, `${kind}_bytes`);
+	const path = detailString(details, `${kind}_path`);
+	if (bytes === undefined && path === undefined) return undefined;
+	const parts = [`${kind} ${bytes ?? "?"}B`];
+	if (detailBoolean(details, `${kind}_truncated`)) parts.push("(truncated)");
+	// Full original path, verbatim modulo display sanitization — no shortening or rewriting.
+	if (path) parts.push(`→ ${sanitizeExecDisplayText(path)}`);
+	return parts.join(" ");
+}
+
+/**
+ * Expanded result card for gsd_exec / gsd_uat_exec. Structured `details` drive
+ * everything (recording state included) — content text is never scanned for
+ * warning markers. Historical rows keep their output visible: results without
+ * `details` fall back to bounded content text, and results with pre-slice
+ * details (status/paths but no `digest` key) keep their content below the
+ * structured rows. Error results show the original content plus the
+ * structured recording warning so a long digest cannot push it out of view.
+ */
+export function renderExecResult(result: unknown, options: unknown, theme: ThemeLike, context?: ExecRendererContext): Text {
+	const record = asRecord(result);
+	const details = asRecord(record?.details);
+	const content = sanitizeExecDisplayText(resultContentText(record)).trim();
+
+	const notRecorded = typeof details?.run_not_recorded === "string" ? details.run_not_recorded : undefined;
+	// An explicit native owner renders the canonical warning outside every body cap.
+	// Older/standalone contexts retain this renderer's structured warning row.
+	const notRecordedRow = notRecorded !== undefined && context?.state?.gsdExecRecordingWarningInFrame !== true
+		? theme.fg("warning", `not recorded (${sanitizeExecDisplayText(notRecorded) || "reason unavailable"}) — not verification or UAT evidence`)
+		: undefined;
+	// Metadata wins even without a digest. Raw-only compatibility requires the
+	// paired historical host footer rather than arbitrary command-output markers.
+	const legacy = Object.keys(details ?? {}).length === 0
+		? /(?:^|\n)--- warning ---\nThe command ran, but the host did not record this run:/.exec(content)
+		: null;
+	const body = legacy ? content.slice(0, legacy.index).trimEnd() : content;
+	let legacyWarning = legacy ? content.slice(legacy.index).trim() : undefined;
+	if (legacyWarning && !legacyWarning.includes("not verification or UAT evidence")) {
+		legacyWarning += "\nThis run is not verification or UAT evidence.";
+	}
+	if (legacyWarning && !legacyWarning.includes("Do not run the command again")) {
+		legacyWarning += " Do not run the command again only to get the output.";
+	}
+	const warnings = [notRecordedRow, legacyWarning ? theme.fg("warning", legacyWarning) : undefined]
+		.filter((row): row is string => row !== undefined);
+	const expanded = asRecord(options)?.expanded === true;
+
+	if (record?.isError === true) {
+		// Original errors remain authoritative; warnings never fall inside preview caps.
+		const errorText = body.length > 0 ? boundedLines(body, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
+		return previewCard([], theme.fg("error", errorText), warnings, theme, true);
+	}
+
+	const lines: string[] = [];
+	const status = execStatusText(details);
+	if (status) lines.push(theme.fg("muted", status));
+	const stdoutRow = outputRow("stdout", details);
+	if (stdoutRow) lines.push(theme.fg("toolOutput", stdoutRow));
+	const stderrRow = outputRow("stderr", details);
+	if (stderrRow) lines.push(theme.fg("toolOutput", stderrRow));
+	const digest = detailString(details, "digest");
+	if (digest) {
+		// Stream-neutral: a digest can be a stderr tail when stdout was empty.
+		lines.push(theme.fg("muted", "output preview — tail of the run's captured output, not the full log:"));
+	}
+	const preview = digest
+		? boundedLines(sanitizeExecDisplayText(digest), DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)
+		: boundedLines(body, LEGACY_FALLBACK_MAX_LINES);
+	if (lines.length === 0 && !preview && warnings.length === 0) return legacyFallback(record, theme);
+	return previewCard(lines, theme.fg("toolOutput", preview), warnings, theme, expanded);
 }

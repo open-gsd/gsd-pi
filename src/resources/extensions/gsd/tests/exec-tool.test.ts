@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { registerExecTools } from "../bootstrap/exec-tools.ts";
 import { executeGsdExec, executeUatExec } from "../tools/exec-tool.ts";
 import type { ExecSandboxOptions, ExecSandboxRequest, ExecSandboxResult } from "../exec-sandbox.ts";
-import { renderExecCall, renderExecResult } from "../tools/exec-tool-renderer.ts";
+import { renderExecCall, renderExecResult, renderUatExecCall } from "../tools/exec-tool-renderer.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 function makeExecResult(request: ExecSandboxRequest): ExecSandboxResult {
@@ -90,10 +90,18 @@ test("executeGsdExec adds unchanged purpose and digest without changing raw text
 test("exec registrations share renderers, request UI purpose, and preserve the UAT schema", () => {
   const tools: any[] = [];
   registerExecTools({ registerTool: (tool: any) => tools.push(tool) } as any);
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, italic: (text: string) => text };
+  const args = { purpose: "Inspect registered execution" };
+  const result = { details: { exit_code: 0, digest: "ready" }, content: [], isError: false };
   for (const name of ["gsd_exec", "gsd_uat_exec"]) {
     const tool = tools.find((entry) => entry.name === name);
-    assert.equal(tool.renderCall, renderExecCall);
-    assert.equal(tool.renderResult, renderExecResult);
+    for (const context of [undefined, { state: { gsdExecPurposeInFrame: true } }]) {
+      const expected = name === "gsd_exec"
+        ? renderExecCall("Exec (Sandboxed)", args, theme, context)
+        : renderUatExecCall(args, theme, context);
+      assert.deepEqual(tool.renderCall(args, theme, context).render(120), expected.render(120));
+    }
+    assert.deepEqual(tool.renderResult(result, {}, theme).render(120), renderExecResult(result, {}, theme).render(120));
   }
   const exec = tools.find((entry) => entry.name === "gsd_exec");
   assert.ok(exec.promptGuidelines.some((line: string) => /concise English purpose/.test(line)));

@@ -75,16 +75,25 @@ function renderToolCollapsed(
 	return stripAnsi(component.render(width).join("\n"));
 }
 
+async function registeredExecDefinition(name: string): Promise<any> {
+	const { registerExecTools } = await import(
+		new URL("../../../../../../../src/resources/extensions/gsd/bootstrap/exec-tools.ts", import.meta.url).href
+	);
+	const definitions = new Map<string, any>();
+	registerExecTools({ registerTool(definition: any) { definitions.set(definition.name, definition); } });
+	const definition = definitions.get(name);
+	assert.ok(definition, `missing registered tool ${name}`);
+	return definition;
+}
+
 describe("ToolExecutionComponent", () => {
 
-	test("real exec callbacks leave purpose to the native frame across lifecycle and history", async () => {
-		const { renderExecCall, renderExecResult } = await import(
-			new URL("../../../../../../../src/resources/extensions/gsd/tools/exec-tool-renderer.ts", import.meta.url).href
-		);
+	test("registered exec callbacks leave purpose to the native frame across lifecycle and history", async () => {
 		for (const name of ["gsd_exec", "gsd_uat_exec"]) {
+			const definition = await registeredExecDefinition(name);
 			const component = new ToolExecutionComponent(
 				name, { purpose: "Inspect application", script: "echo secret-script" }, {},
-				{ label: "Native Exec", renderCall: renderExecCall, renderResult: renderExecResult } as any,
+				{ ...definition, label: "Native Exec" } as any,
 				{ requestRender() {} } as any,
 			);
 			for (const resultPurpose of [undefined, "Verify application", null]) {
@@ -101,19 +110,16 @@ describe("ToolExecutionComponent", () => {
 					assert.match(output, resultPurpose === undefined ? /running/ : /success/);
 					if (expanded) assert.match(output, /collapse/);
 					assert.doesNotMatch(output, /Run a Bash script|secret-script/);
-					if (expanded && resultPurpose !== undefined) assert.match(output, /exit: 0/);
+					if (expanded && resultPurpose !== undefined) assert.match(output, /exit 0/);
 				}
 			}
 		}
 	});
 
 	test("schema-shaped UAT args display sanitized identifiers while running without mutation", async () => {
-		const { renderExecCall, renderExecResult } = await import(
-			new URL("../../../../../../../src/resources/extensions/gsd/tools/exec-tool-renderer.ts", import.meta.url).href
-		);
 		const args = { milestoneId: " \x1b[31mM001\x1b[0m ", sliceId: "S01\n", checkId: "C01\u202e", intent: "uat-runtime-check", script: "echo ready" };
 		const before = structuredClone(args);
-		const definition = { label: "UAT Exec", renderCall: renderExecCall, renderResult: renderExecResult };
+		const definition = { ...await registeredExecDefinition("gsd_uat_exec"), label: "UAT Exec" };
 		for (const expanded of [false, true]) {
 			const component = new ToolExecutionComponent("gsd_uat_exec", args, {}, definition as any, { requestRender() {} } as any);
 			component.setExpanded(expanded);
@@ -134,6 +140,27 @@ describe("ToolExecutionComponent", () => {
 			}
 		}
 		assert.match(renderToolCollapsed("gsd_exec", args), /Run a Bash script/);
+	});
+
+	test("registered recording warnings have one native owner while standalone failures stay visible", async () => {
+		for (const name of ["gsd_exec", "gsd_uat_exec"]) {
+			const definition = await registeredExecDefinition(name);
+			for (const reason of ["database offline", ""]) {
+				for (const isError of [false, true]) {
+					for (const expanded of [false, true]) {
+						const component = new ToolExecutionComponent(name, {}, {}, definition, { requestRender() {} } as any);
+						component.updateResult({ content: [{ type: "text", text: "command output" }], isError,
+							details: { digest: "command output", exit_code: 0, run_not_recorded: reason } });
+						component.setExpanded(expanded);
+						const output = component.render(120).map(stripAnsi).join("\n").replace(/\s+/g, " ");
+						assert.equal(output.split("not verification or UAT evidence").length - 1, 1, output);
+						assert.equal(output.split("Do not run the command again").length - 1, 1, output);
+						if (reason) assert.match(output, /database offline/);
+						assert.equal(component.getRollupPhase(), null);
+					}
+				}
+			}
+		}
 	});
 
 	test("ordinary warning-like output without a digest remains compact and rollup eligible", () => {

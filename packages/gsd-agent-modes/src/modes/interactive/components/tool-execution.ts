@@ -498,6 +498,7 @@ export class ToolExecutionComponent extends Container {
 	private createRenderContext(): ToolRenderContext {
 		if (this.toolName === "gsd_exec" || this.toolName === "gsd_uat_exec") {
 			this.toolRenderState.gsdExecPurposeInFrame = true;
+			this.toolRenderState.gsdExecRecordingWarningInFrame = true;
 		}
 		return {
 			args: this.args,
