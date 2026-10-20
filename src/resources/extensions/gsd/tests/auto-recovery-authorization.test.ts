@@ -489,3 +489,12 @@ test("changed pause cannot be resumed by a stale scheduled callback", async (t) 
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
   assert.equal(calls, 0);
 });
+
+test("closed pause is null-safe and cannot be resumed by the queued callback", async (t) => {
+  fixture(t); approve(); pause(); attachHost(t);
+  let calls = 0;
+  assert.equal(_queueApprovedAutoRecoveryForTest({} as ExtensionAPI, RETRY, () => { calls += 1; }), true);
+  closeAutoPause();
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls, 0);
+});

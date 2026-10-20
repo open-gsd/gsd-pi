@@ -2926,7 +2926,7 @@ function queueApprovedAutoRecovery(pi: ExtensionAPI, classification: RecoveryCla
     s.autoRecoveryPending = false;
     try {
       const currentPause = readOpenAutoPause();
-      if (!s.paused || s.active || currentPause?.pausedAt !== pause.pausedAt ||
+      if (!s.paused || s.active || !currentPause || currentPause.pausedAt !== pause.pausedAt ||
           currentPause.blockerKind !== "machine_fixable" ||
           (currentPause.dispatchId ?? null) !== (pause.dispatchId ?? null)) return;
       commandContext.ui.notify("Auto-recover: resuming a mechanical retry under this run's bounded approval.", "info");
