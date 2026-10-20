@@ -103,6 +103,16 @@ function normalizeDisplayText(text: string): string {
 	return collapseCarriageReturnFrames(text);
 }
 
+function singleRowDisplayText(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const text = stripAnsi(value.replace(/(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[\s\S]*?(?:\x1b\\|\x9c|$)/g, ""))
+		.replace(/[\x00-\x08\x0e-\x1f\x7f-\x9f]/g, "")
+		.replace(/[\u202a-\u202e\u2066-\u2069]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	return text || undefined;
+}
+
 /** Safely coerce value to string for display. Returns null if invalid type. */
 function str(value: unknown): string | null {
 	if (typeof value === "string") return value;
@@ -486,6 +496,10 @@ export class ToolExecutionComponent extends Container {
 	private runningRailTimerIntervalMs: number | undefined;
 
 	private createRenderContext(): ToolRenderContext {
+		if (this.toolName === "gsd_exec" || this.toolName === "gsd_uat_exec") {
+			this.toolRenderState.gsdExecPurposeInFrame = true;
+			this.toolRenderState.gsdExecRecordingWarningInFrame = true;
+		}
 		return {
 			args: this.args,
 			toolCallId: String(this.args?.id ?? this.toolName),
@@ -921,14 +935,15 @@ export class ToolExecutionComponent extends Container {
 	 * mirrors text that is still visible (duplicate "Working · Latest Output"
 	 * content).
 	 *
-	 * Assumption: both collapsed forms render exactly one row. render()'s two
-	 * non-expanded early returns delegate to renderCompactToolStrip() and
+	 * Except recording warnings, both collapsed forms render exactly one row.
+	 * render()'s two non-expanded early returns delegate to renderCompactToolStrip() and
 	 * renderCommandCard(), and each of those returns a single-element array
 	 * (see transcript-design.ts). If either ever grows a header/detail split,
 	 * update this method to match.
 	 */
 	getDisplayedLineCount(width: number): number {
 		if (this.hideComponent) return 0;
+		if (this.getExecRecordingWarning()) return this.render(width).length;
 		// Bash collapsed (non-error): renderCommandCard() → one row.
 		if (this.normalizedToolName === "bash" && !this.showExpandedBody() && !this.result?.isError) {
 			return 1;
@@ -956,10 +971,20 @@ export class ToolExecutionComponent extends Container {
 		const frameLabel = parsed
 			? `${parsed.server}·${parsed.tool}`
 			: prettifyToolName(this.toolName, this.toolDefinition?.label) || "unknown";
+		const recordingWarning = this.getExecRecordingWarning();
 		const recommendedTone: StatusTone =
-			frameTone === "pending" ? "running" : frameTone === "error" ? "error" : "success";
+			frameTone === "pending" ? "running" : frameTone === "error" ? "error" : recordingWarning ? "warning" : "success";
+		const purpose = this.getExecPurpose();
+		const headerMeta = this.expanded
+			? `${frameStatus} · ctrl+o collapse`
+			: recordingWarning ? `${frameStatus} · ctrl+o expand`
+				: this.shouldRenderCompactSuccess() ? `${frameStatus} · output hidden · ctrl+o expand` : frameStatus;
+		const purposeWidth = Math.max(0, frameWidth - visibleWidth(frameLabel.toUpperCase()) - visibleWidth(headerMeta) - 4);
+		const displayTarget = purpose
+			? theme.fg("muted", theme.italic(truncateToWidth(purpose, purposeWidth, "…")))
+			: this.getCompactTarget();
 
-		if (this.normalizedToolName === "bash" && !this.showExpandedBody() && !this.result?.isError) {
+		if (this.normalizedToolName === "bash" && !this.showExpandedBody() && !this.result?.isError && !recordingWarning) {
 			const command = str(this.args?.command);
 			return renderCommandCard(command && command.length > 0 ? formatCommandPreview(command) : frameLabel, frameWidth, {
 				status: frameStatus,
@@ -967,9 +992,8 @@ export class ToolExecutionComponent extends Container {
 			});
 		}
 		const hasImages = this.result?.content?.some((block) => block.type === "image") ?? false;
-		if (!this.showExpandedBody() && !this.result?.isError && !hasImages) {
-			const compactTarget = this.getCompactTarget();
-			return renderCompactToolStrip(frameLabel, compactTarget, frameWidth, {
+		if (!this.showExpandedBody() && !this.result?.isError && !hasImages && !recordingWarning) {
+			return renderCompactToolStrip(frameLabel, displayTarget, frameWidth, {
 				status: frameStatus,
 				tone: recommendedTone,
 				hidden: !this.isPartial && !!this.result,
@@ -981,23 +1005,34 @@ export class ToolExecutionComponent extends Container {
 		// would paint the full image over everything below it. Preserve the exact
 		// line structure whenever the content includes an image.
 		const renderedBody = super.render(contentWidth);
-		const lines = hasImages || renderedBody.some((l) => isImageLine(l))
+		let lines = hasImages || renderedBody.some((l) => isImageLine(l))
 			? renderedBody
 			: collapseBlankLines(renderedBody);
+		// Keep the recording warning outside renderer output caps, including custom
+		// renderers and failure display reasons that replace the raw result.
+		// Ignore wrapping whitespace: narrow renderers can split even within words.
+		const displayedWarningText = recordingWarning
+			? singleRowDisplayText(lines.join("\n"))?.replace(/\s/g, "")
+			: undefined;
+		if (recordingWarning && !displayedWarningText?.includes(recordingWarning.replace(/\s/g, ""))) {
+			lines = [...lines, ...new Text(theme.fg("warning", recordingWarning), 0, 0).render(contentWidth)];
+		}
 		const rightParts = [frameStatus];
 		if (this.expanded) {
 			rightParts.push("ctrl+o collapse");
+		} else if (recordingWarning) {
+			rightParts.push("ctrl+o expand");
 		}
 		return renderPlainToolMessage(lines, frameWidth, {
 			title: frameLabel,
-			target: this.getCompactTarget(),
+			target: displayTarget,
 			meta: rightParts.join(" · "),
 			tone: recommendedTone,
 		});
 	}
 
 	private shouldRenderCompactSuccess(): boolean {
-		if (this.expanded || this.isPartial || !this.result || this.result.isError) return false;
+		if (this.expanded || this.isPartial || !this.result || this.result.isError || this.getExecRecordingWarning()) return false;
 		const hasImages = this.result.content?.some((block) => block.type === "image") ?? false;
 		return !hasImages;
 	}
@@ -1045,6 +1080,8 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getCompactTarget(): string | undefined {
+		const purpose = this.getExecPurpose();
+		if (purpose) return purpose;
 		const metadata = this.getTargetMetadata();
 		const metadataTarget = metadata ? formatToolTarget(metadata) : undefined;
 		if (metadataTarget) return metadataTarget;
@@ -1073,6 +1110,54 @@ export class ToolExecutionComponent extends Container {
 			return glob ? `${label} (${glob})` : label;
 		}
 		return undefined;
+	}
+
+	private getExecPurpose(): string | undefined {
+		if (this.toolName !== "gsd_exec" && this.toolName !== "gsd_uat_exec") return undefined;
+		const purpose = singleRowDisplayText(this.result?.details?.purpose) ?? singleRowDisplayText(this.args?.purpose);
+		if (purpose) return purpose;
+		if (this.toolName === "gsd_uat_exec") {
+			const uat = [this.args?.milestoneId, this.args?.sliceId, this.args?.checkId, this.args?.intent]
+				.map(value => singleRowDisplayText(value));
+			if (uat.every(Boolean)) return `UAT ${uat[0]}/${uat[1]}/${uat[2]} (${uat[3]})`;
+		}
+		const runtime = this.args?.runtime;
+		if (runtime === undefined || runtime === null || runtime === "") return "Run a Bash script";
+		if (typeof runtime !== "string") return "Run a script";
+		switch (runtime.trim().toLowerCase()) {
+			case "": case "bash": case "sh": case "shell": return "Run a Bash script";
+			case "node": case "nodejs": case "js": case "javascript": return "Run a Node.js script";
+			case "python": case "python3": case "py": return "Run a Python script";
+			default: return "Run a script";
+		}
+	}
+
+	private getExecRecordingWarning(): string | undefined {
+		if (this.toolName !== "gsd_exec" && this.toolName !== "gsd_uat_exec") return undefined;
+		if (!this.result) return undefined;
+		const warningStart = "The command ran, but the host did not record this run";
+		const storedReason = this.result.details?.run_not_recorded;
+		let warning: string;
+		if (typeof storedReason === "string") {
+			const reason = singleRowDisplayText(storedReason);
+			warning = `${warningStart}${reason ? `: ${reason}` : ""}.`;
+		} else {
+			// Structured metadata wins even without a digest. Only raw-only historical
+			// host footers qualify; an arbitrary warning in command output does not.
+			if (this.result.details && Object.keys(this.result.details).length > 0) return undefined;
+			const raw = this.result.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
+			const legacy = /(?:^|\n)--- warning ---\n(The command ran, but the host did not record this run:[^\n]*)/.exec(raw);
+			const warningLine = singleRowDisplayText(legacy?.[1]);
+			if (!warningLine) return undefined;
+			warning = warningLine;
+		}
+		if (!warning.includes("not verification or UAT evidence")) {
+			warning += " This run is not verification or UAT evidence.";
+		}
+		if (!warning.includes("Do not run the command again")) {
+			warning += " Do not run the command again only to get the output.";
+		}
+		return warning;
 	}
 
 	private updateDisplay(): void {

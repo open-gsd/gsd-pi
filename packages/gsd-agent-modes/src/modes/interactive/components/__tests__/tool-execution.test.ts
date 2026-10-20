@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import stripAnsi from "strip-ansi";
-import { isImageLine, resetCapabilitiesCache, setCapabilities, setCellDimensions } from "@gsd/pi-tui";
+import { isImageLine, resetCapabilitiesCache, setCapabilities, setCellDimensions, Text, visibleWidth } from "@gsd/pi-tui";
 import {
 	TOOL_TUI_EXPANDED_MAX_LINES,
 	ToolExecutionComponent,
@@ -12,7 +12,7 @@ import {
 	type ToolExecutionPhase,
 } from "../tool-execution.js";
 import { setRailAnimationEnabled } from "../transcript-design.js";
-import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
+import { initTheme, Theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { READ_TUI_EXPANDED_MAX_LINES } from "@gsd/pi-coding-agent/core/tools/read.js";
 
 initTheme("dark", false);
@@ -75,7 +75,352 @@ function renderToolCollapsed(
 	return stripAnsi(component.render(width).join("\n"));
 }
 
+async function registeredExecDefinition(name: string): Promise<any> {
+	const { registerExecTools } = await import(
+		new URL("../../../../../../../src/resources/extensions/gsd/bootstrap/exec-tools.ts", import.meta.url).href
+	);
+	const definitions = new Map<string, any>();
+	registerExecTools({ registerTool(definition: any) { definitions.set(definition.name, definition); } });
+	const definition = definitions.get(name);
+	assert.ok(definition, `missing registered tool ${name}`);
+	return definition;
+}
+
 describe("ToolExecutionComponent", () => {
+
+	test("registered exec callbacks leave purpose to the native frame across lifecycle and history", async () => {
+		for (const name of ["gsd_exec", "gsd_uat_exec"]) {
+			const definition = await registeredExecDefinition(name);
+			const component = new ToolExecutionComponent(
+				name, { purpose: "Inspect application", script: "echo secret-script" }, {},
+				{ ...definition, label: "Native Exec" } as any,
+				{ requestRender() {} } as any,
+			);
+			for (const resultPurpose of [undefined, "Verify application", null]) {
+				if (resultPurpose !== undefined) component.updateResult({
+					content: [], isError: false,
+					details: { id: "exec-1", runtime: "bash", purpose: resultPurpose, digest: "ready", exit_code: 0, duration_ms: 12 },
+				});
+				for (const expanded of [false, true]) {
+					component.setExpanded(expanded);
+					const output = component.render(180).map(stripAnsi).join("\n");
+					const purpose = resultPurpose === "Verify application" ? resultPurpose : "Inspect application";
+					assert.equal(output.split(purpose).length - 1, 1, `${name} expanded=${expanded}\n${output}`);
+					assert.match(output, /NATIVE EXEC/);
+					assert.match(output, resultPurpose === undefined ? /running/ : /success/);
+					if (expanded) assert.match(output, /collapse/);
+					assert.doesNotMatch(output, /Run a Bash script|secret-script/);
+					if (expanded && resultPurpose !== undefined) assert.match(output, /exit 0/);
+				}
+			}
+		}
+	});
+
+	test("schema-shaped UAT args display sanitized identifiers while running without mutation", async () => {
+		const args = { milestoneId: " \x1b[31mM001\x1b[0m ", sliceId: "S01\n", checkId: "C01\u202e", intent: "uat-runtime-check", script: "echo ready" };
+		const before = structuredClone(args);
+		const definition = { ...await registeredExecDefinition("gsd_uat_exec"), label: "UAT Exec" };
+		for (const expanded of [false, true]) {
+			const component = new ToolExecutionComponent("gsd_uat_exec", args, {}, definition as any, { requestRender() {} } as any);
+			component.setExpanded(expanded);
+			let output = component.render(180).map(stripAnsi).join("\n");
+			assert.equal(output.split("UAT M001/S01/C01 (uat-runtime-check)").length - 1, 1);
+			assert.doesNotMatch(output, /\u202e|Run a Bash script/);
+			component.updateResult({ content: [], isError: false, details: { purpose: "Authoritative result", digest: "ready" } });
+			output = component.render(180).map(stripAnsi).join("\n");
+			assert.equal(output.split("Authoritative result").length - 1, 1);
+			assert.doesNotMatch(output, /UAT M001/);
+		}
+		assert.deepEqual(args, before);
+		for (const field of ["milestoneId", "sliceId", "checkId", "intent"]) {
+			for (const value of [undefined, 42, "\n\u202e"]) {
+				const output = renderToolCollapsed("gsd_uat_exec", { ...args, [field]: value });
+				assert.match(output, /Run a Bash script/);
+				assert.doesNotMatch(output, /UAT M001/);
+			}
+		}
+		assert.match(renderToolCollapsed("gsd_exec", args), /Run a Bash script/);
+	});
+
+	test("registered recording warnings have one native owner while standalone failures stay visible", async () => {
+		for (const name of ["gsd_exec", "gsd_uat_exec"]) {
+			const definition = await registeredExecDefinition(name);
+			for (const reason of ["database offline", ""]) {
+				for (const isError of [false, true]) {
+					for (const expanded of [false, true]) {
+						const component = new ToolExecutionComponent(name, {}, {}, definition, { requestRender() {} } as any);
+						component.updateResult({ content: [{ type: "text", text: "command output" }], isError,
+							details: { digest: "command output", exit_code: 0, run_not_recorded: reason } });
+						component.setExpanded(expanded);
+						const output = component.render(120).map(stripAnsi).join("\n").replace(/\s+/g, " ");
+						assert.equal(output.split("not verification or UAT evidence").length - 1, 1, output);
+						assert.equal(output.split("Do not run the command again").length - 1, 1, output);
+						if (reason) assert.match(output, /database offline/);
+						assert.equal(component.getRollupPhase(), null);
+					}
+				}
+			}
+		}
+	});
+
+	test("ordinary warning-like output without a digest remains compact and rollup eligible", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			for (const details of [undefined, { id: "exec-1", exit_code: 0 }]) {
+				const markers = ["--- warning ---", "done\n--- warning ---\nRecording failed", "The command ran, but the host did not record this run: output only."];
+				if (details) markers.push("--- warning ---\nThe command ran, but the host did not record this run: output imitation.");
+				for (const text of markers) {
+					const component = new ToolExecutionComponent(toolName, {}, {}, undefined, { requestRender() {} } as any);
+					component.updateResult({ content: [{ type: "text", text }], details, isError: false });
+					assert.ok(component.getRollupPhase(), `${toolName}: ${text}`);
+					assert.equal(component.render(180).length, 1);
+					assert.doesNotMatch(component.render(180).map(stripAnsi).join("\n"), /not verification or UAT evidence/);
+				}
+			}
+		}
+	});
+
+	test("digest-less warning metadata wins over output and raw paired legacy warnings survive", () => {
+		const footer = "--- warning ---\nThe command ran, but the host did not record this run: misleading output.";
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const component = new ToolExecutionComponent(toolName, {}, {}, undefined, { requestRender() {} } as any);
+			component.updateResult({ content: [{ type: "text", text: footer }], details: { run_not_recorded: "stored database reason" }, isError: false });
+			assert.match(component.render(180).map(stripAnsi).join("\n"), /did not record this run: stored database reason/);
+			assert.equal(component.getRollupPhase(), null);
+			component.updateResult({ content: [{ type: "text", text: footer }], isError: false });
+			assert.equal(component.getRollupPhase(), null);
+			assert.match(component.render(180).map(stripAnsi).join("\n"), /did not record this run: misleading output/);
+		}
+	});
+
+	test("canonical exec tools show muted italic purpose in compact and expanded headers", (t) => {
+		const italic = t.mock.method(Theme.prototype, "italic");
+		const fg = t.mock.method(Theme.prototype, "fg");
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const component = new ToolExecutionComponent(
+				toolName, { purpose: "Check the application", script: "echo ready" }, {}, undefined,
+				{ requestRender() {} } as any,
+			);
+			const pending = component.render(140);
+			assert.ok(italic.mock.calls.some((call) => call.arguments[0] === "Check the application"));
+			assert.ok(fg.mock.calls.some((call) => call.arguments[0] === "muted" &&
+				stripAnsi(call.arguments[1]) === "Check the application"));
+			assert.match(stripAnsi(pending[0]), /Check the application/);
+			assert.match(stripAnsi(pending[0]), /running/);
+			component.updateResult({ content: [{ type: "text", text: "ready" }], isError: false });
+			for (const expanded of [false, true]) {
+				component.setExpanded(expanded);
+				const lines = component.render(140);
+				assert.match(stripAnsi(lines[0]), /Check the application/);
+				assert.match(stripAnsi(lines[0]), /success/);
+				if (!expanded) {
+					assert.equal(lines.length, 1);
+					assert.equal(component.getDisplayedLineCount(140), 1);
+					assert.match(stripAnsi(lines[0]), /output hidden · ctrl\+o expand/);
+					assert.deepEqual(component.getRollupPhase()?.targets, ["Check the application"]);
+				} else {
+					assert.match(stripAnsi(lines[0]), /ctrl\+o collapse/);
+				}
+			}
+		}
+	});
+
+	test("exec purpose prefers valid result details including synthesized UAT purpose", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const rendered = renderToolCollapsed(toolName, { purpose: "Argument purpose" }, {
+				content: [{ type: "text", text: "done" }], isError: false,
+				details: { purpose: "UAT M001/S01/C01 (uat-runtime-check)" },
+			});
+			assert.match(rendered, /UAT M001\/S01\/C01/);
+			assert.doesNotMatch(rendered, /Argument purpose/);
+			for (const purpose of [undefined, null, {}, 7, "", " \n\t ", "\x1b[31m\x00\x1b[0m"]) {
+				assert.match(renderToolCollapsed(toolName, { purpose: "Argument purpose" }, {
+					content: [], isError: false, details: { purpose },
+				}), /Argument purpose/);
+			}
+		}
+	});
+
+	test("exec purpose fallbacks match runtime aliases and defaults", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			for (const [runtimes, expected] of [
+				[[undefined, null, "", " ", "bash", "sh", " SHELL "], "Run a Bash script"],
+				[["node", "nodejs", "js", " JavaScript "], "Run a Node.js script"],
+				[["python", "python3", " PY "], "Run a Python script"],
+				[["ruby", 42, {}], "Run a script"],
+			] as const) {
+				for (const runtime of runtimes) {
+					assert.ok(renderToolCollapsed(toolName, { runtime, purpose: "\n\t" }).includes(expected));
+				}
+			}
+		}
+		for (const name of ["exec", "GSD_EXEC", "mcp__gsd__gsd_exec", "gsd_exec_search", "bash"]) {
+			assert.doesNotMatch(renderToolCollapsed(name, { purpose: "Not an exec header" }), /Not an exec header/);
+		}
+	});
+
+	test("exec purpose strips terminal strings and controls and collapses multiline without changing args", () => {
+		const purpose = " \x1b[31mCheck\x1b[0m\n\r\tapp\x00\x07\x7f\u0085 " +
+			"\x1b]8;;https://example.com\x07link\x1b]8;;\x07 " +
+			"\x1bPprivate-terminal-payload\x1b\\ready\u202e ";
+		const args = { purpose };
+		const component = new ToolExecutionComponent("gsd_exec", args, {}, undefined, { requestRender() {} } as any);
+		const lines = component.render(160);
+		const text = stripAnsi(lines.join("\n"));
+		assert.equal(lines.length, 1);
+		assert.match(text, /Check app link ready/);
+		assert.doesNotMatch(text, /private-terminal-payload|https:\/\/|[\x00-\x1f\x7f-\x9f\u202e]/);
+		assert.equal(args.purpose, purpose);
+	});
+
+	test("long exec purpose stays on one row at narrow widths and preserves hints when they fit", () => {
+		const component = new ToolExecutionComponent(
+			"gsd_exec", { purpose: "Check ".repeat(100) }, {}, undefined, { requestRender() {} } as any,
+		);
+		component.updateResult({ content: [], isError: false });
+		for (const width of [20, 40, 80, 120]) {
+			const lines = component.render(width);
+			assert.equal(lines.length, 1);
+			assert.ok(visibleWidth(lines[0]) <= width);
+			assert.equal(component.getDisplayedLineCount(width), lines.length);
+		}
+		assert.match(stripAnsi(component.render(120)[0]), /ctrl\+o expand/);
+	});
+
+	test("recording warnings bypass compact success and rollup, even with empty reasons", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			for (const reason of ["database unavailable", ""]) {
+				const component = new ToolExecutionComponent(
+					toolName, { purpose: "Check application" }, {}, undefined, { requestRender() {} } as any,
+				);
+				component.updateResult({
+					content: [{ type: "text", text: "command output" }], isError: false,
+					details: { digest: "command output", run_not_recorded: reason },
+				});
+				for (const expanded of [false, true]) {
+					component.setExpanded(expanded);
+					const lines = component.render(100);
+					const rendered = stripAnsi(lines.join("\n")).replace(/\s+/g, " ");
+					assert.match(rendered, /The command ran, but the host did not record this run/);
+					assert.match(rendered, /not verification or UAT evidence/);
+					assert.match(rendered, /Do not run the command again/);
+					assert.doesNotMatch(rendered, /output hidden/);
+					assert.match(stripAnsi(lines[0]), expanded ? /ctrl\+o collapse/ : /ctrl\+o expand/);
+					assert.equal(component.getRollupPhase(), null);
+					assert.equal(component.getDisplayedLineCount(100), lines.length);
+					assert.ok(lines.length > 1);
+				}
+			}
+		}
+	});
+
+	test("structured warning-like output does not fabricate recording failures or disable compact rollup", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			for (const digest of ["", "--- warning ---", "The command ran, but the host did not record this run"]) {
+				const component = new ToolExecutionComponent(
+					toolName, { purpose: "Inspect output" }, {}, undefined, { requestRender() {} } as any,
+				);
+				const text = `header\n--- digest ---\n${digest || "--- warning ---"}`;
+				component.updateResult({ content: [{ type: "text", text }], isError: false, details: { digest } });
+				const lines = component.render(120);
+				assert.equal(lines.length, 1);
+				assert.match(stripAnsi(lines[0]), /output hidden.*ctrl\+o expand/);
+				assert.ok(component.getRollupPhase());
+				assert.equal(component.getDisplayedLineCount(120), 1);
+				component.setExpanded(true);
+				const expanded = stripAnsi(component.render(120).join("\n"));
+				assert.doesNotMatch(expanded, /not verification or UAT evidence|Do not run the command again/);
+			}
+		}
+	});
+
+	test("structured recording warnings use metadata even when output imitates the host warning", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const digest = "The command ran, but the host did not record this run: printed by command.";
+			const component = new ToolExecutionComponent(
+				toolName, {}, {}, undefined, { requestRender() {} } as any,
+			);
+			component.updateResult({
+				content: [{ type: "text", text: `header\n--- digest ---\n${digest}` }], isError: false,
+				details: { digest, run_not_recorded: "actual database failure" },
+			});
+			for (const expanded of [false, true]) {
+				component.setExpanded(expanded);
+				const rendered = stripAnsi(component.render(160).join("\n")).replace(/\s+/g, " ");
+				assert.match(rendered, /did not record this run: actual database failure/);
+				assert.equal(component.getRollupPhase(), null);
+			}
+		}
+	});
+
+	test("middle recording warnings survive generic caps, failures, and custom renderers", () => {
+		const warning = "The command ran, but the host did not record this run: database offline. " +
+			"This run is not verification or UAT evidence. Do not run the command again only to get the output.";
+		const output = [...Array.from({ length: 80 }, (_, i) => `before ${i}`),
+			"--- warning ---", warning, ...Array.from({ length: 80 }, (_, i) => `after ${i}`)].join("\n");
+		for (const isError of [false, true]) {
+			for (const definition of [undefined, { renderResult() { throw new Error("renderer failed"); } },
+				{ renderResult() { return { render() { return ["custom output"]; } }; } }]) {
+				const component = new ToolExecutionComponent(
+					"gsd_exec", {}, {}, definition as any, { requestRender() {} } as any,
+				);
+				component.updateResult({
+					content: [{ type: "text", text: output }], isError,
+					details: { run_not_recorded: "database offline", ...(isError ? { displayReason: "Command failed" } : {}) },
+				});
+				for (const expanded of [false, true]) {
+					component.setExpanded(expanded);
+					const lines = component.render(120);
+					const rendered = stripAnsi(lines.join("\n")).replace(/\s+/g, " ");
+					assert.ok(rendered.includes(warning), rendered);
+					assert.equal(component.getDisplayedLineCount(120), lines.length);
+					assert.equal(component.getRollupPhase(), null);
+					if (isError) assert.match(rendered, /failed/);
+				}
+			}
+		}
+	});
+
+	test("legacy paired host-warning footers prevent compact success without result details", () => {
+		for (const text of [
+			"done\n--- warning ---\nThe command ran, but the host did not record this run: offline.\n" +
+				"This run is not verification or UAT evidence.\nDo not run the command again only to get the output.",
+			"done\n--- warning ---\nThe command ran, but the host did not record this run: offline. " +
+				"This run is not verification or UAT evidence. Do not run the command again only to get the output.",
+		]) {
+			const component = new ToolExecutionComponent("gsd_uat_exec", {}, {}, undefined, { requestRender() {} } as any);
+			component.updateResult({ content: [{ type: "text", text }], isError: false });
+			const rendered = stripAnsi(component.render(120).join("\n")).replace(/\s+/g, " ");
+			assert.match(rendered, /The command ran, but the host did not record this run/);
+			assert.match(rendered, /not verification or UAT evidence/);
+			assert.match(rendered, /Do not run the command again/);
+			assert.equal(component.getRollupPhase(), null);
+		}
+	});
+
+	test("does not duplicate custom renderer warnings wrapped within words at narrow widths", () => {
+		const warning = "Warning: The command ran, but the host did not record this run: " +
+			"database_recording_failure_with_a_long_unbroken_reason. " +
+			"This run is not verification or UAT evidence. Do not run the command again only to get the output.";
+		const component = new ToolExecutionComponent("gsd_exec", {}, {}, {
+			renderResult() { return new Text(warning, 0, 0); },
+		} as any, { requestRender() {} } as any);
+		component.updateResult({
+			content: [{ type: "text", text: `done\n--- warning ---\n${warning}` }],
+			isError: false,
+			details: { run_not_recorded: "database_recording_failure_with_a_long_unbroken_reason" },
+		});
+		for (const expanded of [false, true]) {
+			component.setExpanded(expanded);
+			for (const width of [20, 30, 40, 80, 120]) {
+				const lines = component.render(width);
+				const rendered = stripAnsi(lines.join("\n")).replace(/\s/g, "");
+				assert.equal(rendered.split("Thecommandran,butthehostdidnotrecordthisrun").length - 1, 1);
+				assert.equal(rendered.split("Donotrunthecommandagainonlytogettheoutput.").length - 1, 1);
+				assert.equal(component.getDisplayedLineCount(width), lines.length);
+			}
+		}
+	});
+
 	test("running timer uses rail cadence only for expanded cards", (t) => {
 		// Expanded running tool cards animate their rail at the rail frame cadence.
 		// Collapsed strips are static except for the elapsed-seconds label, so they
