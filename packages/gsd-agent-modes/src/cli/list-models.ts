@@ -68,11 +68,7 @@ export async function listModels(
 	}
 
 	// Get models — include discovered if discovery was run
-	const models = options.discover
-		? modelRegistry
-				.getAllWithDiscovered()
-				.filter((model) => modelRegistry.isProviderRequestReady(model.provider))
-		: modelRegistry.getAvailable();
+	const models = modelRegistry.getAvailable({ includeDiscovered: options.discover });
 
 	if (models.length === 0) {
 		console.log("No models available. Set API keys in environment variables.");

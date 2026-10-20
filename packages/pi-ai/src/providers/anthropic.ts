@@ -8,6 +8,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost } from "../models.js";
+import { isDirectMiniMaxM3, miniMaxFlashEffort } from "../models/minimax.js";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -1075,8 +1076,16 @@ function buildParams(
 		);
 	}
 
-	// Configure thinking mode: adaptive, budget-based, or explicitly disabled.
-	if (model.reasoning) {
+	// Direct MiniMax has no budget/display surface. Flash always thinks; M3
+	// supports adaptive/disabled but does not accept an effort setting.
+	if (isDirectMiniMaxM3(model)) {
+		if (model.id === "MiniMax-M3.1-Flash") {
+			params.thinking = { type: "adaptive" };
+			params.output_config = { effort: miniMaxFlashEffort(options?.effort) } as MessageCreateParamsStreaming["output_config"];
+		} else {
+			params.thinking = { type: options?.thinkingEnabled ? "adaptive" : "disabled" };
+		}
+	} else if (model.reasoning) {
 		if (options?.thinkingEnabled) {
 			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
 			// older Claude 4 models (whose API default is also "summarized").

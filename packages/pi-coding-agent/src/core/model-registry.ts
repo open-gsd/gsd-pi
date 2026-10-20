@@ -10,6 +10,8 @@ import {
 	getModels,
 	getProviders,
 	isModelsCatalogOverlay,
+	isCurrentCatalogModel,
+	prioritizeMiniMaxFlash,
 	type KnownProvider,
 	type Model,
 	type OAuthProviderInterface,
@@ -363,6 +365,7 @@ export const clearApiKeyCache = clearConfigValueCache;
  */
 export class ModelRegistry {
 	private models: Model<Api>[] = [];
+	private customModelKeys = new Set<string>();
 	private discoveredModels: Model<Api>[] = [];
 	private discoveryCache: ModelDiscoveryCache;
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
@@ -445,6 +448,10 @@ export class ModelRegistry {
 			this.loadError = this.loadError ? `${this.loadError}\n\n${overlay.error}` : overlay.error;
 		}
 
+		this.customModelKeys = new Set(customModels.map((model) => `${model.provider}/${model.id}`));
+		for (const [provider, entries] of modelOverrides) {
+			for (const id of entries.keys()) this.customModelKeys.add(`${provider}/${id}`);
+		}
 		const builtInModels = this.loadBuiltInModels(overrides, modelOverrides, overlay.models);
 		let combined = this.mergeCustomModels(builtInModels, customModels);
 
@@ -466,7 +473,7 @@ export class ModelRegistry {
 		catalogOverlayModels: Model<Api>[] = [],
 	): Model<Api>[] {
 		const bundledModels = getProviders().flatMap(
-			(provider) => getModels(provider as Parameters<typeof getModels>[0]) as Model<Api>[],
+			(provider) => getModels(provider as Parameters<typeof getModels>[0], { includeLegacy: true }) as Model<Api>[],
 		);
 		// Overlay entries replace bundled entries with the same provider+id
 		// wholesale and add entries that don't exist in the bundled catalog.
@@ -711,7 +718,7 @@ export class ModelRegistry {
 		const getBuiltInDefaults = (providerName: string): { api: string; baseUrl: string } | undefined => {
 			if (!builtInProviders.has(providerName)) return undefined;
 			if (builtInDefaultsCache.has(providerName)) return builtInDefaultsCache.get(providerName);
-			const builtIn = getModels(providerName as Parameters<typeof getModels>[0]) as Model<Api>[];
+			const builtIn = getModels(providerName as Parameters<typeof getModels>[0], { includeLegacy: true }) as Model<Api>[];
 			if (builtIn.length === 0) return undefined;
 			const defaults = { api: builtIn[0].api, baseUrl: builtIn[0].baseUrl };
 			builtInDefaultsCache.set(providerName, defaults);
@@ -768,8 +775,15 @@ export class ModelRegistry {
 	 * Get only models whose provider is ready to accept requests.
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
-	getAvailable(): Model<Api>[] {
-		return this.models.filter((m) => this.isProviderRequestReady(m.provider));
+	getAvailable(options: { includeDiscovered?: boolean } = {}): Model<Api>[] {
+		const models = options.includeDiscovered ? this.getAllWithDiscovered() : this.models;
+		return prioritizeMiniMaxFlash(models.filter((model) =>
+			this.isProviderRequestReady(model.provider) && (
+				isCurrentCatalogModel(model) ||
+				this.customModelKeys.has(`${model.provider}/${model.id}`) ||
+				this.registeredProviders.get(model.provider)?.models?.some((entry) => entry.id === model.id)
+			),
+		));
 	}
 
 	/**

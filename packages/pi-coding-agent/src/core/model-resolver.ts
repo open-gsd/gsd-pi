@@ -35,8 +35,8 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	cerebras: "zai-glm-4.7",
 	zai: "glm-5.1",
 	mistral: "devstral-medium-latest",
-	minimax: "MiniMax-M2.7",
-	"minimax-cn": "MiniMax-M2.7",
+	minimax: "MiniMax-M3.1-Flash",
+	"minimax-cn": "MiniMax-M3.1-Flash",
 	moonshotai: "kimi-k2.6",
 	"moonshotai-cn": "kimi-k2.6",
 	huggingface: "moonshotai/Kimi-K2.6",
@@ -299,7 +299,18 @@ export async function resolveModelScope(patterns: string[], modelRegistry: Model
 			continue;
 		}
 
-		const { model, thinkingLevel, warning } = parseModelPattern(pattern, availableModels);
+		// Explicit saved scopes may name a legacy model hidden from ordinary choices.
+		const explicitModels = modelRegistry.getAll().filter((model) =>
+			modelRegistry.isProviderRequestReady(model.provider) &&
+			[model.id, `${model.provider}/${model.id}`].some((id) => {
+				const lowerPattern = pattern.toLowerCase();
+				const lowerId = id.toLowerCase();
+				return lowerPattern === lowerId || (
+					lowerPattern.startsWith(`${lowerId}:`) && isValidThinkingLevel(pattern.slice(id.length + 1))
+				);
+			}),
+		);
+		const { model, thinkingLevel, warning } = parseModelPattern(pattern, [...availableModels, ...explicitModels]);
 
 		if (warning) {
 			console.warn(chalk.yellow(`Warning: ${warning}`));

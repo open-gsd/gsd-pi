@@ -1,5 +1,6 @@
 import { FAKE_MODEL, FAKE_MODEL_ID, FAKE_PROVIDER } from "./models/fake-model.js";
 import { MODELS } from "./models.generated.js";
+import { MINIMAX_FLASH_MODELS } from "./models/minimax.js";
 import type { Api, Model, ModelThinkingLevel, Usage } from "./types.js";
 
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
@@ -42,9 +43,25 @@ export function getProviders(): GeneratedProvider[] {
 
 export function getModels<TProvider extends GeneratedProvider>(
 	provider: TProvider,
+	options: { includeLegacy?: boolean } = {},
 ): Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[] {
-	const models = modelRegistry.get(provider);
-	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
+	const models = Array.from(modelRegistry.get(provider)?.values() ?? []);
+	return (options.includeLegacy ? models : prioritizeMiniMaxFlash(models.filter(isCurrentCatalogModel))) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[];
+}
+
+/** Ordinary catalog choices; exact lookup deliberately retains legacy model IDs. */
+export function isCurrentCatalogModel(model: Model<Api>): boolean {
+	if (!modelRegistry.has(model.provider) || !/minimax/i.test(model.id)) return true;
+	return /(?:^|[/\.])minimax-m3$/i.test(model.id) ||
+		MINIMAX_FLASH_MODELS.some((entry) => entry.provider === model.provider && entry.id === model.id);
+}
+
+/** Put Flash first within MiniMax choices without reordering other model families. */
+export function prioritizeMiniMaxFlash<T extends Model<Api>>(models: T[]): T[] {
+	const choices = models.filter((model) => /minimax/i.test(model.id));
+	choices.sort((a, b) => Number(/m3\.1-flash/i.test(b.id)) - Number(/m3\.1-flash/i.test(a.id)));
+	let index = 0;
+	return models.map((model) => /minimax/i.test(model.id) ? choices[index++] : model);
 }
 
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {

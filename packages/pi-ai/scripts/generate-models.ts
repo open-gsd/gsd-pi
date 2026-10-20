@@ -11,6 +11,7 @@ import {
 } from "../src/providers/cloudflare.ts";
 import type { AnthropicMessagesCompat, Api, KnownProvider, Model, OpenAICompletionsCompat } from "../src/types.ts";
 import { formatCost, roundCost } from "./lib/model-cost.ts";
+import { MINIMAX_FLASH_MODELS } from "../src/models/minimax.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2084,7 +2085,14 @@ async function generateModels() {
 		// video inputs alongside text and image, which models.dev does not report.
 		["MiniMax-M3", { contextWindow: 1000000, maxTokens: 131072, input: ["text", "image", "video"] }],
 	]);
-	const minimaxDirectSupportedIds = new Set(minimaxDirectModelOverrides.keys());
+	const minimaxDirectSupportedIds = new Set([...minimaxDirectModelOverrides.keys(), "MiniMax-M3.1-Flash"]);
+
+	// Keep release metadata stable even before the upstream feeds catch up.
+	for (const model of MINIMAX_FLASH_MODELS) {
+		const index = allModels.findIndex((entry) => entry.provider === model.provider && entry.id === model.id);
+		if (index === -1) allModels.push(structuredClone(model));
+		else allModels[index] = structuredClone(model);
+	}
 
 	for (const candidate of allModels) {
 		if (

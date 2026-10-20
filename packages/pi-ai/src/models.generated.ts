@@ -9188,6 +9188,20 @@ export const MODELS = {
 		} satisfies Model<"anthropic-messages">,
 	},
 	"minimax": {
+		"MiniMax-M3.1-Flash": {
+			id: "MiniMax-M3.1-Flash",
+			name: "MiniMax-M3.1-Flash",
+			api: "anthropic-messages",
+			provider: "minimax",
+			baseUrl: "https://api.minimax.io/anthropic",
+			compat: {"forceAdaptiveThinking":true},
+			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"low","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
+			input: ["text", "image", "video"],
+			cost: { input: 0.15, output: 0.6, cacheRead: 0.015, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 524288,
+		} satisfies Model<"anthropic-messages">,
 		"MiniMax-M2.7": {
 			id: "MiniMax-M2.7",
 			name: "MiniMax-M2.7",
@@ -9242,6 +9256,20 @@ export const MODELS = {
 		} satisfies Model<"anthropic-messages">,
 	},
 	"minimax-cn": {
+		"MiniMax-M3.1-Flash": {
+			id: "MiniMax-M3.1-Flash",
+			name: "MiniMax-M3.1-Flash",
+			api: "anthropic-messages",
+			provider: "minimax-cn",
+			baseUrl: "https://api.minimaxi.com/anthropic",
+			compat: {"forceAdaptiveThinking":true},
+			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"low","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
+			input: ["text", "image", "video"],
+			cost: { input: 0.15, output: 0.6, cacheRead: 0.015, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 524288,
+		} satisfies Model<"anthropic-messages">,
 		"MiniMax-M2.7": {
 			id: "MiniMax-M2.7",
 			name: "MiniMax-M2.7",
@@ -11135,6 +11163,19 @@ export const MODELS = {
 		} satisfies Model<"openai-codex-responses">,
 	},
 	"opencode": {
+		"minimax-m3.1-flash-free": {
+			id: "minimax-m3.1-flash-free",
+			name: "MiniMax M3.1 Flash Free",
+			api: "openai-completions",
+			provider: "opencode",
+			baseUrl: "https://opencode.ai/zen/v1",
+			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"low","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
+			input: ["text", "image", "video"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 512000,
+		} satisfies Model<"openai-completions">,
 		"big-pickle": {
 			id: "big-pickle",
 			name: "Big Pickle",
@@ -13137,6 +13178,19 @@ export const MODELS = {
 		} satisfies Model<"openai-completions">,
 	},
 	"openrouter": {
+		"minimax/minimax-m3.1-flash:free": {
+			id: "minimax/minimax-m3.1-flash:free",
+			name: "MiniMax: MiniMax M3.1 Flash (free)",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"low","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
+			input: ["text", "image", "video"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 524288,
+		} satisfies Model<"openai-completions">,
 		"aion-labs/aion-2.0": {
 			id: "aion-labs/aion-2.0",
 			name: "AionLabs: Aion-2.0",

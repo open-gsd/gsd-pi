@@ -12,6 +12,7 @@ import type {
 } from "openai/resources/chat/completions.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
+import { isDirectMiniMaxM3, isMiniMaxFlashGateway, miniMaxFlashEffort } from "../models/minimax.js";
 import type {
 	AssistantMessage,
 	CacheRetention,
@@ -161,6 +162,8 @@ function parseTextSerializedZaiToolCall(text: string): ToolCall | null {
 }
 
 export interface OpenAICompletionsOptions extends StreamOptions {
+	/** Direct MiniMax M3 supports adaptive (default) or disabled thinking. Flash is always adaptive. */
+	thinkingEnabled?: boolean;
 	toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
@@ -696,7 +699,18 @@ function buildParams(
 		}
 	}
 
-	if (compat.thinkingFormat === "zai" && model.reasoning) {
+	if (isMiniMaxFlashGateway(model)) {
+		const effort = miniMaxFlashEffort(options?.reasoningEffort);
+		if (model.provider === "openrouter") (params as any).reasoning = { effort };
+		else (params as any).reasoning_effort = effort;
+	} else if (isDirectMiniMaxM3(model)) {
+		(params as any).thinking = {
+			type: model.id === "MiniMax-M3" && options?.thinkingEnabled === false ? "disabled" : "adaptive",
+		};
+		if (model.id === "MiniMax-M3.1-Flash") {
+			(params as any).reasoning_effort = miniMaxFlashEffort(options?.reasoningEffort);
+		}
+	} else if (compat.thinkingFormat === "zai" && model.reasoning) {
 		(params as any).enable_thinking = !!options?.reasoningEffort;
 	} else if (compat.thinkingFormat === "qwen" && model.reasoning) {
 		(params as any).enable_thinking = !!options?.reasoningEffort;

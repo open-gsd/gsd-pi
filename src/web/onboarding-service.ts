@@ -447,6 +447,9 @@ async function validateAnthropicCompatibleApiKey(
       body: JSON.stringify({
         model,
         max_tokens: 1,
+        ...(model === "MiniMax-M3.1-Flash"
+          ? { thinking: { type: "adaptive" }, output_config: { effort: "max" } }
+          : {}),
         messages: [{ role: "user", content: "hi" }],
       }),
       signal: AbortSignal.timeout(15_000),
@@ -491,7 +494,7 @@ async function defaultValidateApiKey(
         providerId,
         apiKey,
         "https://api.minimax.io/anthropic",
-        "MiniMax-M2.7",
+        "MiniMax-M3.1-Flash",
       );
     case "minimax-cn":
       return await validateAnthropicCompatibleApiKey(
@@ -499,7 +502,7 @@ async function defaultValidateApiKey(
         providerId,
         apiKey,
         "https://api.minimaxi.com/anthropic",
-        "MiniMax-M2.7",
+        "MiniMax-M3.1-Flash",
       );
     default:
       return { ok: false, message: `${providerId} does not support API-key validation via onboarding` };
