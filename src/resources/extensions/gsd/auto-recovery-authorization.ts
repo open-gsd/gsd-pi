@@ -19,7 +19,11 @@ interface RecoveryApproval {
 }
 
 function event(eventType: string, id: string, payload: DomainOperationEventInput["payload"]): DomainOperationEventInput {
-  return { eventType, entityType: ENTITY, entityId: id, payload, destinations: [] };
+  return { eventType, entityType: ENTITY, entityId: id, payload, destinations: ["projection"] };
+}
+
+function projection(id: string) {
+  return [{ projectionKey: `auto-recovery/${id}`, projectionKind: ENTITY, rendererVersion: "1" }];
 }
 
 function readApproval(id: string): RecoveryApproval | null {
@@ -77,7 +81,7 @@ export function authorizeAutoRecovery(input: {
       projectId: input.expectedProjectId, maxRetries: AUTO_RECOVERY_MAX_RETRIES },
   }, (context) => {
     if (context.projectId !== input.expectedProjectId) throw new Error("Auto-recover Project changed during approval");
-    return { projections: [], events: [event("auto.recovery.authorized", input.authorizationId, {
+    return { projections: projection(input.authorizationId), events: [event("auto.recovery.authorized", input.authorizationId, {
       version: 1, runId: input.runId, maxRetries: AUTO_RECOVERY_MAX_RETRIES,
       allowedKind: "machine_fixable", allowedAction: "retry",
       expiresAt: Date.now() + AUTO_RECOVERY_APPROVAL_TTL_MS,
@@ -130,7 +134,7 @@ export function consumeAutoRecoveryRetry(input: {
         pause.pauseReason?.split(" | ", 1)[0] !== `recovery:${input.classification.failureKind}/retry`) {
       throw new Error("Auto-recover requires the same mechanical retry pause, without a human Blocker");
     }
-    return { projections: [], events: [event("auto.recovery.retry-reserved", input.authorizationId, {
+    return { projections: projection(input.authorizationId), events: [event("auto.recovery.retry-reserved", input.authorizationId, {
       runId: input.runId, pausedAt: input.pausedAt, dispatchId: input.dispatchId,
       failureKind: input.classification.failureKind,
     })] };
@@ -151,6 +155,6 @@ export function revokeAutoRecovery(authorizationId: string, runId: string): void
     if (!approval || approval.runId !== runId || approval.projectId !== context.projectId) {
       throw new Error("Cannot revoke a different auto-recover run");
     }
-    return { projections: [], events: [event("auto.recovery.revoked", authorizationId, { runId })] };
+    return { projections: projection(authorizationId), events: [event("auto.recovery.revoked", authorizationId, { runId })] };
   });
 }

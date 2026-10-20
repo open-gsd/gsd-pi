@@ -92,7 +92,7 @@ function fixture(t: TestContext): void {
       { itemKind: "task" as const, milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "ready" as const },
     ]) adoptOrTransitionLifecycle(context, unit);
     return {
-      projections: [],
+      projections: [{ projectionKey: "test/auto-recovery/seed", projectionKind: "test", rendererVersion: "1" }],
       events: [{ eventType: "test.auto-recovery.seeded", entityType: "project", entityId: "M001", payload: {}, destinations: [] }],
     };
   });
@@ -148,7 +148,7 @@ function protectedState() {
 
 function durableState() {
   return [protectedState(), ...[
-    "project_authority", "workflow_operations", "workflow_domain_events",
+    "project_authority", "workflow_operations", "workflow_domain_events", "workflow_projection_work", "workflow_outbox",
   ].map((table) => [table, db().prepare(`SELECT * FROM ${table}`).all()])];
 }
 
@@ -183,6 +183,10 @@ test("host approval records immutable user/internal provenance and the fixed bou
   assert.equal(AUTO_RECOVERY_APPROVAL_TTL_MS, 30 * 60 * 1000);
   const issued = events("auto.recovery.authorized");
   assert.equal(issued.length, 1);
+  const work = db().prepare("SELECT projection_kind, renderer_version FROM workflow_projection_work WHERE projection_key = :key")
+    .get({ ":key": `auto-recovery/${AUTHORIZATION}` });
+  assert.equal(work?.projection_kind, "auto-recovery-authorization");
+  assert.equal(work?.renderer_version, "1");
   assert.equal(issued[0]?.project_id, input.expectedProjectId);
   assert.equal(issued[0]?.authority_epoch, input.expectedAuthorityEpoch);
   assert.deepEqual(JSON.parse(String(issued[0]?.payload_json)), {
@@ -230,7 +234,7 @@ test("an agent or non-native transport cannot mint a usable grant by emitting th
       expectedRevision: fence.revision, expectedAuthorityEpoch: fence.authorityEpoch,
       actorType, sourceTransport, payload: {},
     }, () => ({
-      projections: [],
+      projections: [{ projectionKey: `test/auto-recovery/${authorizationId}`, projectionKind: "test", rendererVersion: "1" }],
       events: [{
         eventType: "auto.recovery.authorized", entityType: "auto-recovery-authorization",
         entityId: authorizationId, destinations: [], payload: {
