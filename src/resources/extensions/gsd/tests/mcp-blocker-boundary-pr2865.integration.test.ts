@@ -380,8 +380,10 @@ for (const [unitType, blockerKind] of [
         : packaged(args, "owner-preserving-refusal");
       for (let attempt = 0; attempt < 2; attempt++) {
         const result = await invoke();
-        assert.equal(result.isError, true, result.content[0]?.text);
-        assert.match(result.content[0]!.text, /user|owner|authority/i);
+        const refusalText = result.content[0]?.text;
+        assert.equal(result.isError, true, refusalText);
+        assert.ok(typeof refusalText === "string", "refusal must include diagnostic text");
+        assert.match(refusalText, /user|owner|authority/i);
         assert.deepEqual(snapshot(), before, "refusal and retry must not mutate workflow state");
       }
     });
