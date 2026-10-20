@@ -46,7 +46,7 @@ import type { RecoveryClassification } from "../recovery-classification.ts";
 import type { AutoPauseBlockerKind, HumanBlockerKind } from "../recovery-policy.ts";
 
 const RUN = "run-approval-test";
-const AUTHORIZATION = "approval-test";
+const RUN_APPROVAL_ID = "approval-test";
 const NOW = Date.parse("2026-10-20T12:00:00.000Z");
 const RETRY: RecoveryClassification = {
   failureKind: "tool-schema",
@@ -98,7 +98,7 @@ function fixture(t: TestContext): void {
   });
 }
 
-function approvalInput(authorizationId = AUTHORIZATION) {
+function approvalInput(authorizationId = RUN_APPROVAL_ID) {
   const fence = readDomainOperationFence();
   return {
     authorizationId, runId: RUN, expectedProjectId: fence.projectId,
@@ -106,7 +106,7 @@ function approvalInput(authorizationId = AUTHORIZATION) {
   };
 }
 
-function approve(authorizationId = AUTHORIZATION): string {
+function approve(authorizationId = RUN_APPROVAL_ID): string {
   return authorizeAutoRecovery(approvalInput(authorizationId));
 }
 
@@ -123,12 +123,12 @@ function pause(overrides: Partial<PausedSessionMetadata> = {}) {
   openAutoPause({ ...metadata, blockerKind: metadata.blockerKind });
   assert.ok(metadata.pausedAt);
   return {
-    authorizationId: AUTHORIZATION, runId: RUN, pausedAt: metadata.pausedAt,
+    authorizationId: RUN_APPROVAL_ID, runId: RUN, pausedAt: metadata.pausedAt,
     dispatchId: metadata.dispatchId ?? null, classification: RETRY,
   };
 }
 
-function events(type: string, id = AUTHORIZATION) {
+function events(type: string, id = RUN_APPROVAL_ID) {
   return db().prepare(`
     SELECT * FROM workflow_domain_events
     WHERE entity_type = 'auto-recovery-authorization'
@@ -178,13 +178,13 @@ test("host approval records immutable user/internal provenance and the fixed bou
   t.after(() => t.mock.timers.reset());
   const input = approvalInput();
   const before = protectedState();
-  assert.equal(authorizeAutoRecovery(input), AUTHORIZATION);
+  assert.equal(authorizeAutoRecovery(input), RUN_APPROVAL_ID);
   assert.equal(AUTO_RECOVERY_MAX_RETRIES, 3);
   assert.equal(AUTO_RECOVERY_APPROVAL_TTL_MS, 30 * 60 * 1000);
   const issued = events("auto.recovery.authorized");
   assert.equal(issued.length, 1);
   const work = db().prepare("SELECT projection_kind, renderer_version FROM workflow_projection_work WHERE projection_key = :key")
-    .get({ ":key": `auto-recovery/${AUTHORIZATION}` });
+    .get({ ":key": `auto-recovery/${RUN_APPROVAL_ID}` });
   assert.equal(work?.projection_kind, "auto-recovery-authorization");
   assert.equal(work?.renderer_version, "1");
   assert.equal(issued[0]?.project_id, input.expectedProjectId);
@@ -201,7 +201,7 @@ test("host approval records immutable user/internal provenance and the fixed bou
     operation_type: "auto.recovery.authorize", actor_type: "user", source_transport: "internal",
   });
   const afterIssue = durableState();
-  assert.equal(authorizeAutoRecovery(input), AUTHORIZATION);
+  assert.equal(authorizeAutoRecovery(input), RUN_APPROVAL_ID);
   assert.deepEqual(durableState(), afterIssue, "approval replay cannot extend expiry or reset budget");
   assert.deepEqual(protectedState(), before);
 });
@@ -325,7 +325,7 @@ test("revocation is durable, agent-attributed, idempotent, and leaves pauses and
   approve();
   const request = pause();
   const before = protectedState();
-  revokeAutoRecovery(AUTHORIZATION, RUN);
+  revokeAutoRecovery(RUN_APPROVAL_ID, RUN);
   assert.deepEqual(protectedState(), before);
   const revoked = events("auto.recovery.revoked");
   assert.equal(revoked.length, 1);
@@ -334,7 +334,7 @@ test("revocation is durable, agent-attributed, idempotent, and leaves pauses and
   `).get({ ":id": revoked[0]?.operation_id });
   assert.deepEqual(operation && { ...operation }, { actor_type: "agent", source_transport: "internal" });
   const afterRevoke = durableState();
-  revokeAutoRecovery(AUTHORIZATION, RUN);
+  revokeAutoRecovery(RUN_APPROVAL_ID, RUN);
   assert.deepEqual(durableState(), afterRevoke);
   rejectsWithoutWrites(() => consumeAutoRecoveryRetry(request), APPROVAL_DENIAL);
 });
@@ -343,7 +343,7 @@ test("wrong-run revocation cannot revoke a valid grant", (t) => {
   fixture(t);
   approve();
   const request = pause();
-  rejectsWithoutWrites(() => revokeAutoRecovery(AUTHORIZATION, "another-run"), /different auto-recover run/);
+  rejectsWithoutWrites(() => revokeAutoRecovery(RUN_APPROVAL_ID, "another-run"), /different auto-recover run/);
   assert.equal(consumeAutoRecoveryRetry(request), true);
 });
 
@@ -438,7 +438,7 @@ test("three distinct reservations exhaust the grant; every replay including the 
   for (const request of requests) {
     assert.equal(consumeAutoRecoveryRetry(request), false, "final-budget replay is not a new reservation or exhaustion error");
   }
-  assert.equal(authorizeAutoRecovery(originalInput), AUTHORIZATION);
+  assert.equal(authorizeAutoRecovery(originalInput), RUN_APPROVAL_ID);
   assert.deepEqual(durableState(), exhausted, "replaying approval cannot replenish exhausted budget");
   const fourth = pause({ pausedAt: new Date(NOW + 3).toISOString() });
   rejectsWithoutWrites(() => consumeAutoRecoveryRetry(fourth), APPROVAL_DENIAL);
@@ -456,7 +456,7 @@ test("retry route requires an exact token, not retrying or retry-later", (t) => 
 function attachHost(t: TestContext) {
   autoSession.reset();
   t.after(() => autoSession.reset());
-  autoSession.autoRecoveryAuthorizationId = AUTHORIZATION;
+  autoSession.autoRecoveryAuthorizationId = RUN_APPROVAL_ID;
   autoSession.autoRecoveryRunId = RUN;
   autoSession.paused = true;
   autoSession.originalBasePath = "/synthetic-host-project";
