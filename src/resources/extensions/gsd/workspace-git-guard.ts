@@ -15,6 +15,10 @@ export function isWorkspaceGitAllowedCommand(trimmed: string): boolean {
   const [name, subcommand] = command.split(/\s+/, 2);
   if (name === "doctor") return true;
   if (name === "forensics") return true;
+  // Inspection and fenced clear-only resolution never prepare Git or start a
+  // unit. Their handler validates syntax, existing Project binding and genuine
+  // terminal consent; workspace preflight would bootstrap the DB before that.
+  if (name === "blocker") return true;
   if (name === "recover") return true;
   if (name === "closeout" || command.startsWith("closeout")) return true;
   if (name === "dispatch") {
@@ -27,6 +31,9 @@ export async function getWorkspaceGitBlockMessageForBase(
   base: string,
   attemptedCommand = "",
 ): Promise<string | null> {
+  // Even allowlisted commands normally run healing/preparation below. Blocker
+  // control must return before that path: inspection/decline cannot open a DB.
+  if (attemptedCommand.trim().split(/\s+/, 1)[0] === "blocker") return null;
   if (isWorkspaceGitAllowedCommand(attemptedCommand)) {
     // Doctor decides in its handler if the run may create the database.
     const ready = await ensureWorkspaceGitReady(base, {

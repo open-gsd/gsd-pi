@@ -12,6 +12,8 @@
 | `/gsd do <text>` | Route freeform text to the right GSD command |
 | `/gsd stop` | Stop auto mode gracefully |
 | `/gsd pause` | Pause auto-mode (preserves state, `/gsd auto` to resume) |
+| `/gsd blocker inspect <id>` | Read-only eligibility, blocker/pause identity and revision/authority fences; RPC permitted |
+| `/gsd blocker resolve <id> resolved <reason...>` | Human terminal only: requires evidence and confirmation; atomically clears only an eligible auto-pause blocker and its associated pause, never a Task or resumed work |
 | `/gsd steer` | Hard-steer plan documents during execution |
 | `/gsd discuss` | Discuss architecture and decisions (stop auto-mode first with `/gsd stop`) |
 | `/gsd status` | Open the status dashboard |
@@ -403,6 +405,20 @@ The following commands are sent directly in your **Telegram chat** to a configur
 | `/login` | Log in to an LLM provider |
 | `/thinking` | Toggle thinking level during sessions |
 | `/voice` | Toggle real-time speech-to-text (macOS, Linux) |
+
+### Auto-pause blocker authority
+
+`/gsd blocker inspect <id>` is read-only. Resolving a user-owned auto-pause blocker
+requires a human in a true native terminal, current evidence, and explicit
+confirmation through `/gsd blocker resolve <id> resolved <reason...>`.
+Closure is clear-only: it never authorizes retry, settles an Attempt, waives a
+gate, completes a Task, or resumes auto mode.
+
+MCP `gsd_resolve_blocker` callers remain agents. Its by-id `pauseBlockerId`
+selector always refuses them, including retries and historical unsafe success
+receipts; a cached receipt cannot grant human authority. Live-session UI responses
+and the legacy persisted-escalation `questionId` / `response` behavior remain
+available.
 
 ## Keyboard Shortcuts
 

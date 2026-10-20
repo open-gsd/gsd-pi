@@ -407,6 +407,50 @@ function fenceTransition(state: FenceState | undefined, text: string): FenceStat
   return state;
 }
 
+const ROADMAP_VISION_LABEL_PATTERN = /^\*\*Vision:\*\*\s*(.*)$/u;
+
+/**
+ * The milestone's own `**Vision:**` value from its ROADMAP, read the same way
+ * slicePlanContent reads Goal/Demo: the value continues over the following
+ * lines until the next heading or fence, fenced lines never anchor anything,
+ * and a blank value (label present, nothing after it) is not emitted — the
+ * renderer already treats an empty vision as "never set", so an empty match
+ * must not overwrite a real value a second candidate on the same key holds.
+ */
+function roadmapVision(file: SourceFile): { value?: string; span: TextSpan } {
+  let value: string[] | undefined;
+  let start = 0;
+  let end = 0;
+  let fenced: FenceState | undefined;
+  for (const line of file.lines) {
+    const outside = fenced === undefined;
+    fenced = fenceTransition(fenced, line.text);
+    if (fenced !== undefined || !outside) {
+      if (value !== undefined) {
+        value.push(line.text);
+        end = line.end;
+      }
+      continue;
+    }
+    if (value !== undefined) {
+      if (/^#{1,6}\s/u.test(line.text) || /^\*\*[^*]+:\*\*/u.test(line.text)) break;
+      value.push(line.text);
+      end = line.end;
+      continue;
+    }
+    const label = ROADMAP_VISION_LABEL_PATTERN.exec(line.text);
+    if (label !== null) {
+      value = [label[1]];
+      start = line.start;
+      end = line.end;
+    }
+  }
+  if (value === undefined) return { span: { start, end } };
+  while (value.length > 0 && value[value.length - 1].trim() === "") value.pop();
+  const text = value.join("\n").trim();
+  return text === "" ? { span: { start, end } } : { value: text, span: { start, end } };
+}
+
 interface SlicePlanIdentity {
   heading?: { match: RegExpExecArray; line: SourceLine; span: TextSpan };
   milestone?: { value: string; line: SourceLine };
@@ -663,6 +707,8 @@ function emitHybridClaim(
       milestone_id: claim.canonicalId,
       status: slice.status,
       title: slice.title,
+      ...(slice.risk === undefined ? {} : { risk: slice.risk }),
+      ...(slice.dependsOn === undefined || slice.dependsOn.length === 0 ? {} : { depends_on: slice.dependsOn }),
     }, reason, slice.span);
   }
 }
@@ -849,6 +895,17 @@ function emitFlatRoadmap(
     reason,
     { start: claim.heading.start, end: claim.heading.end },
   );
+  const vision = roadmapVision(claim.file);
+  if (vision.value !== undefined) {
+    addCandidate(
+      candidates,
+      claim.file,
+      { kind: "milestone", key: claim.canonicalId },
+      { id: claim.canonicalId, vision: vision.value },
+      "flat-roadmap-vision",
+      vision.span,
+    );
+  }
   for (const slice of roadmapSlices(claim.file)) {
     addCandidate(candidates, claim.file, {
       kind: "slice",
@@ -858,6 +915,8 @@ function emitFlatRoadmap(
       milestone_id: claim.canonicalId,
       status: slice.status,
       title: slice.title,
+      ...(slice.risk === undefined ? {} : { risk: slice.risk }),
+      ...(slice.dependsOn === undefined || slice.dependsOn.length === 0 ? {} : { depends_on: slice.dependsOn }),
     }, "flat-slice-checklist", slice.span);
   }
 }

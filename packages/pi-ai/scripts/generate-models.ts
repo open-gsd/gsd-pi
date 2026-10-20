@@ -380,11 +380,31 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (
 		(model.provider === "minimax" || model.provider === "minimax-cn") &&
 		model.api === "anthropic-messages" &&
-		model.id === "MiniMax-M3"
+		(model.id === "MiniMax-M3" || model.id === "MiniMax-M3.1-Flash")
 	) {
 		// M3 exposes adaptive and disabled thinking modes over the Anthropic-compatible
-		// endpoint, so force adaptive thinking instead of the budget-based default.
+		// endpoint; M3.1-Flash REQUIRES adaptive thinking. Force adaptive for both
+		// instead of the budget-based default.
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
+	}
+	if (
+		(model.provider === "minimax" || model.provider === "minimax-cn") &&
+		model.api === "anthropic-messages" &&
+		model.id === "MiniMax-M3.1-Flash"
+	) {
+		// M3.1-Flash always thinks: thinking {type:"disabled"} returns HTTP 400
+		// (error 2013), and output_config.effort accepts low/medium/high/xhigh/max
+		// with a server default of max (#2906). Reject disabled thinking
+		// client-side and map the thinking ladder onto the accepted efforts.
+		mergeAnthropicMessagesCompat(model, { rejectsDisabledThinking: true });
+		mergeThinkingLevelMap(model, {
+			minimal: "low",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: "max",
+		});
 	}
 	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
@@ -429,6 +449,28 @@ function formatFiniteNumber(value: unknown, field: string, modelId: string): str
 	return String(value);
 }
 
+// Verified current MiniMax routes on the OpenAI-compatible gateways (issue
+// #2906, checked against openrouter.ai/api/v1/models and opencode.ai/zen/v1/
+// models): M3.1-Flash and M3. Everything else (M1/M2.x/MiniMax-01/M2-her) is a
+// stale route — keep it out of ordinary catalog choices.
+const MINIMAX_OPENROUTER_ROUTE_IDS = new Set(["minimax/minimax-m3.1-flash:free", "minimax/minimax-m3"]);
+const MINIMAX_OPENCODE_ROUTE_IDS = new Set(["minimax-m3.1-flash-free", "minimax-m3"]);
+
+// M3.1-Flash accepts reasoning effort low/medium/high/xhigh/max on the
+// OpenAI-compatible gateways (reasoning_effort / reasoning.effort); `none` is
+// rejected upstream, so thinking "off" maps to the cheapest supported effort
+// ("low") instead of relying on the server default (max). Minimal maps to low
+// for the same reason.
+const MINIMAX_FLASH_GATEWAY_LEVEL_MAP = {
+	off: "low",
+	minimal: "low",
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	max: "max",
+} as const;
+
 async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from OpenRouter API...");
@@ -440,6 +482,9 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 		for (const model of data.data) {
 			// Only include models that support tools
 			if (!model.supported_parameters?.includes("tools")) continue;
+
+			// Keep only the verified current MiniMax routes (issue #2906)
+			if (model.id.startsWith("minimax/") && !MINIMAX_OPENROUTER_ROUTE_IDS.has(model.id)) continue;
 
 			// Parse provider from model ID
 			let provider: KnownProvider = "openrouter";
@@ -1031,6 +1076,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const m = model as ModelsDevModel & { status?: string };
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
+				// Keep only the verified current MiniMax routes (issue #2906)
+				if (modelId.startsWith("minimax") && !MINIMAX_OPENCODE_ROUTE_IDS.has(modelId)) continue;
 
 				const npm = m.provider?.npm;
 				let api: Api;
@@ -2073,12 +2120,20 @@ async function generateModels() {
 		}
 	}
 
+	// The Anthropic-compatible endpoint only serves MiniMax-M3.1-Flash and
+	// MiniMax-M3 (platform.minimax.io text-anthropic-api, #2906). This map is
+	// also the direct-region allowlist: older M2.x entries are dropped by the
+	// filter below instead of being offered as choices that cannot serve
+	// requests. Saved/custom model ids keep resolving through models.json
+	// custom providers; the resolver's exact-lookup + fallback path is
+	// unchanged.
 	const minimaxDirectModelOverrides = new Map<
 		string,
 		{ contextWindow: number; maxTokens: number; input?: ("text" | "image" | "video")[] }
 	>([
-		["MiniMax-M2.7", { contextWindow: 204800, maxTokens: 131072 }],
-		["MiniMax-M2.7-highspeed", { contextWindow: 204800, maxTokens: 131072 }],
+		// models.dev reports 1M context / 512K output for M3.1-Flash; the API
+		// docs confirm the 1M window and text+image+video input.
+		["MiniMax-M3.1-Flash", { contextWindow: 1000000, maxTokens: 524288, input: ["text", "image", "video"] }],
 		// MiniMax's API overview advertises a 1M context window for M3; models.dev
 		// currently reports the documented guaranteed 512K floor. M3 also accepts
 		// video inputs alongside text and image, which models.dev does not report.
@@ -2099,6 +2154,16 @@ async function generateModels() {
 					candidate.input = override.input;
 				}
 			}
+		}
+		// Gateway MiniMax-M3.1-Flash routes: map the thinking ladder onto the
+		// reasoning effort values the upstream accepts (#2906).
+		if (
+			candidate.provider !== "minimax" &&
+			candidate.provider !== "minimax-cn" &&
+			candidate.api === "openai-completions" &&
+			(candidate.id === "minimax/minimax-m3.1-flash:free" || candidate.id === "minimax-m3.1-flash-free")
+		) {
+			mergeThinkingLevelMap(candidate, MINIMAX_FLASH_GATEWAY_LEVEL_MAP);
 		}
 	}
 

@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, it } from "node:test";
 
 import subagentExtension from "../index.js";
+import { getActiveWorkers, resetWorkerRegistry } from "../worker-registry.js";
+import { SubagentRunStore } from "../run-store.js";
 import { SessionManager } from "../../../../../packages/pi-coding-agent/src/core/session-manager.ts";
 
 const EMITS_USAGE_FIXTURE = fileURLToPath(new URL("./fixtures/emits-usage.cjs", import.meta.url));
@@ -207,9 +209,13 @@ describe("subagent usage reconciliation into the parent session", () => {
 	const savedBinPath = process.env.GSD_BIN_PATH;
 	const savedExitCode = process.env.FIXTURE_EXIT_CODE;
 	const savedFailOnceDir = process.env.FIXTURE_FAIL_ONCE_DIR;
+	const savedModelSequence = process.env.FIXTURE_MODEL_SEQUENCE;
+	const savedTurnModels = process.env.FIXTURE_TURN_MODELS;
+	const savedSkipSuccessEvents = process.env.FIXTURE_SKIP_SUCCESS_EVENTS;
 	let dir: string | undefined;
 
 	afterEach(() => {
+		resetWorkerRegistry();
 		if (dir) rmSync(dir, { recursive: true, force: true });
 		dir = undefined;
 		if (savedAgentDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
@@ -220,6 +226,12 @@ describe("subagent usage reconciliation into the parent session", () => {
 		else process.env.FIXTURE_EXIT_CODE = savedExitCode;
 		if (savedFailOnceDir === undefined) delete process.env.FIXTURE_FAIL_ONCE_DIR;
 		else process.env.FIXTURE_FAIL_ONCE_DIR = savedFailOnceDir;
+		if (savedModelSequence === undefined) delete process.env.FIXTURE_MODEL_SEQUENCE;
+		else process.env.FIXTURE_MODEL_SEQUENCE = savedModelSequence;
+		if (savedTurnModels === undefined) delete process.env.FIXTURE_TURN_MODELS;
+		else process.env.FIXTURE_TURN_MODELS = savedTurnModels;
+		if (savedSkipSuccessEvents === undefined) delete process.env.FIXTURE_SKIP_SUCCESS_EVENTS;
+		else process.env.FIXTURE_SKIP_SUCCESS_EVENTS = savedSkipSuccessEvents;
 	});
 
 	function freshEnv(): string {
@@ -234,7 +246,7 @@ describe("subagent usage reconciliation into the parent session", () => {
 		return dir;
 	}
 
-	function makeExecute(sessionManager: unknown) {
+	function makeExecute(sessionManager: unknown, onUpdate?: (partial: any) => void) {
 		let tool: any;
 		subagentExtension({
 			on: () => {},
@@ -246,7 +258,7 @@ describe("subagent usage reconciliation into the parent session", () => {
 		} as any);
 		assert.ok(tool, "subagent tool was not registered");
 		return (params: Record<string, unknown>) =>
-			tool.execute("tool-call-1", params, undefined, undefined, {
+			tool.execute("tool-call-1", params, undefined, onUpdate, {
 				cwd: process.env.GSD_CODING_AGENT_DIR!,
 				hasUI: false,
 				sessionManager,
@@ -312,4 +324,160 @@ describe("subagent usage reconciliation into the parent session", () => {
 
 		assert.equal(result.details.results[0].exitCode, 0);
 	});
+
+	it("shows a differing provider-reported model without replacing the requested model", async () => {
+		const cwd = freshEnv();
+		const liveIdentities: Array<{ model?: string; reportedModel?: string }> = [];
+		const tool = registerSubagentTool();
+		const execute = makeExecute(SessionManager.inMemory(cwd), (partial) => {
+			const result = partial.details?.results[0];
+			if (result) {
+				liveIdentities.push({
+					model: result.model,
+					reportedModel: result.reportedModel,
+				});
+			}
+		});
+
+		const result = await execute({
+			tasks: [{ agent: "usage-emitter", task: "report model", model: "requested-model" }],
+		});
+
+		assert.equal(result.details.results[0].model, "requested-model");
+		assert.equal(result.details.results[0].reportedModel, "test-model");
+		assert.match(renderCard(tool, result), /requested-model ← test-model/);
+		assert.match(
+			renderCard(tool, { ...result, details: { ...result.details, mode: "single" } }),
+			/requested-model ← test-model/,
+		);
+		assert.match(
+			renderCard(tool, {
+				...result,
+				details: {
+					...result.details,
+					mode: "chain",
+					results: [{ ...result.details.results[0], step: 1 }],
+				},
+			}),
+			/requested-model ← test-model/,
+		);
+		assert.ok(
+			liveIdentities.some(
+				(identity) => identity.model === "requested-model" && identity.reportedModel === "test-model",
+			),
+			"streaming result should expose requested and provider-reported identities",
+		);
+		const worker = getActiveWorkers().find((entry) => entry.task === "report model");
+		assert.equal(worker?.model, "requested-model");
+		assert.equal(worker?.reportedModel, "test-model");
+		const storedRun = new SubagentRunStore().list().find((record) =>
+			record.children.some((child) => child.task === "report model")
+		);
+		assert.equal(storedRun?.children[0]?.model, "requested-model");
+		assert.equal(storedRun?.children[0]?.reportedModel, "test-model");
+		const statusResult = await execute({ action: "status", runId: storedRun?.runId });
+		assert.match(statusResult.content[0].text, /model: requested-model ← test-model/);
+
+		const matchingResult = await execute({
+			agent: "usage-emitter",
+			task: "report matching model",
+			model: "test-model",
+		});
+		assert.equal(matchingResult.details.results[0].model, "test-model");
+		assert.equal(matchingResult.details.results[0].reportedModel, undefined);
+	});
+
+	it("clears a fallback identity when a later turn returns to the requested model", async () => {
+		const cwd = freshEnv();
+		process.env.FIXTURE_TURN_MODELS = "fallback-model|requested-model";
+		const tool = registerSubagentTool();
+		const execute = makeExecute(SessionManager.inMemory(cwd));
+
+		const result = await execute({
+			tasks: [{ agent: "usage-emitter", task: "return to requested model", model: "requested-model" }],
+		});
+
+		assert.equal(result.details.results[0].reportedModel, undefined);
+		assert.doesNotMatch(renderCard(tool, result), /←/);
+		const storedRun = new SubagentRunStore().list().find((record) =>
+			record.children.some((child) => child.task === "return to requested model")
+		);
+		assert.equal(storedRun?.children[0]?.reportedModel, undefined);
+		const statusResult = await execute({ action: "status", runId: storedRun?.runId });
+		assert.doesNotMatch(statusResult.content[0].text, /←/);
+	});
+
+	it("clears a failed attempt's provider model when a retry emits no events", async () => {
+		const cwd = freshEnv();
+		const failOnceDir = join(cwd, "model-retry");
+		mkdirSync(failOnceDir, { recursive: true });
+		process.env.FIXTURE_FAIL_ONCE_DIR = failOnceDir;
+		process.env.FIXTURE_MODEL_SEQUENCE = "fallback-model,requested-model";
+		process.env.FIXTURE_SKIP_SUCCESS_EVENTS = "1";
+		const execute = makeExecute(SessionManager.inMemory(cwd));
+
+		const result = await execute({
+			tasks: [{ agent: "usage-emitter", task: "retry model", model: "requested-model" }],
+		});
+
+		assert.equal(result.details.results[0].model, "requested-model");
+		assert.equal(result.details.results[0].reportedModel, undefined);
+		const worker = getActiveWorkers().find((entry) => entry.task === "retry model");
+		assert.equal(worker?.model, "requested-model");
+		assert.equal(worker?.reportedModel, undefined);
+	});
+});
+
+describe("subagent chain card identity state (#2396)", () => {
+	const tool = registerSubagentTool();
+
+	function chainCard(expanded: boolean): string {
+		// `chainUpdate` streams the active step with exitCode -1 alongside the
+		// settled ones, so the card must not call a running step failed.
+		return renderCard(
+			tool,
+			{
+				content: [{ type: "text", text: "Chain: step 2 running..." }],
+				details: {
+					mode: "chain",
+					agentScope: "both",
+					projectAgentsDir: null,
+					results: [
+						{
+							agent: "a",
+							step: 1,
+							task: "first",
+							exitCode: 0,
+							messages: [],
+							stderr: "",
+							usage: zeroUsage(),
+							model: "requested-model",
+							startedAt: 1000,
+							completedAt: 4000,
+						},
+						{
+							agent: "b",
+							step: 2,
+							task: "second",
+							exitCode: -1,
+							messages: [],
+							stderr: "",
+							usage: zeroUsage(),
+							model: "requested-model",
+							startedAt: 4000,
+						},
+					],
+				},
+			},
+			expanded,
+		);
+	}
+
+	for (const expanded of [false, true]) {
+		it(`labels a streaming step running, not failed (${expanded ? "expanded" : "collapsed"})`, () => {
+			const text = chainCard(expanded);
+			assert.match(text, /running/);
+			assert.doesNotMatch(text, /failed after/);
+		});
+	}
 });

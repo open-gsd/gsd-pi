@@ -577,6 +577,14 @@ export interface AnthropicMessagesCompat {
 	 * off. Implied by `strictRequestParams`. Default: false.
 	 */
 	rejectsTemperature?: boolean;
+	/**
+	 * Whether the model always thinks and rejects `thinking: {type: "disabled"}`
+	 * with a 400 (there is no thinking-off representation at all). The provider
+	 * fails the request client-side with an actionable error instead of sending
+	 * a request the API rejects. MiniMax-M3.1-Flash sets this in generated
+	 * metadata (#2906). Default: false.
+	 */
+	rejectsDisabledThinking?: boolean;
 }
 
 /**

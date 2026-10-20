@@ -52,6 +52,7 @@ import {
   registerWorkflowTools,
   runSerializedWorkflowOperation,
   resolvePersistedBlockerViaBridge,
+  resolvePersistedAutoPauseBlockerViaBridge,
   validateProjectDir,
   warmWorkflowToolBridges,
 } from './workflow-tools.js';
@@ -412,6 +413,11 @@ interface McpServerInstance {
     name: string,
     description: string,
     params: Record<string, unknown>,
+    handler: (args: Record<string, unknown>, extra?: McpToolExtra) => Promise<unknown>,
+  ): unknown;
+  registerTool(
+    name: string,
+    config: { description?: string; inputSchema?: unknown },
     handler: (args: Record<string, unknown>, extra?: McpToolExtra) => Promise<unknown>,
   ): unknown;
   server: {
@@ -1429,29 +1435,87 @@ export async function createMcpServer(
   //      it is resolved from the database and needs no session (it works after
   //      a server restart).
   // -----------------------------------------------------------------------
-  server.tool(
+  const resolveBlockerSchema = z.object({
+    sessionId: z.string().trim().min(1).optional().describe('Session ID returned from gsd_execute'),
+    projectDir: z.string().trim().min(1).optional().describe('Absolute path to the project directory. Resolves the open escalation or auto-pause blocker in the project database.'),
+    questionId: z.string().trim().min(1).optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open. Mutually exclusive with pauseBlockerId.'),
+    pauseBlockerId: z.string().trim().min(1).optional().describe('The exact open auto-pause blocker id to clear-only resolve (blockers in gsd_project_snapshot). Mutually exclusive with sessionId and questionId.'),
+    response: z.string().optional().describe('Required for session or database escalation selection; forbidden with pauseBlockerId.'),
+    rationale: z.string().refine((value) => value.trim().length > 0, 'rationale is required with pauseBlockerId.').optional().describe('Required with pauseBlockerId: why the auto-pause blocker is being cleared.'),
+    expectedRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional().describe('Required with pauseBlockerId: authority.revision from the gsd_project_snapshot that supplied the selected blocker.'),
+    expectedAuthorityEpoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional().describe('Required with pauseBlockerId: authority.authorityEpoch from the same gsd_project_snapshot.'),
+  }).superRefine((value, ctx) => {
+    const pauseSelection = value.pauseBlockerId !== undefined
+      || value.rationale !== undefined
+      || value.expectedRevision !== undefined
+      || value.expectedAuthorityEpoch !== undefined;
+    if (pauseSelection) {
+      for (const field of ['projectDir', 'pauseBlockerId', 'rationale', 'expectedRevision', 'expectedAuthorityEpoch'] as const) {
+        if (value[field] === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [field],
+            message: field === 'pauseBlockerId'
+              ? 'pauseBlockerId is required with rationale and pause fencing.'
+              : `${field} is required with pauseBlockerId.`,
+          });
+        }
+      }
+      for (const field of ['sessionId', 'questionId', 'response'] as const) {
+        if (value[field] !== undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: 'sessionId, questionId, and response conflict with pauseBlockerId.' });
+        }
+      }
+      return;
+    }
+    if (value.sessionId !== undefined && value.questionId !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['questionId'], message: 'sessionId and questionId are mutually exclusive.' });
+    }
+    if (value.response === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['response'], message: 'response is required for escalation selection.' });
+    } else if (value.projectDir !== undefined && !value.response.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['response'], message: 'response must not be blank for escalation selection.' });
+    }
+    if (value.sessionId === undefined && value.projectDir === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['projectDir'], message: 'Either sessionId or projectDir must be provided' });
+    }
+  });
+
+  server.registerTool(
     'gsd_resolve_blocker',
-    'Resolve a pending blocker. With sessionId: answer the UI request that the session waits on. With projectDir: resolve the open escalation stored in the project database (this works after a server restart); sessionId is then not used. For an escalation the response is "<choice> [rationale]"; choice is an option id, "accept" (the recommendation), or "reject-blocker".',
     {
-      sessionId: z.string().optional().describe('Session ID returned from gsd_execute'),
-      projectDir: z.string().optional().describe('Absolute path to the project directory. Resolves the open escalation in the project database.'),
-      questionId: z.string().optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open.'),
-      response: z.string().describe('Response to send for the pending blocker'),
+      description: 'Resolve a live-session UI request with sessionId, or a persisted escalation with projectDir and optional questionId. Escalation response is "<choice> [rationale]": an option id, "accept", or "reject-blocker". MCP callers remain agents. The by-id pauseBlockerId selector always refuses, including retries and historical receipts; a human must use the native terminal /gsd blocker resolve command with evidence and confirmation. Closure never resumes auto, authorizes retry, settles an Attempt, waives a gate, or completes a Task.',
+      inputSchema: resolveBlockerSchema,
     },
     async (args: Record<string, unknown>, extra?: McpToolExtra) => {
-      const { sessionId, projectDir, questionId, response } = args as {
-        sessionId?: string; projectDir?: string; questionId?: string; response: string;
-      };
+      const parsed = resolveBlockerSchema.safeParse(args);
+      if (!parsed.success) return errorContent(parsed.error.issues[0]!.message);
+      const {
+        sessionId, projectDir, questionId, pauseBlockerId, response, rationale,
+        expectedRevision, expectedAuthorityEpoch,
+      } = parsed.data;
       try {
+        if (pauseBlockerId !== undefined) {
+          const result = await resolvePersistedAutoPauseBlockerViaBridge(
+            validateProjectDir(projectDir!), pauseBlockerId, rationale!,
+            expectedRevision!, expectedAuthorityEpoch!, extra,
+          );
+          if (!result.resolved) {
+            const guidance = result.failure === 'owner-mismatch'
+              ? ' MCP cannot act as the human owner. A person must inspect and confirm /gsd blocker resolve in the interactive terminal.'
+              : '';
+            return errorContent(`Auto-pause blocker ${pauseBlockerId} was not resolved: ${result.failure ?? 'unknown'}.${guidance}`);
+          }
+          return jsonContent({ source: 'database', pauseBlockerId, ...result, resolved: true });
+        }
         if (!projectDir) {
-          if (!sessionId) return errorContent('Either sessionId or projectDir must be provided');
-          if (!sessionManager.getSession(sessionId)) {
+          if (!sessionManager.getSession(sessionId!)) {
             return errorContent(`Session not found: ${sessionId}. Pass projectDir to resolve a blocker that the project database holds.`);
           }
-          await sessionManager.resolveBlocker(sessionId, response);
+          await sessionManager.resolveBlocker(sessionId!, response!);
           return jsonContent({ resolved: true });
         }
-        const result = await resolvePersistedBlockerViaBridge(validateProjectDir(projectDir), response, questionId, extra);
+        const result = await resolvePersistedBlockerViaBridge(validateProjectDir(projectDir), response!, questionId, extra);
         if (result.status !== 'resolved' && result.status !== 'rejected-to-blocker') {
           return errorContent(result.message);
         }

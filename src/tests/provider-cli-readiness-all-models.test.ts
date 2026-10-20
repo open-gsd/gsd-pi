@@ -31,6 +31,7 @@ import { clearCursorAgentReadinessCache } from "../resources/extensions/cursor-c
 import googleCli from "../resources/extensions/google-cli/index.ts";
 import { GOOGLE_ANTIGRAVITY_MODELS, GOOGLE_GEMINI_CLI_MODELS } from "../resources/extensions/google-cli/models.ts";
 import { clearGoogleCliReadinessCache } from "../resources/extensions/google-cli/readiness.ts";
+import { READINESS_CHECK_INTERVAL_MS } from "../resources/extensions/shared/cli-readiness.ts";
 
 const IS_WINDOWS = process.platform === "win32";
 const ENV_KEYS = ["PATH", "CLAUDE_TEST_AUTH", "CURSOR_AGENT_TEST_AUTH", "CURSOR_API_KEY", "GSD_CURSOR_DISABLE"] as const;
@@ -231,7 +232,10 @@ describe("external-CLI provider readiness for every model", () => {
 
 	for (const provider of PROVIDERS) {
 		describe(provider.id, () => {
-			test("cold cache: no model is available and nothing is spawned on the caller's stack", () => {
+			test("cold cache: no model is available and nothing is spawned on the caller's stack", async () => {
+				// Drain registration probes before invalidating them: clear() discards
+				// their results but does not cancel child processes already in flight.
+				await registry.settleProviderReadiness();
 				// Registration primed the caches; start from a provably cold one.
 				clearReadinessCache();
 				clearCursorAgentReadinessCache();
@@ -246,7 +250,10 @@ describe("external-CLI provider readiness for every model", () => {
 				assert.deepEqual(syncSpawns, []);
 			});
 
-			test("one async probe makes every model available, however often the list is asked for", async () => {
+			test("one async probe makes every model available, however often the list is asked for", async (t) => {
+				// Cache freshness is a clock invariant, not a CI speed requirement.
+				// Freeze only Date; real async CLI probes must still run to completion.
+				t.mock.timers.enable({ apis: ["Date"] });
 				// A model selector asks once per model, and re-asks on every open.
 				for (let i = 0; i < 10; i++) availableModelIds(provider.id);
 
@@ -255,11 +262,22 @@ describe("external-CLI provider readiness for every model", () => {
 				for (let i = 0; i < 10; i++) {
 					assert.deepEqual(availableModelIds(provider.id).sort(), provider.modelIds().sort());
 				}
+				// Still fresh one millisecond before expiry, even after another listing.
+				t.mock.timers.tick(READINESS_CHECK_INTERVAL_MS - 1);
+				assert.deepEqual(availableModelIds(provider.id).sort(), provider.modelIds().sort());
+				await registry.settleProviderReadiness(provider.id);
 				assert.equal(
 					probeSpawns(provider.binary),
 					provider.spawnsPerProbe,
 					`${provider.modelIds().length} models x 20 listings must cost one probe, not one per model or per call`,
 				);
+
+				// At exactly the TTL the cached answer is stale, not permanently cached.
+				t.mock.timers.tick(1);
+				assert.deepEqual(availableModelIds(provider.id).sort(), provider.modelIds().sort());
+				assert.equal(probeSpawns(provider.binary), provider.spawnsPerProbe, "expiry must not spawn on the caller's stack");
+				await registry.settleProviderReadiness(provider.id);
+				assert.equal(probeSpawns(provider.binary), 2 * provider.spawnsPerProbe, "exactly one refresh at the TTL boundary");
 				assert.deepEqual(syncSpawns, []);
 			});
 

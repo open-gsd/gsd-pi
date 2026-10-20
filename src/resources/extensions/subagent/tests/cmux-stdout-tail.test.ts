@@ -32,6 +32,8 @@ interface BankedSnapshot {
 interface ObservedUpdate {
 	messageCount: number;
 	totalInput: number;
+	model?: string;
+	reportedModel?: string;
 }
 
 interface ScenarioPaths {
@@ -41,7 +43,7 @@ interface ScenarioPaths {
 }
 
 interface ScenarioResult {
-	result: { exitCode: number; messages: unknown[]; usage: { input: number } };
+	result: { exitCode: number; messages: unknown[]; usage: { input: number }; model?: string; reportedModel?: string };
 	paths: ScenarioPaths;
 	banked: BankedSnapshot[];
 	updates: ObservedUpdate[];
@@ -90,11 +92,19 @@ async function runTailScenario(
 		undefined,
 		AbortSignal.timeout(10_000),
 		(partial) => {
-			const first = (partial.details as { results: { messages: unknown[]; usage: { input: number } }[] }).results[0];
-			updates.push({ messageCount: first.messages.length, totalInput: first.usage.input });
+			const first = (partial.details as {
+				results: { messages: unknown[]; usage: { input: number }; model?: string; reportedModel?: string }[];
+			}).results[0];
+			updates.push({
+				messageCount: first.messages.length,
+				totalInput: first.usage.input,
+				model: first.model,
+				reportedModel: first.reportedModel,
+			});
 		},
 		(results) => ({ mode: "single", agentScope: "both" as const, projectAgentsDir: null, results }),
 		{
+			modelOverride: "requested-model",
 			contextMode: "fresh",
 			parentSessionManager: {
 				addExternalUsage: (key: string, usage: BankedSnapshot["usage"]) => {
@@ -138,6 +148,7 @@ function assistantEvent(text: string, input: number): string {
 			role: "assistant",
 			content: [{ type: "text", text }],
 			usage: { input, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 }, totalTokens: input + 100 },
+			model: "provider-model",
 		},
 	})}\n`;
 }
@@ -173,6 +184,8 @@ describe("cmux-split stdout tailing", () => {
 			await waitForUpdate(updates, 1);
 			assert.equal(updates[0]!.messageCount, 1);
 			assert.equal(updates[0]!.totalInput, 100);
+			assert.equal(updates[0]!.model, "requested-model");
+			assert.equal(updates[0]!.reportedModel, "provider-model");
 			assert.ok(banked.length > 0, "live usage is reconciled into the parent session before completion");
 			writeFileSync(paths.exitPath, "0", "utf-8");
 		});
@@ -180,6 +193,8 @@ describe("cmux-split stdout tailing", () => {
 		assert.equal(result.exitCode, 0);
 		assert.equal(result.messages.length, 1, "the event lands exactly once across tail and drain");
 		assert.equal(result.usage.input, 100);
+		assert.equal(result.model, "requested-model");
+		assert.equal(result.reportedModel, "provider-model");
 		assert.equal(updates[0]!.totalInput, 100);
 		assert.equal(Math.max(...banked.map((s) => s.usage.input)), 100, "reconciled snapshots never exceed the real cumulative usage");
 	});

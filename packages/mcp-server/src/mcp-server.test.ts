@@ -53,21 +53,27 @@ interface WorkflowBridgeFixtureModule {
   _getAdapter(): { prepare(sql: string): { run(params?: Record<string, unknown>): unknown } };
 }
 
-async function importWorkflowBridgeFixture(): Promise<WorkflowBridgeFixtureModule> {
+async function importNativeFixtureModule<T>(moduleName: string): Promise<T> {
+  // Source-loader runs and plain compiled package tests must use equivalent
+  // native fixtures; never rely on tsc emitting JS beside the source inputs.
   const candidates = [
-    '../../../src/resources/extensions/gsd/mcp-bridge.js',
-    '../../../src/resources/extensions/gsd/mcp-bridge.ts',
-    '../../../dist/resources/extensions/gsd/mcp-bridge.js',
+    `../../../src/resources/extensions/gsd/${moduleName}.js`,
+    `../../../src/resources/extensions/gsd/${moduleName}.ts`,
+    `../../../dist/resources/extensions/gsd/${moduleName}.js`,
   ];
   let lastError: unknown;
   for (const candidate of candidates) {
     try {
-      return await import(new URL(candidate, import.meta.url).href) as WorkflowBridgeFixtureModule;
+      return await import(new URL(candidate, import.meta.url).href) as T;
     } catch (error) {
       lastError = error;
     }
   }
   throw lastError;
+}
+
+async function importWorkflowBridgeFixture(): Promise<WorkflowBridgeFixtureModule> {
+  return importNativeFixtureModule<WorkflowBridgeFixtureModule>('mcp-bridge');
 }
 
 function restoreEnvironmentValue(name: string, value: string | undefined): void {
@@ -1088,9 +1094,9 @@ describe('createMcpServer tool registration', () => {
   it('registered gsd_captures returns database rows when CAPTURES.md is stale', async (t) => {
     const projectDir = mkdtempSync(join(tmpdir(), 'gsd-captures-handler-'));
     const bridge = await importWorkflowBridgeFixture();
-    const captures = await import(
-      new URL('../../../src/resources/extensions/gsd/captures.js', import.meta.url).href
-    ) as { appendCapture(basePath: string, text: string): string };
+    const captures = await importNativeFixtureModule<{
+      appendCapture(basePath: string, text: string): string;
+    }>('captures');
     t.after(() => {
       bridge.closeDatabase();
       rmSync(projectDir, { recursive: true, force: true });
@@ -1167,9 +1173,9 @@ describe('createMcpServer tool registration', () => {
   it('registered gsd_history returns database rows when metrics.json is deleted or stale', async (t) => {
     const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-handler-'));
     const bridge = await importWorkflowBridgeFixture();
-    const unitMetrics = await import(
-      new URL('../../../src/resources/extensions/gsd/db/writers/unit-metrics.js', import.meta.url).href
-    ) as { recordUnitMetricsRows(units: unknown[]): void };
+    const unitMetrics = await importNativeFixtureModule<{
+      recordUnitMetricsRows(units: unknown[]): void;
+    }>('db/writers/unit-metrics');
     t.after(() => {
       bridge.closeDatabase();
       rmSync(projectDir, { recursive: true, force: true });
@@ -1507,6 +1513,29 @@ describe('createMcpServer tool registration', () => {
         return true;
       },
     );
+  });
+
+  it('gsd_resolve_blocker preserves live sessions and selects persisted pauses explicitly', async () => {
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const tool = (server as any)._registeredTools?.gsd_resolve_blocker;
+    assert.ok(tool, 'gsd_resolve_blocker should be registered');
+
+    const sessionId = await sm.startSession('/tmp/tool-resolve-live', { cliPath: '/usr/bin/gsd' });
+    const liveResult = await tool.handler({ sessionId, response: 'fix' });
+    assert.equal(liveResult.isError, true);
+    assert.match(liveResult.content[0].text, /No pending blocker/);
+
+    const conflictResult = await tool.handler({
+      sessionId,
+      response: 'fix',
+      projectDir: '/tmp/tool-resolve-live',
+      pauseBlockerId: 'persisted-blocker',
+      rationale: 'Human confirmed resolution',
+      expectedRevision: 1,
+      expectedAuthorityEpoch: 1,
+    });
+    assert.equal(conflictResult.isError, true);
+    assert.match(conflictResult.content[0].text, /sessionId, questionId, and response conflict with pauseBlockerId/);
   });
 
   it('gsd_result flow returns HeadlessJsonResult shape', async () => {

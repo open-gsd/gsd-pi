@@ -33,7 +33,13 @@ import {
 	mergeDeltaPatches,
 	readIsolationMode,
 } from "./isolation.js";
-import { registerWorker, updateWorker, formatWorkerIdentity } from "./worker-registry.js";
+import {
+	registerWorker,
+	updateWorker,
+	updateWorkerIdentity,
+	formatWorkerIdentity,
+	formatWorkerModelTokens,
+} from "./worker-registry.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 import { emitJournalEvent } from "../gsd/journal.js";
 import { CmuxClient, shellEscape } from "../cmux/index.js";
@@ -401,7 +407,11 @@ function processSubagentEventLine(
 				currentResult.usage.cost += usage.cost?.total || 0;
 				currentResult.usage.contextTokens = usage.totalTokens || 0;
 			}
-			if (!currentResult.model && msg.model) currentResult.model = msg.model;
+			const reportedModel = typeof msg.model === "string" ? msg.model.trim() : "";
+			if (reportedModel) {
+				if (!currentResult.model) currentResult.model = reportedModel;
+				else currentResult.reportedModel = currentResult.model === reportedModel ? undefined : reportedModel;
+			}
 			if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 			if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 		}
@@ -604,6 +614,7 @@ function resultToChildArtifact(result: SingleResult, index: number, cwd?: string
 		errorMessage: result.errorMessage,
 		stopReason: result.stopReason,
 		model: result.model,
+		reportedModel: result.reportedModel,
 		...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
 		usage: result.usage,
 		merge: result.mergeResult
@@ -736,6 +747,11 @@ function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
 		].filter(Boolean).join(", ");
 		const suffix = facts ? ` (${facts})` : "";
 		lines.push(`- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}: ${child.output || child.errorMessage || child.stderr || child.task}`);
+		const modelIdentity = formatWorkerModelTokens({
+			model: child.model,
+			reportedModel: child.reportedModel,
+		});
+		if (modelIdentity) lines.push(`  model: ${modelIdentity}`);
 		if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
 		if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
 	}
@@ -1977,6 +1993,13 @@ export default function (pi: ExtensionAPI) {
 					const taskModel = t.model || params.model;
 					const taskThinking = t.thinking ?? params.thinking;
 					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId, workerIdentities[index]);
+					const syncWorkerIdentity = (result: SingleResult) => {
+						updateWorkerIdentity(workerId, {
+							...(result.model !== undefined ? { model: result.model } : {}),
+							reportedModel: result.reportedModel,
+							...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
+						});
+					};
 					// A retry supersedes the failed attempt's result object, which
 					// would silently drop its billable usage from the card and the
 					// run record (#2821). Bank the replaced attempt and fold it into
@@ -1998,6 +2021,7 @@ export default function (pi: ExtensionAPI) {
 					const updateParallelResult = (partial: AgentToolResult<SubagentDetails>) => {
 						if (partial.details?.results[0]) {
 							const raw = partial.details.results[0];
+							syncWorkerIdentity(raw);
 							allResults[index] = bankedUsage ? { ...raw, usage: withBankedUsage(raw.usage) } : raw;
 							persistRunResults([...allResults]);
 							emitParallelUpdate();
@@ -2106,6 +2130,7 @@ export default function (pi: ExtensionAPI) {
 						result = makeFailureResult(err, t.agent, t.task, undefined, dispatchTrackingNames[index], batchSignal);
 					}
 
+					syncWorkerIdentity(result);
 					updateWorker(workerId, result.exitCode === 0 ? "completed" : "failed");
 					allResults[index] = result;
 					persistRunResults([...allResults]);
@@ -2496,6 +2521,10 @@ export default function (pi: ExtensionAPI) {
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
+				const identity = formatWorkerIdentity(
+					r,
+					r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+				);
 
 				if (expanded) {
 					const container = new Container();
@@ -2504,6 +2533,7 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+					if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
@@ -2537,6 +2567,7 @@ export default function (pi: ExtensionAPI) {
 
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(formatAgentLabel(r.agent, r.trackingName)))}${theme.fg("muted", ` (${r.agentSource})`)}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+				if (identity) text += `\n${theme.fg("dim", identity)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
@@ -2592,6 +2623,11 @@ export default function (pi: ExtensionAPI) {
 							),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						const identity = formatWorkerIdentity(
+							r,
+							r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+						);
+						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -2634,6 +2670,11 @@ export default function (pi: ExtensionAPI) {
 					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
+					const identity = formatWorkerIdentity(
+						r,
+						r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+					);
+					if (identity) text += `\n${theme.fg("dim", identity)}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}

@@ -542,7 +542,7 @@ const TEST_ENDPOINTS: Record<string, { url: string; method?: string; headers?: (
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     }),
-    body: JSON.stringify({ model: "MiniMax-M2.7", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+    body: JSON.stringify({ model: "MiniMax-M3.1-Flash", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
   },
   "minimax-cn": {
     url: "https://api.minimaxi.com/anthropic/v1/messages",
@@ -552,7 +552,7 @@ const TEST_ENDPOINTS: Record<string, { url: string; method?: string; headers?: (
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     }),
-    body: JSON.stringify({ model: "MiniMax-M2.7", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+    body: JSON.stringify({ model: "MiniMax-M3.1-Flash", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
   },
   openrouter: {
     url: "https://openrouter.ai/api/v1/models",

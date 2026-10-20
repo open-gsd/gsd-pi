@@ -97,6 +97,7 @@ export function formatWorkerIdentity(
 }
 
 const activeWorkers = new Map<string, WorkerEntry>();
+const workerCleanupTimers = new Set<NodeJS.Timeout>();
 let workerIdCounter = 0;
 
 /**
@@ -128,6 +129,18 @@ export function registerWorker(
 }
 
 /**
+ * Refresh identity fields learned after launch, such as the provider-reported
+ * model from an assistant message.
+ */
+export function updateWorkerIdentity(id: string, identity: WorkerIdentityFields): void {
+  const entry = activeWorkers.get(id);
+  if (!entry) return;
+  if ("model" in identity) entry.model = identity.model;
+  if ("reportedModel" in identity) entry.reportedModel = identity.reportedModel;
+  if ("thinking" in identity) entry.thinking = identity.thinking;
+}
+
+/**
  * Update worker status when it completes or fails.
  */
 export function updateWorker(id: string, status: "completed" | "failed"): void {
@@ -145,9 +158,12 @@ export function updateWorker(id: string, status: "completed" | "failed"): void {
     }
     // Remove after a brief display window (5 seconds)
     // unref() so the timer doesn't keep the process alive in test environments
-    setTimeout(() => {
+    const cleanupTimer = setTimeout(() => {
       activeWorkers.delete(id);
-    }, 5000).unref();
+      workerCleanupTimers.delete(cleanupTimer);
+    }, 5000);
+    workerCleanupTimers.add(cleanupTimer);
+    cleanupTimer.unref();
   }
 }
 
@@ -249,6 +265,8 @@ export function hasActiveWorkers(): boolean {
  * Reset registry state. Used for testing.
  */
 export function resetWorkerRegistry(): void {
+  for (const timer of workerCleanupTimers) clearTimeout(timer);
+  workerCleanupTimers.clear();
   activeWorkers.clear();
   hostTaskBatchTotals.clear();
   hostTaskBatchStats.clear();

@@ -141,6 +141,9 @@ export function isUnmergedMilestoneAllowedCommand(trimmed: string): boolean {
   if (!command) return false;
 
   const [name, subcommand] = command.split(/\s+/, 2);
+  // Blocker control never starts work or moves Git; its own handler requires
+  // existing authority and native consent before a clear-only mutation.
+  if (name === "blocker") return true;
   if (name === "dispatch") {
     return subcommand === "complete" || subcommand === "complete-milestone";
   }

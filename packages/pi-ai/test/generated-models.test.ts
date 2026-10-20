@@ -286,11 +286,11 @@ describe("models.generated.ts", () => {
 
 	test("includes MiniMax M3 for direct MiniMax providers", () => {
 		const providers = [
-			["minimax", "https://api.minimax.io/anthropic"],
-			["minimax-cn", "https://api.minimaxi.com/anthropic"],
+			["minimax", "https://api.minimax.io/anthropic", { input: 0.3, output: 1.2, cacheRead: 0.06 }],
+			["minimax-cn", "https://api.minimaxi.com/anthropic", { input: 0.3137, output: 1.2549, cacheRead: 0.0627 }],
 		] as const;
 
-		for (const [provider, baseUrl] of providers) {
+		for (const [provider, baseUrl, cost] of providers) {
 			const model = MODELS[provider]["MiniMax-M3"];
 
 			expect(model).toMatchObject({
@@ -302,16 +302,67 @@ describe("models.generated.ts", () => {
 				reasoning: true,
 				input: ["text", "image", "video"],
 				compat: { forceAdaptiveThinking: true },
-				cost: {
-					input: 0.3,
-					output: 1.2,
-					cacheRead: 0.06,
-					cacheWrite: 0,
-				},
+				cost: { ...cost, cacheWrite: 0 },
 				contextWindow: 1000000,
 				maxTokens: 131072,
 			});
 		}
+	});
+
+	test("includes MiniMax M3.1-Flash first-class for direct MiniMax providers (#2906)", () => {
+		const providers = [
+			["minimax", "https://api.minimax.io/anthropic", { input: 0.15, output: 0.6, cacheRead: 0.015 }],
+			["minimax-cn", "https://api.minimaxi.com/anthropic", { input: 0.1494, output: 0.5976, cacheRead: 0.0149 }],
+		] as const;
+
+		for (const [provider, baseUrl, cost] of providers) {
+			const model = MODELS[provider]["MiniMax-M3.1-Flash"];
+
+			expect(model).toMatchObject({
+				id: "MiniMax-M3.1-Flash",
+				name: "MiniMax-M3.1-Flash",
+				api: "anthropic-messages",
+				provider,
+				baseUrl,
+				reasoning: true,
+				input: ["text", "image", "video"],
+				// Flash always thinks: the endpoint 400s on thinking {type:"disabled"}
+				// and output_config.effort accepts low/medium/high/xhigh/max (default max).
+				compat: { forceAdaptiveThinking: true, rejectsDisabledThinking: true },
+				thinkingLevelMap: {
+					minimal: "low",
+					low: "low",
+					medium: "medium",
+					high: "high",
+					xhigh: "xhigh",
+					max: "max",
+				},
+				cost: { ...cost, cacheWrite: 0 },
+				contextWindow: 1000000,
+				maxTokens: 524288,
+			});
+		}
+	});
+
+	test("filters stale MiniMax entries from the direct and verified gateway routes (#2906)", () => {
+		// The Anthropic-compatible endpoint serves only M3.1-Flash + M3; the
+		// OpenRouter/OpenCode gateways only carry the verified M3.1-Flash + M3
+		// routes. Older M2.x entries must not be offered as ordinary choices.
+		expect(Object.keys(MODELS.minimax)).toEqual(["MiniMax-M3", "MiniMax-M3.1-Flash"]);
+		expect(Object.keys(MODELS["minimax-cn"])).toEqual(["MiniMax-M3", "MiniMax-M3.1-Flash"]);
+
+		expect(Object.keys(MODELS.openrouter).filter((id) => id.startsWith("minimax/"))).toEqual([
+			"minimax/minimax-m3",
+			"minimax/minimax-m3.1-flash:free",
+		]);
+		expect(Object.keys(MODELS.opencode).filter((id) => id.startsWith("minimax"))).toEqual([
+			"minimax-m3",
+			"minimax-m3.1-flash-free",
+		]);
+		expect(Object.keys(MODELS["opencode-go"]).filter((id) => id.startsWith("minimax"))).toEqual([
+			"minimax-m3",
+			"minimax-m3.1-flash-free",
+		]);
 	});
 
 	test("includes Grok 4.5 as a first-class xAI model", () => {
