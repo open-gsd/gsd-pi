@@ -147,12 +147,9 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
     isAutoActive() &&
     (parsed.type === "issue-start" || parsed.type === "continue" || parsed.type === "diagnose-issue")
   ) {
-    ctx.ui.notify(
-      "/gsd debug cannot start an investigation while auto-mode is active.\n" +
-      "Pause auto-mode first with /gsd pause, then run /gsd debug.",
-      "error",
-    );
-    return;
+    // Relinquish the unit before session setup, and fail closed if the host
+    // cannot settle. The dispatch guards below remain as a second boundary.
+    if (!(await pauseAutoForDebugDispatch(ctx, pi))) return;
   }
 
   if (parsed.type === "issue-start") {

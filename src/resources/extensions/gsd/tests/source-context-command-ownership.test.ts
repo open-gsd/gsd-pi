@@ -22,6 +22,8 @@ function fixture(t: TestContext) {
     cwd: basePath,
     ui: {
       notify(message: string, level: string) { notifications.push({ message, level }); },
+      setStatus() {},
+      setWidget() {},
     },
   } as unknown as ExtensionCommandContext;
   const pi = {
@@ -56,20 +58,23 @@ for (const args of [
   "continue existing-session",
   "--diagnose investigate source context",
 ]) {
-  test(`debug ${args} cannot take ownership of an active auto Unit`, async (t) => {
-    const { basePath, ctx, pi, notifications, dispatched, unit } = fixture(t);
-    const block = autoSession.sourceObservations.renderActiveBlock();
+  test(`debug ${args} cannot dispatch or create a session if the paused turn does not settle`, async (t) => {
+    const { basePath, ctx, pi, notifications, dispatched } = fixture(t);
+    ctx.waitForIdle = async () => { throw new Error("host turn did not settle"); };
 
     await handleDebug(args, ctx, pi);
 
-    assert.equal(dispatched.length, 0);
-    assert.equal(notifications.length, 1);
-    assert.equal(notifications[0].level, "error");
-    assert.match(notifications[0].message, /Pause auto-mode first with \/gsd pause/);
+    const debugDispatches = dispatched.filter(message =>
+      (message as { customType?: string })?.customType?.startsWith("gsd-debug"),
+    );
+    assert.equal(debugDispatches.length, 0);
+    const errors = notifications.filter(entry => entry.level === "error");
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /Could not pause auto-mode.*host turn did not settle/);
     assert.equal(existsSync(join(basePath, ".gsd", "debug")), false);
-    assert.equal(autoSession.active, true);
-    assert.equal(autoSession.currentUnit, unit);
-    assert.equal(autoSession.sourceObservations.renderActiveBlock(), block);
+    assert.equal(autoSession.active, false);
+    assert.equal(autoSession.currentUnit, null);
+    assert.equal(autoSession.sourceObservations.renderActiveBlock(), null);
   });
 }
 
