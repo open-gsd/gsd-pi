@@ -8,91 +8,21 @@ import { closeAutoPause, closeAutoPauseForBlocker, readOpenAutoPauseBlockerId } 
 import { getDb } from "./db/engine.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import { PAUSED_SESSION_KV_KEY, type PausedSessionMetadata } from "./interrupted-session.js";
-import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import type { AutoPauseBlockerKind, HumanBlockerKind } from "./recovery-policy.js";
+import {
+  classifyAutoPauseBlockerResolution, findPauseLifecycleIdIn, isHumanPauseBlockerKind,
+  type AutoPauseBlockerResolutionInspection, type ResolveAutoPauseBlockerFailure,
+} from "./pause-blocker-inspection.js";
+export { isHumanPauseBlockerKind } from "./pause-blocker-inspection.js";
+export type { AutoPauseBlockerResolutionInspection, ResolveAutoPauseBlockerFailure } from "./pause-blocker-inspection.js";
 
-const HUMAN_BLOCKER_KINDS = new Set<HumanBlockerKind>([
-  "missing_authority",
-  "missing_access",
-  "external_dependency",
-  "consent",
-  "ambiguous_intent",
-  "subjective_uat",
-  "user_limit",
-]);
-
-export function isHumanPauseBlockerKind(kind: AutoPauseBlockerKind): boolean {
-  return HUMAN_BLOCKER_KINDS.has(kind as HumanBlockerKind);
-}
-
-const TASK_PAUSE_UNIT_TYPES = new Set(["execute-task", "replan-task"]);
-const SLICE_PAUSE_UNIT_TYPES = new Set([
-  "complete-slice", "discuss-slice", "plan-slice", "research-slice", "refine-slice", "replan-slice",
-  "run-uat", "reassess-roadmap", "rewrite-docs",
-]);
-const MILESTONE_PAUSE_UNIT_TYPES = new Set([
-  "complete-milestone", "research-milestone", "plan-milestone", "discuss-milestone",
-  "validate-milestone", "rewrite-docs",
-]);
-const SLICE_ID_RE = /^S\d{2,3}$/;
-const TASK_ID_RE = /^T\d{2,3}$/;
-
-/**
- * The exact lifecycle row represented by a pause's unit identity. The unit
- * type and slash-delimited id must agree, and the separately persisted
- * milestone id must identify the same milestone. Never fall back to a parent:
- * a missing task/slice lifecycle cannot authorize resolution through an
- * existing slice/milestone lifecycle.
- */
+/** Existing internal callers use the bound engine; file inspection never does. */
 export function findPauseLifecycleId(input: {
   milestoneId?: string | null;
   unitType?: string | null;
   unitId?: string | null;
 }): string | null {
-  const milestoneId = input.milestoneId ?? "";
-  const parts = (input.unitId ?? "").split("/");
-  if (
-    !milestoneId
-    || parts.some((part) => part.length === 0)
-    || parts[0] !== milestoneId
-    || !MILESTONE_ID_RE.test(parts[0]!)
-  ) return null;
-
-  let row: { lifecycle_id: string } | undefined;
-  if (
-    TASK_PAUSE_UNIT_TYPES.has(input.unitType ?? "")
-    && parts.length === 3
-    && SLICE_ID_RE.test(parts[1]!)
-    && (TASK_ID_RE.test(parts[2]!)
-      || (parts[2]!.startsWith(`${parts[1]}-`) && TASK_ID_RE.test(parts[2]!.slice(parts[1]!.length + 1))))
-  ) {
-    row = getDb().prepare(`
-      SELECT lifecycle_id FROM workflow_item_lifecycles
-      WHERE item_kind = 'task' AND milestone_id = :milestone_id
-        AND slice_id = :slice_id AND task_id = :task_id
-    `).get({
-      ":milestone_id": milestoneId,
-      ":slice_id": parts[1],
-      ":task_id": parts[2],
-    }) as { lifecycle_id: string } | undefined;
-  } else if (
-    SLICE_PAUSE_UNIT_TYPES.has(input.unitType ?? "")
-    && parts.length === 2
-    && SLICE_ID_RE.test(parts[1]!)
-  ) {
-    row = getDb().prepare(`
-      SELECT lifecycle_id FROM workflow_item_lifecycles
-      WHERE item_kind = 'slice' AND milestone_id = :milestone_id AND slice_id = :slice_id
-    `).get({ ":milestone_id": milestoneId, ":slice_id": parts[1] }) as { lifecycle_id: string } | undefined;
-  } else if (MILESTONE_PAUSE_UNIT_TYPES.has(input.unitType ?? "") && parts.length === 1) {
-    row = getDb().prepare(`
-      SELECT lifecycle_id FROM workflow_item_lifecycles
-      WHERE item_kind = 'milestone' AND milestone_id = :milestone_id
-    `).get({ ":milestone_id": milestoneId }) as { lifecycle_id: string } | undefined;
-  } else {
-    return null;
-  }
-  return row?.lifecycle_id ?? null;
+  return findPauseLifecycleIdIn(getDb(), input);
 }
 
 export function openPauseBlockerForSession(input: {
@@ -101,7 +31,7 @@ export function openPauseBlockerForSession(input: {
   description: string;
   requestedAction: string;
 }): string | null {
-  if (!HUMAN_BLOCKER_KINDS.has(input.blockerKind)) return null;
+  if (!isHumanPauseBlockerKind(input.blockerKind)) return null;
   const lifecycleId = findPauseLifecycleId(input.pause);
   if (!lifecycleId || !input.pause.milestoneId || !input.pause.unitType || !input.pause.unitId) return null;
   const { milestoneId, unitType, unitId } = input.pause;
@@ -302,13 +232,6 @@ export function resolvePauseBlockerRow(input: {
   return resolved;
 }
 
-export type ResolveAutoPauseBlockerFailure =
-  | "blocker-not-found"
-  | "blocker-not-open"
-  | "no-associated-pause"
-  | "association-mismatch"
-  | "unsupported-blocker-kind";
-
 export interface ResolveAutoPauseBlockerResult {
   /** `true` when the exact blocker and its associated open pause both closed. */
   resolved: boolean;
@@ -370,6 +293,40 @@ function replayCompatibleTraceId(
   return receipt?.["trace_id"] === formerRawTrace ? formerRawTrace : invocation.traceId;
 }
 
+/** Internal bound-connection preflight. Public native inspection uses the read-only file reader. */
+export function readAutoPauseBlockerResolution(blockerId: string): AutoPauseBlockerResolutionInspection {
+  return classifyAutoPauseBlockerResolution(getDb(), blockerId);
+}
+
+function autoPauseCallerOwnsBlocker(blockerId: string, invocation: ExecutionInvocation): boolean {
+  const row = getDb().prepare(`SELECT resolution_owner FROM workflow_blockers WHERE blocker_id = :id`)
+    .get({ ":id": blockerId });
+  return !row || row["resolution_owner"] === invocation.actorType;
+}
+
+function requireExpectedPauseProject(expectedProjectId?: string): void {
+  if (expectedProjectId !== undefined) {
+    const authority = getDb().prepare(`SELECT project_id FROM project_authority WHERE singleton = 1`).get();
+    if (!expectedProjectId || authority?.["project_id"] !== expectedProjectId) {
+      throw new Error("Project ID changed; inspect the intended Project again before resolving.");
+    }
+  }
+}
+
+function requireAutoPauseResolutionEligibility(
+  blockerId: string, invocation: ExecutionInvocation, expectedProjectId?: string,
+): void {
+  requireExpectedPauseProject(expectedProjectId);
+  // The same explicit-reader classifier as native inspection, now in the write transaction.
+  const observed = classifyAutoPauseBlockerResolution(getDb(), blockerId);
+  if (!autoPauseCallerOwnsBlocker(blockerId, invocation)) {
+    throw new ResolveAutoPauseRefusal({ resolved: false, failure: "owner-mismatch" });
+  }
+  if (!observed.eligible) {
+    throw new ResolveAutoPauseRefusal({ resolved: false, failure: observed.failure });
+  }
+}
+
 class ResolveAutoPauseRefusal extends Error {
   readonly result: ResolveAutoPauseBlockerResult;
 
@@ -387,6 +344,8 @@ function resolveLegacyAutoPauseBlockerById(input: {
   invocation: ExecutionInvocation;
   expectedRevision: number;
   expectedAuthorityEpoch: number;
+  /** Optional for existing internal callers; native approvals always pin the Project ID. */
+  expectedProjectId?: string;
 }): ResolveAutoPauseBlockerResult {
   if (!input.rationale.trim()) throw new Error("rationale must not be blank");
   const association = getDb().prepare(`
@@ -428,6 +387,7 @@ function resolveLegacyAutoPauseBlockerById(input: {
         pauseId: association.pause_id,
         lifecycleId: association.lifecycle_id,
         rationale: input.rationale.trim(),
+        ...(input.expectedProjectId !== undefined ? { expectedProjectId: input.expectedProjectId } : {}),
       },
     }, () => { throw new Error("Replayed pause blocker operation unexpectedly mutated"); });
     return { resolved: true };
@@ -451,7 +411,7 @@ function resolveLegacyAutoPauseBlockerById(input: {
     || metadata.unitType !== association.unit_type
     || metadata.unitId !== association.unit_id
     || (metadata.blockerKind !== undefined && metadata.blockerKind !== association.blocker_kind)
-    || !HUMAN_BLOCKER_KINDS.has(association.blocker_kind as HumanBlockerKind)
+    || !isHumanPauseBlockerKind(association.blocker_kind as AutoPauseBlockerKind)
     || association.resolution_owner !== "user"
     || findPauseLifecycleId(metadata) !== association.lifecycle_id
   ) return { resolved: false, failure: "association-mismatch" };
@@ -461,6 +421,7 @@ function resolveLegacyAutoPauseBlockerById(input: {
     pauseId: association.pause_id,
     lifecycleId: association.lifecycle_id,
     rationale: input.rationale.trim(),
+    ...(input.expectedProjectId !== undefined ? { expectedProjectId: input.expectedProjectId } : {}),
   };
   executeDomainOperation({
     operationType,
@@ -474,6 +435,7 @@ function resolveLegacyAutoPauseBlockerById(input: {
     turnId: input.invocation.turnId,
     payload,
   }, (context) => {
+    requireAutoPauseResolutionEligibility(input.blockerId, input.invocation, input.expectedProjectId);
     const current = getDb().prepare(`
       SELECT value_json FROM runtime_kv
       WHERE scope = 'global' AND scope_id = '' AND key = :key
@@ -536,6 +498,8 @@ export function resolveAutoPauseBlockerById(input: {
   invocation: ExecutionInvocation;
   expectedRevision: number;
   expectedAuthorityEpoch: number;
+  /** Optional for existing internal callers; native approvals always pin the Project ID. */
+  expectedProjectId?: string;
 }): ResolveAutoPauseBlockerResult {
   if (!input.blockerId.trim()) throw new Error("blockerId must not be blank");
   if (!input.rationale.trim()) throw new Error("rationale must not be blank");
@@ -546,11 +510,26 @@ export function resolveAutoPauseBlockerById(input: {
     throw new Error("expectedAuthorityEpoch must be a non-negative safe integer");
   }
 
+  // Caller provenance is host-owned. Rationale (including model-supplied human
+  // claims) never changes ownership, even for a replay of an older receipt.
+  if (!autoPauseCallerOwnsBlocker(input.blockerId, input.invocation)) {
+    return { resolved: false, failure: "owner-mismatch" };
+  }
+
+  requireExpectedPauseProject(input.expectedProjectId);
+
   // Older builds bound pauses in runtime_kv; preserve that exact association.
   const legacyLink = getDb().prepare(
     `SELECT 1 FROM auto_pause_blocker_links WHERE blocker_id = :blocker_id`,
   ).get({ ":blocker_id": input.blockerId });
-  if (legacyLink) return resolveLegacyAutoPauseBlockerById(input);
+  if (legacyLink) {
+    try {
+      return resolveLegacyAutoPauseBlockerById(input);
+    } catch (error) {
+      if (error instanceof ResolveAutoPauseRefusal) return error.result;
+      throw error;
+    }
+  }
 
   const operationKey = resolveAutoPauseOperationKey(input.invocation);
   const traceId = replayCompatibleTraceId(operationKey, input.invocation);
@@ -571,67 +550,11 @@ export function resolveAutoPauseBlockerById(input: {
         payload: {
           blockerId: input.blockerId,
           rationale: input.rationale,
+          ...(input.expectedProjectId !== undefined ? { expectedProjectId: input.expectedProjectId } : {}),
         },
       },
       (context) => {
-        const db = getDb();
-        const authority = db.prepare(
-          `SELECT project_id FROM project_authority WHERE singleton = 1`,
-        ).get() as { project_id: string };
-        const blocker = db.prepare(
-          `SELECT project_id, lifecycle_id, blocker_kind, resolution_owner, blocker_status
-           FROM workflow_blockers WHERE blocker_id = :blocker_id`,
-        ).get({ ":blocker_id": input.blockerId }) as {
-          project_id: string;
-          lifecycle_id: string;
-          blocker_kind: AutoPauseBlockerKind;
-          resolution_owner: string;
-          blocker_status: string;
-        } | undefined;
-        const pauses = db.prepare(
-          `SELECT scope, blocker_kind, milestone_id, unit_type, unit_id
-           FROM auto_pauses WHERE blocker_id = :blocker_id AND closed_at IS NULL LIMIT 2`,
-        ).all({ ":blocker_id": input.blockerId }) as Array<{
-          scope: string;
-          blocker_kind: AutoPauseBlockerKind;
-          milestone_id: string | null;
-          unit_type: string | null;
-          unit_id: string | null;
-        }>;
-        const pause = pauses.length === 1 ? pauses[0] : undefined;
-
-        let failure: ResolveAutoPauseBlockerFailure | undefined;
-        if (!blocker || blocker.project_id !== authority.project_id) {
-          failure = "blocker-not-found";
-        } else if (blocker.blocker_status !== "open") {
-          failure = "blocker-not-open";
-        } else if (pauses.length === 0) {
-          failure = "no-associated-pause";
-        } else if (pauses.length !== 1 || pause === undefined) {
-          failure = "association-mismatch";
-        } else if (
-          !isHumanPauseBlockerKind(blocker.blocker_kind)
-          || !isHumanPauseBlockerKind(pause.blocker_kind)
-          || blocker.resolution_owner !== "user"
-        ) {
-          failure = "unsupported-blocker-kind";
-        } else {
-          const expectedLifecycleId = findPauseLifecycleId({
-            milestoneId: pause.milestone_id,
-            unitType: pause.unit_type,
-            unitId: pause.unit_id,
-          });
-          if (
-            blocker.blocker_kind !== pause.blocker_kind
-            || expectedLifecycleId === null
-            || blocker.lifecycle_id !== expectedLifecycleId
-          ) {
-            failure = "association-mismatch";
-          }
-        }
-
-        if (failure) throw new ResolveAutoPauseRefusal({ resolved: false, failure });
-
+        requireAutoPauseResolutionEligibility(input.blockerId, input.invocation, input.expectedProjectId);
         const settled = resolveOpenPauseBlocker(context, {
           blockerId: input.blockerId,
           disposition: "resolved",

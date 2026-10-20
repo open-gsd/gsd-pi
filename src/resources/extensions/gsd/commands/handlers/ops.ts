@@ -172,6 +172,13 @@ export async function handleOpsCommand(trimmed: string, ctx: ExtensionCommandCon
     await handleDbPruneQuarantine(ctx, projectRoot(), trimmed.replace(/^db prune-quarantine\s*/, "").trim());
     return true;
   }
+  // Match the guard tokenization, including tabs/newlines, so recognized
+  // blocker commands can never fall through to natural-language quick work.
+  if (/^blocker(?:\s|$)/u.test(trimmed)) {
+    const { handleBlocker } = await import("../../commands-blocker.js");
+    await handleBlocker(trimmed.replace(/^blocker\s*/, "").trim(), ctx, projectRoot());
+    return true;
+  }
   if (trimmed === "uat-answer" || trimmed.startsWith("uat-answer ")) {
     const { handleUatAnswer } = await import("../../commands-uat-answer.js");
     await handleUatAnswer(trimmed.replace(/^uat-answer\s*/, "").trim(), ctx, projectRoot());

@@ -229,7 +229,7 @@ test("internal cleanup closes a pre-upgrade parent-linked pause without weakenin
   const fence = readDomainOperationFence();
   assert.deepEqual(resolveAutoPauseBlockerById({
     blockerId, rationale: "Public resolution must remain exact",
-    invocation: internalExecutionInvocation("test/parent-linked-public"),
+    invocation: { ...internalExecutionInvocation("test/parent-linked-public"), actorType: "user" },
     expectedRevision: fence.revision, expectedAuthorityEpoch: fence.authorityEpoch,
   }), { resolved: false, failure: "association-mismatch" });
   assert.equal(openPauseRows().length, 1);

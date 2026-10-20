@@ -1639,49 +1639,24 @@ export interface PersistedAutoPauseBlockerResolution {
 }
 
 /**
- * Resolve one exact named auto-pause blocker (gsd_resolve_blocker,
- * pauseBlockerId) and atomically close its bound `auto_pauses` row, through
- * the `pause.blocker.resolve.by-id` Domain Operation. Clear-only: it never
- * starts auto, authorizes a retry, settles an Attempt, or records task
- * success — that stays `gsd_task_recovery_resume`'s job. It needs no
- * session, so it works after a server restart; the write gate and workflow
- * serialization queue apply like every other workflow mutation.
+ * Refuse a by-id auto-pause resolution from any MCP caller, including the
+ * native compatibility frontend. MCP provenance is always agent-owned; no
+ * historical receipt or backend cache may upgrade it to human authority.
  */
 export async function resolvePersistedAutoPauseBlockerViaBridge(
-  projectDir: string,
-  pauseBlockerId: string,
+  _projectDir: string,
+  _pauseBlockerId: string,
   rationale: string,
-  expectedRevision: number,
-  expectedAuthorityEpoch: number,
-  extra?: WorkflowMcpRequestExtra,
+  _expectedRevision: number,
+  _expectedAuthorityEpoch: number,
+  _extra?: WorkflowMcpRequestExtra,
 ): Promise<PersistedAutoPauseBlockerResolution> {
   if (!rationale.trim()) throw new Error("rationale must not be blank");
-  return runSerializedWorkflowOperation(async () => {
-    await checkWorkflowWriteGate("gsd_resolve_blocker", projectDir);
-    const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
-    invocation.traceId = derivePrivateMcpTraceId({
-      canonicalToolName: "gsd_resolve_blocker",
-      sourceTransport: invocation.sourceTransport,
-      actorType: invocation.actorType,
-      stableInput: invocation.traceId,
-    });
-    const bridge = await importBridgeModule();
-    const opened = bridge.openExistingWorkflowDatabase(projectDir);
-    if (!opened.ok) {
-      const detail = opened.error ? `: ${opened.error.message}` : "";
-      throw new Error(
-        `No pending blocker: the project database is not available (${opened.reason})${detail}`,
-        { cause: opened.error },
-      );
-    }
-    return bridge.resolveAutoPauseBlockerById({
-      blockerId: pauseBlockerId,
-      rationale,
-      invocation,
-      expectedRevision,
-      expectedAuthorityEpoch,
-    });
-  });
+  // Deliberately do not open the database or consult the backend replay cache.
+  return {
+    resolved: false,
+    failure: "owner-mismatch: Auto-pause blockers are user-owned; an MCP agent cannot resolve them. Use the native operator /gsd blocker resolve command with evidence and confirmation.",
+  };
 }
 
 /** Progress payload from the project database (gsd_progress). */

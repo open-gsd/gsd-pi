@@ -3,14 +3,17 @@
 // Domain Operation (gsd_resolve_blocker, pauseBlockerId): it atomically resolves
 // one exact open workflow_blockers row and its bound auto_pauses row, fails
 // closed on a wrong/stale/closed/unassociated id, and leaves unrelated rows
-// untouched. Uses an isolated temporary fixture database only.
+// untouched. Uses isolated temporary fixture databases only. Every internal
+// actorType:user here is SYNTHETIC domain provenance, NOT proof of human input.
+// Controller/host-capability unit assertions live in commands-blocker.test.ts.
 
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 
 import { pauseAuto } from "../auto.ts";
 import { autoSession } from "../auto-runtime-state.ts";
@@ -28,12 +31,18 @@ import {
 } from "../gsd-db.ts";
 import {
   openPauseBlockerRow,
+  readAutoPauseBlockerResolution,
   resolveAutoPauseBlockerById,
 } from "../pause-blocker-domain-operation.ts";
-import { clearPausedSession } from "../interrupted-session.ts";
+import { clearPausedSession, PAUSED_SESSION_KV_KEY } from "../interrupted-session.ts";
+import { setRuntimeKv } from "../db/runtime-kv.ts";
 import { listOpenEscalations } from "../escalation-resolution.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 import { readOpenAutoPauseByBlockerId } from "../db/writers/auto-pauses.ts";
+import { getDbPath } from "../db/engine.ts";
+import { inspectAutoPauseBlockerFile } from "../pause-blocker-inspection.ts";
+import { handleBlocker } from "../commands-blocker.ts";
+import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
 const TS = "2026-10-15T00:00:00.000Z";
 
@@ -135,6 +144,13 @@ function durableCounts(): {
   };
 }
 
+function executionRows() {
+  return Object.fromEntries([
+    "tasks", "workflow_item_lifecycles", "workflow_execution_attempts",
+    "workflow_attempt_results", "workflow_recovery_actions",
+  ].map((table) => [table, _getAdapter()!.prepare(`SELECT * FROM ${table}`).all()]));
+}
+
 function resolutionInput(
   blockerId: string,
   rationale: string,
@@ -154,14 +170,245 @@ function resolutionInput(
     rationale,
     invocation: {
       idempotencyKey,
-      actorType: "agent",
-      sourceTransport: "workflow-mcp" as const,
+      actorType: "user",
+      sourceTransport: "internal" as const,
       traceId: `trace/${idempotencyKey}`,
     },
     expectedRevision: Number(authority["revision"]),
     expectedAuthorityEpoch: Number(authority["authority_epoch"]),
   };
 }
+
+// Whole-file and schema evidence is confined to tiny fixtures under tmpdir().
+function fixtureFiles(base: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  const visit = (directory: string, prefix: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const name = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) {
+        files[`${name}/`] = "directory";
+        visit(join(directory, entry.name), `${name}/`);
+      } else {
+        // WAL shared memory contains transient reader locks, not durable rows.
+        // Record its existence, and hash every durable file (including DB/WAL).
+        files[name] = name.endsWith("-shm") ? "sqlite reader-lock shared memory" :
+          createHash("sha256").update(readFileSync(join(directory, entry.name))).digest("hex");
+      }
+    }
+  };
+  visit(join(base, ".gsd"), "");
+  return files;
+}
+
+for (const kind of ["missing", "unbound", "legacy-incompatible"]) {
+  test(`existing-file inspection of ${kind} creates/migrates/binds/adopts/cutovers nothing`, async (t) => {
+    closeDatabase();
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-blocker-readonly-")));
+    t.after(() => rmSync(base, { recursive: true, force: true }));
+    mkdirSync(join(base, ".gsd"));
+    const path = join(base, ".gsd", "gsd.db");
+    if (kind !== "missing") {
+      const fixture = new DatabaseSync(path);
+      fixture.exec(`CREATE TABLE project_authority (singleton INTEGER PRIMARY KEY, project_id TEXT,
+        project_root_realpath TEXT, revision INTEGER, authority_epoch INTEGER);
+        CREATE TABLE sentinel (value TEXT);
+        INSERT INTO sentinel VALUES ('unchanged');`);
+      fixture.prepare("INSERT INTO project_authority VALUES (1, 'fixture-project', ?, 17, 3)")
+        .run(kind === "unbound" ? "" : base);
+      fixture.close();
+    }
+    const schemaAndRows = () => {
+      if (kind === "missing") return null;
+      const db = new DatabaseSync(path, { readOnly: true });
+      try {
+        return {
+          schema: db.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all(),
+          authority: db.prepare("SELECT * FROM project_authority").all(),
+          sentinel: db.prepare("SELECT * FROM sentinel").all(),
+        };
+      } finally { db.close(); }
+    };
+    const beforeRows = schemaAndRows();
+    const beforeFiles = fixtureFiles(base);
+    const beforeBinding = getDbPath();
+    assert.throws(() => inspectAutoPauseBlockerFile(path, base, "b1"));
+    // Also exercise the actual controller's refusal, with no terminal approval.
+    const notices: string[] = [];
+    const ctx = { cwd: base, hasUI: true, ui: {
+      notify: (message: string) => notices.push(message),
+      input: async () => { assert.fail("incompatible inspect must not ask for input"); },
+      custom: async () => { assert.fail("incompatible inspect must not request approval"); },
+    } } as unknown as ExtensionCommandContext;
+    await handleBlocker("inspect b1", ctx, base);
+    assert.ok(notices.length);
+    assert.equal(getDbPath(), beforeBinding);
+    assert.deepEqual(schemaAndRows(), beforeRows);
+    assert.deepEqual(fixtureFiles(base), beforeFiles, "schema, fences, rows and files are byte-identical");
+  });
+}
+
+test("public read-only file inspection and controller cancel/blank evidence never bind a writable connection", async (t) => {
+  const base = makeProject(t);
+  activateSession(base);
+  await pauseAuto(undefined, undefined, "consent", { message: "Fixture only", category: "unknown" });
+  const db = _getAdapter()!;
+  // Fixture construction only: no adoption/cutover operation is invoked.
+  db.prepare("UPDATE project_authority SET project_root_realpath = :root, authority_epoch = 1 WHERE singleton = 1").run({ ":root": base });
+  const blockerId = String(blockerRows()[0]!["blocker_id"]);
+  const expected = readAutoPauseBlockerResolution(blockerId);
+  assert.equal(expected.eligible, true);
+  const beforeState = { counts: durableCounts(), blockers: blockerRows(), pauses: openPauseRows(), execution: executionRows() };
+  const beforeBinding = getDbPath();
+  const beforeFiles = fixtureFiles(base);
+  const path = join(base, ".gsd", "gsd.db");
+  const readonly = new DatabaseSync(path, { readOnly: true });
+  assert.throws(() => readonly.exec("CREATE TABLE forbidden (id INTEGER)"), /readonly|read-only/i);
+  readonly.close();
+  assert.deepEqual(inspectAutoPauseBlockerFile(path, base, blockerId), expected);
+  for (const input of [undefined, "", "   "]) {
+    const notices: string[] = [];
+    const ctx = { cwd: base, hasUI: true, ui: {
+      notify: (message: string) => notices.push(message), input: async () => input,
+      custom: async () => { assert.fail("blank evidence must not request approval"); },
+    } } as unknown as ExtensionCommandContext;
+    await handleBlocker(`resolve ${blockerId} resolved fixture reason`, ctx, base);
+    assert.match(notices.join("\n"), /Cancelled; nonblank evidence/);
+    assert.equal(getDbPath(), beforeBinding, "no engine bind or rebind");
+    assert.equal(_getAdapter(), db);
+    assert.deepEqual(fixtureFiles(base), beforeFiles);
+  }
+  assert.deepEqual({ counts: durableCounts(), blockers: blockerRows(), pauses: openPauseRows(), execution: executionRows() }, beforeState);
+  closeDatabase();
+  const unboundFiles = fixtureFiles(base);
+  const notices: string[] = [];
+  await handleBlocker(`resolve ${blockerId} resolved fixture reason`, { cwd: base, ui: {
+    notify: (message: string) => notices.push(message),
+    input: async () => { assert.fail("a missing existing host binding must refuse before input"); },
+  } } as unknown as ExtensionCommandContext, base);
+  assert.match(notices.join("\n"), /No existing writable database binding/);
+  assert.equal(getDbPath(), null);
+  assert.deepEqual(fixtureFiles(base), unboundFiles);
+});
+
+test("SYNTHETIC Project ID pin refuses replacement before replay and inside the final transaction", async (t) => {
+  const base = makeProject(t);
+  activateSession(base);
+  await pauseAuto(undefined, undefined, "consent", { message: "Fixture only", category: "unknown" });
+  const db = _getAdapter()!;
+  const blockerId = String(blockerRows()[0]!["blocker_id"]);
+  const projectId = String(db.prepare("SELECT project_id FROM project_authority").get()!["project_id"]);
+  const state = () => ({ counts: durableCounts(), blockers: blockerRows(), pauses: openPauseRows(), execution: executionRows(),
+    authority: db.prepare("SELECT * FROM project_authority").all() });
+  const before = state();
+  const input = { ...resolutionInput(blockerId, "Synthetic Project pin", "test/project-pin"), expectedProjectId: projectId };
+  assert.throws(() => resolveAutoPauseBlockerById({ ...input, expectedProjectId: "replacement-same-numeric-fences" }), /Project ID changed/);
+  assert.deepEqual(state(), before);
+  // A TEMP-fixture trigger changes identity after the provisional operation
+  // insert, i.e. after preflight and BEGIN, before the Domain Operation callback.
+  // Deferred FKs let the explicit Project pin (not an FK accident) reject it.
+  db.exec(`CREATE TRIGGER replace_fixture_project BEFORE INSERT ON workflow_operations
+    WHEN NEW.operation_type = 'pause.blocker.resolve.by-id'
+    BEGIN UPDATE project_authority SET project_id = 'replacement-during-transaction'; END;
+    `);
+  const exec = db.exec.bind(db);
+  // Receipt preflight has its own read transaction. Defer (never disable) FK
+  // checks only at the actual write BEGIN so the fixture trigger can be read
+  // by the pin before rollback. The production connection is never modified.
+  db.exec = (sql: string) => {
+    exec(sql);
+    if (sql === "BEGIN IMMEDIATE") exec("PRAGMA defer_foreign_keys = ON");
+  };
+  try {
+    assert.equal(db.prepare("PRAGMA foreign_keys").get()!["foreign_keys"], 1);
+    assert.throws(() => resolveAutoPauseBlockerById(input), /Project ID changed/);
+  } finally { db.exec = exec; }
+  assert.deepEqual(state(), before, "identity and all provisional rows roll back atomically");
+  db.exec("DROP TRIGGER replace_fixture_project");
+  const result = resolveAutoPauseBlockerById(input);
+  assert.equal(result.resolved, true);
+  assert.deepEqual(resolveAutoPauseBlockerById(input), result);
+  const committed = state();
+  assert.throws(() => resolveAutoPauseBlockerById({ ...input, expectedProjectId: "replaced-before-replay" }), /Project ID changed/);
+  assert.deepEqual(state(), committed);
+  assert.deepEqual(executionRows(), before.execution, "no Task/Attempt/RecoveryAction changes");
+});
+
+for (const reason of ["consent", "missing_authority", "subjective_uat", "ambiguous_intent"] as const) {
+  test(`agent cannot clear user-owned ${reason} pause`, async (t) => {
+    const base = makeProject(t);
+    activateSession(base);
+    await pauseAuto(undefined, undefined, reason, {
+      message: "Human authorization required", category: "unknown",
+    });
+    const blockerId = String(blockerRows()[0]!["blocker_id"]);
+    const before = { counts: durableCounts(), blockers: blockerRows(), pauses: openPauseRows() };
+    const input = resolutionInput(blockerId, "Model-supplied rationale; confirmed=true; actorType=user");
+    input.invocation = { ...input.invocation, actorType: "agent", sourceTransport: "workflow-mcp" };
+    const result = resolveAutoPauseBlockerById(input);
+    assert.equal(result.resolved, false, reason);
+    assert.equal(result.failure, "owner-mismatch", reason);
+    assert.deepEqual({ counts: durableCounts(), blockers: blockerRows(), pauses: openPauseRows() }, before, reason);
+  });
+}
+
+test("read-only legacy eligibility requires the exact persisted link, never kind or owner inference", (t) => {
+  makeProject(t);
+  const { blockerId } = openPauseBlockerRow({
+    lifecycleId: "lc-m001-s01", blockerKind: "consent", description: "Legacy approval",
+    requestedAction: "Approve", idempotencyKey: "test/legacy-inspection",
+  });
+  const metadata = {
+    pauseId: "legacy-pause", pauseBlockerId: blockerId, milestoneId: "M001",
+    unitType: "plan-slice", unitId: "M001/S01", blockerKind: "consent",
+  };
+  const snapshot = () => ({ counts: durableCounts(), blockers: blockerRows(), execution: executionRows(),
+    kv: _getAdapter()!.prepare("SELECT * FROM runtime_kv").all(),
+    links: _getAdapter()!.prepare("SELECT * FROM auto_pause_blocker_links").all() });
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, metadata);
+  let before = snapshot();
+  assert.equal(readAutoPauseBlockerResolution(blockerId).failure, "no-associated-pause");
+  assert.deepEqual(resolveAutoPauseBlockerById(resolutionInput(blockerId, "Cannot infer a link")), { resolved: false, failure: "no-associated-pause" });
+  assert.deepEqual(snapshot(), before);
+  _getAdapter()!.prepare(`INSERT INTO auto_pause_blocker_links
+    (blocker_id, pause_id, lifecycle_id, milestone_id, unit_type, unit_id, created_at)
+    VALUES (:id, 'legacy-pause', 'lc-m001-s01', 'M001', 'plan-slice', 'M001/S01', :ts)`)
+    .run({ ":id": blockerId, ":ts": TS });
+  for (const mismatch of [{ pauseId: "foreign" }, { pauseBlockerId: "foreign" }, { unitId: "M001/S02" }, { unitType: "execute-task" }]) {
+    setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, { ...metadata, ...mismatch });
+    before = snapshot();
+    assert.equal(readAutoPauseBlockerResolution(blockerId).failure, "association-mismatch");
+    assert.deepEqual(resolveAutoPauseBlockerById(resolutionInput(blockerId, "Wrong legacy link")), { resolved: false, failure: "association-mismatch" });
+    assert.deepEqual(snapshot(), before);
+  }
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, metadata);
+  before = snapshot();
+  assert.equal(readAutoPauseBlockerResolution(blockerId).eligible, true);
+  assert.deepEqual(snapshot(), before);
+  const input = { ...resolutionInput(blockerId, "Synthetic legacy fixture evidence"),
+    expectedProjectId: readAutoPauseBlockerResolution(blockerId).projectId };
+  const result = resolveAutoPauseBlockerById(input);
+  assert.equal(result.resolved, true);
+  assert.deepEqual(resolveAutoPauseBlockerById(input), result, "same human intent replays");
+  assert.equal(blockerRows()[0]!["blocker_status"], "resolved");
+  assert.equal(_getAdapter()!.prepare("SELECT value_json FROM runtime_kv WHERE key = :key").get({ ":key": PAUSED_SESSION_KV_KEY }), undefined);
+  assert.deepEqual(executionRows(), before.execution);
+});
+
+test("SYNTHETIC internal-user domain resolution pins Project ID and closes only the exact pair", async (t) => {
+  const base = makeProject(t);
+  activateSession(base);
+  await pauseAuto(undefined, undefined, "consent", { message: "Approval needed", category: "unknown" });
+  const blockerId = String(blockerRows()[0]!["blocker_id"]);
+  const before = executionRows();
+  const projectId = String(_getAdapter()!.prepare("SELECT project_id FROM project_authority").get()!["project_id"]);
+  const input = { ...resolutionInput(blockerId, "Synthetic fixture evidence"), expectedProjectId: projectId };
+  const result = resolveAutoPauseBlockerById(input);
+  assert.equal(result.resolved, true);
+  assert.equal(blockerRows()[0]!["blocker_status"], "resolved");
+  assert.equal(openPauseRows().length, 0);
+  assert.deepEqual(executionRows(), before);
+  assert.deepEqual(resolveAutoPauseBlockerById(input), result, "same synthetic intent replays");
+});
 
 test("resolves the exact open auto-pause blocker and atomically closes its bound pause", async (t) => {
   const base = makeProject(t);
@@ -408,7 +655,7 @@ test("same-key success replays before closed-state validation and returns the st
   assert.equal(openPauseRows().length, 0);
 });
 
-test("central durable identities separate workflow, native, and internal transports", async (t) => {
+test("model transports cannot acquire human ownership; internal human provenance is preserved", async (t) => {
   const stableInput = "shared-caller-retry-identity";
   const transports = ["workflow-mcp", "pi-tool", "internal"] as const;
   const keys: string[] = [];
@@ -429,6 +676,13 @@ test("central durable identities separate workflow, native, and internal transpo
         stableInput,
       );
       input.invocation.sourceTransport = sourceTransport;
+      if (sourceTransport !== "internal") {
+        input.invocation.actorType = "agent";
+        const before = durableCounts();
+        assert.deepEqual(resolveAutoPauseBlockerById(input), { resolved: false, failure: "owner-mismatch" });
+        assert.deepEqual(durableCounts(), before);
+        return;
+      }
       assert.equal(resolveAutoPauseBlockerById(input).resolved, true);
       const row = _getAdapter()!.prepare(`
         SELECT idempotency_key FROM workflow_operations
@@ -438,8 +692,8 @@ test("central durable identities separate workflow, native, and internal transpo
     });
   }
 
-  assert.equal(keys.length, transports.length);
-  assert.equal(new Set(keys).size, transports.length, "each source transport has a distinct namespace");
+  assert.equal(keys.length, 1);
+  assert.equal(new Set(keys).size, 1, "only the permitted synthetic internal operation has a key; denied transports have no receipts");
   for (const key of keys) {
     assert.match(key, /^resolve-auto-pause-blocker:v1:sha256:[a-f0-9]{64}$/);
     assert.doesNotMatch(key, /shared-caller-retry-identity/);
@@ -473,8 +727,7 @@ test("records caller provenance on the resolve operation", async (t) => {
   });
   const blockerId = String(blockerRows()[0]["blocker_id"]);
   const input = resolutionInput(blockerId, "Access was granted", "test/provenance");
-  input.invocation.actorType = "operator";
-  input.invocation.traceId = "trace-from-mcp";
+  input.invocation.traceId = "trace-from-terminal";
 
   assert.equal(resolveAutoPauseBlockerById(input).resolved, true);
   const operation = _getAdapter()!.prepare(`
@@ -482,9 +735,9 @@ test("records caller provenance on the resolve operation", async (t) => {
     FROM workflow_operations WHERE operation_type = 'pause.blocker.resolve.by-id'
   `).get()!;
   assert.deepEqual({ ...operation }, {
-    actor_type: "operator",
-    source_transport: "workflow-mcp",
-    trace_id: "trace-from-mcp",
+    actor_type: "user",
+    source_transport: "internal",
+    trace_id: "trace-from-terminal",
     idempotency_key: operation["idempotency_key"],
   });
   assert.match(
@@ -728,7 +981,7 @@ test("competing resolution is refused without additional durable mutation", asyn
 test("rejects wrong-project, lifecycle, kind, owner, and non-human pause associations", async (t) => {
   const cases: Array<{
     name: string;
-    expected: "blocker-not-found" | "association-mismatch" | "unsupported-blocker-kind";
+    expected: "blocker-not-found" | "association-mismatch" | "unsupported-blocker-kind" | "owner-mismatch";
     corrupt(db: NonNullable<ReturnType<typeof _getAdapter>>, blockerId: string): void;
   }> = [
     {
@@ -767,7 +1020,7 @@ test("rejects wrong-project, lifecycle, kind, owner, and non-human pause associa
     },
     {
       name: "external owner",
-      expected: "unsupported-blocker-kind",
+      expected: "owner-mismatch",
       corrupt(db, blockerId) {
         // The fixture database is isolated and disposed by makeProject(); only
         // these named opening-identity/transition fences are relaxed for the

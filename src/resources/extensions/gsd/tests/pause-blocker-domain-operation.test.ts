@@ -12,6 +12,13 @@ import { internalExecutionInvocation } from "../execution-invocation.ts";
 import { PAUSED_SESSION_KV_KEY, type PausedSessionMetadata } from "../interrupted-session.ts";
 import { findPauseLifecycleId, openPauseBlockerForSession, resolveAutoPauseBlockerById } from "../pause-blocker-domain-operation.ts";
 
+// A synthetic internal-user fixture models the domain caller after genuine
+// terminal confirmation. This is not MCP provenance or evidence of a real user
+// decision; command transport/confirmation boundaries are tested separately.
+function syntheticOperatorInvocation(key: string) {
+  return { ...internalExecutionInvocation(key), actorType: "user" as const };
+}
+
 function createProject(): string {
   const dir = mkdtempSync(join(tmpdir(), "gsd-pause-blocker-"));
   openDatabase(join(dir, "gsd.db"));
@@ -124,7 +131,7 @@ test("slice-prefixed task IDs create and resolve an exact task blocker", (t) => 
   assert.deepEqual(resolveAutoPauseBlockerById({
     blockerId,
     rationale: "Approved",
-    invocation: internalExecutionInvocation("test/pause-blocker/prefixed-resolve"),
+    invocation: syntheticOperatorInvocation("test/pause-blocker/prefixed-resolve"),
     expectedRevision: currentFence.revision,
     expectedAuthorityEpoch: currentFence.authorityEpoch,
   }), { resolved: true });
@@ -163,7 +170,7 @@ test("human pause blocker is linked durably and resolves clear-only with stable 
   const input = {
     blockerId,
     rationale: "Human validation completed",
-    invocation: internalExecutionInvocation("test/pause-blocker/resolve"),
+    invocation: syntheticOperatorInvocation("test/pause-blocker/resolve"),
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
   };
@@ -204,7 +211,7 @@ test("pause blocker resolution refuses mismatched persisted pause identity witho
   const result = resolveAutoPauseBlockerById({
     blockerId,
     rationale: "Resolved",
-    invocation: internalExecutionInvocation("test/pause-blocker/mismatch"),
+    invocation: syntheticOperatorInvocation("test/pause-blocker/mismatch"),
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
   });
@@ -244,7 +251,7 @@ test("legacy pause resolution refuses a persisted blocker-kind mismatch without 
   const result = resolveAutoPauseBlockerById({
     blockerId,
     rationale: "Clear mismatched kind",
-    invocation: internalExecutionInvocation("test/pause-blocker/legacy-kind-mismatch"),
+    invocation: syntheticOperatorInvocation("test/pause-blocker/legacy-kind-mismatch"),
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
   });
@@ -282,12 +289,13 @@ test("legacy pause resolution refuses external-owned blockers without clearing t
   const result = resolveAutoPauseBlockerById({
     blockerId,
     rationale: "Clear external blocker",
-    invocation: internalExecutionInvocation("test/pause-blocker/legacy-external-owner"),
+    invocation: syntheticOperatorInvocation("test/pause-blocker/legacy-external-owner"),
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
   });
 
-  assert.deepEqual(result, { resolved: false, failure: "association-mismatch" });
+  // Authorization rejects a foreign owner before association/receipt handling.
+  assert.deepEqual(result, { resolved: false, failure: "owner-mismatch" });
   assert.equal(getRuntimeKv<PausedSessionMetadata>("global", "", PAUSED_SESSION_KV_KEY)?.pauseBlockerId, blockerId);
   assert.equal(db().prepare(
     "SELECT blocker_status, resolution_owner FROM workflow_blockers WHERE blocker_id = :id",

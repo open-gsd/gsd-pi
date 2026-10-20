@@ -3,11 +3,49 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { closeDatabase } from "../db/engine.js";
 import { getWorkspaceGitBlockMessageForBase } from "../workspace-git-guard.js";
+import { isUnmergedMilestoneAllowedCommand } from "../unmerged-milestone-guard.js";
+import { isValidationBlockAllowedCommand } from "../validation-block-guard.js";
 import { cleanup, git, makeTempDir, makeTempRepo } from "./test-utils.ts";
+
+test("blocker commands never bootstrap or prepare a workspace database before consent", async () => {
+  const base = makeTempRepo();
+  const stateDir = join(base, ".gsd");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "PROJECT.md"), "# Isolated dispatcher fixture\n");
+  const before = readdirSync(stateDir).sort();
+  try {
+    const opsSource = readFileSync(new URL("../commands/handlers/ops.ts", import.meta.url), "utf8");
+    assert.ok(opsSource.includes("if (/^blocker(?:\\s|$)/u.test(trimmed)) {"),
+      "ops routing must recognize the same whitespace boundary as all entry guards");
+    for (const command of [
+      "blocker inspect blocker-id",
+      "blocker resolve blocker-id resolved operator-decision",
+      "blocker\tinspect blocker-id",
+      "blocker\tresolve blocker-id resolved operator-decision",
+      "blocker\ninvalid",
+      "blocker",
+      "blocker invalid",
+    ]) {
+      assert.equal(await getWorkspaceGitBlockMessageForBase(base, command), null);
+      // The real dispatcher checks both classifiers before their bootstrapping
+      // getters; all three preflight paths must leave metadata-only commands alone.
+      assert.equal(isUnmergedMilestoneAllowedCommand(command), true);
+      assert.equal(isValidationBlockAllowedCommand(command), true);
+      assert.deepEqual(readdirSync(stateDir).sort(), before,
+        `workspace preflight must not initialize state for ${command}`);
+    }
+    assert.equal(isUnmergedMilestoneAllowedCommand("auto"), false);
+    assert.equal(isValidationBlockAllowedCommand("auto"), false);
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
 
 function seedProductConflict(base: string): void {
   writeFileSync(join(base, "app.ts"), "root\n");

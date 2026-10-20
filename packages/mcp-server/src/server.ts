@@ -1436,10 +1436,10 @@ export async function createMcpServer(
   //      a server restart).
   // -----------------------------------------------------------------------
   const resolveBlockerSchema = z.object({
-    sessionId: z.string().min(1).optional().describe('Session ID returned from gsd_execute'),
-    projectDir: z.string().min(1).optional().describe('Absolute path to the project directory. Resolves the open escalation or auto-pause blocker in the project database.'),
-    questionId: z.string().min(1).optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open. Mutually exclusive with pauseBlockerId.'),
-    pauseBlockerId: z.string().min(1).optional().describe('The exact open auto-pause blocker id to clear-only resolve (blockers in gsd_project_snapshot). Mutually exclusive with sessionId and questionId.'),
+    sessionId: z.string().trim().min(1).optional().describe('Session ID returned from gsd_execute'),
+    projectDir: z.string().trim().min(1).optional().describe('Absolute path to the project directory. Resolves the open escalation or auto-pause blocker in the project database.'),
+    questionId: z.string().trim().min(1).optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open. Mutually exclusive with pauseBlockerId.'),
+    pauseBlockerId: z.string().trim().min(1).optional().describe('The exact open auto-pause blocker id to clear-only resolve (blockers in gsd_project_snapshot). Mutually exclusive with sessionId and questionId.'),
     response: z.string().optional().describe('Required for session or database escalation selection; forbidden with pauseBlockerId.'),
     rationale: z.string().refine((value) => value.trim().length > 0, 'rationale is required with pauseBlockerId.').optional().describe('Required with pauseBlockerId: why the auto-pause blocker is being cleared.'),
     expectedRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional().describe('Required with pauseBlockerId: authority.revision from the gsd_project_snapshot that supplied the selected blocker.'),
@@ -1468,6 +1468,9 @@ export async function createMcpServer(
       }
       return;
     }
+    if (value.sessionId !== undefined && value.questionId !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['questionId'], message: 'sessionId and questionId are mutually exclusive.' });
+    }
     if (value.response === undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['response'], message: 'response is required for escalation selection.' });
     } else if (value.projectDir !== undefined && !value.response.trim()) {
@@ -1481,7 +1484,7 @@ export async function createMcpServer(
   server.registerTool(
     'gsd_resolve_blocker',
     {
-      description: 'Resolve a pending blocker. With sessionId: answer the UI request that the session waits on. With projectDir and pauseBlockerId: clear-only resolve one exact open auto-pause blocker (blockers in gsd_project_snapshot) and its associated pause; this does not start auto, authorize a retry, or record task success — use gsd_task_recovery_resume separately for that. Pause selection requires the revision and Authority Epoch observed in that snapshot. With projectDir and no pauseBlockerId: resolve the open escalation stored in the project database (this works after a server restart); sessionId is then not used. For an escalation the response is "<choice> [rationale]"; choice is an option id, "accept" (the recommendation), or "reject-blocker".',
+      description: 'Resolve a live-session UI request with sessionId, or a persisted escalation with projectDir and optional questionId. Escalation response is "<choice> [rationale]": an option id, "accept", or "reject-blocker". MCP callers remain agents. The by-id pauseBlockerId selector always refuses, including retries and historical receipts; a human must use the native terminal /gsd blocker resolve command with evidence and confirmation. Closure never resumes auto, authorizes retry, settles an Attempt, waives a gate, or completes a Task.',
       inputSchema: resolveBlockerSchema,
     },
     async (args: Record<string, unknown>, extra?: McpToolExtra) => {
@@ -1498,7 +1501,10 @@ export async function createMcpServer(
             expectedRevision!, expectedAuthorityEpoch!, extra,
           );
           if (!result.resolved) {
-            return errorContent(`Auto-pause blocker ${pauseBlockerId} was not resolved: ${result.failure ?? 'unknown'}.`);
+            const guidance = result.failure === 'owner-mismatch'
+              ? ' MCP cannot act as the human owner. A person must inspect and confirm /gsd blocker resolve in the interactive terminal.'
+              : '';
+            return errorContent(`Auto-pause blocker ${pauseBlockerId} was not resolved: ${result.failure ?? 'unknown'}.${guidance}`);
           }
           return jsonContent({ source: 'database', pauseBlockerId, ...result, resolved: true });
         }
