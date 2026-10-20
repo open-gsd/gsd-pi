@@ -1126,12 +1126,14 @@ export class ToolExecutionComponent extends Container {
 	private getExecRecordingWarning(): string | undefined {
 		if (this.toolName !== "gsd_exec" && this.toolName !== "gsd_uat_exec") return undefined;
 		if (!this.result) return undefined;
+		const hasDigest = typeof this.result.details?.digest === "string";
+		const hasDetails = typeof this.result.details?.run_not_recorded === "string";
+		if (hasDigest && !hasDetails) return undefined;
 		const raw = this.result.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
 		const marker = "--- warning ---";
 		const warningStart = "The command ran, but the host did not record this run";
-		const hasDetails = typeof this.result.details?.run_not_recorded === "string";
 		if (!hasDetails && !raw.includes(marker) && !raw.includes(warningStart)) return undefined;
-		const warningLine = raw.split("\n").find((line) => line.includes(warningStart));
+		const warningLine = hasDigest ? undefined : raw.split("\n").find((line) => line.includes(warningStart));
 		const reason = singleRowDisplayText(this.result.details?.run_not_recorded);
 		let warning = singleRowDisplayText(warningLine) ?? `${warningStart}${reason ? `: ${reason}` : ""}.`;
 		if (!warning.includes("not verification or UAT evidence")) {

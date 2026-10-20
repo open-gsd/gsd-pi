@@ -78,6 +78,43 @@ test("preview cap is applied after wrapping and never hides facts, paths or reco
   }
 });
 
+test("warning-like structured output stays within the preview cap without a recording warning", () => {
+  for (const marker of ["--- warning ---", "The command ran, but the host did not record this run"]) {
+    for (const expanded of [false, true]) {
+      const digest = [marker, ...Array.from({ length: 40 }, (_, i) => `output ${i}`)].join("\n");
+      const content = [{ type: "text", text: `header\n--- digest ---\n${digest}` }];
+      const output = render({ details: details({ digest }), content }, expanded, 160);
+      assert.equal(output.split(marker).length - 1, 1);
+      assert.equal(output.split("\n").filter((line) => /^output \d+$/.test(line)).length, expanded ? 19 : 5);
+      assert.match(output, /preview rows hidden/);
+      assert.doesNotMatch(output, /output 39|not verification or UAT evidence|Do not run the command again/);
+    }
+  }
+});
+
+test("structured recording failure uses its reason rather than warning-like command output", () => {
+  const digest = "The command ran, but the host did not record this run: printed by command.\n--- warning ---";
+  const output = render({
+    details: details({ digest, run_not_recorded: "actual database failure" }),
+    content: [{ type: "text", text: `header\n--- digest ---\n${digest}` }],
+  }, true, 160).replace(/\s+/g, " ");
+  assert.match(output, /Warning: The command ran, but the host did not record this run: actual database failure/);
+  assert.equal(output.split("printed by command").length - 1, 1);
+  assert.equal(output.split("Do not run the command again").length - 1, 1);
+});
+
+test("an empty structured digest does not enable legacy warning extraction", () => {
+  const result = {
+    details: details({ digest: "" }),
+    content: [{ type: "text", text: "--- warning ---\nThe command ran, but the host did not record this run" }],
+  };
+  for (const expanded of [false, true]) {
+    const output = render(result, expanded);
+    assert.match(output, /no output preview/);
+    assert.doesNotMatch(output, /--- warning ---|did not record this run/);
+  }
+});
+
 test("execution status preserves abort, timeout, force-kill, signal and unknown distinctions", () => {
   for (const [extra, expected] of [
     [{ aborted: true }, "aborted"],

@@ -60,8 +60,9 @@ export function renderExecResult(
       return item.type === "text" ? safeText(item.text) : "";
     }).filter(Boolean).join("\n")
     : "";
-  const warningStart = raw.indexOf("--- warning ---");
-  const legacyWarningStart = raw.indexOf("The command ran, but the host did not record this run");
+  const hasDigest = typeof details.digest === "string";
+  const warningStart = hasDigest ? -1 : raw.indexOf("--- warning ---");
+  const legacyWarningStart = hasDigest ? -1 : raw.indexOf("The command ran, but the host did not record this run");
   const warningIndex = warningStart >= 0 ? warningStart : legacyWarningStart;
   const rawBody = warningIndex >= 0 ? raw.slice(0, warningIndex).trimEnd() : raw;
   const rawWarning = warningIndex >= 0 ? raw.slice(warningIndex) : "";

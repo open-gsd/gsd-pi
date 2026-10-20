@@ -178,7 +178,7 @@ describe("ToolExecutionComponent", () => {
 				);
 				component.updateResult({
 					content: [{ type: "text", text: "command output" }], isError: false,
-					details: { run_not_recorded: reason },
+					details: { digest: "command output", run_not_recorded: reason },
 				});
 				for (const expanded of [false, true]) {
 					component.setExpanded(expanded);
@@ -193,6 +193,45 @@ describe("ToolExecutionComponent", () => {
 					assert.equal(component.getDisplayedLineCount(100), lines.length);
 					assert.ok(lines.length > 1);
 				}
+			}
+		}
+	});
+
+	test("structured warning-like output does not fabricate recording failures or disable compact rollup", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			for (const digest of ["", "--- warning ---", "The command ran, but the host did not record this run"]) {
+				const component = new ToolExecutionComponent(
+					toolName, { purpose: "Inspect output" }, {}, undefined, { requestRender() {} } as any,
+				);
+				const text = `header\n--- digest ---\n${digest || "--- warning ---"}`;
+				component.updateResult({ content: [{ type: "text", text }], isError: false, details: { digest } });
+				const lines = component.render(120);
+				assert.equal(lines.length, 1);
+				assert.match(stripAnsi(lines[0]), /output hidden.*ctrl\+o expand/);
+				assert.ok(component.getRollupPhase());
+				assert.equal(component.getDisplayedLineCount(120), 1);
+				component.setExpanded(true);
+				const expanded = stripAnsi(component.render(120).join("\n"));
+				assert.doesNotMatch(expanded, /not verification or UAT evidence|Do not run the command again/);
+			}
+		}
+	});
+
+	test("structured recording warnings use metadata even when output imitates the host warning", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const digest = "The command ran, but the host did not record this run: printed by command.";
+			const component = new ToolExecutionComponent(
+				toolName, {}, {}, undefined, { requestRender() {} } as any,
+			);
+			component.updateResult({
+				content: [{ type: "text", text: `header\n--- digest ---\n${digest}` }], isError: false,
+				details: { digest, run_not_recorded: "actual database failure" },
+			});
+			for (const expanded of [false, true]) {
+				component.setExpanded(expanded);
+				const rendered = stripAnsi(component.render(160).join("\n")).replace(/\s+/g, " ");
+				assert.match(rendered, /did not record this run: actual database failure/);
+				assert.equal(component.getRollupPhase(), null);
 			}
 		}
 	});
