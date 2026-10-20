@@ -25,6 +25,61 @@ function render(value: unknown, expanded = false, width = 120): string {
     .render(width).map((line) => line.trimEnd()).join("\n");
 }
 
+test("frame ownership is explicit; standalone and older contexts retain purpose", () => {
+  const args = { purpose: "Inspect once" };
+  for (const context of [undefined, { state: {} }, { state: { gsdExecPurposeInFrame: true } }]) {
+    const owned = context?.state.gsdExecPurposeInFrame === true;
+    const call = renderExecCall(args, theme, context).render(120).join("\n");
+    const result = renderExecResult({ details: details(args) }, { expanded: true }, theme, context)
+      .render(120).join("\n");
+    assert.equal(call.includes("Inspect once"), !owned);
+    assert.equal(result.includes("Inspect once"), !owned);
+    assert.match(result, /exit: 0/);
+  }
+});
+
+test("schema-shaped UAT args synthesize a sanitized display-only purpose", () => {
+  const args = {
+    milestoneId: " \x1b[31mM001\x1b[0m ", sliceId: "S01\n", checkId: "C01\u202e",
+    intent: "uat-runtime-check", script: "echo ready",
+  };
+  const before = structuredClone(args);
+  assert.equal(renderExecCall(args, theme).render(120).join("\n").trim(),
+    "UAT M001/S01/C01 (uat-runtime-check)");
+  assert.match(render({ details: details({ ...args, purpose: undefined }) }), /UAT M001\/S01\/C01/);
+  assert.deepEqual(args, before);
+  for (const field of ["milestoneId", "sliceId", "checkId", "intent"]) {
+    for (const value of [undefined, 42, "\n\u202e"]) {
+      assert.equal(renderExecCall({ ...args, [field]: value }, theme).render(120).join("\n").trim(),
+        "Run a Bash script");
+    }
+  }
+});
+
+test("ordinary warning markers stay budgeted without a digest or any metadata", () => {
+  for (const extra of [{}, { id: "exec-1", exit_code: 0 }]) {
+    for (const marker of ["--- warning ---", "The command ran, but the host did not record this run: output only."]) {
+      for (const expanded of [false, true]) {
+        const output = render({ details: extra, content: [{ type: "text", text: `${marker}\n${"x".repeat(400)}` }] }, expanded, 10);
+        assert.ok(output.split("\n").filter((line) => /^x+$/.test(line)).length <= (expanded ? 20 : 6));
+        assert.match(output.replace(/\s/g, ""), /previewrowshidden/);
+        assert.doesNotMatch(output.replace(/\s/g, ""), /notverificationorUATevidence/);
+      }
+    }
+  }
+});
+
+test("metadata reason wins without digest; only paired raw historical footers are warnings", () => {
+  const footer = "--- warning ---\nThe command ran, but the host did not record this run: output imitation.";
+  const output = render({ details: { run_not_recorded: "stored database reason" }, content: [{ type: "text", text: footer }] });
+  assert.match(output, /did not record this run: stored database reason/);
+  const legacy = render({ content: [{ type: "text", text: `old preview\n${footer} This run is not verification or UAT evidence. Do not run the command again only to get the output.` }] });
+  assert.match(legacy, /did not record this run: output imitation/);
+  assert.match(legacy, /not verification or UAT evidence/);
+  const recorded = render({ details: { id: "exec-1", exit_code: 0 }, content: [{ type: "text", text: footer }] });
+  assert.doesNotMatch(recorded, /not verification or UAT evidence/);
+});
+
 test("call renders only muted italic purpose, never script or heading", () => {
   const calls: string[] = [];
   const styled = {

@@ -496,6 +496,9 @@ export class ToolExecutionComponent extends Container {
 	private runningRailTimerIntervalMs: number | undefined;
 
 	private createRenderContext(): ToolRenderContext {
+		if (this.toolName === "gsd_exec" || this.toolName === "gsd_uat_exec") {
+			this.toolRenderState.gsdExecPurposeInFrame = true;
+		}
 		return {
 			args: this.args,
 			toolCallId: String(this.args?.id ?? this.toolName),
@@ -1112,6 +1115,11 @@ export class ToolExecutionComponent extends Container {
 		if (this.toolName !== "gsd_exec" && this.toolName !== "gsd_uat_exec") return undefined;
 		const purpose = singleRowDisplayText(this.result?.details?.purpose) ?? singleRowDisplayText(this.args?.purpose);
 		if (purpose) return purpose;
+		if (this.toolName === "gsd_uat_exec") {
+			const uat = [this.args?.milestoneId, this.args?.sliceId, this.args?.checkId, this.args?.intent]
+				.map(value => singleRowDisplayText(value));
+			if (uat.every(Boolean)) return `UAT ${uat[0]}/${uat[1]}/${uat[2]} (${uat[3]})`;
+		}
 		const runtime = this.args?.runtime;
 		if (runtime === undefined || runtime === null || runtime === "") return "Run a Bash script";
 		if (typeof runtime !== "string") return "Run a script";
@@ -1126,16 +1134,22 @@ export class ToolExecutionComponent extends Container {
 	private getExecRecordingWarning(): string | undefined {
 		if (this.toolName !== "gsd_exec" && this.toolName !== "gsd_uat_exec") return undefined;
 		if (!this.result) return undefined;
-		const hasDigest = typeof this.result.details?.digest === "string";
-		const hasDetails = typeof this.result.details?.run_not_recorded === "string";
-		if (hasDigest && !hasDetails) return undefined;
-		const raw = this.result.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
-		const marker = "--- warning ---";
 		const warningStart = "The command ran, but the host did not record this run";
-		if (!hasDetails && !raw.includes(marker) && !raw.includes(warningStart)) return undefined;
-		const warningLine = hasDigest ? undefined : raw.split("\n").find((line) => line.includes(warningStart));
-		const reason = singleRowDisplayText(this.result.details?.run_not_recorded);
-		let warning = singleRowDisplayText(warningLine) ?? `${warningStart}${reason ? `: ${reason}` : ""}.`;
+		const storedReason = this.result.details?.run_not_recorded;
+		let warning: string;
+		if (typeof storedReason === "string") {
+			const reason = singleRowDisplayText(storedReason);
+			warning = `${warningStart}${reason ? `: ${reason}` : ""}.`;
+		} else {
+			// Structured metadata wins even without a digest. Only raw-only historical
+			// host footers qualify; an arbitrary warning in command output does not.
+			if (this.result.details && Object.keys(this.result.details).length > 0) return undefined;
+			const raw = this.result.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
+			const legacy = /(?:^|\n)--- warning ---\n(The command ran, but the host did not record this run:[^\n]*)/.exec(raw);
+			const warningLine = singleRowDisplayText(legacy?.[1]);
+			if (!warningLine) return undefined;
+			warning = warningLine;
+		}
 		if (!warning.includes("not verification or UAT evidence")) {
 			warning += " This run is not verification or UAT evidence.";
 		}

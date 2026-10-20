@@ -2,6 +2,8 @@ import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@gsd/pi-coding-agent";
 import { Text, wrapTextWithAnsi, type Component } from "@gsd/pi-tui";
 
+type ExecRendererContext = { state?: Record<string, unknown> };
+
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -19,6 +21,9 @@ function safeText(value: unknown): string {
 function purposeFor(args: Record<string, unknown>): string {
   const purpose = safeText(args.purpose).replace(/\s+/g, " ").trim();
   if (purpose) return purpose;
+  const uat = [args.milestoneId, args.sliceId, args.checkId, args.intent]
+    .map(value => safeText(value).replace(/\s+/g, " ").trim());
+  if (uat.every(Boolean)) return `UAT ${uat[0]}/${uat[1]}/${uat[2]} (${uat[3]})`;
   const runtime = typeof args.runtime === "string" ? args.runtime.trim().toLowerCase() : args.runtime;
   if (runtime === undefined || runtime === null || ["", "bash", "sh", "shell"].includes(runtime as string)) {
     return "Run a Bash script";
@@ -28,8 +33,10 @@ function purposeFor(args: Record<string, unknown>): string {
   return "Run a script";
 }
 
-export function renderExecCall(args: unknown, theme: Theme): Component {
-  return new Text(theme.fg("muted", theme.italic(purposeFor(record(args)))), 0, 0);
+export function renderExecCall(args: unknown, theme: Theme, context?: ExecRendererContext): Component {
+  // The native host owns the purpose row; standalone/older hosts still need it.
+  const purpose = context?.state?.gsdExecPurposeInFrame === true ? "" : purposeFor(record(args));
+  return new Text(theme.fg("muted", theme.italic(purpose)), 0, 0);
 }
 
 function exitStatus(details: Record<string, unknown>): string {
@@ -51,6 +58,7 @@ export function renderExecResult(
   result: unknown,
   options: { expanded?: boolean; isPartial?: boolean },
   theme: Theme,
+  context?: ExecRendererContext,
 ): Component {
   const payload = record(result);
   const details = record(payload.details);
@@ -60,10 +68,12 @@ export function renderExecResult(
       return item.type === "text" ? safeText(item.text) : "";
     }).filter(Boolean).join("\n")
     : "";
-  const hasDigest = typeof details.digest === "string";
-  const warningStart = hasDigest ? -1 : raw.indexOf("--- warning ---");
-  const legacyWarningStart = hasDigest ? -1 : raw.indexOf("The command ran, but the host did not record this run");
-  const warningIndex = warningStart >= 0 ? warningStart : legacyWarningStart;
+  // Metadata is authoritative even when an older structured result has no digest.
+  // Raw-only compatibility requires the historical host footer, not output markers.
+  const legacyWarning = Object.keys(details).length === 0
+    ? /(?:^|\n)--- warning ---\nThe command ran, but the host did not record this run:/.exec(raw)
+    : null;
+  const warningIndex = legacyWarning?.index ?? -1;
   const rawBody = warningIndex >= 0 ? raw.slice(0, warningIndex).trimEnd() : raw;
   const rawWarning = warningIndex >= 0 ? raw.slice(warningIndex) : "";
   const warning = typeof details.run_not_recorded === "string"
@@ -79,7 +89,9 @@ export function renderExecResult(
   const before: string[] = [];
   const after: string[] = [];
   if (structured) {
-    before.push(theme.fg("muted", theme.italic(purposeFor(details))));
+    if (context?.state?.gsdExecPurposeInFrame !== true) {
+      before.push(theme.fg("muted", theme.italic(purposeFor(details))));
+    }
     before.push(
       `Run ${safeText(details.id)} · runtime: ${safeText(details.runtime)} · exit: ${exitStatus(details)} · ` +
       `duration: ${numberLabel(details.duration_ms, "ms")}`,

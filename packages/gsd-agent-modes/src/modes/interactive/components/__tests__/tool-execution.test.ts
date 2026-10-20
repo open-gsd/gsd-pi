@@ -76,6 +76,95 @@ function renderToolCollapsed(
 }
 
 describe("ToolExecutionComponent", () => {
+
+	test("real exec callbacks leave purpose to the native frame across lifecycle and history", async () => {
+		const { renderExecCall, renderExecResult } = await import(
+			new URL("../../../../../../../src/resources/extensions/gsd/tools/exec-tool-renderer.ts", import.meta.url).href
+		);
+		for (const name of ["gsd_exec", "gsd_uat_exec"]) {
+			const component = new ToolExecutionComponent(
+				name, { purpose: "Inspect application", script: "echo secret-script" }, {},
+				{ label: "Native Exec", renderCall: renderExecCall, renderResult: renderExecResult } as any,
+				{ requestRender() {} } as any,
+			);
+			for (const resultPurpose of [undefined, "Verify application", null]) {
+				if (resultPurpose !== undefined) component.updateResult({
+					content: [], isError: false,
+					details: { id: "exec-1", runtime: "bash", purpose: resultPurpose, digest: "ready", exit_code: 0, duration_ms: 12 },
+				});
+				for (const expanded of [false, true]) {
+					component.setExpanded(expanded);
+					const output = component.render(180).map(stripAnsi).join("\n");
+					const purpose = resultPurpose === "Verify application" ? resultPurpose : "Inspect application";
+					assert.equal(output.split(purpose).length - 1, 1, `${name} expanded=${expanded}\n${output}`);
+					assert.match(output, /NATIVE EXEC/);
+					assert.match(output, resultPurpose === undefined ? /running/ : /success/);
+					if (expanded) assert.match(output, /collapse/);
+					assert.doesNotMatch(output, /Run a Bash script|secret-script/);
+					if (expanded && resultPurpose !== undefined) assert.match(output, /exit: 0/);
+				}
+			}
+		}
+	});
+
+	test("schema-shaped UAT args display sanitized identifiers while running without mutation", async () => {
+		const { renderExecCall, renderExecResult } = await import(
+			new URL("../../../../../../../src/resources/extensions/gsd/tools/exec-tool-renderer.ts", import.meta.url).href
+		);
+		const args = { milestoneId: " \x1b[31mM001\x1b[0m ", sliceId: "S01\n", checkId: "C01\u202e", intent: "uat-runtime-check", script: "echo ready" };
+		const before = structuredClone(args);
+		const definition = { label: "UAT Exec", renderCall: renderExecCall, renderResult: renderExecResult };
+		for (const expanded of [false, true]) {
+			const component = new ToolExecutionComponent("gsd_uat_exec", args, {}, definition as any, { requestRender() {} } as any);
+			component.setExpanded(expanded);
+			let output = component.render(180).map(stripAnsi).join("\n");
+			assert.equal(output.split("UAT M001/S01/C01 (uat-runtime-check)").length - 1, 1);
+			assert.doesNotMatch(output, /\u202e|Run a Bash script/);
+			component.updateResult({ content: [], isError: false, details: { purpose: "Authoritative result", digest: "ready" } });
+			output = component.render(180).map(stripAnsi).join("\n");
+			assert.equal(output.split("Authoritative result").length - 1, 1);
+			assert.doesNotMatch(output, /UAT M001/);
+		}
+		assert.deepEqual(args, before);
+		for (const field of ["milestoneId", "sliceId", "checkId", "intent"]) {
+			for (const value of [undefined, 42, "\n\u202e"]) {
+				const output = renderToolCollapsed("gsd_uat_exec", { ...args, [field]: value });
+				assert.match(output, /Run a Bash script/);
+				assert.doesNotMatch(output, /UAT M001/);
+			}
+		}
+		assert.match(renderToolCollapsed("gsd_exec", args), /Run a Bash script/);
+	});
+
+	test("ordinary warning-like output without a digest remains compact and rollup eligible", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			for (const details of [undefined, { id: "exec-1", exit_code: 0 }]) {
+				const markers = ["--- warning ---", "done\n--- warning ---\nRecording failed", "The command ran, but the host did not record this run: output only."];
+				if (details) markers.push("--- warning ---\nThe command ran, but the host did not record this run: output imitation.");
+				for (const text of markers) {
+					const component = new ToolExecutionComponent(toolName, {}, {}, undefined, { requestRender() {} } as any);
+					component.updateResult({ content: [{ type: "text", text }], details, isError: false });
+					assert.ok(component.getRollupPhase(), `${toolName}: ${text}`);
+					assert.equal(component.render(180).length, 1);
+					assert.doesNotMatch(component.render(180).map(stripAnsi).join("\n"), /not verification or UAT evidence/);
+				}
+			}
+		}
+	});
+
+	test("digest-less warning metadata wins over output and raw paired legacy warnings survive", () => {
+		const footer = "--- warning ---\nThe command ran, but the host did not record this run: misleading output.";
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const component = new ToolExecutionComponent(toolName, {}, {}, undefined, { requestRender() {} } as any);
+			component.updateResult({ content: [{ type: "text", text: footer }], details: { run_not_recorded: "stored database reason" }, isError: false });
+			assert.match(component.render(180).map(stripAnsi).join("\n"), /did not record this run: stored database reason/);
+			assert.equal(component.getRollupPhase(), null);
+			component.updateResult({ content: [{ type: "text", text: footer }], isError: false });
+			assert.equal(component.getRollupPhase(), null);
+			assert.match(component.render(180).map(stripAnsi).join("\n"), /did not record this run: misleading output/);
+		}
+	});
+
 	test("canonical exec tools show muted italic purpose in compact and expanded headers", (t) => {
 		const italic = t.mock.method(Theme.prototype, "italic");
 		const fg = t.mock.method(Theme.prototype, "fg");
@@ -264,9 +353,8 @@ describe("ToolExecutionComponent", () => {
 		}
 	});
 
-	test("legacy raw warning markers prevent compact success without result details", () => {
+	test("legacy paired host-warning footers prevent compact success without result details", () => {
 		for (const text of [
-			"done\n--- warning ---\nRecording failed",
 			"done\n--- warning ---\nThe command ran, but the host did not record this run: offline.\n" +
 				"This run is not verification or UAT evidence.\nDo not run the command again only to get the output.",
 			"done\n--- warning ---\nThe command ran, but the host did not record this run: offline. " +
