@@ -15,6 +15,7 @@ const { outputText } = ts.transpileModule(commandSource, {
 // Use the host's actual unsupported RPC custom implementation, not a fictitious
 // mode marker. RPC dialog responses remain programmable even under a PTY.
 const rpcOutput = ts.transpileModule(
+  // allow-source-grep: Produce an executable AST/VM fixture of the private RPC adapter; assertions exercise its runtime behavior, not source text.
   readFileSync(new URL("../../../../../packages/gsd-agent-modes/src/modes/rpc/rpc-mode.ts", import.meta.url), "utf8"),
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
 ).outputText;
