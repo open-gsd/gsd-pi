@@ -165,7 +165,7 @@ import { setLogBasePath, logWarning, logError } from "./workflow-logger.js";
 import { preflightCleanRoot, postflightPopStash } from "./clean-root-preflight.js";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, realpathSync } from "node:fs";
 import { atomicWriteSync } from "./atomic-write.js";
 import {
   autoCommitCurrentBranch,
@@ -370,14 +370,20 @@ import {
   stopNoticeDisplayReason,
 } from "./stop-notice.js";
 import { emitWorkflowOutcomeEvent } from "./workflow-outcome-event.js";
-import { classifyFailure } from "./recovery-classification.js";
+import { classifyFailure, type RecoveryClassification } from "./recovery-classification.js";
+import { AUTO_RECOVERY_MAX_RETRIES, authorizeAutoRecovery, canAutomaticallyRecover,
+  consumeAutoRecoveryRetry, revokeAutoRecovery } from "./auto-recovery-authorization.js";
+import { approveInNativeTerminal } from "./commands-blocker.js";
+import { getDb, getDbPath } from "./db/engine.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { requirePauseBlockerCheckout } from "./pause-blocker-inspection.js";
 import {
   findPauseLifecycleId,
   isHumanPauseBlockerKind,
   openPauseBlockerRow,
   resolvePauseBlockerRow,
 } from "./pause-blocker-domain-operation.js";
-import { readOpenAutoPauseBlockerId, setAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
+import { readOpenAutoPause, readOpenAutoPauseBlockerId, setAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
 import { abortActiveUnitTurn } from "./auto/unit-turn-abort.js";
 
 // ── ENCAPSULATION INVARIANT ─────────────────────────────────────────────────
@@ -717,6 +723,7 @@ export function startAutoDetached(
   base: string,
   verboseMode: boolean,
   options?: {
+    autoRecover?: boolean;
     step?: boolean;
     interrupted?: InterruptedSessionAssessment;
     milestoneLock?: string | null;
@@ -2322,6 +2329,10 @@ export async function stopAuto(
     // changes the user made between sessions (#4959).
     if (pi) clearToolBaseline(pi);
 
+    if (s.autoRecoveryAuthorizationId && s.autoRecoveryRunId) {
+      try { revokeAutoRecovery(s.autoRecoveryAuthorizationId, s.autoRecoveryRunId); }
+      catch (error) { debugLog("auto-recovery-revoke-refused", { error: getErrorMessage(error) }); }
+    }
     try {
       await kernelStop(s, reason ?? "stop");
     } catch (err) {
@@ -2461,12 +2472,14 @@ export async function pauseAuto(
   // advance with that route named on the row instead of re-diagnosing prose.
   // The seven human blocker kinds pause for a person unchanged.
   let pauseReasonText = _errorContext?.message ?? options.pauseReason;
+  let automaticRecoveryClassification: RecoveryClassification | null = null;
   if (blockerKind === "machine_fixable") {
     const classification = classifyFailure({
       error: options.pauseReason ?? _errorContext?.message ?? "machine-fixable failure",
       unitType: s.currentUnit?.type,
       unitId: s.currentUnit?.id,
     });
+    automaticRecoveryClassification = classification;
     pauseReasonText = [
       `recovery:${classification.failureKind}/${classification.action}`,
       classification.reason,
@@ -2629,6 +2642,11 @@ export async function pauseAuto(
   // keep the notification-text classification as a fallback (ADR-046). A
   // non-blocking pause does not need operator intervention, so it is not
   // blocked — the same rule the text classifier applies.
+  // A reserved automatic retry is not a terminal run outcome. If approval or
+  // reservation is refused, publish the original honest paused outcome below.
+  if (_pi && automaticRecoveryClassification && !options.abortActiveTurn &&
+      canAutomaticallyRecover(blockerKind, automaticRecoveryClassification, s.stepMode) &&
+      queueApprovedAutoRecovery(_pi, automaticRecoveryClassification)) return;
   emitWorkflowOutcomeEvent(_pi, {
     status: isNonBlockingPauseNotice(pauseMessage.toLowerCase()) ? "completed" : "blocked",
     reason: _errorContext?.message ?? lifecycle.notifyPrefix,
@@ -2850,12 +2868,91 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
  * state, enters the milestone worktree or branch, and dispatches the first unit.
  * No-ops if auto-mode is already active.
  */
+async function approveAutoRecoveryForRun(ctx: ExtensionCommandContext, base: string): Promise<boolean> {
+  if (s.autoRecoveryAuthorizationId && s.autoRecoveryRunId) return true;
+  // Never bootstrap, migrate or bind a database as a side effect of consent.
+  const databasePath = realpathSync(resolveProjectRootDbPath(base));
+  const checkBinding = () => {
+    const boundPath = getDbPath();
+    if (!boundPath || realpathSync(boundPath) !== databasePath) {
+      throw new Error("--auto-recover requires the existing canonical Project to be opened normally first");
+    }
+    requirePauseBlockerCheckout(getDb(), base);
+  };
+  checkBinding();
+  const fence = readDomainOperationFence();
+  if (fence.authorityEpoch < 1) throw new Error("--auto-recover requires canonical Project authority");
+  const approved = await approveInNativeTerminal(ctx, [
+    `Project: ${fence.projectId}`,
+    `This run only; up to ${AUTO_RECOVERY_MAX_RETRIES} automatic mechanical retry resumes; expires in 30 minutes.`,
+    "Only machine_fixable pauses classified retry are eligible. Step mode is excluded.",
+    "Human Blockers, UAT/review, access, security, evidence and budgets are NOT waived.",
+    "No Task retry or completion is authorized. Restart/stop drops this run permission.",
+  ].join("\n"), "Enable bounded --auto-recover for this run?",
+  "Press y to approve and start/resume auto, n or Escape to cancel. RPC responses cannot approve.");
+  if (!approved) {
+    ctx.ui.notify("Auto-recover was not authorized; auto was not started.", "warning");
+    return false;
+  }
+  checkBinding();
+  const runId = randomUUID();
+  const authorizationId = randomUUID();
+  authorizeAutoRecovery({ authorizationId, runId, expectedProjectId: fence.projectId,
+    expectedRevision: fence.revision, expectedAuthorityEpoch: fence.authorityEpoch });
+  s.autoRecoveryAuthorizationId = authorizationId;
+  s.autoRecoveryRunId = runId;
+  return true;
+}
+
+function queueApprovedAutoRecovery(pi: ExtensionAPI, classification: RecoveryClassification,
+  resume: typeof startAutoDetached = startAutoDetached): boolean {
+  const authorizationId = s.autoRecoveryAuthorizationId;
+  const runId = s.autoRecoveryRunId;
+  const commandContext = s.cmdCtx;
+  const pause = readOpenAutoPause();
+  if (!authorizationId || !runId || !commandContext || !pause?.pausedAt || s.autoRecoveryPending) return false;
+  try {
+    if (!consumeAutoRecoveryRetry({ authorizationId, runId, pausedAt: pause.pausedAt,
+      dispatchId: pause.dispatchId ?? null, classification })) return false;
+  } catch (error) {
+    debugLog("auto-recovery-refused", { error: getErrorMessage(error) });
+    return false;
+  }
+  s.autoRecoveryPending = true;
+  // A macrotask lets the old loop observe cancellation and release its dispatch.
+  // Recheck host state: an intervening operator stop must always win.
+  setTimeout(() => {
+    if (s.autoRecoveryAuthorizationId !== authorizationId || s.autoRecoveryRunId !== runId) return;
+    s.autoRecoveryPending = false;
+    try {
+      const currentPause = readOpenAutoPause();
+      if (!s.paused || s.active || currentPause?.pausedAt !== pause.pausedAt ||
+          currentPause.blockerKind !== "machine_fixable" ||
+          (currentPause.dispatchId ?? null) !== (pause.dispatchId ?? null)) return;
+      commandContext.ui.notify("Auto-recover: resuming a mechanical retry under this run's bounded approval.", "info");
+      // Normal startup rechecks every Task/owner/budget/wedge/release gate. No
+      // recovery-resume tool, Blocker resolver or fabricated repair is invoked.
+      resume(commandContext, pi, s.originalBasePath || s.basePath, s.verbose,
+        { milestoneLock: pause.milestoneLock ?? null });
+    } catch (error) {
+      debugLog("auto-recovery-start-refused", { error: getErrorMessage(error) });
+      emitWorkflowOutcomeEvent(pi, { status: "blocked",
+        reason: "Automatic retry could not start; manual resume is required.",
+        unitType: pause.unitType, unitId: pause.unitId });
+    }
+  }, 0);
+  return true;
+}
+
+export const _queueApprovedAutoRecoveryForTest = queueApprovedAutoRecovery;
+
 export async function startAuto(
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
   base: string,
   verboseMode: boolean,
   options?: {
+    autoRecover?: boolean;
     step?: boolean;
     interrupted?: InterruptedSessionAssessment;
     milestoneLock?: string | null;
@@ -2865,6 +2962,10 @@ export async function startAuto(
   if (s.active) {
     debugLog("startAuto", { phase: "already-active", skipping: true });
     return;
+  }
+  if (options?.autoRecover) {
+    if (options.step) throw new Error("--auto-recover is not available in step mode");
+    if (!(await approveAutoRecoveryForRun(ctx, base))) return;
   }
 
   // On a *fresh* start, drop any stale active-tool baseline left by a prior

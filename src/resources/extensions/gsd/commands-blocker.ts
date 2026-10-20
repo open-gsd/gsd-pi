@@ -44,14 +44,18 @@ function describe(snapshot: Snapshot): string {
  * never runs the factory (even under a PTY with hasUI=true). Neither dialog
  * responses nor custom()'s return value grant approval.
  */
-async function approveInNativeTerminal(ctx: ExtensionCommandContext, review: string): Promise<boolean> {
+export async function approveInNativeTerminal(
+  ctx: ExtensionCommandContext,
+  review: string,
+  title = "Clear this auto-pause blocker only?",
+  footer = "Press y to approve, n or Escape to cancel. Nothing resumes or dispatches.",
+): Promise<boolean> {
   if (typeof ctx.ui.custom !== "function") return false;
   let factoryExecuted = false;
   let acceptedByKeyHandler = false;
   await ctx.ui.custom<void>((_tui, _theme, _keys, done) => {
     factoryExecuted = true;
-    const lines = ["Clear this auto-pause blocker only?", ...review.split("\n"),
-      "Press y to approve, n or Escape to cancel. Nothing resumes or dispatches."];
+    const lines = [title, ...review.split("\n"), footer];
     return {
       render: (width: number) => lines.map((line) => truncateToWidth(line, width)),
       invalidate() {},

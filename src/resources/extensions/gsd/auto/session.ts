@@ -103,6 +103,10 @@ export class AutoSession {
   preserveStepSurfaceAfterLoopExit = false;
   stepMode = false;
   verbose = false;
+  // Host-only attachment to an immutable canonical run approval. Never serialized to soft KV.
+  autoRecoveryAuthorizationId: string | null = null;
+  autoRecoveryRunId: string | null = null;
+  autoRecoveryPending = false;
   activeEngineId: string | null = null;
   activeRunDir: string | null = null;
   cmdCtx: ExtensionCommandContext | null = null;
@@ -340,6 +344,9 @@ export class AutoSession {
     this.preserveStepSurfaceAfterLoopExit = false;
     this.stepMode = false;
     this.verbose = false;
+    this.autoRecoveryAuthorizationId = null;
+    this.autoRecoveryRunId = null;
+    this.autoRecoveryPending = false;
     this.activeEngineId = null;
     this.activeRunDir = null;
     this.cmdCtx = null;
