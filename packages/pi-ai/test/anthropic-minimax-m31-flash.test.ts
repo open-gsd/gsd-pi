@@ -38,7 +38,7 @@ function makeContext(): Context {
 }
 
 async function capturePayload(
-	provider: "minimax" | "minimax-cn",
+	provider: "minimax" | "minimax-cn" | "vercel-ai-gateway",
 	modelId: string,
 	options?: SimpleStreamOptions,
 ): Promise<{ payload: AnthropicThinkingPayload; error?: string }> {
@@ -101,6 +101,39 @@ describe("MiniMax M3.1-Flash direct request contract (#2906)", () => {
 			expect(error).toContain("always thinks");
 		});
 	}
+
+	// #2911 follow-up: the Vercel AI Gateway proxies the same upstream
+	// MiniMax-M3.1-Flash over an Anthropic-compatible route, so the identical
+	// request contract applies there.
+	describe("MiniMax M3.1-Flash via Vercel AI Gateway (#2911)", () => {
+		it("sends adaptive thinking with effort instead of budget-based thinking", async () => {
+			const { payload, error } = await capturePayload("vercel-ai-gateway", "minimax/minimax-m3.1-flash", {
+				reasoning: "medium",
+			});
+
+			expect(error).toBeUndefined();
+			expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+			expect(payload.output_config).toEqual({ effort: "medium" });
+			expect(payload.thinking?.budget_tokens).toBeUndefined();
+		});
+
+		it("maps the thinking ladder onto the accepted effort values", async () => {
+			const minimal = await capturePayload("vercel-ai-gateway", "minimax/minimax-m3.1-flash", { reasoning: "minimal" });
+			expect(minimal.payload.output_config).toEqual({ effort: "low" });
+
+			const max = await capturePayload("vercel-ai-gateway", "minimax/minimax-m3.1-flash", { reasoning: "max" });
+			expect(max.payload.output_config).toEqual({ effort: "max" });
+		});
+
+		it("rejects thinking \"off\" client-side instead of sending a disabled request upstream", async () => {
+			const { payload, error } = await capturePayload("vercel-ai-gateway", "minimax/minimax-m3.1-flash");
+
+			expect(payload.thinking).toBeUndefined();
+			expect(error).toBeDefined();
+			expect(error).toContain("cannot disable thinking");
+			expect(error).toContain("always thinks");
+		});
+	});
 
 	it("keeps M3 adaptive/disabled behavior unchanged", async () => {
 		const on = await capturePayload("minimax", "MiniMax-M3", { reasoning: "high" });

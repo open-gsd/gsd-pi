@@ -498,7 +498,7 @@ describe("Context overflow error handling", () => {
 	describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter", () => {
 		// Anthropic backend
 		it("anthropic/claude-sonnet-4 via OpenRouter - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("openrouter", "anthropic/claude-sonnet-4");
+			const model = getModel("openrouter", "anthropic/claude-sonnet-4.5");
 			const result = await testContextOverflow(model, process.env.OPENROUTER_API_KEY!);
 			logResult(result);
 
