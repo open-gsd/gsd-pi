@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AUTO_RECOVERY_AUTHORIZATION_PROJECTION_KIND } from "./auto-recovery-authorization.js";
 import { writeProjectionFileSync } from "./compat/compat-marker.js";
 import { getDb } from "./db/engine.js";
+import { logWarning } from "./workflow-logger.js";
 
 export function renderAutoRecoveryProjection(basePath: string): void {
   const rows = getDb().prepare(`
@@ -32,7 +33,12 @@ export function renderAutoRecoveryProjection(basePath: string): void {
         const value = (payload as Record<string, unknown>).runId;
         if (typeof value === "string") runId = value;
       }
-    } catch { /* A malformed historical payload is not authority and must not break delivery. */ }
+    } catch {
+      // A malformed historical payload is not authority and must not break delivery.
+      logWarning("renderer", "Malformed auto-recovery audit payload; omitting run ID from display", {
+        revision: String(row.project_revision),
+      });
+    }
     lines.push(`| ${cell(row.project_revision)} | ${cell(row.event_type)} | ${cell(row.entity_id)} | ${cell(runId)} |`);
   }
   const content = `${lines.join("\n")}\n`;
