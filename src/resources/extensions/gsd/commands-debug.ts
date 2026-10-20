@@ -12,7 +12,6 @@ import {
   type DebugSpecialistReview,
 } from "./debug-session-store.js";
 import { loadPrompt } from "./prompt-loader.js";
-import { isAutoActive } from "./auto-runtime-state.js";
 
 export type DebugCommandIntent
   = { type: "usage" }
