@@ -15,23 +15,51 @@ const BROWSER_TOOL_SIGNAL = `browser_(?:${
 // lines, so requiring nearby context broke wrapped ("Take a rendered page\nsnapshot")
 // and labeled ("Browser: take a snapshot") UAT lines, plus vocabulary like
 // "accessibility snapshot". Instead, drop the match when the snapshot names
-// database/backup work (#2081, #766 follow-up) or LLM-runtime work (#2436): a
-// DB-CLI verb immediately follows ("snapshot create", "snapshot restore-check"),
-// a database-ish word shares the clause ("database snapshot", "purge / snapshot
-// / export"), or an unambiguous LLM word forms a compound directly before it
-// ("prompt snapshot"). Clause-bounded like NEGATED_BROWSER_CLAUSE_RE. LLM words
-// are adjacent-only — they double as browser vocabulary ("dismiss the prompt,
-// then take an accessibility snapshot") — and the ambiguous ones are left out
-// entirely: "browser/DOM state snapshot" and "browser context snapshot"
-// (Playwright) are genuine browser steps, so "state/context snapshot" stay
-// escalated (the conservative default; extend on evidence like #766→#2081→#2436).
+// database/backup work (#2081, #766 follow-up), LLM-runtime work (#2436), or
+// desktop/graphics work (#2909): a DB-CLI verb immediately follows ("snapshot
+// create", "snapshot restore-check"), a database-ish word shares the clause
+// ("database snapshot", "purge / snapshot / export"), or an unambiguous
+// LLM/desktop word forms a compound directly before it ("prompt snapshot",
+// "byte-snapshot", "save snapshot", "state snapshot" unless browser-qualified —
+// "browser/DOM state snapshot" are genuine Playwright steps). Clause-bounded
+// like NEGATED_BROWSER_CLAUSE_RE. LLM and save words are adjacent-only — they
+// double as browser vocabulary ("dismiss the prompt, then take an accessibility
+// snapshot"; "save a visual snapshot of the layout") — and the ambiguous ones
+// are left out entirely ("context snapshot"; "save a ... snapshot" with a
+// modifier). Extend on evidence like #766→#2081→#2436→#2909.
 const DB_SNAPSHOT_TERMS = String.raw`(?:databases?|db|backups?|export)`;
 const LLM_SNAPSHOT_TERMS = String.raw`(?:prompts?|templates?|models?|conversations?|configs?)`;
 const DB_SNAPSHOT_VERB = String.raw`(?:create|restore|export|purge|import|prune|verify)`;
+const SNAPSHOT_SAVE_TERMS = String.raw`(?:sav(?:e|es|ed|ing))`;
+
+// #2909 (#766→#2081→#2436 follow-up): `screenshot` sat unconditionally in the
+// first alternation, so desktop-app acceptance texts ("the farm saves a PNG
+// render screenshot per view") escalated to browser-required and made
+// gsd_validate_milestone `pass` unreachable. Like `snapshot`, the token is
+// kept as a bare signal (line scanning breaks on wrapped/labeled UAT lines)
+// and a match is dropped only when a desktop/graphics compound is adjacent
+// (before: "render/offscreen/framebuffer/pixel/gpu/canvas/window/widget/PNG
+// screenshot", or a save/export/write/persist file-operation verb with an
+// optional article gap: "saves a screenshot"; after: "screenshot
+// renderer/files") AND no browser-context word shares the clause —
+// "browser window screenshot" and "save a screenshot of the login page"
+// stay browser-required. Clause-qualified and bare usages always escalate
+// ("browser page screenshot", "a screenshot of the dashboard").
+const GRAPHICS_SCREENSHOT_TERMS =
+  String.raw`(?:render(?:ed|ing|s)?|off-?screens?|frame\s?-?buffers?|pixels?|gpu|canvases?|bitmaps?|textures?|atlas(?:es)?|windows?|widgets?|pngs?|jpe?gs?|tiffs?|desktop|guis?|native)`;
+const SCREENSHOT_FILE_VERBS =
+  String.raw`(?:sav(?:e|es|ed|ing)|exports?|exported|exporting|wr(?:ote|itten|ites?|iting)|persist(?:s|ed|ing|ent)?)`;
+const SCREENSHOT_BROWSER_CONTEXT =
+  String.raw`(?:browsers?|playwright|chrome|websites?|web|pages?|tabs?|dom|localhost|urls?|${BROWSER_TOOL_SIGNAL})`;
 
 export const BROWSER_REQUIREMENT_RE = new RegExp(
-  String.raw`\b(?:file://|localhost|playwright|chrome|screenshot|${BROWSER_TOOL_SIGNAL})\b` +
-    String.raw`|(?<!\b${DB_SNAPSHOT_TERMS}\b[^.;:!?]{0,60})(?<!\b${LLM_SNAPSHOT_TERMS}\s+)\bsnapshot\b(?!\s+(?:${DB_SNAPSHOT_VERB})\b)(?![^.;:!?]{0,60}\b${DB_SNAPSHOT_TERMS}\b)` +
+  String.raw`\b(?:file://|localhost|playwright|chrome|${BROWSER_TOOL_SIGNAL})\b` +
+    // `screenshot` (#2909): browser-context-qualified in the clause, or bare
+    // without an adjacent desktop/graphics compound.
+    String.raw`|(?<=\b${SCREENSHOT_BROWSER_CONTEXT}\b[^.;:!?]{0,80})\bscreenshot\b` +
+    String.raw`|\bscreenshot\b(?=[^.;:!?]{0,80}\b${SCREENSHOT_BROWSER_CONTEXT}\b)` +
+    String.raw`|(?<!\b${GRAPHICS_SCREENSHOT_TERMS}[\s-]?)(?<!\b${SCREENSHOT_FILE_VERBS}(?:[\s-]+(?:a|an|the|its|their|each|every))?[\s-]+)\bscreenshot\b(?![\s-]+(?:renderers?|rendering|pipelines?|atlas(?:es)?|frame\s?-?buffers?|pixels?|gpu|canvases?|bitmaps?|files?)\b)` +
+    String.raw`|(?<!\b${DB_SNAPSHOT_TERMS}\b[^.;:!?]{0,60})(?<!\b${LLM_SNAPSHOT_TERMS}\s+)(?<!\bbytes?[\s-]?)(?<!\b${SNAPSHOT_SAVE_TERMS}[\s-]+)(?<!\b(?!(?:browsers?|dom|pages?|tabs?|ui|accessibility|viewport)\b)\w+\s+states?\s+)\bsnapshot\b(?!\s+(?:${DB_SNAPSHOT_VERB})\b)(?![^.;:!?]{0,60}\b${DB_SNAPSHOT_TERMS}\b)` +
     String.raw`|\bin\s+(?:the\s+)?browser\b` +
     String.raw`|\b(?:open|launch|navigate|load|visit|serve|start)\b.{0,80}\b(?:browser|page|localhost|file://)\b|\bbrowser\s+(?:check|session|test|uat|tool|automation|interaction|flow)\b`,
   "i",
