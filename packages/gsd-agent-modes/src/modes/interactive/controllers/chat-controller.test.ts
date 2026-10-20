@@ -53,6 +53,7 @@ function makeActivityHost(
 		session: { messages: [], retryAttempt: 0 },
 		chatContainer: new Container(),
 		pendingTools: new Map(),
+		activeToolInvocations: new Set(),
 		pendingMessagesContainer: { clear() {} },
 		statusContainer,
 		pinnedMessageContainer: new Container(),

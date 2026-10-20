@@ -134,6 +134,10 @@ export class InteractiveMode {
 	private streamingMessage: import("@gsd/pi-ai").AssistantMessage | undefined = undefined;
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	// Live dispatch/terminal tracking for the status widgets. pendingTools
+	// deliberately retains completed components for transcript reconstruction,
+	// so its size is not an active-execution count (#2925).
+	private activeToolInvocations = new Set<string>();
 	private toolOutputExpanded = DEFAULT_TOOL_OUTPUT_EXPANDED;
 	private pendingImages: ImageContent[] = [];
 	private hideThinkingBlock = false;
@@ -197,7 +201,7 @@ export class InteractiveMode {
 		this.pendingMessagesContainer = new Container();
 		this.gsdStatusWidget = new GsdStatusWidget(() => ({
 			override: this.settingsManager.getAdaptiveMode(),
-			activeToolCount: this.pendingTools.size,
+			activeToolCount: this.activeToolInvocations.size,
 			gsdPhase: this.gsdProgressState?.phase ?? this.pendingWorkingMessage ?? undefined,
 			lastError: this.lastBlockingError,
 			sessionName: this.sessionManager.getSessionName(),
@@ -224,7 +228,7 @@ export class InteractiveMode {
 		this.footerDataProvider = new FooterDataProvider(process.cwd());
 		this.footer = new FooterComponent(session, this.footerDataProvider, () => ({
 			override: this.settingsManager.getAdaptiveMode(),
-			activeToolCount: this.pendingTools.size,
+			activeToolCount: this.activeToolInvocations.size,
 			gsdPhase: this.gsdProgressState?.phase ?? this.pendingWorkingMessage ?? undefined,
 			lastError: this.lastBlockingError,
 			cwd: this.gsdProgressState?.path ?? process.cwd(),
