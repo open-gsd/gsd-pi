@@ -93,7 +93,7 @@ function fixture(t: TestContext): void {
     ]) adoptOrTransitionLifecycle(context, unit);
     return {
       projections: [{ projectionKey: "test/auto-recovery/seed", projectionKind: "test", rendererVersion: "1" }],
-      events: [{ eventType: "test.auto-recovery.seeded", entityType: "project", entityId: "M001", payload: {}, destinations: [] }],
+      events: [{ eventType: "test.auto-recovery.seeded", entityType: "project", entityId: "M001", payload: {}, destinations: ["test"] }],
     };
   });
 }
@@ -237,7 +237,7 @@ test("an agent or non-native transport cannot mint a usable grant by emitting th
       projections: [{ projectionKey: `test/auto-recovery/${authorizationId}`, projectionKind: "test", rendererVersion: "1" }],
       events: [{
         eventType: "auto.recovery.authorized", entityType: "auto-recovery-authorization",
-        entityId: authorizationId, destinations: [], payload: {
+        entityId: authorizationId, destinations: ["test"], payload: {
           version: 1, runId: RUN, maxRetries: 3, allowedKind: "machine_fixable",
           allowedAction: "retry", expiresAt: Date.now() + AUTO_RECOVERY_APPROVAL_TTL_MS,
         },
