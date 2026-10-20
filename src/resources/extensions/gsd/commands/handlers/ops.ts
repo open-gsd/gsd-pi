@@ -2,6 +2,7 @@
 // File Purpose: Handles operational /gsd subcommands.
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
+import { isBlockerCommand } from "../blocker-routing.js";
 import { enableDebug } from "../../debug-logger.js";
 import { dispatchDirectPhase } from "../../auto-direct-dispatch.js";
 import { handleConfig } from "../../commands-config.js";
@@ -174,7 +175,7 @@ export async function handleOpsCommand(trimmed: string, ctx: ExtensionCommandCon
   }
   // Match the guard tokenization, including tabs/newlines, so recognized
   // blocker commands can never fall through to natural-language quick work.
-  if (/^blocker(?:\s|$)/u.test(trimmed)) {
+  if (isBlockerCommand(trimmed)) {
     const { handleBlocker } = await import("../../commands-blocker.js");
     await handleBlocker(trimmed.replace(/^blocker\s*/, "").trim(), ctx, projectRoot());
     return true;

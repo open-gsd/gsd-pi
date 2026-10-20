@@ -3,9 +3,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { isBlockerCommand } from "../commands/blocker-routing.ts";
 import { closeDatabase } from "../db/engine.js";
 import { getWorkspaceGitBlockMessageForBase } from "../workspace-git-guard.js";
 import { isUnmergedMilestoneAllowedCommand } from "../unmerged-milestone-guard.js";
@@ -19,9 +20,6 @@ test("blocker commands never bootstrap or prepare a workspace database before co
   writeFileSync(join(stateDir, "PROJECT.md"), "# Isolated dispatcher fixture\n");
   const before = readdirSync(stateDir).sort();
   try {
-    const opsSource = readFileSync(new URL("../commands/handlers/ops.ts", import.meta.url), "utf8");
-    assert.ok(opsSource.includes("if (/^blocker(?:\\s|$)/u.test(trimmed)) {"),
-      "ops routing must recognize the same whitespace boundary as all entry guards");
     for (const command of [
       "blocker inspect blocker-id",
       "blocker resolve blocker-id resolved operator-decision",
@@ -31,6 +29,7 @@ test("blocker commands never bootstrap or prepare a workspace database before co
       "blocker",
       "blocker invalid",
     ]) {
+      assert.equal(isBlockerCommand(command), true, "ops must consume the recognized command");
       assert.equal(await getWorkspaceGitBlockMessageForBase(base, command), null);
       // The real dispatcher checks both classifiers before their bootstrapping
       // getters; all three preflight paths must leave metadata-only commands alone.
@@ -39,6 +38,8 @@ test("blocker commands never bootstrap or prepare a workspace database before co
       assert.deepEqual(readdirSync(stateDir).sort(), before,
         `workspace preflight must not initialize state for ${command}`);
     }
+    assert.equal(isBlockerCommand("blockers inspect"), false);
+    assert.equal(isBlockerCommand("blocker-extra"), false);
     assert.equal(isUnmergedMilestoneAllowedCommand("auto"), false);
     assert.equal(isValidationBlockAllowedCommand("auto"), false);
   } finally {

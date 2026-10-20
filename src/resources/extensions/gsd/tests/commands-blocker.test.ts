@@ -14,13 +14,19 @@ const { outputText } = ts.transpileModule(commandSource, {
 });
 // Use the host's actual unsupported RPC custom implementation, not a fictitious
 // mode marker. RPC dialog responses remain programmable even under a PTY.
-const rpcSource = readFileSync(new URL("../../../../../packages/gsd-agent-modes/src/modes/rpc/rpc-mode.ts", import.meta.url), "utf8");
-const rpcCustomSource = rpcSource.match(/async custom\(\)\s*\{[^}]*\}/)?.[0];
-assert.ok(rpcCustomSource, "RPC custom implementation is present");
-const rpcCustomCode = ts.transpileModule(`({ ${rpcCustomSource} }).custom`, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const rpcCustom = runInNewContext(rpcCustomCode);
+const rpcOutput = ts.transpileModule(
+  readFileSync(new URL("../../../../../packages/gsd-agent-modes/src/modes/rpc/rpc-mode.ts", import.meta.url), "utf8"),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+).outputText;
+const rpcAst = ts.createSourceFile("rpc-mode.js", rpcOutput, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+function findRpcCustomMethod(node: ts.Node): ts.MethodDeclaration | undefined {
+  if (ts.isMethodDeclaration(node) && node.name.getText(rpcAst) === "custom") return node;
+  return ts.forEachChild(node, findRpcCustomMethod);
+}
+const rpcCustomMethod = findRpcCustomMethod(rpcAst);
+assert.ok(rpcCustomMethod, "RPC UI adapter exposes its custom capability method");
+// Execute the real method behavior instead of matching implementation text.
+const rpcCustom = runInNewContext(`({ ${rpcCustomMethod.getText(rpcAst)} }).custom`);
 
 type Component = { handleInput(data: string): void; render(width: number): string[]; invalidate(): void };
 function harness() {
