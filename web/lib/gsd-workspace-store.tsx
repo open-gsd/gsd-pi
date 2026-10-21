@@ -52,7 +52,7 @@ import type {
   WorkspaceSliceTarget,
   WorkspaceValidationIssue,
 } from "../../src/shared/workspace-types.ts"
-import type { ProjectProgressReadMetadata, RpcExtensionUIRequest } from "@opengsd/contracts"
+import type { RpcExtensionUIRequest } from "@opengsd/contracts"
 
 export {
   createWorkspaceRecoverySummary,
@@ -327,7 +327,6 @@ export interface ProjectDetectionSignals {
 export interface ProjectDetection {
   kind: ProjectDetectionKind
   signals: ProjectDetectionSignals
-  readMetadata?: ProjectProgressReadMetadata
 }
 
 // ─── Boot Payload ───────────────────────────────────────────────────────────

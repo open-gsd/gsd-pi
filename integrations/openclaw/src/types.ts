@@ -1,5 +1,36 @@
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
+export interface Flow {
+  flowId: string;
+  controllerId?: string;
+  ownerKey: string;
+  revision: number;
+  status: string;
+  goal: string;
+  currentStep?: string;
+  stateJson?: Json;
+  cancelRequestedAt?: number;
+  endedAt?: number;
+  updatedAt: number;
+}
+
+export interface FlowWrite {
+  flowId: string;
+  expectedRevision: number;
+  currentStep?: string;
+  stateJson?: Json;
+  waitJson?: Json;
+  blockedSummary?: string | null;
+}
+
+export interface Flows {
+  list(): Flow[];
+  get(id: string): Flow | undefined;
+  createManaged(input: { controllerId: string; goal: string; stateJson: Json; notifyPolicy: "silent" }): Flow;
+  setWaiting(input: FlowWrite): { applied: boolean; flow?: Flow; code?: string };
+  finish(input: FlowWrite): { applied: boolean; flow?: Flow; code?: string };
+}
+
 export interface Progress {
   source?: "database" | "markdown";
   phase: string;
@@ -27,10 +58,16 @@ export interface PluginApi {
     agent: {
       resolveAgentWorkspaceDir(config: Record<string, any>, agentId: string): string;
       session: {
-        listSessionEntries(input: { agentId: string; readOnly: true }): { sessionKey: string; entry: { sessionRoot?: string; spawnedCwd?: string } }[];
-        getSessionEntry(input: { sessionKey: string; agentId?: string }): { sessionRoot?: string; spawnedCwd?: string } | undefined;
+        listSessionEntries(input: { agentId: string }): { sessionKey: string; entry: { sessionRoot?: string; cwd?: string } }[];
+        getSessionEntry(input: { sessionKey: string; agentId?: string }): { sessionRoot?: string; cwd?: string } | undefined;
       };
     };
+    // The host's Tasks/TaskFlow registry has been removed with no
+    // compatibility facade (see sdk-migration/removed-surfaces.md,
+    // "Tasks and TaskFlow APIs removed"); `tasks` itself is absent from the
+    // runtime's lazily-materialized property set. Keep this optional so
+    // callers must guard it instead of assuming it is always present.
+    tasks?: { managedFlows: { bindSession(input: { sessionKey: string }): Flows } };
     system: {
       enqueueSystemEvent(text: string, options: { sessionKey: string; contextKey: string; replace: boolean }): boolean;
       requestHeartbeat(options: { source: "other"; intent: "event"; reason: string; sessionKey: string; agentId: string }): void;

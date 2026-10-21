@@ -24,7 +24,6 @@ Use pseudo-elements for decorative content instead of extra DOM nodes.
   Click me
 </button>
 ```
-
 ```css
 .button::before {
   content: "";

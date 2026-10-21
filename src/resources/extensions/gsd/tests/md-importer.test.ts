@@ -16,7 +16,7 @@ import {
   parseDecisionsTable,
   parseRequirementsSections,
   migrateFromMarkdown,
-} from './helpers/md-importer.ts';
+} from '../md-importer.ts';
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 

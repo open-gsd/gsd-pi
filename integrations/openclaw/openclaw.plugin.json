@@ -1,19 +1,14 @@
 {
   "id": "open-gsd-openclaw",
   "name": "Open GSD",
-  "description": "GSD web UI in native Portals, MCP tools, and automatic project and Workboard synchronization",
-  "version": "1.21.1",
-  "activation": {
-    "onStartup": true
-  },
+  "description": "GSD Pi over MCP with a native web UI portal and automatic project, TaskFlow, Workboard, and heartbeat synchronization",
+  "version": "1.19.0",
+  "activation": { "onStartup": true },
   "mcpServers": {
     "gsd": {
       "transport": "stdio",
       "command": "gsd-mcp-server",
       "args": [],
-      "env": {
-        "GSD_MCP_CLIENT_MANAGED": "1"
-      },
       "requestTimeoutMs": 120000
     }
   },
@@ -24,47 +19,13 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "projectSessions": {
-        "type": "array",
-        "description": "Optional per-project destinations for factual status events and heartbeat context. Otherwise follows the default agent's configured heartbeat session.",
-        "items": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "projectDir": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sessionKey": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required": [
-            "projectDir",
-            "sessionKey"
-          ]
-        }
-      },
       "webUi": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "enabled": {
-            "type": "boolean",
-            "description": "Serve the existing GSD web UI in native OpenClaw Portals (default true)."
-          },
-          "packageRoot": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Local GSD installation root; otherwise resolved from GSD_CLI_PATH or gsd on PATH."
-          },
-          "port": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 65535,
-            "description": "Optional loopback web host port; otherwise an available port is selected."
-          }
+          "enabled": { "type": "boolean", "description": "Serve the existing GSD web UI in native OpenClaw Portals (default true)." },
+          "packageRoot": { "type": "string", "minLength": 1, "description": "Local GSD installation root; otherwise resolved from GSD_CLI_PATH or gsd on PATH." },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Optional loopback web host port; otherwise an available port is selected." }
         }
       },
       "embeddedProjects": {
@@ -98,14 +59,5 @@
         }
       }
     }
-  },
-  "controlUi": {
-    "entry": "dist/control-ui/80b853b127690d69a1cf3a0553feb619327f3187b36ef29fa3a79319b9a9cbcb/index.js"
-  },
-  "contracts": {
-    "gatewayMethodDispatch": [
-      "authenticated-request"
-    ],
-    "tools": []
   }
 }

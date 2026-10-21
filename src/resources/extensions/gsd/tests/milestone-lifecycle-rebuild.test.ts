@@ -9,13 +9,14 @@ import { afterEach, test } from "node:test";
 
 import type { DomainJsonValue } from "../db/domain-operation.ts";
 import {
+  _getAdapter,
   closeDatabase,
   executeDomainOperation,
   insertArtifact,
   insertMilestone,
   openDatabase,
   readDomainOperationFence,
-  _getAdapter,
+  updateMilestoneStatus,
 } from "../gsd-db.ts";
 import { latestExplicitReopenAt } from "../milestone-reopen-events.ts";
 import { renderAllFromDb } from "../markdown-renderer.ts";
@@ -36,11 +37,7 @@ function makeBase(status: string, completedAt: string | null = null): string {
   mkdirSync(join(basePath, ".gsd"), { recursive: true });
   assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
   insertMilestone({ id: "M001", title: "Durable Closeout", status: "active" });
-  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
-  // writer refuses rows without a canonical lifecycle row.
-  _getAdapter()!.prepare(
-    "UPDATE milestones SET status = :status, completed_at = :completed_at WHERE id = 'M001'",
-  ).run({ ":status": status, ":completed_at": completedAt });
+  updateMilestoneStatus("M001", status, completedAt);
   return basePath;
 }
 
@@ -152,10 +149,10 @@ test("latestExplicitReopenAt prefers the durable domain event over compatibility
     session_id: "compatibility-test",
   }]);
 
-  assert.equal(latestExplicitReopenAt("M001"), durableCreatedAt);
+  assert.equal(latestExplicitReopenAt(basePath, "M001"), durableCreatedAt);
 });
 
-test("latestExplicitReopenAt does not read the compatibility log", () => {
+test("latestExplicitReopenAt falls back to the compatibility log without a durable event", () => {
   const basePath = makeBase("active");
   writeWorkflowEventLog(basePath, [{
     v: 2,
@@ -167,5 +164,5 @@ test("latestExplicitReopenAt does not read the compatibility log", () => {
     session_id: "compatibility-test",
   }]);
 
-  assert.equal(latestExplicitReopenAt("M001"), null);
+  assert.equal(latestExplicitReopenAt(basePath, "M001"), "2026-07-14T10:00:00.000Z");
 });

@@ -47,8 +47,8 @@ import { loadLegacyImportCorpusCase } from "./helpers/legacy-import-corpus.ts";
 const CORPUS_ROOT = new URL("./__fixtures__/legacy-import-corpus/v1/", import.meta.url);
 const DATABASE_MATRIX_SCENARIOS = [
   "corrupt",
-  "current-v51",
-  "future-v52",
+  "current-v50",
+  "future-v51",
   "historical-v30",
   "historical-v34",
   "historical-v43",
@@ -57,7 +57,6 @@ const DATABASE_MATRIX_SCENARIOS = [
   "historical-v47",
   "historical-v48",
   "historical-v49",
-  "historical-v50",
   "unversioned-populated",
   "wal-present",
 ] as const;
@@ -977,8 +976,7 @@ test("legacy preview database target classifies supported schema boundaries and 
     { name: "historical-v47", version: 47, code: "historical-schema-version", outcome: "mapped" },
     { name: "historical-v48", version: 48, code: "historical-schema-version", outcome: "mapped" },
     { name: "historical-v49", version: 49, code: "historical-schema-version", outcome: "mapped" },
-    { name: "historical-v50", version: 50, code: "historical-schema-version", outcome: "mapped" },
-    { name: "future-v52", version: 52, code: "future-schema-version", outcome: "unparsed" },
+    { name: "future-v51", version: 51, code: "future-schema-version", outcome: "unparsed" },
   ] as const;
   for (const scenario of scenarios) {
     const gsd = join(base, scenario.name);

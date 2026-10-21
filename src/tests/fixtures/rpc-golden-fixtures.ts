@@ -20,7 +20,7 @@ export const rpcGoldenResponses = [
       protocolVersion: 2,
       sessionId: "session-fixture",
       capabilities: {
-        events: ["execution_complete", "cost_update", "workflow_outcome"],
+        events: ["execution_complete", "cost_update"],
         commands: ["init", "get_state", "bash", "set_thinking_level", "get_session_stats", "prompt"],
       },
     },
@@ -104,14 +104,6 @@ export const rpcGoldenEvents = [
       cacheRead: 200,
       cacheWrite: 50,
     },
-  },
-  {
-    type: "workflow_outcome",
-    status: "blocked",
-    exitCode: 10,
-    reason: "Validation failed for milestone M001",
-    unitType: "validate-milestone",
-    unitId: "M001",
   },
 ] as const;
 

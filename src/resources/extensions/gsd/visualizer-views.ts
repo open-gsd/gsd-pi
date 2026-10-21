@@ -1243,11 +1243,9 @@ export function renderHealthView(
     const issueTag = criticalCount > 0
       ? `${criticalCount} critical`
       : warningCount > 0
-        ? `${warningCount} flagged`
-        : "no flags";
-    // "availability", not reads — per-skill counts reflect which skills were
-    // available to units (#2495)
-    lines.push(`  ${th.fg("text", String(total))} skills tracked (availability)  ·  ${th.fg(issueColor, issueTag)}`);
+        ? `${warningCount} warning${warningCount > 1 ? "s" : ""}`
+        : "all healthy";
+    lines.push(`  ${th.fg("text", String(total))} skills tracked  ·  ${th.fg(issueColor, issueTag)}`);
     if (topIssue) lines.push(`  ${th.fg("warning", "⚠")} ${th.fg("dim", topIssue)}`);
     lines.push(`  ${th.fg("dim", "→ /gsd skill-health for full report")}`);
   }

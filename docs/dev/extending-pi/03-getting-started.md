@@ -1,5 +1,6 @@
 # Getting Started
 
+
 ### Minimal Extension
 
 Create `~/.gsd/agent/extensions/my-extension.ts`:

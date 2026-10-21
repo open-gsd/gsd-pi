@@ -54,7 +54,6 @@ const baseAccessors = {
   isVerbose: () => false,
   isSessionSwitching: () => false,
   getCurrentDispatchedModelId: () => null,
-  getCurrentUnitRoutingTier: () => null,
 };
 
 // ── Header lifecycle ────────────────────────────────────────────────────

@@ -11,10 +11,10 @@ import {
 } from "./native-git-bridge.js";
 import { autoWorktreeBranch } from "./auto-worktree-branch-lifecycle.js";
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
-import { readMilestones } from "./db/lifecycle-read.js";
+import { getAllMilestones } from "./gsd-db.js";
 import { resolveMilestoneIntegrationBranch, VALID_BRANCH_NAME } from "./git-service.js";
-import { milestoneBranchMergeState } from "./milestone-closeout-effects.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
+import { isClosedStatus } from "./status-guards.js";
 
 export interface UnmergedMilestoneDirtyEntry {
   path: string;
@@ -171,20 +171,11 @@ export async function findUnmergedCompletedMilestones(base: string): Promise<Unm
   const blockers: UnmergedMilestoneBlocker[] = [];
   let dirtyByPath: UnmergedMilestoneDirtySnapshot | null = null;
 
-  for (const milestone of readMilestones()) {
-    if (!milestone.closed) continue;
+  for (const milestone of getAllMilestones()) {
+    if (!isClosedStatus(milestone.status)) continue;
 
     const branch = autoWorktreeBranch(milestone.id);
     if (!nativeBranchExists(base, branch)) continue;
-    // The merge Settlement Receipt is the database fact that the branch is
-    // merged. Git cannot show a squash merge once the integration branch
-    // moves on, so the diff below would report merged work as unmerged.
-    const mergeState = milestoneBranchMergeState(base, milestone.id, branch);
-    if (mergeState === "settled") continue;
-    // The recorded merge commit left the integration branch. The closeout
-    // must run again even when the work is back there by hand, so the
-    // Milestone is reported with or without a diff.
-    const mergeDropped = mergeState === "dropped";
 
     const integrationBranch = resolveIntegrationBranch(base, milestone.id);
     if (!integrationBranch || integrationBranch === branch) continue;
@@ -196,13 +187,13 @@ export async function findUnmergedCompletedMilestones(base: string): Promise<Unm
     // main, which the diff check would misread as "unmerged" (#825). The diff
     // below remains the correct fallback only when the branch is NOT yet an
     // ancestor — i.e. the merge is genuinely still pending.
-    if (!mergeDropped && nativeIsAncestor(base, branch, integrationBranch)) continue;
+    if (nativeIsAncestor(base, branch, integrationBranch)) continue;
 
     const files = nativeDiffNumstat(base, integrationBranch, branch)
       .map((entry) => entry.path)
       .filter((path) => path && !isRuntimePath(path));
     const uniqueFiles = [...new Set(files)].sort();
-    if (uniqueFiles.length === 0 && !mergeDropped) continue;
+    if (uniqueFiles.length === 0) continue;
 
     if (!dirtyByPath) dirtyByPath = captureDirtyPathStatusSnapshot(base);
     const dirtySnapshot = dirtyByPath;

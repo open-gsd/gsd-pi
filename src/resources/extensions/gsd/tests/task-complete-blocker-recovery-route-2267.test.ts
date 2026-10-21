@@ -20,7 +20,10 @@ import {
 import {
   claimTaskAttempt,
 } from "../task-execution-domain-operation.ts";
-import { readTaskRecoveryRoute } from "../task-recovery-domain-operation.ts";
+import {
+  readTaskRecoveryRoute,
+  recordFailureAndSelectRecovery,
+} from "../task-recovery-domain-operation.ts";
 import { executeTaskComplete } from "../tools/workflow-tool-executors.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 
@@ -143,12 +146,22 @@ test("a canonical blocker receipt names the recorded recovery action and the res
     ...completionParams(),
     blockerDiscovered: true,
   } as never, basePath, blockerInvocation);
-  const firstDetails = first.details as Record<string, unknown>;
-  assert.equal(firstDetails.nextStage, "route");
-  assert.equal(typeof firstDetails.recoveryActionId, "string");
-  const routedRecoveryActionId = String(firstDetails.recoveryActionId);
-  assert.ok(routedRecoveryActionId.length > 0);
-  assert.equal(firstDetails.recoveryActionId, readTaskRecoveryRoute(attemptId)?.recoveryActionId);
+  assert.equal((first.details as Record<string, unknown>).nextStage, "route");
+
+  // The supervisor routes the settled blocker failure with the same durable
+  // operation production uses (attempt.route); the surviving worker's retry
+  // then replays the completion receipt with the action now on record.
+  const routed = recordFailureAndSelectRecovery({
+    invocation: invocation("fixture/route-blocker"),
+    attemptId,
+    resultId: String((first.details as Record<string, unknown>).resultId),
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "A blocker was discovered.",
+    evidence: { source: "executor" },
+    rationale: "Route the recorded blocker.",
+  });
+  assert.ok(routed.recoveryActionId);
 
   const replay = await executeTaskComplete({
     ...completionParams(),
@@ -158,24 +171,24 @@ test("a canonical blocker receipt names the recorded recovery action and the res
   const details = replay.details as Record<string, unknown>;
   assert.equal(typeof details.recoveryActionId, "string");
   assert.ok((details.recoveryActionId as string).length > 0);
-  assert.equal(details.recoveryActionId, routedRecoveryActionId);
-  assert.equal(details.action, firstDetails.action);
+  assert.equal(details.recoveryActionId, routed.recoveryActionId);
+  assert.equal(details.action, routed.action);
   assert.equal(details.resumeEligible, true);
   assert.equal(readTaskRecoveryRoute(attemptId)?.recoveryActionId, details.recoveryActionId);
   const text = String(replay.content[0]?.text);
   assert.ok(
-    text.includes(`Recovery action ${routedRecoveryActionId} (${details.action}) is eligible for resume`),
+    text.includes(`Recovery action ${routed.recoveryActionId} (${routed.action}) is eligible for resume`),
     `notification must name the recovery action: ${text}`,
   );
   assert.ok(
-    text.includes(`call gsd_task_recovery_resume with recoveryActionId "${routedRecoveryActionId}"`),
+    text.includes(`call gsd_task_recovery_resume with recoveryActionId "${routed.recoveryActionId}"`),
     `notification must name the sanctioned resume call: ${text}`,
   );
 });
 
-test("a canonical blocker receipt routes synchronously and names the recovery action (#2267)", async () => {
+test("a canonical blocker receipt with no recorded recovery action keeps the plain routing notice", async () => {
   const basePath = createBase();
-  const attemptId = claimCanonicalAttempt(basePath);
+  claimCanonicalAttempt(basePath);
 
   const result = await executeTaskComplete({
     ...completionParams(),
@@ -185,14 +198,10 @@ test("a canonical blocker receipt routes synchronously and names the recovery ac
   assert.equal(result.isError, undefined);
   const details = result.details as Record<string, unknown>;
   assert.equal(details.nextStage, "route");
-  assert.equal(typeof details.recoveryActionId, "string");
-  assert.ok((details.recoveryActionId as string).length > 0);
-  assert.equal(details.recoveryActionId, readTaskRecoveryRoute(attemptId)?.recoveryActionId);
-  const text = String(result.content[0]?.text);
-  assert.ok(text.includes("Recovery action"), `notification must name the recovery action: ${text}`);
-  assert.ok(
-    text.includes(`call gsd_task_recovery_resume with recoveryActionId "${details.recoveryActionId}"`),
-    `notification must name the sanctioned resume call: ${text}`,
+  assert.equal("recoveryActionId" in details, false);
+  assert.equal(
+    String(result.content[0]?.text),
+    "Recorded blocker for task T01; awaiting recovery routing.",
   );
 });
 

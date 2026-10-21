@@ -16,7 +16,6 @@ import {
   clearUnifiedAuditOverrideForTests,
   setUnifiedAuditEnabled,
 } from "../uok/audit-toggle.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 test.afterEach(() => {
   clearUnifiedAuditOverrideForTests();
@@ -40,8 +39,6 @@ test("uok model policy enforces provider/api/tool constraints and emits decision
   try {
     setUnifiedAuditEnabled(true);
     mkdirSync(join(basePath, ".gsd"), { recursive: true });
-    // Audit events are DB rows first; the JSONL is their projection (ADR-046).
-    openDatabase(join(basePath, ".gsd", "gsd.db"));
     registerToolCompatibility("screenshot", { producesImages: true });
 
     const result = applyModelPolicyFilter(
@@ -93,7 +90,6 @@ test("uok model policy enforces provider/api/tool constraints and emits decision
       "audit stream should include explicit deny reasons",
     );
   } finally {
-    closeDatabase();
     rmSync(basePath, { recursive: true, force: true });
   }
 });

@@ -120,6 +120,7 @@ test("resolveCloseoutArtifactProjection names project and canonical artifact roo
 
     assert.equal(projection.projectRoot, base);
     assert.equal(projection.canonicalMilestoneRoot, wtPath);
+    assert.equal(projection.summaryArtifactBasePath, wtPath);
     assert.equal(projection.gateEvidenceBasePath, wtPath);
   } finally {
     cleanup(base);

@@ -1,8 +1,6 @@
 /**
  * Regression coverage for #2052: long-running coordination tools must not be
  * aborted by the stalled-tool watchdog, while the hard timeout remains armed.
- * #2644: the hard timeout stays armed after its recovery steer, so a unit that
- * never answers the steer is still paused.
  */
 import test, { mock, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +16,6 @@ import {
   markToolStart,
 } from "../auto-tool-tracking.ts";
 import { clearGSDPreferencesCache } from "../preferences.ts";
-import { closeDatabase, insertAssessment, insertMilestone, openDatabase } from "../gsd-db.ts";
 import { readUnitRuntimeRecord, writeUnitRuntimeRecord } from "../unit-runtime.ts";
 
 const SUPERVISOR_PREFS = [
@@ -33,8 +30,6 @@ interface Harness {
   home: string;
   base: string;
   notifications: string[];
-  steers: any[];
-  pauses: any[][];
   s: any;
   sctx: SupervisionContext;
   previousGsdHome: string | undefined;
@@ -47,8 +42,6 @@ function makeHarness(): Harness {
   process.env.GSD_HOME = home;
   writeFileSync(join(home, "preferences.md"), ["---", ...SUPERVISOR_PREFS, "---", ""].join("\n"));
   clearGSDPreferencesCache();
-  // The unit runtime record the watchdog reads is a database row.
-  openDatabase(":memory:");
 
   const notifications: string[] = [];
   const ctx = {
@@ -56,12 +49,8 @@ function makeHarness(): Harness {
     model: { provider: "anthropic" },
     modelRegistry: { getAvailable: () => [] },
   } as any;
-  const steers: any[] = [];
-  const pauses: any[][] = [];
   const pi = {
-    sendMessage: (message: any) => {
-      if (message.customType === "gsd-auto-timeout-recovery") steers.push(message);
-    },
+    sendMessage: () => {},
     setModel: async () => true,
     getThinkingLevel: () => "off",
     setThinkingLevel: () => {},
@@ -89,14 +78,12 @@ function makeHarness(): Harness {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: 0,
-      unclaimedUnitBudgets: new Map(),
+      unitRecoveryCount: new Map(),
     }),
-    pauseAuto: async (...args: any[]) => {
-      pauses.push(args);
-    },
+    pauseAuto: async () => {},
   };
 
-  return { home, base, notifications, steers, pauses, s, sctx, previousGsdHome };
+  return { home, base, notifications, s, sctx, previousGsdHome };
 }
 
 function cleanup(h: Harness): void {
@@ -108,16 +95,10 @@ function cleanup(h: Harness): void {
   mock.timers.reset();
   clearInFlightTools();
   clearGSDPreferencesCache();
-  closeDatabase();
   if (h.previousGsdHome === undefined) delete process.env.GSD_HOME;
   else process.env.GSD_HOME = h.previousGsdHome;
   rmSync(h.home, { recursive: true, force: true });
   rmSync(h.base, { recursive: true, force: true });
-}
-
-/** Let the awaits of a fired hard timeout (closeout, then recovery) finish. */
-async function settle(): Promise<void> {
-  for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function startHarness(t: TestContext): Harness {
@@ -223,81 +204,4 @@ test("bounded execution tools do not re-arm the unit hard timeout (#2203)", (t) 
     assert.equal(readUnitRuntimeRecord(h.base, "validate-milestone", "M002")?.phase, "timeout", toolName);
     cleanup(h);
   }
-});
-
-test("a unit that never answers the hard-timeout steer is paused when the hard timeout expires again (#2644)", async (t) => {
-  const h = startHarness(t);
-
-  // The model stream stalls: no tool runs and the unit never ends.
-  mock.timers.tick(120_000);
-  await settle();
-  assert.equal(h.steers.length, 1, "the first expiry steers the unit");
-  assert.equal(h.pauses.length, 0, "the first expiry does not pause");
-
-  // The unit keeps the full hard-timeout window to answer the steer.
-  mock.timers.tick(119_000);
-  await settle();
-  assert.equal(h.pauses.length, 0, "no pause before the second window ends");
-
-  mock.timers.tick(1_000);
-  await settle();
-  assert.equal(h.steers.length, 1, "a steer that got no answer is not sent again");
-  assert.equal(h.pauses.length, 1, "the second expiry pauses auto-mode");
-  assert.equal(h.pauses[0][2], "machine_fixable");
-  assert.deepEqual(h.pauses[0][4], {
-    expectedCurrentUnit: { type: "validate-milestone", id: "M002", startedAt: 0 },
-  });
-  assert.equal(
-    h.notifications.some((message) => /validate-milestone M002 exceeded 2min hard timeout\. Pausing auto-mode\./.test(message)),
-    true,
-    "the pause names the unit and the hard timeout",
-  );
-  assert.equal(h.s.unitTimeoutHandle, null, "a paused unit has no armed hard timeout");
-});
-
-test("a unit that saves its result after the hard-timeout steer is advanced, not paused (#2644)", async (t) => {
-  const h = startHarness(t);
-
-  mock.timers.tick(120_000);
-  await settle();
-  assert.equal(h.steers.length, 1);
-
-  // The unit answers the steer and saves its result, but its turn is still open.
-  insertMilestone({ id: "M002", title: "Milestone", status: "active" });
-  insertAssessment({
-    path: ".gsd/milestones/M002/M002-VALIDATION.md",
-    milestoneId: "M002",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "---\nverdict: pass\n---\n",
-  });
-
-  mock.timers.tick(120_000);
-  await settle();
-  assert.equal(h.pauses.length, 0, "a saved result is never paused");
-  assert.equal(readUnitRuntimeRecord(h.base, "validate-milestone", "M002")?.phase, "finalized");
-  assert.equal(h.s.unitTimeoutHandle, null, "an advanced unit has no armed hard timeout");
-});
-
-test("a unit that ends while the hard-timeout steer is sent gets no new hard timeout (#2644)", async (t) => {
-  const h = startHarness(t);
-  // The unit ends during recovery: the loop clears the supervision timers, as clearUnitTimeout() does.
-  h.sctx.pi.sendMessage = async () => {
-    for (const key of ["wrapupWarningHandle", "unitTimeoutHandle"]) {
-      if (h.s[key]) clearTimeout(h.s[key]);
-      h.s[key] = null;
-    }
-    for (const key of ["idleWatchdogHandle", "continueHereHandle"]) {
-      if (h.s[key]) clearInterval(h.s[key]);
-      h.s[key] = null;
-    }
-  };
-
-  mock.timers.tick(120_000);
-  await settle();
-  assert.equal(h.s.unitTimeoutHandle, null, "ended supervision is not armed again");
-
-  mock.timers.tick(120_000);
-  await settle();
-  assert.equal(h.pauses.length, 0, "the ended unit is not paused by a stale hard timeout");
 });

@@ -21,22 +21,19 @@ import type {
   PostUnitHookOutcomeVerdict,
 } from "./types.js";
 import { resolvePostUnitHooks, resolvePreDispatchHooks } from "./preferences.js";
-import { existsSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseUnitId } from "./unit-id.js";
-import { readHookStateJson, writeHookStateJson } from "./db/writers/runtime-control.js";
 import {
   buildFlatTaskFileName,
-  normalizeRealPath,
   resolveMilestonePath,
   targetMilestoneFile,
   targetSliceFile,
 } from "./paths.js";
+import { queryJournal, type JournalEntry } from "./journal.js";
 import { readUnitRuntimeRecord, type UnitRuntimePhase } from "./unit-runtime.js";
-import { getHookGateVerdict } from "./db/hook-verdicts.js";
-import { deleteHookGateVerdict } from "./db/writers/hook-verdicts.js";
+import { extractFrontmatterVerdict } from "./verdict-parser.js";
 import { getDbOrNull } from "./db/engine.js";
-import { getTaskCompletionIdentity, type TaskCompletionIdentityRow } from "./db/lifecycle-queries.js";
 
 // ─── Artifact Path Resolution ──────────────────────────────────────────────
 
@@ -132,15 +129,6 @@ export function convertDispatchRules(rules: DispatchRule[]): UnifiedRule[] {
 // ─── RuleRegistry ─────────────────────────────────────────────────────────
 
 const HOOK_STATE_FILE = "hook-state.json";
-
-/**
- * Database scope of the hook state for one base path. It is the real path of
- * the .gsd directory, so a worktree with its own .gsd keeps its own state and
- * a worktree that links to the project .gsd shares the project state.
- */
-export function hookStateScope(basePath: string): string {
-  return normalizeRealPath(join(normalizeRealPath(basePath), ".gsd"));
-}
 const FAILED_HOOK_RUNTIME_PHASES: ReadonlySet<UnitRuntimePhase> = new Set([
   "timeout",
   "finalize-timeout",
@@ -196,31 +184,47 @@ function captureTaskCompletionIdentity(trigger: HookTriggerRef): Pick<
   if (!db) {
     throw new Error(`Cannot dispatch execute-task hook for ${trigger.triggerUnitId}: database unavailable`);
   }
-  let row: TaskCompletionIdentityRow | null;
+  let row: Record<string, unknown> | undefined;
   try {
-    row = getTaskCompletionIdentity(milestone, slice, task);
+    row = db.prepare(`
+      SELECT task.status, task.completed_at,
+             lifecycle.lifecycle_status, lifecycle.last_operation_id
+      FROM tasks task
+      LEFT JOIN workflow_item_lifecycles lifecycle
+        ON lifecycle.item_kind = 'task'
+       AND lifecycle.milestone_id = task.milestone_id
+       AND lifecycle.slice_id = task.slice_id
+       AND lifecycle.task_id = task.id
+      WHERE task.milestone_id = :milestone_id
+        AND task.slice_id = :slice_id
+        AND task.id = :task_id
+    `).get({
+      ":milestone_id": milestone,
+      ":slice_id": slice,
+      ":task_id": task,
+    }) as Record<string, unknown> | undefined;
   } catch (error) {
     throw new Error(
       `Cannot dispatch execute-task hook for ${trigger.triggerUnitId}: completion identity query failed`,
       { cause: error },
     );
   }
-  if (!row || row.status !== "complete") {
+  if (!row || row["status"] !== "complete") {
     return null;
   }
   if (
-    row.lifecycle_status === "completed"
-    && typeof row.last_operation_id === "string"
-    && row.last_operation_id.length > 0
+    row["lifecycle_status"] === "completed"
+    && typeof row["last_operation_id"] === "string"
+    && row["last_operation_id"].length > 0
   ) {
-    return { completionOperationId: row.last_operation_id };
+    return { completionOperationId: row["last_operation_id"] };
   }
   if (
-    !row.lifecycle_status
-    && typeof row.completed_at === "string"
-    && row.completed_at.length > 0
+    !row["lifecycle_status"]
+    && typeof row["completed_at"] === "string"
+    && row["completed_at"].length > 0
   ) {
-    return { legacyCompletedAt: row.completed_at };
+    return { legacyCompletedAt: row["completed_at"] };
   }
   throw new Error(
     `Cannot dispatch execute-task hook for ${trigger.triggerUnitId}: Task has no canonical completion identity`,
@@ -551,13 +555,6 @@ export class RuleRegistry {
       legacyCompletedAt,
     };
 
-    // The verdict belongs to one attempt: dispatching the hook invalidates
-    // the previous attempt's row, so a hook that never records its verdict
-    // (crash, tool error, omitted call) cannot decide this gate on a stale
-    // row — a stale pass would skip the gate and a stale needs-rework would
-    // route rework.
-    deleteHookGateVerdict(config.name, triggerUnitId);
-
     return this._buildHookDispatch(config, triggerUnitId);
   }
 
@@ -573,11 +570,6 @@ export class RuleRegistry {
       .replace(/\{taskId\}/g, tid ?? "");
 
     prompt += "\n\n**Browser tool safety:** Do NOT use `browser_wait_for` with `condition: \"network_idle\"` — it hangs indefinitely when dev servers keep persistent connections (Vite HMR, WebSocket). Use `selector_visible`, `text_visible`, or `delay` instead.";
-
-    // Host-added verdict instruction (owner default: the gate outcome arrives
-    // as a tool call that writes a database row). The artifact file the hook
-    // writes is a report for the operator; the workflow reads the verdict row.
-    prompt += `\n\n**Recording your verdict:** When you are done, record this gate's verdict with the \`gsd_hook_verdict_save\` tool — hookName: "${config.name}", unitId: "${triggerUnitId}", verdict: one of pass | advisory | needs-rework | needs-remediation | needs-attention, and a short rationale. The workflow reads the recorded verdict row, not your artifact file.`;
 
     return {
       hookName: config.name,
@@ -655,25 +647,55 @@ export class RuleRegistry {
     hookName: string,
     unitId: string,
   ): HookCompletionAssessment {
-    // The hook unit's outcome is the unit runtime row in the database. The
-    // journal is a diagnostic log and is not read here.
-    const runtime = readUnitRuntimeRecord(basePath, `hook/${hookName}`, unitId);
-    const unitEnd = runtime?.unitEnd;
-    if (unitEnd) {
-      if (unitEnd.status === "completed" && unitEnd.artifactVerified) {
+    const unitType = `hook/${hookName}`;
+    const latestUnitEnd = this._latestHookUnitEnd(basePath, unitType, unitId);
+    if (latestUnitEnd) {
+      const data = latestUnitEnd.data ?? {};
+      const status = data.status;
+      const artifactVerified = data.artifactVerified;
+      if (status === "completed" && artifactVerified !== false) {
         return { outcome: "success" };
       }
-      const parts = [`status ${unitEnd.status}`];
-      if (!unitEnd.artifactVerified) parts.push("artifact not verified");
-      if (unitEnd.error) parts.push(unitEnd.error);
-      return { outcome: "failed", reason: parts.join("; ") };
+      return {
+        outcome: "failed",
+        reason: this._formatHookFailureReason(status, artifactVerified, data.errorContext),
+      };
     }
 
+    const runtime = readUnitRuntimeRecord(basePath, unitType, unitId);
     if (runtime && FAILED_HOOK_RUNTIME_PHASES.has(runtime.phase)) {
       return { outcome: "failed", reason: `runtime phase ${runtime.phase}` };
     }
 
     return { outcome: "unknown" };
+  }
+
+  private _latestHookUnitEnd(
+    basePath: string,
+    unitType: string,
+    unitId: string,
+  ): JournalEntry | null {
+    const unitEnds = queryJournal(basePath, { eventType: "unit-end", unitId })
+      .filter(entry => entry.data?.unitType === unitType);
+    return unitEnds[unitEnds.length - 1] ?? null;
+  }
+
+  private _formatHookFailureReason(
+    status: unknown,
+    artifactVerified: unknown,
+    errorContext: unknown,
+  ): string {
+    const parts = [`status ${typeof status === "string" ? status : "unknown"}`];
+    if (artifactVerified === false) {
+      parts.push("artifact not verified");
+    }
+    if (typeof errorContext === "object" && errorContext !== null && "message" in errorContext) {
+      const message = (errorContext as { message?: unknown }).message;
+      if (typeof message === "string" && message.length > 0) {
+        parts.push(message);
+      }
+    }
+    return parts.join("; ");
   }
 
   private _handleFailedHookCompletion(
@@ -903,30 +925,56 @@ export class RuleRegistry {
   private _readGateOutcome(
     config: PostUnitHookConfig,
     trigger: HookTriggerRef,
-    _basePath: string,
+    basePath: string,
   ): GateOutcome {
     if (!config.artifact) {
       return { reason: "blocking gate has no configured artifact" };
     }
-    // The gate outcome arrives as a tool call that writes a database row
-    // (owner default). The verdict row is the only gate verdict; the hook's
-    // artifact file is a render for the operator and is not read.
-    const recorded = getHookGateVerdict(config.name, trigger.triggerUnitId);
-    if (!recorded) {
+    const artifactPath = resolveHookArtifactPath(basePath, trigger.triggerUnitId, config.artifact);
+    if (!existsSync(artifactPath)) {
       return {
         artifact: config.artifact,
-        reason: `no recorded verdict for gate ${config.name} — the hook must record its verdict with gsd_hook_verdict_save`,
+        artifactPath,
+        reason: `missing required gate artifact ${config.artifact}`,
       };
     }
-    const rawVerdict = recorded.verdict;
+    let content = "";
+    try {
+      content = readFileSync(artifactPath, "utf-8");
+    } catch (e) {
+      return {
+        artifact: config.artifact,
+        artifactPath,
+        reason: `could not read gate artifact ${config.artifact}: ${(e as Error).message}`,
+      };
+    }
+
+    const rawVerdict = extractFrontmatterVerdict(content);
+    if (!rawVerdict) {
+      return {
+        artifact: config.artifact,
+        artifactPath,
+        reason: `gate artifact ${config.artifact} is missing frontmatter verdict`,
+      };
+    }
+    if (rawVerdict === "failed") {
+      return {
+        artifact: config.artifact,
+        artifactPath,
+        verdict: "failed",
+        reason: `gate artifact ${config.artifact} reported verdict=failed`,
+      };
+    }
     if (!HOOK_OUTCOME_VERDICTS.has(rawVerdict as PostUnitHookOutcomeVerdict)) {
       return {
         artifact: config.artifact,
-        reason: `gate ${config.name} recorded unsupported verdict=${rawVerdict}`,
+        artifactPath,
+        reason: `gate artifact ${config.artifact} has unsupported verdict=${rawVerdict}`,
       };
     }
     return {
       artifact: config.artifact,
+      artifactPath,
       verdict: rawVerdict as PostUnitHookOutcomeVerdict,
     };
   }
@@ -1125,7 +1173,7 @@ export class RuleRegistry {
     return join(basePath, ".gsd", HOOK_STATE_FILE);
   }
 
-  /** Persist current hook state to the database. */
+  /** Persist current hook state to disk. */
   persistState(basePath: string): void {
     try {
       this._persistStateOrThrow(basePath);
@@ -1162,33 +1210,20 @@ export class RuleRegistry {
       })),
       savedAt: new Date().toISOString(),
     };
-    this._storeHookState(basePath, JSON.stringify(state, null, 2));
+    const dir = join(basePath, ".gsd");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const statePath = this._hookStatePath(basePath);
+    const temporaryPath = `${statePath}.tmp`;
+    writeFileSync(temporaryPath, JSON.stringify(state, null, 2), "utf-8");
+    renameSync(temporaryPath, statePath);
   }
 
-  /**
-   * Store the hook state row, then write hook-state.json as a diagnostic copy.
-   * Throws when the row cannot be written. Nothing reads the file back.
-   */
-  private _storeHookState(basePath: string, stateJson: string): void {
-    writeHookStateJson(hookStateScope(basePath), stateJson);
-    try {
-      const dir = join(basePath, ".gsd");
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      const statePath = this._hookStatePath(basePath);
-      const temporaryPath = `${statePath}.tmp`;
-      writeFileSync(temporaryPath, stateJson, "utf-8");
-      renameSync(temporaryPath, statePath);
-    } catch (e) {
-      // Diagnostic copy only — the database row is already stored.
-      logWarning("registry", `failed to write hook-state.json diagnostic copy: ${(e as Error).message}`);
-    }
-  }
-
-  /** Restore hook state from the database after a crash/restart. */
+  /** Restore hook state from disk after a crash/restart. */
   restoreState(basePath: string): void {
     try {
-      const raw = readHookStateJson(hookStateScope(basePath));
-      if (raw === null) return;
+      const filePath = this._hookStatePath(basePath);
+      if (!existsSync(filePath)) return;
+      const raw = readFileSync(filePath, "utf-8");
       const state: PersistedHookState = JSON.parse(raw);
       if (state.cycleCounts && typeof state.cycleCounts === "object") {
         this.cycleCounts.clear();
@@ -1266,12 +1301,13 @@ export class RuleRegistry {
     return restored;
   }
 
-  /** Clear the persisted hook state. */
+  /** Clear persisted hook state file from disk. */
   clearPersistedState(basePath: string): void {
     try {
-      if (readHookStateJson(hookStateScope(basePath)) !== null) {
-        this._storeHookState(
-          basePath,
+      const filePath = this._hookStatePath(basePath);
+      if (existsSync(filePath)) {
+        writeFileSync(
+          filePath,
           JSON.stringify({
             cycleCounts: {},
             redispatchedGateKeys: [],
@@ -1283,6 +1319,7 @@ export class RuleRegistry {
             gateBlockQueue: [],
             savedAt: new Date().toISOString(),
           }, null, 2),
+          "utf-8",
         );
       }
     } catch (e) {

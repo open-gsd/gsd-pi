@@ -15,24 +15,19 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { resolveDispatch, type DispatchContext } from "../auto-dispatch.ts";
-import { closeDatabase, insertArtifact, insertMilestone, openDatabase } from "../gsd-db.ts";
-import {
-  isWorkflowPreferencesCaptured,
-  recordResearchDecision,
-  recordWorkflowPreferencesCaptured,
-} from "../project-setup-facts.ts";
+import { closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
 import type { GSDState } from "../types.ts";
 import type { GSDPreferences } from "../preferences.ts";
 
 function makeIsolatedBase(t: TestContext, scope: "milestone" | "project" = "milestone"): string {
   const base = join(tmpdir(), `gsd-deep-integration-${randomUUID()}`);
   mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
-  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
   if (scope === "milestone") {
+    assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
     insertMilestone({ id: "M001", title: "Test", status: "active" });
   }
   t.after(() => {
-    closeDatabase();
+    if (scope === "milestone") closeDatabase();
     rmSync(base, { recursive: true, force: true });
   });
   return base;
@@ -65,8 +60,9 @@ function makeCtx(
   };
 }
 
-// PREFERENCES.md as the workflow-preferences stage leaves it. The stage gate
-// itself is the database fact recorded by writePreferences below.
+// PREFERENCES.md frontmatter that satisfies the workflow-preferences stage
+// gate. The dispatch layer keys off the explicit `workflow_prefs_captured`
+// marker, not on individual key presence — see isWorkflowPrefsCaptured.
 const capturedPreferencesMd = `---
 planning_depth: deep
 workflow_prefs_captured: true
@@ -145,29 +141,14 @@ const validRequirementsMd = [
 
 function writePreferences(base: string): void {
   writeFileSync(join(base, ".gsd", "PREFERENCES.md"), capturedPreferencesMd);
-  recordWorkflowPreferencesCaptured();
-}
-
-// The setup stages are database rows; the .gsd files are written too so the
-// prompt builders that inline them still find their projection.
-function saveRootArtifact(base: string, path: "PROJECT.md" | "REQUIREMENTS.md", content: string): void {
-  insertArtifact({
-    path,
-    artifact_type: path.replace(".md", ""),
-    milestone_id: null,
-    slice_id: null,
-    task_id: null,
-    full_content: content,
-  });
-  writeFileSync(join(base, ".gsd", path), content);
 }
 
 function writeValidProject(base: string): void {
-  saveRootArtifact(base, "PROJECT.md", validProjectMd);
+  writeFileSync(join(base, ".gsd", "PROJECT.md"), validProjectMd);
 }
 
 function writeValidRequirements(base: string): void {
-  saveRootArtifact(base, "REQUIREMENTS.md", validRequirementsMd);
+  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), validRequirementsMd);
 }
 
 // ─── Regression test for B1: rule ordering bug ────────────────────────────
@@ -186,9 +167,8 @@ test("integration: deep mode + needs-discussion + nothing captured → capture p
     );
   }
   const prefsContent = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(prefsContent, /^commit_policy:\s*per-task\s*$/m);
-  assert.equal(isWorkflowPreferencesCaptured(), true);
-  assert.equal(existsSync(join(base, ".gsd", "runtime", "research-decision.json")), false);
+  assert.match(prefsContent, /^workflow_prefs_captured:\s*true\s*$/m);
+  assert.ok(existsSync(join(base, ".gsd", "runtime", "research-decision.json")));
 });
 
 test("integration: deep mode + pre-planning + nothing captured → capture prefs then discuss-project", async (t) => {
@@ -201,7 +181,7 @@ test("integration: deep mode + pre-planning + nothing captured → capture prefs
     assert.strictEqual(result.unitType, "discuss-project");
   }
   const prefsContent = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(prefsContent, /^commit_policy:\s*per-task\s*$/m);
+  assert.match(prefsContent, /^workflow_prefs_captured:\s*true\s*$/m);
 });
 
 test("integration: deep mode + prefs captured + no PROJECT.md → discuss-project", async (t) => {
@@ -221,7 +201,7 @@ test("integration: deep mode + invalid PROJECT.md → discuss-project, not discu
   const base = makeIsolatedBase(t, "project");
 
   writePreferences(base);
-  saveRootArtifact(base, "PROJECT.md", "# Project\n");
+  writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n");
 
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion", "PROJECT"));
@@ -250,7 +230,7 @@ test("integration: deep mode + invalid REQUIREMENTS.md → discuss-requirements,
 
   writePreferences(base);
   writeValidProject(base);
-  saveRootArtifact(base, "REQUIREMENTS.md", "# Requirements\n");
+  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), "# Requirements\n");
 
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion", "PROJECT"));
@@ -260,7 +240,7 @@ test("integration: deep mode + invalid REQUIREMENTS.md → discuss-requirements,
   }
 });
 
-test("integration: deep mode + REQUIREMENTS saved + no research decision → discuss-milestone", async (t) => {
+test("integration: deep mode + REQUIREMENTS.md + no research-decision → discuss-milestone", async (t) => {
   const base = makeIsolatedBase(t);
 
   writePreferences(base);
@@ -273,7 +253,9 @@ test("integration: deep mode + REQUIREMENTS saved + no research decision → dis
   if (result.action === "dispatch") {
     assert.strictEqual(result.unitType, "discuss-milestone");
   }
-  assert.equal(existsSync(join(base, ".gsd", "runtime", "research-decision.json")), false, "the skip default is not written");
+  const decision = JSON.parse(readFileSync(join(base, ".gsd", "runtime", "research-decision.json"), "utf-8"));
+  assert.equal(decision.decision, "skip");
+  assert.equal(decision.reason, "missing-default-repair");
 });
 
 test("integration: deep mode + decision=research + research files missing → research-project", async (t) => {
@@ -282,7 +264,11 @@ test("integration: deep mode + decision=research + research files missing → re
   writePreferences(base);
   writeValidProject(base);
   writeValidRequirements(base);
-  recordResearchDecision("research");
+  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
+  writeFileSync(
+    join(base, ".gsd", "runtime", "research-decision.json"),
+    JSON.stringify({ decision: "research", source: "research-decision" }),
+  );
 
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion", "PROJECT"));
@@ -292,21 +278,24 @@ test("integration: deep mode + decision=research + research files missing → re
   }
 });
 
-test("integration: deep mode + leftover research-project marker file → research-project, not stop", async (t) => {
+test("integration: deep mode + research-project marker → stop, not discuss-milestone", async (t) => {
   const base = makeIsolatedBase(t, "project");
 
   writePreferences(base);
   writeValidProject(base);
   writeValidRequirements(base);
-  recordResearchDecision("research");
   mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
+  writeFileSync(
+    join(base, ".gsd", "runtime", "research-decision.json"),
+    JSON.stringify({ decision: "research", source: "research-decision" }),
+  );
   writeFileSync(join(base, ".gsd", "runtime", "research-project-inflight"), "{}\n");
 
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion", "PROJECT"));
-  assert.strictEqual(result.action, "dispatch");
-  if (result.action === "dispatch") {
-    assert.strictEqual(result.unitType, "research-project");
+  assert.strictEqual(result.action, "stop");
+  if (result.action === "stop") {
+    assert.match(result.reason, /research-project-inflight/);
   }
 });
 
@@ -316,7 +305,11 @@ test("integration: deep mode + decision=research + dimension blocker → discuss
   writePreferences(base);
   writeValidProject(base);
   writeValidRequirements(base);
-  recordResearchDecision("research");
+  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
+  writeFileSync(
+    join(base, ".gsd", "runtime", "research-decision.json"),
+    JSON.stringify({ decision: "research", source: "research-decision" }),
+  );
   mkdirSync(join(base, ".gsd", "research"), { recursive: true });
   for (const name of ["STACK.md", "FEATURES.md", "ARCHITECTURE.md"]) {
     writeFileSync(join(base, ".gsd", "research", name), "# done\n");
@@ -341,7 +334,11 @@ test("integration: deep mode + decision=skip → falls through to discuss-milest
   writePreferences(base);
   writeValidProject(base);
   writeValidRequirements(base);
-  recordResearchDecision("skip");
+  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
+  writeFileSync(
+    join(base, ".gsd", "runtime", "research-decision.json"),
+    JSON.stringify({ decision: "skip" }),
+  );
 
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion"));
@@ -355,15 +352,17 @@ test("integration: deep mode + decision=skip → falls through to discuss-milest
   }
 });
 
-test("integration: deep mode + leftover research-decision.json → ignored, discusses milestone", async (t) => {
+test("integration: deep mode + decision=<garbage> repairs to skip and discusses milestone", async (t) => {
   const base = makeIsolatedBase(t);
 
   writePreferences(base);
   writeValidProject(base);
   writeValidRequirements(base);
   mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-  const leftover = JSON.stringify({ decision: "research", source: "user" });
-  writeFileSync(join(base, ".gsd", "runtime", "research-decision.json"), leftover);
+  writeFileSync(
+    join(base, ".gsd", "runtime", "research-decision.json"),
+    JSON.stringify({ decision: "garbage" }),
+  );
 
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await resolveDispatch(makeCtx(base, prefs, "needs-discussion"));
@@ -372,10 +371,12 @@ test("integration: deep mode + leftover research-decision.json → ignored, disc
     assert.strictEqual(
       result.unitType,
       "discuss-milestone",
-      "a file is not a research decision; with no database decision the default is skip",
+      "malformed or unrecognized default research markers should repair to skip and advance",
     );
   }
-  assert.equal(readFileSync(join(base, ".gsd", "runtime", "research-decision.json"), "utf-8"), leftover);
+  const decision = JSON.parse(readFileSync(join(base, ".gsd", "runtime", "research-decision.json"), "utf-8"));
+  assert.equal(decision.decision, "skip");
+  assert.equal(decision.reason, "malformed-default-repair");
 });
 
 // ─── Light-mode regression check ──────────────────────────────────────────

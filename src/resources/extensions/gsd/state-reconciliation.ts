@@ -5,7 +5,6 @@
 
 export {
   reconcileBeforeDispatch,
-  settleFlatPhaseMigration,
   ReconciliationFailedError,
   DRIFT_REGISTRY,
 } from "./state-reconciliation/index.js";
@@ -20,7 +19,7 @@ export type {
   ReconciliationResult,
 } from "./state-reconciliation/index.js";
 
-export { heldProjectionChangesBeforeDispatch, reconcileBeforeSpawn } from "./state-reconciliation/spawn-gate.js";
+export { reconcileBeforeSpawn } from "./state-reconciliation/spawn-gate.js";
 export type {
   SpawnGateDeps,
   SpawnGateResult,

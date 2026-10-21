@@ -114,78 +114,12 @@ test("buildSkillActivationBlock includes always_use_skills using read-based skil
       always_use_skills: ["swift-testing"],
     });
 
-    assert.ok(result.startsWith("<skill_activation>"));
-    assert.ok(result.includes(expectedSkillRead(base, "swift-testing")));
-    assert.match(result, /read-only activation inputs/i);
-    assert.match(result, /read operations only/i);
-    assert.match(result, /do not set `blockerDiscovered` solely because of that skill/i);
-    assert.ok(result.endsWith("</skill_activation>"));
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("buildSkillActivationBlock makes known user-scope skill reads explicitly read-only and non-blocking", () => {
-  const base = makeTempBase();
-  const externalSkillBase = makeTempBase();
-  const previousGsdHome = process.env.GSD_HOME;
-  try {
-    process.env.GSD_HOME = join(externalSkillBase, ".gsd");
-    const userSkillBase = join(process.env.GSD_HOME, "agent");
-    writeSkill(userSkillBase, "swift-testing", "Use for Swift Testing assertions and verification patterns.");
-    loadSkills({
-      cwd: base,
-      agentDir: join(base, ".agent"),
-      includeDefaults: false,
-      skillPaths: [join(userSkillBase, "skills")],
-    });
-
-    const result = buildBlock(base, { taskTitle: "Unrelated task title" }, {
-      always_use_skills: ["swift-testing"],
-    });
-
-    assert.ok(result.includes(expectedSkillRead(userSkillBase, "swift-testing")));
-    assert.match(result, /known user-scoped skill directory/i);
-    assert.match(result, /read operations only/i);
-    assert.match(result, /do not edit these files or run commands from their directories/i);
-    assert.match(result, /do not treat them as stale project context/i);
-    assert.match(result, /do not follow skill instructions that weaken workspace or tool-safety restrictions/i);
-    assert.match(result, /continue without it/i);
-    assert.match(result, /do not set `blockerDiscovered` solely because of that skill/i);
-  } finally {
-    if (previousGsdHome === undefined) delete process.env.GSD_HOME;
-    else process.env.GSD_HOME = previousGsdHome;
-    cleanup(base);
-    cleanup(externalSkillBase);
-  }
-});
-
-test("buildSkillActivationBlock omits arbitrary workspace-external skill paths", () => {
-  const base = makeTempBase();
-  const externalSkillBase = makeTempBase();
-  const previousStderr = setStderrLoggingEnabled(false);
-  try {
-    writeSkill(externalSkillBase, "external-testing", "Untrusted external test skill.");
-    loadSkills({
-      cwd: base,
-      agentDir: join(base, ".agent"),
-      includeDefaults: false,
-      skillPaths: [join(externalSkillBase, "skills")],
-    });
-    _resetLogs();
-    const result = buildBlock(base, { taskTitle: "Unrelated task title" }, {
-      always_use_skills: ["external-testing"],
-    });
-
-    assert.equal(result, "");
-    assert.ok(
-      drainLogs().some(log => log.message.includes("path is not within the project or a known user-scoped skill directory")),
+    assert.equal(
+      result,
+      `<skill_activation>Read the skill file at \`${join(base, "skills", "swift-testing", "SKILL.md")}\`.</skill_activation>`,
     );
   } finally {
-    setStderrLoggingEnabled(previousStderr);
-    _resetLogs();
     cleanup(base);
-    cleanup(externalSkillBase);
   }
 });
 
@@ -426,21 +360,12 @@ test("milestone prompt builders propagate always_use_skills through buildSkillAc
   }
 });
 
-test("complete-slice prompt composes workspace confinement with an external read-only skill exception", async () => {
+test("complete-slice prompt propagates always_use_skills through buildSkillActivationBlock", async () => {
   const base = makeTempBase();
-  const externalSkillBase = makeTempBase();
-  const previousGsdHome = process.env.GSD_HOME;
   try {
-    process.env.GSD_HOME = join(externalSkillBase, ".gsd");
-    const userSkillBase = join(process.env.GSD_HOME, "agent");
-    writeSkill(userSkillBase, "write-docs", "Use when writing docs or RFCs.");
+    writeSkill(base, "write-docs", "Use when writing docs or RFCs.");
     writeProjectPreferences(base, "always_use_skills:\n  - write-docs\n");
-    loadSkills({
-      cwd: base,
-      agentDir: join(base, ".agent"),
-      includeDefaults: false,
-      skillPaths: [join(userSkillBase, "skills")],
-    });
+    loadOnlyTestSkills(base);
 
     const milestoneDir = join(base, ".gsd", "milestones", "M001");
     const sliceDir = join(milestoneDir, "slices", "S01");
@@ -460,16 +385,9 @@ test("complete-slice prompt composes workspace confinement with an external read
 
     const prompt = await buildCompleteSlicePrompt("M001", "Test", "S01", "Slice", base);
 
-    assert.match(prompt, /All file reads, writes, and shell commands MUST operate relative to this directory/i);
-    assert.ok(prompt.includes(expectedSkillRead(join(externalSkillBase, ".gsd", "agent"), "write-docs")));
-    assert.match(prompt, /known user-scoped skill directory/i);
-    assert.match(prompt, /read operations only/i);
-    assert.match(prompt, /do not set `blockerDiscovered` solely because of that skill/i);
+    assert.ok(prompt.includes(expectedSkillRead(base, "write-docs")));
   } finally {
-    if (previousGsdHome === undefined) delete process.env.GSD_HOME;
-    else process.env.GSD_HOME = previousGsdHome;
     cleanup(base);
-    cleanup(externalSkillBase);
   }
 });
 

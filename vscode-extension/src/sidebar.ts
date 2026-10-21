@@ -14,10 +14,6 @@ import {
 	hasSessionTokenStats,
 } from "./rpc-display.js";
 import { applySectionCollapseState } from "./section-state.js";
-import {
-	classifyProgressProvenance,
-	SidebarRefreshCoordinator,
-} from "./sidebar-refresh.js";
 
 /**
  * Send a message through VS Code's Chat panel so the user sees the response.
@@ -38,7 +34,7 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
 	private disposables: vscode.Disposable[] = [];
 	private refreshTimer: ReturnType<typeof setInterval> | undefined;
-	private readonly refreshCoordinator: SidebarRefreshCoordinator;
+	private refreshInFlight: Promise<void> | undefined;
 	private projectProgress: ProjectProgress | null = null;
 	private projectProgressError: string | null = null;
 
@@ -46,30 +42,8 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 		private readonly extensionUri: vscode.Uri,
 		private readonly client: GsdClient,
 	) {
-		this.refreshCoordinator = new SidebarRefreshCoordinator(
-			(refreshProjectProgress) => this.refreshInternal(refreshProjectProgress),
-		);
 		this.disposables.push(
-			client.onConnectionChange((connected) => {
-				if (!connected) {
-					// Cached progress must never reappear as live state after a
-					// reconnect; drop it the moment the connection is gone.
-					this.projectProgress = null;
-					this.projectProgressError = null;
-				}
-				// A connection change obsoletes every refresh scheduled before
-				// it; the coordinator guarantees one fresh strong refresh for
-				// the new generation (or none is needed when idle). Both
-				// automatic branches are fire-and-forget: attach a no-op catch
-				// so a failed refresh cannot surface as an unhandled rejection;
-				// awaiting callers still observe the failure.
-				const queued = this.refreshCoordinator.bumpGeneration();
-				if (queued === null) {
-					void this.refresh(true).catch(() => {});
-				} else {
-					void queued.catch(() => {});
-				}
-			}),
+			client.onConnectionChange(() => this.refresh(true)),
 			client.onEvent((evt) => {
 				switch (evt.type) {
 					case "agent_start":
@@ -224,10 +198,16 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 	}
 
 	async refresh(refreshProjectProgress = false): Promise<void> {
-		// Coalescing with stronger-intent preservation lives in the coordinator
-		// (issue #2668): a refresh(true) issued while a weaker refresh is in
-		// flight is queued and re-run instead of being silently swallowed.
-		return this.refreshCoordinator.request(refreshProjectProgress);
+		if (this.refreshInFlight) {
+			return this.refreshInFlight;
+		}
+
+		this.refreshInFlight = this.refreshInternal(refreshProjectProgress);
+		try {
+			await this.refreshInFlight;
+		} finally {
+			this.refreshInFlight = undefined;
+		}
 	}
 
 	private async refreshInternal(refreshProjectProgress: boolean): Promise<void> {
@@ -279,21 +259,12 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 			}
 
 			if (refreshProjectProgress) {
-				const generation = this.refreshCoordinator.generation;
 				try {
-					const progress = await this.client.getProjectProgress();
-					// A response from a dead or superseded connection must never
-					// be restored as fresh state (issue #2668).
-					if (generation === this.refreshCoordinator.generation && this.client.isConnected) {
-						this.projectProgress = progress;
-						this.projectProgressError = null;
-					}
+					this.projectProgress = await this.client.getProjectProgress();
+					this.projectProgressError = null;
 				} catch (error) {
-					// A superseded connection's failure must not publish either.
-					if (generation === this.refreshCoordinator.generation) {
-						this.projectProgress = null;
-						this.projectProgressError = error instanceof Error ? error.message : "Project progress request failed";
-					}
+					this.projectProgress = null;
+					this.projectProgressError = error instanceof Error ? error.message : "Project progress request failed";
 				}
 			}
 		}
@@ -905,15 +876,10 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 				?? progress.activeMilestone?.title
 				?? "No active work";
 			const counts = `${progress.tasks.done}/${progress.tasks.total} tasks done / ${progress.slices.done}/${progress.slices.total} slices done`;
-			// Honest provenance (issue #2668): a projection-fallback read must not
-			// display identically to a DB-authoritative one.
-			const provenanceLabel = classifyProgressProvenance(progress) === "projection"
-				? ` · projection (not DB-authoritative)`
-				: "";
 			body = `
 			<div class="progress-current">
 				<span class="progress-title">${escapeHtml(current)}</span>
-				<span class="progress-meta">${escapeHtml(progress.phase)} / ${escapeHtml(counts)}${provenanceLabel}</span>
+				<span class="progress-meta">${escapeHtml(progress.phase)} / ${escapeHtml(counts)}</span>
 				${progress.nextAction ? `<span class="progress-next">Next: ${escapeHtml(progress.nextAction)}</span>` : ""}
 			</div>`;
 						body += `<div class="progress-tree">${(progress.milestoneDetails ?? []).map((milestone) => `

@@ -1,5 +1,6 @@
 # ExtensionAPI — What You Can Do
 
+
 The `pi` object (received in your default export function) is your registration interface. It persists for the lifetime of the extension.
 
 ### Core Registration
@@ -23,7 +24,6 @@ The `pi` object (received in your default export function) is your registration 
 | `pi.sendUserMessage(content, options?)` | Send a user message (triggers a turn) |
 
 **`sendMessage` delivery modes:**
-
 - `"steer"` (default) — Interrupts streaming. Delivered after current tool finishes, remaining tools skipped.
 - `"followUp"` — Waits for agent to finish. Delivered when agent has no more tool calls.
 - `"nextTurn"` — Queued for next user prompt. Does not interrupt.

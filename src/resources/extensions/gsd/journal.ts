@@ -56,9 +56,6 @@ export type JournalEventType =
   | "pre-execution-retry"
   // #2119 — durable retry telemetry for execute-task deferred-closeout retries
   | "verification-retry"
-  // #2334 — diagnostic copy of the finalize verification pause; the receipt
-  // the task-settle reconcile reads is the task.verification.paused DB event
-  | "verification-paused"
   // #4764 — worktree lifespan / divergence telemetry
   | "worktree-created"
   | "worktree-merged"
@@ -80,9 +77,7 @@ export type JournalEventType =
   | "orchestrator-dispatch-stop"
   | "orchestrator-guard-block"
   | "orchestrator-terminal"
-  | "orchestrator-iteration-end"
-  // #2366 — a pending ScheduleWakeup was discarded because its unit ended non-completed
-  | "wakeup-discarded";
+  | "orchestrator-iteration-end";
 
 /** A single structured event in the journal. */
 export interface JournalEntry {

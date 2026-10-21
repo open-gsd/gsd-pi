@@ -54,16 +54,14 @@ const EXPECTED_KNOWN_UNIT_TYPES = [
   "workflow-preferences",
   "discuss-project",
   "discuss-requirements",
+  "research-decision",
   "research-project",
 ];
 
-// The contract table carries two keys KNOWN_UNIT_TYPES never had (variants).
+// The contract table carried two keys KNOWN_UNIT_TYPES never had (variants)
+// and lacked two it did have (sidecars without contracts).
 const EXPECTED_CONTRACT_ONLY_TYPES = ["discuss-slice", "execute-task-simple"];
-// The capture sidecars each have the one capture tool that records their outcome.
-const EXPECTED_SIDECAR_CONTRACTS: Record<string, string> = {
-  "triage-captures": "gsd_capture_resolve",
-  "quick-task": "gsd_capture_complete",
-};
+const EXPECTED_CONTRACT_LESS_TYPES = ["triage-captures", "quick-task"];
 
 const EXPECTED_EXECUTE_TASK_SET = ["execute-task", "execute-task-simple", "reactive-execute"];
 const EXPECTED_SECTION_CLOSE_SET = [
@@ -86,6 +84,7 @@ const EXPECTED_PHASE_CHAINS: Record<string, string[] | undefined> = {
   "discuss-project": ["discuss", "planning"],
   "discuss-requirements": ["discuss", "planning"],
   "workflow-preferences": ["discuss", "planning"],
+  "research-decision": ["discuss", "planning"],
   "execute-task": ["execution"],
   "reactive-execute": ["execution"],
   "execute-task-simple": ["execution_simple", "execution"],
@@ -124,6 +123,7 @@ const EXPECTED_DIRECT_PROMPT_TEMPLATES: Record<string, string> = {
   "workflow-preferences": "guided-workflow-preferences",
   "discuss-project": "guided-discuss-project",
   "discuss-requirements": "guided-discuss-requirements",
+  "research-decision": "guided-research-decision",
   "research-project": "guided-research-project",
 };
 
@@ -144,20 +144,18 @@ test("KNOWN_UNIT_TYPES derives exactly the pre-registry list, in order", () => {
   assert.deepEqual([...KNOWN_UNIT_TYPES], EXPECTED_KNOWN_UNIT_TYPES);
 });
 
-test("UNIT_TOOL_CONTRACTS has a contract for every unit type and variant", () => {
+test("UNIT_TOOL_CONTRACTS keeps the pre-registry key set, asymmetries included", () => {
   const contractKeys = Object.keys(UNIT_TOOL_CONTRACTS);
   for (const variant of EXPECTED_CONTRACT_ONLY_TYPES) {
     assert.ok(contractKeys.includes(variant), `variant ${variant} must keep its contract`);
     assert.ok(!KNOWN_UNIT_TYPES.includes(variant as never), `${variant} must stay out of KNOWN_UNIT_TYPES`);
   }
-  for (const [sidecar, tool] of Object.entries(EXPECTED_SIDECAR_CONTRACTS)) {
-    assert.deepEqual(getUnitToolSurfaceContract(sidecar), {
-      allowedGsdTools: [tool, "gsd_exec", "gsd_exec_search", "gsd_resume"],
-      requiredWorkflowTools: [tool],
-    });
+  for (const sidecar of EXPECTED_CONTRACT_LESS_TYPES) {
+    assert.ok(!contractKeys.includes(sidecar), `${sidecar} must stay contract-less`);
+    assert.equal(getUnitToolSurfaceContract(sidecar), undefined);
   }
   const expectedKeys = [
-    ...EXPECTED_KNOWN_UNIT_TYPES,
+    ...EXPECTED_KNOWN_UNIT_TYPES.filter((t) => !EXPECTED_CONTRACT_LESS_TYPES.includes(t)),
     ...EXPECTED_CONTRACT_ONLY_TYPES,
   ].sort();
   assert.deepEqual([...contractKeys].sort(), expectedKeys);

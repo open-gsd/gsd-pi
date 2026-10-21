@@ -200,7 +200,6 @@ describe("diagnostics type exports", () => {
       staleSkills: [],
       decliningSkills: [],
       suggestions: [],
-      availabilityBased: true,
     }
     assert.equal(typeof report.generatedAt, "string")
     assert.equal(typeof report.totalUnitsWithSkills, "number")
@@ -208,8 +207,6 @@ describe("diagnostics type exports", () => {
     assert.deepEqual(report.staleSkills, [])
     assert.deepEqual(report.decliningSkills, [])
     assert.deepEqual(report.suggestions, [])
-    // #2495: report must carry the availability-based honesty flag
-    assert.equal(report.availabilityBased, true)
   })
 })
 

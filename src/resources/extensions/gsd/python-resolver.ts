@@ -49,17 +49,9 @@ export function resolveVenvInterpreter(
   return null;
 }
 
-/**
- * Path separator style for an injected interpreter path. `posix` emits
- * forward slashes so a Windows venv path survives bash's backslash escaping
- * (`D:/proj/.venv/Scripts/python.exe`); both cmd and bash accept that form.
- */
-export type InterpreterPathStyle = "native" | "posix";
-
-export function formatPythonInvocation(executable: string, pathStyle: InterpreterPathStyle = "native"): string {
+export function formatPythonInvocation(executable: string): string {
   if (executable === "py -3") return executable;
-  const path = pathStyle === "posix" ? executable.replaceAll("\\", "/") : executable;
-  return /[\s"]/.test(path) ? JSON.stringify(path) : path;
+  return /[\s"]/.test(executable) ? JSON.stringify(executable) : executable;
 }
 
 function detectCacheKey(cwd?: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -115,20 +107,13 @@ export function detectPythonExecutable(cwd?: string): string | null {
  * silent no-op.
  *
  * @param command - The shell command string to normalize.
- * @param cwd - Project root used for venv detection.
- * @param pathStyle - Separator style for an injected venv path; pass `posix`
- *   when the command will run under bash on Windows.
  * @returns The command with Python interpreter tokens rewritten, or the
  *   original command if no rewrite is needed.
  */
-export function normalizePythonCommand(
-  command: string,
-  cwd?: string,
-  pathStyle: InterpreterPathStyle = "native",
-): string {
+export function normalizePythonCommand(command: string, cwd?: string): string {
   const executable = detectPythonExecutable(cwd);
   if (!executable) return command;
-  const invoked = formatPythonInvocation(executable, pathStyle);
+  const invoked = formatPythonInvocation(executable);
 
   // Split on common shell separators to handle compound commands.
   // We reconstruct the string preserving the original separators.

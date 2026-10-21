@@ -14,8 +14,6 @@ import {
   markCaptureExecuted,
   markCaptureResolved,
 } from "../captures.ts";
-import { handleTriage } from "../commands-handlers.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { checkPostUnitHooks } from "../post-unit-hooks.ts";
 import {
   _shouldAttemptPlanRegenerationForTest,
@@ -47,25 +45,6 @@ function makeProject(): string {
   return base;
 }
 
-test("/gsd triage reports an error when the database cannot be opened", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-triage-no-db-"));
-  t.after(() => {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  });
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-  writeFileSync(join(base, ".gsd", "gsd.db"), "this is not a sqlite database\n".repeat(64), "utf-8");
-  closeDatabase();
-  const notes: Array<{ message: string; level: string }> = [];
-  const ctx = { ui: { notify: (message: string, level: string) => notes.push({ message, level }) } };
-
-  await handleTriage(ctx as any, {} as any, base);
-
-  assert.deepEqual(notes, [
-    { message: "Cannot triage captures: the GSD database is not available.", level: "error" },
-  ]);
-});
-
 test("post-unit hooks exclude triage and quick-task units", () => {
   assert.equal(checkPostUnitHooks("triage-captures", "M001/S01/triage", "/tmp/project"), null);
   assert.equal(checkPostUnitHooks("quick-task", "M001/CAP-1", "/tmp/project"), null);
@@ -96,33 +75,42 @@ test("triage dispatch guard excludes step mode, hook units, triage units, and qu
   );
 });
 
-test("quick-task dispatch guard requires a held quick task and avoids quick-task recursion", () => {
+test("quick-task dispatch guard requires queued captures and avoids quick-task recursion", () => {
+  const capture = {
+    id: "CAP-test",
+    text: "Fix typo",
+    timestamp: new Date().toISOString(),
+    status: "resolved" as const,
+    classification: "quick-task" as const,
+  };
   assert.equal(
     _shouldDispatchQuickTaskForTest({
       stepMode: false,
       currentUnit: { type: "execute-task", id: "M001/S01/T01", startedAt: 1 },
-    } as any, () => true),
+      pendingQuickTasks: [capture],
+    } as any),
     true,
   );
   assert.equal(
     _shouldDispatchQuickTaskForTest({
       stepMode: false,
       currentUnit: { type: "quick-task", id: "M001/CAP-test", startedAt: 1 },
-    } as any, () => true),
+      pendingQuickTasks: [capture],
+    } as any),
     false,
   );
   assert.equal(
     _shouldDispatchQuickTaskForTest({
       stepMode: false,
       currentUnit: { type: "execute-task", id: "M001/S01/T01", startedAt: 1 },
-    } as any, () => false),
+      pendingQuickTasks: [],
+    } as any),
     false,
   );
 });
 
 test("capture lifecycle exposes pending, replan, deferred, and executed states", () => {
   const base = makeProject();
-  openDatabase(":memory:");
   try {
     const pendingId = appendCapture(base, "Need a quick follow-up.");
     const replanId = appendCapture(base, "Plan needs a new task.");
@@ -139,7 +127,6 @@ test("capture lifecycle exposes pending, replan, deferred, and executed states",
     assert.equal(loadReplanCaptures(base).some((entry) => entry.id === replanId), true);
     assert.equal(loadDeferredCaptures(base).some((entry) => entry.id === deferId), true);
   } finally {
-    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -156,5 +143,4 @@ test("quick-task prompt carries capture identity and completion instruction", ()
   assert.match(prompt, /CAP-quick/);
   assert.match(prompt, /Fix the CLI typo/);
   assert.match(prompt, /Quick task complete/);
-  assert.match(prompt, /`gsd_capture_complete` with `captureId: "CAP-quick"`/);
 });

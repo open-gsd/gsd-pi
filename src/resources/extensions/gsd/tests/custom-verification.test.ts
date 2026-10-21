@@ -7,7 +7,7 @@
  * optional test artifacts.
  */
 
-import { describe, it, before, after } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -15,28 +15,12 @@ import { tmpdir } from "node:os";
 import { stringify } from "yaml";
 import { runCustomVerification, runCustomVerificationWithEvidence } from "../custom-verification.ts";
 import type { WorkflowDefinition } from "../definition-loader.ts";
-import { initializeGraph, writeGraph } from "../graph.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
-import { importRunDirectory } from "../run-manager.ts";
-
-before(() => {
-  assert.equal(openDatabase(":memory:"), true);
-});
-
-after(() => {
-  closeDatabase();
-});
 import { createFakeRtk } from "../../../../tests/rtk-test-utils.ts";
 
-/**
- * Create a temp run directory with the given definition and optional files, and
- * import it to rows. `instanceStepIds` are steps of the run that are not in the
- * definition (iterate instances).
- */
+/** Create a temp run directory with the given definition and optional files. */
 function makeTempRun(
   def: WorkflowDefinition,
   files?: Record<string, string>,
-  instanceStepIds: string[] = [],
 ): string {
   const runDir = mkdtempSync(join(tmpdir(), "cv-test-"));
   writeFileSync(join(runDir, "DEFINITION.yaml"), stringify(def), "utf-8");
@@ -50,14 +34,6 @@ function makeTempRun(
       writeFileSync(absPath, content, "utf-8");
     }
   }
-
-  // The run is database rows: import the run directory.
-  const graph = initializeGraph(def);
-  for (const id of instanceStepIds) {
-    graph.steps.push({ id, title: id, status: "pending", prompt: id, dependsOn: [] });
-  }
-  writeGraph(runDir, graph);
-  importRunDirectory(runDir);
 
   return runDir;
 }
@@ -370,7 +346,7 @@ describe("no verify policy", () => {
     assert.equal(result, "continue");
   });
 
-  it("returns 'continue' when the step of the run is not in the definition", () => {
+  it("returns 'continue' when step ID is not found in definition", () => {
     const def = makeDef([
       {
         id: "step-1",
@@ -381,22 +357,23 @@ describe("no verify policy", () => {
       },
     ]);
 
-    const runDir = makeTempRun(def, undefined, ["step-1--001"]);
+    const runDir = makeTempRun(def);
 
-    const result = runCustomVerification(runDir, "step-1--001");
+    const result = runCustomVerification(runDir, "nonexistent-step");
     assert.equal(result, "continue");
   });
 });
 
-// ─── run with no rows ───────────────────────────────────────────────────
+// ─── missing DEFINITION.yaml ────────────────────────────────────────────
 
 describe("error handling", () => {
-  it("throws when the run has no database rows", () => {
+  it("throws when DEFINITION.yaml is missing", () => {
     const runDir = mkdtempSync(join(tmpdir(), "cv-test-nodef-"));
+    // No DEFINITION.yaml written
 
     assert.throws(
       () => runCustomVerification(runDir, "step-1"),
-      /has no database rows/,
+      /ENOENT/,
     );
   });
 });
@@ -452,5 +429,31 @@ describe("CustomExecutionPolicy.verify() integration", () => {
       basePath: "/tmp",
     });
     assert.equal(result, "pause");
+  });
+
+  it("proves human verification ownership only for human-review policy", async () => {
+    const { CustomExecutionPolicy } = await import("../custom-execution-policy.ts");
+    const runDir = makeTempRun(makeDef([
+      {
+        id: "human",
+        name: "Human review",
+        prompt: "Review output",
+        requires: [],
+        produces: [],
+        verify: { policy: "human-review" },
+      },
+      {
+        id: "agent",
+        name: "Agent check",
+        prompt: "Check output",
+        requires: [],
+        produces: ["output.md"],
+        verify: { policy: "content-heuristic" },
+      },
+    ]));
+    const policy = new CustomExecutionPolicy(runDir);
+
+    assert.equal(policy.requiresHumanVerification("execute-task", "M001/S01/human"), true);
+    assert.equal(policy.requiresHumanVerification("execute-task", "M001/S01/agent"), false);
   });
 });

@@ -153,6 +153,7 @@ export async function checkGitHealth(
   fixesApplied: string[],
   shouldFix: (code: DoctorIssueCode) => boolean,
   isolationMode: "none" | "worktree" | "branch" = "none",
+  dryRun = false,
 ): Promise<void> {
   // Degrade gracefully if not a git repo
   if (!nativeIsRepo(basePath)) {
@@ -180,9 +181,8 @@ export async function checkGitHealth(
   // preflight/auto-worktree paths use before the doctor hard-blocks auto-mode,
   // so only genuinely-manual conflicts remain. This also clears stale
   // merge-state markers (e.g. MERGE_HEAD) in the same pass when auto-resolve
-  // empties the unmerged set (#849). It changes the git index and work tree,
-  // so it runs only under --fix; plain doctor reports and writes nothing.
-  if (unmergedPaths.length > 0 && shouldFix("unresolved_git_conflicts")) {
+  // empties the unmerged set (#849).
+  if (unmergedPaths.length > 0 && !dryRun) {
     try {
       const reconcileFixes = reconcileGitConflictsOnSignal(basePath, probeGitConflictState(basePath));
       if (reconcileFixes.length > 0) {

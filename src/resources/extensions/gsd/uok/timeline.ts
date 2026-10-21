@@ -1,7 +1,10 @@
 // gsd-pi UOK Timeline Reconstruction from Authoritative DB Records
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { _getAdapter, isDbAvailable } from "../gsd-db.js";
-import { GSDError, GSD_STALE_STATE } from "../errors.js";
+import { gsdRoot } from "../paths.js";
 
 export interface TurnTimelineFilter {
   traceId?: string;
@@ -9,7 +12,7 @@ export interface TurnTimelineFilter {
 }
 
 export interface TurnTimelineEntry {
-  source: "audit_events" | "unit_dispatches" | "turn_git_transactions";
+  source: "audit_events" | "unit_dispatches" | "turn_git_transactions" | "audit_jsonl";
   ts: string;
   traceId?: string;
   turnId?: string | null;
@@ -18,8 +21,8 @@ export interface TurnTimelineEntry {
 }
 
 export interface TurnTimeline {
-  authoritative: "db";
-  degraded: false;
+  authoritative: "db" | "degraded-fallback";
+  degraded: boolean;
   entries: TurnTimelineEntry[];
 }
 
@@ -116,14 +119,40 @@ function readDbTimeline(filter: TurnTimelineFilter): TurnTimelineEntry[] {
   return entries.filter((entry) => entry.ts !== "").sort(byTimestamp);
 }
 
-/** The timeline is read from DB rows only; with no open DB it throws (ADR-046). */
-export function buildTurnTimeline(_basePath: string, filter: TurnTimelineFilter = {}): TurnTimeline {
-  if (!isDbAvailable()) {
-    throw new GSDError(GSD_STALE_STATE, "Cannot build turn timeline: workflow DB is unavailable");
+function readJsonlTimeline(basePath: string, filter: TurnTimelineFilter): TurnTimelineEntry[] {
+  const path = join(gsdRoot(basePath), "audit", "events.jsonl");
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf-8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line): TurnTimelineEntry | null => {
+      const event = parseJsonRecord(line);
+      const entry: TurnTimelineEntry = {
+        source: "audit_jsonl",
+        ts: String(event.ts ?? ""),
+        traceId: typeof event.traceId === "string" ? event.traceId : undefined,
+        turnId: typeof event.turnId === "string" ? event.turnId : null,
+        type: String(event.type ?? "audit"),
+        payload: parseJsonRecord(event.payload),
+      };
+      return entry.ts && matchesFilter(entry, filter) ? entry : null;
+    })
+    .filter((entry): entry is TurnTimelineEntry => entry !== null)
+    .sort(byTimestamp);
+}
+
+export function buildTurnTimeline(basePath: string, filter: TurnTimelineFilter = {}): TurnTimeline {
+  if (isDbAvailable()) {
+    return {
+      authoritative: "db",
+      degraded: false,
+      entries: readDbTimeline(filter),
+    };
   }
+
   return {
-    authoritative: "db",
-    degraded: false,
-    entries: readDbTimeline(filter),
+    authoritative: "degraded-fallback",
+    degraded: true,
+    entries: readJsonlTimeline(basePath, filter),
   };
 }

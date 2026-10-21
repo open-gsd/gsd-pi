@@ -1,14 +1,14 @@
 import { clearParseCache } from "../files.js";
 import {
+  getSlice,
+  getTask,
   insertReplanHistory,
   upsertTaskPlanning,
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
-import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
-import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
-import { readSlice, readTask } from "../db/lifecycle-read.js";
+import { isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
-import { assertVerifyIsShellCheckable, validateVerificationCommand } from "../verification-gate.js";
+import { assertVerifyIsShellCheckable } from "../verification-gate.js";
 import { normalizeVerifyCommandForVenv } from "../python-resolver.js";
 import { loadEffectiveGSDPreferences } from "../preferences.js";
 import {
@@ -30,6 +30,7 @@ import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   adoptLifecycleIfMissing,
+  normalizeLegacyLifecycleStatus,
 } from "../db/writers/lifecycle-commands.js";
 import {
   executePlanningDomainOperation,
@@ -38,10 +39,6 @@ import {
 } from "../planning-domain-operation.js";
 import type { PlanningInvocation } from "../planning-invocation.js";
 import { validateTaskToolRequirements } from "../task-tool-requirements.js";
-import {
-  derivePlanningDecisionScope,
-  validateVerifyAgainstActiveDecisions,
-} from "../planning-decision-guard.js";
 
 export interface ReplanTaskParams {
   milestoneId: string;
@@ -68,8 +65,6 @@ export interface ReplanTaskResult {
   sliceId: string;
   taskId: string;
   taskPlanPath: string;
-  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
-  stale?: true;
 }
 
 function validateParams(params: ReplanTaskParams): ReplanTaskParams {
@@ -80,19 +75,7 @@ function validateParams(params: ReplanTaskParams): ReplanTaskParams {
   if (!isNonEmptyString(params?.description)) throw new Error("description is required");
   if (!isNonEmptyString(params?.estimate)) throw new Error("estimate is required");
   if (!isNonEmptyString(params?.verify)) throw new Error("verify is required");
-  const decisionVerifyError = validateVerifyAgainstActiveDecisions(
-    params.verify,
-    params.milestoneId,
-    derivePlanningDecisionScope(params.milestoneId, params.sliceId),
-  );
-  if (decisionVerifyError) {
-    throw new Error(decisionVerifyError);
-  }
   assertVerifyIsShellCheckable(params.verify);
-  const verifyValidation = validateVerificationCommand(params.verify);
-  if (!verifyValidation.ok) {
-    throw new Error(`verify must be a shell-checkable command: ${verifyValidation.reason}`);
-  }
   const requiredWorkflowTools = params.requiredWorkflowTools === undefined
     ? []
     : Array.from(new Set(validateStringArray(params.requiredWorkflowTools, "requiredWorkflowTools")));
@@ -152,6 +135,7 @@ export async function handleReplanTask(
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.task.replan",
       invocation,
+      actorId: params.actorName,
       payload: planningOperationPayload(params),
       event: {
         eventType: "workflow.task.replanned",
@@ -174,18 +158,18 @@ export async function handleReplanTask(
         { itemKind: "task", milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
       ],
       mutate(context) {
-        const parentSlice = readSlice(params.milestoneId, params.sliceId);
+        const parentSlice = getSlice(params.milestoneId, params.sliceId);
         if (!parentSlice) {
           throw new PlanningGuardError(`missing parent slice: ${params.milestoneId}/${params.sliceId}`);
         }
-        if (parentSlice.closed) {
+        if (isClosedStatus(parentSlice.status)) {
           throw new PlanningGuardError(`cannot replan a task in a closed slice: ${params.sliceId} (status: ${parentSlice.status})`);
         }
         const parentLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
-          lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${params.sliceId}`, parentSlice.status),
+          lifecycleStatus: normalizeLegacyLifecycleStatus(parentSlice.status) ?? "ready",
         });
         if (parentLifecycle.lifecycleStatus === "completed" || parentLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -193,11 +177,11 @@ export async function handleReplanTask(
           );
         }
 
-        const task = readTask(params.milestoneId, params.sliceId, params.taskId);
+        const task = getTask(params.milestoneId, params.sliceId, params.taskId);
         if (!task) {
           throw new PlanningGuardError(`task not found: ${params.milestoneId}/${params.sliceId}/${params.taskId}`);
         }
-        if (task.done) {
+        if (isClosedStatus(task.status)) {
           throw new PlanningGuardError(`cannot replan completed task ${params.taskId} — use gsd_task_reopen first`);
         }
         const lifecycle = adoptLifecycleIfMissing(context, {
@@ -205,7 +189,7 @@ export async function handleReplanTask(
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
           taskId: params.taskId,
-          lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${params.taskId}`, task.status),
+          lifecycleStatus: normalizeLegacyLifecycleStatus(task.status) ?? "ready",
         });
         if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -247,17 +231,10 @@ export async function handleReplanTask(
     });
     operationStatus = receipt.status;
   } catch (err) {
-    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
+    if (err instanceof PlanningGuardError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 
-  // A re-planned unit gets its verification retries again (ADR-048).
-  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}/${params.taskId}`);
-
-  // The replan is committed. A failed render must not fail the tool: its
-  // Projection Work stays pending and the Projection Worker renders it again.
-  let taskPlanPath = "";
-  let stale = false;
   try {
     const milestonePath = resolveMilestonePath(basePath, params.milestoneId);
     const slicePath = resolveSlicePath(basePath, params.milestoneId, params.sliceId);
@@ -265,37 +242,35 @@ export async function handleReplanTask(
     const renderResult = isLegacySliceLayout
       ? await renderTaskPlanFromDb(basePath, params.milestoneId, params.sliceId, params.taskId)
       : await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
-    taskPlanPath = "taskPlanPath" in renderResult ? renderResult.taskPlanPath : renderResult.planPath;
-  } catch (err) {
-    stale = true;
-    logWarning("projection", `replan_task render failed for ${params.milestoneId}/${params.sliceId}/${params.taskId}; the replan stays committed`, { error: (err as Error).message });
-  }
+    const taskPlanPath = "taskPlanPath" in renderResult ? renderResult.taskPlanPath : renderResult.planPath;
 
-  invalidateStateCache();
-  clearParseCache();
+    invalidateStateCache();
+    clearParseCache();
 
-  try {
-    await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
-    await writeManifestAndFlush(basePath);
-    if (operationStatus === "committed") {
-      appendEvent(basePath, {
-        cmd: "replan-task",
-        params: { milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
-        ts: new Date().toISOString(),
-        actor: "agent",
-        actor_name: params.actorName,
-        trigger_reason: params.triggerReason,
-      });
+    try {
+      await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
+      await writeManifestAndFlush(basePath);
+      if (operationStatus === "committed") {
+        appendEvent(basePath, {
+          cmd: "replan-task",
+          params: { milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
+          ts: new Date().toISOString(),
+          actor: "agent",
+          actor_name: params.actorName,
+          trigger_reason: params.triggerReason,
+        });
+      }
+    } catch (hookErr) {
+      logWarning("tool", `replan-task post-mutation hook warning: ${(hookErr as Error).message}`);
     }
-  } catch (hookErr) {
-    logWarning("tool", `replan-task post-mutation hook warning: ${(hookErr as Error).message}`);
-  }
 
-  return {
-    milestoneId: params.milestoneId,
-    sliceId: params.sliceId,
-    taskId: params.taskId,
-    taskPlanPath,
-    ...(stale ? { stale: true as const } : {}),
-  };
+    return {
+      milestoneId: params.milestoneId,
+      sliceId: params.sliceId,
+      taskId: params.taskId,
+      taskPlanPath,
+    };
+  } catch (err) {
+    return { error: `render failed: ${(err as Error).message}` };
+  }
 }

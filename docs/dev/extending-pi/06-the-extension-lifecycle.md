@@ -1,5 +1,6 @@
 # The Extension Lifecycle
 
+
 ```
 pi starts
   │

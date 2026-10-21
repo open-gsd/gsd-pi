@@ -1,7 +1,5 @@
 // Project/App: gsd-pi
 // File Purpose: Fail-closed reconciliation guards for DB/artifact and slice-id drift.
-// Which Milestone, Slice or Task is closed comes from the read interface
-// (db/lifecycle-read.ts): the same answer as dispatch.
 
 import {
   existsSync,
@@ -16,16 +14,11 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import {
   _getAdapter,
   clearTaskSummaryProjectionState,
+  getAllMilestones,
   getMilestoneSlices,
+  getSliceTasks,
   isDbAvailable,
 } from "../../gsd-db.js";
-import {
-  readMilestone,
-  readMilestoneSlices,
-  readMilestones,
-  readSliceTasks,
-  readTask,
-} from "../../db/lifecycle-read.js";
 import { clearParseCache } from "../../files.js";
 import {
   clearPathCache,
@@ -38,20 +31,13 @@ import { isClosedStatus } from "../../status-guards.js";
 import { findMilestoneIds } from "../../milestone-ids.js";
 import { removeProjectionTreeSync } from "../../atomic-write.js";
 import { invalidateStateCache } from "../../state.js";
-import { hasTaskExecutionOrReopenHistory, latestSliceReopenAt } from "../../db/lifecycle-queries.js";
 import type { GSDState } from "../../types.js";
-import {
-  completedEventCoversDispatch,
-  isAfter,
-  latestExplicitReopenAt,
-  legacyReopenImportGuidance,
-} from "../../milestone-reopen-events.js";
+import { isAfter, latestExplicitReopenAt } from "../../milestone-reopen-events.js";
 import { isCanonicalStagedTaskSummaryProjection } from "../../task-summary-projection-classification.js";
 import { readLatestTaskAttempt } from "../../task-execution-domain-operation.js";
 import { quarantineProjectionEvidence } from "../../projection-observation.js";
-import { reopenProjectionRoots } from "../../projection-cleanup.js";
 import { computeProjectionSha, deriveCompatProjectionKey, readCompatMarker } from "../../compat/compat-marker.js";
-import { comparableProjectionContent } from "../../markdown-renderer.js";
+import { stripProjectionStamp } from "../../markdown-renderer.js";
 import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
 
 type DiskSliceIdDivergenceDrift = Extract<
@@ -99,13 +85,13 @@ function safeListArtifactRows(milestoneId: string): ArtifactStatusRow[] {
   }
 }
 
-function completedMilestoneDispatches(
+function latestCompletedMilestoneDispatch(
   milestoneId: string,
-): CompletedDispatchRow[] {
+): CompletedDispatchRow | null {
   const adapter = _getAdapter();
-  if (!adapter) return [];
+  if (!adapter) return null;
   try {
-    return adapter
+    const row = adapter
       .prepare(
         `SELECT started_at, ended_at
          FROM unit_dispatches
@@ -113,19 +99,22 @@ function completedMilestoneDispatches(
            AND unit_type = 'complete-milestone'
            AND unit_id = :mid
            AND status = 'completed'
-         ORDER BY COALESCE(ended_at, started_at) DESC, id DESC`,
+         ORDER BY COALESCE(ended_at, started_at) DESC, id DESC
+         LIMIT 1`,
       )
-      .all({ ":mid": milestoneId }) as CompletedDispatchRow[];
+      .get({ ":mid": milestoneId }) as CompletedDispatchRow | undefined;
+    return row ?? null;
   } catch {
-    return [];
+    return null;
   }
 }
 
 function hasExplicitReopenAfter(
+  basePath: string,
   milestoneId: string,
   completedDispatchAt: string | null | undefined,
 ): boolean {
-  const reopenAt = latestExplicitReopenAt(milestoneId);
+  const reopenAt = latestExplicitReopenAt(basePath, milestoneId);
   if (!reopenAt) return false;
   if (!completedDispatchAt) return true;
   return Date.parse(reopenAt) > Date.parse(completedDispatchAt);
@@ -163,36 +152,39 @@ function taskHasExecutionOrReopenHistory(
   taskId: string,
 ): boolean {
   if (!isDbAvailable()) return false;
-  return hasTaskExecutionOrReopenHistory(milestoneId, sliceId, taskId);
-}
-
-/**
- * Disk-existence check for a slice-level SUMMARY artifact row: the recorded
- * path, or the currently-resolved slice projection path. Mirrors the
- * task-level stagedTaskSummaryExistsOnDisk above.
- */
-function sliceSummaryExistsOnDisk(
-  basePath: string,
-  milestoneId: string,
-  sliceId: string,
-  rowPath: string,
-): boolean {
-  const candidates = [
-    isAbsolute(rowPath) ? rowPath : resolve(basePath, rowPath),
-    resolveSliceFile(basePath, milestoneId, sliceId, "SUMMARY"),
-  ];
-  return candidates.some((candidate) => candidate !== null && existsSync(candidate));
-}
-
-/**
- * The occurred-at of a slice's newest explicit reopen, or null when the DB
- * is unavailable or the slice was never reopened. The caller ties this to
- * the artifact row's imported_at: only a row that predates the reopen is
- * dead bookkeeping left by the pre-reopen completion.
- */
-function sliceLatestReopenAt(milestoneId: string, sliceId: string): string | null {
-  if (!isDbAvailable()) return null;
-  return latestSliceReopenAt(milestoneId, sliceId);
+  const row = _getAdapter()!.prepare(`
+    SELECT 1 AS present
+    FROM workflow_item_lifecycles lifecycle
+    WHERE lifecycle.item_kind = 'task'
+      AND lifecycle.milestone_id = :milestone_id
+      AND lifecycle.slice_id = :slice_id
+      AND lifecycle.task_id = :task_id
+      AND (
+        EXISTS (
+          SELECT 1 FROM workflow_execution_attempts attempt
+          WHERE attempt.lifecycle_id = lifecycle.lifecycle_id
+            AND attempt.project_id = lifecycle.project_id
+        )
+        OR (
+          lifecycle.lifecycle_status = 'ready'
+          AND EXISTS (
+            SELECT 1 FROM workflow_domain_events reopened
+            WHERE reopened.project_id = lifecycle.project_id
+              AND reopened.operation_id = lifecycle.last_operation_id
+              AND reopened.event_type = 'task.reopened'
+              AND reopened.entity_type = 'task'
+              AND reopened.entity_id = :entity_id
+          )
+        )
+      )
+    LIMIT 1
+  `).get({
+    ":milestone_id": milestoneId,
+    ":slice_id": sliceId,
+    ":task_id": taskId,
+    ":entity_id": `${milestoneId}/${sliceId}/${taskId}`,
+  });
+  return row !== undefined;
 }
 
 function isAbandonedStagedTaskSummary(
@@ -200,7 +192,8 @@ function isAbandonedStagedTaskSummary(
   basePath: string,
 ): boolean {
   if (!record.sliceId || !record.taskId || record.artifactType !== "SUMMARY") return false;
-  const task = readTask(record.milestoneId, record.sliceId, record.taskId);
+  const task = getSliceTasks(record.milestoneId, record.sliceId)
+    .find((candidate) => candidate.id === record.taskId);
   if (task?.status !== "in_progress") return false;
   const attempt = readLatestTaskAttempt({
     milestoneId: record.milestoneId,
@@ -226,20 +219,14 @@ function isAbandonedStagedTaskSummary(
   }
   if (
     task.full_summary_md &&
-    comparableProjectionContent(content) === comparableProjectionContent(task.full_summary_md)
+    stripProjectionStamp(content) === stripProjectionStamp(task.full_summary_md)
   ) return true;
 
   const projectionKey = deriveCompatProjectionKey(
     projectionPath,
     [gsdProjectionRoot(basePath), join(basePath, ".gsd")],
   );
-  // gsd_summary_save renders the SUMMARY at the project root and copies it into
-  // the milestone worktree. The baseline of that copy is only in the
-  // project-root marker (#2714).
-  const sha = computeProjectionSha(content);
-  return reopenProjectionRoots(basePath).some((root) =>
-    readCompatMarker(root).projections[projectionKey]?.sha === sha
-  );
+  return readCompatMarker(basePath).projections[projectionKey]?.sha === computeProjectionSha(content);
 }
 
 function resolveTaskSummaryDriftPath(
@@ -286,19 +273,19 @@ function detectArtifactDbStatusDriftForMilestone(
   basePath: string,
   milestoneId: string,
 ): ArtifactDbStatusDivergenceDrift[] {
-  const milestone = readMilestone(milestoneId);
-  if (!milestone || milestone.closed) return [];
+  const milestone = getAllMilestones().find((m) => m.id === milestoneId);
+  if (!milestone || isClosedStatus(milestone.status)) return [];
 
-  const latestReopen = latestExplicitReopenAt(milestoneId);
+  const latestReopen = latestExplicitReopenAt(basePath, milestoneId);
   const artifacts = safeListArtifactRows(milestoneId).filter((row) =>
     isAfter(row.imported_at, latestReopen),
   );
-  const bySlice = new Map(readMilestoneSlices(milestoneId).map((slice) => [slice.id, slice]));
+  const bySlice = new Map(getMilestoneSlices(milestoneId).map((slice) => [slice.id, slice]));
   const drifts: ArtifactDbStatusDivergenceDrift[] = [];
   const seen = new Set<string>();
 
   for (const slice of bySlice.values()) {
-    if (!slice.closed) {
+    if (!isClosedStatus(slice.status)) {
       const diskSummary = resolveSliceFile(basePath, milestoneId, slice.id, "SUMMARY");
       if (diskSummary && existsSync(diskSummary)) {
         addUniqueDrift(drifts, seen, {
@@ -313,7 +300,7 @@ function detectArtifactDbStatusDriftForMilestone(
       }
     }
 
-    const tasks = readSliceTasks(milestoneId, slice.id);
+    const tasks = getSliceTasks(milestoneId, slice.id);
     const taskById = new Map(tasks.map((task) => [task.id, task]));
     const summaryRows = artifacts.filter(
       (row) =>
@@ -352,7 +339,7 @@ function detectArtifactDbStatusDriftForMilestone(
         }
         continue;
       }
-      if (task.done) continue;
+      if (isClosedStatus(task.status)) continue;
       // A missing-file row on a task that ran before (#1771), or whose current
       // lifecycle head is an explicit reopen (#1983), is dead bookkeeping.
       // An unproven row stays a blocker (ADR-017/#414).
@@ -392,7 +379,7 @@ function detectArtifactDbStatusDriftForMilestone(
     }
 
     for (const task of tasks) {
-      if (task.done) continue;
+      if (isClosedStatus(task.status)) continue;
       if (currentStagedTaskIds.has(task.id)) continue;
       const diskTaskSummary = resolveTaskFile(
         basePath,
@@ -418,25 +405,7 @@ function detectArtifactDbStatusDriftForMilestone(
   for (const row of artifacts) {
     if (row.artifact_type !== "SUMMARY" || !row.slice_id || row.task_id) continue;
     const slice = bySlice.get(row.slice_id);
-    if (!slice || slice.closed) continue;
-    // A missing-file slice-level SUMMARY row imported BEFORE the slice's
-    // latest reopen is dead bookkeeping, mirroring the task-level
-    // #1771/#1983 exemption: the reopen cleared the summary carrier and
-    // quarantined the file, so the orphaned artifacts row must not wedge the
-    // reopened slice's re-execution. The temporal tie matters (PR #2674
-    // review): a row imported AFTER the latest reopen with no file on disk is
-    // a genuine divergence — for example a post-reopen gsd_summary_save whose
-    // projection write failed — and must stay flaggable. A slice that
-    // legitimately re-completes re-writes its SUMMARY to disk, so the
-    // disk-absence gate keeps that genuine completion-claim flaggable too.
-    const latestSliceReopen = sliceLatestReopenAt(milestoneId, row.slice_id);
-    if (
-      latestSliceReopen !== null &&
-      !isAfter(row.imported_at, latestSliceReopen) &&
-      !sliceSummaryExistsOnDisk(basePath, milestoneId, row.slice_id, row.path)
-    ) {
-      continue;
-    }
+    if (!slice || isClosedStatus(slice.status)) continue;
     addUniqueDrift(drifts, seen, {
       kind: "artifact-db-status-divergence",
       milestoneId,
@@ -664,30 +633,21 @@ function computeArtifactDbDrift(
     return resolved;
   };
 
-  for (const milestone of readMilestones()) {
-    if (milestone.closed) continue;
+  for (const milestone of getAllMilestones()) {
+    if (isClosedStatus(milestone.status)) continue;
 
-    // #2398: a completed `complete-milestone` dispatch row alone is not proof
-    // the milestone was ever completed — a closeout whose attempts all fail
-    // (or whose session exits) still leaves a status='completed' row behind.
-    // Evaluate every completed dispatch, newest first: a later receiptless
-    // row must not hide an earlier event-backed completion that was never
-    // explicitly reopened, while a row with no covering milestone.completed
-    // event is closeout debris, not completed-then-reopened history.
-    for (const dispatch of completedMilestoneDispatches(milestone.id)) {
-      const completedAt = dispatch.ended_at ?? dispatch.started_at ?? null;
-      if (
-        completedEventCoversDispatch(milestone.id, dispatch.started_at) &&
-        !hasExplicitReopenAfter(milestone.id, completedAt)
-      ) {
-        drifts.push({
-          kind: "completed-milestone-reopened",
-          milestoneId: milestone.id,
-          dbStatus: milestone.status,
-          completedDispatchAt: completedAt,
-        });
-        break; // one drift record per milestone
-      }
+    const completedDispatch = latestCompletedMilestoneDispatch(milestone.id);
+    const completedAt = completedDispatch?.ended_at ?? completedDispatch?.started_at ?? null;
+    if (
+      completedDispatch &&
+      !hasExplicitReopenAfter(ctx.basePath, milestone.id, completedAt)
+    ) {
+      drifts.push({
+        kind: "completed-milestone-reopened",
+        milestoneId: milestone.id,
+        dbStatus: milestone.status,
+        completedDispatchAt: completedAt,
+      });
     }
 
     drifts.push(...detectArtifactDbStatusDriftForMilestone(ctx.basePath, milestone.id));
@@ -746,25 +706,6 @@ function diskSliceIdDivergenceGuidance(record: DiskSliceIdDivergenceDrift): stri
   );
 }
 
-/**
- * Recovery text for an artifact/DB status drift. A rebuild moves the file on
- * disk aside but keeps the artifact row, so it cannot clear a drift that comes
- * from a stale row. Do not tell the user that it can.
- */
-function artifactDbStatusDivergenceExit(record: ArtifactDbStatusDivergenceDrift, basePath?: string): string {
-  const row = safeListArtifactRows(record.milestoneId).find((candidate) => candidate.path === record.artifactPath);
-  if (row) {
-    const legacyReopen = basePath ? legacyReopenImportGuidance(basePath, record.milestoneId, row.imported_at) : null;
-    if (legacyReopen) return legacyReopen;
-    return (
-      "This drift comes from a SUMMARY row in the database. " +
-      "`/gsd rebuild markdown` moves the file on disk to quarantine and keeps that row, so this blocker can remain after a rebuild. " +
-      "If it remains, the row is stale: `/gsd recover` with exact Preview approval is the only command that replaces artifact rows from markdown."
-    );
-  }
-  return "Run `/gsd rebuild markdown` after review to quarantine stale projections and re-render from the DB; use `/gsd recover` with exact Preview approval only when markdown should repopulate a lost or corrupt DB.";
-}
-
 export async function repairArtifactDbDrift(
   record:
     | DiskSliceIdDivergenceDrift
@@ -791,15 +732,8 @@ export async function repairArtifactDbDrift(
   }
 
   if (isAbandonedStagedTaskSummary(record, ctx.basePath)) {
-    // The copy at the other root is the same drift at the next guard, and no
-    // command that runs at one root removes it (#2714). Move each copy that
-    // passes the same proof.
-    const canonical = { ...record, artifactPath: undefined };
-    for (const root of reopenProjectionRoots(ctx.basePath)) {
-      if (!isAbandonedStagedTaskSummary(canonical, root)) continue;
-      const projectionPath = resolveTaskSummaryDriftPath(root, canonical);
-      if (projectionPath) quarantineProjectionEvidence(root, projectionPath);
-    }
+    const projectionPath = resolveTaskSummaryDriftPath(ctx.basePath, record);
+    if (projectionPath) quarantineProjectionEvidence(ctx.basePath, projectionPath);
     clearTaskSummaryProjectionState(record.milestoneId, record.sliceId!, record.taskId!);
     clearPathCache();
     clearParseCache();
@@ -812,7 +746,7 @@ export async function repairArtifactDbDrift(
       `${record.sliceId ? `/${record.sliceId}` : ""}` +
       `${record.taskId ? `/${record.taskId}` : ""}: ${record.reason}. ` +
       "Runtime will not silently import completion artifacts into DB state. " +
-      artifactDbStatusDivergenceExit(record, ctx.basePath),
+      "Run `/gsd rebuild markdown` after review to quarantine stale projections and re-render from the DB; use `/gsd recover` with exact Preview approval only when markdown should repopulate a lost or corrupt DB.",
   );
 }
 
@@ -839,7 +773,7 @@ export function describeArtifactDbDriftBlocker(
     `${record.sliceId ? `/${record.sliceId}` : ""}` +
     `${record.taskId ? `/${record.taskId}` : ""}: ${record.reason}. ` +
     "Runtime will not silently import completion artifacts into DB state. " +
-    artifactDbStatusDivergenceExit(record, ctx?.basePath)
+    "Run `/gsd rebuild markdown` after review to quarantine stale projections and re-render from the DB; use `/gsd recover` with exact Preview approval only when markdown should repopulate a lost or corrupt DB."
   );
 }
 

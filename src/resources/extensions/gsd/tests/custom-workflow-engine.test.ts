@@ -1,23 +1,19 @@
 /**
  * custom-workflow-engine.test.ts — Tests for CustomWorkflowEngine and CustomExecutionPolicy.
  *
- * Uses real temp run directories and an in-memory database — no mocks. Each
- * run directory is file-only; the engine imports it to rows on first use.
+ * Uses real temp directories with actual GRAPH.yaml files — no mocks.
  * Tests the full engine lifecycle: deriveState → resolveDispatch → reconcile.
  */
 
-import { describe, it, before, after, afterEach } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 
-import { CustomWorkflowEngine, stepIdOfUnit } from "../custom-workflow-engine.ts";
-import { customWorkflowRunId } from "../db/custom-workflow-runs.ts";
+import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
 import { CustomExecutionPolicy } from "../custom-execution-policy.ts";
-import { runCustomVerificationWithEvidence } from "../custom-verification.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { writeGraph, readGraph, type WorkflowGraph, type GraphStep } from "../graph.ts";
 import { stringify } from "yaml";
 
@@ -30,14 +26,6 @@ function makeTmpDir(): string {
   tmpDirs.push(dir);
   return dir;
 }
-
-before(() => {
-  assert.equal(openDatabase(":memory:"), true);
-});
-
-after(() => {
-  closeDatabase();
-});
 
 afterEach(() => {
   for (const d of tmpDirs) {
@@ -135,7 +123,7 @@ describe("CustomWorkflowEngine.deriveState", () => {
 
 describe("CustomWorkflowEngine.resolveDispatch", () => {
   it("returns dispatch for first pending step", async () => {
-    const { engine, runDir } = setupEngine([
+    const { engine } = setupEngine([
       makeStep({ id: "step-1", prompt: "Do the first thing" }),
       makeStep({ id: "step-2", dependsOn: ["step-1"] }),
     ], "my-workflow");
@@ -146,8 +134,7 @@ describe("CustomWorkflowEngine.resolveDispatch", () => {
     assert.equal(dispatch.action, "dispatch");
     if (dispatch.action === "dispatch") {
       assert.equal(dispatch.step.unitType, "custom-step");
-      // The unit id carries the run id, so two runs of one workflow have different unit ids.
-      assert.equal(dispatch.step.unitId, `${customWorkflowRunId(runDir)}/step-1`);
+      assert.equal(dispatch.step.unitId, "my-workflow/step-1");
       assert.equal(dispatch.step.prompt, "Do the first thing");
     }
   });
@@ -178,14 +165,14 @@ describe("CustomWorkflowEngine.resolveDispatch", () => {
     const firstDispatch = await engine.resolveDispatch(state, { basePath: "/unused" });
     assert.equal(firstDispatch.action, "dispatch");
     if (firstDispatch.action === "dispatch") {
-      assert.equal(stepIdOfUnit(firstDispatch.step.unitId), "step-1");
+      assert.equal(firstDispatch.step.unitId, "my-workflow/step-1");
     }
 
     state = await engine.deriveState("/unused");
     const secondDispatch = await engine.resolveDispatch(state, { basePath: "/unused" });
     assert.equal(secondDispatch.action, "dispatch");
     if (secondDispatch.action === "dispatch") {
-      assert.equal(stepIdOfUnit(secondDispatch.step.unitId), "step-1");
+      assert.equal(secondDispatch.step.unitId, "my-workflow/step-1");
       assert.equal(secondDispatch.step.prompt, "Do the first thing");
     }
   });
@@ -269,7 +256,7 @@ describe("CustomWorkflowEngine.resolveDispatch", () => {
     // Should pick "a" (no deps), not "b" or "c"
     assert.equal(dispatch.action, "dispatch");
     if (dispatch.action === "dispatch") {
-      assert.equal(stepIdOfUnit(dispatch.step.unitId), "a");
+      assert.equal(dispatch.step.unitId, "dep-wf/a");
     }
   });
 
@@ -286,7 +273,7 @@ describe("CustomWorkflowEngine.resolveDispatch", () => {
     // "a" is done, "b" deps met, should pick "b"
     assert.equal(dispatch.action, "dispatch");
     if (dispatch.action === "dispatch") {
-      assert.equal(stepIdOfUnit(dispatch.step.unitId), "b");
+      assert.equal(dispatch.step.unitId, "dep-wf/b");
     }
   });
 });
@@ -301,7 +288,6 @@ describe("CustomWorkflowEngine.reconcile", () => {
     ], "wf");
 
     const state = await engine.deriveState("/unused");
-    runCustomVerificationWithEvidence(runDir, "step-1");
     const result = await engine.reconcile(state, {
       unitType: "custom-step",
       unitId: "wf/step-1",
@@ -319,12 +305,11 @@ describe("CustomWorkflowEngine.reconcile", () => {
   });
 
   it("returns milestone-complete when all steps done", async () => {
-    const { engine, runDir } = setupEngine([
+    const { engine } = setupEngine([
       makeStep({ id: "only-step" }),
     ], "wf");
 
     const state = await engine.deriveState("/unused");
-    runCustomVerificationWithEvidence(runDir, "only-step");
     const result = await engine.reconcile(state, {
       unitType: "custom-step",
       unitId: "wf/only-step",
@@ -341,7 +326,6 @@ describe("CustomWorkflowEngine.reconcile", () => {
     ], "nested/workflow");
 
     const state = await engine.deriveState("/unused");
-    runCustomVerificationWithEvidence(runDir, "deep-step");
     const result = await engine.reconcile(state, {
       unitType: "custom-step",
       unitId: "nested/workflow/deep-step",
@@ -354,23 +338,22 @@ describe("CustomWorkflowEngine.reconcile", () => {
     assert.equal(graph.steps[0].status, "complete");
   });
 
-  it("does not read a GRAPH.yaml edit made after the run was imported", async () => {
+  it("re-reads GRAPH.yaml before reconcile so concurrent edits are preserved", async () => {
     const { engine, runDir } = setupEngine([
       makeStep({ id: "step-1" }),
       makeStep({ id: "step-2", dependsOn: ["step-1"] }),
     ], "wf");
 
-    const state = await engine.deriveState("/unused");
+    const staleState = await engine.deriveState("/unused");
 
-    // A hand edit that appends a step after the engine imported the run.
+    // Simulate another process appending a new step after deriveState() ran.
     writeGraph(runDir, makeGraph([
       makeStep({ id: "step-1" }),
       makeStep({ id: "step-2", dependsOn: ["step-1"] }),
       makeStep({ id: "step-3", dependsOn: ["step-2"] }),
     ], "wf"));
 
-    runCustomVerificationWithEvidence(runDir, "step-1");
-    const result = await engine.reconcile(state, {
+    const result = await engine.reconcile(staleState, {
       unitType: "custom-step",
       unitId: "wf/step-1",
       startedAt: Date.now() - 1000,
@@ -380,9 +363,10 @@ describe("CustomWorkflowEngine.reconcile", () => {
     assert.equal(result.outcome, "continue");
 
     const graph = readGraph(runDir);
-    assert.equal(graph.steps.length, 2, "the render comes from the rows, not from the edited file");
+    assert.equal(graph.steps.length, 3, "reconcile should preserve the concurrent graph edit");
     assert.equal(graph.steps[0].status, "complete");
     assert.equal(graph.steps[1].status, "pending");
+    assert.equal(graph.steps[2].status, "pending");
   });
 
   it("reconcile completes a step that was previously persisted as active", async () => {
@@ -396,7 +380,6 @@ describe("CustomWorkflowEngine.reconcile", () => {
     assert.equal(dispatch.action, "dispatch");
 
     const activeState = await engine.deriveState("/unused");
-    runCustomVerificationWithEvidence(runDir, "step-1");
     const result = await engine.reconcile(activeState, {
       unitType: "custom-step",
       unitId: "wf/step-1",
@@ -461,9 +444,12 @@ describe("CustomWorkflowEngine.getDisplayMetadata", () => {
 
 describe("CustomExecutionPolicy", () => {
   it("verify returns continue", async () => {
-    // verify() reads the frozen definition of the run to find the step's verify policy
-    const { engine, runDir } = setupEngine([makeStep({ id: "step-1" })], "wf");
-    await engine.deriveState("/unused");
+    // verify() reads DEFINITION.yaml from runDir to find step's verify policy
+    const runDir = makeTmpDir();
+    writeFileSync(join(runDir, "DEFINITION.yaml"), stringify({
+      version: 1, name: "wf", description: "test",
+      steps: [{ id: "step-1", name: "Step 1", prompt: "do it", produces: "step-1/output.md" }],
+    }));
     const policy = new CustomExecutionPolicy(runDir);
     const result = await policy.verify("custom-step", "wf/step-1", { basePath: runDir });
     assert.equal(result, "continue");

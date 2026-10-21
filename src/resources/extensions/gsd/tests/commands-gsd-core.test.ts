@@ -859,15 +859,9 @@ describe("Batch 5 handlers dispatch", () => {
     await handleProfileUser("--questionnaire", ctx as any, pi as any);
     assert.match(pi.sent[0].content, /`--questionnaire` — ON/);
   });
-  test("handleSettings dispatches with embedded effective config", async () => {
-    const pi = createMockPi();
-    const ctx = {
-      ...createMockCtx(),
-      modelRegistry: { getAvailable: () => [] },
-      model: { provider: "anthropic", id: "claude-sonnet-4" },
-    };
+  test("handleSettings dispatches", async () => {
+    const pi = createMockPi(); const ctx = createMockCtx();
     await handleSettings("", ctx as any, pi as any);
     assert.equal(pi.sent[0].customType, "gsd-settings");
-    assert.match(pi.sent[0].content, /GSD Configuration/);
   });
 });

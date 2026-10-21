@@ -31,7 +31,6 @@ const bashTool = createBashTool(cwd, {
   }),
 });
 ```
-
 </spawn_hook>
 
 <ssh_pattern>
@@ -60,7 +59,6 @@ export default function (pi: ExtensionAPI) {
   });
 }
 ```
-
 </ssh_pattern>
 
 <tool_override_pattern>

@@ -11,7 +11,6 @@ Turn a pile of outdated packages into a series of small, verifiable upgrades wit
 gsd-pi ships a `/gsd start dep-upgrade` workflow template (`src/resources/extensions/gsd/workflow-templates/dep-upgrade.md`) that structures the phases: assess → upgrade → fix breaks → verify. This skill is the execution-level detail inside the upgrade phase — how to batch, how to verify, how to recover from a breaking upgrade without losing the good ones.
 
 Invocation points:
-
 - `/gsd start dep-upgrade` workflow is running
 - Ad-hoc "bump the deps" request
 - Security advisory response (CVE in a direct dep)
@@ -32,7 +31,6 @@ Invocation points:
 ## Step 1: Take inventory
 
 Run the ecosystem's outdated check. Capture output, don't act on it yet:
-
 - Node: `npm outdated` or `pnpm outdated` or `yarn outdated`
 - Python: `pip list --outdated` or `uv pip list --outdated`
 - Rust: `cargo outdated`
@@ -40,7 +38,6 @@ Run the ecosystem's outdated check. Capture output, don't act on it yet:
 - Go: `go list -m -u all`
 
 Also capture:
-
 - `npm audit` (or equivalent) — security advisories
 - Current versions of language runtime, build tool, test runner
 
@@ -65,7 +62,6 @@ Order:
 5. **Batch N — Language runtime.** If bumping Node/Python/Rust, last — it changes the compile/run env for everything.
 
 Skip (for now):
-
 - Anything with "unreleased", "pre", "beta", "rc" tags unless the user explicitly wants pre-release tracking
 - Deps you know are blocked by another dep (e.g., can't bump X until Y supports it)
 
@@ -84,7 +80,6 @@ For each batch:
 7. **Smoke-test the app** if it has a running surface (dev server, CLI command).
 
 If any step fails:
-
 - Investigate before moving on. Don't skip the batch.
 - If the failure is trivial (a rename, a deprecated import), fix it in the same commit — the upgrade broke it, the upgrade commit fixes it.
 - If the failure is non-trivial (an API you heavily depend on was removed), either pin back or split: upgrade the other deps in the batch in this commit, and handle the problem dep separately in Step 5.
@@ -136,7 +131,7 @@ After all batches, produce a rollup:
 - <CVE> still open — not exploitable in our usage (see comment in package.json)
 ```
 
-Record with `capture_thought` any non-obvious gotcha from the upgrade (API changes that tripped you up, migration rituals for this codebase).
+Append to `.gsd/KNOWLEDGE.md` any non-obvious gotcha from the upgrade (API changes that tripped you up, migration rituals for this codebase).
 
 </process>
 

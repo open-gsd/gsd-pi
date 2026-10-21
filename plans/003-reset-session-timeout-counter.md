@@ -63,7 +63,6 @@ export async function autoLoop(
 ```
 
 Repo conventions:
-
 - Module-level mutable state is acceptable for process-wide counters but must be reset at session boundaries.
 - Keep the change minimal: one import and one call.
 - Tests use `node:test` and `node:assert/strict`.
@@ -79,12 +78,10 @@ Repo conventions:
 ## Scope
 
 **In scope**:
-
 - `src/resources/extensions/gsd/auto/loop.ts` — call `resetSessionTimeoutState()` at `autoLoop()` entry.
 - `src/resources/extensions/gsd/tests/auto-loop.test.ts` — add a regression test (or extend an existing timeout test).
 
 **Out of scope**:
-
 - Changing the timeout/backoff math.
 - Moving the counter out of `auto/phases.ts` (plan 008 may address module boundaries).
 - Any other session counters.
@@ -102,7 +99,6 @@ Repo conventions:
 In `src/resources/extensions/gsd/auto/loop.ts`, add `resetSessionTimeoutState` to the imports from `auto/phases.js`. Find the existing `import { ... } from "./phases.js"` line and add the symbol.
 
 If `auto/loop.ts` does not currently import from `./phases.js`, add:
-
 ```ts
 import { resetSessionTimeoutState } from "./phases.js";
 ```
@@ -124,7 +120,6 @@ This ensures every new auto-mode session starts with a fresh timeout budget, eve
 ### Step 3: Add a regression test
 
 Open `src/resources/extensions/gsd/tests/auto-loop.test.ts`. Find an existing test that exercises session-timeout handling, or add a focused test that:
-
 1. Creates an `AutoSession` and enters `autoLoop`.
 2. Simulates three session-creation timeouts in one session and verifies auto-resume is still attempted for the first three.
 3. Starts a second `autoLoop` invocation and verifies the counter was reset so timeouts again trigger auto-resume rather than pausing.
@@ -162,7 +157,6 @@ Run the auto-loop tests and the full unit suite.
 ## STOP conditions
 
 Stop and report back if:
-
 - `resetSessionTimeoutState` is not exported from `auto/phases.ts`.
 - `auto/loop.ts` already calls `resetSessionTimeoutState()` (the finding is already fixed).
 - Adding the import creates a circular dependency that `typecheck:extensions` reports.

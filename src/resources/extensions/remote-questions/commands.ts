@@ -111,7 +111,7 @@ function buildUnknown(cmd: string): string {
 /**
  * Build the /status reply.
  *
- * NOTE: the paused-session fallback reads the open project DB, not basePath.
+ * NOTE: basePath only controls disk-based fallbacks (e.g. reading paused-session.json).
  * In-process module resolution via dynamic import() is fixed at build time by ESM
  * semantics and is unaffected by basePath.
  */
@@ -146,10 +146,10 @@ async function buildStatus(basePath: string): Promise<string> {
       lines.push(`Captures pending: ${autoData.pendingCaptureCount}`);
     }
   } else {
-    // No active in-process session — check the DB for a cross-process paused session
-    const pausedMeta = await readPausedSession(basePath);
+    // No active in-process session — check disk for a cross-process paused session
+    const pausedMeta = readPausedSession(basePath);
     if (pausedMeta) {
-      lines.push("State: paused");
+      lines.push("State: paused (from disk)");
       if (pausedMeta.milestoneId) lines.push(`Milestone: ${pausedMeta.milestoneId}`);
       if (pausedMeta.unitType && pausedMeta.unitId) {
         lines.push(`Unit: ${pausedMeta.unitType} / ${pausedMeta.unitId}`);
@@ -259,7 +259,7 @@ async function buildPause(basePath: string): Promise<string> {
   try {
     const capturesMod = await import("../gsd/captures.js");
     const id = capturesMod.appendCapture(basePath, "Remote pause via Telegram /pause command");
-    await capturesMod.resolveCapture(
+    capturesMod.markCaptureResolved(
       basePath,
       id,
       "stop",
@@ -419,13 +419,14 @@ function gsdRootPath(basePath: string): string {
   return join(basePath, ".gsd");
 }
 
-// The paused session is the auto_pauses row auto-mode writes on pause; there is
-// no paused-session.json file to read.
-async function readPausedSession(basePath: string): Promise<PausedSessionMeta | null> {
-  const mod = await tryImportModule<{ readPausedSessionMetadata(basePath: string): PausedSessionMeta | null }>(
-    "../gsd/interrupted-session.js",
-  );
-  return mod?.readPausedSessionMetadata(basePath) ?? null;
+function readPausedSession(basePath: string): PausedSessionMeta | null {
+  try {
+    const p = join(gsdRootPath(basePath), "runtime", "paused-session.json");
+    if (!existsSync(p)) return null;
+    return JSON.parse(readFileSync(p, "utf-8")) as PausedSessionMeta;
+  } catch {
+    return null;
+  }
 }
 
 function readMetricsFromDisk(basePath: string): ProjectTotalsSnapshot | null {

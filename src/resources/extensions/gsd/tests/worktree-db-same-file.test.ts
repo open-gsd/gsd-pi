@@ -18,7 +18,7 @@ import {
   reconcileWorktreeDb,
   insertDecision,
 } from "../gsd-db.ts";
-import { _hasWorktreeLocalDb } from "../auto-worktree-cleanup.ts";
+import { _shouldReconcileWorktreeDb } from "../auto-worktree-sync.ts";
 import { isInfrastructureError } from "../auto/infra-errors.ts";
 
 describe("#2823: reconcileWorktreeDb same-file guard", () => {
@@ -137,15 +137,15 @@ describe("#2823: reconcileWorktreeDb same-file guard", () => {
 
 test("merge-time DB reconciliation requires an existing distinct worktree DB", () => {
   assert.equal(
-    _hasWorktreeLocalDb("worktree.db", "main.db", () => true, () => false),
+    _shouldReconcileWorktreeDb("worktree.db", "main.db", () => true, () => false),
     true,
   );
   assert.equal(
-    _hasWorktreeLocalDb("worktree.db", "main.db", () => false, () => false),
+    _shouldReconcileWorktreeDb("worktree.db", "main.db", () => false, () => false),
     false,
   );
   assert.equal(
-    _hasWorktreeLocalDb("worktree.db", "main.db", () => true, () => true),
+    _shouldReconcileWorktreeDb("worktree.db", "main.db", () => true, () => true),
     false,
   );
 });

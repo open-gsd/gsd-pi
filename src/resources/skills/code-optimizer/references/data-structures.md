@@ -3,7 +3,6 @@
 ## Grep/Glob Patterns to Detect
 
 ### Wrong Data Structure for the Job
-
 ```
 # Array used for frequent lookups (should be Map/Set/dict)
 \.find\(.*===                  (linear search - use Map)
@@ -28,7 +27,6 @@ Object\.keys\(.*\.length       (counting object keys - Map.size is O(1))
 ```
 
 ### Unnecessary Deep Copies
-
 ```
 JSON\.parse\(JSON\.stringify    (JSON round-trip for deep clone)
 \.map\(.*\.map\(.*spread       (nested spread for deep copy)
@@ -39,7 +37,6 @@ import\s+copy                  (check if deepcopy is overused)
 ```
 
 ### Inefficient Serialization
-
 ```
 # JSON for internal communication (use binary formats)
 JSON\.stringify.*JSON\.parse.*internal
@@ -53,7 +50,6 @@ JSON\.parse\(.*loop            (parsing in loop)
 ```
 
 ### Unnecessary Object Creation
-
 ```
 new Date\(.*inside.*loop       (creating Date objects in loop)
 new RegExp\(.*inside.*loop     (compiling regex in loop)
@@ -64,7 +60,6 @@ Array\.from\(.*Array\.from\(   (double Array.from)
 ```
 
 ### Immutability Overhead
-
 ```
 # Excessive spread operators
 \{\.\.\.state,                 (spreading large state objects)

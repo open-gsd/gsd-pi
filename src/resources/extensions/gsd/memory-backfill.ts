@@ -58,9 +58,7 @@ type DecisionContentFields = Pick<DecisionRow, "decision" | "choice" | "rational
  * - Drift auto-heal: after the initial insert pass, the function updates
  *   any pre-existing memory whose `structured_fields.superseded_by` drifted
  *   from the source decision (e.g. a fresh md-importer run introduced a
- *   new supersedes annotation after the initial migration). A supersede
- *   that only the memory holds is kept: gsd_decision_save records it there
- *   and the legacy table gets no new writes.
+ *   new supersedes annotation after the initial migration).
  *
  * Returns the number of memories written (0 when already backfilled or
  * when the DB has no decisions). Drift-heal updates are not counted in
@@ -128,9 +126,7 @@ export function backfillDecisionsToMemories(): number {
           typeof currentSf["superseded_by"] === "string" || currentSf["superseded_by"] === null
             ? (currentSf["superseded_by"] as string | null | undefined)
             : null;
-        // The legacy table gets no new writes, so a supersede that only the
-        // memory holds was recorded by gsd_decision_save and must stay.
-        if (row.superseded_by !== null && memorySuperseded !== row.superseded_by) {
+        if (memorySuperseded !== row.superseded_by) {
           const merged = {
             ...currentSf,
             superseded_by: row.superseded_by,

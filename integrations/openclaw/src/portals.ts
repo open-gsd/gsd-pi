@@ -85,26 +85,13 @@ export function resolveWebLaunch(config: GsdPortalConfig, env: NodeJS.ProcessEnv
   }
   if (!packageRoot) throw new Error("GSD portal cannot locate GSD; configure webUi.packageRoot or GSD_CLI_PATH.");
 
-  // Next bakes basePath into both server and browser assets. The ordinary
-  // standalone build is root-relative and cannot be retargeted with an env var.
-  const sharedRoot = join(packageRoot, "dist", "web", "standalone");
-  const standalone = join(sharedRoot, "openclaw", "server.js");
-  if (existsSync(standalone)) {
-    let compatible = false;
-    try {
-      const shared = JSON.parse(readFileSync(join(sharedRoot, "gsd-web-build.json"), "utf8"));
-      const embedded = JSON.parse(readFileSync(join(dirname(standalone), "gsd-web-build.json"), "utf8"));
-      compatible = shared.version === 1 && embedded.version === 1 && shared.basePath === "" && embedded.basePath === GSD_WEB_BASE_PATH
-        && typeof shared.dependencyHash === "string" && shared.dependencyHash === embedded.dependencyHash
-        && existsSync(join(sharedRoot, "node_modules"));
-    } catch { /* source fallback or actionable error below */ }
-    if (compatible) return { packageRoot, kind: "packaged-standalone", entry: standalone, cwd: dirname(standalone) };
-  }
+  const standalone = join(packageRoot, "dist", "web", "standalone", "server.js");
+  if (existsSync(standalone)) return { packageRoot, kind: "packaged-standalone", entry: standalone, cwd: dirname(standalone) };
   const source = join(packageRoot, "web", "node_modules", "next", "dist", "bin", "next");
   if (existsSync(source) && existsSync(join(packageRoot, "web", "package.json"))) {
     return { packageRoot, kind: "source-dev", entry: source, cwd: join(packageRoot, "web") };
   }
-  throw new Error("GSD portal requires the prefixed OpenClaw web build and matching shared dependencies; update GSD or run `pnpm run build:web-host` followed by `pnpm run build:web-host:openclaw` in its source checkout.");
+  throw new Error("GSD portal web host is missing; install a GSD package with its web build or build the source web host.");
 }
 
 async function reservePort(requested?: number): Promise<number> {
@@ -267,7 +254,6 @@ export class GsdPortalService {
       GSD_WEB_PACKAGE_ROOT: launch.packageRoot, GSD_WEB_HOST_KIND: launch.kind,
       GSD_WEB_NO_AUTH: "1", GSD_WEB_DAEMON_MODE: "1", PUBLIC_URL: portal.publicUrl,
       GSD_WEB_BASE_PATH,
-      GSD_WEB_DIST_DIR: ".next-openclaw",
       NODE_ENV: launch.kind === "source-dev" ? "development" : "production",
     });
     if (launch.kind === "source-dev") env.NEXT_PUBLIC_GSD_DEV = "1";

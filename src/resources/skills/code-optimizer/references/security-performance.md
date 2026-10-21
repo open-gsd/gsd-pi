@@ -3,7 +3,6 @@
 ## Grep/Glob Patterns to Detect
 
 ### Cryptographic Misuse
-
 ```
 md5\(                              (MD5 is fast but broken - use bcrypt/argon2 for passwords)
 sha1\(                             (SHA1 is weak)
@@ -15,7 +14,6 @@ random\.random\(\).*secret         (Python: insecure random for secrets)
 ```
 
 ### Expensive Security Operations in Hot Paths
-
 ```
 bcrypt.*inside.*loop               (hashing in loop - expensive by design)
 jwt\.verify\(.*inside.*loop        (JWT verification in loop)
@@ -24,7 +22,6 @@ encrypt\(.*inside.*loop            (encryption in loop)
 ```
 
 ### Missing Rate Limiting
-
 ```
 app\.(get|post|put|delete)\(       (routes without rate limiting)
 @app\.route\(                      (Flask routes without rate limiting)
@@ -32,7 +29,6 @@ router\.(get|post|put|delete)\(    (Express routes without rate limiting)
 ```
 
 ### SQL Injection Vectors (Also Performance)
-
 ```
 f"SELECT.*\{                       (Python f-string SQL)
 f"INSERT.*\{                       (Python f-string SQL)
@@ -44,7 +40,6 @@ f"INSERT.*\{                       (Python f-string SQL)
 ```
 
 ### ReDoS Vulnerable Patterns
-
 ```
 \(\.\*\)\+                         (catastrophic backtracking)
 \(\.\+\)\+                         (catastrophic backtracking)
@@ -55,7 +50,6 @@ re\.compile\(.*user                (Python: user input in regex)
 ```
 
 ### N+1 Auth Checks
-
 ```
 # Checking permissions inside loops
 \.can\(.*inside.*loop             (permission check in loop)

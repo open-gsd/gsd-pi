@@ -4,19 +4,9 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import {
-  readFileSync,
-  mkdirSync,
-  renameSync,
-  realpathSync,
-  rmSync,
-  openSync,
-  writeSync,
-  closeSync,
-} from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
 
 export interface McpInstanceEntry {
   pid: number;
@@ -32,24 +22,6 @@ export interface RegisterMcpInstanceOptions {
   getProcessCwd?: (pid: number) => string | null;
   getProcessStartTime?: (pid: number) => number | null;
   waitForExit?: () => void;
-  /**
-   * Test-only seam: overrides the random temp-file name segment normally
-   * derived from randomUUID(). Lets tests force a genuine name collision at
-   * writeMcpRegistry's temp path against a real pre-existing foreign file,
-   * to prove that invocation never deletes a file it did not create (the
-   * EEXIST-from-openSync('wx') branch). Not used in production.
-   */
-  tempFileNameForTest?: string;
-}
-
-/**
- * Returned by {@link registerMcpInstance} when a live registry holder could not
- * be verified as this project's server. Carries the holder detail surfaced in
- * the refusal stderr line and the startup-failure error (#2361).
- */
-export interface McpInstanceRefusal {
-  refused: true;
-  detail: string;
 }
 
 export interface McpProcessSnapshot {
@@ -126,114 +98,9 @@ export function readMcpRegistry(registryPath = REGISTRY_PATH): McpInstanceRegist
   }
 }
 
-// Writes the registry atomically: a concurrent reader must only ever observe
-// either the previous complete file or the new complete file, never a
-// partially-written one. writeFileSync(registryPath, ...) in place does not
-// guarantee this — it can truncate the existing file before the new bytes are
-// flushed, so a reader racing the write can see an empty or truncated payload
-// and fail to parse it (#2666). Write the new content to a unique temporary
-// file in the same directory (same filesystem, so renameSync is atomic on
-// POSIX and Windows), then rename it over the target. If any step fails, the
-// original registry file is left untouched and the temp file is cleaned up —
-// the original error is rethrown unmasked.
-function writeMcpRegistry(
-  registry: McpInstanceRegistry,
-  registryPath = REGISTRY_PATH,
-  tempFileNameForTest?: string,
-): void {
-  const dir = dirname(registryPath);
-  mkdirSync(dir, { recursive: true });
-  const tempPath = join(dir, tempFileNameForTest ?? `.${randomUUID()}.mcp-instances.json.tmp`);
-
-  // 'wx' (O_CREAT|O_EXCL|O_WRONLY) refuses to follow a pre-existing path —
-  // including a symlink — at tempPath, and mode 0o600 keeps the registry
-  // (PIDs + project directory paths) private to the current user on
-  // shared/multi-user filesystems, matching env-writer.ts's convention.
-  //
-  // Open exclusively first and only mark tempPath as "owned by this
-  // invocation" once that open call has actually returned a live fd — a
-  // UUID collision (or a foreign file placed at the same path by something
-  // else) makes the open fail with EEXIST, and that failure must NOT trigger
-  // cleanup of a file this invocation never created. Only an fd obtained by
-  // *this* openSync call authorizes removing tempPath afterwards.
-  let fd: number;
-  try {
-    fd = openSync(tempPath, 'wx', 0o600);
-  } catch (err) {
-    // Never created tempPath — nothing to clean up, and no write/rename was
-    // attempted against the real registry. Propagate the original error.
-    throw err;
-  }
-
-  // From here on, this invocation owns tempPath: any failure must clean up
-  // exactly (and only) the file it created.
-  try {
-    writeSync(fd, Buffer.from(JSON.stringify(registry, null, 2), 'utf8'));
-  } catch (err) {
-    try {
-      closeSync(fd);
-    } catch {
-      // Best-effort — do not let a close failure mask the write error below.
-    }
-    try {
-      rmSync(tempPath, { force: true });
-    } catch {
-      // Best-effort cleanup only — do not let a cleanup failure mask the
-      // original write error below.
-    }
-    throw err;
-  }
-
-  try {
-    closeSync(fd);
-  } catch (err) {
-    try {
-      rmSync(tempPath, { force: true });
-    } catch {
-      // Best-effort cleanup only — do not let a cleanup failure mask the
-      // original close error below.
-    }
-    throw err;
-  }
-
-  try {
-    renameRegistrySnapshotWithRetry(tempPath, registryPath);
-  } catch (err) {
-    try {
-      rmSync(tempPath, { force: true });
-    } catch {
-      // Best-effort cleanup only — do not let a cleanup failure mask the
-      // original rename error below.
-    }
-    throw err;
-  }
-}
-
-/**
- * Windows can temporarily refuse replacement while a reader or scanner holds
- * the destination. Retry only the atomic rename, never unlink/truncate/copy the
- * previous snapshot. Ten attempts, at most 450ms of synchronous backoff, keep
- * genuine permission errors bounded and preserve the final original error.
- */
-function renameRegistrySnapshotWithRetry(tempPath: string, registryPath: string): void {
-  let waitState: Int32Array | undefined;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      renameSync(tempPath, registryPath);
-      return;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code;
-      if (
-        process.platform !== 'win32' ||
-        attempt >= 9 ||
-        (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY')
-      ) {
-        throw err;
-      }
-      waitState ??= new Int32Array(new SharedArrayBuffer(4));
-      Atomics.wait(waitState, 0, 0, 10 * (attempt + 1));
-    }
-  }
+function writeMcpRegistry(registry: McpInstanceRegistry, registryPath = REGISTRY_PATH): void {
+  mkdirSync(dirname(registryPath), { recursive: true });
+  writeFileSync(registryPath, JSON.stringify(registry, null, 2), 'utf8');
 }
 
 function defaultGetProcessCommand(pid: number): string | null {
@@ -707,7 +574,7 @@ export function registerMcpInstance(
   projectDir: string,
   registryPath = REGISTRY_PATH,
   options: RegisterMcpInstanceOptions = {},
-): boolean | McpInstanceRefusal {
+): boolean {
   const registry = readMcpRegistry(registryPath);
   const keys = projectRegistryKeys(projectDir);
   const key = keys[0];
@@ -728,24 +595,7 @@ export function registerMcpInstance(
             ? `ignored unverified stale pid=${existing.pid}`
             : `failed to kill pid=${existing.pid}: ${result.error}`;
     process.stderr.write(`[gsd-mcp-server] ${label} for ${key}\n`);
-    if (result === 'unverified') {
-      // Name the blocking process and the way out instead of leaving the
-      // operator to out-of-band process archaeology (#2361). Liveness needs no
-      // extra probe: killPid only returns 'unverified' after its own signal-0
-      // probe succeeded, so the holder was running when it was verified. The
-      // cwd lookup may observe a slightly later snapshot — close enough for a
-      // diagnostic line.
-      const cwd = (options.getProcessCwd ?? defaultGetProcessCwd)(existing.pid);
-      const detail = [
-        `holder pid=${existing.pid}`,
-        `cwd=${cwd ?? 'unknown'}`,
-        `startedAt=${existing.startedAt || 'unknown'}`,
-        'still running',
-        `remedy: kill pid ${existing.pid} if it is stale, or restart with GSD_MCP_CLIENT_MANAGED=1 to skip the per-project registry`,
-      ].join(', ');
-      process.stderr.write(`[gsd-mcp-server] refusal detail: ${detail}\n`);
-      return { refused: true, detail };
-    }
+    if (result === 'unverified') return false;
   }
   if (existingKey && existingKey !== key) delete registry[existingKey];
 
@@ -754,7 +604,7 @@ export function registerMcpInstance(
     projectDir: key,
     startedAt: new Date().toISOString(),
   };
-  writeMcpRegistry(registry, registryPath, options.tempFileNameForTest);
+  writeMcpRegistry(registry, registryPath);
   return true;
 }
 

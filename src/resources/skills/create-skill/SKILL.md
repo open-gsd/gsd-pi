@@ -4,7 +4,6 @@ description: Expert guidance for creating, writing, building, and refining GSD s
 ---
 
 <essential_principles>
-
 ## How Skills Work
 
 Skills are modular, filesystem-based capabilities that provide domain expertise on demand. This skill teaches how to create effective skills.
@@ -16,7 +15,6 @@ All prompting best practices apply. Be clear, be direct, use XML structure. Assu
 ### 2. SKILL.md Is Always Loaded
 
 When a skill is invoked, Claude reads SKILL.md. Use this guarantee:
-
 - Essential principles go in SKILL.md (can't be skipped)
 - Workflow-specific content goes in workflows/
 - Reusable knowledge goes in references/
@@ -35,7 +33,6 @@ skill-name/
 SKILL.md asks "what do you want to do?" → routes to workflow → workflow specifies which references to read.
 
 **When to use each folder:**
-
 - **workflows/** - Multi-step procedures Claude follows
 - **references/** - Domain knowledge Claude reads for context
 - **templates/** - Consistent output structures Claude copies and fills (plans, specs, configs)
@@ -44,7 +41,6 @@ SKILL.md asks "what do you want to do?" → routes to workflow → workflow spec
 ### 4. Pure XML Structure
 
 No markdown headings (#, ##, ###) in skill body. Use semantic XML tags:
-
 ```xml
 <objective>...</objective>
 <process>...</process>
@@ -64,12 +60,10 @@ SKILL.md under 500 lines. Split detailed content into reference files. Load only
 Based on the user's message, route directly to the appropriate workflow:
 
 **Creating new skills:**
-
 - Domain expertise (exhaustive knowledge base) → **Use `create-domain-expertise` skill instead** (separate skill with batched subagent orchestration)
 - Task-execution skill (does specific things) → workflows/create-new-skill.md
 
 **Working with existing skills:**
-
 - Audit, review, check → workflows/audit-skill.md
 - Verify content is current → workflows/verify-skill.md
 - Add workflow → workflows/add-workflow.md
@@ -79,11 +73,9 @@ Based on the user's message, route directly to the appropriate workflow:
 - Upgrade to router pattern → workflows/upgrade-to-router.md
 
 **Need help deciding:**
-
 - General guidance → workflows/get-guidance.md
 
 **If user intent is unclear, ask minimal clarifying questions:**
-
 - "Create a MIDI skill" → "Task-execution skill (does MIDI tasks) or domain expertise (complete MIDI knowledge base)?"
 - "Work on my skill" → "Which skill? What do you want to do with it?"
 - Ask one clarifying question round at a time, then wait for the user's actual response before asking another.
@@ -93,11 +85,9 @@ Then proceed directly to the workflow.
 </routing>
 
 <quick_reference>
-
 ## Skill Structure Quick Reference
 
 **Skill directories:**
-
 - Bundled/read-only: `~/.gsd/agent/skills/{skill-name}/`
 - Global: `~/.agents/skills/{skill-name}/`
 - Project-local: `.agents/skills/{skill-name}/`
@@ -105,7 +95,6 @@ Then proceed directly to the workflow.
 User-authored skills should target the global or project-local directories; GSD manages the bundled directory during install/update.
 
 **Simple skill (single file):**
-
 ```yaml
 ---
 name: skill-name
@@ -119,7 +108,6 @@ description: What it does and when to use it.
 ```
 
 **Complex skill (router pattern):**
-
 ```
 SKILL.md:
   <essential_principles> - Always applies
@@ -142,11 +130,9 @@ scripts/:
   Executable code Claude runs as-is
   (deploy, setup, API calls, data processing)
 ```
-
 </quick_reference>
 
 <reference_index>
-
 ## Domain Knowledge
 
 All in `references/`:
@@ -160,7 +146,6 @@ All in `references/`:
 </reference_index>
 
 <workflows_index>
-
 ## Workflows
 
 All in `workflows/`:
@@ -179,11 +164,9 @@ All in `workflows/`:
 </workflows_index>
 
 <yaml_requirements>
-
 ## YAML Frontmatter
 
 Required fields:
-
 ```yaml
 ---
 name: skill-name          # lowercase-with-hyphens, matches directory
@@ -199,7 +182,6 @@ Name conventions: `create-*`, `manage-*`, `setup-*`, `generate-*`, `build-*`
 
 <success_criteria>
 A well-structured skill:
-
 - Has valid YAML frontmatter
 - Uses pure XML structure (no markdown headings in body)
 - Has essential principles inline in SKILL.md

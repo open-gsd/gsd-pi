@@ -1,5 +1,6 @@
 # Custom UI — Visual Components
 
+
 Pi's extension UI has multiple layers, from simple notifications to full custom components.
 
 ### 12.1 Dialogs (Blocking)

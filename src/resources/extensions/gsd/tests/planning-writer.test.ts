@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { writePlanningDirectory } from "../migrate/planning-writer.ts";
 import { applyPlanningProjectionWrites } from "../compat/planning-compat.ts";
 import { readCompatMarker, writeCompatMarker } from "../compat/compat-marker.ts";
-import { _getAdapter, openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, updateSliceStatus, updateTaskStatus } from "../gsd-db.ts";
 
 const tmpDirs: string[] = [];
 function makeTmp(): string {
@@ -80,9 +80,7 @@ test("writePlanningDirectory emits phase plan file with XML structure", async ()
 
 test("writePlanningDirectory renders completed task checkboxes as [x] (#1276)", async () => {
   const base = makeTmp();
-  // Fixture stamp on the unadopted milestone: raw SQL, the generic status
-  // writer refuses rows with no canonical lifecycle row.
-  _getAdapter()!.prepare("UPDATE tasks SET status = 'complete' WHERE milestone_id = 'M001' AND id = 'T01'").run();
+  updateTaskStatus("M001", "S01", "T01", "complete");
   await writePlanningDirectory(base, "flat-phases");
 
   const phaseDir = readdirSync(join(base, ".planning", "phases"), { withFileTypes: true })
@@ -214,9 +212,8 @@ test("writePlanningDirectory removes cancelled modeled plans while preserving pa
     passthrough: true,
   }]);
 
-  // Fixture stamps on the unadopted milestone (raw SQL — see the note above).
-  _getAdapter()!.prepare("UPDATE slices SET status = 'skipped' WHERE milestone_id = 'M001' AND id = 'S01'").run();
-  _getAdapter()!.prepare("UPDATE tasks SET status = 'skipped' WHERE milestone_id = 'M001' AND id = 'T02'").run();
+  updateSliceStatus("M001", "S01", "skipped");
+  updateTaskStatus("M001", "S02", "T02", "skipped");
   await writePlanningDirectory(base, "flat-phases");
 
   for (const stalePlanPath of stalePlanPaths) {
@@ -249,7 +246,7 @@ test("writePlanningDirectory preserves an externally edited obsolete plan", asyn
   const editedContent = "# User-owned plan\n\nKeep this external edit.\n";
   writeFileSync(planPath, editedContent, "utf8");
 
-  _getAdapter()!.prepare("UPDATE slices SET status = 'skipped' WHERE milestone_id = 'M001' AND id = 'S01'").run();
+  updateSliceStatus("M001", "S01", "skipped");
   await writePlanningDirectory(base, "flat-phases");
 
   assert.equal(readFileSync(planPath, "utf8"), editedContent);

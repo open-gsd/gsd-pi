@@ -47,7 +47,6 @@ Add to `doctor-checks.ts` → `checkGitHealth()`:
 **Scope:** Only GSD-managed worktrees under `.gsd/worktrees/`. Not `.claude/worktrees/`, not sibling repos, not `/tmp/` worktrees. GSD owns what GSD creates.
 
 **Safety rules:**
-
 - Never auto-remove a worktree matching `process.cwd()` (existing pattern)
 - Never auto-remove a worktree with uncommitted changes
 - Never auto-remove a worktree with unpushed commits
@@ -58,7 +57,6 @@ Add to `doctor-checks.ts` → `checkGitHealth()`:
 **2a. Make `legacy_slice_branches` fixable in doctor.**
 
 Currently detected as `info` severity, not fixable. Change to:
-
 - Severity: `info` (keep)
 - Fixable: `true`
 - `--fix` action: `nativeBranchDelete(basePath, branch, true)` for each merged legacy branch
@@ -68,7 +66,6 @@ This makes `cleanup branches` redundant — doctor handles both `milestone/*` an
 **2b. Add `snapshot_ref_bloat` doctor check.**
 
 New check in `checkRuntimeHealth()`:
-
 - Count `refs/gsd/snapshots/` refs
 - If > 50 refs per label, report `snapshot_ref_bloat` (warning, fixable)
 - `--fix` action: prune to newest 5 per label (same logic as existing `handleCleanupSnapshots`)
@@ -113,7 +110,6 @@ GSD Worktrees
 ```
 
 Data to show per worktree:
-
 - Uncommitted file count (if any)
 - Unpushed commit count (if any)
 - Merge status (merged into main or not)
@@ -123,7 +119,6 @@ Data to show per worktree:
 ### Phase 4: Add `/gsd cleanup worktrees` convenience entry point
 
 For discoverability, add to the cleanup catalog:
-
 ```
 /gsd cleanup worktrees        — Remove merged/safe-to-delete worktrees
 /gsd cleanup worktrees --dry  — Preview what would be removed

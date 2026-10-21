@@ -1,52 +1,56 @@
-import type { DatabaseSync } from "node:sqlite"
+import { existsSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 
 import { resolveBridgeRuntimeConfig } from "./bridge-service.ts"
-import { openProjectDatabaseReadOnly } from "./project-db-read.ts"
 import type { InspectData } from "../../web/lib/remaining-command-types.ts"
 
 /**
- * Collects project inspection data from `.gsd/gsd.db`, with the same queries
- * as the TUI `/gsd inspect` command. The read does not change the project (see
- * `openProjectDatabaseReadOnly`). A project with no readable database gives
- * the empty state.
+ * Collects project inspection data by reading gsd-db.json directly.
+ * No child process needed — gsd-db.json is plain JSON with no .js imports.
  */
 export async function collectInspectData(projectCwdOverride?: string): Promise<InspectData> {
-  const { projectCwd } = resolveBridgeRuntimeConfig(undefined, projectCwdOverride)
+  const config = resolveBridgeRuntimeConfig(undefined, projectCwdOverride)
+  const { projectCwd } = config
 
-  let db: DatabaseSync | undefined
-  try {
-    const connection = db = openProjectDatabaseReadOnly(projectCwd)
-    const count = (table: string): number =>
-      Number(connection.prepare(`SELECT count(*) AS cnt FROM ${table}`).get()?.cnt ?? 0)
-    const version = connection.prepare("SELECT MAX(version) AS v FROM schema_version").get()?.v
+  const gsdDir = join(projectCwd, ".gsd")
+  const dbPath = join(gsdDir, "gsd-db.json")
 
-    return {
-      schemaVersion: typeof version === "number" ? version : null,
-      counts: {
-        decisions: count("decisions"),
-        requirements: count("requirements"),
-        artifacts: count("artifacts"),
-      },
-      recentDecisions: connection
-        .prepare("SELECT id, decision, choice FROM decisions ORDER BY seq DESC LIMIT 5")
-        .all()
-        .map((d) => ({ id: String(d.id), decision: String(d.decision), choice: String(d.choice) })),
-      recentRequirements: connection
-        .prepare("SELECT id, status, description FROM requirements ORDER BY id DESC LIMIT 5")
-        .all()
-        .map((r) => ({ id: String(r.id), status: String(r.status), description: String(r.description) })),
-      readMetadata: { source: "database", authority: "db-authoritative" },
+  let schemaVersion: number | null = null
+  let decisions: Array<{ id: string; decision: string; choice: string; [k: string]: unknown }> = []
+  let requirements: Array<{
+    id: string
+    status: string
+    description: string
+    [k: string]: unknown
+  }> = []
+  let artifacts: unknown[] = []
+
+  if (existsSync(dbPath)) {
+    try {
+      const db = JSON.parse(readFileSync(dbPath, "utf-8"))
+      schemaVersion = db.schema_version ?? null
+      decisions = db.decisions || []
+      requirements = db.requirements || []
+      artifacts = db.artifacts || []
+    } catch {
+      // Corrupt or unreadable — return empty state
     }
-  } catch {
-    // No database, no SQLite provider, or a schema older than these tables.
-    return {
-      schemaVersion: null,
-      counts: { decisions: 0, requirements: 0, artifacts: 0 },
-      recentDecisions: [],
-      recentRequirements: [],
-      readMetadata: { source: "projection", authority: "projection-fallback" },
-    }
-  } finally {
-    db?.close()
+  }
+
+  return {
+    schemaVersion,
+    counts: {
+      decisions: decisions.length,
+      requirements: requirements.length,
+      artifacts: artifacts.length,
+    },
+    recentDecisions: decisions
+      .slice(-5)
+      .reverse()
+      .map((d) => ({ id: d.id, decision: d.decision, choice: d.choice })),
+    recentRequirements: requirements
+      .slice(-5)
+      .reverse()
+      .map((r) => ({ id: r.id, status: r.status, description: r.description })),
   }
 }

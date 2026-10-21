@@ -17,14 +17,11 @@ import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
   isStrictLegacyImportData,
-  legacyImportBaseSnapshotForPreview,
-  type LegacyImportPreviewArtifact,
 } from "./legacy-import-preview.js";
 import {
   captureCurrentLegacyImportBaseSnapshot,
   captureLegacyImportBaseSnapshot,
   createLegacyImportBaseSnapshotSource,
-  legacyImportBaseSnapshotAtVersion,
   type LegacyImportBaseRow,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
@@ -561,21 +558,17 @@ function applicationMatchesInput(
     && application.backupAuthorityEpoch === backup.base_authority_epoch
     && application.backupQuickCheck === backup.quick_check
     && application.backupVerifiedAt === backup.verified_at
-    // The checkout root is a binding that /gsd db bind may move (and is '' in
-    // backups taken before binding existed), not identity: match project_id.
-    && application.projectId === backup.project_id;
+    && application.projectId === backup.project_id
+    && application.projectRootRealpath === backup.project_root_realpath;
 }
 
-function captureBackupBase(
-  backupRef: string,
-  preview: LegacyImportPreviewArtifact,
-): LegacyImportBaseSnapshot {
-  return legacyImportBaseSnapshotForPreview(preview, inspectSqliteReadOnlySnapshot(backupRef, (db) =>
+function captureBackupBase(backupRef: string): LegacyImportBaseSnapshot {
+  return inspectSqliteReadOnlySnapshot(backupRef, (db) =>
     captureLegacyImportBaseSnapshot({
       readTransaction: (operation) => operation(),
       source: createLegacyImportBaseSnapshotSource(db),
     }),
-  ));
+  );
 }
 
 function coordinationCounts(projectRootRealpath: string): LegacyImportRestoreCoordinationCounts {
@@ -948,7 +941,7 @@ export function assessLegacyImportRestore(value: unknown): LegacyImportRestoreAs
   reachBoundary("after-initial-state");
   let backupBase: LegacyImportBaseSnapshot;
   try {
-    backupBase = captureBackupBase(input.backup.backup_ref, application.preview);
+    backupBase = captureBackupBase(input.backup.backup_ref);
     verifyLegacyImportBackupArtifact({ backup: input.backup, preview: application.preview, base: backupBase });
     reachBoundary("after-backup-verification");
   } catch {
@@ -968,13 +961,7 @@ export function assessLegacyImportRestore(value: unknown): LegacyImportRestoreAs
   if (terminalAfterVerification !== null) {
     return terminalAssessment(input, terminalAfterVerification);
   }
-  const captured = captureState(application);
-  // The Application result is compared at the snapshot schema version that
-  // made it, so a row set that a later version added does not read as a change.
-  const after = {
-    ...captured,
-    base: legacyImportBaseSnapshotAtVersion(captured.base, backupBase.snapshot_schema_version),
-  };
+  const after = captureState(application);
   const evidenceExtra = {
     backupRelevantRowsHash: backupBase.relevant_rows_hash,
     expectedApplicationRelevantRowsHash: application.applicationRelevantRowsHash,
@@ -985,7 +972,7 @@ export function assessLegacyImportRestore(value: unknown): LegacyImportRestoreAs
     cutoverCount: after.cutoverCount,
     coordination: after.coordination,
   };
-  if (hashLegacyImportValue(before) !== hashLegacyImportValue(captured)) {
+  if (hashLegacyImportValue(before) !== hashLegacyImportValue(after)) {
     return result(input, application, after.base, null, "temporarily-unavailable", "coordination", "ASSESSMENT_STALE", true,
       recommendation("retry-assessment", "I recommend retrying the restore assessment.",
         "Canonical or coordination state changed while the backup was being verified."), evidenceExtra);

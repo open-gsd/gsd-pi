@@ -384,15 +384,6 @@ describe("legacy supplemental captured-byte integration", () => {
     assert.deepEqual(normalizedSources(interpretation.sources), normalizedSources(expectedSources));
     assert.deepEqual(compositeCandidateSemantics(interpretation), [
       {
-        target: { kind: "knowledge", key: "K701" },
-        normalized: {
-          source_knowledge_id: "K701",
-          table: "rules",
-          cells: ["import", "Preserve derived evidence", "Classification must not rebuild projections", "M702"],
-        },
-        reason_code: "knowledge-row-mapped",
-      },
-      {
         target: { kind: "legacy-knowledge-source", key: ".gsd/KNOWLEDGE.md" },
         normalized: { role: "projection-input", preservation: "verbatim" },
         reason_code: "knowledge-markdown-preserved",
@@ -437,14 +428,13 @@ describe("legacy supplemental captured-byte integration", () => {
         reason_code: "canonical-worktree-preserved",
       },
     ].sort(compareCanonical));
-    assert.deepEqual(interpretation.diagnoses.map((diagnosis) => diagnosis.code).sort(), [
-      "knowledge-content-not-imported",
+    assert.deepEqual(interpretation.diagnoses.map((diagnosis) => diagnosis.code), [
       "unsupported-database-schema",
     ]);
-    assert.deepEqual(interpretation.resolutions.map((resolution) => resolution.disposition).sort(), [
-      "preserved",
-      "unsupported",
-    ]);
+    assert.deepEqual(interpretation.resolutions.map((resolution) => ({
+      disposition: resolution.disposition,
+      target: resolution.target,
+    })), [{ disposition: "unsupported", target: undefined }]);
     assertRuntimeIdentity(capture, interpretation);
     assertNoDiagnosticSecretLeak(interpretation);
     assert.deepEqual(interpretation, interpretLegacySupplementalCapture(capture, context));

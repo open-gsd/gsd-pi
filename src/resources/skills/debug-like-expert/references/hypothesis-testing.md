@@ -3,18 +3,17 @@
 Debugging is applied scientific method. You observe a phenomenon (the bug), form hypotheses about its cause, design experiments to test those hypotheses, and revise based on evidence. This isn't metaphorical - it's literal experimental science.
 </overview>
 
+
 <principle name="falsifiability">
 A good hypothesis can be proven wrong. If you can't design an experiment that could disprove it, it's not a useful hypothesis.
 
 **Bad hypotheses** (unfalsifiable):
-
 - "Something is wrong with the state"
 - "The timing is off"
 - "There's a race condition somewhere"
 - "The library is buggy"
 
 **Good hypotheses** (falsifiable):
-
 - "The user state is being reset because the component remounts when the route changes"
 - "The API call completes after the component unmounts, causing the state update on unmounted component warning"
 - "Two async operations are modifying the same array without locking, causing data loss"
@@ -49,7 +48,6 @@ A good hypothesis can be proven wrong. If you can't design an experiment that co
 ❌ Unfalsifiable, not specific
 
 **Specific hypotheses**:
-
 1. "The save API call is timing out when network is slow"
    - Testable: Check network tab for timeout errors
    - Falsifiable: If all requests complete successfully, this is wrong
@@ -62,21 +60,19 @@ A good hypothesis can be proven wrong. If you can't design an experiment that co
    - Testable: Check if API returns success
    - Falsifiable: If UI updates on successful response, this is wrong
 </example>
-
 </how_to_form>
+
 
 <experimental_design>
 An experiment is a test that produces evidence supporting or refuting a hypothesis.
 
 **Good experiments**:
-
 - Test one hypothesis at a time
 - Have clear success/failure criteria
 - Produce unambiguous results
 - Are repeatable
 
 **Bad experiments**:
-
 - Test multiple things at once
 - Have unclear outcomes ("maybe it works better?")
 - Rely on subjective judgment
@@ -101,7 +97,6 @@ For each hypothesis, design an experiment:
 **1. Prediction**: If true, the component will re-render even when the object's values haven't changed
 
 **2. Test setup**:
-
    - Add console.log in component body to count renders
    - Add console.log in parent to track when object is created
    - Add useEffect with the object as dependency to log when it changes
@@ -109,14 +104,12 @@ For each hypothesis, design an experiment:
 **3. Measurement**: Count of renders and object creations
 
 **4. Success criteria**:
-
    - Confirms H: Component re-renders match parent renders, object reference changes each time
    - Refutes H: Component only re-renders when object values actually change
 
 **5. Run**: Execute the code with logging
 
 **6. Observe**:
-
    ```
    [Parent] Created user object
    [Child] Rendering (1)
@@ -130,18 +123,17 @@ For each hypothesis, design an experiment:
 </example>
 </experimental_design>
 
+
 <evidence_quality>
 Not all evidence is equal. Learn to distinguish strong from weak evidence.
 
 **Strong evidence**:
-
 - Directly observable ("I can see in the logs that X happens")
 - Repeatable ("This fails every time I do Y")
 - Unambiguous ("The value is definitely null, not undefined")
 - Independent ("This happens even in a fresh browser with no cache")
 
 **Weak evidence**:
-
 - Hearsay ("I think I saw this fail once")
 - Non-repeatable ("It failed that one time but I can't reproduce it")
 - Ambiguous ("Something seems off")
@@ -160,7 +152,6 @@ console.log('Type:', typeof userId); // Output: Type: undefined
 ❌ Vague, not verified, uncertain
 
 **Strong**:
-
 ```javascript
 for (let i = 0; i < 100; i++) {
   const result = processData(testData);
@@ -170,7 +161,6 @@ for (let i = 0; i < 100; i++) {
 }
 // Output: Failed on iterations: 3, 7, 12, 23, 31...
 ```
-
 ✅ Repeatable, shows pattern
 
 **Weak**:
@@ -178,6 +168,7 @@ for (let i = 0; i < 100; i++) {
 ❌ Not quantified, no pattern identified
 </examples>
 </evidence_quality>
+
 
 <decision_point>
 Don't act too early (premature fix) or too late (analysis paralysis).
@@ -203,7 +194,6 @@ Don't act too early (premature fix) or too late (analysis paralysis).
    - This is the most likely cause, not just the first idea
 
 **Don't act if**:
-
 - "I think it might be X" - Too uncertain
 - "This could be the issue" - Not confident enough
 - "Let me try changing Y and see" - Random changes, not hypothesis-driven
@@ -217,7 +207,6 @@ Don't act too early (premature fix) or too late (analysis paralysis).
 - Result: Bug persists, now you have caching to debug too
 
 **Right time** (act):
-
 - Hypothesis: "API response is missing the 'status' field when user is inactive, causing the app to crash"
 - Evidence:
   - Logged API response for active user: has 'status' field
@@ -226,8 +215,8 @@ Don't act too early (premature fix) or too late (analysis paralysis).
 - Action: Add defensive check for missing status field
 - Result: Bug fixed because you understood the cause
 </example>
-
 </decision_point>
+
 
 <recovery>
 You will be wrong sometimes. This is normal. The skill is recovering gracefully.
@@ -263,7 +252,6 @@ You will be wrong sometimes. This is normal. The skill is recovering gracefully.
 **Result**: Listener count stays stable, doesn't grow over time
 
 **Recovery**:
-
 1. ✅ "Event listeners are NOT the cause. The count doesn't increase."
 2. ✅ "I've ruled out event listeners as the culprit"
 3. ✅ "But the memory profile shows objects accumulating. What objects? Let me check the heap snapshot..."
@@ -272,6 +260,7 @@ You will be wrong sometimes. This is normal. The skill is recovering gracefully.
 This is good debugging. Wrong hypothesis, quick recovery, better understanding.
 </example>
 </recovery>
+
 
 <multiple_hypotheses>
 Don't fall in love with your first hypothesis. Generate multiple alternatives.
@@ -282,7 +271,6 @@ Don't fall in love with your first hypothesis. Generate multiple alternatives.
 **Problem**: Form submission fails intermittently
 
 **Competing hypotheses**:
-
 1. Network timeout
 2. Validation failure
 3. Race condition with auto-save
@@ -291,7 +279,6 @@ Don't fall in love with your first hypothesis. Generate multiple alternatives.
 **Design experiment that differentiates**:
 
 Add logging at each stage:
-
 ```javascript
 try {
   console.log('[1] Starting validation');
@@ -311,7 +298,6 @@ try {
 ```
 
 **Observe results**:
-
 - Fails at [2] with timeout error → Hypothesis 1
 - Fails at [1] with validation error → Hypothesis 2
 - Succeeds but [3] has wrong data → Hypothesis 3
@@ -320,6 +306,7 @@ try {
 **One experiment, differentiates between four hypotheses.**
 </example>
 </multiple_hypotheses>
+
 
 <workflow>
 ```
@@ -345,33 +332,29 @@ try {
 **Key insight**: This is a loop, not a line. You'll cycle through multiple times. That's expected.
 </workflow>
 
+
 <pitfalls>
 
 **Pitfall: Testing multiple hypotheses at once**
-
 - You change three things and it works
 - Which one fixed it? You don't know
 - Solution: Test one hypothesis at a time
 
 **Pitfall: Confirmation bias in experiments**
-
 - You only look for evidence that confirms your hypothesis
 - You ignore evidence that contradicts it
 - Solution: Actively seek disconfirming evidence
 
 **Pitfall: Acting on weak evidence**
-
 - "It seems like maybe this could be..."
 - Solution: Wait for strong, unambiguous evidence
 
 **Pitfall: Not documenting results**
-
 - You forget what you tested
 - You repeat the same experiments
 - Solution: Write down each hypothesis and its result
 
 **Pitfall: Giving up on the scientific method**
-
 - Under pressure, you start making random changes
 - "Let me just try this..."
 - Solution: Double down on rigor when pressure increases

@@ -5,7 +5,6 @@ This file is the explicit capability and coverage contract for the project.
 Use it to track what is actively in scope, what has been validated by completed work, what is intentionally deferred, and what is explicitly out of scope.
 
 Guidelines:
-
 - Keep requirements capability-oriented, not a giant feature wishlist.
 - Requirements should be atomic, testable, and stated in plain language.
 - Every **Active** requirement should be mapped to a slice, deferred, blocked with reason, or moved out of scope.
@@ -16,7 +15,6 @@ Guidelines:
 ## Active
 
 ### R001 — {{requirementTitle}}
-
 - Class: {{core-capability | primary-user-loop | launchability | continuity | failure-visibility | integration | quality-attribute | operability | admin/support | compliance/security | differentiator | constraint | anti-feature}}
 - Status: active
 - Description: {{what must be true in plain language}}
@@ -30,7 +28,6 @@ Guidelines:
 ## Validated
 
 ### R010 — {{requirementTitle}}
-
 - Class: {{failure-visibility}}
 - Status: validated
 - Description: {{what was proven}}
@@ -44,7 +41,6 @@ Guidelines:
 ## Deferred
 
 ### R020 — {{requirementTitle}}
-
 - Class: {{admin/support}}
 - Status: deferred
 - Description: {{useful later, not now}}
@@ -58,7 +54,6 @@ Guidelines:
 ## Out of Scope
 
 ### R030 — {{requirementTitle}}
-
 - Class: {{anti-feature | constraint | core-capability}}
 - Status: out-of-scope
 - Description: {{what is explicitly excluded}}

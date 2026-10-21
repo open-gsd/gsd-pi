@@ -348,9 +348,12 @@ export async function showProjectInit(
   // The explicit /gsd init path (ops.ts) returns without entering showSmartEntry(),
   // which would otherwise generate STATE.md at guided-flow.ts:1358.
   try {
-    // The DB was opened above; renderStateProjection keeps the file unchanged without it.
-    const { renderStateProjection } = await import("./workflow-projections.js");
-    await renderStateProjection(basePath);
+    const { deriveState } = await import("./state.js");
+    const { buildStateMarkdown } = await import("./doctor.js");
+    const { saveFile } = await import("./files.js");
+    const { resolveGsdRootFile } = await import("./paths.js");
+    const state = await deriveState(basePath);
+    await saveFile(resolveGsdRootFile(basePath, "STATE"), buildStateMarkdown(state));
   } catch {
     // Non-fatal — STATE.md will be regenerated on next /gsd invocation
   }

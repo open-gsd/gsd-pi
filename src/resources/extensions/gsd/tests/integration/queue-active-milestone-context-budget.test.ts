@@ -5,9 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { buildExistingMilestonesContext } from "../../guided-flow-queue.ts";
-import { closeDatabase, openDatabase } from "../../gsd-db.ts";
 import type { GSDState, MilestoneRegistryEntry } from "../../types.ts";
-import { saveMilestoneFilesAsArtifacts } from "../narrative-artifact-fixture.ts";
 
 const LARGE_BODY = "A".repeat(150_000);
 const LARGE_DRAFT = "D".repeat(150_000);
@@ -45,10 +43,6 @@ describe("queue active/pending milestone context budget", () => {
         { id: "M002", title: "Pending milestone", status: "pending" },
       ];
 
-      // The queue context takes the narrative from artifact rows.
-      openDatabase(":memory:");
-      saveMilestoneFilesAsArtifacts(tmpBase);
-
       const context = await buildExistingMilestonesContext(tmpBase, ["M001", "M002"], makeState(registry));
 
       assert.match(context, /Source: `.gsd\/milestones\/M001\/M001-CONTEXT.md`/);
@@ -61,7 +55,6 @@ describe("queue active/pending milestone context budget", () => {
       assert.equal(context.includes("END_PENDING_DRAFT"), false);
       assert.equal(context.includes("END_PENDING_ROADMAP"), false);
     } finally {
-      closeDatabase();
       rmSync(tmpBase, { recursive: true, force: true });
     }
   });
@@ -79,10 +72,6 @@ describe("queue active/pending milestone context budget", () => {
         writeMilestoneArtifact(tmpBase, mid, "ROADMAP", `# ${mid} roadmap\n\n${LARGE_ROADMAP}\nEND_${mid}_ROADMAP`);
       }
 
-      // The queue context takes the narrative from artifact rows.
-      openDatabase(":memory:");
-      saveMilestoneFilesAsArtifacts(tmpBase);
-
       const context = await buildExistingMilestonesContext(tmpBase, milestoneIds, makeState(registry));
 
       assert.ok(
@@ -98,7 +87,6 @@ describe("queue active/pending milestone context budget", () => {
       }
       assert.equal(context.includes("END_M005_ROADMAP"), false);
     } finally {
-      closeDatabase();
       rmSync(tmpBase, { recursive: true, force: true });
     }
   });

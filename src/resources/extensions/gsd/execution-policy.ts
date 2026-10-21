@@ -36,6 +36,9 @@ export interface ExecutionPolicy {
     inputPayload: string;
   }>;
 
+  /** Return true only when the configured verification boundary explicitly requires a person. */
+  requiresHumanVerification?(unitType: string, unitId: string): boolean;
+
   /** Determine recovery action when a unit fails. */
   recover(
     unitType: string,

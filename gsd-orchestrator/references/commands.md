@@ -73,7 +73,6 @@ cat spec.md | gsd headless new-milestone --context - --auto
 ```
 
 Extra flags:
-
 - `--context <path>` — path to spec/PRD file (use `-` for stdin)
 - `--context-text <text>` — inline specification text
 - `--auto` — start auto-mode after milestone creation
@@ -200,10 +199,10 @@ gsd headless prefs
 
 ### `knowledge <rule|pattern|lesson>`
 
-Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
+Add persistent project knowledge. Rules append to `KNOWLEDGE.md`; patterns and lessons are captured as memories and projected back into `KNOWLEDGE.md`.
 
 ```bash
-gsd headless knowledge rule "Always use UTC timestamps in API responses"
+gsd headless knowledge "Always use UTC timestamps in API responses"
 ```
 
 ## Additional Prompt-Driven Workflows

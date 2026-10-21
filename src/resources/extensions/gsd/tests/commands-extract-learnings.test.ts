@@ -617,7 +617,6 @@ describe("complete-milestone loadPrompt round-trip (#4429)", () => {
       roadmapPath: ".gsd/milestones/M123/M123-ROADMAP.md",
       inlinedContext: "(inlined context stub)",
       milestoneSummaryPath: "/p/.gsd/milestones/M123/M123-SUMMARY.md",
-      verificationFailedPath: ".gsd/milestones/M123/M123-VERIFICATION-FAILED.md",
       extractLearningsSteps: stepsBlock,
     });
 

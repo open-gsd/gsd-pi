@@ -19,77 +19,7 @@ export const GSD_EMBED_READY_TYPE = "gsd-ui-ready"
 export const GSD_EMBED_REQUEST_TYPE = "gsd-ui-request"
 export const GSD_EMBED_RESPONSE_TYPE = "gsd-ui-response"
 export const GSD_EMBED_EVENT_TYPE = "gsd-ui-event"
-export const GSD_EMBED_THEME_TYPE = "gsd-ui-theme"
 export const GSD_UI_HOST_EVENT_NAME = "gsd.ui.event"
-
-// ControlUiHost intentionally has no theme-settings API. As with OpenClaw's
-// native widget/MCP-App embeds, consume the host's resolved semantic tokens.
-// This also covers custom palettes, accent overrides, and system color mode.
-const HOST_THEME_TOKENS: Record<string, string> = {
-  "--background": "--bg",
-  "--foreground": "--text",
-  "--card": "--card",
-  "--card-foreground": "--card-foreground",
-  "--popover": "--popover",
-  "--popover-foreground": "--popover-foreground",
-  "--primary": "--primary",
-  "--primary-foreground": "--primary-foreground",
-  "--secondary": "--secondary",
-  "--secondary-foreground": "--secondary-foreground",
-  "--muted": "--bg-muted",
-  "--muted-foreground": "--muted",
-  "--accent": "--accent-subtle",
-  "--accent-foreground": "--text",
-  "--destructive": "--danger",
-  "--destructive-foreground": "--destructive-foreground",
-  "--border": "--border",
-  "--input": "--input",
-  "--ring": "--ring",
-  "--sidebar": "--bg",
-  "--sidebar-foreground": "--text",
-  "--sidebar-primary": "--primary",
-  "--sidebar-primary-foreground": "--primary-foreground",
-  "--sidebar-accent": "--accent-subtle",
-  "--sidebar-accent-foreground": "--text",
-  "--sidebar-border": "--border",
-  "--sidebar-ring": "--ring",
-  "--success": "--ok",
-  "--warning": "--warn",
-  "--info": "--info",
-  "--terminal": "--bg",
-  "--terminal-foreground": "--text",
-  "--code-line-number": "--muted",
-  "--radius": "--radius",
-}
-
-interface HostTheme {
-  mode: "light" | "dark"
-  variables: Record<string, string>
-}
-
-interface ThemeDocumentLike {
-  documentElement?: { dataset: { themeMode?: string } }
-  defaultView?: {
-    getComputedStyle(root: unknown): { getPropertyValue(name: string): string }
-    MutationObserver?: new (listener: () => void) => {
-      observe(root: unknown, options: unknown): void
-      disconnect(): void
-    }
-  } | null
-}
-
-function readHostTheme(doc: ThemeDocumentLike): HostTheme | undefined {
-  const root = doc.documentElement
-  const view = doc.defaultView
-  if (!root || !view) return undefined
-  const style = view.getComputedStyle(root)
-  const variables: Record<string, string> = {}
-  for (const [target, source] of Object.entries(HOST_THEME_TOKENS)) {
-    const value = style.getPropertyValue(source).trim()
-    if (value) variables[target] = value
-  }
-  return { mode: root.dataset.themeMode === "light" ? "light" : "dark", variables }
-}
 
 export interface EmbedFrameRequest {
   protocol: string
@@ -140,7 +70,7 @@ interface IframeLike {
   addEventListener?(type: string, listener: () => void): void
 }
 
-interface DocumentLike extends ThemeDocumentLike {
+interface DocumentLike {
   createElement(tag: string): IframeLike
 }
 
@@ -183,22 +113,6 @@ export function createGsdEmbedPlugin(options: GsdEmbedOptions): unknown {
           let disposed = false
           let documentNonce: string | null = null
           const ownedSubscriptions = new Map<string, string>()
-          let lastTheme = ""
-          const forwardTheme = () => {
-            if (disposed || !port || !bound) return
-            const theme = readHostTheme(doc)
-            if (!theme) return
-            const fingerprint = JSON.stringify(theme)
-            if (fingerprint === lastTheme) return
-            lastTheme = fingerprint
-            port.postMessage({ protocol: GSD_EMBED_PROTOCOL, type: GSD_EMBED_THEME_TYPE, generation, theme })
-          }
-          const ThemeObserver = doc.defaultView?.MutationObserver
-          const themeObserver = ThemeObserver ? new ThemeObserver(forwardTheme) : undefined
-          if (doc.documentElement) themeObserver?.observe(doc.documentElement, {
-            attributes: true,
-            attributeFilter: ["data-theme", "data-theme-mode", "style"],
-          })
 
           const respond = (requestId: string, ok: boolean, payload: unknown, error?: string) => {
             port?.postMessage({
@@ -297,10 +211,8 @@ export function createGsdEmbedPlugin(options: GsdEmbedOptions): unknown {
             }
             port = channel.port1
             bound = true
-            const theme = readHostTheme(doc)
-            lastTheme = JSON.stringify(theme) ?? ""
             ;(iframe.contentWindow as ContentWindowLike | null)?.postMessage(
-              { protocol: GSD_EMBED_PROTOCOL, type: GSD_EMBED_BIND_TYPE, generation, nonce, ...(theme ? { theme } : {}) },
+              { protocol: GSD_EMBED_PROTOCOL, type: GSD_EMBED_BIND_TYPE, generation, nonce },
               "*",
               [channel.port2],
             )
@@ -353,7 +265,6 @@ export function createGsdEmbedPlugin(options: GsdEmbedOptions): unknown {
             generation += 1
             retireChannel()
             documentNonce = null
-            themeObserver?.disconnect()
             unsubscribeHostEvents?.()
             ;(globalThis as unknown as { removeEventListener(t: string, l: unknown): void }).removeEventListener("message", windowListener)
             try {

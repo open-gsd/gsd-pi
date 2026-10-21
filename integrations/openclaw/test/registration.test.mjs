@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import test from 'node:test';
 import plugin from '../dist/index.js';
 import { GsdPortalService } from '../dist/portals.js';
-import { nativeProjectRegistry } from '../dist/native-projects.js';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -16,14 +15,13 @@ function fixture(t) {
   const requests = [];
   const registrations = [];
   const connections = [];
-  t.mock.method(nativeProjectRegistry, 'list', async () => registrations.map(({ project }) => ({ ...project, name: project.projectId })));
   t.mock.method(GsdPortalService.prototype, 'start', async function () {
     Object.defineProperty(this, 'webPort', { value: 33277 });
   });
   t.mock.method(GsdPortalService.prototype, 'stop', async () => {});
   t.mock.method(globalThis, 'fetch', async (url) => {
     requests.push(new URL(url));
-    return Response.json(String(url).includes('/api/projects?') ? [{ path: directory, name: 'fixture' }] : { entries: ['fixture'] });
+    return Response.json({ entries: ['fixture'] });
   });
   t.after(async () => {
     // Connection retirement also cleans up a failing regression's leaked stream.
@@ -81,7 +79,7 @@ test('each compiled registration receives its own approved policy before service
   assert.equal(h.requests.at(-1).searchParams.get('path'), h.directory);
   assert.equal((await a.call('gsd.ui.preferences.read')).ok, true);
   const untouched = await b.call('gsd.ui.projects.list', { projectId: 'a' });
-  assert.deepEqual(untouched.payload, [], 'starting A must not grant B a project');
+  assert.equal(untouched.error?.message, 'no approved project matches', 'starting A must not grant B a project');
   const denied = await a.call('gsd.ui.projects.list', { projectId: 'a' }, { client: { internal: { controlUiAdmin: false } } });
   assert.equal(denied.error?.message, 'administrator admission required', 'admin-only remains the default');
 });
@@ -95,12 +93,12 @@ test('policy withdrawal and removal affect only the registration being reloaded'
   assert.equal((await a.call('gsd.ui.projects.list', { projectId: 'a' })).ok, true);
   await a.service.stop();
   await a.start({ adminOnly: true, projects: [] });
-  assert.deepEqual((await a.call('gsd.ui.projects.list', { projectId: 'a' })).payload, []);
+  assert.equal((await a.call('gsd.ui.projects.list', { projectId: 'a' })).error?.message, 'no approved project matches');
   assert.equal((await b.call('gsd.ui.projects.list', { projectId: 'b' })).ok, true, 'A withdrawal preserves B policy');
   await a.start();
   assert.equal((await a.call('gsd.ui.projects.list', { projectId: 'a' })).ok, true);
   await a.start({});
-  assert.equal((await a.call('gsd.ui.projects.list')).payload.length, 2, 'omitting explicit policy uses the native catalog');
+  assert.equal((await a.call('gsd.ui.projects.list', { projectId: 'a' })).error?.message, 'no approved project matches');
   assert.equal((await b.call('gsd.ui.projects.list', { projectId: 'b' })).ok, true);
 });
 

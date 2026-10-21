@@ -3,7 +3,6 @@
 ## Grep/Glob Patterns to Detect
 
 ### Missing Connection Pooling
-
 ```
 # New connection per request
 create_engine\(.*(?!.*pool)        (SQLAlchemy without pool config)
@@ -15,7 +14,6 @@ redis\.createClient\(.*per.*request (new Redis client per request)
 ```
 
 ### Missing Environment-Based Config
-
 ```
 hardcoded.*url                     (hardcoded URLs)
 ['"]http://localhost               (hardcoded localhost URLs)
@@ -27,7 +25,6 @@ port\s*=\s*\d{4}                   (hardcoded port numbers)
 ```
 
 ### Missing Process Management
-
 ```
 # Single-threaded Node.js without clustering
 app\.listen\(.*(?!.*cluster)       (Node without cluster module)
@@ -38,7 +35,6 @@ gunicorn.*-w\s*1\b                 (single gunicorn worker)
 ```
 
 ### Docker/Container Issues
-
 ```
 FROM.*:latest                      (unpinned image version)
 RUN.*apt-get.*&&.*apt-get         (check if apt cache is cleaned)
@@ -50,7 +46,6 @@ RUN.*\nRUN.*\nRUN                  (multiple RUN layers)
 ```
 
 ### Missing Health Checks
-
 ```
 # Services without health endpoints
 app\.(listen|start)\(.*(?!.*health) (server without health check)
@@ -59,7 +54,6 @@ Dockerfile.*(?!.*HEALTHCHECK)       (Dockerfile without health check)
 ```
 
 ### Inefficient Polling
-
 ```
 setInterval\(.*fetch               (polling instead of WebSocket/SSE)
 setInterval\(.*axios               (polling instead of push)

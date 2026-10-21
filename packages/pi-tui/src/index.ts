@@ -67,7 +67,6 @@ export {
 	isKeyRelease,
 	isKeyRepeat,
 	isKittyProtocolActive,
-	isModifyOtherKeysFrame,
 	Key,
 	type KeyEventType,
 	type KeyId,
@@ -88,14 +87,7 @@ export {
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.js";
 // Terminal interface and implementations
-export {
-	getKeyboardCapabilities,
-	isStdoutClosedError,
-	ProcessTerminal,
-	type KeyboardCapabilities,
-	type ModifyOtherKeysCapability,
-	type Terminal,
-} from "./terminal.js";
+export { isStdoutClosedError, ProcessTerminal, type Terminal } from "./terminal.js";
 // Terminal image support
 export {
 	allocateImageId,

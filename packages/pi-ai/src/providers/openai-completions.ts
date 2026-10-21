@@ -641,9 +641,7 @@ function buildParams(
 		}
 	}
 
-	// Claude 5.x relays (Copilot, OpenRouter) reject temperature with 400s
-	// (#2645); marked models omit it.
-	if (options?.temperature !== undefined && !compat.rejectsTemperature) {
+	if (options?.temperature !== undefined) {
 		params.temperature = options.temperature;
 	}
 
@@ -662,12 +660,7 @@ function buildParams(
 	}
 
 	if (options?.toolChoice) {
-		// Marked models (#2645) 400 on a forced tool_choice ("required" / named
-		// function); "auto" and "none" remain valid and pass through.
-		const isForcedToolChoice = options.toolChoice === "required" || typeof options.toolChoice === "object";
-		if (!(compat.rejectsForcedToolChoice && isForcedToolChoice)) {
-			params.tool_choice = options.toolChoice;
-		}
+		params.tool_choice = options.toolChoice;
 	}
 
 	if (compat.thinkingFormat === "zai" && model.reasoning) {
@@ -1305,8 +1298,6 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		cacheControlFormat,
 		sendSessionAffinityHeaders: false,
 		supportsLongCacheRetention: !(isTogether || isCloudflareWorkersAI || isCloudflareAiGateway),
-		rejectsTemperature: false,
-		rejectsForcedToolChoice: false,
 	};
 }
 
@@ -1339,7 +1330,5 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		cacheControlFormat: model.compat.cacheControlFormat ?? detected.cacheControlFormat,
 		sendSessionAffinityHeaders: model.compat.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
 		supportsLongCacheRetention: model.compat.supportsLongCacheRetention ?? detected.supportsLongCacheRetention,
-		rejectsTemperature: model.compat.rejectsTemperature ?? detected.rejectsTemperature,
-		rejectsForcedToolChoice: model.compat.rejectsForcedToolChoice ?? detected.rejectsForcedToolChoice,
 	};
 }

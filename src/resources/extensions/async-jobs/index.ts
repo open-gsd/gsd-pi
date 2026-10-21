@@ -49,14 +49,9 @@ export default function AsyncJobs(pi: ExtensionAPI) {
 					? job.resultText ?? "(no output)"
 					: `Error: ${job.errorText ?? "unknown error"}`;
 
-				// Truncate output for the follow-up message. When truncating, record it
-				// on the job: the "use await_job for full output" pointer must be true,
-				// so await_job serves the complete resultText once for a
-				// delivered-but-truncated job instead of only acknowledging it tersely.
+				// Truncate output for the follow-up message
 				const maxLen = 2000;
-				const isTruncated = output.length > maxLen;
-				if (isTruncated) job.deliveredTruncated = true;
-				const truncatedOutput = isTruncated
+				const truncatedOutput = output.length > maxLen
 					? output.slice(0, maxLen) + "\n\n[... truncated, use await_job for full output]"
 					: output;
 

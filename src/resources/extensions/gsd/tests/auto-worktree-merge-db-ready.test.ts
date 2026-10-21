@@ -37,19 +37,19 @@ describe("assertMilestoneDbReadyForMerge", () => {
         dbAvailable = true;
         return true;
       },
-      hasWorktreeLocalDb: (candidate, main) => {
-        calls.push(`local:${candidate}->${main}`);
-        return false;
+      shouldReconcileWorktreeDb: (candidate, main) => {
+        calls.push(`should:${candidate}->${main}`);
+        return true;
+      },
+      reconcileWorktreeDb: (main, worktree) => {
+        calls.push(`reconcile:${main}<-${worktree}`);
+        return { conflicts: [] } as never;
       },
       proveMilestoneCloseout: (milestoneId) => {
         calls.push(`prove:${milestoneId}`);
         return { ok: true };
       },
-      readMilestoneMergeObservation: () => ({
-        kind: "completed",
-        legacyStatus: "complete",
-        canonicalStatus: "completed",
-      }),
+      readMilestoneMergeObservation: () => ({ kind: "unadopted" }),
     });
 
     assertMilestoneDbReadyForMerge({
@@ -61,12 +61,13 @@ describe("assertMilestoneDbReadyForMerge", () => {
     assert.deepEqual(calls, [
       "resolve",
       "open:/repo/.gsd/gsd.db",
-      "local:/repo/.gsd-worktrees/M002/.gsd/gsd.db->/repo/.gsd/gsd.db",
+      "should:/repo/.gsd-worktrees/M002/.gsd/gsd.db->/repo/.gsd/gsd.db",
+      "reconcile:/repo/.gsd/gsd.db<-/repo/.gsd-worktrees/M002/.gsd/gsd.db",
       "prove:M002",
     ]);
   });
 
-  test("switches the active DB to the project DB, then stops on a worktree-local DB with the import instruction", () => {
+  test("switches the active DB to the project DB before reconciling the worktree DB", () => {
     const calls: string[] = [];
     _setMergeDbReadyDepsForTests({
       isDbAvailable: () => true,
@@ -75,8 +76,8 @@ describe("assertMilestoneDbReadyForMerge", () => {
         worktreeGsd: "/repo/.gsd-worktrees/M002/.gsd",
       } as never),
       getWorkflowDatabasePath: () => "/repo/.gsd-worktrees/M002/.gsd/gsd.db",
-      hasWorktreeLocalDb: (candidate, main) => {
-        calls.push(`local:${candidate}->${main}`);
+      shouldReconcileWorktreeDb: (candidate, main) => {
+        calls.push(`should:${candidate}->${main}`);
         return true;
       },
       closeWorkflowDatabase: () => {
@@ -86,7 +87,10 @@ describe("assertMilestoneDbReadyForMerge", () => {
         calls.push(`open:${path}`);
         return true;
       },
-      logError: () => undefined,
+      reconcileWorktreeDb: (main, worktree) => {
+        calls.push(`reconcile:${main}<-${worktree}`);
+        return { conflicts: [] } as never;
+      },
       readMilestoneMergeObservation: () => ({ kind: "unadopted" }),
       proveMilestoneCloseout: (milestoneId) => {
         calls.push(`prove:${milestoneId}`);
@@ -94,23 +98,19 @@ describe("assertMilestoneDbReadyForMerge", () => {
       },
     });
 
-    assert.throws(
-      () => assertMilestoneDbReadyForMerge({
-        milestoneId: "M002",
-        projectRoot: "/repo",
-        worktreeCwd: "/repo/.gsd-worktrees/M002",
-      }),
-      (err: unknown) => err instanceof GSDError
-        && /Milestone M002 merge blocked: worktree-local database found/.test(err.message)
-        && /\/worktree import-db M002/.test(err.message)
-        && /Recovery reason: closeout-consistency-blocked/.test(err.message),
-    );
+    assertMilestoneDbReadyForMerge({
+      milestoneId: "M002",
+      projectRoot: "/repo",
+      worktreeCwd: "/repo/.gsd-worktrees/M002",
+    });
 
     assert.deepEqual(calls, [
-      "local:/repo/.gsd-worktrees/M002/.gsd/gsd.db->/repo/.gsd/gsd.db",
+      "should:/repo/.gsd-worktrees/M002/.gsd/gsd.db->/repo/.gsd/gsd.db",
       "close",
       "open:/repo/.gsd/gsd.db",
-      "local:/repo/.gsd-worktrees/M002/.gsd/gsd.db->/repo/.gsd/gsd.db",
+      "should:/repo/.gsd-worktrees/M002/.gsd/gsd.db->/repo/.gsd/gsd.db",
+      "reconcile:/repo/.gsd/gsd.db<-/repo/.gsd-worktrees/M002/.gsd/gsd.db",
+      "prove:M002",
     ]);
   });
 
@@ -133,7 +133,7 @@ describe("assertMilestoneDbReadyForMerge", () => {
         worktreeCwd: "/repo/.gsd-worktrees/M002",
       }),
       (err: unknown) => err instanceof GSDError
-        && /Milestone M002 merge blocked: cannot open project DB/.test(err.message)
+        && /DB reconciliation failed before milestone M002 merge/.test(err.message)
         && /Recovery reason: closeout-consistency-blocked/.test(err.message),
     );
   });
@@ -146,7 +146,7 @@ describe("assertMilestoneDbReadyForMerge", () => {
         worktreeGsd: "/repo/.gsd-worktrees/M002/.gsd",
       } as never),
       getWorkflowDatabasePath: () => "/repo/.gsd/gsd.db",
-      hasWorktreeLocalDb: () => false,
+      shouldReconcileWorktreeDb: () => false,
       readMilestoneMergeObservation: () => ({ kind: "unavailable" }),
       proveMilestoneCloseout: () => ({ ok: true }),
     });
@@ -163,7 +163,7 @@ describe("assertMilestoneDbReadyForMerge", () => {
     );
   });
 
-  test("blocks the merge of an unadopted milestone with the adoption instruction", () => {
+  test("surfaces closeout proof failures after successful reconciliation", () => {
     _setMergeDbReadyDepsForTests({
       isDbAvailable: () => true,
       resolveGsdPathContract: () => ({
@@ -171,38 +171,8 @@ describe("assertMilestoneDbReadyForMerge", () => {
         worktreeGsd: "/repo/.gsd-worktrees/M002/.gsd",
       } as never),
       getWorkflowDatabasePath: () => "/repo/.gsd/gsd.db",
-      hasWorktreeLocalDb: () => false,
+      shouldReconcileWorktreeDb: () => false,
       readMilestoneMergeObservation: () => ({ kind: "unadopted" }),
-      proveMilestoneCloseout: () => ({ ok: true }),
-    });
-
-    assert.throws(
-      () => assertMilestoneDbReadyForMerge({
-        milestoneId: "M002",
-        projectRoot: "/repo",
-        worktreeCwd: "/repo/.gsd-worktrees/M002",
-      }),
-      (err: unknown) => err instanceof GSDError
-        && /no canonical lifecycle row/.test(err.message)
-        && /\/gsd db adopt --apply/.test(err.message)
-        && /Recovery reason: closeout-consistency-blocked/.test(err.message),
-    );
-  });
-
-  test("surfaces closeout proof failures when the project DB is the only DB", () => {
-    _setMergeDbReadyDepsForTests({
-      isDbAvailable: () => true,
-      resolveGsdPathContract: () => ({
-        projectDb: "/repo/.gsd/gsd.db",
-        worktreeGsd: "/repo/.gsd-worktrees/M002/.gsd",
-      } as never),
-      getWorkflowDatabasePath: () => "/repo/.gsd/gsd.db",
-      hasWorktreeLocalDb: () => false,
-      readMilestoneMergeObservation: () => ({
-        kind: "completed",
-        legacyStatus: "complete",
-        canonicalStatus: "completed",
-      }),
       proveMilestoneCloseout: () => ({
         ok: false,
         reason: "consistency-blocked",

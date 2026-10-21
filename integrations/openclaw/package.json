@@ -1,7 +1,7 @@
 {
   "name": "@opengsd/open-gsd-openclaw",
-  "version": "1.21.1",
-  "description": "GSD Pi over MCP with native OpenClaw projects, embedded web UI, Workboard, and heartbeat synchronization",
+  "version": "1.19.0",
+  "description": "GSD Pi over MCP with automatic OpenClaw project, TaskFlow, and Workboard synchronization",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -38,26 +38,26 @@
     "install": {
       "npmSpec": "@opengsd/open-gsd-openclaw",
       "defaultChoice": "npm",
-      "minHostVersion": ">=2026.9.7"
+      "minHostVersion": ">=2026.9.2"
     },
     "compat": {
-      "pluginApi": ">=2026.9.7",
-      "minGatewayVersion": "2026.9.7"
+      "pluginApi": ">=2026.9.2",
+      "minGatewayVersion": "2026.9.2"
     },
     "build": {
-      "openclawVersion": "2026.9.7",
-      "pluginSdkVersion": "2026.9.7"
+      "openclawVersion": "2026.9.2",
+      "pluginSdkVersion": "2026.9.2"
     },
     "controlUi": "./src/control-ui-entry.ts"
   },
   "scripts": {
-    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false && node scripts/build-control-ui.mjs",
-    "test": "pnpm run build && node --experimental-strip-types --test test/*.test.mjs test/*.test.ts"
+    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false",
+    "test": "pnpm run build && node --test test/*.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.12.0",
     "typescript": "^5.4.0",
-    "openclaw": "2026.9.7",
+    "openclaw": "2026.9.4",
     "esbuild": "^0.25.0"
   },
   "engines": {

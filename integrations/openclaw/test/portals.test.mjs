@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { setImmediate as nextTurn } from 'node:timers/promises';
@@ -9,19 +9,6 @@ import { GsdPortalService, resolveWebLaunch } from '../dist/portals.js';
 
 const PORT = 32117;
 const PUBLIC_URL = 'http://portal.example.invalid:32118';
-const BASE_PATH = '/plugins/open-gsd-openclaw/web';
-
-async function packagedFixture(root) {
-  const shared = join(root, 'dist/web/standalone');
-  const embedded = join(shared, 'openclaw');
-  await mkdir(join(shared, 'node_modules'), { recursive: true });
-  await mkdir(embedded, { recursive: true });
-  for (const [directory, basePath] of [[shared, ''], [embedded, BASE_PATH]]) {
-    await writeFile(join(directory, 'server.js'), '// Fixture: never executed.');
-    await writeFile(join(directory, 'gsd-web-build.json'), JSON.stringify({ version: 1, basePath, dependencyHash: 'fixture' }));
-  }
-  return join(embedded, 'server.js');
-}
 
 function deferred() {
   let resolve, reject;
@@ -30,10 +17,10 @@ function deferred() {
 }
 
 async function fixture(t, source = false) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'gsd-portal-test-')));
+  const root = await mkdtemp(join(tmpdir(), 'gsd-portal-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@opengsd/gsd-pi' }));
-  const entry = source ? join(root, 'web/node_modules/next/dist/bin/next') : await packagedFixture(root);
+  const entry = source ? join(root, 'web/node_modules/next/dist/bin/next') : join(root, 'dist/web/standalone/server.js');
   await mkdir(dirname(entry), { recursive: true });
   await writeFile(entry, '// Fixture: never executed.');
   if (source) await writeFile(join(root, 'web/package.json'), '{}');
@@ -76,7 +63,7 @@ async function harness(t, options = {}) {
 
 test('standalone host is opened only after portal registration and uses sanitized daemon picker environment', async (t) => {
   const h = await harness(t, { env: {
-    GSD_HOME: '/existing/gsd', GSD_WEB_AUTH_TOKEN: ['old', 'token'].join('-'),
+    GSD_HOME: '/existing/gsd', GSD_WEB_AUTH_TOKEN: 'old-token',
     GSD_WEB_PROJECT_CWD: '/existing/project', GSD_WEB_PROJECT_SESSIONS_DIR: '/existing/session',
     GSD_WEB_ALLOWED_ORIGINS: '*', GSD_WEB_ALLOW_UNAUTHENTICATED_LAN: '1',
     HOSTNAME: '0.0.0.0', PORT: '123', GSD_WEB_DAEMON_MODE: '0',
@@ -97,8 +84,6 @@ test('standalone host is opened only after portal registration and uses sanitize
   assert.equal(env.GSD_HOME, '/existing/gsd');
   assert.equal(env.GSD_WEB_PACKAGE_ROOT, h.root);
   assert.equal(env.GSD_WEB_HOST_KIND, 'packaged-standalone');
-  assert.equal(env.GSD_WEB_BASE_PATH, BASE_PATH);
-  assert.equal(env.GSD_WEB_DIST_DIR, '.next-openclaw');
   assert.equal(env.PUBLIC_URL, PUBLIC_URL);
   assert.equal(env.HOSTNAME, '127.0.0.1');
   assert.equal(env.GSD_WEB_HOST, '127.0.0.1');
@@ -121,8 +106,6 @@ test('source development fallback launches Next directly without npm or gsd CLI 
   assert.equal(spawned.options.cwd, join(h.root, 'web'));
   assert.equal(spawned.options.env.NEXT_PUBLIC_GSD_DEV, '1');
   assert.equal(spawned.options.env.NODE_ENV, 'development');
-  assert.equal(spawned.options.env.GSD_WEB_BASE_PATH, BASE_PATH);
-  assert.equal(spawned.options.env.GSD_WEB_DIST_DIR, '.next-openclaw');
 });
 
 test('explicitly disabled UI does not resolve packages, reserve ports or request Gateway access', async () => {
@@ -136,7 +119,9 @@ test('explicitly disabled UI does not resolve packages, reserve ports or request
 test('GSD_CLI_PATH and PATH symlinks resolve to the real GSD package and standalone wins', async (t) => {
   const { root, entry } = await fixture(t, true);
   const cli = join(root, 'dist/bootstrap.js');
-  const standalone = await packagedFixture(root);
+  const standalone = join(root, 'dist/web/standalone/server.js');
+  await mkdir(dirname(standalone), { recursive: true });
+  await writeFile(standalone, '// not executed');
   await writeFile(cli, '// not executed');
   await mkdir(join(root, 'bin'));
   await symlink(cli, join(root, 'bin/gsd'));
@@ -145,37 +130,6 @@ test('GSD_CLI_PATH and PATH symlinks resolve to the real GSD package and standal
   assert.notEqual(entry, standalone);
   assert.throws(() => resolveWebLaunch({ packageRoot: join(root, 'bin') }, {}), /packageRoot/);
   assert.throws(() => resolveWebLaunch({}, { PATH: '' }), /cannot locate GSD/);
-});
-
-test('root-only packaged hosts are not silently launched with an ineffective runtime prefix', async (t) => {
-  const { root, entry } = await fixture(t);
-  await rm(dirname(entry), { recursive: true });
-  assert.throws(() => resolveWebLaunch({ packageRoot: root }, {}), /requires the prefixed OpenClaw web build/);
-});
-
-test('incompatible prefixed build metadata or missing shared dependencies cannot launch', async (t) => {
-  const { root, entry } = await fixture(t);
-  const marker = join(dirname(entry), 'gsd-web-build.json');
-  for (const metadata of [
-    { version: 1, basePath: '', dependencyHash: 'fixture' },
-    { version: 1, basePath: BASE_PATH, dependencyHash: 'old-dependencies' },
-    { version: 2, basePath: BASE_PATH, dependencyHash: 'fixture' },
-  ]) {
-    await writeFile(marker, JSON.stringify(metadata));
-    assert.throws(() => resolveWebLaunch({ packageRoot: root }, {}), /matching shared dependencies/);
-  }
-  await packagedFixture(root);
-  await rm(join(root, 'dist/web/standalone/node_modules'), { recursive: true });
-  assert.throws(() => resolveWebLaunch({ packageRoot: root }, {}), /matching shared dependencies/);
-});
-
-test('source checkout safely falls back to Next dev when its packaged variant is incompatible', async (t) => {
-  const { root, entry } = await fixture(t, true);
-  await packagedFixture(root);
-  await writeFile(join(root, 'dist/web/standalone/openclaw/gsd-web-build.json'), '{}');
-  const launch = resolveWebLaunch({ packageRoot: root }, {});
-  assert.equal(launch.kind, 'source-dev');
-  assert.equal(launch.entry, entry);
 });
 
 test('an existing portal is never claimed, spawned over or closed', async (t) => {

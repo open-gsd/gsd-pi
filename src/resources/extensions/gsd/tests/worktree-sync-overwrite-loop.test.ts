@@ -1,13 +1,15 @@
 /**
  * worktree-sync-overwrite-loop.test.ts — Regression tests for #1886.
  *
- * Reproduces the infinite validate-milestone loop caused by
- * syncProjectRootToWorktree: safeCopyRecursive overwrites
- * worktree-authoritative files (e.g. VALIDATION.md written by
- * validate-milestone gets clobbered by the stale project root copy that
- * lacks the file).
+ * Reproduces the infinite validate-milestone loop caused by two bugs
+ * in syncProjectRootToWorktree:
  *
- * completed-units.json has no reader, so it is not synced in either direction.
+ * 1. safeCopyRecursive overwrites worktree-authoritative files (e.g.
+ *    VALIDATION.md written by validate-milestone gets clobbered by the
+ *    stale project root copy that lacks the file).
+ *
+ * 2. completed-units.json is not forward-synced from project root to
+ *    worktree, so the worktree never learns about already-completed units.
  */
 
 import { test } from "node:test";
@@ -101,7 +103,7 @@ test("#1886: missing worktree files are still copied from project root", (t) => 
   );
 });
 
-test("completed-units.json is not forward-synced to worktree", (t) => {
+test("#1886: completed-units.json is forward-synced to worktree", (t) => {
   const mainBase = createBase("main");
   const wtBase = createBase("wt");
   registerBases(t, mainBase, wtBase);
@@ -122,7 +124,33 @@ test("completed-units.json is not forward-synced to worktree", (t) => {
   );
   assert.deepEqual(
     wtCompleted,
-    [],
-    "worktree completed-units.json is left as it was",
+    ["validate-milestone/M004"],
+    "completed-units.json synced from project root (force:true)",
+  );
+});
+
+test("#1886: worktree completed-units.json untouched when project root has none", (t) => {
+  const mainBase = createBase("main");
+  const wtBase = createBase("wt");
+  registerBases(t, mainBase, wtBase);
+
+  // Project root milestone dir must exist for sync to run
+  const prM004 = join(mainBase, ".gsd", "milestones", "M004");
+  mkdirSync(prM004, { recursive: true });
+
+  writeFileSync(
+    join(wtBase, ".gsd", "completed-units.json"),
+    JSON.stringify(["some-unit/M001"]),
+  );
+
+  syncProjectRootToWorktree(mainBase, wtBase, "M004");
+
+  const wtCompleted = JSON.parse(
+    readFileSync(join(wtBase, ".gsd", "completed-units.json"), "utf-8"),
+  );
+  assert.deepEqual(
+    wtCompleted,
+    ["some-unit/M001"],
+    "worktree completed-units.json untouched when project root has none",
   );
 });

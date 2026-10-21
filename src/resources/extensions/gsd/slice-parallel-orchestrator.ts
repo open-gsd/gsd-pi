@@ -31,7 +31,6 @@ import { fileURLToPath } from "node:url";
 import { gsdRoot } from "./paths.js";
 import { createWorktree, worktreePath, removeWorktree } from "./worktree-manager.js";
 import { autoWorktreeBranch } from "./auto-worktree-branch-lifecycle.js";
-import { nativeDetectMainBranch, nativeIsAncestor } from "./native-git-bridge.js";
 import { syncGsdStateToWorktreeByScope } from "./auto-worktree-sync.js";
 import { runWorktreePostCreateHook } from "./worktree-post-create-hook.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
@@ -151,21 +150,6 @@ async function waitForStartupGrace(pid: number, graceMs: number): Promise<boolea
   return isWorkerPidAlive(pid);
 }
 
-/**
- * Remove a slice worktree directory and keep its `slice/<MID>/<SID>` branch.
- * No code merges that branch yet, so deleting it would delete the commits of
- * a slice worker. The next start for the slice reuses the kept branch when it
- * holds commits of its own; a branch without own commits moves to the current
- * start point.
- */
-function removeSliceWorktree(basePath: string, wtName: string): void {
-  removeWorktree(basePath, wtName, { deleteBranch: false, force: true });
-}
-
-export function _createSliceWorktreeForTest(basePath: string, milestoneId: string, sliceId: string): string {
-  return createSliceWorktree(basePath, milestoneId, sliceId);
-}
-
 function createSliceWorktree(basePath: string, milestoneId: string, sliceId: string): string {
   const wtBranch = `slice/${milestoneId}/${sliceId}`;
   const wtName = `${milestoneId}-${sliceId}`;
@@ -175,12 +159,7 @@ function createSliceWorktree(basePath: string, milestoneId: string, sliceId: str
     rmSync(wtPath, { recursive: true, force: true });
   }
   if (!existsSync(wtPath)) {
-    const startPoint = nativeDetectMainBranch(basePath);
-    createWorktree(basePath, wtName, {
-      branch: wtBranch,
-      startPoint,
-      reuseExistingBranch: !nativeIsAncestor(basePath, wtBranch, startPoint),
-    });
+    createWorktree(basePath, wtName, { branch: wtBranch });
   }
 
   const hookError = runWorktreePostCreateHook(basePath, wtPath);
@@ -398,7 +377,7 @@ export function restoreSliceState(basePath: string): PersistedSliceState | null 
     for (const w of dead) {
       const wtName = `${w.milestoneId}-${w.sliceId}`;
       try {
-        removeSliceWorktree(persisted.basePath, wtName);
+        removeWorktree(persisted.basePath, wtName, { deleteBranch: true, force: true });
       } catch {
         /* worktree may already be gone */
       }
@@ -564,7 +543,7 @@ export async function startSliceParallel(
         errors.push({ sid: slice.id, error: "Worker failed startup gate" });
         sliceState.workers.delete(slice.id);
         try {
-          removeSliceWorktree(basePath, wtName);
+          removeWorktree(basePath, wtName, { deleteBranch: true, force: true });
         } catch { /* ignore cleanup failures */ }
       }
     } catch (err) {
@@ -573,7 +552,7 @@ export async function startSliceParallel(
       const wtName = `${milestoneId}-${slice.id}`;
       sliceState.workers.delete(slice.id);
       try {
-        removeSliceWorktree(basePath, wtName);
+        removeWorktree(basePath, wtName, { deleteBranch: true, force: true });
       } catch { /* ignore cleanup failures */ }
     }
   }
@@ -589,7 +568,7 @@ export async function startSliceParallel(
     sliceState.workers.delete(sid);
     const wtName = `${milestoneId}-${sid}`;
     try {
-      removeSliceWorktree(basePath, wtName);
+      removeWorktree(basePath, wtName, { deleteBranch: true, force: true });
     } catch { /* ignore cleanup failures */ }
   }
 
@@ -628,7 +607,7 @@ export function stopSliceParallel(): void {
     // Clean up worktree created for this worker
     const wtName = `${worker.milestoneId}-${worker.sliceId}`;
     try {
-      removeSliceWorktree(sliceState.basePath, wtName);
+      removeWorktree(sliceState.basePath, wtName, { deleteBranch: true, force: true });
     } catch { /* best-effort cleanup */ }
   }
 

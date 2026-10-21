@@ -3,7 +3,6 @@ Custom slash commands — registration, argument completions, subcommand pattern
 </overview>
 
 <basic_registration>
-
 ```typescript
 pi.registerCommand("deploy", {
   description: "Deploy to an environment",
@@ -14,7 +13,6 @@ pi.registerCommand("deploy", {
   },
 });
 ```
-
 </basic_registration>
 
 <argument_completions>
@@ -36,7 +34,6 @@ pi.registerCommand("deploy", {
   },
 });
 ```
-
 </argument_completions>
 
 <subcommand_pattern>
@@ -114,7 +111,6 @@ pi.registerCommand("handoff", {
   },
 });
 ```
-
 </command_context>
 
 <reload_pattern>
@@ -140,5 +136,4 @@ pi.registerTool({
   },
 });
 ```
-
 </reload_pattern>

@@ -49,7 +49,6 @@ Never use `__dirname` directly for package assets.
 ## Debug Command
 
 `/debug` (hidden) writes to `~/.pi/agent/pi-debug.log`:
-
 - Rendered TUI lines with ANSI codes
 - Last messages sent to the LLM
 

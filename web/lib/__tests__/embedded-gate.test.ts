@@ -10,7 +10,7 @@ import {
   embeddedEventSourceForUrl,
   shouldSuppressShutdownBeacon,
 } from "../embedded-gate.ts"
-import { EMBEDDED_PROTOCOL, EVENT_TYPE, type FrameEventMessage } from "../embedded-transport.ts"
+import { EMBEDDED_PROTOCOL, EVENT_TYPE } from "../embedded-transport.ts"
 
 function stubWindow(embedded: boolean): () => void {
   const g = globalThis as unknown as { window?: unknown }
@@ -24,10 +24,10 @@ function stubWindow(embedded: boolean): () => void {
 
 function fakeTransport(result?: unknown, error?: Error) {
   const requests: Array<{ operation: string; args?: unknown }> = []
-  const handlers = new Set<(message: FrameEventMessage) => void>()
+  const handlers = new Set<(message: unknown) => void>()
   return {
     requests,
-    emit: (message: FrameEventMessage) => {
+    emit: (message: unknown) => {
       for (const h of [...handlers]) h(message)
     },
     client: {
@@ -36,7 +36,7 @@ function fakeTransport(result?: unknown, error?: Error) {
         if (error) throw error
         return result
       },
-      onEvent: (handler: (message: FrameEventMessage) => void) => {
+      onEvent: (handler: (message: unknown) => void) => {
         handlers.add(handler)
         return () => handlers.delete(handler)
       },

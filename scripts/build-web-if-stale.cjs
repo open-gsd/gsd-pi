@@ -28,11 +28,10 @@ const webRoot = join(root, 'web')
 // Also watch src/ because api routes import directly from src/web/* and src/resources/*
 const srcRoot = join(root, 'src')
 const stagedSentinel = join(root, 'dist', 'web', 'standalone', 'server.js')
-const includeOpenClaw = process.argv.includes('--openclaw')
 
 // Directories inside web/ that are not source and should be ignored for
 // staleness comparison.
-const IGNORED_DIRS = new Set(['node_modules', '.next', '.next-openclaw', '.turbo', 'dist', 'out', '.cache'])
+const IGNORED_DIRS = new Set(['node_modules', '.next', '.turbo', 'dist', 'out', '.cache'])
 
 /**
  * Walk a directory tree, yield the mtime of every file, skipping ignored dirs.
@@ -69,7 +68,6 @@ function newestMtime(dir) {
 
 function sentinelMtime() {
   try {
-    if (!existsSync(join(root, 'dist', 'web', 'standalone', 'gsd-web-build.json'))) return 0
     return statSync(stagedSentinel).mtimeMs
   } catch {
     return 0
@@ -94,7 +92,10 @@ const builtMtime = sentinelMtime()
 
 if (builtMtime > 0 && builtMtime >= sourceMtime) {
   console.log('[gsd] Web build is up-to-date, skipping rebuild.')
-} else if (builtMtime === 0) {
+  process.exit(0)
+}
+
+if (builtMtime === 0) {
   console.log('[gsd] No staged web build found — building now...')
 } else {
   console.log('[gsd] Web/src source has changed since last build — rebuilding...')
@@ -102,15 +103,7 @@ if (builtMtime > 0 && builtMtime >= sourceMtime) {
 
 try {
   ensureWebBuildDependencies()
-  if (builtMtime === 0 || builtMtime < sourceMtime) {
-    execSync('pnpm run build:web-host', { cwd: root, stdio: 'inherit' })
-  }
-  if (includeOpenClaw) {
-    const variant = join(root, 'dist', 'web', 'standalone', 'openclaw', 'server.js')
-    if (!existsSync(variant) || statSync(variant).mtimeMs < sourceMtime) {
-      execSync('pnpm run build:web-host:openclaw', { cwd: root, stdio: 'inherit' })
-    }
-  }
+  execSync('pnpm run build:web-host', { cwd: root, stdio: 'inherit' })
 } catch (err) {
   console.error('[gsd] Web build failed:', err.message)
   process.exit(1)

@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 
 import {
   closeDatabase,
-  insertArtifact,
   insertMilestone,
   insertSlice,
   insertTask,
@@ -15,6 +14,7 @@ import {
 import type { GSDState, Phase } from "../types.ts";
 import {
   ensurePlanV2Graph,
+  hasFinalizedMilestoneContext,
   isEmptyPlanV2GraphResult,
   isMissingFinalizedContextResult,
 } from "../uok/plan-v2.ts";
@@ -37,33 +37,16 @@ function createBasePath(): string {
   return basePath;
 }
 
-/** Save a milestone artifact row, as gsd_summary_save does. The plan-v2 gate reads these rows. */
-function saveMilestoneArtifact(type: string, content: string): void {
-  insertArtifact({
-    path: `milestones/${MILESTONE_ID}/${MILESTONE_ID}-${type}.md`,
-    artifact_type: type,
-    milestone_id: MILESTONE_ID,
-    slice_id: null,
-    task_id: null,
-    full_content: `${content}\n`,
-  });
-}
-
-function saveSliceArtifact(type: string, content: string): void {
-  insertArtifact({
-    path: `milestones/${MILESTONE_ID}/slices/${SLICE_ID}/${SLICE_ID}-${type}.md`,
-    artifact_type: type,
-    milestone_id: MILESTONE_ID,
-    slice_id: SLICE_ID,
-    task_id: null,
-    full_content: `${content}\n`,
-  });
-}
-
 function writeMilestoneFile(basePath: string, suffix: string, content: string): void {
   const milestoneDir = join(basePath, ".gsd", "milestones", MILESTONE_ID);
   mkdirSync(milestoneDir, { recursive: true });
   writeFileSync(join(milestoneDir, `${MILESTONE_ID}-${suffix}.md`), `${content}\n`, "utf-8");
+}
+
+function writeSliceFile(basePath: string, suffix: string, content: string): void {
+  const sliceDir = join(basePath, ".gsd", "milestones", MILESTONE_ID, "slices", SLICE_ID);
+  mkdirSync(sliceDir, { recursive: true });
+  writeFileSync(join(sliceDir, `${SLICE_ID}-${suffix}.md`), `${content}\n`, "utf-8");
 }
 
 function seedGraphRows(): void {
@@ -115,8 +98,8 @@ test.afterEach(() => {
 
 test("guided flow keeps plan-v2 fail-closed handling for non-recoverable failures", () => {
   const basePath = createBasePath();
+  writeMilestoneFile(basePath, "CONTEXT", "Finalized context.");
   insertMilestone({ id: MILESTONE_ID, title: "Milestone", status: "active" });
-  saveMilestoneArtifact("CONTEXT", "Finalized context.");
   insertSlice({
     id: SLICE_ID,
     milestoneId: MILESTONE_ID,
@@ -139,7 +122,7 @@ test("guided flow keeps plan-v2 fail-closed handling for non-recoverable failure
 test("guided flow routes recoverable missing finalized context to discuss-milestone", () => {
   const basePath = createBasePath();
   seedGraphRows();
-  saveMilestoneArtifact("CONTEXT-DRAFT", "Draft context only.");
+  writeMilestoneFile(basePath, "CONTEXT-DRAFT", "Draft context only.");
 
   const decision = _runPlanV2GateForTest(
     { ui: { notify: () => undefined } } as any,
@@ -166,40 +149,46 @@ test("plan-v2 gate fails closed for execution phase when finalized context is mi
   const basePath = createBasePath();
   seedGraphRows();
 
-  saveMilestoneArtifact("CONTEXT-DRAFT", "Draft context only.");
+  writeMilestoneFile(basePath, "CONTEXT-DRAFT", "Draft context only.");
 
   const compiled = ensurePlanV2Graph(basePath, buildState("executing"));
   assert.equal(compiled.ok, false);
-  assert.match(compiled.reason ?? "", /finalized CONTEXT is missing/i);
+  assert.match(compiled.reason ?? "", /CONTEXT\.md/i);
   assert.equal(isMissingFinalizedContextResult(compiled), true);
 });
 
-test("plan-v2 gate reads the saved CONTEXT row and ignores a CONTEXT file", () => {
-  const basePath = createBasePath();
+test("plan-v2 gate accepts finalized context from project-root fallback", () => {
+  const projectRoot = createBasePath();
+  const worktreeBase = createBasePath();
   seedGraphRows();
 
-  // A finalized CONTEXT file with only a draft row saved: the gate stays closed.
-  saveMilestoneArtifact("CONTEXT-DRAFT", "Draft context.");
-  writeMilestoneFile(basePath, "CONTEXT", "Finalized context written to disk only.");
-  const fileOnly = ensurePlanV2Graph(basePath, buildState("executing"));
-  assert.equal(fileOnly.ok, false);
-  assert.equal(isMissingFinalizedContextResult(fileOnly), true);
+  writeMilestoneFile(projectRoot, "CONTEXT", "Finalized context in project root.");
+  writeMilestoneFile(worktreeBase, "CONTEXT-DRAFT", "Draft context in worktree.");
 
-  // The saved CONTEXT row opens it, from any base path and with no file there.
-  saveMilestoneArtifact("CONTEXT", "Finalized context.");
-  const compiled = ensurePlanV2Graph(createBasePath(), buildState("executing"));
-  assert.equal(compiled.ok, true);
-  assert.equal(compiled.finalizedContextIncluded, true);
+  const prevProjectRoot = process.env.GSD_PROJECT_ROOT;
+  process.env.GSD_PROJECT_ROOT = projectRoot;
+  try {
+    const compiled = ensurePlanV2Graph(worktreeBase, buildState("executing"));
+    assert.equal(compiled.ok, true);
+    assert.equal(compiled.finalizedContextIncluded, true);
+    assert.equal(hasFinalizedMilestoneContext(worktreeBase, MILESTONE_ID), true);
+  } finally {
+    if (prevProjectRoot === undefined) {
+      delete process.env.GSD_PROJECT_ROOT;
+    } else {
+      process.env.GSD_PROJECT_ROOT = prevProjectRoot;
+    }
+  }
 });
 
 test("plan-v2 compiler writes pipeline metadata for clarify/research/draft stages", () => {
   const basePath = createBasePath();
   seedGraphRows();
 
-  saveMilestoneArtifact("CONTEXT", "Finalized context.");
-  saveMilestoneArtifact("CONTEXT-DRAFT", "Draft context retained.");
-  saveMilestoneArtifact("RESEARCH", "Milestone research synthesis.");
-  saveSliceArtifact("RESEARCH", "Slice research detail.");
+  writeMilestoneFile(basePath, "CONTEXT", "Finalized context.");
+  writeMilestoneFile(basePath, "CONTEXT-DRAFT", "Draft context retained.");
+  writeMilestoneFile(basePath, "RESEARCH", "Milestone research synthesis.");
+  writeSliceFile(basePath, "RESEARCH", "Slice research detail.");
 
   const compiled = ensurePlanV2Graph(basePath, buildState("executing"));
   assert.equal(compiled.ok, true);
@@ -226,16 +215,16 @@ test("plan-v2 graph may compile during planning even without finalized context",
   const basePath = createBasePath();
   seedGraphRows();
 
-  saveMilestoneArtifact("CONTEXT-DRAFT", "Planning draft context.");
+  writeMilestoneFile(basePath, "CONTEXT-DRAFT", "Planning draft context.");
   const compiled = ensurePlanV2Graph(basePath, buildState("planning"));
   assert.equal(compiled.ok, true);
 });
 
 test("plan-v2 ensure rejects empty executable graph", () => {
   const basePath = createBasePath();
+  writeMilestoneFile(basePath, "CONTEXT", "Finalized context.");
 
   insertMilestone({ id: MILESTONE_ID, title: "Milestone", status: "active" });
-  saveMilestoneArtifact("CONTEXT", "Finalized context.");
   insertSlice({
     id: SLICE_ID,
     milestoneId: MILESTONE_ID,
@@ -275,7 +264,7 @@ function seedMultiSliceRows(): void {
 test("plan-v2 batched compile preserves node ids, order, and count", () => {
   const basePath = createBasePath();
   seedMultiSliceRows();
-  saveMilestoneArtifact("CONTEXT", "Finalized context.");
+  writeMilestoneFile(basePath, "CONTEXT", "Finalized context.");
 
   const compiled = ensurePlanV2Graph(basePath, buildState("executing"));
   assert.equal(compiled.ok, true);
@@ -299,7 +288,7 @@ test("plan-v2 batched compile preserves node ids, order, and count", () => {
 test("plan-v2 skips the disk write when the graph is unchanged", () => {
   const basePath = createBasePath();
   seedMultiSliceRows();
-  saveMilestoneArtifact("CONTEXT", "Finalized context.");
+  writeMilestoneFile(basePath, "CONTEXT", "Finalized context.");
 
   const first = ensurePlanV2Graph(basePath, buildState("executing"));
   assert.equal(first.ok, true);
@@ -319,7 +308,7 @@ test("plan-v2 skips the disk write when the graph is unchanged", () => {
 test("plan-v2 rewrites the graph when it changes", () => {
   const basePath = createBasePath();
   seedMultiSliceRows();
-  saveMilestoneArtifact("CONTEXT", "Finalized context.");
+  writeMilestoneFile(basePath, "CONTEXT", "Finalized context.");
 
   const first = ensurePlanV2Graph(basePath, buildState("executing"));
   const graphPath = first.graphPath ?? "";
@@ -344,7 +333,7 @@ test("plan-v2 rewrites the graph when it changes", () => {
 
 test("plan-v2 allows empty graph for milestone terminal phases", () => {
   const basePath = createBasePath();
-  saveMilestoneArtifact("CONTEXT", "Finalized context.");
+  writeMilestoneFile(basePath, "CONTEXT", "Finalized context.");
 
   insertMilestone({ id: MILESTONE_ID, title: "Milestone", status: "active" });
   insertSlice({

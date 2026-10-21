@@ -2,7 +2,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import claudeCodeCli from "../index.ts";
-import { buildClaudeCodeModelList, CLAUDE_CODE_MODELS } from "../models.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -59,174 +58,18 @@ test("registers Claude Sonnet 5 as a Claude Code CLI model", () => {
 	assert.equal(sonnet5.maxTokens, 128_000);
 });
 
-// #2437 — catalog-driven registration: new Claude releases must register
-// without a code change in models.ts.
-test("registers catalog-only Claude models (claude-fable-5-1) with zero cost and catalog metadata (#2437)", () => {
-	const { pi, providers } = makeMockPi();
-	claudeCodeCli(pi as never);
-
-	const models = providers[0].config.models as Array<Record<string, unknown>>;
-	const fable51 = models.find((model) => model.id === "claude-fable-5-1");
-
-	assert.ok(fable51, "claude-fable-5-1 must register from the anthropic catalog without a code change");
-	assert.equal(fable51.name, "Claude Fable 5.1 (via Claude Code)");
-	assert.equal(fable51.reasoning, true);
-	assert.equal(fable51.contextWindow, 1_000_000);
-	assert.equal(fable51.maxTokens, 128_000);
-	assert.deepEqual(fable51.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-	assert.deepEqual(
-		fable51.compat,
-		{ forceAdaptiveThinking: true, strictRequestParams: true },
-		"catalog strict-surface marker for Fable 5.1 must reach the registered model (#2645)",
-	);
-	assert.deepEqual(fable51.thinkingLevelMap, { xhigh: "xhigh" });
-});
-
-test("every hardcoded CLAUDE_CODE_MODELS entry survives the catalog merge", () => {
-	const { pi, providers } = makeMockPi();
-	claudeCodeCli(pi as never);
-
-	const models = providers[0].config.models as Array<Record<string, unknown>>;
-	const ids = new Set(models.map((model) => model.id));
-	for (const model of CLAUDE_CODE_MODELS) {
-		assert.ok(ids.has(model.id), `${model.id} must remain registered`);
-	}
-});
-
-test("buildClaudeCodeModelList: hardcoded list wins conflicts, catalog-only entries are appended, dated aliases are excluded", () => {
-	const merged = buildClaudeCodeModelList([
-		{
-			id: "claude-opus-5",
-			name: "Catalog Opus 5",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 123,
-			maxTokens: 456,
-			compat: { forceAdaptiveThinking: true },
-			thinkingLevelMap: { xhigh: "max" },
-		},
-		{
-			id: "claude-opus-9",
-			name: "Claude Opus 9",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 5, output: 10, cacheRead: 1, cacheWrite: 2 },
-			contextWindow: 999_000,
-			maxTokens: 64_000,
-		},
-		{
-			id: "claude-opus-4-5-20251101",
-			name: "Claude Opus 4.5 (dated)",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 64_000,
-		},
-	]);
-
-	const opus5 = merged.find((model) => model.id === "claude-opus-5");
-	assert.ok(opus5, "conflicting id must stay registered");
-	assert.equal(opus5.name, "Claude Opus 5 (via Claude Code)", "curated name must win over the catalog name");
-	assert.equal(opus5.contextWindow, 1_000_000, "curated context window must win over the catalog value");
-	assert.equal(opus5.maxTokens, 128_000, "curated max tokens must win over the catalog value");
-	assert.equal(opus5.thinkingLevelMap, undefined, "curated entry (no map) must not inherit the catalog map");
-
-	const opus9 = merged.find((model) => model.id === "claude-opus-9");
-	assert.ok(opus9, "catalog-only first-party id must be merged in");
-	assert.deepEqual(opus9.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, "merged entries must be zero-cost");
-
-	assert.ok(
-		!merged.some((model) => model.id === "claude-opus-4-5-20251101"),
-		"dated snapshot aliases must be excluded",
-	);
-
-	// Curated order is preserved so "first model" fallback selection stays
-	// stable; catalog-only entries are appended after the curated list.
-	assert.equal(merged[0]!.id, CLAUDE_CODE_MODELS[0]!.id, "curated list order must lead the merged list");
-	assert.deepEqual(
-		merged.slice(0, CLAUDE_CODE_MODELS.length).map((model) => model.id),
-		CLAUDE_CODE_MODELS.map((model) => model.id),
-		"curated entries must keep their relative order",
-	);
-	assert.equal(merged[merged.length - 1]!.id, "claude-opus-9", "catalog-only entries must be appended at the end");
-});
-
-test("buildClaudeCodeModelList: catalog strictRequestParams compat flows through to merged entries (#2500)", () => {
-	const merged = buildClaudeCodeModelList([
-		{
-			id: "claude-sonnet-5-5",
-			name: "Claude Sonnet 5.5",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-			contextWindow: 1_000_000,
-			maxTokens: 128_000,
-			compat: { forceAdaptiveThinking: true, strictRequestParams: true },
-		},
-	]);
-
-	const sonnet55 = merged.find((model) => model.id === "claude-sonnet-5-5");
-	assert.ok(sonnet55, "catalog sonnet-5-5 must be merged in");
-	assert.deepEqual(
-		sonnet55.compat,
-		{ forceAdaptiveThinking: true, strictRequestParams: true },
-		"strictRequestParams must reach the registered model so the stream adapter can guard requests",
-	);
-});
-
-// #2645 — curated CLAUDE_CODE_MODELS entries win the catalog merge (#2437),
-// so the strict-surface compat must be restated on the curated opus-5-5 /
-// fable-5 entries; without it thinking-off sends {type:"disabled"} and 400s.
-test("curated 5.x entries carry the strict-surface compat through the merge (#2645)", () => {
-	const merged = buildClaudeCodeModelList([]);
-
-	const opus55 = merged.find((model) => model.id === "claude-opus-5-5");
-	assert.ok(opus55, "curated opus-5-5 must be present");
-	assert.deepEqual(
-		opus55.compat,
-		{ forceAdaptiveThinking: true, strictRequestParams: true },
-		"curated Opus 5.5 must keep the strictRequestParams umbrella",
-	);
-
-	const fable5 = merged.find((model) => model.id === "claude-fable-5");
-	assert.ok(fable5, "curated fable-5 must be present");
-	assert.deepEqual(
-		fable5.compat,
-		{ forceAdaptiveThinking: true, thinkingOffMode: "between_tools", rejectsTemperature: true },
-		"curated Fable 5 must carry the granular flags (it accepts forced tool_choice)",
-	);
-});
-
-// #2701 — Haiku 5.5 registers via the curated list with the adaptive +
-// temperature compat (no strict umbrella: it accepts disabled + forced
-// tool_choice) and the 1M/128K limits.
-test("curated Haiku 5.5 carries adaptive + temperature compat through the merge (#2701)", () => {
-	const merged = buildClaudeCodeModelList([]);
-
-	const haiku55 = merged.find((model) => model.id === "claude-haiku-5-5");
-	assert.ok(haiku55, "curated haiku-5-5 must be present");
-	assert.deepEqual(
-		haiku55.compat,
-		{ forceAdaptiveThinking: true, rejectsTemperature: true },
-		"curated Haiku 5.5 must be adaptive-only and temperature-guarded without the strict umbrella",
-	);
-	assert.equal(haiku55.contextWindow, 1_000_000);
-	assert.equal(haiku55.maxTokens, 128_000);
-	assert.deepEqual(haiku55.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-});
-
-test("captures UI context before streamSimple, including when before_provider_request never fires (#2118)", () => {
+test("registers a before_provider_request hook to capture the UI context", () => {
 	const { pi, handlers } = makeMockPi();
 	claudeCodeCli(pi as never);
 
-	for (const event of ["session_start", "before_agent_start", "before_provider_request"]) {
-		const registered = handlers.get(event);
-		assert.ok(registered && registered.length === 1, `${event} handler must be registered`);
-		const handler = registered[0]!;
-		const sentinelUi = { kind: "ui" };
-		assert.equal(handler({ type: event }, { hasUI: true, ui: sentinelUi }), undefined);
-		assert.equal(handler({ type: event }, { hasUI: false, ui: sentinelUi }), undefined);
-	}
+	const registered = handlers.get("before_provider_request");
+	assert.ok(registered && registered.length === 1, "before_provider_request handler must be registered");
+
+	// Without this hook, core calls streamSimple with no UI context and
+	// ask_user_questions self-cancels. The handler must accept both UI states
+	// without throwing and must not mutate the provider payload.
+	const handler = registered[0];
+	const sentinelUi = { kind: "ui" };
+	assert.equal(handler({ type: "before_provider_request" }, { hasUI: true, ui: sentinelUi }), undefined);
+	assert.equal(handler({ type: "before_provider_request" }, { hasUI: false, ui: sentinelUi }), undefined);
 });

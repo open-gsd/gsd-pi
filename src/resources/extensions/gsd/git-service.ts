@@ -14,11 +14,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
-import { gsdProjectionRoot, gsdRoot, resolveMilestonePath } from "./paths.js";
-import {
-  getRecordedIntegrationBranch,
-  recordIntegrationBranch,
-} from "./db/writers/milestone-integration-branch.js";
+import { gsdRoot } from "./paths.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { logWarning } from "./workflow-logger.js";
@@ -389,8 +385,6 @@ export const RUNTIME_EXCLUSION_PATHS: readonly string[] = [
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
   ".gsd/DISCUSSION-MANIFEST.json",
-  ".gsd/.compat.json",
-  ".gsd/quarantine/",
 ];
 
 const runtimeFilesCleanedUpRepos = new Set<string>();
@@ -411,26 +405,11 @@ function legacyMilestoneMetaPath(basePath: string, milestoneId: string): string 
   return join(gsdRoot(basePath), "milestones", milestoneId, `${milestoneId}-META.json`);
 }
 
-function validIntegrationBranch(branch: unknown): string | null {
-  return typeof branch === "string" && branch.trim() !== "" && VALID_BRANCH_NAME.test(branch)
-    ? branch
-    : null;
-}
-
 /**
  * Read the integration branch recorded for a milestone.
- *
- * The database row is the authority; the META.json file is a rendered copy
- * and is not read when the row exists. The file is read only for a milestone
- * recorded before the row existed, or when no database is open.
+ * Returns null if no metadata file exists or the branch isn't set.
  */
 export function readIntegrationBranch(basePath: string, milestoneId: string): string | null {
-  const recorded = getRecordedIntegrationBranch(milestoneId);
-  if (recorded) return validIntegrationBranch(recorded);
-  return readIntegrationBranchFile(basePath, milestoneId);
-}
-
-function readIntegrationBranchFile(basePath: string, milestoneId: string): string | null {
   try {
     let metaFile = milestoneMetaPath(basePath, milestoneId);
     if (!existsSync(metaFile)) {
@@ -439,7 +418,11 @@ function readIntegrationBranchFile(basePath: string, milestoneId: string): strin
       metaFile = legacy;
     }
     const data = JSON.parse(readFileSync(metaFile, "utf-8"));
-    return validIntegrationBranch(data?.integrationBranch);
+    const branch = data?.integrationBranch;
+    if (typeof branch === "string" && branch.trim() !== "" && VALID_BRANCH_NAME.test(branch)) {
+      return branch;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -456,8 +439,7 @@ export { QUICK_BRANCH_RE, WORKFLOW_BRANCH_RE } from "./branch-patterns.js";
  * branch. Idempotent when the branch matches; updates the record when the
  * user starts from a different branch.
  *
- * The record is a database row. The META.json file is rendered from the same
- * value for readers that have no database.
+ * The file is committed immediately so the metadata is persisted in git.
  */
 export function writeIntegrationBranch(
   basePath: string,
@@ -479,14 +461,11 @@ export function writeIntegrationBranch(
   if (WORKFLOW_BRANCH_RE.test(branch)) return;
   // Validate
   if (!VALID_BRANCH_NAME.test(branch)) return;
-  // Record the branch in the database: that row is what the merge reads. If a
-  // different branch is recorded, update it — the user started auto-mode from
-  // a new branch and expects slices to merge back there (#300).
-  if (getRecordedIntegrationBranch(milestoneId) !== branch) {
-    recordIntegrationBranch(milestoneId, branch);
-  }
-  // Render the file copy. Skip when it already matches (idempotent across restarts).
-  if (readIntegrationBranchFile(basePath, milestoneId) === branch) return;
+  // Skip if already recorded with the same branch (idempotent across restarts).
+  // If recorded with a different branch, update it — the user started auto-mode
+  // from a new branch and expects slices to merge back there (#300).
+  const existingBranch = readIntegrationBranch(basePath, milestoneId);
+  if (existingBranch === branch) return;
 
   const metaFile = milestoneMetaPath(basePath, milestoneId);
   // Ensure the flat .gsd/ root exists (never milestones/<MID>/ — that would
@@ -890,26 +869,19 @@ export class GitServiceImpl {
     // must only commit files belonging to its own milestone. Exclude all other
     // milestone directories from staging to prevent cross-milestone pollution
     // (e.g., an M033 worker fabricating M032 artifacts in the same commit).
-    // The directories are read from the tree that this commit stages (the
-    // worktree's `.gsd` in a worktree), in both the legacy `milestones/`
-    // layout and the flat `phases/` layout.
     const milestoneLock = process.env.GSD_MILESTONE_LOCK;
     if (milestoneLock) {
-      const projectionRoot = gsdProjectionRoot(this.basePath);
-      const ownDir = resolveMilestonePath(this.basePath, milestoneLock);
-      for (const layout of ["milestones", "phases"] as const) {
-        const layoutDir = join(projectionRoot, layout);
-        if (!existsSync(layoutDir)) continue;
+      const msDir = join(gsdRoot(this.basePath), "milestones");
+      if (existsSync(msDir)) {
         try {
-          for (const entry of readdirSync(layoutDir, { withFileTypes: true })) {
-            if (!entry.isDirectory()) continue;
-            const own = layout === "milestones"
-              ? entry.name === milestoneLock
-              : join(layoutDir, entry.name) === ownDir;
-            if (!own) allExclusions.push(`.gsd/${layout}/${entry.name}/`);
+          const entries = readdirSync(msDir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.isDirectory() && entry.name !== milestoneLock) {
+              allExclusions.push(`.gsd/milestones/${entry.name}/`);
+            }
           }
         } catch {
-          // Best-effort — if we can't read the layout dir, proceed without scoping
+          // Best-effort — if we can't read the milestones dir, proceed without scoping
         }
       }
     }

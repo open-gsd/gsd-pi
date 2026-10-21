@@ -17,7 +17,6 @@ Add a `pi` manifest to `package.json`:
   }
 }
 ```
-
 </package_manifest>
 
 <installing>
@@ -27,9 +26,7 @@ gsd install git:github.com/user/repo@v1
 gsd install ./local/path
 
 # Try without installing:
-
 gsd -e npm:@foo/bar
-
 ```
 </installing>
 
@@ -55,5 +52,4 @@ If no `pi` manifest exists, auto-discovers:
   }
 }
 ```
-
 </gallery_metadata>

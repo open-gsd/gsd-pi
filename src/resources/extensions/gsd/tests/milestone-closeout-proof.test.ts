@@ -3,19 +3,41 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
-import { closeDatabase } from "../gsd-db.js";
-import { proveMilestoneCloseout } from "../milestone-closeout-proof.js";
 import {
-  completeValidatedMilestone,
-  seedValidatedMilestone,
-} from "./helpers/canonical-milestone.ts";
+  closeDatabase,
+  insertAssessment,
+  insertMilestone,
+  insertSlice,
+  openDatabase,
+} from "../gsd-db.js";
+import { proveMilestoneCloseout } from "../milestone-closeout-proof.js";
 
 const tmpDirs: string[] = [];
 
-function writeSummary(base: string, status: string): void {
+function makeBase(): string {
+  const base = mkdtempSync(join(tmpdir(), "gsd-closeout-proof-"));
+  tmpDirs.push(base);
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  try { closeDatabase(); } catch { /* noop */ }
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  return base;
+}
+
+function insertValidationPass(): void {
+  insertAssessment({
+    path: "milestones/M001/M001-VALIDATION.md",
+    milestoneId: "M001",
+    status: "pass",
+    scope: "milestone-validation",
+    fullContent: "verdict: pass",
+  });
+}
+
+function writeSummary(base: string, status = "complete"): void {
   writeFileSync(
     join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"),
     `---\nstatus: ${status}\n---\n\n# Summary\n`,
@@ -30,39 +52,48 @@ test.after(() => {
   }
 });
 
-test("proveMilestoneCloseout accepts closed DB state", async () => {
-  const fixture = await seedValidatedMilestone("closeout-proof/closed");
-  tmpDirs.push(fixture.basePath);
-  await completeValidatedMilestone(fixture, "closeout-proof/closed");
+test("proveMilestoneCloseout accepts closed DB state plus summary artifact", () => {
+  const base = makeBase();
+  insertMilestone({ id: "M001", title: "Done", status: "complete" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
+  insertValidationPass();
+  writeSummary(base);
 
-  const result = proveMilestoneCloseout(fixture.milestoneId, {
-    artifactBasePath: fixture.basePath,
+  const result = proveMilestoneCloseout("M001", {
+    summaryArtifactBasePath: base,
   });
 
   assert.deepEqual(result, { ok: true });
 });
 
-test("proveMilestoneCloseout can prove readiness before DB milestone is closed", async () => {
-  const fixture = await seedValidatedMilestone("closeout-proof/ready");
-  tmpDirs.push(fixture.basePath);
+test("proveMilestoneCloseout can prove readiness before DB milestone is closed", () => {
+  const base = makeBase();
+  insertMilestone({ id: "M001", title: "Ready", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
+  insertValidationPass();
+  writeSummary(base);
 
-  const result = proveMilestoneCloseout(fixture.milestoneId, {
+  const result = proveMilestoneCloseout("M001", {
     allowOpenMilestone: true,
-    artifactBasePath: fixture.basePath,
+    summaryArtifactBasePath: base,
   });
 
   assert.deepEqual(result, { ok: true });
 });
 
-test("proveMilestoneCloseout takes the outcome from the database, not from the SUMMARY file", async () => {
-  const fixture = await seedValidatedMilestone("closeout-proof/db-authoritative");
-  tmpDirs.push(fixture.basePath);
-  await completeValidatedMilestone(fixture, "closeout-proof/db-authoritative");
-  writeSummary(fixture.basePath, "failed");
+test("proveMilestoneCloseout rejects explicit failure summaries", () => {
+  const base = makeBase();
+  insertMilestone({ id: "M001", title: "Done", status: "complete" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
+  insertValidationPass();
+  writeSummary(base, "failed");
 
-  const result = proveMilestoneCloseout(fixture.milestoneId, {
-    artifactBasePath: fixture.basePath,
+  const result = proveMilestoneCloseout("M001", {
+    summaryArtifactBasePath: base,
   });
 
-  assert.deepEqual(result, { ok: true });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, "summary-artifact-failed");
+  }
 });

@@ -8,8 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
 import type { AutoSession } from "./session.js";
 import type { AutoTerminalOutcome } from "./contracts.js";
-import type { ErrorContext, IterationData, UnitPhaseResult } from "./types.js";
-import type { AutoPauseBlockerKind } from "../recovery-policy.js";
+import type { ErrorContext, IterationData } from "./types.js";
 import type { GSDPreferences } from "../preferences.js";
 import type { GSDState } from "../types.js";
 import type { SessionLockStatus } from "../session-lock.js";
@@ -31,12 +30,15 @@ import type { JournalEntry } from "../journal.js";
 import type { MergeReconcileResult } from "../auto-recovery.js";
 import type { UokTurnObserver } from "../uok/contracts.js";
 import type { PostflightResult, PreflightResult } from "../clean-root-preflight.js";
+import type { VerificationOutcome } from "../custom-verification.js";
+import type { CustomEngineHostVerificationInput } from "./custom-task-host-verification.js";
 import type {
   TaskExecutionCutoverDeps,
   TaskExecutionCutoverInput,
   VerifiedTaskPublicationDeps,
   VerifiedTaskPublicationInput,
 } from "./task-execution-cutover.js";
+import type { UnitPhaseResult } from "./workflow-unit-dispatch.js";
 import type { MemoryPressureSnapshot } from "./workflow-memory-pressure.js";
 import type {
   DispatchClaimOutcome,
@@ -71,10 +73,9 @@ export interface PauseAutoOptions {
   abortActiveTurn?: boolean;
 }
 
-export type PauseAutoFn = (
-  ctx: ExtensionContext | undefined,
-  pi: ExtensionAPI | undefined,
-  blockerKind: AutoPauseBlockerKind,
+type PauseAutoFn = (
+  ctx?: ExtensionContext,
+  pi?: ExtensionAPI,
   errorContext?: ErrorContext,
   options?: PauseAutoOptions,
 ) => Promise<void>;
@@ -120,6 +121,9 @@ export interface LoopDeps {
     input: VerifiedTaskPublicationInput,
     deps: VerifiedTaskPublicationDeps,
   ) => Promise<void>;
+  customEngineHostVerificationBoundary?: (
+    input: CustomEngineHostVerificationInput,
+  ) => Promise<VerificationOutcome>;
   lockBase: () => string;
   buildSnapshotOpts: (
     unitType: string,
@@ -223,12 +227,7 @@ export interface LoopDeps {
 
   // Budget/context/secrets
   getLedger: () => unknown;
-  /**
-   * Total unit cost in USD from the database. With `sinceMs`, only units
-   * started at or after it. With `unitScope` (`<MID>` or `<MID>/<SID>`), only
-   * the units of that Milestone or Slice.
-   */
-  getBudgetSpend: (sinceMs?: number, unitScope?: string) => number;
+  getProjectTotals: (units: unknown) => { cost: number };
   formatCost: (cost: number) => string;
   getBudgetAlertLevel: (pct: number) => number;
   getNewBudgetAlertLevel: (lastLevel: number, pct: number) => number;
@@ -375,9 +374,6 @@ export interface LoopDeps {
 
   // Journal
   emitJournalEvent: (entry: JournalEntry) => void;
-
-  // Durable verification-pause receipt (DB) for the task-settle reconcile gate
-  recordVerificationPause: (unitType: string, unitId: string) => void;
 
   // UOK (optional, flag-gated)
   uokObserver?: UokTurnObserver;

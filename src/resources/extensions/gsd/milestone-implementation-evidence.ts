@@ -2,17 +2,20 @@
 // File Purpose: Git-based detection of milestone implementation evidence for closeout guards.
 
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import {
+  getCompletedMilestoneTaskFileHints,
   getMilestone,
   getMilestoneCommitAttributionShas,
   getTask,
   isDbAvailable,
   recordMilestoneCommitAttribution,
 } from "./gsd-db.js";
-import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import { readIntegrationBranch } from "./git-service.js";
 import { logWarning } from "./workflow-logger.js";
+import { resolveTasksDir } from "./paths.js";
 
 /** Large enough for unbounded milestone-history git log scans in big repos. */
 const GIT_LOG_MAX_BUFFER = 16 * 1024 * 1024;
@@ -282,14 +285,6 @@ function getChangedFilesFromAttributedMilestoneCommits(
   }
 }
 
-/** The files and key files of the completed Tasks of the Milestone, as the read interface answers. */
-function completedTaskFileHints(milestoneId: string): string[] {
-  return readMilestoneSlices(milestoneId)
-    .flatMap((slice) => readSliceTasks(milestoneId, slice.id))
-    .filter((task) => task.status === "complete" || task.status === "done")
-    .flatMap((task) => [...task.files, ...task.key_files]);
-}
-
 function backfillChangedFilesFromUntaggedMilestoneCommits(
   basePath: string,
   milestoneId: string,
@@ -299,7 +294,7 @@ function backfillChangedFilesFromUntaggedMilestoneCommits(
     const milestoneStartedAt = milestone?.created_at ? Math.floor(Date.parse(milestone.created_at) / 1000) * 1000 : NaN;
     if (!Number.isFinite(milestoneStartedAt)) return { ok: true, matched: false, files: [] };
 
-    const taskFileHints = completedTaskFileHints(milestoneId);
+    const taskFileHints = getCompletedMilestoneTaskFileHints(milestoneId);
     if (taskFileHints.length === 0) return { ok: true, matched: false, files: [] };
 
     const hintSet = new Set(taskFileHints.map(normalizeRepoPath).filter(Boolean));
@@ -435,7 +430,7 @@ function commitMatchesMilestone(basePath: string, message: string, milestoneId: 
   if (/^GSD-Task:\s*S[^/\s]+\/T\S+/m.test(message)) {
     if (files.some((file) => isMilestoneArtifactPath(file, milestoneId))) return true;
     if (commitMessageMentionsMilestone(message, milestoneId)) return true;
-    const taskTrailerOwnership = getTaskOwnershipStatus(message, milestoneId);
+    const taskTrailerOwnership = getTaskOwnershipStatus(basePath, message, milestoneId);
     if (taskTrailerOwnership === true) return true;
     if (taskTrailerOwnership === false) return false;
     // taskTrailerOwnership === null: unknown ownership. Apply fallback only
@@ -448,11 +443,12 @@ function commitMatchesMilestone(basePath: string, message: string, milestoneId: 
 
 /**
  * Tri-state task ownership probe.
- * true => DB confirms this milestone owns the task.
+ * true => DB or local files confirm this milestone owns the task.
  * false => DB is available and this milestone is registered, but task is absent.
- * null => ownership unknown (milestone not in DB yet, or no DB).
+ * null => ownership unknown (milestone not in DB yet, or no DB + no local files).
  */
 function getTaskOwnershipStatus(
+  basePath: string,
   message: string,
   milestoneId: string,
 ): true | false | null {
@@ -460,9 +456,24 @@ function getTaskOwnershipStatus(
   if (!match) return null;
   const [, sliceId, taskId] = match;
 
-  // No DB means ownership is unknown; task files are not ownership evidence.
-  if (!isDbAvailable() || !getMilestone(milestoneId)) return null;
-  return getTask(milestoneId, sliceId, taskId) ? true : false;
+  if (isDbAvailable()) {
+    if (!getMilestone(milestoneId)) return null;
+    return getTask(milestoneId, sliceId, taskId) ? true : false;
+  }
+
+  // DB unavailable: fallback to local task-file presence.
+  const tasksDir = resolveTasksDir(basePath, milestoneId, sliceId);
+  if (
+    tasksDir
+    && (
+      existsSync(join(tasksDir, `${taskId}-PLAN.md`))
+      || existsSync(join(tasksDir, `${taskId}-SUMMARY.md`))
+    )
+  ) {
+    return true;
+  }
+
+  return null;
 }
 
 function commitMessageMentionsMilestone(message: string, milestoneId: string): boolean {

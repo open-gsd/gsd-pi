@@ -22,12 +22,15 @@ import {
   getSlice,
   getSliceTasks,
   _getAdapter,
+  updateSliceStatus,
+  updateTaskStatus,
 } from "../gsd-db.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
 import {
   handleSkipSlice as handleSkipSliceWithInvocation,
   type SkipSliceParams,
 } from "../tools/skip-slice.ts";
+import { skipSliceCascade } from "../db/writers/cascades.ts";
 
 let invocationSequence = 0;
 
@@ -37,13 +40,6 @@ function handleSkipSlice(params: SkipSliceParams) {
     params,
     internalExecutionInvocation(`test/skip-slice/${invocationSequence}`),
   );
-}
-
-/** Fixture write on the unadopted milestone: bypass the guarded generic writer. */
-function stampSliceStatus(status: string) {
-  _getAdapter()!.prepare(
-    "UPDATE slices SET status = :status WHERE milestone_id = 'M001' AND id = 'S03'",
-  ).run({ ":status": status });
 }
 
 describe("handleSkipSlice cascades skip to tasks (#4375)", () => {
@@ -84,12 +80,7 @@ describe("handleSkipSlice cascades skip to tasks (#4375)", () => {
   });
 
   test("does not downgrade already-closed tasks", () => {
-    // Fixture write: the milestone is unadopted (epoch-0 import shape), so the
-    // generic status writer refuses it — stamp the row directly.
-    _getAdapter()!.prepare(`
-      UPDATE tasks SET status = 'complete', completed_at = COALESCE(completed_at, :completed_at)
-      WHERE milestone_id = 'M001' AND slice_id = 'S03' AND id = 'T01'
-    `).run({ ":completed_at": new Date().toISOString() });
+    updateTaskStatus("M001", "S03", "T01", "complete", new Date().toISOString());
 
     const result = handleSkipSlice({ milestoneId: "M001", sliceId: "S03" });
 
@@ -128,7 +119,7 @@ describe("handleSkipSlice cascades skip to tasks (#4375)", () => {
   });
 
   test("refuses to skip an already-complete slice", () => {
-    stampSliceStatus("complete");
+    updateSliceStatus("M001", "S03", "complete");
 
     const result = handleSkipSlice({ milestoneId: "M001", sliceId: "S03" });
     assert.ok(result.error, "expected error when slice is already complete");
@@ -137,7 +128,7 @@ describe("handleSkipSlice cascades skip to tasks (#4375)", () => {
   });
 
   test("refuses to skip a slice in the legacy 'done' status", () => {
-    stampSliceStatus("done");
+    updateSliceStatus("M001", "S03", "done");
 
     const result = handleSkipSlice({ milestoneId: "M001", sliceId: "S03" });
     assert.ok(result.error, "expected error when slice is already done");
@@ -152,4 +143,23 @@ describe("handleSkipSlice cascades skip to tasks (#4375)", () => {
     assert.equal(result.errorCode, "slice_not_found");
   });
 
+  test("skipSliceCascade rejects a slice in the legacy 'closed' status without nulling completed_at", () => {
+    const completedAt = "2026-01-01T00:00:00.000Z";
+    updateSliceStatus("M001", "S03", "closed", completedAt);
+
+    const outcome = skipSliceCascade("M001", "S03");
+    assert.deepEqual(outcome, { ok: false, reason: "slice-already-complete" });
+
+    const slice = getSlice("M001", "S03");
+    assert.equal(slice?.status, "closed", "closed slice must not be downgraded to skipped");
+    assert.equal(slice?.completed_at, completedAt, "completed_at must be preserved");
+  });
+
+  test("skipSliceCascade still re-skips an already-skipped slice (ok, wasAlreadySkipped)", () => {
+    updateSliceStatus("M001", "S03", "skipped");
+
+    const outcome = skipSliceCascade("M001", "S03");
+    assert.equal(outcome.ok, true);
+    if (outcome.ok) assert.equal(outcome.wasAlreadySkipped, true);
+  });
 });

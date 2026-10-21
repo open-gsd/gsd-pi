@@ -1,5 +1,5 @@
 // Project/App: gsd-pi
-// File Purpose: Milestone closeout settlement state across DB proof, merge, and cleanup.
+// File Purpose: Milestone closeout settlement state across DB proof, artifacts, merge, and cleanup.
 
 import { isInAutoWorktree } from "./auto-worktree-entry.js";
 import {
@@ -7,7 +7,6 @@ import {
   proveMilestoneCloseout,
 } from "./milestone-closeout-proof.js";
 import { resolveCloseoutArtifactProjection } from "./artifact-projection.js";
-import { readSettledMilestoneMerge } from "./milestone-closeout-effects.js";
 
 export type MilestoneSettlementOutcome =
   | { ok: true; reason: "settled" | "not-applicable" }
@@ -30,8 +29,6 @@ export interface MilestoneSettlementInput {
 
 function isActiveUnmergedWorktree(input: MilestoneSettlementInput): boolean {
   if (!input.milestoneId || input.milestoneMerged) return false;
-  // A merge Settlement Receipt is the database fact that the merge is done.
-  if (readSettledMilestoneMerge(input.milestoneId)) return false;
   return isInAutoWorktree(input.basePath);
 }
 
@@ -57,7 +54,7 @@ export function evaluateAllCompleteSettlement(
   });
   const proof = proveMilestoneCloseout(milestoneId, {
     refreshFromDisk: true,
-    artifactBasePath: projection.gateEvidenceBasePath,
+    summaryArtifactBasePath: projection.summaryArtifactBasePath,
   });
 
   if (!proof.ok) {

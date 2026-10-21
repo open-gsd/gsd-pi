@@ -1,41 +1,36 @@
 // Project/App: gsd-pi
 // File Purpose: DB-backed GSD state derivation pipeline stage.
 // Post-cutover (T007) this module is the sole state authority on the live
-// derive path: DB rows decide phase/registry/progress. Item status answers
-// (done, parked, discarded, dependency satisfaction) come from the read
-// interface db/lifecycle-read.ts, which answers from canonical lifecycle rows
-// after the Authority Epoch Cutover and from legacy rows before it.
-// Markdown state projections on disk (STATE.md, roadmaps, plans, summaries)
-// are never parsed as authority here; DB-unavailable fails closed in db-open.ts.
-// The validation verdict (handleAllSlicesDone +
-// resolveMilestoneValidationVerdict) still reads the legacy assessment (D005).
+// derive path: DB rows decide phase/registry/progress. Markdown state
+// projections on disk (STATE.md, roadmaps, plans, summaries) are never
+// parsed as authority here; DB-unavailable fails closed in db-open.ts.
+// Canonical-lifecycle read authority (handleAllSlicesDone +
+// resolveMilestoneValidationVerdict) is pinned by D005 and unchanged.
 
 import type { ActiveRef, GSDState, MilestoneRegistryEntry, Phase } from '../../types.js';
+import { isClosedStatus, isDeferredStatus } from '../../status-guards.js';
+import { parseProject } from '../../schemas/parsers.js';
 import {
   queryDecisions,
   queryDecisionsFromMemories,
 } from '../../context-store.js';
 import {
-  getDb,
+  getAllMilestones,
+  getArtifact,
   getMilestoneScopedArtifacts,
   getPlanMilestoneRecoveryBlock,
   getPendingGateCountForTurn,
   getReplanHistory,
   getRequirementCounts,
   getSlice,
+  getSliceTasks,
+  getSlicesByMilestoneIds,
 } from '../../gsd-db.js';
+import type { MilestoneRow } from '../../db-milestone-artifact-rows.js';
+import type { SliceRow, TaskRow } from '../../db-task-slice-rows.js';
 import {
-  readMilestones,
-  readSliceTasks,
-  readSlicesByMilestoneIds,
-  type MilestoneRead,
-  type SliceRead,
-  type TaskRead,
-} from '../../db/lifecycle-read.js';
-import { readProjectMilestoneSequence } from '../../db/writers/project-milestone-sequence.js';
-import {
+  classifyMilestoneReadiness,
   readinessNeedsDiscussion,
-  selectActiveMilestone,
 } from '../../milestone-readiness.js';
 import {
   needsAttentionBlockerGuidance as formatNeedsAttentionBlocker,
@@ -54,6 +49,9 @@ import {
   getRequestedMilestoneLock,
 } from './db-open.js';
 import { resolveMilestoneValidationVerdict } from '../../milestone-validation-verdict.js';
+import { isMilestoneLifecycleAdopted } from '../../db/milestone-closeout-readiness.js';
+
+const isStatusDone = isClosedStatus;
 
 type MilestoneProgress = { done: number; total: number };
 type SliceProgress = { done: number; total: number };
@@ -112,7 +110,7 @@ function stripMilestonePrefix(title: string): string {
   return title.replace(/^M\d+(?:-[a-z0-9]{6})?[^:]*:\s*/, '') || title;
 }
 
-function buildCompletenessSet(basePath: string, milestones: MilestoneRead[]) {
+function buildCompletenessSet(basePath: string, milestones: MilestoneRow[]) {
   const completeMilestoneIds = new Set<string>();
   const parkedMilestoneIds = new Set<string>();
 
@@ -121,11 +119,11 @@ function buildCompletenessSet(basePath: string, milestones: MilestoneRead[]) {
   // (crashed complete-milestone turn, partial merge, manual edit) must not
   // flip derived state to complete and cascade into a false auto-merge (#4179).
   for (const m of milestones) {
-    if (m.parked) {
+    if (m.status === 'parked') {
       parkedMilestoneIds.add(m.id);
       continue;
     }
-    if (m.done) {
+    if (isStatusDone(m.status)) {
       completeMilestoneIds.add(m.id);
       continue;
     }
@@ -141,74 +139,138 @@ function loadRecentDecisionsFromDb(): string[] {
   );
 }
 
-// The IDs the user actually committed to as their roadmap: the Milestone
-// Sequence rows that the save of the PROJECT artifact stores. A content-less
-// queued milestone that appears here is a real, not-yet-planned roadmap stage
-// (e.g. the first milestone right after deep-project setup) and is safe to
-// promote to active. A content-less queued row that is NOT listed here is a
-// phantom left by gsd_milestone_generate_id that was never made part of the
-// roadmap (#1524) and must not be promoted. No row keeps phantom-only repos
-// out of the promotion path. PROJECT.md text is not parsed here, on disk or
-// in the artifact row.
+// The IDs the user actually committed to as their roadmap, read from the
+// PROJECT.md artifact stored in the DB. A content-less queued milestone that
+// appears here is a real, not-yet-planned roadmap stage (e.g. the first
+// milestone right after deep-project setup) and is safe to promote to active.
+// A content-less queued row that is NOT listed here is a phantom left by
+// gsd_milestone_generate_id that was never made part of the roadmap (#1524)
+// and must not be promoted. Returns an empty set when the PROJECT artifact is
+// absent or unparsable, which keeps phantom-only repos out of the promotion
+// path. Disk PROJECT.md is a projection and is never opened here.
 function loadProjectSequenceIds(): Set<string> {
-  return new Set(readProjectMilestoneSequence(getDb()));
+  const project = getArtifact("PROJECT.md");
+  if (!project?.full_content) return new Set<string>();
+  try {
+    return new Set(parseProject(project.full_content).milestones.map((m) => m.id));
+  } catch (e) {
+    logWarning('state', `failed to parse PROJECT.md milestone sequence: ${(e as Error).message}`);
+    return new Set<string>();
+  }
 }
 
 async function buildRegistryAndFindActive(
-  milestones: MilestoneRead[],
+  milestones: MilestoneRow[],
   completeMilestoneIds: Set<string>,
   parkedMilestoneIds: Set<string>
 ) {
+  const registry: MilestoneRegistryEntry[] = [];
+  let activeMilestone: ActiveRef | null = null;
+  let activeMilestoneSlices: SliceRow[] = [];
+  let activeMilestoneFound = false;
+  let activeMilestoneHasDraft = false;
+  let firstPromotableQueuedShell: { id: string; title: string; deps: string[]; hasDraftContext: boolean } | null = null;
+
+  const projectSequenceIds = loadProjectSequenceIds();
+
   const activeMilestoneIds = milestones
     .filter((m) => !parkedMilestoneIds.has(m.id))
     .map((m) => m.id);
-  const slicesByMilestone = readSlicesByMilestoneIds(activeMilestoneIds);
+  const slicesByMilestone = getSlicesByMilestoneIds(activeMilestoneIds);
 
-  // DB-authoritative completeness (#4179): only trust completeMilestoneIds,
-  // which is itself derived from DB status. SUMMARY-file presence alone must
-  // not imply completion.
-  const candidates = milestones.map((m) => {
-    const parked = parkedMilestoneIds.has(m.id);
-    const done = completeMilestoneIds.has(m.id);
-    const artifacts = parked || done ? [] : getMilestoneScopedArtifacts(m.id);
-    return {
-      id: m.id,
-      status: m.status,
-      dependsOn: m.depends_on,
-      queuedShell: m.queuedShell,
-      done,
-      parked,
-      sliceCount: slicesByMilestone.get(m.id)?.length ?? 0,
-      hasContext: artifacts.some((a) => a.artifact_type === "CONTEXT"),
-      hasDraftContext: artifacts.some((a) => a.artifact_type === "CONTEXT-DRAFT"),
-    };
-  });
-  const selected = selectActiveMilestone(candidates, loadProjectSequenceIds());
-  const activeId = selected?.milestone.id;
-
-  const registry: MilestoneRegistryEntry[] = [];
-  let activeMilestone: ActiveRef | null = null;
   for (const m of milestones) {
-    const title = stripMilestonePrefix(m.title) || m.id;
     if (parkedMilestoneIds.has(m.id)) {
-      registry.push({ id: m.id, title, status: 'parked' });
+      registry.push({ id: m.id, title: stripMilestonePrefix(m.title) || m.id, status: 'parked' });
       continue;
     }
+
+    const slices = slicesByMilestone.get(m.id) ?? [];
+
+    // DB-authoritative completeness (#4179): only trust completeMilestoneIds,
+    // which is itself derived from DB status. SUMMARY-file presence alone must
+    // not imply completion.
     if (completeMilestoneIds.has(m.id)) {
+      const title = stripMilestonePrefix(m.title) || m.id;
       registry.push({ id: m.id, title, status: 'complete' });
       continue;
     }
-    const deps = m.depends_on;
-    const active = m.id === activeId;
-    if (active) activeMilestone = { id: m.id, title };
-    registry.push({ id: m.id, title, status: active ? 'active' : 'pending', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
+
+    const allSlicesDone = slices.length > 0 && slices.every(s => isStatusDone(s.status));
+
+    const title = stripMilestonePrefix(m.title) || m.id;
+    const artifacts = getMilestoneScopedArtifacts(m.id);
+    const hasContext = artifacts.some((a) => a.artifact_type === "CONTEXT");
+    const hasDraftContext = !hasContext && artifacts.some((a) => a.artifact_type === "CONTEXT-DRAFT");
+    const readiness = classifyMilestoneReadiness({
+      status: m.status,
+      hasContext,
+      hasDraftContext,
+      sliceCount: slices.length,
+    });
+
+    if (!activeMilestoneFound) {
+      const deps = m.depends_on;
+      const depsUnmet = deps.some(dep => !completeMilestoneIds.has(dep));
+
+      if (depsUnmet) {
+        registry.push({ id: m.id, title, status: 'pending', dependsOn: deps });
+        continue;
+      }
+
+      if (readiness.kind === 'queued-shell') {
+        // Only a *promotable* queued-shell may become active in the fallback
+        // below: one that carries draft context (discuss-milestone was started)
+        // or is listed in the PROJECT artifact roadmap sequence (a real, not-yet-
+        // planned stage). A content-less shell that is neither is a phantom left
+        // by gsd_milestone_generate_id that was never planned; promoting it
+        // strands the user on an empty milestone (#1524), so we record it only
+        // as 'pending' and never promote it. Storing just the first promotable
+        // shell also means an earlier phantom can't mask a later resumable one.
+        const promotable = readiness.hasDraftContext || projectSequenceIds.has(m.id);
+        if (promotable && !firstPromotableQueuedShell) {
+          firstPromotableQueuedShell = { id: m.id, title, deps, hasDraftContext: readiness.hasDraftContext };
+        }
+        registry.push({ id: m.id, title, status: 'pending', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
+        continue;
+      }
+
+      if (allSlicesDone) {
+        activeMilestone = { id: m.id, title };
+        activeMilestoneSlices = slices;
+        activeMilestoneFound = true;
+        registry.push({ id: m.id, title, status: 'active', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
+        continue;
+      }
+
+      if (readinessNeedsDiscussion(readiness)) activeMilestoneHasDraft = true;
+
+      activeMilestone = { id: m.id, title };
+      activeMilestoneSlices = slices;
+      activeMilestoneFound = true;
+      registry.push({ id: m.id, title, status: 'active', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
+    } else {
+      const deps = m.depends_on;
+      registry.push({ id: m.id, title, status: 'pending', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
+    }
   }
 
-  const activeMilestoneSlices: SliceRead[] = (activeId ? slicesByMilestone.get(activeId) : undefined) ?? [];
-  const allSlicesDone = activeMilestoneSlices.length > 0 && activeMilestoneSlices.every(s => s.done);
-  // A draft-bearing milestone resumes discussion (needs-discussion); a promoted
-  // in-sequence shell with no draft goes to pre-planning.
-  const activeMilestoneHasDraft = selected !== null && !allSlicesDone && readinessNeedsDiscussion(selected.readiness);
+  // Promote the first promotable queued-shell as a fallback when no other
+  // milestone became active. "Promotable" (tracked above) means it either
+  // carries draft context or is part of the PROJECT artifact roadmap sequence.
+  // Content-less phantom rows never reach here, so state falls through to
+  // handleNoActiveMilestone and the doctor can flag them as orphans (#1524).
+  // A draft-bearing shell resumes discussion (needs-discussion); an in-sequence
+  // shell with no draft goes to pre-planning, so only carry the draft flag
+  // when the shell actually has draft context.
+  if (!activeMilestoneFound && firstPromotableQueuedShell) {
+    const shell = firstPromotableQueuedShell;
+    activeMilestone = { id: shell.id, title: shell.title };
+    activeMilestoneSlices = [];
+    activeMilestoneFound = true;
+    if (shell.hasDraftContext) activeMilestoneHasDraft = true;
+    const entry = registry.find(e => e.id === shell.id);
+    if (entry) entry.status = 'active';
+  }
 
   return { registry, activeMilestone, activeMilestoneSlices, activeMilestoneHasDraft };
 }
@@ -309,12 +371,14 @@ async function handleAllSlicesDone(
   // All roadmap slices are done (enforced by caller) and verdict is
   // needs-remediation — remediation cannot progress without new slices.
   // Return blocked instead of re-dispatching validate-milestone (#4506).
+  const allowLegacyVerdictOverride = !isMilestoneLifecycleAdopted(activeMilestone.id);
+
   if (verdict === 'needs-attention') {
     return buildDerivedState(
       context,
       'blocked',
       `Resolve ${activeMilestone.id} validation attention before proceeding.`,
-      { blockers: [formatNeedsAttentionBlocker(activeMilestone.id)] },
+      { blockers: [formatNeedsAttentionBlocker(activeMilestone.id, allowLegacyVerdictOverride)] },
     );
   }
 
@@ -323,7 +387,7 @@ async function handleAllSlicesDone(
       context,
       'blocked',
       `Resolve ${activeMilestone.id} remediation before proceeding.`,
-      { blockers: [formatNeedsRemediationBlocker(activeMilestone.id)] },
+      { blockers: [formatNeedsRemediationBlocker(activeMilestone.id, allowLegacyVerdictOverride)] },
     );
   }
 
@@ -334,9 +398,9 @@ async function handleAllSlicesDone(
   );
 }
 
-function resolveSliceDependencies(activeMilestoneSlices: SliceRead[]): { activeSlice: ActiveRef | null, activeSliceRow: SliceRead | null } {
-  const satisfiedDependencyIds = new Set(
-    activeMilestoneSlices.filter(s => s.satisfiesDependents).map(s => s.id)
+function resolveSliceDependencies(activeMilestoneSlices: SliceRow[]): { activeSlice: ActiveRef | null, activeSliceRow: SliceRow | null } {
+  const doneSliceIds = new Set(
+    activeMilestoneSlices.filter(s => isStatusDone(s.status)).map(s => s.id)
   );
 
   const sliceLock = process.env.GSD_PARALLEL_WORKER ? process.env.GSD_SLICE_LOCK : undefined;
@@ -351,8 +415,9 @@ function resolveSliceDependencies(activeMilestoneSlices: SliceRead[]): { activeS
   }
 
   for (const s of activeMilestoneSlices) {
-    if (s.done) continue;
-    if (s.depends.every(dep => satisfiedDependencyIds.has(dep))) {
+    if (isStatusDone(s.status)) continue;
+    if (isDeferredStatus(s.status)) continue;
+    if (s.depends.every(dep => doneSliceIds.has(dep))) {
       return { activeSlice: { id: s.id, title: s.title }, activeSliceRow: s };
     }
   }
@@ -360,8 +425,8 @@ function resolveSliceDependencies(activeMilestoneSlices: SliceRead[]): { activeS
   return { activeSlice: null, activeSliceRow: null };
 }
 
-async function detectBlockers(basePath: string, milestoneId: string, sliceId: string, tasks: TaskRead[]): Promise<string | null> {
-  const completedTasks = tasks.filter(t => t.done);
+async function detectBlockers(basePath: string, milestoneId: string, sliceId: string, tasks: TaskRow[]): Promise<string | null> {
+  const completedTasks = tasks.filter(t => isStatusDone(t.status));
   for (const ct of completedTasks) {
     if (ct.blocker_discovered) {
       return ct.id;
@@ -378,18 +443,18 @@ function checkReplanTrigger(basePath: string, milestoneId: string, sliceId: stri
 export async function deriveStateFromDb(
   basePath: string,
   _artifactReadRoot: string = basePath,
+  options: { syncQueueOrder?: boolean } = {},
 ): Promise<GSDState> {
   // Use the canonical read root (matches the caller's DB-open call in
   // derive/index.ts) — a worktree basePath can resolve to a different (or
   // nonexistent) DB path than the canonical project root.
-  if (!ensureExistingWorkflowDbOpen(_artifactReadRoot)) {
+  if (!ensureExistingWorkflowDbOpen(_artifactReadRoot, options)) {
     return buildDbUnavailableState();
   }
 
   const requirements = getRequirementCounts();
 
-  const allMilestones = readMilestones()
-    .filter(m => !m.discarded);
+  const allMilestones = getAllMilestones();
 
   const milestoneLock = getRequestedMilestoneLock();
   const milestones = milestoneLock
@@ -444,9 +509,9 @@ export async function deriveStateFromDb(
     );
   }
 
-  const allSlicesDone = activeMilestoneSlices.every(s => s.done);
+  const allSlicesDone = activeMilestoneSlices.every(s => isStatusDone(s.status));
   const sliceProgress = {
-    done: activeMilestoneSlices.filter(s => s.done).length,
+    done: activeMilestoneSlices.filter(s => isStatusDone(s.status)).length,
     total: activeMilestoneSlices.length,
   };
   const sliceStateContext: DerivedStateContext = {
@@ -483,9 +548,10 @@ export async function deriveStateFromDb(
   const { activeSlice } = activeSliceContext;
   const activeSliceRow = activeSliceContext.activeSliceRow;
 
-  // ADR-011: DB slice metadata is authoritative for sketch refinement. Only
-  // gsd_plan_slice and gsd_plan_task clear is_sketch, inside their Domain
-  // Operation. PLAN.md and preference flags are projections/configuration and are
+  // ADR-011: DB slice metadata is authoritative for sketch refinement.
+  // Stale sketch flags (PLAN on disk but is_sketch=1) are repaired by
+  // sketchFlagHandler via reconcileBeforeDispatch — not during derivation.
+  // PLAN.md and preference flags are projections/configuration and are
   // deliberately not used to infer whether the slice itself is a sketch.
   if (activeSliceRow?.is_sketch === 1) {
     return buildDerivedState(
@@ -495,10 +561,10 @@ export async function deriveStateFromDb(
     );
   }
 
-  const tasks = readSliceTasks(activeMilestone.id, activeSlice.id);
+  const tasks = getSliceTasks(activeMilestone.id, activeSlice.id);
   
   const taskProgress = {
-    done: tasks.filter(t => t.done).length,
+    done: tasks.filter(t => isStatusDone(t.status)).length,
     total: tasks.length,
   };
   const taskStateContext: DerivedStateContext = {
@@ -507,7 +573,7 @@ export async function deriveStateFromDb(
     taskProgress,
   };
 
-  const activeTaskRow = tasks.find(t => !t.done);
+  const activeTaskRow = tasks.find(t => !isStatusDone(t.status));
 
   if (!activeTaskRow && tasks.length > 0) {
     return buildDerivedState(
@@ -589,7 +655,7 @@ export async function deriveStateFromDb(
   // honored even if the user later toggles the flag off. Otherwise those
   // rows would silently orphan, the loop would advance past the paused task,
   // and the user's prior resolution never lands.
-  const escalatingTaskId = detectPendingEscalation(tasks);
+  const escalatingTaskId = detectPendingEscalation(tasks, basePath);
   if (escalatingTaskId) {
     return buildDerivedState(
       activeTaskStateContext,

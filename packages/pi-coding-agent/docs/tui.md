@@ -47,7 +47,6 @@ class MyInput implements Component, Focusable {
 ```
 
 When a `Focusable` component has focus, TUI:
-
 1. Sets `focused = true` on the component
 2. Scans rendered output for `CURSOR_MARKER` (a zero-width APC escape sequence)
 3. Positions the hardware terminal cursor at that location
@@ -281,7 +280,6 @@ handleInput(data: string) {
 ```
 
 **Key identifiers** (use `Key.*` for autocomplete, or string literals):
-
 - Basic keys: `Key.enter`, `Key.escape`, `Key.tab`, `Key.space`, `Key.backspace`, `Key.delete`, `Key.home`, `Key.end`
 - Arrow keys: `Key.up`, `Key.down`, `Key.left`, `Key.right`
 - With modifiers: `Key.ctrl("c")`, `Key.shift("tab")`, `Key.alt("left")`, `Key.ctrlShift("p")`
@@ -301,7 +299,6 @@ render(width: number): string[] {
 ```
 
 Utilities:
-
 - `visibleWidth(str)` - Get display width (ignores ANSI codes)
 - `truncateToWidth(str, width, ellipsis?)` - Truncate with optional ellipsis
 - `wrapTextWithAnsi(str, width)` - Word wrap preserving ANSI codes

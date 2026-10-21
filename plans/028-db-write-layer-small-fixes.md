@@ -131,7 +131,6 @@ comments, `_*ForTest` seams, `node:test` tests in
 ## Scope
 
 **In scope**:
-
 - `src/resources/extensions/gsd/db/writers/cascades.ts`
 - `src/resources/extensions/gsd/gsd-db.ts` (only `insertTask` and `saveGateResult`)
 - `src/resources/extensions/gsd/db/command-queue.ts`
@@ -144,7 +143,6 @@ comments, `_*ForTest` seams, `node:test` tests in
 - `plans/README.md` (status row only)
 
 **Out of scope**:
-
 - Routing the cascades through `applyStatusTransition` — ADR-030 explicitly
   sequences that behind sanctioned reopen faces; do not attempt it here.
 - Any other inline status comparison elsewhere in the codebase (~50 sites) —

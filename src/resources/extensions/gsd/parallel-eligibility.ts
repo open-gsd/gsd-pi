@@ -5,8 +5,9 @@
  * dependency satisfaction and file overlap across slice plans.
  */
 
-import { deriveState, isGhostMilestone } from "./state.js";
+import { deriveState } from "./state.js";
 import { resolveMilestoneFile, resolveSliceFile } from "./paths.js";
+import { findMilestoneIds } from "./guided-flow.js";
 import { isDbAvailable, getMilestoneSlices, getTasksBySliceIds } from "./gsd-db.js";
 import { openExistingWorkflowDatabase } from "./db-workspace.js";
 import type { MilestoneRegistryEntry } from "./types.js";
@@ -101,8 +102,7 @@ export async function analyzeParallelEligibility(
     openExistingWorkflowDatabase(basePath);
   }
 
-  // The milestone universe is the registry, which deriveState reads from the
-  // database. A directory on disk with no milestone row is not a milestone.
+  const milestoneIds = findMilestoneIds(basePath);
   const state = await deriveState(basePath);
   const registry = state.registry;
 
@@ -115,14 +115,13 @@ export async function analyzeParallelEligibility(
   const eligible: EligibilityResult[] = [];
   const ineligible: EligibilityResult[] = [];
 
-  for (const entry of registry) {
-    const mid = entry.id;
-    const title = entry.title;
-    const status = entry.status;
+  for (const mid of milestoneIds) {
+    const entry = registryMap.get(mid);
+    const title = entry?.title ?? mid;
 
-    // Rule 0: a queued row that was never planned (no saved context, no
-    // slices) is ineligible — a worker for it has nothing to run (#2501)
-    if (isGhostMilestone(basePath, mid)) {
+    // Rule 0: milestones with no registry entry (ghost directories, unknown
+    // state) are ineligible — we cannot determine their status or deps (#2501)
+    if (!entry) {
       ineligible.push({
         milestoneId: mid,
         title,
@@ -131,6 +130,8 @@ export async function analyzeParallelEligibility(
       });
       continue;
     }
+
+    const status = entry.status;
 
     // Rule 1: skip complete and parked milestones
     if (status === "complete" || status === "parked") {

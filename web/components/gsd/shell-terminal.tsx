@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useCallback, useState } from "react"
-import { useEmbeddedTheme, useTheme } from "@/components/theme-provider"
+import { useTheme } from "next-themes"
 import { AlertCircle, Plus, X, TerminalSquare, Loader2, ImagePlus } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { validateImageFile } from "@/lib/image-utils"
@@ -130,9 +130,6 @@ function TerminalInstance({
   projectCwd,
   onConnectionChange,
 }: TerminalInstanceProps) {
-  const hostTheme = useEmbeddedTheme()
-  const themeRef = useRef({ isDark, hostTheme })
-  themeRef.current = { isDark, hostTheme }
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerminal | null>(null)
   const fitAddonRef = useRef<XFitAddon | null>(null)
@@ -206,9 +203,9 @@ function TerminalInstance({
   // Update xterm theme when isDark changes
   useEffect(() => {
     if (termRef.current) {
-      termRef.current.options.theme = getXtermTheme(isDark, "classic", hostTheme)
+      termRef.current.options.theme = getXtermTheme(isDark)
     }
-  }, [isDark, hostTheme])
+  }, [isDark])
 
   // Update xterm font size when fontSize changes
   useEffect(() => {
@@ -259,7 +256,7 @@ function TerminalInstance({
 
       if (disposed) return
 
-      terminal = new Terminal(getXtermOptions(themeRef.current.isDark, fontSize, "classic", themeRef.current.hostTheme))
+      terminal = new Terminal(getXtermOptions(isDark, fontSize))
       fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
       terminal.open(containerRef.current!)

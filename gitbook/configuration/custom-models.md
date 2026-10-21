@@ -5,7 +5,6 @@ Define custom models and providers in `~/.gsd/agent/models.json`. This lets you 
 ## File Location
 
 GSD looks for models.json at:
-
 1. `~/.gsd/agent/models.json` (primary)
 2. `~/.pi/agent/models.json` (fallback)
 

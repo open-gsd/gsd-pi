@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { CodeEditor } from "@/components/gsd/code-editor"
 import { useEditorFontSize } from "@/lib/use-editor-font-size"
-import { useTheme } from "@/components/theme-provider"
+import { useTheme } from "next-themes"
 
 /* ── Language detection ── */
 

@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { useTheme } from "@/components/theme-provider"
+import { useTheme } from "next-themes"
 import { AnimatePresence, motion } from "motion/react"
 import {
   getCurrentScopeLabel,
@@ -79,7 +79,7 @@ export function NavRail({ activeView, onViewChange, isConnecting = false }: NavR
   const manager = useProjectStoreManager()
   const activeProjectCwd = useSyncExternalStore(manager.subscribe, manager.getSnapshot, manager.getSnapshot)
   const [exitDialogOpen, setExitDialogOpen] = useState(false)
-  const { theme, setTheme, forcedTheme } = useTheme()
+  const { theme, setTheme } = useTheme()
 
   const cycleTheme = () => {
     if (theme === "system") setTheme("light")
@@ -160,8 +160,8 @@ export function NavRail({ activeView, onViewChange, isConnecting = false }: NavR
               ? "cursor-not-allowed opacity-30"
               : "hover:bg-accent/50 hover:text-foreground",
           )}
-          title={forcedTheme ? `Theme: ${themeLabel} (OpenClaw)` : `Theme: ${themeLabel}`}
-          disabled={isConnecting || Boolean(forcedTheme)}
+          title={`Theme: ${themeLabel}`}
+          disabled={isConnecting}
           onClick={() => !isConnecting && cycleTheme()}
           data-testid="sidebar-theme-toggle"
         >
@@ -737,7 +737,7 @@ export function Sidebar({
 
 function MobileNavPanel({ activeView, onViewChange, isConnecting = false }: NavRailProps) {
   const { openCommandSurface } = useGSDWorkspaceActions()
-  const { theme, setTheme, forcedTheme } = useTheme()
+  const { theme, setTheme } = useTheme()
 
   const cycleTheme = () => {
     if (theme === "system") setTheme("light")
@@ -797,11 +797,11 @@ function MobileNavPanel({ activeView, onViewChange, isConnecting = false }: NavR
         </button>
         <button
           onClick={() => !isConnecting && cycleTheme()}
-          disabled={isConnecting || Boolean(forcedTheme)}
+          disabled={isConnecting}
           className="flex w-full items-center gap-3 rounded-md px-3 py-3 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors min-h-[44px]"
         >
           <ThemeIcon className="h-5 w-5 shrink-0" />
-          Theme: {themeLabel}{forcedTheme ? " (OpenClaw)" : ""}
+          Theme: {themeLabel}
         </button>
       </div>
     </div>

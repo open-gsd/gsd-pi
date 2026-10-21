@@ -3,13 +3,7 @@ import assert from "node:assert/strict"
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { registerGsdUiMethods as registerRealGsdUiMethods } from "../dist/ui-methods.js"
-import type { UiMethodApi, UiHandlerOptions, EmbeddedProjectsConfig, UiClient } from "../src/ui-methods.ts"
-import type { NativeProject } from "../src/native-projects.ts"
-
-// Existing containment/stream tests use a native catalog matching their fixtures.
-const registerGsdUiMethods = (api: UiMethodApi, port: () => number | undefined, config?: EmbeddedProjectsConfig) =>
-  registerRealGsdUiMethods(api, port, config, async () => (config?.projects ?? []).map(p => ({ ...p, name: p.projectId })))
+import { registerGsdUiMethods, type UiMethodApi, type UiHandlerOptions, type EmbeddedProjectsConfig, type UiClient } from "../src/ui-methods.ts"
 
 const NL2 = String.fromCharCode(10)
 
@@ -54,8 +48,7 @@ function stubDaemonFetch(body: unknown = { stubbed: true }) {
   const original = globalThis.fetch
   globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: string }) => {
     calls.push({ url: String(input), init })
-    const result = String(input).includes("/api/projects?") && !Array.isArray(body) ? [{ path: new URL(String(input)).searchParams.get("root"), name: "fixture" }] : body
-    return new Response(JSON.stringify(result), { status: 200, headers: { "Content-Type": "application/json" } })
+    return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })
   }) as typeof fetch
   return { calls, restore: () => { globalThis.fetch = original } }
 }
@@ -73,8 +66,8 @@ test("twelve methods registered; respond contract with ErrorShape third argument
     const adminDenied = await call(registered.get("gsd.ui.preferences.read")!.handler)
     assert.equal(adminDenied[0].ok, false, "preferences.read must enforce admin admission")
     const responses = await call(registered.get("gsd.ui.preferences.read")!.handler, { client: adminClient() })
-    assert.deepEqual(responses, [{ ok: true, payload: { projectSource: "openclaw", launchCwd: null }, error: undefined }])
-    assert.equal(daemon.calls.length, 0, "embedded preferences never read standalone settings")
+    assert.deepEqual(responses, [{ ok: true, payload: { stubbed: true }, error: undefined }])
+    assert.equal(daemon.calls[0].url, "http://127.0.0.1:33277/plugins/open-gsd-openclaw/web/api/preferences")
   } finally {
     daemon.restore()
   }
@@ -140,7 +133,7 @@ test("symlinked approved root loses canonical identity and denies", async () => 
     const config: EmbeddedProjectsConfig = { adminOnly: true, projects: [{ projectId: "p1", canonicalRoot: linkPath }] }
     const { api, registered } = recordingApi()
     registerGsdUiMethods(api, () => 33277, config)
-    const denied = await call(registered.get("gsd.ui.directories.list")!.handler, { params: { projectId: "p1" }, client: adminClient() })
+    const denied = await call(registered.get("gsd.ui.projects.list")!.handler, { params: { projectId: "p1" }, client: adminClient() })
     assert.equal(denied[0].ok, false)
     assert.match(denied[0].error?.message ?? "", /canonical identity/)
   } finally {
@@ -242,18 +235,31 @@ test("subscription admission failures answer the RPC with an explicit error", as
   }
 })
 
-test("embedded root mutations are denied without changing standalone preferences", async () => {
+test("daemon unavailability responds with an error frame", async () => {
   const { api, registered } = recordingApi()
-  registerGsdUiMethods(api, () => 33277)
+  registerGsdUiMethods(api, () => undefined)
+  const responses = await call(registered.get("gsd.ui.preferences.read")!.handler, { client: adminClient() })
+  assert.equal(responses[0].ok, false)
+  assert.match(responses[0].error?.message ?? "", /unavailable/)
+})
+
+
+test("setDevRoot proxies PUT preferences with the admitted canonical root", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "gsd-sdr-")))
+  const config: EmbeddedProjectsConfig = { adminOnly: true, projects: [{ projectId: "p1", canonicalRoot: root }] }
+  const { api, registered } = recordingApi()
+  registerGsdUiMethods(api, () => 33277, config)
   const daemon = stubDaemonFetch()
   try {
-    for (const method of ["selectRoot", "setDevRoot"]) {
-      const responses = await call(registered.get(`gsd.ui.preferences.${method}`)!.handler, { params: { devRoot: "/new-root" }, client: adminClient() })
-      assert.equal(responses[0].ok, false)
-      assert.match(responses[0].error?.message ?? "", /Manage projects in OpenClaw/)
-    }
-    assert.equal(daemon.calls.length, 0)
-  } finally { daemon.restore() }
+    const res = await call(registered.get("gsd.ui.preferences.setDevRoot")!.handler, { params: { devRoot: root }, client: adminClient() })
+    assert.equal(res[0].ok, true, res[0].error?.message)
+    assert.equal(daemon.calls[0].init?.method, "PUT")
+    assert.equal(daemon.calls[0].init?.body, JSON.stringify({ devRoot: root }))
+    assert.ok(daemon.calls[0].url.endsWith("/api/preferences"))
+  } finally {
+    daemon.restore()
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test("path-only browse pins to the single approved project", async () => {
@@ -428,8 +434,7 @@ test("SSE reader error releases its lock and sends one closure after admission",
 
 test("ordinary daemon responses count bytes while reading and cancel/release on oversize", async () => {
   const { api, registered } = recordingApi()
-  const root = temporaryProject()
-  registerGsdUiMethods(api, () => 33277, { projects: [{ projectId: "p1", canonicalRoot: root }] })
+  registerGsdUiMethods(api, () => 33277)
   const original = globalThis.fetch
   let cancelled = 0
   const body = new ReadableStream<Uint8Array>({
@@ -438,13 +443,13 @@ test("ordinary daemon responses count bytes while reading and cancel/release on 
   })
   globalThis.fetch = (async () => new Response(body)) as typeof fetch
   try {
-    const responses = await call(registered.get("gsd.ui.projects.list")!.handler, { client: adminClient() })
+    const responses = await call(registered.get("gsd.ui.preferences.read")!.handler, { client: adminClient() })
     assert.equal(responses.length, 1)
     assert.equal(responses[0].ok, false)
     assert.match(responses[0].error?.message ?? "", /size bound/)
     assert.equal(cancelled, 1)
     assert.equal(body.locked, false)
-  } finally { globalThis.fetch = original; rmSync(root, { recursive: true, force: true }) }
+  } finally { globalThis.fetch = original }
 })
 
 test("terminal subscription forwards admitted canonical project and never starts the daemon route", async () => {
@@ -546,7 +551,7 @@ test("admission observes policy updates after registration and defaults back to 
   const { api, registered } = recordingApi()
   registerGsdUiMethods(api, () => 33277, config)
   const method = registered.get("gsd.ui.projects.list")!
-  const daemon = stubDaemonFetch()
+  const daemon = stubDaemonFetch([])
   const opts = { params: { project: root }, client: { connId: "non-admin" } as UiClient }
   try {
     assert.equal((await call(method.handler, opts))[0].ok, false)
@@ -556,7 +561,7 @@ test("admission observes policy updates after registration and defaults back to 
     assert.equal((await call(method.handler, opts))[0].ok, false)
     config.adminOnly = false
     config.projects = []
-    assert.deepEqual((await call(method.handler, opts))[0].payload, [])
+    assert.equal((await call(method.handler, opts))[0].ok, false)
     assert.equal(daemon.calls.length, 1)
   } finally { daemon.restore(); rmSync(root, { recursive: true, force: true }) }
 })
@@ -681,139 +686,4 @@ test("file reads reject malformed DTOs and enforce raw JSON and UTF-8 content bo
       assert.deepEqual(responses[0].payload, { content })
     } finally { daemon.restore() }
   } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test("default embedded catalog lists all native projects exactly, without scanning or changing standalone preferences", async () => {
-  const a = temporaryProject(), b = temporaryProject()
-  let native: NativeProject[] = [
-    { projectId: "a", canonicalRoot: a, name: "Native A" },
-    { projectId: "b", canonicalRoot: b, name: "Native B" },
-  ]
-  const { api, registered } = recordingApi()
-  registerRealGsdUiMethods(api, () => 33277, undefined, async () => native)
-  const daemon = stubDaemonFetch()
-  const client = adminClient()
-  try {
-    const response = await call(registered.get("gsd.ui.projects.list")!.handler, { params: { root: "/forged", detail: true }, client })
-    assert.equal(response[0].ok, true)
-    assert.deepEqual(response[0].payload, [
-      { path: a, name: "Native A", projectId: "a" },
-      { path: b, name: "Native B", projectId: "b" },
-    ])
-    assert.equal(daemon.calls.length, 2)
-    for (const { url, init } of daemon.calls) {
-      assert.equal(new URL(url).searchParams.get("exact"), "true")
-      assert.equal(new URL(url).searchParams.get("detail"), "true")
-      assert.equal(init?.method, "GET")
-    }
-    const ambiguous = await call(registered.get("gsd.ui.directories.list")!.handler, { client })
-    assert.equal(ambiguous[0].ok, false)
-    const mismatch = await call(registered.get("gsd.ui.directories.list")!.handler, { client, params: { projectId: "a", root: b } })
-    assert.equal(mismatch[0].ok, false)
-    native = native.filter(p => p.projectId !== "a")
-    const removed = await call(registered.get("gsd.ui.directories.list")!.handler, { client, params: { projectId: "a" } })
-    assert.equal(removed[0].ok, false, "registry removals take effect on the next operation")
-    assert.equal(daemon.calls.length, 2)
-  } finally { daemon.restore(); rmSync(a, { recursive: true, force: true }); rmSync(b, { recursive: true, force: true }) }
-})
-
-test("explicit project policy only narrows the current caller's native catalog", async () => {
-  const root = temporaryProject()
-  const { api, registered } = recordingApi()
-  const config = { adminOnly: false, projects: [{ projectId: "allowed", canonicalRoot: root }] }
-  let native: NativeProject[] = []
-  registerRealGsdUiMethods(api, () => 33277, config, async () => native)
-  const daemon = stubDaemonFetch()
-  try {
-    const handler = registered.get("gsd.ui.projects.list")!.handler
-    const opts = { client: adminClient() }
-    assert.deepEqual((await call(handler, opts))[0].payload, [], "an explicit allowlist cannot restore a redacted root")
-    native = [{ projectId: "allowed", canonicalRoot: root, name: "Registered" }]
-    assert.equal(((await call(handler, opts))[0].payload as unknown[]).length, 1)
-    config.projects = []
-    assert.deepEqual((await call(handler, opts))[0].payload, [])
-    const noPolicy = recordingApi()
-    registerRealGsdUiMethods(noPolicy.api, () => 33277, { adminOnly: false }, async () => native)
-    assert.deepEqual((await call(noPolicy.registered.get("gsd.ui.projects.list")!.handler, { client: { connId: "reader" } }))[0].payload, [])
-  } finally { daemon.restore(); rmSync(root, { recursive: true, force: true }) }
-})
-
-test("subscription lookup cannot admit after plugin disposal or connection retirement", async () => {
-  const root = temporaryProject()
-  try {
-    for (const retirement of ["dispose", "disconnect"]) {
-      let resolve!: (projects: NativeProject[]) => void
-      const { api, registered } = recordingApi()
-      const handles = registerRealGsdUiMethods(api, () => 33277, undefined, () => new Promise(r => { resolve = r }))
-      const connection = new AbortController()
-      const daemon = stubDaemonFetch()
-      try {
-        const pending = call(registered.get("gsd.ui.workspace.events.subscribe")!.handler, {
-          params: { project: root }, client: adminClient({ connectionSignal: connection.signal }),
-          context: { broadcastToConnIds() {} },
-        })
-        if (retirement === "dispose") handles.disposeAll()
-        else connection.abort()
-        resolve([{ projectId: "p", name: "P", canonicalRoot: root }])
-        const responses = await pending
-        assert.equal(responses[0].ok, false)
-        assert.equal(handles.subscriptions.size, 0)
-        assert.equal(daemon.calls.length, 0)
-      } finally { handles.disposeAll(); daemon.restore() }
-    }
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-
-test("native lookup rechecks non-admin policy after an asynchronous service reload", async () => {
-  const root = temporaryProject()
-  try {
-    for (const change of ["require-admin", "remove-list"]) {
-      const config: EmbeddedProjectsConfig = { adminOnly: false, projects: [{ projectId: "p", canonicalRoot: root }] }
-      let resolve!: (projects: NativeProject[]) => void
-      const { api, registered } = recordingApi()
-      registerRealGsdUiMethods(api, () => 33277, config, () => new Promise(r => { resolve = r }))
-      const daemon = stubDaemonFetch()
-      try {
-        const pending = call(registered.get("gsd.ui.projects.list")!.handler, { client: { connId: "non-admin" } as UiClient })
-        if (change === "require-admin") config.adminOnly = true
-        else delete config.projects
-        resolve([{ projectId: "p", canonicalRoot: root, name: "P" }])
-        const responses = await pending
-        if (change === "require-admin") {
-          assert.equal(responses[0].ok, false)
-          assert.match(responses[0].error?.message ?? "", /administrator admission required/)
-        } else {
-          assert.equal(responses[0].ok, true)
-          assert.deepEqual(responses[0].payload, [], "removing the explicit list never grants a non-admin the whole catalog")
-        }
-        assert.equal(daemon.calls.length, 0)
-      } finally { daemon.restore() }
-    }
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test("native catalog retains other projects if exact inspection loses a checkout, but rejects malformed metadata", async () => {
-  const a = temporaryProject(), b = temporaryProject()
-  const { api, registered } = recordingApi()
-  registerRealGsdUiMethods(api, () => 33277, undefined, async () => [
-    { projectId: "a", canonicalRoot: a, name: "A" },
-    { projectId: "b", canonicalRoot: b, name: "B" },
-  ])
-  const original = globalThis.fetch
-  let lostProject: unknown = []
-  globalThis.fetch = (async (url: unknown) => Response.json(
-    new URL(String(url)).searchParams.get("root") === a ? lostProject : [{ path: b, name: "b" }],
-  )) as typeof fetch
-  try {
-    const handler = registered.get("gsd.ui.projects.list")!.handler
-    const opts = { client: adminClient() }
-    const responses = await call(handler, opts)
-    assert.equal(responses[0].ok, true)
-    assert.deepEqual(responses[0].payload, [{ path: b, name: "B", projectId: "b" }])
-    lostProject = [{ path: b, name: "wrong checkout" }]
-    const malformed = await call(handler, opts)
-    assert.equal(malformed[0].ok, false)
-    assert.match(malformed[0].error?.message ?? "", /invalid native project metadata/)
-  } finally { globalThis.fetch = original; rmSync(a, { recursive: true, force: true }); rmSync(b, { recursive: true, force: true }) }
 })

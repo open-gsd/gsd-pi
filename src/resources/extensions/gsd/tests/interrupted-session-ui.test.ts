@@ -15,7 +15,11 @@ import {
 import { registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { recordDispatchClaim } from "../db/unit-dispatches.ts";
-import { openAutoPause } from "../db/writers/auto-pauses.ts";
+import { setRuntimeKv } from "../db/runtime-kv.ts";
+import {
+  PAUSED_SESSION_KV_KEY,
+  type PausedSessionMetadata,
+} from "../interrupted-session.ts";
 import { normalizeRealPath } from "../paths.ts";
 
 function makeTmpBase(): string {
@@ -42,12 +46,12 @@ function expireWorker(workerId: string): void {
 
 function writePausedSession(base: string, milestoneId = "M001", stepMode = false): void {
   openFixtureDb(base);
-  openAutoPause({
-    blockerKind: "user_request",
+  const meta: PausedSessionMetadata = {
     milestoneId,
     originalBasePath: base,
     stepMode,
-  });
+  };
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, meta);
 }
 
 function writeLock(base: string, unitType: string, unitId: string): void {

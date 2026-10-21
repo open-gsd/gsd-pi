@@ -50,7 +50,6 @@
 ### Task 1: Version Stamp Script
 
 **Files:**
-
 - Create: `scripts/version-stamp.mjs`
 
 - [ ] **Step 1: Write the version stamp script**
@@ -97,7 +96,6 @@ git commit -m "feat(ci): add version stamp script for dev publishes"
 ### Task 2: Multi-Stage Dockerfile
 
 **Files:**
-
 - Create: `Dockerfile`
 
 - [ ] **Step 1: Write the Dockerfile**
@@ -176,7 +174,6 @@ git commit -m "feat(ci): add multi-stage Dockerfile for CI builder and runtime i
 ### Task 3: Smoke Test Runner and Tests
 
 **Files:**
-
 - Create: `tests/smoke/run.ts`
 - Create: `tests/smoke/test-version.ts`
 - Create: `tests/smoke/test-help.ts`
@@ -309,7 +306,6 @@ try {
 - [ ] **Step 5: Add test:smoke script to package.json**
 
 Add to `package.json` `scripts`:
-
 ```json
 "test:smoke": "node --experimental-strip-types tests/smoke/run.ts"
 ```
@@ -333,7 +329,6 @@ git commit -m "feat(ci): add CLI smoke tests for pipeline test stage"
 ### Task 4: FixtureProvider Implementation
 
 **Files:**
-
 - Create: `tests/fixtures/provider.ts`
 
 The `FixtureProvider` operates at the `ApiProvider` level defined in `packages/pi-ai/src/api-registry.ts:23-27`. The key interface is:
@@ -508,7 +503,6 @@ git commit -m "feat(ci): add FixtureProvider for LLM conversation recording and 
 ### Task 5: Fixture Test Runner
 
 **Files:**
-
 - Create: `tests/fixtures/run.ts`
 - Create: `tests/fixtures/recordings/agent-creates-file.json`
 - Modify: `package.json` (add `test:fixtures` script)
@@ -629,7 +623,6 @@ if (failed > 0) process.exit(1);
 - [ ] **Step 3: Add test:fixtures script to package.json**
 
 Add to `package.json` `scripts`:
-
 ```json
 "test:fixtures": "node --experimental-strip-types tests/fixtures/run.ts"
 ```
@@ -651,7 +644,6 @@ git commit -m "feat(ci): add fixture test runner with sample recording"
 ### Task 5b: Additional Fixture Recordings
 
 **Files:**
-
 - Create: `tests/fixtures/recordings/agent-reads-and-edits.json`
 - Create: `tests/fixtures/recordings/agent-handles-error.json`
 - Create: `tests/fixtures/recordings/agent-multi-turn-tools.json`
@@ -809,7 +801,6 @@ git commit -m "feat(ci): add additional fixture recordings for multi-turn and er
 ### Task 6: Live Test Stubs
 
 **Files:**
-
 - Create: `tests/live/run.ts`
 - Create: `tests/live/test-anthropic-roundtrip.ts`
 - Modify: `package.json` (add remaining scripts)
@@ -952,7 +943,6 @@ console.log(`OpenAI roundtrip OK: "${text.substring(0, 50)}"`);
 - [ ] **Step 4: Add remaining scripts to package.json**
 
 Add to `package.json` `scripts`:
-
 ```json
 "test:fixtures:record": "GSD_FIXTURE_MODE=record node --experimental-strip-types tests/fixtures/record.ts",
 "test:live": "GSD_LIVE_TESTS=1 node --experimental-strip-types tests/live/run.ts",
@@ -980,7 +970,6 @@ git commit -m "feat(ci): add live LLM test stubs and remaining npm scripts"
 ### Task 7: Pipeline Workflow
 
 **Files:**
-
 - Create: `.github/workflows/pipeline.yml`
 
 - [ ] **Step 1: Write the pipeline workflow**
@@ -1204,7 +1193,6 @@ git commit -m "feat(ci): add three-stage promotion pipeline workflow"
 ### Task 8: Dev Version Cleanup Workflow
 
 **Files:**
-
 - Create: `.github/workflows/cleanup-dev-versions.yml`
 
 - [ ] **Step 1: Write the cleanup workflow**
@@ -1293,7 +1281,6 @@ git commit -m "feat(ci): add weekly dev version cleanup workflow"
 ### Task 9: Fixture Recording Helper
 
 **Files:**
-
 - Create: `tests/fixtures/record.ts`
 
 - [ ] **Step 1: Create the recording helper**
@@ -1361,7 +1348,6 @@ npm run test:live
 ```
 
 Expected:
-
 - Smoke tests: 3 passed
 - Fixture tests: 1 passed
 - Live tests: Skipped (no `GSD_LIVE_TESTS=1`)

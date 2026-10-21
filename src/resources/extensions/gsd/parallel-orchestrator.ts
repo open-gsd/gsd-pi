@@ -1,4 +1,3 @@
-import { assertModelSelectionAllowed, inheritModelRequestPolicy } from "@gsd/pi-ai/model-request-policy.js";
 /**
  * GSD Parallel Orchestrator — Core engine for parallel milestone orchestration.
  *
@@ -606,9 +605,8 @@ export function spawnWorker(
 
   let child: ChildProcess;
   try {
-    assertModelSelectionAllowed(state.config.worker_model);
     const workerEnv: Record<string, string | undefined> = {
-      ...inheritModelRequestPolicy(process.env),
+      ...process.env,
       GSD_MILESTONE_LOCK: milestoneId,
       // Pass the real project root so workers don't need to re-derive it.
       // Without this, process.cwd() resolves symlinks and the worktree
@@ -873,11 +871,8 @@ export async function stopParallel(
     const worker = state.workers.get(mid);
     if (!worker) continue;
 
-    // Queue the stop command (the worker reads it at its next unit boundary).
-    // SIGTERM below stops the worker now, so a closed database does not block the stop.
-    try {
-      sendSignal(mid, "stop");
-    } catch (e) { logWarning("parallel", `stop command for ${mid} was not queued: ${(e as Error).message}`); }
+    // Send stop signal via file-based IPC (worker checks on next dispatch)
+    sendSignal(basePath, mid, "stop");
 
     // Send SIGTERM to the process for immediate response.
     // Use process handle when available, fall back to PID-based kill
@@ -953,7 +948,7 @@ export function pauseWorker(
     const worker = state.workers.get(mid);
     if (!worker || worker.state !== "running") continue;
 
-    sendSignal(mid, "pause");
+    sendSignal(basePath, mid, "pause");
     worker.state = "paused";
   }
 }
@@ -973,7 +968,7 @@ export function resumeWorker(
     const worker = state.workers.get(mid);
     if (!worker || worker.state !== "paused") continue;
 
-    sendSignal(mid, "resume");
+    sendSignal(basePath, mid, "resume");
     worker.state = "running";
   }
 }

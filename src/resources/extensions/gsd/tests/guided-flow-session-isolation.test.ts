@@ -21,7 +21,6 @@ import {
   checkAutoStartAfterDiscuss,
 } from "../guided-flow.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
-import { saveContextArtifact } from "./helpers/saved-context.ts";
 
 function pendingInput(basePath: string, milestoneId: string) {
   return {
@@ -125,7 +124,6 @@ test("checkAutoStartAfterDiscuss ignores missing manifest for single-milestone d
     );
     writeFileSync(join(gsdDir, "STATE.md"), "# State\n");
     writeFileSync(join(milestoneDir, "M001-CONTEXT.md"), "# M001 Context\n");
-    saveContextArtifact("M001");
 
     clearPendingAutoStart();
     setPendingAutoStart(base, {
@@ -162,7 +160,6 @@ test("checkAutoStartAfterDiscuss(basePath) selects the matching pending entry wh
     clearPendingAutoStart();
     writeReadyArtifacts(projectA, "M001");
     writeReadyArtifacts(projectB, "M002");
-    saveContextArtifact("M002");
     setPendingAutoStart(projectA, {
       basePath: projectA,
       milestoneId: "M001",
@@ -200,7 +197,6 @@ test("checkAutoStartAfterDiscuss can accept context handoff without scheduling a
     writeFileSync(join(gsdDir, "PROJECT.md"), "# Project\n\n| M001 | First milestone | active |\n");
     writeFileSync(join(gsdDir, "STATE.md"), "# State\n");
     writeFileSync(join(milestoneDir, "M001-CONTEXT.md"), "# M001 Context\n");
-    saveContextArtifact("M001");
 
     clearPendingAutoStart();
     setPendingAutoStart(base, {

@@ -1,6 +1,6 @@
 /**
  * Tests for parallel milestone orchestration modules:
- * - session-status-io.ts (status files, command-queue signals)
+ * - session-status-io.ts (file-based IPC)
  * - parallel-eligibility.ts (eligibility formatting)
  * - parallel-orchestrator.ts (orchestrator lifecycle)
  * - preferences.ts (parallel config validation)
@@ -53,7 +53,6 @@ import {
 } from "../parallel-orchestrator.js";
 
 import { validatePreferences, resolveParallelConfig } from "../preferences.js";
-import { closeDatabase, openDatabase } from "../gsd-db.js";
 
 import { determineMergeOrder, formatMergeResults, type MergeResult } from "../parallel-merge.js";
 import type { WorkerInfo } from "../parallel-orchestrator.js";
@@ -130,33 +129,27 @@ describe("session-status-io: status roundtrip", () => {
 
 describe("session-status-io: signal roundtrip", () => {
   let base: string;
-  beforeEach(() => {
-    base = makeTmpBase();
-    openDatabase(join(base, ".gsd", "gsd.db"));
-  });
-  afterEach(() => {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  });
+  beforeEach(() => { base = makeTmpBase(); });
+  afterEach(() => { rmSync(base, { recursive: true, force: true }); });
 
   it("sendSignal then consumeSignal returns the signal", () => {
-    sendSignal("M001", "pause");
-    const signal = consumeSignal("M001");
+    sendSignal(base, "M001", "pause");
+    const signal = consumeSignal(base, "M001");
     assert.ok(signal);
     assert.equal(signal.signal, "pause");
     assert.equal(signal.from, "coordinator");
     assert.ok(signal.sentAt > 0);
   });
 
-  it("consumeSignal delivers a signal one time", () => {
-    sendSignal("M001", "stop");
-    consumeSignal("M001");
-    const second = consumeSignal("M001");
+  it("consumeSignal removes the signal file", () => {
+    sendSignal(base, "M001", "stop");
+    consumeSignal(base, "M001");
+    const second = consumeSignal(base, "M001");
     assert.equal(second, null);
   });
 
   it("consumeSignal returns null when no signal pending", () => {
-    assert.equal(consumeSignal("M001"), null);
+    assert.equal(consumeSignal(base, "M001"), null);
   });
 });
 
@@ -284,7 +277,6 @@ describe("parallel-orchestrator: lifecycle", () => {
   });
   afterEach(() => {
     resetOrchestrator();
-    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   });
 
@@ -373,7 +365,6 @@ describe("parallel-orchestrator: lifecycle", () => {
   });
 
   it("pauseWorker and resumeWorker toggle worker state", async () => {
-    openDatabase(join(base, ".gsd", "gsd.db"));
     await startParallel(base, ["M001"], undefined);
     const initial = getWorkerStatuses()[0].state;
     // Only test pause/resume if worker is in a pausable state
@@ -390,18 +381,17 @@ describe("parallel-orchestrator: lifecycle", () => {
   });
 
   it("pauseWorker sends pause signal", async () => {
-    openDatabase(join(base, ".gsd", "gsd.db"));
     await startParallel(base, ["M001"], undefined);
     const w = getWorkerStatuses()[0];
     if (w.state === "running") {
       pauseWorker(base, "M001");
-      const signal = consumeSignal("M001");
+      const signal = consumeSignal(base, "M001");
       assert.ok(signal);
       assert.equal(signal.signal, "pause");
     } else {
       // Spawn failed — pauseWorker is a no-op, signal not written
       pauseWorker(base, "M001");
-      const signal = consumeSignal("M001");
+      const signal = consumeSignal(base, "M001");
       assert.equal(signal, null);
     }
   });

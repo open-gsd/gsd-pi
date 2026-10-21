@@ -12,17 +12,16 @@ import {
   openDatabase,
   closeDatabase,
   insertMilestone,
-  insertSlice,
-  insertTask,
   _getAdapter,
 } from "../gsd-db.ts";
 import { registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { recordDispatchClaim } from "../db/unit-dispatches.ts";
-import { openAutoPause } from "../db/writers/auto-pauses.ts";
+import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.ts";
 import {
-  readPausedSessionMetadata,
+  PAUSED_SESSION_KV_KEY,
   type InterruptedSessionAssessment,
+  type PausedSessionMetadata,
 } from "../interrupted-session.ts";
 import { normalizeRealPath } from "../paths.ts";
 
@@ -48,7 +47,7 @@ function expireWorker(workerId: string): void {
   ).run({ ":worker_id": workerId });
 }
 
-function writeLock(base: string, unitType: string, unitId: string): number {
+function writeLock(base: string, unitType: string, unitId: string): void {
   openFixtureDb(base);
   insertMilestone({
     id: "M001",
@@ -58,7 +57,6 @@ function writeLock(base: string, unitType: string, unitId: string): number {
   const workerId = registerAutoWorker({ projectRootRealpath: normalizeRealPath(base) });
   const lease = claimMilestoneLease(workerId, "M001");
   assert.equal(lease.ok, true);
-  let dispatchId = 0;
   if (lease.ok) {
     const [, sliceId = null, taskId = null] = unitId.split("/");
     const claimed = recordDispatchClaim({
@@ -72,23 +70,21 @@ function writeLock(base: string, unitType: string, unitId: string): number {
       unitId,
     });
     assert.equal(claimed.ok, true);
-    if (claimed.ok) dispatchId = claimed.dispatchId;
   }
   _getAdapter()!
     .prepare(`UPDATE workers SET pid = 99999 WHERE worker_id = :worker_id`)
     .run({ ":worker_id": workerId });
   expireWorker(workerId);
-  return dispatchId;
 }
 
 function writePausedSession(base: string, milestoneId = "M001", stepMode = false): void {
   openFixtureDb(base);
-  openAutoPause({
-    blockerKind: "user_request",
+  const meta: PausedSessionMetadata = {
     milestoneId,
     originalBasePath: base,
     stepMode,
-  });
+  };
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, meta);
 }
 
 function writeRoadmap(base: string, checked = false): void {
@@ -239,7 +235,7 @@ test("direct /gsd auto never restores a paused milestone superseded by the activ
 
   await startAuto(ctx, pi, base, false, { interrupted });
 
-  assert.equal(readPausedSessionMetadata(base), null, "the superseded pause must be closed");
+  assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), null);
   // #1644 required that the stale pin never be restored; #1643 goes one step
   // further and adopts the project's current active milestone instead of
   // starting from no milestone at all.
@@ -272,16 +268,28 @@ test("direct /gsd auto source only resumes paused-session metadata for recoverab
 test("direct /gsd auto skips paused-session replay when recovered unit already completed", async () => {
   const base = makeTmpBase();
   try {
-    // The paused plan-slice unit recorded its result: the slice has a task
-    // row (ADR-046). No PLAN file is written. Its dispatch row is still in the
-    // execute stage, so the result rows decide.
-    const dispatchId = writeLock(base, "plan-slice", "M001/S01");
-    insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "pending" });
-    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First task", status: "pending" });
+    writeRoadmap(base, false);
+    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+    const tasksDir = join(sliceDir, "tasks");
+    mkdirSync(tasksDir, { recursive: true });
+    writeFileSync(
+      join(sliceDir, "S01-PLAN.md"),
+      [
+        "# S01: Test Slice",
+        "",
+        "## Tasks",
+        "",
+        "- [ ] **T01: First task** `est:1h`",
+      ].join("\n"),
+      "utf-8",
+    );
+    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan\n\nDo the thing.\n", "utf-8");
 
     const state = {
       pausedSessionFile: join(base, ".gsd", "activity", "paused-session.jsonl"),
-      pausedDispatchId: dispatchId,
+      currentUnit: null,
+      pausedUnitType: "plan-slice",
+      pausedUnitId: "M001/S01",
       pendingCrashRecovery: "stale-recovery-prompt",
     };
 
@@ -289,23 +297,26 @@ test("direct /gsd auto skips paused-session replay when recovered unit already c
     assert.equal(result.skippedReplay, true);
     assert.equal(state.pausedSessionFile, null);
     assert.equal(state.pendingCrashRecovery, null);
-    assert.equal(state.pausedDispatchId, null);
+    assert.equal(state.pausedUnitType, null);
+    assert.equal(state.pausedUnitId, null);
   } finally {
     cleanup(base);
   }
 });
 
-test("paused-session resume skips replay when the pause has no dispatch link", () => {
+test("paused-session resume skips replay when unit identity was never recorded", () => {
   const base = makeTmpBase();
   try {
-    // The pause row links no dispatch row: no unit was active. A replay with
-    // an unknown unit can neither be verified nor correctly targeted (the
-    // thrash that turns one stuck unit into several). Resume skips the replay
-    // and takes the next unit from the database.
-    openFixtureDb(base);
+    // No currentUnit and no persisted unit type/id — identity is unknown. The
+    // old code fell back to the literal "unknown" unit, which can neither be
+    // verified nor correctly targeted, and synthesized a full tool-call replay
+    // (the thrash that turns one stuck unit into several). The fix skips the
+    // replay and resumes from rebuilt disk state instead.
     const state = {
       pausedSessionFile: join(base, ".gsd", "activity", "paused-session.jsonl"),
-      pausedDispatchId: null,
+      currentUnit: null,
+      pausedUnitType: null,
+      pausedUnitId: null,
       pendingCrashRecovery: "stale-recovery-prompt",
     };
 
@@ -313,6 +324,8 @@ test("paused-session resume skips replay when the pause has no dispatch link", (
     assert.equal(result.skippedReplay, true);
     assert.equal(state.pausedSessionFile, null);
     assert.equal(state.pendingCrashRecovery, null, "must not synthesize a replay for an unknown unit");
+    assert.equal(state.pausedUnitType, null);
+    assert.equal(state.pausedUnitId, null);
   } finally {
     cleanup(base);
   }

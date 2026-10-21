@@ -34,17 +34,14 @@ See [use-xml-tags.md](use-xml-tags.md) for detailed guidance on each tag.
 
 <tag_selection_intelligence>
 **Simple skills** (single domain, straightforward):
-
 - Required tags only
 - Example: Text extraction, file format conversion
 
 **Medium skills** (multiple patterns, some complexity):
-
 - Required tags + workflow/examples as needed
 - Example: Document processing with steps, API integration
 
 **Complex skills** (multiple domains, security, APIs):
-
 - Required tags + conditional tags as appropriate
 - Example: Payment processing, authentication systems, multi-step workflows
 </tag_selection_intelligence>
@@ -62,18 +59,15 @@ Properly nest XML tags for hierarchical content:
 ```
 
 Always close tags:
-
 ```xml
 <objective>
 Content here
 </objective>
 ```
-
 </xml_nesting>
 
 <tag_naming_conventions>
 Use descriptive, semantic names:
-
 - `<workflow>` not `<steps>`
 - `<success_criteria>` not `<done>`
 - `<anti_patterns>` not `<dont_do>`
@@ -84,19 +78,16 @@ Be consistent within your skill. If you use `<workflow>`, don't also use `<proce
 
 <yaml_requirements>
 <required_fields>
-
 ```yaml
 ---
 name: skill-name-here
 description: What it does and when to use it (third person, specific triggers)
 ---
 ```
-
 </required_fields>
 
 <name_field>
 **Validation rules**:
-
 - Maximum 64 characters
 - Lowercase letters, numbers, hyphens only
 - No XML tags
@@ -104,7 +95,6 @@ description: What it does and when to use it (third person, specific triggers)
 - Must match directory name exactly
 
 **Examples**:
-
 - ✅ `process-pdfs`
 - ✅ `manage-facebook-ads`
 - ✅ `setup-stripe-payments`
@@ -115,7 +105,6 @@ description: What it does and when to use it (third person, specific triggers)
 
 <description_field>
 **Validation rules**:
-
 - Non-empty, maximum 1024 characters
 - No XML tags
 - Third person (never first or second person)
@@ -123,7 +112,6 @@ description: What it does and when to use it (third person, specific triggers)
 - Must parse as YAML; quote values containing `:` or use `description: >`
 
 **Critical rule**: Always write in third person.
-
 - ✅ "Processes Excel files and generates reports"
 - ❌ "I can help you process Excel files"
 - ❌ "You can use this to process Excel files"
@@ -131,7 +119,6 @@ description: What it does and when to use it (third person, specific triggers)
 **Structure**: Include both capabilities and triggers.
 
 **Effective examples**:
-
 ```yaml
 description: Extract text and tables from PDF files, fill forms, merge documents. Use when working with PDF files or when the user mentions PDFs, forms, or document extraction.
 ```
@@ -145,7 +132,6 @@ description: Generate descriptive commit messages by analyzing git diffs. Use wh
 ```
 
 **Avoid**:
-
 ```yaml
 description: Helps with documents
 ```
@@ -153,7 +139,6 @@ description: Helps with documents
 ```yaml
 description: Processes data
 ```
-
 </description_field>
 </yaml_requirements>
 
@@ -185,7 +170,6 @@ Examples: `generate-ai-images`
 </pattern>
 
 <avoid_patterns>
-
 - Vague: `helper`, `utils`, `tools`
 - Generic: `documents`, `data`, `files`
 - Reserved words: `anthropic-helper`, `claude-tools`
@@ -199,7 +183,6 @@ SKILL.md serves as an overview that points to detailed materials as needed. This
 </principle>
 
 <practical_guidance>
-
 - Keep SKILL.md body under 500 lines
 - Split content into separate files when approaching this limit
 - Keep references one level deep from SKILL.md
@@ -227,14 +210,12 @@ import pdfplumber
 with pdfplumber.open("file.pdf") as pdf:
     text = pdf.pages[0].extract_text()
 ```
-
 </quick_start>
 
 <advanced_features>
 **Form filling**: See [forms.md](forms.md)
 **API reference**: See [reference.md](reference.md)
 </advanced_features>
-
 ```
 
 Claude loads forms.md or reference.md only when needed.
@@ -244,7 +225,6 @@ Claude loads forms.md or reference.md only when needed.
 For skills with multiple domains, organize by domain to avoid loading irrelevant context:
 
 ```
-
 bigquery-skill/
 ├── SKILL.md (overview and navigation)
 └── reference/
@@ -252,7 +232,6 @@ bigquery-skill/
     ├── sales.md (opportunities, pipeline)
     ├── product.md (API usage, features)
     └── marketing.md (campaigns, attribution)
-
 ```
 
 When user asks about revenue, Claude reads only finance.md. Other files stay on filesystem consuming zero tokens.
@@ -315,7 +294,6 @@ skill-name/
     ├── validate.py
     └── process.py
 ```
-
 </directory_structure>
 </file_organization>
 
@@ -348,7 +326,6 @@ Extract text...
 Form filling...
 </advanced_features>
 ```
-
 </pitfall>
 
 <pitfall name="vague_descriptions">

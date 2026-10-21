@@ -15,7 +15,6 @@
 - [OpenAI 兼容性](#openai-compatibility)
 
 <a id="minimal-example"></a>
-
 ## 最小示例
 
 对于本地 models（Ollama、LM Studio、vLLM），每个 model 只要求提供 `id`：
@@ -65,7 +64,6 @@
 ```
 
 <a id="full-example"></a>
-
 ## 完整示例
 
 当你需要显式覆盖默认值时，可以写成更完整的配置：
@@ -96,7 +94,6 @@
 每次打开 `/model` 时，这个文件都会重新加载。可以在会话过程中直接编辑，无需重启。
 
 <a id="supported-apis"></a>
-
 ## 支持的 API
 
 | API | 说明 |
@@ -109,7 +106,6 @@
 `api` 可以设置在 provider 级别（作为该 provider 下所有 models 的默认值），也可以设置在 model 级别（覆盖单个 model）。
 
 <a id="provider-configuration"></a>
-
 ## Provider 配置
 
 | 字段 | 说明 |
@@ -123,32 +119,25 @@
 | `modelOverrides` | 针对该 provider 的内置 models 做按 model 覆盖 |
 
 <a id="value-resolution"></a>
-
 ### 值解析
 
 `apiKey` 和 `headers` 支持三种写法：
 
 - **Shell 命令：** `"!command"`，执行后读取 stdout
-
   ```json
   "apiKey": "!security find-generic-password -ws 'anthropic'"
   "apiKey": "!op read 'op://vault/item/credential'"
   ```
-
 - **环境变量：** 取对应环境变量的值
-
   ```json
   "apiKey": "MY_API_KEY"
   ```
-
 - **字面量：** 直接使用
-
   ```json
   "apiKey": "sk-..."
   ```
 
 <a id="command-allowlist"></a>
-
 #### 命令允许列表
 
 Shell 命令（`!command`）只能执行一组已知的凭据工具。只有以下前缀开头的命令才会被允许：
@@ -199,7 +188,6 @@ export GSD_ALLOWED_COMMAND_PREFIXES="pass,op,sops,doppler"
 ```
 
 <a id="model-configuration"></a>
-
 ## Model 配置
 
 | 字段 | 必填 | 默认值 | 说明 |
@@ -220,7 +208,6 @@ export GSD_ALLOWED_COMMAND_PREFIXES="pass,op,sops,doppler"
 - 配置里的 `name` 会用于 model 匹配，以及详情 / 状态文本展示
 
 <a id="overriding-built-in-providers"></a>
-
 ## 覆盖内置 Providers
 
 如果你想把某个内置 provider 经由代理路由出去，但又不想重新定义全部 models，可以这样写：
@@ -260,7 +247,6 @@ export GSD_ALLOWED_COMMAND_PREFIXES="pass,op,sops,doppler"
 - 如果某个自定义 model 的 `id` 是新的，它会作为新增条目并列出现
 
 <a id="per-model-overrides"></a>
-
 ## 按 model 覆盖
 
 如果你只想修改某些特定的内置 model，而不想替换整个 provider 的 model 列表，可以使用 `modelOverrides`。
@@ -294,7 +280,6 @@ export GSD_ALLOWED_COMMAND_PREFIXES="pass,op,sops,doppler"
 - 如果某个 provider 同时定义了 `models`，那么自定义 models 会在应用完内置覆盖后再合并；如果它的 `id` 与已覆盖的内置 model 相同，最终会以自定义 model 为准
 
 <a id="updating-the-model-catalog"></a>
-
 ## 更新 Model 目录
 
 在 shell 中运行 `gsd update --models`，或在 GSD 会话中运行 `/gsd update --models`，即可在不进行完整 npm 升级的情况下获取最新发布的 model 目录：
@@ -414,7 +399,6 @@ Copilot 有意不使用通用的跨 provider 内置回退定价档位：共享�
 - 规划文档中讨论的、更长远的“provider 自持”实时目录架构仍是未来方向；当前实现在 GSD 的内置 extension 层内安全地交付。
 
 <a id="openai-compatibility"></a>
-
 ## OpenAI 兼容性
 
 对于只部分兼容 OpenAI 的 providers，可通过 `compat` 字段修正行为。

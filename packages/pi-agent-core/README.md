@@ -36,7 +36,6 @@ await agent.prompt("Hello!");
 ### AgentMessage vs LLM Message
 
 The agent works with `AgentMessage`, a flexible type that can include:
-
 - Standard LLM messages (`user`, `assistant`, `toolResult`)
 - Custom app-specific message types via declaration merging
 
@@ -351,7 +350,6 @@ agent.clearAllQueues();
 Use clearSteeringQueue, clearFollowUpQueue, or clearAllQueues to drop queued messages.
 
 When steering messages are detected after a turn completes:
-
 1. All tool calls from the current assistant message have already finished
 2. Steering messages are injected
 3. The LLM responds on the next turn

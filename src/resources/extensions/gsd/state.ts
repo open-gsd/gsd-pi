@@ -13,6 +13,8 @@ import {
   gsdRoot,
 } from './paths.js';
 
+import { findMilestoneIds } from './milestone-ids.js';
+import { isClosedStatus } from './status-guards.js';
 import { join } from 'path';
 import { existsSync } from 'node:fs';
 import { extractVerdict } from './verdict-parser.js';
@@ -24,7 +26,7 @@ import {
   type DeriveStateOptions,
 } from './state/derive/index.js';
 import { deriveStateFromDb } from './state/derive/from-db.js';
-import { getRequestedMilestoneLock } from './state/derive/db-open.js';
+import { getRequestedMilestoneLock, syncQueueOrderProjectionToDb } from './state/derive/db-open.js';
 
 export {
   deriveState,
@@ -37,11 +39,9 @@ export {
 
 import {
   isDbAvailable,
+  getAllMilestones,
   getMilestone,
-  getMilestoneSlices,
-  hasSavedArtifact,
 } from './gsd-db.js';
-import { readMilestone, readMilestones } from './db/lifecycle-read.js';
 
 /**
  * A "ghost" milestone directory contains only META.json (and no substantive
@@ -50,8 +50,8 @@ import { readMilestone, readMilestones } from './db/lifecycle-read.js';
  * auto-mode to stall or falsely declare completion.
  *
  * However, a milestone is NOT a ghost if:
- * - It has a DB row. The one exception is a queued row with no saved CONTEXT
- *   or CONTEXT-DRAFT row and no slice rows (see below); files do not decide.
+ * - It has a DB row with a meaningful status (queued, active, etc.) — the DB
+ *   knows about it even if content files haven't been created yet.
  * - It has a worktree directory — a worktree proves the milestone was
  *   legitimately created and is expected to be populated.
  *
@@ -60,16 +60,16 @@ import { readMilestone, readMilestones } from './db/lifecycle-read.js';
  */
 export function isGhostMilestone(basePath: string, mid: string): boolean {
   // If the milestone has a DB row, it's usually a known milestone — not a ghost.
-  // Exception: a "queued" row with no saved context and no slice rows is a
-  // phantom from gsd_milestone_generate_id that was never planned (#3645).
-  // The rows decide; a projection file on disk is not read.
+  // Exception: a "queued" row with no disk artifacts is a phantom from
+  // gsd_milestone_generate_id that was never planned (#3645).
   if (isDbAvailable()) {
-    const dbRow = readMilestone(mid);
+    const dbRow = getMilestone(mid);
     if (dbRow) {
       if (dbRow.status === 'queued') {
-        return !hasSavedArtifact(mid, null, "CONTEXT")
-          && !hasSavedArtifact(mid, null, "CONTEXT-DRAFT")
-          && getMilestoneSlices(mid).length === 0;
+        const hasContent = resolveMilestoneFile(basePath, mid, "CONTEXT")
+          || resolveMilestoneFile(basePath, mid, "ROADMAP")
+          || resolveMilestoneFile(basePath, mid, "SUMMARY");
+        return !hasContent;
       }
       return false;
     }
@@ -163,16 +163,31 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
   // open milestone in queue order.
   const milestoneLock = getRequestedMilestoneLock();
   if (milestoneLock) {
-    // Fail closed: with no DB the locked milestone cannot be confirmed open.
-    if (!isDbAvailable()) return null;
-    const locked = readMilestone(milestoneLock);
-    if (!locked || locked.closed || locked.parked) return null;
-    return locked.id;
+    if (isDbAvailable()) {
+      const locked = getAllMilestones().find(m => m.id === milestoneLock);
+      if (!locked || isClosedStatus(locked.status) || locked.status === "parked") return null;
+      return locked.id;
+    }
+
+    const milestoneIds = findMilestoneIds(basePath);
+    if (!milestoneIds.includes(milestoneLock)) return null;
+    const lockedParked = resolveMilestoneFile(basePath, milestoneLock, "PARKED");
+    if (lockedParked) return null;
+    return milestoneLock;
   }
 
-  // DB-first: the first milestone in workflow order that is not closed and not parked
+  // DB-first: query milestones table for the first non-complete, non-parked milestone
   if (isDbAvailable()) {
-    return readMilestones().find(m => !m.closed && !m.parked)?.id ?? null;
+    syncQueueOrderProjectionToDb(basePath);
+    const allMilestones = getAllMilestones();
+    if (allMilestones.length > 0) {
+      for (const m of allMilestones) {
+        if (isClosedStatus(m.status) || m.status === "parked") continue;
+        return m.id;
+      }
+      return null;
+    }
+    return null;
   }
 
   // Fail closed: an unavailable DB is not a license to parse markdown (T022).

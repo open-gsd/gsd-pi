@@ -7,10 +7,8 @@ import { homedir } from "node:os";
 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import { readCrashLock, isLockProcessAlive } from "../crash-recovery.js";
-import { openWorkflowDatabasePathOrNull, resolveProjectRootDbPath, restoreWorkflowDatabase } from "../db-workspace.js";
-import { findStaleScopedPauses, readPausedSessionMetadata } from "../interrupted-session.js";
-import { listOpenAutoPauseScopes } from "../db/writers/auto-pauses.js";
-import { sidecarQueueScope } from "../db/unit-dispatch-sidecars.js";
+import { closeWorkflowDatabase } from "../db-workspace.js";
+import { readPausedSessionMetadata } from "../interrupted-session.js";
 import { gsdRoot } from "../paths.js";
 import { canonicalWorktreesDir } from "../worktree-placement.js";
 import type { MigrationPreview } from "./writer.js";
@@ -184,10 +182,8 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
     );
   }
 
-  // A target with no database has no pause row to read, and this check creates none.
-  const hasDatabase = existsSync(resolveProjectRootDbPath(targetRoot));
-  const openBefore = openWorkflowDatabasePathOrNull();
-  if (hasDatabase && !(await ensureDbOpen(targetRoot, { createEmptyAuthority: true }))) return;
+  const opened = await ensureDbOpen(targetRoot);
+  if (!opened) return;
 
   try {
     const lock = readCrashLock(targetRoot);
@@ -197,25 +193,13 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
       );
     }
 
-    const pausedScopes = hasDatabase ? listOpenAutoPauseScopes() : [];
-    if (hasDatabase && pausedScopes.length === 0 && readPausedSessionMetadata(targetRoot)) {
-      pausedScopes.push(sidecarQueueScope());
-    }
-    if (pausedScopes.length > 0) {
-      const staleScopes = new Set(findStaleScopedPauses());
-      const closers = pausedScopes.map((scope) => {
-        if (staleScopes.has(scope)) return `worker scope ${scope}: its milestone or slice is closed, run /gsd doctor fix`;
-        if (scope === "/") return "project root: resume it with /gsd auto";
-        if (scope.split("/")[1]) {
-          return `worker scope ${scope}: it closes when the slice completes; after that, /gsd doctor fix or the next /gsd auto closes it`;
-        }
-        return `worker scope ${scope}: resume its worker with /gsd parallel start`;
-      });
+    const paused = readPausedSessionMetadata(targetRoot);
+    if (paused) {
       throw new MigrationBlockedError(
-        `Migration blocked - a paused auto-mode session exists for this project. Close each pause before migrating (${closers.join("; ")}).`,
+        "Migration blocked - a paused auto-mode session exists for this project. Resume or stop it before migrating.",
       );
     }
   } finally {
-    if (hasDatabase) restoreWorkflowDatabase(openBefore);
+    closeWorkflowDatabase();
   }
 }

@@ -6,9 +6,7 @@ import { tmpdir } from "node:os";
 
 import { deriveState } from "../state.js";
 import { buildExistingMilestonesContext } from "../guided-flow.js";
-import { closeDatabase, openDatabase } from "../gsd-db.js";
 import { extractSourceRegion } from "./test-helpers.ts";
-import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 describe('queue-draft-detection', () => {
   test('draft and context milestone detection', async () => {
@@ -43,10 +41,6 @@ describe('queue-draft-detection', () => {
 
       // M004: has neither (empty milestone dir)
       mkdirSync(join(gsd, "milestones", "M004"), { recursive: true });
-
-      // The queue context takes the narrative from artifact rows.
-      openDatabase(join(gsd, "gsd.db"));
-      saveMilestoneFilesAsArtifacts(tmpBase);
 
       // Build context
       const state = await deriveState(tmpBase);
@@ -101,7 +95,6 @@ describe('queue-draft-detection', () => {
         "M004 (neither file) should not have Draft label",
       );
     } finally {
-      closeDatabase();
       rmSync(tmpBase, { recursive: true, force: true });
     }
   });

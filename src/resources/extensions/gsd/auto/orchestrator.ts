@@ -24,7 +24,6 @@ export type AutoAdvanceFailureResult = Extract<AutoAdvanceResult, { kind: "pause
 import { debugCount, debugLog, debugTime } from "../debug-logger.js";
 import {
   reconcileBeforeDispatch,
-  settleFlatPhaseMigration,
   type ReconciliationBlockerDetail,
 } from "../state-reconciliation.js";
 import { isLegalEdge, IllegalPhaseTransitionError } from "../state-transition-matrix.js";
@@ -50,7 +49,7 @@ import {
   resolveProjectRoot,
   resolveWorktreeProjectRoot,
 } from "../worktree.js";
-import { getPriorSliceCompletionBlocker } from "../dispatch-guard.js";
+import { getDispatchAuthorityBlocker, getPriorSliceCompletionBlocker } from "../dispatch-guard.js";
 import { GitServiceImpl } from "../git-service.js";
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import { WorktreeLifecycle } from "../worktree-lifecycle.js";
@@ -64,12 +63,7 @@ import { getErrorMessage } from "../error-utils.js";
 import { parseUnitId } from "../unit-id.js";
 import { logWarning } from "../workflow-logger.js";
 import { normalizeRealPath } from "../paths.js";
-import {
-  describeHeldProjectionChanges,
-  describePreservedProjectionChanges,
-  preserveProjectionChangesBeforeDispatch,
-  repairProjectionDrift,
-} from "../projection-worker.js";
+import { preserveProjectionChanges } from "../projection-worker.js";
 import { throwIfTransientProjectionLockError } from "../projection-root-errors.js";
 import { buildDispatchKey } from "./dispatch-key.js";
 import { stableClaimSignature } from "./lease-conflict-notice.js";
@@ -77,14 +71,11 @@ import { abortActiveUnitTurn } from "./unit-turn-abort.js";
 import { clearInFlightTools } from "../auto-tool-tracking.js";
 import {
   COMPLETED_NO_ADVANCE_GUARD_ID,
-  clearAbandonedCloseoutSignatures,
   formatWedgeRefusalNotice,
   formatWedgeTripNotice,
-  garbageCollectResolvedWedges,
   getOpenWedge,
   hashBackstopInput,
   lookupLatestLedgerError,
-  recheckCompletedNoAdvanceWedge,
   recordNonAdvancingOutcome,
   recordNonAdvancingRecurrence,
   serializeNonAdvancingEvidence,
@@ -104,7 +95,6 @@ import {
   getDispatchById,
 } from "../db/unit-dispatches.js";
 import { claimMilestoneLease } from "../db/milestone-leases.js";
-import { readStoredUnitRetry, releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { isAutoWorkerLive } from "../db/auto-workers.js";
 import type { IterationRunOutcome } from "./iteration-run.js";
 import {
@@ -148,7 +138,7 @@ function now(): number {
  * @internal
  */
 let _projectionRebuildFn: ((projectRoot: string) => Promise<void>) | null = null;
-let _preserveProjectionChangesFn: typeof preserveProjectionChangesBeforeDispatch | null = null;
+let _preserveProjectionChangesFn: typeof preserveProjectionChanges | null = null;
 
 function noRemainingUnitsOutcome(stateSnapshot: GSDState): AutoTerminalOutcome {
   if (stateSnapshot.phase === "complete") {
@@ -311,6 +301,45 @@ export async function decideOrchestratorDispatch(
         ? "true"
         : "false");
 
+  // Only replay a milestone-scoped verification retry when a milestone is
+  // active. Pre-PR (#712 fix), `!active` returned null before reaching this
+  // block, so the retry was preserved for a future tick. The new
+  // pre-planning + deep-pending fall-through must keep that contract:
+  // otherwise a stale execute-task / complete-slice / complete-milestone
+  // retry whose target milestone has since been parked would preempt
+  // project-level deep rules like `discuss-project`.
+  const pendingRetry = session?.pendingVerificationRetryDispatch;
+  if (session && pendingRetry && active) {
+    const authorityBlocker = getDispatchAuthorityBlocker(pendingRetry.unitType, pendingRetry.unitId);
+    if (authorityBlocker) {
+      return { kind: "blocked", reason: authorityBlocker, action: "stop", guardId: "dispatch-authority" };
+    }
+    const alreadyClosedReason = getDispatchAlreadyClosedReason(
+      pendingRetry.unitType,
+      pendingRetry.unitId,
+    );
+    if (
+      alreadyClosedReason &&
+      !shouldBypassAlreadyClosedForVerificationRetry(
+        pendingRetry.unitType,
+        pendingRetry.unitId,
+        session.pendingVerificationRetry,
+      )
+    ) {
+      session.pendingOrchestrationDispatch = null;
+      session.pendingVerificationRetry = null;
+      return { kind: "skipped", reason: alreadyClosedReason, code: "already-closed" };
+    }
+    session.pendingVerificationRetryDispatch = null;
+    session.pendingOrchestrationDispatch = pendingRetry;
+    return {
+      unitType: pendingRetry.unitType,
+      unitId: pendingRetry.unitId,
+      reason: "verification-retry",
+      preconditions: [],
+    };
+  }
+
   const action = await resolveDispatch({
     basePath: activeDispatchBasePath,
     mid: dispatchMid,
@@ -351,17 +380,13 @@ export async function decideOrchestratorDispatch(
     !shouldBypassAlreadyClosedForVerificationRetry(
       action.unitType,
       action.unitId,
-      // ADR-048: the retry is on the unit's dispatch row, so a restart reads
-      // the same decision as a live process.
-      readStoredUnitRetry(action.unitType, action.unitId),
+      session?.pendingVerificationRetry,
     )
   ) {
     if (session) {
       session.pendingOrchestrationDispatch = null;
       session.pendingVerificationRetry = null;
     }
-    // A closed unit does not run again, so its stored retry is released.
-    releaseUnitRetry(action.unitType, action.unitId);
     return { kind: "skipped", reason: alreadyClosedReason, code: "already-closed" };
   }
   if (session) {
@@ -643,27 +668,19 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
     }
   > {
     const activeBasePath = this.getLiveDispatchBasePath();
-    // Settle the layout before the hold: a legacy file that the migration is
-    // about to move is not a change from outside GSD.
-    await settleFlatPhaseMigration(activeBasePath);
-    let held: readonly string[] = [];
     try {
-      const observation = await (_preserveProjectionChangesFn ?? preserveProjectionChangesBeforeDispatch)(activeBasePath);
-      held = observation.held;
-      if (observation.preserved.length > 0) {
-        this.ctx.ui.notify(describePreservedProjectionChanges(activeBasePath, observation.preserved), "warning");
-      }
-      for (const error of observation.errors) logWarning("projection", `projection render failed: ${error}`);
+      await (_preserveProjectionChangesFn ?? preserveProjectionChanges)(activeBasePath);
     } catch (error) {
       // Keep transient Windows projection-lock failures on the typed recovery
       // path so autoLoop receives their classification and bounded backoff.
       throwIfTransientProjectionLockError(error);
-      // Projection files are not workflow state: report the failure and go on.
-      logWarning("reconcile", `Projection observation failed: ${getErrorMessage(error)}`);
-    }
-    if (held.length > 0) {
-      const reason = describeHeldProjectionChanges(activeBasePath, held);
-      return { ok: false, reason, blockerDetails: [{ message: reason }] };
+      const reason = `Projection observation failed: ${getErrorMessage(error)}`;
+      logWarning("reconcile", reason);
+      return {
+        ok: false,
+        reason,
+        blockerDetails: [{ message: reason }],
+      };
     }
     const result = await reconcileBeforeDispatch(activeBasePath);
     if (result.blockers.length > 0) {
@@ -674,9 +691,6 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
         blockerDetails: result.blockerDetails,
       };
     }
-    // After reconciliation, so the layout is settled before files are compared.
-    const drift = await repairProjectionDrift(activeBasePath);
-    for (const error of drift.errors) logWarning("projection", `projection drift repair failed: ${error}`);
     const repairedKinds = result.repaired.map((d) => d.kind);
     return {
       ok: true,
@@ -957,8 +971,6 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
     }
     const scopeId = this.backstopScopeId();
     if (!scopeId) return this.backstopFailure('project scope unavailable');
-    const gcResult = await garbageCollectResolvedWedges(scopeId, (wedge) => this.recheckWedge(wedge));
-    if (!gcResult.ok) return this.backstopFailure(gcResult.error);
     const openWedgeResult = getOpenWedge(scopeId);
     if (!openWedgeResult.ok) return this.backstopFailure(openWedgeResult.error);
     const openWedge = openWedgeResult.wedge;
@@ -982,7 +994,13 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
 
   public async recheckWedge(wedge: WedgeRecheckTarget): Promise<WedgeRecheckResult> {
     if (wedge.guardId === COMPLETED_NO_ADVANCE_GUARD_ID) {
-      return recheckCompletedNoAdvanceWedge(wedge);
+      const current = snapshotUnitTargetRows(wedge.unitType, wedge.unitId);
+      if (!current.ok) return { blocking: true, reason: current.error };
+      const blocking = current.hash !== null && hashBackstopInput(current.hash) === wedge.inputHash;
+      return {
+        blocking,
+        ...(blocking ? { reason: `state did not advance for ${wedge.unitType} ${wedge.unitId}` } : {}),
+      };
     }
 
     if (wedge.guardId === "orphaned-active-unit") {
@@ -1002,7 +1020,10 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
         const stateSnapshot = await deriveState(this.getLiveDispatchBasePath());
         // Dispatch selection can update session bookkeeping. Re-evaluate with a
         // shadow so acknowledging a wedge remains a read-only operation.
-        const shadowSession = { ...this.s } as AutoSession;
+        const shadowSession = {
+          ...this.s,
+          missingTaskPlanRetryCount: new Map(this.s.missingTaskPlanRetryCount),
+        } as AutoSession;
         const decision = await decideOrchestratorDispatch(
           this.ctx,
           this.pi,
@@ -1807,13 +1828,6 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
       }
     }
 
-    if (scopeId) {
-      const gcResult = await garbageCollectResolvedWedges(scopeId, (wedge) => this.recheckWedge(wedge));
-      if (!gcResult.ok) {
-        this.pendingBackstopFailure = gcResult.error;
-      }
-    }
-
     this.status.activeUnit = undefined;
     this.lastFinalizedUnitKey = unitKey;
     this.bumpTransition();
@@ -1877,15 +1891,6 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
     // later units from the idle watchdog and hard timeout.
     abortActiveUnitTurn(this.ctx);
     clearInFlightTools();
-    const scopeId = this.backstopScopeId();
-    if (scopeId) {
-      try {
-        clearAbandonedCloseoutSignatures(scopeId, unit.unitType, unit.unitId);
-      } catch (err) {
-        // Best-effort: the abandon must still clear the active unit below.
-        logWarning("engine", `abandoned closeout signatures not cleared: ${getErrorMessage(err)}`);
-      }
-    }
     this.status.activeUnit = undefined;
     this.pendingTargetSnapshot = null;
     this.bumpTransition();
@@ -1966,7 +1971,7 @@ export function _setProjectionRebuildFnForTests(
 
 /** @internal Test-only override for projection observation failures. */
 export function _setPreserveProjectionChangesFnForTests(
-  fn: typeof preserveProjectionChangesBeforeDispatch | null,
+  fn: typeof preserveProjectionChanges | null,
 ): () => void {
   _preserveProjectionChangesFn = fn;
   return () => { _preserveProjectionChangesFn = null; };

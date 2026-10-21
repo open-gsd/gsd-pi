@@ -1,5 +1,6 @@
 # Packaging & Distribution
 
+
 ### Creating a Pi Package
 
 Add a `pi` manifest to `package.json`:
@@ -53,7 +54,6 @@ pi -e npm:@foo/bar
 ### Convention Directories (no manifest needed)
 
 If no `pi` manifest exists, pi auto-discovers:
-
 - `extensions/` → `.ts` and `.js` files
 - `skills/` → `SKILL.md` folders
 - `prompts/` → `.md` files

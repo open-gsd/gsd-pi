@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Collapsible GSD auto-mode status widget above the editor (Grok-style minimal chrome).
 
-import { alignRight, type Component, padRight, truncateToWidth, visibleWidth } from "@gsd/pi-tui";
+import { alignRight, type Component, padRight, truncateToWidth } from "@gsd/pi-tui";
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import type { AdaptiveLayoutState } from "./adaptive-layout.js";
 import type { GsdProgressState } from "./gsd-progress-state.js";
@@ -85,39 +85,10 @@ function buildTaskProgressSegments(progress: GsdProgressState): string[] {
 	return segments;
 }
 
-/** Compact tier initials for constrained widths (#2395): light/standard/heavy → L/S/H. */
-const COMPACT_TIER_INITIALS: Record<NonNullable<GsdProgressState["dynamicRoutingTier"]>, string> = {
-	light: "L",
-	standard: "S",
-	heavy: "H",
-};
-
-/**
- * Model segment for the head-right, annotated with the dynamic-routing tier
- * to match the historical attribution label `(dynamic/<tier>)` (#2208, #2395).
- * `tierStyle` degrades atomically at constrained widths — full annotation,
- * compact `(dyn/<initial>)`, then none — so the label is either complete or
- * absent, never cut in half by the trailing truncation.
- */
-function modelSegment(
-	progress: GsdProgressState,
-	tierStyle: "full" | "compact" | "none",
-): string | undefined {
-	if (!progress.model) return undefined;
-	const tier = progress.dynamicRoutingTier;
-	if (!tier || tierStyle === "none") return progress.model;
-	return tierStyle === "compact"
-		? `${progress.model} (dyn/${COMPACT_TIER_INITIALS[tier]})`
-		: `${progress.model} (dynamic/${tier})`;
-}
-
-function renderProgressHeadRight(
-	progress: GsdProgressState,
-	tierStyle: "full" | "compact" | "none" = "full",
-): string {
+function renderProgressHeadRight(progress: GsdProgressState): string {
 	const sep = theme.fg("dim", " · ");
 	const progressSegments = buildTaskProgressSegments(progress);
-	const dimParts = [modelSegment(progress, tierStyle), progress.elapsed, progress.eta].filter(
+	const dimParts = [progress.model, progress.elapsed, progress.eta].filter(
 		(part): part is string => Boolean(part),
 	);
 
@@ -155,19 +126,7 @@ function renderProgressDrivenStrip(state: GsdStatusWidgetState, width: number): 
 	]
 		.filter(Boolean)
 		.join(" ");
-	// Degrade the tier annotation atomically: full form, then compact
-	// `(dyn/<initial>)`, then none — never a half-cut label from the trailing
-	// truncation (#2395).
-	const budget = width - 1;
-	const fullHeadRight = renderProgressHeadRight(progress, "full");
-	let headRight = fullHeadRight;
-	if (visibleWidth(headLeft) + visibleWidth(fullHeadRight) > budget) {
-		const compactHeadRight = renderProgressHeadRight(progress, "compact");
-		headRight =
-			visibleWidth(headLeft) + visibleWidth(compactHeadRight) <= budget
-				? compactHeadRight
-				: renderProgressHeadRight(progress, "none");
-	}
+	const headRight = renderProgressHeadRight(progress);
 	const headLine = padLine(alignRight(headLeft, headRight, width), width);
 
 	if (!expanded) {
@@ -180,14 +139,8 @@ function renderProgressDrivenStrip(state: GsdStatusWidgetState, width: number): 
 	// "full" mode (or unspecified): full detail with health summary, task progress, and workflow line.
 	const isSmall = progress.widgetMode === "small";
 
-	// Render the row even without a summary (#2333): a health-signal flip must not
-	// change the widget height, or the bottom-anchored viewport jumps.
-	if (!isSmall) {
-		lines.push(
-			progress.healthSummary
-				? padLine(theme.fg("dim", truncateToWidth(progress.healthSummary, width, "…")), width)
-				: padLine("", width),
-		);
+	if (!isSmall && progress.healthSummary) {
+		lines.push(padLine(theme.fg("dim", truncateToWidth(progress.healthSummary, width, "…")), width));
 	}
 
 	if (!isSmall) {

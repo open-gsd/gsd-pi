@@ -1,6 +1,3 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-
 import type { ExtensionContext } from "@gsd/pi-coding-agent";
 
 import {
@@ -8,6 +5,7 @@ import {
   ensureProjectWorkflowMcpConfig,
 } from "./mcp-project-config.js";
 import { warmWorkflowMcpProbeInBackground } from "./workflow-mcp-readiness-cache.js";
+import { usesWorkflowMcpTransport } from "./workflow-mcp.js";
 
 interface WorkflowMcpAutoPrepContext {
   model?: { provider?: string; baseUrl?: string };
@@ -23,31 +21,66 @@ interface WorkflowMcpAutoPrepModel {
   baseUrl?: string;
 }
 
-// Provider is irrelevant here: project .mcp.json is also useful for direct
-// `claude` CLI usage. The .gsd directory gate below avoids dirtying non-GSD repos.
-export function shouldAutoPrepareWorkflowMcp(_ctx: WorkflowMcpAutoPrepContext): boolean {
-  return true;
+function withModelOverride(
+  ctx: WorkflowMcpAutoPrepContext,
+  modelOverride: WorkflowMcpAutoPrepModel | null | undefined,
+): WorkflowMcpAutoPrepContext {
+  if (!modelOverride) return ctx;
+
+  const provider = modelOverride.provider ?? ctx.model?.provider;
+  return {
+    model: {
+      provider,
+      baseUrl: modelOverride.baseUrl
+        ?? (provider === ctx.model?.provider ? ctx.model?.baseUrl : undefined),
+    },
+    modelRegistry: ctx.modelRegistry,
+    ui: ctx.ui,
+  };
+}
+
+function getAuthModeSafe(
+  ctx: WorkflowMcpAutoPrepContext,
+  provider: string | undefined,
+): string | undefined {
+  if (!provider) return undefined;
+  const getAuthMode = ctx.modelRegistry?.getProviderAuthMode;
+  if (typeof getAuthMode !== "function") return undefined;
+  try {
+    return getAuthMode(provider);
+  } catch {
+    return undefined;
+  }
+}
+
+export function shouldAutoPrepareWorkflowMcp(ctx: WorkflowMcpAutoPrepContext): boolean {
+  const provider = ctx.model?.provider;
+  const baseUrl = ctx.model?.baseUrl;
+  const authMode = getAuthModeSafe(ctx, provider);
+
+  if (provider !== "claude-code") return false;
+  if (authMode === undefined) return true;
+  return usesWorkflowMcpTransport(authMode as any, baseUrl) || authMode === "externalCli";
 }
 
 export function prepareWorkflowMcpForProject(
   ctx: WorkflowMcpAutoPrepContext,
   projectRoot: string,
-  _modelOverride?: WorkflowMcpAutoPrepModel | null,
+  modelOverride?: WorkflowMcpAutoPrepModel | null,
 ): EnsureProjectWorkflowMcpConfigResult | null {
-  if (!shouldAutoPrepareWorkflowMcp(ctx)) return null;
-
-  if (!existsSync(join(projectRoot, ".gsd"))) return null;
+  const prepCtx = withModelOverride(ctx, modelOverride);
+  if (!shouldAutoPrepareWorkflowMcp(prepCtx)) return null;
 
   try {
     const result = ensureProjectWorkflowMcpConfig(projectRoot);
     if (result.status !== "unchanged") {
-      ctx.ui?.notify?.(`GSD MCP Server Prepared at ${result.configPath}`, "info");
+      prepCtx.ui?.notify?.(`GSD MCP Server Prepared at ${result.configPath}`, "info");
     }
     warmWorkflowMcpProbeInBackground(projectRoot);
     return result;
   } catch (err) {
-    ctx.ui?.notify?.(
-      `Claude Code MCP prep failed: ${err instanceof Error ? err.message : String(err)}. Please run /gsd mcp init . from your project root.`,
+    prepCtx.ui?.notify?.(
+      `Claude Code MCP prep failed: ${err instanceof Error ? err.message : String(err)}. Detected Claude Code model but no workflow MCP. Please run /gsd mcp init . from your project root.`,
       "warning",
     );
     return null;

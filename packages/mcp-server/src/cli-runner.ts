@@ -15,7 +15,6 @@ import {
   registerMcpInstance,
   sweepProjectOrphanMcpServers,
   unregisterMcpInstance,
-  type McpInstanceRefusal,
 } from './pid-registry.js';
 import { createActivityTrackingInput, type ActivityTrackingInput } from './stdio-watchdog.js';
 
@@ -100,13 +99,13 @@ export interface RunMcpServerCliOptions {
   env?: NodeJS.ProcessEnv;
   exit?: (code: number) => never;
   loadStoredCredentialEnvKeys?: () => void;
-  registerMcpInstance?: (projectDir: string) => boolean | McpInstanceRefusal | void;
+  registerMcpInstance?: (projectDir: string) => boolean | void;
   sweepProjectOrphanMcpServers?: (projectDir: string) => void;
   unregisterMcpInstance?: (projectDir: string) => void;
   createSessionManager?: () => SessionManagerLike;
   createMcpServer?: (
     sessionManager: SessionManagerLike,
-    options: { includeWorkflowTools: boolean; clientManaged: boolean },
+    options: { includeWorkflowTools: boolean },
   ) => Promise<{ server: McpServerLike }>;
   importStdioServerTransport?: () => Promise<{ StdioServerTransport: StdioTransportConstructor }>;
   warmWorkflowToolBridges?: () => Promise<unknown> | unknown;
@@ -226,7 +225,7 @@ export async function runMcpServerCli(options: RunMcpServerCliOptions = {}): Pro
   const unregisterInstance = options.unregisterMcpInstance ?? unregisterMcpInstance;
   const createSessionManager = options.createSessionManager ?? (() => new SessionManager());
   const createServer = options.createMcpServer ?? (
-    async (manager: SessionManagerLike, serverOptions: { includeWorkflowTools: boolean; clientManaged: boolean }) =>
+    async (manager: SessionManagerLike, serverOptions: { includeWorkflowTools: boolean }) =>
       createMcpServer(manager as SessionManager, serverOptions)
   );
   const importTransport = options.importStdioServerTransport ?? importDefaultStdioServerTransport;
@@ -315,20 +314,14 @@ export async function runMcpServerCli(options: RunMcpServerCliOptions = {}): Pro
 
     if (!probeSession && !pumpScopedObservationSession && !clientManagedSession) {
       sweepOrphans(projectDir);
-      const registration = registerInstance(projectDir);
-      if (registration === false || (typeof registration === 'object' && registration.refused)) {
-        const detail = typeof registration === 'object' && registration.refused
-          ? registration.detail
-          : '';
-        throw new Error(
-          `refusing to start: existing MCP server PID could not be verified${detail ? ` (${detail})` : ''}`,
-        );
+      if (registerInstance(projectDir) === false) {
+        throw new Error('refusing to start: existing MCP server PID could not be verified');
       }
       registered = true;
     }
 
     sessionManager = createSessionManager();
-    ({ server } = await createServer(sessionManager, { includeWorkflowTools, clientManaged: clientManagedSession }));
+    ({ server } = await createServer(sessionManager, { includeWorkflowTools }));
 
     const { StdioServerTransport } = await importTransport();
     trackedStdin = createActivityTrackingInput(stdin, () => {

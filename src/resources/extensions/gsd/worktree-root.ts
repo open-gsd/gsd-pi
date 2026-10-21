@@ -160,17 +160,7 @@ function resolveProjectRootFromPath(path: string): string {
   const normalizedPath = path.replaceAll("\\", "/");
   const segment = findWorktreeSegment(normalizedPath);
   if (!segment) {
-    // Walk up to an ancestor `.gsd` only inside one git working tree — the same
-    // rule as probeGsdRoot in paths.ts. A folder in no git repository is its own
-    // project root: without a git boundary the walk adopts an unrelated
-    // ancestor project, and init then runs `git init` and writes setup files
-    // in a folder the user never opened.
-    const gitRoot = resolveGitWorkingTreeRoot(path);
-    if (!gitRoot) return path;
-    const nearest = resolveNearestBootstrappedGsdRoot(path);
-    if (nearest) return nearest;
-    const externalStateParent = normalizeWorktreePathForCompare(resolve(gsdHome(), ".."));
-    return normalizeWorktreePathForCompare(gitRoot) === externalStateParent ? path : gitRoot;
+    return resolveNearestBootstrappedGsdRoot(path) ?? resolveGitWorkingTreeRoot(path) ?? path;
   }
 
   // Slice at the first `.gsd` boundary, but never past the worktree segment:
@@ -218,13 +208,11 @@ function resolveNearestBootstrappedGsdRoot(path: string): string | null {
   return null;
 }
 
-// The project root (and so the DB path) is anchored on the database and the
-// user's preferences, never on projection files such as milestones/.
 function hasGsdBootstrapArtifacts(gsdPath: string): boolean {
   return existsSync(gsdPath) &&
-    (existsSync(join(gsdPath, "gsd.db")) ||
-      existsSync(join(gsdPath, "PREFERENCES.md")) ||
-      existsSync(join(gsdPath, "preferences.md")));
+    (existsSync(join(gsdPath, "PREFERENCES.md")) ||
+      existsSync(join(gsdPath, "preferences.md")) ||
+      existsSync(join(gsdPath, "milestones")));
 }
 
 function resolveGitWorkingTreeRoot(path: string): string | null {
@@ -235,9 +223,9 @@ function resolveGitWorkingTreeRoot(path: string): string | null {
     const externalStateParent = normalizeWorktreePathForCompare(resolve(gsdHome(), ".."));
 
     for (let i = 0; i < 30; i++) {
+      if (normalizeWorktreePathForCompare(dir) === externalStateParent) return null;
       const gitPath = join(dir, ".git");
       if (existsSync(gitPath)) return dir;
-      if (normalizeWorktreePathForCompare(dir) === externalStateParent) return null;
 
       const parent = resolve(dir, "..");
       if (parent === dir) break;

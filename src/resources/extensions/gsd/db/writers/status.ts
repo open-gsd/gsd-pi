@@ -5,15 +5,14 @@
 // row-level status policy lands.
 // The update*Status faces in gsd-db.ts delegate here.
 //
-// One ADR-030 responsibility remains deferred for safety:
-//   - Write-normalization via toStatus(): tests assert raw "done"/"in-progress"
+// Two ADR-030 responsibilities remain deferred for safety:
+//   - Write-normalization via toStatus(): workflow-reconcile replays journal
+//     events that write raw "done"/"in-progress" and tests assert those exact
 //     stored values, so converging on write is a separate, behavior-sensitive
-//     change.
-//
-// The writer only updates adopted rows: a hierarchy row without a canonical
-// lifecycle row is refused with a loud adoption error, so the pre-adoption
-// compatibility write path is gone. Migration and adoption flows write
-// pre-adoption rows through Domain Operations instead.
+//     change (migrate replay/import to canonical first).
+//   - Generalizing the closed→open guard to unadopted slices: legitimate reopen
+//     callers still use the generic face. Adopted slices are fenced below, but
+//     changing unadopted compatibility behavior remains separate work.
 import type { DomainOperationContext } from "../domain-operation.js";
 import { getDbOrNull, immediateTransaction } from "../engine.js";
 import { compareLifecycleShadow } from "../lifecycle-shadow-comparison.js";
@@ -116,28 +115,18 @@ function isAligned(legacyStatus: string, canonicalStatus: string): boolean {
   return comparison.kind === "match" || comparison.kind === "semantic_match_exact_delta";
 }
 
-function requireCanonicalLifecycleRow(t: StatusTransition, row: StatusRow): string {
-  if (!row.canonicalStatus) {
-    throw new Error(
-      `${entityLabel(t)} has no canonical lifecycle row; the generic status writer only updates ` +
-      "adopted rows. Adopt the project with /gsd db adopt, then retry.",
-    );
-  }
-  return row.canonicalStatus;
-}
-
-function requireGenericAdoptedWriteIsAligned(t: StatusTransition, row: StatusRow, canonicalStatus: string): void {
-  if (!row.status) return;
-  if (!isAligned(row.status, canonicalStatus)) {
+function requireGenericAdoptedWriteIsAligned(t: StatusTransition, row: StatusRow): void {
+  if (!row.status || !row.canonicalStatus) return;
+  if (!isAligned(row.status, row.canonicalStatus)) {
     throw new Error(
       `Cannot update adopted ${entityLabel(t)} while canonical and legacy status mismatch ` +
-      `(canonical=${canonicalStatus}, legacy=${row.status}).`,
+      `(canonical=${row.canonicalStatus}, legacy=${row.status}).`,
     );
   }
-  if (!isAligned(t.status, canonicalStatus)) {
+  if (!isAligned(t.status, row.canonicalStatus)) {
     throw new Error(
       `Cannot change adopted ${entityLabel(t)} legacy status to ${t.status}; ` +
-      `canonical lifecycle is ${canonicalStatus}. Use the canonical lifecycle operation.`,
+      `canonical lifecycle is ${row.canonicalStatus}. Use the canonical lifecycle operation.`,
     );
   }
 }
@@ -147,7 +136,23 @@ interface CompletionWrite {
   preserveExisting: boolean;
 }
 
-function genericCompletionWrite(row: StatusRow): CompletionWrite {
+function genericCompletionWrite(t: StatusTransition, row: StatusRow): CompletionWrite {
+  if (!row.canonicalStatus) {
+    return {
+      completedAt: t.completedAt ?? null,
+      preserveExisting: t.preserveCompletion ?? false,
+    };
+  }
+  if (
+    (row.canonicalStatus === "completed" || row.canonicalStatus === "cancelled") &&
+    row.status !== null &&
+    isClosedStatus(row.status) &&
+    isClosedStatus(t.status) &&
+    row.completedAt === null &&
+    t.completedAt != null
+  ) {
+    return { completedAt: t.completedAt, preserveExisting: false };
+  }
   return {
     completedAt: null,
     preserveExisting: row.completedAt !== null,
@@ -201,15 +206,14 @@ function writeStatusTransition(
  * writes — the update*Status faces delegate here so the guard and (future)
  * normalization/journal/cache policy live in one place rather than per face.
  *
- * The writer refuses any hierarchy row without a canonical lifecycle row and
- * any closed→open transition; callers must adopt the project and use the
- * corresponding semantic reopen operation respectively.
+ * Closed→open guard: generic updates may close or advance Tasks and milestones,
+ * but may not reopen closed rows; callers must use the corresponding semantic
+ * reopen operation. Slices are not yet guarded — see the file header.
  */
 function applyStatusTransitionLocked(t: StatusTransition): void {
   const row = readStatusRow(t);
-  const canonicalStatus = requireCanonicalLifecycleRow(t, row);
-  requireGenericAdoptedWriteIsAligned(t, row, canonicalStatus);
-  const completion = genericCompletionWrite(row);
+  requireGenericAdoptedWriteIsAligned(t, row);
+  const completion = genericCompletionWrite(t, row);
 
   switch (t.entity) {
     case "task": {
@@ -223,16 +227,9 @@ function applyStatusTransitionLocked(t: StatusTransition): void {
       return;
     }
 
-    case "slice": {
-      const currentStatus = row.status;
-      if (currentStatus && isClosedStatus(currentStatus) && !isClosedStatus(t.status)) {
-        throw new Error(
-          `Cannot update closed slice ${t.sliceId} from ${currentStatus} to ${t.status}; use gsd_slice_reopen for an explicit reopen.`,
-        );
-      }
+    case "slice":
       writeStatusTransition(t, completion);
       return;
-    }
 
     case "milestone": {
       const currentStatus = row.status;

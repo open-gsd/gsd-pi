@@ -40,9 +40,7 @@ blocker_discovered: false
 ## Verification Evidence
 
 <!-- Populated from verification gate output. If the gate ran, fill in the table below.
-     If no gate ran (e.g., no verification commands discovered), note that.
-     List rows in the order they ran. When a command is re-run after a fix, repeat the
-     same command text so its latest row is the one that counts. -->
+     If no gate ran (e.g., no verification commands discovered), note that. -->
 
 | # | Command | Exit Code | Verdict | Duration |
 |---|---------|-----------|---------|----------|

@@ -2,7 +2,7 @@
 
 import { useMemo } from "react"
 import dynamic from "next/dynamic"
-import { useEmbeddedTheme, useTheme } from "@/components/theme-provider"
+import { useTheme } from "next-themes"
 import { Loader2 } from "lucide-react"
 import { createTheme } from "@uiw/codemirror-themes"
 import { tags as t } from "@lezer/highlight"
@@ -171,25 +171,7 @@ export function CodeEditor({
   className,
 }: CodeEditorProps) {
   const { resolvedTheme } = useTheme()
-  const hostTheme = useEmbeddedTheme()
-  const theme = useMemo(() => {
-    if (!hostTheme) return resolvedTheme !== "light" ? darkTheme : lightTheme
-    // CodeMirror owns its surface styles independently of the page tokens.
-    return createTheme({
-      theme: hostTheme.mode,
-      settings: {
-        background: "var(--background)",
-        foreground: "var(--foreground)",
-        caret: "var(--foreground)",
-        selection: "var(--accent)",
-        lineHighlight: "var(--muted)",
-        gutterBackground: "var(--background)",
-        gutterForeground: "var(--code-line-number)",
-        gutterBorder: "transparent",
-      },
-      styles: hostTheme.mode === "light" ? lightStyles : darkStyles,
-    })
-  }, [hostTheme, resolvedTheme])
+  const theme = resolvedTheme !== "light" ? darkTheme : lightTheme
 
   // Resolve and cache language extension
   const langExtension = useMemo(() => {

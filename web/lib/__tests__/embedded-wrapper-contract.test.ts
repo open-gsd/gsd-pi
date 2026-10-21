@@ -8,7 +8,6 @@ import {
 } from "../embedded-gate.ts"
 import { authFetch } from "../auth.ts"
 import { buildProjectPath } from "../project-url.ts"
-import { getEmbeddedTheme, subscribeEmbeddedTheme } from "../embedded-theme.ts"
 import {
   createGsdEmbedPlugin,
   EMBED_ALLOWED_OPERATIONS,
@@ -37,24 +36,6 @@ function mountContract(basePath = "") {
   const waiting = new Map<string, (call: Call) => void>()
   let directFetches = 0
   let subscriptionNumber = 0
-  const themeRoot = { dataset: { themeMode: "dark" } }
-  let themeVariables: Record<string, string> = { "--bg": "#112233", "--text": "#eef4ff", "--primary": "#ee6633" }
-  let themeChanged = () => {}
-  let observingTheme = false
-  const themeDocument = {
-    documentElement: themeRoot,
-    defaultView: {
-      getComputedStyle: () => ({ getPropertyValue: (name: string) => themeVariables[name] ?? "" }),
-      MutationObserver: class {
-        constructor(callback: () => void) { themeChanged = callback }
-        observe(_root: unknown, options: { attributeFilter: string[] }) {
-          assert.deepEqual(options.attributeFilter, ["data-theme", "data-theme-mode", "style"])
-          observingTheme = true
-        }
-        disconnect() { observingTheme = false }
-      },
-    },
-  }
   const postToParent = (data: unknown) => queueMicrotask(() => {
     for (const listener of [...parentListeners]) listener({ data, source: child, origin: "null", ports: [] })
   })
@@ -104,15 +85,10 @@ function mountContract(basePath = "") {
     registerNavigation() {},
   } } as unknown as EmbedHost)
   const abort = new AbortController()
-  const mount = page.mount({ ownerDocument: { ...themeDocument, createElement: () => iframe }, appendChild() {} } as unknown as HTMLElement,
+  const mount = page.mount({ ownerDocument: { createElement: () => iframe }, appendChild() {} } as unknown as HTMLElement,
     { signal: abort.signal } as Parameters<typeof page.mount>[1])
   return {
     calls, binds, readyMessages,
-    changeTheme(mode: string, variables: Record<string, string>) {
-      themeRoot.dataset.themeMode = mode
-      themeVariables = variables
-      if (observingTheme) themeChanged()
-    },
     start: () => embeddedStartup(),
     fireLoad: () => { for (const listener of loadListeners) listener() },
     duplicateReady: () => postToParent(readyMessages.at(-1)),
@@ -133,7 +109,6 @@ function mountContract(basePath = "") {
       assert.equal(parentListeners.size, 0)
       assert.equal(childListeners.size, 0)
       assert.equal(directFetches, 0)
-      assert.equal(observingTheme, false)
     },
   }
 }
@@ -169,29 +144,6 @@ test("every production operation has a contract case and is admitted by the real
   ])
   assert.deepEqual([...exercised].sort(), [...EMBEDDED_ALLOWED_OPERATIONS].sort())
   assert.deepEqual([...EMBED_ALLOWED_OPERATIONS].sort(), [...EMBEDDED_ALLOWED_OPERATIONS].sort())
-})
-
-test("native resolved palette binds initially, updates live in either mode, and resets without RPC", { timeout: 5000 }, async () => {
-  const h = mountContract()
-  try {
-    assert.equal(await h.start(), "embedded-ready")
-    assert.equal(getEmbeddedTheme()?.mode, "dark")
-    assert.equal(getEmbeddedTheme()?.variables["--background"], "#112233")
-    assert.equal(getEmbeddedTheme()?.variables["--primary"], "#ee6633")
-    for (const mode of ["light", "light", "dark"]) {
-      const updated = new Promise<void>((resolve) => {
-        const unsubscribe = subscribeEmbeddedTheme(() => { unsubscribe(); resolve() })
-      })
-      const color = mode === "dark" ? "#102030" : getEmbeddedTheme()?.variables["--background"] === "#fafafa" ? "#eeeedd" : "#fafafa"
-      h.changeTheme(mode, { "--bg": color, "--text": "#304050", "--primary": "#993355" })
-      await updated
-      assert.equal(getEmbeddedTheme()?.mode, mode)
-      assert.equal(getEmbeddedTheme()?.variables["--background"], color)
-      assert.equal(getEmbeddedTheme()?.variables["--primary"], "#993355")
-    }
-    assert.deepEqual(h.calls, [], "presentation must not read or write server preferences")
-  } finally { h.dispose() }
-  assert.equal(getEmbeddedTheme(), undefined)
 })
 
 for (const basePath of ["", "/plugins/open-gsd-openclaw/web"]) {

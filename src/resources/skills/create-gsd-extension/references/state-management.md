@@ -59,7 +59,6 @@ pi.on("session_start", async (_event, ctx) => {
   }
 });
 ```
-
 </append_entry>
 
 <when_to_use_which>

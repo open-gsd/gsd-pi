@@ -54,8 +54,6 @@ export interface McpToolDef {
 // `any` and skips static checking.
 const MCP_PKG = '@modelcontextprotocol/sdk'
 
-import { randomUUID } from 'node:crypto'
-
 import { sanitizeSchemaForMoonshot } from '@gsd/pi-ai'
 
 export function mcpSdkSpecifier(subpath: 'server/index' | 'server/stdio' | 'types'): string {
@@ -79,8 +77,6 @@ export function mcpSdkSpecifier(subpath: 'server/index' | 'server/stdio' | 'type
 export async function startMcpServer(options: {
   tools: McpToolDef[]
   version?: string
-  /** MCP transport to serve on. Default: stdin/stdout. */
-  transport?: unknown
 }): Promise<void> {
   const { tools, version = '0.0.0' } = options
 
@@ -132,10 +128,8 @@ export async function startMcpServer(options: {
     const signal: AbortSignal | undefined = extra?.signal
 
     try {
-      // Workflow tools use this id as a permanent idempotency key, so it must
-      // be unique for each call. A timestamp repeats for parallel calls.
       const result = await tool.execute(
-        `mcp-${randomUUID()}`,
+        `mcp-${Date.now()}`,
         args ?? {},
         signal,
         undefined, // onUpdate not yet wired — progress notifications require a progressToken round-trip
@@ -183,8 +177,8 @@ export async function startMcpServer(options: {
     }
   })
 
-  // Connect to the given transport, or to stdin/stdout by default
-  const transport = options.transport ?? new StdioServerTransport()
+  // Connect to stdin/stdout transport
+  const transport = new StdioServerTransport()
   await server.connect(transport)
   process.stderr.write(`[gsd] MCP server started (v${version})\n`)
 }

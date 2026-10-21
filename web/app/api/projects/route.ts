@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
-import { discoverProjects, inspectProject } from "../../../../src/web/project-discovery-service.ts";
+import { discoverProjects } from "../../../../src/web/project-discovery-service.ts";
 import { detectProjectKind } from "../../../../src/web/bridge-service.ts";
 
 export const runtime = "nodejs";
@@ -28,9 +28,7 @@ export async function GET(request: Request): Promise<Response> {
 
   const detail = url.searchParams.get("detail") === "true";
 
-  const exact = url.searchParams.get("exact") === "true";
-  const selected = exact ? inspectProject(expandTilde(root), detail) : null;
-  const projects = exact ? (selected ? [selected] : []) : discoverProjects(expandTilde(root), detail);
+  const projects = discoverProjects(expandTilde(root), detail);
   return Response.json(projects, {
     headers: {
       "Cache-Control": "no-store",

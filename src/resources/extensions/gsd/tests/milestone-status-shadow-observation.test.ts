@@ -225,17 +225,15 @@ test("a shadow-query failure preserves the milestone response and persists expli
   assert.match((payloads[0] as any).observationLossAccounting.errorHash, /^sha256:[0-9a-f]{64}$/u);
 });
 
-// The Authority Epoch chooses the read source of the status response. A read
-// that cannot learn the epoch must not answer from either source.
-test("an Authority Epoch query failure fails the status read closed and is loss-accounted", async () => {
+test("an authority-revision query failure is response-neutral and loss-accounted", async () => {
   const basePath = makeFixture();
   const db = _getAdapter()!;
   db.exec("ALTER TABLE project_authority RENAME TO unavailable_project_authority");
 
   const result = await executeMilestoneStatus({ milestoneId: "M001" }, basePath);
 
-  assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /^Error querying milestone status: .*project_authority/);
+  assert.equal(JSON.parse(result.content[0].text).milestoneId, "M001");
+  assert.equal(result.isError, undefined);
   const payloads = auditPayloads();
   assert.equal(payloads.length, 1);
   assert.equal((payloads[0] as any).reason, "shadow_query_failed");

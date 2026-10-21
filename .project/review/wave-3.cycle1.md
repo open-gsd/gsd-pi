@@ -70,7 +70,6 @@ see.
   as `return null` → sequential dispatch. Degrades conservatively; no verify-pass.
 
 Warnings (non-blocking):
-
 - `doctor.ts:148-153` and `doctor-state-checks.ts:194-210, 338-348` now read
   `getMilestoneSlices`/`getSliceTasks` unconditionally. With the DB unavailable
   these return `[]`, so doctor's slice/plan health checks silently produce no
@@ -119,7 +118,6 @@ Warnings (non-blocking):
 - ✅ AC4 `baseline:refactor:phase0` green (140/140).
 
 Warnings (non-blocking):
-
 - `checkNeedsReassessment` (`auto-prompts.ts:1632-1654`) now returns `null` on a
   DB-unavailable project instead of falling back to roadmap checkboxes — i.e. the
   reassess-roadmap unit is silently never dispatched. Conservative direction
@@ -252,7 +250,6 @@ Warnings (non-blocking):
   untouched (restore runs under `withDatabaseMaintenanceClaim`).
 
 Warnings (non-blocking):
-
 - Step 4 made `handleCleanupBranches`'s stale-milestone check DB-only: branches with
   no DB milestone row (or no DB) are now *skipped*. Conservative for a destructive
   cleanup, so not a silent pass — but it means cleanup silently does nothing on a
@@ -276,7 +273,6 @@ Warnings (non-blocking):
   the assertions are behavioural, not tautological.
 
 Warnings (non-blocking — none defeat a written criterion, all three deserve a human):
-
 - **The proof's green will be a rename artifact.** It matches the module specifier
   `parsers-legacy`, and wave 3 migrated consumers by rewriting
   `from './parsers-legacy.js'` → `from './schemas/parsers.js'` for *byte-identical*
@@ -321,7 +317,6 @@ Warnings (non-blocking — none defeat a written criterion, all three deserve a 
 - ✅ AC3 `BANNED_DECISION_PATHS` byte-unchanged (15 entries).
 
 Warnings (non-blocking):
-
 - Inherits the specifier-vs-symbol gap described under T015: the registry now reads
   "one importer left" while seven modules import the same functions from
   `schemas/parsers.js`.
@@ -352,7 +347,6 @@ publish/fixture scope. If a contributor-facing local-verification section is wan
 that is a new doc request, not a T017 regression.
 
 Warnings (non-blocking):
-
 - The `ci.yml` "Gating Tests" list (`:142-146`) no longer mentions that `ci.yml`
   itself runs `pnpm run test:smoke` (`ci.yml:431-440`); the smoke bullet moved into
   the `npm-publish.yml` list at `:152`. Not a false statement, an incomplete list.
@@ -377,7 +371,6 @@ Warnings (non-blocking):
   notes do not overstate.
 
 Warnings (non-blocking):
-
 - Markdown rendering defect in all five files: the `> Implementation note …` line is
   immediately followed by `**Date:**` with no blank line (`ADR-004:5→6`, `-009:5→6`,
   `-011:5→6`, `-013:14→15`, `-036:5→6`). CommonMark lazy continuation pulls the whole
@@ -420,7 +413,6 @@ Warnings (non-blocking):
   (11 call sites across 10 distinct exported functions).
 
 Warnings (non-blocking):
-
 - §3.4 (`projection-contract:126-131`) lists only STATE.md, DECISIONS.md and
   `.planning/` as unstamped. Several projections have a *second, unstamped writer*:
   `workflow-projections.ts:116` (legacy-layout slice PLAN), `:172` (legacy-layout

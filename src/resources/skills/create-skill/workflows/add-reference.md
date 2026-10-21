@@ -2,7 +2,6 @@
 
 <required_reading>
 **Read these reference files NOW:**
-
 1. references/recommended-structure.md
 2. references/skill-structure.md
 </required_reading>
@@ -29,7 +28,6 @@ ls {skill-path}/references/ 2>/dev/null
 ```
 
 Determine:
-
 - **Has references/ folder?** → Good, can add directly
 - **Simple skill?** → May need to create references/ first
 - **What references exist?** → Understand the knowledge landscape
@@ -39,7 +37,6 @@ Report current references to user.
 ## Step 3: Gather Reference Requirements
 
 Ask:
-
 - What knowledge should this reference contain?
 - Which workflows will use it?
 - Is this reusable across workflows or specific to one?
@@ -51,7 +48,6 @@ Ask:
 Create `references/{reference-name}.md`:
 
 Use semantic XML tags to structure the content:
-
 ```xml
 <overview>
 Brief description of what this reference covers
@@ -76,7 +72,6 @@ Brief description of what this reference covers
 ## Step 5: Update SKILL.md
 
 Add the new reference to `<reference_index>`:
-
 ```markdown
 **Category:** existing.md, new-reference.md
 ```
@@ -99,7 +94,6 @@ For each workflow that should use this reference:
 
 <success_criteria>
 Reference addition is complete when:
-
 - [ ] Reference file created with useful content
 - [ ] Added to reference_index in SKILL.md
 - [ ] Relevant workflows updated to read it

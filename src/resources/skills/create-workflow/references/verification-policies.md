@@ -13,7 +13,6 @@ verify:
 ```
 
 Fields:
-
 - `policy`: `"content-heuristic"` (required)
 - `minSize`: number (optional) — minimum artifact size in bytes
 - `pattern`: string (optional) — text pattern to match in the artifact content
@@ -31,7 +30,6 @@ verify:
 ```
 
 Fields:
-
 - `policy`: `"shell-command"` (required)
 - `command`: string (required, non-empty) — shell command to execute
 
@@ -48,7 +46,6 @@ verify:
 ```
 
 Fields:
-
 - `policy`: `"prompt-verify"` (required)
 - `prompt`: string (required, non-empty) — the verification prompt sent to the LLM
 
@@ -64,7 +61,6 @@ verify:
 ```
 
 Fields:
-
 - `policy`: `"human-review"` (required)
 - No additional fields.
 
@@ -73,7 +69,6 @@ Use when: The step produces work that requires human judgment — design decisio
 **Validation Details:**
 
 The engine validates the `verify` object at definition-load time:
-
 - `policy` must be one of the four strings above. Any other value is rejected.
 - `shell-command` requires a non-empty `command` field. Missing or empty `command` is rejected.
 - `prompt-verify` requires a non-empty `prompt` field. Missing or empty `prompt` is rejected.

@@ -56,7 +56,7 @@ import {
   shouldBlockContextWrite,
   shouldBlockPendingGateInSnapshot,
   shouldBlockQueueExecutionInSnapshot,
-  clearDiscussionFlowState,
+  resetWriteGateState,
   type WriteGateSnapshot,
 } from "../bootstrap/write-gate.ts";
 import { BLOCKED_WRITE_ERROR } from "../write-intercept.ts";
@@ -166,7 +166,7 @@ describe("#2883: isToolInvocationError classification", () => {
   });
 
   test("detects raw write-gate CONTEXT failures for non-GSD write tools", () => {
-    clearDiscussionFlowState(process.cwd());
+    resetWriteGateState(process.cwd());
     const result = shouldBlockContextWrite(
       "write",
       "/tmp/project/.gsd/milestones/M001/M001-CONTEXT.md",

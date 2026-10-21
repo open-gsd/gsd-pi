@@ -1,5 +1,6 @@
 # State Management & Persistence
 
+
 ### Pattern: State in Tool Result Details
 
 The recommended approach for stateful tools. State lives in `details` so it works correctly with branching/forking.

@@ -3,10 +3,11 @@
  *
  * Reproduces two cascading bugs:
  *
- * Bug 1 — UAT stuck-loop: the UAT verdict is read from the database, so
- *   syncProjectRootToWorktree copies an ASSESSMENT into the worktree only
- *   when the worktree has none. Verdict text in a project-root file never
- *   overwrites the worktree file.
+ * Bug 1 — UAT stuck-loop: syncProjectRootToWorktree uses force:false for
+ *   milestone files. When the project root has an ASSESSMENT with a verdict
+ *   but the worktree has a stale/empty ASSESSMENT (or none at all after DB
+ *   rebuild), the verdict is NOT synced into the worktree. checkNeedsRunUat
+ *   finds no verdict → re-dispatches run-uat indefinitely.
  *
  * Bug 2 — Orphaned worktree: removeWorktree silently swallows failures when
  *   git worktree remove fails (untracked files, CWD inside worktree, etc.).
@@ -58,7 +59,7 @@ function makeBaseRepo(): string {
 
 // ─── Bug 1: ASSESSMENT force-sync ─────────────────────────────────────────
 
-describe("#2821 Bug 1 — ASSESSMENT file text is not authority on resume", () => {
+describe("#2821 Bug 1 — ASSESSMENT file force-synced on resume", () => {
   let mainBase: string;
   let wtBase: string;
 
@@ -78,7 +79,7 @@ describe("#2821 Bug 1 — ASSESSMENT file text is not authority on resume", () =
     rmSync(wtBase, { recursive: true, force: true });
   });
 
-  test("does NOT overwrite the worktree ASSESSMENT when the project root file has a verdict", () => {
+  test("force-syncs ASSESSMENT with verdict from project root into worktree when worktree copy has no verdict", () => {
     // Project root has ASSESSMENT with a PASS verdict (written by run-uat, synced by post-unit)
     const prAssessment = join(
       mainBase,
@@ -111,14 +112,15 @@ describe("#2821 Bug 1 — ASSESSMENT file text is not authority on resume", () =
 
     syncProjectRootToWorktree(mainBase, wtBase, "M011");
 
-    // Verdict text in the project-root file is not authority: the worktree file stays.
-    assert.equal(
-      readFileSync(wtAssessment, "utf-8"),
-      "---\nverdict: fail\n---\n# S01 Assessment\nSome tests fail.\n",
+    // The worktree ASSESSMENT must now have the project root's PASS verdict
+    const content = readFileSync(wtAssessment, "utf-8");
+    assert.ok(
+      content.includes("verdict: pass"),
+      `Expected worktree ASSESSMENT to have verdict:pass after sync, got: ${content.slice(0, 100)}`,
     );
   });
 
-  test("copies the ASSESSMENT from project root when the worktree has none", () => {
+  test("force-syncs ASSESSMENT from project root when worktree has no ASSESSMENT at all", () => {
     // Project root has ASSESSMENT with verdict
     const prAssessment = join(
       mainBase,

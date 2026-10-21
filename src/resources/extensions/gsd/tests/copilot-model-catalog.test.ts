@@ -340,27 +340,21 @@ test("computeCatalogRegistrationCandidates subtracts the effective local catalog
   assert.deepEqual(candidates.map((model) => model.id), ["brand-new-model"]);
 });
 
-test("registerCopilotModelsInOverlay quarantines remote-only candidates instead of writing fabricated metadata", (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), "gsd-copilot-quarantine-"));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const overlayPath = join(tmp, "models-catalog.json");
+test("registerCopilotModelsInOverlay quarantines remote-only candidates instead of writing fabricated metadata", () => {
   const plan = registerCopilotModelsInOverlay(
-    overlayPath,
+    "/tmp/gsd-copilot-should-stay-quarantined.json",
     [normalizedRecord("brand-new-model", { supported_endpoints: [], reasoning: undefined, limit: {}, cost: {} })],
     [{ id: "gpt-5.4", provider: "github-copilot" }],
   );
 
   assert.deepEqual(plan.registeredIds, []);
   assert.deepEqual(plan.quarantined.map((model) => model.id), ["brand-new-model"]);
-  assert.equal(plan.overlayPath, overlayPath);
+  assert.equal(plan.overlayPath, "/tmp/gsd-copilot-should-stay-quarantined.json");
 });
 
-test("registerCopilotModelsInOverlay quarantines candidates with unknown input modality", (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), "gsd-copilot-quarantine-vision-"));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const overlayPath = join(tmp, "models-catalog.json");
+test("registerCopilotModelsInOverlay quarantines candidates with unknown input modality", () => {
   const plan = registerCopilotModelsInOverlay(
-    overlayPath,
+    "/tmp/gsd-copilot-unknown-vision-should-stay-quarantined.json",
     [normalizedRecord("brand-new-unknown-vision", { supports_vision: undefined, vision: undefined })],
     [],
   );

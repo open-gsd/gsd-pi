@@ -8,4 +8,3 @@ export * from "./rpc-types.js";
 export { serializeJsonLine, attachJsonlLineReader } from "./jsonl.js";
 export { RpcClient } from "./rpc-client.js";
 export type { RpcClientOptions, RpcEventListener } from "./rpc-client.js";
-export { verifyQualifiedModelBinding } from "./model-binding.js";

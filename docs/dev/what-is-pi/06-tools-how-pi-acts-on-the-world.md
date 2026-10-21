@@ -25,7 +25,6 @@ pi --no-tools                         # No built-in tools (extensions only)
 ```
 
 Extensions can also manage tools at runtime:
-
 ```typescript
 pi.setActiveTools(["read", "bash"]);   // Switch to read-only + bash
 pi.setActiveTools(pi.getAllTools().map(t => t.name));  // Enable all

@@ -19,8 +19,6 @@ import type {
   ExtensionCommandContext,
   SessionMessageEntry,
 } from "@gsd/pi-coding-agent";
-import { setBeforeAgentStartContext } from "@gsd/pi-coding-agent";
-import { randomUUID } from "node:crypto";
 
 import { deriveState, invalidateStateCache } from "./state.js";
 import {
@@ -32,15 +30,17 @@ import { parseUnitId } from "./unit-id.js";
 import type { GSDState } from "./types.js";
 import {
   assessInterruptedSession,
-  clearPausedSession as closePausedSession,
-  closeStaleScopedPauses,
   readPausedSessionMetadata,
-  recordedMachinePauseAction,
+  PAUSED_SESSION_KV_KEY,
   type InterruptedSessionAssessment,
+  type PausedSessionMetadata,
 } from "./interrupted-session.js";
-import { openAutoPause } from "./db/writers/auto-pauses.js";
-import type { AutoPauseBlockerKind } from "./recovery-policy.js";
+import {
+  setRuntimeKv,
+  deleteRuntimeKv,
+} from "./db/runtime-kv.js";
 import { extractSection, getManifestStatus, splitFrontmatter, parseFrontmatterMap } from "./files.js";
+export { inlinePriorMilestoneSummary } from "./files.js";
 import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
 
 import {
@@ -63,6 +63,7 @@ import { clearActivityLogState } from "./activity-log.js";
 import {
   synthesizeCrashRecovery,
   getDeepDiagnostic,
+  readActiveMilestoneId,
 } from "./session-forensics.js";
 import {
   writeLock,
@@ -89,7 +90,6 @@ import {
   getIsolationMode,
   resolveEffectiveUnitIsolationMode,
 } from "./preferences.js";
-import { fallbackEntryThinking, fallbackModelId } from "./preferences-types.js";
 import { playNotificationBell, sendDesktopNotification } from "./notifications.js";
 import type { GSDPreferences } from "./preferences.js";
 import {
@@ -131,7 +131,6 @@ import {
   reconcileRestoredGateBlock,
   clearPersistedHookState,
 } from "./post-unit-hooks.js";
-import { cancelOpenSidecarItems } from "./db/writers/unit-dispatch-sidecars.js";
 import { runGSDDoctor, rebuildState } from "./doctor.js";
 import {
   preDispatchHealthGate,
@@ -160,7 +159,6 @@ import {
   formatCost,
   formatTokenCount,
 } from "./metrics.js";
-import { readUnitSpend } from "./db/unit-metrics.js";
 import { setLogBasePath, logWarning, logError } from "./workflow-logger.js";
 import { preflightCleanRoot, postflightPopStash } from "./clean-root-preflight.js";
 import { isAbsolute, join } from "node:path";
@@ -184,10 +182,12 @@ import { getPriorSliceCompletionBlocker } from "./dispatch-guard.js";
 import { autoWorktreeBranch, enterBranchModeForMilestone } from "./auto-worktree-branch-lifecycle.js";
 import { createAutoWorktree } from "./auto-worktree-creation.js";
 import { enterAutoWorktree, isInAutoWorktree } from "./auto-worktree-entry.js";
+import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
 import { checkResourcesStale, readResourceVersion } from "./auto-worktree-resource-version.js";
 import { escapeStaleWorktree } from "./auto-worktree-runtime-cleanup.js";
 import { teardownWarmedBrowserDaemons } from "./browser-daemon-auto-prep.js";
 import { getAutoWorktreeOriginalBase } from "./auto-worktree-session-registry.js";
+import { syncWorktreeStateBack } from "./auto-worktree-sync.js";
 import { teardownAutoWorktree } from "./auto-worktree-teardown.js";
 import { pruneQueueOrder } from "./queue-order.js";
 import { startCommandPolling as _startCommandPolling, isRemoteConfigured } from "../remote-questions/manager.js";
@@ -199,12 +199,13 @@ import {
   reconcileMergeState,
   verifyExpectedArtifact,
 } from "./auto-recovery.js";
+import { classifyMilestoneSummaryContent } from "./milestone-summary-classifier.js";
 import { resolveDispatch, DISPATCH_RULES, milestoneIdsDispatchCompatible } from "./auto-dispatch.js";
 import { getErrorMessage } from "./error-utils.js";
 import { recoverFailedMigration } from "./migrate-external.js";
 import { initRegistry, convertDispatchRules } from "./rule-registry.js";
 import { emitJournalEvent as _emitJournalEvent, type JournalEntry } from "./journal.js";
-import { recordTaskVerificationPause } from "./task-settle.js";
+import { isClosedStatus } from "./status-guards.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import {
   type AutoDashboardData,
@@ -228,35 +229,22 @@ import {
 import {
   isDbAvailable,
   getMilestone,
+  getMilestoneSlices,
   getSlice,
   getTask,
 } from "./gsd-db.js";
-import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import {
   checkpointWorkflowDatabase,
   closeWorkflowDatabase,
   getWorkflowDatabaseStatus,
   resolveProjectRootDbPath,
 } from "./db-workspace.js";
-import {
-  getActiveForWorker,
-  getDispatchById,
-  getLatestForUnit,
-  isDispatchExecutionOpen,
-  markActiveForWorkerCanceled,
-} from "./db/unit-dispatches.js";
+import { markActiveForWorkerCanceled } from "./db/unit-dispatches.js";
 import { writeUnitRuntimeRecord } from "./unit-runtime.js";
 import { countPendingCaptures } from "./captures.js";
 import { CMUX_CHANNELS, type CmuxLogLevel } from "../shared/cmux-events.js";
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
-import {
-  acknowledgeWedge,
-  COMPLETED_NO_ADVANCE_GUARD_ID,
-  formatWedgeRefusalNotice,
-  garbageCollectResolvedWedges,
-  getOpenWedge,
-  recheckCompletedNoAdvanceWedge,
-} from "./auto-liveness-backstop.js";
+import { acknowledgeWedge, formatWedgeRefusalNotice, getOpenWedge } from "./auto-liveness-backstop.js";
 import { getValidationBlockMessageForBase } from "./validation-block-guard.js";
 import { getUnmergedMilestoneBlockMessageForBase } from "./unmerged-milestone-guard.js";
 import { clearSessionModelOverride } from "./session-model-override.js";
@@ -290,8 +278,7 @@ import {
   type BootstrapDeps,
 } from "./auto-start.js";
 import { initHealthWidget } from "./health-widget.js";
-import { autoLoop } from "./auto/loop.js";
-import { autoResumeEnterFailureStop } from "./auto/phase-helpers.js";
+import { runLegacyAutoLoop, runUokKernelLoop } from "./auto/loop.js";
 import { resolveAgentEnd, resolveAgentEndCancelled, _resetPendingResolve, isSessionSwitchInFlight } from "./auto/resolve.js";
 import type { LoopDeps, PauseAutoOptions, PauseAutoUnitIdentity, StopAutoOptions } from "./auto/loop-deps.js";
 import type { ErrorContext } from "./auto/types.js";
@@ -299,7 +286,6 @@ import { runAutoLoopWithUok } from "./uok/kernel.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { validateDirectory } from "./validate-directory.js";
 import { createAutoOrchestrator } from "./auto/orchestrator.js";
-import { kernelResume, kernelStart, kernelStop } from "./auto/lifecycle-kernel.js";
 import type { AutoAdvanceResult, AutoOrchestrationModule } from "./auto/contracts.js";
 import {
   repairAutoWorktreeSafetyFailure,
@@ -356,27 +342,14 @@ import { createWorkspace, scopeMilestone } from "./workspace.js";
 import {
   registerAutoWorker,
   markWorkerStopping,
-  getAutoWorker,
-  markWorkerStoppingByPid,
-  getAllAutoWorkers,
 } from "./db/auto-workers.js";
-import { releaseMilestoneLease, forceReleaseLeasesForWorker } from "./db/milestone-leases.js";
+import { releaseMilestoneLease } from "./db/milestone-leases.js";
 import { normalizeRealPath } from "./paths.js";
 import {
   formatStopNoticePrefix,
   isBlockedStopReason,
-  isNonBlockingPauseNotice,
   stopNoticeDisplayReason,
 } from "./stop-notice.js";
-import { emitWorkflowOutcomeEvent } from "./workflow-outcome-event.js";
-import { classifyFailure } from "./recovery-classification.js";
-import {
-  findPauseLifecycleId,
-  isHumanPauseBlockerKind,
-  openPauseBlockerRow,
-  resolvePauseBlockerRow,
-} from "./pause-blocker-domain-operation.js";
-import { readOpenAutoPauseBlockerId, setAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
 import { abortActiveUnitTurn } from "./auto/unit-turn-abort.js";
 
 // ── ENCAPSULATION INVARIANT ─────────────────────────────────────────────────
@@ -391,6 +364,9 @@ import { abortActiveUnitTurn } from "./auto/unit-turn-abort.js";
 //
 // Tests in auto-session-encapsulation.test.ts enforce this invariant.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Throttle STATE.md rebuilds — at most once per 30 seconds */
+const STATE_REBUILD_MIN_INTERVAL_MS = 30_000;
 
 export function formatAutoStopNotification(prefix: string, totals: { cost: number; tokens: { total: number } }, unitCount: number): string {
   return [
@@ -418,31 +394,7 @@ function registerAutoWorkerForSession(
   session: AutoSession,
   projectRootOverride?: string,
 ): void {
-  // #2532 belt-and-braces: a cached workerId is only reusable while its row
-  // is still 'active'. A row that flipped to 'stopping'/'crashed' (or was
-  // removed) would silently no-op heartbeats for the whole session, so
-  // release its leftover lease and register a fresh worker instead of
-  // early-returning. The cached identity is only dropped on positive
-  // evidence — an unavailable DB or a failed lookup keeps it.
-  if (session.workerId) {
-    try {
-      if (getAutoWorker(session.workerId)?.status === "active") return;
-      if (!isDbAvailable()) return; // cannot verify — keep the cached identity
-    } catch {
-      return; // lookup failed — keep the cached identity rather than dropping it
-    }
-    const staleWorkerId = session.workerId;
-    try {
-      if (session.currentMilestoneId && session.milestoneLeaseToken) {
-        releaseMilestoneLease(staleWorkerId, session.currentMilestoneId, session.milestoneLeaseToken);
-      }
-    } catch (err) {
-      // Best-effort: the stale lease still expires via TTL.
-      debugLog("auto-register-stale-lease-release", { error: err instanceof Error ? err.message : String(err) });
-    }
-    session.milestoneLeaseToken = null;
-    session.workerId = null;
-  }
+  if (session.workerId) return; // already registered (e.g. resume re-runs)
   try {
     const projectRootRealpath = normalizeRealPath(
       projectRootOverride
@@ -583,57 +535,66 @@ export function _synthesizePausedSessionRecoveryForTest(
 
 type PausedResumeRecoverySessionState = {
   pausedSessionFile: string | null;
-  pausedDispatchId: number | null;
+  currentUnit: { type: string; id: string } | null;
+  pausedUnitType: string | null;
+  pausedUnitId: string | null;
   pendingCrashRecovery: string | null;
 };
 
-/**
- * Decide whether the resumed session replays the tool calls of the paused
- * unit. The pause row names the unit through its dispatch link, and the
- * dispatch row with its stage says whether the unit still has execution to
- * continue. The session file is read only to build the replay text.
- */
 function handlePausedSessionResumeRecovery(
   basePath: string,
   state: PausedResumeRecoverySessionState,
   notify: (message: string) => void,
 ): { skippedReplay: boolean } {
-  const sessionFile = state.pausedSessionFile;
-  const dispatch = state.pausedDispatchId === null ? null : getDispatchById(state.pausedDispatchId);
-  state.pausedSessionFile = null;
-  state.pausedDispatchId = null;
-  if (!sessionFile) return { skippedReplay: false };
+  if (!state.pausedSessionFile) return { skippedReplay: false };
 
-  // A pause with no dispatch link had no active unit (the pause happened
-  // between units) or ran a unit with no dispatch row. There is no unit to
-  // target, and a replay with an unknown unit puts a tool-call blob of the
-  // wrong unit into the resumed context. The next unit comes from the database.
-  if (!dispatch) {
+  const pausedRecoveryUnitType = state.currentUnit?.type ?? state.pausedUnitType ?? null;
+  const pausedRecoveryUnitId = state.currentUnit?.id ?? state.pausedUnitId ?? null;
+
+  // When the paused-session metadata never captured the unit identity (the
+  // pause happened between units, or the worker died before currentUnit was
+  // set), we have nothing to verify against and nothing correct to target. A
+  // replay synthesized with an "unknown" unit re-injects an unbounded,
+  // mis-identified tool-call blob into the fresh resume context — exactly the
+  // thrash that turns one stuck unit into several. Disk state has already been
+  // rebuilt (rebuildState + doctor) before this runs, so skip the replay and
+  // let the normal dispatcher recompute the next unit from disk.
+  if (!pausedRecoveryUnitType || !pausedRecoveryUnitId) {
+    state.pausedSessionFile = null;
+    state.pausedUnitType = null;
+    state.pausedUnitId = null;
     state.pendingCrashRecovery = null;
-    notify("Paused session had no active unit. Skipping tool-call replay and resuming from database state.");
+    notify("Paused session had no recorded unit identity. Skipping tool-call replay and resuming from disk state.");
     return { skippedReplay: true };
   }
 
-  // The unit left the execute stage, or its result rows exist: it has no
-  // execution to continue.
-  if (
-    !isDispatchExecutionOpen(dispatch.id)
-    || verifyExpectedArtifact(dispatch.unit_type, dispatch.unit_id, basePath)
-  ) {
+  const completedPausedUnit = verifyExpectedArtifact(
+    pausedRecoveryUnitType,
+    pausedRecoveryUnitId,
+    basePath,
+  );
+
+  if (completedPausedUnit) {
+    state.pausedSessionFile = null;
+    state.pausedUnitType = null;
+    state.pausedUnitId = null;
     state.pendingCrashRecovery = null;
     return { skippedReplay: true };
   }
 
   const recovery = synthesizePausedSessionRecovery(
     basePath,
-    dispatch.unit_type,
-    dispatch.unit_id,
-    sessionFile,
+    pausedRecoveryUnitType,
+    pausedRecoveryUnitId,
+    state.pausedSessionFile,
   );
   if (recovery && recovery.trace.toolCallCount > 0) {
     state.pendingCrashRecovery = recovery.prompt;
     notify(`Recovered ${recovery.trace.toolCallCount} tool calls from paused session. Resuming with context.`);
   }
+  state.pausedSessionFile = null;
+  state.pausedUnitType = null;
+  state.pausedUnitId = null;
   return { skippedReplay: false };
 }
 
@@ -646,16 +607,8 @@ function handlePausedSessionResumeRecovery(
  * passed both checks, got pinned into `session.currentMilestoneId`, and then
  * every dispatch iteration hit the milestone-mismatch guard and stopped —
  * a permanent wedge with no field escape short of hand-editing the
- * pause row. Per ADR-047 the guard stays; this makes the
+ * `paused_session` runtime_kv row. Per ADR-047 the guard stays; this makes the
  * exit reachable by never restoring a superseded pin in the first place.
- *
- * `machineAction` is the Recovery Classifier route the open pause row recorded
- * (ADR-046). A machine-classified `retry` pause is consumed by the machine:
- * the advance re-runs the unit from its stored budgets and retries without a
- * person, so the route is `machine-retry` instead of a human restore. Every
- * other action — and every human blocker kind — restores the paused session
- * for a person as before. A superseded pin still adopts the active milestone
- * first: the stale-pin exit outranks the retry.
  *
  * Id comparison uses the dispatch guard's own normalization
  * (`milestoneIdsDispatchCompatible`, #1317) so bare-vs-suffixed aliases of the
@@ -663,19 +616,16 @@ function handlePausedSessionResumeRecovery(
  */
 export type PausedSessionResumeRoute =
   | { route: "restore" }
-  | { route: "machine-retry" }
   | { route: "discard"; reason: "missing" | "terminal" }
   | { route: "adopt-active"; activeMilestoneId: string };
 
 export function routePausedSessionResume(args: {
-  milestoneExists: boolean;
+  milestoneDirExists: boolean;
   summaryIsTerminal: boolean;
   pausedMilestoneId: string;
   activeMilestoneId: string | null | undefined;
-  /** The action the machine_fixable pause row recorded, when it did. */
-  machineAction?: "retry" | "escalate" | "stop" | null;
 }): PausedSessionResumeRoute {
-  if (!args.milestoneExists) return { route: "discard", reason: "missing" };
+  if (!args.milestoneDirExists) return { route: "discard", reason: "missing" };
   if (args.summaryIsTerminal) return { route: "discard", reason: "terminal" };
   if (
     args.activeMilestoneId
@@ -683,7 +633,6 @@ export function routePausedSessionResume(args: {
   ) {
     return { route: "adopt-active", activeMilestoneId: args.activeMilestoneId };
   }
-  if (args.machineAction === "retry") return { route: "machine-retry" };
   return { route: "restore" };
 }
 
@@ -1208,31 +1157,6 @@ export function forceStopAutoRemote(projectRoot: string): {
     }
     if (isLockProcessAlive(lock)) {
       process.kill(lock.pid, "SIGKILL");
-      // #2532: clearLock now only retires verifiably-dead holders, and a
-      // SIGKILLed pid can stay observable through kernel teardown (or, in
-      // tests, via mocked liveness). The stop decision was made above, so
-      // retire the force-stopped worker's row and leases explicitly instead
-      // of leaning on teardown timing.
-      // Best-effort: the remote-session guards run before the workflow DB is
-      // opened, and the PID is already killed. A failed retirement must not
-      // skip clearLock or report the stop as failed.
-      try {
-        const stoppedRoot = normalizeRealPath(projectRoot);
-        markWorkerStoppingByPid(stoppedRoot, lock.pid);
-        // Release leases for EVERY row sharing this pid+root — repeated
-        // step-mode runs in one process leave older retired rows behind, and
-        // the current lease holder may not be the first match.
-        for (const w of getAllAutoWorkers()) {
-          if (
-            w.pid === lock.pid
-            && normalizeRealPath(w.project_root_realpath) === stoppedRoot
-          ) {
-            forceReleaseLeasesForWorker(w.worker_id);
-          }
-        }
-      } catch (err) {
-        logWarning("session", `force-stopped worker ${lock.pid} not retired: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
-      }
     }
     clearLock(projectRoot);
     return { found: true, pid: lock.pid };
@@ -1359,10 +1283,6 @@ function pauseAutoUnitIdentityMatches(expected: PauseAutoUnitIdentity | null): b
 }
 
 function shouldPreserveCoordinationForPause(errorContext?: ErrorContext): boolean {
-  // While a unit execution is in flight its Attempt settlement still needs the
-  // lease's fencing token — dropping it on a watchdog pause would fence the
-  // settlement out (LEASE_FENCING_LOST) and orphan the Attempt (#2429).
-  if (s.unitExecutionInFlight) return true;
   return errorContext?.category === "provider" && errorContext.isTransient === true;
 }
 
@@ -1491,7 +1411,6 @@ function handleLostSessionLock(
   s.active = false;
   s.paused = false;
   deactivateGSD();
-  setBeforeAgentStartContext(undefined);
   clearUnitTimeout();
   stopAutoCommandPolling();
   restoreProjectRootEnv();
@@ -1613,7 +1532,6 @@ export async function cleanupAfterLoopExit(ctx: ExtensionContext): Promise<void>
   s.clearCurrentUnit();
   s.active = false;
   deactivateGSD();
-  setBeforeAgentStartContext(undefined);
   clearUnitTimeout();
   stopAutoCommandPolling();
   restoreProjectRootEnv();
@@ -1629,37 +1547,6 @@ export async function cleanupAfterLoopExit(ctx: ExtensionContext): Promise<void>
   } catch (err) {
     /* best-effort — mirror stopAuto cleanup */
     logWarning("session", `lock cleanup failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
-  }
-
-  // ── Coordination cleanup (mirrors stopAuto Step 1b, #2532) ──
-  // The step-exit path ends this worker's lifecycle. Without releasing the
-  // lease and clearing s.workerId, the next /gsd auto (or /gsd next) in this
-  // process reuses a stale workerId whose row is no longer active — heartbeat
-  // no-ops and every status-gated path treats the live session as inactive.
-  // Skipped while a paused surface is preserved: pauseAuto keeps the worker
-  // row + lease alive on purpose there (in-flight Attempt settlement still
-  // needs the fencing token, #2429), and retiring it here would fence that
-  // resume out. When pause did not preserve coordination it already cleared
-  // s.workerId, so this block is a no-op in that case.
-  if (!preservePausedSurface) {
-    try {
-      if (s.workerId && s.currentMilestoneId && s.milestoneLeaseToken) {
-        releaseMilestoneLease(s.workerId, s.currentMilestoneId, s.milestoneLeaseToken);
-      }
-    } catch (err) {
-      debugLog("loop-exit-cleanup-lease-release", { error: err instanceof Error ? err.message : String(err) });
-    }
-    // Independent of the lease release: a thrown release must not skip the
-    // row retirement or the local identity reset.
-    try {
-      if (s.workerId) {
-        markWorkerStopping(s.workerId);
-      }
-    } catch (err) {
-      debugLog("loop-exit-cleanup-worker-stopping", { error: err instanceof Error ? err.message : String(err) });
-    }
-    s.workerId = null;
-    s.milestoneLeaseToken = null;
   }
 
   // Symmetric teardown for the browser-UAT warm-up preflight (#1259): stop any
@@ -1729,13 +1616,6 @@ export async function cleanupAfterLoopExit(ctx: ExtensionContext): Promise<void>
 
 export function _cleanupAfterLoopExitForTest(ctx: ExtensionContext): Promise<void> {
   return cleanupAfterLoopExit(ctx);
-}
-
-export function _registerAutoWorkerForSessionForTest(
-  session: AutoSession,
-  projectRoot?: string,
-): void {
-  return registerAutoWorkerForSession(session, projectRoot);
 }
 
 export type AutoWorktreeExitAction = "skip" | "merge" | "preserve";
@@ -1887,11 +1767,11 @@ export async function stopAuto(
       if (s.workerId) {
         markWorkerStopping(s.workerId);
       }
+      s.workerId = null;
+      s.milestoneLeaseToken = null;
     } catch (e) {
       debugLog("stop-cleanup-coordination", { error: e instanceof Error ? e.message : String(e) });
     }
-    s.workerId = null;
-    s.milestoneLeaseToken = null;
 
     // ── Step 1b: Flush queued follow-up messages (#3512) ──
     // Late async notifications (async_job_result, gsd-auto-wrapup) can trigger
@@ -1945,14 +1825,29 @@ export async function stopAuto(
         // leave a file behind without the milestone actually being done,
         // which previously caused stopAuto to merge a failed milestone and
         // emit a misleading metadata-only merge warning (#4175).
-        // With no DB the milestone is never treated as complete: the branch
-        // is preserved, never merged on a file's word (ADR-046).
+        // DB-unavailable projects fall back to SUMMARY-file presence.
         let milestoneComplete = false;
         try {
           if (isDbAvailable()) {
-            milestoneComplete = readMilestone(stopMilestoneId)?.done === true;
+            const dbRow = getMilestone(stopMilestoneId);
+            milestoneComplete = dbRow?.status === "complete";
           } else {
-            logWarning("engine", `stopAuto: DB unavailable, preserving ${stopMilestoneId} branch instead of merging`, { file: "auto.ts" });
+            const summaryPath = resolveMilestoneFile(
+              s.originalBasePath || s.basePath,
+              stopMilestoneId,
+              "SUMMARY",
+            );
+            if (!summaryPath) {
+              // Also check in the worktree path (SUMMARY may not be synced yet)
+              const wtSummaryPath = resolveMilestoneFile(
+                s.basePath,
+                stopMilestoneId,
+                "SUMMARY",
+              );
+              milestoneComplete = wtSummaryPath !== null;
+            } else {
+              milestoneComplete = true;
+            }
           }
         } catch (err) {
           // Non-fatal — fall through to preserveBranch path
@@ -1974,16 +1869,6 @@ export async function stopAuto(
             notifyCtx,
           );
           if (!r.ok && r.cause instanceof Error) throw r.cause;
-          if (r.ok) {
-            // A merged `.gsd` file is not authority: render the project-root
-            // projections from the database after the merge.
-            try {
-              const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
-              await rebuildMarkdownProjectionsFromDb(s.originalBasePath || s.basePath);
-            } catch (err) {
-              logWarning("engine", `markdown projection rebuild after stop merge failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
-            }
-          }
         } else if (exitAction === "preserve") {
           // Milestone still in progress — preserve branch for later resumption
           const r = lifecycle.exitMilestone(
@@ -2028,8 +1913,8 @@ export async function stopAuto(
     let totalSlices: number | null = null;
     if (preserveCompletionSurface && options.completionWidget && completionMilestoneId && isDbAvailable()) {
       try {
-        const slices = readMilestoneSlices(completionMilestoneId);
-        completedSlices = slices.filter(slice => slice.done).length;
+        const slices = getMilestoneSlices(completionMilestoneId);
+        completedSlices = slices.filter(slice => isClosedStatus(slice.status)).length;
         totalSlices = slices.length;
       } catch (err) {
         logWarning("dashboard", `completion slice stats lookup failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -2038,13 +1923,6 @@ export async function stopAuto(
 
     // ── Step 6: DB cleanup ──
     if (isDbAvailable()) {
-      // A stop drops the follow-on work that did not run yet. Only a killed
-      // process leaves it queued for the next start.
-      try {
-        cancelOpenSidecarItems();
-      } catch (err) {
-        logWarning("engine", `sidecar queue cancel on stop failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
-      }
       try {
         closeWorkflowDatabase();
       } catch (e) {
@@ -2215,6 +2093,14 @@ export async function stopAuto(
       debugLog("stop-cleanup-metrics", { error: e instanceof Error ? e.message : String(e) });
     }
 
+    // ── Step 12: Remove paused-session metadata (#1383) ──
+    // Phase C pt 2: deleteRuntimeKv replaces unlinkSync(paused-session.json).
+    try {
+      deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+    } catch (err) { /* non-fatal */
+      logWarning("engine", `paused-session DB delete failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
+
     // ── Step 13: Restore original model + thinking (before reset clears IDs) ──
     try {
       if (pi && ctx && s.originalModelId && s.originalModelProvider) {
@@ -2241,21 +2127,6 @@ export async function stopAuto(
     } catch (e) {
       debugLog("stop-cleanup-pending-resolve", { error: e instanceof Error ? e.message : String(e) });
     }
-
-    // The typed outcome event: hosts read the run's terminal state from it and
-    // keep the notification-text classification as a fallback (ADR-046). A
-    // blocked stop keeps exit 10; every other stop ends the run like a plain
-    // stop (exit 0), the same rule the text classifier applies.
-    // Emitted last, after every notification surface above (the Step 8 ledger
-    // notice and the headless completion notice): the headless host resolves
-    // the run on this event and stops reading the stream, so a notify sent
-    // after it never reaches the run's output.
-    emitWorkflowOutcomeEvent(pi, {
-      status: isBlockedStopReason(reason) ? "blocked" : "completed",
-      reason: displayReason || reason || undefined,
-      unitType: s.currentUnit?.type,
-      unitId: s.currentUnit?.id,
-    });
   } finally {
     // ── Critical invariants: these MUST execute regardless of errors ──
     // Browser teardown — prevent orphaned Chrome processes across retries (#1733)
@@ -2308,7 +2179,7 @@ export async function stopAuto(
     if (pi) clearToolBaseline(pi);
 
     try {
-      await kernelStop(s, reason ?? "stop");
+      await s.orchestration?.stop(reason ?? "stop");
     } catch (err) {
       debugLog("stop-orchestration-stop", { error: err instanceof Error ? err.message : String(err) });
     }
@@ -2343,33 +2214,13 @@ export function _selectStopAutoWorktreeExit(args: {
 }
 
 /**
- * The dispatch row of the unit that is active when auto-mode pauses: the
- * claimed row of this worker, or the newest row of the current unit when the
- * loop already settled it. Null when no unit with a dispatch row is active.
- *
- * The loop claims the row before the unit starts its session. Until the unit
- * is the current unit, the session file belongs to an earlier unit, and a
- * link to the claimed row makes resume replay that file as the new unit.
- */
-function activeUnitDispatchId(): number | null {
-  if (!s.currentUnit) return null;
-  const claimed = s.workerId ? getActiveForWorker(s.workerId) : null;
-  if (claimed?.unit_type === s.currentUnit.type && claimed.unit_id === s.currentUnit.id) {
-    return claimed.id;
-  }
-  const latest = getLatestForUnit(s.currentUnit.id);
-  return latest?.unit_type === s.currentUnit.type ? latest.id : null;
-}
-
-/**
  * Pause auto-mode without destroying state. Context is preserved.
  * The user can interact with the agent, then `/gsd auto` resumes
  * from disk state. Called when the user presses Escape or runs `/gsd pause`.
  */
 export async function pauseAuto(
-  ctx: ExtensionContext | undefined,
-  _pi: ExtensionAPI | undefined,
-  blockerKind: AutoPauseBlockerKind,
+  ctx?: ExtensionContext,
+  _pi?: ExtensionAPI,
   _errorContext?: ErrorContext,
   options: PauseAutoOptions = {},
 ): Promise<void> {
@@ -2415,29 +2266,11 @@ export async function pauseAuto(
 
   s.pausedSessionFile = normalizeSessionFilePath(ctx?.sessionManager?.getSessionFile() ?? null);
 
-  // Persist the pause so resume survives /exit (#1383). It is the open
-  // auto_pauses row of this worker's scope; the fresh-start bootstrap below
-  // reads the same row.
-  // A machine_fixable pause routes through the Recovery Classifier (ADR-046):
-  // the classifier owns the route, so the row records the classified failure
-  // kind, the action and the remediation, and a resume re-enters the kernel
-  // advance with that route named on the row instead of re-diagnosing prose.
-  // The seven human blocker kinds pause for a person unchanged.
-  let pauseReasonText = _errorContext?.message;
-  if (blockerKind === "machine_fixable") {
-    const classification = classifyFailure({
-      error: _errorContext?.message ?? "machine-fixable failure",
-      unitType: s.currentUnit?.type,
-      unitId: s.currentUnit?.id,
-    });
-    pauseReasonText = [
-      `recovery:${classification.failureKind}/${classification.action}`,
-      classification.reason,
-      classification.remediation,
-    ].filter(Boolean).join(" | ");
-  }
+  // Persist paused-session metadata so resume survives /exit (#1383).
+  // Phase C pt 2: persisted to runtime_kv (global scope, key
+  // PAUSED_SESSION_KV_KEY) instead of runtime/paused-session.json. The
+  // fresh-start bootstrap below reads from the same key.
   try {
-    s.pausedDispatchId = activeUnitDispatchId();
     const pausedWorktreePath = resolvePausedAutoWorktreePath({
       basePath: s.basePath,
       originalBasePath: s.originalBasePath,
@@ -2445,12 +2278,7 @@ export async function pauseAuto(
       isolationMode: getIsolationMode(s.originalBasePath || s.basePath),
       baseIsAutoWorktree: isInAutoWorktree(s.basePath),
     });
-    // The pause this row replaces had opened a workflow_blockers row for its
-    // human blocker; the new pause closes that row (ADR-046).
-    const previousBlockerId = readOpenAutoPauseBlockerId();
-    openAutoPause({
-      blockerKind,
-      dispatchId: s.pausedDispatchId,
+    const pausedMeta: PausedSessionMetadata = {
       milestoneId: s.currentMilestoneId ?? undefined,
       worktreePath: pausedWorktreePath,
       originalBasePath: s.originalBasePath,
@@ -2463,55 +2291,22 @@ export async function pauseAuto(
       activeRunDir: s.activeRunDir,
       autoStartTime: s.autoStartTime,
       milestoneLock: s.sessionMilestoneLock ?? undefined,
-      pauseReason: pauseReasonText,
-    });
-    if (previousBlockerId) {
-      try {
-        resolvePauseBlockerRow({
-          blockerId: previousBlockerId,
-          disposition: "resolved",
-          resolution: "closed by a newer pause of the same worker scope",
-          idempotencyKey: `pause-blocker-resolve-superseded:${previousBlockerId}`,
-        });
-      } catch (err) {
-        logWarning("engine", `pause blocker resolve failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    // A human blocker is human-only work (ADR-046): the pause opens a
-    // workflow_blockers row for the paused item. A pause of an item without a
-    // lifecycle row, and every machine_fixable or user_request pause, records
-    // the pause row alone.
-    if (isHumanPauseBlockerKind(blockerKind)) {
-      try {
-        const lifecycleId = findPauseLifecycleId({
-          milestoneId: s.currentMilestoneId,
-          unitType: s.currentUnit?.type,
-          unitId: s.currentUnit?.id,
-        });
-        if (lifecycleId) {
-          const { blockerId } = openPauseBlockerRow({
-            lifecycleId,
-            blockerKind,
-            description: pauseReasonText ?? `${blockerKind} pause`,
-            requestedAction: s.stepMode ? "Run /gsd next after resolving the blocker." : "Run /gsd auto after resolving the blocker.",
-            idempotencyKey: `pause-blocker-open:${randomUUID()}`,
-          });
-          setAutoPauseBlockerId(blockerId);
-        }
-      } catch (err) {
-        // The pause row is the source of truth; a blocker row that cannot open
-        // never blocks the pause itself.
-        logWarning("engine", `pause blocker open failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+      pauseReason: _errorContext?.message,
+      lastPreExecFailure: s.lastPreExecFailure
+        ? {
+            ...s.lastPreExecFailure,
+            blockingFindings: [...s.lastPreExecFailure.blockingFindings],
+          }
+        : null,
+      preExecRetryCount: Object.fromEntries(s.preExecRetryCount),
+    };
+    setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pausedMeta);
   } catch (err) {
     // Non-fatal — resume will still work via full bootstrap, just without worktree context
     logWarning("engine", `paused-session DB write failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
   }
 
   const pausedUnitLabel = currentUnitLabel();
-  const pausedUnitType = s.currentUnit?.type;
-  const pausedUnitId = s.currentUnit?.id;
 
   // Close out the current unit so its runtime record doesn't stay at "dispatched"
   if (s.currentUnit && ctx) {
@@ -2558,13 +2353,12 @@ export async function pauseAuto(
   deregisterSigtermHandler();
 
   try {
-    await kernelStop(s, "pause");
+    await s.orchestration?.stop("pause");
   } catch (err) {
     debugLog("pause-orchestration-stop", { error: err instanceof Error ? err.message : String(err) });
   }
 
   deactivateGSD();
-  setBeforeAgentStartContext(undefined);
   restoreProjectRootEnv();
   restoreMilestoneLockEnv();
   s.pendingVerificationRetry = null;
@@ -2582,23 +2376,32 @@ export async function pauseAuto(
   if (ctx) initHealthWidget(ctx);
   const pauseMessage = _errorContext?.message
     ? `${lifecycle.notifyPrefix}: ${_errorContext.message}`
-    : `${lifecycle.notifyPrefix}. Type to interact, or ${lifecycle.commands[0] ?? (s.stepMode ? "/gsd next" : "/gsd auto")} to resume.`;
+    : `${lifecycle.notifyPrefix} (Escape). Type to interact, or ${lifecycle.commands[0] ?? (s.stepMode ? "/gsd next" : "/gsd auto")} to resume.`;
   ctx?.ui.notify(
     pauseMessage,
     lifecycle.notifyLevel,
   );
-
-  // The typed outcome event: hosts read the run's terminal state from it and
-  // keep the notification-text classification as a fallback (ADR-046). A
-  // non-blocking pause does not need operator intervention, so it is not
-  // blocked — the same rule the text classifier applies.
-  emitWorkflowOutcomeEvent(_pi, {
-    status: isNonBlockingPauseNotice(pauseMessage.toLowerCase()) ? "completed" : "blocked",
-    reason: _errorContext?.message ?? lifecycle.notifyPrefix,
-    unitType: pausedUnitType,
-    unitId: pausedUnitId,
-  });
 }
+
+function restorePausedPreExecRepairState(
+  meta: PausedSessionMetadata,
+  session: Pick<AutoSession, "lastPreExecFailure" | "preExecRetryCount">,
+): void {
+  session.lastPreExecFailure = meta.lastPreExecFailure
+    ? {
+        ...meta.lastPreExecFailure,
+        blockingFindings: [...meta.lastPreExecFailure.blockingFindings],
+      }
+    : null;
+  session.preExecRetryCount.clear();
+  for (const [unitId, count] of Object.entries(meta.preExecRetryCount ?? {})) {
+    if (Number.isSafeInteger(count) && count > 0) {
+      session.preExecRetryCount.set(unitId, count);
+    }
+  }
+}
+
+export const _restorePausedPreExecRepairStateForTest = restorePausedPreExecRepairState;
 
 /**
  * Build a WorktreeLifecycle Module wrapping the current session.
@@ -2731,7 +2534,7 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
 
     // Budget/context/secrets
     getLedger,
-    getBudgetSpend: readUnitSpend,
+    getProjectTotals,
     formatCost,
     getBudgetAlertLevel,
     getNewBudgetAlertLevel,
@@ -2762,7 +2565,11 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
     startUnitSupervision,
 
     // Prompt helpers
-    getDeepDiagnostic,
+    getDeepDiagnostic: (basePath: string) => {
+      const mid = readActiveMilestoneId(basePath);
+      const wtPath = mid ? getAutoWorktreePath(basePath, mid) : undefined;
+      return getDeepDiagnostic(basePath, wtPath ?? undefined);
+    },
     isDbAvailable,
     reorderForCaching,
 
@@ -2795,12 +2602,6 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
 
     // Journal
     emitJournalEvent: (entry: JournalEntry) => _emitJournalEvent(s.basePath, entry),
-    recordVerificationPause: (unitType: string, unitId: string) => {
-      if (unitType !== "execute-task") return;
-      const { milestone, slice, task } = parseUnitId(unitId);
-      if (!slice || !task) return;
-      recordTaskVerificationPause({ milestoneId: milestone, sliceId: slice, taskId: task });
-    },
 
     // Clean-root preflight gate (#2909)
     preflightCleanRoot,
@@ -2898,23 +2699,7 @@ export async function startAuto(
     );
     return;
   }
-  const scopeId = normalizeRealPath(base) || base;
-  const gcResult = await garbageCollectResolvedWedges(scopeId, async (wedge) => {
-    if (wedge.guardId === COMPLETED_NO_ADVANCE_GUARD_ID) {
-      return recheckCompletedNoAdvanceWedge(wedge);
-    }
-    // One-shot runtime wedges (finalize-break, etc.) cannot be re-probed
-    // without a live orchestrator; leave them for --resume-wedge.
-    return { blocking: true };
-  });
-  if (!gcResult.ok) {
-    ctx.ui.notify(
-      `Auto-mode blocked — liveness backstop unavailable: ${gcResult.error}. Run \`/gsd doctor --fix\` before retrying.`,
-      "error",
-    );
-    return;
-  }
-  const openWedgeResult = getOpenWedge(scopeId);
+  const openWedgeResult = getOpenWedge(normalizeRealPath(base) || base);
   if (!openWedgeResult.ok) {
     ctx.ui.notify(
       `Auto-mode blocked — liveness backstop unavailable: ${openWedgeResult.error}. Run \`/gsd doctor --fix\` before retrying.`,
@@ -2971,34 +2756,22 @@ export async function startAuto(
   }
 
   // If resuming from paused state, just re-activate and dispatch next unit.
-  // Check the persisted pause first (#1383) — it survives /exit. The pause
-  // row is the only record that resume routing reads.
+  // Check persisted paused-session first (#1383) — survives /exit.
+  // Phase C pt 2: persisted in runtime_kv (global scope) instead of
+  // runtime/paused-session.json. The `clearPausedSession` helper
+  // replaces every prior unlinkSync(pausedPath) call.
   const clearPausedSession = (logTag: string): void => {
     try {
-      closePausedSession();
+      deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
     } catch (err) {
       logWarning("session", `${logTag}: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
   };
 
-  if (!process.env.GSD_PARALLEL_WORKER) {
-    try {
-      closeStaleScopedPauses();
-    } catch (err) {
-      logWarning("session", `stale scoped pause cleanup failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
-    }
-  }
-
   if (!s.paused) {
     try {
       const meta = freshStartAssessment.pausedSession ?? readPausedSessionMetadata(base);
-      if (meta?.activeEngineId && meta.activeEngineId !== "dev" && s.activeRunDir !== null) {
-        // The command named the run (/gsd workflow run, /gsd workflow resume
-        // <run>). The run rows are its identity, so the named run starts and
-        // the pause record of the earlier session is dropped; that run stays
-        // resumable by its id.
-        clearPausedSession("paused-session DB cleanup failed (named workflow run)");
-      } else if (meta?.activeEngineId && meta.activeEngineId !== "dev") {
+      if (meta?.activeEngineId && meta.activeEngineId !== "dev") {
         // Custom workflow resume — restore engine state
         s.activeEngineId = meta.activeEngineId;
         s.activeRunDir = meta.activeRunDir ?? null;
@@ -3021,40 +2794,40 @@ export async function startAuto(
           );
         if (shouldResumePausedSession) {
           // Validate the milestone still exists and isn't already complete (#1664).
-          // DB status is the only authority; with no DB the milestone is not
-          // treated as terminal and the open failure is reported (ADR-046).
+          // DB status is authoritative when available; SUMMARY.md is a legacy
+          // fallback only for unmigrated/offline projects.
+          const mDir = resolveMilestonePath(base, meta.milestoneId);
           let summaryIsTerminal = false;
           let dbAvailable = isDbAvailable();
-          let milestoneRow = dbAvailable ? readMilestone(meta.milestoneId) : null;
+          let milestoneRow = dbAvailable ? getMilestone(meta.milestoneId) : null;
           if (!milestoneRow) {
             const opened = await ensureDbOpen(base);
             dbAvailable = opened || isDbAvailable();
             if (dbAvailable) {
-              milestoneRow = readMilestone(meta.milestoneId);
+              milestoneRow = getMilestone(meta.milestoneId);
             }
           }
           if (dbAvailable) {
-            summaryIsTerminal = milestoneRow?.closed === true;
+            summaryIsTerminal = !!milestoneRow && isClosedStatus(milestoneRow.status);
           } else {
-            ctx.ui.notify(
-              `Cannot check paused milestone ${meta.milestoneId}: workflow DB is unavailable.`,
-              "error",
-            );
+            const summaryFile = resolveMilestoneFile(base, meta.milestoneId, "SUMMARY");
+            if (summaryFile) {
+              try {
+                summaryIsTerminal = classifyMilestoneSummaryContent(readFileSync(summaryFile, "utf-8")) !== "failure";
+              } catch {
+                summaryIsTerminal = false;
+              }
+            }
           }
           // #1643 / #1644 share this seam: `routePausedSessionResume` subsumes
           // `getSupersedingActiveMilestoneId` here — it discards a missing or
           // terminal pin and, instead of merely starting fresh on a superseded
           // pin, adopts the project's current active milestone.
           const resumeRoute = routePausedSessionResume({
-            // The milestone row is the authority. With no database nothing is
-            // known, so the pause is kept.
-            milestoneExists: !dbAvailable || milestoneRow != null,
+            milestoneDirExists: !!mDir,
             summaryIsTerminal,
             pausedMilestoneId: meta.milestoneId,
             activeMilestoneId: freshStartAssessment.state?.activeMilestone?.id ?? null,
-            // The Recovery Classifier route the machine_fixable pause recorded
-            // (ADR-046): a retry is consumed by the machine, not by a person.
-            machineAction: recordedMachinePauseAction(meta),
           });
           if (resumeRoute.route === "discard") {
             clearPausedSession("paused-session DB cleanup failed (milestone gone/complete)");
@@ -3075,35 +2848,16 @@ export async function startAuto(
               `Paused milestone ${meta.milestoneId} was superseded — ${resumeRoute.activeMilestoneId} is now the project's active milestone. Adopting ${resumeRoute.activeMilestoneId}; ${meta.milestoneId} remains open for later dispatch.`,
               "info",
             );
-          } else if (resumeRoute.route === "machine-retry") {
-            // The recorded Recovery Classifier route continues by machine
-            // decision (ADR-046): the advance re-runs the unit from its stored
-            // budgets and retries, so the interrupted turn is not replayed for
-            // a person — no paused-session file or tool-call recovery.
-            s.currentMilestoneId = meta.milestoneId;
-            s.originalBasePath = meta.originalBasePath || base;
-            s.stepMode = meta.stepMode ?? requestedStepMode;
-            s.autoStartTime = meta.autoStartTime || Date.now();
-            s.sessionMilestoneLock = meta.milestoneLock ?? null;
-            s.paused = true;
-            rebuildScope(
-              meta.worktreePath && existsSync(meta.worktreePath)
-                ? meta.worktreePath
-                : (s.originalBasePath || base),
-              s.currentMilestoneId,
-            );
-            ctx.ui.notify(
-              `Paused session for ${meta.milestoneId} was machine-classified retryable — resuming without operator action.`,
-              "info",
-            );
           } else {
             s.currentMilestoneId = meta.milestoneId;
             s.originalBasePath = meta.originalBasePath || base;
             s.stepMode = meta.stepMode ?? requestedStepMode;
             s.pausedSessionFile = normalizeSessionFilePath(meta.sessionFile ?? null);
-            s.pausedDispatchId = meta.dispatchId ?? null;
+            s.pausedUnitType = meta.unitType ?? null;
+            s.pausedUnitId = meta.unitId ?? null;
             s.autoStartTime = meta.autoStartTime || Date.now();
             s.sessionMilestoneLock = meta.milestoneLock ?? null;
+            restorePausedPreExecRepairState(meta, s);
             s.paused = true;
             // Build scope from persisted state. Use worktreePath when present and
             // still on disk so mode is detected correctly; fall back to project root.
@@ -3249,12 +3003,12 @@ export async function startAuto(
       const enterResult = buildLifecycle().enterMilestone(s.currentMilestoneId, {
         notify: ctx.ui.notify.bind(ctx.ui),
       });
-      // #2317 — lease conflicts and stale worktree registrations must stop the
-      // resume: continuing would run the milestone against the wrong tree.
-      const enterStop = autoResumeEnterFailureStop(enterResult, s.currentMilestoneId);
-      if (enterStop) {
-        ctx.ui.notify(enterStop.notify, "error");
-        await stopAuto(ctx, pi, enterStop.detail);
+      if (!enterResult.ok && enterResult.reason === "lease-conflict") {
+        ctx.ui.notify(
+          `Cannot resume milestone ${s.currentMilestoneId}: lease is held by another worker.`,
+          "error",
+        );
+        await stopAuto(ctx, pi, "lease-conflict during resume");
         return;
       }
       // s.basePath may have been updated to a worktree path by enterMilestone.
@@ -3276,13 +3030,13 @@ export async function startAuto(
       "info",
     );
     restoreHookState(s.basePath);
-    // A restored activeHook may have no queued dispatch (a pause closed its
-    // row); re-enqueue it so the hook runs instead of blocking the next
+    // A restored activeHook has no live dispatch (the sidecar queue is not
+    // persisted); re-enqueue it so the hook runs instead of blocking the next
     // unrelated unit's close-out (#1246).
-    reconcileRestoredHookDispatch(s.basePath);
+    reconcileRestoredHookDispatch(s.basePath, s.sidecarQueue);
     // A restored gate block has no dispatch either; re-enqueue the blocked
     // hook so a failed blocking gate cannot be bypassed by resuming (#2194).
-    reconcileRestoredGateBlock(s.basePath);
+    reconcileRestoredGateBlock(s.basePath, s.sidecarQueue);
     // Re-sync managed resources on resume so long-lived auto sessions pick up
     // bundled extension updates before resume-time verification/state logic runs.
     // GSD_PKG_ROOT is set by loader.ts and points to the gsd-pi package root.
@@ -3338,7 +3092,7 @@ export async function startAuto(
     pi.events.emit(CMUX_CHANNELS.LOG, { preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, message: s.stepMode ? "Step-mode resumed." : "Auto-mode resumed.", level: "progress" });
 
     try {
-      const resumeResult = await kernelResume(s);
+      const resumeResult = await s.orchestration?.resume();
       if (resumeResult?.kind === "blocked" && resumeResult.action === "stop") {
         notifyResumeBlocked(ctx, resumeResult);
         await cleanupAfterLoopExit(ctx);
@@ -3357,8 +3111,8 @@ export async function startAuto(
         pi,
         s,
         deps: loopDeps,
-        runKernelLoop: autoLoop,
-        runLegacyLoop: autoLoop,
+        runKernelLoop: runUokKernelLoop,
+        runLegacyLoop: runLegacyAutoLoop,
       });
     } finally {
       await cleanupAfterLoopExit(ctx);
@@ -3436,7 +3190,7 @@ export async function startAuto(
   pi.events.emit(CMUX_CHANNELS.LOG, { preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, message: requestedStepMode ? "Step-mode started." : "Auto-mode started.", level: "progress" });
 
   try {
-    await kernelStart(s, { basePath: s.basePath, trigger: "auto-loop" });
+    await s.orchestration?.start({ basePath: s.basePath, trigger: "auto-loop" });
   } catch (err) {
     debugLog("start-orchestration-start", { error: err instanceof Error ? err.message : String(err) });
   }
@@ -3450,8 +3204,8 @@ export async function startAuto(
       pi,
       s,
       deps: loopDeps,
-      runKernelLoop: autoLoop,
-      runLegacyLoop: autoLoop,
+      runKernelLoop: runUokKernelLoop,
+      runLegacyLoop: runLegacyAutoLoop,
     });
   } finally {
     await cleanupAfterLoopExit(ctx);
@@ -3480,7 +3234,6 @@ const widgetStateAccessors: WidgetStateAccessors = {
   isVerbose: () => s.verbose,
   isSessionSwitching: isSessionSwitchInFlight,
   getCurrentDispatchedModelId: () => s.currentDispatchedModelId,
-  getCurrentUnitRoutingTier: () => s.currentUnitRouting?.tier ?? null,
 };
 
 // ─── Preconditions ────────────────────────────────────────────────────────────
@@ -3567,6 +3320,7 @@ export async function dispatchHookUnit(
     s.cmdCtx = ctx as ExtensionCommandContext;
     s.autoStartTime = Date.now();
     s.clearCurrentUnit();
+    s.pendingQuickTasks = [];
   }
 
   // ADR-016 phase 2 / B2 (#5620): hook-trigger basePath transition. Treats
@@ -3636,8 +3390,7 @@ export async function dispatchHookUnit(
   if (modelCandidates.length > 0) {
     let applied = false;
     for (const candidate of modelCandidates) {
-      const candidateId = fallbackModelId(candidate);
-      const match = resolveModelId(candidateId, availableModels, ctx.model?.provider);
+      const match = resolveModelId(candidate, availableModels, ctx.model?.provider);
       if (!match) continue;
       // Skip models the runtime has marked blocked or temporarily unavailable
       // (e.g. a primary that just tripped a provider limit) so the configured
@@ -3649,24 +3402,21 @@ export async function dispatchHookUnit(
           // The manual trigger path bypasses selectAndApplyModel, so apply the
           // hook's per-field `thinking` (from `post_unit_hooks[].model`'s object
           // form) here against the just-set model rather than leaving the hook at
-          // the session level (#1269). A per-entry `thinking` on the matched
-          // fallback entry wins over the field level (#1270). Absent → session
-          // level, unchanged.
-          const level = fallbackEntryThinking(candidate) ?? hookModelConfig?.thinking;
-          if (level) {
-            applyThinkingLevelForModel(pi, level, match, ctx);
+          // the session level (#1269). Absent → session level, unchanged.
+          if (hookModelConfig?.thinking) {
+            applyThinkingLevelForModel(pi, hookModelConfig.thinking, match, ctx);
           }
           applied = true;
           break;
         }
       } catch (err) {
         /* non-fatal — try the next fallback */
-        logWarning("dispatch", `hook model set failed for ${candidateId}: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+        logWarning("dispatch", `hook model set failed for ${candidate}: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
       }
     }
     if (!applied) {
       ctx.ui.notify(
-        `Hook model${modelCandidates.length > 1 ? "s" : ""} "${modelCandidates.map(fallbackModelId).join(", ")}" not available. ` +
+        `Hook model${modelCandidates.length > 1 ? "s" : ""} "${modelCandidates.join(", ")}" not available. ` +
         `Falling back to current session model. ` +
         `Ensure the model is defined in models.json and has auth configured.`,
         "warning",
@@ -3693,7 +3443,7 @@ export async function dispatchHookUnit(
       "warning",
     );
     resetHookState();
-    await pauseAuto(ctx, pi, "machine_fixable");
+    await pauseAuto(ctx, pi);
   }, hookHardTimeoutMs);
 
   setAutoActiveStatus(ctx, s.stepMode ? "next" : "auto");

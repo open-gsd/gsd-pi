@@ -16,7 +16,6 @@
 
 import {
   _getAdapter,
-  getDb,
   isDbAvailable,
   transaction,
 } from "../gsd-db.js";
@@ -33,7 +32,7 @@ export interface RuntimeKvRow {
 
 /**
  * Set or update a runtime_kv row. The value is JSON-stringified before
- * storage. Throws when no database is open.
+ * storage. Best-effort — silently no-ops when the DB is unavailable.
  */
 export function setRuntimeKv(
   scope: RuntimeKvScope,
@@ -41,8 +40,9 @@ export function setRuntimeKv(
   key: string,
   value: unknown,
 ): void {
+  if (!isDbAvailable()) return;
   const now = new Date().toISOString();
-  const db = getDb();
+  const db = _getAdapter()!;
   let valueJson: string;
   try {
     valueJson = JSON.stringify(value);
@@ -93,15 +93,16 @@ export function getRuntimeKv<T = unknown>(
 }
 
 /**
- * Delete a runtime_kv row. Idempotent — no-ops when the row doesn't exist.
- * Throws when no database is open.
+ * Delete a runtime_kv row. Idempotent — silently no-ops when the row
+ * doesn't exist or the DB is unavailable.
  */
 export function deleteRuntimeKv(
   scope: RuntimeKvScope,
   scopeId: string,
   key: string,
 ): void {
-  const db = getDb();
+  if (!isDbAvailable()) return;
+  const db = _getAdapter()!;
   transaction(() => {
     db.prepare(
       `DELETE FROM runtime_kv WHERE scope = :scope AND scope_id = :scope_id AND key = :key`,

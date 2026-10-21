@@ -9,7 +9,6 @@ GSD tracks token usage and cost for every unit of work during auto mode. This da
 **Visualizer:** `/gsd visualize` → Metrics tab for detailed charts.
 
 **Aggregations:**
-
 - By phase (research, planning, execution, completion, reassessment)
 - By slice
 - By model

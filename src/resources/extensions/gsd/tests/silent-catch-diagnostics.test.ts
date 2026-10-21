@@ -64,6 +64,7 @@ const MIGRATED_FILES = new Set([
   // core infrastructure
   "gsd-db.ts",
   "workflow-logger.ts",
+  "workflow-reconcile.ts",
   "workflow-projections.ts",
   "workflow-events.ts",
   "worktree-manager.ts",
@@ -74,6 +75,7 @@ const MIGRATED_FILES = new Set([
   "commands-maintenance.ts",
   "commands-inspect.ts",
   "markdown-renderer.ts",
+  "md-importer.ts",
   "milestone-actions.ts",
   "milestone-ids.ts",
   "rule-registry.ts",

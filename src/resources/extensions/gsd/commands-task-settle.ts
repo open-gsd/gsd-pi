@@ -14,7 +14,6 @@ import {
   type TaskSettleTask,
 } from "./task-settle.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
-import { renderStateProjection } from "./workflow-projections.js";
 
 function parseTaskSettleArgs(args: string): {
   task: TaskSettleTask;
@@ -116,7 +115,6 @@ export async function handleTaskSettle(
         ctx.ui.notify(`gsd task settle: ${unit} is already closed as blocker-accepted — nothing to do.`, "info");
         return;
       }
-      await renderStateProjection(basePath);
       ctx.ui.notify(
         `Accepted blocker for ${unit}: Task closed as blocker-accepted; Attempt ${result.attemptId} and its ` +
         `failed Result remain history and the route head is consumed (no re-route). ` +
@@ -125,14 +123,10 @@ export async function handleTaskSettle(
       );
       return;
     }
-    const settleOptions = {
-      reconcileLifecycle: parsed.reconcileLifecycle,
-      basePath,
-      legacyJournalBasePath: basePath,
-    };
+    const settleOptions = { reconcileLifecycle: parsed.reconcileLifecycle };
     if (!parsed.apply) {
       const plan = planTaskSettle(parsed.task, parsed.reason, settleOptions);
-      if (plan.rows.length === 0 && plan.lifecycleRows.length === 0 && !plan.publication) {
+      if (plan.rows.length === 0 && plan.lifecycleRows.length === 0) {
         ctx.ui.notify(`gsd task settle (dry run): ${unit} has no running Attempt — nothing to do.`, "info");
         return;
       }
@@ -143,12 +137,6 @@ export async function handleTaskSettle(
         ...plan.lifecycleRows.map(
           (row) => `  lifecycle ${row.currentStatus} → ${row.targetStatus} — ${row.rationale}`,
         ),
-        ...(plan.publication ? [
-          `  publication: ${plan.publication.rationale} (host verdict: ${plan.publication.verdict ?? "none recorded"})` +
-          (plan.publication.verdict === "pass"
-            ? ""
-            : " — apply will fail closed until a passing host Technical Verdict is recorded (re-enter `/gsd auto` to run verification)"),
-        ] : []),
         ...(plan.proof ? [`  proof: ${plan.proof.note}`] : []),
       ];
       ctx.ui.notify(
@@ -157,15 +145,13 @@ export async function handleTaskSettle(
       );
       return;
     }
-    const result = await applyTaskSettle({
+    const result = applyTaskSettle({
       invocation: cliInvocation(),
       task: parsed.task,
       reason: parsed.reason,
-      // settleOptions carries basePath for verified publication and for the
-      // one-time import of a pre-upgrade journal verification-pause receipt.
       ...settleOptions,
     });
-    if (!result.settled && !result.reconciled && !result.published) {
+    if (!result.settled && !result.reconciled) {
       ctx.ui.notify(`gsd task settle: ${unit} has no running Attempt — nothing to do.`, "info");
       return;
     }
@@ -176,12 +162,6 @@ export async function handleTaskSettle(
     if (result.reconciled) {
       const target = result.lifecycleRows[result.lifecycleRows.length - 1]?.targetStatus;
       parts.push(`Reconciled lifecycle to ${target} (${unit}) without deleting SUMMARYs.`);
-    }
-    if (result.published) {
-      parts.push(
-        `Published verified Task completion for ${unit} from Attempt ${result.published.attemptId} ` +
-        `(${result.published.status}): lifecycle completed, tasks.status complete.`,
-      );
     }
     ctx.ui.notify(parts.join(" "), "info");
   } catch (error) {

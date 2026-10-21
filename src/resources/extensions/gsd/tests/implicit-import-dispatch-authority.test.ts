@@ -28,8 +28,9 @@ import {
 } from "../gsd-db.ts";
 import { captureCurrentLegacyImportBaseSnapshot } from "../legacy-import-preview-base.ts";
 import { reconcileBeforeDispatch, type ReconciliationResult } from "../state-reconciliation.ts";
-import { observeExternalMarkdownEdits } from "../state-reconciliation/drift/external-markdown-edit.ts";
-import { observeExternalPlanningEdits } from "../state-reconciliation/drift/external-planning-edit.ts";
+import { externalMarkdownEditHandler } from "../state-reconciliation/drift/external-markdown-edit.ts";
+import { externalPlanningEditHandler } from "../state-reconciliation/drift/external-planning-edit.ts";
+import type { GSDState } from "../types.ts";
 import { fingerprintLegacyImportCorpusTree } from "./helpers/legacy-import-corpus.ts";
 
 const PLANNING_FIXTURE = join(
@@ -116,6 +117,21 @@ function seedCanonicalHierarchy(): void {
   });
 }
 
+function state(): GSDState {
+  return {
+    activeMilestone: { id: "M001", title: "Canonical milestone" },
+    activeSlice: null,
+    activeTask: null,
+    phase: "planning",
+    recentDecisions: [],
+    blockers: [],
+    nextAction: "Continue canonical work",
+    registry: [],
+    requirements: { active: 0, validated: 0, deferred: 0, outOfScope: 0, blocked: 0, total: 0 },
+    progress: { milestones: { done: 0, total: 1 } },
+  };
+}
+
 function markerBytes(base: string): Buffer | null {
   const path = join(base, ".gsd", ".compat.json");
   return existsSync(path) ? readFileSync(path) : null;
@@ -143,6 +159,15 @@ function projectionTreeSnapshot(root: string, relative = ""): string[] {
     }
   }
   return rows;
+}
+
+function assertExplicitImportBlocker(result: ReconciliationResult): void {
+  assert.ok(result.blockers.length > 0, "dispatch must block before importing a projection");
+  assert.match(
+    result.blockers.join("\n"),
+    /Preview\/Application|\/gsd recover/i,
+    "blocker recommends the explicit Preview/Application or recovery route",
+  );
 }
 
 function assertNoExternalImportRepair(result: ReconciliationResult): void {
@@ -193,7 +218,7 @@ test("cold planning-only reconciliation ignores Markdown without capturing or ad
   );
 });
 
-test("changed modeled .gsd projection is observed without importing or advancing its stale marker", async () => {
+test("changed modeled .gsd projection blocks without importing or advancing its stale marker", async () => {
   const base = makeWorkspace();
   seedCanonicalHierarchy();
   const relativePath = "phases/01-canonical/01-ROADMAP.md";
@@ -229,15 +254,20 @@ test("changed modeled .gsd projection is observed without importing or advancing
   const markerBefore = markerBytes(base);
   const projectionBefore = projectionTreeSnapshot(join(base, ".gsd"));
 
-  const drift = observeExternalMarkdownEdits(base);
+  const result = await reconcileBeforeDispatch(base, {
+    registry: [externalMarkdownEditHandler],
+    invalidateStateCache: () => {},
+    deriveState: async () => state(),
+  });
 
-  assert.equal(drift.length, 1, "the edited projection is observed");
+  assertExplicitImportBlocker(result);
+  assertNoExternalImportRepair(result);
   assert.deepEqual(durableSnapshot(), databaseBefore, "canonical authority and lineage remain exact");
   assert.deepEqual(markerBytes(base), markerBefore, "stale marker baseline remains exact");
   assert.deepEqual(
     projectionTreeSnapshot(join(base, ".gsd")),
     projectionBefore,
-    "observation leaves the whole modeled .gsd projection tree exact",
+    "dispatch leaves the whole modeled .gsd projection tree exact",
   );
 
   writeFileSync(siblingPath, "# Sabotaged sibling projection\n");
@@ -256,7 +286,7 @@ test("changed modeled .gsd projection is observed without importing or advancing
   assert.deepEqual(markerBytes(base), markerBefore, "marker sabotage restored");
 });
 
-test("changed modeled .planning projection is observed without transform, import, or marker advance", async () => {
+test("changed modeled .planning projection blocks without transform, import, or marker advance", async () => {
   const base = makeWorkspace();
   seedCanonicalHierarchy();
   mkdirSync(join(base, ".planning"), { recursive: true });
@@ -285,9 +315,14 @@ test("changed modeled .planning projection is observed without transform, import
   const planningBefore = fingerprintLegacyImportCorpusTree(join(base, ".planning"));
   const projectionBefore = projectionTreeSnapshot(join(base, ".gsd"));
 
-  const drift = await observeExternalPlanningEdits(base);
+  const result = await reconcileBeforeDispatch(base, {
+    registry: [externalPlanningEditHandler],
+    invalidateStateCache: () => {},
+    deriveState: async () => state(),
+  });
 
-  assert.equal(drift.length, 1, "the edited projection is observed");
+  assertExplicitImportBlocker(result);
+  assertNoExternalImportRepair(result);
   assert.deepEqual(durableSnapshot(), databaseBefore, "canonical authority and lineage remain exact");
   assert.deepEqual(markerBytes(base), markerBefore, "planning marker baseline remains exact");
   assert.equal(
@@ -298,6 +333,6 @@ test("changed modeled .planning projection is observed without transform, import
   assert.deepEqual(
     projectionTreeSnapshot(join(base, ".gsd")),
     projectionBefore,
-    "observation does not transform .planning into a .gsd hierarchy",
+    "dispatch does not transform .planning into a .gsd hierarchy",
   );
 });

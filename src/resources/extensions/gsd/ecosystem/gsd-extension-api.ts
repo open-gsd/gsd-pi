@@ -31,7 +31,6 @@ export interface BeforeAgentStartEventResult {
   systemPrompt?: string;
 }
 
-import type { DbProjectSnapshot } from "../state/project-snapshot.js";
 import type { GSDActiveUnit, GSDState, Phase } from "../types.js";
 import { isGSDActive, getCurrentPhase } from "../../shared/gsd-phase-state.js";
 import { logWarning } from "../workflow-logger.js";
@@ -43,14 +42,6 @@ export interface GSDExtensionAPI extends ExtensionAPI {
   getPhase(): Phase | null;
   /** Currently active milestone/slice/task triple, or null if none. */
   getActiveUnit(): GSDActiveUnit | null;
-  /**
-   * The project snapshot from the workflow database: authority revision,
-   * current refs, progress counts, blockers, open questions, verification and
-   * the milestone registry. Null when the project has no database. The read
-   * changes nothing. An extension reads workflow state here and not from
-   * `.gsd/` files, which are projections of the database.
-   */
-  getProjectSnapshot(basePath: string): Promise<DbProjectSnapshot | null>;
 }
 
 export type GSDEcosystemBeforeAgentStartHandler = ExtensionHandler<
@@ -238,10 +229,6 @@ export function createGSDExtensionAPI(
     // ── GSD-specific additions ─────────────────────────────────────────
     getPhase: (): Phase | null => _snapshot.phase,
     getActiveUnit: (): GSDActiveUnit | null => _snapshot.activeUnit,
-    getProjectSnapshot: async (basePath: string): Promise<DbProjectSnapshot | null> => {
-      const { readProjectSnapshotFromDb } = await import("../state/project-snapshot.js");
-      return readProjectSnapshotFromDb(basePath, { preserveGlobalDbHandle: true });
-    },
   } satisfies GSDExtensionAPI;
 
   return wrapper;

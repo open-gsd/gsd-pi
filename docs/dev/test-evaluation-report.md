@@ -40,4 +40,5 @@ Generated: 2026-06-20T21:30:18.157Z
 
 ## Priority gaps (critical/high untested)
 
+
 Regenerate: `npm run audit:test-matrix -- --write-report`

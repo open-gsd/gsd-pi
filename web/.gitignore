@@ -14,5 +14,4 @@ next.user-config.*
 # Common ignores
 node_modules/
 .next/
-.next-openclaw/
 .DS_Store

@@ -36,6 +36,7 @@ export function unitTypeToPrefsPhaseKey(unitType: string | undefined): string | 
     case "discuss-project":
     case "discuss-requirements":
     case "workflow-preferences":
+    case "research-decision":
       return "discuss";
     case "execute-task":
     case "execute-task-simple":

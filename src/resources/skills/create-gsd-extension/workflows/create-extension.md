@@ -1,6 +1,5 @@
 <required_reading>
 **Read these reference files before proceeding:**
-
 1. references/extension-lifecycle.md
 2. references/custom-tools.md (if building tools)
 3. references/custom-commands.md (if building commands)
@@ -13,7 +12,6 @@
 ## Step 1: Determine Scope and Placement
 
 Ask the user:
-
 - **Global** (`~/.pi/agent/extensions/`) — Available in all GSD sessions
 - **Project-local** (`.gsd/extensions/`) — Available only in this project
 
@@ -37,7 +35,6 @@ Identify what the extension needs from the user's description:
 ## Step 3: Choose Extension Structure
 
 **Directory with index.ts** — the standard pattern for all extensions:
-
 ```
 ~/.pi/agent/extensions/my-extension/
 ├── extension-manifest.json   # Required — declares capabilities
@@ -47,7 +44,6 @@ Identify what the extension needs from the user's description:
 ```
 
 **Package with dependencies** — when npm packages are needed:
-
 ```
 ~/.pi/agent/extensions/my-extension/
 ├── extension-manifest.json
@@ -57,7 +53,6 @@ Identify what the extension needs from the user's description:
 ```
 
 For packages, `package.json` needs:
-
 ```json
 {
   "name": "my-extension",
@@ -103,7 +98,6 @@ export default function (pi: ExtensionAPI) {
 Then add capabilities based on Step 2. Reference the appropriate reference files for each capability.
 
 **Tool registration pattern:**
-
 ```typescript
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@gsd/pi-ai";
@@ -127,7 +121,6 @@ pi.registerTool({
 ```
 
 **Command registration pattern:**
-
 ```typescript
 pi.registerCommand("mycommand", {
   description: "What this command does",
@@ -138,7 +131,6 @@ pi.registerCommand("mycommand", {
 ```
 
 **Event hook pattern:**
-
 ```typescript
 pi.on("tool_call", async (event, ctx) => {
   if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
@@ -158,7 +150,6 @@ gsd -e ./path/to/my-extension.ts
 ```
 
 Verify:
-
 - Extension loads without errors (check GSD startup output)
 - Tools appear when LLM is asked to use them
 - Commands respond to `/mycommand`
@@ -172,7 +163,6 @@ Fix issues, add features, refine. Use `/reload` for hot-reload during developmen
 
 <success_criteria>
 Extension creation is complete when:
-
 - [ ] Extension directory created with index.ts and extension-manifest.json
 - [ ] Manifest `provides` accurately lists all registered tools, commands, hooks, shortcuts
 - [ ] All imports resolve (TypeBox, pi-ai, pi-coding-agent, pi-tui as needed)

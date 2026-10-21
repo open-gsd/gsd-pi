@@ -1,8 +1,7 @@
 import type { FailureClass, GateResult } from "./contracts.js";
-import { insertGateRun, isDbAvailable } from "../gsd-db.js";
+import { insertGateRun } from "../gsd-db.js";
 import { buildAuditEnvelope, emitUokAuditEvent } from "./audit.js";
 import { isUnifiedAuditEnabled } from "./audit-toggle.js";
-import { logError } from "../workflow-logger.js";
 
 export interface GateRunnerContext {
   basePath: string;
@@ -37,8 +36,6 @@ const RETRY_MATRIX: Record<FailureClass, number> = {
   git: 1,
   timeout: 2,
   "manual-attention": 0,
-  // A refusal is deterministic by definition (#2046) — never gate-retry it.
-  refusal: 0,
   unknown: 0,
 };
 
@@ -63,38 +60,6 @@ function emitGateAuditIfEnabled(ctx: GateRunnerContext, result: GateResult): voi
       },
     }),
   );
-}
-
-/**
- * gate_runs and audit rows are telemetry for the gate (coordination tables,
- * not workflow state). With no DB the record is refused and logged as an
- * error, never dropped silently (ADR-046); a failed DB write still throws.
- */
-function recordGateResult(ctx: GateRunnerContext, result: GateResult): void {
-  if (!isDbAvailable()) {
-    logError("db", `gate ${result.gateId} result not recorded: workflow DB is unavailable`);
-    return;
-  }
-  insertGateRun({
-    traceId: ctx.traceId,
-    turnId: ctx.turnId,
-    gateId: result.gateId,
-    gateType: result.gateType,
-    unitType: ctx.unitType,
-    unitId: ctx.unitId,
-    milestoneId: ctx.milestoneId,
-    sliceId: ctx.sliceId,
-    taskId: ctx.taskId,
-    outcome: result.outcome,
-    failureClass: result.failureClass,
-    rationale: result.rationale,
-    findings: result.findings,
-    attempt: result.attempt,
-    maxAttempts: result.maxAttempts,
-    retryable: result.retryable,
-    evaluatedAt: result.evaluatedAt,
-  });
-  emitGateAuditIfEnabled(ctx, result);
 }
 
 export class UokGateRunner {
@@ -124,7 +89,27 @@ export class UokGateRunner {
         evaluatedAt: now,
       };
 
-      recordGateResult(ctx, unknownResult);
+      insertGateRun({
+        traceId: ctx.traceId,
+        turnId: ctx.turnId,
+        gateId: unknownResult.gateId,
+        gateType: unknownResult.gateType,
+        unitType: ctx.unitType,
+        unitId: ctx.unitId,
+        milestoneId: ctx.milestoneId,
+        sliceId: ctx.sliceId,
+        taskId: ctx.taskId,
+        outcome: unknownResult.outcome,
+        failureClass: unknownResult.failureClass,
+        rationale: unknownResult.rationale,
+        findings: unknownResult.findings,
+        attempt: unknownResult.attempt,
+        maxAttempts: unknownResult.maxAttempts,
+        retryable: unknownResult.retryable,
+        evaluatedAt: unknownResult.evaluatedAt,
+      });
+
+      emitGateAuditIfEnabled(ctx, unknownResult);
 
       return unknownResult;
     }
@@ -172,7 +157,27 @@ export class UokGateRunner {
         evaluatedAt: now,
       };
 
-      recordGateResult(ctx, final);
+      insertGateRun({
+        traceId: ctx.traceId,
+        turnId: ctx.turnId,
+        gateId: final.gateId,
+        gateType: final.gateType,
+        unitType: ctx.unitType,
+        unitId: ctx.unitId,
+        milestoneId: ctx.milestoneId,
+        sliceId: ctx.sliceId,
+        taskId: ctx.taskId,
+        outcome: final.outcome,
+        failureClass: final.failureClass,
+        rationale: final.rationale,
+        findings: final.findings,
+        attempt: final.attempt,
+        maxAttempts: final.maxAttempts,
+        retryable: final.retryable,
+        evaluatedAt: final.evaluatedAt,
+      });
+
+      emitGateAuditIfEnabled(ctx, final);
 
       if (!retryable) break;
     }

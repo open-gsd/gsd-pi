@@ -28,10 +28,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.21.1**
+Latest release: **v1.19.0**
 
-- **release:** Wait for bounded npm registry propagation (#2688).
-- **release:** Verify npm artifact identity before accepting publication (#2686).
+- **vscode:** Add Copilot project read tools.
+- **gsd:** Expose progress read metadata.
+- **mcp:** GSD-side smoke probe and per-host checklist for canonical read tools (#2174).
+- **vscode:** Show DB-authoritative project progress in sidebar (#2136) (#2143).
+- **gsd:** Add gsd_project_snapshot canonical DB read tool (#2170).
+- **gsd:** Delete dead planner-handoff module (#2149).
+- **gsd:** Stop husk-task gates from wedging milestone closeout.
+- **gsd:** Rebuild markdown projections at the invocation root.
 
 <!-- release-highlights:end -->
 
@@ -152,7 +158,7 @@ Need help choosing settings? Use the [GSD Pi web configurator](https://pi.opengs
 gsd
 ```
 
-Run the setup flow, choose your preferred model provider, and open a project directory. Cursor Agent users can choose the `cursor-agent` provider after installing and authenticating the local `cursor-agent` CLI; its default model is `composer-2.5`, and `CURSOR_API_KEY` is supported as an auth signal. GSD stores project planning and runtime state in `.gsd/`, with gitignored sibling runtime directories such as `.gsd-backups/` for migration snapshots. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
+Run the setup flow, choose your preferred model provider, and open a project directory. Cursor Agent users can choose the `cursor-agent` provider after installing and authenticating the local `cursor-agent` CLI; its default model is `composer-2.5`, and `CURSOR_API_KEY` is supported as an auth signal. GSD stores project planning and runtime state in `.gsd/`, with gitignored sibling runtime directories such as `.gsd-backups/` for migration snapshots. Stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the flat-phase `.gsd/phases/` migration is complete.
 
 For a full first-run walkthrough, see [Getting Started With gsd-pi](./docs/user-docs/getting-started.md).
 

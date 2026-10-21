@@ -53,7 +53,6 @@ pi.registerTool({
   renderCall(args, theme) { ... },
   renderResult(result, { expanded, isPartial }, theme) { ... },
 });
-
 ```
 </registration>
 
@@ -69,7 +68,6 @@ action: StringEnum(["list", "add", "remove"] as const)
 // ❌ BROKEN with Google's API
 action: Type.Union([Type.Literal("list"), Type.Literal("add")])
 ```
-
 </critical_stringenum>
 
 <output_truncation>
@@ -113,7 +111,6 @@ async execute(toolCallId, params) {
   return { content: [{ type: "text", text: "OK" }], details: {} };
 }
 ```
-
 </signaling_errors>
 
 <dynamic_registration>
@@ -171,7 +168,6 @@ export default function (pi: ExtensionAPI) {
   });
 }
 ```
-
 </multiple_tools>
 
 <path_normalization>
@@ -184,5 +180,4 @@ async execute(toolCallId, params, signal, onUpdate, ctx) {
   // ...
 }
 ```
-
 </path_normalization>

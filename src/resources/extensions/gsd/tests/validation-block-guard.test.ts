@@ -38,8 +38,9 @@ function blockedState(): GSDState {
         "Milestone M006 is blocked because milestone validation returned needs-attention.",
         "Fix options:",
         "1. Review the validation details: `/gsd status`",
-        "2. Fix the issue or gather the missing proof, then re-run milestone validation with current structured evidence: `/gsd validate-milestone`",
-        "3. Run `/gsd auto` after canonical validation passes.",
+        "2. If you fixed the missing evidence or issue, re-run milestone validation: `/gsd validate-milestone`",
+        "3. If the finding is acceptable, override it: `/gsd verdict pass --rationale \"why this is okay\"`",
+        "4. If this should wait, defer it explicitly: `/gsd park M006`",
       ].join("\n"),
     ],
     nextAction: "Resolve M006 validation attention before proceeding.",
@@ -84,6 +85,7 @@ test("validation block allows recovery, diagnostics, and unrelated commands", ()
     "h",
     "?",
     "status",
+    "verdict pass --rationale ok",
     "validate-milestone",
     "dispatch reassess",
     "dispatch reassess-roadmap",
@@ -203,7 +205,8 @@ test("validation block message includes attempted command and recovery options",
   assert.match(message, /\/gsd next cannot run/);
   assert.match(message, /\/gsd status/);
   assert.match(message, /\/gsd validate-milestone/);
-  assert.doesNotMatch(message, /\/gsd verdict/);
+  assert.match(message, /\/gsd verdict pass --rationale/);
+  assert.match(message, /\/gsd park M006/);
 });
 
 test("validation block message can guide remediation through dispatch reassess", () => {
@@ -213,9 +216,9 @@ test("validation block message can guide remediation through dispatch reassess",
       [
         "Milestone M006 is blocked because milestone validation returned needs-remediation, but all slices are complete.",
         "Fix options:",
-        "1. Run `/gsd dispatch reassess` to add remediation slices, then complete the new work.",
-        "2. Re-run milestone validation with current structured evidence: `/gsd validate-milestone`",
-        "3. Run `/gsd auto` after canonical validation passes.",
+        "1. Run `/gsd dispatch reassess` to add remediation slices, then run `/gsd auto`",
+        "2. If the finding is acceptable, override it: `/gsd verdict pass --rationale \"why this is okay\"`",
+        "3. If this should wait, defer it explicitly: `/gsd park M006`",
       ].join("\n"),
     ],
   }, "auto");

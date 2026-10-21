@@ -2,7 +2,7 @@
 // File Purpose: Verifies UOK kernel path selection and legacy fallback telemetry.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 import { runAutoLoopWithUok } from "../uok/kernel.ts";
 import type { AutoSession } from "../auto/session.ts";
 import type { LoopDeps } from "../auto/loop-deps.ts";
+import { gsdRoot } from "../paths.ts";
 import type { GSDPreferences } from "../preferences.ts";
 import { getLegacyTelemetry, resetLegacyTelemetry } from "../legacy-telemetry.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
@@ -21,7 +22,7 @@ import {
   isUnifiedAuditEnabled,
   setUnifiedAuditEnabled,
 } from "../uok/audit-toggle.ts";
-import { buildAuditEnvelope, emitUokAuditEvent } from "../uok/audit.ts";
+import { writeEscalationArtifact } from "../escalation.ts";
 import { peekLogs, _resetLogs } from "../workflow-logger.ts";
 
 function makeBasePath(): string {
@@ -88,7 +89,14 @@ function makeArgs(
   };
 }
 
-test("runAutoLoopWithUok uses kernel path by default", async () => {
+function readParityEvents(basePath: string): Array<Record<string, unknown>> {
+  const file = join(gsdRoot(basePath), "runtime", "uok-parity.jsonl");
+  const raw = readFileSync(file, "utf-8").trim();
+  if (raw.length === 0) return [];
+  return raw.split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("runAutoLoopWithUok uses kernel path by default and records uok-kernel parity", async () => {
   const basePath = makeBasePath();
   try {
     resetLegacyTelemetry();
@@ -108,6 +116,14 @@ test("runAutoLoopWithUok uses kernel path by default", async () => {
     assert.ok(args.calls.kernelDeps?.uokObserver);
     assert.equal(isUnifiedAuditEnabled(), true);
     assert.equal(isUnifiedAuditEnabled(basePath), false);
+
+    const events = readParityEvents(basePath);
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.path, "uok-kernel");
+    assert.equal(events[0]?.phase, "enter");
+    assert.equal(events[1]?.path, "uok-kernel");
+    assert.equal(events[1]?.phase, "exit");
+    assert.equal(events[1]?.status, "ok");
     assert.equal(getLegacyTelemetry()["legacy.uokFallbackUsed"], 0);
   } finally {
     resetLegacyTelemetry();
@@ -132,6 +148,12 @@ test("runAutoLoopWithUok keeps audit disabled for legacy-wrapper while restoring
     assert.equal(args.calls.legacy, 1);
     assert.equal(isUnifiedAuditEnabled(), true);
     assert.equal(isUnifiedAuditEnabled(basePath), false);
+
+    const events = readParityEvents(basePath);
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.path, "legacy-wrapper");
+    assert.equal(events[1]?.path, "legacy-wrapper");
+    assert.equal(events[1]?.status, "ok");
     assert.equal(getLegacyTelemetry()["legacy.uokFallbackUsed"], 1);
   } finally {
     clearUnifiedAuditOverrideForTests();
@@ -155,6 +177,12 @@ test("runAutoLoopWithUok uses legacy path when explicit legacy fallback is enabl
     assert.equal(args.calls.kernel, 0);
     assert.equal(args.calls.legacy, 1);
     assert.equal(args.calls.legacyDeps, args.deps);
+
+    const events = readParityEvents(basePath);
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.path, "legacy-fallback");
+    assert.equal(events[1]?.path, "legacy-fallback");
+    assert.equal(events[1]?.status, "ok");
     assert.equal(getLegacyTelemetry()["legacy.uokFallbackUsed"], 1);
   } finally {
     resetLegacyTelemetry();
@@ -177,6 +205,11 @@ test("runAutoLoopWithUok respects GSD_UOK_FORCE_LEGACY emergency switch", async 
 
     assert.equal(args.calls.kernel, 0);
     assert.equal(args.calls.legacy, 1);
+
+    const events = readParityEvents(basePath);
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.path, "legacy-fallback");
+    assert.equal(events[1]?.path, "legacy-fallback");
     assert.equal(getLegacyTelemetry()["legacy.uokFallbackUsed"], 1);
   } finally {
     resetLegacyTelemetry();
@@ -213,6 +246,13 @@ test("runAutoLoopWithUok records error exit and restores previous audit override
     assert.equal(args.calls.kernel, 1);
     assert.equal(args.calls.legacy, 0);
     assert.equal(isUnifiedAuditEnabled(), false);
+
+    const events = readParityEvents(basePath);
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.phase, "enter");
+    assert.equal(events[1]?.phase, "exit");
+    assert.equal(events[1]?.status, "error");
+    assert.match(String(events[1]?.error), /kernel exploded/);
   } finally {
     clearUnifiedAuditOverrideForTests();
     resetLegacyTelemetry();
@@ -299,18 +339,38 @@ test("runAutoLoopWithUok treats kernel-enter audit failures as telemetry-only", 
     );
     assert.equal(filtered.eligible.length, 1);
 
-    emitUokAuditEvent(basePath, buildAuditEnvelope({
-      traceId: "escalation:M001:S01:T01",
-      category: "gate",
-      type: "escalation-manual-attention-created",
-      payload: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
-    }));
+    mkdirSync(join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), {
+      recursive: true,
+    });
+    writeEscalationArtifact(basePath, {
+      version: 1,
+      taskId: "T01",
+      sliceId: "S01",
+      milestoneId: "M001",
+      question: "Choose a path",
+      options: [
+        { id: "a", label: "A", tradeoffs: "First path" },
+        { id: "b", label: "B", tradeoffs: "Second path" },
+      ],
+      recommendation: "a",
+      recommendationRationale: "Test recommendation",
+      continueWithDefault: false,
+      createdAt: new Date().toISOString(),
+    });
   };
 
   await runAutoLoopWithUok(args);
 
   assert.equal(args.calls.kernel, 1);
   assert.equal(args.calls.legacy, 0);
+
+  const events = readParityEvents(basePath);
+  assert.equal(events.length, 3);
+  assert.equal(events[0]?.phase, "enter");
+  assert.equal(events[1]?.phase, "telemetry-error");
+  assert.equal(events[1]?.telemetry, "uok-kernel-enter");
+  assert.equal(events[2]?.phase, "exit");
+  assert.equal(events[2]?.status, "ok");
   assert.equal(isUnifiedAuditEnabled(), true);
   assert.equal(isUnifiedAuditEnabled(basePath), false);
   assert.ok(
@@ -323,11 +383,20 @@ test("runAutoLoopWithUok treats kernel-enter audit failures as telemetry-only", 
   );
 
   assert.doesNotThrow(() => {
-    emitUokAuditEvent(basePath, buildAuditEnvelope({
-      traceId: "escalation:M001:S01:T02",
-      category: "gate",
-      type: "escalation-manual-attention-created",
-      payload: { milestoneId: "M001", sliceId: "S01", taskId: "T02" },
-    }));
+    writeEscalationArtifact(basePath, {
+      version: 1,
+      taskId: "T02",
+      sliceId: "S01",
+      milestoneId: "M001",
+      question: "Continue?",
+      options: [
+        { id: "yes", label: "Yes", tradeoffs: "Continue" },
+        { id: "no", label: "No", tradeoffs: "Stop" },
+      ],
+      recommendation: "yes",
+      recommendationRationale: "Audit stayed disabled after degraded enter",
+      continueWithDefault: true,
+      createdAt: new Date().toISOString(),
+    });
   });
 });

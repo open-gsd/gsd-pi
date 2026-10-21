@@ -1,19 +1,30 @@
-import test, { afterEach, beforeEach } from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createPromptRecord, writePromptRecord } from "../../remote-questions/mod.js";
 import { getLatestPromptSummary } from "../../remote-questions/mod.js";
 
-// Prompt records are rows of the project database.
-beforeEach(() => {
-  assert.equal(openDatabase(":memory:"), true);
-});
+function withTempHome(fn: (tempHome: string) => void | Promise<void>) {
+  return async () => {
+    const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
+    const tempHome = join(tmpdir(), `gsd-remote-status-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(tempHome, ".gsd", "runtime", "remote-questions"), { recursive: true });
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome;
+    try {
+      await fn(tempHome);
+    } finally {
+      process.env.HOME = savedHome;
+      process.env.USERPROFILE = savedUserProfile;
+      rmSync(tempHome, { recursive: true, force: true });
+    }
+  };
+}
 
-afterEach(() => {
-  closeDatabase();
-});
-
-test("getLatestPromptSummary returns latest stored prompt", () => {
+test("getLatestPromptSummary returns latest stored prompt", withTempHome(() => {
   const recordA = createPromptRecord({
     id: "a-prompt",
     channel: "slack",
@@ -40,9 +51,9 @@ test("getLatestPromptSummary returns latest stored prompt", () => {
   const latest = getLatestPromptSummary();
   assert.equal(latest?.id, "z-prompt");
   assert.equal(latest?.status, "answered");
-});
+}));
 
-test("getLatestPromptSummary sorts by updatedAt, not by id", () => {
+test("getLatestPromptSummary sorts by updatedAt, not filename", withTempHome(() => {
   // Record with alphabetically-LAST id but OLDEST timestamp
   const old = createPromptRecord({
     id: "zzz-oldest",
@@ -82,13 +93,7 @@ test("getLatestPromptSummary sorts by updatedAt, not by id", () => {
 
   const latest = getLatestPromptSummary();
   // Should return "aaa-newest" (updatedAt=3000), NOT "zzz-oldest" (alphabetically last)
-  assert.equal(latest?.id, "aaa-newest", "should pick the most recently updated prompt, not the alphabetically last id");
+  assert.equal(latest?.id, "aaa-newest", "should pick the most recently updated prompt, not the alphabetically last filename");
   assert.equal(latest?.status, "answered");
   assert.equal(latest?.updatedAt, 3000);
-});
-
-test("getLatestPromptSummary returns null when no project database is open", () => {
-  closeDatabase();
-  assert.equal(getLatestPromptSummary(), null);
-  assert.equal(openDatabase(":memory:"), true);
-});
+}));

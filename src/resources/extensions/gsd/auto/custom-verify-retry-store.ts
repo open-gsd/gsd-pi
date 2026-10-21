@@ -1,59 +1,90 @@
 // Project/App: gsd-pi
-// File Purpose: Persistence adapter for verification retry counts. A step of a
-// custom workflow run keeps its count on its custom_workflow_steps row
-// (verify_retries); the session map serves the close-out that is in progress.
-// There is no JSON file: custom-verify-retries.json is gone.
+// File Purpose: Persistence adapter for custom workflow verification retry counts.
 
-import { stepIdOfUnit } from "../custom-workflow-engine.js";
-import {
-  customWorkflowRunId,
-  getCustomWorkflowStepVerifyRetries,
-} from "../db/custom-workflow-runs.js";
-import { setCustomWorkflowStepVerifyRetries } from "../db/writers/custom-workflow-runs.js";
-import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
+import { readFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { atomicWriteSync } from "../atomic-write.js";
+import { gsdRoot } from "../paths.js";
 import type { AutoSession } from "./session.js";
 
-type RetrySession = Pick<AutoSession, "activeRunDir" | "verificationRetryCount">;
+type RetrySession = Pick<AutoSession, "activeRunDir" | "basePath" | "verificationRetryCount"> & {
+  exhaustedVerificationUnits?: Set<string>;
+};
 
-/** The step row key of a custom workflow unit. */
-function stepRowOf(
-  s: Pick<AutoSession, "activeRunDir">,
-  unitId: string,
-): { runId: string; stepId: string } {
-  if (!s.activeRunDir) throw new Error(`Custom workflow unit ${unitId} has no active run directory`);
-  return { runId: customWorkflowRunId(s.activeRunDir), stepId: stepIdOfUnit(unitId) };
+interface RetryStoreLogDeps {
+  logFailure: (err: unknown) => void;
 }
 
-/**
- * Load the retry count of a custom workflow step from its step row, so a
- * restart continues the count.
- */
-export function hydrateCustomStepVerifyRetryCount(
-  s: Pick<AutoSession, "activeRunDir" | "verificationRetryCount">,
-  unitType: string,
-  unitId: string,
+function ensureExhaustedVerificationUnits(s: RetrySession): Set<string> {
+  if (!s.exhaustedVerificationUnits) {
+    s.exhaustedVerificationUnits = new Set<string>();
+  }
+  return s.exhaustedVerificationUnits;
+}
+
+export function customVerifyRetryStateDir(s: Pick<AutoSession, "activeRunDir" | "basePath">): string {
+  return s.activeRunDir ? join(s.activeRunDir, "runtime") : join(gsdRoot(s.basePath), "runtime");
+}
+
+export function customVerifyRetryStatePath(s: Pick<AutoSession, "activeRunDir" | "basePath">): string {
+  return join(customVerifyRetryStateDir(s), "custom-verify-retries.json");
+}
+
+export function hydrateCustomVerifyRetryCounts(
+  s: RetrySession,
+  deps: RetryStoreLogDeps,
 ): Map<string, number> {
-  const step = stepRowOf(s, unitId);
-  s.verificationRetryCount.set(
-    `${unitType}/${unitId}`,
-    getCustomWorkflowStepVerifyRetries(step.runId, step.stepId),
-  );
+  const exhaustedUnits = ensureExhaustedVerificationUnits(s);
+  if (s.verificationRetryCount.size > 0 || exhaustedUnits.size > 0) {
+    return s.verificationRetryCount;
+  }
+
+  try {
+    const raw = JSON.parse(readFileSync(customVerifyRetryStatePath(s), "utf-8"));
+    const counts = raw && typeof raw === "object" && raw.counts && typeof raw.counts === "object"
+      ? raw.counts as Record<string, unknown>
+      : {};
+    for (const [key, value] of Object.entries(counts)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        s.verificationRetryCount.set(key, Math.floor(value));
+      }
+    }
+    const exhausted = raw && typeof raw === "object" && Array.isArray(raw.exhausted) ? raw.exhausted : [];
+    for (const key of exhausted) {
+      if (typeof key === "string" && key.length > 0) {
+        exhaustedUnits.add(key);
+      }
+    }
+  } catch (err) {
+    deps.logFailure(err);
+  }
+
   return s.verificationRetryCount;
 }
 
-/**
- * Store the retry count of a custom workflow step on its step row with a
- * Domain Operation. A unit with no count stores 0. A count that is already
- * stored writes nothing.
- */
-export function saveCustomStepVerifyRetryCount(
-  s: Pick<AutoSession, "activeRunDir" | "verificationRetryCount">,
-  unitType: string,
-  unitId: string,
+export function saveCustomVerifyRetryCounts(
+  s: RetrySession,
+  deps: RetryStoreLogDeps,
 ): void {
-  const step = stepRowOf(s, unitId);
-  const fence = readDomainOperationFence();
-  const used = s.verificationRetryCount.get(`${unitType}/${unitId}`) ?? 0;
-  if (getCustomWorkflowStepVerifyRetries(step.runId, step.stepId) === used) return;
-  setCustomWorkflowStepVerifyRetries({ fence, ...step, used });
+  const retryCounts = s.verificationRetryCount;
+  const exhaustedUnits = ensureExhaustedVerificationUnits(s);
+  const filePath = customVerifyRetryStatePath(s);
+
+  try {
+    if ((!retryCounts || retryCounts.size === 0) && (!exhaustedUnits || exhaustedUnits.size === 0)) {
+      unlinkSync(filePath);
+      return;
+    }
+    mkdirSync(customVerifyRetryStateDir(s), { recursive: true });
+    atomicWriteSync(filePath, JSON.stringify({
+      counts: Object.fromEntries(retryCounts),
+      exhausted: [...exhaustedUnits],
+      updatedAt: new Date().toISOString(),
+    }) + "\n");
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err ? (err as { code?: string }).code : undefined;
+    if (code !== "ENOENT") {
+      deps.logFailure(err);
+    }
+  }
 }

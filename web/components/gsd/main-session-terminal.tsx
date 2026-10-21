@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { useEmbeddedTheme, useTheme } from "@/components/theme-provider"
+import { useTheme } from "next-themes"
 import { Loader2, ImagePlus } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { validateImageFile } from "@/lib/image-utils"
@@ -86,9 +86,6 @@ async function settleTerminalLayout(
 export function MainSessionTerminal({ className, fontSize, projectCwd }: MainSessionTerminalProps) {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme !== "light"
-  const hostTheme = useEmbeddedTheme()
-  const themeRef = useRef({ isDark, hostTheme })
-  themeRef.current = { isDark, hostTheme }
   const wrapperRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerminal | null>(null)
@@ -145,9 +142,9 @@ export function MainSessionTerminal({ className, fontSize, projectCwd }: MainSes
 
   useEffect(() => {
     if (termRef.current) {
-      termRef.current.options.theme = getXtermTheme(isDark, "classic", hostTheme)
+      termRef.current.options.theme = getXtermTheme(isDark)
     }
-  }, [isDark, hostTheme])
+  }, [isDark])
 
   useEffect(() => {
     if (!termRef.current) return
@@ -176,7 +173,7 @@ export function MainSessionTerminal({ className, fontSize, projectCwd }: MainSes
 
       if (disposed) return
 
-      terminal = new Terminal(getXtermOptions(themeRef.current.isDark, fontSize, "classic", themeRef.current.hostTheme))
+      terminal = new Terminal(getXtermOptions(isDark, fontSize))
       fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
       terminal.open(containerRef.current!)

@@ -63,7 +63,6 @@ pi list                               # List packages
 ---
 
 *This document was generated from the Pi documentation. Source files are at:*
-
 ```
 ~/.nvm/versions/node/v22.20.0/lib/node_modules/@gsd/pi-coding-agent/
 ```

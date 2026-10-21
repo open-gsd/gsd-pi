@@ -3,7 +3,6 @@
 ## Grep/Glob Patterns to Detect
 
 ### O(n^2) and Worse Patterns
-
 ```
 # Nested loops over same/related collections
 for.*in.*\n.*for.*in         (nested for loops)
@@ -21,7 +20,6 @@ if.*in\s+list                 (Python: O(n) lookup in list)
 ```
 
 ### Unnecessary Iterations
-
 ```
 \.filter\(.*\.length          (filter just to count)
 \.filter\(.*\[0\]             (filter just to get first - use find)
@@ -36,7 +34,6 @@ Object\.keys\(.*\.map\(.*Object\.values  (iterating keys then accessing values)
 ```
 
 ### Redundant Computation
-
 ```
 # Same computation in loop
 for.*\n.*Math\.              (math operations that could be hoisted)
@@ -48,7 +45,6 @@ for.*\n.*new Date\(          (creating Date objects in loop for same date)
 ```
 
 ### Inefficient Data Structure Choice
-
 ```
 # Using arrays where Set/Map would be better
 \.push\(.*\.includes\(       (array as unique set)

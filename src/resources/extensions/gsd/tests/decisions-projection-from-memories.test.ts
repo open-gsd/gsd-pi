@@ -479,32 +479,25 @@ test("saveDecisionToDb writes a DECISIONS.md projection sourced from memories th
   }
 });
 
-test("saveDecisionToDb fails a decision whose memory write fails and DECISIONS.md does not list it", async () => {
+test("saveDecisionToDb injects a projection fallback when memory mirror is absent", async () => {
   const base = makeTmpBase();
   try {
-    await saveDecisionToDb(
-      { when_context: "M001 kept", scope: "M001", decision: "Keep", choice: "kept", rationale: "valid" },
+    const result = await saveDecisionToDb(
+      {
+        when_context: "M001 fallback",
+        scope: "M001",
+        decision: "",
+        choice: "",
+        rationale: "",
+      },
       base,
     );
-    const decisionsPath = join(base, ".gsd", "DECISIONS.md");
-    const before = readFileSync(decisionsPath, "utf-8");
 
-    await assert.rejects(
-      saveDecisionToDb(
-        { when_context: "M001 failed", scope: "M001", decision: "", choice: "", rationale: "" },
-        base,
-      ),
-      /Unable to persist decision D002/,
-    );
+    assert.equal(result.id, "D001");
+    assert.equal(getAllDecisionsFromMemories().some((d) => d.id === "D001"), false);
 
-    assert.equal(getAllDecisionsFromMemories().some((d) => d.id === "D002"), false);
-    const operations = _getAdapter()!
-      .prepare("SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'decision.save'")
-      .get() as { count: number };
-    assert.equal(operations.count, 1, "the failed save must not commit a decision.save operation");
-    const after = readFileSync(decisionsPath, "utf-8");
-    assert.equal(after, before);
-    assert.doesNotMatch(after, /D002|M001 failed/);
+    const md = readFileSync(join(base, ".gsd", "DECISIONS.md"), "utf-8");
+    assert.match(md, /\| D001 \| M001 fallback \| M001 \|  \|  \|  \| Yes \| agent \|/);
   } finally {
     cleanup(base);
   }

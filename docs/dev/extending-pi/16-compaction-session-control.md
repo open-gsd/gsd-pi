@@ -1,5 +1,6 @@
 # Compaction & Session Control
 
+
 ### Custom Compaction
 
 Override the default compaction behavior:

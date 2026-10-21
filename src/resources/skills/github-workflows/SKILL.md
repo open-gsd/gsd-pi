@@ -24,7 +24,6 @@ node scripts/ci_monitor.cjs <command>
 ```
 
 **Before using any command:**
-
 - [ ] Run `--help` to discover available arguments
 
 **Routing Table:**
@@ -47,7 +46,6 @@ node scripts/ci_monitor.cjs <command>
 **Base URL:** `https://docs.github.com/en/actions/reference/workflows-and-actions/`
 
 **Before writing any workflow syntax:**
-
 - [ ] Fetch the relevant `.md` file from the URL above
 - [ ] Read only the section you need
 

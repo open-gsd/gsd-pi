@@ -3,24 +3,16 @@
 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import {
-  appliedMigrationApprovalHash,
   applyVerifiedMigrationApplication,
-  openWorkflowDatabase,
-  openWorkflowDatabasePathOrNull,
-  previewVerifiedMigrationApplication,
-  resolveProjectRootDbPath,
-  restoreWorkflowDatabase,
   loadVerifiedRecoverApplication,
   loadVerifiedMigrationApplication,
   loadVerifiedMigrationApplicationByPreviewId,
 } from "../db-workspace.js";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { withDatabaseMaintenanceOwner } from "../database-maintenance-fence.js";
 import { immediateTransaction, withDatabaseMaintenanceClaim } from "../db/engine.js";
 import { inspectLegacyImportApplicationEvidence } from "../legacy-import-application-evidence.js";
-import { incrementLegacyTelemetry } from "../legacy-telemetry.js";
 import {
   verifyLegacyImportApplicationResult,
   verifyLegacyImportApplicationTargets,
@@ -30,7 +22,6 @@ import { captureCurrentLegacyImportBaseSnapshot } from "../legacy-import-preview
 import { gsdRoot, MIGRATION_STAGING_DIR_PREFIX } from "../paths.js";
 import { loadManagedProjectionPaths } from "../managed-projection-history.js";
 import { deriveState, invalidateStateCache } from "../state.js";
-import { renderStateProjection } from "../workflow-projections.js";
 import {
   archiveLegacyPlanningDirectory,
   canonicalForwardMigrationProjection,
@@ -55,7 +46,6 @@ import {
   prepareMigrationPublication,
   proveMigrationProjectionRoot,
   pruneMigrationPublications,
-  stagedMigrationProjection,
   writeMigrationProjectionFile,
   removeMigrationProjectionPath,
   syncMigrationPublicationDirectories,
@@ -244,7 +234,7 @@ function runForwardRepair(
       .join(" ");
     throw new Error(
       `migration Forward Repair for Application ${imported.application.operationId} requires explicit reviewed choice:\n${details}\n`
-      + `Recommended resume: /gsd migrate --preview=${appliedMigrationApprovalHash(imported.application.operationId)} ${recommended} ${JSON.stringify(sourcePath)}\n`
+      + `Recommended resume: /gsd migrate ${recommended} ${JSON.stringify(sourcePath)}\n`
       + "To select an alternative, replace that target's flag with its displayed preserve or restore flag.",
     );
   }
@@ -285,16 +275,11 @@ export async function importWrittenMigrationToDb(
   sourceGsdRoot: string = gsdRoot(basePath),
   beforeApply?: (evidence: { previewId: string; previewHash: string }) => void,
   artifactEvidence: readonly { logicalPath: string; sha256: string }[] = [],
-  approvedPreviewHash?: string,
 ): Promise<MigrationImportCounts> {
-  // Explicit import: the markdown was just written, so an empty database is intended.
-  const opened = await ensureDbOpen(basePath, { createEmptyAuthority: true });
+  const opened = await ensureDbOpen(basePath);
   if (!opened) {
     throw new Error(`failed to open or create the GSD database at ${basePath}`);
   }
-  // The migrate import lands hierarchy rows through the pre-adoption upsert
-  // ELSE arms in gsd-db.ts; the G8 gate watches this bridge.
-  incrementLegacyTelemetry("legacy.migrateImported");
 
   const counts = applyVerifiedMigrationApplication(
     basePath,
@@ -302,7 +287,6 @@ export async function importWrittenMigrationToDb(
     sourceGsdRoot,
     beforeApply,
     artifactEvidence,
-    approvedPreviewHash,
   );
   if (preview) assertMigrationImportMatchesPreview(counts, preview);
   invalidateStateCache();
@@ -322,7 +306,6 @@ async function completeMigrationPublication(
   initial: MigrationPublicationRecord,
   choices: readonly Readonly<LegacyImportForwardRepairChoice>[],
   evidence: { projectionRoot: string; legacyPath: string },
-  approvedPreviewHash?: string,
   claimed = false,
 ): Promise<MigrationExecutionResult> {
   let record = initial;
@@ -330,11 +313,9 @@ async function completeMigrationPublication(
   const sourceRoot = evidence.projectionRoot;
   const sourcePaths = record.logicalPaths.map((logicalPath) => join(sourceRoot, logicalPath));
   if (!claimed) {
-    const opened = await ensureDbOpen(record.targetRoot, { createEmptyAuthority: true });
+    const opened = await ensureDbOpen(record.targetRoot);
     if (!opened) throw new Error(`failed to open or create the GSD database at ${record.targetRoot}`);
-    return withDatabaseMaintenanceClaim(() => (
-      completeMigrationPublication(initial, choices, evidence, approvedPreviewHash, true)
-    ));
+    return withDatabaseMaintenanceClaim(() => completeMigrationPublication(initial, choices, evidence, true));
   }
 
   let imported = record.applicationOperationId
@@ -357,15 +338,6 @@ async function completeMigrationPublication(
         });
       },
       record.artifactHashes,
-      approvedPreviewHash,
-    );
-  } else if (
-    approvedPreviewHash !== undefined
-    && appliedMigrationApprovalHash(imported.application.operationId) !== approvedPreviewHash
-  ) {
-    throw new Error(
-      `this migration was applied under Preview ${appliedMigrationApprovalHash(imported.application.operationId)}, `
-      + `not the approved Preview ${approvedPreviewHash}`,
     );
   }
   if (record.legacyPreviewId !== null
@@ -570,7 +542,6 @@ async function completeMigrationPublication(
     auditOperationId: recordedAudit.operation.operationId,
     outputHashes,
   });
-  await renderStateProjection(record.targetRoot);
   return result;
 }
 
@@ -611,69 +582,6 @@ export function sweepStaleMigrationStaging(targetRoot: string, now: number = Dat
   }
 }
 
-/**
- * The Import Preview that `executeMigrationWrite` applies for this source, with
- * the hash the operator approves. It writes no projection, no backup and no
- * row, and it leaves the target as it was: a target with no database gets its
- * Preview from an empty database in the OS temporary directory. The database
- * that was open before the call stays open; a handle that this call opened is
- * closed. A migration that already holds an Import Application returns the
- * approval hash of that Application, so the same approval resumes it.
- */
-export async function previewMigrationWrite(
-  sourcePath: string,
-  targetRoot: string,
-  project: GSDProject,
-): Promise<{ previewHash: string; authorizationText: string }> {
-  const projectionRootIdentity = proveMigrationProjectionRoot(targetRoot);
-  const stagingRoot = mkdtempSync(join(targetRoot, MIGRATION_STAGING_DIR_PREFIX));
-  const openBefore = openWorkflowDatabasePathOrNull();
-  let previewBase = targetRoot;
-  let temporaryBase: string | null = null;
-  try {
-    const staged = await writeGSDDirectory(project, stagingRoot);
-    const stagedGsd = join(stagingRoot, ".gsd");
-    if (existsSync(resolveProjectRootDbPath(targetRoot))) {
-      const opened = await ensureDbOpen(targetRoot, { createEmptyAuthority: true });
-      if (!opened) throw new Error(`failed to open the GSD database at ${targetRoot}`);
-      const retained = findMigrationPublication(
-        sourcePath,
-        targetRoot,
-        migrationPublicationRequestHash(sourcePath, stagedGsd),
-        projectionRootIdentity,
-      );
-      const applied = retained?.legacyPreviewId
-        ? loadVerifiedMigrationApplicationByPreviewId(retained.legacyPreviewId, retained.logicalPaths, retained.artifactHashes)
-        : null;
-      if (applied) {
-        const previewHash = appliedMigrationApprovalHash(applied.application.operationId);
-        return {
-          previewHash,
-          authorizationText: `A migration of this source already holds the Import Application of Preview ${previewHash}.`,
-        };
-      }
-    } else {
-      // Explicit import: an empty database is the base of the Preview.
-      temporaryBase = mkdtempSync(join(tmpdir(), "gsd-migrate-preview-"));
-      mkdirSync(join(temporaryBase, ".gsd"));
-      const opened = openWorkflowDatabase(temporaryBase, { createEmptyAuthority: true });
-      if (!opened.ok) throw new Error(`failed to create the temporary Preview database for ${targetRoot}`);
-      previewBase = temporaryBase;
-    }
-    const { logicalPaths, artifactHashes } = stagedMigrationProjection(stagedGsd, staged);
-    return previewVerifiedMigrationApplication(
-      previewBase,
-      logicalPaths.map((logicalPath) => join(stagedGsd, logicalPath)),
-      stagedGsd,
-      artifactHashes,
-    );
-  } finally {
-    restoreWorkflowDatabase(openBefore);
-    rmSync(stagingRoot, { recursive: true, force: true });
-    if (temporaryBase !== null) rmSync(temporaryBase, { recursive: true, force: true });
-  }
-}
-
 export async function executeMigrationWrite(
   sourcePath: string,
   targetRoot: string,
@@ -681,7 +589,6 @@ export async function executeMigrationWrite(
   preview: MigrationPreview,
   startedAt: string = new Date().toISOString(),
   choices: readonly Readonly<LegacyImportForwardRepairChoice>[] = [],
-  approvedPreviewHash?: string,
 ): Promise<MigrationExecutionResult> {
   const projectionRootIdentity = proveMigrationProjectionRoot(targetRoot);
   sweepStaleMigrationStaging(targetRoot);
@@ -695,7 +602,7 @@ export async function executeMigrationWrite(
     const retained = findMigrationPublication(sourcePath, targetRoot, requestHash, projectionRootIdentity);
     if (retained) {
       const evidence = materializeMigrationPublicationEvidence(retained, join(stagingRoot, "retained"));
-      return await completeMigrationPublication(retained, choices, evidence, approvedPreviewHash);
+      return await completeMigrationPublication(retained, choices, evidence);
     }
     if (findPendingMigrationPublication(sourcePath, targetRoot, projectionRootIdentity)) {
       throw new Error("pending migration Application evidence differs from the current source; restore the reviewed source before retrying");
@@ -715,7 +622,7 @@ export async function executeMigrationWrite(
       projectionRootIdentity: preparedProjectionRootIdentity,
     });
     const evidence = materializeMigrationPublicationEvidence(publication, join(stagingRoot, "retained"));
-    return await completeMigrationPublication(publication, choices, evidence, approvedPreviewHash);
+    return await completeMigrationPublication(publication, choices, evidence);
   } finally {
     rmSync(stagingRoot, { recursive: true, force: true });
   }

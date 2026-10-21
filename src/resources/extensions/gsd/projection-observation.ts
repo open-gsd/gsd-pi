@@ -16,7 +16,6 @@ import { withProjectionMutation, withProjectionMutationSync } from "./database-m
 import { detectProjectionDrift } from "./markdown-renderer.js";
 import { observeExternalMarkdownEdits } from "./state-reconciliation/drift/external-markdown-edit.js";
 import { observeExternalPlanningEdits } from "./state-reconciliation/drift/external-planning-edit.js";
-import { nativeLsFiles } from "./native-git-bridge.js";
 import type { DriftRecord } from "./state-reconciliation/types.js";
 
 type ExternalProjectionEdit = Extract<
@@ -33,18 +32,6 @@ export interface PreservedProjectionEvidence {
 export interface ProjectionObservationResult {
   preserved: PreservedProjectionEvidence[];
   refreshedPassthrough: string[];
-  /** Changed git-tracked projections left in place for an explicit import or rebuild. */
-  held: string[];
-}
-
-function isGitTracked(basePath: string, absPath: string): boolean {
-  try {
-    const rel = relative(normalizeRealPath(basePath), normalizeRealPath(absPath)).split(sep).join("/");
-    return nativeLsFiles(basePath, rel).length > 0;
-  } catch {
-    // No repository or a git failure: the file is not a tracked team projection.
-    return false;
-  }
 }
 
 function uniquePath(path: string): string {
@@ -138,17 +125,12 @@ export function quarantineProjectionEvidence(
  * Preserve every modeled projection whose current bytes differ from its
  * writer-owned baseline, plus any caller-supplied legacy drift paths.
  * Passthrough planning files are observed but never moved because GSD does not
- * render them from database authority. With `holdTracked`, a changed file that
- * git tracks (a teammate's change from pull, merge, rebase or branch switch) is
- * not moved: it is returned in `held` so the caller stops for a choice, and no
- * other changed file is moved until that choice is made. With `dryRun` nothing
- * is moved or written; `held` is still reported.
+ * render them from database authority.
  */
 export async function preserveProjectionEvidence(
   basePath: string,
   additionalPaths: readonly string[] = [],
   dryRun = false,
-  holdTracked = false,
 ): Promise<ProjectionObservationResult> {
   const observeAndPreserve = async (): Promise<ProjectionObservationResult> => {
     const planningObservations = await observeExternalPlanningEdits(basePath, dryRun);
@@ -191,15 +173,9 @@ export async function preserveProjectionEvidence(
       ...observedByPath.keys(),
     ]);
     const preserved: PreservedProjectionEvidence[] = [];
-    const changed: Array<{ absPath: string; observedBytes: Buffer; observation?: ExternalProjectionEdit }> = [];
-    const held: string[] = [];
     for (const absPath of paths) {
       if (dryRun) {
         if (!existsSync(absPath)) continue;
-        if (holdTracked && isGitTracked(basePath, absPath)) {
-          held.push(absPath);
-          continue;
-        }
         preserved.push({
           sourcePath: absPath,
           quarantinePath: quarantinePath(basePath, absPath, stamp),
@@ -216,23 +192,12 @@ export async function preserveProjectionEvidence(
       ) {
         continue;
       }
-      if (holdTracked && isGitTracked(basePath, absPath)) {
-        held.push(absPath);
-        continue;
-      }
-      changed.push({ absPath, observedBytes, observation });
-    }
-    // A held file stops the caller, so no file is moved in that pass: the
-    // render that follows a move would overwrite the held file.
-    if (held.length === 0) {
-      for (const { absPath, observedBytes, observation } of changed) {
-        preserved.push({ ...preserveOne(basePath, absPath, stamp, observedBytes), observation });
-      }
+      const result = preserveOne(basePath, absPath, stamp, observedBytes);
+      preserved.push({ ...result, observation });
     }
     return {
       preserved,
       refreshedPassthrough: passthrough.map((record) => record.projectionPath),
-      held,
     };
   };
 

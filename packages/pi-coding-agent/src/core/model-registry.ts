@@ -8,9 +8,6 @@ import {
 	type AssistantMessageEventStream,
 	type Context,
 	getModels,
-	isModelRequestAllowed,
-	isModelProviderAllowed,
-	assertModelRequestAllowed,
 	getProviders,
 	isModelsCatalogOverlay,
 	type KnownProvider,
@@ -372,13 +369,6 @@ export class ModelRegistry {
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private disabledModelProviders: Set<string> = new Set();
 	private loadError: string | undefined = undefined;
-	/** Last successfully parsed models.json state, kept so a torn read (#2077) never wipes custom models. */
-	private lastGoodCustomModels: CustomModelsResult | null = null;
-	/** Request config (provider auth/headers + per-model headers) captured with the last good parse. */
-	private lastGoodRequestState: {
-		providerRequestConfigs: Map<string, ProviderRequestConfig>;
-		modelRequestHeaders: Map<string, Record<string, string>>;
-	} | null = null;
 	readonly authStorage: AuthStorage;
 	private _modelsJsonPath: string | undefined;
 
@@ -514,42 +504,9 @@ export class ModelRegistry {
 
 	private loadCustomModels(modelsJsonPath: string): CustomModelsResult {
 		if (!existsSync(modelsJsonPath)) {
-			this.lastGoodCustomModels = null;
-			this.lastGoodRequestState = null;
 			return emptyCustomModelsResult();
 		}
 
-		let result = this.readModelsJson(modelsJsonPath);
-		if (result.error !== undefined) {
-			// #2077: a read racing a concurrent rewrite of models.json can fail to
-			// parse, which would silently empty the custom-model registry and arm
-			// the startup model fallback. One immediate re-read resolves the common
-			// torn-read case (the rewrite usually completes between the two reads).
-			result = this.readModelsJson(modelsJsonPath);
-		}
-		if (result.error !== undefined) {
-			// Still broken: keep serving the last successfully parsed state so an
-			// existing registry is never wiped by a transient read, while the
-			// error stays visible via getError(). The request-config maps are
-			// restored too — refresh() clears them before loadModels runs, and
-			// retained models without their provider auth/headers would resolve
-			// requests without the configured keys and headers.
-			if (this.lastGoodCustomModels && this.lastGoodRequestState) {
-				this.providerRequestConfigs = new Map(this.lastGoodRequestState.providerRequestConfigs);
-				this.modelRequestHeaders = new Map(this.lastGoodRequestState.modelRequestHeaders);
-				return { ...this.lastGoodCustomModels, error: result.error };
-			}
-			return result;
-		}
-		this.lastGoodCustomModels = result;
-		this.lastGoodRequestState = {
-			providerRequestConfigs: new Map(this.providerRequestConfigs),
-			modelRequestHeaders: new Map(this.modelRequestHeaders),
-		};
-		return result;
-	}
-
-	private readModelsJson(modelsJsonPath: string): CustomModelsResult {
 		try {
 			const content = readFileSync(modelsJsonPath, "utf-8");
 			const parsed = JSON.parse(stripJsonComments(content)) as unknown;
@@ -589,9 +546,6 @@ export class ModelRegistry {
 						authMode: providerConfig.apiKey ? "apiKey" : "none",
 						apiKey: providerConfig.apiKey,
 						baseUrl: providerConfig.baseUrl,
-						api: providerConfig.api,
-						headers: providerConfig.headers,
-						authHeader: providerConfig.authHeader,
 						isReady: providerConfig.apiKey ? () => true : undefined,
 					});
 				}
@@ -771,7 +725,7 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.models.filter((m) => isModelRequestAllowed(m) && this.isProviderRequestReady(m.provider));
+		return this.models.filter((m) => this.isProviderRequestReady(m.provider));
 	}
 
 	/**
@@ -785,7 +739,6 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		if (!isModelRequestAllowed(model) || this.disabledModelProviders.has(model.provider.trim().toLowerCase())) return false;
 		const authMode = this.getProviderAuthMode(model.provider);
 		if (authMode === "none" || authMode === "externalCli") {
 			return true;
@@ -833,10 +786,6 @@ export class ModelRegistry {
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
-			assertModelRequestAllowed(model);
-			if (this.disabledModelProviders.has(model.provider.trim().toLowerCase())) {
-				throw new Error(`Model provider is disabled: ${model.provider}`);
-			}
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
 			const storedAuth = await this.authStorage.getApiKeyWithOAuthState(model.provider, { includeFallback: false });
 			const apiKey =
@@ -1267,7 +1216,7 @@ export class ModelRegistry {
 	}
 
 	isProviderRequestReady(provider: string): boolean {
-		return isModelProviderAllowed(provider) && checkProviderRequestReady(this._readinessDeps(), provider);
+		return checkProviderRequestReady(this._readinessDeps(), provider);
 	}
 
 	private _readinessDeps() {

@@ -28,10 +28,7 @@ export async function getWorkspaceGitBlockMessageForBase(
   attemptedCommand = "",
 ): Promise<string | null> {
   if (isWorkspaceGitAllowedCommand(attemptedCommand)) {
-    // Doctor decides in its handler if the run may create the database.
-    const ready = await ensureWorkspaceGitReady(base, {
-      existingDbOnly: attemptedCommand.trim().split(/\s+/, 1)[0] === "doctor",
-    });
+    const ready = await ensureWorkspaceGitReady(base);
     if (ready.ok) return null;
     // Allowlisted commands still heal; only block when unrecoverable probe fails.
     if (ready.severity === "unrecoverable") {

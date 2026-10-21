@@ -94,7 +94,6 @@ A unit dispatched more than once (`type/id` repeated) indicates a stuck loop: un
 ## Output
 
 Explain findings:
-
 - **What happened** — sequence from activity logs/anomalies
 - **Why it happened** — root cause with `file:line`
 - **Code snippet** — problematic code and intended behavior
@@ -206,7 +205,6 @@ echo "$ISSUE_URL"
 ### Redaction Rules (CRITICAL)
 
 Before creating the issue, you MUST:
-
 - Replace all absolute paths with relative paths
 - Remove any API keys, tokens, or credentials
 - Remove any environment variable values

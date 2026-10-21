@@ -9,11 +9,10 @@ import { getProviderCapabilities, clampThinkingLevel } from "@gsd/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 import type { GSDPreferences } from "./preferences.js";
 import { resolveModelWithFallbacksForUnit, resolveThinkingLevelForUnit, resolveDynamicRoutingConfig } from "./preferences.js";
-import { fallbackCandidate, fallbackEntryThinking, fallbackModelId, type GSDModelFallback } from "./preferences-types.js";
 import type { ComplexityTier } from "./complexity-classifier.js";
 import { classifyUnitComplexity, extractTaskMetadata, tierLabel } from "./complexity-classifier.js";
 import { resolveModelForComplexity, escalateTier, getEligibleModels, loadCapabilityOverrides, adjustToolSet, filterToolsForProvider } from "./model-router.js";
-import { readUnitSpend } from "./db/unit-metrics.js";
+import { getLedger, getProjectTotals } from "./metrics.js";
 import { unitPhaseLabel } from "./auto-dashboard.js";
 import { getSessionModelOverride } from "./session-model-override.js";
 import { logWarning } from "./workflow-logger.js";
@@ -91,7 +90,7 @@ function normalizeModelIdToken(modelId: string): string {
 
 export interface PreferredModelConfig {
   primary: string;
-  fallbacks: GSDModelFallback[];
+  fallbacks: string[];
   source: "explicit" | "synthesized";
 }
 
@@ -226,7 +225,7 @@ function augmentModelPolicyCandidates(
   };
 
   tryAdd(modelConfig.primary);
-  for (const fallback of modelConfig.fallbacks) tryAdd(fallbackModelId(fallback));
+  for (const fallback of modelConfig.fallbacks) tryAdd(fallback);
 
   return augmented;
 }
@@ -316,28 +315,22 @@ export async function applySupervisorModelIfConfigured(
 
   const availableModels = ctx.modelRegistry.getAvailable();
   for (const candidate of [modelConfig.primary, ...modelConfig.fallbacks]) {
-    const match = resolveModelId(fallbackModelId(candidate), availableModels, ctx.model?.provider);
+    const match = resolveModelId(candidate, availableModels, ctx.model?.provider);
     if (!match) continue;
     if (isModelUnavailable(basePath, match.provider, match.id)) continue;
     try {
       if (await pi.setModel(match, { persist: false })) {
         // Prefer the per-field `thinking` from `auto_supervisor.model`'s object
         // form over the session level so a configured supervisor level actually
-        // applies (#1269). A per-entry `thinking` on the fallback entry wins
-        // over the field level (#1270).
-        applyThinkingLevelForModel(
-          pi,
-          fallbackEntryThinking(candidate) ?? modelConfig.thinking ?? pi.getThinkingLevel(),
-          match,
-          ctx,
-        );
+        // applies (#1269).
+        applyThinkingLevelForModel(pi, modelConfig.thinking ?? pi.getThinkingLevel(), match, ctx);
         return;
       }
     } catch (err) {
       // Non-fatal — try the next fallback.
       logWarning(
         "dispatch",
-        `supervisor model set failed for ${fallbackModelId(candidate)}: ${err instanceof Error ? err.message : String(err)}`,
+        `supervisor model set failed for ${candidate}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -738,7 +731,7 @@ export async function selectAndApplyModel(
           unitId,
           buildModelPolicyBlockReasons(policyDenyReasons, availableModels, routingEligibleModels, [
             effectiveModelConfig.primary,
-            ...effectiveModelConfig.fallbacks.map(fallbackModelId),
+            ...effectiveModelConfig.fallbacks,
           ]),
         );
       }
@@ -773,7 +766,9 @@ export async function selectAndApplyModel(
       if (routingConfig.budget_pressure !== false) {
         const budgetCeiling = prefs?.budget_ceiling;
         if (budgetCeiling !== undefined && budgetCeiling > 0) {
-          budgetPct = readUnitSpend() / budgetCeiling;
+          const currentLedger = getLedger();
+          const totalCost = currentLedger ? getProjectTotals(currentLedger.units).cost : 0;
+          budgetPct = totalCost / budgetCeiling;
         }
       }
 
@@ -848,7 +843,7 @@ export async function selectAndApplyModel(
             eligibleModels: eligible,
             phaseConfig: modelConfig ? {
               primary: modelConfig.primary,
-              fallbacks: (modelConfig.fallbacks ?? []).map(fallbackModelId),
+              fallbacks: modelConfig.fallbacks ?? [],
             } : undefined,
           });
           if (hookResult?.modelId) {
@@ -862,7 +857,7 @@ export async function selectAndApplyModel(
           routingResult = {
             modelId: hookOverride,
             fallbacks: [
-              ...(modelConfig?.fallbacks ?? []).map(fallbackModelId).filter(f => f !== hookOverride),
+              ...(modelConfig?.fallbacks ?? []).filter(f => f !== hookOverride),
               ...(modelConfig?.primary && modelConfig.primary !== hookOverride ? [modelConfig.primary] : []),
             ],
             tier: classification.tier,
@@ -914,17 +909,10 @@ export async function selectAndApplyModel(
       }
     }
 
-    // #1270: fallback entries may carry a per-entry `thinking` that overrides
-    // the dispatch-level level for that model. Plain strings keep the shared
-    // `desiredThinkingLevel` behavior exactly.
-    const modelsToTry = [
-      { id: effectiveModelConfig.primary },
-      ...effectiveModelConfig.fallbacks.map(fallbackCandidate),
-    ];
+    const modelsToTry = [effectiveModelConfig.primary, ...effectiveModelConfig.fallbacks];
     let attemptedPolicyEligible = false;
 
-    for (const entry of modelsToTry) {
-      const modelId = entry.id;
+    for (const modelId of modelsToTry) {
       const resolutionPool = uokFlags.modelPolicy ? routingEligibleModels : availableModels;
       const model = resolveModelId(modelId, resolutionPool, ctx.model?.provider);
 
@@ -971,7 +959,7 @@ export async function selectAndApplyModel(
       const ok = await pi.setModel(model, { persist: false });
       if (ok) {
         appliedModel = model;
-        appliedThinkingLevel = applyThinkingLevelForModel(pi, entry.thinking ?? desiredThinkingLevel, model, ctx);
+        appliedThinkingLevel = applyThinkingLevelForModel(pi, desiredThinkingLevel, model, ctx);
 
         // ADR-005: Adjust active tool set for the selected model's provider capabilities.
         // Hard-filter incompatible tools, then let extensions override via adjust_tool_set hook.
@@ -1014,9 +1002,9 @@ export async function selectAndApplyModel(
         }
         break;
       } else {
-        const nextEntry = modelsToTry[modelsToTry.indexOf(entry) + 1];
-        if (nextEntry) {
-          if (verbose) ctx.ui.notify(`Failed to set model ${modelId}, trying ${nextEntry.id}...`, "info");
+        const nextModel = modelsToTry[modelsToTry.indexOf(modelId) + 1];
+        if (nextModel) {
+          if (verbose) ctx.ui.notify(`Failed to set model ${modelId}, trying ${nextModel}...`, "info");
         } else {
           ctx.ui.notify(`All preferred models unavailable for ${unitType}. Using default.`, "warning");
         }
@@ -1045,12 +1033,7 @@ export async function selectAndApplyModel(
         throw new ModelPolicyDispatchBlockedError(
           unitType,
           unitId,
-          buildModelPolicyBlockReasons(
-            policyDenyReasons,
-            availableModels,
-            routingEligibleModels,
-            modelsToTry.map((entry) => entry.id),
-          ),
+          buildModelPolicyBlockReasons(policyDenyReasons, availableModels, routingEligibleModels, modelsToTry),
         );
       }
     }

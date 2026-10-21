@@ -11,7 +11,6 @@ Remote questions allow GSD to ask for user input and send informational notifica
 ```
 
 The setup wizard:
-
 1. Prompts for your Discord bot token
 2. Validates the token against the Discord API
 3. Lists servers the bot belongs to (or lets you pick)
@@ -20,7 +19,6 @@ The setup wizard:
 6. Saves the configuration to `~/.gsd/PREFERENCES.md`
 
 **Bot requirements:**
-
 - A Discord bot application with a token (from [Discord Developer Portal](https://discord.com/developers/applications))
 - Bot must be invited to the target server with these permissions:
   - Send Messages
@@ -36,7 +34,6 @@ The setup wizard:
 ```
 
 The setup wizard:
-
 1. Prompts for your Slack bot token (`xoxb-...`)
 2. Validates the token
 3. Lists channels the bot can access (with manual ID fallback)
@@ -44,7 +41,6 @@ The setup wizard:
 5. Saves the configuration
 
 **Bot requirements:**
-
 - A Slack app with a bot token (from [Slack API](https://api.slack.com/apps))
 - Bot must be invited to the target channel
 - Typical scopes for public/private channels: `chat:write`, `reactions:read`, `reactions:write`, `channels:read`, `groups:read`, `channels:history`, `groups:history`
@@ -56,7 +52,6 @@ The setup wizard:
 ```
 
 The setup wizard:
-
 1. Prompts for your Telegram bot token (from [@BotFather](https://t.me/BotFather))
 2. Validates the token against the Telegram API
 3. Prompts for the chat ID (group or private chat)
@@ -64,7 +59,6 @@ The setup wizard:
 5. Saves the configuration
 
 **Bot requirements:**
-
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - Bot must be added to the target group chat (or use private chat with the bot)
 - The `TELEGRAM_BOT_TOKEN` environment variable must be set
@@ -102,13 +96,11 @@ suite sets this so fixture questions never reach a real channel.
 ### Response Formats
 
 **Single question:**
-
 - React with a number emoji (single-question prompts)
 - Reply with a number: `2`
 - Reply with free text (captured as a user note)
 
 **Multiple questions:**
-
 - Reply with semicolons: `1;2;custom text`
 - Reply with newlines (one answer per line)
 
@@ -193,31 +185,26 @@ Telegram supports all the above plus background command polling (`/status`, `/pa
 ## Troubleshooting
 
 ### "Remote auth failed"
-
 - Verify your bot token is correct and not expired
 - For Discord: ensure the bot is still in the server
 - For Slack: ensure the bot token starts with `xoxb-`
 
 ### "Could not send to channel"
-
 - Verify the bot has Send Messages permission in the target channel
 - For Discord: check the bot's role permissions in Server Settings
 - For Slack: ensure the bot is invited to the channel (`/invite @botname`)
 
 ### No response detected
-
 - Ensure you're **replying to** the prompt message (not posting a new message)
 - For reactions: only number emojis (1️⃣-5️⃣) on single-question prompts are detected
 - Check that `timeout_minutes` is long enough for your response time
 
 ### Channel ID format
-
 - **Slack:** 9-12 uppercase alphanumeric characters (e.g., `C0123456789`)
 - **Discord:** 17-20 digit numeric snowflake ID (e.g., `1234567890123456789`)
 - Enable Developer Mode in Discord (Settings → Advanced) to copy channel IDs
 
 ### Telegram commands not responding
-
 - Confirm auto-mode is actively running — background polling only operates while auto-mode is active
 - Verify the bot token in `~/.gsd/PREFERENCES.md` matches the token from [@BotFather](https://t.me/BotFather)
 - Ensure the `chat_id` (or `channel_id`) in your configuration matches the chat where you're sending the commands — the bot only responds in its configured chat

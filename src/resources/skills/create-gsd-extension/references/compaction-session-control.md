@@ -22,7 +22,6 @@ pi.on("session_before_compact", async (event, ctx) => {
   };
 });
 ```
-
 </custom_compaction>
 
 <trigger_compaction>
@@ -35,7 +34,6 @@ ctx.compact({
   onError: (error) => ctx.ui.notify(`Failed: ${error.message}`, "error"),
 });
 ```
-
 </trigger_compaction>
 
 <session_control>
@@ -72,7 +70,6 @@ pi.registerCommand("handoff", {
 | `ctx.reload()` | Hot-reload everything (treat as terminal — code after runs pre-reload version) |
 
 `navigateTree` options:
-
 - `summarize: boolean` — generate summary of abandoned branch
 - `customInstructions: string` — instructions for summarizer
 - `replaceInstructions: boolean` — replace default prompt entirely

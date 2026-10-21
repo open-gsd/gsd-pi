@@ -88,18 +88,7 @@ test('planning-unit: blocks write to user source via relative path', () => {
   assert.strictEqual(r.block, true);
 });
 
-test('planning-unit: allows write to .gsd/ artifacts that have no save tool', () => {
-  const r = shouldBlockPlanningUnit(
-    'write',
-    join(BASE, '.gsd', 'milestones', 'M001', 'M001-LEARNINGS.md'),
-    BASE,
-    'discuss-milestone',
-    PLANNING,
-  );
-  assert.strictEqual(r.block, false);
-});
-
-test('planning-unit: refuses a managed projection write and names the save tool', () => {
+test('planning-unit: allows write to .gsd/ artifacts (planning artifacts live here)', () => {
   const r = shouldBlockPlanningUnit(
     'write',
     join(BASE, '.gsd', 'milestones', 'M001', 'M001-CONTEXT.md'),
@@ -107,30 +96,18 @@ test('planning-unit: refuses a managed projection write and names the save tool'
     'discuss-milestone',
     PLANNING,
   );
-  assert.strictEqual(r.block, true);
-  assert.match(r.reason!, /HARD BLOCK/);
-  assert.match(r.reason!, /gsd_summary_save/);
-  assert.strictEqual(r.displayReason, GSD_PHASE_SCOPE_DISPLAY_REASON);
+  assert.strictEqual(r.block, false);
 });
 
-test('planning-unit: refuses edits to root projections via relative path and names the tool', () => {
-  const project = shouldBlockPlanningUnit('edit', '.gsd/PROJECT.md', BASE, 'plan-milestone', PLANNING);
-  const queueOrder = shouldBlockPlanningUnit('edit', '.gsd/QUEUE-ORDER.json', BASE, 'plan-milestone', PLANNING);
-  assert.strictEqual(project.block, true);
-  assert.match(project.reason!, /gsd_summary_save/);
-  assert.strictEqual(queueOrder.block, true);
-  assert.match(queueOrder.reason!, /gsd_milestone_reorder/);
-});
-
-test('planning-unit: allows edit to a non-managed .gsd/ file via relative path', () => {
-  const r = shouldBlockPlanningUnit('edit', '.gsd/skill-review-queue.md', BASE, 'plan-milestone', PLANNING);
+test('planning-unit: allows edit to .gsd/ via relative path', () => {
+  const r = shouldBlockPlanningUnit('edit', '.gsd/PROJECT.md', BASE, 'plan-milestone', PLANNING);
   assert.strictEqual(r.block, false);
 });
 
 test('planning-unit: allows canonical project .gsd writes from worktree-isolated base path', () => {
   const worktreeBase = join(BASE, '.gsd', 'worktrees', 'M001');
-  const canonicalDraft = join(BASE, '.gsd', 'captures', 'draft.md');
-  const r = shouldBlockPlanningUnit('edit', canonicalDraft, worktreeBase, 'triage-captures', PLANNING);
+  const canonicalCaptures = join(BASE, '.gsd', 'CAPTURES.md');
+  const r = shouldBlockPlanningUnit('edit', canonicalCaptures, worktreeBase, 'triage-captures', PLANNING);
   assert.strictEqual(r.block, false);
 });
 
@@ -351,24 +328,15 @@ test('planning-dispatch: still blocks writes to user source (write isolation pre
   assert.strictEqual(r.block, true);
 });
 
-test('planning-dispatch: still allows writes inside .gsd/ that have no save tool', () => {
+test('planning-dispatch: still allows writes inside .gsd/', () => {
   const r = shouldBlockPlanningUnit(
     'write',
-    join(BASE, '.gsd', 'milestones', 'M001', 'slices', 'S01', 'NOTES.md'),
+    join(BASE, '.gsd', 'milestones', 'M001', 'slices', 'S01', 'PLAN.md'),
     BASE,
     'plan-slice',
     PLANNING_DISPATCH,
   );
   assert.strictEqual(r.block, false);
-  const projection = shouldBlockPlanningUnit(
-    'write',
-    join(BASE, '.gsd', 'milestones', 'M001', 'slices', 'S01', 'S01-PLAN.md'),
-    BASE,
-    'plan-slice',
-    PLANNING_DISPATCH,
-  );
-  assert.strictEqual(projection.block, true);
-  assert.match(projection.reason!, /gsd_plan_slice/);
 });
 
 test('planning_subagents: upgrades plan-milestone to controlled read-only dispatch', () => {
@@ -687,12 +655,9 @@ test('docs-mode: blocks deep .md outside docs/', () => {
   assert.strictEqual(r.block, true);
 });
 
-test('docs-mode: still allows .gsd/ writes that have no save tool', () => {
-  const r = shouldBlockPlanningUnit('write', '.gsd/notes/heal-plan.md', BASE, 'rewrite-docs', DOCS);
+test('docs-mode: still allows .gsd/ writes', () => {
+  const r = shouldBlockPlanningUnit('write', '.gsd/PROJECT.md', BASE, 'rewrite-docs', DOCS);
   assert.strictEqual(r.block, false);
-  const projection = shouldBlockPlanningUnit('write', '.gsd/ROADMAP.md', BASE, 'rewrite-docs', DOCS);
-  assert.strictEqual(projection.block, true);
-  assert.match(projection.reason!, /gsd_plan_milestone/);
 });
 
 test('docs-mode: blocks subagent', () => {

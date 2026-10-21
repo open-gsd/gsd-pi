@@ -81,7 +81,7 @@ function makeHarness(): Harness {
     basePath: base,
     verbose: false,
     currentUnitStartedAt: 1234,
-    unclaimedUnitBudgets: new Map(),
+    unitRecoveryCount: new Map(),
   };
 
   return { home, base, ctx, pi, rctx, setModelCalls, sendMessageCalls };

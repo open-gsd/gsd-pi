@@ -7,8 +7,7 @@
 
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { readMilestoneDoneIn } from "./db/lifecycle-read.js";
-import { openWorkflowDatabaseIsolated } from "./db-workspace.js";
+import { spawnSync } from "node:child_process";
 import { resolveGsdPathContract } from "./paths.js";
 import { worktreePathFor, worktreesDirs } from "./worktree-placement.js";
 import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
@@ -40,28 +39,29 @@ export type MergeOrder = "sequential" | "by-completion";
 
 /**
  * Check whether a milestone is complete by querying the canonical project DB.
- * Uses an isolated connection, so the global DB handle is not displaced.
- * The read interface (db/lifecycle-read.ts) answers: the same rule as dispatch.
+ * Uses a subprocess to avoid disrupting the global DB singleton.
+ * Returns true when milestones.status = 'complete' in project gsd.db.
  */
 export function isMilestoneCompleteInProjectDb(basePath: string, mid: string): boolean {
   const workRoot = worktreePathFor(basePath, mid);
   const dbPath = resolveGsdPathContract(workRoot, basePath).projectDb;
   if (!existsSync(dbPath)) return false;
 
-  const db = openWorkflowDatabaseIsolated(dbPath);
-  if (!db) return false;
   try {
-    return readMilestoneDoneIn(db, mid);
+    const result = spawnSync(
+      "sqlite3",
+      [dbPath, `SELECT status FROM milestones WHERE id='${mid}' LIMIT 1`],
+      { timeout: 3000, encoding: "utf-8" },
+    );
+    return (result.stdout || "").trim() === "complete";
   } catch (e) {
-    logWarning("parallel", `milestone completion check failed for ${mid}: ${(e as Error).message}`);
+    logWarning("parallel", `spawnSync milestone completion check failed for ${mid}: ${(e as Error).message}`);
     return false;
-  } finally {
-    db.close();
   }
 }
 
 /**
- * Discover milestone IDs that are complete in the canonical DB,
+ * Discover milestone IDs with status='complete' in the canonical DB,
  * using worktree directories only to enumerate active parallel workers.
  */
 function discoverDbCompletedMilestones(basePath: string): Set<string> {
@@ -88,7 +88,7 @@ function discoverDbCompletedMilestones(basePath: string): Set<string> {
  *
  * When basePath is provided, also checks the canonical project DB as the
  * source of truth. Workers with stale orchestrator state (e.g. "error")
- * are included if the project DB shows them complete.
+ * are included if their project DB row shows status='complete'.
  * See: https://github.com/open-gsd/gsd-pi/issues/2812
  */
 export function determineMergeOrder(
@@ -214,14 +214,6 @@ export async function mergeCompletedMilestone(
 
   // Clean up parallel session status — only on a real merge.
   removeSessionStatus(basePath, milestoneId);
-  // A merged `.gsd` file is not authority: render the project-root
-  // projections (STATE.md included) from the database after the merge.
-  try {
-    const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
-    await rebuildMarkdownProjectionsFromDb(basePath);
-  } catch (err) {
-    logWarning("parallel", `${milestoneId}: markdown projection rebuild after merge failed: ${getErrorMessage(err)}`);
-  }
 
   return {
     milestoneId,

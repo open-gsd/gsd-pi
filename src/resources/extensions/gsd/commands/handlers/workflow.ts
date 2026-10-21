@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -10,11 +10,12 @@ import { handleStart, handleTemplates, dispatchMarkdownPhasePlugin } from "../..
 import { gsdRoot } from "../../paths.js";
 import { deriveState } from "../../state.js";
 import { discardMilestone, isParked, parkMilestone, unparkMilestone } from "../../milestone-actions.js";
+import { loadEffectiveGSDPreferences } from "../../preferences.js";
 import { setPlanningDepth } from "../../planning-depth.js";
-import { normalizeDiscussTarget } from "../../milestone-ids.js";
+import { nextMilestoneId, normalizeDiscussTarget } from "../../milestone-ids.js";
+import { findMilestoneIds } from "../../guided-flow.js";
 import { currentDirectoryRoot, projectRoot } from "../context.js";
-import { createRun, listRuns, loadRunDefinition, openRunForResume } from "../../run-manager.js";
-import { CustomWorkflowEngine } from "../../custom-workflow-engine.js";
+import { createRun, listRuns } from "../../run-manager.js";
 import {
   setActiveEngineId,
   setActiveRunDir,
@@ -123,30 +124,10 @@ function requireNotAutoActive(commandName: string, ctx: ExtensionCommandContext)
   return true;
 }
 
-// Park, unpark, discard and the custom workflow run commands run Domain
-// Operations, so a cold session must open the database first (#3385: commands
-// can arrive before anything opened it).
-async function blockWithoutDb(commandName: string, basePath: string, ctx: ExtensionCommandContext): Promise<boolean> {
-  const { ensureDbOpen } = await import("../../bootstrap/dynamic-tools.js");
-  if (await ensureDbOpen(basePath)) return false;
-  ctx.ui.notify(`${commandName}: GSD database is not available.`, "error");
-  return true;
-}
-
-/**
- * A workflow run can be the first GSD command in a project. Create the state
- * directory so the database of the run rows can be created; auto-mode start
- * then moves the directory to external state, as it does for any project.
- */
-async function blockRunWithoutDb(commandName: string, basePath: string, ctx: ExtensionCommandContext): Promise<boolean> {
-  mkdirSync(join(basePath, ".gsd"), { recursive: true });
-  return blockWithoutDb(commandName, basePath, ctx);
-}
-
 // ─── Custom Workflow Subcommands ─────────────────────────────────────────
 
 const RESERVED_SUBCOMMANDS = new Set([
-  "new", "run", "list", "validate", "pause", "resume", "approve",
+  "new", "run", "list", "validate", "pause", "resume",
   "info", "install", "uninstall",
 ]);
 
@@ -159,8 +140,6 @@ const WORKFLOW_USAGE = [
   "  new               — Create a new workflow definition (via skill)",
   "  run <name> [k=v]  — Explicit YAML run (creates a new run dir)",
   "  list [name]       — List workflow runs (optionally filtered by name)",
-  "  resume <name>/<timestamp> — Resume a workflow run (also after a crash)",
-  "  approve <name>/<timestamp> <step> — Approve a step that waits for review",
   "  info <name>       — Show plugin details (source, mode, phases)",
   "  install <source>  — Install a plugin from a URL / gist: / gh:",
   "  uninstall <name>  — Remove an installed plugin",
@@ -250,12 +229,12 @@ export function parseWorkflowOverridesOnly(args: string): Record<string, string>
 /**
  * Dispatch a resolved plugin according to its declared mode.
  */
-async function dispatchPluginByMode(
+function dispatchPluginByMode(
   plugin: WorkflowPlugin,
   args: string,
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
-): Promise<void> {
+): void {
   switch (plugin.meta.mode) {
     case "oneshot": {
       dispatchOneshot(plugin, pi, args.trim());
@@ -267,7 +246,6 @@ async function dispatchPluginByMode(
       const overrides = parseWorkflowOverridesOnly(args);
       try {
         const base = projectRoot();
-        if (await blockRunWithoutDb(`/gsd workflow ${plugin.name}`, base, ctx)) return;
         const runDir = createRun(base, plugin.name, Object.keys(overrides).length > 0 ? overrides : undefined);
         setActiveEngineId("custom");
         setActiveRunDir(runDir);
@@ -340,9 +318,6 @@ async function handleCustomWorkflow(
     const { defName, overrides } = parseWorkflowRunArgs(rest);
     try {
       const base = projectRoot();
-      // An unknown definition name fails here, before the database is opened.
-      loadRunDefinition(base, defName);
-      if (await blockRunWithoutDb("/gsd workflow run", base, ctx)) return true;
       const runDir = createRun(base, defName, Object.keys(overrides).length > 0 ? overrides : undefined);
       setActiveEngineId("custom");
       setActiveRunDir(runDir);
@@ -360,8 +335,6 @@ async function handleCustomWorkflow(
   // ── list [name] — list YAML runs ──
   if (head === "list") {
     const base = projectRoot();
-    // The run rows decide which runs are imported. A project with no state directory has no runs.
-    if (existsSync(join(base, ".gsd")) && await blockWithoutDb("/gsd workflow list", base, ctx)) return true;
     const runs = listRuns(base, rest || undefined);
     if (runs.length === 0) {
       ctx.ui.notify("No workflow runs found.", "info");
@@ -369,8 +342,7 @@ async function handleCustomWorkflow(
     }
     const lines = runs.map((r) => {
       const stepInfo = `${r.steps.completed}/${r.steps.total} steps`;
-      const notImported = r.imported ? "" : " — not imported";
-      return `• ${r.name} [${r.timestamp}] — ${r.status} (${stepInfo})${notImported}`;
+      return `• ${r.name} [${r.timestamp}] — ${r.status} (${stepInfo})`;
     });
     ctx.ui.notify(lines.join("\n"), "info");
     return true;
@@ -548,51 +520,8 @@ async function handleCustomWorkflow(
       ctx.ui.notify("Auto-mode is not active.", "warning");
       return true;
     }
-    await pauseAuto(ctx, pi, "user_request");
+    await pauseAuto(ctx, pi);
     ctx.ui.notify("Custom workflow paused.", "info");
-    return true;
-  }
-
-  // ── resume <name>/<timestamp> — resume a run from its database rows ──
-  if (head === "resume" && rest) {
-    if (requireNotAutoActive("/gsd workflow resume", ctx)) return true;
-    try {
-      const base = projectRoot();
-      if (await blockWithoutDb("/gsd workflow resume", base, ctx)) return true;
-      const runDir = openRunForResume(base, rest);
-      setActiveEngineId("custom");
-      setActiveRunDir(runDir);
-      ctx.ui.notify(`Resuming workflow run: ${rest}`, "info");
-      startAutoDetached(ctx, pi, base, false);
-    } catch (err) {
-      setActiveEngineId(null);
-      setActiveRunDir(null);
-      const msg = err instanceof Error ? err.message : String(err);
-      ctx.ui.notify(`Failed to resume workflow run "${rest}": ${msg}`, "error");
-    }
-    return true;
-  }
-
-  // ── approve <name>/<timestamp> <step> — the operator decides a step that waits for review ──
-  if (head === "approve") {
-    const [runId, stepId, ...extra] = rest.split(/\s+/).filter(Boolean);
-    if (!runId || !stepId || extra.length > 0) {
-      ctx.ui.notify("Usage: /gsd workflow approve <name>/<timestamp> <step>", "warning");
-      return true;
-    }
-    if (requireNotAutoActive("/gsd workflow approve", ctx)) return true;
-    try {
-      const base = projectRoot();
-      if (await blockWithoutDb("/gsd workflow approve", base, ctx)) return true;
-      await new CustomWorkflowEngine(openRunForResume(base, runId)).approveStep(stepId);
-      ctx.ui.notify(
-        `Approved step "${stepId}" of workflow run ${runId}.\nContinue the run: /gsd workflow resume ${runId}`,
-        "info",
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      ctx.ui.notify(`Failed to approve step "${stepId}" of workflow run "${runId}": ${msg}`, "error");
-    }
     return true;
   }
 
@@ -614,7 +543,7 @@ async function handleCustomWorkflow(
     const base = projectRoot();
     const plugin = resolvePlugin(base, head);
     if (plugin) {
-      await dispatchPluginByMode(plugin, rest, ctx, pi);
+      dispatchPluginByMode(plugin, rest, ctx, pi);
       return true;
     }
   }
@@ -719,7 +648,6 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
   if (trimmed === "park" || trimmed.startsWith("park ")) {
     if (requireNotAutoActive("/gsd park", ctx)) return true;
     const basePath = projectRoot();
-    if (await blockWithoutDb("/gsd park", basePath, ctx)) return true;
     const arg = trimmed.replace(/^park\s*/, "").trim();
     const { id: parsedId, reason: parsedReason } = parseParkArgs(arg);
     let targetId = parsedId ?? "";
@@ -731,14 +659,14 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
       }
       targetId = state.activeMilestone.id;
     }
-    if (isParked(targetId)) {
+    if (isParked(basePath, targetId)) {
       ctx.ui.notify(`${targetId} is already parked. Use /gsd unpark ${targetId} to reactivate.`, "info");
       return true;
     }
     const reason = parsedReason || "Parked via /gsd park";
     let success: boolean;
     try {
-      success = await parkMilestone(basePath, targetId, reason);
+      success = parkMilestone(basePath, targetId, reason);
     } catch (err) {
       // #2255: the park did not take (e.g. DB sync failed) — surface it as an error.
       ctx.ui.notify(`Could not park ${targetId}: ${(err as Error).message}`, "error");
@@ -753,7 +681,6 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
   if (trimmed === "unpark" || trimmed.startsWith("unpark ")) {
     if (requireNotAutoActive("/gsd unpark", ctx)) return true;
     const basePath = projectRoot();
-    if (await blockWithoutDb("/gsd unpark", basePath, ctx)) return true;
     const arg = trimmed.replace(/^unpark\s*/, "").trim();
     let targetId = arg;
     if (!targetId) {
@@ -770,13 +697,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
         return true;
       }
     }
-    let success: boolean;
-    try {
-      success = await unparkMilestone(basePath, targetId);
-    } catch (err) {
-      ctx.ui.notify(`Could not unpark ${targetId}: ${(err as Error).message}`, "error");
-      return true;
-    }
+    const success = unparkMilestone(basePath, targetId);
     ctx.ui.notify(
       success ? `Unparked ${targetId}. It will resume its normal position in the queue.` : `Could not unpark ${targetId} — milestone not found or not parked.`,
       success ? "info" : "warning",
@@ -791,7 +712,6 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
       return true;
     }
     const targetId = args[0]!;
-    if (await blockWithoutDb("/gsd discard", projectRoot(), ctx)) return true;
     const confirmed = await showConfirm(ctx, {
       title: "Discard milestone?",
       message: `This will permanently delete ${targetId} and all its contents.`,
@@ -802,13 +722,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
       ctx.ui.notify(`Discard of ${targetId} cancelled.`, "info");
       return true;
     }
-    let success: boolean;
-    try {
-      success = await discardMilestone(projectRoot(), targetId);
-    } catch (err) {
-      ctx.ui.notify(`Could not discard ${targetId}: ${(err as Error).message}`, "error");
-      return true;
-    }
+    const success = discardMilestone(projectRoot(), targetId);
     ctx.ui.notify(
       success ? `Discarded ${targetId}.` : `Could not discard ${targetId} — milestone not found.`,
       success ? "info" : "warning",
@@ -816,4 +730,10 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     return true;
   }
   return false;
+}
+
+export function getNextMilestoneId(basePath: string): string {
+  const milestoneIds = findMilestoneIds(basePath);
+  const uniqueIds = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
+  return nextMilestoneId(milestoneIds, uniqueIds);
 }

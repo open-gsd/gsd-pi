@@ -1,5 +1,6 @@
 # Extension Locations & Discovery
 
+
 ### Auto-Discovery Paths
 
 | Location | Scope |

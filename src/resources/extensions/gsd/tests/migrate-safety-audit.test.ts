@@ -38,8 +38,6 @@ import {
   verifyMigrationProjection,
 } from "../migrate/audit.ts";
 import { assertMigrationDbReadiness, executeMigrationWrite, importWrittenMigrationToDb, migrationFailureMessage, sweepStaleMigrationStaging } from "../migrate/execution.ts";
-import { renderStateContent } from "../workflow-projections.ts";
-import { deriveState } from "../state.ts";
 import { formatPlan, formatRoadmap, writeGSDDirectory } from "../migrate/writer.ts";
 import {
   _setManagedMutationBoundaryForTest,
@@ -63,7 +61,6 @@ import {
   _setUnboundEvidenceAcknowledgementFaultForTest,
   _setUnboundEvidenceRemovalFaultForTest,
   _setUnboundEvidenceResolutionFaultForTest,
-  _setUnboundEvidenceExchangeFaultForTest,
   loadUnboundProjectionEvidence,
   loadManagedProjectionPaths,
   previewUnboundProjectionEvidenceResolution,
@@ -71,7 +68,6 @@ import {
 } from "../managed-projection-history.ts";
 import { renderAllFromDb, renderMilestoneArtifactsFromDb, renderRoadmapFromDb } from "../markdown-renderer.ts";
 import { gsdRoot } from "../paths.ts";
-import { ProjectionLockTransientError } from "../projection-root-errors.ts";
 import { _getAdapter, closeDatabase, getArtifact, getMilestone, getSliceTasks, insertArtifact, insertMilestone, openDatabase } from "../gsd-db.ts";
 import { _setDomainOperationFaultForTest, executeDomainOperation } from "../db/domain-operation.ts";
 import { hashLegacyImportValue } from "../legacy-import-preview.ts";
@@ -94,9 +90,9 @@ import { withDatabaseMaintenanceClaim } from "../db/engine.ts";
 import { claimProjectionMaintenance } from "../database-maintenance-fence.ts";
 import { removeProjectionIfCurrent } from "../projection-cleanup.ts";
 import { classifyGsdLogicalPath } from "../projection-path-policy.ts";
+import { _removeDependsOnFromContextFilesForTest } from "../guided-flow-queue.ts";
 import { _removeContextDraftProjectionForTest } from "../tools/workflow-tool-executors.ts";
 import { parkMilestone } from "../milestone-actions.ts";
-import { renderMilestoneParkedMarker } from "../milestone-park-projection.ts";
 import { acquireProjectionRootIdentityLock } from "@gsd/native/file-identity";
 
 function makeBase(prefix: string): string {
@@ -475,6 +471,7 @@ test("executeMigrationWrite records audit artifacts and verifies DB-backed proje
       result.written.artifactPaths.map((path) => path.slice(gsdRoot(base).length + 1)).sort(),
       [
         "PROJECT.md",
+        "STATE.md",
         "milestones/M001/M001-CONTEXT.md",
         "milestones/M001/M001-RESEARCH.md",
       ],
@@ -530,11 +527,6 @@ test("executeMigrationWrite records audit artifacts and verifies DB-backed proje
       formatPlan(project.milestones[0]!.slices[0]!),
     );
     assert.equal(result.verification.dbReadiness.registry, 2, "imported and preserved authority are readable by deriveState");
-    assert.equal(
-      readFileSync(join(base, ".gsd", "STATE.md"), "utf8"),
-      renderStateContent(await deriveState(base)),
-      "migration leaves a STATE.md rendered from the imported database",
-    );
     assert.notEqual(result.verification.dbReadiness.phase, "not-checked", "readiness gate ran before audit");
   } finally {
     cleanup(base);
@@ -2780,38 +2772,6 @@ test("unbound evidence resolution resumes after bytes move before ledger cleanup
   }
 });
 
-test("#2178: unbound evidence resolution falls back to copy+delete on transient exchange failure", () => {
-  const base = makeBase("gsd-migrate-evidence-exchange-fallback-");
-  try {
-    mkdirSync(join(base, ".gsd", "notes"), { recursive: true });
-    assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
-    const evidencePath = "notes/.gsd-projection-tmp-00000000-0000-0000-0000-000000000002";
-    write(join(base, ".gsd", evidencePath), "later accepted work\n");
-    write(join(base, ".gsd", "migration", "unbound-projection-evidence.json"), `${JSON.stringify([{
-      evidencePath,
-      evidenceIdentity: null,
-      kind: "temporary",
-      logicalPath: "notes/result.md",
-      scope: "file",
-      transition: "retained",
-    }])}\n`);
-    const [evidence] = loadUnboundProjectionEvidence(base);
-    assert.ok(evidence);
-    const preview = previewUnboundProjectionEvidenceResolution(base, evidence.evidenceId, "restore");
-    _setUnboundEvidenceExchangeFaultForTest(() => {
-      throw new ProjectionLockTransientError(new Error("projection root operation failed: os error 32 sharing violation"));
-    });
-    resolveUnboundProjectionEvidence(base, evidence.evidenceId, "restore", preview.consent);
-    _setUnboundEvidenceExchangeFaultForTest(null);
-
-    assert.deepEqual(loadUnboundProjectionEvidence(base), []);
-    assert.equal(readFileSync(join(base, ".gsd", "notes", "result.md"), "utf8"), "later accepted work\n");
-  } finally {
-    _setUnboundEvidenceExchangeFaultForTest(null);
-    cleanup(base);
-  }
-});
-
 test("unbound evidence resolution finishes an already-moved guard", () => {
   const base = makeBase("gsd-migrate-evidence-guard-replay-");
   try {
@@ -3878,7 +3838,7 @@ test("projection mutation gate flags .gsd-headed template literal paths", () => 
   }
 });
 
-test("milestone projection mutations honor the publication claim", async () => {
+test("milestone projection mutations honor the publication claim", () => {
   const base = makeBase("gsd-migrate-milestone-actions-fence-");
   try {
     mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
@@ -3888,15 +3848,11 @@ test("milestone projection mutations honor the publication claim", async () => {
     insertMilestone({ id: "M001", title: "Milestone", status: "pending" });
     const release = claimProjectionMaintenance(databasePath);
     try {
-      // The park commits in the DB; only the marker render is fenced.
-      assert.equal(await parkMilestone(base, "M001", "hold"), true);
+      assert.throws(() => parkMilestone(base, "M001", "hold"), /maintenance|fenced/i);
     } finally {
       release();
     }
-    assert.equal(getMilestone("M001")?.status, "parked");
     assert.equal(existsSync(join(base, ".gsd", "milestones", "M001", "M001-PARKED.md")), false);
-    assert.equal(renderMilestoneParkedMarker(base, "M001"), true, "the marker renders once the claim is released");
-    assert.equal(existsSync(join(base, ".gsd", "milestones", "M001", "M001-PARKED.md")), true);
   } finally {
     cleanup(base);
   }
@@ -3915,6 +3871,30 @@ test("migration backup rejects a symlinked destination root", () => {
   } finally {
     cleanup(base);
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("guided queue projection rewrites honor the publication claim", () => {
+  const base = makeBase("gsd-migrate-guided-queue-fence-");
+  try {
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    const databasePath = join(base, ".gsd", "gsd.db");
+    assert.equal(openDatabase(databasePath), true);
+    const contextPath = join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md");
+    const original = "---\ndepends_on: [M002]\n---\n# Context\n";
+    write(contextPath, original);
+    const release = claimProjectionMaintenance(databasePath);
+    try {
+      assert.throws(
+        () => _removeDependsOnFromContextFilesForTest(base, [{ milestone: "M001", dep: "M002" }]),
+        /maintenance|fenced/i,
+      );
+      assert.equal(readFileSync(contextPath, "utf8"), original);
+    } finally {
+      release();
+    }
+  } finally {
+    cleanup(base);
   }
 });
 

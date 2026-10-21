@@ -26,12 +26,9 @@ export function isMigrationBackupError(err: unknown): err is MigrationBackupErro
 /**
  * Creates a same-version backup before file-backed schema migrations.
  *
- * An existing backup is never overwritten: a retry after a failed migration
- * would otherwise replace the pristine copy with a half-migrated database.
- * Later copies go to the first free `backup-v<N>.latest`,
- * `backup-v<N>.latest-2`, ... name instead. WAL
- * checkpoint, copy, integrity-check, and schema-version failures are logged
- * and then rethrown before migration DDL runs.
+ * Same-version backups are replaced so they always represent the database
+ * being migrated. WAL checkpoint, copy, integrity-check, and schema-version
+ * failures are logged and then rethrown before migration DDL runs.
  */
 export function backupDatabaseBeforeMigration(
   db: DbAdapter,
@@ -42,15 +39,10 @@ export function backupDatabaseBeforeMigration(
   if (!dbPath || dbPath === ":memory:" || !deps.existsSync(dbPath)) return;
 
   try {
-    const allowMissingSchemaVersion = deps.allowMissingSchemaVersion === true;
-    const basePath = `${dbPath}.backup-v${currentVersion}`;
-    let backupPath = basePath;
-    for (let n = 1; deps.existsSync(backupPath); n++) {
-      backupPath = n === 1 ? `${basePath}.latest` : `${basePath}.latest-${n}`;
-    }
+    const backupPath = `${dbPath}.backup-v${currentVersion}`;
     checkpointWal(db);
     deps.copyFileSync(dbPath, backupPath);
-    verifyBackup(db, backupPath, currentVersion, allowMissingSchemaVersion);
+    verifyBackup(db, backupPath, currentVersion, deps.allowMissingSchemaVersion === true);
   } catch (backupErr) {
     const error = toMigrationBackupError(backupErr);
     deps.logWarning("db", `Pre-migration backup failed: ${error.message}`);

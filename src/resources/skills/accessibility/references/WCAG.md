@@ -90,7 +90,6 @@
 ## Common ARIA patterns
 
 ### Buttons
-
 ```html
 <button>Label</button>
 <!-- or -->
@@ -98,7 +97,6 @@
 ```
 
 ### Links
-
 ```html
 <a href="/page">Descriptive link text</a>
 <!-- External links -->
@@ -109,7 +107,6 @@
 ```
 
 ### Form fields
-
 ```html
 <label for="email">Email address</label>
 <input type="email" id="email" aria-describedby="email-hint">
@@ -117,7 +114,6 @@
 ```
 
 ### Error states
-
 ```html
 <label for="email">Email</label>
 <input type="email" id="email" aria-invalid="true" aria-describedby="email-error">
@@ -125,7 +121,6 @@
 ```
 
 ### Navigation
-
 ```html
 <nav aria-label="Main">
   <ul>
@@ -136,7 +131,6 @@
 ```
 
 ### Modals
-
 ```html
 <div role="dialog" aria-modal="true" aria-labelledby="dialog-title">
   <h2 id="dialog-title">Confirm Action</h2>
@@ -145,7 +139,6 @@
 ```
 
 ### Live regions
-
 ```html
 <!-- Polite (waits for pause in speech) -->
 <div aria-live="polite">Status update here</div>

@@ -27,8 +27,6 @@ import {
   buildExecuteTaskPrompt,
   buildCompleteSlicePrompt,
 } from "../auto-prompts.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
-import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 const MID = "M001";
 const SID = "S01";
@@ -74,12 +72,9 @@ describe("guided-flow → auto-prompts consolidation (#5183)", () => {
         "- Working code",
       ].join("\n"),
     );
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    saveMilestoneFilesAsArtifacts(base);
   });
 
   afterEach(() => {
-    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   });
 

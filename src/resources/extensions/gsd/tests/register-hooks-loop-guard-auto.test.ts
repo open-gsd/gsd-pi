@@ -14,10 +14,7 @@ import { readUnitHarnessAbort } from "../unit-runtime.ts";
 
 type Handler = (event: any, ctx?: any) => Promise<any> | any;
 
-// agent_end reads the write gate, and that read opens the project database of
-// `cwd`. A test that asserts on database rows after agent_end passes its own
-// base, so a database in the process working directory cannot replace its own.
-function makeHookHarness(cwd: string = process.cwd()): {
+function makeHookHarness(): {
   emitToolCall: (toolName: string, input: Record<string, unknown>) => Promise<any>;
   emitToolResult: (event: Record<string, unknown>) => Promise<void>;
   emitToolExecutionEnd: (event: Record<string, unknown>) => Promise<void>;
@@ -32,7 +29,7 @@ function makeHookHarness(cwd: string = process.cwd()): {
     },
   };
   const ctx = {
-    cwd,
+    cwd: process.cwd(),
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
   };
   let callId = 0;
@@ -75,13 +72,8 @@ function makeHookHarness(cwd: string = process.cwd()): {
 function makeRuntimeBase(): string {
   const base = join(tmpdir(), `gsd-hook-runtime-${randomUUID()}`);
   mkdirSync(join(base, ".gsd"), { recursive: true });
-  // The harness abort is a database row. Without an open database nothing is
-  // recorded, and a "no abort recorded" assertion would prove nothing.
-  openDatabase(":memory:");
   return base;
 }
-
-test.after(() => closeDatabase());
 
 test("register-hooks keeps loop-guard block reason interactive outside auto-mode", async (t) => {
   autoSession.reset();
@@ -579,7 +571,7 @@ test("register-hooks preserves a turn-abort and does not overwrite it with a sub
     rmSync(base, { recursive: true, force: true });
   });
 
-  const { emitAgentEnd, emitToolExecutionEnd } = makeHookHarness(base);
+  const { emitAgentEnd, emitToolExecutionEnd } = makeHookHarness();
   await emitAgentEnd({
     messages: [{ role: "assistant", stopReason: "aborted", errorMessage: "context truncated" }],
   });
@@ -688,7 +680,7 @@ test("register-hooks only records agent_end turn aborts for aborted or error sto
     rmSync(base, { recursive: true, force: true });
   });
 
-  const { emitAgentEnd } = makeHookHarness(base);
+  const { emitAgentEnd } = makeHookHarness();
   await emitAgentEnd({
     abortOrigin: "auto-context",
     messages: [{ stopReason: "stop" }],

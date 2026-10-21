@@ -17,7 +17,7 @@ import type {
 } from "@gsd/pi-coding-agent";
 import { deriveState } from "./state.js";
 import { findWorktreeSegment, isGsdWorktreePath } from "./worktree-root.js";
-import { getManifestStatus } from "./files.js";
+import { loadFile, getManifestStatus } from "./files.js";
 import type { InterruptedSessionAssessment } from "./interrupted-session.js";
 import {
   loadEffectiveGSDPreferences,
@@ -31,7 +31,8 @@ import {
 import { ensureGsdSymlink, isInheritedRepo, validateProjectId } from "./repo-identity.js";
 import { migrateToExternalState, recoverFailedMigration } from "./migrate-external.js";
 import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
-import { gsdRoot } from "./paths.js";
+import { gsdRoot, resolveMilestoneFile } from "./paths.js";
+import { findMilestoneIds } from "./milestone-ids.js";
 import { milestoneEntryBlockedGuidance } from "./guidance.js";
 import { invalidateAllCaches } from "./cache.js";
 import { writeLock, clearLock, readCrashLock, isLockProcessAlive } from "./crash-recovery.js";
@@ -67,6 +68,7 @@ import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
 import { checkoutBranchWithStashGuard } from "./worktree-git-recovery.js";
 import { cleanStaleRuntimeUnits } from "./auto-worktree-runtime-cleanup.js";
 import { readResourceVersion } from "./auto-worktree-resource-version.js";
+import { queryJournal } from "./journal.js";
 import { worktreePath as getWorktreeDir, isInsideWorktreesDir } from "./worktree-manager.js";
 import { emitWorktreeOrphaned } from "./worktree-telemetry.js";
 import { initMetrics } from "./metrics.js";
@@ -77,9 +79,13 @@ import { snapshotSkills } from "./skill-discovery.js";
 import {
   isDbAvailable,
   probeDbWritable,
-  hasSavedArtifact,
+  getMilestone,
+  getAllMilestones,
+  insertMilestone,
+  updateMilestoneStatus,
 } from "./gsd-db.js";
-import { readListedMilestoneIds, readMilestone, readMilestones, type MilestoneRead } from "./db/lifecycle-read.js";
+import { readMilestoneMergeObservation } from "./db/milestone-closeout-readiness.js";
+import { immediateTransaction } from "./db/engine.js";
 import {
   closeAllWorkflowDatabases,
   getWorkflowDatabaseStatus,
@@ -87,6 +93,9 @@ import {
   openWorkflowDatabase,
   resolveProjectRootDbPath,
 } from "./db-workspace.js";
+import { isClosedStatus } from "./status-guards.js";
+import { classifyMilestoneSummaryContent } from "./milestone-summary-classifier.js";
+import { extractVerdict } from "./verdict-parser.js";
 import { auditOrphanedPreflightStashes } from "./orphan-stash-audit.js";
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
 
@@ -102,6 +111,7 @@ import type { AutoSession } from "./auto/session.js";
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
 } from "node:fs";
@@ -198,6 +208,77 @@ export async function openProjectDbIfPresent(basePath: string): Promise<void> {
   const result = openExistingWorkflowDatabase(basePath);
   if (!result.ok && (result.reason === "open-failed" || result.reason === "locked")) {
     logWarning("engine", `gsd-db: failed to open existing database: ${result.error?.message ?? "open failed"}`);
+  }
+}
+
+class MilestoneMergeObservationMismatchError extends Error {}
+
+export function reconcileMergedMilestonesFromJournal(basePath: string): number {
+  if (!isDbAvailable()) return 0;
+
+  try {
+    const mergedAtByMilestone = new Map<string, string>();
+    for (const entry of queryJournal(basePath, { eventType: "worktree-merged" })) {
+      const data = entry.data ?? {};
+      const milestoneId = typeof data.milestoneId === "string" ? data.milestoneId : null;
+      if (!milestoneId) continue;
+      if (data.conflict === true) continue;
+
+      const endedAt = typeof data.endedAt === "string" ? data.endedAt : entry.ts;
+      const previous = mergedAtByMilestone.get(milestoneId);
+      if (!previous || endedAt > previous) mergedAtByMilestone.set(milestoneId, endedAt);
+    }
+
+    const closed = immediateTransaction(() => {
+      const preflight = [...mergedAtByMilestone].map(([milestoneId, completedAt]) => ({
+        milestoneId,
+        completedAt,
+        observation: readMilestoneMergeObservation(milestoneId),
+      }));
+      for (const { milestoneId, observation } of preflight) {
+        if (observation.kind === "mismatch") {
+          throw new MilestoneMergeObservationMismatchError(
+            `Milestone ${milestoneId} canonical and legacy status mismatch ` +
+            `(canonical=${observation.canonicalStatus}, legacy=${observation.legacyStatus})`,
+          );
+        }
+      }
+
+      let completed = 0;
+      for (const { milestoneId, completedAt, observation } of preflight) {
+        if (observation.kind === "completed") continue;
+        if (observation.kind === "not-completed") {
+          logWarning(
+            "bootstrap",
+            `Ignoring worktree-merged observation for adopted Milestone ${milestoneId}: ` +
+            `canonical lifecycle is ${observation.canonicalStatus}, not completed.`,
+          );
+          continue;
+        }
+        const existing = getMilestone(milestoneId);
+        if (!existing) {
+          insertMilestone({ id: milestoneId, title: milestoneId, status: "complete" });
+          updateMilestoneStatus(milestoneId, "complete", completedAt);
+          completed++;
+          continue;
+        }
+        if (!isClosedStatus(existing.status)) {
+          updateMilestoneStatus(milestoneId, "complete", completedAt);
+          completed++;
+        }
+      }
+      return completed;
+    });
+
+    if (closed > 0) invalidateAllCaches();
+    return closed;
+  } catch (err) {
+    if (err instanceof MilestoneMergeObservationMismatchError) throw err;
+    logWarning(
+      "bootstrap",
+      `merged-milestone journal reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 0;
   }
 }
 
@@ -468,7 +549,7 @@ export function auditOrphanedMilestoneBranches(
 
   for (const branch of milestoneBranches) {
     const milestoneId = branch.replace(/^milestone\//, "");
-    const milestone = readMilestone(milestoneId);
+    const milestone = getMilestone(milestoneId);
 
     if (!milestone) continue;
 
@@ -482,10 +563,10 @@ export function auditOrphanedMilestoneBranches(
     // we never delete or touch; we just surface a warning so the user knows
     // where to look.
     //
-    // Gate on the closed answer so we only warn about genuinely open
-    // milestones. Other closed milestones go through the complete/unmerged
+    // Gate on isClosedStatus so we only warn about genuinely open milestones.
+    // Parked/other closed statuses go through the legacy complete/unmerged
     // path below where appropriate.
-    if (!milestone.closed) {
+    if (!isClosedStatus(milestone.status)) {
       let commitsAhead = 0;
       try {
         commitsAhead = nativeCommitCountBetween(basePath, mainBranch, branch);
@@ -554,9 +635,10 @@ export function auditOrphanedMilestoneBranches(
       continue;
     }
 
-    // Only a done milestone participates in the merged/unmerged cleanup
-    // paths below — a discarded milestone is intentionally left alone.
-    if (!milestone.done) continue;
+    // Only the "complete" status participates in the merged/unmerged cleanup
+    // paths below — other closed statuses (parked, etc.) are intentionally
+    // left alone.
+    if (milestone.status !== "complete") continue;
 
     if (isMerged) {
       // Branch is merged — safe to delete branch and clean up worktree dir
@@ -661,15 +743,15 @@ export function auditOrphanedMilestoneBranches(
   const seenMilestoneIds = new Set(
     milestoneBranches.map((branch) => branch.replace(/^milestone\//, "")),
   );
-  let completedMilestones: readonly MilestoneRead[] = [];
+  let completedMilestones: readonly { id: string; status: string }[] = [];
   try {
-    completedMilestones = readMilestones();
+    completedMilestones = getAllMilestones();
   } catch {
     // DB read failure — skip the second pass; the first pass is still useful.
     completedMilestones = [];
   }
   for (const m of completedMilestones) {
-    if (!m.closed) {
+    if (!isClosedStatus(m.status)) {
       if (seenMilestoneIds.has(m.id)) continue;
       const worktreeEvidence = detectWorktreeEvidence(basePath, m.id, hasChanges);
       if (!worktreeEvidence.dirty) continue;
@@ -705,7 +787,7 @@ export function auditOrphanedMilestoneBranches(
       continue;
     }
 
-    if (!m.done) continue;
+    if (m.status !== "complete") continue;
     if (seenMilestoneIds.has(m.id)) continue; // already processed in the branch loop
     if (!milestoneBranchListAvailable) {
       try {
@@ -854,10 +936,30 @@ export function findUnmergedCompletedMilestone(
   return _selectResumableMilestone(
     milestoneBranches,
     mergedBranches,
-    // DB status is the only completion authority; no DB or no row is not complete.
-    (milestoneId) => isDbAvailable() && readMilestone(milestoneId)?.done === true,
+    (milestoneId) => {
+      if (isDbAvailable()) {
+        const row = getMilestone(milestoneId);
+        if (row) return row.status === "complete";
+      }
+      return isCompletedMilestoneOnDisk(basePath, milestoneId);
+    },
     (branch) => nativeCommitCountBetween(basePath, mainBranch, branch),
   );
+}
+
+function isCompletedMilestoneOnDisk(basePath: string, milestoneId: string): boolean {
+  const summaryPath = resolveMilestoneFile(basePath, milestoneId, "SUMMARY");
+  const validationPath = resolveMilestoneFile(basePath, milestoneId, "VALIDATION");
+  if (!summaryPath || !validationPath) return false;
+
+  try {
+    const summary = readFileSync(summaryPath, "utf-8");
+    if (classifyMilestoneSummaryContent(summary) === "failure") return false;
+    const validation = readFileSync(validationPath, "utf-8");
+    return extractVerdict(validation) != null;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1135,13 +1237,7 @@ export async function bootstrapAutoSession(
       return releaseLockAndReturn();
     }
 
-    // Workflow history without a database: stop before any state derivation
-    // or dispatch can run against a missing authority.
-    const firstDbOpen = openWorkflowDatabase(base);
-    if (!firstDbOpen.ok && (firstDbOpen.reason === "authority-missing" || firstDbOpen.reason === "checkout-unbound")) {
-      ctx.ui.notify(firstDbOpen.error.message, "error");
-      return releaseLockAndReturn();
-    }
+    openWorkflowDatabase(base);
 
     // Ensure .gitignore has baseline patterns.
     // ensureGitignore checks for git-tracked .gsd/ files and skips the
@@ -1209,12 +1305,22 @@ export async function bootstrapAutoSession(
     // Clean stale runtime unit files for completed milestones (#887).
     // DB-authoritative: when DB is available, require DB status to be closed
     // before clearing runtime units. A SUMMARY file alone is no longer
-    // trusted as proof of completion (#4663). With no DB nothing is cleared.
+    // trusted as proof of completion (#4663). Fall back to SUMMARY-file
+    // presence only when DB is unavailable (legacy/pre-migration).
     cleanStaleRuntimeUnits(
       gsdRoot(base),
       (mid) => {
-        if (!isDbAvailable()) return false;
-        return readMilestone(mid)?.closed === true;
+        if (isDbAvailable()) {
+          const row = getMilestone(mid);
+          return !!row && isClosedStatus(row.status);
+        }
+        const summaryFile = resolveMilestoneFile(base, mid, "SUMMARY");
+        if (!summaryFile) return false;
+        try {
+          return classifyMilestoneSummaryContent(readFileSync(summaryFile, "utf-8")) !== "failure";
+        } catch {
+          return false;
+        }
       },
     );
 
@@ -1263,7 +1369,8 @@ export async function bootstrapAutoSession(
     try {
       if (isDbAvailable()) {
         const stashAudit = auditOrphanedPreflightStashes(base, (milestoneId) => {
-          return readMilestone(milestoneId)?.closed === true;
+          const row = getMilestone(milestoneId);
+          return !!row && isClosedStatus(row.status);
         });
         for (const entry of stashAudit.applied) {
           ctx.ui.notify(
@@ -1543,8 +1650,9 @@ export async function bootstrapAutoSession(
       // Active milestone exists but has no roadmap
       if (state.phase === "pre-planning") {
         const mid = state.activeMilestone!.id;
-        // The saved CONTEXT row decides; the CONTEXT.md projection is not read.
-        if (!hasSavedArtifact(mid, null, "CONTEXT") && effectivePrefs?.planning_depth !== "deep") {
+        const contextFile = resolveMilestoneFile(base, mid, "CONTEXT");
+        const hasContext = !!(contextFile && (await loadFile(contextFile)));
+        if (!hasContext && effectivePrefs?.planning_depth !== "deep") {
           const { showSmartEntry } = await import("./guided-flow.js");
           await showSmartEntry(ctx, pi, base, { step: requestedStepMode });
 
@@ -1606,10 +1714,18 @@ export async function bootstrapAutoSession(
     // (originalBasePath is empty on a fresh bootstrap).
     buildLifecycle().adoptSessionRoot(base);
     s.unitDispatchCount.clear();
+    s.unitRecoveryCount.clear();
     s.lastBudgetAlertLevel = 0;
     s.unitLifetimeDispatches.clear();
     resetHookState();
     restoreHookState(base);
+    // A restored activeHook has no live dispatch (the sidecar queue is not
+    // persisted); re-enqueue it so the hook runs instead of blocking the next
+    // unrelated unit's close-out (#1246).
+    reconcileRestoredHookDispatch(base, s.sidecarQueue);
+    // A restored gate block has no dispatch either; re-enqueue the blocked
+    // hook so a failed blocking gate cannot be bypassed by resuming (#2194).
+    reconcileRestoredGateBlock(base, s.sidecarQueue);
     resetProactiveHealing();
     // Notify user on health level transitions (green→yellow→red and back)
     setLevelChangeCallback((_from, to, summary) => {
@@ -1618,17 +1734,11 @@ export async function bootstrapAutoSession(
     });
     s.autoStartTime = Date.now();
     s.resourceVersionOnStart = readResourceVersion();
+    s.pendingQuickTasks = [];
     s.clearCurrentUnit();
     s.currentMilestoneId ??=
       strandedRecoveryAction?.milestoneId ??
       (deepProjectStagePending ? null : state.activeMilestone?.id ?? null);
-    // A restored activeHook may have no queued dispatch (a pause closed its
-    // row); re-enqueue it so the hook runs instead of blocking the next
-    // unrelated unit's close-out (#1246).
-    reconcileRestoredHookDispatch(base);
-    // A restored gate block has no dispatch either; re-enqueue the blocked
-    // hook so a failed blocking gate cannot be bypassed by resuming (#2194).
-    reconcileRestoredGateBlock(base);
     s.originalModelId = startModelSnapshot?.id ?? ctx.model?.id ?? null;
     s.originalModelProvider = startModelSnapshot?.provider ?? ctx.model?.provider ?? null;
     s.originalThinkingLevel = startThinkingSnapshot ?? null;
@@ -1733,7 +1843,7 @@ export async function bootstrapAutoSession(
     // ── DB lifecycle ──
     const gsdDbPath = resolveProjectRootDbPath(s.basePath);
     const initialDbOpen = openWorkflowDatabase(s.basePath);
-    if (!initialDbOpen.ok && (initialDbOpen.reason === "open-failed" || initialDbOpen.reason === "locked" || initialDbOpen.reason === "authority-missing" || initialDbOpen.reason === "checkout-unbound")) {
+    if (!initialDbOpen.ok && (initialDbOpen.reason === "open-failed" || initialDbOpen.reason === "locked")) {
       logError("engine", `failed to initialize project database: ${initialDbOpen.error?.message ?? "open failed"}`);
     }
     if (_shouldAbortBootstrapForUnavailableDbForTest(gsdDbPath, isDbAvailable())) {
@@ -1756,9 +1866,11 @@ export async function bootstrapAutoSession(
         ? "The database file could not be opened"
         : dbStatus.lastPhase === "initSchema"
           ? "The database schema could not be initialized"
-          : dbStatus.attempted
-            ? "The database could not be opened (phase unknown)"
-            : "The database provider could not be loaded";
+          : dbStatus.lastPhase === "vacuum-recovery"
+            ? "Corruption recovery (VACUUM) failed"
+            : dbStatus.attempted
+              ? "The database could not be opened (phase unknown)"
+              : "The database provider could not be loaded";
       const errorDetail = dbStatus.lastError ? ` (${dbStatus.lastError.message})` : "";
       const providerHint = dbStatus.provider
         ? ` Provider: ${dbStatus.provider}.`
@@ -1791,7 +1903,7 @@ export async function bootstrapAutoSession(
     initMetrics(s.basePath);
 
     // Initialize routing history
-    initRoutingHistory();
+    initRoutingHistory(s.basePath);
 
     // Restore the model that was active when auto bootstrap began (#650, #2829).
     if (startModelSnapshot) {
@@ -1935,18 +2047,18 @@ export async function bootstrapAutoSession(
 
     // Pre-flight: validate milestone queue
     try {
-      const milestoneIds = readListedMilestoneIds();
+      const milestoneIds = findMilestoneIds(base);
       if (milestoneIds.length > 1) {
         const issues: string[] = [];
         for (const id of milestoneIds) {
-          // Skip completed/parked milestones — a leftover CONTEXT-DRAFT
+          // Skip completed/parked milestones — a leftover CONTEXT-DRAFT.md
           // on a finished milestone is harmless residue, not an actionable warning.
           if (isDbAvailable()) {
-            const ms = readMilestone(id);
-            if (ms?.done || ms?.parked) continue;
+            const ms = getMilestone(id);
+            if (ms?.status === "complete" || ms?.status === "parked") continue;
           }
-          // The draft row stays after the final CONTEXT is saved, so it counts only without one.
-          if (!hasSavedArtifact(id, null, "CONTEXT") && hasSavedArtifact(id, null, "CONTEXT-DRAFT"))
+          const draft = resolveMilestoneFile(base, id, "CONTEXT-DRAFT");
+          if (draft)
             issues.push(
               `${id}: has CONTEXT-DRAFT.md (will pause for discussion)`,
             );

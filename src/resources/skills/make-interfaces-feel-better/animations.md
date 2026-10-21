@@ -177,7 +177,6 @@ Exit animations should be softer and less attention-grabbing than enter animatio
 ```
 
 **Key points:**
-
 - Use a small fixed `translateY` (e.g., `-12px`) instead of the full container height
 - Keep some directional movement to indicate where the element went
 - Exit duration should be shorter than enter duration (150ms vs 300ms)
@@ -274,7 +273,6 @@ The non-absolute icon (InactiveIcon) defines the layout size. The absolute icon 
 | Loading/success state indicators | Icon labels (text next to icon) |
 
 **Important:** Always use exactly these values for contextual icon animations — do not deviate:
-
 - `scale`: `0.25` → `1` (never use `0.5` or `0.6`)
 - `opacity`: `0` → `1`
 - `filter`: `"blur(4px)"` → `"blur(0px)"`

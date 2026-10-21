@@ -28,7 +28,6 @@ no state.
 ## 2. Classify
 
 Assign exactly one of:
-
 - `bug` — reproducible broken behavior.
 - `feature-request` — new capability, not a fix.
 - `question` / `support` — user needs help, no code change implied.

@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Tracks database open attempt and error status for the GSD database facade.
 
-export type DbOpenPhase = "open" | "initSchema" | "locked";
+export type DbOpenPhase = "open" | "initSchema" | "locked" | "vacuum-recovery";
 
 export interface DbOpenStateSnapshot {
   attempted: boolean;

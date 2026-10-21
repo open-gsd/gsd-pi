@@ -15,8 +15,6 @@
  * permission to retry. The transport never handles tokens, cookies, or URLs.
  */
 
-import { parseEmbeddedTheme, type EmbeddedTheme } from "./embedded-theme.ts"
-
 export const EMBEDDED_PROTOCOL = "gsd-ui/1"
 export const EMBEDDED_MARKER_QUERY = "__gsd_embedded"
 export const BIND_TYPE = "gsd-ui-bind"
@@ -25,7 +23,6 @@ export const REQUEST_TYPE = "gsd-ui-request"
 export const EVENT_TYPE = "gsd-ui-event"
 export const READY_TYPE = "gsd-ui-ready"
 export const RESPONSE_TYPE = "gsd-ui-response"
-export const THEME_TYPE = "gsd-ui-theme"
 
 export const DEFAULT_NEGOTIATION_TIMEOUT_MS = 30_000
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
@@ -42,7 +39,6 @@ interface BindMessage {
   protocol: string
   type: string
   generation: number
-  theme?: unknown
 }
 
 export interface FrameRequest {
@@ -130,7 +126,6 @@ export function negotiateEmbeddedTransport(options: {
   negotiationTimeoutMs?: number
   requestTimeoutMs?: number
   maxPending?: number
-  onTheme?: (theme: EmbeddedTheme) => void
 }): Promise<EmbeddedOperationClient> {
   const allowed = new Set(options.allowedOperations)
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
@@ -160,14 +155,8 @@ export function negotiateEmbeddedTransport(options: {
         run(entry)
       }
       const portListener = (event: MessageEvent) => {
-        if (disposed) return
-        const data = event.data as FrameResponse | FrameEventMessage | { protocol: string; type: typeof THEME_TYPE; generation: number; theme?: unknown } | undefined
+        const data = event.data as FrameResponse | FrameEventMessage | undefined
         if (!data || data.protocol !== EMBEDDED_PROTOCOL || data.generation !== generation) return
-        if (data.type === THEME_TYPE) {
-          const theme = parseEmbeddedTheme(data.theme)
-          if (theme) options.onTheme?.(theme)
-          return
-        }
         if (data.type === EVENT_TYPE) {
           if (typeof (data as FrameEventMessage).subscriptionId !== "string" || typeof (data as FrameEventMessage).seq !== "number") return
           for (const handler of [...eventHandlers]) handler(data as FrameEventMessage)
@@ -295,10 +284,6 @@ export function negotiateEmbeddedTransport(options: {
         rejectNegotiation(error instanceof Error ? error : new Error("embedded transport bind acknowledgement failed"))
         return
       }
-      // Publish presentation only after a usable channel has been established.
-      // A failed bind must not leave a host override on the unavailable screen.
-      const theme = parseEmbeddedTheme(data.theme)
-      if (theme) options.onTheme?.(theme)
       resolveNegotiation(client)
     }
     w.addEventListener("message", listener)

@@ -1,8 +1,5 @@
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 import { _getAdapter, closeDatabase, openDatabase } from '../gsd-db.ts';
 import { createMemory, supersedeMemory } from '../memory-store.ts';
@@ -11,11 +8,6 @@ import {
   executeMemoryCapture,
   executeMemoryQuery,
 } from '../tools/memory-tools.ts';
-
-// Project root for captures; gotcha/pattern/rule captures render KNOWLEDGE.md here.
-const base = mkdtempSync(join(tmpdir(), 'gsd-memory-tools-'));
-mkdirSync(join(base, '.gsd'), { recursive: true });
-after(() => rmSync(base, { recursive: true, force: true }));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // capture_thought
@@ -27,7 +19,7 @@ test('memory-tools: capture_thought creates a memory with a MEM id', () => {
   const result = executeMemoryCapture({
     category: 'gotcha',
     content: 'sql.js FTS5 virtual tables need explicit triggers.',
-  }, base);
+  });
 
   assert.ok(!result.isError, 'capture should not error');
   assert.equal(result.details.operation, 'memory_capture');
@@ -44,7 +36,7 @@ test('memory-tools: capture_thought rejects invalid category', () => {
   const result = executeMemoryCapture({
     category: 'opinion', // not in the allow-list
     content: 'some content',
-  }, base);
+  });
 
   assert.ok(result.isError, 'invalid category should error');
   assert.equal(result.details.error, 'invalid_category');
@@ -55,7 +47,7 @@ test('memory-tools: capture_thought rejects invalid category', () => {
 test('memory-tools: capture_thought rejects missing fields', () => {
   openDatabase(':memory:');
 
-  const empty = executeMemoryCapture({ category: '', content: '' }, base);
+  const empty = executeMemoryCapture({ category: '', content: '' });
   assert.ok(empty.isError, 'missing fields should error');
   assert.equal(empty.details.error, 'missing_fields');
 
@@ -69,7 +61,7 @@ test('memory-tools: capture_thought clamps confidence to the 0.1–0.99 range', 
     category: 'convention',
     content: 'clamp test high',
     confidence: 42,
-  }, base);
+  });
   assert.ok(!hi.isError);
   assert.equal(hi.details.confidence, 0.99);
 
@@ -77,7 +69,7 @@ test('memory-tools: capture_thought clamps confidence to the 0.1–0.99 range', 
     category: 'convention',
     content: 'clamp test low',
     confidence: -5,
-  }, base);
+  });
   assert.ok(!lo.isError);
   assert.equal(lo.details.confidence, 0.1);
 
@@ -90,7 +82,7 @@ test('memory-tools: capture_thought fails gracefully when DB is closed', () => {
   const result = executeMemoryCapture({
     category: 'gotcha',
     content: 'db closed',
-  }, base);
+  });
 
   assert.ok(result.isError, 'db-closed capture should error');
   assert.equal(result.details.error, 'db_unavailable');
@@ -187,7 +179,7 @@ test('memory-tools: capture_thought stores scope and tags', () => {
     content: 'use WAL journaling by default',
     scope: 'global',
     tags: ['sqlite', 'wal'],
-  }, base);
+  });
   assert.ok(!result.isError);
   assert.equal(result.details.scope, 'global');
   assert.deepEqual(result.details.tags, ['sqlite', 'wal']);
@@ -321,7 +313,7 @@ test('memory-tools: capture_thought surfaces underlying SQL error (regression #4
   const result = executeMemoryCapture({
     category: 'gotcha',
     content: 'should reveal the real reason',
-  }, base);
+  });
 
   assert.ok(result.isError, 'broken store should produce an error result');
   assert.equal(result.details.operation, 'memory_capture');

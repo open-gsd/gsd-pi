@@ -1,5 +1,6 @@
 # ExtensionContext — What You Can Access
 
+
 Every event handler receives `ctx: ExtensionContext`. This is your window into pi's runtime state.
 
 ### ctx.ui — User Interaction

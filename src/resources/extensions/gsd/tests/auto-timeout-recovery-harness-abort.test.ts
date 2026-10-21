@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { recoverTimedOutUnit } from "../auto-timeout-recovery.ts";
-import { closeDatabase, insertGateRow, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 import {
   readUnitHarnessAbort,
   readUnitRuntimeRecord,
@@ -17,11 +16,6 @@ test("timeout recovery retry clears stale harness abort for the same unit run", 
   const startedAt = Date.now();
   mkdirSync(join(base, ".gsd"), { recursive: true });
   try {
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    // The gate is still pending, so the unit has no durable outcome yet.
-    insertMilestone({ id: "M001", title: "Milestone", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active" });
-    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
     recordUnitHarnessAbort(base, "gate-evaluate", "M001/S01/gates+Q3", startedAt, {
       kind: "turn-abort",
       reason: "Agent turn aborted before the unit could complete its gate evaluation.",
@@ -44,7 +38,7 @@ test("timeout recovery retry clears stale harness abort for the same unit run", 
         basePath: base,
         verbose: false,
         currentUnitStartedAt: startedAt,
-        unclaimedUnitBudgets: new Map(),
+        unitRecoveryCount: new Map(),
       },
     );
 
@@ -56,7 +50,6 @@ test("timeout recovery retry clears stale harness abort for the same unit run", 
     assert.equal(messages.length, 1, "retry recovery should send one steering message");
     assert.equal(notifications.length, 1, "retry recovery should notify once");
   } finally {
-    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });

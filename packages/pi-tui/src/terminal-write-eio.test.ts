@@ -3,7 +3,6 @@ import { describe, it } from "node:test";
 import { Text } from "./components/text.ts";
 import { isStdoutClosedError, ProcessTerminal } from "./terminal.ts";
 import type { Terminal } from "./terminal.ts";
-import { setCapabilities } from "./terminal-image.ts";
 import { TUI } from "./tui.ts";
 
 describe("isStdoutClosedError", () => {
@@ -51,8 +50,6 @@ class BrokenWriteTerminal implements Terminal {
 	readonly isTTY = true;
 	readonly kittyProtocolActive = false;
 
-	constructor(private readonly error: Error) {}
-
 	start(_onInput: (data: string) => void, _onResize: () => void): void {}
 
 	stop(): void {}
@@ -60,7 +57,7 @@ class BrokenWriteTerminal implements Terminal {
 	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
 
 	write(_data: string): void {
-		throw this.error;
+		throw Object.assign(new Error("write EIO"), { code: "EIO", syscall: "write" });
 	}
 
 	get columns(): number {
@@ -120,9 +117,7 @@ class StartupClosedTerminal implements Terminal {
 describe("TUI render loop on dead stdout", () => {
 	it("stops rendering and notifies onOutputClosed instead of throwing", async () => {
 		let closed = false;
-		const terminal = new BrokenWriteTerminal(
-			Object.assign(new Error("write EIO"), { code: "EIO", syscall: "write" }),
-		);
+		const terminal = new BrokenWriteTerminal();
 		const tui = new TUI(terminal);
 		tui.addChild(new Text("hello"));
 		tui.onOutputClosed = () => {
@@ -136,33 +131,6 @@ describe("TUI render loop on dead stdout", () => {
 
 		assert.equal(closed, true);
 		tui.stop();
-	});
-
-	it("recovers an EPIPE from the iTerm2 startup query", () => {
-		let closed = false;
-		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
-		const terminal = new BrokenWriteTerminal(Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
-		const tui = new TUI(terminal);
-		tui.onOutputClosed = () => {
-			closed = true;
-		};
-
-		tui.start();
-
-		assert.equal(closed, true);
-		tui.stop();
-		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
-	});
-
-	it("rethrows unrelated startup write errors", () => {
-		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-		const error = new Error("write failed");
-		const terminal = new BrokenWriteTerminal(error);
-		const tui = new TUI(terminal);
-
-		assert.throws(() => tui.start(), error);
-		tui.stop();
-		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
 	});
 
 	it("notifies onOutputClosed when assigned after startup output closes", () => {

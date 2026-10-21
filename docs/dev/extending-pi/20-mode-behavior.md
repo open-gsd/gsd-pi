@@ -1,5 +1,6 @@
 # Mode Behavior
 
+
 | Mode | UI Methods | Notes |
 |------|-----------|-------|
 | **Interactive** (default) | Full TUI | Normal operation |

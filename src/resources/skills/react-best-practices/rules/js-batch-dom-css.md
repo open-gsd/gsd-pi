@@ -10,7 +10,6 @@ tags: javascript, dom, css, performance, reflow, layout-thrashing
 Avoid interleaving style writes with layout reads. When you read a layout property (like `offsetWidth`, `getBoundingClientRect()`, or `getComputedStyle()`) between style changes, the browser is forced to trigger a synchronous reflow.
 
 **This is OK (browser batches style changes):**
-
 ```typescript
 function updateElementStyles(element: HTMLElement) {
   // Each line invalidates style, but browser batches the recalculation
@@ -22,7 +21,6 @@ function updateElementStyles(element: HTMLElement) {
 ```
 
 **Incorrect (interleaved reads and writes force reflows):**
-
 ```typescript
 function layoutThrashing(element: HTMLElement) {
   element.style.width = '100px'
@@ -33,7 +31,6 @@ function layoutThrashing(element: HTMLElement) {
 ```
 
 **Correct (batch writes, then read once):**
-
 ```typescript
 function updateElementStyles(element: HTMLElement) {
   // Batch all writes together
@@ -48,7 +45,6 @@ function updateElementStyles(element: HTMLElement) {
 ```
 
 **Correct (batch reads, then writes):**
-
 ```typescript
 function avoidThrashing(element: HTMLElement) {
   // Read phase - all layout queries first
@@ -63,7 +59,6 @@ function avoidThrashing(element: HTMLElement) {
 ```
 
 **Better: use CSS classes**
-
 ```css
 .highlighted-box {
   width: 100px;
@@ -72,7 +67,6 @@ function avoidThrashing(element: HTMLElement) {
   border: 1px solid black;
 }
 ```
-
 ```typescript
 function updateElementStyles(element: HTMLElement) {
   element.classList.add('highlighted-box')
@@ -82,7 +76,6 @@ function updateElementStyles(element: HTMLElement) {
 ```
 
 **React example:**
-
 ```tsx
 // Incorrect: interleaving style changes with layout queries
 function Box({ isHighlighted }: { isHighlighted: boolean }) {

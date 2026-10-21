@@ -5,16 +5,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
-  _getAdapter,
-  closeDatabase,
-  getMilestone,
-  insertMilestone,
-  openDatabase,
-} from '../gsd-db.ts';
-import {
   loadQueueOrder,
-  renderQueueOrder,
-  reorderMilestones,
+  saveQueueOrder,
   sortByQueueOrder,
   pruneQueueOrder,
   validateQueueOrder,
@@ -68,9 +60,9 @@ test('test block at line 57', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// loadQueueOrder / renderQueueOrder
+// loadQueueOrder / saveQueueOrder
 // ═══════════════════════════════════════════════════════════════════════════
-test('loadQueueOrder / renderQueueOrder', () => {
+test('loadQueueOrder / saveQueueOrder', () => {
 // Load returns null when file doesn't exist
   const base = createFixtureBase();
   assert.deepStrictEqual(loadQueueOrder(base), null, 'returns null when file missing');
@@ -80,7 +72,7 @@ test('loadQueueOrder / renderQueueOrder', () => {
 // Save then load round-trip
 test('test block at line 76', () => {
   const base = createFixtureBase();
-  renderQueueOrder(base, ['M003', 'M001', 'M002']);
+  saveQueueOrder(base, ['M003', 'M001', 'M002']);
   const loaded = loadQueueOrder(base);
   assert.deepStrictEqual(loaded, ['M003', 'M001', 'M002'], 'round-trip preserves order');
 
@@ -108,40 +100,12 @@ test('test block at line 98', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// reorderMilestones
-// ═══════════════════════════════════════════════════════════════════════════
-test('reorderMilestones writes sequence and depends_on in one Domain Operation and renders the file', (t) => {
-  const base = createFixtureBase();
-  t.after(() => {
-    closeDatabase();
-    cleanup(base);
-  });
-  openDatabase(join(base, '.gsd', 'gsd.db'));
-  insertMilestone({ id: 'M001', title: 'One', status: 'queued' });
-  insertMilestone({ id: 'M002', title: 'Two', status: 'queued' });
-  insertMilestone({ id: 'M003', title: 'Three', status: 'queued', depends_on: ['M002'] });
-  const scalar = (sql: string) => Object.values(_getAdapter()!.prepare(sql).get() ?? {})[0];
-  const before = Number(scalar('SELECT revision FROM project_authority WHERE singleton = 1'));
-
-  reorderMilestones(base, ['M003', 'M001', 'M002'], [{ milestone: 'M003', dep: 'M002' }]);
-
-  assert.equal(Number(scalar("SELECT COUNT(*) FROM workflow_operations WHERE operation_type = 'milestone.reorder'")), 1);
-  assert.equal(Number(scalar('SELECT revision FROM project_authority WHERE singleton = 1')), before + 1);
-  assert.deepEqual(
-    _getAdapter()!.prepare('SELECT id FROM milestones ORDER BY sequence').all().map((row) => row['id']),
-    ['M003', 'M001', 'M002'],
-  );
-  assert.deepEqual(getMilestone('M003')!.depends_on, []);
-  assert.deepEqual(loadQueueOrder(base), ['M003', 'M001', 'M002'], 'QUEUE-ORDER.json is rendered from the DB');
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // pruneQueueOrder
 // ═══════════════════════════════════════════════════════════════════════════
 test('pruneQueueOrder', () => {
 // Prune removes invalid IDs
   const base = createFixtureBase();
-  renderQueueOrder(base, ['M001', 'M002', 'M003']);
+  saveQueueOrder(base, ['M001', 'M002', 'M003']);
   pruneQueueOrder(base, ['M001', 'M003']);
   assert.deepStrictEqual(loadQueueOrder(base), ['M001', 'M003'], 'prune removes invalid IDs');
   cleanup(base);
@@ -158,7 +122,7 @@ test('test block at line 121', () => {
 // Prune no-ops when all IDs are valid
 test('test block at line 129', () => {
   const base = createFixtureBase();
-  renderQueueOrder(base, ['M001', 'M002']);
+  saveQueueOrder(base, ['M001', 'M002']);
   pruneQueueOrder(base, ['M001', 'M002', 'M003']);
   assert.deepStrictEqual(loadQueueOrder(base), ['M001', 'M002'], 'prune is no-op when all valid');
   cleanup(base);

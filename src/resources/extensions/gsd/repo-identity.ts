@@ -468,29 +468,6 @@ function hasProjectState(externalPath: string): boolean {
 }
 
 /**
- * Move a state directory as a whole. The source is deleted only after every
- * entry reached the destination; a copy failure throws with the source
- * intact, so gsd.db is never separated from its -wal/-shm sidecars or lost.
- * Once the copy is complete the destination is the state directory, so a
- * failed source cleanup is logged, not thrown.
- */
-export function moveStateDirectory(from: string, to: string): void {
-  mkdirSync(dirname(to), { recursive: true });
-  try {
-    renameSync(from, to); // atomic when the destination is absent or empty
-    return;
-  } catch {
-    // Cross-device or non-empty destination: copy everything, then delete.
-  }
-  cpSync(from, to, { recursive: true, force: true });
-  try {
-    rmSync(from, { recursive: true, force: true });
-  } catch (err) {
-    logWarning("migration", `state moved to ${to}, but the old directory ${from} could not be removed: ${(err as Error).message}`);
-  }
-}
-
-/**
  * Resolve the external state directory, with recovery for relocated projects.
  *
  * For local-only repos where the computed identity produces an empty state dir,
@@ -546,7 +523,22 @@ function resolveExternalPathWithRecovery(projectPath: string): { path: string; i
       // Move the state from the old hash dir to the new one so future lookups work
       // without the marker.
       try {
-        moveStateDirectory(markerPath, computedPath);
+        mkdirSync(computedPath, { recursive: true });
+        const entries = readdirSync(markerPath);
+        for (const entry of entries) {
+          try {
+            const src = join(markerPath, entry);
+            const dst = join(computedPath, entry);
+            // Use rename for same-filesystem (fast) or fall back to copy.
+            try {
+              renameSync(src, dst);
+            } catch {
+              cpSync(src, dst, { recursive: true, force: true });
+            }
+          } catch { /* continue with remaining entries */ }
+        }
+        // Clean up old directory after successful migration.
+        try { rmSync(markerPath, { recursive: true, force: true }); } catch { /* non-fatal */ }
         writeGsdIdMarker(projectPath, computedId);
       } catch {
         // If migration fails, just point at the old directory.
@@ -699,7 +691,16 @@ function ensureGsdSymlinkCore(projectPath: string): { path: string; identity: st
       // and update the symlink (#2750).
       if (!hasProjectState(externalPath) && hasProjectState(target)) {
         try {
-          moveStateDirectory(target, externalPath);
+          mkdirSync(externalPath, { recursive: true });
+          const oldEntries = readdirSync(target);
+          for (const entry of oldEntries) {
+            try {
+              const src = join(target, entry);
+              const dst = join(externalPath, entry);
+              try { renameSync(src, dst); } catch { cpSync(src, dst, { recursive: true, force: true }); }
+            } catch { /* continue */ }
+          }
+          try { rmSync(target, { recursive: true, force: true }); } catch { /* non-fatal */ }
           return replaceWithSymlink();
         } catch {
           // Migration failed — preserve old symlink

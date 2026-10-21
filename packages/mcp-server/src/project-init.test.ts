@@ -1,13 +1,13 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { initProjectWorkflowState } from './workflow-tools.js';
 
 function makeTempProject(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'gsd-project-init-')));
+  return mkdtempSync(join(tmpdir(), 'gsd-project-init-'));
 }
 
 describe('initProjectWorkflowState', () => {

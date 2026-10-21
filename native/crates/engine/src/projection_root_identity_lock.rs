@@ -1971,31 +1971,6 @@ fn retry_windows_projection_operation<T>(
     unreachable!("bounded Windows projection operation loop always returns")
 }
 
-/// Structural rejections must name the node and the operation that refused it
-/// (#2648). "projection root contains an unsupported node" is raised by seven
-/// distinct Windows sites; raised bare, the offending node cannot be
-/// identified once the tree has changed. The leading phrase stays verbatim so
-/// existing matchers still recognise the family, and the reason trails the
-/// path so the diagnostic tail (the text after the last ": ", which is all the
-/// JS health latch classifies) never carries path text.
-#[cfg(any(windows, test))]
-fn unsupported_projection_node_message(path: &Path, operation: &str, reason: &str) -> String {
-    format!(
-        "projection root contains an unsupported node while {operation} at {}: {reason}",
-        path.display(),
-    )
-}
-
-/// Path-bearing counterpart for the reparse-point family: the same structural
-/// rejection, raised wherever a node is opened without following links.
-#[cfg(any(windows, test))]
-fn unsupported_projection_reparse_point_message(path: &Path) -> String {
-    format!(
-        "projection root contains an unsupported reparse point at {}: symbolic links and junctions are not followed",
-        path.display(),
-    )
-}
-
 /// Clears the thread-local errno before a readdir loop so a null return can
 /// distinguish end-of-directory from an I/O error. Without this, an I/O error
 /// would silently truncate listings that feed fail-closed occupant checks.
@@ -2040,7 +2015,7 @@ fn reject_windows_reparse(path: &Path) -> Result<()> {
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Error::new(
             Status::GenericFailure,
-            unsupported_projection_reparse_point_message(path),
+            "projection root contains an unsupported reparse point".to_owned(),
         ));
     }
     Ok(())
@@ -2064,7 +2039,7 @@ fn open_windows_directory(path: &Path) -> Result<File> {
     if information.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Error::new(
             Status::GenericFailure,
-            unsupported_projection_reparse_point_message(path),
+            "projection root contains an unsupported reparse point".to_owned(),
         ));
     }
     Ok(file)
@@ -2083,7 +2058,9 @@ fn open_windows_root_directory(path: &Path) -> Result<File> {
         .open(path)
         .map_err(|error| projection_path_error(path, error))?;
     if windows_file_information(&file)?.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(projection_error(unsupported_projection_reparse_point_message(path)));
+        return Err(projection_error(
+            "projection root contains an unsupported reparse point",
+        ));
     }
     Ok(file)
 }
@@ -2119,7 +2096,7 @@ fn open_windows_node(path: &Path, write: bool) -> Result<File> {
     if information.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Error::new(
             Status::GenericFailure,
-            unsupported_projection_reparse_point_message(path),
+            "projection root contains an unsupported reparse point".to_owned(),
         ));
     }
     Ok(file)
@@ -2131,11 +2108,7 @@ fn open_windows_file(path: &Path, write: bool) -> Result<File> {
     if windows_file_information(&file)?.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
         return Err(Error::new(
             Status::GenericFailure,
-            unsupported_projection_node_message(
-                path,
-                "opening projection file",
-                "expected a regular file, found a directory",
-            ),
+            "projection root contains an unsupported node".to_owned(),
         ));
     }
     Ok(file)
@@ -2172,11 +2145,7 @@ fn open_windows_delete_node(path: &Path) -> Result<File> {
     if information.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Error::new(
             Status::GenericFailure,
-            unsupported_projection_node_message(
-                path,
-                "opening projection child for removal",
-                "node is a reparse point (symbolic link or junction)",
-            ),
+            "projection root contains an unsupported node".to_owned(),
         ));
     }
     Ok(file)
@@ -2194,11 +2163,7 @@ fn open_windows_exclusive_delete_node(path: &Path) -> Result<File> {
     if information.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Error::new(
             Status::GenericFailure,
-            unsupported_projection_node_message(
-                path,
-                "exclusively opening projection child for removal",
-                "node is a reparse point (symbolic link or junction)",
-            ),
+            "projection root contains an unsupported node".to_owned(),
         ));
     }
     Ok(file)
@@ -2213,11 +2178,9 @@ fn open_windows_content_guard(path: &Path) -> Result<File> {
         .open(path)
         .map_err(|error| projection_path_error(path, error))?;
     if windows_file_information(&file)?.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(projection_error(unsupported_projection_node_message(
-            path,
-            "guarding projection content",
-            "node is a reparse point (symbolic link or junction)",
-        )));
+        return Err(projection_error(
+            "projection root contains an unsupported node",
+        ));
     }
     Ok(file)
 }
@@ -2461,22 +2424,9 @@ fn open_windows_exclusive_delete_node_if_exists(path: &Path) -> Result<Option<Fi
 fn delete_windows_handle(file: File, directory: bool) -> Result<()> {
     let information = windows_file_information(&file)?;
     if (information.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0) != directory {
-        // The handle is all this site has; a failed path query must not mask
-        // the structural rejection it is trying to describe.
-        let path = windows_handle_path(&file)
-            .map(|units| String::from_utf16_lossy(&units))
-            .unwrap_or_else(|_| "an unresolvable handle path".to_owned());
         return Err(Error::new(
             Status::GenericFailure,
-            unsupported_projection_node_message(
-                Path::new(&path),
-                "deleting projection child",
-                if directory {
-                    "expected a directory, found a file"
-                } else {
-                    "expected a regular file, found a directory"
-                },
-            ),
+            "projection root contains an unsupported node".to_owned(),
         ));
     }
     let path_units = windows_handle_path(&file)?;
@@ -2510,11 +2460,7 @@ fn remove_windows_tree_open(path: &Path, directory: File) -> Result<()> {
     if windows_file_information(&directory)?.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
         return Err(Error::new(
             Status::GenericFailure,
-            unsupported_projection_node_message(
-                path,
-                "removing projection tree",
-                "expected a directory, found a file",
-            ),
+            "projection root contains an unsupported node".to_owned(),
         ));
     }
     let parent_volume = windows_file_identity(&directory)?.0;
@@ -2809,11 +2755,9 @@ fn hash_windows_projection_tree_open(
             hash_windows_open_file(&child_handle, hash)?;
             hash.update(b"\0");
         } else {
-            return Err(projection_error(unsupported_projection_node_message(
-                &child,
-                "hashing projection tree",
-                "node is a device, not a regular file or directory",
-            )));
+            return Err(projection_error(
+                "projection root contains an unsupported node",
+            ));
         }
     }
     Ok(())
@@ -3022,23 +2966,6 @@ fn decode_windows_tree_deletion_manifest(
     Ok(entries)
 }
 
-/// Renames a deletion manifest inside the claimed tree. The caller holds that
-/// tree's root with `share_mode(0)`, and a rename target that names a
-/// directory (a `RootDirectory` handle or a full path) makes the I/O manager
-/// open that directory for FILE_ADD_FILE. The exclusive hold refuses the open,
-/// so the rename fails with ERROR_SHARING_VIOLATION (os error 32) on every
-/// attempt. A bare name with a NULL `RootDirectory` is the NT simple rename:
-/// the file system renames inside the directory that already holds the source
-/// and opens no directory. `NtSetInformationFile` passes the bare name through
-/// unchanged; only the Win32 wrapper resolves it against the current directory.
-#[cfg(windows)]
-fn rename_windows_tree_deletion_manifest(file: &File, target: &Path) -> Result<()> {
-    let name = target
-        .file_name()
-        .ok_or_else(|| projection_error("projection deletion manifest name is invalid"))?;
-    rename_windows_handle(file, Path::new(name), None)
-}
-
 #[cfg(windows)]
 fn load_or_publish_windows_tree_deletion_manifest(
     root: &Path,
@@ -3068,7 +2995,7 @@ fn load_or_publish_windows_tree_deletion_manifest(
         let bytes = fs::read(&prepared).map_err(|error| projection_path_error(&prepared, error))?;
         let entries = decode_windows_tree_deletion_manifest(&bytes, root_identity, content_digest)?;
         let prepared_handle = open_windows_delete_node(&prepared)?;
-        rename_windows_tree_deletion_manifest(&prepared_handle, &committed)?;
+        rename_windows_handle(&prepared_handle, &committed, Some(root_handle))?;
         root_handle.sync_all().map_err(projection_error)?;
         return Ok(entries);
     }
@@ -3118,7 +3045,7 @@ fn load_or_publish_windows_tree_deletion_manifest(
     }
     file.write_all(&bytes).map_err(projection_error)?;
     file.sync_all().map_err(projection_error)?;
-    rename_windows_tree_deletion_manifest(&file, &prepared)?;
+    rename_windows_handle(&file, &prepared, Some(root_handle))?;
     root_handle.sync_all().map_err(projection_error)?;
     if MUTATION_BOUNDARY_FAULT
         .compare_exchange(9, 0, Ordering::SeqCst, Ordering::SeqCst)
@@ -3128,7 +3055,7 @@ fn load_or_publish_windows_tree_deletion_manifest(
             "simulated prepared deletion manifest crash",
         ));
     }
-    rename_windows_tree_deletion_manifest(&file, &committed)?;
+    rename_windows_handle(&file, &committed, Some(root_handle))?;
     root_handle.sync_all().map_err(projection_error)?;
     Ok(entries)
 }
@@ -6232,10 +6159,6 @@ fn remove_claimed_tree_at(
         }
         let mut entries = Vec::new();
         collect_tree_deletion_entries(claimed, "", &mut entries)?;
-        // The manifest is read back in its canonical order (deepest first).
-        // Walk order differs from that for a nested tree, so sort before the
-        // manifest is written and compared with what was committed.
-        sort_tree_deletion_entries(&mut entries);
         if MUTATION_BOUNDARY_FAULT
             .compare_exchange(14, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
@@ -6528,7 +6451,6 @@ fn rename_relative_between_exclusive(
 mod sharing_violation_tests {
     use super::{
         is_windows_sharing_violation, projection_path_error, retry_windows_projection_operation,
-        unsupported_projection_node_message, unsupported_projection_reparse_point_message,
     };
     use std::path::Path;
 
@@ -6630,30 +6552,6 @@ mod sharing_violation_tests {
         assert_eq!(attempts, 1);
         assert!(waits.is_empty());
         assert!(error.to_string().contains("os error 5"));
-    }
-
-    #[test]
-    fn structural_rejections_name_the_node_and_keep_the_path_out_of_the_tail() {
-        // A directory literally named like a transient marker must stay in the
-        // path segment: the JS health latch classifies only the text after the
-        // last ": ", and a structural rejection must never feed it (#2648).
-        let path = Path::new(r"C:\repo\EBUSY\.gsd\migration\unbound-projection-evidence.json");
-        let node = unsupported_projection_node_message(
-            path,
-            "opening projection file",
-            "expected a regular file, found a directory",
-        );
-        let reparse = unsupported_projection_reparse_point_message(path);
-
-        assert!(node.starts_with("projection root contains an unsupported node while "));
-        assert!(node.contains("opening projection file"));
-        assert!(reparse.starts_with("projection root contains an unsupported reparse point at "));
-        for message in [&node, &reparse] {
-            assert!(message.contains(path.to_string_lossy().as_ref()));
-            let tail = message.rsplit(": ").next().unwrap();
-            assert!(!tail.contains("EBUSY"));
-            assert!(!tail.contains('\\'));
-        }
     }
 
     #[cfg(windows)]

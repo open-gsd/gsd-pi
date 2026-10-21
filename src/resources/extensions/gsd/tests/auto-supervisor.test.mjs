@@ -1,11 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeUnitRuntimeRecord, readUnitRuntimeRecord } from '../unit-runtime.ts';
 import { resolveAutoSupervisorConfig } from '../preferences.ts';
-import { closeDatabase, openDatabase } from '../gsd-db.ts';
 
 test('resolveAutoSupervisorConfig provides safe timeout defaults', () => {
   // Isolate from any developer ~/.gsd/PREFERENCES.md that overrides these
@@ -35,11 +34,9 @@ test('resolveAutoSupervisorConfig provides safe timeout defaults', () => {
   }
 });
 
-test('writeUnitRuntimeRecord persists progress and recovery metadata defaults', (t) => {
+test('writeUnitRuntimeRecord persists progress and recovery metadata defaults', () => {
   const base = mkdtempSync(join(tmpdir(), 'gsd-auto-supervisor-'));
   const startedAt = 1234567890;
-  openDatabase(':memory:');
-  t.after(() => closeDatabase());
 
   writeUnitRuntimeRecord(base, 'plan-milestone', 'M010', startedAt, {
     phase: 'dispatched',
@@ -57,11 +54,9 @@ test('writeUnitRuntimeRecord persists progress and recovery metadata defaults', 
   assert.equal(runtime.recoveryAttempts, 0);
 });
 
-test('writeUnitRuntimeRecord keeps explicit recovery attempt fields', (t) => {
+test('writeUnitRuntimeRecord keeps explicit recovery attempt fields', () => {
   const base = mkdtempSync(join(tmpdir(), 'gsd-auto-supervisor-'));
   const startedAt = 2234567890;
-  openDatabase(':memory:');
-  t.after(() => closeDatabase());
 
   writeUnitRuntimeRecord(base, 'research-milestone', 'M011', startedAt, {
     phase: 'timeout',
@@ -72,7 +67,7 @@ test('writeUnitRuntimeRecord keeps explicit recovery attempt fields', (t) => {
     lastProgressKind: 'recovery-retry',
   });
 
-  const runtime = readUnitRuntimeRecord(base, 'research-milestone', 'M011');
+  const runtime = JSON.parse(readFileSync(join(base, '.gsd/runtime/units/research-milestone-M011.json'), 'utf8'));
   assert.equal(runtime.recoveryAttempts, 2);
   assert.equal(runtime.lastRecoveryReason, 'idle');
   assert.equal(runtime.lastProgressKind, 'recovery-retry');

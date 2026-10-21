@@ -64,7 +64,6 @@ function lookupLatestLedgerError(unitType: string, unitId: string): string | und
 ```
 
 Repo conventions:
-
 - Use the existing `buildDispatchKey`/`normalizeDispatchKey` helpers.
 - Keep rehydration lazy and degradable (catch and log, return 0 on failure).
 - Tests use `node:test` and `node:assert/strict`.
@@ -80,12 +79,10 @@ Repo conventions:
 ## Scope
 
 **In scope**:
-
 - `src/resources/extensions/gsd/auto/dispatch-history.ts` — attach ledger errors during rehydration.
 - `src/resources/extensions/gsd/tests/dispatch-history.test.ts` — add a regression test proving cross-session repeat-error detection.
 
 **Out of scope**:
-
 - Changing `detect-stuck.ts` rules.
 - Changing `recordDispatch()` behavior.
 - Any other caller of `createDispatchHistory`.
@@ -103,13 +100,11 @@ Repo conventions:
 In `src/resources/extensions/gsd/auto/dispatch-history.ts`, change the `rehydrate()` body so each persisted key is normalized and then parsed into `unitType`/`unitId`. Use the existing `parseDispatchKey` helper (re-exported from `dispatch-key.ts`) or split the normalized key on `:`.
 
 Before:
-
 ```ts
 window = persisted.map(({ key }) => ({ key: normalizeDispatchKey(key) }));
 ```
 
 After (shape):
-
 ```ts
 window = persisted.map(({ key }) => {
   const normalized = normalizeDispatchKey(key);
@@ -181,7 +176,6 @@ Run the compiled unit tests to ensure no regression in stuck-detection or dispat
 ## STOP conditions
 
 Stop and report back if:
-
 - `parseDispatchKey` does not exist or returns an unexpected shape.
 - `getLatestForUnit` is unavailable or its signature differs from what `lookupLatestLedgerError` expects.
 - The new test cannot be written without touching `detect-stuck.ts` (it should not need to).

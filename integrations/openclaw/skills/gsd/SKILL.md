@@ -21,8 +21,6 @@ stops and required user input.
 
 A returned session ID or completed agent turn is not proof the objective is
 finished. Check GSD's results and the requested acceptance criteria.
-Native project registration, optional Workboard cards, and heartbeat status data
-are handled by plugin code and require no agent bookkeeping. Workboard preserves
-observed progress across restarts; without it the heartbeat observations are
-memory-only. These records do not supervise or restart the external GSD process.
-Archiving a card stops its synchronization, not GSD execution.
+Registration, TaskFlow, Workboard, and heartbeat status data are handled by
+plugin code and require no agent bookkeeping. Those records describe workflow
+progress; they do not supervise or restart the external GSD process.

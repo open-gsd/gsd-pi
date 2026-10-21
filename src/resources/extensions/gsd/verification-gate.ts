@@ -14,16 +14,13 @@ import {
   readSync,
   readdirSync,
   rmSync,
-  writeFileSync,
   type Dirent,
 } from "node:fs";
-import { join, basename, delimiter, dirname } from "node:path";
+import { join, basename, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import type { AuditWarning, RuntimeError, VerificationCheck, VerificationResult } from "./types.js";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
-import { redactSecrets } from "./redact-secrets.js";
 import { rewriteCommandWithRtk } from "../shared/rtk.js";
-import { getPathValue, prependPathEntry, resolvePathCandidates } from "../shared/rtk-shared.js";
 import { normalizePythonCommand, resolveVenvInterpreter, venvBinDirectory, formatPythonInvocation } from "./python-resolver.js";
 import {
   isWorkflowSurfaceAliasTool,
@@ -70,10 +67,7 @@ function readBoundedCommandOutput(path: string): string {
 
 // ─── Command Discovery ──────────────────────────────────────────────────────
 
-/**
- * Evidence for the current Task. `gsd_task_complete` stages the agent's claim;
- * the gate takes only the host-recorded form (see hostRecordedTaskEvidence).
- */
+/** Structured evidence staged by `gsd_task_complete` for the current Task. */
 export interface TaskVerificationEvidence {
   command: string;
   exitCode: number;
@@ -84,7 +78,7 @@ export interface TaskVerificationEvidence {
 export interface DiscoverCommandsOptions {
   preferenceCommands?: string[];
   taskPlanVerify?: string;
-  /** Host-recorded task-specific evidence (#1591); never the agent's bare claim. */
+  /** Structured task-specific evidence supplied at completion (#1591). */
   taskEvidence?: TaskVerificationEvidence[];
   cwd: string;
 }
@@ -110,109 +104,25 @@ function verdictQualifies(verdict: string): boolean {
   return PASSING_VERDICT_RE.test(stripped.slice(0, cut).trim().toLowerCase());
 }
 
-function recordQualifies(record: TaskVerificationEvidence): boolean {
-  const verdict = (record.verdict ?? "").trim();
-  if (verdict) return verdictQualifies(verdict);
-  return record.exitCode === 0;
-}
-
 /**
  * Task-specific evidence qualifies when at least one record exists and every
- * distinct command's latest staged row reports a passing outcome (#1591,
- * #2338). The executor's staged verdict is authoritative: negated verify
- * idioms (`! grep -q`, `grep -v`, `git diff --exit-code`) succeed on a
- * non-zero exit, so a "pass" verdict qualifies even with a non-zero
- * exitCode. `exitCode === 0` is the fallback for records staged without a
- * verdict (#2213). Verdict matching is lenient (#2014): leading markers
- * (`✅ pass`) and `pass: <details>` descriptions are accepted; unknown
- * tokens fail closed.
- *
- * Records are staged chronologically, so a command that was re-run is judged
- * by its latest row: an earlier FAIL for the same command may be followed by a
- * passing final row, while a failing latest row for any distinct command still
- * disqualifies the set.
+ * record reports a passing outcome (#1591). The executor's staged verdict is
+ * authoritative: negated verify idioms (`! grep -q`, `grep -v`,
+ * `git diff --exit-code`) succeed on a non-zero exit, so a "pass" verdict
+ * qualifies even with a non-zero exitCode. `exitCode === 0` is the fallback
+ * for records staged without a verdict (#2213). Verdict matching is lenient
+ * (#2014): leading markers (`✅ pass`) and `pass: <details>` descriptions are
+ * accepted; unknown tokens fail closed.
  */
 export function hasQualifyingTaskEvidence(
   evidence: TaskVerificationEvidence[] | undefined,
 ): boolean {
   if (!evidence || evidence.length === 0) return false;
-  const latestByCommand = new Map<string, TaskVerificationEvidence>();
-  for (const [index, record] of evidence.entries()) {
-    const normalizedCommand = record.command?.trim()
-      ? normalizeCommandIdentity(record.command)
-      : `__no_command__:${index}`;
-    latestByCommand.set(normalizedCommand, record);
-  }
-  return [...latestByCommand.values()].every(recordQualifies);
-}
-
-/** One gsd_exec run the host recorded in the Attempt under verification, oldest first. */
-export interface HostExecRun {
-  id: string;
-  command: string;
-  /** Exit 0 and no signal, timeout or abort. */
-  succeeded: boolean;
-  durationMs: number;
-}
-
-/**
- * The agent's claimed evidence, replaced by the host's own record of it. The
- * claim counts only when it qualifies and the host ran every claimed command
- * through gsd_exec in this Attempt with success. A claimed command names its
- * run by the exact script, and the latest run of that script counts. One
- * claimed command without such a run voids the whole set: the result is empty.
- */
-export function hostRecordedTaskEvidence(
-  claimed: TaskVerificationEvidence[],
-  attemptRuns: readonly HostExecRun[],
-): TaskVerificationEvidence[] {
-  if (!hasQualifyingTaskEvidence(claimed)) return [];
-  const latestRun = new Map<string, HostExecRun>();
-  for (const run of attemptRuns) latestRun.set(normalizeCommandIdentity(run.command), run);
-  const recorded = new Map<string, TaskVerificationEvidence>();
-  for (const record of claimed) {
-    // The host stores a command with secrets redacted, so compare in that form.
-    const run = latestRun.get(normalizeCommandIdentity(redactSecrets(record.command)));
-    if (!run?.succeeded) return [];
-    recorded.set(run.id, { command: run.command, exitCode: 0, verdict: "pass", durationMs: run.durationMs });
-  }
-  return [...recorded.values()];
-}
-
-/**
- * Identity key for "the same command re-run": collapse whitespace runs
- * between tokens, but leave quoted text untouched so `grep -q 'a  b'` and
- * `grep -q 'a b'` stay distinct checks rather than one re-run.
- */
-export function normalizeCommandIdentity(command: string): string {
-  let out = "";
-  let inSingle = false;
-  let inDouble = false;
-  let escaped = false;
-  let pendingSpace = false;
-
-  for (const ch of command) {
-    if (!inSingle && !inDouble && !escaped && /\s/.test(ch)) {
-      pendingSpace = out.length > 0;
-      continue;
-    }
-    if (pendingSpace) {
-      out += " ";
-      pendingSpace = false;
-    }
-    out += ch;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\" && !inSingle) {
-      escaped = true;
-      continue;
-    }
-    if (ch === "'" && !inDouble) inSingle = !inSingle;
-    else if (ch === "\"" && !inSingle) inDouble = !inDouble;
-  }
-  return out;
+  return evidence.every((record) => {
+    const verdict = (record.verdict ?? "").trim();
+    if (verdict) return verdictQualifies(verdict);
+    return record.exitCode === 0;
+  });
 }
 
 export interface DiscoveredCommands {
@@ -481,18 +391,6 @@ export function formatFailureSignature(result: VerificationResult): string {
 const UNQUOTED_SHELL_CONTROL_CHARS = new Set([";", "<", ">"]);
 const EXIT_CODE_ECHO_SUFFIX = /^;\s*echo\s+(?:"exit:\$\?"|'exit:\$\?'|exit:\$\?)\s*$/;
 
-/**
- * CJK / fullwidth sentence punctuation (#2428). Unquoted, these mark prose
- * sentence structure rather than shell syntax; test on quote-stripped text so
- * quoted CJK data (a `grep '驗證腳本' src` pattern) does not trip it.
- */
-const CJK_PROSE_PUNCTUATION_RE = /[、。，：；！？」』）　…—]/u;
-
-/** True when quote-stripped command text carries CJK sentence punctuation. */
-function hasCjkProsePunctuation(cmd: string): boolean {
-  return CJK_PROSE_PUNCTUATION_RE.test(cmd);
-}
-
 function isAllowedExitCodeEchoSuffix(suffix: string): boolean {
   return EXIT_CODE_ECHO_SUFFIX.test(suffix);
 }
@@ -728,7 +626,7 @@ const KNOWN_COMMAND_PREFIXES = new Set([
   "git", "gh",
   "eslint", "prettier", "vitest", "jest", "mocha", "pytest", "phpunit",
   "curl", "wget",
-  "grep", "rg", "find", "diff", "wc", "sort", "head", "tail",
+  "grep", "find", "diff", "wc", "sort", "head", "tail",
 ]);
 
 /**
@@ -811,117 +709,6 @@ function readsAsProseAfterCommandWord(tokens: string[], proseTokens: string[]): 
     .some(t => PROSE_MARKER_WORDS.has(t.toLowerCase().replace(/[.,;:!?]+$/, "")));
 }
 
-function hasShellLikeToken(token: string): boolean {
-  return token.startsWith("-")
-    || token.includes("/")
-    || token.includes("\\")
-    || token.includes(".")
-    || token.includes("*")
-    || token.includes("=")
-    || token.includes(":")
-    || token.includes("@")
-    || token.includes("%");
-}
-
-/**
- * Long natural-language runs after a known command word are prose in any
- * language (#1994). Require four or more word-only tail tokens with no shell
- * metacharacters so short invocations like `go build with tags` stay commands.
- */
-function looksLikeNaturalLanguageTail(tokens: string[]): boolean {
-  const tail = tokens.slice(1);
-  if (tail.length < 4) return false;
-  if (tail.some(hasShellLikeToken)) return false;
-  return tail.every((token) => /^[\p{L}\p{N}_'-]+$/u.test(token.replace(/[.,;:!?]+$/, "")));
-}
-
-function knownPrefixInvocationIsCommand(
-  effectiveTokens: string[],
-  proseTokens: string[],
-): boolean {
-  if (readsAsProseAfterCommandWord(effectiveTokens, proseTokens)) return false;
-  if (looksLikeNaturalLanguageTail(effectiveTokens)) return false;
-  return true;
-}
-
-/** Executable script extensions for a repo-relative path's final segment. */
-const EXECUTABLE_PATH_SUFFIX_RE = /\.(?:sh|bash|zsh)$/;
-
-/**
- * Repo-relative executable path such as `bin/rails`, `scripts/verify.sh` or
- * `node_modules/.bin/vitest`. A bare relative path is as much an invocation as
- * `./bin/rails`; without this, a binstub with two or more operands and no flag
- * (`bin/rails test a_test.rb b_test.rb`) fell through to the prose rejection
- * (#2664). Only extensionless program names and shell scripts count as
- * runnable: a path whose final segment carries any other extension (`.md`,
- * `.ts`, `.yml`, ...) names a file and keeps reading as prose.
- */
-function isRelativeExecutablePath(token: string): boolean {
-  if (!/^[\w.-]+(?:\/[\w.@-]+)+$/.test(token)) return false;
-  const lastSegment = token.slice(token.lastIndexOf("/") + 1);
-  return !lastSegment.includes(".") || EXECUTABLE_PATH_SUFFIX_RE.test(lastSegment);
-}
-
-/**
- * Is this first token positively anchored as something executable: a known
- * command prefix, an absolute/`./`/`../` path, or a repo-relative executable
- * path (#2664)?
- */
-function isAnchoredCommandToken(token: string): boolean {
-  return KNOWN_COMMAND_PREFIXES.has(token)
-    || token.startsWith("/")
-    || token.startsWith("./")
-    || token.startsWith("../")
-    || isRelativeExecutablePath(token);
-}
-
-/**
- * Index just past the shell word starting at `start`, where the word ends at
- * the first UNQUOTED whitespace. Quoted sections may contain whitespace and
- * adjacent quoted/unquoted fragments form one word (`"a"b`). Returns null
- * when a quote never closes: the word is ambiguous shell input.
- */
-function shellWordEnd(command: string, start: number): number | null {
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = start; i < command.length; i += 1) {
-    const ch = command[i];
-    if (ch === "\\" && !inSingle) {
-      i += 1;
-      continue;
-    }
-    if (ch === "'" && !inDouble) {
-      inSingle = !inSingle;
-    } else if (ch === "\"" && !inSingle) {
-      inDouble = !inDouble;
-    } else if (!inSingle && !inDouble && /\s/.test(ch)) {
-      return i;
-    }
-  }
-  return inSingle || inDouble ? null : command.length;
-}
-
-/**
- * Peel leading `NAME=value` environment assignments (shell-word aware, so
- * quoted values may contain whitespace) from a command string. Used by
- * isLikelyCommand to judge the command an environment prefix anchors (#2664).
- * An assignment whose value never terminates is left in place: the caller
- * falls back to the legacy prose heuristics.
- */
-function stripLeadingEnvAssignments(command: string): { stripped: boolean; remainder: string } {
-  let current = command.trim();
-  let stripped = false;
-  for (;;) {
-    const nameMatch = /^[A-Z_][A-Z0-9_]*=/.exec(current);
-    if (!nameMatch) break;
-    const wordEnd = shellWordEnd(current, nameMatch[0].length);
-    if (wordEnd === null) break;
-    current = current.slice(wordEnd).trim();
-    stripped = true;
-  }
-  return { stripped, remainder: current };
-}
-
 /**
  * Heuristic check: does this string look like an executable shell command
  * rather than a prose description?
@@ -931,13 +718,10 @@ function stripLeadingEnvAssignments(command: string): { stripped: boolean; remai
  *
  * Heuristics (any true → command-like):
  *   1. First token is a known command prefix
- *   2. First token is path-like (`/`, `./`, `../`, or a repo-relative
- *      executable path such as `bin/rails`, #2664)
+ *   2. First token starts with `.` or `/` (path-like)
  *   3. Any token starts with `-` (flag-like)
  *   4. First token contains no uppercase letters (commands are lowercase)
  *      AND first token does not end with a comma or colon (prose punctuation)
- *   5. Leading `NAME=value` environment assignments are unwrapped and the
- *      anchored command they prefix is judged instead (#2664)
  *
  * Heuristics (any true → prose-like):
  *   1. First token starts with an uppercase letter and the string has 4+ words
@@ -962,45 +746,16 @@ export function isLikelyCommand(cmd: string): boolean {
   const strippedTokens = stripped ? stripped.split(/\s+/) : [];
   const proseTokens = firstToken === "!" ? strippedTokens.slice(1) : strippedTokens;
 
-  // CJK sentence punctuation outside quotes is prose structure, not shell
-  // syntax (#2428): tokenization on `\s+` and the ASCII-only control-char
-  // scan cannot see it, so a CJK planning sentence that begins with a known
-  // tool prefix used to slip past every heuristic (flags in the tail suppress
-  // the natural-language check) and execute verbatim. Quoted content is
-  // already stripped above, so real commands that search CJK text
-  // (e.g. `grep -r '驗證腳本' src`) stay valid.
-  if (hasCjkProsePunctuation(stripped)) return false;
-
-  // Numbered checklist / narrative prose (#1994).
-  if (/^\d+[.)]\s/.test(trimmed)) return false;
-
-  // Leading `NAME=value` environment assignments are shell syntax, not prose
-  // (#2664): when they prefix an anchored command (known prefix or executable
-  // path) that itself reads as a command, accept. Shell-word aware, so
-  // multi-word quoted values like `RUBYOPT="-W:no-deprecated"` survive and an
-  // unterminated quoted value is never treated as a command prefix. Anything
-  // else falls through to the original heuristics, so env-prefixed acceptance
-  // is a strict superset of the legacy behavior (`CI=1 rspec --format
-  // progress` stays a command via flags; `STATUS=ok means done` stays prose).
-  const envStrip = stripLeadingEnvAssignments(effectiveTokens.join(" "));
-  if (envStrip.stripped) {
-    if (!envStrip.remainder) return false;
-    const commandToken = envStrip.remainder.split(/\s+/)[0] ?? "";
-    if (isAnchoredCommandToken(commandToken) && isLikelyCommand(envStrip.remainder)) {
-      return true;
-    }
-  }
-
-  // Known command prefix → command, unless the rest reads as prose.
+  // Known command prefix → command, unless the rest reads as English prose
   if (KNOWN_COMMAND_PREFIXES.has(effectiveFirstToken)) {
-    return knownPrefixInvocationIsCommand(effectiveTokens, proseTokens);
+    return !readsAsProseAfterCommandWord(effectiveTokens, proseTokens);
   }
 
-  // Path-like first token → command, unless the rest reads as prose.
+  // Path-like first token → command, unless the rest reads as English prose.
   // "./out/report.txt exists and contains the summary" is a description of a
   // file, not an invocation of it.
-  if (isAnchoredCommandToken(effectiveFirstToken)) {
-    return knownPrefixInvocationIsCommand(effectiveTokens, proseTokens);
+  if (effectiveFirstToken.startsWith("/") || effectiveFirstToken.startsWith("./") || effectiveFirstToken.startsWith("../")) {
+    return !readsAsProseAfterCommandWord(effectiveTokens, proseTokens);
   }
 
   // Has flag-like tokens → command
@@ -1018,17 +773,12 @@ export function isLikelyCommand(cmd: string): boolean {
   // Non-ASCII prose with multiple words should not be executed as a command.
   if (!/[A-Za-z0-9]/.test(effectiveFirstToken) && effectiveTokens.length >= 4) return false;
 
-  // Short custom script names remain commands; everything else needs positive
-  // command evidence instead of defaulting to executable (#1994).
-  if (effectiveTokens.length <= 2) return true;
-  if (effectiveTokens.length === 3) {
-    const tailHasProseMarker = proseTokens
-      .slice(1)
-      .some((token) => PROSE_MARKER_WORDS.has(token.toLowerCase().replace(/[.,;:!?]+$/, "")));
-    if (!tailHasProseMarker) return true;
-  }
-  if (readsAsProseAfterCommandWord(effectiveTokens, proseTokens)) return false;
-  return false;
+  // Everything above only rejects prose that announces itself with a capital
+  // letter or comma. Lowercase prose fell through to "command" and got executed
+  // — `greet/hello.txt exists and contains "hello"` ran the .txt file as a
+  // program and failed with exit 126 "Permission denied", failing the gate for
+  // a task that had in fact succeeded. English function words are the tell.
+  return !readsAsProseAfterCommandWord(effectiveTokens, proseTokens);
 }
 
 /**
@@ -1074,21 +824,6 @@ export function assertVerifyIsShellCheckable(verify: string): void {
       "use a shell-checkable command, or describe the tool-verified outcome as prose",
     );
   }
-  // CJK prose sentence in the verify field would otherwise execute verbatim
-  // and record its exit-0 no-op as a passing check (#2428). Flag it at
-  // plan time; quoted CJK data is stripped before the test. Splitting uses
-  // the quote-aware splitter so a multiline quoted operand is not misread as
-  // unterminated fragments (#2428 review).
-  const proseLine = splitUnquotedLines(verify)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .find((line) => hasCjkProsePunctuation(stripQuotedSegments(line).trim())) ?? null;
-  if (proseLine) {
-    throw new Error(
-      `verify must be a shell command, not prose: "${proseLine}" — ` +
-      "write the check as a plain shell command; this line reads as narrative prose (CJK/fullwidth sentence punctuation)",
-    );
-  }
 }
 
 /**
@@ -1124,7 +859,7 @@ export interface VerificationTarget {
   preferenceCommands?: string[];
 }
 
-export function verificationChildEnvironment(cwd: string): NodeJS.ProcessEnv {
+function verificationChildEnvironment(cwd: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of [
     "GSD_PROJECT_ROOT",
@@ -1137,175 +872,10 @@ export function verificationChildEnvironment(cwd: string): NodeJS.ProcessEnv {
   }
   const venv = resolveVenvInterpreter(cwd);
   if (venv) {
-    prependPathEntry(env, venvBinDirectory(venv));
-  }
-  if (process.platform === "win32") {
-    const posixTools = resolveGitPosixToolsDirectory(env);
-    if (posixTools) appendPathEntry(env, posixTools);
+    const bin = venvBinDirectory(venv);
+    env.PATH = `${bin}${delimiter}${env.PATH ?? ""}`;
   }
   return env;
-}
-
-/**
- * Git for Windows ships grep/sed/awk/head/wc in `<Git>\usr\bin` but keeps that
- * directory off the system PATH, so planner-written POSIX Verify fields fail
- * under `cmd` even on machines with Git installed (#2087).
- */
-export function resolveGitPosixToolsDirectory(env: NodeJS.ProcessEnv): string | null {
-  for (const root of gitForWindowsInstallRoots(env)) {
-    const candidate = join(root, "usr", "bin");
-    if (existsSync(join(candidate, "grep.exe"))) return candidate;
-  }
-  return null;
-}
-
-/**
- * Git for Windows' own `bash.exe`, or null when Git is not installed. The
- * probe deliberately never consults `bash` on PATH: on Windows that name
- * usually resolves to `System32\bash.exe`, the WSL launcher, which runs
- * commands inside a Linux distribution rather than against the project.
- */
-export function resolveGitBashExecutable(env: NodeJS.ProcessEnv): string | null {
-  for (const root of gitForWindowsInstallRoots(env)) {
-    for (const candidate of [join(root, "bin", "bash.exe"), join(root, "usr", "bin", "bash.exe")]) {
-      if (existsSync(candidate)) return candidate;
-    }
-  }
-  return null;
-}
-
-function gitForWindowsInstallRoots(env: NodeJS.ProcessEnv): string[] {
-  const roots = new Map<string, string>();
-  const addRoot = (root: string | undefined): void => {
-    if (!root) return;
-    const trimmed = root.replace(/[\\/]+$/, "");
-    if (!trimmed) return;
-    roots.set(trimmed.toLowerCase(), roots.get(trimmed.toLowerCase()) ?? trimmed);
-  };
-  for (const entry of resolvePathCandidates(getPathValue(env))) {
-    if (/^(cmd|bin)$/i.test(basename(entry)) && existsSync(join(entry, "git.exe"))) {
-      addRoot(dirname(entry));
-    }
-  }
-  for (const installRoot of [env.ProgramW6432, env.ProgramFiles, env["ProgramFiles(x86)"]]) {
-    addRoot(installRoot ? join(installRoot, "Git") : undefined);
-  }
-  addRoot(env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Programs", "Git") : undefined);
-  return [...roots.values()];
-}
-
-export type VerificationShellKind = "posix" | "git-bash" | "cmd";
-
-export interface VerificationShell {
-  kind: VerificationShellKind;
-  bin: string;
-  argsFor(command: string): string[];
-}
-
-const POSIX_VERIFICATION_SHELL: VerificationShell = {
-  kind: "posix",
-  bin: "sh",
-  argsFor: (command) => [
-    "-c",
-    "if command -v bash >/dev/null 2>&1; then exec bash -o pipefail -c \"$1\" verification-gate; fi\nexec sh -c \"$1\" verification-gate",
-    "verification-gate",
-    command,
-  ],
-};
-
-const CMD_VERIFICATION_SHELL: VerificationShell = {
-  kind: "cmd",
-  bin: "cmd",
-  argsFor: (command) => ["/d", "/s", "/c", command],
-};
-
-/**
- * Pick the shell that runs Verify commands on this host.
- *
- * Planners write Verify fields in POSIX shell (`test -f`, `grep -q '...'`,
- * `&&` chains). Routing them through `cmd.exe` on Windows made the host gate
- * fail commands the executor had just run green in bash — single quotes,
- * `\^` regex escapes and `vendor/bin/*` shims all mean something else to cmd —
- * so every re-attempt failed identically and the unit never converged
- * (#635, #2338, #2399). Mirror the POSIX branch's bash preference: use Git
- * for Windows' bash when it is installed and keep `cmd` only as the fallback.
- */
-export function resolveVerificationShell(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
-): VerificationShell {
-  if (platform !== "win32") return POSIX_VERIFICATION_SHELL;
-  const bash = resolveGitBashExecutable(env);
-  if (bash) {
-    return {
-      kind: "git-bash",
-      bin: bash,
-      argsFor: (command) => ["-o", "pipefail", "-c", command, "verification-gate"],
-    };
-  }
-  return CMD_VERIFICATION_SHELL;
-}
-
-/**
- * Windows path shapes in unquoted text that are specific enough to prefer
- * `cmd.exe` on their own: a drive or `.\`/`..\` prefix. Bare backslash
- * fragments such as `tests\unit` are intentionally not enough by themselves:
- * POSIX-authored Verify commands can include those paths while still relying on
- * bash semantics (`&&`, single quotes, globs, shims).
- */
-const WINDOWS_PATH_RE = /(?:^|[\s=(])(?:[A-Za-z]:|\.{1,2})\\/;
-/** `%NAME%` expansion; two-plus characters so `date +%Y%m%d` is not mistaken for one. */
-const CMD_VARIABLE_RE = /%[A-Za-z_][A-Za-z0-9_]+%/;
-/**
- * cmd-only builtins in command position, matched on the unquoted stream so a
- * quoted `'foo|type'` pattern cannot select cmd. `set` counts only as
- * `set NAME=` or, once its quoted `"NAME=value"` has been stripped, as a bare
- * `set` followed by a cmd separator (`&`, `&&`, `|`, `||`) or the end;
- * `set -e` (POSIX) never matches. `type` is omitted: it is also a bash
- * builtin (`type -P node`).
- */
-const CMD_BUILTIN_RE = /(?:^|&&|\|\||[|&])\s*(?:set\s+(?:[A-Za-z_][A-Za-z0-9_]*=|(?=[&|]|$))|if\s+(?:not\s+)?exist\b|(?:dir|copy|del|erase|rd|md|move|ren|rename|call)\b)/i;
-const POSIX_AUTHORED_RE = /'[^']*'|(?:^|&&|\|\||[|&])\s*(?:test\s+-[A-Za-z]|\[\[?|\bgrep\b|\bfind\b|\bprintf\b|\bcat\b|\bcommand\s+-v\b|\bset\s+-e\b)/;
-
-/**
- * Verify text written for `cmd.exe` rather than a POSIX shell: Windows path
- * shapes (`.\node_modules\.bin\tsc.cmd`, `D:\proj\.venv\Scripts\python.exe`),
- * `%VAR%` expansion, or cmd-only builtins such as `set NAME=value` and
- * `if exist`. Quoted text is ignored: `grep -q '\^1.19.0'` and
- * `grep -q 'foo|dir'` are POSIX.
- */
-export function looksLikeCmdCommand(command: string): boolean {
-  const unquoted = stripQuotedSegments(command);
-  return WINDOWS_PATH_RE.test(unquoted)
-    || CMD_VARIABLE_RE.test(unquoted)
-    || CMD_BUILTIN_RE.test(unquoted);
-}
-
-export function looksLikePosixAuthoredCommand(command: string): boolean {
-  return POSIX_AUTHORED_RE.test(command);
-}
-
-/**
- * Per-command shell choice. Existing Windows-authored Verify fields keep
- * running through cmd, where their backslash paths and builtins already work;
- * everything else on a Git-for-Windows host runs through bash. POSIX hosts and
- * hosts without Git never change shell.
- */
-export function shellForCommand(hostShell: VerificationShell, command: string): VerificationShell {
-  if (hostShell.kind === "git-bash" && looksLikeCmdCommand(command)) return CMD_VERIFICATION_SHELL;
-  return hostShell;
-}
-
-function appendPathEntry(env: NodeJS.ProcessEnv, entry: string): void {
-  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "Path";
-  const currentPath = env[pathKey] ?? "";
-  const normalizedEntry = entry.replace(/[\\/]+$/, "").toLowerCase();
-  const present = currentPath
-    .split(delimiter)
-    .some((part) => part.replace(/[\\/]+$/, "").toLowerCase() === normalizedEntry);
-  if (!present) {
-    env[pathKey] = [currentPath, entry].filter(Boolean).join(delimiter);
-  }
 }
 
 // When targets use different discovery methods, return the highest-priority
@@ -1381,70 +951,34 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
   });
 
   if (commands.length === 0) {
-    // A prose Verify is proven by the host-recorded runs of the claimed
-    // commands. They are the checks of this result; with none, the result has
-    // no check and the verdict policy does not pass it.
-    const recorded = source === "task-plan-prose" && hasQualifyingTaskEvidence(options.taskEvidence)
-      ? options.taskEvidence ?? []
-      : [];
     return {
       passed: true,
-      checks: recorded.map((record) => ({
-        command: record.command,
-        exitCode: record.exitCode,
-        stdout: "",
-        stderr: "",
-        durationMs: record.durationMs ?? 0,
-      })),
+      checks: [],
       discoverySource: source,
       timestamp,
     };
   }
 
   const checks: VerificationCheck[] = [];
-  const childEnv = verificationChildEnvironment(options.cwd);
-  const hostShell = resolveVerificationShell(childEnv);
 
   for (const command of commands) {
     const start = Date.now();
-    const authoredCommand = rewriteCommandWithRtk(command);
-    if (hostShell.kind === "cmd" && !looksLikeCmdCommand(authoredCommand) && looksLikePosixAuthoredCommand(authoredCommand)) {
-      checks.push({
-        command: authoredCommand,
-        exitCode: 127,
-        stdout: "",
-        stderr: "Verify command requires a POSIX shell, but this Windows host does not have Git Bash available. Install Git for Windows or rewrite the command for cmd.exe.",
-        durationMs: Date.now() - start,
-        failureClass: "command-not-found",
-      });
-      continue;
-    }
-    // Route on the authored text, then format the injected venv interpreter
-    // for that shell — a native `D:\...\python.exe` must not drag a POSIX
-    // `python -c '...'` check onto cmd, where its quotes would be literal.
-    const shell = shellForCommand(hostShell, authoredCommand);
-    const pythonNormalized = normalizePythonCommand(
-      authoredCommand,
-      options.cwd,
-      shell.kind === "git-bash" ? "posix" : "native",
+    const rewrittenCommand = normalizeWindowsPackageManagerCommand(
+      normalizePythonCommand(rewriteCommandWithRtk(command), options.cwd),
     );
-    // The `.\app\pnpm.cmd` rewrite is cmd-only; bash runs `app/pnpm.cmd` as is.
-    const rewrittenCommand = shell.kind === "cmd"
-      ? normalizeWindowsPackageManagerCommand(pythonNormalized)
-      : pythonNormalized;
+    // Pass the command string as an argument to the shell explicitly
+    // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
+    const isWindows = process.platform === "win32";
+    const shellBin = isWindows ? "cmd" : "sh";
+    const shellArgs = isWindows
+      ? ["/d", "/s", "/c", rewrittenCommand]
+      : [
+          "-c",
+          "if command -v bash >/dev/null 2>&1; then exec bash -o pipefail -c \"$1\" verification-gate; fi\nexec sh -c \"$1\" verification-gate",
+          "verification-gate",
+          rewrittenCommand,
+        ];
     const outputDir = mkdtempSync(join(tmpdir(), "gsd-verification-"));
-    // Git Bash runs authored Verify text from a temp script file so the
-    // selected absolute bash.exe executes the command as a script file in its
-    // own process, without re-resolving bash by name or re-parsing via eval.
-    const shellArgs = shell.kind === "git-bash"
-      ? (() => {
-          const commandPath = join(outputDir, "verify.sh");
-          writeFileSync(commandPath, `set -o pipefail\n${rewrittenCommand}\n`, "utf-8");
-          return [commandPath];
-        })()
-      // Pass the command string as an argument to the shell explicitly
-      // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
-      : shell.argsFor(rewrittenCommand);
     const stdoutPath = join(outputDir, "stdout");
     const stderrPath = join(outputDir, "stderr");
     const stdoutFd = openSync(stdoutPath, "w");
@@ -1453,15 +987,12 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
     let stdout: string;
     let capturedStderr: string;
     try {
-      result = spawnSync(shell.bin, shellArgs, {
+      result = spawnSync(shellBin, shellArgs, {
         cwd: options.cwd,
-        env: childEnv,
+        env: verificationChildEnvironment(options.cwd),
         stdio: ["ignore", stdoutFd, stderrFd],
         timeout: options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-        // cmd re-parses its command line itself; Node's quoting would mangle
-        // nested quotes (#1940). bash.exe follows the MSVCRT argv rules Node
-        // emits, so it needs the default quoting.
-        windowsVerbatimArguments: shell.kind === "cmd",
+        windowsVerbatimArguments: isWindows,
       });
       stdout = readBoundedCommandOutput(stdoutPath);
       capturedStderr = readBoundedCommandOutput(stderrPath);

@@ -40,7 +40,7 @@ type SqlRecord = Readonly<Record<string, SqlValue>>;
 
 export interface LegacyImportApplicationRowInstruction {
   readonly action: "create" | "update" | "delete";
-  readonly targetKind: Exclude<CanonicalTargetKind, "decision" | "knowledge">;
+  readonly targetKind: Exclude<CanonicalTargetKind, "decision">;
   readonly targetKey: string;
   readonly rowSet: LegacyImportBaseRowSet;
   readonly identity: SqlRecord;
@@ -56,16 +56,6 @@ export interface LegacyImportApplicationDecisionInstruction {
   readonly targetKind: "decision";
   readonly targetKey: string;
   readonly decisionId: string;
-  readonly values: SqlRecord;
-  readonly changeIds: readonly string[];
-}
-
-/** One KNOWLEDGE.md row written as a memories row: `values` holds `table` and `cells`. */
-export interface LegacyImportApplicationKnowledgeInstruction {
-  readonly action: "create-knowledge-memory" | "update-knowledge-memory";
-  readonly targetKind: "knowledge";
-  readonly targetKey: string;
-  readonly knowledgeId: string;
   readonly values: SqlRecord;
   readonly changeIds: readonly string[];
 }
@@ -108,11 +98,6 @@ export interface LegacyImportApplicationQualityGateInstruction {
   readonly targetKey: string;
   readonly milestoneId: string;
   readonly sliceId: string;
-  /**
-   * "pending" seeds the pending Q8 row of an open slice. "complete" marks a
-   * slice imported as completed: it gets no gate row. The instruction stays
-   * in the sealed plan so retained Applications still validate.
-   */
   readonly gateStatus: "pending" | "complete";
   readonly changeIds: readonly string[];
 }
@@ -131,7 +116,6 @@ export interface LegacyImportApplicationPreserveInstruction {
 export type LegacyImportApplicationPlanInstruction =
   | LegacyImportApplicationRowInstruction
   | LegacyImportApplicationDecisionInstruction
-  | LegacyImportApplicationKnowledgeInstruction
   | LegacyImportApplicationSliceDependenciesInstruction
   | LegacyImportApplicationDeleteSliceDependenciesInstruction
   | LegacyImportApplicationLifecycleInstruction
@@ -649,10 +633,7 @@ function normalizedDecisionFields(
 
 function rowInstruction(
   row: MutableRowClaim,
-):
-  | LegacyImportApplicationRowInstruction
-  | LegacyImportApplicationDecisionInstruction
-  | LegacyImportApplicationKnowledgeInstruction {
+): LegacyImportApplicationRowInstruction | LegacyImportApplicationDecisionInstruction {
   const values = row.action === "create"
     ? { ...row.identity, ...row.values }
     : row.action === "delete" ? {} : row.values;
@@ -669,22 +650,9 @@ function rowInstruction(
       changeIds,
     };
   }
-  if (row.targetKind === "knowledge") {
-    if (row.action === "delete") {
-      fail("LEGACY_IMPORT_APPLICATION_MAPPING_UNSUPPORTED", "legacy import cannot delete a knowledge row");
-    }
-    return {
-      action: `${row.action}-knowledge-memory`,
-      targetKind: "knowledge",
-      targetKey: row.targetKey,
-      knowledgeId: row.targetKey,
-      values: row.values,
-      changeIds,
-    };
-  }
   return {
     action: row.action,
-    targetKind: row.targetKind as Exclude<CanonicalTargetKind, "decision" | "knowledge">,
+    targetKind: row.targetKind as Exclude<CanonicalTargetKind, "decision">,
     targetKey: row.targetKey,
     rowSet: row.rowSet,
     identity: row.identity,
@@ -894,15 +862,7 @@ export function compileLegacyImportApplicationPlan(value: unknown): LegacyImport
         fail("LEGACY_IMPORT_APPLICATION_MAPPING_UNSUPPORTED", "legacy import lifecycle action is unsupported");
       }
       const identity = lifecycleIdentity(itemKind, change.target.key);
-      const claimedStatus = normalizedLifecycleStatus(change.normalized);
-      // The Preview adopts an existing row with no lifecycle row when the
-      // import changes its status. The row keeps the status that the source
-      // gives it, and open work adopts as "ready", as for a row that the
-      // import creates: only an Attempt makes "in_progress" true.
-      const lifecycleStatus = change.reason_code === "existing-row-status-change"
-        && (claimedStatus === "pending" || claimedStatus === "in_progress")
-        ? "ready"
-        : claimedStatus;
+      const lifecycleStatus = normalizedLifecycleStatus(change.normalized);
       const status = isRecord(change.normalized) ? change.normalized["status"] : change.normalized;
       const shadowTarget = { kind: itemKind, key: change.target.key, field: "status" };
       const shadowPrepared = preparedTarget(shadowTarget);
@@ -959,10 +919,10 @@ export function compileLegacyImportApplicationPlan(value: unknown): LegacyImport
   //   lifecycle claim; explicit status evidence keeps authority. The status
   //   mapping mirrors the planning adoption seam (milestone-planning-persistence):
   //   terminal statuses adopt as-is, in-flight work adopts as "ready".
-  //   #1658: an open slice needs the pending Q8 quality gate that plan_slice
-  //   seeds. Derive one Q8 claim per created slice, mirroring whichever
-  //   lifecycle authority won above. The writer seeds a row only for
-  //   "pending"; a slice imported as completed gets no gate row.
+  //   #1658: complete-slice requires exactly one Q8 quality gate per slice
+  //   (pending while open — the row plan_slice seeds; complete once closed —
+  //   the state completeSliceHierarchy leaves behind). Derive one Q8 claim per
+  //   created slice, mirroring whichever lifecycle authority won above.
   const qualityGateClaims: LegacyImportApplicationQualityGateInstruction[] = [];
   for (const row of rows.values()) {
     if (row.action !== "create") continue;

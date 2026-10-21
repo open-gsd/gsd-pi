@@ -4,11 +4,7 @@
 export const promptGoldenUnits = [
   {
     unitType: "plan-slice",
-    // Re-baseline (19259 -> 19494): project knowledge is now read from the
-    // database, and this DB-less fixture gets the explicit 141-char
-    // "Project Knowledge unavailable" block (block + separator). Measured
-    // 11652 chars here; 141 / 0.6 = 235 keeps the headroom unchanged.
-    phase2StartChars: 19494,
+    phase2StartChars: 19259,
     requiredMarkers: [
       "UNIT: Plan Slice S01",
       "Inlined Context",
@@ -21,17 +17,7 @@ export const promptGoldenUnits = [
     // Tool Surface guidance and related prompt additions have grown this prompt;
     // the baseline is adjusted so the gate still tracks shrinkage from the
     // original oversized prompts while allowing today's ~8586-char fixture.
-    // Re-baseline (14320 -> 14379): the work checkpoint is now a database row.
-    // The Tool Surface block advertises `gsd_checkpoint_save` (+23 chars) and
-    // the empty Resume State line names the Work Checkpoint, not the continue
-    // file (+12 chars). Measured 8625 chars in CI; 35 / 0.6 = 59 keeps the
-    // headroom unchanged.
-    // Re-baseline (14379 -> 14530): the Gates And Verification section now
-    // carries the #2665 evidence-row packaging rule (one command per
-    // `gsd_exec` call, never chained or piped) folded into the existing
-    // `gsd_exec` bullet. Measured 8673 chars in CI-style rendering;
-    // 151 / 0.6 = 251 keeps the headroom unchanged.
-    phase2StartChars: 14530,
+    phase2StartChars: 14320,
     requiredMarkers: [
       "UNIT: Execute Task T01",
       "Inlined Task Plan",
@@ -62,10 +48,7 @@ export const promptGoldenUnits = [
     // stalled auto-mode runs. Measured 9487 chars here; floor(16000 * 0.6) =
     // 9600 restores roughly the headroom the #846 adjustment used, which
     // 15900's 9540 cap had shrunk to 53 chars.
-    // Re-baseline (16000 -> 16235): the same 141-char "Project Knowledge
-    // unavailable" block as plan-slice. Measured 9690 chars here; 141 / 0.6 =
-    // 235 keeps the headroom unchanged.
-    phase2StartChars: 16235,
+    phase2StartChars: 16000,
     requiredMarkers: [
       "UNIT: Complete Slice S01",
       "Tool Surface",

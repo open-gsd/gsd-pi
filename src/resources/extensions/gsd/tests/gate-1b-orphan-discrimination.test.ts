@@ -25,7 +25,6 @@ import {
   getMilestone,
   insertMilestone,
 } from "../gsd-db.ts";
-import { saveContextArtifact } from "./helpers/saved-context.ts";
 
 interface MockCapture {
   notifies: Array<{ msg: string; level: string }>;
@@ -104,7 +103,6 @@ describe("Gate 1b discussion handoff in checkAutoStartAfterDiscuss", () => {
     openDatabase(":memory:");
     insertMilestone({ id: "M001", title: "Test Milestone", status: "queued" });
     writeContext(base);
-    saveContextArtifact("M001");
 
     cap = mkCapture();
     setPendingAutoStart(base, {
@@ -165,7 +163,6 @@ describe("Gate 1b discussion handoff in checkAutoStartAfterDiscuss", () => {
     openDatabase(":memory:");
     insertMilestone({ id: "M001", title: "Test Milestone", status: "queued" });
     writeFlatContext(base);
-    saveContextArtifact("M001");
 
     cap = mkCapture();
     setPendingAutoStart(base, {
@@ -211,11 +208,10 @@ describe("Gate 1b discussion handoff in checkAutoStartAfterDiscuss", () => {
     assert.ok(_getPendingAutoStart(base), "pending handoff should remain for a later recovery attempt");
   });
 
-  test("missing milestone row with a saved CONTEXT artifact inserts a queued row and accepts handoff", () => {
+  test("missing DB row with CONTEXT.md inserts a queued row and accepts handoff", () => {
     base = mkFlatBase();
     openDatabase(":memory:");
     writeFlatContext(base);
-    saveContextArtifact("M001");
 
     cap = mkCapture();
     setPendingAutoStart(base, {

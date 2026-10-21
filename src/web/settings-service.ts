@@ -32,27 +32,25 @@ export async function collectSettingsData(projectCwdOverride?: string): Promise<
   const budgetResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/context-budget.ts")
   const historyResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/routing-history.ts")
   const metricsResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/metrics.ts")
-  const dbResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/db-workspace.ts")
 
   const prefsPath = prefsResolution.modulePath
   const routerPath = routerResolution.modulePath
   const budgetPath = budgetResolution.modulePath
   const historyPath = historyResolution.modulePath
   const metricsPath = metricsResolution.modulePath
-  const dbPath = dbResolution.modulePath
 
   // All modules share the same compiled-vs-source mode (they're all from the same package)
   const useCompiledJs = prefsResolution.useCompiledJs
 
   if (!useCompiledJs) {
-    const requiredPaths = [resolveTsLoader, prefsPath, routerPath, budgetPath, historyPath, metricsPath, dbPath]
+    const requiredPaths = [resolveTsLoader, prefsPath, routerPath, budgetPath, historyPath, metricsPath]
     for (const p of requiredPaths) {
       if (!existsSync(p)) {
         throw new Error(`settings data provider not found; missing=${p}`)
       }
     }
   } else {
-    const requiredPaths = [prefsPath, routerPath, budgetPath, historyPath, metricsPath, dbPath]
+    const requiredPaths = [prefsPath, routerPath, budgetPath, historyPath, metricsPath]
     for (const p of requiredPaths) {
       if (!existsSync(p)) {
         throw new Error(`settings data provider not found; missing=${p}`)
@@ -134,10 +132,8 @@ export async function collectSettingsData(projectCwdOverride?: string): Promise<
     // 3. Budget allocation (use 200K as default context window)
     'const budgetAllocation = budgetMod.computeBudgets(200000);',
 
-    // 4. Routing history is a database row; with no database it is empty.
-    'const dbMod = await import(pathToFileURL(process.env.GSD_SETTINGS_DB_MODULE).href);',
-    'dbMod.openExistingWorkflowDatabase(process.env.GSD_SETTINGS_BASE);',
-    'historyMod.initRoutingHistory();',
+    // 4. Routing history (must init before reading)
+    'historyMod.initRoutingHistory(process.env.GSD_SETTINGS_BASE);',
     'const routingHistory = historyMod.getRoutingHistory();',
 
     // 5. Project totals (null if no metrics ledger exists)
@@ -167,7 +163,6 @@ export async function collectSettingsData(projectCwdOverride?: string): Promise<
           GSD_SETTINGS_BUDGET_MODULE: budgetPath,
           GSD_SETTINGS_HISTORY_MODULE: historyPath,
           GSD_SETTINGS_METRICS_MODULE: metricsPath,
-          GSD_SETTINGS_DB_MODULE: dbPath,
           GSD_SETTINGS_BASE: projectCwd,
         },
         maxBuffer: SETTINGS_MAX_BUFFER,

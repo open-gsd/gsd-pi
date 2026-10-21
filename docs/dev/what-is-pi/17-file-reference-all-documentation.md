@@ -1,7 +1,6 @@
 # File Reference — All Documentation
 
 All paths relative to:
-
 ```
 ~/.nvm/versions/node/v22.20.0/lib/node_modules/@gsd/pi-coding-agent/
 ```

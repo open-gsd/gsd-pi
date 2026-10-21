@@ -40,13 +40,12 @@ Let the developer react to each mockup. Iterate quickly on the throwaway HTML. C
 ### 7. Document
 
 Write `.gsd/sketches/{{sketchId}}/README.md` with:
-
 - The design idea and the surfaces explored
 - The mockup files and what each demonstrates
 - Design decisions captured and their rationale
 - Recommendations for the real implementation
 
-Give the developer a one-line summary that links the README, ready to save with `/gsd capture`. Do not edit `.gsd/CAPTURES.md`; it is rendered from the database.
+Append a one-line summary to `.gsd/CAPTURES.md` linking the README.
 
 ### 8. Frontier mode (only when frontier flag is active)
 

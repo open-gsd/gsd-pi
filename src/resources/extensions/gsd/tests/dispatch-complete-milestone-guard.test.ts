@@ -7,30 +7,27 @@
 
 import { describe, test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 
 import { DISPATCH_RULES, resolveDispatch, type DispatchContext } from "../auto-dispatch.ts";
 import { AutoSession } from "../auto/session.ts";
-import { releaseExhaustedUnits, spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
-import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
-import { seedLifecycles } from "./helpers/authority-cutover.ts";
 import {
   closeDatabase,
+  getLatestAssessmentByScope,
+  getPendingGates,
+  insertAssessment,
   insertGateRow,
   insertMilestone,
   insertSlice,
   openDatabase,
 } from "../gsd-db.ts";
-import { handleValidateMilestone } from "../tools/validate-milestone.ts";
-import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
 
 function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-complete-dispatch-"));
   mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
-  writeFileSync(join(base, ".gitignore"), ".gsd/\n");
   writeFileSync(join(base, ".gsd", "milestones", "M001", "ROADMAP.md"), "# M001\n\n## Slices\n\n- [x] **S01**: Done\n");
   writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "SUMMARY.md"), "# Summary\n");
   writeFileSync(join(base, "implementation.txt"), "done\n");
@@ -43,44 +40,6 @@ function initGitRepo(base: string): void {
   execFileSync("git", ["config", "user.name", "Test"], { cwd: base, stdio: "ignore" });
   execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "initial"], { cwd: base, stdio: "ignore" });
-}
-
-/**
- * Canonical complete-milestone dispatch fixture: adopted milestone with a
- * closed slice and a recorded passing canonical validation, in a git
- * repository so the closeout gate can match the tested source revision.
- */
-function makeCanonicalBase(key: string): string {
-  const base = makeBase();
-  initGitRepo(base);
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
-  insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
-  seedLifecycles(key, [
-    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
-    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
-  ]);
-  return base;
-}
-
-async function recordPassingValidation(base: string, key: string): Promise<void> {
-  const result = await handleValidateMilestone({
-    milestoneId: "M001",
-    verdict: "pass",
-    remediationRound: 0,
-    successCriteriaChecklist: "- [x] Complete",
-    sliceDeliveryAudit: "Delivered",
-    crossSliceIntegration: "Passed",
-    requirementCoverage: "Covered",
-    verdictRationale: "Everything passes.",
-  }, base, {
-    invocation: {
-      idempotencyKey: key,
-      sourceTransport: "internal",
-      actorType: "agent",
-    },
-  });
-  assert.ok(!("error" in result), `canonical passing validation should be recorded: ${JSON.stringify(result)}`);
 }
 
 function gitOutput(base: string, args: string[]): string {
@@ -129,9 +88,10 @@ describe("completing-milestone dispatch guard (#4324)", () => {
     assert.equal(result?.action, "skip");
   });
 
-  test("dispatches complete-milestone when the canonical closeout is ready", async () => {
-    base = makeCanonicalBase("dispatch-guard/ready");
-    await recordPassingValidation(base, "dispatch-guard/ready/validate");
+  test("dispatches complete-milestone when the DB milestone is still active", async () => {
+    base = makeBase();
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
 
     const result = await rule.match(buildDispatchCtx(base));
 
@@ -140,32 +100,47 @@ describe("completing-milestone dispatch guard (#4324)", () => {
     assert.equal(result?.unitId, "M001");
   });
 
-  test("resolveDispatch stops an exhausted complete-milestone after a restart, until a reopen releases it (#5662)", async () => {
-    base = makeCanonicalBase("dispatch-guard/exhausted");
-    await recordPassingValidation(base, "dispatch-guard/exhausted/validate");
-    // The unit ran in auto-mode and used all its artifact verification
-    // retries: its dispatch row holds the `exhausted` mark.
-    claimTestDispatch(base, { milestoneId: "M001", unitType: "complete-milestone", unitId: "M001" });
-    spendUnitBudget(new Map(), { unitType: "complete-milestone", unitId: "M001", kind: "exhausted" });
+  test("records pass-through validation before completing-milestone dispatch when validation is absent (#823)", async () => {
+    base = makeBase();
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
 
-    // A new session holds nothing about the unit, as after a restart.
-    const ctx = { ...buildDispatchCtx(base), session: new AutoSession() };
-    const stopped = await resolveDispatch(ctx);
+    const result = await rule.match(buildDispatchCtx(base));
 
-    assert.equal(stopped.action, "stop");
-    assert.match(stopped.action === "stop" ? stopped.reason : "", /used all its verification retries/i);
+    assert.equal(result?.action, "dispatch");
+    assert.equal(result?.unitType, "complete-milestone");
+    const validation = getLatestAssessmentByScope("M001", "milestone-validation");
+    assert.equal(validation?.status, "pass");
+    const validationPath = join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
+    assert.equal(existsSync(validationPath), true);
+    assert.match(readFileSync(validationPath, "utf-8"), /skip_validation_reason: closeout-recovery/);
+  });
 
-    releaseExhaustedUnits("M001");
-    const released = await resolveDispatch(ctx);
+  test("resolveDispatch stops complete-milestone when unit is exhausted in-session (#5662)", async () => {
+    base = makeBase();
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
 
-    assert.equal(released.action, "dispatch");
-    assert.equal(released.action === "dispatch" ? released.unitType : null, "complete-milestone");
+    const ctx = buildDispatchCtx(base);
+    ctx.state.phase = "complete";
+
+    const session = new AutoSession();
+    session.exhaustedVerificationUnits.add("complete-milestone:M001");
+
+    const result = await resolveDispatch({ ...ctx, session });
+
+    assert.equal(result.action, "stop");
+    assert.match(result.reason, /exhausted verification retries this session/i);
   });
 
   test("dispatches complete-milestone when only .gsd/ files exist in git history (#5097)", async () => {
-    base = makeCanonicalBase("dispatch-guard/planning-only");
+    base = makeBase();
     rmSync(join(base, "implementation.txt"), { force: true });
-    await recordPassingValidation(base, "dispatch-guard/planning-only/validate");
+    initGitRepo(base);
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Milestone Summary\n");
+    execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "chore: planning artifacts only"], { cwd: base, stdio: "ignore" });
 
     const result = await rule.match(buildDispatchCtx(base));
 
@@ -175,11 +150,9 @@ describe("completing-milestone dispatch guard (#4324)", () => {
   });
 
   test("commits pending closeout changes before complete-milestone dispatch (#6132)", async () => {
-    base = makeCanonicalBase("dispatch-guard/commit");
-    // The dirty tracked file is part of the tree the validation proves; the
-    // preflight commit then captures exactly that content.
+    base = makeBase();
+    initGitRepo(base);
     writeFileSync(join(base, "implementation.txt"), "dirty\n");
-    await recordPassingValidation(base, "dispatch-guard/commit/validate");
 
     const result = await rule.match(buildDispatchCtx(base));
 
@@ -275,22 +248,17 @@ describe("complete phase dispatch guard (#5683)", () => {
   });
 
   test("stops when derived state is complete and DB milestone is closed", async () => {
-    base = makeCanonicalBase("dispatch-guard/terminal");
-    await recordPassingValidation(base, "dispatch-guard/terminal/validate");
-    // The real canonical completion: only milestone.complete may close the
-    // milestone lifecycle.
-    const completion = await handleCompleteMilestone({
+    base = makeBase();
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
+    insertAssessment({
+      path: "milestones/M001/M001-VALIDATION.md",
       milestoneId: "M001",
-      title: "Milestone One",
-      oneLiner: "Done",
-      narrative: "Done",
-      verificationPassed: true,
-    }, base, {
-      idempotencyKey: "dispatch-guard/terminal/complete",
-      sourceTransport: "internal",
-      actorType: "agent",
+      status: "pass",
+      scope: "milestone-validation",
+      fullContent: "verdict: pass",
     });
-    assert.ok(!("error" in completion), JSON.stringify(completion));
 
     const ctx = buildDispatchCtx(base);
     ctx.state.phase = "complete";
@@ -299,6 +267,36 @@ describe("complete phase dispatch guard (#5683)", () => {
 
     assert.equal(result?.action, "stop");
     assert.equal(result?.reason, "All milestones complete.");
+  });
+
+  test("closes stale pending gates from milestone validation before terminal stop", async () => {
+    base = makeBase();
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
+    insertAssessment({
+      path: "milestones/M001/M001-VALIDATION.md",
+      milestoneId: "M001",
+      status: "pass",
+      scope: "milestone-validation",
+      fullContent: "verdict: pass",
+    });
+    insertGateRow({
+      milestoneId: "M001",
+      sliceId: "S01",
+      gateId: "Q3",
+      scope: "slice",
+      status: "pending",
+    });
+
+    const ctx = buildDispatchCtx(base);
+    ctx.state.phase = "complete";
+
+    const result = await rule.match(ctx);
+
+    assert.equal(result?.action, "stop");
+    assert.equal(result?.reason, "All milestones complete.");
+    assert.deepEqual(getPendingGates("M001", "S01"), []);
   });
 
   test("blocks terminal stop when pending gates have no closeout evidence", async () => {
@@ -323,20 +321,35 @@ describe("complete phase dispatch guard (#5683)", () => {
     assert.equal(result?.level, "warning");
     assert.match(result?.reason ?? "", /closeout-consistency-blocked/);
     assert.match(result?.reason ?? "", /latest milestone validation is "absent"/);
-    assert.match(result?.reason ?? "", /\/gsd dispatch validate M001/);
+    assert.match(result?.reason ?? "", /\/gsd validate-milestone M001/);
   });
 });
 
 describe("complete milestone context recovery guard (#5831)", () => {
   let base = "";
+  const executionEntryRule = DISPATCH_RULES.find(
+    (candidate) => candidate.name === "execution-entry phase (no context) → discuss-milestone",
+  );
   const prePlanningRule = DISPATCH_RULES.find(
     (candidate) => candidate.name === "pre-planning (no context) → discuss-milestone",
   );
+  assert.ok(executionEntryRule, "execution-entry missing-context rule should exist");
   assert.ok(prePlanningRule, "pre-planning missing-context rule should exist");
 
   afterEach(() => {
     if (base) rmSync(base, { recursive: true, force: true });
     base = "";
+  });
+
+  test("does not discuss a complete execution-entry milestone with no CONTEXT file", async () => {
+    base = makeBase();
+    const ctx = buildDispatchCtx(base);
+    ctx.state.registry = [{ id: "M001", title: "Milestone One", status: "complete" }];
+    ctx.state.phase = "completing-milestone";
+
+    const result = await executionEntryRule.match(ctx);
+
+    assert.equal(result, null);
   });
 
   test("does not discuss a complete pre-planning milestone with no CONTEXT file", async () => {

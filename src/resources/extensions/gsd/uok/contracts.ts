@@ -15,8 +15,6 @@ export type FailureClass =
   | "git"
   | "timeout"
   | "manual-attention"
-  /** Deliberate closeout refusal (`*VERIFICATION-FAILED` marker, #2046). */
-  | "refusal"
   | "unknown";
 
 export type GateOutcome = "pass" | "fail" | "retry" | "manual-attention";

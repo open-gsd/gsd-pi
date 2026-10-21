@@ -1,9 +1,8 @@
 /**
- * /gsd migrate — migration from .planning to .gsd
+ * /gsd migrate — one-shot migration from .planning to .gsd
  *
  * Thin UX orchestrator: resolves paths, runs the validate → parse → transform →
- * preview → write pipeline. The first run prints the Import Preview and its
- * hash and writes nothing; a run with `--preview=<hash>` applies that Preview.
+ * preview → write pipeline, and shows confirmation UI via showNextAction.
  * All business logic lives in the pipeline modules (S01–S03).
  *
  * After a successful write, offers a read-only review that audits the output
@@ -13,13 +12,11 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { gsdRoot } from "../paths.js";
 import { showNextAction } from "../../shared/tui.js";
-import { requiresInteractiveMenu } from "../command-feedback.js";
 import {
-  executeMigrationWrite,
-  migrationFailureMessage,
-  previewMigrationWrite,
-  type MigrationExecutionResult,
-} from "./execution.js";
+  notifyMigrateNeedsInteractiveMenu,
+  requiresInteractiveMenu,
+} from "../command-feedback.js";
+import { executeMigrationWrite, migrationFailureMessage, type MigrationExecutionResult } from "./execution.js";
 import { createMigrationPlan } from "./plan.js";
 import { buildMigrationPreviewSummary, buildReviewPrompt } from "./presentation.js";
 import type { MigrationPreview } from "./writer.js";
@@ -36,13 +33,7 @@ import type { LegacyImportForwardRepairChoice } from "../legacy-import-forward-r
 export function parseMigrationRecoveryArgs(args: string): {
   sourceArgs: string;
   choices: LegacyImportForwardRepairChoice[];
-  approvedPreviewHash?: string;
 } {
-  const approvals = [...args.matchAll(/(?:^|\s)--preview=(\S*)/gu)].map((match) => match[1]!);
-  if (approvals.length > 1 || approvals.some((hash) => !/^sha256:[0-9a-f]{64}$/u.test(hash))) {
-    throw new Error("migration --preview must be one sha256:<64 hex> Preview hash");
-  }
-  args = args.replace(/(?:^|\s)--preview=\S*/gu, " ");
   const pattern = /(?:^|\s)--forward-choice=([A-Za-z0-9_-]+)\.(preserve-later|restore-backup)(?=\s|$)/gu;
   const choices: LegacyImportForwardRepairChoice[] = [];
   const identities = new Set<string>();
@@ -78,7 +69,7 @@ export function parseMigrationRecoveryArgs(args: string): {
   if (sourceArgs.includes("--forward-choice=")) {
     throw new Error("migration Forward Repair choice token is invalid");
   }
-  return { sourceArgs, choices, ...(approvals.length === 1 ? { approvedPreviewHash: approvals[0] } : {}) };
+  return { sourceArgs, choices };
 }
 
 function dispatchReview(
@@ -150,29 +141,33 @@ export async function handleMigrate(
   // ── Build preview text ─────────────────────────────────────────────────────
   const lines = buildMigrationPreviewSummary(preview, targetRoot);
 
-  // ── Approval by Preview hash ───────────────────────────────────────────────
-  let sealed: Awaited<ReturnType<typeof previewMigrationWrite>>;
-  try {
-    sealed = await previewMigrationWrite(sourcePath, targetRoot, project);
-  } catch (err) {
-    ctx.ui.notify(migrationFailureMessage(err), "error");
+  // ── Confirmation via showNextAction ────────────────────────────────────────
+  if (requiresInteractiveMenu(ctx, false)) {
+    notifyMigrateNeedsInteractiveMenu(ctx, "migration confirmation needs an interactive menu");
     return;
   }
-  const flags = recovery.choices.length === 0 ? "" : ` ${args.match(/--forward-choice=\S+/gu)!.join(" ")}`;
-  const approval = `/gsd migrate --preview=${sealed.previewHash}${flags} ${JSON.stringify(sourcePath)}`;
-  if (recovery.approvedPreviewHash === undefined) {
-    ctx.ui.notify(
-      [...lines, "", sealed.authorizationText, "", `Nothing was imported. To apply this exact Preview, run: ${approval}`].join("\n"),
-      "warning",
-    );
-    return;
-  }
-  if (recovery.approvedPreviewHash !== sealed.previewHash) {
-    ctx.ui.notify(
-      `Migration Preview ${recovery.approvedPreviewHash} is not the current Preview; nothing was written. `
-      + `The source or the database changed. To apply the current Preview, run: ${approval}`,
-      "error",
-    );
+
+  const choice = await showNextAction(ctx, {
+    title: "Migration preview",
+    summary: lines,
+    actions: [
+      {
+        id: "confirm",
+        label: "Write .gsd directory",
+        description: `Migrate ${preview.milestoneCount} milestone(s) to ${gsdRoot(targetRoot)}`,
+        recommended: true,
+      },
+      {
+        id: "cancel",
+        label: "Cancel",
+        description: "Exit without writing anything",
+      },
+    ],
+    notYetMessage: "Run /gsd migrate again when ready.",
+  });
+
+  if (choice !== "confirm") {
+    ctx.ui.notify("Migration cancelled — no files were written.", "info");
     return;
   }
 
@@ -181,15 +176,7 @@ export async function handleMigrate(
 
   let execution: MigrationExecutionResult;
   try {
-    execution = await executeMigrationWrite(
-      sourcePath,
-      targetRoot,
-      project,
-      preview,
-      undefined,
-      recovery.choices,
-      recovery.approvedPreviewHash,
-    );
+    execution = await executeMigrationWrite(sourcePath, targetRoot, project, preview, undefined, recovery.choices);
   } catch (err) {
     ctx.ui.notify(
       migrationFailureMessage(err),
@@ -207,8 +194,6 @@ export async function handleMigrate(
   );
 
   // ── Post-write review offer ────────────────────────────────────────────────
-  // The offer is a menu. A run with no interactive menu ends here.
-  if (requiresInteractiveMenu(ctx, false)) return;
   const reviewChoice = await showNextAction(ctx, {
     title: "Migration written",
     summary: [

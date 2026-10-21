@@ -18,9 +18,7 @@ import { resolve } from 'node:path'
 import { ChildProcess } from 'node:child_process'
 
 import { RpcClient } from '@gsd/agent-modes/modes/rpc/rpc-client.js'
-import { verifyQualifiedModelBinding } from '@opengsd/rpc-client'
 import { SessionManager } from '@gsd/pi-coding-agent'
-import { assertModelSelectionAllowed, inheritModelRequestPolicy } from '@gsd/pi-ai/model-request-policy.js'
 import type { SessionInfo } from '@gsd/pi-coding-agent'
 import { getProjectSessionsDir } from './project-sessions.js'
 import { loadAndValidateAnswerFile, AnswerInjector } from './headless-answers.js'
@@ -43,7 +41,6 @@ import {
   EXIT_BLOCKED,
   EXIT_CANCELLED,
   mapStatusToExitCode,
-  parseWorkflowOutcomeEvent,
 } from './headless-events.js'
 
 import type { OutputFormat, HeadlessJsonResult } from './headless-types.js'
@@ -291,7 +288,6 @@ export function parseHeadlessArgs(argv: string[]): HeadlessOptions {
 // ---------------------------------------------------------------------------
 
 export async function runHeadless(options: HeadlessOptions): Promise<void> {
-  assertModelSelectionAllowed(options.model)
   if (options.command === 'quick' && options.commandArgs.join(' ').trim().length === 0) {
     process.stderr.write('[headless] Error: quick requires a task description.\n')
     process.stderr.write('[headless] Usage: gsd headless quick "<task description>"\n')
@@ -431,14 +427,6 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     writeFileSync(join(runtimeDir, 'headless-context.md'), contextContent, 'utf-8')
   }
 
-  // Migrate: preview or apply a v1 .planning migration, with no RPC child
-  // needed. A v1 project has no .gsd/ yet, so this runs before the .gsd/ check.
-  if (options.command === 'migrate') {
-    const { handleMigrate } = await import('./headless-migrate.js')
-    const result = await handleMigrate(options.commandArgs)
-    process.exit(result.exitCode)
-  }
-
   // Validate .gsd/ directory (skip for new-milestone since we just bootstrapped it)
   const gsdDir = join(process.cwd(), '.gsd')
   if (!isNewMilestone && !existsSync(gsdDir)) {
@@ -534,7 +522,6 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     clientOptions.args = [...((clientOptions.args as string[]) || []), '--bare']
   }
 
-  clientOptions.env = inheritModelRequestPolicy(clientOptions.env as Record<string, string | undefined>)
   const client = new RpcClient(clientOptions)
 
   // Event tracking
@@ -896,21 +883,6 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       return
     }
 
-    // Handle the typed workflow outcome first (ADR-046): the extension reports
-    // the run's terminal state as a contract event, so the exit code comes from
-    // the event rather than from notification text. Unlike execution_complete
-    // this is not a per-turn event — it fires once when auto-mode stops or
-    // pauses — so multi-turn commands (auto, next) resolve on it too. The text
-    // classifiers below stay as the fallback for a run of an older extension.
-    const workflowOutcome = parseWorkflowOutcomeEvent(eventObj)
-    if (workflowOutcome && !completed) {
-      completed = true
-      exitCode = workflowOutcome.exitCode
-      if (workflowOutcome.status === 'blocked') blocked = true
-      resolveCompletion()
-      return
-    }
-
     // Blocking command blocks are rendered as assistant messages instead of
     // extension UI notifications, but headless still needs to stop immediately.
     if (eventObj.type !== 'extension_ui_request') {
@@ -1079,18 +1051,6 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       process.exit(1)
     }
     process.stderr.write(`[headless] Resuming session ${matched.id}\n`)
-  }
-
-  // A resumed session can restore a different model. Verify the explicit
-  // provider binding after switching sessions and before sending any prompt.
-  try {
-    await verifyQualifiedModelBinding(client, options.model)
-  } catch (err) {
-    process.stderr.write(`[headless] Error: ${err instanceof Error ? err.message : String(err)}\n`)
-    await client.stop()
-    if (timeoutTimer) clearTimeout(timeoutTimer)
-    if (idleTimer) clearTimeout(idleTimer)
-    process.exit(EXIT_ERROR)
   }
 
   // Build injector adapter — wraps client.sendUIResponse for AnswerInjector's writeToStdin interface

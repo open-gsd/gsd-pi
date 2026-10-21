@@ -33,7 +33,6 @@ import {
 import { handlePlanTask as handlePlanTaskWithInvocation, type PlanTaskParams } from "../tools/plan-task.ts";
 import { handleReplanTask as handleReplanTaskWithInvocation } from "../tools/replan-task.ts";
 import { internalPlanningInvocation } from "../planning-invocation.ts";
-import { saveDecisionToDb } from "../db-writer.ts";
 
 function makeTempDir(prefix: string): string {
   const dir = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -121,10 +120,8 @@ describe("verification-gate: GSD tool-name verify (issue #1628)", () => {
     }));
     assert.equal(result.passed, true);
     assert.equal(result.discoverySource, "task-plan-prose");
-    assert.deepStrictEqual(result.checks, [
-      { command: "gsd_exec_search limit 1 query D023", exitCode: 0, stdout: "", stderr: "", durationMs: 19 },
-    ]);
-    const verdict = decideVerificationVerdict(result);
+    assert.deepStrictEqual(result.checks, []);
+    const verdict = decideVerificationVerdict("execute-task", result);
     assert.equal(verdict.passed, true);
     assert.equal(verdict.reason, "passed");
   });
@@ -189,36 +186,6 @@ describe("plan-time verify validation (issue #1628)", () => {
     const result = await handlePlanTaskWithInvocation(taskParams(), base, internalPlanningInvocation());
     assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
     assert.equal(getTask("M001", "S01", "T01")?.verify, "grep -q D023 docs/decisions.md");
-  });
-
-  test("gsd_plan_task rejects prose verify at write time (#2248)", async () => {
-    const result = await handlePlanTaskWithInvocation(
-      taskParams({ verify: "Document exists and contains all required sections" }),
-      base,
-      internalPlanningInvocation(),
-    );
-    assert.ok("error" in result);
-    assert.match(result.error, /verify must be a shell-checkable command: does not look like a runnable command/);
-    assert.equal(getTask("M001", "S01", "T01"), null, "prose verify must not persist");
-  });
-
-  test("gsd_plan_task cites active verify-field decisions when prose verify violates them (#2248)", async () => {
-    const saved = await saveDecisionToDb({
-      when_context: "",
-      scope: "verify-field-rules",
-      decision: "Every verify line must be a directly runnable shell command, never narrative prose.",
-      choice: "Shell commands only",
-      rationale: "Pre-exec gate requires runnable commands",
-    }, base);
-    const result = await handlePlanTaskWithInvocation(
-      taskParams({ verify: "Document exists and contains all required sections" }),
-      base,
-      internalPlanningInvocation(),
-    );
-    assert.ok("error" in result);
-    assert.match(result.error, /violates active decision\(s\)/);
-    assert.match(result.error, new RegExp(saved.id));
-    assert.equal(getTask("M001", "S01", "T01"), null, "prose verify must not persist when a verify decision is active");
   });
 
   test("gsd_replan_task rejects a verify that names a GSD tool", async () => {

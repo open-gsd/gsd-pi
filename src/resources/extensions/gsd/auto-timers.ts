@@ -24,9 +24,7 @@ import { closeoutUnit, type CloseoutOptions } from "./auto-unit-closeout.js";
 import { saveActivityLog } from "./activity-log.js";
 import { recoverTimedOutUnit, type RecoveryContext } from "./auto-timeout-recovery.js";
 import { resolveAgentEndCancelled } from "./auto/resolve.js";
-import { getCurrentTurnGeneration } from "./auto/turn-epoch.js";
-import { startGlobalIdleWatchdog } from "./auto/global-idle-watchdog.js";
-import type { PauseAutoFn } from "./auto/loop-deps.js";
+import type { PauseAutoOptions } from "./auto/loop-deps.js";
 import type { AutoSession } from "./auto/session.js";
 import { logWarning, logError } from "./workflow-logger.js";
 
@@ -39,7 +37,7 @@ export interface SupervisionContext {
   prefs: GSDPreferences | undefined;
   buildSnapshotOpts: () => CloseoutOptions & Record<string, unknown>;
   buildRecoveryContext: () => RecoveryContext;
-  pauseAuto: PauseAutoFn;
+  pauseAuto: (ctx?: ExtensionContext, pi?: ExtensionAPI, errorContext?: undefined, options?: PauseAutoOptions) => Promise<void>;
   /** Optional task estimate string (e.g. "30m", "2h") for timeout scaling (#2243). */
   taskEstimate?: string;
 }
@@ -291,7 +289,7 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
         `Unit ${unitType} ${unitId} made no meaningful progress for ${supervisor.idle_timeout_minutes}min. Pausing auto-mode.`,
         "warning",
       );
-      await pauseAuto(ctx, pi, "machine_fixable", undefined, { expectedCurrentUnit });
+      await pauseAuto(ctx, pi, undefined, { expectedCurrentUnit });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logError("timer", `[idle-watchdog] Unhandled error: ${message}`);
@@ -306,9 +304,6 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
   }, 15000);
 
   // ── 3. Hard timeout ──
-  // The caller clears all supervision handles together when the unit ends, so
-  // this handle tells the hard timeout that its supervision is still installed.
-  const idleWatchdogHandle = s.idleWatchdogHandle;
   const hardTimeoutBody = async () => {
     try {
       s.unitTimeoutHandle = null;
@@ -326,7 +321,6 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
         s.unitTimeoutHandle = setTimeout(hardTimeoutBody, hardTimeoutMs);
         return;
       }
-      const turnGenerationAtExpiry = getCurrentTurnGeneration();
       const expectedCurrentUnit = s.currentUnit
         ? { type: s.currentUnit.type, id: s.currentUnit.id, startedAt: s.currentUnit.startedAt }
         : null;
@@ -341,25 +335,13 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
       }
 
       const recovery = await recoverTimedOutUnit(ctx, pi, unitType, unitId, "hard", buildRecoveryContext());
-      if (recovery === "recovered") {
-        // A recovery steer keeps the turn open, and a stalled model stream never
-        // reads it. This timer was one-shot, so no timer was left to end that
-        // unit (#2644). Re-arm with the same budget: the next expiry finds the
-        // recovery attempt spent and pauses, or advances a unit whose result is
-        // saved. Do not re-arm when recovery advanced the unit (that bumps the
-        // turn generation) or when the unit ended during recovery (its
-        // supervision handles are cleared or replaced).
-        if (s.idleWatchdogHandle === idleWatchdogHandle && getCurrentTurnGeneration() === turnGenerationAtExpiry) {
-          s.unitTimeoutHandle = setTimeout(hardTimeoutBody, hardTimeoutMs);
-        }
-        return;
-      }
+      if (recovery === "recovered") return;
 
       ctx.ui.notify(
         `Unit ${unitType} ${unitId} exceeded ${supervisor.hard_timeout_minutes}min hard timeout. Pausing auto-mode.`,
         "warning",
       );
-      await pauseAuto(ctx, pi, "machine_fixable", undefined, { expectedCurrentUnit });
+      await pauseAuto(ctx, pi, undefined, { expectedCurrentUnit });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logError("timer", `[hard-timeout] Unhandled error: ${message}`);
@@ -444,54 +426,3 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
     }
   }, 15_000);
 }
-// ── Session-level idle watchdog (#2373) ──────────────────────────────────────
-// The pure state machine and timer ownership live in
-// ./auto/global-idle-watchdog.ts (dependency-free so AutoSession.setCurrentUnit
-// can re-arm it directly). This wrapper binds it to the auto-loop lifetime and
-// the configured threshold.
-
-export type {
-  GlobalIdleWatchdogSession,
-  GlobalIdleWatchdogState,
-  GlobalIdleWatchdogNotify,
-} from "./auto/global-idle-watchdog.js";
-export {
-  GLOBAL_IDLE_WATCHDOG_TICK_MS,
-  noteGlobalIdleWatchdogUnitStarted,
-  startGlobalIdleWatchdog,
-  tickGlobalIdleWatchdog,
-} from "./auto/global-idle-watchdog.js";
-
-/**
- * Owns the session-level idle watchdog for one auto-loop run (#2373): when
- * `auto_supervisor.global_idle_timeout_minutes` is > 0, a 60s unref'd interval
- * tracks unit presence and is cleared when the loop promise settles.
- * Disabled (`0`, the default) runs the loop unchanged.
- */
-export function withGlobalIdleWatchdog<T>(
-  ctx: ExtensionContext,
-  s: AutoSession,
-  run: () => Promise<T>,
-  options?: { thresholdMinutes?: number; tickMs?: number },
-): Promise<T> {
-  const thresholdMinutes = options?.thresholdMinutes
-    ?? resolveAutoSupervisorConfig().global_idle_timeout_minutes
-    ?? 0;
-  if (!(thresholdMinutes > 0)) return run();
-  const stop = startGlobalIdleWatchdog(
-    s,
-    (message, level) => ctx.ui.notify(message, level),
-    thresholdMinutes,
-    options?.tickMs,
-    (message) => logWarning("timer", message),
-  );
-  return (async () => {
-    try {
-      return await run();
-    } finally {
-      stop();
-    }
-  })();
-}
-
-export const _withGlobalIdleWatchdogForTest = withGlobalIdleWatchdog;

@@ -14,9 +14,18 @@ import {
   getSlice,
   openDatabase,
   _getAdapter,
+  updateSliceStatus,
 } from "../gsd-db.ts";
-import { migrateHierarchyToDb, milestoneIdsFromEntities } from "./helpers/md-importer.ts";
+import { migrateHierarchyToDb, milestoneIdsFromEntities } from "../md-importer.ts";
+import { externalMarkdownEditHandler } from "../state-reconciliation/drift/external-markdown-edit.ts";
+import {
+  computeProjectionSha,
+  writeCompatMarker,
+} from "../compat/compat-marker.ts";
+import type { DriftContext } from "../state-reconciliation/types.ts";
+import type { GSDState } from "../types.ts";
 
+const stubState = { phase: "idle" } as unknown as GSDState;
 
 function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-scoped-import-"));
@@ -32,6 +41,8 @@ function cleanup(base: string): void {
   }
   rmSync(base, { recursive: true, force: true });
 }
+
+const roadmapRel = (mid: string): string => join("milestones", mid, `${mid}-ROADMAP.md`);
 
 /** Render a single-slice roadmap whose one slice is checked (`done`). */
 function roadmapContent(mid: string, sliceTitle: string, done: boolean): string {
@@ -90,9 +101,7 @@ function seedTwoMilestonesWithReopenedB(base: string): void {
   migrateHierarchyToDb(base);
   assert.equal(getSlice("M001", "S01")?.status, "complete");
   assert.equal(getSlice("M002", "S01")?.status, "complete");
-  // Fixture stamp for the reopened out-of-scope slice: raw SQL, the generic
-  // status writer refuses rows without a canonical lifecycle row.
-  _getAdapter()!.prepare("UPDATE slices SET status = 'pending', completed_at = NULL WHERE milestone_id = 'M002' AND id = 'S01'").run();
+  updateSliceStatus("M002", "S01", "pending");
   assert.equal(getSlice("M002", "S01")?.status, "pending", "precondition: B/S01 reopened");
 }
 
@@ -109,9 +118,7 @@ function seedTwoMilestonesWithReopenedBTask(base: string): void {
   migrateHierarchyToDb(base);
   assert.equal(getSlice("M002", "S01")?.status, "complete");
   assert.equal(taskStatus("M002"), "complete");
-  // Fixture stamp for the reopened out-of-scope slice: raw SQL, the generic
-  // status writer refuses rows without a canonical lifecycle row.
-  _getAdapter()!.prepare("UPDATE slices SET status = 'pending', completed_at = NULL WHERE milestone_id = 'M002' AND id = 'S01'").run();
+  updateSliceStatus("M002", "S01", "pending");
   // Fixture-only bypass: reproduce a legacy reopened row without asking the
   // guarded generic status writer to perform a forbidden closed→open change.
   _getAdapter()!.prepare(`
@@ -217,4 +224,46 @@ test("scoped import still imports NEW out-of-scope content with its parsed statu
   migrateHierarchyToDb(base, { statusAuthoritativeMilestones: new Set(["M001"]) });
 
   assert.equal(getSlice("M002", "S01")?.status, "complete", "new out-of-scope slice imports as parsed");
+});
+
+test("external-markdown-edit blocks instead of importing a drifted milestone", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedTwoMilestonesWithReopenedB(base);
+
+  // Externally edit M001's roadmap (change the slice title) so its sha drifts;
+  // leave M002's roadmap byte-identical to its marker baseline (not drifted).
+  writeRoadmap(base, "M001", "Alpha Slice EDITED", true);
+  const m002Content = roadmapContent("M002", "Beta Slice", true);
+
+  writeCompatMarker(base, {
+    schema: 2,
+    lastWriter: "gsd-pi",
+    lastProjectedAt: "2026-07-07T00:00:00.000Z",
+    projections: {
+      [roadmapRel("M001")]: { sha: "stale000000000000", entities: ["M001"] },
+      [roadmapRel("M002")]: { sha: computeProjectionSha(m002Content), entities: ["M002"] },
+    },
+    piVersion: "1.8.1",
+  });
+
+  const ctx: DriftContext = { basePath: base, state: stubState };
+  const drift = await externalMarkdownEditHandler.detect(stubState, ctx);
+  assert.equal(drift.length, 1, "only M001's roadmap should be detected as drifted");
+  assert.deepEqual(drift[0].entities, ["M001"]);
+
+  const blocker = await externalMarkdownEditHandler.blocker?.(drift[0], ctx);
+  assert.match(blocker ?? "", /\/gsd recover/);
+  assert.throws(
+    () => externalMarkdownEditHandler.repair(drift[0], ctx),
+    /modeled projection repair must remain blocked/,
+  );
+
+  assert.equal(
+    getSlice("M002", "S01")?.status,
+    "pending",
+    "blocked reconciliation must not revert unrelated DB state",
+  );
+  assert.equal(getSlice("M001", "S01")?.title, "Alpha Slice", "A's projection edit is not imported");
+  assert.equal(getSlice("M001", "S01")?.status, "complete");
 });

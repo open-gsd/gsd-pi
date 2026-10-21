@@ -62,12 +62,10 @@ The curated catalog is maintained in `src/resources/extensions/gsd/skill-catalog
 #### Available Skill Packs
 
 **Swift (any Swift project — `Package.swift` or `.xcodeproj` detected):**
-
 - **SwiftUI** — layout, navigation, animations, gestures, Liquid Glass
 - **Swift Core** — Swift language, concurrency, Codable, Charts, Testing, SwiftData
 
 **iOS (only when `.xcodeproj` targets `iphoneos` via SDKROOT):**
-
 - **iOS App Frameworks** — App Intents, Widgets, StoreKit, MapKit, Live Activities
 - **iOS Data Frameworks** — CloudKit, HealthKit, MusicKit, WeatherKit, Contacts
 - **iOS AI & ML** — Core ML, Vision, on-device AI, speech recognition
@@ -76,19 +74,16 @@ The curated catalog is maintained in `src/resources/extensions/gsd/skill-catalog
 - **iOS Platform** — CallKit, EnergyKit, HomeKit, SharePlay, PermissionKit
 
 **Web:**
-
 - **React & Web Frontend** — React best practices, web design, composition patterns
 - **React Native** — cross-platform mobile patterns
 - **Frontend Design & UX** — frontend design, accessibility
 
 **Languages:**
-
 - **Rust** — Rust patterns and best practices
 - **Python** — Python patterns and best practices
 - **Go** — Go patterns and best practices
 
 **General:**
-
 - **Document Handling** — PDF, DOCX, XLSX, PPTX creation and manipulation
 
 ### Maintaining the Catalog
@@ -136,7 +131,6 @@ skill_rules:
 ### Resolution Order
 
 Skills can be referenced by:
-
 1. **Bare name** — e.g., `frontend-design` → scans the skill directories above in priority order
 2. **Absolute path** — e.g., `/Users/you/.agents/skills/my-skill/SKILL.md`
 3. **Directory path** — e.g., `~/custom-skills/my-skill` → looks for `SKILL.md` inside
@@ -190,7 +184,6 @@ View skill performance with `/gsd skill-health`:
 ```
 
 The dashboard flags skills that may need attention:
-
 - **Success rate below 70%** over the last 10 uses
 - **Token usage rising 20%+** compared to the previous window
 - **Stale skills** unused beyond the configured threshold

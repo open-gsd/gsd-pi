@@ -18,9 +18,6 @@ import {
   insertMilestone,
   insertSlice,
 } from "../resources/extensions/gsd/gsd-db.ts";
-import { registerMilestones } from "../resources/extensions/gsd/milestone-registration.ts";
-import { addLegacyCompletionEvidence } from "../resources/extensions/gsd/tests/helpers/legacy-completion-evidence.ts";
-import { insertPlannedSlice } from "../resources/extensions/gsd/tests/helpers/planned-slice.ts";
 import {
   captureMilestoneExecutionSnapshot,
   isMilestoneExecutableInDb,
@@ -67,7 +64,6 @@ test("not executable when the only milestone is terminal", () => {
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "m1", title: "Done", status: "complete" });
     insertSlice({ id: "S01", milestoneId: "m1", title: "Slice one", status: "complete" });
-    addLegacyCompletionEvidence();
     closeDatabase();
 
     assert.equal(isMilestoneExecutableInDb(base), false);
@@ -84,14 +80,12 @@ test("changed-since fallback skips queued shells and sees a newly planned milest
     insertMilestone({ id: "m1", title: "Leftover shell", status: "queued" });
     closeDatabase();
 
-    // The snapshot is the first open of the existing database: it cuts the
-    // project over, so later rows come from Domain Operations.
     const before = captureMilestoneExecutionSnapshot(base);
     assert.ok(before);
 
     openDatabase(join(base, ".gsd", "gsd.db"));
-    registerMilestones([{ id: "m2", title: "New executable milestone" }], "test");
-    insertPlannedSlice("m2", "S01", "Slice one");
+    insertMilestone({ id: "m2", title: "New executable milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "m2", title: "Slice one" });
     closeDatabase();
 
     assert.equal(isMilestoneExecutableInDb(base, { changedSince: before }), true);
@@ -113,7 +107,7 @@ test("changed-since fallback does not reuse an older active milestone for a new 
     assert.ok(before);
 
     openDatabase(join(base, ".gsd", "gsd.db"));
-    registerMilestones([{ id: "m2", title: "New shell" }], "test");
+    insertMilestone({ id: "m2", title: "New shell", status: "queued" });
     closeDatabase();
 
     assert.equal(isMilestoneExecutableInDb(base, { changedSince: before }), false);

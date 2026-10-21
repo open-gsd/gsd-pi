@@ -10,8 +10,6 @@ const nextConfig = {
   // proxy path) rather than at an origin root; the path is baked in at build time.
   basePath: process.env.GSD_WEB_BASE_PATH || undefined,
   env: { NEXT_PUBLIC_BASE_PATH: process.env.GSD_WEB_BASE_PATH || '' },
-  // Keep the prefixed plugin build separate from standalone/dev output.
-  distDir: process.env.GSD_WEB_DIST_DIR || '.next',
   output: 'standalone',
   outputFileTracingRoot: repoRoot,
   typescript: {

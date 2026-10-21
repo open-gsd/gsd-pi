@@ -15,6 +15,7 @@ import {
   isRetryPending,
   resolveHookArtifactPath,
 } from "../post-unit-hooks.ts";
+import { uncheckTaskInPlan } from "../undo.ts";
 import { parseUnitId } from "../unit-id.ts";
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
@@ -70,6 +71,34 @@ test('consumeRetryTrigger: returns null when no retry pending', () => {
   resetHookState();
   const trigger = consumeRetryTrigger();
   assert.deepStrictEqual(trigger, null, "returns null when no retry pending");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test: uncheckTaskInPlan reverses doctor's [x] mark
+// ═══════════════════════════════════════════════════════════════════════════
+test('Retry reset step 1: uncheck [x] → [ ] in PLAN.md', () => {
+  const { base, cleanup } = createRetryFixture();
+  try {
+    const planFile = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
+
+    // Precondition: T01 is checked
+    const before = readFileSync(planFile, "utf-8");
+    assert.ok(before.includes("- [x] **T01:"), "precondition: T01 is checked [x]");
+
+    // Step 1: Uncheck T01
+    const result = uncheckTaskInPlan(base, "M001", "S01", "T01");
+    assert.ok(result, "uncheckTaskInPlan returns true");
+
+    // Verify T01 is now unchecked
+    const after = readFileSync(planFile, "utf-8");
+    assert.ok(after.includes("- [ ] **T01:"), "T01 is now unchecked [ ]");
+    assert.ok(!after.includes("- [x] **T01:"), "T01 no longer has [x]");
+
+    // T02 is unaffected
+    assert.ok(after.includes("- [ ] **T02:"), "T02 remains unchanged");
+  } finally {
+    cleanup();
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -163,7 +192,11 @@ test('Full retry reset: all steps combined', () => {
     ];
 
     // ── Execute the full reset sequence (mirrors auto-post-unit.ts logic) ──
-    assert.ok(mid && sid && tid);
+
+    // Step 1: Uncheck in PLAN
+    if (mid && sid && tid) {
+      uncheckTaskInPlan(base, mid, sid, tid);
+    }
 
     // Step 2: Delete SUMMARY (in milestones path)
     const tasksDir = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
@@ -189,6 +222,12 @@ test('Full retry reset: all steps combined', () => {
     }
 
     // ── Verify all state is reset ──
+
+    // PLAN.md: T01 unchecked
+    const planFile = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
+    const planContent = readFileSync(planFile, "utf-8");
+    assert.ok(planContent.includes("- [ ] **T01:"), "after reset: T01 unchecked in PLAN");
+    assert.ok(!planContent.includes("- [x] **T01:"), "after reset: T01 not checked in PLAN");
 
     // SUMMARY.md: deleted
     assert.ok(!existsSync(summaryFile), "after reset: SUMMARY.md deleted");
@@ -226,6 +265,10 @@ test('Retry reset: idempotent when artifacts already missing', () => {
 
     // These should not throw even with missing files
     const { milestone: mid, slice: sid, task: tid } = parseUnitId(trigger.unitId);
+
+    // Uncheck — returns false because no PLAN file
+    const uncheckResult = uncheckTaskInPlan(base, mid, sid!, tid!);
+    assert.ok(!uncheckResult, "uncheck returns false when no PLAN exists");
 
     // Summary does not exist — no crash
     const summaryFile = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks", `${tid}-SUMMARY.md`);

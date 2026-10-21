@@ -8,20 +8,19 @@ import {
   BIND_ACK_TYPE,
   REQUEST_TYPE,
   RESPONSE_TYPE,
-  THEME_TYPE,
 } from "../embedded-transport.ts"
 
 type AnyPort = { postMessage(message: unknown): void; close(): void; start?(): void; onmessage: ((event: { data: unknown }) => void) | null; addEventListener(type: string, listener: (event: { data: unknown }) => void): void; removeEventListener(type: string, listener: (event: { data: unknown }) => void): void }
 
 function fakeWindow(origin: string, marker: boolean) {
-  const listeners: Array<(event: MessageEvent) => void> = []
+  const listeners: Array<(event: { data: unknown; source?: unknown; origin?: string; ports?: unknown[] }) => void> = []
   const parentMessages: unknown[] = []
   const parent = { postMessage: (message: unknown) => { parentMessages.push(message) } }
   const win = {
     origin,
     location: { search: marker ? "?__gsd_embedded=1" : "" },
-    addEventListener: (_t: string, l: (event: MessageEvent) => void) => listeners.push(l),
-    removeEventListener: (_t: string, l: (event: MessageEvent) => void) => {
+    addEventListener: (_t: string, l: (event: { data: unknown; source?: unknown; origin?: string; ports?: unknown[] }) => void) => listeners.push(l),
+    removeEventListener: (_t: string, l: (event: { data: unknown; source?: unknown; origin?: string; ports?: unknown[] }) => void) => {
       const i = listeners.indexOf(l)
       if (i >= 0) listeners.splice(i, 1)
     },
@@ -36,7 +35,7 @@ function fakeWindow(origin: string, marker: boolean) {
       const source = opts && "source" in opts ? opts.source : parent
       const eventOrigin = opts?.eventOrigin ?? "https://parent.test"
       const ports = opts?.ports ?? []
-      for (const l of [...listeners]) l({ data, source, origin: eventOrigin, ports } as unknown as MessageEvent)
+      for (const l of [...listeners]) l({ data, source, origin: eventOrigin, ports })
     },
     listenerCount: () => listeners.length,
   }
@@ -52,7 +51,7 @@ function waitForMessage(port: AnyPort): Promise<any> {
   })
 }
 
-async function bind(h: ReturnType<typeof fakeWindow>, generation = 7, opts?: Partial<Parameters<typeof negotiateEmbeddedTransport>[0]>) {
+async function bind(h: ReturnType<typeof fakeWindow>, generation = 7, opts?: Parameters<typeof negotiateEmbeddedTransport>[0]) {
   const channel = new MessageChannel() as unknown as { port1: AnyPort; port2: AnyPort }
   const negotiation = negotiateEmbeddedTransport({ window: h.win, allowedOperations: ["preferences.get", "projects.list"], ...opts })
   const readyMessage = h.parentMessages.findLast((m) => (m as { type?: string })?.type === "gsd-ui-ready") as { nonce?: string } | undefined
@@ -81,31 +80,6 @@ test("strict embedded detection requires opaque origin, distinct parent, and mar
   }
   topLevel.parent = topLevel
   assert.equal(isEmbeddedMode(topLevel as never), false)
-})
-
-test("theme messages use the bound port and current generation, not window messages", async () => {
-  const h = fakeWindow("null", true)
-  const received: unknown[] = []
-  const { client, parentPort, generation } = await bind(h, 7, {
-    allowedOperations: ["preferences.get"],
-    onTheme: (theme) => { received.push(theme) },
-  })
-  try {
-    const theme = { mode: "light", variables: { "--background": "#fff" } }
-    h.dispatch({ protocol: EMBEDDED_PROTOCOL, type: THEME_TYPE, generation, theme })
-    parentPort.postMessage({ protocol: EMBEDDED_PROTOCOL, type: THEME_TYPE, generation: generation - 1, theme })
-    parentPort.postMessage({ protocol: EMBEDDED_PROTOCOL, type: THEME_TYPE, generation, theme: { ...theme, mode: "invalid" } })
-    parentPort.postMessage({ protocol: EMBEDDED_PROTOCOL, type: THEME_TYPE, generation, theme })
-    // The response is an ordering barrier after all preceding theme messages.
-    const request = client.request("preferences.get")
-    const frameRequest = await waitForMessage(parentPort)
-    parentPort.postMessage({ protocol: EMBEDDED_PROTOCOL, type: RESPONSE_TYPE, generation, requestId: frameRequest.requestId, ok: true })
-    await request
-    assert.deepEqual(received, [theme])
-  } finally {
-    client.dispose()
-    parentPort.close()
-  }
 })
 
 test("valid parent bind resolves a client and sends a bind-ack over the port", async () => {
@@ -238,7 +212,6 @@ test("a request postMessage throw rejects the request and drains pending after a
 
 test("bind acknowledgement failure rejects the negotiation instead of resolving a broken client", async () => {
   const h = fakeWindow("null", true)
-  const themes: unknown[] = []
   const deadPort = {
     postMessage: () => {
       throw new Error("port closed")
@@ -247,57 +220,10 @@ test("bind acknowledgement failure rejects the negotiation instead of resolving 
     addEventListener: () => {},
     removeEventListener: () => {},
   }
-  const negotiation = negotiateEmbeddedTransport({ window: h.win, allowedOperations: ["preferences.get"], onTheme: (theme) => { themes.push(theme) } })
+  const negotiation = negotiateEmbeddedTransport({ window: h.win, allowedOperations: ["preferences.get"] })
   const readyMessage = h.parentMessages.findLast((m) => (m as { type?: string })?.type === "gsd-ui-ready") as { nonce?: string } | undefined
-  h.dispatch({ protocol: EMBEDDED_PROTOCOL, type: BIND_TYPE, generation: 1, nonce: readyMessage?.nonce, theme: { mode: "light", variables: {} } }, { ports: [deadPort] })
+  h.dispatch({ protocol: EMBEDDED_PROTOCOL, type: BIND_TYPE, generation: 1, nonce: readyMessage?.nonce }, { ports: [deadPort] })
   await assert.rejects(() => negotiation, /port closed/)
-  assert.deepEqual(themes, [])
-  assert.equal(h.listenerCount(), 0)
-})
-
-test("initial theme requires the bound parent source, expected origin, and echoed document nonce", async () => {
-  const h = fakeWindow("null", true)
-  const themes: unknown[] = []
-  const channel = new MessageChannel() as unknown as { port1: AnyPort; port2: AnyPort }
-  const negotiation = negotiateEmbeddedTransport({
-    window: h.win,
-    allowedOperations: [],
-    expectedParentOrigin: "https://parent.test",
-    onTheme: (theme) => { themes.push(theme) },
-  })
-  const { nonce } = h.parentMessages.at(-1) as { nonce: string }
-  const theme = { mode: "light", variables: { "--background": "#eee" } }
-  const message = { protocol: EMBEDDED_PROTOCOL, type: BIND_TYPE, generation: 1, nonce, theme }
-  h.dispatch(message, { source: {}, ports: [channel.port2] })
-  h.dispatch(message, { eventOrigin: "https://untrusted.test", ports: [channel.port2] })
-  h.dispatch({ ...message, nonce: "another-document" })
-  assert.deepEqual(themes, [])
-  h.dispatch(message, { ports: [channel.port2] })
-  const client = await negotiation
-  assert.deepEqual(themes, [theme])
-  client.dispose()
-  channel.port1.close()
-})
-
-test("disposed theme channels ignore queued messages and remove their listeners", async () => {
-  const h = fakeWindow("null", true)
-  const themes: unknown[] = []
-  let listener: ((event: MessageEvent) => void) | undefined
-  let removed = false
-  const port = {
-    postMessage() {}, close() {},
-    addEventListener(_type: string, callback: (event: MessageEvent) => void) { listener = callback },
-    removeEventListener(_type: string, callback: (event: MessageEvent) => void) { removed = callback === listener },
-  }
-  const negotiation = negotiateEmbeddedTransport({ window: h.win, allowedOperations: [], onTheme: (theme) => { themes.push(theme) } })
-  const { nonce } = h.parentMessages.at(-1) as { nonce: string }
-  h.dispatch({ protocol: EMBEDDED_PROTOCOL, type: BIND_TYPE, generation: 3, nonce }, { ports: [port] })
-  const client = await negotiation
-  client.dispose()
-  listener?.({ data: { protocol: EMBEDDED_PROTOCOL, type: THEME_TYPE, generation: 3, theme: { mode: "dark", variables: {} } } } as MessageEvent)
-  assert.equal(removed, true)
-  assert.equal(h.listenerCount(), 0)
-  assert.deepEqual(themes, [])
 })
 
 test("binds with multiple transferred ports are rejected and negotiation expires", async () => {

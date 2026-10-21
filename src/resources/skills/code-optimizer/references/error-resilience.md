@@ -3,7 +3,6 @@
 ## Grep/Glob Patterns to Detect
 
 ### Missing Timeouts
-
 ```
 fetch\(.*(?!.*timeout)         (fetch without timeout)
 axios\.\w+\(.*(?!.*timeout)   (axios without timeout)
@@ -14,7 +13,6 @@ new Promise\(.*(?!.*setTimeout) (promise without timeout)
 ```
 
 ### Swallowed Errors
-
 ```
 catch\s*\(\s*\w*\s*\)\s*\{\s*\}  (empty catch block)
 catch\s*\(\s*\)\s*\{\s*\}        (empty catch, no error param)
@@ -27,7 +25,6 @@ on_error.*pass                     (error handler that does nothing)
 ```
 
 ### Missing Retries for Transient Failures
-
 ```
 # Network calls without retry logic
 fetch\(.*(?!.*retry)           (fetch without retry)
@@ -39,7 +36,6 @@ requests\.\w+\(.*(?!.*retry)  (Python request without retry)
 ```
 
 ### No Circuit Breaker
-
 ```
 # Repeated calls to potentially failing services without circuit breaking
 while.*retry.*fetch            (retry loop without circuit break)
@@ -47,7 +43,6 @@ MAX_RETRIES.*=.*[5-9]|[1-9]\d+ (high retry count without circuit breaker)
 ```
 
 ### Resource Cleanup on Error
-
 ```
 # try without finally for resource cleanup
 try\s*\{.*open.*(?!.*finally)   (open resource without finally)
@@ -57,7 +52,6 @@ async.*try.*(?!.*finally)       (async operation without cleanup)
 ```
 
 ### Cascading Failures
-
 ```
 # No fallback/default values
 \?\?.*undefined                 (check fallback quality)
@@ -69,7 +63,6 @@ catch.*return\s+null            (returning null on error - caller may not handle
 ```
 
 ### Logging Without Action
-
 ```
 console\.error\(.*(?!.*throw|return|retry)  (logging error but not handling it)
 logger\.error\(.*(?!.*raise|return|retry)   (Python: logging without action)

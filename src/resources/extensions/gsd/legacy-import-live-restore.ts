@@ -2,7 +2,6 @@
 // File Purpose: Sole crash-convergent owner for an eligible live legacy-import database restore.
 
 import { deepFreeze } from "./legacy-import-utils.js";
-import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -43,13 +42,11 @@ import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
   isStrictLegacyImportData,
-  legacyImportBaseSnapshotForPreview,
 } from "./legacy-import-preview.js";
 import {
   captureCurrentLegacyImportBaseSnapshot,
   captureLegacyImportBaseSnapshot,
   createLegacyImportBaseSnapshotSource,
-  legacyImportBaseSnapshotForRetainedHash,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
 import {
@@ -1149,7 +1146,7 @@ function verifyCandidate(
   if (hashFile(candidatePath) !== input.backup.backup_sha256) {
     fail("LEGACY_IMPORT_LIVE_RESTORE_STAGE_FAILED", "stage", "staged candidate bytes do not match the verified backup");
   }
-  const base = legacyImportBaseSnapshotForPreview(application.preview, backupBase(candidatePath));
+  const base = backupBase(candidatePath);
   verifyLegacyImportBackupArtifact({
     backup: { ...input.backup, backup_ref: candidatePath },
     preview: application.preview,
@@ -1222,12 +1219,7 @@ function verifyInstalledDatabase(
   installedDatabaseSha256: string,
   boundary?: LiveRestoreDependencies["boundary"],
 ): LegacyImportLiveRestoreVerification {
-  // The verified backup does not hold its snapshot schema version, so the
-  // installed rows are hashed at the version that made the backup rows hash.
-  const base = legacyImportBaseSnapshotForRetainedHash(
-    verifyOpenDatabaseIntegrity(boundary),
-    input.backup.relevant_rows_hash,
-  );
+  const base = verifyOpenDatabaseIntegrity(boundary);
   if (
     base.authority.project_id !== input.backup.project_id
     || base.authority.project_root_realpath !== input.backup.project_root_realpath
@@ -1381,9 +1373,8 @@ function existingTerminalResult(input: RestoreInputSnapshot): LegacyImportLiveRe
   if (assessment.decision !== "already-restored") return null;
   const current = verifyOpenDatabaseIntegrity();
   if (
-    // The live checkout binding may differ from the backup's (see
-    // applicationMatchesInput); project_id is the identity.
     current.authority.project_id !== input.backup.project_id
+    || current.authority.project_root_realpath !== input.backup.project_root_realpath
     || current.authority.revision < input.backup.base_project_revision + 1
     || current.authority.authority_epoch < input.backup.base_authority_epoch
   ) {
@@ -1393,10 +1384,7 @@ function existingTerminalResult(input: RestoreInputSnapshot): LegacyImportLiveRe
   if (hashFile(input.backup.backup_ref) !== input.backup.backup_sha256) {
     fail("LEGACY_IMPORT_LIVE_RESTORE_VERIFICATION_FAILED", "verify", "retained restore backup no longer matches its receipt");
   }
-  const restoredBase = legacyImportBaseSnapshotForRetainedHash(
-    backupBase(input.backup.backup_ref),
-    input.backup.relevant_rows_hash,
-  );
+  const restoredBase = backupBase(input.backup.backup_ref);
   if (
     restoredBase.authority.project_id !== input.backup.project_id
     || restoredBase.authority.project_root_realpath !== input.backup.project_root_realpath
@@ -1721,10 +1709,7 @@ export function _restoreLegacyImportLiveForTest(
         { requestHash: hash, stage: active.stage },
       );
     }
-    const current = legacyImportBaseSnapshotForRetainedHash(
-      captureCurrentLegacyImportBaseSnapshot(),
-      input.backup.relevant_rows_hash,
-    );
+    const current = captureCurrentLegacyImportBaseSnapshot();
     const installedBackup = current.authority.project_id === input.backup.project_id
       && current.authority.revision === input.backup.base_project_revision
       && current.authority.authority_epoch === input.backup.base_authority_epoch
@@ -1963,6 +1948,5 @@ export function _restoreLegacyImportLiveForTest(
 }
 
 export function restoreLegacyImportLive(value: unknown): LegacyImportLiveRestoreResult {
-  incrementLegacyTelemetry("legacy.restoreExecuted");
   return _restoreLegacyImportLiveForTest(value);
 }
