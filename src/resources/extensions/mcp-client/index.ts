@@ -13,18 +13,13 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
-import {
-	truncateHead,
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-} from "@gsd/pi-coding-agent";
 import { Text } from "@gsd/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildHttpTransportOpts } from "./auth.js";
+import { formatMcpOutputText } from "./output-truncation.js";
 import {
 	buildMcpChildEnv,
 	clearMcpConfigCache,
@@ -519,13 +514,9 @@ export default function (pi: ExtensionAPI) {
 				const cached = toolCache.get(params.server);
 				if (cached) {
 					const text = formatToolList(params.server, cached);
-					const truncation = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-					let finalText = truncation.content;
-					if (truncation.truncated) {
-						finalText += `\n\n[Truncated: ${truncation.outputLines}/${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
-					}
+					const output = formatMcpOutputText(text, "Truncated");
 					return {
-						content: [{ type: "text", text: finalText }],
+						content: [{ type: "text", text: output.text }],
 						details: { server: params.server, toolCount: cached.length, cached: true },
 					};
 				}
@@ -540,14 +531,10 @@ export default function (pi: ExtensionAPI) {
 				toolCache.set(params.server, tools);
 
 				const text = formatToolList(params.server, tools);
-				const truncation = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-				let finalText = truncation.content;
-				if (truncation.truncated) {
-					finalText += `\n\n[Truncated: ${truncation.outputLines}/${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
-				}
+				const output = formatMcpOutputText(text, "Truncated");
 
 				return {
-					content: [{ type: "text", text: finalText }],
+					content: [{ type: "text", text: output.text }],
 					details: { server: params.server, toolCount: tools.length, cached: false },
 				};
 			} catch (err: unknown) {
@@ -627,19 +614,17 @@ export default function (pi: ExtensionAPI) {
 					.map((c) => (c.type === "text" ? c.text ?? "" : JSON.stringify(c)))
 					.join("\n");
 
-				const truncation = truncateHead(raw, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-				let finalText = truncation.content;
-				if (truncation.truncated) {
-					finalText += `\n\n[Output truncated: ${truncation.outputLines}/${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
-				}
+				const output = formatMcpOutputText(raw);
 
 				return {
-					content: [{ type: "text", text: finalText }],
+					content: [{ type: "text", text: output.text }],
 					details: {
 						server: params.server,
 						tool: params.tool,
-						charCount: finalText.length,
-						truncated: truncation.truncated,
+						charCount: output.text.length,
+						truncated: output.truncated,
+						totalBytes: output.totalBytes,
+						outputBytes: output.outputBytes,
 					},
 				};
 			} catch (err: unknown) {
