@@ -27,7 +27,7 @@ import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { deriveStateFromDb, invalidateStateCache } from '../state.ts';
 import { handleRecover } from '../commands-maintenance.ts';
 import { handleTaskRecoveryResume } from '../commands-task-recovery.ts';
-import { renderPlanFromDb } from '../markdown-renderer.ts';
+import { renderPlanFromDb, renderRoadmapContentFromDb } from '../markdown-renderer.ts';
 import { generateDecisionsMd, generateRequirementsMd, saveArtifactToDb, saveDecisionToDb, saveRequirementToDb } from '../db-writer.ts';
 import { hasSavedArtifact } from '../db/queries.ts';
 import { getAllDecisionsFromMemories } from '../context-store.ts';
@@ -980,6 +980,77 @@ describe('gsd-recover', async () => {
     ]) {
       assert.ok(renderedContent.includes(kept), kept);
     }
+  });
+
+  test('recover imports a milestone Vision from a flat ROADMAP and a re-render preserves it', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'phases/01-m001/01-ROADMAP.md', [
+      '# M001: Recovery Test',
+      '',
+      '**Vision:** Initial Kafka Streams topology: state models, JSON serdes, EOS config.',
+      '',
+      '## Slices',
+      '',
+      '- [ ] **S01: Setup** `risk:low` `depends:[]`',
+      '',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0);
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.equal(
+      _getAdapter()!.prepare("SELECT vision FROM milestones WHERE id = 'M001'").get()?.['vision'],
+      'Initial Kafka Streams topology: state models, JSON serdes, EOS config.',
+      'the milestone row carries the ROADMAP vision, not an empty string',
+    );
+
+    const rendered = renderRoadmapContentFromDb('M001');
+    assert.ok(rendered?.includes('**Vision:** Initial Kafka Streams topology: state models, JSON serdes, EOS config.'));
+  });
+
+  test('recover imports slice risk and depends from a flat ROADMAP checklist and a re-render preserves them', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'phases/01-m001/01-ROADMAP.md', [
+      '# M001: Recovery Test',
+      '',
+      '## Slices',
+      '',
+      '- [x] **S01: Foundation** `risk:low` `depends:[]`',
+      '- [x] **S02: Aggregation** `risk:high` `depends:[S01]`',
+      '',
+    ].join('\n'));
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const approvedPreview = recoverPreview(base);
+    assert.equal(approvedPreview.preview.counts.unresolved, 0);
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--preview=${approvedPreview.preview_hash}`);
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT risk, depends FROM slices WHERE id = 'S01'").get(),
+      { risk: 'low', depends: '[]' },
+      'S01 keeps its own risk and empty dependency list, not a rewritten default',
+    );
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT risk, depends FROM slices WHERE id = 'S02'").get(),
+      { risk: 'high', depends: '["S01"]' },
+      'S02 keeps its own risk and its real dependency on S01, not an emptied list',
+    );
+
+    const rendered = renderRoadmapContentFromDb('M001');
+    assert.ok(rendered?.includes('`risk:low` `depends:[]`'));
+    assert.ok(rendered?.includes('`risk:high` `depends:[S01]`'));
   });
 
   test('recover imports a slice PLAN with only a Goal and leaves the other columns at their defaults', async (t) => {

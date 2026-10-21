@@ -65,18 +65,32 @@ export function isWorkflowAliasTool(toolName: string): boolean {
   return isWorkflowSurfaceAliasTool(toolName);
 }
 
-function hardBlockReason(unitType: string, what: string): string {
+// Guidance for a tool that is not in the unit's contract at all: retries are
+// deterministic failures, so the model must stop calling it (#2877).
+const TOOL_MEMBERSHIP_GUIDANCE =
+  "The blocked tool is not part of this unit's Tool Contract, so every retry of it returns this " +
+  "same deterministic block. Stop calling that tool for the rest of this turn; continue with the " +
+  "unit's own tools, or describe the blocker in your response text so the orchestrator can act.";
+
+// Guidance for a contract-owned tool whose ARGUMENTS failed the task scope:
+// the fix is to correct the ids and re-issue, not to stop calling the tool.
+const TASK_SCOPE_ARGUMENT_GUIDANCE =
+  "The tool is part of this unit's Tool Contract; the arguments are what failed. " +
+  "Re-issue the call with the active task ids named above — do not route around the phase boundary.";
+
+function hardBlockReason(unitType: string, what: string, guidance: string): string {
   return [
     `HARD BLOCK: Tool Contract failure for unit "${unitType}" — ${what}.`,
+    guidance,
     "This is a mechanical phase-boundary gate. You MUST NOT proceed, retry the same call,",
     "or route around this block; the orchestrator owns phase transitions.",
   ].join(" ");
 }
 
-function hardBlock(unitType: string, what: string): AutoUnitToolScopeResult {
+function hardBlock(unitType: string, what: string, guidance: string = TOOL_MEMBERSHIP_GUIDANCE): AutoUnitToolScopeResult {
   return {
     block: true,
-    reason: hardBlockReason(unitType, what),
+    reason: hardBlockReason(unitType, what, guidance),
     displayReason: GSD_PHASE_SCOPE_DISPLAY_REASON,
   };
 }
@@ -145,6 +159,7 @@ function shouldBlockTaskCompletionScope(
   return hardBlock(
     unitType,
     `gsd_task_complete may only complete the active task ${expected.milestone}/${expected.slice}/${expected.task}; requested ${actualMilestone}/${actualSlice}/${actualTask}`,
+    TASK_SCOPE_ARGUMENT_GUIDANCE,
   );
 }
 

@@ -152,9 +152,12 @@ function loadAnthropicCatalogModels(): ClaudeCodeModelDefinition[] {
  * Merge the pi-ai anthropic catalog into the hardcoded Claude Code list
  * (#2437). CLAUDE_CODE_MODELS win conflicts so the curated list stays
  * authoritative, and the curated order is preserved so "first model"
- * fallback selection does not drift with catalog updates. Catalog-only
- * entries (e.g. a Claude release newer than this build) are appended with
- * zero cost plus their compat/thinkingLevelMap metadata.
+ * fallback selection does not drift with catalog updates. Catalog thinking
+ * metadata is additive: a curated entry inherits the catalog entry's compat
+ * flags and thinkingLevelMap keys it does not set itself (#2830), with
+ * curated keys winning where both specify. Catalog-only entries (e.g. a
+ * Claude release newer than this build) are appended with zero cost plus
+ * their compat/thinkingLevelMap metadata.
  */
 export function buildClaudeCodeModelList(
 	catalogModels: readonly ClaudeCodeModelDefinition[] = loadAnthropicCatalogModels(),
@@ -164,7 +167,18 @@ export function buildClaudeCodeModelList(
 		merged.set(model.id, model);
 	}
 	for (const entry of catalogModels) {
-		if (!CATALOG_MODEL_PATTERN.test(entry.id) || merged.has(entry.id)) continue;
+		if (!CATALOG_MODEL_PATTERN.test(entry.id)) continue;
+		const curated = merged.get(entry.id);
+		if (curated) {
+			merged.set(entry.id, {
+				...curated,
+				...(entry.compat ? { compat: { ...entry.compat, ...curated.compat } } : {}),
+				...(entry.thinkingLevelMap
+					? { thinkingLevelMap: { ...entry.thinkingLevelMap, ...curated.thinkingLevelMap } }
+					: {}),
+			});
+			continue;
+		}
 		merged.set(entry.id, {
 			id: entry.id,
 			name: `${entry.name} (via Claude Code)`,

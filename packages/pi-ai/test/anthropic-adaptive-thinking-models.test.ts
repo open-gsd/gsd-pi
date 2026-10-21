@@ -49,7 +49,9 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"github-copilot/claude-opus-4.8",
 	"github-copilot/claude-sonnet-4.6",
 	"minimax-cn/MiniMax-M3",
+	"minimax-cn/MiniMax-M3.1-Flash",
 	"minimax/MiniMax-M3",
+	"minimax/MiniMax-M3.1-Flash",
 	"opencode-go/claude-haiku-5-5",
 	"opencode/claude-fable-5",
 	"opencode/claude-fable-5-1",
@@ -87,6 +89,7 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"vercel-ai-gateway/anthropic/claude-sonnet-5-batch",
 	"vercel-ai-gateway/anthropic/claude-sonnet-5.5",
 	"vercel-ai-gateway/anthropic/claude-sonnet-5.5-batch",
+	"vercel-ai-gateway/minimax/minimax-m3.1-flash",
 ];
 
 function getAllModels(): Model<Api>[] {

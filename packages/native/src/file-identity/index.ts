@@ -126,6 +126,14 @@ export function _setProjectionRootIdentityLockClockForTest(clock: (() => number)
   latchClock = clock ?? (() => Date.now());
 }
 
+// Puts the wrapper into the exact state 3 consecutive transient failures
+// produce, so tests of gated consumers (#2815: evidence resolution) can
+// exercise the degraded mode in native-enabled CI without fault injection.
+/** @internal Exported for latch-degraded consumer tests. */
+export function _latchProjectionRootIdentityLockForTest(): void {
+  latchCooldownUntil = latchClock() + PROJECTION_LOCK_LATCH_COOLOFF_MS;
+}
+
 // Records the health outcome of every handle operation so the latch reflects
 // real native behavior rather than construction alone. close() is excluded:
 // it runs in finally blocks after failures and must not mask them (or count

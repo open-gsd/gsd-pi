@@ -386,9 +386,9 @@ function createExtensionAPI(
 			return runtime.getThinkingLevel();
 		},
 
-		setThinkingLevel(level) {
+		setThinkingLevel(level, options) {
 			runtime.assertActive();
-			runtime.setThinkingLevel(level);
+			runtime.setThinkingLevel(level, options);
 		},
 
 		retryLastTurn() {

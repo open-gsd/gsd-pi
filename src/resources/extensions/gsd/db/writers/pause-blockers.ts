@@ -1,7 +1,12 @@
 // Project/App: gsd-pi
 // File Purpose: Context-bound writers for the workflow_blockers row of a human
 // pause (ADR-046): the row a `pause.blocker.open` Domain Operation opens and a
-// `pause.blocker.resolve` Domain Operation resolves or dismisses.
+// `pause.blocker.resolve` Domain Operation resolves or dismisses. The exact
+// clear-only `pause.blocker.resolve.by-id` Domain Operation (an explicit
+// operator-named auto-pause blocker id) also resolves through this writer,
+// atomically with closing the blocker's bound pause row.
+// Legacy runtime_kv pauses keep their durable association writes here too;
+// the domain layer validates identity before invoking these context-bound writers.
 
 import { randomUUID } from "node:crypto";
 
@@ -22,6 +27,7 @@ export function insertOpenPauseBlocker(
     blockerKind: AutoPauseBlockerKind;
     description: string;
     requestedAction: string;
+    resolutionOwner?: "user" | "external";
   },
 ): { blockerId: string; blockerStatus: "open" } {
   if (requireActiveDomainOperationContext(context) !== "pause.blocker.open") {
@@ -34,7 +40,7 @@ export function insertOpenPauseBlocker(
       blocker_status, description, requested_action, resolution, opened_at,
       opened_operation_id, opened_project_revision, opened_authority_epoch
     ) VALUES (
-      :blocker_id, :project_id, :lifecycle_id, :blocker_kind, 'user',
+      :blocker_id, :project_id, :lifecycle_id, :blocker_kind, :resolution_owner,
       'open', :description, :requested_action, '', :opened_at,
       :operation_id, :project_revision, :authority_epoch
     )
@@ -43,6 +49,7 @@ export function insertOpenPauseBlocker(
     ":project_id": context.projectId,
     ":lifecycle_id": input.lifecycleId,
     ":blocker_kind": input.blockerKind,
+    ":resolution_owner": input.resolutionOwner ?? "user",
     ":description": input.description.trim(),
     ":requested_action": input.requestedAction.trim(),
     ":opened_at": new Date().toISOString(),
@@ -51,6 +58,48 @@ export function insertOpenPauseBlocker(
     ":authority_epoch": context.resultingAuthorityEpoch,
   });
   return { blockerId, blockerStatus: "open" };
+}
+
+export function insertPauseBlockerLink(
+  context: Readonly<DomainOperationContext>,
+  input: {
+    blockerId: string;
+    pauseId: string;
+    lifecycleId: string;
+    milestoneId: string;
+    unitType: string;
+    unitId: string;
+  },
+): void {
+  if (requireActiveDomainOperationContext(context) !== "pause.blocker.open") {
+    throw new Error("pause.blocker.open Domain Operation required");
+  }
+  getDb().prepare(`
+    INSERT INTO auto_pause_blocker_links (
+      blocker_id, pause_id, lifecycle_id, milestone_id, unit_type, unit_id, created_at
+    ) VALUES (:blocker_id, :pause_id, :lifecycle_id, :milestone_id, :unit_type, :unit_id, :created_at)
+  `).run({
+    ":blocker_id": input.blockerId,
+    ":pause_id": input.pauseId,
+    ":lifecycle_id": input.lifecycleId,
+    ":milestone_id": input.milestoneId,
+    ":unit_type": input.unitType,
+    ":unit_id": input.unitId,
+    ":created_at": new Date().toISOString(),
+  });
+}
+
+export function resolvePauseBlockerLink(
+  context: Readonly<DomainOperationContext>,
+  blockerId: string,
+): void {
+  if (requireActiveDomainOperationContext(context) !== "pause.blocker.resolve.by-id") {
+    throw new Error("pause.blocker.resolve.by-id Domain Operation required");
+  }
+  getDb().prepare(`
+    UPDATE auto_pause_blocker_links SET resolved_at = :resolved_at
+    WHERE blocker_id = :blocker_id AND resolved_at IS NULL
+  `).run({ ":resolved_at": new Date().toISOString(), ":blocker_id": blockerId });
 }
 
 /**
@@ -66,8 +115,14 @@ export function resolveOpenPauseBlocker(
     resolution: string;
   },
 ): { resolved: boolean } {
-  if (requireActiveDomainOperationContext(context) !== "pause.blocker.resolve") {
-    throw new Error("pause.blocker.resolve Domain Operation required");
+  const activeOperationType = requireActiveDomainOperationContext(context);
+  if (
+    activeOperationType !== "pause.blocker.resolve" &&
+    activeOperationType !== "pause.blocker.resolve.by-id"
+  ) {
+    throw new Error(
+      "pause.blocker.resolve or pause.blocker.resolve.by-id Domain Operation required",
+    );
   }
   const result = getDb().prepare(`
     UPDATE workflow_blockers

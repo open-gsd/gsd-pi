@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
-import subagentExtension, { truncateDiagnostic } from "../index.js";
+import subagentExtension from "../index.js";
 
 interface SentMessage {
 	message: { customType: string; content: string; display: boolean; details?: unknown };
@@ -108,7 +108,11 @@ describe("detached subagent completion wake", () => {
 		assert.equal(wake.message.customType, "subagent_completed");
 		assert.equal(wake.message.display, true);
 		assert.ok(wake.message.content.includes(runId), "wake content carries the runId");
-		assert.ok(wake.message.content.includes("missing-agent"), "wake content names the agent");
+		assert.ok(wake.message.content.includes("1 failed"), "wake carries the aggregate failure count");
+		assert.ok(
+			!wake.message.content.includes("missing-agent:"),
+			"raw diagnostics stay in the run record, not repeated in the notification (#2928)",
+		);
 
 		const record = await waitForTerminalRecord(harness, runId);
 		assert.equal(record.status, "failed", "persistence is unaffected by the wake");
@@ -188,25 +192,22 @@ describe("detached subagent completion wake", () => {
 		assert.equal(harness.attemptsNow, 0);
 	});
 
-	it("does not wake for the synchronous background validation failure", async () => {
+	it("does not wake for the synchronous batch-size validation failure", async () => {
 		const cwd = freshAgentDir();
 		const harness = makeHarness({ hasUI: true });
 
+		// Since #2820 a pure batch is a valid background dispatch; the remaining
+		// synchronous launch rejection is the batch-size cap, which must ride the
+		// pending tool call (no wake, record terminal via finishDispatch).
+		const tasks = Array.from({ length: 9 }, (_, i) => ({ agent: "a", task: `t${i}` }));
 		const result: any = await harness.execute(
-			{ action: "launch", background: true, tasks: [{ agent: "a", task: "b" }] },
+			{ action: "launch", background: true, tasks },
 			{ cwd, hasUI: true },
 		);
-		assert.equal(result.isError, true);
+		const text: string = result.content[0].text;
+		assert.match(text, /Too many parallel tasks/, "the batch-size cap must reject synchronously");
+		assert.doesNotMatch(text, /Started background subagent run/, "no detached run may start");
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		assert.equal(harness.attemptsNow, 0, "sync failures ride the pending tool call; no wake");
-	});
-
-	it("bounds wake diagnostics from a noisy child", () => {
-		const noisy = "x".repeat(1024 * 1024);
-		const bounded = truncateDiagnostic(noisy, 300);
-		assert.ok(bounded.length < 1024, `diagnostic should be bounded, got ${bounded.length}`);
-		assert.ok(bounded.startsWith("x".repeat(300)));
-		assert.ok(bounded.includes("[truncated"));
-		assert.equal(truncateDiagnostic("short", 300), "short");
 	});
 });

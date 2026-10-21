@@ -200,19 +200,28 @@ export function terminalizeTaskExecutionDispatch(
   });
   if (Number((result as { changes?: number }).changes ?? 0) === 1) return;
 
-  if (input.outcome === "interrupted") {
-    const alreadyTerminal = getDb().prepare(`
-      SELECT 1 AS present FROM unit_dispatches
-      WHERE id = :dispatch_id
-        AND worker_id = :worker_id
-        AND milestone_lease_token = :lease_token
-        AND status IN ('canceled', 'failed', 'stuck', 'paused')
-    `).get({
-      ":dispatch_id": input.dispatchId,
-      ":worker_id": input.workerId,
-      ":lease_token": input.milestoneLeaseToken,
-    });
-    if (alreadyTerminal) return;
-  }
+  // An already-terminal row under this dispatch's exact identity
+  // (dispatch_id + worker_id + milestone_lease_token) means a legitimate owner
+  // of the same unit run already recorded its terminal transition — e.g. a
+  // pause cancels the in-flight row before the loop's own Attempt settlement
+  // runs (#2850). The tolerance is per-outcome so a settlement can only accept
+  // terminal statuses compatible with its outcome: a succeeded settle never
+  // accepts a failed/canceled dispatch, and an identity mismatch still throws
+  // below.
+  const toleratedTerminalStatuses = input.outcome === "succeeded"
+    ? ["completed"]
+    : ["canceled", "failed", "stuck", "paused"];
+  const alreadyTerminal = getDb().prepare(`
+    SELECT 1 AS present FROM unit_dispatches
+    WHERE id = :dispatch_id
+      AND worker_id = :worker_id
+      AND milestone_lease_token = :lease_token
+      AND status IN (${toleratedTerminalStatuses.map((status) => `'${status}'`).join(", ")})
+  `).get({
+    ":dispatch_id": input.dispatchId,
+    ":worker_id": input.workerId,
+    ":lease_token": input.milestoneLeaseToken,
+  });
+  if (alreadyTerminal) return;
   throw new Error("Task execution settlement did not terminalize exactly one coordination dispatch");
 }

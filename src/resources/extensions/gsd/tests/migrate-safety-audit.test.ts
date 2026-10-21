@@ -1341,10 +1341,9 @@ test("exchange racer recovery closes its journal after retaining every participa
       },
     })}\n`);
 
-    assert.throws(
-      () => loadManagedProjectionPaths(base),
-      /managed projection target identity changed; recovery evidence retained/u,
-    );
+    // The retirement has converged the entry, so the pass completes instead
+    // of re-failing every later managed open one throw at a time (#2879).
+    loadManagedProjectionPaths(base);
     assert.equal(existsSync(journal), false);
     assert.equal(existsSync(join(rootPath, temporaryPath)), true);
     assert.equal(existsSync(join(rootPath, replacementPath)), true);
@@ -3408,12 +3407,14 @@ test("legacy projection cleanup retains evidence when the quarantine identity ch
     renameSync(quarantinePath, `${quarantinePath}.superseded`);
     mkdirSync(quarantinePath, { recursive: true });
 
-    // Recovery must retain reviewable evidence and close the journal instead
-    // of re-issuing an exchange against a stale identity, which would wedge
-    // the journal and fail every later projection operation.
+    // Recovery retains reviewable evidence and closes the journal instead of
+    // re-issuing an exchange against a stale identity, which would wedge the
+    // journal and fail every later projection operation. The cleanup itself
+    // then refuses through the unresolved-evidence gate (#2879): the retired
+    // target stays fail-loud until the retained evidence is reviewed.
     assert.throws(
       () => removeLegacyProjectionTreeSync(base, orphan),
-      /recovery evidence retained/i,
+      /managed projection target has unresolved recovery evidence/u,
     );
     assert.deepEqual(
       (existsSync(journalRoot) ? readdirSync(journalRoot) : []).filter(name => name.endsWith(".json")),

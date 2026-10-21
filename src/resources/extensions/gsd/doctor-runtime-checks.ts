@@ -25,6 +25,7 @@ import {
   previewUnboundProjectionEvidenceResolution,
   previewUnboundProjectionEvidenceResolutionLockFree,
   isControlPublicationIntentName,
+  isExhaustedTransientProjectionSharingError,
   isStructuralProjectionRootError,
   scanProjectionRootStructure,
   CONTROL_INTENT_QUARANTINE_MIN_AGE_MS,
@@ -49,25 +50,38 @@ function unresolvedProjectionEvidenceIssue(
   const discard = preview("discard");
   const preserve = preview("preserve");
   const restore = preview("restore");
+  // Discard deletes the evidence path; for canonical evidence that is the
+  // projection itself, which an operator must not learn after the fact (#2846).
+  const discarded = discard.kind === "canonical"
+    ? `.gsd/${discard.evidencePath} (the projection itself; --action=restore keeps it in place)`
+    : `.gsd/${discard.evidencePath}`;
+  // Preserve's effect depends on the kind (#2881): canonical evidence is the
+  // projection itself, so preserve retains a copy and the projection stays in
+  // place; for staging evidence the artifact itself is moved.
+  const preserved = preserve.kind === "canonical"
+    ? `retains a copy at .gsd/${preserve.destinationPath} (the projection itself stays in place)`
+    : `moves the evidence to .gsd/${preserve.destinationPath}`;
   return {
     severity: "error",
     code: "unresolved_projection_evidence",
     scope: "project",
     unitId: "project",
-    message: `Unresolved ${discard.scope} projection evidence for ${discard.logicalPath} is retained at .gsd/${discard.evidencePath}.${note} Review exact content ${discard.contentDigest}. Resolve by ID: /gsd doctor resolve-evidence ${discard.evidenceId} --action=discard --consent=${discard.consent}; --action=preserve --consent=${preserve.consent} retains it at .gsd/${preserve.destinationPath}; or --action=restore --consent=${restore.consent} restores it to .gsd/${restore.destinationPath}.`,
+    message: `Unresolved ${discard.scope} projection evidence for ${discard.logicalPath} is retained at .gsd/${discard.evidencePath}.${note} Review exact content ${discard.contentDigest}. Resolve by ID: /gsd doctor resolve-evidence ${discard.evidenceId} --action=discard --consent=${discard.consent} deletes ${discarded}; --action=preserve --consent=${preserve.consent} ${preserved}; or --action=restore --consent=${restore.consent} restores it to .gsd/${restore.destinationPath}.`,
     file: `.gsd/${discard.evidencePath}`,
     fixable: false,
   };
 }
 
-// Structural rejection (#2648): the native lock refuses a node inside the
-// projection root, so every managed open — the evidence assessment included —
-// throws. In the pattern of the #2154 intent scan, name the rejected nodes
-// and keep the retained evidence enumerable without opening the lock.
+// Degraded evidence enumeration for stores whose every managed open throws:
+// structural rejections (#2648) and exhausted native sharing-violation
+// retries (#2355 family, #2883). In the pattern of the #2154 intent scan,
+// keep the retained evidence enumerable without opening the lock; the review
+// note names which class failed and when the listed commands apply.
 function reportRejectedProjectionRoot(
   basePath: string,
   issues: DoctorIssue[],
   listedEvidenceIds: ReadonlySet<string>,
+  reviewNote: string,
 ): void {
   try {
     for (const finding of scanProjectionRootStructure(basePath)) {
@@ -105,7 +119,7 @@ function reportRejectedProjectionRoot(
     try {
       issues.push(unresolvedProjectionEvidenceIssue(
         (action) => previewUnboundProjectionEvidenceResolutionLockFree(basePath, evidence.evidenceId, action),
-        " Listed without the native projection lock, which is rejecting this projection root: repair the root first, then the commands below apply.",
+        reviewNote,
       ));
     } catch (error) {
       issues.push({
@@ -136,10 +150,24 @@ export async function checkRuntimeHealth(
     const listedEvidenceIds = new Set<string>();
     try {
       for (const evidence of loadUnboundProjectionEvidence(basePath)) {
-        issues.push(unresolvedProjectionEvidenceIssue(
-          (action) => previewUnboundProjectionEvidenceResolution(basePath, evidence.evidenceId, action),
-        ));
         listedEvidenceIds.add(evidence.evidenceId);
+        try {
+          issues.push(unresolvedProjectionEvidenceIssue(
+            (action) => previewUnboundProjectionEvidenceResolution(basePath, evidence.evidenceId, action),
+          ));
+        } catch (error) {
+          // One record whose reviewed path is momentarily unreadable (a crash
+          // mid-resolution, #2815) must not blank the rest of the assessment.
+          issues.push({
+            severity: "error",
+            code: "unresolved_projection_evidence",
+            scope: "project",
+            unitId: "project",
+            message: `Unresolved ${evidence.scope} projection evidence for ${evidence.logicalPath} is retained at .gsd/${evidence.evidencePath} (${evidence.evidenceId}), but it could not be reviewed: ${error instanceof Error ? error.message : String(error)}. Resolve the in-flight state first, then rerun /gsd doctor for the resolution commands.`,
+            file: `.gsd/${evidence.evidencePath}`,
+            fixable: false,
+          });
+        }
       }
     } catch (error) {
       issues.push({
@@ -152,7 +180,19 @@ export async function checkRuntimeHealth(
         fixable: false,
       });
       if (isStructuralProjectionRootError(error)) {
-        reportRejectedProjectionRoot(basePath, issues, listedEvidenceIds);
+        reportRejectedProjectionRoot(
+          basePath,
+          issues,
+          listedEvidenceIds,
+          " Listed without the native projection lock, which is rejecting this projection root: repair the root first, then the commands below apply.",
+        );
+      } else if (isExhaustedTransientProjectionSharingError(error)) {
+        reportRejectedProjectionRoot(
+          basePath,
+          issues,
+          listedEvidenceIds,
+          " Listed without the native projection lock, whose sharing-violation retries keep exhausting on this projection root (open-gsd/gsd-pi#2355): the commands below apply once a managed open succeeds.",
+        );
       }
     }
   }

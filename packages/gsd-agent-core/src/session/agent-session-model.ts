@@ -76,8 +76,9 @@ export class AgentSessionModelModule {
 			this.host.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 		}
 
-		// Re-clamp thinking level for new model's capabilities
-		this.host.setThinkingLevel(thinkingLevel);
+		// Re-clamp thinking level for new model's capabilities. A non-persisting
+		// model switch must not persist the re-clamped level either (#2828).
+		this.host.setThinkingLevel(thinkingLevel, { persist: options?.persist !== false });
 
 		await this.emitModelSelect(model, previousModel, "set");
 	}
@@ -210,21 +211,28 @@ export class AgentSessionModelModule {
 		return { model: nextModel, thinkingLevel: this.host.thinkingLevel, isScoped: false };
 	}
 
-	setThinkingLevel(level: ThinkingLevel): void {
+	setThinkingLevel(level: ThinkingLevel, options?: { persist?: boolean }): void {
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this.clampThinkingLevel(level, availableLevels);
 
-		// Only persist if actually changing
 		const previousLevel = this.host.agent.state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
 
 		this.host.agent.state.thinkingLevel = effectiveLevel;
 
-		if (isChanging) {
-			this.host.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (this.supportsThinking() || effectiveLevel !== "off") {
+		// Persisting calls sync the stored default whenever it drifted from the
+		// session level (e.g. an explicit re-select of a temporary level, or a
+		// re-clamp from a persisting model switch). Non-persisting calls —
+		// auto-mode dispatches and restores (#2828) — never write it.
+		if (options?.persist !== false && (this.supportsThinking() || effectiveLevel !== "off")) {
+			const storedDefault = this.host.settingsManager.getDefaultThinkingLevel();
+			if (storedDefault !== effectiveLevel) {
 				this.host.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
+		}
+
+		if (isChanging) {
+			this.host.sessionManager.appendThinkingLevelChange(effectiveLevel);
 			this.host.emit({ type: "thinking_level_changed", level: effectiveLevel });
 			void this.host._extensionRunner.emit({
 				type: "thinking_level_select",

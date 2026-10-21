@@ -133,6 +133,7 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 					host.streamingComponent = undefined;
 					host.streamingMessage = undefined;
 					host.pendingTools.clear();
+					host.activeToolInvocations.clear();
 					host.pendingMessagesContainer.clear();
 					tearDownPinnedZone(host);
 					rs.resetForSessionChange();
@@ -250,6 +251,12 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 				// ToolExecutionComponent immediately so output is visible in
 				// real-time instead of waiting for the session to end.
 				if (externalToolResult) {
+					// The provider already finished this invocation and delivered the
+					// result inline; serverToolUse blocks never see a native
+					// tool_execution_end, so stop counting here (#2925). For regular
+					// toolCalls the loop's paired start/end events re-claim and release
+					// the id transiently at dispatch — net zero.
+					host.activeToolInvocations.delete(externalToolResult.toolCallId);
 					const component = host.pendingTools.get(externalToolResult.toolCallId);
 					if (component) {
 						component.updateResult({
@@ -366,6 +373,9 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 						}
 					}
 					host.pendingTools.clear();
+					// Turn terminal: every invocation stops counting, including ones
+					// whose paired tool_execution_end never arrived (abort/timeout).
+					host.activeToolInvocations.clear();
 				} else {
 					for (const [, component] of host.pendingTools.entries()) {
 						component.setArgsComplete();
@@ -387,6 +397,9 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 		break;
 
 		case "tool_execution_start": {
+			// Count the invocation the moment the session dispatches it — keyed by
+			// toolCallId, so duplicate start events are idempotent (#2925).
+			host.activeToolInvocations.add(event.toolCallId);
 			const { component, created } = registerPendingToolComponent(
 				host,
 				event.toolCallId,
@@ -419,6 +432,12 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 		}
 
 		case "tool_execution_end": {
+			// Terminal event: stop counting before touching the component. Delete
+			// is idempotent — duplicate terminals and late terminals for ids the
+			// tracker no longer holds are no-ops, so the count can't go negative
+			// or double-decrement (#2925). The component itself stays in
+			// host.pendingTools — see the retention note below.
+			host.activeToolInvocations.delete(event.toolCallId);
 			const component = host.pendingTools.get(event.toolCallId);
 			if (component) {
 				component.updateResult({ ...event.result, isError: event.isError });
@@ -454,6 +473,7 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 			host.streamingMessage = undefined;
 			rs.resetForSessionChange();
 			host.pendingTools.clear();
+			host.activeToolInvocations.clear();
 			// Pinned output is only useful while work is actively streaming.
 			// Keep chat history as the single source after completion.
 			tearDownPinnedZone(host, { realignViewport: true });

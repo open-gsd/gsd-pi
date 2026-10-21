@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Plans milestone roadmap state through DB-backed workflow tools.
 
-import { isNonEmptyString, validateStringArray, validateTitle } from "../validation.js";
+import { isNonEmptyString, sanitizeTitle, validateStringArray } from "../validation.js";
 import { persistMilestonePlan } from "../milestone-planning-persistence.js";
 import type { PlanningInvocation } from "../planning-invocation.js";
 
@@ -62,6 +62,8 @@ export interface PlanMilestoneParams {
 export interface PlanMilestoneResult {
   milestoneId: string;
   roadmapPath: string;
+  /** True when any milestone/slice title carried state-document delimiter characters (em/en dash, "/") and was rewritten. (#2588) */
+  titleNormalized?: true;
   /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
   stale?: true;
 }
@@ -147,8 +149,9 @@ function validateSlices(value: unknown): PlanMilestoneSliceInput[] {
     if (seen.has(sliceId)) throw new Error(`slices[${index}].sliceId must be unique`);
     seen.add(sliceId);
     if (!isNonEmptyString(title)) throw new Error(`slices[${index}].title must be a non-empty string`);
-    const titleIssue = validateTitle(title);
-    if (titleIssue) throw new Error(`slices[${index}].title is invalid: ${titleIssue}`);
+    // #2588: normalize delimiter characters instead of rejecting — GSD's own
+    // discuss/context prompts routinely generate em dashes and slashes in titles.
+    const normalizedTitle = sanitizeTitle(title);
     if (!isNonEmptyString(risk)) throw new Error(`slices[${index}].risk must be a non-empty string`);
     if (!Array.isArray(depends) || depends.some((item) => !isNonEmptyString(item) || !SLICE_ID_RE.test(item as string))) {
       throw new Error(`slices[${index}].depends must be an array of valid slice IDs (e.g. "S01")`);
@@ -175,7 +178,7 @@ function validateSlices(value: unknown): PlanMilestoneSliceInput[] {
 
     return {
       sliceId,
-      title,
+      title: normalizedTitle,
       risk,
       depends,
       demo,
@@ -196,11 +199,11 @@ function validateParams(params: PlanMilestoneParams): PlanMilestoneParams {
   if (!isNonEmptyString(params?.milestoneId)) throw new Error("milestoneId is required");
   if (!isNonEmptyString(params?.title)) throw new Error("title is required");
   if (!isNonEmptyString(params?.vision)) throw new Error("vision is required");
-  const milestoneTitleIssue = validateTitle(params.title);
-  if (milestoneTitleIssue) throw new Error(`title is invalid: ${milestoneTitleIssue}`);
 
   return {
     ...params,
+    // #2588: normalize delimiter characters instead of rejecting (see validateSlices).
+    title: sanitizeTitle(params.title),
     dependsOn: params.dependsOn ? validateStringArray(params.dependsOn, "dependsOn") : [],
     // Apply defaults for optional enrichment fields (#2771)
     successCriteria: params.successCriteria ? validateStringArray(params.successCriteria, "successCriteria") : [],
@@ -229,5 +232,12 @@ export async function handlePlanMilestone(
     return { error: `validation failed: ${(err as Error).message}` };
   }
 
-  return persistMilestonePlan(params, basePath, invocation);
+  const result = await persistMilestonePlan(params, basePath, invocation);
+  if ("error" in result) return result;
+  // #2588: surface normalization so callers learn their title was rewritten
+  // (the persisted DB/roadmap values are authoritative).
+  const titleNormalized =
+    params.title !== rawParams.title
+    || params.slices.some((slice, i) => slice.title !== rawParams.slices[i]?.title);
+  return titleNormalized ? { ...result, titleNormalized: true } : result;
 }

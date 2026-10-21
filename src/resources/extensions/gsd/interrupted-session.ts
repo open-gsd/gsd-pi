@@ -19,7 +19,9 @@ import type { GSDState } from "./types.js";
 import { getRuntimeKv, deleteRuntimeKv } from "./db/runtime-kv.js";
 import { isDispatchExecutionOpen } from "./db/unit-dispatches.js";
 import { closeAutoPause, listOpenAutoPauseScopes, readOpenAutoPause, readOpenAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
-import { resolvePauseBlockerRow } from "./pause-blocker-domain-operation.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { internalExecutionInvocation } from "./execution-invocation.js";
+import { resolveAutoPauseBlockerById, resolvePauseBlockerRow } from "./pause-blocker-domain-operation.js";
 import { logWarning } from "./workflow-logger.js";
 import { readMilestone, readSlice } from "./db/lifecycle-read.js";
 import type { AutoPauseBlockerKind } from "./recovery-policy.js";
@@ -49,6 +51,8 @@ export function recordedMachinePauseAction(
 }
 
 export interface PausedSessionMetadata {
+  pauseId?: string;
+  pauseBlockerId?: string;
   milestoneId?: string;
   worktreePath?: string | null;
   originalBasePath?: string;
@@ -165,22 +169,31 @@ export function readPausedSessionMetadata(
  * key. Throws when no database is open.
  */
 export function clearPausedSession(): void {
-  // The resolution of the pause resolves the workflow_blockers row the human
-  // pause opened (ADR-046). Best-effort: the pause closes even when the
-  // blocker row cannot.
   const blockerId = readOpenAutoPauseBlockerId();
-  closeAutoPause();
+  const legacyBlockerId = readStoredPausedSession()?.pauseBlockerId;
+  const associatedBlockerId = blockerId ?? legacyBlockerId;
   if (blockerId) {
-    try {
-      resolvePauseBlockerRow({
-        blockerId,
-        disposition: "resolved",
-        resolution: "pause closed: the blocked work resumed or was discarded",
-        idempotencyKey: `pause-blocker-resolve-close:${blockerId}`,
-      });
-    } catch (err) {
-      logWarning("engine", `pause blocker resolve failed: ${err instanceof Error ? err.message : String(err)}`);
+    resolvePauseBlockerRow({
+      blockerId,
+      disposition: "resolved",
+      resolution: "pause closed: the blocked work resumed or was discarded",
+      idempotencyKey: `pause-blocker-resolve-close:${blockerId}`,
+      closeCurrentPause: true,
+    });
+  } else if (associatedBlockerId) {
+    const fence = readDomainOperationFence();
+    const result = resolveAutoPauseBlockerById({
+      blockerId: associatedBlockerId,
+      rationale: "pause closed: the blocked work resumed or was discarded",
+      invocation: internalExecutionInvocation(`pause-clear:${associatedBlockerId}`),
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+    });
+    if (!result.resolved) {
+      throw new Error(`Could not close pause blocker ${associatedBlockerId}: ${result.failure ?? "unknown"}`);
     }
+  } else {
+    closeAutoPause();
   }
   deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
 }

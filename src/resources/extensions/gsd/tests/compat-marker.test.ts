@@ -381,7 +381,7 @@ test("hostile marker makes the drift detector read nothing outside the project",
   });
 
   // Must not throw and must not emit a record referencing the sentinel.
-  const drift = observeExternalMarkdownEdits(base);
+  const drift = await observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0, "no drift record from a rejected hostile marker");
   assert.ok(
     !drift.some((d) => d.projectionPath.includes(sentinelName)),

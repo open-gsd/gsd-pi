@@ -70,11 +70,7 @@ function makeCtx(
 const capturedPreferencesMd = `---
 planning_depth: deep
 workflow_prefs_captured: true
-commit_policy: per-task
-branch_model: single
 uat_dispatch: true
-models:
-  executor_class: balanced
 phases:
   skip_research: false
 ---
@@ -186,7 +182,9 @@ test("integration: deep mode + needs-discussion + nothing captured → capture p
     );
   }
   const prefsContent = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(prefsContent, /^commit_policy:\s*per-task\s*$/m);
+  assert.match(prefsContent, /^planning_depth:\s*deep\s*$/m);
+  assert.match(prefsContent, /^uat_dispatch:\s*true\s*$/m);
+  assert.doesNotMatch(prefsContent, /^commit_policy:/m);
   assert.equal(isWorkflowPreferencesCaptured(), true);
   assert.equal(existsSync(join(base, ".gsd", "runtime", "research-decision.json")), false);
 });
@@ -201,7 +199,9 @@ test("integration: deep mode + pre-planning + nothing captured → capture prefs
     assert.strictEqual(result.unitType, "discuss-project");
   }
   const prefsContent = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(prefsContent, /^commit_policy:\s*per-task\s*$/m);
+  assert.match(prefsContent, /^planning_depth:\s*deep\s*$/m);
+  assert.match(prefsContent, /^uat_dispatch:\s*true\s*$/m);
+  assert.doesNotMatch(prefsContent, /^commit_policy:/m);
 });
 
 test("integration: deep mode + prefs captured + no PROJECT.md → discuss-project", async (t) => {

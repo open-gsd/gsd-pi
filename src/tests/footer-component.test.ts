@@ -215,3 +215,117 @@ test("FooterComponent promotes gsd-step to center when GSD strip is visible", ()
 	assert.match(lines[0], /fast: priority/);
 	assert.doesNotMatch(lines[0], /● GSD/);
 });
+
+test("FooterComponent renders the session cost including subagent usage", () => {
+	const footer = new FooterComponent(
+		{
+			state: {
+				model: { id: "test-model", provider: "test", contextWindow: 1000 },
+			},
+			sessionManager: {
+				// Parent + reconciled child-session usage (#2821).
+				getUsageTotals: () => ({ input: 500, output: 300, cacheRead: 100, cacheWrite: 0, cost: 21.14 }),
+				getSessionName: () => undefined,
+			},
+			getContextUsage: () => ({ percent: 10, contextWindow: 1000 }),
+			getLastTurnCost: () => 0,
+			modelRegistry: {
+				isUsingOAuth: () => false,
+				getProviderAuthMode: () => "apiKey",
+			},
+		} as any,
+		{
+			getGitBranch: () => "main",
+			getExtensionStatuses: () => new Map(),
+			getAvailableProviderCount: () => 1,
+		} as any,
+		() => ({
+			override: "chat",
+			activeToolCount: 0,
+			cwd: "/tmp/gsd-pi",
+			manuallyExpanded: false,
+		}),
+	);
+
+	const lines = footer.render(160).map((line) => stripVTControlCharacters(line));
+
+	assert.match(lines[0], /\$21\.14/);
+	assert.doesNotMatch(lines[0], /\$21\.14\*/);
+});
+
+test("FooterComponent keeps the subscription * marker on the combined session cost", () => {
+	const footer = new FooterComponent(
+		{
+			state: {
+				model: { id: "test-model", provider: "test", contextWindow: 1000 },
+			},
+			sessionManager: {
+				getUsageTotals: () => ({ input: 500, output: 300, cacheRead: 100, cacheWrite: 0, cost: 21.14 }),
+				getSessionName: () => undefined,
+			},
+			getContextUsage: () => ({ percent: 10, contextWindow: 1000 }),
+			getLastTurnCost: () => 0,
+			modelRegistry: {
+				isUsingOAuth: () => true,
+				getProviderAuthMode: () => "oauth",
+			},
+		} as any,
+		{
+			getGitBranch: () => "main",
+			getExtensionStatuses: () => new Map(),
+			getAvailableProviderCount: () => 1,
+		} as any,
+		() => ({
+			override: "chat",
+			activeToolCount: 0,
+			cwd: "/tmp/gsd-pi",
+			manuallyExpanded: false,
+		}),
+	);
+
+	const lines = footer.render(160).map((line) => stripVTControlCharacters(line));
+
+	assert.match(lines[0], /\$21\.14\*/);
+});
+
+test("FooterComponent combines subagent cost without distorting the parent cache percentage", () => {
+	const parentTotals = { input: 500, output: 300, cacheRead: 4500, cacheWrite: 0, cost: 16.93 };
+	const combinedTotals = { input: 500 + 9000, output: 300, cacheRead: 4500 + 100, cacheWrite: 0, cost: 21.14 };
+	const footer = new FooterComponent(
+		{
+			state: {
+				model: { id: "test-model", provider: "test", contextWindow: 1_000_000 },
+			},
+			sessionManager: {
+				getUsageTotals: (options?: { includeExternalUsage?: boolean }) =>
+					options?.includeExternalUsage ? combinedTotals : parentTotals,
+				getSessionName: () => undefined,
+			},
+			getContextUsage: () => ({ percent: 10, contextWindow: 1_000_000, tokens: 100_000 }),
+			getLastTurnCost: () => 0,
+			modelRegistry: {
+				isUsingOAuth: () => false,
+				getProviderAuthMode: () => "apiKey",
+			},
+		} as any,
+		{
+			getGitBranch: () => "main",
+			getExtensionStatuses: () => new Map(),
+			getAvailableProviderCount: () => 1,
+		} as any,
+		() => ({
+			override: "chat",
+			activeToolCount: 0,
+			cwd: "/tmp/gsd-pi",
+			manuallyExpanded: false,
+		}),
+	);
+
+	const lines = footer.render(160).map((line) => stripVTControlCharacters(line));
+
+	// Cost is parent + children.
+	assert.match(lines[0], /\$21\.14/);
+	// Cache percentage stays a parent-conversation property (4500/5000 = 90%),
+	// not the child-diluted 4500/13600.
+	assert.match(lines[0], /90%↺/);
+});

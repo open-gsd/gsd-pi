@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isNonEmptyString, validateStringArray } from '../validation.ts';
+import { isNonEmptyString, sanitizeTitle, validateStringArray } from '../validation.ts';
 
 // ─── isNonEmptyString ────────────────────────────────────────────────────────
 
@@ -69,4 +69,28 @@ test('validateStringArray: ["a", ""] throws with "must contain only non-empty st
       return true;
     },
   );
+});
+
+// ─── sanitizeTitle (#2588) ───────────────────────────────────────────────────
+
+
+test('sanitizeTitle: em dash with surrounding spaces becomes spaced hyphen', () => {
+  assert.equal(sanitizeTitle('Control Plan — Time Zones'), 'Control Plan - Time Zones');
+});
+
+test('sanitizeTitle: em dash without spaces becomes spaced hyphen', () => {
+  assert.equal(sanitizeTitle('Control Plan—Time Zones'), 'Control Plan - Time Zones');
+});
+
+test('sanitizeTitle: en dash becomes spaced hyphen', () => {
+  assert.equal(sanitizeTitle('S01 – Setup'), 'S01 - Setup');
+});
+
+test('sanitizeTitle: forward slash becomes hyphen, spaces collapsed', () => {
+  assert.equal(sanitizeTitle('Client/Server split'), 'Client-Server split');
+  assert.equal(sanitizeTitle('Client / Server split'), 'Client-Server split');
+});
+
+test('sanitizeTitle: clean titles pass through unchanged', () => {
+  assert.equal(sanitizeTitle('DB-backed planning'), 'DB-backed planning');
 });

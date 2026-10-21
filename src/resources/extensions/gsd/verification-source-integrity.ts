@@ -47,6 +47,25 @@ export interface VerificationSourceSnapshotOptions {
   excludePaths?: readonly string[];
 }
 
+/**
+ * Snapshot options implied by user preferences (#2873): the
+ * `verification_source_exclude_paths` entries become `:(exclude)` pathspecs so
+ * large non-evidence trees are not re-hashed on every dispatch. Every site
+ * that produces a compared source revision must flow through this helper (or
+ * merge it into its explicit options) — mixed exclusion sets would make
+ * stored `testedSourceRevision` values fail closed against recaptures.
+ */
+export function verificationSourceSnapshotOptions(
+  preferences: GSDPreferences | undefined,
+): VerificationSourceSnapshotOptions {
+  // A blank entry would serialize as a bare `:(exclude)` pathspec, which git
+  // treats as "exclude everything" — silently hashing an empty tree. Drop it.
+  const excludePaths = preferences?.verification_source_exclude_paths
+    ?.map((path) => path.trim())
+    .filter((path) => path.length > 0);
+  return excludePaths && excludePaths.length > 0 ? { excludePaths } : {};
+}
+
 export interface VerificationSourceDriftDiagnosis {
   paths: string[];
   autoCommitDetected: boolean;
@@ -413,7 +432,8 @@ export function captureMilestoneVerificationSourceRevision(
       id: repository.id,
       cwd: repository.root,
     })),
-    options,
+    // Preference-derived exclusions are the default; explicit caller options win.
+    { ...verificationSourceSnapshotOptions(preferences), ...options },
   );
   if (!source.ok) return { ok: false, error: source.error };
   return { ok: true, sourceRevision: source.snapshot.aggregateRevision };

@@ -4,7 +4,7 @@
 
 The built-in diagnostic tool validates `.gsd/` integrity:
 
-```
+```bash
 /gsd doctor
 ```
 
@@ -630,13 +630,13 @@ Then run `/gsd doctor` to refresh projections and `/gsd auto` to restart from cu
 
 If adaptive model routing is producing bad results, clear the routing history:
 
-```
+```bash
 /gsd rate reset
 ```
 
 ### Refresh rendered state
 
-```
+```bash
 /gsd doctor
 ```
 
@@ -648,7 +648,7 @@ Doctor checks the authoritative database, refreshes `STATE.md` from derived data
 
 Use this only when the database is missing, damaged, or known to be stale but the rendered milestone, slice, and task markdown on disk is the best available source:
 
-```
+```bash
 /gsd recover
 # Then re-run with the exact --preview=<sha256> printed by the command.
 ```
@@ -728,7 +728,7 @@ GSD auto-detects language servers based on project files (e.g. `package.json` â†
 
 **Check status:**
 
-```
+```bash
 lsp status
 ```
 

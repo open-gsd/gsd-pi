@@ -922,3 +922,133 @@ test("a replacement lease cannot reinterpret a completed dispatch as interrupted
   assert.deepEqual(executionSnapshot(), before);
   assert.equal(row("SELECT status FROM unit_dispatches").status, "completed");
 });
+
+// #2850: a session-creation timeout pauses auto-mode while the unit execution
+// is in flight; the pause path cancels the active dispatch row before the
+// loop's own attempt.settle runs. The failed settlement must tolerate the
+// identity-matched already-terminal row instead of throwing and rolling the
+// whole Domain Operation back (which orphans the Attempt as running).
+for (const dispatchStatus of ["canceled", "failed", "stuck", "paused"] as const) {
+  test(`a same-identity failed settlement commits over an already ${dispatchStatus} dispatch`, async () => {
+    const { claimTaskAttempt, settleTaskAttempt } = await subject();
+    const { dispatchId } = seedFixture();
+    const claim = claimTaskAttempt(claimInput(dispatchId));
+    db().prepare(`
+      UPDATE unit_dispatches
+      SET status = :status, ended_at = '2026-07-12T00:01:00.000Z'
+      WHERE id = :dispatch_id
+    `).run({ ":status": dispatchStatus, ":dispatch_id": dispatchId });
+
+    const settled = settleTaskAttempt(
+      settleInput(claim.attemptId, "failed", `task-attempt/settle/failed/${dispatchStatus}`),
+    );
+
+    assert.equal(settled.nextStage, "route");
+    assert.deepEqual(row(`
+      SELECT attempt_state, settle_outcome
+      FROM workflow_execution_attempts
+    `), { attempt_state: "settled", settle_outcome: "failed" });
+    assert.equal(row("SELECT status FROM unit_dispatches").status, dispatchStatus);
+  });
+}
+
+test("a same-identity succeeded settlement commits over its own completed dispatch", async () => {
+  const { claimTaskAttempt, settleTaskAttempt } = await subject();
+  const { dispatchId } = seedFixture();
+  const claim = claimTaskAttempt(claimInput(dispatchId));
+  db().exec(`
+    UPDATE unit_dispatches
+    SET status = 'completed', ended_at = '2026-07-12T00:01:00.000Z'
+    WHERE id = ${dispatchId};
+  `);
+
+  const settled = settleTaskAttempt(settleInput(claim.attemptId, "succeeded"));
+
+  assert.equal(settled.nextStage, "verify");
+  assert.deepEqual(row(`
+    SELECT attempt_state, settle_outcome
+    FROM workflow_execution_attempts
+  `), { attempt_state: "settled", settle_outcome: "succeeded" });
+  assert.equal(row("SELECT status FROM unit_dispatches").status, "completed");
+});
+
+test("a succeeded settlement cannot launder a failed dispatch", async () => {
+  const { claimTaskAttempt, settleTaskAttempt } = await subject();
+  const { dispatchId } = seedFixture();
+  const claim = claimTaskAttempt(claimInput(dispatchId));
+  db().exec(`
+    UPDATE unit_dispatches
+    SET status = 'failed', ended_at = '2026-07-12T00:01:00.000Z'
+    WHERE id = ${dispatchId};
+  `);
+  const before = executionSnapshot();
+
+  assert.throws(() => settleTaskAttempt(settleInput(claim.attemptId, "succeeded")),
+    /did not terminalize exactly one coordination dispatch/i);
+
+  assert.deepEqual(executionSnapshot(), before);
+  assert.equal(row("SELECT status FROM unit_dispatches").status, "failed");
+});
+
+test("a failed settlement cannot terminalize over a completed dispatch", async () => {
+  const { claimTaskAttempt, settleTaskAttempt } = await subject();
+  const { dispatchId } = seedFixture();
+  const claim = claimTaskAttempt(claimInput(dispatchId));
+  db().exec(`
+    UPDATE unit_dispatches
+    SET status = 'completed', ended_at = '2026-07-12T00:01:00.000Z'
+    WHERE id = ${dispatchId};
+  `);
+  const before = executionSnapshot();
+
+  assert.throws(() => settleTaskAttempt(settleInput(claim.attemptId, "failed")),
+    /did not terminalize exactly one coordination dispatch/i);
+
+  assert.deepEqual(executionSnapshot(), before);
+  assert.equal(row("SELECT status FROM unit_dispatches").status, "completed");
+});
+
+test("a failed settlement cannot terminalize against a stale lease token", async () => {
+  const { claimTaskAttempt, settleTaskAttempt } = await subject();
+  const { dispatchId } = seedFixture();
+  const claim = claimTaskAttempt(claimInput(dispatchId));
+  db().exec(`
+    UPDATE unit_dispatches
+    SET status = 'canceled', milestone_lease_token = 8,
+        ended_at = '2026-07-12T00:01:00.000Z'
+    WHERE id = ${dispatchId};
+  `);
+  const before = executionSnapshot();
+
+  assert.throws(() => settleTaskAttempt(settleInput(claim.attemptId, "failed")),
+    /did not terminalize exactly one coordination dispatch/i);
+
+  assert.deepEqual(executionSnapshot(), before);
+  assert.equal(row("SELECT status FROM unit_dispatches").status, "canceled");
+});
+
+test("a failed settlement cannot terminalize against another worker's terminal dispatch", async () => {
+  const { claimTaskAttempt, settleTaskAttempt } = await subject();
+  const { dispatchId } = seedFixture();
+  const claim = claimTaskAttempt(claimInput(dispatchId));
+  db().exec(`
+    INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status,
+      project_root_realpath
+    ) VALUES (
+      'worker-2', 'test-host', 2, '2026-07-12T00:01:00.000Z', 'test',
+      '2026-07-12T00:01:00.000Z', 'active', '/tmp/project'
+    );
+    UPDATE unit_dispatches
+    SET status = 'canceled', worker_id = 'worker-2',
+        ended_at = '2026-07-12T00:01:00.000Z'
+    WHERE id = ${dispatchId};
+  `);
+  const before = executionSnapshot();
+
+  assert.throws(() => settleTaskAttempt(settleInput(claim.attemptId, "failed")),
+    /did not terminalize exactly one coordination dispatch/i);
+
+  assert.deepEqual(executionSnapshot(), before);
+  assert.equal(row("SELECT worker_id, status FROM unit_dispatches").worker_id, "worker-2");
+});

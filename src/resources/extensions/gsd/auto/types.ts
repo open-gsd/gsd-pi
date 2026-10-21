@@ -11,6 +11,7 @@ import type { GSDPreferences } from "../preferences.js";
 import type { GSDState } from "../types.js";
 import type { CmuxLogLevel } from "../../shared/cmux-events.js";
 import type { LoopDeps } from "./loop-deps.js";
+import type { HumanBlockerKind } from "../recovery-policy.js";
 
 /**
  * Maximum total loop iterations before forced stop. Prevents runaway loops
@@ -61,6 +62,7 @@ export interface AgentEndEvent {
 export interface ErrorContext {
   message: string;
   category: "provider" | "tool-schema" | "timeout" | "idle" | "network" | "aborted" | "session-failed" | "unknown";
+  blockerKind?: HumanBlockerKind;
   stopReason?: string;
   isTransient?: boolean;
   retryAfterMs?: number;

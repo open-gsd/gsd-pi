@@ -80,6 +80,7 @@ const CompatSchema = Type.Object({
 	supportsEagerToolInputStreaming: Type.Optional(Type.Boolean()),
 	supportsCacheControlOnTools: Type.Optional(Type.Boolean()),
 	forceAdaptiveThinking: Type.Optional(Type.Boolean()),
+	rejectsDisabledThinking: Type.Optional(Type.Boolean()),
 });
 
 const ThinkingLevelMapSchema = Type.Object(

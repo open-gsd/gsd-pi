@@ -42,6 +42,8 @@ describe("SubagentRunStore", () => {
 				status: "succeeded",
 				exitCode: 0,
 				output: "done",
+				model: "openrouter/auto",
+				reportedModel: "anthropic/claude-sonnet-5",
 			}],
 		}));
 
@@ -49,6 +51,8 @@ describe("SubagentRunStore", () => {
 		assert.equal(loaded?.status, "succeeded");
 		assert.equal(loaded?.children[0]?.trackingName, "clear-beacon");
 		assert.equal(loaded?.children[0]?.thinking, "medium");
+		assert.equal(loaded?.children[0]?.model, "openrouter/auto");
+		assert.equal(loaded?.children[0]?.reportedModel, "anthropic/claude-sonnet-5");
 		assert.equal(loaded?.children[0]?.output, "done");
 		assert.equal(store.list()[0]?.runId, "run-1");
 	});

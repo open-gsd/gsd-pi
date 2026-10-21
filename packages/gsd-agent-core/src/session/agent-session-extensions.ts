@@ -298,7 +298,7 @@ export class AgentSessionExtensionsModule {
 					return true;
 				},
 				getThinkingLevel: () => this.host.thinkingLevel,
-				setThinkingLevel: (level) => this.host.setThinkingLevel(level),
+				setThinkingLevel: (level, options) => this.host.setThinkingLevel(level, options),
 				retryLastTurn: () => {
 					void this.host.agent.continue();
 				},

@@ -10,6 +10,7 @@ import {
   formatKeyDashboard,
   formatTestResults,
   runKeyDoctor,
+  testProviderKey,
 	  formatDoctorFindings,
 	  PROVIDER_REGISTRY,
 	  getProviderAuthMode,
@@ -151,6 +152,39 @@ test("PROVIDER_REGISTRY includes all major LLM providers", () => {
   assert.ok(ids.includes("minimax"));
   assert.ok(ids.includes("minimax-cn"));
 });
+
+// #2906 — the doctor key probes must use a model the MiniMax
+// Anthropic-compatible endpoint actually serves (only M3.1-Flash and M3).
+// Probing with the retired MiniMax-M2.7 would report valid keys as invalid.
+for (const providerId of ["minimax", "minimax-cn"] as const) {
+  test(`testProviderKey probes ${providerId} with MiniMax-M3.1-Flash (#2906)`, async () => {
+    const provider = findProvider(providerId);
+    assert.ok(provider, `${providerId} missing from PROVIDER_REGISTRY`);
+
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = (async (url: unknown, init: RequestInit = {}) => {
+      requests.push({ url: String(url), init });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const auth = makeAuth({ [providerId]: { type: "api_key", key: "mm-key" } });
+      const result = await testProviderKey(provider, auth);
+
+      assert.equal(result.status, "valid");
+      assert.equal(requests.length, 1);
+      const expectedUrl = providerId === "minimax"
+        ? "https://api.minimax.io/anthropic/v1/messages"
+        : "https://api.minimaxi.com/anthropic/v1/messages";
+      assert.equal(requests[0].url, expectedUrl);
+      const body = JSON.parse(String(requests[0].init.body));
+      assert.equal(body.model, "MiniMax-M3.1-Flash");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
 
 test("PROVIDER_REGISTRY includes claude-code as a first-class LLM provider (#4541)", () => {
   const entry = PROVIDER_REGISTRY.find((p) => p.id === "claude-code");

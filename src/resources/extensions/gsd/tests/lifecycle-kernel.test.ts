@@ -3,12 +3,13 @@
 
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { AutoAdvanceResult, AutoOrchestrationModule } from "../auto/contracts.ts";
-import { kernelAdvance, kernelResume, kernelStart, kernelStop } from "../auto/lifecycle-kernel.ts";
+import { kernelAdvance, kernelClaimUnit, kernelResume, kernelStart, kernelStop } from "../auto/lifecycle-kernel.ts";
 import { AutoSession } from "../auto/session.ts";
 import { postUnitPostVerification, type PostUnitContext } from "../auto-post-unit.ts";
 import { invalidateAllCaches } from "../cache.ts";
@@ -21,8 +22,8 @@ import {
   insertTask,
   openDatabase,
 } from "../gsd-db.ts";
-import { registerAutoWorker } from "../db/auto-workers.ts";
-import { claimMilestoneLease } from "../db/milestone-leases.ts";
+import { registerAutoWorker, getAutoWorker } from "../db/auto-workers.ts";
+import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.ts";
 import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
 import {
   getDispatchById,
@@ -419,4 +420,87 @@ test("start, resume and stop reach the orchestration module of the session", asy
   assert.deepEqual(await kernelResume(s), { kind: "resumed" });
   assert.deepEqual(await kernelStop(s, "pause"), { kind: "stopped", reason: "pause" });
   assert.deepEqual(calls, ["start", "resume", "stop:pause"]);
+});
+
+test("kernelClaimUnit reclaims the milestone lease of a dead local worker (#2851)", (t) => {
+  const base = makeProject(t);
+  const holder = registerAutoWorker({ projectRootRealpath: base });
+  _getAdapter()!.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
+    .run({ ":pid": -1, ":worker_id": holder });
+  const held = claimMilestoneLease(holder, "M001");
+  assert.equal(held.ok, true);
+
+  const claim = kernelClaimUnit({
+    projectRoot: base,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    traceId: "trace-dead-holder-reclaim",
+  });
+
+  assert.equal(claim.kind, "claimed", `expected the dead holder's lease to be reclaimed: ${JSON.stringify(claim)}`);
+  if (claim.kind === "claimed") {
+    const lease = getMilestoneLease("M001");
+    assert.ok(lease);
+    assert.equal(lease!.worker_id, claim.workerId);
+    assert.equal(lease!.fencing_token, 2, "reclaim takeover must advance the fencing token");
+  }
+  assert.equal(getAutoWorker(holder)?.status, "crashed", "dead holder must be marked crashed");
+});
+
+test("kernelClaimUnit reclaims a repo-root holder when dispatched from the milestone worktree (#2851)", (t) => {
+  const base = makeProject(t);
+  // `/gsd dispatch` passes the milestone worktree as the claim's project root
+  // while an auto holder registers the repository root.
+  const worktree = join(base, ".gsd-worktrees", "M001");
+  mkdirSync(worktree, { recursive: true });
+  const holder = registerAutoWorker({ projectRootRealpath: base });
+  _getAdapter()!.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
+    .run({ ":pid": -1, ":worker_id": holder });
+  const held = claimMilestoneLease(holder, "M001");
+  assert.equal(held.ok, true);
+
+  const claim = kernelClaimUnit({
+    projectRoot: worktree,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    traceId: "trace-worktree-root-reclaim",
+  });
+
+  assert.equal(claim.kind, "claimed", `expected the repo-root holder to be reclaimed from the worktree: ${JSON.stringify(claim)}`);
+  assert.equal(getAutoWorker(holder)?.status, "crashed");
+});
+
+test("kernelClaimUnit keeps the refusal for a live lease holder (#2851)", (t) => {
+  const base = makeProject(t);
+  const live = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  assert.ok(live.pid !== undefined && live.pid > 0);
+  t.after(() => live.kill());
+  const holder = registerAutoWorker({ projectRootRealpath: base });
+  _getAdapter()!.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
+    .run({ ":pid": live.pid!, ":worker_id": holder });
+  const held = claimMilestoneLease(holder, "M001");
+  assert.equal(held.ok, true);
+
+  const claim = kernelClaimUnit({
+    projectRoot: base,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    traceId: "trace-live-holder-conflict",
+  });
+
+  assert.equal(claim.kind, "refused", "a live holder's lease must never be stolen");
+  if (claim.kind === "refused") {
+    assert.match(claim.reason, new RegExp(`held by worker`));
+  }
+  assert.equal(getAutoWorker(holder)?.status, "active", "live holder must not be marked crashed");
+  assert.equal(getMilestoneLease("M001")?.worker_id, holder);
 });

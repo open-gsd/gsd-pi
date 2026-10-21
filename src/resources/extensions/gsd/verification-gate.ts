@@ -724,6 +724,7 @@ const KNOWN_COMMAND_PREFIXES = new Set([
   "echo", "cat", "ls", "test", "true", "false", "pwd", "env",
   "make", "cargo", "go", "python", "python3", "pip", "pip3",
   "ruby", "gem", "bundle", "rake",
+  "Rscript",
   "java", "javac", "mvn", "gradle",
   "docker", "docker-compose",
   "git", "gh",
@@ -754,7 +755,7 @@ const PROSE_MARKER_WORDS = new Set([
  * unchanged: the remainder is ambiguous shell input, so the prose heuristic
  * keeps seeing it (protects #1671-style prose containing apostrophes).
  */
-function stripQuotedSegments(cmd: string): string {
+function stripQuotedSegments(cmd: string, quotedSegmentPlaceholder = ""): string {
   let out = "";
   let inSingle = false;
   let inDouble = false;
@@ -784,10 +785,12 @@ function stripQuotedSegments(cmd: string): string {
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
+      if (!inSingle) out += quotedSegmentPlaceholder;
       continue;
     }
     if (ch === "\"" && !inSingle) {
       inDouble = !inDouble;
+      if (!inDouble) out += quotedSegmentPlaceholder;
       continue;
     }
     if (!inSingle && !inDouble) out += ch;
@@ -843,6 +846,50 @@ function knownPrefixInvocationIsCommand(
   if (readsAsProseAfterCommandWord(effectiveTokens, proseTokens)) return false;
   if (looksLikeNaturalLanguageTail(effectiveTokens)) return false;
   return true;
+}
+
+/**
+ * Does this token end in sentence punctuation rather than shell syntax?
+ * Only a bare word (letters, digits, underscore, apostrophe, hyphen) with a
+ * single trailing period counts. Shell tokens with a trailing dot always
+ * carry more than a word: path or assignment metacharacters (`src/.`,
+ * `.\tests\.`, `LEFT=.`), an inner dot (`example.com.` absolute DNS name),
+ * a regex anchor or wildcard (`^ERROR.`), dot-only operands (`find .`,
+ * `cd ..`) or an ellipsis/glob tail (`go test ./...`).
+ */
+function endsWithSentenceTerminator(token: string): boolean {
+  return /^[\w'-]+\.$/.test(token);
+}
+
+/**
+ * Does the token after a candidate sentence terminator begin an independent
+ * clause — another embedded command span (known command, executable path or
+ * `NAME=value` assignment) or a prose-marker word? `echo ERROR. WARN. OK`
+ * chains positional shell data, not clauses.
+ */
+function startsNewClause(token: string | undefined): boolean {
+  if (!token) return false;
+  if (isAnchoredCommandToken(token)) return true;
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) return true;
+  return PROSE_MARKER_WORDS.has(token.toLowerCase().replace(/[.,;:!?]+$/, ""));
+}
+
+/**
+ * Count mid-stream sentence terminators that open a new clause: a bare-word
+ * token ending in a single `.` whose successor starts another command span
+ * or prose clause. The final token is exempt — a trailing period is just
+ * punctuation, not a clause boundary — and a word that is a flag's argument
+ * (`grep -e ERROR.`) is shell structure, not a clause boundary.
+ */
+function countSentenceTerminators(tokens: string[]): number {
+  let count = 0;
+  for (let i = 0; i < tokens.length - 1; i += 1) {
+    if (!endsWithSentenceTerminator(tokens[i] ?? "")) continue;
+    if (tokens[i - 1]?.startsWith("-")) continue;
+    if (!startsNewClause(tokens[i + 1])) continue;
+    count += 1;
+  }
+  return count;
 }
 
 /** Executable script extensions for a repo-relative path's final segment. */
@@ -934,16 +981,27 @@ function stripLeadingEnvAssignments(command: string): { stripped: boolean; remai
  *   1. First token is a known command prefix
  *   2. First token is path-like (`/`, `./`, `../`, or a repo-relative
  *      executable path such as `bin/rails`, #2664)
- *   3. Any token starts with `-` (flag-like)
- *   4. First token contains no uppercase letters (commands are lowercase)
- *      AND first token does not end with a comma or colon (prose punctuation)
- *   5. Leading `NAME=value` environment assignments are unwrapped and the
+ *   3. Any token starts with `-` and is not a bare `-` in a capitalized line
+ *      (a bare `-` is a prose dash there, #2849; it stays a stdin operand
+ *      for lowercase invocations)
+ *   4. Leading `NAME=value` environment assignments are unwrapped and the
  *      anchored command they prefix is judged instead (#2664)
  *
  * Heuristics (any true → prose-like):
- *   1. First token starts with an uppercase letter and the string has 4+ words
+ *   1. First token starts with an uppercase letter (and is not path-like)
+ *      and the string has 4+ words — evaluated before the flag heuristic,
+ *      #2849; for env-prefixed strings the command word after the
+ *      assignments is judged, not the assignment
  *   2. String contains commas followed by spaces (prose clause structure)
  *   3. First token has no ASCII letters or digits and the string has 4+ words
+ *   4. Two or more mid-stream sentence terminators that each open a new
+ *      clause — the successor token starts an embedded command span or a
+ *      prose-marker clause (#2868): a single line stringing several
+ *      `.`-terminated clauses together is prose that embeds commands, not
+ *      one runnable command — the flags come from the embedded spans, so
+ *      the flag heuristic and the anchored branches must not see them.
+ *      Real compound commands chain with `&&`, `;` or `|`, never sentence
+ *      periods
  */
 export function isLikelyCommand(cmd: string): boolean {
   const trimmed = cmd.trim();
@@ -975,6 +1033,22 @@ export function isLikelyCommand(cmd: string): boolean {
   // Numbered checklist / narrative prose (#1994).
   if (/^\d+[.)]\s/.test(trimmed)) return false;
 
+  // Multi-sentence prose blob (#2868): a verify line that strings several
+  // `.`-terminated clauses together ("run each command ... gives 0.
+  // python -m pytest ... gives 0. ...") is a prose sentence embedding
+  // commands, not one runnable shell command. The flag-like tokens come from
+  // the embedded spans, so they must not reach the flag heuristic — and an
+  // env-assignment or known-command opener must not anchor the whole blob
+  // either, which is why this runs before the env-prefix acceptance below.
+  // Real compound commands chain with `&&`, `;` or `|`, never sentence
+  // periods. Quoted segments are replaced by a placeholder instead of
+  // vanishing, so a word continuing past a quoted fragment
+  // (`package."${EXT:-json}"`) does not manufacture a trailing sentence
+  // period, while wholly quoted sentence text still counts as data.
+  const shapePreservedTokens = stripQuotedSegments(trimmed, "\u0000").trim().split(/\s+/);
+  const terminatorTokens = firstToken === "!" ? shapePreservedTokens.slice(1) : shapePreservedTokens;
+  if (countSentenceTerminators(terminatorTokens) >= 2) return false;
+
   // Leading `NAME=value` environment assignments are shell syntax, not prose
   // (#2664): when they prefix an anchored command (known prefix or executable
   // path) that itself reads as a command, accept. Shell-word aware, so
@@ -1004,11 +1078,27 @@ export function isLikelyCommand(cmd: string): boolean {
     return knownPrefixInvocationIsCommand(effectiveTokens, proseTokens);
   }
 
-  // Has flag-like tokens → command
-  if (effectiveTokens.some(t => t.startsWith("-"))) return true;
+  // An unanchored capitalized first word reads as prose even when the tail
+  // carries flags (#1671 principle, #2849): "Check 1 - front-door sections
+  // present. Command: grep -n ..." carries a bare prose dash plus an embedded
+  // flag, which used to win the flag heuristic below and run the labelled
+  // line verbatim. Known prefixes and executable paths are already accepted
+  // above, so only unrecognized first words reach this guard. Path-like first
+  // tokens (`C:\Python312\python.exe`) stay command-shaped, and env
+  // assignments are shell syntax, not prose words — judge the command they
+  // prefix (`CI=1 rspec --format progress` stays a command).
+  const proseFirstToken = envStrip.stripped
+    ? envStrip.remainder.split(/\s+/)[0] ?? ""
+    : effectiveFirstToken;
+  const capitalizedProseFirstWord = /^[A-Z]/.test(proseFirstToken)
+    && !proseFirstToken.includes("/")
+    && !proseFirstToken.includes("\\");
+  if (capitalizedProseFirstWord && effectiveTokens.length >= 4) return false;
 
-  // First token starts with uppercase + 4 or more words → prose
-  if (/^[A-Z]/.test(effectiveFirstToken) && effectiveTokens.length >= 4) return false;
+  // Has flag-like tokens → command. A bare `-` reads as a prose dash in a
+  // capitalized line (#2849) but stays a stdin operand for lowercase
+  // invocations (`cmp - reference.bin 0 0`).
+  if (effectiveTokens.some(t => t.startsWith("-") && (t !== "-" || !capitalizedProseFirstWord))) return true;
 
   // Contains comma-space patterns (prose clause separators) → prose
   if (/,\s/.test(trimmed) && tokens.length >= 4) return false;

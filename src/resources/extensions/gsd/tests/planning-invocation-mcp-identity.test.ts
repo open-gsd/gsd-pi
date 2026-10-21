@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -16,9 +16,10 @@ process.env.GSD_WORKFLOW_EXECUTORS_MODULE = fileURLToPath(
 import { _getAdapter, closeDatabase } from "../mcp-bridge.ts";
 import { openWorkflowDatabase } from "../db-workspace.ts";
 import { invalidateAllCaches } from "../cache.ts";
-import { registerWorkflowTools } from "../../../../../packages/mcp-server/src/workflow-tools.ts";
+import { NATIVE_MCP_TOOL_CALL_ID, registerWorkflowTools } from "../../../../../packages/mcp-server/src/workflow-tools.ts";
 
 interface RequestExtra {
+  [NATIVE_MCP_TOOL_CALL_ID]?: string;
   requestId: string | number;
   sessionId?: string;
   _meta?: Record<string, unknown>;
@@ -177,6 +178,50 @@ test("MCP canonical and alias planning calls replay one Claude Code tool identit
         resulting_revision: 2,
       },
     ]);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("native and packaged MCP identities allow independent planning writes in the same project", async () => {
+  const base = makeBase();
+  try {
+    const server = makeServer();
+    registerWorkflowTools(server as Parameters<typeof registerWorkflowTools>[0]);
+    const canonical = tool(server, "gsd_plan_milestone");
+    const alias = tool(server, "gsd_milestone_plan");
+    const identity = `mcp-explicit:v1:sha256:${createHash("sha256").update("native-private-key").digest("hex")}`;
+    const nativeExtra: RequestExtra = { requestId: 1, [NATIVE_MCP_TOOL_CALL_ID]: identity };
+    const packagedExtra: RequestExtra = {
+      requestId: 1,
+      _meta: {
+        "io.opengsd/idempotency-key": identity,
+        "native-mcp-tool-call-id": identity,
+        sourceTransport: "pi-tool",
+      },
+    };
+    const first = await canonical.handler(params(base), nativeExtra);
+    assert.notEqual(first.isError, true);
+    const secondArgs = { ...params(base), milestoneId: "M002" };
+    const second = await canonical.handler(secondArgs, packagedExtra);
+    assert.notEqual(second.isError, true, JSON.stringify(second));
+    assert.deepEqual(await alias.handler(params(base), nativeExtra), first);
+    assert.deepEqual(await alias.handler(secondArgs, packagedExtra), second);
+    const changed = await canonical.handler(params(base, "changed native payload"), nativeExtra);
+    assert.equal(changed.isError, true, "native identity must still detect changed payloads");
+
+    const writes = operations().slice(1);
+    assert.equal(writes.length, 2, "each transport commits its own mutation, retries commit neither");
+    assert.match(String(writes[0]!.idempotency_key), /^mcp-native:gsd_plan_milestone:sha256:[a-f0-9]{64}$/);
+    assert.equal(writes[1]!.idempotency_key, `mcp:gsd_plan_milestone:${identity}`);
+    const receipts = _getAdapter()!.prepare(`
+      SELECT source_transport, trace_id FROM workflow_operations
+      WHERE operation_type = 'workflow.milestone.plan' ORDER BY resulting_revision
+    `).all();
+    assert.equal(receipts[0]!["source_transport"], "pi-tool");
+    assert.equal(receipts[1]!["source_transport"], "workflow-mcp");
+    assert.notEqual(receipts[0]!["trace_id"], receipts[1]!["trace_id"]);
+    assert.equal(JSON.stringify(receipts).includes("native-private-key"), false);
   } finally {
     cleanup(base);
   }

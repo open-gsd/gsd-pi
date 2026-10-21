@@ -219,6 +219,16 @@ export interface OverlayOptions {
 	/** Margin from terminal edges. Number applies to all sides. */
 	margin?: OverlayMargin | number;
 
+	// === Layout ===
+	/**
+	 * Dock the overlay below the content instead of painting over it. The content
+	 * is pushed up by the overlay's height, so nothing the overlay is about to ask
+	 * about (e.g. a summary the user must read before answering) is hidden. The
+	 * overlay occupies the bottom rows of the screen; anchor/row/offsetY are ignored,
+	 * width/col still apply. Default: false (float over the content).
+	 */
+	reserveSpace?: boolean;
+
 	// === Visibility ===
 	/**
 	 * Control overlay visibility based on terminal dimensions.
@@ -378,6 +388,8 @@ export class TUI extends Container {
 		preFocus: Component | null;
 		hidden: boolean;
 		focusOrder: number;
+		/** Tallest height a reserveSpace overlay has had while shown; see compositeOverlays. */
+		dockedHeightHighWater?: number;
 	}[] = [];
 
 	// Screen regions (viewport-relative, 0-based) of overlays from the last
@@ -460,7 +472,7 @@ export class TUI extends Container {
 	 * Returns a handle to control the overlay's visibility.
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
-		const entry = {
+		const entry: (typeof this.overlayStack)[number] = {
 			component,
 			options,
 			preFocus: this.focusedComponent,
@@ -493,6 +505,7 @@ export class TUI extends Container {
 			setHidden: (hidden: boolean) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
+				entry.dockedHeightHighWater = undefined;
 				// Update focus when hiding/showing
 				if (hidden) {
 					// If this overlay had focus, move focus to next visible or preFocus
@@ -544,6 +557,11 @@ export class TUI extends Container {
 	/** Check if there are any visible overlays */
 	hasOverlay(): boolean {
 		return this.overlayStack.some((o) => this.isOverlayVisible(o));
+	}
+
+	/** True when a visible overlay is docked below the content (reserveSpace). */
+	private hasDockedOverlay(): boolean {
+		return this.overlayStack.some((o) => o.options?.reserveSpace && this.isOverlayVisible(o));
 	}
 
 	/** Check if an overlay entry is currently visible */
@@ -1088,8 +1106,23 @@ export class TUI extends Container {
 		if (this.overlayStack.length === 0) return lines;
 		const result = [...lines];
 
-		// Pre-render all visible overlays and calculate positions
-		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
+		// Pre-render all visible overlays and calculate positions. Entries are
+		// kept in focus order and painted in that same order, so a later-opened
+		// overlay paints over an earlier one regardless of kind — matching the
+		// topmost-region hit-test in dispatchMouse.
+		const painted: {
+			component: Component;
+			overlayLines: string[];
+			/** Floats: screen-relative row. Docks: assigned below, viewport-relative. */
+			row: number;
+			col: number;
+			w: number;
+			focusOrder: number;
+			capturing: boolean;
+			/** Set for docked (reserveSpace) overlays. */
+			dock?: { reserved: number; actualHeight: number };
+		}[] = [];
+		let dockedHeight = 0;
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
@@ -1109,30 +1142,42 @@ export class TUI extends Container {
 				overlayLines = overlayLines.slice(0, maxHeight);
 			}
 
+			if (options?.reserveSpace) {
+				// Never let docked rows exceed the screen.
+				overlayLines = overlayLines.slice(0, Math.max(0, termHeight - dockedHeight));
+				// Keep the docked block at its tallest height while shown: a dialog that
+				// shrinks (fewer options on the next question) would shrink the whole
+				// frame, and the renderer repaints a shrunken tall frame with an overlay
+				// up by re-emitting scrollback. Blank rows sit above the dialog.
+				const reserved = Math.min(Math.max(entry.dockedHeightHighWater ?? 0, overlayLines.length), termHeight - dockedHeight);
+				entry.dockedHeightHighWater = reserved;
+				const { col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
+				painted.push({
+					component,
+					overlayLines,
+					row: 0,
+					col,
+					w: width,
+					focusOrder: entry.focusOrder,
+					capturing: !options?.nonCapturing,
+					dock: { reserved, actualHeight: overlayLines.length },
+				});
+				dockedHeight += reserved;
+				continue;
+			}
+
 			// Get final row/col with actual overlay height
 			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
 
-			rendered.push({ overlayLines, row, col, w: width });
-			// Record the on-screen region for mouse hit-testing. Overlays force the
-			// working area to at least the terminal height (see below), so the
-			// viewport is bottom-aligned to the screen and `row`/`col` are also the
-			// viewport-relative screen coordinates.
-			this.overlayRegions.push({
-				component,
-				row,
-				col,
-				width,
-				height: overlayLines.length,
-				focusOrder: entry.focusOrder,
-				capturing: !options?.nonCapturing,
-			});
+			painted.push({ component, overlayLines, row, col, w: width, focusOrder: entry.focusOrder, capturing: !options?.nonCapturing });
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
 
 		// Pad to at least terminal height so overlays have screen-relative positions.
 		// Excludes maxLinesRendered: the historical high-water mark caused self-reinforcing
 		// inflation that pushed content into scrollback on terminal widen.
-		const workingHeight = Math.max(result.length, termHeight, minLinesNeeded);
+		// Docked overlays add their height below the content.
+		const workingHeight = Math.max(result.length + dockedHeight, termHeight, minLinesNeeded);
 
 		// Extend result with empty lines if content is too short for overlay placement or working area
 		while (result.length < workingHeight) {
@@ -1141,8 +1186,45 @@ export class TUI extends Container {
 
 		const viewportStart = Math.max(0, workingHeight - termHeight);
 
-		// Composite each overlay
-		for (const { overlayLines, row, col, w } of rendered) {
+		// Docked overlays stack below the content, in focus order (top-most last).
+		// Assign each its bottom rows before painting.
+		let dockRow = workingHeight - dockedHeight;
+		for (const p of painted) {
+			if (!p.dock) continue;
+			p.row = dockRow - viewportStart;
+			dockRow += p.dock.reserved;
+		}
+
+		// Composite each overlay in focus order and record the on-screen region
+		// for mouse hit-testing. Overlays force the working area to at least the
+		// terminal height (see above), so the viewport is bottom-aligned to the
+		// screen and screen-relative rows are also viewport-relative coordinates.
+		for (const { component, overlayLines, row, col, w, focusOrder, capturing, dock } of painted) {
+			if (dock) {
+				// The reserved block's blank padding sits above the actual rows; only
+				// the component's own rows are painted and registered, so mouse
+				// coordinates never map into the padding. `row` is the reserved
+				// block's viewport-relative top, assigned in the stacking pass above.
+				const pad = dock.reserved - dock.actualHeight;
+				const top = viewportStart + row + pad;
+				for (let i = 0; i < dock.actualHeight; i++) {
+					// Defensive: truncate overlay line to declared width before compositing
+					// (components should already respect width, but this ensures it)
+					const truncatedOverlayLine =
+						visibleWidth(overlayLines[i]) > w ? sliceByColumn(overlayLines[i], 0, w, true) : overlayLines[i];
+					result[top + i] = this.compositeLineAt(result[top + i], truncatedOverlayLine, col, w, termWidth);
+				}
+				this.overlayRegions.push({
+					component,
+					row: top - viewportStart,
+					col,
+					width: w,
+					height: dock.actualHeight,
+					focusOrder,
+					capturing,
+				});
+				continue;
+			}
 			for (let i = 0; i < overlayLines.length; i++) {
 				const idx = viewportStart + row + i;
 				if (idx >= 0 && idx < result.length) {
@@ -1153,6 +1235,15 @@ export class TUI extends Container {
 					result[idx] = this.compositeLineAt(result[idx], truncatedOverlayLine, col, w, termWidth);
 				}
 			}
+			this.overlayRegions.push({
+				component,
+				row,
+				col,
+				width: w,
+				height: overlayLines.length,
+				focusOrder,
+				capturing,
+			});
 		}
 
 		return result;
@@ -1805,8 +1896,12 @@ export class TUI extends Container {
 		// render has no committed frame to compare against (previousLines is
 		// reset), so it never pads here — the kept-top writer handles that
 		// path.
+		// Docked (reserveSpace) overlays add their rows after this padding, so the
+		// frame is not shorter than the retained top; padding too would count them
+		// twice.
 		const retainedTop = this.previousViewportTop;
 		if (
+			!this.hasDockedOverlay() &&
 			retainedTop > 0 &&
 			retainedTop <= this.flushedLineCount &&
 			this.flushedAtWidth === width &&

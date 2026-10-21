@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	_resolveVerificationTimeoutMsForTest,
 	_routeHostTechnicalFailureForTest,
 	runPostUnitVerification,
 } from "../auto-verification.ts";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "../constants.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { describeHostVerificationRationale } from "../verification-verdict.ts";
 import { cleanup, makeTempRepo } from "./test-utils.ts";
 import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
@@ -401,4 +403,107 @@ test("identical gate failures count 1/2, then 2/2, then exhaust into a durable a
 	assert.equal(session.lastTaskRecoveryAbortId, "ra-3");
 	assert.equal(usedUnitBudget(session, "execute-task", "M001/S01/T01"), 0, "abort clears the per-unit retry counter");
 	assert.equal(paused, false, "the gate defers the pause to the finalize abort path");
+});
+
+test("host verification resolves project preferences from the session basePath (#2833)", async (t) => {
+	const base = makeTempRepo("gsd-verify-basepath-");
+	mkdirSync(join(base, ".gsd"), { recursive: true });
+	mkdirSync(join(base, "child"), { recursive: true });
+	// The child repository is declared in the SESSION project's preferences.
+	// The process cwd (the repo checkout running the test) declares none, so a
+	// cwd-resolved preference load cannot find the target.
+	writeFileSync(
+		join(base, ".gsd", "PREFERENCES.md"),
+		[
+			"---",
+			"workspace:",
+			"  mode: parent",
+			"  repositories:",
+			"    child:",
+			"      path: ./child",
+			"---",
+			"",
+		].join("\n"),
+	);
+	openDatabase(join(base, ".gsd", "gsd.db"));
+	insertMilestone({ id: "M001", title: "M", status: "active" });
+	insertSlice({ id: "S01", milestoneId: "M001", title: "S", status: "active" });
+	insertTask({
+		id: "T01",
+		sliceId: "S01",
+		milestoneId: "M001",
+		title: "Task",
+		status: "active",
+		planning: { targetRepositories: ["child"] },
+	});
+
+	// Isolate global preferences so machine state cannot satisfy the load:
+	// a valid file at GSD_HOME wins over the legacy homedir fallback, and it
+	// declares no workspace repositories.
+	const prevGsdHome = process.env.GSD_HOME;
+	process.env.GSD_HOME = join(base, "gsd-home");
+	mkdirSync(process.env.GSD_HOME, { recursive: true });
+	writeFileSync(join(process.env.GSD_HOME, "PREFERENCES.md"), "---\nversion: 1\n---\n");
+	t.after(() => {
+		if (prevGsdHome === undefined) delete process.env.GSD_HOME;
+		else process.env.GSD_HOME = prevGsdHome;
+		closeDatabase();
+		cleanup(base);
+	});
+
+	const session = {
+		basePath: base,
+		canonicalProjectRoot: base,
+		currentUnit: { type: "execute-task", id: "M001/S01/T01" },
+		lastTaskRecoveryAbortId: null,
+		pendingVerificationRetry: null,
+		unclaimedUnitBudgets: new Map<string, number>(),
+	};
+	useUnitBudget(session, "execute-task", "M001/S01/T01", 1);
+
+	let recordedVerdict = false;
+	let gateCwd: string | undefined;
+	const result = await runPostUnitVerification({
+		s: session,
+		ctx: { ui: { notify() {} } },
+		pi: {},
+		taskAuthority: {
+			readLatestTaskAttempt: () => ({
+				attemptId: "attempt-1",
+				resultId: "result-1",
+				state: "settled",
+				outcome: "succeeded",
+				nextStage: "verify",
+			}),
+			readTaskTechnicalVerdict: () => null,
+			recordTaskTechnicalVerdict: () => {
+				recordedVerdict = true;
+				return { verdictId: "verdict-1", evidenceId: "evidence-1" } as never;
+			},
+			invalidateTaskTechnicalPass: () => { throw new Error("must not invalidate"); },
+			routeTaskFailure: () => {
+				throw new Error("must not route a recovery for a passed gate");
+			},
+		},
+		runVerificationGate: (input: { cwd: string }) => {
+			gateCwd = input.cwd;
+			return {
+				passed: true,
+				checks: [{
+					command: "echo ok",
+					exitCode: 0,
+					stdout: "",
+					stderr: "",
+					durationMs: 1,
+				}],
+				discoverySource: "preference",
+				timestamp: Date.now(),
+			};
+		},
+	} as never, async () => {});
+
+	assert.equal(result, "continue", "declared repositories must resolve so the gate runs and passes");
+	assert.equal(gateCwd, join(base, "child"), "the gate must run in the repository resolved from session basePath preferences");
+	assert.equal(recordedVerdict, true, "the passing gate must be recorded as the technical verdict");
+	assert.equal(session.pendingVerificationRetry, null);
 });

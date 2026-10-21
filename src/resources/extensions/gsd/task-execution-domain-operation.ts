@@ -434,6 +434,60 @@ export function readTaskAttemptIds(task: ClaimTaskAttemptInput["task"]): string[
   return rows.map((row) => String(row["attempt_id"]));
 }
 
+/** The unit_dispatches row status for a coordination dispatch id, or null. */
+export function readTaskExecutionDispatchStatus(dispatchId: number): string | null {
+  const row = getDb().prepare(
+    "SELECT status FROM unit_dispatches WHERE id = :dispatch_id LIMIT 1",
+  ).get({ ":dispatch_id": dispatchId }) as { status: string } | undefined;
+  return row ? String(row.status) : null;
+}
+
+/**
+ * Dispatch rows that can no longer act on their Attempt. The terminal mirror
+ * of terminalizeTaskExecutionDispatch's tolerated sets (db/writers/
+ * task-execution.ts): "completed" for succeeded settlements, and
+ * canceled/failed/stuck/paused for failed/interrupted ones. The column is
+ * unconstrained TEXT, so this is an explicit allowlist — an unknown status
+ * stays live (fail-closed), never orphaning.
+ */
+const TERMINAL_DISPATCH_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "canceled",
+  "failed",
+  "stuck",
+  "paused",
+]);
+
+/**
+ * A `running` Attempt is orphaned when its coordination dispatch row is
+ * terminal: no live runner can settle it anymore. This is the kill window of
+ * #2850/#2855 — the row is canceled before the Attempt settlement runs. An
+ * unknown or missing dispatch row stays live (fail-closed).
+ */
+export function isTaskExecutionAttemptOrphaned(
+  attempt: Pick<TaskExecutionAttemptSnapshot, "state" | "coordinationDispatchId"> | null | undefined,
+): boolean {
+  if (attempt?.state !== "running") return false;
+  const status = readTaskExecutionDispatchStatus(attempt.coordinationDispatchId);
+  return status !== null && TERMINAL_DISPATCH_STATUSES.has(status);
+}
+
+/**
+ * The newest settled Attempt of the Task's lifecycle, or null. #2855: an
+ * orphaned running re-dispatch Attempt must not hide the settled predecessor
+ * from staged-SUMMARY classification, so its readers look through the orphan
+ * to the attempt that actually owns the durable outcome.
+ */
+export function readLatestSettledTaskAttempt(
+  task: ClaimTaskAttemptInput["task"],
+): TaskExecutionAttemptSnapshot | null {
+  for (const attemptId of readTaskAttemptIds(task)) {
+    const attempt = readTaskAttempt(attemptId);
+    if (attempt?.state === "settled") return attempt;
+  }
+  return null;
+}
+
 export function claimTaskAttempt(input: ClaimTaskAttemptInput): ClaimTaskAttemptReceipt {
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
   let claimed: ClaimRunningAttemptResult | undefined;

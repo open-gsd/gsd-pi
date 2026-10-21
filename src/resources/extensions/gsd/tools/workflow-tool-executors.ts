@@ -2573,11 +2573,15 @@ export async function executePlanMilestone(
       };
     }
     return {
-      content: [{ type: "text", text: `Planned milestone ${result.milestoneId}${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}` }],
+      content: [{
+        type: "text",
+        text: `Planned milestone ${result.milestoneId}${result.titleNormalized ? " (title normalized: em/en dashes and slashes were rewritten; the persisted title is authoritative)" : ""}${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}`,
+      }],
       details: {
         operation: "plan_milestone",
         milestoneId: result.milestoneId,
         roadmapPath: result.roadmapPath,
+        ...(result.titleNormalized ? { titleNormalized: true } : {}),
         ...(result.stale ? { stale: true } : {}),
       },
     };

@@ -42,6 +42,7 @@ import {
   captureVerificationSourceSnapshot,
   confirmVerificationSourceSnapshot,
   resolveVerificationRepositoryTargets,
+  verificationSourceSnapshotOptions,
 } from "../verification-source-integrity.js";
 
 export type MilestoneVerificationClass = "Contract" | "Integration" | "Operational" | "UAT";
@@ -220,7 +221,10 @@ function recordCanonicalValidation(input: {
     sourceRevision = replaySource.aggregateRevision;
     sourceTargets = replaySource.targets;
   } else {
-    const preferences = loadEffectiveGSDPreferences()?.preferences;
+    // Resolve from the artifact's project, not process.cwd(): source-revision
+    // exclusions must match what dispatch/doctor/closeout compute for the same
+    // milestone (#2873, #2833).
+    const preferences = loadEffectiveGSDPreferences(input.artifactBasePath)?.preferences;
     const resolvedTargets = resolveVerificationRepositoryTargets(
       input.artifactBasePath,
       preferences,
@@ -236,9 +240,10 @@ function recordCanonicalValidation(input: {
       id: repository.id,
       cwd: repository.root,
     }));
-    const source = captureVerificationSourceSnapshot(targets);
+    const snapshotOptions = verificationSourceSnapshotOptions(preferences);
+    const source = captureVerificationSourceSnapshot(targets, snapshotOptions);
     if (!source.ok) return { error: source.error };
-    const confirmed = confirmVerificationSourceSnapshot(targets, source.snapshot);
+    const confirmed = confirmVerificationSourceSnapshot(targets, source.snapshot, snapshotOptions);
     if (!confirmed.ok) return { error: confirmed.error };
     sourceRevision = source.snapshot.aggregateRevision;
     sourceTargets = source.snapshot.targets.map((target) => ({

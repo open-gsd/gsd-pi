@@ -40,7 +40,7 @@ mode instead of inheriting an earlier run's degraded-isolation flag.
 
 ## Branching Model (Worktree Mode)
 
-```
+```text
 main ─────────────────────────────────────────────────────────
   │                                                     ↑
   └── milestone/M001 (worktree) ────────────────────────┘
@@ -60,7 +60,7 @@ In **none mode**, commits land directly on the current branch — no milestone b
 
 With [parallel orchestration](./parallel-orchestration.md) enabled, multiple milestones run in separate worktrees simultaneously:
 
-```
+```text
 main ──────────────────────────────────────────────────────────
   │                                      ↑              ↑
   ├── milestone/M002 (worktree) ─────────┘              │
@@ -85,7 +85,7 @@ Each worktree operates on its own branch with its own commit history. Merges hap
 
 Commits use conventional commit format with GSD metadata in trailers:
 
-```
+```text
 feat: core type definitions
 
 GSD-Task: M001/S01/T01
@@ -116,7 +116,7 @@ Worktrees share the project database. GSD never merges a worktree-local `gsd.db`
 
 Use the `/worktree` (or `/wt`) command for standalone manual worktree management:
 
-```
+```bash
 /worktree create
 /worktree switch
 /worktree merge
@@ -126,7 +126,7 @@ Use the `/worktree` (or `/wt`) command for standalone manual worktree management
 
 Inside an active GSD TUI session, use `/gsd worktree` (or `/gsd wt`) for worktree commands that report through the session UI:
 
-```
+```bash
 /gsd worktree list
 /gsd worktree merge [name]
 /gsd worktree clean
@@ -189,8 +189,6 @@ git:
 ```
 
 This pushes the milestone branch and creates a PR targeting `develop` (or whichever branch you specify). Requires `gh` CLI installed and authenticated. See [git.auto_pr](./configuration.md#gitauto_pr) for details.
-
-```
 
 ## Self-Healing
 

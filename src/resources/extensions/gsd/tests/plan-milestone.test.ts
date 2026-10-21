@@ -186,27 +186,44 @@ test('handlePlanMilestone rejects invalid payloads', async () => {
   }
 });
 
-test('handlePlanMilestone rejects delimiter characters in milestone and slice titles', async () => {
+test('handlePlanMilestone normalizes delimiter characters in milestone and slice titles (#2588)', async () => {
   const base = makeTmpBase();
   const dbPath = join(base, '.gsd', 'gsd.db');
   openDatabase(dbPath);
 
   try {
-    const milestoneResult = await handlePlanMilestone({ ...validParams(), title: 'Client/Server split' }, base);
-    assert.ok('error' in milestoneResult);
-    assert.match(milestoneResult.error, /validation failed: title is invalid: .*forward slash/);
-    assert.equal(getMilestone('M001'), null, 'invalid milestone title must not persist');
-
-    const sliceResult = await handlePlanMilestone({
+    const result = await handlePlanMilestone({
       ...validParams(),
+      title: 'Client/Server split — Time Zones',
       slices: [
         validParams().slices[0],
         { ...validParams().slices[1], title: 'Client/Server migration' },
       ],
     }, base);
-    assert.ok('error' in sliceResult);
-    assert.match(sliceResult.error, /validation failed: slices\[1\]\.title is invalid: .*forward slash/);
-    assert.equal(getMilestoneSlices('M001').length, 0, 'invalid slice title must not persist partial roadmap state');
+    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+    assert.equal(result.titleNormalized, true, 'normalization must be surfaced to the caller');
+
+    const milestone = getMilestone('M001');
+    assert.ok(milestone, 'a delimiter-carrying title must not be rejected');
+    assert.equal(milestone?.title, 'Client-Server split - Time Zones');
+
+    const slices = getMilestoneSlices('M001');
+    assert.equal(slices.length, 2);
+    assert.equal(slices[1]?.title, 'Client-Server migration', 'slice titles must be normalized too');
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handlePlanMilestone omits titleNormalized when titles are already clean', async () => {
+  const base = makeTmpBase();
+  const dbPath = join(base, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+
+  try {
+    const result = await handlePlanMilestone(validParams(), base);
+    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+    assert.equal('titleNormalized' in result, false);
   } finally {
     cleanup(base);
   }

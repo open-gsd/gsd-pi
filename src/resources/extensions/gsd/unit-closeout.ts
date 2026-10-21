@@ -24,12 +24,14 @@
 // own dedup window — so `closeUnit` keeps no result cache of its own.
 
 import { appendNotification, type NotifySeverity } from "./notification-store.js";
+import { isInAutoWorktree } from "./auto-worktree-entry.js";
 import { readStringField } from "./auto-unit-tool-scope.js";
 import { MILESTONE_BRANCH_PREFIX } from "./branch-patterns.js";
 import { hasPendingCloseoutEffect } from "./milestone-closeout-effects.js";
 import { nativeGetCurrentBranch } from "./native-git-bridge.js";
-import { getIsolationMode } from "./preferences.js";
-import { autoCommitCurrentBranch } from "./worktree.js";
+import { getIsolationMode, loadEffectiveGSDPreferences } from "./preferences.js";
+import { pushIntegrationBranchIfAhead } from "./publication.js";
+import { autoCommitCurrentBranch, getCurrentBranch } from "./worktree.js";
 import { logWarning } from "./workflow-logger.js";
 
 export type CloseoutBoundary = "task" | "slice" | "milestone";
@@ -79,6 +81,44 @@ export interface UnitCloseoutDeps {
   currentBranch(basePath: string): string | null;
   commit(basePath: string, unitType: string, unitId: string): string | null;
   notify(message: string, severity: NotifySeverity): void;
+  /**
+   * The solo-mode auto-push honor point (#2874). Only called for the
+   * milestone boundary under `isolation: none` — production resolves to the
+   * Publication module's push-if-ahead.
+   */
+  pushIfAhead?(basePath: string, milestoneId: string): void;
+}
+
+/**
+ * The default honor point: with `git.isolation: none` the milestone work
+ * lands directly on the integration branch and no merge/publication step
+ * ever runs, so the closeout commit is the one point where `git.auto_push`
+ * can still honor its documented "push after committing" contract.
+ * Delegates to the Publication module's push-if-ahead (the #2153 closeout
+ * path): a plain, never-forced `git push <remote> <branch>` of the
+ * integration branch only when it is ahead of its upstream, journal-logged.
+ */
+function pushIfAheadAtCloseout(basePath: string, milestoneId: string): void {
+  // A surviving milestone worktree must not be published by a solo push even
+  // when the preferences now say isolation none — its branch belongs to the
+  // worktree merge flow (same guard as milestoneCloseoutEffects).
+  if (isInAutoWorktree(basePath)) return;
+  const git = loadEffectiveGSDPreferences(basePath)?.preferences?.git ?? {};
+  try {
+    pushIntegrationBranchIfAhead({
+      basePath,
+      branch: getCurrentBranch(basePath),
+      milestoneId,
+      prefs: {
+        autoPush: git.auto_push === true,
+        autoPr: git.auto_pr === true,
+        remote: typeof git.remote === "string" ? git.remote : undefined,
+      },
+    });
+  } catch (err) {
+    // The closeout already committed; a push problem must not fail it.
+    logWarning("engine", `auto_push at milestone closeout failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 const defaultDeps: UnitCloseoutDeps = {
@@ -92,6 +132,7 @@ const defaultDeps: UnitCloseoutDeps = {
   },
   commit: (basePath, unitType, unitId) => autoCommitCurrentBranch(basePath, unitType, unitId),
   notify: (message, severity) => appendNotification(message, severity),
+  pushIfAhead: pushIfAheadAtCloseout,
 };
 
 export function closeUnit(request: UnitCloseoutRequest, deps: UnitCloseoutDeps = defaultDeps): UnitCloseoutResult {
@@ -134,6 +175,11 @@ export function closeUnit(request: UnitCloseoutRequest, deps: UnitCloseoutDeps =
         logWarning("engine", notice);
         deps.notify(notice, "warning");
       }
+    } else {
+      // #2874: solo mode has no merge or publication step, so this commit is
+      // the one point auto_push can still honor. Non-fatal, journal-logged;
+      // worktree/branch flows keep owning publication.
+      (deps.pushIfAhead ?? pushIfAheadAtCloseout)(request.basePath, request.unitId);
     }
   }
 

@@ -88,6 +88,15 @@ export interface ExecSandboxResult {
   stderr_path: string;
   meta_path: string;
   digest: string;
+  /**
+   * Bounded, labeled tail of captured stderr, present only on failed
+   * executions (nonzero/null exit, signal, timeout, or abort) that captured
+   * stderr and whose digest does not already expose it (a plain failure with
+   * empty stdout keeps its stderr-exposing marker instead of a duplicate
+   * excerpt). Streams stay separate: the digest remains the stdout tail (or
+   * its marker), this field carries the stderr diagnostics (issue #2927).
+   */
+  stderr_excerpt?: string;
 }
 
 const ALWAYS_FORWARD_ENV = ["PATH", "HOME"] as const;
@@ -325,6 +334,22 @@ export function runExecSandbox(
       writeFileSync(stderrPath, redactSecrets(Buffer.concat([stderrBuf, Buffer.from(stderrSuffix, "utf-8")]).toString("utf-8")));
 
       const digestBody = tail(stdoutBuf, opts.digest_chars);
+      // Issue #2927: failed executions surface a bounded stderr excerpt
+      // alongside stdout instead of losing failure diagnostics behind a
+      // nonempty stdout. Streams stay separate — the digest remains the
+      // stdout tail, the excerpt is its own labeled field — and semantics
+      // stay authoritative: success never gains an excerpt. When stdout is
+      // empty, a plain failure's digest marker already exposes the stderr
+      // tail, so no duplicate excerpt is needed; the aborted/timed-out
+      // markers carry no stderr, so those failures still get one. Bounded by
+      // the existing digest budget; no new cap.
+      const failed = aborted || timedOut || signal !== null || exitCode !== 0;
+      const digestExposesStderr = digestBody.length === 0 && stderrBuf.length > 0 && !aborted && !timedOut;
+      const stderrExcerpt =
+        failed && stderrBuf.length > 0 && !digestExposesStderr
+          ? tail(stderrBuf, opts.digest_chars)
+          : "";
+
       const digest =
         digestBody.length > 0
           ? digestBody
@@ -353,6 +378,7 @@ export function runExecSandbox(
         stderr_path: stderrPath,
         meta_path: metaPath,
         digest,
+        ...(stderrExcerpt ? { stderr_excerpt: stderrExcerpt } : {}),
       };
       writeMeta(metaPath, result, request, now);
       resolveP(result);
