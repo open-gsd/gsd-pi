@@ -148,6 +148,18 @@ function boundedLines(text: string, maxLines: number, lineChars = Number.POSITIV
 	return kept.join("\n") + suffix;
 }
 
+/**
+ * Like boundedLines, but keeps the LAST lines: the stderr preview is a tail,
+ * so its final lines carry the actual failure cause and must survive elision.
+ */
+function boundedTailLines(text: string, maxLines: number, lineChars = Number.POSITIVE_INFINITY): string {
+	const lines = text.split("\n");
+	const kept = lines.slice(-maxLines).map((line) => (line.length > lineChars ? `${line.slice(0, lineChars - 1)}…` : line));
+	const hidden = lines.length - maxLines;
+	const prefix = hidden > 0 ? `… (${hidden} more lines hidden)\n` : "";
+	return prefix + kept.join("\n");
+}
+
 function legacyFallback(result: Record<string, unknown> | null, theme: ThemeLike): Text {
 	const content = sanitizeExecDisplayText(resultContentText(result)).trim();
 	if (content.length === 0) return new Text(theme.fg("muted", "gsd_exec run"), 0, 0);
@@ -202,8 +214,11 @@ function outputRow(kind: "stdout" | "stderr", details: Record<string, unknown> |
  * warning markers. Historical rows keep their output visible: results without
  * `details` fall back to bounded content text, and results with pre-slice
  * details (status/paths but no `digest` key) keep their content below the
- * structured rows. Error results show the original content plus the
- * structured recording warning so a long digest cannot push it out of view.
+ * structured rows. Error results render as a structured failure card when the
+ * run carries preview fields (bounded stdout digest and stderr diagnostics
+ * previews rebuilt from details, recording warning pinned last) and fall back
+ * to the bounded original content plus the structured recording warning
+ * otherwise, so a long digest cannot push either out of view.
  */
 export function renderExecResult(result: unknown, _options: unknown, theme: ThemeLike): Text {
 	const record = asRecord(result);
@@ -216,6 +231,57 @@ export function renderExecResult(result: unknown, _options: unknown, theme: Them
 		: undefined;
 
 	if (record?.isError === true) {
+		// Structured failure card (issue #2927): previews are rebuilt from
+		// details so a long stdout digest cannot push the stderr diagnostics —
+		// or the structured recording warning — out of the fixed error budget
+		// (both previews get the digest-preview row budget; the total stays at
+		// the historical error-card size). Historical rows and non-execution
+		// failures (validation, policy, spawn) without these fields keep the
+		// bounded original-content fallback below.
+		const structuredDigest = detailString(details, "digest");
+		const stderrExcerpt = detailString(details, "stderr_excerpt");
+		if (structuredDigest !== undefined || stderrExcerpt !== undefined) {
+			const lines: string[] = [];
+			const id = detailString(details, "id");
+			const status = execStatusText(details);
+			if (id !== undefined || status !== undefined) {
+				lines.push(theme.fg("muted", `gsd_exec${id ? ` [${sanitizeExecDisplayText(id)}]` : ""}${status ? ` — ${status}` : ""}`));
+			}
+			const stdoutRow = outputRow("stdout", details);
+			if (stdoutRow) lines.push(theme.fg("toolOutput", stdoutRow));
+			const stderrRow = outputRow("stderr", details);
+			if (stderrRow) lines.push(theme.fg("toolOutput", stderrRow));
+			lines.push(theme.fg("muted", "output preview — tail of the run's captured output, not the full log:"));
+			// A stderr-only failure's digest is the labeled stderr tail ("[no
+			// stdout — tail of stderr]" marker + the tail): the marker is kept as
+			// its own line and the tail keeps its final lines, where the cause
+			// lives. A stdout tail keeps the head-keeping bounder used by the
+			// success card.
+			const rawDigest = structuredDigest ?? "";
+			if (rawDigest.startsWith("[no stdout —")) {
+				const newlineIndex = rawDigest.indexOf("\n");
+				const marker = newlineIndex === -1 ? rawDigest : rawDigest.slice(0, newlineIndex);
+				const stderrTail = newlineIndex === -1 ? "" : rawDigest.slice(newlineIndex + 1);
+				lines.push(theme.fg("muted", sanitizeExecDisplayText(marker)));
+				const visibleTail = sanitizeExecDisplayText(stderrTail).trim();
+				if (visibleTail) {
+					lines.push(theme.fg("toolOutput", boundedTailLines(visibleTail, DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
+				}
+			} else {
+				lines.push(theme.fg("toolOutput", boundedLines(sanitizeExecDisplayText(rawDigest), DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
+			}
+			// Whitespace- or escape-only stderr has no visible diagnostic — the
+			// panel would be blank, so it is skipped entirely (issue #2927).
+			const visibleStderr = stderrExcerpt !== undefined ? sanitizeExecDisplayText(stderrExcerpt).trim() : "";
+			if (visibleStderr) {
+				lines.push(theme.fg("error", "stderr (tail) — failure diagnostics:"));
+				// The excerpt is a tail: keep its final lines, where the cause lives.
+				lines.push(theme.fg("error", boundedTailLines(visibleStderr, DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
+			}
+			if (notRecordedRow) lines.push(notRecordedRow);
+			return new Text(lines.join("\n"), 0, 0);
+		}
+
 		// Content is the authoritative error text (validation, policy block,
 		// execution failure): show it bounded, then guarantee the structured
 		// recording warning regardless of how long the content is.

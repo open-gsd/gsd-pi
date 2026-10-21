@@ -421,7 +421,13 @@ function formatResult(result: ExecSandboxResult, purpose?: string): ToolExecutio
     `  stdout: ${result.stdout_bytes}B${result.stdout_truncated ? " (truncated)" : ""} → ${result.stdout_path}`,
     `  stderr: ${result.stderr_bytes}B${result.stderr_truncated ? " (truncated)" : ""} → ${result.stderr_path}`,
   ];
-  const summary = `${headerLines.join("\n")}\n--- digest ---\n${result.digest}`.trimEnd();
+  // Issue #2927: failed executions append a separate, labeled bounded stderr
+  // excerpt after the digest — streams stay separate (the digest remains the
+  // stdout tail), successes are unchanged, and the section is additive so
+  // historical result text keeps its shape.
+  const sections = [`--- digest ---\n${result.digest}`];
+  if (result.stderr_excerpt) sections.push(`--- stderr (tail) ---\n${result.stderr_excerpt}`);
+  const summary = `${headerLines.join("\n")}\n${sections.join("\n")}`.trimEnd();
   return {
     content: [{ type: "text", text: summary }],
     details: {
@@ -446,6 +452,9 @@ function formatResult(result: ExecSandboxResult, purpose?: string): ToolExecutio
       // renderers display-normalize it without mutating these values.
       ...(typeof purpose === "string" ? { purpose } : {}),
       digest: result.digest,
+      // Additive (issue #2927): bounded labeled stderr diagnostics for failed
+      // executions; absent (never null) when not applicable.
+      ...(result.stderr_excerpt ? { stderr_excerpt: result.stderr_excerpt } : {}),
     },
     isError: result.aborted === true || result.timed_out || result.signal !== null || result.exit_code !== 0,
   };
