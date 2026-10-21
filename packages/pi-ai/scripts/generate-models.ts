@@ -10,6 +10,7 @@ import {
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
 import type { AnthropicMessagesCompat, Api, KnownProvider, Model, OpenAICompletionsCompat } from "../src/types.ts";
+import { applyCopilotGpt6ResponsesRouting } from "./copilot-gpt6-routing.ts";
 import { formatCost, roundCost } from "./lib/model-cost.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1158,7 +1159,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 				// Claude 4.x models route to Anthropic Messages API
 				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
-				// gpt-5 models require responses API, others use completions
+				// Base routing; explicit Copilot GPT-6 routes are normalized before final metadata.
 				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
 
 				const api: Api = isCopilotClaude4
@@ -2659,6 +2660,8 @@ async function generateModels() {
 	allModels.push(...azureOpenAiModels);
 
 	for (const model of allModels) {
+		// Apply after ingestion and alias synthesis so catalog refreshes cannot undo this transport contract.
+		applyCopilotGpt6ResponsesRouting(model);
 		applyThinkingLevelMetadata(model);
 	}
 

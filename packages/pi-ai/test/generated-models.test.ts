@@ -4,11 +4,50 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { applyCopilotGpt6ResponsesRouting } from "../scripts/copilot-gpt6-routing.ts";
 import { isModelsCatalog } from "../src/model-catalog.ts";
 import { calculateCost } from "../src/models.ts";
 import { MODELS } from "../src/models.generated.ts";
 
+describe("Copilot GPT-6 generator routing", () => {
+	for (const id of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra"]) {
+		test(`normalizes ingested or synthesized ${id} without changing model limits`, () => {
+			const model = { id, provider: "github-copilot", api: "openai-completions", compat: { supportsReasoningEffort: false }, contextWindow: 1050000 };
+			applyCopilotGpt6ResponsesRouting(model);
+			expect(model).toEqual({ id, provider: "github-copilot", api: "openai-responses", contextWindow: 1050000 });
+		});
+	}
+
+	for (const [provider, id, api] of [
+		["openai", "gpt-6-luna", "openai-completions"],
+		["github-copilot", "gpt-5.4", "openai-responses"],
+		["github-copilot", "gpt-6-luna-preview", "openai-completions"],
+	]) {
+		test(`does not override ${provider}/${id}`, () => {
+			const model = { provider, id, api, compat: { supportsStore: false } };
+			const before = structuredClone(model);
+			applyCopilotGpt6ResponsesRouting(model);
+			expect(model).toEqual(before);
+		});
+	}
+
+	test("preserves existing Responses compatibility metadata", () => {
+		const compat = { supportsStore: false };
+		const model = { provider: "github-copilot", id: "gpt-6-luna", api: "openai-responses", compat };
+		applyCopilotGpt6ResponsesRouting(model);
+		expect(model.compat).toBe(compat);
+	});
+});
+
 describe("models.generated.ts", () => {
+	for (const modelId of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra"] as const) {
+		test(`routes Copilot ${modelId} through the supported Responses endpoint`, () => {
+			const model = MODELS["github-copilot"][modelId];
+			expect(model.api).toBe("openai-responses");
+			expect("compat" in model).toBe(false);
+		});
+	}
+
 	test("models.generated.json mirrors the complete generated catalog", () => {
 		// allow-source-grep: reads the generated JSON data snapshot (manifest output), not source, to verify it mirrors MODELS
 		const snapshot = JSON.parse(readFileSync(join(import.meta.dirname, "../src/models.generated.json"), "utf8"));
@@ -198,7 +237,7 @@ describe("models.generated.ts", () => {
 		const model = MODELS["github-copilot"]["gpt-6-astra"];
 		expect(model).toMatchObject({
 			id: "gpt-6-astra",
-			api: "openai-completions",
+			api: "openai-responses",
 			provider: "github-copilot",
 			contextWindow: 1_050_000,
 			maxTokens: 128_000,

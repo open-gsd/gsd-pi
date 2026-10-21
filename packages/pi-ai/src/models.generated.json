@@ -14925,7 +14925,7 @@
     "gpt-6-luna": {
       "id": "gpt-6-luna",
       "name": "GPT-6 Luna",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -14946,11 +14946,6 @@
         "Editor-Version": "vscode/1.107.0",
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
-      },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
       }
     },
     "grok-4.5": {
@@ -15278,7 +15273,7 @@
     "gpt-6.1-sol": {
       "id": "gpt-6.1-sol",
       "name": "GPT-6.1 Sol",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -15299,11 +15294,6 @@
         "Editor-Version": "vscode/1.107.0",
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
-      },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
       }
     },
     "kimi-k3": {
@@ -15468,7 +15458,7 @@
     "gpt-6-astra": {
       "id": "gpt-6-astra",
       "name": "GPT-6 Astra",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -15489,11 +15479,6 @@
         "Editor-Version": "vscode/1.107.0",
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
-      },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
       }
     },
     "gpt-5.4-nano": {
@@ -15530,7 +15515,7 @@
     "gpt-6-sol": {
       "id": "gpt-6-sol",
       "name": "GPT-6 Sol",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -15551,11 +15536,6 @@
         "Editor-Version": "vscode/1.107.0",
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
-      },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
       }
     },
     "mai-code-1-flash-picker": {
