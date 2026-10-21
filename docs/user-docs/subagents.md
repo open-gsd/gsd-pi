@@ -169,7 +169,7 @@ If the run has more than one resumable child session, include the agent selector
 }
 ```
 
-Resume requires a run record with exactly one matching child session file. If no run exists, no child session was recorded, or multiple child sessions match without an `agent` selector, GSD returns a hard error instead of guessing.
+Resume requires a run record with exactly one matching child session file. Fresh children (the default) run with `--no-session`, so they record no session and cannot be resumed — launch the work with `context: "fork"` when a resumable child session is needed. When resume is refused, the error names the actual reason (`no_persisted_child_session`, `selected_child_sessionless`, `unknown_agent`, `missing_session_file`, or `ambiguous_selector`) instead of a generic selector error, and the `status` output states per-child resumability directly.
 
 ## Run State
 
