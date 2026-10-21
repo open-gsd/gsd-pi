@@ -51,7 +51,7 @@
 | `/gsd fast` | Toggle service tier for supported models (prioritized API routing) |
 | `/gsd rate` | Rate last unit's model tier (over/ok/under) or reset the routing history — improves adaptive routing |
 | `/gsd changelog` | Show categorized release notes |
-| `/gsd logs` | Browse activity logs, debug logs, and metrics |
+| `/gsd logs` | Browse activity logs, debug logs, exec output logs, and metrics |
 | `/gsd remote` | Control remote auto-mode |
 | `/gsd help` | Categorized command reference with descriptions for all GSD subcommands |
 
