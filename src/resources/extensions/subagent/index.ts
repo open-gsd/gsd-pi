@@ -634,8 +634,9 @@ export function markMissingFinalResponse(result: SingleResult): void {
 		`model: ${result.model ?? "unknown"}`,
 		`stopReason: ${originalStopReason ?? "unknown"}`,
 	].join(", ");
-	result.errorMessage = `Subagent produced no valid final response (child exited 0; ${detail}).`;
-	result.stderr = result.stderr || result.errorMessage;
+	const diagnostic = `Subagent produced no valid final response (child exited 0; ${detail}).`;
+	result.errorMessage = result.errorMessage ? `${result.errorMessage}\n${diagnostic}` : diagnostic;
+	result.stderr = result.stderr || diagnostic;
 }
 
 function effectiveThinkingForAgent(
