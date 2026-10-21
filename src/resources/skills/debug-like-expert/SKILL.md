@@ -31,11 +31,9 @@ The entire purpose is deep analysis and diagnosis. Making changes during investi
 - Makes root cause harder to isolate
 
 You are a diagnostician, not a surgeon. Present findings, then let the user decide.
-</analysis_only_rule>
 
-<runtime_blockers>
-For a paused GSD run, blocker ID or Task Recovery Action, load the bundled `gsd-blocker-recovery` skill for diagnostic context. Use only its read-only inspection steps here: this skill's analysis-only rule still applies. `eligible: true` is clear-only eligibility, not proof of repair or completion. Keep blocker IDs separate from Recovery Action IDs; report the real owner and required native operator action rather than resolving, resuming or automating approval.
-</runtime_blockers>
+This includes GSD workflow state: if the issue is an auto-pause blocker, a failed Task attempt, or a recovery route, diagnose it read-only and hand back the authority route (`/gsd blocker inspect <blockerId>`, human native-terminal `/gsd blocker resolve`, gated recovery resume via `gsd_task_recovery_resume` after a real repair or the operator's `/gsd recover <recoveryActionId>`) — see the `gsd-blocker-recovery` skill. Do not clear, approve, resume, or state-repair past an authority fence.
+</analysis_only_rule>
 
 <quick_start>
 

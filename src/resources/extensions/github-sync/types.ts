@@ -27,12 +27,17 @@ export interface SyncEntityRecord {
   issueNumber: number;
   lastSyncedAt: string;
   state: "open" | "closed";
+  /**
+   * Set when a sync step failed after the GitHub entity existed (e.g. the
+   * native sub-issue link to the milestone tracking issue, or a milestone
+   * close), so a later sync can retry it without recreating the entity.
+   * Cleared once the failed step succeeds.
+   */
+  lastSyncError?: string;
 }
 
 export interface MilestoneSyncRecord extends SyncEntityRecord {
   ghMilestoneNumber: number;
-  /** Set when a close attempt fails so a later sync can retry. */
-  lastSyncError?: string;
 }
 
 export interface SliceSyncRecord extends SyncEntityRecord {

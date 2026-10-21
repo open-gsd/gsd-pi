@@ -11,6 +11,7 @@ import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase, 
 import { internalExecutionInvocation } from "../execution-invocation.ts";
 import { PAUSED_SESSION_KV_KEY, type PausedSessionMetadata } from "../interrupted-session.ts";
 import { findPauseLifecycleId, openPauseBlockerForSession, resolveAutoPauseBlockerById } from "../pause-blocker-domain-operation.ts";
+import { classifyAutoPauseBlockerResolution } from "../pause-blocker-inspection.ts";
 
 // A synthetic internal-user fixture models the domain caller after genuine
 // terminal confirmation. This is not MCP provenance or evidence of a real user
@@ -124,6 +125,11 @@ test("slice-prefixed task IDs create and resolve an exact task blocker", (t) => 
     pause, blockerKind: "consent", description: "Approval required", requestedAction: "Review",
   });
   assert.ok(blockerId);
+  const inspected = classifyAutoPauseBlockerResolution(db(), blockerId);
+  assert.equal(inspected.eligible, true);
+  assert.equal(inspected.blocker?.description, "Approval required");
+  assert.equal(inspected.blocker?.requestedAction, "Review");
+  assert.ok(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), "inspection is read-only and leaves the pause intact");
   assert.equal(db().prepare(
     "SELECT lifecycle_id FROM workflow_blockers WHERE blocker_id = :id",
   ).get({ ":id": blockerId })?.["lifecycle_id"], findPauseLifecycleId(pause));

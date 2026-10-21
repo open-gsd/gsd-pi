@@ -74,10 +74,6 @@ A unit dispatched more than once (`type/id` repeated) indicates a stuck loop: un
 
 {{dedupSection}}
 
-## Runtime Blockers
-
-For a blocker or Task Recovery Action, load the bundled `gsd-blocker-recovery` skill and use only its read-only diagnostic steps. This forensics investigation must not resolve, resume or mutate state. Inspection eligibility is clear-only, not repair, Task success or retry authority. Keep blocker IDs separate from Recovery Action IDs and report any required native operator action without performing it or synthesizing approval.
-
 ## Investigation Protocol
 
 1. Start with the forensic report; treat anomalies as leads.
@@ -102,7 +98,7 @@ Explain findings:
 - **What happened** — sequence from activity logs/anomalies
 - **Why it happened** — root cause with `file:line`
 - **Code snippet** — problematic code and intended behavior
-- **Recovery** — immediate unstuck steps
+- **Recovery** — immediate unstuck steps that stay inside the authority boundaries (read the `gsd-blocker-recovery` skill): recommend the routes — `/gsd blocker inspect <blockerId>` then a human `/gsd blocker resolve` in the native terminal for an eligible auto-pause blocker, or the gated recovery path (`gsd_task_recovery_resume` after a genuine repair with concrete evidence, or the operator's `/gsd recover <recoveryActionId>`) for an eligible recovery action. Never recommend direct database, runtime KV/counter, or rendered-file manipulation to unblock a run, and never claim a resolution or resume happened.
 
 Then **offer GitHub issue creation**: "Would you like me to create a GitHub issue for this on open-gsd/gsd-pi?"
 

@@ -61,6 +61,16 @@ Optional fields:
 | `background` | all modes | Return immediately and persist progress for later `status` checks |
 | `isolated` | launch | Run through the configured filesystem isolation backend before merging patches back |
 
+## Child Tools And Session Evidence
+
+The launcher passes an explicit `--tools` list to the child process only when its agent definition configures one; otherwise the child starts with the default toolset. A tool available in the parent session — for example the native `gsd_graph` memory graph tool — is not automatically available to a child. Check the agent definition to know which tools a child can use; do not infer child access from the parent session.
+
+To verify what a child actually received, read local records only:
+
+- **Fresh context (default):** the child runs with `--no-session`, so no child session file exists. That is expected, not a failure. The run record's per-child status, output, and stderr are the evidence (see [Run State](#run-state)).
+- **Forked context:** the run record lists the child session file. Inspect it — or `resume` it — to see the conversation the child actually had.
+- **Tool access:** when the agent definition sets an explicit `tools` list, the child process is launched with exactly that list. Without one, the child starts from the default toolset plus loaded extension tools, so a tool missing from the frontmatter is not proof it is unavailable. In the child's output, a `Tool <name> not found` error means the child lacked the tool; any other error means the tool ran and failed. These are different facts.
+
 ## Context Modes
 
 `context: "fresh"` is the default. The child starts with the agent's prompt and the delegated task, keeping the parent conversation out of the child context.

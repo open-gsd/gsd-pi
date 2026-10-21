@@ -271,6 +271,15 @@ export class InteractiveMode {
 		this.ui.addChild(this.footer);
 		this.ui.setFocus(this.editor);
 
+		// Fullscreen (alternate screen) mode, slice-1 (#2946): opt-in via env.
+		// Everything from the status line down (pinned zone, widgets, editor,
+		// footer) stays fixed on screen; the header, chat transcript and pending
+		// messages form the scrolling viewport above it.
+		if (process.env.PI_TUI_FULLSCREEN === "1") {
+			this.ui.setFullscreenPinBoundary(this.statusContainer);
+			this.ui.setFullscreen(true);
+		}
+
 		this.setupKeyHandlers();
 		this.setupEditorSubmitHandler();
 		await this.initExtensions();

@@ -12,8 +12,7 @@ Rules:
 6. After each repair cluster, verify the relevant invariant with `gsd_milestone_status`.
 7. When done, rerun `/gsd doctor {{doctorCommandSuffix}}` mentally by ensuring the remaining issue set for this scope is reduced or cleared.
 8. Do NOT query `.gsd/gsd.db` directly via `sqlite3` or `node -e require('better-sqlite3')` — use `gsd_milestone_status` to inspect DB state. Direct access bypasses the WAL connection owned by the engine and can corrupt in-flight writes.
-
-9. A user-owned or external-owned runtime blocker is not permission to heal away an approval boundary. Load the bundled `gsd-blocker-recovery` skill and inspect the current project snapshot first. `/gsd blocker resolve` requires genuine native operator confirmation and is clear-only; an agent/RPC request cannot substitute for it. A Task Recovery Action ID belongs to the separate recovery-resume path. Do not edit blocker/pause rows, runtime JSON or retry counters to make auto-mode run, and do not fabricate a succeeded Attempt or passing Technical Verdict.
+9. Heal mode repairs projections and missing content only — it does not fold authority actions into a heal repair. Never clear or approve an auto-pause blocker resolution (that approval belongs to the human in the native terminal), and treat a Task recovery resume as its own gated route, not a heal step: read the `gsd-blocker-recovery` skill, inspect read-only (`/gsd blocker inspect <blockerId>`), and route recovery through `gsd_task_recovery_resume` (after a genuine repair with concrete evidence) or the operator's `/gsd recover <recoveryActionId>`.
 
 ## Doctor Summary
 
