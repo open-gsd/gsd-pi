@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 
 import { verifyExpectedArtifact, hasImplementationArtifacts, resolveExpectedArtifactPath, diagnoseExpectedArtifact, diagnoseWorktreeIntegrityFailure, buildLoopRemediationSteps, writeBlockerPlaceholder, refreshRecoveryDbForArtifact, writeReactiveExecuteBlocker } from "../auto-recovery.ts";
+import { _describeArtifactVerificationFailureForTest } from "../auto-post-unit.ts";
 import { resolveMilestoneFile } from "../paths.ts";
 import { _getAdapter, openDatabase, closeDatabase, insertArtifact, insertMilestone, insertSlice, insertGateRow, insertTask, insertAssessment, getMilestone, getMilestoneCommitAttributionShas, getPlanMilestoneRecoveryBlock, getTask, getSlice, saveGateResult, projectCanonicalStatusToLegacy } from "../gsd-db.ts";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
@@ -1037,6 +1038,30 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * Build the #2976 topology: implementation commits live on `milestone/M001`,
+ * the branch was fast-forwarded into `main` BEFORE closeout, and the checkout
+ * still sits on `milestone/M001` (same tip as main) — the worktree-isolation
+ * state when complete-milestone runs. `.gsd/` is git-excluded only after the
+ * tagged evidence commit so the tagged scan can bind the milestone.
+ */
+function makeFfMergedMilestoneBase(): string {
+  const base = makeGitBase();
+  execFileSync("git", ["checkout", "-b", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  mkdirSync(join(base, "src"), { recursive: true });
+  mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
+  writeFileSync(join(base, "src", "app.ts"), "console.log('hello');");
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-SUMMARY.md"), "# Summary");
+  execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "feat: implementation landed on the milestone branch\n\nGSD-Task: S01/T01"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["checkout", "main"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["merge", "--ff-only", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["checkout", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
+  writeIntegrationBranch(base, "M001", "main");
+  return base;
+}
+
+/**
  * Take the open adopted M001 through the real canonical validation and
  * completion tools so the closeout proof has a receipt to read.
  */
@@ -1318,6 +1343,132 @@ test("hasImplementationArtifacts backfills untagged main implementation commits 
   }
 });
 
+test("hasImplementationArtifacts finds milestone evidence when the branch was fast-forwarded into the integration branch (#2976)", (t) => {
+  const base = makeFfMergedMilestoneBase();
+  t.after(() => cleanup(base));
+
+  const result = hasImplementationArtifacts(base, "M001");
+  assert.equal(
+    result,
+    "present",
+    "a ff-merged milestone branch with tagged implementation commits must not read absent",
+  );
+});
+
+test("hasImplementationArtifacts stays absent when a fast-forwarded milestone only has .gsd commits (#2976)", (t) => {
+  const base = makeGitBase();
+  t.after(() => cleanup(base));
+  execFileSync("git", ["checkout", "-b", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Milestone Summary\nDone.");
+  execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "chore: auto-commit after complete-milestone\n\nGSD-Unit: M001"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["checkout", "main"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["merge", "--ff-only", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["checkout", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  writeIntegrationBranch(base, "M001", "main");
+
+  const result = hasImplementationArtifacts(base, "M001");
+  assert.equal(
+    result,
+    "absent",
+    "contained topology must still fail a milestone with no implementation commits anywhere",
+  );
+});
+
+test("hasImplementationArtifacts finds milestone evidence when the integration branch advanced after the fast-forward (#2976)", (t) => {
+  const base = makeFfMergedMilestoneBase();
+  t.after(() => cleanup(base));
+  execFileSync("git", ["checkout", "main"], { cwd: base, stdio: "ignore" });
+  mkdirSync(join(base, "docs"), { recursive: true });
+  writeFileSync(join(base, "docs", "later.md"), "unrelated post-merge work\n");
+  execFileSync("git", ["add", "docs/later.md"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "chore: unrelated post-merge work"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["checkout", "milestone/M001"], { cwd: base, stdio: "ignore" });
+
+  const result = hasImplementationArtifacts(base, "M001");
+  assert.equal(
+    result,
+    "present",
+    "a strict-ancestor milestone branch stays contained when the integration branch moves ahead",
+  );
+});
+
+test("verifyExpectedArtifact complete-milestone passes when the milestone branch was fast-forwarded into main (#2976)", async (t) => {
+  const base = makeFfMergedMilestoneBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
+  seedLifecycles("auto-recovery/ff-merged", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+  ]);
+  await recordCanonicalValidationAndCompletion(base, "auto-recovery/ff-merged");
+
+  const result = verifyExpectedArtifact("complete-milestone", "M001", base);
+  assert.equal(
+    result,
+    true,
+    "a ff-merged milestone branch with implementation evidence should pass closeout verification",
+  );
+});
+
+test("verifyExpectedArtifact complete-milestone accepts an evidence-less contained branch as unknown, not absent (#2976)", async (t) => {
+  const base = makeGitBase();
+  t.after(() => cleanup(base));
+  // Contained branch with zero commits of its own and no milestone evidence
+  // anywhere: the empty diff proves nothing, so the gate reads "unknown" —
+  // the same semantics the integration self-diff retry already had. This
+  // test pins that deliberate fail-open boundary; the .gsd-only-commits
+  // test above pins the provable-absent boundary that still fails.
+  writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
+  execFileSync("git", ["checkout", "-b", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  writeIntegrationBranch(base, "M001", "main");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
+  seedLifecycles("auto-recovery/ff-unknown", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+  ]);
+  await recordCanonicalValidationAndCompletion(base, "auto-recovery/ff-unknown");
+
+  const result = verifyExpectedArtifact("complete-milestone", "M001", base);
+  assert.equal(
+    result,
+    true,
+    "an empty contained diff without evidence is unknown, which not-absent accepts",
+  );
+});
+
+test("complete-milestone retry context names the closeout proof reason instead of the SUMMARY file (#2976)", async (t) => {
+  const base = makeGitBase();
+  t.after(() => cleanup(base));
+  execFileSync("git", ["checkout", "-b", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Milestone Summary\nDone.");
+  execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "chore: auto-commit after complete-milestone\n\nGSD-Unit: M001"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["checkout", "main"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["merge", "--ff-only", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["checkout", "milestone/M001"], { cwd: base, stdio: "ignore" });
+  writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
+  writeIntegrationBranch(base, "M001", "main");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
+  seedLifecycles("auto-recovery/proof-reason", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+  ]);
+  await recordCanonicalValidationAndCompletion(base, "auto-recovery/proof-reason");
+
+  const msg = _describeArtifactVerificationFailureForTest("complete-milestone", "M001", base);
+  assert.match(msg, /implementation evidence is absent/, "retry context must name the closeout proof reason");
+  assert.doesNotMatch(msg, /SUMMARY\.md was not found on disk/);
+});
+
 test("after the Cutover hasImplementationArtifacts takes the completed tasks of the file hints from the lifecycle rows", () => {
   const base = makeGitBase();
   try {
@@ -1447,16 +1598,17 @@ test("hasImplementationArtifacts does not backfill unrelated untagged implementa
   }
 });
 
-test("hasImplementationArtifacts treats empty non-integration branch diff as absent (#4699)", () => {
+test("hasImplementationArtifacts returns unknown for an empty diff on a branch contained in the integration branch (#4699, #2976)", (t) => {
   const base = makeGitBase();
-  try {
-    execFileSync("git", ["checkout", "-b", "feat/empty-milestone"], { cwd: base, stdio: "ignore" });
+  t.after(() => cleanup(base));
+  execFileSync("git", ["checkout", "-b", "feat/empty-milestone"], { cwd: base, stdio: "ignore" });
 
-    const result = hasImplementationArtifacts(base, "M001");
-    assert.equal(result, "absent", "empty milestone branch diffs should not use main retry fallback");
-  } finally {
-    cleanup(base);
-  }
+  const result = hasImplementationArtifacts(base, "M001");
+  assert.equal(
+    result,
+    "unknown",
+    "an empty diff on a contained branch proves nothing about the milestone's work; only evidence classifies it",
+  );
 });
 
 test("hasImplementationArtifacts returns unknown for empty integration self-diff without milestone evidence (#5071)", () => {

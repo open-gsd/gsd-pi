@@ -64,6 +64,7 @@ import {
   readExecuteTaskArtifactReadiness,
   readTerminalTaskRecoveryAbort,
   resolveArtifactVerificationBase,
+  proveCompleteMilestoneCloseout,
 } from "./artifact-verification.js";
 import { compareLifecycleShadow } from "./db/lifecycle-shadow-comparison.js";
 import { readCurrentMilestoneCompletionReceipt } from "./milestone-lifecycle-domain-operation.js";
@@ -79,6 +80,7 @@ export {
   verifyExpectedArtifact,
   diagnoseWorktreeIntegrityFailure,
   resolveArtifactVerificationBase,
+  proveCompleteMilestoneCloseout,
 } from "./artifact-verification.js";
 
 // ─── Recovery DB refresh ──────────────────────────────────────────────────────

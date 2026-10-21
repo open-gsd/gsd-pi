@@ -129,6 +129,27 @@ export function resolveArtifactVerificationBase(unitId: string, base: string): s
   return resolveCanonicalMilestoneRoot(base, milestone);
 }
 
+/**
+ * The single complete-milestone closeout-proof invocation, shared by
+ * post-unit verification and the retry diagnostic so the two can never drift
+ * on proof options (#2976). `refreshFromDisk` mirrors the verification
+ * call's `!readOnly`.
+ */
+export function proveCompleteMilestoneCloseout(
+  milestoneId: string,
+  base: string,
+  refreshFromDisk: boolean,
+): ReturnType<typeof proveMilestoneCloseout> {
+  return proveMilestoneCloseout(milestoneId, {
+    refreshFromDisk,
+    artifactBasePath: resolveArtifactVerificationBase(milestoneId, base),
+    implementationEvidence: {
+      basePath: base,
+      requirement: "not-absent",
+    },
+  });
+}
+
 function hasCompleteProjectResearch(base: string): boolean {
   return getProjectResearchStatus(base).complete;
 }
@@ -381,14 +402,7 @@ export function verifyExpectedArtifact(
   if (!mid) return false;
   try {
     if (unitType === "complete-milestone") {
-      const closeoutProof = proveMilestoneCloseout(mid, {
-        refreshFromDisk: !options.readOnly,
-        artifactBasePath: resolveArtifactVerificationBase(unitId, base),
-        implementationEvidence: {
-          basePath: base,
-          requirement: "not-absent",
-        },
-      });
+      const closeoutProof = proveCompleteMilestoneCloseout(mid, base, !options.readOnly);
       if (!closeoutProof.ok) {
         logWarning(
           "recovery",
