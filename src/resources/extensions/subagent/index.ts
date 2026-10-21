@@ -88,17 +88,6 @@ const LIVENESS_DEATH_GRACE_MS = 5_000;
 // one small read per tick, not a file re-scan.
 const CMUX_STDOUT_TAIL_INTERVAL_MS = 250;
 
-/**
- * Bound a diagnostic excerpt so a noisy child cannot flood the parent session
- * through the detached-completion wake message (#2363 review finding).
- */
-export function truncateDiagnostic(text: string, maxChars: number): string {
-	return text.length > maxChars
-		? `${text.slice(0, maxChars)}… [truncated, full output via action: "status"]`
-		: text;
-}
-
-const WAKE_DIAGNOSTIC_MAX_CHARS = 300;
 const liveSubagentProcesses = new Set<ChildProcess>();
 
 async function stopLiveSubagents(): Promise<void> {
@@ -322,6 +311,12 @@ interface SubagentDetails {
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
+	/**
+	 * Persisted run snapshot for action: "status" (#2928). Present only there;
+	 * lets the renderer separate lifecycle facts from each child's authored
+	 * report instead of flattening both into one plain-text fallback.
+	 */
+	runRecord?: NonNullable<ReturnType<SubagentRunStore["get"]>>;
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -732,31 +727,88 @@ async function revalidateRunningRecord(
 	}
 }
 
-function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
-	if (!record) return "Subagent run not found.";
-	const lines = [
+// Shared lifecycle-fact formatters for persisted run records (#2928). The
+// model-facing formatRunRecord text and the TUI status view must not drift:
+// both build on the same header/bullet/meta lines, and the authored report
+// content stays OUT of these facts so the renderer can present it separately.
+function runRecordHeaderLines(record: NonNullable<ReturnType<SubagentRunStore["get"]>>): string[] {
+	return [
 		`Run ${record.runId}: ${record.status}`,
 		`Mode: ${record.mode}`,
 		`Context: ${record.contextMode}`,
 		`Updated: ${record.updatedAt}`,
 	];
+}
+
+function runRecordChildBullet(child: NonNullable<ReturnType<SubagentRunStore["get"]>>["children"][number]): string {
+	const facts = [
+		child.pid !== undefined ? `pid ${child.pid}` : undefined,
+		child.exitCode !== undefined ? `exit ${child.exitCode}` : undefined,
+	].filter(Boolean).join(", ");
+	const suffix = facts ? ` (${facts})` : "";
+	return `- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}`;
+}
+
+function runRecordChildMetaLines(child: NonNullable<ReturnType<SubagentRunStore["get"]>>["children"][number]): string[] {
+	const lines: string[] = [];
+	const modelIdentity = formatWorkerModelTokens({
+		model: child.model,
+		reportedModel: child.reportedModel,
+	});
+	if (modelIdentity) lines.push(`  model: ${modelIdentity}`);
+	if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
+	if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
+	return lines;
+}
+
+function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
+	if (!record) return "Subagent run not found.";
+	const lines = runRecordHeaderLines(record);
 	for (const child of record.children) {
-		const facts = [
-			child.pid !== undefined ? `pid ${child.pid}` : undefined,
-			child.exitCode !== undefined ? `exit ${child.exitCode}` : undefined,
-		].filter(Boolean).join(", ");
-		const suffix = facts ? ` (${facts})` : "";
-		lines.push(`- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}: ${child.output || child.errorMessage || child.stderr || child.task}`);
-		const modelIdentity = formatWorkerModelTokens({
-			model: child.model,
-			reportedModel: child.reportedModel,
-		});
-		if (modelIdentity) lines.push(`  model: ${modelIdentity}`);
-		if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
-		if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
+		lines.push(`${runRecordChildBullet(child)}: ${child.output || child.errorMessage || child.stderr || child.task}`);
+		lines.push(...runRecordChildMetaLines(child));
 	}
 	if (record.failure) lines.push(`Failure: ${record.failure.message}`);
 	return lines.join("\n");
+}
+
+/**
+ * TUI view of a persisted run record for action: "status" (#2928). Lifecycle
+ * facts (status bullets, model/session identity, failure) render as plain
+ * text; each child's authored report renders through the same Markdown
+ * renderer ordinary results use, so headings/lists/code present identically.
+ * Raw sources — errorMessage and stderr — stay plain text, never reinterpreted
+ * as Markdown.
+ */
+function renderRunRecordReport(
+	record: NonNullable<ReturnType<SubagentRunStore["get"]>>,
+	theme: { fg: (color: any, text: string) => string },
+): Container {
+	const container = new Container();
+	container.addChild(new Text(runRecordHeaderLines(record).join("\n"), 0, 0));
+	for (const child of record.children) {
+		container.addChild(new Text([runRecordChildBullet(child), ...runRecordChildMetaLines(child)].join("\n"), 0, 0));
+		// Outcome diagnostics stay lifecycle facts beside the bullet, even when a
+		// partial authored report exists below — the report must not swallow them.
+		if (child.errorMessage) container.addChild(new Text(theme.fg("error", child.errorMessage), 0, 0));
+		if (child.output?.trim()) {
+			container.addChild(
+				new Text(theme.fg("muted", `─── Report: ${formatAgentLabel(child.agent, child.trackingName)} ───`), 0, 0),
+			);
+			// The authored source goes to the renderer unchanged (trim is only the
+			// emptiness check): leading indentation is meaningful markdown and must
+			// survive verbatim (#2928).
+			container.addChild(new Markdown(child.output, 0, 0, getMarkdownTheme()));
+		} else if (child.stderr) {
+			// Raw logs stay plain text — source, never reinterpreted as report
+			// markdown (#2928).
+			container.addChild(new Text(theme.fg("toolOutput", child.stderr), 0, 0));
+		} else if (!child.errorMessage && child.task) {
+			container.addChild(new Text(theme.fg("dim", child.task), 0, 0));
+		}
+	}
+	if (record.failure) container.addChild(new Text(theme.fg("error", `Failure: ${record.failure.message}`), 0, 0));
+	return container;
 }
 
 interface SubagentRunOptions {
@@ -1474,7 +1526,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				return {
 					content: [{ type: "text", text: formatRunRecord(record) }],
-					details: makeDetails("single")([]),
+					// The snapshot rides the details (#2928) so the renderer can
+					// present authored reports as Markdown while the content text
+					// above stays the model-facing record dump.
+					details: record ? { ...makeDetails("single")([]), runRecord: record } : makeDetails("single")([]),
 					...(record ? {} : { isError: true }),
 				};
 			}
@@ -1824,44 +1879,42 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			// A detached run's completion is otherwise invisible: the journal event
-			// has no turn-starting consumer, so the session idles until the model
-			// happens to poll action: "status" (#2363). Re-invoke it with a short
-			// summary. One wake per dispatch, interactive sessions only, and fully
-			// defensive — a wake failure must never affect persistence or escape
-			// the unobserved IIFE (ctx.hasUI itself can throw on a stale runtime).
-			let backgroundWakeSent = false;
-			const wakeSessionAfterDetachedCompletion = (results: SingleResult[]): void => {
-				try {
-					if (!ctx.hasUI || backgroundWakeSent) return;
-					backgroundWakeSent = true;
-					const successCount = results.filter((r) => r.exitCode === 0).length;
-					const failureCount = results.length - successCount;
-					const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
-					const wallSeconds = ((Date.now() - dispatchStartMs) / 1000).toFixed(1);
-					const perAgent = results
-						.map((r) =>
-							`- ${r.agent}: ${r.exitCode === 0 ? "succeeded" : `failed — ${truncateDiagnostic(r.errorMessage || r.stderr || "unknown error", WAKE_DIAGNOSTIC_MAX_CHARS)}`}`
-						)
-						.join("\n");
-					void pi.sendMessage(
-						{
-							customType: "subagent_completed",
-							content: [
-								`Background subagent run ${dispatchId} finished in ${wallSeconds}s: ${successCount} succeeded, ${failureCount} failed (cost $${totalCost.toFixed(4)}).`,
-								perAgent,
-								`Full output is persisted. Inspect it with the subagent tool, action: "status", runId: "${dispatchId}", and process the results in this turn.`,
-							].join("\n"),
-							display: true,
-							details: { dispatchId, mode: dispatchMode, agents: dispatchAgents, successCount, failureCount },
-						},
-						{ triggerTurn: true },
-					).catch(() => {
-						// Wake delivery is best-effort; persistence above is authoritative.
-					});
-				} catch {
-					// A wake failure must never affect persistence.
-				}
-			};
+		// has no turn-starting consumer, so the session idles until the model
+		// happens to poll action: "status" (#2363). Re-invoke it with a short
+		// summary. One wake per dispatch, interactive sessions only, and fully
+		// defensive — a wake failure must never affect persistence or escape
+		// the unobserved IIFE (ctx.hasUI itself can throw on a stale runtime).
+		let backgroundWakeSent = false;
+		const wakeSessionAfterDetachedCompletion = (results: SingleResult[]): void => {
+			try {
+				if (!ctx.hasUI || backgroundWakeSent) return;
+				backgroundWakeSent = true;
+				const successCount = results.filter((r) => r.exitCode === 0).length;
+				const failureCount = results.length - successCount;
+				const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
+				const wallSeconds = ((Date.now() - dispatchStartMs) / 1000).toFixed(1);
+				// The host renders this message as Markdown (#2928): keep it to the
+				// aggregate completion facts plus the inspection pointer. Per-agent
+				// outcomes and raw diagnostics live in the status report — repeating
+				// them here would both duplicate facts and reinterpret source.
+				void pi.sendMessage(
+					{
+						customType: "subagent_completed",
+						content: [
+							`Background subagent run ${dispatchId} finished in ${wallSeconds}s: ${successCount} succeeded, ${failureCount} failed (cost $${totalCost.toFixed(4)}).`,
+							`Full output is persisted. Inspect it with the subagent tool, action: "status", runId: "${dispatchId}", and process the results in this turn.`,
+						].join("\n"),
+						display: true,
+						details: { dispatchId, mode: dispatchMode, agents: dispatchAgents, successCount, failureCount },
+					},
+					{ triggerTurn: true },
+				).catch(() => {
+					// Wake delivery is best-effort; persistence above is authoritative.
+				});
+			} catch {
+				// A wake failure must never affect persistence.
+			}
+		};
 
 			// Batch executors shared by the synchronous dispatch paths and detached
 			// background runs (#2820): a background batch must not drift from
@@ -2493,6 +2546,14 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded }, theme) {
 			const details = result.details as SubagentDetails | undefined;
 			if (!details || details.results.length === 0) {
+				// Background status reports (#2928): the run-record snapshot drives a
+				// structured view that renders authored reports as Markdown while
+				// lifecycle facts and raw diagnostics stay plain text. The same view
+				// serves collapsed and expanded (status is an explicit inspection
+				// action; truncating it would regress today's full-report fallback).
+				if (details?.runRecord) {
+					return renderRunRecordReport(details.runRecord, theme);
+				}
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 			}
