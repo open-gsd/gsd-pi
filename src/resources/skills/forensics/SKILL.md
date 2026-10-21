@@ -38,6 +38,10 @@ Invocation points:
 **PRE-PARSED LEADS, NOT CONCLUSIONS.** If `/gsd forensics` has surfaced anomalies, treat them as hypotheses to verify, not answers.
 </core_principle>
 
+<runtime_blockers>
+For a blocker or Task Recovery Action, load the bundled `gsd-blocker-recovery` skill and use only its read-only diagnostic steps. This forensics session must not resolve, resume or mutate state. Distinguish a blocker ID from a Recovery Action ID, and clear-only eligibility from a repaired cause or succeeded Task. Use the current project snapshot for ownership/description; report any required native operator action without performing it or synthesizing approval.
+</runtime_blockers>
+
 <process>
 
 ## Step 1: Locate the evidence

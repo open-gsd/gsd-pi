@@ -57,6 +57,7 @@ export const BUNDLED_SKILL_TRIGGERS: Array<{ trigger: string; skill: string }> =
   { trigger: "Frontend UI - web components, pages, landing pages, dashboards, React/HTML/CSS, styling", skill: "frontend-design" },
   { trigger: "macOS or iOS apps - SwiftUI, Xcode, App Store", skill: "swiftui" },
   { trigger: "Debugging - complex bugs, failing tests, root-cause investigation after standard approaches fail", skill: "debug-like-expert" },
+  { trigger: "GSD runtime recovery - paused auto-mode, blocker inspect/resolve, native operator approval, Task Recovery Action IDs", skill: "gsd-blocker-recovery" },
   { trigger: "Code review - security, performance, bugs, quality review of staged/unstaged diffs or PRs", skill: "review" },
   { trigger: "Test generation or execution - auto-detect framework, generate tests, run suite, analyze failures", skill: "test" },
   { trigger: "Linting/formatting - run the detected linter/formatter with auto-fix, report remaining issues", skill: "lint" },

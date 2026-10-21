@@ -13,6 +13,8 @@ Rules:
 7. When done, rerun `/gsd doctor {{doctorCommandSuffix}}` mentally by ensuring the remaining issue set for this scope is reduced or cleared.
 8. Do NOT query `.gsd/gsd.db` directly via `sqlite3` or `node -e require('better-sqlite3')` — use `gsd_milestone_status` to inspect DB state. Direct access bypasses the WAL connection owned by the engine and can corrupt in-flight writes.
 
+9. A user-owned or external-owned runtime blocker is not permission to heal away an approval boundary. Load the bundled `gsd-blocker-recovery` skill and inspect the current project snapshot first. `/gsd blocker resolve` requires genuine native operator confirmation and is clear-only; an agent/RPC request cannot substitute for it. A Task Recovery Action ID belongs to the separate recovery-resume path. Do not edit blocker/pause rows, runtime JSON or retry counters to make auto-mode run, and do not fabricate a succeeded Attempt or passing Technical Verdict.
+
 ## Doctor Summary
 
 {{doctorSummary}}

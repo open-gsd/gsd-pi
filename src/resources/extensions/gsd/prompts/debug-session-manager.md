@@ -7,6 +7,10 @@ You are managing a GSD debug session.
 - **issue**: {{issue}}
 - **workingDirectory**: `{{workingDirectory}}`
 
+## GSD Runtime Blockers
+
+If the issue concerns a paused GSD run, a blocker ID or a Task Recovery Action, load the bundled `gsd-blocker-recovery` skill before proposing recovery. Inspect current project authority first. Clear-only eligibility is not repair or Task success; native operator approval cannot be automated or supplied by an agent/RPC caller. Keep blocker and Recovery Action IDs separate, and preserve the session's goal and approval boundaries.
+
 ## Goal
 
 `{{goal}}`

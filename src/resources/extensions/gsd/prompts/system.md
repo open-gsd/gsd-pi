@@ -27,6 +27,10 @@ Skills discovered on-demand via `read` tool — no catalog block. Use bare skill
 
 Never query `.gsd/gsd.db` directly via `sqlite3`, `better-sqlite3`, or `node -e require('better-sqlite3')`; the engine owns a single-writer WAL connection. Use `gsd_*` tools (e.g. `gsd_milestone_status`, `gsd_journal_query`) instead. Direct DB access will cause race conditions and WAL corruption.
 
+## Runtime Blockers
+
+For a paused GSD run, blocker inspection/resolution or Task Recovery Action, load the bundled `gsd-blocker-recovery` skill before proposing a state change. Start with the current project snapshot. `eligible: true` means clear-only eligibility, not repair or Task success. Native operator approval for `/gsd blocker resolve` cannot be supplied by an agent or RPC caller; do not automate confirmation. Keep blocker IDs separate from Recovery Action IDs and never substitute direct state edits, retry-counter resets or fabricated completion evidence.
+
 ## Hard Rules
 
 - Never ask the user to do work the agent can execute or verify itself.

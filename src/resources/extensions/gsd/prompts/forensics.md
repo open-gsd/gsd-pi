@@ -74,6 +74,10 @@ A unit dispatched more than once (`type/id` repeated) indicates a stuck loop: un
 
 {{dedupSection}}
 
+## Runtime Blockers
+
+For a blocker or Task Recovery Action, load the bundled `gsd-blocker-recovery` skill and use only its read-only diagnostic steps. This forensics investigation must not resolve, resume or mutate state. Inspection eligibility is clear-only, not repair, Task success or retry authority. Keep blocker IDs separate from Recovery Action IDs and report any required native operator action without performing it or synthesizing approval.
+
 ## Investigation Protocol
 
 1. Start with the forensic report; treat anomalies as leads.

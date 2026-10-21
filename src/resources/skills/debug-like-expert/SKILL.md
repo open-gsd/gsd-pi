@@ -33,6 +33,10 @@ The entire purpose is deep analysis and diagnosis. Making changes during investi
 You are a diagnostician, not a surgeon. Present findings, then let the user decide.
 </analysis_only_rule>
 
+<runtime_blockers>
+For a paused GSD run, blocker ID or Task Recovery Action, load the bundled `gsd-blocker-recovery` skill for diagnostic context. Use only its read-only inspection steps here: this skill's analysis-only rule still applies. `eligible: true` is clear-only eligibility, not proof of repair or completion. Keep blocker IDs separate from Recovery Action IDs; report the real owner and required native operator action rather than resolving, resuming or automating approval.
+</runtime_blockers>
+
 <quick_start>
 
 <evidence_gathering>
