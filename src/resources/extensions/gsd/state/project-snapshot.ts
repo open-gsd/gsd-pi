@@ -223,11 +223,18 @@ export async function readProjectSnapshotFromDb(
 
       if (stabilityTokensMatch(before, after) || attempt === MAX_REVISION_ATTEMPTS) {
         noteSessionRead(dbRead.authority.revision);
+        // current/capturedAt serialize FIRST (#2944): display truncation caps
+        // a tool result's text (provider-payload-policy
+        // DEFAULT_TOOL_RESULT_MAX_CHARS) at the head of the serialized text, so
+        // the decision-critical section (active refs/phase/nextAction,
+        // capturedAt) must lead instead of sitting behind the bulk registries —
+        // a tail past the cap is unreachable, and an identical reread returns
+        // the same head.
         return {
-          ...dbRead,
-          lifecycleStatusVersion: LIFECYCLE_STATUS_VERSION,
           current: buildCurrent(state),
           capturedAt: new Date().toISOString(),
+          ...dbRead,
+          lifecycleStatusVersion: LIFECYCLE_STATUS_VERSION,
         };
       }
       invalidateStateCache();

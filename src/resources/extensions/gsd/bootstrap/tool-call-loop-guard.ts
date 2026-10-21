@@ -11,7 +11,11 @@
  * arguments. State resets at Agent Turn boundaries (session_start,
  * agent_end) and the identical-signature streak also resets when a
  * different tool call breaks the streak. Block messages instruct the model
- * to stop tooling for the rest of that turn and answer in text.
+ * to stop tooling for the rest of that turn and answer in text. A second
+ * consecutive block of the same tool additionally returns `escalate: true`
+ * (#2877): the model already ignored one explicit block, so the auto-mode
+ * hook aborts the turn through the sanctioned pause path instead of
+ * returning another error toolResult.
  *
  * The per-tool-name check (#783 Brief C) tracks call counts within a
  * turn regardless of args, decaying after successful state-progressing tools.
@@ -40,6 +44,21 @@ import { canonicalToolName, canonicalWorkflowToolName } from "../engine-hook-con
 const DEFAULT_MAX_CONSECUTIVE_IDENTICAL_CALLS = 4;
 const DEFAULT_PER_TOOL_DEFAULT_CAP = 6;
 const DEFAULT_PER_TOOL_REPEATABLE_CAP = 15;
+
+/**
+ * Consecutive blocks of the same tool that turn into a turn abort (#2877).
+ *
+ * A first block already proves the model exhausted the per-tool cap (or the
+ * identical-args streak) while ignoring every block message; a second block in
+ * a row proves it ignored the first explicit block too — but only once a new
+ * model response started between the two, so the first block was actually
+ * delivered as feedback (a single response's tool batch never escalates).
+ * Blocks below this threshold stay error toolResults so a legitimate turn that
+ * hits the cap gets its one signal; the auto-mode hook escalates only
+ * `escalate` results to the sanctioned pause path (see
+ * bootstrap/loop-guard-abort.ts).
+ */
+const CONSECUTIVE_SAME_TOOL_BLOCK_ABORT_THRESHOLD = 2;
 
 /**
  * Tools exempt from Guard 2 (per-tool-name cap), exported so tests and tooling
@@ -274,6 +293,48 @@ const perToolCounts = new Map<string, number>();
 let mutationEpoch = 0;
 const perToolLastMutationEpoch = new Map<string, number>();
 
+/**
+ * Consecutive loop-guard blocks of the same tool within the current turn
+ * (#2877). Allowed calls reset the streak: only a tight re-issue loop (the
+ * model retrying a blocked tool back-to-back) escalates to a turn abort.
+ */
+let blockedStreakToolName = "";
+let blockedStreakCount = 0;
+
+/**
+ * Model-response boundary counter (#2877). One assistant response can carry a
+ * whole tool batch (executeToolCallsParallel prepares every call before any
+ * result reaches the model), so adjacent blocks inside one response prove only
+ * that the batch blew the cap — the model has not seen any block yet. The
+ * streak may only escalate once a new model response started after the
+ * previous block, i.e. the block was actually delivered as feedback.
+ */
+let modelResponseSeq = 0;
+let blockedStreakResponseSeq = 0;
+
+/** Bump the model-response boundary. Call from the message_start hook. */
+export function noteLoopGuardModelResponse(): void {
+  modelResponseSeq += 1;
+}
+
+function noteGuardBlock(toolName: string): boolean {
+  const freshStreak = blockedStreakToolName !== toolName;
+  const sawPreviousBlock = !freshStreak && modelResponseSeq > blockedStreakResponseSeq;
+  if (freshStreak) {
+    blockedStreakToolName = toolName;
+    blockedStreakCount = 1;
+  } else {
+    blockedStreakCount += 1;
+  }
+  blockedStreakResponseSeq = modelResponseSeq;
+  return blockedStreakCount >= CONSECUTIVE_SAME_TOOL_BLOCK_ABORT_THRESHOLD && sawPreviousBlock;
+}
+
+function noteGuardAllowed(): void {
+  blockedStreakToolName = "";
+  blockedStreakCount = 0;
+}
+
 /** Hash tool name + args into a compact signature for comparison. */
 function hashToolCall(toolName: string, args: Record<string, unknown>): string {
   const h = createHash("sha256");
@@ -295,6 +356,10 @@ function hashToolCall(toolName: string, args: Record<string, unknown>): string {
  *
  * Returns `{ block: false }` for allowed calls.
  * Returns `{ block: true, reason }` when the loop threshold is exceeded.
+ * A block that repeats the immediately preceding block of the same tool also
+ * carries `escalate: true` (#2877) — the auto-mode hook aborts the turn
+ * through the sanctioned pause path instead of returning another error
+ * toolResult that the model may ignore.
  *
  * Two independent guards run; whichever trips first blocks:
  *  1. Identical-signature streak (config.maxConsecutiveIdentical, strict for
@@ -309,7 +374,7 @@ function hashToolCall(toolName: string, args: Record<string, unknown>): string {
 export function checkToolCallLoop(
   toolName: string,
   args: Record<string, unknown>,
-): { block: boolean; reason?: string; count?: number } {
+): { block: boolean; reason?: string; count?: number; escalate?: boolean } {
   if (!enabled || !config.guardEnabled) return { block: false, count: 0 };
 
   const sig = hashToolCall(toolName, args);
@@ -328,6 +393,7 @@ export function checkToolCallLoop(
     : config.maxConsecutiveIdentical;
 
   if (config.identicalEnabled && consecutiveCount > threshold) {
+    const escalate = noteGuardBlock(toolName);
     return {
       block: true,
       reason:
@@ -337,6 +403,7 @@ export function checkToolCallLoop(
         `(or GSD_TOOL_LOOP_IDENTICAL_MAX) if this is expected. ` +
         `Do not retry this tool or call other tools this turn — stop and respond to the user in text.`,
       count: consecutiveCount,
+      escalate,
     };
   }
 
@@ -369,6 +436,7 @@ export function checkToolCallLoop(
     config.perToolExempt.has(canonicalName) ||
     hasBrowserContractPrefix(canonicalName)
   ) {
+    noteGuardAllowed();
     return { block: false, count: consecutiveCount };
   }
 
@@ -377,6 +445,7 @@ export function checkToolCallLoop(
     : config.perToolDefaultCap;
 
   if (perToolCount > perToolCap) {
+    const escalate = noteGuardBlock(toolName);
     return {
       block: true,
       reason:
@@ -388,9 +457,11 @@ export function checkToolCallLoop(
         `(or GSD_TOOL_LOOP_REPEATED_* / GSD_TOOL_LOOP_EXEMPT_TOOLS) if this is expected. ` +
         `Do not retry this tool or pivot to other tools this turn — stop and respond to the user in text.`,
       count: perToolCount,
+      escalate,
     };
   }
 
+  noteGuardAllowed();
   return { block: false, count: consecutiveCount };
 }
 
@@ -430,6 +501,9 @@ export function resetToolCallLoopGuard(): void {
   perToolCounts.clear();
   mutationEpoch = 0;
   perToolLastMutationEpoch.clear();
+  noteGuardAllowed();
+  modelResponseSeq = 0;
+  blockedStreakResponseSeq = 0;
 }
 
 /** Disable the guard (e.g. during shutdown). */
@@ -441,6 +515,9 @@ export function disableToolCallLoopGuard(): void {
   perToolCounts.clear();
   mutationEpoch = 0;
   perToolLastMutationEpoch.clear();
+  noteGuardAllowed();
+  modelResponseSeq = 0;
+  blockedStreakResponseSeq = 0;
 }
 
 /** Get current consecutive count for diagnostics. */

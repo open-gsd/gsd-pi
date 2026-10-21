@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
+import { postUnitPreVerification } from "../auto-post-unit.ts";
 import { AutoSession } from "../auto/session.ts";
 import { _setAutoActiveForTest } from "../auto.ts";
 import { gsdRoot } from "../paths.ts";
@@ -158,9 +159,6 @@ function buildPostUnitHarness(base: string, worktree: string): PostUnitHarness {
     pauseAuto: async () => { pauseCalls.count += 1; },
     updateProgressWidget: () => {},
   } as any;
-  const { postUnitPreVerification } = require("../auto-post-unit.ts") as {
-    postUnitPreVerification: (pctx: unknown, opts?: unknown) => Promise<string>;
-  };
   return {
     result: postUnitPreVerification(pctx, { skipSettleDelay: true }),
     s,

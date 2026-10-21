@@ -344,7 +344,8 @@ test("Deep mode: workflow-preferences captures defaults in-process when PREFEREN
   const result = await rule(WORKFLOW_PREFS_RULE_NAME).match(makeCtx(base, prefs));
   assert.strictEqual(result, null, "workflow prefs are written deterministically, not dispatched to an agent");
   const content = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(content, /^commit_policy:\s*per-task\s*$/m);
+  assert.match(content, /^uat_dispatch:\s*true\s*$/m);
+  assert.doesNotMatch(content, /^commit_policy:/m);
   assert.equal(isWorkflowPreferencesCaptured(), true, "the stage is recorded in the database");
   assert.equal(existsSync(join(base, ".gsd", "runtime", "research-decision.json")), false);
 });
@@ -359,7 +360,8 @@ test("Deep mode: workflow-preferences self-heals PREFERENCES.md when the stage i
   const result = await rule(WORKFLOW_PREFS_RULE_NAME).match(makeCtx(base, prefs));
   assert.strictEqual(result, null);
   const content = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(content, /^branch_model:\s*single\s*$/m);
+  assert.match(content, /^uat_dispatch:\s*true\s*$/m);
+  assert.doesNotMatch(content, /^branch_model:/m);
 });
 
 test("Deep mode: workflow-preferences self-heals malformed frontmatter", async (t) => {
@@ -370,7 +372,7 @@ test("Deep mode: workflow-preferences self-heals malformed frontmatter", async (
   const result = await rule(WORKFLOW_PREFS_RULE_NAME).match(makeCtx(base, prefs));
   assert.strictEqual(result, null);
   const content = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(content, /^commit_policy:\s*per-task\s*$/m);
+  assert.match(content, /^uat_dispatch:\s*true\s*$/m);
   assert.ok(content.includes("this is not valid yaml"), "malformed original content is preserved as body");
 });
 

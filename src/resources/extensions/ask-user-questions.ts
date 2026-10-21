@@ -10,7 +10,6 @@
  */
 
 import type { ExtensionAPI, Theme } from "@gsd/pi-coding-agent";
-import type { NotificationPreferences } from "./gsd/types.js";
 import { sanitizeError } from "./shared/sanitize.js";
 import { Text } from "@gsd/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -20,6 +19,22 @@ import {
 	type QuestionOption,
 	type RoundResult,
 } from "./shared/tui.js";
+import {
+	formatForLLM,
+	isCancelledResultContent,
+	OTHER_OPTION_LABEL,
+	parseLlmAnswersContent,
+	playQuestionBell,
+	raceRemoteAndLocal,
+	sequentialSelectFallback,
+} from "./shared/question-routing.js";
+import {
+	QUESTION_CHANNEL_DIR_ENV,
+	questionChannelRequestPath,
+	waitForQuestionAnswer,
+	writeQuestionRequest,
+} from "./shared/question-channel.js";
+import * as fsSync from "node:fs";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -115,110 +130,17 @@ export function resetAskUserQuestionsCache(): void {
 	turnCache.clear();
 }
 
-// ─── Race helper ─────────────────────────────────────────────────────────────
-
-interface RaceableResult {
-	content: { type: "text"; text: string }[];
-	details?: unknown;
-}
-
-/**
- * Race a remote channel dispatch against the local TUI. The first to produce
- * a valid (non-error, non-timeout) result wins. The loser is cancelled via
- * the shared AbortController.
- *
- * If the local TUI responds first, the remote poll is aborted (the message
- * stays in Discord/Slack but polling stops). If remote responds first, the
- * local TUI prompt is cancelled.
- *
- * Returns null only when both sides fail or are cancelled.
- */
-async function raceRemoteAndLocal(
-	startRemote: () => Promise<RaceableResult | null>,
-	startLocal: () => Promise<RoundResult | null | undefined>,
-	controller: AbortController,
-	questions: Question[],
-): Promise<RaceableResult | null> {
-	// Wrap local TUI result into the same shape as remote results
-	const localPromise = startLocal().then((result): RaceableResult | null => {
-		if (!result || Object.keys(result.answers).length === 0) return null;
-		return {
-			content: [{ type: "text" as const, text: formatForLLM(result) }],
-			details: { questions, response: result, cancelled: false } satisfies LocalResultDetails,
-		};
-	}).catch(() => null);
-
-	const remotePromise = startRemote().then((result): RaceableResult | null => {
-		if (!result) return null;
-		const details = result.details as Record<string, unknown> | undefined;
-		// Treat timeouts and errors as non-wins — let the local TUI win instead
-		if (details?.timed_out || details?.error) return null;
-		return result;
-	}).catch(() => null);
-
-	// Race: first non-null result wins
-	const winner = await Promise.race([
-		localPromise.then((r) => r ? { source: "local" as const, result: r } : null),
-		remotePromise.then((r) => r ? { source: "remote" as const, result: r } : null),
-	]);
-
-	if (winner) {
-		// Cancel the loser
-		controller.abort();
-		return winner.result;
-	}
-
-	// First to resolve was null — wait for the other
-	const [localResult, remoteResult] = await Promise.all([localPromise, remotePromise]);
-	controller.abort();
-	return localResult ?? remoteResult;
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const OTHER_OPTION_LABEL = "None of the above";
 
 function errorResult(
 	message: string,
 	questions: Question[] = [],
 	options?: { interrupted?: boolean },
-): { content: { type: "text"; text: string }[]; details: AskUserQuestionsDetails } {
+): { content: { type: "text"; text: string }[]; details: LocalResultDetails } {
 	return {
 		content: [{ type: "text", text: sanitizeError(message) }],
 		details: { questions, response: null, cancelled: true, interrupted: options?.interrupted === true },
 	};
-}
-
-/** Parse the LLM-facing JSON payload back into a RoundResult for TUI rendering. */
-function parseLlmAnswersContent(text: string): RoundResult | null {
-	try {
-		const parsed = JSON.parse(text) as { answers?: Record<string, { answers?: string[] }> };
-		if (!parsed?.answers || typeof parsed.answers !== "object") return null;
-
-		const answers: RoundResult["answers"] = {};
-		for (const [id, entry] of Object.entries(parsed.answers)) {
-			const list = Array.isArray(entry?.answers) ? [...entry.answers] : [];
-			let notes = "";
-			const noteIdx = list.findIndex((item) => typeof item === "string" && item.startsWith("user_note:"));
-			if (noteIdx >= 0) {
-				notes = list.splice(noteIdx, 1)[0].replace(/^user_note:\s*/, "");
-			}
-			if (list.length === 0) continue;
-			answers[id] = {
-				selected: list.length === 1 ? list[0] : list,
-				notes,
-			};
-		}
-		if (Object.keys(answers).length === 0) return null;
-		return { endInterview: false, answers };
-	} catch {
-		return null;
-	}
-}
-
-function isCancelledResultContent(text: string): boolean {
-	return /\bwas cancelled before receiving a response\b/i.test(text)
-		|| /\bwas interrupted before receiving a response\b/i.test(text);
 }
 
 function renderAnswerLines(questions: Question[], response: RoundResult, theme: Theme): Text {
@@ -244,36 +166,56 @@ function renderAnswerLines(questions: Question[], response: RoundResult, theme: 
 	return new Text(lines.join("\n"), 0, 0);
 }
 
-/** Convert the shared RoundResult into the JSON the LLM expects. */
-function formatForLLM(result: RoundResult): string {
-	const answers: Record<string, { answers: string[] }> = {};
-	for (const [id, answer] of Object.entries(result.answers)) {
-		const list: string[] = [];
-		if (Array.isArray(answer.selected)) {
-			list.push(...answer.selected);
-		} else {
-			list.push(answer.selected);
+// ─── Headless-child forwarding (#2713) ───────────────────────────────────────
+
+/**
+ * Forward a question to the interactive parent through the question channel
+ * (GSD_QUESTION_CHANNEL_DIR, wired by the subagent launcher) and wait for the
+ * correlated answer. The parent owns the local/remote routing; the child must
+ * not dispatch remotely to avoid double-asking.
+ *
+ * Returns null when there is no live channel (parent died / dir removed) so
+ * the caller can fall back to its existing headless behavior.
+ */
+/** @internal Exported for testing only. */
+export async function forwardViaQuestionChannel(
+	channelDir: string,
+	questions: Question[],
+	signal: AbortSignal | undefined,
+	options: { pollMs?: number } = {},
+): Promise<{ content: { type: "text"; text: string }[]; details: LocalResultDetails } | null> {
+	if (!fsSync.existsSync(channelDir)) return null;
+	const request = writeQuestionRequest(channelDir, questions);
+	const answer = await waitForQuestionAnswer(channelDir, request.id, {
+		pollMs: options.pollMs ?? 200,
+		signal,
+	});
+	if (!answer) {
+		// Remove the pending request so the parent does not open a dialog for a
+		// request this child is no longer waiting on (best-effort).
+		try {
+			fsSync.unlinkSync(questionChannelRequestPath(channelDir, request.id));
+		} catch { /* already gone */ }
+		if (signal?.aborted) {
+			return errorResult("ask_user_questions was interrupted before receiving a response", questions, { interrupted: true });
 		}
-		if (answer.notes) {
-			list.push(`user_note: ${answer.notes}`);
-		}
-		answers[id] = { answers: list };
+		// Channel directory disappeared — parent is gone; fall back.
+		return null;
 	}
-	return JSON.stringify({ answers });
+	if (answer.cancelled) {
+		const reason = answer.reason ? ` (${answer.reason})` : "";
+		return errorResult(`ask_user_questions was cancelled by the parent process${reason}`, questions);
+	}
+	const content = answer.content ?? "";
+	const response = content ? parseLlmAnswersContent(content) : null;
+	return {
+		content: [{ type: "text", text: content }],
+		details: { questions, response, cancelled: false },
+	};
 }
 
 /** @internal Exported for testing only. */
-export async function playQuestionBell(
-	preferences?: NotificationPreferences,
-	stream?: { isTTY?: boolean; write(chunk: string): unknown },
-): Promise<void> {
-	try {
-		const { playNotificationBell } = await import("./gsd/notifications.js");
-		playNotificationBell("question", preferences, stream);
-	} catch {
-		// Best-effort: question rendering must never depend on alert delivery.
-	}
-}
+export { playQuestionBell } from "./shared/question-routing.js";
 
 // ─── Extension ────────────────────────────────────────────────────────────────
 
@@ -355,6 +297,22 @@ export default function AskUserQuestions(pi: ExtensionAPI) {
 				return errorResult("ask_user_questions: no response received from local UI or remote channel", params.questions);
 			}
 
+			// Case 2a: headless subagent child under a live interactive parent —
+			// forward the question through the question channel (#2713). The
+			// parent owns the local/remote race, so the child must not dispatch
+			// remotely here (would double-ask). If the channel is gone (parent
+			// died), fall through to the headless behavior below.
+			const questionChannelDir = process.env[QUESTION_CHANNEL_DIR_ENV];
+			if (!ctx.hasUI && questionChannelDir) {
+				const forwarded = await forwardViaQuestionChannel(questionChannelDir, params.questions, signal);
+				if (forwarded) {
+					if (!forwarded.details.cancelled) {
+						turnCache.set(sig, forwarded as unknown as CachedResult);
+					}
+					return forwarded;
+				}
+			}
+
 			// Case 2: Remote configured but no local UI (headless) — remote only.
 			if (hasRemote && !ctx.hasUI) {
 				const remoteResult = await tryRemoteQuestions(params.questions, signal);
@@ -380,56 +338,16 @@ export default function AskUserQuestions(pi: ExtensionAPI) {
 			// RPC mode fallback: custom() returns undefined, so showInterviewRound
 			// may return undefined. Fall back to sequential ctx.ui.select() calls.
 			if (!result) {
-				const answers: Record<string, { answers: string[] }> = {};
-				for (const q of params.questions) {
-					const options = q.options.map((o) => o.label);
-					if (!q.allowMultiple) {
-						options.push(OTHER_OPTION_LABEL);
-					}
-					const selected = await ctx.ui.select(
-						`${q.header}: ${q.question}`,
-						options,
-						{ signal, ...(q.allowMultiple ? { allowMultiple: true } : {}) },
-					);
-					if (selected === undefined) {
-						return errorResult("ask_user_questions was cancelled", params.questions);
-					}
-
-					// When the user picks "None of the above" on a single-select
-					// question, prompt for a free-text explanation so they are not
-					// trapped in a re-asking loop (bug #2715).
-					let freeTextNote = "";
-					const selectedStr = Array.isArray(selected) ? selected[0] : selected;
-					if (!q.allowMultiple && selectedStr === OTHER_OPTION_LABEL) {
-						const note = await ctx.ui.input(
-							`${q.header}: Please explain in your own words`,
-							"Type your answer here…",
-						);
-						if (note) {
-							freeTextNote = note;
-						}
-					}
-
-					const answerList = Array.isArray(selected) ? selected : [selected];
-					if (freeTextNote) {
-						answerList.push(`user_note: ${freeTextNote}`);
-					}
-					answers[q.id] = { answers: answerList };
+				const fallbackRound = await sequentialSelectFallback(params.questions, ctx as any, signal);
+				if (!fallbackRound) {
+					return errorResult("ask_user_questions was cancelled", params.questions);
 				}
-				const roundResult: RoundResult = {
-					endInterview: false,
-					answers: Object.fromEntries(
-						Object.entries(answers).map(([id, a]) => [
-							id,
-							{ selected: a.answers.length === 1 ? a.answers[0] : a.answers, notes: "" },
-						]),
-					),
-				};
+				const fallbackContent = formatForLLM(fallbackRound);
 				const fallbackResult = {
-					content: [{ type: "text" as const, text: JSON.stringify({ answers }) }],
+					content: [{ type: "text" as const, text: fallbackContent }],
 					details: {
 						questions: params.questions,
-						response: roundResult,
+						response: fallbackRound,
 						cancelled: false,
 					} satisfies LocalResultDetails,
 				};

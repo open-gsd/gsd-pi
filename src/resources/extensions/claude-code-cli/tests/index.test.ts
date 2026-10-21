@@ -131,7 +131,18 @@ test("buildClaudeCodeModelList: hardcoded list wins conflicts, catalog-only entr
 	assert.equal(opus5.name, "Claude Opus 5 (via Claude Code)", "curated name must win over the catalog name");
 	assert.equal(opus5.contextWindow, 1_000_000, "curated context window must win over the catalog value");
 	assert.equal(opus5.maxTokens, 128_000, "curated max tokens must win over the catalog value");
-	assert.equal(opus5.thinkingLevelMap, undefined, "curated entry (no map) must not inherit the catalog map");
+	// Catalog thinking metadata is additive (#2830): a curated entry without
+	// its own map/compat inherits the catalog entry's.
+	assert.deepEqual(
+		opus5.thinkingLevelMap,
+		{ xhigh: "max" },
+		"curated entry (no map) must inherit the catalog thinkingLevelMap",
+	);
+	assert.deepEqual(
+		opus5.compat,
+		{ forceAdaptiveThinking: true },
+		"curated entry (no compat) must inherit the catalog compat flags",
+	);
 
 	const opus9 = merged.find((model) => model.id === "claude-opus-9");
 	assert.ok(opus9, "catalog-only first-party id must be merged in");
@@ -215,6 +226,85 @@ test("curated Haiku 5.5 carries adaptive + temperature compat through the merge 
 	assert.equal(haiku55.contextWindow, 1_000_000);
 	assert.equal(haiku55.maxTokens, 128_000);
 	assert.deepEqual(haiku55.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+});
+
+// #2830 — curated entries win the merge, but only for the fields they
+// actually specify: catalog compat flags OR in and curated thinkingLevelMap
+// keys override, so curated ids keep the catalog's xhigh mapping.
+test("curated compat keys win the per-field merge; catalog keys fill the gaps (#2830)", () => {
+	const merged = buildClaudeCodeModelList([
+		{
+			id: "claude-opus-5-5",
+			name: "Catalog Opus 5.5",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 123,
+			maxTokens: 456,
+			compat: { forceAdaptiveThinking: true, strictRequestParams: false, rejectsTemperature: true },
+			thinkingLevelMap: { xhigh: "xhigh", high: "HIGH" },
+		},
+	]);
+
+	const opus55 = merged.find((model) => model.id === "claude-opus-5-5");
+	assert.ok(opus55, "conflicting id must stay registered");
+	assert.equal(opus55.contextWindow, 1_000_000, "curated limits must still win");
+	assert.deepEqual(
+		opus55.compat,
+		// Curated strictRequestParams (true) beats the catalog's false; the
+		// catalog's rejectsTemperature fills the gap the curated entry leaves.
+		{ forceAdaptiveThinking: true, strictRequestParams: true, rejectsTemperature: true },
+	);
+	assert.deepEqual(
+		opus55.thinkingLevelMap,
+		{ xhigh: "xhigh", high: "HIGH" },
+		"curated entry without a map must inherit the catalog keys",
+	);
+	// The merge composes into a copy — the module-level curated list itself
+	// must stay untouched (no catalog compat/map may leak into later merges).
+	assert.equal(
+		CLAUDE_CODE_MODELS.find((model) => model.id === "claude-opus-5-5")?.thinkingLevelMap,
+		undefined,
+		"merge must not mutate the curated list entries",
+	);
+	assert.deepEqual(
+		CLAUDE_CODE_MODELS.find((model) => model.id === "claude-opus-5-5")?.compat,
+		{ forceAdaptiveThinking: true, strictRequestParams: true },
+		"merge must not add catalog compat flags to the curated constant",
+	);
+});
+
+// #2830 — the real anthropic catalog carries the xhigh maps and the adaptive
+// compat that curated entries drop today; they must reach the merged list.
+test("real catalog thinking metadata reaches curated entries (#2830)", () => {
+	const merged = buildClaudeCodeModelList();
+
+	const opus55 = merged.find((model) => model.id === "claude-opus-5-5");
+	assert.ok(opus55, "curated opus-5-5 must be present");
+	assert.deepEqual(
+		opus55.thinkingLevelMap,
+		{ xhigh: "xhigh" },
+		"Opus 5.5 must keep the catalog xhigh mapping so configured xhigh is not clamped to high",
+	);
+
+	const opus46 = merged.find((model) => model.id === "claude-opus-4-6");
+	assert.ok(opus46, "curated opus-4-6 must be present");
+	assert.deepEqual(opus46.thinkingLevelMap, { xhigh: "max" }, "Opus 4.6 maps xhigh to max effort");
+
+	const sonnet5 = merged.find((model) => model.id === "claude-sonnet-5");
+	assert.ok(sonnet5, "curated sonnet-5 must be present");
+	assert.equal(
+		sonnet5.compat?.forceAdaptiveThinking,
+		true,
+		"Sonnet 5 must inherit adaptive thinking — the id heuristic does not cover it",
+	);
+	assert.deepEqual(sonnet5.thinkingLevelMap, { xhigh: "xhigh" });
+
+	// The anthropic catalog has no thinkingLevelMap for the Haiku rows — the
+	// curated entries must not grow an empty/undefined map.
+	const haiku45 = merged.find((model) => model.id === "claude-haiku-4-5");
+	assert.ok(haiku45, "curated haiku-4-5 must be present");
+	assert.equal(haiku45.thinkingLevelMap, undefined);
 });
 
 test("captures UI context before streamSimple, including when before_provider_request never fires (#2118)", () => {

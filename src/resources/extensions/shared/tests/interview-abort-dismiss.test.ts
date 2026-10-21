@@ -12,6 +12,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@gsd/pi-tui";
 import { showInterviewRound, type Question, type RoundResult } from "../interview-ui.js";
 
 const ENTER = "\r";
@@ -52,7 +53,7 @@ describe("interview-ui abort dismissal (#2212)", () => {
 						muted: (t: string) => t,
 						dimmed: (t: string) => t,
 					};
-					widget = factory(mockTui, mockTheme, {}, (result: RoundResult) => {
+					widget = factory(mockTui, mockTheme, new KeybindingsManager(TUI_KEYBINDINGS), (result: RoundResult) => {
 						doneCalls.push(result);
 						resolve(result);
 					});

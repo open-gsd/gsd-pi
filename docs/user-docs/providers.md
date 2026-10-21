@@ -706,7 +706,7 @@ After configuring a provider:
 
 2. **Check available models:**
 
-   ```
+   ```bash
    /model
    ```
 

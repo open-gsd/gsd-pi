@@ -3,6 +3,15 @@ import { test } from "node:test";
 
 import { GSD_COMMAND_DESCRIPTION, getGsdArgumentCompletions, TOP_LEVEL_SUBCOMMANDS } from "../commands/catalog.ts";
 
+test("blocker completion exposes read-only inspection and human clear-only resolution", () => {
+  assert.ok(TOP_LEVEL_SUBCOMMANDS.some((command) => command.cmd === "blocker"));
+  assert.match(GSD_COMMAND_DESCRIPTION, /\|blocker\|/);
+  assert.deepEqual(
+    getGsdArgumentCompletions("blocker ").map((completion) => completion.label),
+    ["inspect", "resolve"],
+  );
+});
+
 test("quick command completion surfaces every right-sizing flag", () => {
   const labels = getGsdArgumentCompletions("quick ").map((completion) => completion.label);
 

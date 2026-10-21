@@ -154,6 +154,7 @@ export {
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
+	type ExternalUsageSnapshot,
 	type FileEntry,
 	getLatestCompactionEntry,
 	type ModelChangeEntry,

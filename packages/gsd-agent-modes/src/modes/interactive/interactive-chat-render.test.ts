@@ -24,6 +24,7 @@ function createHost(): InteractiveModeDelegateHost {
 	return {
 		chatContainer: new Container(),
 		pendingTools: new Map(),
+		activeToolInvocations: new Set(),
 		settingsManager: {
 			getTimestampFormat: () => "date-time-iso",
 			getShowImages: () => false,

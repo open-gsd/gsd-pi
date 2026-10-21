@@ -157,8 +157,12 @@ function checkMilestoneLevel(gsdRoot: string, mid: string, issues: DoctorIssue[]
     });
     const summaryPath = resolveMilestoneFile(gsdRoot, mid, 'SUMMARY');
     if (allDone && (!summaryPath || !existsSync(summaryPath))) {
+      // Info, not error: this file-only checker cannot know whether the
+      // database holds a milestone closeout. A milestone imported (or
+      // recorded) complete has no closeout to render, so the missing SUMMARY
+      // is expected there and must not fail the doctor forever (#2729).
       issues.push({
-        severity: 'error',
+        severity: 'info',
         code: 'all_slices_done_missing_summary',
         scope: 'milestone',
         unitId: mid,

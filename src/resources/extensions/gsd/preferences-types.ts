@@ -179,6 +179,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "verification_auto_fix",
   "verification_max_retries",
   "verification_timeout_ms",
+  "verification_source_exclude_paths",
   "per_unit_cost_cap_usd",
   "unit_cost_spike_multiplier",
   "search_provider",
@@ -622,6 +623,16 @@ export interface GSDPreferences {
   verification_max_retries?: number;
   /** Per-command host-verification and verification-oriented gsd_exec timeout in ms. Unset host verification uses 120000. */
   verification_timeout_ms?: number;
+  /**
+   * Git pathspecs excluded from the verification source-revision snapshot
+   * (#2873). Each entry becomes a `:(exclude)<entry>` pathspec on every
+   * `git ls-files` pass, on top of the built-in `.gsd/**` and `receipts/**`
+   * exclusions. Use for large non-evidence trees (historical test artifacts,
+   * committed fixtures) that would otherwise be re-hashed on every dispatch.
+   * Changes under excluded paths no longer invalidate recorded verification
+   * evidence — exclude only trees that verification evidence never depends on.
+   */
+  verification_source_exclude_paths?: string[];
   per_unit_cost_cap_usd?: number;
   /** Multiplier over the rolling per-unit cost average that triggers a cost-spike pause. Default: 3.0. The `burn-max` token profile ignores this and never pauses on spikes. */
   unit_cost_spike_multiplier?: number;

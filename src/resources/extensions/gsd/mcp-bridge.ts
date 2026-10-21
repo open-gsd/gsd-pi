@@ -44,3 +44,4 @@ export {
 } from "./db-writer.js";
 export { queryJournal } from "./journal.js";
 export { resolvePendingEscalation } from "./escalation-resolution.js";
+export { resolveAutoPauseBlockerById } from "./pause-blocker-domain-operation.js";

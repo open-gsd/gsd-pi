@@ -531,16 +531,20 @@ export async function regenerateDecisionsMarkdown(basePath: string): Promise<voi
   await writeProjectionFile(basePath, intent.path, intent.content, []);
 }
 
-/**
- * Re-project root REQUIREMENTS.md from the requirement rows, with no
- * requirement being added or changed. Writes nothing when there are no
- * requirement rows and no file, and returns false.
- */
-export async function regenerateRequirementsMarkdown(basePath: string): Promise<boolean> {
+export interface RequirementsProjectionIntent {
+  path: string;
+  content: string;
+}
+
+/** The REQUIREMENTS.md render derived from the requirement rows, or null when
+ * there are no requirement rows and no file. */
+export async function readRequirementsProjectionIntent(
+  basePath: string,
+): Promise<RequirementsProjectionIntent | null> {
   const db = await import('./gsd-db.js');
   const rows = db._getAdapter()?.prepare('SELECT * FROM requirements ORDER BY id').all() ?? [];
   const filePath = resolveGsdRootFile(basePath, 'REQUIREMENTS');
-  if (rows.length === 0 && !existsSync(filePath)) return false;
+  if (rows.length === 0 && !existsSync(filePath)) return null;
   const requirements: Requirement[] = rows.map(row => ({
     id: row['id'] as string,
     class: row['class'] as string,
@@ -555,12 +559,21 @@ export async function regenerateRequirementsMarkdown(basePath: string): Promise<
     full_content: row['full_content'] as string,
     superseded_by: (row['superseded_by'] as string) ?? null,
   }));
-  await writeProjectionFile(
-    basePath,
-    filePath,
-    generateRequirementsMd(requirements.filter(r => r.superseded_by == null)),
-    [],
-  );
+  return {
+    path: filePath,
+    content: generateRequirementsMd(requirements.filter(r => r.superseded_by == null)),
+  };
+}
+
+/**
+ * Re-project root REQUIREMENTS.md from the requirement rows, with no
+ * requirement being added or changed. Writes nothing when there are no
+ * requirement rows and no file, and returns false.
+ */
+export async function regenerateRequirementsMarkdown(basePath: string): Promise<boolean> {
+  const intent = await readRequirementsProjectionIntent(basePath);
+  if (!intent) return false;
+  await writeProjectionFile(basePath, intent.path, intent.content, []);
   return true;
 }
 

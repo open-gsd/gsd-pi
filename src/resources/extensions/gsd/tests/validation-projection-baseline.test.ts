@@ -71,7 +71,7 @@ function makeInvalidatedValidation(): string {
 
 async function assertNotAnExternalEdit(validationPath: string): Promise<void> {
   assert.deepEqual(
-    observeExternalMarkdownEdits(base, true).filter((record) => record.projectionPath.endsWith("VALIDATION.md")),
+    (await observeExternalMarkdownEdits(base, true)).filter((record) => record.projectionPath.endsWith("VALIDATION.md")),
     [],
     "the file that GSD wrote is not an external edit",
   );

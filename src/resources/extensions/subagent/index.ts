@@ -33,7 +33,13 @@ import {
 	mergeDeltaPatches,
 	readIsolationMode,
 } from "./isolation.js";
-import { registerWorker, updateWorker, formatWorkerIdentity } from "./worker-registry.js";
+import {
+	registerWorker,
+	updateWorker,
+	updateWorkerIdentity,
+	formatWorkerIdentity,
+	formatWorkerModelTokens,
+} from "./worker-registry.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 import { emitJournalEvent } from "../gsd/journal.js";
 import { CmuxClient, shellEscape } from "../cmux/index.js";
@@ -47,6 +53,12 @@ import {
 	type SubagentSessionArgs,
 } from "./launch.js";
 import { resolveSubagentWorktreeCwd } from "./worktree-cwd.js";
+import { QUESTION_CHANNEL_DIR_ENV } from "../shared/question-channel.js";
+import {
+	startQuestionChannelWatcher,
+	type ForwarderQuestionCtx,
+	type QuestionChannelWatcher,
+} from "./question-forwarding.js";
 import {
 	SubagentRunStore,
 	createInitialRunRecord,
@@ -70,18 +82,12 @@ const COLLAPSED_ITEM_COUNT = 10;
 // deliberately exempt from stall detection — are never touched.
 const LIVENESS_POLL_INTERVAL_MS = 30_000;
 const LIVENESS_DEATH_GRACE_MS = 5_000;
+// How often the cmux-split tailer re-reads the wrapper's teed stdout (#2835).
+// Same sub-300ms feel as the exit/pid wait loop's 150ms existence poll; each
+// tick reads only the byte range appended since the last read, so the cost is
+// one small read per tick, not a file re-scan.
+const CMUX_STDOUT_TAIL_INTERVAL_MS = 250;
 
-/**
- * Bound a diagnostic excerpt so a noisy child cannot flood the parent session
- * through the detached-completion wake message (#2363 review finding).
- */
-export function truncateDiagnostic(text: string, maxChars: number): string {
-	return text.length > maxChars
-		? `${text.slice(0, maxChars)}… [truncated, full output via action: "status"]`
-		: text;
-}
-
-const WAKE_DIAGNOSTIC_MAX_CHARS = 300;
 const liveSubagentProcesses = new Set<ChildProcess>();
 
 async function stopLiveSubagents(): Promise<void> {
@@ -145,6 +151,56 @@ function formatUsageStats(
 	}
 	if (model) parts.push(model);
 	return parts.join(" ");
+}
+
+/**
+ * Compact per-child cost token for the collapsed batch overview (#2822):
+ * `$0.0123` once the provider reported billable usage, "" while usage is
+ * still pending (the batch subtotal's `N pending usage` covers those) or
+ * the value is not a usable positive number. Mirrors formatUsageStats's
+ * cost formatting so both views read identically.
+ */
+function formatChildCost(usage: { cost: number } | undefined): string {
+	const cost = Number(usage?.cost);
+	return Number.isFinite(cost) && cost > 0 ? `$${cost.toFixed(4)}` : "";
+}
+
+/**
+ * Parent-session sink for child usage (#2821): `SessionManager.addExternalUsage`.
+ * Structural so tests can stub it; absent sink (stale harness, mock ctx) means
+ * reconciliation is skipped — usage visibility is observability and must never
+ * affect execution.
+ */
+type ExternalUsageSink = {
+	addExternalUsage?: (
+		key: string,
+		usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number },
+	) => void;
+};
+
+/**
+ * Reconcile a child's cumulative provider-reported usage into the parent
+ * session's external-usage accumulator (#2821). The sink banks only positive
+ * deltas per stable child key, so repeated or late partial updates never
+ * double count and the footer total stays `parent + reconciled children`.
+ */
+function reconcileChildUsage(
+	sink: ExternalUsageSink | undefined,
+	key: string,
+	usage: UsageStats,
+): void {
+	if (!sink || typeof sink.addExternalUsage !== "function") return;
+	try {
+		sink.addExternalUsage(key, {
+			input: usage.input,
+			output: usage.output,
+			cacheRead: usage.cacheRead,
+			cacheWrite: usage.cacheWrite,
+			cost: usage.cost,
+		});
+	} catch {
+		/* ignore — usage visibility is observability; execution remains authoritative */
+	}
 }
 
 function formatToolCall(
@@ -255,6 +311,12 @@ interface SubagentDetails {
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
+	/**
+	 * Persisted run snapshot for action: "status" (#2928). Present only there;
+	 * lets the renderer separate lifecycle facts from each child's authored
+	 * report instead of flattening both into one plain-text fallback.
+	 */
+	runRecord?: NonNullable<ReturnType<SubagentRunStore["get"]>>;
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -340,7 +402,11 @@ function processSubagentEventLine(
 				currentResult.usage.cost += usage.cost?.total || 0;
 				currentResult.usage.contextTokens = usage.totalTokens || 0;
 			}
-			if (!currentResult.model && msg.model) currentResult.model = msg.model;
+			const reportedModel = typeof msg.model === "string" ? msg.model.trim() : "";
+			if (reportedModel) {
+				if (!currentResult.model) currentResult.model = reportedModel;
+				else currentResult.reportedModel = currentResult.model === reportedModel ? undefined : reportedModel;
+			}
 			if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 			if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 		}
@@ -423,6 +489,93 @@ async function waitForExitFileWithWrapperLiveness(
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+/**
+ * Incrementally tail the cmux wrapper's teed stdout while the child runs
+ * (#2835). The wrapper pipeline is `node … | tee stdout.jsonl`, so child
+ * events land on disk as the child emits them; complete `\n`-terminated
+ * records are fed through the same processSubagentEventLine path as
+ * direct-spawn children, giving live activity and per-turn usage
+ * reconciliation. Exactly-once is positional, not heuristic: consumed bytes
+ * are tracked by offset and never re-read, so the completion paths drain only
+ * the unconsumed tail instead of re-parsing the file (a full re-read would
+ * double usage and duplicate messages). The pending buffer stays raw bytes
+ * until a newline arrives, so a multi-byte UTF-8 character split across reads
+ * is only decoded once complete; a trailing record without a final newline is
+ * processed by drain once the writer is done.
+ */
+function createCmuxStdoutTailer(
+	stdoutPath: string,
+	currentResult: SingleResult,
+	emitUpdate: () => void,
+) {
+	let readOffset = 0;
+	let pending: Buffer = Buffer.alloc(0);
+
+	const consume = (chunk: Buffer) => {
+		pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
+		while (true) {
+			const newline = pending.indexOf(0x0a);
+			if (newline === -1) break;
+			const line = pending.subarray(0, newline).toString("utf-8");
+			pending = pending.subarray(newline + 1);
+			processSubagentEventLine(line, currentResult, emitUpdate);
+		}
+	};
+
+	const readNewBytes = (flush: boolean) => {
+		let size: number;
+		try {
+			size = fs.statSync(stdoutPath).size;
+		} catch (err) {
+			if (flush && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			return; // tee has not created the file yet; nothing to tail
+		}
+		if (size < readOffset) {
+			// The private tmp output was truncated or replaced: already
+			// processed events stay authoritative and the lost region is
+			// skipped rather than re-processed (no double count); a child
+			// that lost its whole transcript is surfaced at completion by
+			// markMissingFinalResponse / the real exit code.
+			readOffset = size;
+			pending = Buffer.alloc(0);
+		}
+		// Read through the size captured above: a single readSync may return
+		// short, and drain has no next tick to pick up the remainder.
+		while (readOffset < size) {
+			const fd = fs.openSync(stdoutPath, "r");
+			try {
+				const chunk = Buffer.alloc(size - readOffset);
+				const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, readOffset);
+				if (bytesRead <= 0) break; // zero-progress guard: never spin
+				readOffset += bytesRead;
+				consume(chunk.subarray(0, bytesRead));
+			} finally {
+				fs.closeSync(fd);
+			}
+		}
+		if (flush && pending.length > 0) {
+			// The writer has exited, so a buffered record without a trailing
+			// newline is complete; process and reset — even when this drain
+			// saw no new bytes.
+			const line = pending.toString("utf-8");
+			pending = Buffer.alloc(0);
+			processSubagentEventLine(line, currentResult, emitUpdate);
+		}
+	};
+
+	return {
+		poll: () => {
+			try {
+				readNewBytes(false);
+			} catch {
+				/* transient read failure (e.g. EBUSY/EACCES): retry next tick */
+			}
+		},
+		/** Final pass after the exit file exists (tee has flushed by then): process every remaining byte. */
+		drain: () => readNewBytes(true),
+	};
+}
+
 interface TaskParam {
 	agent: string;
 	task: string;
@@ -456,6 +609,7 @@ function resultToChildArtifact(result: SingleResult, index: number, cwd?: string
 		errorMessage: result.errorMessage,
 		stopReason: result.stopReason,
 		model: result.model,
+		reportedModel: result.reportedModel,
 		...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
 		usage: result.usage,
 		merge: result.mergeResult
@@ -573,26 +727,88 @@ async function revalidateRunningRecord(
 	}
 }
 
-function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
-	if (!record) return "Subagent run not found.";
-	const lines = [
+// Shared lifecycle-fact formatters for persisted run records (#2928). The
+// model-facing formatRunRecord text and the TUI status view must not drift:
+// both build on the same header/bullet/meta lines, and the authored report
+// content stays OUT of these facts so the renderer can present it separately.
+function runRecordHeaderLines(record: NonNullable<ReturnType<SubagentRunStore["get"]>>): string[] {
+	return [
 		`Run ${record.runId}: ${record.status}`,
 		`Mode: ${record.mode}`,
 		`Context: ${record.contextMode}`,
 		`Updated: ${record.updatedAt}`,
 	];
+}
+
+function runRecordChildBullet(child: NonNullable<ReturnType<SubagentRunStore["get"]>>["children"][number]): string {
+	const facts = [
+		child.pid !== undefined ? `pid ${child.pid}` : undefined,
+		child.exitCode !== undefined ? `exit ${child.exitCode}` : undefined,
+	].filter(Boolean).join(", ");
+	const suffix = facts ? ` (${facts})` : "";
+	return `- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}`;
+}
+
+function runRecordChildMetaLines(child: NonNullable<ReturnType<SubagentRunStore["get"]>>["children"][number]): string[] {
+	const lines: string[] = [];
+	const modelIdentity = formatWorkerModelTokens({
+		model: child.model,
+		reportedModel: child.reportedModel,
+	});
+	if (modelIdentity) lines.push(`  model: ${modelIdentity}`);
+	if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
+	if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
+	return lines;
+}
+
+function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
+	if (!record) return "Subagent run not found.";
+	const lines = runRecordHeaderLines(record);
 	for (const child of record.children) {
-		const facts = [
-			child.pid !== undefined ? `pid ${child.pid}` : undefined,
-			child.exitCode !== undefined ? `exit ${child.exitCode}` : undefined,
-		].filter(Boolean).join(", ");
-		const suffix = facts ? ` (${facts})` : "";
-		lines.push(`- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}: ${child.output || child.errorMessage || child.stderr || child.task}`);
-		if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
-		if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
+		lines.push(`${runRecordChildBullet(child)}: ${child.output || child.errorMessage || child.stderr || child.task}`);
+		lines.push(...runRecordChildMetaLines(child));
 	}
 	if (record.failure) lines.push(`Failure: ${record.failure.message}`);
 	return lines.join("\n");
+}
+
+/**
+ * TUI view of a persisted run record for action: "status" (#2928). Lifecycle
+ * facts (status bullets, model/session identity, failure) render as plain
+ * text; each child's authored report renders through the same Markdown
+ * renderer ordinary results use, so headings/lists/code present identically.
+ * Raw sources — errorMessage and stderr — stay plain text, never reinterpreted
+ * as Markdown.
+ */
+function renderRunRecordReport(
+	record: NonNullable<ReturnType<SubagentRunStore["get"]>>,
+	theme: { fg: (color: any, text: string) => string },
+): Container {
+	const container = new Container();
+	container.addChild(new Text(runRecordHeaderLines(record).join("\n"), 0, 0));
+	for (const child of record.children) {
+		container.addChild(new Text([runRecordChildBullet(child), ...runRecordChildMetaLines(child)].join("\n"), 0, 0));
+		// Outcome diagnostics stay lifecycle facts beside the bullet, even when a
+		// partial authored report exists below — the report must not swallow them.
+		if (child.errorMessage) container.addChild(new Text(theme.fg("error", child.errorMessage), 0, 0));
+		if (child.output?.trim()) {
+			container.addChild(
+				new Text(theme.fg("muted", `─── Report: ${formatAgentLabel(child.agent, child.trackingName)} ───`), 0, 0),
+			);
+			// The authored source goes to the renderer unchanged (trim is only the
+			// emptiness check): leading indentation is meaningful markdown and must
+			// survive verbatim (#2928).
+			container.addChild(new Markdown(child.output, 0, 0, getMarkdownTheme()));
+		} else if (child.stderr) {
+			// Raw logs stay plain text — source, never reinterpreted as report
+			// markdown (#2928).
+			container.addChild(new Text(theme.fg("toolOutput", child.stderr), 0, 0));
+		} else if (!child.errorMessage && child.task) {
+			container.addChild(new Text(theme.fg("dim", child.task), 0, 0));
+		}
+	}
+	if (record.failure) container.addChild(new Text(theme.fg("error", `Failure: ${record.failure.message}`), 0, 0));
+	return container;
 }
 
 interface SubagentRunOptions {
@@ -610,6 +826,12 @@ interface SubagentRunOptions {
 	 * pid file (#2652). Persisted so action: "status" can revalidate.
 	 */
 	onChildSpawned?: (pid: number | undefined) => void;
+	/**
+	 * The dispatching session's context slice, when available. When present,
+	 * the child gets a question channel and its ask_user_questions calls are
+	 * routed to this session's UI / remote channels (#2713).
+	 */
+	questionCtx?: ForwarderQuestionCtx;
 }
 
 async function runSingleAgent(
@@ -674,6 +896,9 @@ async function runSingleAgent(
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	// #2713: question channel state (function scope for the finally cleanup).
+	let questionWatcher: QuestionChannelWatcher | null = null;
+	let questionChannelDir: string | null = null;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -691,7 +916,15 @@ async function runSingleAgent(
 		step,
 	};
 
+	// Stable identity for this child attempt (#2821): every cumulative usage
+	// snapshot reported through emitUpdate reconciles against this key. A retry
+	// of the same slot is a fresh attempt with a fresh key, so its spend is
+	// added on top of the failed attempt's banked usage instead of colliding.
+	const externalUsageKey = `subagent:${trackingName ?? agentName}:${crypto.randomUUID()}`;
+	const externalUsageSink = options.parentSessionManager as ExternalUsageSink | undefined;
+
 	const emitUpdate = () => {
+		reconcileChildUsage(externalUsageSink, externalUsageKey, currentResult.usage);
 		if (onUpdate) {
 			onUpdate({
 				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
@@ -701,6 +934,10 @@ async function runSingleAgent(
 	};
 
 	try {
+		// Bind the key to the current session generation before any await: if
+		// the user switches sessions while this child is still launching, its
+		// first real report must not bill the new session for old work.
+		reconcileChildUsage(externalUsageSink, externalUsageKey, currentResult.usage);
 		if (agent.systemPrompt.trim()) {
 			const tmp = writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
@@ -721,6 +958,24 @@ async function runSingleAgent(
 			projectRootSourceCwd,
 		});
 		if (launch.session.mode === "fork") currentResult.sessionFile = launch.session.sessionFile;
+		// #2713: export a question channel so the headless child forwards its
+		// ask_user_questions calls to this session's UI / remote channels.
+		if (options.questionCtx) {
+			try {
+				questionChannelDir = fs.mkdtempSync(path.join(os.tmpdir(), "gsd-questions-"));
+				launch.env[QUESTION_CHANNEL_DIR_ENV] = questionChannelDir;
+				questionWatcher = startQuestionChannelWatcher({
+					channelDir: questionChannelDir,
+					agentName,
+					questionCtx: options.questionCtx,
+					signal,
+				});
+			} catch {
+				// Non-fatal: without a channel the child keeps its headless behavior.
+				questionWatcher = null;
+				questionChannelDir = null;
+			}
+		}
 		let wasAborted = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
@@ -824,6 +1079,18 @@ async function runSingleAgent(
 		markMissingFinalResponse(currentResult);
 		return currentResult;
 	} finally {
+		// #2713: close any forwarded-question dialog the child left open, drain
+		// in-flight routing, then remove the channel.
+		if (questionWatcher) {
+			try {
+				await questionWatcher.stop();
+			} catch { /* ignore — best-effort teardown */ }
+		}
+		if (questionChannelDir) {
+			try {
+				fs.rmSync(questionChannelDir, { recursive: true, force: true });
+			} catch { /* ignore */ }
+		}
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -873,6 +1140,13 @@ export async function runSingleAgentInCmuxSplit(
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 	let tmpOutputDir: string | null = null;
+	// #2713: question channel state (function scope for the finally cleanup).
+	let questionWatcher: QuestionChannelWatcher | null = null;
+	let questionChannelDir: string | null = null;
+	// Function scope, not try-block scope: the finally clause must be able to
+	// clear the tail interval on every path (try-block declarations are
+	// invisible to the finally clause).
+	let tailTimer: NodeJS.Timeout | undefined;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -890,7 +1164,12 @@ export async function runSingleAgentInCmuxSplit(
 		step,
 	};
 
+	// Same per-attempt usage reconciliation as the direct-spawn path (#2821).
+	const externalUsageKey = `subagent:${trackingName ?? agentName}:${crypto.randomUUID()}`;
+	const externalUsageSink = options.parentSessionManager as ExternalUsageSink | undefined;
+
 	const emitUpdate = () => {
+		reconcileChildUsage(externalUsageSink, externalUsageKey, currentResult.usage);
 		if (onUpdate) {
 			onUpdate({
 				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
@@ -900,6 +1179,8 @@ export async function runSingleAgentInCmuxSplit(
 	};
 
 	try {
+		// Bind before any await — see the direct-spawn path.
+		reconcileChildUsage(externalUsageSink, externalUsageKey, currentResult.usage);
 		if (agent.systemPrompt.trim()) {
 			const tmp = writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
@@ -910,6 +1191,9 @@ export async function runSingleAgentInCmuxSplit(
 		const stderrPath = path.join(tmpOutputDir, "stderr.log");
 		const exitPath = path.join(tmpOutputDir, "exit.code");
 		const pidPath = path.join(tmpOutputDir, "pid");
+		// Live tail of the teed child stdout (#2835): the poller owns consumed
+		// bytes, so the completion paths below drain only the unconsumed tail.
+		const stdoutTailer = createCmuxStdoutTailer(stdoutPath, currentResult, emitUpdate);
 		// Accept either a pre-created surface ID or a direction to create a new split
 		const isDirection = directionOrSurfaceId === "right" || directionOrSurfaceId === "down"
 			|| directionOrSurfaceId === "left" || directionOrSurfaceId === "up";
@@ -937,12 +1221,30 @@ export async function runSingleAgentInCmuxSplit(
 			projectRootSourceCwd,
 		});
 		if (launch.session.mode === "fork") currentResult.sessionFile = launch.session.sessionFile;
+		// #2713: export a question channel so the headless child inside the
+		// split forwards its ask_user_questions calls to this session. The
+		// wrapper shell only forwards allowlisted env assignments
+		// (buildShellEnvAssignments), so the channel var is appended explicitly
+		// to the command prefix below.
+		if (options.questionCtx) {
+			try {
+				questionChannelDir = fs.mkdtempSync(path.join(os.tmpdir(), "gsd-questions-"));
+				launch.env[QUESTION_CHANNEL_DIR_ENV] = questionChannelDir;
+			} catch {
+				// Non-fatal: without a channel the child keeps its headless behavior.
+				questionChannelDir = null;
+			}
+		}
 		const processArgs = [process.env.GSD_BIN_PATH!, ...extensionArgs, ...launch.args];
 		// Normalize all paths to forward slashes before embedding in bash strings.
 		// On Windows, backslashes are interpreted as escape characters by bash,
 		// mangling paths like C:\Users\user into C:Useruser (#1436).
 		const bashPath = (p: string) => shellEscape(p.replaceAll("\\", "/"));
-		const envPrefix = buildShellEnvAssignments(launch.env).join(" ");
+		const envAssignments = buildShellEnvAssignments(launch.env);
+		if (questionChannelDir) {
+			envAssignments.push(`${QUESTION_CHANNEL_DIR_ENV}=${shellEscape(questionChannelDir)}`);
+		}
+		const envPrefix = envAssignments.join(" ");
 		const commandPrefix = envPrefix ? `${envPrefix} ` : "";
 		const innerScript = [
 			// Publish the wrapper shell's pid first (#2652): it is the process
@@ -960,6 +1262,21 @@ export async function runSingleAgentInCmuxSplit(
 		if (!sent) {
 			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, options);
 		}
+		// #2713: the child is live in the split — start routing its forwarded
+		// questions (kept after the fallback returns so they never double-start).
+		if (options.questionCtx && questionChannelDir) {
+			try {
+				questionWatcher = startQuestionChannelWatcher({
+					channelDir: questionChannelDir,
+					agentName,
+					questionCtx: options.questionCtx,
+					signal,
+				});
+			} catch {
+				questionWatcher = null;
+			}
+		}
+		tailTimer = setInterval(() => stdoutTailer.poll(), CMUX_STDOUT_TAIL_INTERVAL_MS);
 
 		const finished = await waitForExitFileWithWrapperLiveness(
 			exitPath,
@@ -982,12 +1299,7 @@ export async function runSingleAgentInCmuxSplit(
 			currentResult.running = false;
 			currentResult.completedAt = Date.now();
 			currentResult.stderr = "cmux split execution timed out or was aborted";
-			if (fs.existsSync(stdoutPath)) {
-				const stdout = fs.readFileSync(stdoutPath, "utf-8");
-				for (const line of stdout.split("\n")) {
-					processSubagentEventLine(line, currentResult, emitUpdate);
-				}
-			}
+			stdoutTailer.drain();
 			return currentResult;
 		}
 		if (finished.outcome === "wrapper-died") {
@@ -1003,12 +1315,7 @@ export async function runSingleAgentInCmuxSplit(
 			currentResult.exitCode = 1;
 			currentResult.running = false;
 			currentResult.completedAt = Date.now();
-			if (fs.existsSync(stdoutPath)) {
-				const stdout = fs.readFileSync(stdoutPath, "utf-8");
-				for (const line of stdout.split("\n")) {
-					processSubagentEventLine(line, currentResult, emitUpdate);
-				}
-			}
+			stdoutTailer.drain();
 			if (fs.existsSync(stderrPath)) {
 				currentResult.stderr = fs.readFileSync(stderrPath, "utf-8");
 			}
@@ -1017,12 +1324,7 @@ export async function runSingleAgentInCmuxSplit(
 			return currentResult;
 		}
 
-		if (fs.existsSync(stdoutPath)) {
-			const stdout = fs.readFileSync(stdoutPath, "utf-8");
-			for (const line of stdout.split("\n")) {
-				processSubagentEventLine(line, currentResult, emitUpdate);
-			}
-		}
+		stdoutTailer.drain();
 		if (fs.existsSync(stderrPath)) {
 			currentResult.stderr = fs.readFileSync(stderrPath, "utf-8");
 		}
@@ -1032,6 +1334,18 @@ export async function runSingleAgentInCmuxSplit(
 		markMissingFinalResponse(currentResult);
 		return currentResult;
 	} finally {
+		if (tailTimer) clearInterval(tailTimer);
+		// #2713: close any forwarded-question dialog, drain routing, remove channel.
+		if (questionWatcher) {
+			try {
+				await questionWatcher.stop();
+			} catch { /* ignore — best-effort teardown */ }
+		}
+		if (questionChannelDir) {
+			try {
+				fs.rmSync(questionChannelDir, { recursive: true, force: true });
+			} catch { /* ignore */ }
+		}
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -1107,7 +1421,7 @@ const SubagentParams = Type.Object({
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
 	agentScope: Type.Optional(AgentScopeSchema),
 	context: Type.Optional(ContextModeSchema),
-	background: Type.Optional(Type.Boolean({ description: "Return immediately after starting a single-mode run ({ agent, task }) and keep status in the persisted run record. Requires single mode; not supported with tasks or chain. Default: false.", default: false })),
+	background: Type.Optional(Type.Boolean({ description: "Return immediately after starting the run and keep status in the persisted run record. Supported for every valid dispatch mode: single ({ agent, task }), parallel ({ tasks }), and chain ({ chain }). Default: false.", default: false })),
 	followUp: Type.Optional(Type.String({ description: "Follow-up instruction for resume action. Falls back to task when omitted." })),
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: false.", default: false }),
@@ -1156,7 +1470,7 @@ export default function (pi: ExtensionAPI) {
 			"Delegate tasks to specialized subagents, each a separate pi process with its own isolated context window, tools, model, and system prompt.",
 			"Modes: single ({ agent, task }), parallel ({ tasks: [{agent, task},...] }), chain ({ chain: [{agent, task},...] } where each step's {previous} placeholder receives the prior output).",
 			"Agents are defined as .md files in ~/.gsd/agent/agents/ (user) or .gsd/agents/ (project); list them with the /subagent command.",
-			"background: true returns immediately after starting a single-mode run ({ agent, task }); it is not supported with tasks or chain.",
+			"background: true returns immediately after starting the run — single ({ agent, task }), parallel ({ tasks }), or chain ({ chain }) — and keeps status in the persisted run record.",
 		].join(" "),
 		promptGuidelines: [
 			"Prefer subagent dispatch over inline work for self-contained tasks (recon, planning, review, refactor, test writing, security audit, docs); each dispatch gets a fresh context window so the main session stays focused on synthesis.",
@@ -1212,7 +1526,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				return {
 					content: [{ type: "text", text: formatRunRecord(record) }],
-					details: makeDetails("single")([]),
+					// The snapshot rides the details (#2928) so the renderer can
+					// present authored reports as Markdown while the content text
+					// above stays the model-facing record dump.
+					details: record ? { ...makeDetails("single")([]), runRecord: record } : makeDetails("single")([]),
 					...(record ? {} : { isError: true }),
 				};
 			}
@@ -1274,6 +1591,7 @@ export default function (pi: ExtensionAPI) {
 						sessionOverride: { mode: "fork", sessionFile: selected.sessionFile, sessionDir: path.dirname(selected.sessionFile) },
 						trackingName: selected.trackingName,
 						thinkingOverride: params.thinking,
+						questionCtx: ctx,
 					},
 				);
 				return {
@@ -1451,12 +1769,18 @@ export default function (pi: ExtensionAPI) {
 			});
 			const errorMessageFor = (err: unknown): string =>
 				err instanceof Error ? err.message : String(err || "subagent dispatch failed");
+			// Failure attribution uses the signal the executor actually ran under:
+			// detached batches run with no signal, so a launch failure after the
+			// dispatching turn was canceled is an error, not an abort (#2820).
+			// failureSignal is always passed explicitly (no default): an explicit
+			// `undefined` must mean "ran detached", not "fall back to the turn".
 			const makeFailureResult = (
 				err: unknown,
 				agent: string,
 				task: string,
-				step?: number,
-				trackingName?: string,
+				step: number | undefined,
+				trackingName: string | undefined,
+				failureSignal: AbortSignal | undefined,
 			): SingleResult => {
 				const message = errorMessageFor(err);
 				const dispatchIndex = dispatchAgents.findIndex((dispatchAgent, index) =>
@@ -1471,13 +1795,13 @@ export default function (pi: ExtensionAPI) {
 					messages: [],
 					stderr: message,
 					usage: zeroUsage(),
-					stopReason: signal?.aborted ? "aborted" : "error",
+					stopReason: failureSignal?.aborted ? "aborted" : "error",
 					errorMessage: message,
 					thinking: dispatchIndex >= 0 ? dispatchChildren[dispatchIndex]?.thinking : undefined,
 					...(step !== undefined ? { step } : {}),
 				};
 			};
-			const synthesizeFailureResults = (err: unknown): SingleResult[] => {
+			const synthesizeFailureResults = (err: unknown, failureSignal: AbortSignal | undefined): SingleResult[] => {
 				if (finalResults.length > 0) {
 					let patchedRunning = false;
 					const patched = finalResults.map((result) => {
@@ -1488,7 +1812,7 @@ export default function (pi: ExtensionAPI) {
 							...result,
 							exitCode: 1,
 							stderr: result.stderr || message,
-							stopReason: signal?.aborted ? "aborted" : "error",
+							stopReason: failureSignal?.aborted ? "aborted" : "error",
 							errorMessage: result.errorMessage || message,
 							usage: result.usage ?? zeroUsage(),
 							// Freeze elapsed display at the failure moment (#2396)
@@ -1507,6 +1831,7 @@ export default function (pi: ExtensionAPI) {
 								dispatchTasks[nextIndex] ?? "",
 								dispatchMode === "chain" ? nextIndex + 1 : undefined,
 								dispatchTrackingNames[nextIndex],
+								failureSignal,
 							),
 						];
 					}
@@ -1520,6 +1845,7 @@ export default function (pi: ExtensionAPI) {
 						dispatchTasks[index] ?? "",
 						dispatchMode === "chain" ? index + 1 : undefined,
 						dispatchTrackingNames[index],
+						failureSignal,
 					),
 				);
 			};
@@ -1553,160 +1879,55 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			// A detached run's completion is otherwise invisible: the journal event
-			// has no turn-starting consumer, so the session idles until the model
-			// happens to poll action: "status" (#2363). Re-invoke it with a short
-			// summary. One wake per dispatch, interactive sessions only, and fully
-			// defensive — a wake failure must never affect persistence or escape
-			// the unobserved IIFE (ctx.hasUI itself can throw on a stale runtime).
-			let backgroundWakeSent = false;
-			const wakeSessionAfterDetachedCompletion = (results: SingleResult[]): void => {
-				try {
-					if (!ctx.hasUI || backgroundWakeSent) return;
-					backgroundWakeSent = true;
-					const successCount = results.filter((r) => r.exitCode === 0).length;
-					const failureCount = results.length - successCount;
-					const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
-					const wallSeconds = ((Date.now() - dispatchStartMs) / 1000).toFixed(1);
-					const perAgent = results
-						.map((r) =>
-							`- ${r.agent}: ${r.exitCode === 0 ? "succeeded" : `failed — ${truncateDiagnostic(r.errorMessage || r.stderr || "unknown error", WAKE_DIAGNOSTIC_MAX_CHARS)}`}`
-						)
-						.join("\n");
-					void pi.sendMessage(
-						{
-							customType: "subagent_completed",
-							content: [
-								`Background subagent run ${dispatchId} finished in ${wallSeconds}s: ${successCount} succeeded, ${failureCount} failed (cost $${totalCost.toFixed(4)}).`,
-								perAgent,
-								`Full output is persisted. Inspect it with the subagent tool, action: "status", runId: "${dispatchId}", and process the results in this turn.`,
-							].join("\n"),
-							display: true,
-							details: { dispatchId, mode: dispatchMode, agents: dispatchAgents, successCount, failureCount },
-						},
-						{ triggerTurn: true },
-					).catch(() => {
-						// Wake delivery is best-effort; persistence above is authoritative.
-					});
-				} catch {
-					// A wake failure must never affect persistence.
-				}
-			};
-
+		// has no turn-starting consumer, so the session idles until the model
+		// happens to poll action: "status" (#2363). Re-invoke it with a short
+		// summary. One wake per dispatch, interactive sessions only, and fully
+		// defensive — a wake failure must never affect persistence or escape
+		// the unobserved IIFE (ctx.hasUI itself can throw on a stale runtime).
+		let backgroundWakeSent = false;
+		const wakeSessionAfterDetachedCompletion = (results: SingleResult[]): void => {
 			try {
-			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
-				const requestedAgentNames = new Set<string>();
-				if (hasChain) for (const step of chainParams) requestedAgentNames.add(step.agent);
-				if (hasTasks) for (const t of taskParams) requestedAgentNames.add(t.agent);
-				if (params.agent) requestedAgentNames.add(params.agent);
-
-				const projectAgentsRequested = Array.from(requestedAgentNames)
-					.map((name) => agents.find((a) => a.name === name))
-					.filter((a): a is AgentConfig => a?.source === "project");
-
-				if (projectAgentsRequested.length > 0) {
-					const names = projectAgentsRequested.map((a) => a.name).join(", ");
-					const dir = discovery.projectAgentsDir ?? "(unknown)";
-					const ok = await ctx.ui.confirm(
-						"Run project-local agents?",
-						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-					);
-					if (!ok) {
-						finishDispatch([]);
-						return {
-							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
-						};
-					}
-				}
+				if (!ctx.hasUI || backgroundWakeSent) return;
+				backgroundWakeSent = true;
+				const successCount = results.filter((r) => r.exitCode === 0).length;
+				const failureCount = results.length - successCount;
+				const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
+				const wallSeconds = ((Date.now() - dispatchStartMs) / 1000).toFixed(1);
+				// The host renders this message as Markdown (#2928): keep it to the
+				// aggregate completion facts plus the inspection pointer. Per-agent
+				// outcomes and raw diagnostics live in the status report — repeating
+				// them here would both duplicate facts and reinterpret source.
+				void pi.sendMessage(
+					{
+						customType: "subagent_completed",
+						content: [
+							`Background subagent run ${dispatchId} finished in ${wallSeconds}s: ${successCount} succeeded, ${failureCount} failed (cost $${totalCost.toFixed(4)}).`,
+							`Full output is persisted. Inspect it with the subagent tool, action: "status", runId: "${dispatchId}", and process the results in this turn.`,
+						].join("\n"),
+						display: true,
+						details: { dispatchId, mode: dispatchMode, agents: dispatchAgents, successCount, failureCount },
+					},
+					{ triggerTurn: true },
+				).catch(() => {
+					// Wake delivery is best-effort; persistence above is authoritative.
+				});
+			} catch {
+				// A wake failure must never affect persistence.
 			}
+		};
 
-			if (params.background) {
-				if (!params.agent || !params.task || hasTasks || hasChain) {
-					const failure = makeFailureResult(
-						new Error(
-							"Background launch requires single mode with agent and task; it cannot be combined with tasks or chain. " +
-								"Remove background to dispatch tasks/chain synchronously.",
-						),
-						params.agent ?? "unknown",
-						params.task ?? "",
-					);
-					finishDispatch([failure]);
-					return {
-						content: [{ type: "text", text: failure.errorMessage ?? failure.stderr }],
-						details: makeDetails("single")([failure]),
-						isError: true,
-					};
-				}
-
-				void (async () => {
-					let isolation: IsolationEnvironment | null = null;
-					try {
-						const effectiveCwd = resolveSubagentWorktreeCwd(ctx.cwd, params.cwd);
-						if (useIsolation) {
-							const taskId = crypto.randomUUID();
-							isolation = await createIsolation(effectiveCwd, taskId, isolationMode);
-						}
-						const projectRoot = isolation
-							? resolveSubagentProjectRoot(ctx.cwd, effectiveCwd)
-							: undefined;
-						const result = await runSingleAgent(
-							ctx.cwd,
-							agents,
-							params.agent!,
-							params.task!,
-							isolation ? isolation.workDir : effectiveCwd,
-							undefined,
-							undefined,
-							(partial) => {
-								if (partial.details?.results[0]) persistRunResults([partial.details.results[0]]);
-							},
-							makeDetails("single"),
-							{
-								modelOverride: params.model,
-								contextMode,
-								parentSessionManager: ctx.sessionManager,
-								trackingName: dispatchTrackingNames[0],
-								thinkingOverride: params.thinking,
-								projectRoot,
-								projectRootSourceCwd: isolation ? effectiveCwd : undefined,
-								onChildSpawned: noteChildPid(0),
-							},
-						);
-						if (isolation && result.exitCode === 0) {
-							const patches = await isolation.captureDelta();
-							if (patches.length > 0) {
-								const mergeResult = await mergeDeltaPatches(effectiveCwd, patches);
-								result.mergeResult = mergeResult;
-								if (!mergeResult.success) {
-									result.exitCode = 1;
-									result.stopReason = "error";
-									result.errorMessage = `Patch merge failed: ${mergeResult.error || "unknown error"}`;
-									result.stderr = result.stderr || result.errorMessage;
-								}
-							}
-						}
-						finalResults = [result];
-						finishDispatch([result]);
-						wakeSessionAfterDetachedCompletion([result]);
-					} catch (err) {
-						finalResults = synthesizeFailureResults(err);
-						finishDispatch(finalResults);
-						wakeSessionAfterDetachedCompletion(finalResults);
-					} finally {
-						if (isolation) await isolation.cleanup();
-					}
-				})();
-
-				return {
-					content: [{
-						type: "text",
-						text: `Started background subagent run ${dispatchId}. Use action: "status" with runId: "${dispatchId}" to inspect it.`,
-					}],
-					details: makeDetails("single")([]),
-				};
-			}
-
-			if (chainParams.length > 0) {
+			// Batch executors shared by the synchronous dispatch paths and detached
+			// background runs (#2820): a background batch must not drift from
+			// synchronous semantics, so ordering, {previous} handoff, concurrency,
+			// per-task overrides, retry, worker identity, isolation, cmux splits,
+			// and run-record persistence live here once. Detached runs pass no
+			// signal (children must outlive the dispatching turn) and no update
+			// forwarding (the tool call has returned; the persisted run record and
+			// action: "status" are the observation surface).
+			const runChainBatch = async (
+				batchSignal: AbortSignal | undefined,
+				batchOnUpdate: OnUpdateCallback | undefined,
+			): Promise<SingleResult[]> => {
 				const results: SingleResult[] = [];
 				finalResults = results;
 				let previousOutput = "";
@@ -1722,8 +1943,8 @@ export default function (pi: ExtensionAPI) {
 						if (currentResult) {
 							const allResults = [...results, currentResult];
 							persistRunResults(allResults);
-							if (onUpdate) {
-								onUpdate({
+							if (batchOnUpdate) {
+								batchOnUpdate({
 									content: partial.content,
 									details: makeDetails("chain")(allResults),
 								});
@@ -1739,7 +1960,7 @@ export default function (pi: ExtensionAPI) {
 						taskWithContext,
 						stepCwd,
 						i + 1,
-						signal,
+						batchSignal,
 						chainUpdate,
 						makeDetails("chain"),
 						{
@@ -1749,6 +1970,7 @@ export default function (pi: ExtensionAPI) {
 							trackingName: dispatchTrackingNames[i],
 							thinkingOverride: step.thinking ?? params.thinking,
 							onChildSpawned: noteChildPid(i),
+							questionCtx: ctx,
 						},
 					);
 					results.push(result);
@@ -1756,39 +1978,18 @@ export default function (pi: ExtensionAPI) {
 
 					const isError =
 						result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-					if (isError) {
-						const errorMsg =
-							result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-						finishDispatch(results);
-						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
-							details: makeDetails("chain")(results),
-							isError: true,
-						};
-					}
+					// A failed step stops the chain; it is the last entry. The caller
+					// formats the stop (synchronous) or the aggregate wake (background).
+					if (isError) return results;
 					previousOutput = getFinalOutput(result.messages);
 				}
-				finishDispatch(results);
-				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
-					details: makeDetails("chain")(results),
-				};
-			}
+				return results;
+			};
 
-			if (taskParams.length > 0) {
-				if (taskParams.length > MAX_PARALLEL_TASKS) {
-					finishDispatch([]);
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Too many parallel tasks (${taskParams.length}). Max is ${MAX_PARALLEL_TASKS}.`,
-							},
-						],
-						details: makeDetails("parallel")([]),
-					};
-				}
-
+			const runParallelBatch = async (
+				batchSignal: AbortSignal | undefined,
+				batchOnUpdate: OnUpdateCallback | undefined,
+			): Promise<SingleResult[]> => {
 				// Track all results for streaming updates
 				const allResults: SingleResult[] = new Array(taskParams.length);
 
@@ -1822,10 +2023,10 @@ export default function (pi: ExtensionAPI) {
 				finalResults = allResults;
 
 				const emitParallelUpdate = () => {
-					if (onUpdate) {
+					if (batchOnUpdate) {
 						const running = allResults.filter((r) => r.exitCode === -1).length;
 						const done = allResults.filter((r) => r.exitCode !== -1).length;
-						onUpdate({
+						batchOnUpdate({
 							content: [
 								{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` },
 							],
@@ -1845,9 +2046,36 @@ export default function (pi: ExtensionAPI) {
 					const taskModel = t.model || params.model;
 					const taskThinking = t.thinking ?? params.thinking;
 					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId, workerIdentities[index]);
+					const syncWorkerIdentity = (result: SingleResult) => {
+						updateWorkerIdentity(workerId, {
+							...(result.model !== undefined ? { model: result.model } : {}),
+							reportedModel: result.reportedModel,
+							...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
+						});
+					};
+					// A retry supersedes the failed attempt's result object, which
+					// would silently drop its billable usage from the card and the
+					// run record (#2821). Bank the replaced attempt and fold it into
+					// every later view of this slot; the parent-session accumulator
+					// already banks each attempt separately under its own key.
+					let bankedUsage: UsageStats | undefined;
+					const withBankedUsage = (usage: UsageStats): UsageStats => {
+						if (!bankedUsage) return usage;
+						return {
+							input: bankedUsage.input + usage.input,
+							output: bankedUsage.output + usage.output,
+							cacheRead: bankedUsage.cacheRead + usage.cacheRead,
+							cacheWrite: bankedUsage.cacheWrite + usage.cacheWrite,
+							cost: bankedUsage.cost + usage.cost,
+							contextTokens: usage.contextTokens,
+							turns: bankedUsage.turns + usage.turns,
+						};
+					};
 					const updateParallelResult = (partial: AgentToolResult<SubagentDetails>) => {
 						if (partial.details?.results[0]) {
-							allResults[index] = partial.details.results[0];
+							const raw = partial.details.results[0];
+							syncWorkerIdentity(raw);
+							allResults[index] = bankedUsage ? { ...raw, usage: withBankedUsage(raw.usage) } : raw;
 							persistRunResults([...allResults]);
 							emitParallelUpdate();
 						}
@@ -1866,6 +2094,7 @@ export default function (pi: ExtensionAPI) {
 							projectRoot,
 							projectRootSourceCwd,
 							onChildSpawned: noteChildPid(index),
+							questionCtx: ctx,
 						};
 						return cmuxSplitsEnabled
 							? runSingleAgentInCmuxSplit(
@@ -1877,7 +2106,7 @@ export default function (pi: ExtensionAPI) {
 								t.task,
 								runCwd,
 								undefined,
-								signal,
+								batchSignal,
 								updateParallelResult,
 								makeDetails("parallel"),
 								runOptions,
@@ -1889,7 +2118,7 @@ export default function (pi: ExtensionAPI) {
 								t.task,
 								runCwd,
 								undefined,
-								signal,
+								batchSignal,
 								updateParallelResult,
 								makeDetails("parallel"),
 								runOptions,
@@ -1930,14 +2159,31 @@ export default function (pi: ExtensionAPI) {
 							if (isolation) await isolation.cleanup();
 						}
 					};
-					let result = await runTask();
-
-					// Auto-retry failed tasks (likely API rate limit or transient error)
-					const isFailed = result.exitCode !== 0 || (result.messages.length === 0 && !signal?.aborted);
-					if (isFailed && MAX_RETRIES > 0 && !signal?.aborted) {
+					let result: SingleResult;
+					try {
 						result = await runTask();
+
+						// Auto-retry failed tasks (likely API rate limit or transient error)
+						const isFailed = result.exitCode !== 0 || (result.messages.length === 0 && !batchSignal?.aborted);
+						if (isFailed && MAX_RETRIES > 0 && !batchSignal?.aborted) {
+							// The superseded attempt's billable usage must not vanish
+							// from the card or run record (#2821): bank it and fold it
+							// into every later view of this slot. The parent-session
+							// accumulator already banked it under the attempt's own key.
+							bankedUsage = result.usage;
+							result = await runTask();
+							result.usage = withBankedUsage(result.usage);
+						}
+					} catch (err) {
+						// A thrown launch (isolation, fork setup) fails this child, not
+						// the batch: the executor must await every worker before the
+						// batch finalizes, or a detached run would complete early and
+						// the stragglers' progress writes would resurrect the terminal
+						// record as `running` (#2820 review).
+						result = makeFailureResult(err, t.agent, t.task, undefined, dispatchTrackingNames[index], batchSignal);
 					}
 
+					syncWorkerIdentity(result);
 					updateWorker(workerId, result.exitCode === 0 ? "completed" : "failed");
 					allResults[index] = result;
 					persistRunResults([...allResults]);
@@ -1945,6 +2191,160 @@ export default function (pi: ExtensionAPI) {
 					return result;
 				});
 				finalResults = results;
+				return results;
+			};
+
+			try {
+			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
+				const requestedAgentNames = new Set<string>();
+				if (hasChain) for (const step of chainParams) requestedAgentNames.add(step.agent);
+				if (hasTasks) for (const t of taskParams) requestedAgentNames.add(t.agent);
+				if (params.agent) requestedAgentNames.add(params.agent);
+
+				const projectAgentsRequested = Array.from(requestedAgentNames)
+					.map((name) => agents.find((a) => a.name === name))
+					.filter((a): a is AgentConfig => a?.source === "project");
+
+				if (projectAgentsRequested.length > 0) {
+					const names = projectAgentsRequested.map((a) => a.name).join(", ");
+					const dir = discovery.projectAgentsDir ?? "(unknown)";
+					const ok = await ctx.ui.confirm(
+						"Run project-local agents?",
+						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+					);
+					if (!ok) {
+						finishDispatch([]);
+						return {
+							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
+							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
+						};
+					}
+				}
+			}
+
+			// Batch-size validation must fail before any launch, synchronous or
+			// detached (#2820).
+			if (taskParams.length > MAX_PARALLEL_TASKS) {
+				finishDispatch([]);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Too many parallel tasks (${taskParams.length}). Max is ${MAX_PARALLEL_TASKS}.`,
+						},
+					],
+					details: makeDetails("parallel")([]),
+				};
+			}
+
+			if (params.background) {
+				// Detached single-child body (isolation + run + merge). Throws on
+				// abort or funnel failure; the IIFE below synthesizes failures.
+				const runSingleDetached = async (): Promise<SingleResult> => {
+					let isolation: IsolationEnvironment | null = null;
+					try {
+						const effectiveCwd = resolveSubagentWorktreeCwd(ctx.cwd, params.cwd);
+						if (useIsolation) {
+							const taskId = crypto.randomUUID();
+							isolation = await createIsolation(effectiveCwd, taskId, isolationMode);
+						}
+						const projectRoot = isolation
+							? resolveSubagentProjectRoot(ctx.cwd, effectiveCwd)
+							: undefined;
+						const result = await runSingleAgent(
+							ctx.cwd,
+							agents,
+							params.agent!,
+							params.task!,
+							isolation ? isolation.workDir : effectiveCwd,
+							undefined,
+							undefined,
+							(partial) => {
+								if (partial.details?.results[0]) persistRunResults([partial.details.results[0]]);
+							},
+							makeDetails("single"),
+							{
+								modelOverride: params.model,
+								contextMode,
+								parentSessionManager: ctx.sessionManager,
+								trackingName: dispatchTrackingNames[0],
+								thinkingOverride: params.thinking,
+								projectRoot,
+								projectRootSourceCwd: isolation ? effectiveCwd : undefined,
+								onChildSpawned: noteChildPid(0),
+								questionCtx: ctx,
+							},
+						);
+						if (isolation && result.exitCode === 0) {
+							const patches = await isolation.captureDelta();
+							if (patches.length > 0) {
+								const mergeResult = await mergeDeltaPatches(effectiveCwd, patches);
+								result.mergeResult = mergeResult;
+								if (!mergeResult.success) {
+									result.exitCode = 1;
+									result.stopReason = "error";
+									result.errorMessage = `Patch merge failed: ${mergeResult.error || "unknown error"}`;
+									result.stderr = result.stderr || result.errorMessage;
+								}
+							}
+						}
+						return result;
+					} finally {
+						if (isolation) await isolation.cleanup();
+					}
+				};
+
+				// Every valid mode launches detached through the same executors the
+				// synchronous paths use (#2820); only completion differs: the run
+				// record goes terminal and one aggregate wake re-invokes the session.
+				void (async () => {
+					let results: SingleResult[];
+					try {
+						if (hasChain) results = await runChainBatch(undefined, undefined);
+						else if (hasTasks) results = await runParallelBatch(undefined, undefined);
+						else results = [await runSingleDetached()];
+						finishDispatch(results);
+						wakeSessionAfterDetachedCompletion(results);
+				} catch (err) {
+					// The detached run executed with no signal, so failure synthesis
+					// must not attribute the dispatching turn's cancellation (#2820).
+					const failures = synthesizeFailureResults(err, undefined);
+					finishDispatch(failures);
+					wakeSessionAfterDetachedCompletion(failures);
+				}
+				})();
+
+				return {
+					content: [{
+						type: "text",
+						text: `Started background subagent run ${dispatchId}. Use action: "status" with runId: "${dispatchId}" to inspect it.`,
+					}],
+					details: makeDetails(dispatchMode)([]),
+				};
+			}
+
+			if (chainParams.length > 0) {
+				const results = await runChainBatch(signal, onUpdate);
+				const last = results[results.length - 1];
+				const isError =
+					last.exitCode !== 0 || last.stopReason === "error" || last.stopReason === "aborted";
+				if (isError) {
+					const errorMsg =
+						last.errorMessage || last.stderr || getFinalOutput(last.messages) || "(no output)";
+					return {
+						content: [{ type: "text", text: `Chain stopped at step ${results.length} (${last.agent}): ${errorMsg}` }],
+						details: makeDetails("chain")(results),
+						isError: true,
+					};
+				}
+				return {
+					content: [{ type: "text", text: getFinalOutput(last.messages) || "(no output)" }],
+					details: makeDetails("chain")(results),
+				};
+			}
+
+			if (taskParams.length > 0) {
+				const results = await runParallelBatch(signal, onUpdate);
 
 				const successCount = results.filter((r) => r.exitCode === 0).length;
 				const summaries = results.map((r) => {
@@ -1993,6 +2393,7 @@ export default function (pi: ExtensionAPI) {
 						projectRoot,
 						projectRootSourceCwd: isolation ? effectiveCwd : undefined,
 						onChildSpawned: noteChildPid(0),
+						questionCtx: ctx,
 					};
 					const result = cmuxSplitsEnabled
 						? await runSingleAgentInCmuxSplit(
@@ -2073,25 +2474,36 @@ export default function (pi: ExtensionAPI) {
 				details: makeDetails("single")([]),
 			};
 			} catch (err) {
-				if (!dispatchCompletedEmitted) finalResults = synthesizeFailureResults(err);
+				if (!dispatchCompletedEmitted) finalResults = synthesizeFailureResults(err, signal);
 				throw err;
 			} finally {
 				if (!params.background) finishDispatch(finalResults);
 			}
 		},
 
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
+			// Ctrl+O exposes the complete untruncated assignment for every entry
+			// (#2834); the collapsed overview stays compact (40-char previews,
+			// first three entries). The Text component wraps long lines
+			// ANSI-safely at terminal width, so full tasks need no slicing here.
+			const expanded = context?.expanded ?? false;
 			const scope: AgentScope = args.agentScope ?? "both";
 			if (args.chain && args.chain.length > 0) {
+				const listedCount = expanded ? args.chain.length : Math.min(args.chain.length, 3);
 				let text =
 					theme.fg("toolTitle", theme.bold("subagent ")) +
 					theme.fg("accent", `chain (${args.chain.length} steps)`) +
 					theme.fg("muted", ` [${scope}]`);
-				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
+				for (let i = 0; i < listedCount; i++) {
 					const step = args.chain[i];
-					// Clean up {previous} placeholder for display
-					const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
-					const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
+					// Args may still be streaming: never assume task is present.
+					const rawTask: string = step.task ?? "";
+					// Clean up {previous} placeholder for display (the executed
+					// task, with the placeholder substituted, renders in full in
+					// the result detail); fall back to the raw task when cleanup
+					// would blank the entry.
+					const cleanTask = rawTask.replace(/\{previous\}/g, "").trim() || rawTask;
+					const preview = expanded || cleanTask.length <= 40 ? cleanTask : `${cleanTask.slice(0, 40)}...`;
 					text +=
 						"\n  " +
 						theme.fg("muted", `${i + 1}.`) +
@@ -2099,19 +2511,26 @@ export default function (pi: ExtensionAPI) {
 						theme.fg("accent", step.agent) +
 						theme.fg("dim", ` ${preview}`);
 				}
-				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
+				if (!expanded && args.chain.length > 3) {
+					text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
+				}
 				return new Text(text, 0, 0);
 			}
 			if (args.tasks && args.tasks.length > 0) {
+				const listedTasks = expanded ? args.tasks : args.tasks.slice(0, 3);
 				let text =
 					theme.fg("toolTitle", theme.bold("subagent ")) +
 					theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
 					theme.fg("muted", ` [${scope}]`);
-				for (const t of args.tasks.slice(0, 3)) {
-					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
+				for (const t of listedTasks) {
+					// Args may still be streaming: never render a bare undefined.
+					const taskText: string = t.task ?? "";
+					const preview = expanded || taskText.length <= 40 ? taskText : `${taskText.slice(0, 40)}...`;
 					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
 				}
-				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				if (!expanded && args.tasks.length > 3) {
+					text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				}
 				return new Text(text, 0, 0);
 			}
 			const agentName = args.agent || "...";
@@ -2127,6 +2546,14 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded }, theme) {
 			const details = result.details as SubagentDetails | undefined;
 			if (!details || details.results.length === 0) {
+				// Background status reports (#2928): the run-record snapshot drives a
+				// structured view that renders authored reports as Markdown while
+				// lifecycle facts and raw diagnostics stay plain text. The same view
+				// serves collapsed and expanded (status is an explicit inspection
+				// action; truncating it would regress today's full-report fallback).
+				if (details?.runRecord) {
+					return renderRunRecordReport(details.runRecord, theme);
+				}
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 			}
@@ -2155,6 +2582,10 @@ export default function (pi: ExtensionAPI) {
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
+				const identity = formatWorkerIdentity(
+					r,
+					r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+				);
 
 				if (expanded) {
 					const container = new Container();
@@ -2163,6 +2594,7 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+					if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
@@ -2196,6 +2628,7 @@ export default function (pi: ExtensionAPI) {
 
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(formatAgentLabel(r.agent, r.trackingName)))}${theme.fg("muted", ` (${r.agentSource})`)}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+				if (identity) text += `\n${theme.fg("dim", identity)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
@@ -2251,6 +2684,11 @@ export default function (pi: ExtensionAPI) {
 							),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						const identity = formatWorkerIdentity(
+							r,
+							r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+						);
+						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -2293,6 +2731,11 @@ export default function (pi: ExtensionAPI) {
 					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
+					const identity = formatWorkerIdentity(
+						r,
+						r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+					);
+					if (identity) text += `\n${theme.fg("dim", identity)}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
@@ -2316,7 +2759,10 @@ export default function (pi: ExtensionAPI) {
 					? `${successCount + failCount}/${details.results.length} done, ${running} running`
 					: `${successCount}/${details.results.length} tasks`;
 
-				if (expanded && !isRunning) {
+				if (expanded) {
+					// Ctrl+O opens the detail container while the batch runs too
+					// (#2834): running children show the live activity tail, done
+					// children keep the completed-result rendering.
 					const container = new Container();
 					container.addChild(
 						new Text(
@@ -2327,7 +2773,12 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon =
+							r.exitCode === -1
+								? theme.fg("warning", "⏳")
+								: r.exitCode === 0
+									? theme.fg("success", "✓")
+									: theme.fg("error", "✗");
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -2336,42 +2787,71 @@ export default function (pi: ExtensionAPI) {
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`, 0, 0),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-						// Terminal children keep their identity attribution (#2396)
-						const identity = formatWorkerIdentity(r, r.exitCode === 0 ? "completed" : "failed");
+						// Per-child identity in every state, running included (#2396)
+						const identity = formatWorkerIdentity(
+							r,
+							r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+						);
 						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
-						// Show tool calls
-						for (const item of displayItems) {
-							if (item.type === "toolCall") {
-								container.addChild(
-									new Text(
-										theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-										0,
-										0,
-									),
-								);
+						if (r.exitCode === -1) {
+							// Live child: the running view's recent-item tail, at
+							// expanded fidelity, inside the detail container (#2834).
+							if (displayItems.length === 0) {
+								container.addChild(new Text(theme.fg("muted", "(running...)"), 0, 0));
+							} else {
+								container.addChild(new Text(renderDisplayItems(displayItems, 5), 0, 0));
 							}
-						}
+						} else {
+							// Terminal child keeps its identity attribution (#2396)
+							// and completed-result rendering.
+							// Show tool calls
+							for (const item of displayItems) {
+								if (item.type === "toolCall") {
+									container.addChild(
+										new Text(
+											theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+											0,
+											0,
+										),
+									);
+								}
+							}
 
-						// Show final output as markdown
-						if (finalOutput) {
-							container.addChild(new Spacer(1));
-							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+							// Show final output as markdown
+							if (finalOutput) {
+								container.addChild(new Spacer(1));
+								container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+							}
 						}
 
 						const taskUsage = formatUsageStats(r.usage, r.model);
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
 
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) {
+					// Aggregate subtotal: while the batch runs, keep the latest
+					// known subtotal with the pending-usage suffix (#2821).
+					const totalUsage = aggregateUsage(details.results);
+					const usageStr = formatUsageStats(totalUsage);
+					if (isRunning) {
+						const pendingUsage = details.results.filter((r) => !r.usage || r.usage.turns === 0).length;
+						const subtotalParts = [
+							usageStr,
+							pendingUsage > 0 ? `${pendingUsage} pending usage` : undefined,
+						].filter(Boolean);
+						if (subtotalParts.length > 0) {
+							container.addChild(new Spacer(1));
+							container.addChild(new Text(theme.fg("dim", `Total: ${subtotalParts.join(" · ")}`), 0, 0));
+						}
+					} else if (usageStr) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
 					}
 					return container;
 				}
 
-				// Collapsed view (or still running)
+				// Collapsed overview: compact batch summary in every state
+				// (running included — Ctrl+O opens the live detail above)
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
 					const rIcon =
@@ -2382,19 +2862,35 @@ export default function (pi: ExtensionAPI) {
 								: theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
-					// Per-child identity: model · thinking · elapsed (#2396)
+					// Per-child identity + live cost: model · thinking · elapsed · $X
+					// (#2396, #2822). The cost token rides the same per-child usage
+					// the #2826 accumulator reconciles; children without a first
+					// provider report stay blank here (the batch subtotal counts
+					// them as pending usage).
 					const identity = formatWorkerIdentity(
 						r,
 						r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
 					);
-					if (identity) text += `\n${theme.fg("dim", identity)}`;
+					const meta = [identity, formatChildCost(r.usage)].filter(Boolean).join(" · ");
+					if (meta) text += `\n${theme.fg("dim", meta)}`;
 					if (displayItems.length === 0)
 						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
-				if (!isRunning) {
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+				// Latest known aggregate subtotal, shown while the batch runs too
+				// (#2821). Children without a first provider report count as
+				// pending usage instead of silently reading as zero.
+				const totalUsage = aggregateUsage(details.results);
+				const usageStr = formatUsageStats(totalUsage);
+				const pendingUsage = details.results.filter((r) => !r.usage || r.usage.turns === 0).length;
+				if (isRunning) {
+					const subtotalParts = [
+						usageStr,
+						pendingUsage > 0 ? `${pendingUsage} pending usage` : undefined,
+					].filter(Boolean);
+					if (subtotalParts.length > 0) text += `\n\n${theme.fg("dim", `Total: ${subtotalParts.join(" · ")}`)}`;
+				} else if (usageStr) {
+					text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
 				}
 				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);

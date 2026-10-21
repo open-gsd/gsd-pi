@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGunzip } from "node:zlib";
@@ -229,6 +229,70 @@ test("tarball installs and gsd binary resolves", async (t) => {
     "index.ts",
   );
   assert.ok(existsSync(installedGsdExt), "bundled gsd extension present in installed package");
+
+  await t.test("installed SDK docs ignore the branding shim (#2809)", () => {
+    const installedRoot = join(sandbox.installPrefix, "node_modules", "@opengsd", "gsd-pi");
+    const sdkRoot = join(installedRoot, "packages", "pi-coding-agent");
+    const docProbe = String.raw`
+      import assert from "node:assert/strict";
+      import { readFileSync, readdirSync, realpathSync } from "node:fs";
+      import { join } from "node:path";
+      import { pathToFileURL } from "node:url";
+
+      const installedRoot = realpathSync(process.argv[1]);
+      process.env.PI_PACKAGE_DIR = join(installedRoot, "pkg");
+      const sdkRoot = join(installedRoot, "packages", "pi-coding-agent");
+      const { getReadmePath, getDocsPath, getExamplesPath } =
+        await import(pathToFileURL(join(sdkRoot, "dist", "config.js")).href);
+
+      for (const [name, actual] of [
+        ["README.md", getReadmePath()],
+        ["docs", getDocsPath()],
+        ["examples", getExamplesPath()],
+      ]) {
+        assert.equal(actual, join(sdkRoot, name), name + " must resolve inside the installed SDK");
+      }
+      assert.notEqual(getReadmePath(), join(installedRoot, "README.md"));
+      assert.match(readFileSync(getReadmePath(), "utf-8"), /\[docs\/sdk\.md\]\(docs\/sdk\.md\)/);
+      assert.doesNotThrow(() => readFileSync(join(getDocsPath(), "sdk.md")), "readable SDK docs");
+      assert.doesNotThrow(() => readdirSync(join(getExamplesPath(), "sdk")), "readable SDK examples");
+    `;
+    const probe = (root = installedRoot) => spawnSync(process.execPath, ["--input-type=module", "--eval", docProbe, root], {
+      cwd: sandbox.installPrefix,
+      env: sandbox.env,
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
+
+    const installed = probe();
+    assert.ifError(installed.error);
+    assert.equal(installed.status, 0, installed.stderr);
+
+    // Exercise symlinked install paths on Linux too (e.g. /var on macOS).
+    const linkedRoot = join(sandbox.rootDir, "linked-install");
+    symlinkSync(installedRoot, linkedRoot, process.platform === "win32" ? "junction" : "dir");
+    const linked = probe(linkedRoot);
+    assert.ifError(linked.error);
+    assert.equal(linked.status, 0, linked.stderr);
+
+    // Remove each directory from the disposable install, never the checkout.
+    // Reuse the identical child probe so missing packed assets cannot pass.
+    for (const directory of ["docs", "examples"]) {
+      const original = join(sdkRoot, directory);
+      const removed = join(sandbox.rootDir, "removed-" + directory);
+      renameSync(original, removed);
+      try {
+        const missing = probe();
+        assert.ifError(missing.error);
+        assert.equal(missing.status, 1, missing.stderr);
+        assert.match(missing.stderr, /ERR_ASSERTION/);
+        assert.match(missing.stderr, /ENOENT/);
+        assert.match(missing.stderr, new RegExp("readable SDK " + directory));
+      } finally {
+        renameSync(removed, original);
+      }
+    }
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

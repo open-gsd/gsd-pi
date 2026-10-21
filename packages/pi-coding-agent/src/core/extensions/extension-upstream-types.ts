@@ -1363,8 +1363,12 @@ export interface ExtensionAPI {
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel;
 
-	/** Set thinking level (clamped to model capabilities). */
-	setThinkingLevel(level: ThinkingLevel): void;
+	/**
+	 * Set thinking level (clamped to model capabilities). Pass
+	 * `{ persist: false }` to keep the change in memory only — restores and
+	 * per-unit dispatches must not rewrite the stored default (#2828).
+	 */
+	setThinkingLevel(level: ThinkingLevel, options?: { persist?: boolean }): void;
 
 	retryLastTurn(): void;
 	getVisibleSkills(): string[] | undefined;
@@ -1593,7 +1597,7 @@ export type SetModelHandler = (model: Model<any>, options?: { persist?: boolean 
 
 export type GetThinkingLevelHandler = () => ThinkingLevel;
 
-export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
+export type SetThinkingLevelHandler = (level: ThinkingLevel, options?: { persist?: boolean }) => void;
 
 export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
 

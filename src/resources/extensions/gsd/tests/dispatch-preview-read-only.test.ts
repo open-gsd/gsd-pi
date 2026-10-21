@@ -530,7 +530,11 @@ describe("dispatch preview purity: deep workflow preferences (#2230)", () => {
     assert.equal(resolveDeepProjectSetupState(deepPrefs, base).stage, "workflow-preferences");
 
     assert.equal(await matchPrefsRule(false), null);
-    assert.match(readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8"), /commit_policy: per-task/);
+    const prefsContent = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
+    assert.match(prefsContent, /^uat_dispatch:\s*true\s*$/m);
+    // #2832 — the deterministic defaults write only validator-known keys.
+    assert.doesNotMatch(prefsContent, /^commit_policy:/m);
+    assert.doesNotMatch(prefsContent, /^branch_model:/m);
     assert.equal(isWorkflowPreferencesCaptured(), true);
     assert.equal(resolveDeepProjectSetupState(deepPrefs, base).stage, "project");
   });

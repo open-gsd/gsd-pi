@@ -196,6 +196,12 @@ export function renderSessionContext(host: InteractiveModeDelegateHost,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		host.pendingTools.clear();
+		// NOTE: intentionally does NOT touch host.activeToolInvocations. This
+		// path rebuilds the transcript presentation (including mid-stream via
+		// toggleThinkingBlockVisibility), so it must preserve live invocation
+		// counts; replay itself never dispatches tools, so it cannot inflate
+		// the counter either. Lifecycle resets clear the tracker in
+		// chat-controller (session change, agent_end, abort) (#2925).
 		const timestampFormat = host.settingsManager.getTimestampFormat();
 
 		if (options.updateFooter) {

@@ -1922,10 +1922,15 @@ test("a just-claimed resumed successor survives its first reconcile pass without
 
   assert.equal(ran, true);
   assert.equal(result.action, "retry");
-  assert.equal(
-    (result as { reason?: string }).reason,
-    "task-recovery-resumed-claim-grace",
+  const graceReason = (result as { reason?: string }).reason ?? "";
+  assert.ok(
+    graceReason.startsWith("task-recovery-resumed-claim-grace"),
     "the first pass must be graced instead of settling missing-executor-result",
+  );
+  assert.match(
+    graceReason,
+    /doctor --fix or gsd_task_settle/,
+    "the grace reason must name the orphan cause and the sanctioned remedies (#2889)",
   );
   const successor = readLatestTaskAttempt(task);
   assert.notEqual(successor?.attemptId, first.attemptId);
@@ -1989,7 +1994,9 @@ test("a same-dispatch claim replay after the grace re-enters ordinary settlement
     action: "next",
     data: {},
   }), canonicalDeps());
-  assert.equal((graced as { reason?: string }).reason, "task-recovery-resumed-claim-grace");
+  assert.ok(
+    ((graced as { reason?: string }).reason ?? "").startsWith("task-recovery-resumed-claim-grace"),
+  );
   const successor = readLatestTaskAttempt(task);
   assert.equal(successor?.state, "running");
 
@@ -2052,7 +2059,9 @@ test("the pass after the resumed-successor grace interrupts repairably, not as l
   const graced = await runWithTaskExecutionAttempt(input({
     dispatchId: gracedDispatch,
   }), async () => ({ action: "next", data: {} }), canonicalDeps());
-  assert.equal((graced as { reason?: string }).reason, "task-recovery-resumed-claim-grace");
+  assert.ok(
+    ((graced as { reason?: string }).reason ?? "").startsWith("task-recovery-resumed-claim-grace"),
+  );
 
   // The graced dispatch stays active for the unit; terminalize it so the
   // retry dispatch claim does not hit the one-active-dispatch-per-unit rule.

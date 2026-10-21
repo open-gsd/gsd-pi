@@ -244,7 +244,11 @@ function getAnthropicCompat(
 	model: Model<"anthropic-messages">,
 ): Required<Omit<
 	AnthropicMessagesCompat,
-	"forceAdaptiveThinking" | "strictRequestParams" | "thinkingOffMode" | "rejectsTemperature"
+	| "forceAdaptiveThinking"
+	| "strictRequestParams"
+	| "thinkingOffMode"
+	| "rejectsTemperature"
+	| "rejectsDisabledThinking"
 >> {
 	// Auto-detect session affinity and cache control support from provider
 	const isFireworks = model.provider === "fireworks";
@@ -1102,6 +1106,16 @@ function buildParams(
 				};
 			}
 		} else if (options?.thinkingEnabled === false) {
+			if (model.compat?.rejectsDisabledThinking === true) {
+				// Always-thinking models (MiniMax-M3.1-Flash, #2906) 400 on
+				// thinking: {type: "disabled"} with no off representation at all.
+				// Fail client-side with an actionable message rather than a raw
+				// upstream 400.
+				throw new Error(
+					`${model.id} cannot disable thinking: the model always thinks. ` +
+						"Set the thinking level to minimal, low, medium, high, xhigh, or max instead of off.",
+				);
+			}
 			// Strict-param models (#2500/#2645) 400 on {type: "disabled"};
 			// {type: "between_tools"} is their off switch. The SDK type union
 			// lags the API value, same as the xhigh effort workaround above.

@@ -361,10 +361,12 @@ test("workflow preferences prompt writes defaults without interactive questions"
   const prompt = readPrompt("guided-workflow-preferences");
   assert.match(prompt, /default-writing/i);
   assert.match(prompt, /Do NOT call `ask_user_questions`/);
-  assert.match(prompt, /commit_policy:\s*per-task/);
-  assert.match(prompt, /branch_model:\s*single/);
-  assert.match(prompt, /research:\s*skip/);
-  assert.doesNotMatch(prompt, /research:\s*research/);
+  assert.match(prompt, /uat_dispatch:\s*true/);
+  // #2832 — the prompt must not instruct writing keys the validator rejects.
+  assert.doesNotMatch(prompt, /commit_policy/);
+  assert.doesNotMatch(prompt, /branch_model/);
+  assert.doesNotMatch(prompt, /executor_class/);
+  assert.doesNotMatch(prompt, /research:\s*skip/);
   assert.doesNotMatch(prompt, /Ask all three questions/i);
   assert.doesNotMatch(prompt, /Ask all four questions/i);
   assert.doesNotMatch(prompt, /Ask all five questions/i);

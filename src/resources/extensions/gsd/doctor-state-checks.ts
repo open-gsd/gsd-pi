@@ -4,10 +4,11 @@ import { join, relative } from "node:path";
 import { loadFile, parseSummary, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
 import { getActiveRequirements, getMilestone, getPlanMilestoneRecoveryBlock } from "./gsd-db.js";
 import { readMilestone, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
+import { readMilestoneCompletionProjection } from "./milestone-summary-projection.js";
 import { resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTasksDir, legacyMilestonesDir, relMilestoneFile, relSliceFile, relTaskFile, relSlicePath, relGsdRootFile, relMilestonePath } from "./paths.js";
 import { findMilestoneIds } from "./milestone-ids.js";
 import { deriveState } from "./state.js";
-import { isSkippedForDispatch } from "./status-guards.js";
+import { isSkippedForDispatch, toStatus } from "./status-guards.js";
 
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
 import type { Requirement, RoadmapSliceEntry } from "./types.js";
@@ -573,12 +574,20 @@ export async function checkGsdStateHealth(
 
     // Milestone-level check: all slices done but no milestone summary
     if (milestoneComplete && !resolveMilestoneFile(basePath, milestoneId, "SUMMARY")) {
+      // A milestone the database records as complete without a completion
+      // event (bulk import, or a database that predates the Domain Operation
+      // cutover) has no closeout to render a SUMMARY from: the milestone is
+      // not stuck, the closeout is simply absent (#2729).
+      const importedComplete = toStatus(dbMilestone?.status ?? "") === "complete"
+        && readMilestoneCompletionProjection(milestoneId) === null;
       issues.push({
-        severity: "warning",
+        severity: importedComplete ? "info" : "warning",
         code: "all_slices_done_missing_milestone_summary",
         scope: "milestone",
         unitId: milestoneId,
-        message: `All slices are done but ${milestoneId}-SUMMARY.md is missing \u2014 milestone is stuck in completing-milestone phase`,
+        message: importedComplete
+          ? `All slices are done and ${milestoneId} is complete in the database, but no completion closeout is recorded (imported or pre-cutover milestone), so no SUMMARY.md can be rendered — save one with gsd_summary_save if wanted`
+          : `All slices are done but ${milestoneId}-SUMMARY.md is missing \u2014 milestone is stuck in completing-milestone phase`,
         file: relMilestoneFile(basePath, milestoneId, "SUMMARY"),
         fixable: false,
       });

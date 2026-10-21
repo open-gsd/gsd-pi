@@ -5,6 +5,7 @@
  * Workflow MCP tools — exposes the core GSD mutation/read handlers over MCP.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -63,6 +64,13 @@ interface GsdMcpBridge {
     invocation: ExecutionInvocation,
     questionId?: string,
   ) => Promise<PersistedBlockerResolution>;
+  resolveAutoPauseBlockerById: (input: {
+    blockerId: string;
+    rationale: string;
+    invocation: ExecutionInvocation;
+    expectedRevision: number;
+    expectedAuthorityEpoch: number;
+  }) => { resolved: boolean; failure?: string; scope?: string };
 }
 
 /** The outcome of answering the open escalation question in the project database. */
@@ -1316,7 +1324,11 @@ interface PlanningInvocation {
 
 type ExecutionInvocation = PlanningInvocation;
 
+// Only in-process adapters can supply this identity; JSON MCP metadata cannot.
+export const NATIVE_MCP_TOOL_CALL_ID = Symbol("native-mcp-tool-call-id");
+
 interface WorkflowMcpRequestExtra {
+  [NATIVE_MCP_TOOL_CALL_ID]?: string;
   signal?: AbortSignal;
   requestId?: string | number;
   sessionId?: string;
@@ -1335,12 +1347,58 @@ interface McpToolServer {
 const MCP_IDEMPOTENCY_META_KEY = "io.opengsd/idempotency-key";
 const CLAUDE_CODE_TOOL_USE_META_KEY = "claudecode/toolUseId";
 const CLAUDE_CODE_IDEMPOTENCY_PREFIX = "transport:claude-code:";
+const MCP_TRACE_CORRELATION_LABEL = "opengsd:workflow-mcp:trace-correlation:v1";
+
+function lengthPrefixed(value: string): string {
+  return `${Buffer.byteLength(value, "utf8")}:${value}`;
+}
+
+/**
+ * Correlates private MCP retries without copying their idempotency identity
+ * into durable trace metadata. The versioned purpose label is intentionally
+ * distinct from every idempotency-key namespace. Length-prefixed fields keep
+ * tool, transport, actor, and stable input boundaries unambiguous.
+ *
+ * This only handles transport-private retry identity. Callers that already
+ * have a legitimate externally assigned trace ID continue to pass it through
+ * the separate trusted ExecutionInvocation.traceId field.
+ */
+export function derivePrivateMcpTraceId(input: {
+  canonicalToolName: string;
+  sourceTransport: ExecutionInvocation["sourceTransport"];
+  actorType: string;
+  stableInput: string;
+}): string {
+  const digestInput = [
+    MCP_TRACE_CORRELATION_LABEL,
+    input.canonicalToolName,
+    input.sourceTransport,
+    input.actorType,
+    input.stableInput,
+  ].map(lengthPrefixed).join("|");
+  const digest = createHash("sha256").update(digestInput, "utf8").digest("hex");
+  return `workflow-mcp-trace:v1:sha256:${digest}`;
+}
 
 function mcpInvocation(
   canonicalToolName: string,
   mutationKind: "Planning mutation" | "Task execution mutation" | "Workflow execution mutation",
   extra?: WorkflowMcpRequestExtra,
-): ExecutionInvocation {
+): ExecutionInvocation & { traceId: string } {
+  const nativeToolCallId = extra?.[NATIVE_MCP_TOOL_CALL_ID];
+  if (nativeToolCallId !== undefined) {
+    if (typeof nativeToolCallId !== "string" || !nativeToolCallId.trim()) {
+      throw new Error(`${mutationKind} ${canonicalToolName} requires a nonblank native tool-call identity`);
+    }
+    const digest = createHash("sha256").update(nativeToolCallId, "utf8").digest("hex");
+    const key = `mcp-native:${canonicalToolName}:sha256:${digest}`;
+    return {
+      idempotencyKey: key,
+      sourceTransport: "pi-tool",
+      actorType: "agent",
+      traceId: key,
+    };
+  }
   const explicitKey = extra?._meta?.[MCP_IDEMPOTENCY_META_KEY];
   const stableExplicitKey = typeof explicitKey === "string" && explicitKey.trim()
     ? explicitKey.trim()
@@ -1364,10 +1422,12 @@ function mcpInvocation(
       `Retry with the same nonblank value.`,
     );
   }
+  const sourceTransport = "workflow-mcp";
+  const actorType = "agent";
   return {
     idempotencyKey: `mcp:${canonicalToolName}:${stableKey}`,
-    sourceTransport: "workflow-mcp",
-    actorType: "agent",
+    sourceTransport,
+    actorType,
     traceId: stableKey,
   };
 }
@@ -1382,7 +1442,7 @@ function mcpPlanningInvocation(
 function mcpExecutionInvocation(
   canonicalToolName: string,
   extra?: WorkflowMcpRequestExtra,
-): ExecutionInvocation {
+): ExecutionInvocation & { traceId: string } {
   return mcpInvocation(canonicalToolName, "Task execution mutation", extra);
 }
 
@@ -1559,9 +1619,9 @@ export async function resolvePersistedBlockerViaBridge(
   questionId?: string,
   extra?: WorkflowMcpRequestExtra,
 ): Promise<PersistedBlockerResolution> {
-  await enforceWorkflowWriteGate("gsd_resolve_blocker", projectDir);
-  const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
   return runSerializedWorkflowOperation(async () => {
+    await checkWorkflowWriteGate("gsd_resolve_blocker", projectDir);
+    const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
     const bridge = await importBridgeModule();
     const opened = bridge.openExistingWorkflowDatabase(projectDir);
     if (!opened.ok) {
@@ -1569,6 +1629,34 @@ export async function resolvePersistedBlockerViaBridge(
     }
     return bridge.resolvePendingEscalation(projectDir, response, invocation, questionId);
   });
+}
+
+/** Outcome of resolving an exact auto-pause blocker (gsd_resolve_blocker, pauseBlockerId). */
+export interface PersistedAutoPauseBlockerResolution {
+  resolved: boolean;
+  failure?: string;
+  scope?: string;
+}
+
+/**
+ * Refuse a by-id auto-pause resolution from any MCP caller, including the
+ * native compatibility frontend. MCP provenance is always agent-owned; no
+ * historical receipt or backend cache may upgrade it to human authority.
+ */
+export async function resolvePersistedAutoPauseBlockerViaBridge(
+  _projectDir: string,
+  _pauseBlockerId: string,
+  rationale: string,
+  _expectedRevision: number,
+  _expectedAuthorityEpoch: number,
+  _extra?: WorkflowMcpRequestExtra,
+): Promise<PersistedAutoPauseBlockerResolution> {
+  if (!rationale.trim()) throw new Error("rationale must not be blank");
+  // Deliberately do not open the database or consult the backend replay cache.
+  return {
+    resolved: false,
+    failure: "owner-mismatch: Auto-pause blockers are user-owned; an MCP agent cannot resolve them. Use the native operator /gsd blocker resolve command with evidence and confirmation.",
+  };
 }
 
 /** Progress payload from the project database (gsd_progress). */

@@ -92,6 +92,9 @@ export function isValidationBlockAllowedCommand(trimmed: string): boolean {
   if (!command) return false;
 
   const [name, subcommand] = command.split(/\s+/, 2);
+  // Inspecting/clearing a Blocker is not validation acceptance or new work.
+  // Do not bootstrap a database before that handler's read-only review/consent.
+  if (name === "blocker") return true;
   if (name === "dispatch") {
     return VALIDATION_SAFE_DISPATCH_COMMANDS.has(subcommand ?? "");
   }

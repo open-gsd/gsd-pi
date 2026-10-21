@@ -7,7 +7,7 @@
   "base_authority_epoch": 3,
   "base_database_schema_version": 51,
   "source_set_hash": "sha256:be640f15687502bb6cf6348f5a0b8c8f2bda92b71a0f18cd6b3285410e432242",
-  "change_set_hash": "sha256:069210b367d09b99efa05273f8f04fee38dd2d2b25611eb560fedd70a289f353",
+  "change_set_hash": "sha256:137e7dba835f45f3c22e03a5a7b33266d42d6bdb97d1348b0aa79b1831fe76a3",
   "counts": {
     "create": 8,
     "update": 0,
@@ -394,6 +394,7 @@
       "normalized": {
         "id": "S01",
         "milestone_id": "M702",
+        "risk": "low",
         "status": "complete",
         "title": "Classify legacy evidence"
       },

@@ -51,6 +51,10 @@ import {
   diagnoseWorktreeIntegrityFailure,
   writeReactiveExecuteBlocker,
 } from "./auto-recovery.js";
+import {
+  describeMissingUnitResult,
+  LATE_RENDERED_MILESTONE_UNITS,
+} from "./artifact-verification.js";
 import { regenerateIfMissing } from "./workflow-projections.js";
 import { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
@@ -1188,7 +1192,13 @@ function describeArtifactVerificationFailure(
   const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
   const expected = diagnoseExpectedArtifact(unitType, unitId, basePath);
   if (!artifactPath) {
-    return `Artifact verification failed: ${unitType} "${unitId}" has no resolvable artifact path.`;
+    // #2827: for late-rendered milestone units the missing file is expected —
+    // the database rows are the artifact. Name the row-contract failure so
+    // the retry context tells the model what to persist.
+    const missing = LATE_RENDERED_MILESTONE_UNITS.has(unitType)
+      ? describeMissingUnitResult(unitType, unitId)
+      : null;
+    return `Artifact verification failed: ${unitType} "${unitId}" has no resolvable artifact path${missing ? ` (${missing})` : ""}.`;
   }
   const relPath = relative(normalizeRealPath(basePath), artifactPath);
   if (!existsSync(artifactPath)) {
@@ -2436,7 +2446,16 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           return "dispatched";
         }
 
-        const hasExpectedArtifact = resolveExpectedArtifactPath(s.currentUnit.type, s.currentUnit.id, verificationBasePath) !== null;
+        // #2827: milestone planning units render their ROADMAP/CONTEXT/RESEARCH
+        // projection by running their save tool, so on a milestone with no
+        // rendered phase directory the path below resolves null although the
+        // unit carries a full database-row contract. A verify-fail for them
+        // must reach the bounded ladder like every other contract unit —
+        // dropping it settled the unit "completed" with no rows and wedged
+        // auto-mode on the second identical dispatch (completed-no-advance).
+        const hasExpectedArtifact =
+          resolveExpectedArtifactPath(s.currentUnit.type, s.currentUnit.id, verificationBasePath) !== null ||
+          LATE_RENDERED_MILESTONE_UNITS.has(s.currentUnit.type);
         if (hasExpectedArtifact) {
           const verificationBudgetRef = verificationBudget(s.currentUnit.type, s.currentUnit.id);
           const verificationFailureMarker = resolveVerificationFailureMarkerPath(s.currentUnit.type, s.currentUnit.id, s.basePath);

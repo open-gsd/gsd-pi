@@ -115,12 +115,17 @@ export class FooterComponent implements Component {
 		const state = this.session.state;
 		const gsdState = this.getGsdStatus?.();
 
+		// Token fields stay parent-only: the cache percentage is a property of
+		// the active parent conversation and child tokens must not distort it
+		// (#2821). The cost segment is the session total: parent + reconciled
+		// child-session usage.
 		const usageTotals = this.session.sessionManager.getUsageTotals();
+		const sessionTotals = this.session.sessionManager.getUsageTotals({ includeExternalUsage: true });
 		const totalInput = usageTotals.input;
 		const totalOutput = usageTotals.output;
 		const totalCacheRead = usageTotals.cacheRead;
 		const totalCacheWrite = usageTotals.cacheWrite;
-		const totalCost = usageTotals.cost;
+		const totalCost = sessionTotals.cost;
 
 		const displayModel = state.activeInferenceModel ?? state.model;
 		const contextUsage = this.session.getContextUsage();

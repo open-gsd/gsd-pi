@@ -714,6 +714,9 @@ verification_commands:
 verification_auto_fix: true       # auto-retry runnable failures (default: true)
 verification_max_retries: 2       # max retry attempts (default: 2)
 verification_timeout_ms: 120000   # host verification and verification-oriented gsd_exec default (default: 120000)
+verification_source_exclude_paths: # git pathspecs skipped by source-revision hashing (default: [])
+  - artifacts/**
+  - fixtures/**
 ```
 
 | Field | Type | Default | Description |
@@ -722,6 +725,7 @@ verification_timeout_ms: 120000   # host verification and verification-oriented 
 | `verification_auto_fix` | boolean | `true` | Auto-retry runnable verification failures |
 | `verification_max_retries` | number | `2` | Maximum auto-fix retry attempts for runnable failures |
 | `verification_timeout_ms` | number | `120000` | Per-command host-verification timeout in milliseconds and the default timeout for verification-oriented `gsd_exec` workloads. Unset keeps the 120s host-verification default. A timeout is reported as `failureClass: timeout`, never as exit 127. |
+| `verification_source_exclude_paths` | string[] | `[]` | Git pathspecs excluded from the verification source-revision snapshot. Each entry becomes a `:(exclude)` pathspec on the `git ls-files` passes, in addition to the built-in `.gsd/**` and `receipts/**` exclusions. Global and project lists merge additively — a project list adds to the global list and cannot clear it. Use for large non-evidence trees (historical test artifacts, committed fixtures) that would otherwise be re-hashed on every dispatch. Changes under excluded paths no longer invalidate recorded verification evidence, so exclude only trees verification evidence never depends on. |
 
 For missing-command handling and the task-evidence exception, see [Auto Mode — Verification Enforcement](./auto-mode.md#verification-enforcement).
 
@@ -861,6 +865,7 @@ git:
   isolation: none             # git isolation: "none" (default), "worktree", or "branch"
   manage_gitignore: true      # set false to prevent GSD from modifying .gitignore
   worktree_post_create: .gsd/hooks/post-worktree-create  # script to run after worktree creation
+  preserve_worktree_on_stop: false  # keep an in-progress milestone worktree on stop instead of removing it
   auto_pr: false              # create a PR on milestone completion (requires push_branches)
   pr_target_branch: develop   # target branch for auto-created PRs (default: main branch)
 ```
@@ -878,6 +883,7 @@ git:
 | `isolation` | string | `"none"` | Auto-mode isolation: `"none"` (no isolation — commits on current branch, no worktree or milestone branch), `"worktree"` (separate directory), or `"branch"` (work in project root — useful for submodule-heavy repos). `worktree` requires a committed `HEAD`; zero-commit repos temporarily run as `none` until the first commit exists |
 | `manage_gitignore` | boolean | `true` | When `false`, GSD will not modify `.gitignore` at all — no baseline patterns, no self-healing. Use if you manage your own `.gitignore` |
 | `worktree_post_create` | string | (none) | Script to run after worktree creation. Receives `SOURCE_DIR` and `WORKTREE_DIR` env vars |
+| `preserve_worktree_on_stop` | boolean | `false` | When `true`, a stop with an in-progress milestone keeps the milestone worktree directory on disk alongside the preserved branch instead of removing it. Covers attempt-death teardown (liveness backstop, recovery abort) and manual stops. `/gsd auto` re-enters an existing worktree on resume |
 | `auto_pr` | boolean | `false` | Automatically create a pull request when a milestone completes. Requires `auto_push: true` and `gh` CLI installed and authenticated |
 | `pr_target_branch` | string | (main branch) | Target branch for auto-created PRs (e.g. `develop`, `qa`). Defaults to `main_branch` if not set |
 

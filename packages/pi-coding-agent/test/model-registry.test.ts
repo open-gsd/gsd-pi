@@ -254,7 +254,7 @@ describe("ModelRegistry", () => {
 				});
 
 				const registryWithoutKey = ModelRegistry.create(authStorage, modelsJsonPath);
-				const minimaxModelWithoutKey = registryWithoutKey.find("minimax", "MiniMax-M2.7");
+				const minimaxModelWithoutKey = registryWithoutKey.find("minimax", "MiniMax-M3.1-Flash");
 
 				expect(minimaxModelWithoutKey).toBeDefined();
 				expect(registryWithoutKey.isProviderRequestReady("minimax")).toBe(false);
@@ -268,7 +268,7 @@ describe("ModelRegistry", () => {
 				});
 
 				const registryWithKey = ModelRegistry.create(authStorage, modelsJsonPath);
-				const minimaxModelWithKey = registryWithKey.find("minimax", "MiniMax-M2.7");
+				const minimaxModelWithKey = registryWithKey.find("minimax", "MiniMax-M3.1-Flash");
 
 				expect(minimaxModelWithKey).toBeDefined();
 				const auth = await registryWithKey.getApiKeyAndHeaders(minimaxModelWithKey!);

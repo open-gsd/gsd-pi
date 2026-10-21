@@ -32,13 +32,13 @@ This is automatic. Projection drift does not become workflow authority or block 
 
 If you switch tools while gsd-pi is running (e.g., a teammate edits `.gsd/plan.md` via gsd-core and pushes), run:
 
-```
+```bash
 /gsd sync
 ```
 
 This checks projections against the database. Modeled drift is preserved under `.gsd/quarantine/projections/` without being imported, then sync re-projects from the database. Safe `.planning/` passthrough changes only refresh their checksums. Workflow-state blockers can still stop sync. Use `--dry-run` to list projection edits that would be preserved without repairs, projection, or marker writes:
 
-```
+```bash
 /gsd sync --dry-run
 ```
 
@@ -46,13 +46,13 @@ This checks projections against the database. Modeled drift is preserved under `
 
 `/gsd doctor` includes a compat-health line that tells you whether the marker is present and whether any files have drifted:
 
-```
+```text
 Compat health:      OK
 ```
 
 or
 
-```
+```text
 Compat health:      2 file(s) drifted — run /gsd sync
 ```
 

@@ -31,6 +31,7 @@ import {
   MAX_SNAPSHOT_OPEN_ITEMS,
   readProjectSnapshotFromDb,
 } from "../state/project-snapshot.ts";
+import { truncateContextResultMessages } from "../context-masker.ts";
 import {
   createWorkflowAuthorityFixture,
 } from "./workflow-authority-fixture.ts";
@@ -419,6 +420,54 @@ test("readProjectSnapshotFromDb truncates the milestone registry beyond the cap"
   );
   // Counts stay project-wide even when the registry is truncated.
   assert.deepEqual(snapshot.progress.milestones, { total: 51, done: 0, active: 1, pending: 50, parked: 0 });
+});
+
+test("readProjectSnapshotFromDb serializes current/capturedAt inside the default display truncation head", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  t.after(() => fixture.cleanup());
+
+  // Mature-project scale (#2944): a registry-capped milestone list pushes the
+  // serialized snapshot far past the default 800-char display budget
+  // (provider-payload-policy DEFAULT_TOOL_RESULT_MAX_CHARS), so the
+  // decision-critical section — active refs/phase/nextAction plus capturedAt —
+  // must serialize first, ahead of the bulk sections, to survive the head an
+  // identical reread can never extend.
+  transaction(() => {
+    for (let n = 2; n <= 51; n += 1) {
+      insertMilestone({
+        id: `M${String(n).padStart(3, "0")}`,
+        title: `Registry filler milestone ${n} for display truncation sizing`,
+        status: "pending",
+      });
+    }
+  });
+
+  const snapshot = await readProjectSnapshotFromDb(fixture.root);
+  assert.ok(snapshot);
+  const serialized = JSON.stringify(snapshot);
+  assert.ok(serialized.length > 800, "mature fixture must exceed the default display budget");
+
+  // current + capturedAt lead the serialization; the bulk sections follow.
+  assert.deepEqual(Object.keys(snapshot).slice(0, 2), ["current", "capturedAt"]);
+  const currentAt = serialized.indexOf('"current"');
+  assert.ok(currentAt !== -1, "serialized snapshot must contain the current section");
+  assert.ok(currentAt < serialized.indexOf('"authority"'), "current must serialize before authority");
+  assert.ok(currentAt < serialized.indexOf('"milestones"'), "current must serialize before the registry");
+
+  // Pinned through the real display truncation primitive: the 800-char head
+  // the model actually receives carries the answer.
+  const [truncated] = truncateContextResultMessages(
+    [{ role: "toolResult", content: [{ type: "text", text: serialized }] }] as any,
+    800,
+  );
+  const visible = (truncated.content as Array<{ text: string }>)[0].text;
+  assert.ok(visible.length <= 800 + "\n…[truncated]".length, "head must respect the display budget");
+  assert.ok(visible.includes('"nextAction"'), "nextAction must survive display truncation");
+  assert.ok(visible.includes('"capturedAt"'), "capturedAt must survive display truncation");
+  // The values must survive complete, not cut mid-string by the head boundary.
+  const escapedNextAction = JSON.stringify(snapshot.current.nextAction).slice(1, -1);
+  assert.ok(visible.includes(escapedNextAction), "nextAction value must be complete in the head");
+  assert.ok(visible.includes(snapshot.capturedAt), "capturedAt value must be complete in the head");
 });
 
 test("readProjectSnapshotFromDb truncates blockers and open questions beyond the cap", async (t) => {

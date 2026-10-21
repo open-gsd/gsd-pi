@@ -47,7 +47,7 @@
   "scripts": {
     "build": "node ../../scripts/clean-package-dist.cjs && tsc --incremental false",
     "build:test": "tsc -p tsconfig.test.json",
-    "test": "pnpm run build:test && node --test dist/mcp-server.test.js dist/public-server-warmup.test.js dist/remote-questions.test.js dist/moonshot-tool-schema.test.js dist/pid-registry.test.js dist/probe-mode.test.js dist/stdio-watchdog.test.js dist/cli-runner.test.js dist/readers/graph.test.js dist/readers/paths.test.js dist/readers/readers.test.js"
+    "test": "pnpm run build:test && node --test dist/mcp-server.test.js dist/resolve-blocker.test.js dist/public-server-warmup.test.js dist/remote-questions.test.js dist/moonshot-tool-schema.test.js dist/pid-registry.test.js dist/probe-mode.test.js dist/stdio-watchdog.test.js dist/cli-runner.test.js dist/readers/graph.test.js dist/readers/paths.test.js dist/readers/readers.test.js"
   },
   "dependencies": {
     "@opengsd/contracts": "workspace:*",

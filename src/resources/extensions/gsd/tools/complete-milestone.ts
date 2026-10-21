@@ -46,6 +46,7 @@ import { loadEffectiveGSDPreferences } from "../preferences.js";
 import {
   captureVerificationSourceSnapshot,
   resolveVerificationRepositoryTargets,
+  verificationSourceSnapshotOptions,
 } from "../verification-source-integrity.js";
 import {
   readMilestoneCompletionProjection,
@@ -222,9 +223,13 @@ export async function handleCompleteMilestone(
   if (replaySourceRevision) {
     currentSourceRevision = replaySourceRevision;
   } else {
+    // Resolve from the artifact's project, not process.cwd(): source-revision
+    // exclusions must match what dispatch/doctor/closeout compute for the same
+    // milestone (#2873, #2833).
+    const preferences = loadEffectiveGSDPreferences(artifactBasePath)?.preferences;
     const targets = resolveVerificationRepositoryTargets(
       artifactBasePath,
-      loadEffectiveGSDPreferences()?.preferences,
+      preferences,
       null,
       null,
     );
@@ -233,10 +238,13 @@ export async function handleCompleteMilestone(
         error: `verification source repositories are missing: ${targets.missingRepositoryIds.join(", ")}`,
       };
     }
-    const source = captureVerificationSourceSnapshot(targets.repositories.map((repository) => ({
-      id: repository.id,
-      cwd: repository.root,
-    })));
+    const source = captureVerificationSourceSnapshot(
+      targets.repositories.map((repository) => ({
+        id: repository.id,
+        cwd: repository.root,
+      })),
+      verificationSourceSnapshotOptions(preferences),
+    );
     if (!source.ok) return { error: source.error };
     currentSourceRevision = source.snapshot.aggregateRevision;
   }

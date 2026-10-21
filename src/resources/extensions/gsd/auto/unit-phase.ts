@@ -438,7 +438,7 @@ export async function runUnitPhase(
         ctx.ui.notify("Failed to restore previous session model after compatibility check failure.", "warning");
       }
       if (prevSessionThinkingLevel) {
-        pi.setThinkingLevel(prevSessionThinkingLevel);
+        pi.setThinkingLevel(prevSessionThinkingLevel, { persist: false });
       }
     }
 

@@ -154,7 +154,7 @@ Models without a built-in profile receive **uniform scores of 50** across all di
 
 The routing pipeline within a tier:
 
-```
+```text
 classify complexity tier
     ↓
 filter eligible models for tier
@@ -168,7 +168,7 @@ select winner (or first eligible if scoring is disabled)
 
 **Scoring formula:** weighted average of capability dimensions
 
-```
+```text
 score = Σ(weight × capability) / Σ(weights)
 ```
 
@@ -220,13 +220,13 @@ Overrides are **deep-merged** with built-in defaults — only the specified dime
 
 When verbose mode is active, the router logs its routing decision. When capability scoring was used, the log includes a full scoring breakdown:
 
-```
+```text
 Dynamic routing [S]: claude-sonnet-4-6 (capability-scored) — claude-sonnet-4-6: 82.3, gpt-4o: 78.1, deepseek-chat: 72.0
 ```
 
 When tier-only routing was used (scoring disabled, single eligible model, or routing guards applied):
 
-```
+```text
 Dynamic routing [S]: claude-sonnet-4-6 (standard complexity, multiple steps)
 ```
 

@@ -50,7 +50,7 @@ const DEVIATIONS = {
   "composite-capstone": {
     reason: "multi-target-completeness",
     counts: [6, 0, 0, 5, 3, 5],
-    semantic_hash: "sha256:522dcd88992a7c2b64423d3578b665732d7522bd384ffbdd7e93c55d374d3e88",
+    semantic_hash: "sha256:15eec3d5cda75fd0c9070ce7301b692dd2b8b89d5f742204a92ee6094a71f4de",
   },
   "db-target-matrix": {
     reason: "multi-target-ambiguity",

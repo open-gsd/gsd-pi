@@ -74,6 +74,7 @@ import {
 } from "./workflow-db-locks.js";
 import { readTerminalTaskRecoveryAbort, taskAttemptArtifactReadiness } from "./artifact-verification.js";
 import { readLatestTaskAttempt } from "./task-execution-domain-operation.js";
+import { applyTaskSettle } from "./task-settle.js";
 import { getProjectAuthorityRow } from "./db/queries.js";
 
 const USER_AUTHORED_ARTIFACT_TYPES = new Set(["CONTEXT", "RESEARCH"]);
@@ -98,13 +99,18 @@ type RunningAttemptRow = DoctorRunningAttemptRow;
  * A running Attempt is orphaned when no live process can settle it: its
  * milestone lease is not currently held, or the lease-holding worker's OS
  * process is gone (#1749). Mirrors the lease/liveness semantics auto-mode uses
- * for dead lease holders, but reports instead of interrupting.
+ * for dead lease holders. Detected on every run; under `--fix` the Attempt is
+ * settled as `interrupted` through applyTaskSettle (#2889) — the same
+ * fail-closed gate as `gsd_task_settle`: it refuses a live worker or a
+ * replacement lease, and it never publishes or reconciles the lifecycle.
  */
-function reportOrphanedRunningAttempts(
+async function reportOrphanedRunningAttempts(
   adapter: ReturnType<typeof _getAdapter> & object,
   basePath: string,
   issues: DoctorIssue[],
-): void {
+  fixesApplied: string[],
+  repair: boolean,
+): Promise<void> {
   const running = listOrphanableRunningAttempts(adapter);
   if (running.length === 0) return;
 
@@ -154,17 +160,72 @@ function reportOrphanedRunningAttempts(
       if (!processDead) continue;
     }
     const unitId = `${attempt.milestone_id}/${attempt.slice_id}/${attempt.task_id}`;
-    issues.push({
-      severity: "error",
-      code: "orphaned_running_attempt",
-      scope: "task",
-      unitId,
-      message:
-        `Task ${unitId} has an orphaned running Attempt (${attempt.attempt_id}) with no live process or lease. ` +
-        "Settle it with gsd_task_settle (dry-run first, then apply: true) — doctor --fix will not settle it for you.",
-      file: ".gsd/gsd.db",
-      fixable: false,
-    });
+    const detected =
+      `Task ${unitId} has an orphaned running Attempt (${attempt.attempt_id}) with no live process or lease.`;
+    if (!repair) {
+      issues.push({
+        severity: "error",
+        code: "orphaned_running_attempt",
+        scope: "task",
+        unitId,
+        message:
+          detected +
+          " Run `/gsd doctor --fix` to settle it as interrupted, or settle it with " +
+          "gsd_task_settle (dry-run first, then apply: true).",
+        file: ".gsd/gsd.db",
+        fixable: true,
+      });
+      continue;
+    }
+    // #2889: the operator consented via --fix; the settle itself is the
+    // operator tool's own writer, so a live worker or a replacement lease is
+    // refused and the Attempt is only ever settled, never published.
+    try {
+      const result = await applyTaskSettle({
+        invocation: {
+          idempotencyKey: `cli:doctor:task.settle:${attempt.attempt_id}`,
+          sourceTransport: "internal",
+          actorType: "user",
+        },
+        task: {
+          milestoneId: attempt.milestone_id,
+          sliceId: attempt.slice_id,
+          taskId: attempt.task_id,
+        },
+        reason: "doctor --fix: orphaned running Attempt with no live process or lease",
+        basePath,
+      });
+      if (result.settled) {
+        fixesApplied.push(
+          `settled orphaned running Attempt ${attempt.attempt_id} as interrupted (${unitId})`,
+        );
+        continue;
+      }
+      issues.push({
+        severity: "error",
+        code: "orphaned_running_attempt",
+        scope: "task",
+        unitId,
+        message:
+          detected + " Automatic settle found no running Attempt to settle (state changed during the run); " +
+          "re-run doctor or settle it with gsd_task_settle (dry-run first, then apply: true).",
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      issues.push({
+        severity: "error",
+        code: "orphaned_running_attempt",
+        scope: "task",
+        unitId,
+        message:
+          detected + ` Automatic settle refused: ${detail} Settle it with ` +
+          "gsd_task_settle (dry-run first, then apply: true).",
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+    }
   }
 }
 
@@ -1091,11 +1152,18 @@ export async function checkEngineHealth(
 
       // e. Orphaned running Task Attempts (#1749): a running Attempt whose
       // milestone lease is gone or whose worker process is dead wedges every
-      // downstream lifecycle operation ("running Attempt descendant"). The
-      // operator repair is gsd_task_settle; doctor --fix must never settle on
-      // its own — settling is a human judgment call.
+      // downstream lifecycle operation ("running Attempt descendant").
+      // Detected always; under --fix it is settled as interrupted through
+      // applyTaskSettle (#2889) — the operator tool's own fail-closed writer,
+      // so a live worker or a replacement lease is never disturbed.
       try {
-        reportOrphanedRunningAttempts(adapter, basePath, issues);
+        await reportOrphanedRunningAttempts(
+          adapter,
+          basePath,
+          issues,
+          fixesApplied,
+          options?.repair === true,
+        );
       } catch {
         // Non-fatal — orphaned running Attempt check failed
       }

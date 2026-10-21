@@ -88,6 +88,8 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd quick          Quick task  [--discuss] [--research] [--validate] [--full]",
     "  /gsd dispatch       Dispatch a specific phase directly  [research|plan|execute|complete|validate|reassess|uat|replan]",
     "  /gsd uat-answer     Answer an open subjective UAT question  [accept|reject] --rationale \"...\" [--question <id>]",
+    "  /gsd blocker inspect <id>  Read-only auto-pause blocker eligibility (RPC permitted)",
+    "  /gsd blocker resolve <id> resolved <reason...>  Human terminal evidence + confirmation; clear only, no resume",
     "  /gsd parallel       Parallel milestone orchestration  [start|status|stop|pause|resume|merge|watch]",
     "  /gsd workflow       Custom workflow lifecycle  [new|run|list|validate|pause|resume]",
     "",

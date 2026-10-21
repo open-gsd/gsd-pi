@@ -676,8 +676,9 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
 
   // ─── Deep planning mode (project-level) units ────────────────────────
   // workflow-preferences: default-writing stage that records
-  // commit_policy / branch_model in PREFERENCES.md, defaults
-  // uat_dispatch/executor_class, and records the research decision. No project artifacts needed.
+  // uat_dispatch in PREFERENCES.md (#2832 — only validator-known keys).
+  // The research decision is a database fact, not a preference key.
+  // No project artifacts needed.
   "workflow-preferences": {
     skills: { mode: "none" },
     knowledge: "none",
