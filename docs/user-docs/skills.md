@@ -147,7 +147,7 @@ Bundled skills (`~/.gsd/agent/skills/`) take precedence over user-global skills 
 
 Create your own skills by adding a directory with a `SKILL.md` file:
 
-```
+```text
 ~/.agents/skills/my-skill/
   SKILL.md           — instructions for the LLM
   references/        — optional reference files
@@ -163,7 +163,7 @@ for longer trigger descriptions.
 
 Place skills in your project for project-specific guidance:
 
-```
+```text
 .agents/skills/my-project-skill/
   SKILL.md
 ```
@@ -182,7 +182,7 @@ Every auto-mode unit records which skills were available and actively loaded. Th
 
 View skill performance with `/gsd skill-health`:
 
-```
+```bash
 /gsd skill-health              # overview table: name, uses, success%, tokens, trend, last used
 /gsd skill-health rust-core    # detailed view for one skill
 /gsd skill-health --stale 30   # skills unused for 30+ days

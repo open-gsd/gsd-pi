@@ -22,6 +22,12 @@ export interface InteractiveModeStateHost {
 	pinnedMessageContainer: any;
 	settingsManager: any;
 	pendingTools: Map<string, any>;
+	/**
+	 * Active tool invocations keyed by toolCallId — dispatch/terminal tracking
+	 * kept separate from pendingTools, which deliberately retains completed
+	 * components for transcript reconstruction (#2925).
+	 */
+	activeToolInvocations: Set<string>;
 	toolOutputExpanded: boolean;
 	hideThinkingBlock: boolean;
 	isBashMode: boolean;

@@ -188,7 +188,7 @@ GSD tracks the success and failure of each tier assignment over time and adjusts
 
 Use `/gsd rate` to submit feedback on the last completed unit's model tier:
 
-```
+```bash
 /gsd rate over    # model was overpowered — encourage cheaper next time
 /gsd rate ok      # model was appropriate — no adjustment
 /gsd rate under   # model was too weak — encourage stronger next time
@@ -200,7 +200,7 @@ Feedback signals are weighted 2× compared to automatic outcomes. Requires dynam
 
 Routing history is stored per-project in the project database (`.gsd/gsd.db`). A `.gsd/routing-history.json` file from an older version is not read.
 
-```
+```bash
 /gsd rate reset   # clear the history to reset adaptive learning
 ```
 
@@ -264,7 +264,7 @@ models:
 
 ## How the Pieces Fit Together
 
-```
+```text
 PREFERENCES.md
   └─ token_profile: balanced
        ├─ resolveProfileDefaults() → model defaults + phase skip defaults

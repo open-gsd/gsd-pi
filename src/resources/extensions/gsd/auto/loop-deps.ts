@@ -69,6 +69,14 @@ export type PauseAutoUnitIdentity = {
 export interface PauseAutoOptions {
   expectedCurrentUnit?: PauseAutoUnitIdentity | null;
   abortActiveTurn?: boolean;
+  /**
+   * Diagnostic reason for the pause row without routing an ErrorContext
+   * through resolveAgentEndCancelled (#2877). A contexted cancellation makes
+   * the loop re-process the result (transient-pause or hard stop) instead of
+   * recognizing it as pause-origin; callers that pause directly and only want
+   * the reason persisted pass it here with `errorContext` left undefined.
+   */
+  pauseReason?: string;
 }
 
 export type PauseAutoFn = (

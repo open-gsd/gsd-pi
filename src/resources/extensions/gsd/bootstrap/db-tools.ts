@@ -1076,7 +1076,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Use gsd_plan_milestone for milestone planning instead of writing ROADMAP.md directly.",
 			"Requires milestoneId, title, vision, and slices[] — never pass only milestoneId + sliceId (that is gsd_plan_slice).",
 			"Keep parameters flat and provide the full milestone planning payload, including slices.",
-			"Milestone and slice titles must not contain forward slash (/), en dash, or em dash characters.",
+			"Milestone and slice titles are normalized automatically: forward slash (/) becomes '-', en/em dashes become ' - ' (#2588).",
 			"The tool validates input, writes milestone and slice planning data transactionally, renders ROADMAP.md from DB, and clears both state and parse caches after success.",
 			"Use the canonical name gsd_plan_milestone; gsd_milestone_plan is only an alias.",
 		],
@@ -1085,7 +1085,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
 			title: Type.String({
 				description:
-					"Milestone title; must not contain forward slash (/), en dash, or em dash characters",
+					"Milestone title; forward slash (/), en dash, and em dash characters are normalized automatically",
 			}),
 			vision: Type.String({ description: "Milestone vision" }),
 			slices: Type.Array(
@@ -1093,7 +1093,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					sliceId: Type.String({ description: "Slice ID (e.g. S01)" }),
 					title: Type.String({
 						description:
-							"Slice title; must not contain forward slash (/), en dash, or em dash characters",
+							"Slice title; forward slash (/), en dash, and em dash characters are normalized automatically",
 					}),
 					risk: Type.String({ description: "Slice risk" }),
 					depends: Type.Array(Type.String(), {

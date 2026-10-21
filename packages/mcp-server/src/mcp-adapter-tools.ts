@@ -1,6 +1,7 @@
 import { SessionManager } from "./session-manager.js";
 import { createMcpServer } from "./server.js";
 import { toMoonshotCompatibleInputSchema } from "./moonshot-tool-schema.js";
+import { NATIVE_MCP_TOOL_CALL_ID } from "./workflow-tools.js";
 
 export const GSD_MODE_MCP_WORKFLOW_ADAPTER_TOOL_NAMES = [
 	"gsd_execute",
@@ -109,6 +110,7 @@ export async function createWorkflowMcpAdapterToolDefs(
 			execute: async (toolCallId, params, signal) => normalizeMcpToolResult(
 				await handler(params, {
 					requestId: toolCallId,
+					[NATIVE_MCP_TOOL_CALL_ID]: toolCallId,
 					...(signal ? { signal } : {}),
 				}),
 			),

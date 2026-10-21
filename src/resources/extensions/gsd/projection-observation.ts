@@ -165,7 +165,7 @@ export async function preserveProjectionEvidence(
       writeCompatMarker(basePath, marker);
     }
     const observations = [
-      ...observeExternalMarkdownEdits(basePath, dryRun),
+      ...(await observeExternalMarkdownEdits(basePath, dryRun)),
       ...planningObservations.filter((record) => !record.passthrough),
     ];
     const marker = readCompatMarker(basePath);

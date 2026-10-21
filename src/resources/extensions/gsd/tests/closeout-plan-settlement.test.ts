@@ -29,6 +29,7 @@ import { closeoutHash, insertCloseoutPlan } from "../db/writers/closeout.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 import { clearParseCache } from "../files.ts";
+import { queryJournal } from "../journal.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -58,6 +59,7 @@ import { publishMilestone } from "../publication.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
 import { handleValidateMilestone } from "../tools/validate-milestone.ts";
+import { runInteractiveUnitCloseout } from "../unit-closeout.ts";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
 import { closeUnit } from "../unit-closeout.ts";
 import { findUnmergedCompletedMilestones } from "../unmerged-milestone-guard.ts";
@@ -1217,4 +1219,198 @@ test("deleting META.json does not change the branch the Milestone merges to", as
   mergeMilestoneToMain(repo, "M001", ROADMAP);
   assert.equal(git(["show", "release:feature.txt"], repo), "milestone work");
   assert.equal(git(["show", "main:feature.txt"], repo), "base");
+});
+
+// ─── Solo-mode completion honors auto_push (#2874) ───────────────────────────
+
+/**
+ * M001 completes directly on the integration branch: isolation defaults to
+ * none, so there is no worktree, no milestone branch, and no merge step —
+ * tool-driven completion is the only publication point. `autoPush` writes the
+ * preference; a bare `origin` is always created and main is pushed to it as
+ * the baseline. Local main is then left one commit ahead — the
+ * accumulated-unpushed state from #2874 — unless `diverged` also advances
+ * origin/main by a commit main does not have.
+ */
+async function milestoneOnIntegrationBranch(options: {
+  autoPush?: boolean;
+  diverged?: boolean;
+} = {}): Promise<{ repo: string; remote: string }> {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "gsd-solo-push-")));
+  tempDirs.add(root);
+  process.env.HOME = join(root, "home");
+  process.env.GSD_HOME = join(root, "home", ".gsd");
+  mkdirSync(process.env.GSD_HOME, { recursive: true });
+  _clearGsdRootCache();
+  _resetServiceCache();
+
+  const repo = join(root, "repo");
+  const remote = join(root, "origin.git");
+  mkdirSync(repo);
+  git(["init", "-b", "main"], repo);
+  git(["config", "user.email", "test@example.com"], repo);
+  git(["config", "user.name", "Test"], repo);
+  writeFileSync(join(repo, ".gitignore"), ".gsd/\n");
+  writeFileSync(join(repo, "feature.txt"), "base\n");
+  git(["add", "."], repo);
+  git(["commit", "-m", "init"], repo);
+  git(["init", "--bare", "-b", "main", remote], root); // -b: the clone below must start on main
+  git(["remote", "add", "origin", remote], repo);
+  git(["push", "-u", "origin", "main"], repo);
+
+  if (options.diverged) {
+    const mirror = join(root, "mirror");
+    git(["clone", remote, mirror], root);
+    git(["config", "user.email", "test@example.com"], mirror);
+    git(["config", "user.name", "Test"], mirror);
+    writeFileSync(join(mirror, "remote-only.txt"), "remote\n");
+    git(["add", "."], mirror);
+    git(["commit", "-m", "chore: remote-side commit"], mirror);
+    git(["push", "origin", "main"], mirror);
+  }
+  writeFileSync(join(repo, "feature.txt"), "milestone work\n");
+  git(["commit", "-am", "feat: milestone work"], repo);
+
+  mkdirSync(join(repo, ".gsd", "milestones", "M001"), { recursive: true });
+  if (options.autoPush) {
+    writeFileSync(
+      join(repo, ".gsd", "PREFERENCES.md"),
+      "---\nversion: 1\ngit:\n  auto_push: true\n---\n",
+    );
+  }
+
+  assert.equal(openDatabase(join(repo, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: "M001", title: "Closeout Plan", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", status: "complete" });
+  atFence("fixture/adopt", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready",
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed",
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed",
+    });
+  });
+  await recordValidation(repo, "passed");
+  return { repo, remote };
+}
+
+/**
+ * The production sequence for an interactive (non-auto) milestone
+ * completion: the tool handler, then the host's closeout hook (which owns
+ * the durable commit and, since #2874, the solo-mode auto_push honor point).
+ */
+function completeMilestoneInteractively(basePath: string, key: string) {
+  return async () => {
+    const completed = await handleCompleteMilestone(completionParams, basePath, invocation(key));
+    assert.ok(!("error" in completed), `completion failed: ${"error" in completed ? completed.error : ""}`);
+    const closeout = runInteractiveUnitCloseout({
+      basePath,
+      canonicalToolName: "gsd_complete_milestone",
+      input: { milestoneId: "M001" },
+    });
+    assert.ok(closeout, "expected the interactive closeout to run");
+    assert.notEqual(closeout.gitVerdict, "commit-failed");
+    return completed;
+  };
+}
+
+test("solo completion pushes the closeout commit when auto_push is on and main is ahead (#2874)", async () => {
+  const { repo, remote } = await milestoneOnIntegrationBranch({ autoPush: true });
+
+  const completed = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-solo"));
+  assert.ok(!("error" in completed), `completion failed: ${"error" in completed ? completed.error : ""}`);
+
+  // Work the agent left uncommitted lands in the closeout commit, which the
+  // push must follow — never precede.
+  writeFileSync(join(repo, "feature.txt"), "milestone work v2\n");
+  // A hostile push config must not remap or force an unattended auto push.
+  git(["config", "remote.origin.push", "+refs/heads/main:refs/heads/evil"], repo);
+
+  const closeout = runInteractiveUnitCloseout({
+    basePath: repo,
+    canonicalToolName: "gsd_complete_milestone",
+    input: { milestoneId: "M001" },
+  });
+  assert.equal(closeout?.gitVerdict, "committed");
+  assert.equal(getMilestone("M001")?.status, "complete");
+
+  // The push carried the closeout commit itself, straight to the same branch.
+  assert.equal(git(["rev-parse", "main"], remote), git(["rev-parse", "main"], repo));
+  const heads = git(["ls-remote", "--heads", remote], repo);
+  assert.match(heads, /refs\/heads\/main/);
+  assert.doesNotMatch(heads, /refs\/heads\/evil/, "the push config remap must not apply");
+  const [pushEvent] = queryJournal(repo, { eventType: "milestone-pushed" });
+  assert.ok(pushEvent, "expected a milestone-pushed journal event");
+  assert.equal(pushEvent.data?.pushed, true);
+  assert.equal(pushEvent.data?.branch, "main");
+  assert.equal(pushEvent.data?.remote, "origin");
+});
+
+test("solo completion does not attempt a push when main is not ahead (#2874)", async () => {
+  const { repo, remote } = await milestoneOnIntegrationBranch({ autoPush: true });
+  git(["push", "origin", "main"], repo); // bring the upstream in sync
+  // Point origin at a dead path: an unwanted push attempt would fail loud
+  // instead of passing silently, so no journal event proves the ahead check
+  // suppressed the push.
+  git(["remote", "set-url", "origin", join(remote, "missing")], repo);
+
+  await completeMilestoneInteractively(repo, "tool/complete-solo-synced")();
+
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(
+    queryJournal(repo, { eventType: "milestone-pushed" }).length,
+    0,
+    "no push attempt, no journal event",
+  );
+});
+
+test("a diverged integration branch is left for the owner: no push, remote unchanged (#2874)", async () => {
+  const { repo, remote } = await milestoneOnIntegrationBranch({ autoPush: true, diverged: true });
+  const remoteHeadBefore = git(["rev-parse", "main"], remote);
+
+  await completeMilestoneInteractively(repo, "tool/complete-solo-diverged")();
+
+  assert.equal(getMilestone("M001")?.status, "complete");
+  // The plain push is rejected without force: origin/main keeps its own tip.
+  assert.equal(git(["rev-parse", "main"], remote), remoteHeadBefore);
+  const [pushEvent] = queryJournal(repo, { eventType: "milestone-pushed" });
+  assert.ok(pushEvent, "the rejected push is logged durably");
+  assert.equal(pushEvent.data?.pushed, false);
+  assert.equal(typeof pushEvent.data?.error, "string");
+});
+
+test("solo completion leaves everything unpushed when auto_push is off (#2874)", async () => {
+  const { repo, remote } = await milestoneOnIntegrationBranch();
+  const remoteHeadBefore = git(["rev-parse", "main"], remote);
+
+  await completeMilestoneInteractively(repo, "tool/complete-solo-off")();
+
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(git(["rev-parse", "main"], remote), remoteHeadBefore);
+  assert.equal(queryJournal(repo, { eventType: "milestone-pushed" }).length, 0);
+});
+
+test("interactive closeout never solo-pushes a surviving milestone worktree branch (#2874)", async () => {
+  // The worktree exists and is on milestone/M001, but the preferences say
+  // isolation none (unset). The host hook still runs the closeout there; the
+  // physical worktree veto keeps publication in the worktree merge flow.
+  const { remote, worktree } = await milestoneInWorktree({ autoPush: true });
+  const remoteMainBefore = git(["rev-parse", "main"], remote);
+
+  const closeout = runInteractiveUnitCloseout({
+    basePath: worktree,
+    canonicalToolName: "gsd_complete_milestone",
+    input: { milestoneId: "M001" },
+  });
+  assert.ok(closeout, "expected the interactive closeout to run");
+  assert.notEqual(closeout.gitVerdict, "commit-failed");
+
+  const heads = git(["ls-remote", "--heads", remote], worktree);
+  assert.doesNotMatch(heads, /refs\/heads\/milestone\//, "no solo push of the milestone branch");
+  assert.equal(git(["rev-parse", "main"], remote), remoteMainBefore);
+  assert.equal(queryJournal(worktree, { eventType: "milestone-pushed" }).length, 0);
 });

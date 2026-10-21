@@ -6,7 +6,7 @@ Captures let you fire-and-forget thoughts during auto-mode execution. Instead of
 
 While auto-mode is running (or any time):
 
-```
+```bash
 /gsd capture "add rate limiting to the API endpoints"
 /gsd capture "the auth flow should support OAuth, not just JWT"
 ```
@@ -17,7 +17,7 @@ Captures are stored in the GSD database and triaged automatically between tasks.
 
 ### Pipeline
 
-```
+```text
 capture → triage → confirm → resolve → resume
 ```
 
@@ -53,7 +53,7 @@ The LLM classifies each capture and proposes a resolution. Plan-modifying resolu
 
 Trigger triage manually at any time:
 
-```
+```bash
 /gsd triage
 ```
 

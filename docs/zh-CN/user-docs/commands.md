@@ -36,7 +36,7 @@
 | `/gsd fast` | 为支持的模型切换 service tier（优先级 API 路由） |
 | `/gsd rate` | 评价上一个单元所用模型层级（over / ok / under）或重置路由历史（reset），帮助改进自适应路由 |
 | `/gsd changelog` | 查看分类后的发行说明 |
-| `/gsd logs` | 浏览活动日志、调试日志和指标 |
+| `/gsd logs` | 浏览活动日志、调试日志、执行输出日志和指标 |
 | `/gsd remote` | 控制远程自动模式 |
 | `/gsd help` | 查看所有 GSD 子命令的分类参考及说明 |
 

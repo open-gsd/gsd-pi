@@ -1,243 +1,188 @@
 // Project/App: gsd-pi
-// File Purpose: gsd_resolve_blocker resolves the pending blocker that the project database holds, with no session (after a server restart).
+// File Purpose: Compiled MCP protocol tests with mocked native bridges only.
+// Native persistence parity lives in mcp-blocker-boundary-pr2865.integration.test.ts.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { registerHooks } from "node:module";
+import { after, test } from "node:test";
+import { createMcpServer } from "./server.js";
+import { SessionManager } from "./session-manager.js";
+import { resolvePersistedAutoPauseBlockerViaBridge } from "./workflow-tools.js";
 
-import {
-  hostWriteGateAdapter,
-  setQueuePhaseActive,
-} from "../../../src/resources/extensions/gsd/bootstrap/write-gate.ts";
-import { executeDomainOperation } from "../../../src/resources/extensions/gsd/db/domain-operation.ts";
-import {
-  adoptOrTransitionLifecycle,
-  readDomainOperationFence,
-} from "../../../src/resources/extensions/gsd/db/writers/lifecycle-commands.ts";
-import {
-  buildEscalationArtifact,
-  openTaskEscalation,
-  readTaskEscalation,
-} from "../../../src/resources/extensions/gsd/escalation.ts";
-import { getAllDecisionsFromMemories } from "../../../src/resources/extensions/gsd/context-store.ts";
-import { internalExecutionInvocation } from "../../../src/resources/extensions/gsd/execution-invocation.ts";
-import {
-  _getAdapter,
-  closeDatabase,
-  insertMilestone,
-  insertSlice,
-  insertTask,
-  openDatabase,
-} from "../../../src/resources/extensions/gsd/gsd-db.ts";
-import { createMcpServer } from "./server.ts";
-import { SessionManager } from "./session-manager.ts";
-
-// The server reads the gate through the module instance that this file seeds.
-// A second instance (the built dist copy) keeps its own database connection,
-// which this file cannot close before it removes the project directory.
-process.env.GSD_WORKFLOW_WRITE_GATE_MODULE ??= fileURLToPath(new URL(
-  `../../../src/resources/extensions/gsd/bootstrap/write-gate.${import.meta.url.includes("/dist-test/") ? "js" : "ts"}`,
-  import.meta.url,
-));
-
-/** A project whose database holds one open escalation on M001/S01/T01. The database is closed. */
-function seedProjectWithOpenEscalation(t: { after(fn: () => void): void }): string {
-  const projectDir = mkdtempSync(join(tmpdir(), "gsd-resolve-blocker-"));
-  t.after(() => {
-    try { closeDatabase(); } catch { /* The server may have closed it. */ }
-    rmSync(projectDir, { recursive: true, force: true });
-  });
-  mkdirSync(join(projectDir, ".gsd"));
-  openDatabase(join(projectDir, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Test", status: "active" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
-  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
-  const fence = readDomainOperationFence();
-  executeDomainOperation({
-    operationType: "test.task.adopt",
-    idempotencyKey: "fixture/task/adopt/T01",
-    expectedRevision: fence.revision,
-    expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: "test",
-    sourceTransport: "test",
-    payload: { taskId: "T01" },
-  }, (context) => {
-    adoptOrTransitionLifecycle(context, {
-      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "ready",
-    });
-    return {
-      events: [{
-        eventType: "test.task.adopted", entityType: "task", entityId: "M001/S01/T01",
-        payload: { taskId: "T01" }, destinations: ["test"],
-      }],
-      projections: [{ projectionKey: "test/task/t01", projectionKind: "test", rendererVersion: "1" }],
-    };
-  });
-  openTaskEscalation(projectDir, buildEscalationArtifact({
-    taskId: "T01", sliceId: "S01", milestoneId: "M001",
-    question: "Which store?",
-    options: [
-      { id: "A", label: "Separate table", tradeoffs: "More flexible; requires migration." },
-      { id: "B", label: "JSON array", tradeoffs: "Simpler; limited to ~1000 entries." },
-    ],
-    recommendation: "A", recommendationRationale: "Flexible",
-    continueWithDefault: false,
-  }), internalExecutionInvocation("test:escalation:T01"));
-  closeDatabase();
-  return projectDir;
+// Intercept the dynamic runtime boundary, not native TypeScript. This compiled
+// suite must neither compile native sources nor open a real project database.
+const state = {
+  calls: [] as unknown[][],
+  backendCalls: 0,
+  gate: "",
+  cachedSuccess: { resolved: true, scope: "M001/S01/T01", replayed: true },
+};
+const stateKey = "__pr2865McpBoundaryMock";
+(globalThis as any)[stateKey] = state;
+const bridge = `
+const state = globalThis.${stateKey};
+export function openExistingWorkflowDatabase() { return { ok: true }; }
+export function closeDatabase() {}
+export async function resolvePendingEscalation(...args) {
+  state.calls.push(args);
+  return { status: 'resolved', questionId: args[3] ?? 'legacy-question', message: 'Escalation resolved' };
 }
+export function resolveAutoPauseBlockerById() {
+  state.backendCalls++;
+  return state.cachedSuccess;
+}
+`;
+const gate = `
+const state = globalThis.${stateKey};
+export function loadWriteGateSnapshot() { return { activeQueuePhase: false }; }
+export function shouldBlockPendingGateInSnapshot() {
+  return { block: !!state.gate, reason: state.gate };
+}
+export function shouldBlockQueueExecutionInSnapshot() { return { block: false }; }
+`;
+const hooks = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const source = /(?:^|\/)mcp-bridge\.[jt]s$/.test(specifier) ? bridge + gate.replace(`const state = globalThis.${stateKey};`, "")
+      : /(?:^|\/)write-gate\.[jt]s$/.test(specifier) ? gate : undefined;
+    if (source !== undefined) {
+      return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+after(() => {
+  hooks.deregister();
+  delete (globalThis as any)[stateKey];
+});
 
-type ToolResult = { isError?: boolean; content: Array<{ text: string }> };
-
-let callSequence = 0;
-
-/**
- * The gsd_resolve_blocker handler of a new server that tracks no session: the
- * state after a restart. Each call carries the request identity that an MCP
- * client sends.
- */
-async function resolveBlockerToolAfterRestart() {
-  const { server } = await createMcpServer(new SessionManager(), { includeWorkflowTools: false });
+async function captureResolveBlockerTool(manager = new SessionManager()) {
+  const { server } = await createMcpServer(manager, { includeWorkflowTools: false });
   const tool = (server as any)._registeredTools?.gsd_resolve_blocker;
-  assert.ok(tool, "gsd_resolve_blocker should be registered");
-  return (args: Record<string, unknown>): Promise<ToolResult> => tool.handler(args, {
-    _meta: { "io.opengsd/idempotency-key": `resolve-blocker-test:${++callSequence}` },
-  });
+  assert.ok(tool);
+  return tool;
 }
 
-/** The write-gate rows that the extension host leaves in the project database. The database is closed. */
-function writeWriteGateSnapshot(
-  projectDir: string,
-  snapshot: { activeQueuePhase?: boolean; pendingGateId?: string },
-): void {
-  if (snapshot.pendingGateId) hostWriteGateAdapter.setPending(snapshot.pendingGateId, projectDir);
-  if (snapshot.activeQueuePhase) setQueuePhaseActive(true, projectDir);
-  closeDatabase();
+const pauseInput = {
+  pauseBlockerId: "B-cache",
+  outcome: "resolved" as const,
+  rationale: "The guard is clear",
+  expectedRevision: 7,
+  expectedAuthorityEpoch: 3,
+};
+
+function extra(requestId = "resolve-test") {
+  return { sessionId: "mcp-client", requestId, _meta: { "claudecode/toolUseId": requestId } };
 }
 
-function assertEscalationStillOpen(projectDir: string): void {
-  closeDatabase();
-  openDatabase(join(projectDir, ".gsd", "gsd.db"));
-  assert.equal(readTaskEscalation("M001", "S01", "T01")?.respondedAt, undefined);
-}
-
-test("gsd_resolve_blocker resolves the open escalation from the project database after a server restart", async (t) => {
-  const projectDir = seedProjectWithOpenEscalation(t);
-  const resolveBlocker = await resolveBlockerToolAfterRestart();
-
-  const result = await resolveBlocker({ projectDir, response: "B fewer moving parts" });
-  assert.notEqual(result.isError, true, result.content[0]?.text);
-  const payload = JSON.parse(result.content[0]!.text);
-  assert.equal(payload.resolved, true);
-  assert.equal(payload.source, "database");
-  assert.equal(payload.taskId, "T01");
-
-  closeDatabase();
-  openDatabase(join(projectDir, ".gsd", "gsd.db"));
-  const stored = readTaskEscalation("M001", "S01", "T01");
-  assert.equal(stored?.userChoice, "B", "the answer row holds the response");
-  assert.equal(stored?.userRationale, "fewer moving parts");
-  closeDatabase();
-
-  // The blocker is gone: a second call has nothing to resolve.
-  const again = await resolveBlocker({ projectDir, response: "A" });
-  assert.equal(again.isError, true);
-  assert.match(again.content[0]!.text, /No pending blocker/);
+test("resolve-blocker schema rejects conflicting, empty, and malformed selectors", async () => {
+  const tool = await captureResolveBlockerTool();
+  for (const args of [
+    { sessionId: "live", response: "continue" },
+    { projectDir: "/tmp/project", response: "A" },
+    { projectDir: "/tmp/project", questionId: "Q-explicit", response: "A" },
+    { projectDir: "/tmp/project", ...pauseInput },
+  ]) {
+    assert.equal(tool.inputSchema.safeParse(args).success, true, JSON.stringify(args));
+  }
+  for (const args of [
+    {},
+    { sessionId: "", response: "A" },
+    { sessionId: "  ", response: "A" },
+    { questionId: "", response: "A" },
+    { questionId: "  ", response: "A" },
+    { response: "" },
+    { response: "  " },
+    { projectDir: "  ", response: "A" },
+    { sessionId: "live", questionId: "Q", response: "A" },
+    { ...pauseInput, sessionId: "live" },
+    { ...pauseInput, questionId: "Q" },
+    { ...pauseInput, response: "A" },
+    { ...pauseInput, pauseBlockerId: "" },
+    { ...pauseInput, pauseBlockerId: "  " },
+    { ...pauseInput, rationale: "  " },
+    { ...pauseInput, outcome: "waived" },
+    { ...pauseInput, expectedRevision: -1 },
+    { ...pauseInput, expectedRevision: 0.5 },
+    { ...pauseInput, expectedAuthorityEpoch: -1 },
+    { ...pauseInput, expectedAuthorityEpoch: 0.5 },
+    { ...pauseInput, expectedRevision: undefined },
+    { ...pauseInput, expectedAuthorityEpoch: undefined },
+  ]) {
+    assert.equal(tool.inputSchema.safeParse(args).success, false, JSON.stringify(args));
+  }
 });
 
-test("gsd_resolve_blocker rejects a response that is not a valid choice and keeps the escalation open", async (t) => {
-  const projectDir = seedProjectWithOpenEscalation(t);
-  const resolveBlocker = await resolveBlockerToolAfterRestart();
-
-  const result = await resolveBlocker({ projectDir, response: "Z" });
-  assert.equal(result.isError, true);
-  assert.match(result.content[0]!.text, /Valid choices: accept, reject-blocker, A, B/);
-
-  assertEscalationStillOpen(projectDir);
+test("invalid selectors are refused before calling the bridge", async () => {
+  state.calls.length = 0;
+  const tool = await captureResolveBlockerTool();
+  for (const args of [{}, { ...pauseInput, questionId: "Q" }, { response: "  " }]) {
+    const result = await tool.handler(args, extra());
+    assert.equal(result.isError, true);
+    assert.ok(result.content[0].text.length > 0);
+  }
+  assert.equal(state.calls.length, 0);
 });
 
-test("gsd_resolve_blocker does not resolve the escalation while a discussion gate is pending", async (t) => {
-  const projectDir = seedProjectWithOpenEscalation(t);
-  writeWriteGateSnapshot(projectDir, { pendingGateId: "depth_verification_M001_confirm" });
-  const resolveBlocker = await resolveBlockerToolAfterRestart();
-
-  const result = await resolveBlocker({ projectDir, response: "accept" });
-  assert.equal(result.isError, true);
-  assert.match(result.content[0]!.text, /Discussion gate .* has not been confirmed/);
-
-  assertEscalationStillOpen(projectDir);
+test("explicit questionId and legacy escalation paths preserve agent invocation", async () => {
+  state.calls.length = 0;
+  const tool = await captureResolveBlockerTool();
+  for (const args of [
+    { projectDir: "/tmp/protocol", questionId: "Q-explicit", response: "A" },
+    { projectDir: "/tmp/protocol", response: "B" },
+  ]) {
+    const result = await tool.handler(args, extra());
+    assert.notEqual(result.isError, true, result.content[0].text);
+  }
+  assert.equal(state.calls.length, 2);
+  assert.equal(state.calls[0]![3], "Q-explicit");
+  assert.equal(state.calls[1]![3], undefined);
+  for (const call of state.calls) {
+    assert.equal((call[2] as any).actorType, "agent");
+    assert.equal((call[2] as any).sourceTransport, "workflow-mcp");
+  }
 });
 
-test("gsd_resolve_blocker does not resolve the escalation in queue mode", async (t) => {
-  const projectDir = seedProjectWithOpenEscalation(t);
-  writeWriteGateSnapshot(projectDir, { activeQueuePhase: true });
-  const resolveBlocker = await resolveBlockerToolAfterRestart();
-
-  const result = await resolveBlocker({ projectDir, response: "accept" });
-  assert.equal(result.isError, true);
-  assert.match(result.content[0]!.text, /not permitted during queue mode/);
-
-  assertEscalationStillOpen(projectDir);
+test("live session UI responses retain the session path", async () => {
+  const manager = new SessionManager();
+  const calls: unknown[][] = [];
+  manager.getSession = (() => ({ id: "live" })) as any;
+  manager.resolveBlocker = async (...args) => { calls.push(args); };
+  const tool = await captureResolveBlockerTool(manager);
+  const result = await tool.handler({ sessionId: "live", response: "continue" }, extra());
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(calls, [["live", "continue"]]);
 });
 
-test("gsd_resolve_blocker records the MCP transport and the agent actor on the answer and on the decision", async (t) => {
-  const projectDir = seedProjectWithOpenEscalation(t);
-  const resolveBlocker = await resolveBlockerToolAfterRestart();
-
-  const result = await resolveBlocker({ projectDir, response: "accept" });
-  assert.notEqual(result.isError, true, result.content[0]?.text);
-  const { decisionId } = JSON.parse(result.content[0]!.text);
-
-  closeDatabase();
-  openDatabase(join(projectDir, ".gsd", "gsd.db"));
-  const operations = _getAdapter()!.prepare(`
-    SELECT operation_type, actor_type, source_transport FROM workflow_operations
-    WHERE operation_type IN ('task.escalation.resolve', 'decision.save')
-    ORDER BY resulting_revision
-  `).all().map((row) => ({ ...row }));
-  assert.deepEqual(operations, [
-    { operation_type: "task.escalation.resolve", actor_type: "agent", source_transport: "workflow-mcp" },
-    { operation_type: "decision.save", actor_type: "agent", source_transport: "workflow-mcp" },
-  ]);
-  assert.equal(getAllDecisionsFromMemories().find((row) => row.id === decisionId)?.made_by, "agent");
+test("persisted escalation write gate runs before resolving", async () => {
+  state.calls.length = 0;
+  state.gate = "Discussion gate is active";
+  try {
+    const tool = await captureResolveBlockerTool();
+    const result = await tool.handler({ projectDir: "/tmp/protocol", response: "A" }, extra());
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Discussion gate/);
+    assert.equal(state.calls.length, 0);
+  } finally {
+    state.gate = "";
+  }
 });
 
-test("gsd_resolve_blocker does not resolve the escalation for a request with no replay-stable identity", async (t) => {
-  const projectDir = seedProjectWithOpenEscalation(t);
-  const { server } = await createMcpServer(new SessionManager(), { includeWorkflowTools: false });
-  const tool = (server as any)._registeredTools.gsd_resolve_blocker;
-
-  const result: ToolResult = await tool.handler({ projectDir, response: "accept" }, {});
-  assert.equal(result.isError, true);
-  assert.match(result.content[0]!.text, /requires replay-stable private request metadata/);
-
-  assertEscalationStillOpen(projectDir);
-});
-
-test("gsd_resolve_blocker with only the sessionId of a live session that has no pending blocker does not resolve the escalation", async (t) => {
-  const projectDir = seedProjectWithOpenEscalation(t);
-  const sessionManager = new SessionManager();
-  (sessionManager as any).sessions.set(projectDir, { sessionId: "live-session", projectDir, pendingBlocker: null });
-  const { server } = await createMcpServer(sessionManager, { includeWorkflowTools: false });
-  const tool = (server as any)._registeredTools.gsd_resolve_blocker;
-
-  const result: ToolResult = await tool.handler({ sessionId: "live-session", response: "accept" }, {
-    _meta: { "io.opengsd/idempotency-key": `resolve-blocker-test:${++callSequence}` },
-  });
-  assert.equal(result.isError, true);
-  assert.match(result.content[0]!.text, /No pending blocker for session live-session/);
-
-  openDatabase(join(projectDir, ".gsd", "gsd.db"));
-  assert.equal(readTaskEscalation("M001", "S01", "T01")?.respondedAt, undefined);
-});
-
-test("gsd_resolve_blocker with an unknown session and no projectDir names the database path", async () => {
-  const resolveBlocker = await resolveBlockerToolAfterRestart();
-
-  const result = await resolveBlocker({ sessionId: "gone-after-restart", response: "A" });
-  assert.equal(result.isError, true);
-  assert.match(result.content[0]!.text, /Session not found: gone-after-restart\. Pass projectDir/);
+test("unsafe cached pause success cannot replay through packaged or shared MCP entrypoints", async () => {
+  state.backendCalls = 0;
+  const tool = await captureResolveBlockerTool();
+  for (let retry = 0; retry < 2; retry++) {
+    // An old request identity is deliberately reused. The mock native backend
+    // would replay unsafe historical success if either frontend consulted it.
+    const packaged = await tool.handler({ projectDir: "/tmp/protocol", ...pauseInput }, extra("old-unsafe-receipt"));
+    assert.equal(packaged.isError, true);
+    assert.match(packaged.content[0].text, /native operator/);
+    const shared = await resolvePersistedAutoPauseBlockerViaBridge(
+      "/tmp/protocol", pauseInput.pauseBlockerId, pauseInput.rationale,
+      pauseInput.expectedRevision, pauseInput.expectedAuthorityEpoch,
+      extra("old-unsafe-receipt"),
+    );
+    assert.equal(shared.resolved, false);
+    assert.match(shared.failure!, /user-owned.*native operator/);
+  }
+  assert.equal(state.backendCalls, 0);
 });

@@ -32,6 +32,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { resolveStreamIdleTimeoutMs, withIdleDeadline } from "../utils/idle-deadline.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeToolSchema } from "../utils/sanitize-tool-schema.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
@@ -230,8 +231,28 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
+			// Idle-chunk stall deadline (#2644): an accepted request whose
+			// stream body then goes silent otherwise hangs the turn forever —
+			// SDK request timeouts do not cover an open stream body. When
+			// enabled, an internal controller fronts the request: the caller's
+			// signal forwards into it (user aborts stay user aborts), and the
+			// deadline aborts only the internal one, so a stall surfaces via
+			// the catch below as a plain `stopReason: "error"` provider
+			// failure — classified and retryable by the existing ladder.
+			const idleTimeoutMs = resolveStreamIdleTimeoutMs();
+			let stallController: AbortController | undefined;
+			if (idleTimeoutMs > 0) {
+				stallController = new AbortController();
+				const userSignal = options?.signal;
+				if (userSignal) {
+					const forwardAbort = () => stallController?.abort(userSignal.reason);
+					if (userSignal.aborted) forwardAbort();
+					else userSignal.addEventListener("abort", forwardAbort, { once: true });
+				}
+			}
+			const requestSignal = stallController?.signal ?? options?.signal;
 			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
+				...(requestSignal ? { signal: requestSignal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
@@ -370,7 +391,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				});
 			};
 
-			for await (const chunk of openaiStream) {
+			for await (const chunk of withIdleDeadline({
+				source: openaiStream,
+				timeoutMs: idleTimeoutMs,
+				onStall: () => stallController?.abort(new Error("stream idle deadline exceeded")),
+				label: `${model.provider}/${model.id}`,
+			})) {
 				if (!chunk || typeof chunk !== "object") continue;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,

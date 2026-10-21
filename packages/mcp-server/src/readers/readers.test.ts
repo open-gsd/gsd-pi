@@ -468,13 +468,38 @@ describe('gsd_doctor projection-gap repair hints (#2651)', () => {
     const result = runDoctorLite(projectDir);
     assert.equal(result.ok, false);
     assert.equal(result.readMetadata?.authority, 'projection-fallback');
-    assert.equal(result.issues.find((i) => i.code === 'all_slices_done_missing_summary')?.severity, 'error');
+    // A missing milestone SUMMARY is info: the file-only checker cannot know
+    // whether the database holds a closeout, and an imported-complete
+    // milestone has none to render (#2729).
+    assert.equal(result.issues.find((i) => i.code === 'all_slices_done_missing_summary')?.severity, 'info');
     assert.equal(result.issues.find((i) => i.code === 'missing_slice_plan')?.severity, 'error');
     assert.equal(result.issues.find((i) => i.code === 'missing_roadmap')?.severity, 'warning');
     assert.equal(result.issues.find((i) => i.code === 'missing_task_plan')?.severity, 'warning');
     // S01 is planned and done: no findings for it.
     assert.equal(result.issues.find((i) => i.code === 'missing_slice_plan' && i.unitId === 'M008/S01'), undefined);
     assert.equal(result.issues.find((i) => i.code === 'missing_task_plan' && i.unitId === 'M008/S01/T01'), undefined);
+  });
+
+  it('a complete milestone with no SUMMARY does not fail the doctor (#2729)', () => {
+    // The imported-complete shape, alone: every slice done, no SUMMARY.md,
+    // nothing else missing — the exact state that reported ok:false forever.
+    const projectDir = tmpProject();
+    writeFixture(projectDir, '.gsd/PROJECT.md', '# Project');
+    writeFixture(projectDir, '.gsd/STATE.md', '# State');
+    writeFixture(projectDir, '.gsd/phases/09-i/09-01-PLAN.md', `# S01
+
+<tasks>
+- [x] **T01**: Done unit
+</tasks>
+`);
+    writeFixture(projectDir, '.gsd/phases/09-i/S01-T01-SUMMARY.md', '# T01 done\n');
+    const result = runDoctorLite(projectDir);
+    const issue = result.issues.find((i) => i.code === 'all_slices_done_missing_summary');
+    assert.ok(issue, 'the missing milestone SUMMARY is still reported');
+    assert.equal(issue.severity, 'info');
+    assert.equal(result.ok, true, 'an imported-complete milestone must not fail the doctor');
+    assert.equal(result.counts.error, 0);
+    rmSync(projectDir, { recursive: true, force: true });
   });
 });
 

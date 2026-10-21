@@ -20,7 +20,7 @@ parallel:
 
 2. Start parallel execution:
 
-```
+```bash
 /gsd parallel start
 ```
 
@@ -28,13 +28,13 @@ GSD scans your milestones, checks dependencies and file overlap, shows an eligib
 
 3. Monitor progress:
 
-```
+```bash
 /gsd parallel status
 ```
 
 4. Stop when done:
 
-```
+```bash
 /gsd parallel stop
 ```
 
@@ -42,7 +42,7 @@ GSD scans your milestones, checks dependencies and file overlap, shows an eligib
 
 ### Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │  Coordinator (your GSD session)                         │
 │                                                         │
@@ -104,7 +104,7 @@ Before starting parallel execution, GSD checks which milestones can safely run c
 
 ### Example Report
 
-```
+```text
 # Parallel Eligibility Report
 
 ## Eligible for Parallel Execution (2)

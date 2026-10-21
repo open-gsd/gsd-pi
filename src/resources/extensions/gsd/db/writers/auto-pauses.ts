@@ -11,6 +11,8 @@ import { _getAdapter, isDbAvailable, transaction } from "../engine.js";
 import type { PausedSessionMetadata } from "../../interrupted-session.js";
 import type { AutoPauseBlockerKind } from "../../recovery-policy.js";
 import { sidecarQueueScope } from "../unit-dispatch-sidecars.js";
+import type { DomainOperationContext } from "../domain-operation.js";
+import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 interface AutoPauseRow {
   blocker_kind: AutoPauseBlockerKind;
@@ -158,4 +160,48 @@ export function openAutoPause(
       ":paused_at": pause.pausedAt ?? new Date().toISOString(),
     });
   });
+}
+
+/**
+ * The one open pause row whose `blocker_id` is the given id, or null when
+ * there are zero or multiple matches. Used by the `pause.blocker.resolve.by-id`
+ * Domain Operation to bind an exact operator-named blocker to one pause.
+ */
+export function readOpenAutoPauseByBlockerId(
+  blockerId: string,
+): { id: number; scope: string } | null {
+  if (!isDbAvailable()) return null;
+  const rows = _getAdapter()!.prepare(
+    `SELECT id, scope FROM auto_pauses WHERE blocker_id = :blocker_id AND closed_at IS NULL LIMIT 2`,
+  ).all({ ":blocker_id": blockerId }) as Array<{ id: number; scope: string }>;
+  return rows.length === 1 ? rows[0] : null;
+}
+
+/**
+ * Close the open pause bound to `blockerId`, inside the caller's
+ * `pause.blocker.resolve.by-id` Domain Operation transaction. A blocker with
+ * anything other than one matching open pause row closes nothing and
+ * `closed: false` comes back — the caller must treat this as a failed
+ * association, not a partial success.
+ */
+export function closeAutoPauseForBlocker(
+  context: Readonly<DomainOperationContext>,
+  blockerId: string,
+): { closed: boolean; scope: string | null } {
+  if (requireActiveDomainOperationContext(context) !== "pause.blocker.resolve.by-id") {
+    throw new Error("pause.blocker.resolve.by-id Domain Operation required");
+  }
+  const target = readOpenAutoPauseByBlockerId(blockerId);
+  if (!target) return { closed: false, scope: null };
+  const result = _getAdapter()!.prepare(
+    `UPDATE auto_pauses SET closed_at = :closed_at
+     WHERE id = :id AND scope = :scope AND blocker_id = :blocker_id AND closed_at IS NULL`,
+  ).run({
+    ":closed_at": new Date().toISOString(),
+    ":id": target.id,
+    ":scope": target.scope,
+    ":blocker_id": blockerId,
+  });
+  const closed = Number((result as { changes?: unknown }).changes ?? 0) > 0;
+  return { closed, scope: closed ? target.scope : null };
 }

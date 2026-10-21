@@ -49,6 +49,7 @@ import {
 } from "./native-git-bridge.js";
 import { GSDError, GSD_MERGE_CONFLICT, GSD_GIT_ERROR } from "./errors.js";
 import { getErrorMessage } from "./error-utils.js";
+import { buildScriptCommand, detectPackageManager } from "./package-manager.js";
 import { isInfrastructureError } from "./auto/infra-errors.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -113,6 +114,15 @@ export interface GitPreferences {
    *  Default: true when collapse_cadence is "slice", ignored otherwise.
    */
   milestone_resquash?: boolean;
+  /** #2888 — when true, a stop with an in-progress milestone (attempt death
+   *  via liveness backstop or recovery abort, manual stop, graceful exit)
+   *  leaves the milestone worktree directory on disk alongside the preserved
+   *  branch instead of removing it. On the default path (false) the worktree
+   *  is removed; git-visible uncommitted work is quarantined under
+   *  `.gsd/quarantine/worktrees/` first. `/gsd auto` re-enters an existing
+   *  worktree on resume. Default: false.
+   */
+  preserve_worktree_on_stop?: boolean;
 }
 
 export const VALID_BRANCH_NAME = /^[a-zA-Z0-9_\-\/.]+$/;
@@ -1268,12 +1278,15 @@ export class GitServiceImpl {
     if (typeof this.prefs.pre_merge_check === "string") {
       command = this.prefs.pre_merge_check;
     } else {
-      // Auto-detect: look for package.json with a test script
+      // Auto-detect: look for package.json with a test script, then build the
+      // command with the project's own package manager (lockfile /
+      // packageManager detection — same helper as verification-gate, #2870).
       try {
         const pkg = readFileSync(join(this.basePath, "package.json"), "utf-8");
         const parsed = JSON.parse(pkg);
         if (parsed.scripts?.test) {
-          command = "npm test";
+          const pm = detectPackageManager(this.basePath) ?? "npm";
+          command = buildScriptCommand(pm, "test");
         } else {
           return { passed: true, skipped: true };
         }

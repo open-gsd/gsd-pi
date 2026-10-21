@@ -191,7 +191,11 @@ function pushIntegrationBranch(
 ): PushIfAheadResult {
   const result: PushIfAheadResult = { pushed: false };
   try {
-    execFileSync("git", ["push", remote, branch], {
+    // A full source:destination refspec, never forced: a single-part refspec
+    // would inherit `remote.<name>.push` remapping and force flags, and an
+    // unattended auto push must always go fast-forward to the branch it
+    // resolved (#2874).
+    execFileSync("git", ["push", remote, `refs/heads/${branch}:refs/heads/${branch}`], {
       cwd: basePath,
       stdio: ["ignore", "pipe", "pipe"],
       encoding: "utf-8",

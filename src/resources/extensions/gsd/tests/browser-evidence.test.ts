@@ -297,8 +297,9 @@ describe('hasBrowserRequiredText — LLM snapshot wording', () => {
   test('LLM words not forming the compound do not suppress a browser snapshot', () => {
     // The LLM exclusion is adjacent-only: those words double as browser
     // vocabulary, so a wider before-window would suppress real requirements.
-    // `state`/`context` are not excluded at all — "browser/DOM state snapshot"
-    // and "browser context snapshot" (Playwright) are genuine browser steps.
+    // `state` is excluded only as a desktop compound (#2909): "browser/DOM
+    // state snapshot" (Playwright) stay escalated, plain desktop "state
+    // snapshot" does not. `context` is not excluded at all.
     assert.ok(
       hasBrowserRequiredText('Dismiss the prompt and take an accessibility snapshot.'),
       'accessibility snapshot after dialog-prompt wording must escalate',
@@ -345,6 +346,103 @@ describe('hasBrowserRequiredText — LLM snapshot wording', () => {
     assert.ok(
       hasBrowserRequiredText('take a browser snapshot of the page'),
       'browser snapshot of the page must escalate',
+    );
+  });
+});
+
+describe('hasBrowserRequiredText — desktop screenshot/snapshot wording', () => {
+  // #2909 (#766 → #2081 → #2436 follow-up): `screenshot` sat unconditionally in
+  // the first alternation, so desktop-app acceptance texts ("the farm saves a
+  // PNG render screenshot per view") escalated to browser-required and a
+  // gsd_validate_milestone `pass` verdict became unreachable — evidence a
+  // desktop app cannot produce. `screenshot` keeps its bare-signal default
+  // (line scanning breaks wrapped/labeled UAT lines) and a match is dropped
+  // only when a desktop/graphics compound is adjacent AND no browser-context
+  // word shares the clause; the `snapshot` guards gain the same desktop
+  // compounds the issue reported (byte-snapshot, state snapshot, save
+  // snapshot).
+  test('desktop/graphics screenshot and snapshot compounds are not browser requirements', () => {
+    assert.ok(
+      !hasBrowserRequiredText('the farm saves a screenshot per view'),
+      'save-verb screenshot compound must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('the farm saves a PNG render screenshot per view'),
+      'render screenshot compound must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('offscreen framebuffer screenshot written to disk'),
+      'graphics noun screenshot compound must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('export a PNG screenshot of each widget for the atlas'),
+      'PNG/widget screenshot compound must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('the farm writes a render screenshot per view'),
+      'write-verb screenshot compound must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('the farm saves a byte-snapshot per view'),
+      'byte-snapshot compound must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('persist a state snapshot per view'),
+      'desktop state snapshot compound must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('save snapshot per view'),
+      'adjacent save snapshot compound must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('farm renders each view to PNG files for the atlas'),
+      'render wording without screenshot/snapshot must stay non-browser (issue control)',
+    );
+  });
+
+  test('browser-qualified and bare screenshot/snapshot stay browser requirements', () => {
+    // Inverse constraints: the guards may only suppress a desktop/graphics
+    // compound without browser context nearby — never bare usage.
+    assert.ok(
+      hasBrowserRequiredText('take a screenshot of the login page'),
+      'bare screenshot of a page must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Playwright screenshot shows the login page'),
+      'Playwright screenshot must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('save a screenshot of the login page'),
+      'save-verb screenshot with a browser-context word in the clause must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('browser window screenshot shows the chart'),
+      'graphics compound with a browser word in the clause must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('take a screenshot after login'),
+      'bare screenshot must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('capture a screenshot at localhost:3000'),
+      'screenshot beside a localhost URL must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('the prompt snapshot must include a screenshot of the dashboard'),
+      'bare screenshot with no desktop compound must escalate',
+    );
+  });
+
+  test('browser-qualified state snapshot stays a browser requirement', () => {
+    // The desktop `state snapshot` exclusion is escaped when the word before
+    // `state` is itself browser vocabulary (Playwright page/DOM state).
+    assert.ok(
+      hasBrowserRequiredText('Capture a browser state snapshot after login.'),
+      'browser state snapshot must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Take a DOM state snapshot after clicking Submit.'),
+      'DOM state snapshot must escalate',
     );
   });
 });

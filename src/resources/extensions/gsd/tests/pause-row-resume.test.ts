@@ -352,7 +352,7 @@ test("restart after a kill in the execute stage replays the session file of the 
   const base = makeProject(t);
   const unit = claimUnit(base, "execute-task", "M001/S01/T01");
   setRuntimeKv("worker", unit.workerId, "session_file", writeSessionFile(base));
-  killWorker(unit.workerId);
+  killWorker(t, unit.workerId);
 
   const assessment = await assessInterruptedSession(base);
 
@@ -367,7 +367,7 @@ test("restart after a kill in the verify stage reads the stage from the dispatch
   const unit = claimUnit(base, "execute-task", "M001/S01/T01");
   setRuntimeKv("worker", unit.workerId, "session_file", writeSessionFile(base));
   setDispatchStage(unit.dispatchId, "verify");
-  killWorker(unit.workerId);
+  killWorker(t, unit.workerId);
 
   // The next process reads the stage from the database file.
   closeDatabase();
@@ -650,7 +650,15 @@ test("the root session closes the pause of a parallel worker scope whose milesto
 });
 
 /** The process that ran the worker was killed: its pid is dead and its heartbeat is old. */
-function killWorker(workerId: string): void {
+function killWorker(t: TestContext, workerId: string): void {
+  const originalKill = process.kill.bind(process);
+  // A fixed fixture PID can belong to an unrelated process on a busy runner.
+  t.mock.method(process, "kill", (pid: number, signal?: number | NodeJS.Signals) => {
+    if (pid === 99999 && signal === 0) {
+      throw Object.assign(new Error("fixture worker exited"), { code: "ESRCH" });
+    }
+    return originalKill(pid, signal);
+  });
   _getAdapter()!.prepare(
     `UPDATE workers
      SET pid = 99999, last_heartbeat_at = '1970-01-01T00:00:00.000Z'

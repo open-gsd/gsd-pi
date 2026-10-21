@@ -195,6 +195,43 @@ test("auto Unit tool scope blocks complete-slice from saving UAT Assessment", ()
   assert.match(result.reason ?? "", /Run UAT owns persisted UAT Assessment/);
 });
 
+test("auto Unit tool scope HARD BLOCK explains why and what to do (#2877)", () => {
+  // A contract-forbidden tool is a deterministic rejection: the reason must
+  // tell the model that retries return the same block, that it should stop
+  // calling the tool this turn, and what to do instead — a bare mechanical
+  // gate message is what turned a one-off mistake into a 425-retry loop.
+  const result = shouldBlockAutoUnitToolCall("execute-task", "gsd_complete_milestone");
+
+  assert.equal(result.block, true);
+  assert.match(result.reason ?? "", /HARD BLOCK: Tool Contract failure for unit "execute-task"/);
+  assert.match(result.reason ?? "", /is not part of this unit's Tool Contract/,
+    "the reason must name the contract violation");
+  assert.match(result.reason ?? "", /every retry of it returns this\s+same deterministic block/,
+    "the reason must warn that retries are futile");
+  assert.match(result.reason ?? "", /Stop calling that tool for the rest of this turn/,
+    "the reason must say what to do");
+  assert.match(result.reason ?? "", /describe the blocker in your response text/,
+    "the reason must offer the text-response alternative");
+});
+
+test("task-scope HARD BLOCK tells the model to fix the arguments, not stop calling (#2877)", () => {
+  // gsd_task_complete IS in the execute-task contract: the block fires on
+  // wrong task ids, so the guidance must point at correcting them and
+  // re-issuing — "stop calling that tool" would be wrong here.
+  const result = shouldBlockAutoUnitToolCall(
+    "execute-task",
+    "gsd_task_complete",
+    { milestoneId: "M001", sliceId: "S01", taskId: "T02" },
+    "M001/S01/T01",
+  );
+
+  assert.equal(result.block, true);
+  assert.match(result.reason ?? "", /HARD BLOCK: Tool Contract failure for unit "execute-task"/);
+  assert.match(result.reason ?? "", /the arguments are what failed/);
+  assert.match(result.reason ?? "", /Re-issue the call with the active task ids named above/);
+  assert.doesNotMatch(result.reason ?? "", /Stop calling that tool for the rest of this turn/);
+});
+
 test("auto Unit tool scope allows repaired-abort authorization in execute-task", () => {
   for (const toolName of [
     "gsd_task_recovery_resume",

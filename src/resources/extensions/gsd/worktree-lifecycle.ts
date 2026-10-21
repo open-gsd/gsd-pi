@@ -24,6 +24,7 @@ import { join } from "node:path";
 import type { PreflightResult, PostflightResult } from "./clean-root-preflight.js";
 
 import type { AutoSession } from "./auto/session.js";
+import { claimMilestoneLeaseReclaimingDeadHolder } from "./auto/milestone-lease-reclaim.js";
 import { debugLog } from "./debug-logger.js";
 import { logWarning } from "./workflow-logger.js";
 import { emitJournalEvent } from "./journal.js";
@@ -33,7 +34,6 @@ import {
   normalizeWorktreePathForCompare,
 } from "./worktree-root.js";
 import {
-  claimMilestoneLease,
   refreshMilestoneLease,
   releaseMilestoneLease,
 } from "./db/milestone-leases.js";
@@ -723,9 +723,28 @@ export function _enterMilestoneCore(
 
     if (s.milestoneLeaseToken === null) {
       try {
-        const claim = claimMilestoneLease(s.workerId, milestoneId);
+        // #2851: a verifiably-dead local holder must not wedge entry — probe
+        // and reclaim before accepting the conflict (mirrors auto/loop.ts and
+        // the gsd_plan_milestone reclaim from PR #2382).
+        const { claim, reclaimedFrom } = claimMilestoneLeaseReclaimingDeadHolder(
+          s.workerId,
+          milestoneId,
+          s.canonicalProjectRoot,
+        );
         if (claim.ok) {
           s.milestoneLeaseToken = claim.token;
+          if (reclaimedFrom) {
+            debugLog("WorktreeLifecycle", {
+              action: "enterMilestone",
+              milestoneId,
+              reclaimedFromDeadHolder: reclaimedFrom,
+              fencingToken: claim.token,
+            });
+            ctx.notify(
+              `Reclaimed milestone ${milestoneId} lease from dead worker ${reclaimedFrom}.`,
+              "warning",
+            );
+          }
           debugLog("WorktreeLifecycle", {
             action: "enterMilestone",
             milestoneId,
@@ -734,7 +753,7 @@ export function _enterMilestoneCore(
             expiresAt: claim.expiresAt,
           });
         } else {
-          // Lease held by another worker — fail loud so the user can
+          // Lease held by a live worker — fail loud so the user can
           // see the conflict instead of silently double-running.
           const msg = `Milestone ${milestoneId} is held by worker ${claim.byWorker} until ${claim.expiresAt}.`;
           debugLog("WorktreeLifecycle", {
@@ -1522,7 +1541,15 @@ export function mergeMilestoneStandalone(
     // auto_push silently never pushed. Honor it here when the branch is ahead
     // of its upstream; push failure is non-fatal to the closeout.
     recognizeSkippedMilestoneMerge(deps, originalBasePath || worktreeBasePath, milestoneId);
-    const publication = pushIfAheadAtCloseout(deps, originalBasePath, milestoneId);
+    // Same anchor as the recognize call above: a session that never adopted a
+    // root must not silently skip the #2153 closeout push — unless that anchor
+    // is itself a milestone worktree, whose publication belongs to the
+    // worktree flow (a solo push there could publish an unmerged milestone
+    // branch).
+    const pushAnchor = !originalBasePath && lifecycleIsInAutoWorktree(deps, worktreeBasePath)
+      ? undefined
+      : (originalBasePath || worktreeBasePath);
+    const publication = pushIfAheadAtCloseout(deps, pushAnchor, milestoneId);
     return {
       merged: false,
       mode: "skipped",

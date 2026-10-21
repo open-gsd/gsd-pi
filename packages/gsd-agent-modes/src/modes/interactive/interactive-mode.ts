@@ -134,6 +134,10 @@ export class InteractiveMode {
 	private streamingMessage: import("@gsd/pi-ai").AssistantMessage | undefined = undefined;
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	// Live dispatch/terminal tracking for the status widgets. pendingTools
+	// deliberately retains completed components for transcript reconstruction,
+	// so its size is not an active-execution count (#2925).
+	private activeToolInvocations = new Set<string>();
 	private toolOutputExpanded = DEFAULT_TOOL_OUTPUT_EXPANDED;
 	private pendingImages: ImageContent[] = [];
 	private hideThinkingBlock = false;
@@ -197,7 +201,7 @@ export class InteractiveMode {
 		this.pendingMessagesContainer = new Container();
 		this.gsdStatusWidget = new GsdStatusWidget(() => ({
 			override: this.settingsManager.getAdaptiveMode(),
-			activeToolCount: this.pendingTools.size,
+			activeToolCount: this.activeToolInvocations.size,
 			gsdPhase: this.gsdProgressState?.phase ?? this.pendingWorkingMessage ?? undefined,
 			lastError: this.lastBlockingError,
 			sessionName: this.sessionManager.getSessionName(),
@@ -224,7 +228,7 @@ export class InteractiveMode {
 		this.footerDataProvider = new FooterDataProvider(process.cwd());
 		this.footer = new FooterComponent(session, this.footerDataProvider, () => ({
 			override: this.settingsManager.getAdaptiveMode(),
-			activeToolCount: this.pendingTools.size,
+			activeToolCount: this.activeToolInvocations.size,
 			gsdPhase: this.gsdProgressState?.phase ?? this.pendingWorkingMessage ?? undefined,
 			lastError: this.lastBlockingError,
 			cwd: this.gsdProgressState?.path ?? process.cwd(),
@@ -266,6 +270,15 @@ export class InteractiveMode {
 		this.ui.addChild(this.widgetContainerBelow);
 		this.ui.addChild(this.footer);
 		this.ui.setFocus(this.editor);
+
+		// Fullscreen (alternate screen) mode, slice-1 (#2946): opt-in via env.
+		// Everything from the status line down (pinned zone, widgets, editor,
+		// footer) stays fixed on screen; the header, chat transcript and pending
+		// messages form the scrolling viewport above it.
+		if (process.env.PI_TUI_FULLSCREEN === "1") {
+			this.ui.setFullscreenPinBoundary(this.statusContainer);
+			this.ui.setFullscreen(true);
+		}
 
 		this.setupKeyHandlers();
 		this.setupEditorSubmitHandler();

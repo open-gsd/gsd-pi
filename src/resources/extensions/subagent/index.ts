@@ -33,7 +33,13 @@ import {
 	mergeDeltaPatches,
 	readIsolationMode,
 } from "./isolation.js";
-import { registerWorker, updateWorker, formatWorkerIdentity } from "./worker-registry.js";
+import {
+	registerWorker,
+	updateWorker,
+	updateWorkerIdentity,
+	formatWorkerIdentity,
+	formatWorkerModelTokens,
+} from "./worker-registry.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 import { emitJournalEvent } from "../gsd/journal.js";
 import { CmuxClient, shellEscape } from "../cmux/index.js";
@@ -47,6 +53,12 @@ import {
 	type SubagentSessionArgs,
 } from "./launch.js";
 import { resolveSubagentWorktreeCwd } from "./worktree-cwd.js";
+import { QUESTION_CHANNEL_DIR_ENV } from "../shared/question-channel.js";
+import {
+	startQuestionChannelWatcher,
+	type ForwarderQuestionCtx,
+	type QuestionChannelWatcher,
+} from "./question-forwarding.js";
 import {
 	SubagentRunStore,
 	createInitialRunRecord,
@@ -76,17 +88,6 @@ const LIVENESS_DEATH_GRACE_MS = 5_000;
 // one small read per tick, not a file re-scan.
 const CMUX_STDOUT_TAIL_INTERVAL_MS = 250;
 
-/**
- * Bound a diagnostic excerpt so a noisy child cannot flood the parent session
- * through the detached-completion wake message (#2363 review finding).
- */
-export function truncateDiagnostic(text: string, maxChars: number): string {
-	return text.length > maxChars
-		? `${text.slice(0, maxChars)}… [truncated, full output via action: "status"]`
-		: text;
-}
-
-const WAKE_DIAGNOSTIC_MAX_CHARS = 300;
 const liveSubagentProcesses = new Set<ChildProcess>();
 
 async function stopLiveSubagents(): Promise<void> {
@@ -150,6 +151,18 @@ function formatUsageStats(
 	}
 	if (model) parts.push(model);
 	return parts.join(" ");
+}
+
+/**
+ * Compact per-child cost token for the collapsed batch overview (#2822):
+ * `$0.0123` once the provider reported billable usage, "" while usage is
+ * still pending (the batch subtotal's `N pending usage` covers those) or
+ * the value is not a usable positive number. Mirrors formatUsageStats's
+ * cost formatting so both views read identically.
+ */
+function formatChildCost(usage: { cost: number } | undefined): string {
+	const cost = Number(usage?.cost);
+	return Number.isFinite(cost) && cost > 0 ? `$${cost.toFixed(4)}` : "";
 }
 
 /**
@@ -298,6 +311,12 @@ interface SubagentDetails {
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
+	/**
+	 * Persisted run snapshot for action: "status" (#2928). Present only there;
+	 * lets the renderer separate lifecycle facts from each child's authored
+	 * report instead of flattening both into one plain-text fallback.
+	 */
+	runRecord?: NonNullable<ReturnType<SubagentRunStore["get"]>>;
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -383,7 +402,11 @@ function processSubagentEventLine(
 				currentResult.usage.cost += usage.cost?.total || 0;
 				currentResult.usage.contextTokens = usage.totalTokens || 0;
 			}
-			if (!currentResult.model && msg.model) currentResult.model = msg.model;
+			const reportedModel = typeof msg.model === "string" ? msg.model.trim() : "";
+			if (reportedModel) {
+				if (!currentResult.model) currentResult.model = reportedModel;
+				else currentResult.reportedModel = currentResult.model === reportedModel ? undefined : reportedModel;
+			}
 			if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 			if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 		}
@@ -586,6 +609,7 @@ function resultToChildArtifact(result: SingleResult, index: number, cwd?: string
 		errorMessage: result.errorMessage,
 		stopReason: result.stopReason,
 		model: result.model,
+		reportedModel: result.reportedModel,
 		...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
 		usage: result.usage,
 		merge: result.mergeResult
@@ -703,26 +727,88 @@ async function revalidateRunningRecord(
 	}
 }
 
-function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
-	if (!record) return "Subagent run not found.";
-	const lines = [
+// Shared lifecycle-fact formatters for persisted run records (#2928). The
+// model-facing formatRunRecord text and the TUI status view must not drift:
+// both build on the same header/bullet/meta lines, and the authored report
+// content stays OUT of these facts so the renderer can present it separately.
+function runRecordHeaderLines(record: NonNullable<ReturnType<SubagentRunStore["get"]>>): string[] {
+	return [
 		`Run ${record.runId}: ${record.status}`,
 		`Mode: ${record.mode}`,
 		`Context: ${record.contextMode}`,
 		`Updated: ${record.updatedAt}`,
 	];
+}
+
+function runRecordChildBullet(child: NonNullable<ReturnType<SubagentRunStore["get"]>>["children"][number]): string {
+	const facts = [
+		child.pid !== undefined ? `pid ${child.pid}` : undefined,
+		child.exitCode !== undefined ? `exit ${child.exitCode}` : undefined,
+	].filter(Boolean).join(", ");
+	const suffix = facts ? ` (${facts})` : "";
+	return `- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}`;
+}
+
+function runRecordChildMetaLines(child: NonNullable<ReturnType<SubagentRunStore["get"]>>["children"][number]): string[] {
+	const lines: string[] = [];
+	const modelIdentity = formatWorkerModelTokens({
+		model: child.model,
+		reportedModel: child.reportedModel,
+	});
+	if (modelIdentity) lines.push(`  model: ${modelIdentity}`);
+	if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
+	if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
+	return lines;
+}
+
+function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
+	if (!record) return "Subagent run not found.";
+	const lines = runRecordHeaderLines(record);
 	for (const child of record.children) {
-		const facts = [
-			child.pid !== undefined ? `pid ${child.pid}` : undefined,
-			child.exitCode !== undefined ? `exit ${child.exitCode}` : undefined,
-		].filter(Boolean).join(", ");
-		const suffix = facts ? ` (${facts})` : "";
-		lines.push(`- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}: ${child.output || child.errorMessage || child.stderr || child.task}`);
-		if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
-		if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
+		lines.push(`${runRecordChildBullet(child)}: ${child.output || child.errorMessage || child.stderr || child.task}`);
+		lines.push(...runRecordChildMetaLines(child));
 	}
 	if (record.failure) lines.push(`Failure: ${record.failure.message}`);
 	return lines.join("\n");
+}
+
+/**
+ * TUI view of a persisted run record for action: "status" (#2928). Lifecycle
+ * facts (status bullets, model/session identity, failure) render as plain
+ * text; each child's authored report renders through the same Markdown
+ * renderer ordinary results use, so headings/lists/code present identically.
+ * Raw sources — errorMessage and stderr — stay plain text, never reinterpreted
+ * as Markdown.
+ */
+function renderRunRecordReport(
+	record: NonNullable<ReturnType<SubagentRunStore["get"]>>,
+	theme: { fg: (color: any, text: string) => string },
+): Container {
+	const container = new Container();
+	container.addChild(new Text(runRecordHeaderLines(record).join("\n"), 0, 0));
+	for (const child of record.children) {
+		container.addChild(new Text([runRecordChildBullet(child), ...runRecordChildMetaLines(child)].join("\n"), 0, 0));
+		// Outcome diagnostics stay lifecycle facts beside the bullet, even when a
+		// partial authored report exists below — the report must not swallow them.
+		if (child.errorMessage) container.addChild(new Text(theme.fg("error", child.errorMessage), 0, 0));
+		if (child.output?.trim()) {
+			container.addChild(
+				new Text(theme.fg("muted", `─── Report: ${formatAgentLabel(child.agent, child.trackingName)} ───`), 0, 0),
+			);
+			// The authored source goes to the renderer unchanged (trim is only the
+			// emptiness check): leading indentation is meaningful markdown and must
+			// survive verbatim (#2928).
+			container.addChild(new Markdown(child.output, 0, 0, getMarkdownTheme()));
+		} else if (child.stderr) {
+			// Raw logs stay plain text — source, never reinterpreted as report
+			// markdown (#2928).
+			container.addChild(new Text(theme.fg("toolOutput", child.stderr), 0, 0));
+		} else if (!child.errorMessage && child.task) {
+			container.addChild(new Text(theme.fg("dim", child.task), 0, 0));
+		}
+	}
+	if (record.failure) container.addChild(new Text(theme.fg("error", `Failure: ${record.failure.message}`), 0, 0));
+	return container;
 }
 
 interface SubagentRunOptions {
@@ -740,6 +826,12 @@ interface SubagentRunOptions {
 	 * pid file (#2652). Persisted so action: "status" can revalidate.
 	 */
 	onChildSpawned?: (pid: number | undefined) => void;
+	/**
+	 * The dispatching session's context slice, when available. When present,
+	 * the child gets a question channel and its ask_user_questions calls are
+	 * routed to this session's UI / remote channels (#2713).
+	 */
+	questionCtx?: ForwarderQuestionCtx;
 }
 
 async function runSingleAgent(
@@ -804,6 +896,9 @@ async function runSingleAgent(
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	// #2713: question channel state (function scope for the finally cleanup).
+	let questionWatcher: QuestionChannelWatcher | null = null;
+	let questionChannelDir: string | null = null;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -863,6 +958,24 @@ async function runSingleAgent(
 			projectRootSourceCwd,
 		});
 		if (launch.session.mode === "fork") currentResult.sessionFile = launch.session.sessionFile;
+		// #2713: export a question channel so the headless child forwards its
+		// ask_user_questions calls to this session's UI / remote channels.
+		if (options.questionCtx) {
+			try {
+				questionChannelDir = fs.mkdtempSync(path.join(os.tmpdir(), "gsd-questions-"));
+				launch.env[QUESTION_CHANNEL_DIR_ENV] = questionChannelDir;
+				questionWatcher = startQuestionChannelWatcher({
+					channelDir: questionChannelDir,
+					agentName,
+					questionCtx: options.questionCtx,
+					signal,
+				});
+			} catch {
+				// Non-fatal: without a channel the child keeps its headless behavior.
+				questionWatcher = null;
+				questionChannelDir = null;
+			}
+		}
 		let wasAborted = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
@@ -966,6 +1079,18 @@ async function runSingleAgent(
 		markMissingFinalResponse(currentResult);
 		return currentResult;
 	} finally {
+		// #2713: close any forwarded-question dialog the child left open, drain
+		// in-flight routing, then remove the channel.
+		if (questionWatcher) {
+			try {
+				await questionWatcher.stop();
+			} catch { /* ignore — best-effort teardown */ }
+		}
+		if (questionChannelDir) {
+			try {
+				fs.rmSync(questionChannelDir, { recursive: true, force: true });
+			} catch { /* ignore */ }
+		}
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -1015,6 +1140,9 @@ export async function runSingleAgentInCmuxSplit(
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 	let tmpOutputDir: string | null = null;
+	// #2713: question channel state (function scope for the finally cleanup).
+	let questionWatcher: QuestionChannelWatcher | null = null;
+	let questionChannelDir: string | null = null;
 	// Function scope, not try-block scope: the finally clause must be able to
 	// clear the tail interval on every path (try-block declarations are
 	// invisible to the finally clause).
@@ -1093,12 +1221,30 @@ export async function runSingleAgentInCmuxSplit(
 			projectRootSourceCwd,
 		});
 		if (launch.session.mode === "fork") currentResult.sessionFile = launch.session.sessionFile;
+		// #2713: export a question channel so the headless child inside the
+		// split forwards its ask_user_questions calls to this session. The
+		// wrapper shell only forwards allowlisted env assignments
+		// (buildShellEnvAssignments), so the channel var is appended explicitly
+		// to the command prefix below.
+		if (options.questionCtx) {
+			try {
+				questionChannelDir = fs.mkdtempSync(path.join(os.tmpdir(), "gsd-questions-"));
+				launch.env[QUESTION_CHANNEL_DIR_ENV] = questionChannelDir;
+			} catch {
+				// Non-fatal: without a channel the child keeps its headless behavior.
+				questionChannelDir = null;
+			}
+		}
 		const processArgs = [process.env.GSD_BIN_PATH!, ...extensionArgs, ...launch.args];
 		// Normalize all paths to forward slashes before embedding in bash strings.
 		// On Windows, backslashes are interpreted as escape characters by bash,
 		// mangling paths like C:\Users\user into C:Useruser (#1436).
 		const bashPath = (p: string) => shellEscape(p.replaceAll("\\", "/"));
-		const envPrefix = buildShellEnvAssignments(launch.env).join(" ");
+		const envAssignments = buildShellEnvAssignments(launch.env);
+		if (questionChannelDir) {
+			envAssignments.push(`${QUESTION_CHANNEL_DIR_ENV}=${shellEscape(questionChannelDir)}`);
+		}
+		const envPrefix = envAssignments.join(" ");
 		const commandPrefix = envPrefix ? `${envPrefix} ` : "";
 		const innerScript = [
 			// Publish the wrapper shell's pid first (#2652): it is the process
@@ -1115,6 +1261,20 @@ export async function runSingleAgentInCmuxSplit(
 		const sent = await cmuxClient.sendSurface(cmuxSurfaceId, `bash -lc ${shellEscape(innerScript)}`);
 		if (!sent) {
 			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, options);
+		}
+		// #2713: the child is live in the split — start routing its forwarded
+		// questions (kept after the fallback returns so they never double-start).
+		if (options.questionCtx && questionChannelDir) {
+			try {
+				questionWatcher = startQuestionChannelWatcher({
+					channelDir: questionChannelDir,
+					agentName,
+					questionCtx: options.questionCtx,
+					signal,
+				});
+			} catch {
+				questionWatcher = null;
+			}
 		}
 		tailTimer = setInterval(() => stdoutTailer.poll(), CMUX_STDOUT_TAIL_INTERVAL_MS);
 
@@ -1175,6 +1335,17 @@ export async function runSingleAgentInCmuxSplit(
 		return currentResult;
 	} finally {
 		if (tailTimer) clearInterval(tailTimer);
+		// #2713: close any forwarded-question dialog, drain routing, remove channel.
+		if (questionWatcher) {
+			try {
+				await questionWatcher.stop();
+			} catch { /* ignore — best-effort teardown */ }
+		}
+		if (questionChannelDir) {
+			try {
+				fs.rmSync(questionChannelDir, { recursive: true, force: true });
+			} catch { /* ignore */ }
+		}
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -1355,7 +1526,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				return {
 					content: [{ type: "text", text: formatRunRecord(record) }],
-					details: makeDetails("single")([]),
+					// The snapshot rides the details (#2928) so the renderer can
+					// present authored reports as Markdown while the content text
+					// above stays the model-facing record dump.
+					details: record ? { ...makeDetails("single")([]), runRecord: record } : makeDetails("single")([]),
 					...(record ? {} : { isError: true }),
 				};
 			}
@@ -1417,6 +1591,7 @@ export default function (pi: ExtensionAPI) {
 						sessionOverride: { mode: "fork", sessionFile: selected.sessionFile, sessionDir: path.dirname(selected.sessionFile) },
 						trackingName: selected.trackingName,
 						thinkingOverride: params.thinking,
+						questionCtx: ctx,
 					},
 				);
 				return {
@@ -1704,44 +1879,42 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			// A detached run's completion is otherwise invisible: the journal event
-			// has no turn-starting consumer, so the session idles until the model
-			// happens to poll action: "status" (#2363). Re-invoke it with a short
-			// summary. One wake per dispatch, interactive sessions only, and fully
-			// defensive — a wake failure must never affect persistence or escape
-			// the unobserved IIFE (ctx.hasUI itself can throw on a stale runtime).
-			let backgroundWakeSent = false;
-			const wakeSessionAfterDetachedCompletion = (results: SingleResult[]): void => {
-				try {
-					if (!ctx.hasUI || backgroundWakeSent) return;
-					backgroundWakeSent = true;
-					const successCount = results.filter((r) => r.exitCode === 0).length;
-					const failureCount = results.length - successCount;
-					const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
-					const wallSeconds = ((Date.now() - dispatchStartMs) / 1000).toFixed(1);
-					const perAgent = results
-						.map((r) =>
-							`- ${r.agent}: ${r.exitCode === 0 ? "succeeded" : `failed — ${truncateDiagnostic(r.errorMessage || r.stderr || "unknown error", WAKE_DIAGNOSTIC_MAX_CHARS)}`}`
-						)
-						.join("\n");
-					void pi.sendMessage(
-						{
-							customType: "subagent_completed",
-							content: [
-								`Background subagent run ${dispatchId} finished in ${wallSeconds}s: ${successCount} succeeded, ${failureCount} failed (cost $${totalCost.toFixed(4)}).`,
-								perAgent,
-								`Full output is persisted. Inspect it with the subagent tool, action: "status", runId: "${dispatchId}", and process the results in this turn.`,
-							].join("\n"),
-							display: true,
-							details: { dispatchId, mode: dispatchMode, agents: dispatchAgents, successCount, failureCount },
-						},
-						{ triggerTurn: true },
-					).catch(() => {
-						// Wake delivery is best-effort; persistence above is authoritative.
-					});
-				} catch {
-					// A wake failure must never affect persistence.
-				}
-			};
+		// has no turn-starting consumer, so the session idles until the model
+		// happens to poll action: "status" (#2363). Re-invoke it with a short
+		// summary. One wake per dispatch, interactive sessions only, and fully
+		// defensive — a wake failure must never affect persistence or escape
+		// the unobserved IIFE (ctx.hasUI itself can throw on a stale runtime).
+		let backgroundWakeSent = false;
+		const wakeSessionAfterDetachedCompletion = (results: SingleResult[]): void => {
+			try {
+				if (!ctx.hasUI || backgroundWakeSent) return;
+				backgroundWakeSent = true;
+				const successCount = results.filter((r) => r.exitCode === 0).length;
+				const failureCount = results.length - successCount;
+				const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
+				const wallSeconds = ((Date.now() - dispatchStartMs) / 1000).toFixed(1);
+				// The host renders this message as Markdown (#2928): keep it to the
+				// aggregate completion facts plus the inspection pointer. Per-agent
+				// outcomes and raw diagnostics live in the status report — repeating
+				// them here would both duplicate facts and reinterpret source.
+				void pi.sendMessage(
+					{
+						customType: "subagent_completed",
+						content: [
+							`Background subagent run ${dispatchId} finished in ${wallSeconds}s: ${successCount} succeeded, ${failureCount} failed (cost $${totalCost.toFixed(4)}).`,
+							`Full output is persisted. Inspect it with the subagent tool, action: "status", runId: "${dispatchId}", and process the results in this turn.`,
+						].join("\n"),
+						display: true,
+						details: { dispatchId, mode: dispatchMode, agents: dispatchAgents, successCount, failureCount },
+					},
+					{ triggerTurn: true },
+				).catch(() => {
+					// Wake delivery is best-effort; persistence above is authoritative.
+				});
+			} catch {
+				// A wake failure must never affect persistence.
+			}
+		};
 
 			// Batch executors shared by the synchronous dispatch paths and detached
 			// background runs (#2820): a background batch must not drift from
@@ -1797,6 +1970,7 @@ export default function (pi: ExtensionAPI) {
 							trackingName: dispatchTrackingNames[i],
 							thinkingOverride: step.thinking ?? params.thinking,
 							onChildSpawned: noteChildPid(i),
+							questionCtx: ctx,
 						},
 					);
 					results.push(result);
@@ -1872,6 +2046,13 @@ export default function (pi: ExtensionAPI) {
 					const taskModel = t.model || params.model;
 					const taskThinking = t.thinking ?? params.thinking;
 					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId, workerIdentities[index]);
+					const syncWorkerIdentity = (result: SingleResult) => {
+						updateWorkerIdentity(workerId, {
+							...(result.model !== undefined ? { model: result.model } : {}),
+							reportedModel: result.reportedModel,
+							...(result.thinking !== undefined ? { thinking: result.thinking } : {}),
+						});
+					};
 					// A retry supersedes the failed attempt's result object, which
 					// would silently drop its billable usage from the card and the
 					// run record (#2821). Bank the replaced attempt and fold it into
@@ -1893,6 +2074,7 @@ export default function (pi: ExtensionAPI) {
 					const updateParallelResult = (partial: AgentToolResult<SubagentDetails>) => {
 						if (partial.details?.results[0]) {
 							const raw = partial.details.results[0];
+							syncWorkerIdentity(raw);
 							allResults[index] = bankedUsage ? { ...raw, usage: withBankedUsage(raw.usage) } : raw;
 							persistRunResults([...allResults]);
 							emitParallelUpdate();
@@ -1912,6 +2094,7 @@ export default function (pi: ExtensionAPI) {
 							projectRoot,
 							projectRootSourceCwd,
 							onChildSpawned: noteChildPid(index),
+							questionCtx: ctx,
 						};
 						return cmuxSplitsEnabled
 							? runSingleAgentInCmuxSplit(
@@ -2000,6 +2183,7 @@ export default function (pi: ExtensionAPI) {
 						result = makeFailureResult(err, t.agent, t.task, undefined, dispatchTrackingNames[index], batchSignal);
 					}
 
+					syncWorkerIdentity(result);
 					updateWorker(workerId, result.exitCode === 0 ? "completed" : "failed");
 					allResults[index] = result;
 					persistRunResults([...allResults]);
@@ -2088,6 +2272,7 @@ export default function (pi: ExtensionAPI) {
 								projectRoot,
 								projectRootSourceCwd: isolation ? effectiveCwd : undefined,
 								onChildSpawned: noteChildPid(0),
+								questionCtx: ctx,
 							},
 						);
 						if (isolation && result.exitCode === 0) {
@@ -2208,6 +2393,7 @@ export default function (pi: ExtensionAPI) {
 						projectRoot,
 						projectRootSourceCwd: isolation ? effectiveCwd : undefined,
 						onChildSpawned: noteChildPid(0),
+						questionCtx: ctx,
 					};
 					const result = cmuxSplitsEnabled
 						? await runSingleAgentInCmuxSplit(
@@ -2360,6 +2546,14 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded }, theme) {
 			const details = result.details as SubagentDetails | undefined;
 			if (!details || details.results.length === 0) {
+				// Background status reports (#2928): the run-record snapshot drives a
+				// structured view that renders authored reports as Markdown while
+				// lifecycle facts and raw diagnostics stay plain text. The same view
+				// serves collapsed and expanded (status is an explicit inspection
+				// action; truncating it would regress today's full-report fallback).
+				if (details?.runRecord) {
+					return renderRunRecordReport(details.runRecord, theme);
+				}
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 			}
@@ -2388,6 +2582,10 @@ export default function (pi: ExtensionAPI) {
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
+				const identity = formatWorkerIdentity(
+					r,
+					r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+				);
 
 				if (expanded) {
 					const container = new Container();
@@ -2396,6 +2594,7 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+					if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
@@ -2429,6 +2628,7 @@ export default function (pi: ExtensionAPI) {
 
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(formatAgentLabel(r.agent, r.trackingName)))}${theme.fg("muted", ` (${r.agentSource})`)}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+				if (identity) text += `\n${theme.fg("dim", identity)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
@@ -2484,6 +2684,11 @@ export default function (pi: ExtensionAPI) {
 							),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						const identity = formatWorkerIdentity(
+							r,
+							r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+						);
+						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -2526,6 +2731,11 @@ export default function (pi: ExtensionAPI) {
 					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
+					const identity = formatWorkerIdentity(
+						r,
+						r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+					);
+					if (identity) text += `\n${theme.fg("dim", identity)}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
@@ -2652,12 +2862,17 @@ export default function (pi: ExtensionAPI) {
 								: theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
-					// Per-child identity: model · thinking · elapsed (#2396)
+					// Per-child identity + live cost: model · thinking · elapsed · $X
+					// (#2396, #2822). The cost token rides the same per-child usage
+					// the #2826 accumulator reconciles; children without a first
+					// provider report stay blank here (the batch subtotal counts
+					// them as pending usage).
 					const identity = formatWorkerIdentity(
 						r,
 						r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
 					);
-					if (identity) text += `\n${theme.fg("dim", identity)}`;
+					const meta = [identity, formatChildCost(r.usage)].filter(Boolean).join(" · ");
+					if (meta) text += `\n${theme.fg("dim", meta)}`;
 					if (displayItems.length === 0)
 						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;

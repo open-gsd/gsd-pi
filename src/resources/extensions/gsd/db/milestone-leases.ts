@@ -295,6 +295,42 @@ export function forceReleaseLeasesForWorker(workerId: string): number {
 }
 
 /**
+ * Force-release one held lease of a dead worker, bound to the fencing token
+ * the caller observed on the held row. Returns true only when THIS call
+ * released the lease: a concurrent recovery claim under the dead worker's id
+ * (task-settle) or a competing reclaimer that moves the row off
+ * (worker_id, fencing_token) makes this a no-op, so the caller never revokes
+ * a newer lease epoch and never journals a release it did not perform.
+ */
+export function forceReleaseMilestoneLeaseForWorker(
+  workerId: string,
+  milestoneId: string,
+  fencingToken: number,
+): boolean {
+  const db = getDb();
+  let released = false;
+  transaction(() => {
+    const result = db.prepare(
+      `UPDATE milestone_leases
+       SET status = 'released'
+       WHERE milestone_id = :milestone_id
+         AND worker_id = :worker_id
+         AND fencing_token = :fencing_token
+         AND status = 'held'`,
+    ).run({
+      ":milestone_id": milestoneId,
+      ":worker_id": workerId,
+      ":fencing_token": fencingToken,
+    });
+    released =
+      typeof (result as { changes?: unknown }).changes === "number"
+        ? (result as { changes: number }).changes === 1
+        : false;
+  });
+  return released;
+}
+
+/**
  * Read current lease row for diagnostics. Returns null if no row exists.
  */
 export function getMilestoneLease(milestoneId: string): MilestoneLeaseRow | null {

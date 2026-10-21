@@ -58,7 +58,7 @@ If you have an existing project with `.gsd/` blanket-ignored:
 3. Add `unique_milestone_ids: true` to `.gsd/PREFERENCES.md`
 4. Optionally rename existing milestones to use unique IDs:
 
-   ```
+   ```text
    I have turned on unique milestone ids, please update all old milestone
    ids to use this new format e.g. M001-abc123 where abc123 is a random
    6 char lowercase alpha numeric string. Update all references in all

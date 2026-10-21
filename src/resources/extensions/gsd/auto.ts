@@ -179,6 +179,7 @@ import {
   resolveProjectRoot,
 } from "./worktree.js";
 import { GitServiceImpl } from "./git-service.js";
+import type { GitPreferences } from "./git-service.js";
 import { nativeCheckoutBranch } from "./native-git-bridge.js";
 import { getPriorSliceCompletionBlocker } from "./dispatch-guard.js";
 import { autoWorktreeBranch, enterBranchModeForMilestone } from "./auto-worktree-branch-lifecycle.js";
@@ -1986,16 +1987,28 @@ export async function stopAuto(
           }
         } else if (exitAction === "preserve") {
           // Milestone still in progress — preserve branch for later resumption
+          const preserveWorktree = _resolveStopAutoPreserveWorktree({
+            explicit: options.preserveWorktree,
+            gitPreferences: loadedPreferences?.git,
+          });
           const r = lifecycle.exitMilestone(
             stopMilestoneId,
             {
               merge: false,
               preserveBranch: true,
-              preserveWorktree: options.preserveWorktree ?? false,
+              preserveWorktree,
             },
             notifyCtx,
           );
           if (!r.ok && r.cause instanceof Error) throw r.cause;
+          // Surface preference-driven preservation so the operator knows the
+          // worktree — and any uncommitted work in it — was left in place (#2888).
+          if (r.ok && preserveWorktree && options.preserveWorktree === undefined) {
+            ctx?.ui.notify(
+              `Worktree for ${stopMilestoneId} preserved (git.preserve_worktree_on_stop) — uncommitted work left in place. /gsd auto re-enters it.`,
+              "info",
+            );
+          }
         }
       }
     } catch (e) {
@@ -2345,6 +2358,19 @@ export function _selectStopAutoWorktreeExit(args: {
 }
 
 /**
+ * Resolve `preserveWorktree` for stopAuto's non-merge worktree exit (#2888).
+ * Precedence: an explicit caller option wins; otherwise the opt-in
+ * `git.preserve_worktree_on_stop` preference; otherwise false (remove the
+ * worktree — git-visible uncommitted work is quarantined on that path).
+ */
+export function _resolveStopAutoPreserveWorktree(args: {
+  explicit?: boolean;
+  gitPreferences?: GitPreferences;
+}): boolean {
+  return args.explicit ?? (args.gitPreferences?.preserve_worktree_on_stop === true);
+}
+
+/**
  * The dispatch row of the unit that is active when auto-mode pauses: the
  * claimed row of this worker, or the newest row of the current unit when the
  * loop already settled it. Null when no unit with a dispatch row is active.
@@ -2394,7 +2420,16 @@ export async function pauseAuto(
 
   s.active = false;
   s.paused = true;
-  if (options.abortActiveTurn && ctx && !ctx.isIdle()) ctx.abort();
+  // A throwing abort must not strand the half-paused state: active/paused are
+  // already observable above, so every step below (cancellation resolution,
+  // pause row, unit closeout) still has to run (#2877 codex review).
+  if (options.abortActiveTurn && ctx) {
+    try {
+      if (!ctx.isIdle()) ctx.abort();
+    } catch (err) {
+      logWarning("engine", `pause turn-abort failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
+  }
   clearUnitTimeout();
   stopAutoCommandPolling();
 
@@ -2425,10 +2460,10 @@ export async function pauseAuto(
   // kind, the action and the remediation, and a resume re-enters the kernel
   // advance with that route named on the row instead of re-diagnosing prose.
   // The seven human blocker kinds pause for a person unchanged.
-  let pauseReasonText = _errorContext?.message;
+  let pauseReasonText = _errorContext?.message ?? options.pauseReason;
   if (blockerKind === "machine_fixable") {
     const classification = classifyFailure({
-      error: _errorContext?.message ?? "machine-fixable failure",
+      error: options.pauseReason ?? _errorContext?.message ?? "machine-fixable failure",
       unitType: s.currentUnit?.type,
       unitId: s.currentUnit?.id,
     });

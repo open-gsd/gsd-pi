@@ -290,6 +290,19 @@ function readVerificationPauseReceipt(
   return null;
 }
 
+/**
+ * Read-only (#2864): does a durable verification-pause receipt recorded by the
+ * auto finalizer vouch for this exact Attempt? Same match as the
+ * reconcileLifecycle gate below, exposed for the drift-repair seam so the
+ * repair consumes exactly the state this command releases.
+ */
+export function taskHasVerificationPauseReceipt(
+  task: TaskSettleTask,
+  attemptId: string | undefined,
+): boolean {
+  return readVerificationPauseReceipt(task, attemptId) !== null;
+}
+
 // The journal receipt of a pre-upgrade pause. A journal line has no Attempt
 // id, so freshness binds it to the Attempt: a line written before the latest
 // Attempt's Result belongs to an earlier pause.

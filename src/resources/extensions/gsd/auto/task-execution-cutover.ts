@@ -557,7 +557,16 @@ function reconcileNext(
     && deps.readGrantedResumeGrace(attempt.attemptId) !== true
   ) {
     deps.markResumeGraceGranted(attempt.attemptId);
-    return { action: "retry", reason: "task-recovery-resumed-claim-grace" };
+    // #2889: the retry reason reaches the dispatch ledger and the operator as
+    // a bare token today; name the likely cause and the sanctioned remedies
+    // the way taskRecoveryAbortResult names its resume exit.
+    return {
+      action: "retry",
+      reason:
+        "task-recovery-resumed-claim-grace (one resume-grace pass granted for this Attempt; " +
+        "a recurrence usually means an orphaned running Attempt from a dead worker still holds " +
+        "the task — settle it with /gsd doctor --fix or gsd_task_settle)",
+    };
   }
 
   const recovery = settleRunningAttempt(

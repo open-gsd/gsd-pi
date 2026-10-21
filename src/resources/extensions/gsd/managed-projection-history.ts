@@ -270,6 +270,18 @@ function isDeterministicExchangeIdentityError(error: unknown): boolean {
   return isUnexpectedOccupantError(error) || isJournaledExchangeIdentityChangedError(error);
 }
 
+// Completed journal retirements (#2879): every retention site records the
+// participant evidence rows and removes the journal entry BEFORE throwing this
+// stable message, so the entry is already converged when the error escapes.
+// Matched by exact equality, never a substring: a native error quoting a
+// managed path that happens to contain the phrase must not read as a
+// retirement (Codex round 1).
+function isRetiredProjectionExchangeError(error: unknown): boolean {
+  const message = projectionErrorMessage(error);
+  return message === "managed projection target identity changed; recovery evidence retained"
+    || message === "managed projection target kind changed; recovery evidence retained";
+}
+
 // Deterministic native control-publication replay failures (#2154): a stale
 // prepared intent (.gsd-control-*.json.intent) whose publication can no
 // longer complete throws these on every projection-root open, wedging every
@@ -283,6 +295,33 @@ function isControlPublicationEvidenceError(error: unknown): boolean {
     const candidate = current as { message?: unknown; cause?: unknown };
     if (typeof candidate.message === "string"
       && /control publication content evidence changed|control publication evidence retention is incomplete/u
+        .test(candidate.message)) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
+// Exhausted native sharing-violation retries (#2355 family, #2883): the
+// engine's Windows retry schedule ran out renaming a node inside the
+// projection root — among them the control-publication renames a pending
+// mutation's retention publishes on every managed open — and the same
+// failure returns deterministically (stable staging/destination names across
+// fresh processes, no visible control artifact). Writes stay fail-loud; the
+// doctor evidence assessment classifies this so the retained rows stay
+// enumerable. Matched as an anchored full-message scaffold, never a
+// substring: the engine builds the message verbatim around the two paths, so
+// an unrelated error quoting a managed pathname that happens to contain a
+// phrase must not read as an exhaustion (the #2880 classifier lesson).
+export function isExhaustedTransientProjectionSharingError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { message?: unknown; cause?: unknown };
+    if (typeof candidate.message === "string"
+      && /^projection root operation failed: transient projection root sharing violation while .+ after \d+ attempts:/u
         .test(candidate.message)) {
       return true;
     }
@@ -1992,6 +2031,14 @@ function recoverManagedProjectionMutations(
       else if (mutation.operation === "write") applyWriteMutation(handle, mutation);
       else applyRemoveMutation(handle, mutation);
     } catch (error) {
+      // A retirement has already converged its entry: the participants are
+      // retained evidence rows and the journal file is removed. Continuing
+      // lets the remaining entries converge in this pass instead of failing
+      // every later managed open one retirement per pass, which kept the
+      // retained evidence unassessable and growing (#2879). A write to a
+      // retired target still fails loud through the unresolved-evidence
+      // conflict gate in beginManagedProjectionMutation.
+      if (isRetiredProjectionExchangeError(error)) continue;
       // A transient class (EBUSY / sharing violation / os error 32) keeps the
       // entry for the existing outer retry schedules, but a count persisted
       // across restarts bounds the retries: an entry whose exchange replay
@@ -2000,7 +2047,12 @@ function recoverManagedProjectionMutations(
       if (!isTransientProjectionRootLockError(error)) throw error;
       mutation.replayFailureCount = (mutation.replayFailureCount ?? 0) + 1;
       if (mutation.replayFailureCount >= MANAGED_PROJECTION_REPLAY_FAILURE_LIMIT) {
-        retireExchangeWithRetainedEvidence(handle, mutation);
+        try {
+          retireExchangeWithRetainedEvidence(handle, mutation);
+        } catch (retirement) {
+          if (!isRetiredProjectionExchangeError(retirement)) throw retirement;
+          continue;
+        }
       }
       persistMutation(handle, mutation);
       throw error;
@@ -2185,6 +2237,19 @@ function evidenceDestination(
   if (action === "discard") return null;
   if (action === "restore") return evidence.logicalPath;
   return `migration/preserved-projection-evidence/${evidence.evidenceId.slice("evidence:sha256:".length)}`;
+}
+
+// Canonical preserve retains a copy at the preserved-evidence destination and
+// keeps the live projection in place (#2881): the evidence IS the projection
+// (evidencePath === logicalPath), so consuming it would unship the projection
+// and the next assessment would report the artifact missing. Staging rows
+// (temporary/quarantine) keep the move: their evidence path is a protocol
+// artifact, not a live projection.
+function preservesEvidenceSource(
+  evidence: UnboundProjectionEvidence,
+  action: UnboundProjectionEvidenceResolutionAction,
+): boolean {
+  return evidence.kind === "canonical" && action === "preserve";
 }
 
 function pathToken(value: string, label: string): string {
@@ -2604,6 +2669,148 @@ function publishEvidenceDestination(
   persistResolvingEvidence(handle, evidence);
 }
 
+// The replay's re-review hand-off (#2856): the entry has already been
+// rewritten to `retained` over the current bytes when this is thrown, so the
+// recovery loop keeps it and continues, while every other caller fails loud.
+const EVIDENCE_RETURNED_TO_REVIEW_MESSAGE
+  = "unbound projection evidence target changed under the journaled resolution; returned to retained for re-review";
+
+function isEvidenceReturnedToReviewError(error: unknown): boolean {
+  return projectionErrorMessage(error) === EVIDENCE_RETURNED_TO_REVIEW_MESSAGE;
+}
+
+// Lock-backed counterpart of preparedArtifactState: same tri-state over the
+// projection-root lock's own reads. Unknown node kinds fail closed. For an
+// empty artifact the digest of the exact observed content comes back with the
+// classification, so a removal can be pinned to the verified-empty state —
+// a writer that populates the node afterwards must make an identity- and
+// digest-bound removal refuse instead of authorizing the new bytes (#2856).
+function preparedArtifactStateUnderLock(
+  handle: ProjectionRootIdentityLock,
+  artifactPath: string,
+): { state: PreparedArtifactState; emptyDigest: string | null } {
+  if (!handle.pathExists(artifactPath)) return { state: "absent", emptyDigest: null };
+  const kind = handle.pathKind(artifactPath);
+  if (kind === "directory") {
+    if (handle.listDirectory(artifactPath).length !== 0) {
+      return { state: "holds-content", emptyDigest: null };
+    }
+    // The digest of an empty tree per the projectionContentDigest walk: the
+    // root entry frame and no children.
+    const hash = createHash("sha256");
+    hash.update(`\0directory\0`);
+    return { state: "empty", emptyDigest: `sha256:${hash.digest("hex")}` };
+  }
+  if (kind !== "file") return { state: "holds-content", emptyDigest: null };
+  const bytes = handle.readFile(artifactPath);
+  if (bytes.byteLength !== 0) return { state: "holds-content", emptyDigest: null };
+  const hash = createHash("sha256");
+  hash.update(bytes);
+  return { state: "empty", emptyDigest: `sha256:${hash.digest("hex")}` };
+}
+
+// A journaled "prepared" resolution whose evidence path was legitimately
+// rewritten after the attempt (#2856: the readable-index behaviour lets the
+// target be written again while the record is in flight) can never complete
+// its exchange — the native replay refuses the stale left identity
+// deterministically, and the raw error re-wedges every later managed open:
+// retention stays reachable, settlement becomes unreachable. The reviewed
+// bytes are gone (replaced at the evidence path), so the #2815/#2823 review
+// contract applies instead of a permanent refusal: journaled artifacts that
+// hold bytes become their own retained records, verified-empty protocol
+// placeholders are removed (never one another record still references), and
+// the entry returns to `retained` over the CURRENT bytes so the next preview
+// offers fresh consent.
+// Journaled guard/exchange leftovers of a prepared resolution, settled in
+// place: an artifact holding bytes, or one whose identity no longer matches
+// the journaled slot, becomes its own reviewed record; the exact journal-bound
+// empty placeholder is removed under the digest of the same observation that
+// established emptiness (#2856 codex). Null-identity artifacts are not
+// journal-bound cleanup eligible here (restageEvidenceResolutionExchange owns
+// those). Shared by the drift hand-off and the copy-style preserve, which must
+// not leave placeholders behind at the journaled paths — a later replay of the
+// published phase would otherwise treat the leftover guard as the move
+// protocol's source (#2881 codex).
+function reconcilePreparedArtifacts(handle: ProjectionRootIdentityLock, evidence: UnboundProjectionEvidence): void {
+  const resolution = evidence.resolution!;
+  const paths = resolveEvidenceResolutionPaths(evidence);
+  // Paths independently referenced by another evidence record stay for the
+  // same reason the #2819 degraded cleanup leaves them: an interrupted
+  // restage may have recorded a companion quarantine row for that artifact.
+  const otherReferencedPaths = new Set(
+    readUnboundProjectionEvidence(handle)
+      .filter((entry) => entry.evidenceId !== evidence.evidenceId)
+      .map((entry) => entry.evidencePath),
+  );
+  for (const [artifactPath, artifactIdentity] of [
+    [resolution.guardPath, resolution.guardIdentity],
+    [paths.exchangePath, resolution.exchangeIdentity],
+  ] as const) {
+    // A null identity means the protocol never journal-acknowledged the
+    // artifact, so it is not journal-bound cleanup eligible either.
+    if (artifactIdentity === null) continue;
+    const observed = preparedArtifactStateUnderLock(handle, artifactPath);
+    if (observed.state === "absent") continue;
+    const isTree = handle.pathKind(artifactPath) === "directory";
+    const artifactScope = isTree ? "tree" as const : "file" as const;
+    if (observed.state === "holds-content" || handle.pathIdentity(artifactPath) !== artifactIdentity) {
+      // An artifact holding bytes, or one whose identity no longer matches
+      // the journaled slot (an exchange that rotated further than the
+      // journal recorded): never removed — it becomes its own reviewed
+      // record. An empty rotated occupant has nothing to lose but no
+      // journal-bound removal identity either, so retention is the only
+      // disposition that cannot refuse or destroy (#2856 codex).
+      recordUnboundProjectionEvidence(handle, {
+        evidencePath: artifactPath,
+        evidenceIdentity: handle.pathIdentity(artifactPath),
+        kind: "quarantine",
+        logicalPath: evidence.logicalPath,
+        scope: artifactScope,
+      });
+    } else if (!otherReferencedPaths.has(artifactPath)) {
+      // The exact journal-bound empty placeholder, removed under the digest
+      // of the same observation that established emptiness: a writer that
+      // populates the placeholder after this classification makes the
+      // identity- and digest-bound removal refuse instead of supplying
+      // fresh deletion authorization (#2856 codex).
+      if (handle.pathExists(artifactPath)) {
+        handle.removeFileViaGuardExact(
+          artifactPath,
+          artifactIdentity,
+          artifactPath,
+          isTree,
+          observed.emptyDigest!,
+        );
+      }
+    }
+  }
+}
+
+function returnDriftedResolutionToReview(
+  handle: ProjectionRootIdentityLock,
+  evidence: UnboundProjectionEvidence,
+): never {
+  reconcilePreparedArtifacts(handle, evidence);
+  const entries = readUnboundProjectionEvidence(handle);
+  const currentIdentity = handle.pathIdentity(evidence.evidencePath);
+  writeUnboundProjectionEvidence(
+    handle,
+    entries.map((entry) => entry.evidenceId === evidence.evidenceId
+      ? {
+          evidenceId: entry.evidenceId,
+          evidencePath: entry.evidencePath,
+          evidenceIdentity: currentIdentity,
+          contentDigest: projectionContentDigest(handle, entry.evidencePath, entry.scope),
+          kind: entry.kind,
+          logicalPath: entry.logicalPath,
+          scope: entry.scope,
+          transition: "retained" as const,
+        }
+      : entry),
+  );
+  throw new Error(EVIDENCE_RETURNED_TO_REVIEW_MESSAGE);
+}
+
 function applyEvidenceResolution(
   handle: ProjectionRootIdentityLock,
   evidence: UnboundProjectionEvidence,
@@ -2626,8 +2833,11 @@ function applyEvidenceResolution(
     // marker pins the plain-fs identity format, which differs from the
     // native's on Windows), and removeFileViaGuardExact re-verifies identity
     // and digest inside the guard at removal time. A canonical restore's
-    // destination is the evidence path itself — those reviewed bytes stay.
+    // destination is the evidence path itself — those reviewed bytes stay,
+    // and a canonical preserve keeps them in place too (#2881): its
+    // destination copy is already verified above.
     if (resolution.destinationPath !== evidence.evidencePath
+      && !preservesEvidenceSource(evidence, resolution.action)
       && handle.pathExists(evidence.evidencePath)
       && projectionContentDigest(handle, evidence.evidencePath, evidence.scope) === resolution.contentDigest) {
       handle.removeFileViaGuardExact(
@@ -2639,6 +2849,79 @@ function applyEvidenceResolution(
       );
     }
     return;
+  }
+  // Canonical preserve keeps the live projection in place (#2881): the move
+  // protocol below consumes the evidence path, and for a canonical row that
+  // path is the projection itself. While a prepared resolution's reviewed
+  // bytes still sit at the evidence path (identity and digest both verified),
+  // publish a digest-verified copy at the preserved-evidence destination and
+  // let the record retire without any source mutation. A pre-fix attempt's
+  // leftover guard/exchange placeholders are reconciled first so nothing
+  // stays behind at the journaled paths — a replay of the published phase
+  // with a leftover guard at resolution.guardPath would bypass the
+  // completed-destination gate and treat that guard as the move protocol's
+  // source. States the move protocol already advanced past fall through to
+  // their existing gates: a missing or rotated source means the exchange
+  // holds the bytes, and the plain-fs deleting marker above already finished
+  // under the reviewed consent.
+  if (resolution.phase === "prepared"
+    && preservesEvidenceSource(evidence, resolution.action)
+    && handle.pathExists(evidence.evidencePath)
+    && handle.pathIdentity(evidence.evidencePath) === resolution.currentIdentity
+    && projectionContentDigest(handle, evidence.evidencePath, evidence.scope) === resolution.contentDigest) {
+    restageEvidenceResolutionExchange(handle, evidence);
+    reconcilePreparedArtifacts(handle, evidence);
+    // Artifacts reconciliation had to retain (another record references them,
+    // or they hold bytes) must not stay at the journaled paths: the published
+    // record must replay against an absent guard, or its completed-destination
+    // gate would treat the retained artifact as the move protocol's source
+    // (#2881 codex). Fresh randomized paths are the same detachment restage
+    // uses for null-identity leftovers.
+    const detachedPaths = resolveEvidenceResolutionPaths(evidence);
+    const evidenceParent = dirname(evidence.evidencePath).replaceAll("\\", "/");
+    const prefix = evidenceParent === "." ? "" : `${evidenceParent}/`;
+    let detached = false;
+    if (handle.pathExists(resolution.guardPath)) {
+      resolution.guardPath = `${prefix}.gsd-projection-remove-${randomUUID()}`;
+      resolution.guardIdentity = null;
+      detached = true;
+    }
+    if (handle.pathExists(detachedPaths.exchangePath)) {
+      resolution.exchangePath = `${prefix}.gsd-projection-exchange-${randomUUID()}`;
+      resolution.exchangeIdentity = null;
+      detached = true;
+    }
+    if (detached) persistResolvingEvidence(handle, evidence);
+    publishEvidenceDestination(handle, evidence, evidence.evidencePath);
+    if (projectionContentDigest(handle, resolution.destinationPath!, evidence.scope) !== resolution.contentDigest) {
+      throw new Error("unbound projection evidence destination verification failed");
+    }
+    return;
+  }
+  // Left-drift replay gate (#2856): the evidence path holds other content
+  // under a new identity, so the journaled exchange can only refuse. The one
+  // drift the exchange replay still owns is the rotation-completed signature
+  // (the evidence path holding the journaled guard identity), which stays
+  // resumable below. Native-control records replay through the engine's own
+  // descriptor protocol and are not converted here.
+  if (resolution.phase === "prepared"
+    && evidence.origin !== "native-control"
+    && handle.pathExists(evidence.evidencePath)
+    && handle.pathIdentity(evidence.evidencePath) !== resolution.currentIdentity
+    && handle.pathIdentity(evidence.evidencePath) !== resolution.guardIdentity) {
+    returnDriftedResolutionToReview(handle, evidence);
+  }
+  // Content drift under a matching identity (an in-place edit between the
+  // review and a replayed canonical preserve) must not fall through to the
+  // move protocol: it would consume the projection and re-file the edited
+  // bytes as quarantine evidence at a guard path. The unconsumed source goes
+  // back to review over the current bytes instead (#2881 codex).
+  if (resolution.phase === "prepared"
+    && preservesEvidenceSource(evidence, resolution.action)
+    && handle.pathExists(evidence.evidencePath)
+    && handle.pathIdentity(evidence.evidencePath) === resolution.currentIdentity
+    && projectionContentDigest(handle, evidence.evidencePath, evidence.scope) !== resolution.contentDigest) {
+    returnDriftedResolutionToReview(handle, evidence);
   }
   const source = moveEvidenceIntoGuard(handle, evidence);
   unboundEvidenceGuardFaultForTest?.();
@@ -2708,18 +2991,35 @@ function applyEvidenceResolution(
 
 function recoverEvidenceResolutions(handle: ProjectionRootIdentityLock): void {
   const entries = readUnboundProjectionEvidence(handle);
-  const retained: UnboundProjectionEvidence[] = [];
   let changed = false;
+  const converged = new Set<string>();
   for (const evidence of entries) {
     if (evidence.transition === "retained") {
-      retained.push(evidence);
       continue;
     }
-    applyEvidenceResolution(handle, evidence);
-    changed = true;
+    try {
+      applyEvidenceResolution(handle, evidence);
+      converged.add(evidence.evidenceId);
+      changed = true;
+    } catch (error) {
+      // The replay returned the record to `retained` over the current bytes
+      // (#2856) and may have retained records for artifacts that held the
+      // moved bytes: the final write below folds the persisted index back in
+      // (companion records included), and the assessment continues — the
+      // record settles through normal review.
+      if (!isEvidenceReturnedToReviewError(error)) throw error;
+      changed = true;
+    }
   }
   if (changed) {
-    writeUnboundProjectionEvidence(handle, retained);
+    // Write the CURRENT index minus the converged records: companion evidence
+    // rows a replayed resolution created along the way (restaged or
+    // reconciled artifacts) must survive the pass instead of being clobbered
+    // by the loop's stale snapshot (#2881 codex).
+    writeUnboundProjectionEvidence(
+      handle,
+      readUnboundProjectionEvidence(handle).filter((entry) => !converged.has(entry.evidenceId)),
+    );
     for (const evidence of entries) {
       if (evidence.transition === "resolving" && evidence.origin === "native-control") {
         removeNativeEvidenceDescriptor(handle, evidence.evidencePath);
@@ -2897,7 +3197,8 @@ function resolveUnboundProjectionEvidencePlainFs(
           throw new Error("unbound projection evidence completed destination changed");
         }
       }
-      if (existsSync(path) && evidence.resolution.destinationPath !== evidence.evidencePath) {
+      if (existsSync(path) && evidence.resolution.destinationPath !== evidence.evidencePath
+        && !preservesEvidenceSource(evidence, evidence.resolution.action)) {
         if (fallbackProjectionIdentity(path) !== evidence.resolution.currentIdentity
           || fallbackProjectionContentDigest(path, evidence.scope) !== evidence.resolution.contentDigest) {
           throw new Error("unbound projection evidence changed after review");
@@ -3039,7 +3340,11 @@ function resolveUnboundProjectionEvidencePlainFs(
       targetRoot,
       entries.map((entry) => entry.evidenceId === evidence.evidenceId ? deleting : entry),
     );
-    if (destination !== path) {
+    // Canonical preserve keeps the live projection in place (#2881): the copy
+    // above is the retention; the reviewed source is never consumed. Its
+    // final verification still runs below so the record only retires while
+    // the projection holds exactly the reviewed bytes.
+    if (destination !== path && !preservesEvidenceSource(evidence, action)) {
       if (fallbackProjectionIdentity(path) !== currentIdentity
         || fallbackProjectionContentDigest(path, evidence.scope) !== contentDigest) {
         throw new Error("unbound projection evidence changed after review");
@@ -3047,8 +3352,9 @@ function resolveUnboundProjectionEvidencePlainFs(
       if (evidence.scope === "file") unlinkSync(path);
       else rmdirSync(path);
     } else if (fallbackProjectionContentDigest(path, evidence.scope) !== contentDigest) {
-      // Canonical restore: the reviewed bytes stay in place, so verify them
-      // one last time before the record that protects them is retired.
+      // Canonical restore and canonical preserve: the reviewed bytes stay in
+      // place, so verify them one last time before the record that protects
+      // them is retired.
       throw new Error("unbound projection evidence changed after review");
     }
     writeFallbackUnboundProjectionEvidence(

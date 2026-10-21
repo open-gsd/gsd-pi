@@ -34,7 +34,9 @@ import {
 import { isDbAvailable } from "../gsd-db.js";
 import { getMilestone } from "../db/queries.js";
 import {
-  claimMilestoneLease,
+  claimMilestoneLeaseReclaimingDeadHolder,
+} from "./milestone-lease-reclaim.js";
+import {
   milestoneLeaseTtlSeconds,
   refreshMilestoneLease,
   releaseMilestoneLease,
@@ -200,7 +202,22 @@ export function kernelClaimUnit(input: KernelUnitClaimInput): KernelUnitClaim {
     prefix: "dispatch",
   });
 
-  const lease = claimMilestoneLease(workerId, input.milestoneId);
+  // #2851: a verifiably-dead local holder must not refuse an interactive
+  // claim — probe and reclaim first (mirrors auto/loop.ts and the
+  // gsd_plan_milestone reclaim from PR #2382).
+  const { claim: lease, reclaimedFrom } = claimMilestoneLeaseReclaimingDeadHolder(
+    workerId,
+    input.milestoneId,
+    input.projectRoot,
+  );
+  if (reclaimedFrom) {
+    debugLog("lifecycleKernel", {
+      phase: "interactive-claim-dead-holder-reclaimed",
+      milestoneId: input.milestoneId,
+      workerId,
+      holderWorkerId: reclaimedFrom,
+    });
+  }
   if (!lease.ok) {
     markWorkerStopping(workerId);
     return {

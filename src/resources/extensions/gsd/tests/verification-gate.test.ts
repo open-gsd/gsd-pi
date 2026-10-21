@@ -384,6 +384,51 @@ describe("verification-gate: discovery", () => {
     assert.deepStrictEqual(result.commands, []);
   });
 
+  test("prose Verify sentence embedding several commands routes to task-plan-prose, not execution (issue #2868)", () => {
+    // The #2868 repro: ONE verify line, several `.`-terminated clauses each
+    // embedding a command. The embedded flags (`-c`, `-m`, `--ignore=…`) must
+    // not anchor the whole sentence as a single runnable command — residual
+    // escapes after #2853 were the lowercase opener (flag heuristic), the
+    // env-assignment opener and the bare known-command opener.
+    const blob =
+      "Run each command from the description as its own separate, unchained invocation. " +
+      "PYTHONPATH=src python -c 'from docs.checks import main; main()' gives 0. " +
+      "python -m pytest tests/uat --ignore=tests/uat/slow gives 0. " +
+      "python -m pytest --collect-only -q lists 34 tests. make clean-repro gives 0.";
+    for (const candidate of [
+      blob,
+      blob.charAt(0).toLowerCase() + blob.slice(1),
+      blob.replace(/^Run each command from the description as its own separate, unchained invocation\. /, ""),
+      blob.replace(/^Run each command from the description as its own separate, unchained invocation\. PYTHONPATH=src /, ""),
+    ]) {
+      const result = discoverCommands({ taskPlanVerify: candidate, cwd: tmp });
+      assert.equal(result.source, "task-plan-prose");
+      assert.deepStrictEqual(result.commands, []);
+    }
+    // The prose fallback satisfies the requirement through the host-recorded
+    // runs staged for the Task (#1431, #1591) — never by re-executing
+    // commands parsed out of prose.
+    const evidenced = discoverCommands({
+      taskPlanVerify: blob,
+      cwd: tmp,
+      taskEvidence: [
+        { command: "python -m pytest tests/uat", exitCode: 0, verdict: "pass", durationMs: 900 },
+        { command: "make clean-repro", exitCode: 0, verdict: "pass", durationMs: 40 },
+      ],
+    });
+    assert.equal(evidenced.source, "task-plan-prose");
+    assert.deepStrictEqual(evidenced.commands, []);
+
+    // Codex review: path operands with a trailing dot are shell syntax — a
+    // pipeline over them still discovers as runnable task-plan commands.
+    const pipeline = discoverCommands({
+      taskPlanVerify: "find src/. tests/. -maxdepth 0 | wc -l",
+      cwd: tmp,
+    });
+    assert.equal(pipeline.source, "task-plan");
+    assert.deepStrictEqual(pipeline.commands, ["find src/. tests/. -maxdepth 0 | wc -l"]);
+  });
+
   test("prose taskPlanVerify with passing task evidence beats preference commands (issue #1591)", () => {
     const result = discoverCommands({
       taskPlanVerify: "Planning artifacts exist and contain all required sections",
@@ -698,6 +743,32 @@ describe("verification-gate: execution", () => {
 
     assert.equal(result.discoverySource, "task-plan-prose");
     assert.deepEqual(result.checks, []);
+  });
+
+  test("prose Verify sentence embedding commands passes via host-recorded evidence, never executed (issue #2868)", async () => {
+    const blob =
+      "Run each command from the description as its own separate, unchained invocation. " +
+      "PYTHONPATH=src python -c 'from docs.checks import main; main()' gives 0. " +
+      "python -m pytest tests/uat --ignore=tests/uat/slow gives 0. " +
+      "python -m pytest --collect-only -q lists 34 tests. make clean-repro gives 0.";
+    const result = await runVerificationGate({
+      cwd: tmp,
+      taskPlanVerify: blob,
+      taskEvidence: [
+        { command: "python -m pytest tests/uat", exitCode: 0, verdict: "pass", durationMs: 900 },
+        { command: "make clean-repro", exitCode: 0, verdict: "pass", durationMs: 40 },
+      ],
+    });
+
+    // The sentence itself is never executed: the host-recorded runs are the
+    // checks (#1431), so the gate passes instead of failing exit 2 and
+    // re-dispatching the Task.
+    assert.equal(result.passed, true);
+    assert.equal(result.discoverySource, "task-plan-prose");
+    assert.deepEqual(result.checks.map((check) => [check.command, check.exitCode]), [
+      ["python -m pytest tests/uat", 0],
+      ["make clean-repro", 0],
+    ]);
   });
 
   describe("hostRecordedTaskEvidence", () => {
@@ -1739,6 +1810,75 @@ test("isLikelyCommand: labelled prose checklist lines with embedded flags are pr
   assert.equal(isLikelyCommand("C:\\Python312\\python.exe -m pytest tests"), true);
   // A bare `-` stays a stdin operand for lowercase invocations (codex review).
   assert.equal(isLikelyCommand("cmp - reference.bin 0 0"), true);
+});
+
+test("isLikelyCommand: multi-sentence prose blobs embedding commands are prose (issue #2868)", () => {
+  // #2868 residual escapes after #2853: a one-line Verify sentence embedding
+  // several commands. The embedded flags won the flag heuristic (lowercase
+  // opener) or the embedded command anchored the whole blob (env-assignment
+  // opener, bare known-command opener), so the full sentence executed as ONE
+  // command and failed exit 2.
+  const blob =
+    "Run each command from the description as its own separate, unchained invocation. " +
+    "PYTHONPATH=src python -c 'from docs.checks import main; main()' gives 0. " +
+    "python -m pytest tests/uat --ignore=tests/uat/slow gives 0. " +
+    "python -m pytest --collect-only -q lists 34 tests. make clean-repro gives 0.";
+  assert.equal(isLikelyCommand(blob), false);
+  assert.equal(isLikelyCommand(blob.charAt(0).toLowerCase() + blob.slice(1)), false);
+  assert.equal(
+    isLikelyCommand(blob.replace(/^Run each command from the description as its own separate, unchained invocation\. /, "")),
+    false,
+  );
+  assert.equal(
+    isLikelyCommand(blob.replace(/^Run each command from the description as its own separate, unchained invocation\. PYTHONPATH=src /, "")),
+    false,
+  );
+
+  // The inverse failure mode stays closed: real compound commands, single
+  // commands with flags, and dot operands are still commands.
+  assert.equal(isLikelyCommand("npm test && npm run lint"), true);
+  assert.equal(isLikelyCommand("make clean-repro; make reproduce"), true);
+  assert.equal(isLikelyCommand("grep -n 'front door' README.md | wc -l"), true);
+  assert.equal(isLikelyCommand('for f in tests/*.py; do python -m pytest "$f"; done'), true);
+  assert.equal(isLikelyCommand("pytest --collect-only -q"), true);
+  assert.equal(isLikelyCommand("python -m pytest tests -k front_door --ignore=tests/uat/slow"), true);
+  // Codex review: path and assignment tokens with a trailing dot are shell
+  // operands, not sentence punctuation — compound chains and pipes over them
+  // stay commands.
+  assert.equal(isLikelyCommand("find src/. tests/. -maxdepth 0"), true);
+  assert.equal(isLikelyCommand("test -d src/. && test -d tests/. && true"), true);
+  assert.equal(isLikelyCommand("find src/. tests/. -maxdepth 0 | wc -l"), true);
+  assert.equal(isLikelyCommand("LEFT=. RIGHT=. test -d src"), true);
+  assert.equal(isLikelyCommand(String.raw`python -m pytest .\tests\. .\integration\. -q`), true);
+  // One trailing period is punctuation, not a clause boundary; dot operands
+  // and glob ellipsis tails never count as terminators.
+  assert.equal(isLikelyCommand("python tools/check-status.py runs clean."), true);
+  assert.equal(isLikelyCommand("find . -name '*.test.ts' -maxdepth 2"), true);
+  assert.equal(isLikelyCommand("go test ./... ./pkg/..."), true);
+  assert.equal(isLikelyCommand("git add ."), true);
+  // Codex review round 2: regex wildcards and absolute DNS names carry
+  // trailing dots that are not sentence punctuation, and a word continuing
+  // past a quoted fragment must not manufacture one either.
+  assert.equal(isLikelyCommand("grep -e ^ERROR. -e ^WARN. app.log"), true);
+  assert.equal(isLikelyCommand("grep -q ^ERROR. app.log && grep -q ^WARN. app.log"), true);
+  assert.equal(isLikelyCommand("LC_ALL=C grep -e ^ERROR. -e ^WARN. app.log | wc -l"), true);
+  assert.equal(isLikelyCommand("curl example.com. --head && curl example.org. --head"), true);
+  assert.equal(isLikelyCommand('cat package."${EXT:-json}" tsconfig."${EXT:-json}" | wc -l'), true);
+  // Codex review round 3: unanchored regex wildcards and operator-chained
+  // dotted words are shell structure — a terminator that is a flag's
+  // argument or that chains into `&&`/`|` never counts.
+  assert.equal(isLikelyCommand("echo ERROR1 WARN2 | grep -e ERROR. -e WARN. | wc -l"), true);
+  assert.equal(isLikelyCommand("grep -e ERROR. -e WARN. app.log"), true);
+  assert.equal(isLikelyCommand("echo ok. && echo done. && true"), true);
+  assert.equal(isLikelyCommand("find . -name test. -o -name spec. -print"), true);
+  // Codex review round 4: positional shell data after a dotted word is not a
+  // new clause — the terminator only counts when the next token starts an
+  // embedded command span or a prose-marker clause.
+  assert.equal(isLikelyCommand("echo ERROR. WARN. OK | grep -q WARN"), true);
+  // A single mid-stream terminator is below the prose threshold, and quoted
+  // sentence text is shell data, never counted.
+  assert.equal(isLikelyCommand("grep pattern file. next"), true);
+  assert.equal(isLikelyCommand('git commit -m "fix. done. all green"'), true);
 });
 
 test("validateVerificationCommand allows exit-code echo diagnostic suffix", () => {
