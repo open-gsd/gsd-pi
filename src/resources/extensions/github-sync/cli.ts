@@ -146,7 +146,19 @@ export interface CreateIssueOpts {
   parentIssue?: number;
 }
 
-export function ghCreateIssue(cwd: string, opts: CreateIssueOpts): GhResult<number> {
+/**
+ * Result of `ghCreateIssue`. `ok`/`data` reflect issue creation only; a
+ * failed native sub-issue attachment is reported separately via
+ * `attachmentError` so callers can preserve the created issue and retry
+ * the link later instead of re-running creation (which would duplicate
+ * the issue).
+ */
+export interface CreateIssueResult extends GhResult<number> {
+  /** Set when the issue was created but native sub-issue attachment failed. */
+  attachmentError?: string;
+}
+
+export function ghCreateIssue(cwd: string, opts: CreateIssueOpts): CreateIssueResult {
   const args = [
     "issue", "create",
     "--repo", opts.repo,
@@ -161,16 +173,25 @@ export function ghCreateIssue(cwd: string, opts: CreateIssueOpts): GhResult<numb
   }
 
   const result = runGh(args, cwd);
-  if (!result.ok) return fail(result.error!);
+  if (!result.ok) return { ok: false, error: result.error! };
 
   // gh issue create returns the URL; extract issue number
   const match = result.data!.match(/\/issues\/(\d+)/);
-  if (!match) return fail(`Could not parse issue number from: ${result.data}`);
+  if (!match) return { ok: false, error: `Could not parse issue number from: ${result.data}` };
   const issueNumber = parseInt(match[1], 10);
 
-  // If parent specified, add as sub-issue via GraphQL
+  // If parent specified, add as sub-issue via GraphQL. Attachment failure
+  // does not undo the created issue — surface it so the caller can retry
+  // the link on a later sync.
   if (opts.parentIssue) {
-    ghAddSubIssue(cwd, opts.repo, opts.parentIssue, issueNumber);
+    const linked = ghAddSubIssue(cwd, opts.repo, opts.parentIssue, issueNumber);
+    if (!linked.ok) {
+      return {
+        ok: true,
+        data: issueNumber,
+        attachmentError: `issue created, but native sub-issue link to #${opts.parentIssue} failed: ${linked.error}`,
+      };
+    }
   }
 
   return ok(issueNumber);
@@ -197,9 +218,9 @@ export function ghAddComment(cwd: string, repo: string, issueNumber: number, bod
   return ok(undefined);
 }
 
-// ─── Sub-Issues (GraphQL) ───────────────────────────────────────────────────
+// ─── Sub-Issues (GraphQL + REST) ────────────────────────────────────────────
 
-function ghAddSubIssue(cwd: string, repo: string, parentNumber: number, childNumber: number): GhResult<void> {
+export function ghAddSubIssue(cwd: string, repo: string, parentNumber: number, childNumber: number): GhResult<void> {
   // Get node IDs for both issues
   const parentResult = runGhJson<{ id: string }>(
     ["api", `repos/${repo}/issues/${parentNumber}`, "--jq", "{id: .node_id}"],
@@ -211,11 +232,44 @@ function ghAddSubIssue(cwd: string, repo: string, parentNumber: number, childNum
   );
 
   if (!parentResult.ok || !childResult.ok) {
-    return fail("Could not resolve issue node IDs for sub-issue linking");
+    const detail = [
+      parentResult.ok ? null : `parent #${parentNumber}: ${parentResult.error}`,
+      childResult.ok ? null : `child #${childNumber}: ${childResult.error}`,
+    ].filter(Boolean).join("; ");
+    return fail(`Could not resolve issue node IDs for sub-issue linking (${detail})`);
   }
 
   const mutation = `mutation { addSubIssue(input: { issueId: "${parentResult.data!.id}", subIssueId: "${childResult.data!.id}" }) { issue { id } } }`;
   return runGh(["api", "graphql", "-f", `query=${mutation}`], cwd) as GhResult<void>;
+}
+
+export interface ParentIssueInfo {
+  number: number;
+  /** "owner/repo" of the parent's repository; null when the response omits it. */
+  repo: string | null;
+}
+
+/**
+ * Return the current native parent of `childNumber` (number + repository, so
+ * callers can detect a same-numbered parent in a different repo), or null
+ * when the issue has no parent. The REST endpoint answers 404 for an
+ * unparented issue; gh surfaces that as "… (HTTP 404)" in the error text.
+ */
+export function ghGetParentIssue(cwd: string, repo: string, childNumber: number): GhResult<ParentIssueInfo | null> {
+  const result = runGhJson<{ number: number; repository_url?: string }>(
+    ["api", `repos/${repo}/issues/${childNumber}/parent`],
+    cwd,
+  );
+  if (result.ok) {
+    const data = result.data;
+    if (!data) return ok(null);
+    const repoMatch = (data.repository_url ?? "").match(/repos\/([^/]+\/[^/]+)$/);
+    return ok({ number: data.number, repo: repoMatch ? repoMatch[1]! : null });
+  }
+  if (/\(HTTP 404\)/.test(result.error ?? "")) {
+    return ok(null);
+  }
+  return fail(result.error!);
 }
 
 // ─── Milestones ─────────────────────────────────────────────────────────────

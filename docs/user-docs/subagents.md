@@ -61,6 +61,16 @@ Optional fields:
 | `background` | all modes | Return immediately and persist progress for later `status` checks |
 | `isolated` | launch | Run through the configured filesystem isolation backend before merging patches back |
 
+## Child Tools And Session Evidence
+
+The launcher passes an explicit `--tools` list to the child process only when its agent definition configures one; otherwise the child starts with the default toolset. A tool available in the parent session — for example the native `gsd_graph` memory graph tool — is not automatically available to a child. Check the agent definition to know which tools a child can use; do not infer child access from the parent session.
+
+To verify what a child actually received, read local records only:
+
+- **Fresh context (default):** the child runs with `--no-session`, so no child session file exists. That is expected, not a failure. The run record's per-child status, output, and stderr are the evidence (see [Run State](#run-state)).
+- **Forked context:** the run record lists the child session file. Inspect it — or `resume` it — to see the conversation the child actually had.
+- **Tool access:** when the agent definition sets an explicit `tools` list, the child process is launched with exactly that list. Without one, the child starts from the default toolset plus loaded extension tools, so a tool missing from the frontmatter is not proof it is unavailable. In the child's output, a `Tool <name> not found` error means the child lacked the tool; any other error means the tool ran and failed. These are different facts.
+
 ## Context Modes
 
 `context: "fresh"` is the default. The child starts with the agent's prompt and the delegated task, keeping the parent conversation out of the child context.
@@ -70,6 +80,39 @@ Optional fields:
 Child processes are marked with `GSD_SUBAGENT_CHILD=1`, which suppresses recursive subagent registration inside the child.
 
 When a project has a [project-local runtime contract](./local-runtime-contract.md), a child launched into a nested repository inherits the owning project's runtime authority while its other preferences and context remain local to the child. The same authority is propagated to explicitly isolated children so a temporary checkout cannot silently replace the startup and teardown contract.
+
+## Skills In Child Sessions
+
+A child does not inherit the parent session's skill inventory. Each session — parent or child — scans the skill directories at startup and builds its own inventory (see [Skill Directories](./skills.md#skill-directories)). Project-scope directories resolve against that session's working directory, so a child launched with a different `cwd` scans a different set:
+
+| Directory | Found when the child cwd is below the project root? |
+|-----------|-----------------------------------------------------|
+| `<cwd>/.gsd/skills/` | No — exact working directory only |
+| `<cwd>/.agents/skills/` | Yes — nearest first, up to the nearest enclosing directory containing a `.git` entry (or the filesystem root when there is none) |
+| `<cwd>/.claude/skills/` | No — exact working directory only |
+| `~/.gsd/agent/skills/` (bundled) | Yes — home-level, independent of cwd |
+| `~/.agents/skills/`, `~/.claude/skills/` | Yes — home-level, independent of cwd |
+
+A root-local `.agents/skills/` directory is therefore still discovered from a child launched into a subdirectory, while root-local `.gsd/skills/` and `.claude/skills/` are not. When task isolation is active, discovery follows the isolation environment's working directory instead of the original one.
+
+### Skill Activation Evidence
+
+The discovered inventory is bookkeeping, not model-visible context: the base system prompt does not automatically embed the skill inventory. A skill's instructions reach the model only when its `SKILL.md` is read — for example because the GSD system context or the agent's prompt named the skill, or the model chose to read a known skill path. (Auto mode is the exception on the parent side: it can append newly discovered skills with their locations to the system prompt mid-run, and unit prompts can add explicit activation directives. Neither is attached to subagent launches.)
+
+Installation and inventory presence are not evidence that a child used a skill. The stages are distinct:
+
+| Stage | Meaning | Evidence |
+|-------|---------|----------|
+| Installed | Files exist in a directory the child scans | Filesystem only — not child-specific |
+| Discovered | The skill entered the child's inventory at startup | The table above gives search eligibility; membership additionally requires a parseable `SKILL.md` with a description that wins name collisions. Inventory presence is not model-visible and does not imply use |
+| Read | The child's model loaded the skill's `SKILL.md` with a `read` tool call | Child transcript only (see below) |
+| Followed | The output conforms to the skill's instructions | Not directly observable — judge the child's output |
+
+Skills are instruction files, not tools: reading one does not register tools or grant permissions the child does not already have (see [Child Tools And Session Evidence](#child-tools-and-session-evidence)).
+
+To evidence a read by a specific child, launch it with `context: "fork"` and inspect the branched session file recorded in the run record (`sessionFile` field of `~/.gsd/agent/subagent-runs/<runId>.json`). Branched sessions copy the parent's history, so match only entries the child appended after branching, and require the read to have succeeded — the tool result must carry the skill content. Note that a fork can also carry skill content inherited from the parent conversation without any new child read; the recipe above proves a child read, not the only way skill instructions can reach the child's context. Fresh children run with `--no-session`, so no persisted child transcript exists for them; their output mentioning a skill is the model's narrative, not proof of a read. Re-run with `context: "fork"` when you need an inspectable trace.
+
+Auto-mode skill telemetry (the `skills` data recorded per unit and surfaced by `/gsd skill-health`) captures the skill names available to a parent auto-mode unit at dispatch. It is not a record of reads, and it never describes a subagent child's activity.
 
 ## Background Runs
 
@@ -126,7 +169,7 @@ If the run has more than one resumable child session, include the agent selector
 }
 ```
 
-Resume requires a run record with exactly one matching child session file. If no run exists, no child session was recorded, or multiple child sessions match without an `agent` selector, GSD returns a hard error instead of guessing.
+Resume requires a run record with exactly one matching child session file. Fresh children (the default) run with `--no-session`, so they record no session and cannot be resumed — launch the work with `context: "fork"` when a resumable child session is needed. When resume is refused, the error names the actual reason (`no_persisted_child_session`, `selected_child_sessionless`, `unknown_agent`, `missing_session_file`, or `ambiguous_selector`) instead of a generic selector error, and the `status` output states per-child resumability directly.
 
 ## Run State
 

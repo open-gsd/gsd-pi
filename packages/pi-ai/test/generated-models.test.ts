@@ -6,9 +6,56 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import * as ts from "typescript";
 import { describe, expect, test } from "vitest";
+import { applyCopilotGpt6ResponsesRouting } from "../scripts/copilot-gpt6-routing.ts";
 import { isModelsCatalog } from "../src/model-catalog.ts";
 import { MODELS } from "../src/models.generated.ts";
 import { calculateCost } from "../src/models.ts";
+
+describe("Copilot GPT-6 generator routing", () => {
+	for (const id of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra"]) {
+		test(`normalizes ingested or synthesized ${id} without changing model limits`, () => {
+			const model = {
+				id,
+				provider: "github-copilot",
+				api: "openai-completions",
+				compat: { supportsReasoningEffort: false },
+				contextWindow: 1050000,
+			};
+			applyCopilotGpt6ResponsesRouting(model);
+			expect(model).toEqual({
+				id,
+				provider: "github-copilot",
+				api: "openai-responses",
+				contextWindow: 1050000,
+			});
+		});
+	}
+
+	for (const [provider, id, api] of [
+		["openai", "gpt-6-luna", "openai-completions"],
+		["github-copilot", "gpt-5.4", "openai-responses"],
+		["github-copilot", "gpt-6-luna-preview", "openai-completions"],
+	]) {
+		test(`does not override ${provider}/${id}`, () => {
+			const model = { provider, id, api, compat: { supportsStore: false } };
+			const before = structuredClone(model);
+			applyCopilotGpt6ResponsesRouting(model);
+			expect(model).toEqual(before);
+		});
+	}
+
+	test("preserves existing Responses compatibility metadata", () => {
+		const compat = { supportsStore: false };
+		const model = {
+			provider: "github-copilot",
+			id: "gpt-6-luna",
+			api: "openai-responses",
+			compat,
+		};
+		applyCopilotGpt6ResponsesRouting(model);
+		expect(model.compat).toBe(compat);
+	});
+});
 
 describe("models.generated.ts", () => {
 	test("evaluates actual generator capability guards without network or absent-catalog fixtures", () => {
@@ -85,7 +132,10 @@ describe("models.generated.ts", () => {
 			}
 		}
 		expect(evaluate({ provider: "github-copilot", id: "gpt-6-astra" })).toEqual(
-			{ xhigh: true, max: true },
+			{
+				xhigh: true,
+				max: true,
+			},
 		);
 		for (const provider of ["openai", "github-copilot", "custom-proxy"]) {
 			expect(evaluate({ provider, id: "gpt-5.6-sol" })).toEqual({
@@ -94,6 +144,19 @@ describe("models.generated.ts", () => {
 			});
 		}
 	});
+	for (const modelId of [
+		"gpt-6-luna",
+		"gpt-6-sol",
+		"gpt-6.1-sol",
+		"gpt-6-astra",
+	] as const) {
+		test(`routes Copilot ${modelId} through the supported Responses endpoint`, () => {
+			const model = MODELS["github-copilot"][modelId];
+			expect(model.api).toBe("openai-responses");
+			expect("compat" in model).toBe(false);
+		});
+	}
+
 	test("models.generated.json mirrors the complete generated catalog", () => {
 		// allow-source-grep: reads the generated JSON data snapshot (manifest output), not source, to verify it mirrors MODELS
 		const snapshot = JSON.parse(
@@ -535,8 +598,16 @@ describe("models.generated.ts", () => {
 
 	test("includes MiniMax M3 for direct MiniMax providers", () => {
 		const providers = [
-			["minimax", "https://api.minimax.io/anthropic", { input: 0.3, output: 1.2, cacheRead: 0.06 }],
-			["minimax-cn", "https://api.minimaxi.com/anthropic", { input: 0.3137, output: 1.2549, cacheRead: 0.0627 }],
+			[
+				"minimax",
+				"https://api.minimax.io/anthropic",
+				{ input: 0.3, output: 1.2, cacheRead: 0.06 },
+			],
+			[
+				"minimax-cn",
+				"https://api.minimaxi.com/anthropic",
+				{ input: 0.3137, output: 1.2549, cacheRead: 0.0627 },
+			],
 		] as const;
 
 		for (const [provider, baseUrl, cost] of providers) {
@@ -560,8 +631,16 @@ describe("models.generated.ts", () => {
 
 	test("includes MiniMax M3.1-Flash first-class for direct MiniMax providers (#2906)", () => {
 		const providers = [
-			["minimax", "https://api.minimax.io/anthropic", { input: 0.15, output: 0.6, cacheRead: 0.015 }],
-			["minimax-cn", "https://api.minimaxi.com/anthropic", { input: 0.1494, output: 0.5976, cacheRead: 0.0149 }],
+			[
+				"minimax",
+				"https://api.minimax.io/anthropic",
+				{ input: 0.15, output: 0.6, cacheRead: 0.015 },
+			],
+			[
+				"minimax-cn",
+				"https://api.minimaxi.com/anthropic",
+				{ input: 0.1494, output: 0.5976, cacheRead: 0.0149 },
+			],
 		] as const;
 
 		for (const [provider, baseUrl, cost] of providers) {
@@ -597,21 +676,26 @@ describe("models.generated.ts", () => {
 		// The Anthropic-compatible endpoint serves only M3.1-Flash + M3; the
 		// OpenRouter/OpenCode gateways only carry the verified M3.1-Flash + M3
 		// routes. Older M2.x entries must not be offered as ordinary choices.
-		expect(Object.keys(MODELS.minimax)).toEqual(["MiniMax-M3", "MiniMax-M3.1-Flash"]);
-		expect(Object.keys(MODELS["minimax-cn"])).toEqual(["MiniMax-M3", "MiniMax-M3.1-Flash"]);
+		expect(Object.keys(MODELS.minimax)).toEqual([
+			"MiniMax-M3",
+			"MiniMax-M3.1-Flash",
+		]);
+		expect(Object.keys(MODELS["minimax-cn"])).toEqual([
+			"MiniMax-M3",
+			"MiniMax-M3.1-Flash",
+		]);
 
-		expect(Object.keys(MODELS.openrouter).filter((id) => id.startsWith("minimax/"))).toEqual([
-			"minimax/minimax-m3",
-			"minimax/minimax-m3.1-flash:free",
-		]);
-		expect(Object.keys(MODELS.opencode).filter((id) => id.startsWith("minimax"))).toEqual([
-			"minimax-m3",
-			"minimax-m3.1-flash-free",
-		]);
-		expect(Object.keys(MODELS["opencode-go"]).filter((id) => id.startsWith("minimax"))).toEqual([
-			"minimax-m3",
-			"minimax-m3.1-flash-free",
-		]);
+		expect(
+			Object.keys(MODELS.openrouter).filter((id) => id.startsWith("minimax/")),
+		).toEqual(["minimax/minimax-m3", "minimax/minimax-m3.1-flash:free"]);
+		expect(
+			Object.keys(MODELS.opencode).filter((id) => id.startsWith("minimax")),
+		).toEqual(["minimax-m3", "minimax-m3.1-flash-free"]);
+		expect(
+			Object.keys(MODELS["opencode-go"]).filter((id) =>
+				id.startsWith("minimax"),
+			),
+		).toEqual(["minimax-m3", "minimax-m3.1-flash-free"]);
 	});
 
 	test("includes Grok 4.5 as a first-class xAI model", () => {
