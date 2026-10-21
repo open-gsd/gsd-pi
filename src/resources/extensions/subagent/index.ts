@@ -634,8 +634,9 @@ export function markMissingFinalResponse(result: SingleResult): void {
 		`model: ${result.model ?? "unknown"}`,
 		`stopReason: ${originalStopReason ?? "unknown"}`,
 	].join(", ");
-	result.errorMessage = `Subagent produced no valid final response (child exited 0; ${detail}).`;
-	result.stderr = result.stderr || result.errorMessage;
+	const diagnostic = `Subagent produced no valid final response (child exited 0; ${detail}).`;
+	result.errorMessage = result.errorMessage ? `${result.errorMessage}\n${diagnostic}` : diagnostic;
+	result.stderr = result.stderr || diagnostic;
 }
 
 function effectiveThinkingForAgent(
@@ -648,6 +649,115 @@ function effectiveThinkingForAgent(
 
 function formatAgentLabel(agent: string, trackingName?: string): string {
 	return trackingName ? `${trackingName} / ${agent}` : agent;
+}
+
+export type ResumePreflight =
+	| { ok: true; child: SubagentChildArtifact; sessionFile: string }
+	| {
+		ok: false;
+		reason:
+			| "no_children"
+			| "unknown_agent"
+			| "no_persisted_child_session"
+			| "selected_child_sessionless"
+			| "missing_session_file"
+			| "ambiguous_selector";
+		message: string;
+	};
+
+const RESUME_FRESH_GUIDANCE =
+	'Fresh-context children run with --no-session by design and cannot be resumed; launch new work with context: "fork" when a resumable child session is needed.';
+
+/**
+ * Resume preflight (#2973): every rejection names its actual cause instead of
+ * collapsing into the generic agent-selector error. Fresh children are
+ * launched with `--no-session` on purpose, so "no recorded child session" is a
+ * design fact — the sessionless reasons never prescribe a selector that cannot
+ * repair the state. Only the genuinely ambiguous case keeps the selector
+ * wording. An otherwise eligible child still wins when a selector matches both
+ * resumable and sessionless siblings (pre-existing behavior), and a recorded
+ * session file that vanished from disk is its own diagnostic rather than a
+ * downstream child-CLI failure.
+ */
+export function resolveResumeChild(record: SubagentRunRecord, agentSelector?: string): ResumePreflight {
+	const label = (child: SubagentChildArtifact) => formatAgentLabel(child.agent, child.trackingName);
+	const children = record.children;
+	if (children.length === 0) {
+		return {
+			ok: false,
+			reason: "no_children",
+			message: `Run ${record.runId} has no recorded children to resume. (reason: no_children)`,
+		};
+	}
+	if (agentSelector && !children.some((child) => child.agent === agentSelector)) {
+		return {
+			ok: false,
+			reason: "unknown_agent",
+			message: `Run ${record.runId} has no child agent "${agentSelector}". Recorded children: ${
+				children.map(label).join(", ")
+			}. (reason: unknown_agent)`,
+		};
+	}
+	// Recorded = a session file path is on the child artifact; eligible = that
+	// file also still exists on disk. Availability, not the recorded path,
+	// decides resumability — and availability lists in messages must not name
+	// sessions that are gone (#2973 codex finding).
+	const recorded = children.filter((child) => child.sessionFile && (!agentSelector || child.agent === agentSelector));
+	const eligible = recorded.filter((child) => fs.existsSync(child.sessionFile!));
+	if (recorded.length === 1) {
+		const child = recorded[0]!;
+		const sessionFile = child.sessionFile!;
+		if (eligible.length === 0) {
+			return {
+				ok: false,
+				reason: "missing_session_file",
+				message: `Child ${label(child)} in run ${record.runId} recorded session file ${sessionFile}, which no longer exists on disk and cannot be resumed. (reason: missing_session_file)`,
+			};
+		}
+		return { ok: true, child, sessionFile };
+	}
+	if (recorded.length > 1) {
+		if (eligible.length === 0) {
+			return {
+				ok: false,
+				reason: "missing_session_file",
+				message: `Children ${
+					recorded.map(label).join(", ")
+				} in run ${record.runId} recorded session files that no longer exist on disk and cannot be resumed. (reason: missing_session_file)`,
+			};
+		}
+		if (eligible.length === 1) {
+			const child = eligible[0]!;
+			return { ok: true, child, sessionFile: child.sessionFile! };
+		}
+		const missingCount = recorded.length - eligible.length;
+		const missingNote = missingCount > 0
+			? ` ${missingCount} other recorded session ${missingCount === 1 ? "file no longer exists" : "files no longer exist"} on disk.`
+			: "";
+		const names = eligible.map(label).join(", ");
+		return {
+			ok: false,
+			reason: "ambiguous_selector",
+			message: agentSelector
+				? `Agent "${agentSelector}" matches ${eligible.length} persisted child sessions in run ${record.runId} (${names}); resume cannot distinguish multiple sessions of one agent, so launch new forked work per continuation instead.${missingNote} (reason: ambiguous_selector)`
+				: `Resume requires exactly one child session or an agent selector. Available resumable agents: ${names}.${missingNote} (reason: ambiguous_selector)`,
+		};
+	}
+	if (agentSelector) {
+		const matched = children.filter((child) => child.agent === agentSelector);
+		return {
+			ok: false,
+			reason: "selected_child_sessionless",
+			message: `Child ${matched.map(label).join(", ")} in run ${record.runId} recorded no persisted session. ${RESUME_FRESH_GUIDANCE} (reason: selected_child_sessionless)`,
+		};
+	}
+	return {
+		ok: false,
+		reason: "no_persisted_child_session",
+		message: `Run ${record.runId} has no persisted child session to resume (children: ${
+			children.map(label).join(", ")
+		}). ${RESUME_FRESH_GUIDANCE} (reason: no_persisted_child_session)`,
+	};
 }
 
 /**
@@ -757,7 +867,17 @@ function runRecordChildMetaLines(child: NonNullable<ReturnType<SubagentRunStore[
 	});
 	if (modelIdentity) lines.push(`  model: ${modelIdentity}`);
 	if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
-	if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
+	// #2973: resumability must be stated, not inferred from an omitted field —
+	// including a recorded session file that has vanished from disk.
+	if (child.sessionFile) {
+		lines.push(
+			fs.existsSync(child.sessionFile)
+				? `  session: ${child.sessionFile}`
+				: `  session: ${child.sessionFile} (missing on disk; not resumable)`,
+		);
+	} else {
+		lines.push("  session: none (no persisted child session on record; fresh children run with --no-session)");
+	}
 	return lines;
 }
 
@@ -1403,12 +1523,12 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 });
 
 const ContextModeSchema = StringEnum(["fresh", "fork"] as const, {
-	description: 'Context mode for delegated work. "fresh" is the default existing behavior; "fork" branches the parent session.',
+	description: 'Context mode for delegated work. "fresh" is the default existing behavior and is ephemeral; "fork" branches the parent session. Only "fork" children record a session that action: "resume" can continue.',
 	default: "fresh",
 });
 
 const SubagentActionSchema = StringEnum(["launch", "status", "resume"] as const, {
-	description: 'Run action. "launch" starts delegated work, "status" inspects a persisted run, and "resume" follows up a child session from a run.',
+	description: 'Run action. "launch" starts delegated work, "status" inspects a persisted run, and "resume" follows up a child session from a run. Only children launched with context: "fork" record a resumable session; fresh children (default) run with --no-session and cannot be resumed.',
 	default: "launch",
 });
 
@@ -1558,22 +1678,15 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-				const sessionChildren = record.children.filter((child) => child.sessionFile);
-				const matches = params.agent
-					? sessionChildren.filter((child) => child.agent === params.agent)
-					: sessionChildren;
-				const selected = matches.length === 1 ? matches[0] : undefined;
-				if (!selected?.sessionFile) {
-					const available = sessionChildren.map((child) => formatAgentLabel(child.agent, child.trackingName)).join(", ") || "none";
+				const preflight = resolveResumeChild(record, params.agent);
+				if (!preflight.ok) {
 					return {
-						content: [{
-							type: "text",
-							text: `Resume requires exactly one child session or an agent selector. Available resumable agents: ${available}`,
-						}],
+						content: [{ type: "text", text: preflight.message }],
 						details: makeDetails("single")([]),
 						isError: true,
 					};
 				}
+				const selected = preflight.child;
 				const result = await runSingleAgent(
 					ctx.cwd,
 					agents,
@@ -1588,7 +1701,7 @@ export default function (pi: ExtensionAPI) {
 						modelOverride: params.model,
 						contextMode: "fresh",
 						parentSessionManager: ctx.sessionManager,
-						sessionOverride: { mode: "fork", sessionFile: selected.sessionFile, sessionDir: path.dirname(selected.sessionFile) },
+						sessionOverride: { mode: "fork", sessionFile: preflight.sessionFile, sessionDir: path.dirname(preflight.sessionFile) },
 						trackingName: selected.trackingName,
 						thinkingOverride: params.thinking,
 						questionCtx: ctx,

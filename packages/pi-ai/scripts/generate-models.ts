@@ -16,6 +16,7 @@ import type {
 	Model,
 	OpenAICompletionsCompat,
 } from "../src/types.ts";
+import { applyCopilotGpt6ResponsesRouting } from "./copilot-gpt6-routing.ts";
 import { formatCost, roundCost } from "./lib/model-cost.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -72,8 +73,8 @@ const COPILOT_STATIC_HEADERS = {
  * /chat/completions, and dispatching them via Completions hard-400s with
  * "unsupported_api_for_model". models.dev does not carry per-provider
  * endpoint support, so this set is curated from the live Copilot catalog
- * (verified 2026-10-07). The gpt-5/gpt-6 families are covered by prefix in
- * needsResponsesApi instead.
+ * (verified 2026-10-07). GPT-5 is covered by prefix in needsResponsesApi;
+ * verified GPT-6 IDs are normalized by applyCopilotGpt6ResponsesRouting.
  */
 const COPILOT_RESPONSES_ONLY_MODEL_IDS = new Set([
 	"grok-4.5",
@@ -328,7 +329,9 @@ function isFable5BaseModel(modelId: string): boolean {
 function isClaude55RelayTemperatureRejectionModel(modelId: string): boolean {
 	return (
 		modelId.includes("claude") &&
-		(isClaude55StrictRequestModel(modelId) || isFable5BaseModel(modelId) || isHaiku55Model(modelId))
+		(isClaude55StrictRequestModel(modelId) ||
+			isFable5BaseModel(modelId) ||
+			isHaiku55Model(modelId))
 	);
 }
 
@@ -342,12 +345,24 @@ function isHaiku55Model(modelId: string): boolean {
 	return modelId.includes("haiku-5-5") || modelId.includes("haiku-5.5");
 }
 
-function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
-	model.compat = { ...(model.compat as AnthropicMessagesCompat | undefined), ...compat };
+function mergeAnthropicMessagesCompat(
+	model: Model<Api>,
+	compat: AnthropicMessagesCompat,
+): void {
+	model.compat = {
+		...(model.compat as AnthropicMessagesCompat | undefined),
+		...compat,
+	};
 }
 
-function mergeOpenAICompletionsCompat(model: Model<Api>, compat: OpenAICompletionsCompat): void {
-	model.compat = { ...(model.compat as OpenAICompletionsCompat | undefined), ...compat };
+function mergeOpenAICompletionsCompat(
+	model: Model<Api>,
+	compat: OpenAICompletionsCompat,
+): void {
+	model.compat = {
+		...(model.compat as OpenAICompletionsCompat | undefined),
+		...compat,
+	};
 }
 
 function normalizeAnthropicVertexModelId(modelId: string): string {
@@ -445,7 +460,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	) {
 		// Fable 5 rejects thinking {type:"disabled"} and temperature but still
 		// accepts forced tool_choice (#2645) — granular flags, not the umbrella.
-		mergeAnthropicMessagesCompat(model, { thinkingOffMode: "between_tools", rejectsTemperature: true });
+		mergeAnthropicMessagesCompat(model, {
+			thinkingOffMode: "between_tools",
+			rejectsTemperature: true,
+		});
 	}
 	if (
 		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
@@ -476,7 +494,8 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		model.api === "anthropic-messages" &&
 		(((model.provider === "minimax" || model.provider === "minimax-cn") &&
 			(model.id === "MiniMax-M3" || model.id === "MiniMax-M3.1-Flash")) ||
-			(model.provider === "vercel-ai-gateway" && model.id === "minimax/minimax-m3.1-flash"));
+			(model.provider === "vercel-ai-gateway" &&
+				model.id === "minimax/minimax-m3.1-flash"));
 	if (isMinimaxM3DirectAnthropic) {
 		// M3 exposes adaptive and disabled thinking modes over the Anthropic-compatible
 		// endpoint; M3.1-Flash REQUIRES adaptive thinking. Force adaptive for both
@@ -485,8 +504,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (
 		model.api === "anthropic-messages" &&
-		(((model.provider === "minimax" || model.provider === "minimax-cn") && model.id === "MiniMax-M3.1-Flash") ||
-			(model.provider === "vercel-ai-gateway" && model.id === "minimax/minimax-m3.1-flash"))
+		(((model.provider === "minimax" || model.provider === "minimax-cn") &&
+			model.id === "MiniMax-M3.1-Flash") ||
+			(model.provider === "vercel-ai-gateway" &&
+				model.id === "minimax/minimax-m3.1-flash"))
 	) {
 		// M3.1-Flash always thinks: thinking {type:"disabled"} returns HTTP 400
 		// (error 2013), and output_config.effort accepts low/medium/high/xhigh/max
@@ -575,8 +596,14 @@ function formatFiniteNumber(
 // #2906, checked against openrouter.ai/api/v1/models and opencode.ai/zen/v1/
 // models): M3.1-Flash and M3. Everything else (M1/M2.x/MiniMax-01/M2-her) is a
 // stale route — keep it out of ordinary catalog choices.
-const MINIMAX_OPENROUTER_ROUTE_IDS = new Set(["minimax/minimax-m3.1-flash:free", "minimax/minimax-m3"]);
-const MINIMAX_OPENCODE_ROUTE_IDS = new Set(["minimax-m3.1-flash-free", "minimax-m3"]);
+const MINIMAX_OPENROUTER_ROUTE_IDS = new Set([
+	"minimax/minimax-m3.1-flash:free",
+	"minimax/minimax-m3",
+]);
+const MINIMAX_OPENCODE_ROUTE_IDS = new Set([
+	"minimax-m3.1-flash-free",
+	"minimax-m3",
+]);
 
 // M3.1-Flash accepts reasoning effort low/medium/high/xhigh/max on the
 // OpenAI-compatible gateways (reasoning_effort / reasoning.effort); `none` is
@@ -606,7 +633,11 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 			if (!model.supported_parameters?.includes("tools")) continue;
 
 			// Keep only the verified current MiniMax routes (issue #2906)
-			if (model.id.startsWith("minimax/") && !MINIMAX_OPENROUTER_ROUTE_IDS.has(model.id)) continue;
+			if (
+				model.id.startsWith("minimax/") &&
+				!MINIMAX_OPENROUTER_ROUTE_IDS.has(model.id)
+			)
+				continue;
 
 			// Parse provider from model ID
 			const provider: KnownProvider = "openrouter";
@@ -621,13 +652,14 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 			}
 
 			// Convert pricing from $/token to $/million tokens
-			const inputCost = parseFloat(model.pricing?.prompt || "0") * 1_000_000;
+			const inputCost =
+				Number.parseFloat(model.pricing?.prompt || "0") * 1_000_000;
 			const outputCost =
-				parseFloat(model.pricing?.completion || "0") * 1_000_000;
+				Number.parseFloat(model.pricing?.completion || "0") * 1_000_000;
 			const cacheReadCost =
-				parseFloat(model.pricing?.input_cache_read || "0") * 1_000_000;
+				Number.parseFloat(model.pricing?.input_cache_read || "0") * 1_000_000;
 			const cacheWriteCost =
-				parseFloat(model.pricing?.input_cache_write || "0") * 1_000_000;
+				Number.parseFloat(model.pricing?.input_cache_write || "0") * 1_000_000;
 
 			const normalizedModel: Model<any> = {
 				id: modelKey,
@@ -668,7 +700,7 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 			if (typeof value === "number") {
 				return Number.isFinite(value) ? value : 0;
 			}
-			const parsed = parseFloat(value ?? "0");
+			const parsed = Number.parseFloat(value ?? "0");
 			return Number.isFinite(parsed) ? parsed : 0;
 		};
 
@@ -1268,7 +1300,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
 				// Keep only the verified current MiniMax routes (issue #2906)
-				if (modelId.startsWith("minimax") && !MINIMAX_OPENCODE_ROUTE_IDS.has(modelId)) continue;
+				if (
+					modelId.startsWith("minimax") &&
+					!MINIMAX_OPENCODE_ROUTE_IDS.has(modelId)
+				)
+					continue;
 
 				const npm = m.provider?.npm;
 				let api: Api;
@@ -1351,12 +1387,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.-]|$)/.test(
 					modelId,
 				);
-				// The gpt-5/gpt-6 families (and oswe) require the Responses API, as do
-				// the responses-only ids in COPILOT_RESPONSES_ONLY_MODEL_IDS -- live
-				// catalog evidence 2026-10-07: Completions dispatch hard-400s.
+				// Preserve additional verified Responses-only IDs; upstream's GPT-6
+				// normalizer runs before final thinking metadata is applied.
 				const needsResponsesApi =
 					modelId.startsWith("gpt-5") ||
-					modelId.startsWith("gpt-6") ||
 					modelId.startsWith("oswe") ||
 					COPILOT_RESPONSES_ONLY_MODEL_IDS.has(modelId);
 
@@ -2564,7 +2598,14 @@ async function generateModels() {
 	>([
 		// models.dev reports 1M context / 512K output for M3.1-Flash; the API
 		// docs confirm the 1M window and text+image+video input.
-		["MiniMax-M3.1-Flash", { contextWindow: 1000000, maxTokens: 524288, input: ["text", "image", "video"] }],
+		[
+			"MiniMax-M3.1-Flash",
+			{
+				contextWindow: 1000000,
+				maxTokens: 524288,
+				input: ["text", "image", "video"],
+			},
+		],
 		// MiniMax's API overview advertises a 1M context window for M3; models.dev
 		// currently reports the documented guaranteed 512K floor. M3 also accepts
 		// video inputs alongside text and image, which models.dev does not report.
@@ -2600,7 +2641,8 @@ async function generateModels() {
 			candidate.provider !== "minimax" &&
 			candidate.provider !== "minimax-cn" &&
 			candidate.api === "openai-completions" &&
-			(candidate.id === "minimax/minimax-m3.1-flash:free" || candidate.id === "minimax-m3.1-flash-free")
+			(candidate.id === "minimax/minimax-m3.1-flash:free" ||
+				candidate.id === "minimax-m3.1-flash-free")
 		) {
 			mergeThinkingLevelMap(candidate, MINIMAX_FLASH_GATEWAY_LEVEL_MAP);
 		}
@@ -3148,6 +3190,8 @@ async function generateModels() {
 	allModels.push(...azureOpenAiModels);
 
 	for (const model of allModels) {
+		// Apply after ingestion and alias synthesis so catalog refreshes cannot undo this transport contract.
+		applyCopilotGpt6ResponsesRouting(model);
 		applyThinkingLevelMetadata(model);
 	}
 

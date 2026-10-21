@@ -72,6 +72,7 @@ export const BUNDLED_SKILL_TRIGGERS: Array<{ trigger: string; skill: string }> =
   { trigger: "Create a Model Context Protocol (MCP) server — tool design, error handling, Inspector testing, evals", skill: "create-mcp-server" },
   { trigger: "Write documentation, proposals, specs, RFCs, or READMEs for a fresh reader", skill: "write-docs" },
   { trigger: "Post-mortem a failed GSD auto-mode run using .gsd/activity, .gsd/journal, and .gsd/metrics.json", skill: "forensics" },
+  { trigger: "GSD blocker or failed-run recovery - auto-pause blocker inspection, human clear-only resolution, Task recovery resume authority, verified-completion boundaries", skill: "gsd-blocker-recovery" },
   { trigger: "Prepare a clean cross-session handoff — Work Checkpoint + summary updates (pause/resume work)", skill: "handoff" },
   { trigger: "Security review with STRIDE threat modeling and exploit-scenario reporting", skill: "security-review" },
   { trigger: "HTTP/REST/GraphQL API design — verbs, status codes, pagination, errors, idempotency, versioning", skill: "api-design" },
