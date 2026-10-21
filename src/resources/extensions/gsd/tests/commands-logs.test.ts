@@ -368,7 +368,9 @@ test("logs exec <N|id> shows complete original paths verbatim — long Unicode p
   const realDir = process.cwd();
   const stdoutPath = join(realDir, ".gsd", "exec", "run-long.stdout");
   const stderrPath = join(realDir, ".gsd", "exec", "run-long.stderr");
-  assert.ok(stdoutPath.length > 200, "test setup should produce a long path");
+  // Byte length (not UTF-16 units) so the threshold holds on every platform
+  // regardless of how short the platform tmpdir base is.
+  assert.ok(Buffer.byteLength(stdoutPath) > 200, "test setup should produce a long path");
   for (const component of stdoutPath.split("/")) {
     assert.ok(Buffer.byteLength(component) <= 255, "fixture must stay within Linux per-component limits");
   }
