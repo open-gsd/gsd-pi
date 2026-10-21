@@ -634,7 +634,13 @@ export function markMissingFinalResponse(result: SingleResult): void {
 		`model: ${result.model ?? "unknown"}`,
 		`stopReason: ${originalStopReason ?? "unknown"}`,
 	].join(", ");
-	result.errorMessage = `Subagent produced no valid final response (child exited 0; ${detail}).`;
+	const missingFinal = `Subagent produced no valid final response (child exited 0; ${detail}).`;
+	// The child's messages may already carry the actionable cause (a provider/
+	// transport refusal, #2968); keep it as the headline and append the guard's
+	// note as context rather than overwriting it. A whitespace-only error is no
+	// cause, so the generic message stays the fallback.
+	const cause = result.errorMessage?.trim();
+	result.errorMessage = cause ? `${cause}\n${missingFinal}` : missingFinal;
 	result.stderr = result.stderr || result.errorMessage;
 }
 

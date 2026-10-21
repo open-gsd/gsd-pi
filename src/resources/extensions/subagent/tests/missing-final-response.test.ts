@@ -75,6 +75,59 @@ describe("markMissingFinalResponse", () => {
 		assert.equal(result.stderr, "boom");
 	});
 
+	it("keeps a captured provider error as the headline and appends the missing-final context (#2968)", () => {
+		const result = makeResult({
+			model: "github-copilot/gpt-6-luna",
+			stopReason: "error",
+			errorMessage: '400 model "gpt-6-luna" is not accessible via the /chat/completions endpoint',
+		});
+
+		markMissingFinalResponse(result);
+
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.stopReason, "error");
+		const message = result.errorMessage ?? "";
+		assert.match(message, /^400 model "gpt-6-luna" is not accessible via the \/chat\/completions endpoint/);
+		assert.ok(message.includes("Subagent produced no valid final response"));
+		assert.ok(message.includes("model: github-copilot/gpt-6-luna, stopReason: error"));
+		assert.equal(result.stderr, result.errorMessage);
+	});
+
+	it("preserves a multiline provider error verbatim and appends the missing-final context on a new line", () => {
+		const cause = "400 model unavailable\ntrace-id: 42\nretry after backoff";
+		const result = makeResult({ errorMessage: cause });
+
+		markMissingFinalResponse(result);
+
+		assert.equal(
+			result.errorMessage,
+			`${cause}\nSubagent produced no valid final response (child exited 0; model: unknown, stopReason: unknown).`,
+		);
+	});
+
+	it("falls back to the generic message when the captured error is whitespace-only", () => {
+		const result = makeResult({ errorMessage: "  \n\t " });
+
+		markMissingFinalResponse(result);
+
+		assert.equal(
+			result.errorMessage,
+			"Subagent produced no valid final response (child exited 0; model: unknown, stopReason: unknown).",
+		);
+	});
+
+	it("does not overwrite existing stderr when a provider error is preserved", () => {
+		const result = makeResult({
+			errorMessage: "400 model unavailable",
+			stderr: "child stderr output",
+		});
+
+		markMissingFinalResponse(result);
+
+		assert.equal(result.stderr, "child stderr output");
+		assert.ok(result.errorMessage?.startsWith("400 model unavailable"));
+	});
+
 	it("leaves a result with final output untouched", () => {
 		const result = makeResult({
 			model: "claude-opus-5-5",
