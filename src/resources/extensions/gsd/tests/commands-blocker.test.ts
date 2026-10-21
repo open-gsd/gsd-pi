@@ -34,7 +34,7 @@ function harness() {
   const state = {
     snapshot: {
       eligible: true, projectId: "project-original", revision: 7, authorityEpoch: 2,
-      blocker: { id: "b1", kind: "consent", owner: "user", scope: "M001/S01", origin: "auto-pause", lifecycleState: "in_progress" },
+      blocker: { id: "b1", kind: "consent", owner: "user", scope: "M001/S01", origin: "auto-pause", lifecycleState: "in_progress", description: "Live acceptance remains blocked by an authorization failure.", requestedAction: "Review the preserved failure before retrying.", evidence: "do-not-display-evidence" },
       pause: { id: "p1", scope: "M001/S01" },
       secretPayload: "do-not-display",
     },
@@ -151,8 +151,15 @@ test("UNIT: inspect exposes safe fields and Project ID without writable binding 
   assert.equal(h.state.fileReads, 1);
   assert.equal(h.state.boundReads, 0);
   assert.equal(h.state.factoryRuns, 0);
-  assert.match(h.state.notices.join("\n"), /project-original/);
-  assert.doesNotMatch(h.state.notices.join("\n"), /do-not-display/);
+  const shown = h.state.notices.join("\n");
+  assert.match(shown, /project-original/);
+  const details = JSON.parse(shown);
+  assert.equal(details.blocker.description, h.state.snapshot.blocker.description);
+  assert.equal(details.blocker.requestedAction, h.state.snapshot.blocker.requestedAction);
+  assert.match(details.guidance, /eligible.*clear-only/i);
+  assert.match(details.guidance, /not.*(?:succeeded|success|passed)/i);
+  assert.match(details.guidance, /never resumes/i);
+  assert.doesNotMatch(shown, /do-not-display|secretPayload/);
 });
 
 for (const boundary of ["afterInput", "afterCustom"] as const) {

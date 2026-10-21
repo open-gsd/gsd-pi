@@ -22,7 +22,7 @@ const USAGE = "Usage: /gsd blocker inspect <id>\n" +
 type Snapshot = AutoPauseBlockerResolutionInspection;
 
 function describe(snapshot: Snapshot): string {
-  // Explicit allowlist: no stored evidence, request payloads or runtime metadata.
+  // Explicit allowlist: include human-facing context, never evidence JSON, request payloads or runtime metadata.
   return JSON.stringify({
     projectId: snapshot.projectId,
     eligible: snapshot.eligible,
@@ -31,8 +31,14 @@ function describe(snapshot: Snapshot): string {
       id: snapshot.blocker.id, kind: snapshot.blocker.kind, owner: snapshot.blocker.owner,
       scope: snapshot.blocker.scope, origin: snapshot.blocker.origin,
       lifecycleState: snapshot.blocker.lifecycleState,
+      description: snapshot.blocker.description, requestedAction: snapshot.blocker.requestedAction,
     },
     pause: snapshot.pause && { id: snapshot.pause.id, scope: snapshot.pause.scope },
+    guidance: snapshot.eligible
+      ? "eligible means clear-only resolution is available, not that the Task succeeded or verification passed. " +
+        "Review the description and requestedAction; only resolve after addressing the blocker or making the required human decision. " +
+        "Resolution never resumes auto-mode, retries work or completes a Task."
+      : "Clear-only resolution is unavailable; inspect failure and the blocker context. No state was changed.",
     revision: snapshot.revision,
     authorityEpoch: snapshot.authorityEpoch,
   }, null, 2);
