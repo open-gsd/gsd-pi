@@ -33,6 +33,8 @@ Invocation points:
 <core_principle>
 **READ-ONLY.** Forensics touches no live state. Non-mutating inspection commands (e.g., `ps`, `top -b`, `cat /proc/*`) are allowed for checking process status or reading system files. Strictly prohibited: `gsd_*` writes, commands that modify state, executing binaries that produce side effects, writing to files (outside the final report), or re-running the failed unit. The evidence must stay pristine for future investigations.
 
+**RECOVERY IS A BOUNDARY, NOT A BYPRODUCT.** If the failure involves a GSD auto-pause blocker or a failed Task attempt, the recovery routes are authority-controlled: `/gsd blocker resolve` is cleared only by the human in the native terminal, and a recovery resume (`gsd_task_recovery_resume` or the operator's `/gsd recover <recoveryActionId>`) is a gated continuation with its own repair-evidence requirements. Forensics recommends those routes in its Recovery section; it never performs them, and it never recommends direct database, runtime KV/counter, or rendered-file manipulation to unblock a run. Read the `gsd-blocker-recovery` skill before writing the Recovery section.
+
 **SYMPTOM → ROOT CAUSE, WITH CITATIONS.** Every claim in the report is backed by an artifact path and either a line number or a JSONL field. "The loop got stuck because of a race" is not useful; "`.gsd/journal/2026-04-19.jsonl:142` shows `stuck-detected` with flowId X, caused by `dispatch-guard.ts:87` returning the same unit after `unit-end`" is.
 
 **PRE-PARSED LEADS, NOT CONCLUSIONS.** If `/gsd forensics` has surfaced anomalies, treat them as hypotheses to verify, not answers.
@@ -139,6 +141,7 @@ Offer to file this as a GitHub issue via the active GitHub issue-write tool if o
 <anti_patterns>
 
 - **Running any `gsd_*` write tool during forensics.** Evidence stays pristine.
+- **"Fixing" the blocker or resuming the recovery during forensics.** Resolution and resume authority belong to the human/operator (`gsd-blocker-recovery` skill); forensics only recommends the route.
 - **Re-running the auto-mode loop to "reproduce."** That overwrites the activity log. Read the existing one.
 - **Vague root cause.** "There's a race" is not a root cause. Name the race.
 - **No citations.** Every claim gets an artifact path.

@@ -25,4 +25,8 @@ Goal semantics:
 4. When complete, surface a clear summary: what failed, why, and what was done (or what a fix would require for root-cause-only mode).
 5. Once root cause is identified, call `capture_thought` with `category: "gotcha"` so future debug sessions can find it via `memory_query`. Keep the content to 1–3 sentences — the symptom, the root cause, and the fix or guard.
 
+## Blocker and Recovery Boundary
+
+The goal semantics above still govern, including the minimal fix in `find_and_fix` mode. The restriction covers workflow authority only: do not clear or approve a blocker resolution, and do not repair GSD workflow state to bypass an authority fence — `/gsd blocker resolve` approval belongs to the human in the native terminal. If the reported issue is a GSD auto-pause blocker or a failed Task attempt, read the `gsd-blocker-recovery` skill before recommending recovery: inspect read-only with `/gsd blocker inspect <blockerId>`, and route resumes through the gated recovery path (`gsd_task_recovery_resume` after a genuine repair with concrete evidence, or the operator's `/gsd recover <recoveryActionId>`).
+
 {{skillActivation}}
