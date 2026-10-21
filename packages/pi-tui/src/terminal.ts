@@ -13,7 +13,10 @@ const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 
 export function shouldEnableMouseReporting(env: NodeJS.ProcessEnv = process.env): boolean {
-	return env.PI_TUI_MOUSE === "1";
+	// Fullscreen mode (#2946) implies mouse reporting: the transcript viewport
+	// scrolls with the wheel there. Opt-in either way — native text selection
+	// then needs Shift+drag.
+	return env.PI_TUI_MOUSE === "1" || env.PI_TUI_FULLSCREEN === "1";
 }
 
 /** True when stdout is no longer writable (pipe closed, terminal detached). */

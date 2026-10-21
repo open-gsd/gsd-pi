@@ -380,6 +380,52 @@ export class TUI extends Container {
 	// a content line for hit-testing base (non-overlay) components.
 	private baseContentLineCount = 0;
 
+	// --- Fullscreen (alternate screen) mode, slice-1 (#2946) ---
+	// Opt-in: the app calls setFullscreen(true) (PI_TUI_FULLSCREEN=1 wiring).
+	// Frames are written to the alternate screen buffer as a fixed grid — a
+	// transcript viewport above and a pinned tail (status, editor, footer) at
+	// the bottom. The alternate screen has no scrollback, so the inline
+	// renderer's flushed-prefix/repair machinery is never exercised; the
+	// default inline path below is untouched when the mode is off.
+	private fullscreen = false;
+	// True while the alternate screen is actually entered (entered in
+	// setFullscreen/start, left in stop/setFullscreen) — ?1049 nests in most
+	// terminals, so enter/exit must stay balanced, never doubled.
+	private fullscreenActive = false;
+	private startCalled = false;
+	// Child at which the pinned tail starts; everything from it down stays on
+	// screen. Resolved to an index per frame, so adding children before the
+	// boundary keeps working. null pins nothing (whole tree scrolls).
+	private fullscreenPinComponent: Component | null = null;
+	// Scroll state of the transcript viewport. null = live: the viewport
+	// follows new output (shows the transcript bottom). A number = frozen: the
+	// absolute index of the topmost visible transcript line, pinned against
+	// appends so new output never moves the viewport — it only raises the
+	// "N new lines below" hint count.
+	private fullscreenAnchor: number | null = null;
+	// Transcript line count as laid out by the last fullscreen frame; the
+	// input-time scroll clamp before the next frame renders.
+	private fullscreenScrollLength = 0;
+	// Last committed screen grid plus the dimensions it was laid out at; the
+	// diff writer rewrites only rows that differ.
+	private fullscreenGrid: string[] = [];
+	private fullscreenGridWidth = 0;
+	private fullscreenGridHeight = 0;
+	private fullscreenKittyIds = new Set<number>();
+	// Transcript viewport height as laid out by the last fullscreen frame;
+	// the page-scroll step before the first frame lays one out.
+	private fullscreenViewportHeight = 0;
+	// Physical cursor row as the fullscreen writer last left it. Tracked
+	// separately from hardwareCursorRow because requestRender(true) resets
+	// that to 0 for the inline renderer; the fullscreen diff may then write
+	// nothing and the real physical row would be lost.
+	private fullscreenCursorRow = 0;
+	// Per-child row ranges of the last fullscreen grid (grid coordinates),
+	// used to route mouse clicks to the component under the pointer — the
+	// children are rendered directly here, so Container's own childRanges
+	// never populate.
+	private fullscreenChildRanges: { component: Component; start: number; lineCount: number }[] = [];
+
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
 	private overlayStack: {
@@ -451,6 +497,95 @@ export class TUI extends Container {
 	 */
 	setClearOnShrink(enabled: boolean): void {
 		this.clearOnShrink = enabled;
+	}
+
+	isFullscreen(): boolean {
+		return this.fullscreen;
+	}
+
+	/**
+	 * Toggle fullscreen (alternate screen) rendering (#2946). Entering writes
+	 * \x1b[?1049h (the primary buffer and its scrollback are preserved by the
+	 * terminal and restored on exit); leaving writes \x1b[?1049l and forces a
+	 * repaint of the primary buffer from the current components. Safe to call
+	 * before start() — the enter sequence is then emitted by start() instead,
+	 * keeping enter/exit balanced across suspend/resume cycles.
+	 */
+	setFullscreen(enabled: boolean): void {
+		if (this.fullscreen === enabled) return;
+		this.fullscreen = enabled;
+		this.fullscreenAnchor = null;
+		this.resetFullscreenGrid();
+		const writable = !this.stopped && this.terminal.isTTY && !this.terminal.outputClosed && this.startCalled;
+		if (writable) {
+			if (enabled) {
+				this.terminal.write("\x1b[?1049h\x1b[2J\x1b[1;1H");
+				this.fullscreenActive = true;
+			} else if (this.fullscreenActive) {
+				this.terminal.write("\x1b[?1049l");
+				this.fullscreenActive = false;
+			}
+		}
+		this.requestRender(true);
+	}
+
+	/** Drop the committed fullscreen grid so the next frame rewrites the screen. */
+	private resetFullscreenGrid(): void {
+		this.fullscreenGrid = [];
+		this.fullscreenGridWidth = 0;
+		this.fullscreenGridHeight = 0;
+		this.fullscreenKittyIds = new Set();
+		this.fullscreenScrollLength = 0;
+		// The alt screen is (about to be) cleared with the cursor homed.
+		this.fullscreenCursorRow = 0;
+		this.fullscreenChildRanges = [];
+	}
+
+	/**
+	 * Mark the child at which the pinned tail starts: in fullscreen mode this
+	 * component and every child after it stay fixed on screen while the
+	 * children before it form the scrolling transcript viewport. No effect on
+	 * the inline renderer.
+	 */
+	setFullscreenPinBoundary(component: Component): void {
+		this.fullscreenPinComponent = component;
+	}
+
+	/**
+	 * Scroll the fullscreen transcript viewport. Positive lines scroll up
+	 * (toward older output, freezing the viewport); negative lines scroll down
+	 * (toward newer; reaching the bottom unfreezes back to live).
+	 */
+	scrollFullscreenBy(lines: number): void {
+		if (!this.fullscreen || lines === 0) return;
+		const viewportRows = this.fullscreenViewportRows();
+		const bottomTop = Math.max(0, this.fullscreenScrollLength - viewportRows);
+		if (lines > 0) {
+			// Up: freeze at an absolute top index so appends cannot move it.
+			const currentTop = this.fullscreenAnchor ?? bottomTop;
+			const next = currentTop - lines;
+			if (next <= 0) {
+				this.fullscreenAnchor = 0;
+			} else {
+				this.fullscreenAnchor = Math.min(next, Math.max(0, this.fullscreenScrollLength - 1));
+			}
+		} else {
+			const currentTop = this.fullscreenAnchor ?? bottomTop;
+			const next = currentTop - lines;
+			if (next >= bottomTop) {
+				this.fullscreenAnchor = null; // back to the live bottom
+			} else {
+				this.fullscreenAnchor = Math.max(0, next);
+			}
+		}
+		this.requestRender();
+	}
+
+	/** Jump the fullscreen transcript viewport back to the live bottom. */
+	jumpFullscreenToBottom(): void {
+		if (!this.fullscreen || this.fullscreenAnchor === null) return;
+		this.fullscreenAnchor = null;
+		this.requestRender();
 	}
 
 	setFocus(component: Component | null): void {
@@ -596,6 +731,16 @@ export class TUI extends Container {
 		if (!this.terminal.isTTY) {
 			return;
 		}
+		this.startCalled = true;
+		// Re-enter the alternate screen after a stop()/start() cycle (suspend/
+		// resume, external editor). ?1049 nests, so guard on fullscreenActive
+		// to keep enter/exit balanced; the cleared alt screen needs a full
+		// grid rewrite, not a diff against the pre-suspend frame.
+		if (this.fullscreen && !this.fullscreenActive) {
+			this.terminal.write("\x1b[?1049h\x1b[2J\x1b[1;1H");
+			this.fullscreenActive = true;
+			this.resetFullscreenGrid();
+		}
 		this.terminal.setOutputClosedHandler?.(() => this.notifyOutputClosed());
 		this.terminal.start(
 			(data) => this.handleInput(data),
@@ -686,8 +831,9 @@ export class TUI extends Container {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;
 		}
-		// Move cursor to the end of the content to prevent overwriting/artifacts on exit
-		if (this.previousLines.length > 0) {
+		const leaveAltScreen = this.fullscreen && this.fullscreenActive;
+		if (!leaveAltScreen && this.previousLines.length > 0) {
+			// Move cursor to the end of the content to prevent overwriting/artifacts on exit
 			const targetRow = this.previousLines.length; // Line after the last content
 			const lineDiff = targetRow - this.hardwareCursorRow;
 			if (lineDiff > 0) {
@@ -700,6 +846,16 @@ export class TUI extends Container {
 
 		this.terminal.showCursor();
 		this.terminal.stop();
+		if (leaveAltScreen) {
+			// Leave the alternate screen AFTER terminal.stop(): keyboard/mouse
+			// modes were pushed while the alt buffer was active and Kitty keeps
+			// the state stacks per buffer, so the pop in terminal.stop() must
+			// land before the primary buffer is restored. The primary buffer
+			// (and its scrollback) then reappear exactly as preserved, which is
+			// why the inline cursor dance above does not apply here.
+			this.terminal.write("\x1b[?1049l");
+			this.fullscreenActive = false;
+		}
 	}
 
 	/**
@@ -713,6 +869,24 @@ export class TUI extends Container {
 	 */
 	retireScreenToScrollback(): void {
 		if (this.stopped || !this.terminal.isTTY || this.terminal.outputClosed) {
+			return;
+		}
+		if (this.fullscreen) {
+			// The alternate screen has no scrollback to retire into: clearing it
+			// discards the frame, which is the intended "transcript discarded"
+			// behavior of the alt-buffer contract. Reset only the fullscreen
+			// state; the inline renderer's state keeps describing the preserved
+			// primary buffer for the exit path.
+			let buffer = this.useSynchronizedOutput ? "\x1b[?2026h" : "";
+			buffer += this.deleteKittyImages(this.fullscreenKittyIds);
+			buffer += "\x1b[2J\x1b[1;1H";
+			if (this.useSynchronizedOutput) {
+				buffer += "\x1b[?2026l";
+			}
+			this.terminal.write(buffer);
+			this.fullscreenAnchor = null;
+			this.resetFullscreenGrid();
+			this.requestRender();
 			return;
 		}
 		// Only retire what is already painted. A frame still waiting for its
@@ -850,6 +1024,28 @@ export class TUI extends Container {
 			return;
 		}
 
+		// Fullscreen scroll keys are handled globally, before the focused
+		// component: PageUp/PageDown scroll the transcript viewport (they are
+		// taken from the editor in this mode), ctrl+end jumps back to the live
+		// bottom. A visible overlay (menu, dialog) keeps its own keys. Pages
+		// step one row short of the viewport: the frozen frame lends its bottom
+		// row to the new-lines hint, and the overlap keeps paging from skipping
+		// the line hiding under it.
+		if (this.fullscreen && !this.hasOverlay()) {
+			if (matchesKey(data, "pageUp")) {
+				this.scrollFullscreenBy(Math.max(1, this.fullscreenViewportRows() - 1));
+				return;
+			}
+			if (matchesKey(data, "pageDown")) {
+				this.scrollFullscreenBy(-Math.max(1, this.fullscreenViewportRows() - 1));
+				return;
+			}
+			if (matchesKey(data, "ctrl+end")) {
+				this.jumpFullscreenToBottom();
+				return;
+			}
+		}
+
 		// Global debug key handler (Shift+Ctrl+D)
 		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {
 			this.onDebug();
@@ -935,8 +1131,28 @@ export class TUI extends Container {
 			return;
 		}
 
+		// Fullscreen mode: the wheel scrolls the transcript viewport instead of
+		// routing to base content (the transcript is a rendered viewport here,
+		// not a bottom-anchored frame).
+		if (this.fullscreen && (event.button === "wheel-up" || event.button === "wheel-down")) {
+			this.scrollFullscreenBy(event.button === "wheel-up" ? 3 : -3);
+			return;
+		}
+
 		// Base content: translate the screen row to a content-line row.
 		if (this.baseContentLineCount <= 0) return;
+		if (this.fullscreen) {
+			// The fullscreen frame lays its children out directly, so route
+			// clicks through the grid ranges recorded by the last frame.
+			for (const range of this.fullscreenChildRanges) {
+				if (screenRow >= range.start && screenRow < range.start + range.lineCount) {
+					range.component.handleMouse?.({ ...event, x: screenCol, y: screenRow - range.start });
+					break;
+				}
+			}
+			this.requestRender();
+			return;
+		}
 		const contentRow = screenRow + (this.baseContentLineCount - this.terminal.rows);
 		if (contentRow < 0) return;
 
@@ -1863,8 +2079,223 @@ export class TUI extends Container {
 		return null;
 	}
 
+	/** Transcript viewport height as laid out by the last fullscreen frame. */
+	private fullscreenViewportRows(): number {
+		return this.fullscreenViewportHeight > 0 ? this.fullscreenViewportHeight : Math.max(1, this.terminal.rows - 1);
+	}
+
+	/**
+	 * Render one fullscreen (alternate screen) frame (#2946). The child tree is
+	 * split at the pin boundary: children before it render into the scrolling
+	 * transcript viewport; the boundary child and everything after it render
+	 * into the pinned tail that owns the bottom rows. The frame is a diff over
+	 * the previously committed screen grid — the alternate screen has no
+	 * scrollback, so none of the inline renderer's flushed-prefix machinery
+	 * applies here.
+	 */
+	private doRenderFullscreen(): void {
+		const width = this.terminal.columns;
+		const height = this.terminal.rows;
+
+		// A width change re-wraps the transcript, so a frozen top index into
+		// the wrapped lines no longer points at the content it pinned — drop
+		// the reading position and return to the live bottom rather than land
+		// somewhere arbitrary (#2946 review: slice-1 keeps this simple).
+		if (this.fullscreenGrid.length > 0 && this.fullscreenGridWidth !== width) {
+			this.fullscreenAnchor = null;
+		}
+
+		const resolvedPin = this.fullscreenPinComponent
+			? this.children.indexOf(this.fullscreenPinComponent)
+			: this.children.length;
+		const pinIndex = resolvedPin >= 0 ? resolvedPin : this.children.length;
+		const scrollChildren = this.children.slice(0, pinIndex);
+		const pinnedChildren = this.children.slice(pinIndex);
+
+		// The pinned tail owns the bottom rows; if it alone outgrows the screen
+		// its top is truncated so the tail's end (editor, footer) stays visible.
+		// Note the app keeps widgets-below small: a tail whose END is not the
+		// editor can still crowd it out — the renderer cannot know which child
+		// holds the caret.
+		const pinnedSpans: { component: Component; offset: number; lineCount: number }[] = [];
+		let pinnedLines: string[] = [];
+		for (const child of pinnedChildren) {
+			const childLines = child.render(width);
+			pinnedSpans.push({ component: child, offset: pinnedLines.length, lineCount: childLines.length });
+			pinnedLines.push(...childLines);
+		}
+		const pinnedCut = Math.max(0, pinnedLines.length - (height - 1));
+		if (pinnedCut > 0) {
+			pinnedLines = pinnedLines.slice(pinnedCut);
+			for (const span of pinnedSpans) {
+				span.lineCount = Math.max(0, span.offset + span.lineCount - pinnedCut);
+				span.offset = Math.max(0, span.offset - pinnedCut);
+			}
+		}
+		const viewportHeight = Math.max(1, height - pinnedLines.length);
+		this.fullscreenViewportHeight = viewportHeight;
+
+		// Render the full transcript, then window it. A frozen (scrolled-up)
+		// viewport pins an absolute top index: appends leave the window in
+		// place and only raise the new-lines count below it.
+		const scrollSpans: { component: Component; offset: number; lineCount: number }[] = [];
+		const scrollLines: string[] = [];
+		for (const child of scrollChildren) {
+			const childLines = child.render(width);
+			scrollSpans.push({ component: child, offset: scrollLines.length, lineCount: childLines.length });
+			scrollLines.push(...childLines);
+		}
+		const maxAnchor = Math.max(0, scrollLines.length - 1);
+		if (this.fullscreenAnchor !== null && this.fullscreenAnchor > maxAnchor) {
+			this.fullscreenAnchor = maxAnchor;
+		}
+		const anchor = this.fullscreenAnchor;
+		const frozen = anchor !== null;
+		const start = frozen ? anchor : Math.max(0, scrollLines.length - viewportHeight);
+		const viewport = scrollLines.slice(start, start + viewportHeight);
+		while (viewport.length < viewportHeight) {
+			viewport.push("");
+		}
+		this.fullscreenScrollLength = scrollLines.length;
+
+		// Frozen with output still below: the bottom viewport row becomes the
+		// new-lines hint.
+		const newBelow = scrollLines.length - (start + viewportHeight);
+		if (frozen && newBelow > 0) {
+			viewport[viewport.length - 1] = `\x1b[2m ↓ ${newBelow} new line${newBelow === 1 ? "" : "s"} below · ctrl+end for latest \x1b[22m`;
+		}
+
+		// Grid-coordinate row ranges of the children visible on screen, for
+		// mouse click routing (the children are rendered directly here, so
+		// Container's childRanges never populate).
+		this.fullscreenChildRanges = [];
+		for (const span of scrollSpans) {
+			const from = Math.max(span.offset, start);
+			const to = Math.min(span.offset + span.lineCount, start + viewportHeight);
+			if (to > from) {
+				this.fullscreenChildRanges.push({ component: span.component, start: from - start, lineCount: to - from });
+			}
+		}
+		for (const span of pinnedSpans) {
+			if (span.lineCount > 0) {
+				this.fullscreenChildRanges.push({
+					component: span.component,
+					start: viewportHeight + span.offset,
+					lineCount: span.lineCount,
+				});
+			}
+		}
+
+		let grid = [...viewport, ...pinnedLines];
+
+		// Overlays composite onto the grid exactly as the inline renderer does:
+		// with the grid already screen-height, floating overlays are
+		// screen-relative. A docked (reserveSpace) overlay grows the result and
+		// pushes the viewport up, so keep the bottom `height` rows — the dialog
+		// takes focus anyway; it covering the pinned tail is accepted slice-1
+		// behavior.
+		if (this.overlayStack.length > 0) {
+			grid = this.compositeOverlays(grid, width, height);
+			if (grid.length > height) {
+				grid = grid.slice(grid.length - height);
+			}
+		} else {
+			this.overlayRegions = [];
+		}
+		this.baseContentLineCount = grid.length;
+
+		let cursorPos = this.extractCursorPosition(grid, height);
+		grid = this.applyLineResets(grid);
+
+		// Diff against the committed grid; rewrite only changed rows.
+		const fullRewrite =
+			this.fullscreenGridWidth !== width ||
+			this.fullscreenGridHeight !== height ||
+			this.fullscreenGrid.length !== height;
+		const changed: number[] = [];
+		for (let row = 0; row < height; row++) {
+			if (fullRewrite || (this.fullscreenGrid[row] ?? "") !== (grid[row] ?? "")) {
+				changed.push(row);
+			}
+		}
+
+		let kittyBuffer = "";
+		if (changed.length > 0) {
+			const ids = new Set<number>();
+			if (fullRewrite) {
+				for (const id of this.fullscreenKittyIds) ids.add(id);
+			} else {
+				// \x1b[2K does not remove Kitty placements. Scan from the first
+				// change down: a multi-row placement can overwrite rows below it,
+				// so image rows at or below the first change are rewritten too
+				// (mirrors the inline expandLastChangedForKittyImages).
+				for (let row = changed[0]; row < height; row++) {
+					for (const id of extractKittyImageIds(this.fullscreenGrid[row] ?? "")) {
+						ids.add(id);
+						if (!changed.includes(row)) {
+							changed.push(row);
+						}
+					}
+				}
+				changed.sort((a, b) => a - b);
+			}
+			kittyBuffer = this.deleteKittyImages(ids);
+		}
+
+		let buffer = this.useSynchronizedOutput ? "\x1b[?2026h" : "";
+		buffer += kittyBuffer;
+		let lastWrittenRow = -2;
+		for (const row of changed) {
+			if (row === lastWrittenRow + 1) {
+				// Consecutive row: \r pins column 1 and \x1b[1B steps down without
+				// scrolling (CUD clamps at the screen bottom), so the fixed grid
+				// can never spill into a buffer.
+				buffer += "\r\x1b[1B";
+			} else {
+				buffer += `\x1b[${row + 1};1H`;
+			}
+			buffer += "\x1b[2K";
+			let line = grid[row] ?? "";
+			if (!isImageLine(line) && visibleWidth(line) > width) {
+				line = truncateToWidth(line, width);
+			}
+			buffer += line;
+			lastWrittenRow = row;
+		}
+		if (changed.length > 0) {
+			if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
+			this.terminal.write(buffer);
+		}
+
+		// Commit the grid and reposition the hardware cursor for IME. The
+		// physical cursor sits at the end of the last rewritten row — or where
+		// the last frame left it when nothing was written. Tracked in
+		// fullscreenCursorRow because requestRender(true) zeroes the inline
+		// renderer's hardwareCursorRow even though the fullscreen grid (and the
+		// physical cursor) did not move.
+		this.fullscreenGrid = grid;
+		this.fullscreenGridWidth = width;
+		this.fullscreenGridHeight = height;
+		this.fullscreenKittyIds = this.collectKittyImageIds(grid);
+		this.cursorRow = height - 1;
+		this.hardwareCursorRow = changed.length > 0 ? changed[changed.length - 1] : this.fullscreenCursorRow;
+		this.positionHardwareCursor(cursorPos, height);
+		this.fullscreenCursorRow = this.hardwareCursorRow;
+	}
+
 	private doRender(): void {
 		if (this.stopped) return;
+		if (this.fullscreen) {
+			// Frames may only be written once the alternate screen is actually
+			// entered: between setFullscreen(true) and start() there can be
+			// awaited app work, and a scheduled render that fired before the
+			// ?1049h would paint absolute-positioned rows over the user's
+			// primary buffer.
+			if (this.fullscreenActive) {
+				this.doRenderFullscreen();
+			}
+			return;
+		}
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		const getViewportTop = (lineCount: number): number => lineCount - height;
