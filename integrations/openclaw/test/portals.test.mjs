@@ -287,14 +287,34 @@ test('stop cancels a hung health probe, cleans once, and permits a later fresh s
 test('unexpected exit after readiness closes owned portal and reports one sanitized failure', async (t) => {
   const h = await harness(t);
   await h.service.start();
+  assert.equal(h.service.webPort, PORT);
   h.child.emit('error', new Error('private output'));
   h.child.emit('exit', 1);
   await nextTurn();
+  assert.equal(h.service.webPort, undefined, 'failed hosts must not leave a dead port advertised');
   assert.equal(h.calls.filter((call) => call.method === 'terminate').length, 1);
   assert.equal(h.calls.filter((call) => call.method === 'portal.close').length, 1);
   assert.equal(h.failures.length, 1);
   assert.match(h.failures[0].message, /host exited or failed/);
   assert.ok(!h.failures[0].message.includes('private output'));
+});
+
+test('web route receives a port only after readiness, and none after startup failure', async (t) => {
+  const ready = deferred();
+  const entered = deferred();
+  const h = await harness(t, { probe: async () => { entered.resolve(); return ready.promise; } });
+  const started = h.service.start();
+  await entered.promise;
+  assert.equal(h.service.webPort, undefined, 'reserved or unready listeners are not routable');
+  ready.resolve(true);
+  await started;
+  assert.equal(h.service.webPort, PORT);
+  await h.service.stop();
+  assert.equal(h.service.webPort, undefined);
+
+  const failed = await harness(t, { request: async () => { throw new Error('Gateway timeout'); } });
+  await assert.rejects(failed.service.start());
+  assert.equal(failed.service.webPort, undefined);
 });
 
 test('Gateway shutdown failure cannot prevent owned host termination', async (t) => {

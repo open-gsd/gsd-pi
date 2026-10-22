@@ -4,6 +4,7 @@ import { realpath, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import type { Card, Json, Progress } from "./types.js";
+import { GsdGatewayRequestError } from "./gateway-request.js";
 
 const exec = promisify(execFile);
 export const CONTROLLER = "open-gsd-openclaw.projects";
@@ -109,7 +110,7 @@ export class ProjectSync {
       if (!Array.isArray(result.cards)) throw new Error("Invalid Workboard card list");
       return result.cards.filter((card: Card) => card.metadata?.automation?.tenant === CONTROLLER);
     } catch (error) {
-      if (/unknown method|method not found/i.test(String(error))) return undefined;
+      if (error instanceof GsdGatewayRequestError ? error.methodUnavailable : /unknown method|method not found/i.test(String(error))) return undefined;
       throw error;
     }
   }

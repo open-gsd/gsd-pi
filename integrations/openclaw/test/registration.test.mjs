@@ -16,9 +16,11 @@ function fixture(t) {
   const requests = [];
   const registrations = [];
   const connections = [];
+  const hosts = [];
   t.mock.method(nativeProjectRegistry, 'list', async () => registrations.map(({ project }) => ({ ...project, name: project.projectId })));
   t.mock.method(GsdPortalService.prototype, 'start', async function () {
-    Object.defineProperty(this, 'webPort', { value: 33277 });
+    Object.defineProperty(this, 'webPort', { value: 33277, configurable: true });
+    hosts.push(this);
   });
   t.mock.method(GsdPortalService.prototype, 'stop', async () => {});
   t.mock.method(globalThis, 'fetch', async (url) => {
@@ -52,6 +54,7 @@ function fixture(t) {
           'open-gsd-openclaw': { config: { webUi: { enabled: true }, embeddedProjects: policy } },
         } } } });
         await flush();
+        this.host = hosts.at(-1);
       },
       async call(name, params = {}, overrides = {}) {
         const connection = new AbortController();
@@ -138,4 +141,17 @@ test('service stop disposes its own subscriptions without closing another regist
   await flush();
   assert.equal(streams[1].cancelled, 1);
   assert.deepEqual(events.filter((event) => event.payload.closed).map((event) => event.recipients), [['a'], ['b']]);
+});
+
+test('compiled UI methods do not retain a cached port after the owned web host fails', async (t) => {
+  const h = fixture(t);
+  const a = h.register('a');
+  await a.start();
+  assert.equal((await a.call('gsd.ui.directories.list', { root: h.directory })).ok, true);
+  const before = h.requests.length;
+  Object.defineProperty(a.host, 'webPort', { value: undefined });
+  const unavailable = await a.call('gsd.ui.directories.list', { root: h.directory });
+  assert.equal(unavailable.ok, false);
+  assert.match(unavailable.error.message, /web host unavailable/);
+  assert.equal(h.requests.length, before, 'a dead cached port must never receive proxy traffic');
 });

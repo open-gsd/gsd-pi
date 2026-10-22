@@ -219,7 +219,6 @@ export class GsdPortalService {
     const env = { ...(this.options.env ?? process.env) };
     const launch = resolveWebLaunch(config, env);
     const port = await this.deps.reservePort(config.port);
-    this.currentPort = port;
     run.abort.signal.throwIfAborted();
     const listed = await this.options.request("portal.list", {});
     if (!Array.isArray(listed.portals)) throw new Error("GSD portal could not verify existing native portals.");
@@ -297,7 +296,9 @@ export class GsdPortalService {
     const timeout = setTimeout(() => run.abort.abort(new Error("GSD portal web host readiness timed out.")), this.deps.readyTimeoutMs);
     try {
       await Promise.race([this.waitReady(`http://${LOOPBACK}:${port}`, run.abort.signal), childStopped]);
+      run.abort.signal.throwIfAborted();
       run.ready = true;
+      this.currentPort = port;
     } finally { clearTimeout(timeout); }
   }
 
@@ -313,6 +314,7 @@ export class GsdPortalService {
 
   private cleanup(run: PortalRun): Promise<void> {
     if (run.cleanup) return run.cleanup;
+    if (this.run === run) this.currentPort = undefined;
     run.cleanup = (async () => {
       // Stop the owned child even if Gateway has already closed its portals.
       try { if (run.child) await this.deps.terminate(run.child); } finally {
