@@ -57,6 +57,27 @@ export interface ToolCallLoopGuardConfig {
 }
 
 /**
+ * How discuss units (discuss-milestone, discuss-slice, discuss-project,
+ * discuss-requirements) ask the user questions (#2979).
+ */
+export type DiscussionQuestionMode = "dialog" | "chat";
+
+export interface DiscussionPreferences {
+  /**
+   * Question surface for discussion interviews.
+   * - "dialog" (default): structured `ask_user_questions` choice dialogs when
+   *   the transport supports them.
+   * - "chat": plain-text numbered questions answered in the normal chat. The
+   *   `ask_user_questions` tool stays allowed (the tool-surface readiness
+   *   check still requires it — unlike `GSD_WORKFLOW_MCP_STRUCTURED_QUESTIONS=0`,
+   *   which removes the tool and breaks `/gsd discuss`), but discuss prompts
+   *   take their plain-text branch and a dispatched slice discussion holds its
+   *   picker until the CONTEXT artifact is saved (#2979).
+   */
+  question_mode?: DiscussionQuestionMode;
+}
+
+/**
  * Opt-in tool-output sandboxing for sub-sessions. When enabled, the gsd_exec
  * MCP tool runs scripts in an isolated subprocess and returns only a short
  * digest to the calling agent's context window; capped stdout/stderr persist
@@ -162,6 +183,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "notifications",
   "cmux",
   "remote_questions",
+  "discussion",
   "git",
   "post_unit_hooks",
   "pre_dispatch_hooks",
@@ -574,6 +596,8 @@ export interface GSDPreferences {
   notifications?: NotificationPreferences;
   cmux?: CmuxPreferences;
   remote_questions?: RemoteQuestionsConfig;
+  /** Discussion interview surface controls (#2979). */
+  discussion?: DiscussionPreferences;
   git?: GitPreferences;
   post_unit_hooks?: PostUnitHookConfig[];
   pre_dispatch_hooks?: PreDispatchHookConfig[];

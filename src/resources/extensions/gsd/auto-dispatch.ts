@@ -14,7 +14,7 @@
 
 import type { GSDState, TaskIO } from "./types.js";
 import type { GSDPreferences } from "./preferences.js";
-import { renderLanguageDirectiveForPrompt } from "./preferences.js";
+import { getDiscussionQuestionMode, renderLanguageDirectiveForPrompt } from "./preferences.js";
 import type { MinimalModelRegistry } from "./context-budget.js";
 import { extractUatType } from "./files.js";
 import { getRewriteCount, loadActiveOverrides, recordRewriteAttempt, resolveAllOverrides } from "./overrides.js";
@@ -201,6 +201,24 @@ export function setReactiveGraphDeriveFnForTest(
 function shouldBypassMilestoneDepthGateInAuto(prefs: GSDPreferences | undefined): boolean {
   return isAutoActive() && prefs?.planning_depth !== "deep";
 }
+
+/**
+ * The structured-questions flag a discuss rule passes to its prompt builder.
+ * `discussion.question_mode: chat` (#2979) forces the plain-text branch while
+ * leaving the ask_user_questions tool surface untouched, so the tool-surface
+ * readiness gate keeps passing (unlike GSD_WORKFLOW_MCP_STRUCTURED_QUESTIONS=0).
+ * Only discuss rules route through this — research-project and
+ * workflow-preferences keep the session's transport-derived flag.
+ */
+function discussQuestionFlag(
+  basePath: string,
+  structuredQuestionsAvailable: "true" | "false" | undefined,
+): "true" | "false" {
+  if (getDiscussionQuestionMode(basePath) === "chat") return "false";
+  return structuredQuestionsAvailable === "true" ? "true" : "false";
+}
+
+export const _discussQuestionFlagForTest = discussQuestionFlag;
 
 export function setReassessmentCheckerForTest(checker: ReassessmentChecker): () => void {
   const previous = reassessmentChecker;
@@ -803,7 +821,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
           mid,
           midTitle,
           basePath,
-          structuredQuestionsAvailable,
+          discussQuestionFlag(basePath, structuredQuestionsAvailable),
           { headless: !!process.env.GSD_HEADLESS },
         ),
         pauseAfterDispatch: !process.env.GSD_HEADLESS,
@@ -843,7 +861,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
         action: "dispatch",
         unitType: "discuss-project",
         unitId: "PROJECT",
-        prompt: await buildDiscussProjectPrompt(basePath, structuredQuestionsAvailable),
+        prompt: await buildDiscussProjectPrompt(basePath, discussQuestionFlag(basePath, structuredQuestionsAvailable)),
         pauseAfterDispatch: !process.env.GSD_HEADLESS,
       };
     },
@@ -862,7 +880,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
         action: "dispatch",
         unitType: "discuss-requirements",
         unitId: "REQUIREMENTS",
-        prompt: await buildDiscussRequirementsPrompt(basePath, structuredQuestionsAvailable),
+        prompt: await buildDiscussRequirementsPrompt(basePath, discussQuestionFlag(basePath, structuredQuestionsAvailable)),
         pauseAfterDispatch: !process.env.GSD_HEADLESS,
       };
     },
@@ -916,7 +934,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
           mid,
           midTitle,
           basePath,
-          structuredQuestionsAvailable,
+          discussQuestionFlag(basePath, structuredQuestionsAvailable),
           { headless: !!process.env.GSD_HEADLESS },
         ),
         pauseAfterDispatch: !process.env.GSD_HEADLESS,

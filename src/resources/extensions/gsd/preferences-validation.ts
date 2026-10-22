@@ -717,6 +717,34 @@ export function validatePreferences(preferences: GSDPreferences): {
     }
   }
 
+  // ─── Discussion (#2979) ─────────────────────────────────────────────
+  if (preferences.discussion !== undefined) {
+    if (preferences.discussion && typeof preferences.discussion === "object") {
+      const discussion = preferences.discussion as Record<string, unknown>;
+      const validatedDiscussion: NonNullable<GSDPreferences["discussion"]> = {};
+      if (discussion.question_mode !== undefined) {
+        if (discussion.question_mode === "dialog" || discussion.question_mode === "chat") {
+          validatedDiscussion.question_mode = discussion.question_mode;
+        } else {
+          errors.push(`discussion.question_mode must be "dialog" or "chat", got: ${String(discussion.question_mode)}`);
+        }
+      }
+
+      const knownDiscussionKeys = new Set(["question_mode"]);
+      for (const key of Object.keys(discussion)) {
+        if (!knownDiscussionKeys.has(key)) {
+          warnings.push(`unknown discussion key "${key}" — ignored`);
+        }
+      }
+
+      if (Object.keys(validatedDiscussion).length > 0) {
+        validated.discussion = validatedDiscussion;
+      }
+    } else {
+      errors.push("discussion must be an object");
+    }
+  }
+
   // ─── Post-Unit Hooks ─────────────────────────────────────────────────
   if (preferences.post_unit_hooks && Array.isArray(preferences.post_unit_hooks)) {
     const validHooks: PostUnitHookConfig[] = [];

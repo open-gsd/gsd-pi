@@ -23,8 +23,9 @@ import {
   relTaskFile, resolveGsdRootFile, relGsdRootFile, resolveRuntimeFile, targetMilestoneFile,
   normalizeRealPath, gsdProjectionRoot,
 } from "./paths.js";
-import { resolveInlineLevel, loadEffectiveGSDPreferences, renderLanguageDirectiveForPrompt } from "./preferences.js";
+import { resolveInlineLevel, getDiscussionQuestionMode, loadEffectiveGSDPreferences, renderLanguageDirectiveForPrompt } from "./preferences.js";
 import { createRepositoryRegistryFromPreferences } from "./repository-registry.js";
+import { discussionChatPromptNote } from "./question-transport.js";
 import { isContextModeEnabled } from "./preferences-types.js";
 import type { GSDState, InlineLevel } from "./types.js";
 import type { GSDPreferences } from "./preferences.js";
@@ -1838,7 +1839,7 @@ export async function buildDiscussMilestonePrompt(
     structuredQuestionsAvailable,
     commitInstruction,
     fastPathInstruction,
-  });
+  }) + discussionChatPromptNote(getDiscussionQuestionMode(base), structuredQuestionsAvailable);
   const promptWithContextMode = includeContextMode
     ? prependContextModeToBlock("discuss-milestone", base, basePrompt)
     : basePrompt;
@@ -1913,7 +1914,7 @@ export async function buildDiscussProjectPrompt(
     inlinedTemplates,
     structuredQuestionsAvailable,
     commitInstruction: "Do not commit planning artifacts — .gsd/ is managed externally.",
-  }));
+  }) + discussionChatPromptNote(getDiscussionQuestionMode(base), structuredQuestionsAvailable));
 }
 
 /**
@@ -1933,7 +1934,7 @@ export async function buildDiscussRequirementsPrompt(
     inlinedTemplates,
     structuredQuestionsAvailable,
     commitInstruction: "Do not commit planning artifacts — .gsd/ is managed externally.",
-  }));
+  }) + discussionChatPromptNote(getDiscussionQuestionMode(base), structuredQuestionsAvailable));
 }
 
 /**

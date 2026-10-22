@@ -243,6 +243,9 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `timeout_minutes`: number — question timeout in minutes (clamped 1-30).
   - `poll_interval_seconds`: number — poll interval in seconds (clamped 2-30).
 
+- `discussion`: controls how discussion interviews ask for input (#2979). Keys:
+  - `question_mode`: `"dialog"` or `"chat"`. `"dialog"` (default) interviews through `ask_user_questions` choice dialogs when the transport supports them. `"chat"` interviews in plain text: discuss prompts (milestone, slice, project, requirements) take their plain-text branch — numbered questions answered in the normal chat — and a `/gsd discuss` slice interview holds its picker open until the discussion's CONTEXT artifact is saved instead of treating the first turn's end as done. `ask_user_questions` stays on the tool surface in chat mode (the workflow-MCP readiness check still requires it), so this is the supported plain-chat switch; setting `GSD_WORKFLOW_MCP_STRUCTURED_QUESTIONS=0` for the same effect instead removes the tool and breaks `/gsd discuss` dispatch. The depth-verification gate is unchanged: on the plain-text path it arms when the confirmation question streams and unlocks on an explicit approval reply ("yes", "approve", "proceed", ...). Default: `"dialog"`.
+
 - `notifications`: configures desktop notification behavior during auto-mode. Keys:
   - `enabled`: boolean — master toggle for all notifications. Default: `true`.
   - `local_bell`: boolean — play a local terminal bell when a question needs an answer or auto-mode stops. Default: `false`.

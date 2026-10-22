@@ -1060,6 +1060,20 @@ When `notifications.enabled: true` is set **and** a remote channel is configured
 
 See [Remote Questions](./remote-questions.md) for setup instructions and Telegram command reference.
 
+### `discussion`
+
+Controls how discussion interviews (`/gsd discuss`, milestone/slice/project/requirements interviews) ask for input:
+
+```yaml
+discussion:
+  question_mode: dialog       # "dialog" (default) or "chat"
+```
+
+- `dialog` (default): interviews use `ask_user_questions` choice dialogs when the transport supports them.
+- `chat`: interviews happen in plain chat. The discuss prompts ask numbered questions in the conversation, you answer in your own words, and the interview stays open across turns until the discussion's CONTEXT artifact is saved. Free-form answers, any language, no modal dialogs.
+
+`ask_user_questions` stays available in chat mode (the workflow tool-surface readiness check still requires it) — GSD only stops steering the interviews through it. The milestone depth check still applies: the agent asks for explicit confirmation in plain text before writing CONTEXT, and it unlocks on an explicit approval reply. This is the supported plain-chat switch; do not use `GSD_WORKFLOW_MCP_STRUCTURED_QUESTIONS=0` for this — it removes the tool from the session surface and `/gsd discuss` then waits forever for the workflow tools.
+
 ### `post_unit_hooks`
 
 Custom hooks that fire after specific unit types complete. See the
