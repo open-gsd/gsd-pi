@@ -43,6 +43,7 @@ const PREF_SAMPLE_VALUES: Record<string, unknown> = {
   },
   cmux: { enabled: true },
   remote_questions: { provider: "slack", channel: "C123" },
+  discussion: { question_mode: "chat" },
   git: {
     auto_push: false,
     push_branches: true,
