@@ -522,6 +522,8 @@ test("a state-directory move whose source cleanup fails still succeeds with the 
     assert.doesNotThrow(() => moveStateDirectory(from, to));
   } finally {
     chmodSync(join(from, "locked"), 0o700);
+    // The copy can preserve read-only permissions; restore both fixtures for teardown.
+    chmodSync(join(to, "locked"), 0o700);
   }
   assert.equal(readFileSync(join(to, "gsd.db"), "utf8"), "db");
   assert.equal(readFileSync(join(to, "locked", "entry"), "utf8"), "x");
