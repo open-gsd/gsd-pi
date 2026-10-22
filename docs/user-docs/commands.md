@@ -232,6 +232,25 @@ These commands are native GSD workflows surfaced in `/gsd help full`. They dispa
 | `/gsd settings` | Configure workflow toggles and model profile |
 | `/gsd ns-context`, `/gsd ns-ideate`, `/gsd ns-manage`, `/gsd ns-project`, `/gsd ns-review`, `/gsd ns-workflow` | Namespace grouping commands from older command sets; each redirects to `/gsd help` because GSD uses a flat command list |
 
+## Graph Surfaces
+
+GSD ships several graph features with similar names but separate contracts. They have different producers, storage, and authority; a shared name does not imply a shared schema, and none of them is a runtime call graph.
+
+| Surface | Entry points | Graph content | Producer | Storage |
+|---------|--------------|---------------|----------|---------|
+| Prompt knowledge graph | `/gsd graphify` | Codebase entities and static relationships (`nodes.md`, `edges.json`), grounded in `.gsd/CODEBASE.md` and project memories | An agent run executing the `graphify` prompt | `.gsd/knowledge/` |
+| Project workflow graph | `gsd graph <subcommand>`; `gsd_graph` on the standalone MCP server | Milestone, slice, task, state, and knowledge nodes from GSD workflow data | Deterministic build, no model involved | `.gsd/graphs/graph.json` |
+| Memory relationship graph | `gsd_graph` in a native session; `gsd_memory_graph` on the standalone MCP server | Edges between rows of the project `memories` table, stored in `memory_relations` | Deterministic query tool | GSD project database |
+| External source graph | None — proposed only, not installed | Would model relationships in selected source code | No accepted provider or schema exists today | None |
+
+Boundary notes:
+
+- `/gsd graphify` is a prompt workflow, not a tool call. Dispatching it creates `.gsd/knowledge/` when the directory is missing and starts an agent run — including for `status`, so it is not a side-effect-free probe. Edges are static source facts, not runtime evidence: an `import` alone does not prove a `calls` edge. Builds preserve human-added annotations where possible and stamp the HEAD commit, noting whether the working tree was dirty or had untracked sources; `status` reports stale or unknown freshness rather than declaring a dirty-tree graph current. `build` rewrites the graph pair; `query`/`status`/`diff` only read it.
+- The project workflow graph is database-first: milestone, slice, task, state, and knowledge nodes come from the workflow database. The `.gsd/` projections (STATE.md, milestone ROADMAPs, slice PLANs, KNOWLEDGE.md) are parsed when the database is unavailable or cannot be opened — including when the runtime bridge is not configured. LEARNINGS text is still read from files for learning nodes. It models workflow entities, not source-code relationships. `build` writes `.gsd/graphs/graph.json` atomically and reports its source (`readMetadata` on the MCP build response, `source` in CLI output); `query`/`status`/`diff` are read-only, and `status` reports the graph stale when it was built more than 24 hours ago. The CLI refuses `gsd graph build` against a project whose database schema is newer than the installed GSD.
+- The memory relationship graph owns a different `gsd_graph`: in a native session the name belongs to the memory tool, which walks the `memory_relations` edges of the project database in both directions; its `build` mode is a placeholder that rebuilds nothing today. It is read-only. The standalone MCP server renames it to `gsd_memory_graph` and uses `gsd_graph` for the project workflow graph instead.
+- On `gsd --mode mcp`, session tools and workflow adapter tools merge by name with session tools first: with the GSD extension loaded, `gsd_graph` is the memory graph, and the adapter's project-graph tool of the same name is not exposed.
+- Graph evidence is navigation context. It does not verify work, approve lifecycle transitions, or replace tests.
+
 ## Workflow Templates
 
 | Command | Description |
@@ -465,7 +484,7 @@ available.
 | `gsd install <source> [-l\|--local]` | Install a package from npm, git, a URL, or a local path (e.g. `gsd install npm:@foo/bar`). The default scope is user-wide; `--local` installs into the current project and registers its extensions as project entries. |
 | `gsd remove <source> [-l\|--local]` | Remove a package from the matching user or project scope and unregister its extensions. Use `--local` for a project-local install. |
 | `gsd list` | List installed user/project packages, followed by separate user/project extension sections. |
-| `gsd graph <subcommand>` | Build, query, status, or diff the project knowledge graph. The build reads the workflow database, and the `.gsd/` artifacts only when the project has no database |
+| `gsd graph <subcommand>` | Build, query, status, or diff the project knowledge graph. The build reads the workflow database, and the `.gsd/` artifacts when the workflow database is unavailable. Distinct from `/gsd graphify` — see [Graph Surfaces](#graph-surfaces) |
 | `gsd quick <task>` | Execute a quick task without a TUI (alias for `gsd headless quick <task>`) |
 | `gsd headless --json` | Structured JSONL event stream to stdout for scripting, CI, and troubleshooting (alias: `--output-format stream-json`) |
 | `gsd headless new-milestone` | Create a new milestone from a context file (headless — no TUI required) |
@@ -611,6 +630,8 @@ MCP mode also exposes the GSD workflow adapter tools used by headless runtimes:
 - Session control tools: `gsd_execute`, `gsd_status`, `gsd_result`, `gsd_cancel`, `gsd_resolve_blocker`
 - Project state and read-only tools: `gsd_query`, `gsd_progress`, `gsd_roadmap`, `gsd_history`, `gsd_doctor`, `gsd_captures`, `gsd_knowledge`, `gsd_graph`
 - Interactive form tool: `ask_user_questions`
+
+`gsd_graph` in this list is the project workflow graph from the standalone MCP package. With the GSD extension loaded, `gsd --mode mcp` merges session tools by name first, so the native memory-graph `gsd_graph` wins and this adapter tool is skipped. See [Graph Surfaces](#graph-surfaces) for the full boundary map.
 
 For an auto-mode run, call `gsd_execute` first with an absolute `projectDir`. It returns a `sessionId`; poll `gsd_status` with that `sessionId` until the run finishes, then call `gsd_result` for accumulated output or `gsd_cancel` to stop it. If a client loses the `sessionId`, `gsd_status` can fall back to `projectDir`, or omit both fields only when this MCP server tracks exactly one session. Read-only project tools do not require an active session. With the GSD runtime bridge available, `gsd_progress` reads the project-root database and may run pending migrations and synchronize milestone queue order, matching `gsd headless status`. It uses the `STATE.md` projection only when the database is missing or cannot be opened; failures after a successful open are returned as errors. Without the bridge, the standalone MCP package keeps its projection-reader behavior. `gsd_query`, `gsd_roadmap`, `gsd_doctor`, `gsd_captures`, `gsd_knowledge`, `gsd_history` and the `gsd_graph` build follow the same database-first rule, and a result from the projection fallback says so in `readMetadata`. The graph build still reads LEARNINGS files for learning nodes.
 

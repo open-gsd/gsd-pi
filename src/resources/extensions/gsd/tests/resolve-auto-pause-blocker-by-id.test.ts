@@ -247,6 +247,39 @@ for (const kind of ["missing", "unbound", "legacy-incompatible"]) {
   });
 }
 
+for (const eligible of [true, false]) {
+  test(`read-only file inspection preserves actionable context when eligible=${eligible} without binding or mutation`, async (t) => {
+    const base = makeProject(t);
+    activateSession(base);
+    const description = "Approval required: review the offline fixture result.\nNo verification success is implied.";
+    const requestedAction = "Run /gsd auto after resolving the blocker.";
+    await pauseAuto(undefined, undefined, "consent", { message: description, category: "unknown" });
+    const db = _getAdapter()!;
+    db.prepare("UPDATE project_authority SET project_root_realpath = :root, authority_epoch = 1 WHERE singleton = 1").run({ ":root": base });
+    const blockerId = String(blockerRows()[0]!["blocker_id"]);
+    // SYNTHETIC fixture provenance only: a closed blocker must retain its context,
+    // never regain eligibility. Use the Domain Operation, not an immutable-row edit.
+    if (!eligible) assert.equal(resolveAutoPauseBlockerById(resolutionInput(blockerId, "Fixture decision only")).resolved, true);
+    const before = { counts: durableCounts(), blockers: blockerRows(), pauses: openPauseRows(), execution: executionRows() };
+    const path = join(base, ".gsd", "gsd.db");
+    closeDatabase();
+    const bytes = readFileSync(path);
+    const binding = getDbPath();
+
+    const inspected = inspectAutoPauseBlockerFile(path, base, blockerId);
+    assert.equal(inspected.eligible, eligible);
+    assert.equal(inspected.failure, eligible ? undefined : "blocker-not-open");
+    assert.equal(inspected.blocker?.description, description);
+    assert.equal(inspected.blocker?.requestedAction, requestedAction);
+    assert.equal(_getAdapter(), null, "inspection must not open the writable engine");
+    assert.equal(getDbPath(), binding, "inspection must not bind the engine");
+    assert.deepEqual(readFileSync(path), bytes, "inspection must not write the database");
+
+    openDatabase(path);
+    assert.deepEqual({ counts: durableCounts(), blockers: blockerRows(), pauses: openPauseRows(), execution: executionRows() }, before);
+  });
+}
+
 test("public read-only file inspection and controller cancel/blank evidence never bind a writable connection", async (t) => {
   const base = makeProject(t);
   activateSession(base);

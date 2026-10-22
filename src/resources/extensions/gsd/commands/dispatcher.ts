@@ -37,10 +37,21 @@ function emitVisibleCommandBlock(
   ctx.ui.notify(message, "warning");
 }
 
+export interface HandleGSDCommandOptions {
+  /**
+   * Route an unhandled multi-word command through `/gsd do` keyword matching.
+   * `/gsd do` turns this off when it re-dispatches: its rewritten command can
+   * equal its input (`status d` → `status d`), and falling back again would
+   * loop forever without yielding to I/O.
+   */
+  naturalLanguageFallback?: boolean;
+}
+
 export async function handleGSDCommand(
   args: string,
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
+  options: HandleGSDCommandOptions = {},
 ): Promise<void> {
   const trimmed = (typeof args === "string" ? args : "").trim();
 
@@ -100,7 +111,7 @@ export async function handleGSDCommand(
 
   if (handled) return;
 
-  if (trimmed.includes(" ")) {
+  if (trimmed.includes(" ") && options.naturalLanguageFallback !== false) {
     const { handleDo } = await import("../commands-do.js");
     await handleDo(trimmed, ctx, pi);
     return;

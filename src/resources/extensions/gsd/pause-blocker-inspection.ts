@@ -78,7 +78,12 @@ export interface AutoPauseBlockerResolutionInspection {
   projectId: string;
   revision: number;
   authorityEpoch: number;
-  blocker?: { id: string; kind: string; owner: string; scope: string; origin: string; lifecycleState: string; description: string | null; requestedAction: string | null };
+  blocker?: {
+    id: string; kind: string; owner: string; scope: string; origin: string; lifecycleState: string;
+    /** Persisted human-facing context. Null when a legacy row carries no usable value. */
+    description: string | null;
+    requestedAction: string | null;
+  };
   pause?: { id: string; scope: string };
 }
 
@@ -111,6 +116,7 @@ export function classifyAutoPauseBlockerResolution(
     id: blockerId, kind: String(blocker["blocker_kind"]), owner: String(blocker["resolution_owner"]),
     scope: [blocker["milestone_id"], blocker["slice_id"], blocker["task_id"]].filter(Boolean).join("/"),
     origin: "auto-pause", lifecycleState: String(blocker["lifecycle_status"]),
+    // Fail-soft: legacy/pre-migration readers may surface rows without usable text.
     description: typeof blocker["description"] === "string" ? blocker["description"] : null,
     requestedAction: typeof blocker["requested_action"] === "string" ? blocker["requested_action"] : null,
   };

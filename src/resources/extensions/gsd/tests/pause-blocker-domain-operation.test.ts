@@ -129,8 +129,7 @@ test("slice-prefixed task IDs create and resolve an exact task blocker", (t) => 
   assert.equal(inspected.eligible, true);
   assert.equal(inspected.blocker?.description, "Approval required");
   assert.equal(inspected.blocker?.requestedAction, "Review");
-  assert.equal(classifyAutoPauseBlockerResolution(db(), blockerId).revision, inspected.revision);
-  assert.ok(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), "inspection leaves the pause untouched");
+  assert.ok(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), "inspection is read-only and leaves the pause intact");
   assert.equal(db().prepare(
     "SELECT lifecycle_id FROM workflow_blockers WHERE blocker_id = :id",
   ).get({ ":id": blockerId })?.["lifecycle_id"], findPauseLifecycleId(pause));

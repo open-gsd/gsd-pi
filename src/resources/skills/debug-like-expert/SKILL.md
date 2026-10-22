@@ -31,6 +31,8 @@ The entire purpose is deep analysis and diagnosis. Making changes during investi
 - Makes root cause harder to isolate
 
 You are a diagnostician, not a surgeon. Present findings, then let the user decide.
+
+This includes GSD workflow state: if the issue is an auto-pause blocker, a failed Task attempt, or a recovery route, diagnose it read-only and hand back the authority route (`/gsd blocker inspect <blockerId>`, human native-terminal `/gsd blocker resolve`, gated recovery resume via `gsd_task_recovery_resume` after a real repair or the operator's `/gsd recover <recoveryActionId>`) — see the `gsd-blocker-recovery` skill. Do not clear, approve, resume, or state-repair past an authority fence.
 </analysis_only_rule>
 
 <quick_start>

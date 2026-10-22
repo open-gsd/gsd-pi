@@ -22,23 +22,29 @@ const USAGE = "Usage: /gsd blocker inspect <id>\n" +
 type Snapshot = AutoPauseBlockerResolutionInspection;
 
 function describe(snapshot: Snapshot): string {
-  // Explicit allowlist: include human-facing context, never evidence JSON, request payloads or runtime metadata.
+  // Explicit allowlist: human-facing context plus technical metadata only.
+  // Never stored evidence, request payloads or unrelated runtime metadata.
   return JSON.stringify({
     projectId: snapshot.projectId,
     eligible: snapshot.eligible,
     failure: snapshot.failure,
+    // Clear-only eligibility is not repair, verification success, retry
+    // authority or completion; resolution never resumes or dispatches work.
+    guidance: snapshot.eligible
+      ? "eligible means clear-only resolution is available for this blocker; it is not repair, " +
+        "not Task success, not verification success, no retry authority and not completion. " +
+        "Address the description/requestedAction (or the human decision it names) before resolving; " +
+        "resolving only clears the blocker and its pause and never resumes or retries work."
+      : "Clear-only resolution is unavailable for this blocker (see failure); nothing was changed. " +
+        "Inspect the failure and any persisted blocker context; resolving requires eligibility.",
     blocker: snapshot.blocker && {
       id: snapshot.blocker.id, kind: snapshot.blocker.kind, owner: snapshot.blocker.owner,
       scope: snapshot.blocker.scope, origin: snapshot.blocker.origin,
       lifecycleState: snapshot.blocker.lifecycleState,
-      description: snapshot.blocker.description, requestedAction: snapshot.blocker.requestedAction,
+      description: snapshot.blocker.description,
+      requestedAction: snapshot.blocker.requestedAction,
     },
     pause: snapshot.pause && { id: snapshot.pause.id, scope: snapshot.pause.scope },
-    guidance: snapshot.eligible
-      ? "eligible means clear-only resolution is available, not that the Task succeeded or verification passed. " +
-        "Review the description and requestedAction; only resolve after addressing the blocker or making the required human decision. " +
-        "Resolution never resumes auto-mode, retries work or completes a Task."
-      : "Clear-only resolution is unavailable; inspect failure and the blocker context. No state was changed.",
     revision: snapshot.revision,
     authorityEpoch: snapshot.authorityEpoch,
   }, null, 2);
