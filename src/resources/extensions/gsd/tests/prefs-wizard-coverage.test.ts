@@ -75,6 +75,7 @@ const PREF_SAMPLE_VALUES: Record<string, unknown> = {
   verification_max_retries: 1,
   verification_timeout_ms: 120000,
   verification_source_exclude_paths: ["artifacts/**"],
+  verification_reuse_exec_evidence: false,
   per_unit_cost_cap_usd: 5,
   unit_cost_spike_multiplier: 4,
   search_provider: "web",

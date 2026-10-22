@@ -1485,6 +1485,14 @@ export function validatePreferences(preferences: GSDPreferences): {
     }
   }
 
+  if (preferences.verification_reuse_exec_evidence !== undefined) {
+    if (typeof preferences.verification_reuse_exec_evidence === "boolean") {
+      validated.verification_reuse_exec_evidence = preferences.verification_reuse_exec_evidence;
+    } else {
+      errors.push("verification_reuse_exec_evidence must be a boolean");
+    }
+  }
+
   if (preferences.verification_source_exclude_paths !== undefined) {
     if (Array.isArray(preferences.verification_source_exclude_paths)) {
       const allStrings = preferences.verification_source_exclude_paths.every(

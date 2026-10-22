@@ -4,6 +4,7 @@
 // First non-empty source wins.
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash, type Hash } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -26,6 +27,7 @@ import { redactSecrets } from "./redact-secrets.js";
 import { rewriteCommandWithRtk } from "../shared/rtk.js";
 import { getPathValue, prependPathEntry, resolvePathCandidates } from "../shared/rtk-shared.js";
 import { normalizePythonCommand, resolveVenvInterpreter, venvBinDirectory, formatPythonInvocation } from "./python-resolver.js";
+import { execRunSucceeded, type ExecRunRow } from "./db/writers/exec-runs.js";
 import {
   isWorkflowSurfaceAliasTool,
   isWorkflowToolSurfaceName,
@@ -227,6 +229,46 @@ const INTERPRETER_PREFIX_RE = /^(bash|sh|zsh|node|python3?|ts-node|tsx):\s*/;
 const ITEM_WRAPPER_RE = /<\/?item>/gi;
 
 /**
+ * How one Verify line classifies under the gate's task-plan branch. Shared by
+ * command discovery and `runnableTaskPlanCommands` so the two can never drift.
+ */
+type TaskPlanCandidateClass = "command" | "tool-prose" | "prose" | "unsafe";
+
+function classifyTaskPlanCandidate(normalized: string): TaskPlanCandidateClass {
+  const validation = validateVerificationCommand(normalized);
+  if (validation.ok) return "command";
+  if (isGsdWorkflowToolInvocation(normalized)) {
+    // A GSD tool name describes tool-verified evidence, not a runnable
+    // shell command — route to the task-plan-prose fallback instead of
+    // executing exit-127 noise that false-fails the task (#1628).
+    return "tool-prose";
+  }
+  if (validation.reason === "does not look like a runnable command") return "prose";
+  if (splitUnquotedStatements(normalized).some(s => !isLikelyCommand(s))) {
+    // Rejected for unsafe syntax, but at least one `;`-separated clause reads
+    // as prose — treat the whole candidate as a description, not a command.
+    return "prose";
+  }
+  return "unsafe";
+}
+
+/**
+ * The runnable shell commands of a Task Verify field, exactly as the gate's
+ * task-plan branch discovers them (same splitting, interpreter-prefix strip
+ * and validation). A `gsd_exec` run of one of these is a candidate for reuse
+ * in the gate; anything else never is.
+ */
+export function runnableTaskPlanCommands(verify: string): string[] {
+  if (!verify || !verify.trim()) return [];
+  const commands: string[] = [];
+  for (const candidate of splitUnquotedLines(verify.replace(ITEM_WRAPPER_RE, "\n"))) {
+    const normalized = candidate.replace(INTERPRETER_PREFIX_RE, "").trim();
+    if (classifyTaskPlanCandidate(normalized) === "command") commands.push(normalized);
+  }
+  return commands;
+}
+
+/**
  * Discover verification commands using the first-non-empty-wins strategy (D003):
  *   1. Task plan verify field (split on newlines)
  *   2. Explicit preference commands
@@ -251,19 +293,10 @@ export function discoverCommands(options: DiscoverCommandsOptions): DiscoveredCo
     const candidates = splitUnquotedLines(taskPlanVerify.replace(ITEM_WRAPPER_RE, "\n"));
     for (const candidate of candidates) {
       const normalized = candidate.replace(INTERPRETER_PREFIX_RE, "").trim();
-      const validation = validateVerificationCommand(normalized);
-      if (validation.ok) {
+      const classification = classifyTaskPlanCandidate(normalized);
+      if (classification === "command") {
         commands.push(normalized);
-      } else if (isGsdWorkflowToolInvocation(normalized)) {
-        // A GSD tool name describes tool-verified evidence, not a runnable
-        // shell command — route to the task-plan-prose fallback instead of
-        // executing exit-127 noise that false-fails the task (#1628).
-        hasTaskPlanProse = true;
-      } else if (validation.reason === "does not look like a runnable command") {
-        hasTaskPlanProse = true;
-      } else if (splitUnquotedStatements(normalized).some(s => !isLikelyCommand(s))) {
-        // Rejected for unsafe syntax, but at least one `;`-separated clause reads
-        // as prose — treat the whole candidate as a description, not a command.
+      } else if (classification === "tool-prose" || classification === "prose") {
         hasTaskPlanProse = true;
       } else {
         hasUnsafeTaskPlanCommand = true;
@@ -1207,6 +1240,14 @@ export interface RunVerificationGateOptions {
   taskEvidence?: TaskVerificationEvidence[];
   /** Per-command timeout in ms. Defaults to 120 000 (2 minutes). */
   commandTimeoutMs?: number;
+  /**
+   * Opt-in reuse of the Attempt's own `gsd_exec` runs (#2982). Only the
+   * single-target host gate passes this; when set, the gate reuses a recorded
+   * run for every discovered command only under its own shell form, child
+   * environment, rewrites, source revision and timeout — one miss runs
+   * everything as today.
+   */
+  reuseExecRuns?: VerificationExecRunReuse;
 }
 
 export interface VerificationTarget {
@@ -1235,6 +1276,255 @@ export function verificationChildEnvironment(cwd: string): NodeJS.ProcessEnv {
     if (posixTools) appendPathEntry(env, posixTools);
   }
   return env;
+}
+
+/** The one way the gate runs a Verify command on a POSIX host (#2982). */
+export interface VerificationCommandInvocation {
+  /** Authored command after the gate's own rewrites (rtk, python normalization). */
+  rewrittenCommand: string;
+  program: string;
+  args: string[];
+  cwd: string;
+  /** The gate's child environment — the exact variables and values. */
+  env: NodeJS.ProcessEnv;
+  /**
+   * Contract digest: sha256 over program, argv, folder and every environment
+   * variable and value. Two runs with the same digest ran the same way.
+   */
+  digest: string;
+}
+
+/**
+ * Length-prefixed field hash, same shape as the source-snapshot hash: labels
+ * and byte lengths stop boundary ambiguities between concatenated values.
+ */
+function contractField(hash: Hash, label: string, value: string): void {
+  hash.update(label);
+  hash.update("\0");
+  hash.update(String(Buffer.byteLength(value, "utf8")));
+  hash.update("\0");
+  hash.update(value, "utf8");
+}
+
+/** The contract digest over everything about how a Verify command would run. */
+function verificationContractDigest(parts: {
+  program: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}): string {
+  const hash = createHash("sha256");
+  contractField(hash, "program", parts.program);
+  for (const [index, arg] of parts.args.entries()) contractField(hash, `arg:${index}`, arg);
+  contractField(hash, "cwd", parts.cwd);
+  for (const key of Object.keys(parts.env).sort()) {
+    const value = parts.env[key];
+    // spawnSync ignores non-string environment values; so does the contract.
+    if (typeof value !== "string") continue;
+    contractField(hash, `env:${key}`, value);
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+/**
+ * The gate's exact invocation of one Verify command, built with the gate's own
+ * steps (rtk rewrite, shell choice, python normalization, child environment).
+ * On a POSIX host `runVerificationGate` spawns exactly this, so the digest
+ * describes what the gate runs. Git Bash (script file) and cmd have no stable
+ * contract and never reuse: this returns null there, and for the POSIX-authored
+ * command that a cmd-only host cannot run.
+ */
+export function verificationCommandInvocation(
+  command: string,
+  cwd: string,
+  platform: NodeJS.Platform = process.platform,
+): VerificationCommandInvocation | null {
+  if (platform === "win32") return null;
+  const authoredCommand = rewriteCommandWithRtk(command);
+  // POSIX hosts always run the POSIX shell, and the cmd-only package-manager
+  // rewrite does not apply to it — the same pipeline as the gate's run loop,
+  // including the native python format it formats that shell's checks with.
+  const rewrittenCommand = normalizePythonCommand(authoredCommand, cwd, "native");
+  const env = verificationChildEnvironment(cwd);
+  const args = POSIX_VERIFICATION_SHELL.argsFor(rewrittenCommand);
+  return {
+    rewrittenCommand,
+    program: POSIX_VERIFICATION_SHELL.bin,
+    args,
+    cwd,
+    env,
+    digest: verificationContractDigest({
+      program: POSIX_VERIFICATION_SHELL.bin,
+      args,
+      cwd,
+      env,
+    }),
+  };
+}
+
+/**
+ * What a gsd_exec run stores in `exec_runs.run_contract`: the invocation
+ * identity without the environment (which may hold credentials) — the digest
+ * covers it. The gate reuses a run only when this digest equals the digest of
+ * its own invocation of the same command.
+ */
+export function execRunContractStorage(invocation: VerificationCommandInvocation): string {
+  return JSON.stringify({
+    program: invocation.program,
+    args: invocation.args,
+    cwd: invocation.cwd,
+    digest: invocation.digest,
+  });
+}
+
+/**
+ * The digest recorded in a stored `exec_runs.run_contract`, or null.
+ */
+function storedExecRunContractDigest(runContract: string | null): string | null {
+  if (!runContract) return null;
+  try {
+    const parsed = JSON.parse(runContract) as { digest?: unknown };
+    return typeof parsed.digest === "string" && parsed.digest.startsWith("sha256:")
+      ? parsed.digest
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The per-stream output hash recorded on a contract-bearing exec run
+ * (#2982). Single source for the writer (exec-tool) and the verifier
+ * (verifiedRunOutput): the two must never drift.
+ */
+export function execRunOutputHash(stdout: Buffer, stderr: Buffer): string {
+  const digest = (buffer: Buffer): string => createHash("sha256").update(buffer).digest("hex");
+  return `sha256s:${digest(stdout)}:${digest(stderr)}`;
+}
+
+/**
+ * The recorded output of a run, verified against the row's output hash. A run
+ * whose output files are gone or no longer match proves nothing and never
+ * reuses: the gate cannot know what it produced. Classification reads the
+ * files through the same bounded reader a fresh spawn's output goes through,
+ * so both paths see the same text.
+ */
+function verifiedRunOutput(run: ExecRunRow): { stdout: string; stderr: string } | null {
+  const dir = join(run.cwd, ".gsd", "exec");
+  const stdoutPath = join(dir, `${run.id}.stdout`);
+  const stderrPath = join(dir, `${run.id}.stderr`);
+  let stdoutBuffer: Buffer;
+  let stderrBuffer: Buffer;
+  try {
+    stdoutBuffer = readFileSync(stdoutPath);
+    stderrBuffer = readFileSync(stderrPath);
+  } catch {
+    return null;
+  }
+  // Contract runs (#2982) hash each stream separately: moving text between
+  // the two persisted files changes the hash. Legacy rows keep the
+  // concatenated form and never carry a contract, so they never reach here.
+  const expected = execRunOutputHash(stdoutBuffer, stderrBuffer);
+  const legacy = `sha256:${createHash("sha256").update(stdoutBuffer).update(stderrBuffer).digest("hex")}`;
+  if (run.output_hash !== expected && run.output_hash !== legacy) return null;
+  // A run whose persisted output was transformed after the child wrote it —
+  // capped by the sandbox or bounded at persist time — is not the artifact a
+  // fresh spawn would have captured; the gate refuses to reason over it.
+  if (
+    stdoutBuffer.includes("[truncated: stdout cap reached]")
+    || stderrBuffer.includes("[truncated: stderr cap reached]")
+    || stdoutBuffer.includes("[truncated: verification output cap reached]")
+    || stderrBuffer.includes("[truncated: verification output cap reached]")
+  ) {
+    return null;
+  }
+  return {
+    stdout: readBoundedCommandOutput(stdoutPath),
+    stderr: readBoundedCommandOutput(stderrPath),
+  };
+}
+
+/** Host-recorded exec runs offered to the gate for reuse (#2982). */
+export interface VerificationExecRunReuse {
+  /** The Attempt's recorded runs, oldest first. */
+  runs: readonly ExecRunRow[];
+  /** The aggregate source revision under test. */
+  sourceRevision: string;
+}
+
+/**
+ * Reuse the Attempt's own exec runs for every discovered command, or nothing.
+ * Each command needs a run whose stored contract digest equals the digest of
+ * the gate's own invocation of it — the newest such run, so a newer failure
+ * of the command blocks reuse of an older pass — that succeeded with a clean
+ * exit, ran on exactly the source revision under test, finished inside the
+ * gate's timeout, and whose recorded output still verifies and classifies
+ * exactly as a fresh spawn's would. One miss runs every command as today.
+ */
+function tryReuseExecRuns(
+  commands: readonly string[],
+  reuse: VerificationExecRunReuse,
+  cwd: string,
+  commandTimeoutMs: number | undefined,
+  discoverySource: VerificationResult["discoverySource"],
+): VerificationResult | null {
+  // Newest run per contract digest. Two runs of one command sharing a
+  // timestamp are conflicting observations — refuse and re-run.
+  const newestByDigest = new Map<string, { run: ExecRunRow; ambiguous: boolean }>();
+  for (const run of reuse.runs) {
+    const digest = storedExecRunContractDigest(run.run_contract);
+    if (!digest) continue;
+    const current = newestByDigest.get(digest);
+    if (!current) {
+      newestByDigest.set(digest, { run, ambiguous: false });
+    } else if (run.started_at > current.run.started_at) {
+      newestByDigest.set(digest, { run, ambiguous: false });
+    } else if (run.started_at === current.run.started_at) {
+      current.ambiguous = true;
+    }
+  }
+  const limitMs = commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const checks: VerificationCheck[] = [];
+  for (const command of commands) {
+    const invocation = verificationCommandInvocation(command, cwd);
+    const entry = invocation ? newestByDigest.get(invocation.digest) : undefined;
+    const run = entry && !entry.ambiguous ? entry.run : undefined;
+    if (
+      !run
+      || !execRunSucceeded(run)
+      || run.source_revision !== reuse.sourceRevision
+      || run.duration_ms >= limitMs
+    ) {
+      return null;
+    }
+    // A reused check must classify like a fresh spawn: exit 0 with a
+    // "command not found" stderr is an execution fault the fresh gate would
+    // report, never a pass.
+    const output = verifiedRunOutput(run);
+    if (!output) return null;
+    if (isShellCommandNotFound(0, output.stderr) || isShellParseFailure(0, output.stdout, output.stderr)) {
+      return null;
+    }
+    checks.push({
+      command,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      durationMs: run.duration_ms,
+      reusedRun: {
+        runId: run.id,
+        startedAt: run.started_at,
+        durationMs: run.duration_ms,
+        outputHash: run.output_hash,
+      },
+    });
+  }
+  return {
+    passed: true,
+    checks,
+    discoverySource,
+    timestamp: Date.now(),
+  };
 }
 
 /**
@@ -1561,13 +1851,34 @@ export async function runVerificationGate(options: RunVerificationGateOptions): 
     };
   }
 
+  if (options.reuseExecRuns) {
+    const reused = tryReuseExecRuns(commands, options.reuseExecRuns, options.cwd, options.commandTimeoutMs, source);
+    if (reused) {
+      process.stderr.write(
+        `verification-gate: reusing ${reused.checks.length} recorded exec run(s) for this verification: `
+        + reused.checks.map((check) => `${check.command} (run ${check.reusedRun?.runId})`).join(", ")
+        + "\n",
+      );
+      return reused;
+    }
+    process.stderr.write(
+      "verification-gate: no recorded exec run matches this gate's invocation for every command; running the verification\n",
+    );
+  }
+
   const checks: VerificationCheck[] = [];
   const childEnv = verificationChildEnvironment(options.cwd);
   const hostShell = resolveVerificationShell(childEnv);
 
   for (const command of commands) {
     const start = Date.now();
-    const authoredCommand = rewriteCommandWithRtk(command);
+    // One canonical invocation on a POSIX host (#2982): the spawn below uses
+    // exactly what verificationCommandInvocation computes, so a contract
+    // digest can never drift from what the gate actually runs.
+    const posixInvocation = hostShell.kind === "posix"
+      ? verificationCommandInvocation(command, options.cwd)
+      : null;
+    const authoredCommand = posixInvocation?.rewrittenCommand ?? rewriteCommandWithRtk(command);
     if (hostShell.kind === "cmd" && !looksLikeCmdCommand(authoredCommand) && looksLikePosixAuthoredCommand(authoredCommand)) {
       checks.push({
         command: authoredCommand,
@@ -1583,7 +1894,7 @@ export async function runVerificationGate(options: RunVerificationGateOptions): 
     // for that shell — a native `D:\...\python.exe` must not drag a POSIX
     // `python -c '...'` check onto cmd, where its quotes would be literal.
     const shell = shellForCommand(hostShell, authoredCommand);
-    const pythonNormalized = normalizePythonCommand(
+    const pythonNormalized = posixInvocation?.rewrittenCommand ?? normalizePythonCommand(
       authoredCommand,
       options.cwd,
       shell.kind === "git-bash" ? "posix" : "native",
@@ -1602,9 +1913,12 @@ export async function runVerificationGate(options: RunVerificationGateOptions): 
           writeFileSync(commandPath, `set -o pipefail\n${rewrittenCommand}\n`, "utf-8");
           return [commandPath];
         })()
-      // Pass the command string as an argument to the shell explicitly
-      // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
-      : shell.argsFor(rewrittenCommand);
+      // On a POSIX host the canonical invocation's argv is the spawn's argv
+      // (#2982); otherwise build the shell's own args.
+      : posixInvocation?.args
+        // Pass the command string as an argument to the shell explicitly
+        // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
+        ?? shell.argsFor(rewrittenCommand);
     const stdoutPath = join(outputDir, "stdout");
     const stderrPath = join(outputDir, "stderr");
     const stdoutFd = openSync(stdoutPath, "w");

@@ -112,8 +112,10 @@ describe("host exec runs are database rows", () => {
     assert.equal(run?.attempt_ref, null);
   });
 
-  test("a run the host cannot record still returns its exit code and output, with a warning", async () => {
-    // The output file is gone before the host hashes it, so the record step fails.
+  test("a run whose output vanishes before hashing is still recorded, and its output can never verify", async () => {
+    // The output file is gone before the host hashes it. The observation must
+    // not vanish with it: the row is recorded with a hash that matches no
+    // file, so verification reuse can never reason over its output (#2982).
     const result = await executeGsdExec({ script: "printf done; exit 3" }, {
       baseDir: base,
       preferences: null,
@@ -128,9 +130,9 @@ describe("host exec runs are database rows", () => {
     assert.equal(result.details?.exit_code, 3);
     assert.match(text, /exit=3/);
     assert.match(text, /done/);
-    assert.match(text, /did not record this run: ENOENT/);
-    assert.match(String(result.details?.run_not_recorded), /ENOENT/);
-    assert.equal(readExecRun(String(result.details?.id)), null);
+    const row = readExecRun(String(result.details?.id));
+    assert.ok(row, "the observation is recorded even when its output is gone");
+    assert.match(row.output_hash, /^sha256:[0-9a-f]{64}$/);
   });
 
   test("gsd_uat_exec stores the slice and the run-uat attempt of the run", async () => {
