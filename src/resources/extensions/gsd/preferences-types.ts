@@ -89,7 +89,7 @@ export interface DiscussionPreferences {
 export interface ContextModeConfig {
   /** Master switch. Default: true (opt-out via `enabled: false`). */
   enabled?: boolean;
-  /** Per-invocation timeout in milliseconds. Defaults to verification_timeout_ms. Range: 1_000–600_000. */
+  /** Per-invocation timeout in milliseconds. Defaults to verification_timeout_ms. Range: 1_000–3_600_000. */
   exec_timeout_ms?: number;
   /** Cap on persisted stdout bytes per invocation. Default: 1_048_576 (1 MiB). Range: 4_096–16_777_216. */
   exec_stdout_cap_bytes?: number;

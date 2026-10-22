@@ -51,6 +51,8 @@ import {
   _summarySaveSchemaForTest,
   _runSerializedWorkflowOperationForTest,
   _sliceCompleteSchemaForTest,
+  EXEC_TOOL_DEADLINE_MARGIN_MS,
+  execOperationDeadlineMs,
 } from "./workflow-tools.ts";
 
 function makeTmpBase(): string {
@@ -4312,5 +4314,208 @@ describe("readProjectProgressViaBridge", () => {
 
     assert.equal(result, null);
     assert.equal(existsSync(dbPath), true, "a locked read must preserve the existing DB");
+  });
+});
+
+// ── One-hour exec timeout ceiling + per-call operation deadline (issue #2981) ──
+
+describe("execOperationDeadlineMs", () => {
+  const sandboxTimeouts = { default_timeout_ms: 120_000, clamp_timeout_ms: 3_600_000 };
+
+  it("adds a fixed margin on top of the requested timeout", () => {
+    assert.equal(execOperationDeadlineMs(1_800_000, sandboxTimeouts), 1_800_000 + EXEC_TOOL_DEADLINE_MARGIN_MS);
+  });
+
+  it("falls back to the preferences default when no timeout is requested", () => {
+    assert.equal(execOperationDeadlineMs(undefined, sandboxTimeouts), 120_000 + EXEC_TOOL_DEADLINE_MARGIN_MS);
+  });
+
+  it("clamps an above-ceiling request to the sandbox ceiling plus margin", () => {
+    assert.equal(execOperationDeadlineMs(10_000_000, sandboxTimeouts), 3_600_000 + EXEC_TOOL_DEADLINE_MARGIN_MS);
+  });
+});
+
+describe("runSerializedWorkflowOperation per-call deadline", () => {
+  it("honors a per-call deadline above the server-wide default", async (t) => {
+    const previousTimeout = process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+    t.after(() => {
+      if (previousTimeout === undefined) delete process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+      else process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = previousTimeout;
+    });
+    process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "10";
+    const value = await _runSerializedWorkflowOperationForTest(async () => {
+      await delay(50);
+      return "slow-but-covered";
+    }, { timeoutMs: 60_000 });
+    assert.equal(value, "slow-but-covered");
+  });
+
+  it("rejects on the per-call deadline and keeps the queue held until the operation settles", async (t) => {
+    const previousTimeout = process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+    const events: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstCanFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    t.after(() => {
+      releaseFirst?.();
+      if (previousTimeout === undefined) delete process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+      else process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = previousTimeout;
+    });
+
+    process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "600000"; // server default must not govern this call
+    const first = _runSerializedWorkflowOperationForTest(async () => {
+      events.push("first-start");
+      await firstCanFinish;
+      return "first";
+    }, { timeoutMs: 20 });
+
+    await assert.rejects(first, /Workflow operation exceeded 20ms deadline/);
+
+    let secondSettled = false;
+    const second = _runSerializedWorkflowOperationForTest(async () => {
+      events.push("second-start");
+      return "second";
+    }).then((value) => {
+      secondSettled = true;
+      return value;
+    });
+    t.after(() => second.catch(() => undefined));
+
+    await delay(30);
+    assert.equal(secondSettled, false, "retry must stay queued while the timed-out operation runs");
+    releaseFirst?.();
+    assert.equal(await second, "second");
+  });
+});
+
+describe("exec tools one-hour timeout ceiling (issue #2981)", () => {
+  function registeredTool(name: string) {
+    const server = makeMockServer();
+    registerWorkflowTools(server as any);
+    const tool = server.tools.find((t) => t.name === name);
+    assert.ok(tool, `${name} should be registered`);
+    return tool!;
+  }
+
+  it("gsd_exec accepts timeout_ms up to the one-hour ceiling", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    const tool = registeredTool("gsd_exec");
+
+    for (const timeoutMs of [590_000, 1_800_000, 3_600_000]) {
+      const result = await tool.handler({
+        projectDir: base,
+        command: "echo long-ok",
+        timeout_ms: timeoutMs,
+      });
+      const record = result as any;
+      assert.equal(record.isError, false, `timeout_ms=${timeoutMs} should run, got: ${record.content?.[0]?.text}`);
+      assert.match(record.content[0].text as string, /long-ok/);
+    }
+  });
+
+  it("gsd_uat_exec accepts timeout_ms up to the one-hour ceiling", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    const tool = registeredTool("gsd_uat_exec");
+
+    const result = await tool.handler({
+      projectDir: base,
+      milestoneId: "M001",
+      sliceId: "S01",
+      checkId: "UAT-2981",
+      intent: "uat-runtime-check",
+      command: "echo UAT_LONG_OK",
+      timeout_ms: 1_800_000,
+    });
+
+    const record = result as any;
+    assert.equal(record.isError, false, `expected success, got: ${record.content?.[0]?.text}`);
+    assert.match(record.content[0].text as string, /UAT_LONG_OK/);
+  });
+
+  it("rejects timeout_ms above the one-hour ceiling on both exec tools", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+
+    for (const name of ["gsd_exec", "gsd_uat_exec"]) {
+      const tool = registeredTool(name);
+      const args: Record<string, unknown> = name === "gsd_exec"
+        ? { projectDir: base, command: "echo never-runs", timeout_ms: 3_600_001 }
+        : {
+            projectDir: base,
+            milestoneId: "M001",
+            sliceId: "S01",
+            checkId: "UAT-2981",
+            intent: "uat-runtime-check",
+            command: "echo never-runs",
+            timeout_ms: 3_600_001,
+          };
+      const result = await tool.handler(args);
+      const record = result as any;
+      assert.equal(record.isError, true, `${name} must reject timeout_ms above the ceiling`);
+      assert.doesNotMatch(record.content[0].text as string, /never-runs/, "the command must not run");
+    }
+  });
+
+  it("gsd_exec bounds its serialized-operation deadline by the command timeout, not the server default", async (t) => {
+    const base = makeTmpBase();
+    const previousTimeout = process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+    t.after(() => {
+      if (previousTimeout === undefined) delete process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+      else process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = previousTimeout;
+      cleanup(base);
+    });
+    // A server-wide deadline far below the command duration: only the
+    // per-call deadline derived from timeout_ms can carry this call.
+    process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "20";
+    const tool = registeredTool("gsd_exec");
+
+    const result = await tool.handler({
+      projectDir: base,
+      command: "sleep 0.3",
+      // Within the old 600s schema cap so this isolates the deadline wiring
+      // from the schema-raising change.
+      timeout_ms: 590_000,
+    });
+
+    const record = result as any;
+    assert.equal(
+      record.isError,
+      false,
+      `the per-call deadline should cover the command, got: ${record.content?.[0]?.text}`,
+    );
+    assert.equal(record.structuredContent?.exit_code, 0);
+  });
+
+  it("gsd_uat_exec bounds its serialized-operation deadline by the command timeout too", async (t) => {
+    const base = makeTmpBase();
+    const previousTimeout = process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+    t.after(() => {
+      if (previousTimeout === undefined) delete process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+      else process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = previousTimeout;
+      cleanup(base);
+    });
+    process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "20";
+    const tool = registeredTool("gsd_uat_exec");
+
+    const result = await tool.handler({
+      projectDir: base,
+      milestoneId: "M001",
+      sliceId: "S01",
+      checkId: "UAT-2981",
+      intent: "uat-runtime-check",
+      command: "sleep 0.3",
+      timeout_ms: 590_000,
+    });
+
+    const record = result as any;
+    assert.equal(
+      record.isError,
+      false,
+      `the per-call deadline should cover the command, got: ${record.content?.[0]?.text}`,
+    );
+    assert.equal(record.structuredContent?.exit_code, 0);
   });
 });

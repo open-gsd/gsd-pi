@@ -133,6 +133,40 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
   return Math.floor(value);
 }
 
+/**
+ * Sandbox timeout options for a prospective exec call, classified the same way
+ * executeGsdExec classifies the workload (verification-oriented calls inherit
+ * verification_timeout_ms; unrelated calls keep the short sandbox default).
+ * Exported so the workflow MCP handlers can size their serialized-operation
+ * deadline to the exact bound the sandbox will apply (issue #2981).
+ */
+export function buildExecOptionsForParams(
+  baseDir: string,
+  params: ExecToolParams,
+  preferences: ExecToolPreferences | null | undefined,
+  uat = false,
+): ExecSandboxOptions {
+  if (uat) {
+    // Classify on the normalized params — the injected UAT purpose names the
+    // checkId, which is part of what makes a UAT run verification-oriented.
+    const normalized = normalizeUatExecParams(params as UatExecToolParams);
+    if ("error" in normalized) return buildExecOptions(baseDir, preferences, undefined, false);
+    return buildExecOptions(
+      baseDir,
+      preferences,
+      undefined,
+      isVerificationWorkload(normalized.params, normalized.params.script),
+    );
+  }
+  const script = normalizeScript(params);
+  return buildExecOptions(
+    baseDir,
+    preferences,
+    undefined,
+    typeof script === "string" && isVerificationWorkload(params, script),
+  );
+}
+
 function isEnabled(prefs: ExecToolDeps["preferences"]): boolean {
   return isContextModeEnabled(prefs);
 }
@@ -235,6 +269,71 @@ interface UatExecBinding {
   milestoneId: string;
   sliceId: string;
   checkId: string;
+}
+
+interface NormalizedUatExecError {
+  error: ToolExecutionResult;
+  params?: never;
+  uat?: never;
+}
+
+interface NormalizedUatExecOk {
+  error?: never;
+  /** Exactly the params executeGsdExec will run (script resolved, purpose/metadata injected). */
+  params: ExecToolParams & { script: string; purpose: string; metadata: Record<string, unknown> };
+  uat: UatExecBinding;
+  intent: UatExecIntent;
+}
+
+/**
+ * Validate and normalize gsd_uat_exec params into the exact shape
+ * executeGsdExec runs: script resolved, purpose defaulted from the UAT
+ * coordinates, typed metadata attached. Shared with the workflow MCP
+ * handlers so deadline sizing classifies the workload on the same params
+ * the executor uses (issue #2981).
+ */
+function normalizeUatExecParams(params: UatExecToolParams): NormalizedUatExecError | NormalizedUatExecOk {
+  const milestoneId = normalizeRequiredString(params.milestoneId, "milestoneId");
+  if (isToolExecutionResult(milestoneId)) return { error: milestoneId };
+  const sliceId = normalizeRequiredString(params.sliceId, "sliceId");
+  if (isToolExecutionResult(sliceId)) return { error: sliceId };
+  const checkId = normalizeRequiredString(params.checkId, "checkId");
+  if (isToolExecutionResult(checkId)) return { error: checkId };
+  const intent = normalizeUatIntent(params.intent);
+  if (isToolExecutionResult(intent)) return { error: intent };
+  const script = normalizeScript(params);
+  if (isToolExecutionResult(script)) return { error: script };
+  const rejected = rejectUatScript(script);
+  if (rejected) {
+    return {
+      error: {
+        content: [{ type: "text", text: `Error: gsd_uat_exec blocked command — ${rejected}` }],
+        details: { operation: "gsd_uat_exec", error: "uat_exec_policy_block", reason: rejected },
+        isError: true,
+      },
+    };
+  }
+  return {
+    params: {
+      ...params,
+      script,
+      purpose: typeof params.purpose === "string" && params.purpose.trim().length > 0
+        ? params.purpose
+        : `UAT ${milestoneId}/${sliceId}/${checkId} (${intent})`,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId,
+        sliceId,
+        checkId,
+        intent,
+        ...(typeof params.expected === "string" && params.expected.trim().length > 0
+          ? { expected: params.expected.trim() }
+          : {}),
+      },
+    },
+    uat: { milestoneId, sliceId, checkId },
+    intent,
+  };
 }
 
 /**
@@ -361,55 +460,20 @@ export async function executeUatExec(
   params: UatExecToolParams,
   deps: ExecToolDeps,
 ): Promise<ToolExecutionResult> {
-  const milestoneId = normalizeRequiredString(params.milestoneId, "milestoneId");
-  if (isToolExecutionResult(milestoneId)) return milestoneId;
-  const sliceId = normalizeRequiredString(params.sliceId, "sliceId");
-  if (isToolExecutionResult(sliceId)) return sliceId;
-  const checkId = normalizeRequiredString(params.checkId, "checkId");
-  if (isToolExecutionResult(checkId)) return checkId;
-  const intent = normalizeUatIntent(params.intent);
-  if (isToolExecutionResult(intent)) return intent;
-  const script = normalizeScript(params);
-  if (isToolExecutionResult(script)) return script;
-  const rejected = rejectUatScript(script);
-  if (rejected) {
-    return {
-      content: [{ type: "text", text: `Error: gsd_uat_exec blocked command — ${rejected}` }],
-      details: { operation: "gsd_uat_exec", error: "uat_exec_policy_block", reason: rejected },
-      isError: true,
-    };
-  }
+  const normalized = normalizeUatExecParams(params);
+  if (normalized.error) return normalized.error;
+  const { uat, intent } = normalized;
 
-  const result = await executeGsdExec(
-    {
-      ...params,
-      script,
-      purpose: typeof params.purpose === "string" && params.purpose.trim().length > 0
-        ? params.purpose
-        : `UAT ${milestoneId}/${sliceId}/${checkId} (${intent})`,
-      metadata: {
-        kind: "uat_exec",
-        milestoneId,
-        sliceId,
-        checkId,
-        intent,
-        ...(typeof params.expected === "string" && params.expected.trim().length > 0
-          ? { expected: params.expected.trim() }
-          : {}),
-      },
-    },
-    deps,
-    { milestoneId, sliceId, checkId },
-  );
+  const result = await executeGsdExec(normalized.params, deps, uat);
   const details = result.details ?? {};
   return {
     ...result,
     details: {
       ...details,
       operation: "gsd_uat_exec",
-      milestoneId,
-      sliceId,
-      checkId,
+      milestoneId: uat.milestoneId,
+      sliceId: uat.sliceId,
+      checkId: uat.checkId,
       intent,
     },
   };

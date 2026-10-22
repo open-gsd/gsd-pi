@@ -476,10 +476,25 @@ test('validatePreferences: rejects invalid context_mode preference values', () =
   } as any);
   assert.ok(result.errors.length > 0);
   assert.ok(result.errors.includes('context_mode.enabled must be a boolean'));
-  assert.ok(result.errors.includes('context_mode.exec_timeout_ms must be a number between 1000 and 600000'));
+  assert.ok(result.errors.includes('context_mode.exec_timeout_ms must be a number between 1000 and 3600000'));
   assert.ok(result.errors.includes('context_mode.exec_stdout_cap_bytes must be a number between 4096 and 16777216'));
   assert.ok(result.errors.includes('context_mode.exec_digest_chars must be a number between 0 and 4000'));
   assert.ok(result.errors.includes('context_mode.exec_env_allowlist must be an array of valid env var names'));
+});
+
+test('validatePreferences: accepts context_mode.exec_timeout_ms up to the one-hour ceiling (issue #2981)', () => {
+  const accepted = validatePreferences({
+    context_mode: { enabled: true, exec_timeout_ms: 3_600_000 },
+  } as any);
+  assert.deepEqual(accepted.errors, [], 'exactly one hour must validate');
+
+  const rejected = validatePreferences({
+    context_mode: { enabled: true, exec_timeout_ms: 3_600_001 },
+  } as any);
+  assert.ok(
+    rejected.errors.includes('context_mode.exec_timeout_ms must be a number between 1000 and 3600000'),
+    'above one hour must be rejected',
+  );
 });
 
 test('isContextModeEnabled: defaults to true; only explicit false disables', () => {

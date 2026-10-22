@@ -1191,8 +1191,8 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
       if (cmode.exec_timeout_ms !== undefined) {
         const t = cmode.exec_timeout_ms;
-        if (typeof t === "number" && t >= 1000 && t <= 600_000) validCmode.exec_timeout_ms = Math.floor(t);
-        else errors.push("context_mode.exec_timeout_ms must be a number between 1000 and 600000");
+        if (typeof t === "number" && t >= 1000 && t <= 3_600_000) validCmode.exec_timeout_ms = Math.floor(t);
+        else errors.push("context_mode.exec_timeout_ms must be a number between 1000 and 3600000");
       }
       if (cmode.exec_stdout_cap_bytes !== undefined) {
         const b = cmode.exec_stdout_cap_bytes;

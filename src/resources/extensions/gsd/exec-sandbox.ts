@@ -106,7 +106,11 @@ const ALWAYS_FORWARD_ENV = ["PATH", "HOME"] as const;
 // so this sandbox can never drift from the canonical kill path it delegates to.
 
 export const EXEC_DEFAULTS = {
-  clampTimeoutMs: 600_000,
+  // Issue #2981: a verification command can legitimately run up to an hour
+  // (the unit's auto_supervisor.hard_timeout_minutes is the real bound), and
+  // host verification (verification_timeout_ms) has no cap — so the sandbox
+  // ceiling must not be the thing that forbids what the gate allows.
+  clampTimeoutMs: 3_600_000,
   defaultTimeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
   stdoutCapBytes: 1_048_576,
   stderrCapBytes: 262_144,
