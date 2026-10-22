@@ -622,10 +622,11 @@ test("refreshRecoveryDbForArtifact refuses execute-task recovery after a termina
   assert.ok(result.message.includes(route.recoveryActionId));
   assert.ok(result.message.includes(`/gsd recover ${route.recoveryActionId}`));
   assert.match(result.message, /after.*repair/i);
+  assert.match(result.message, /gsd_task_recovery_resume with concrete repair evidence/);
   assert.match(result.message, /rewriting plans.*does not authorize/i);
   assert.doesNotMatch(result.message, /or reconcile|database-import form/);
 
-  // A completed plan rewrite is not a recovery authorization. The ordinary
+  // A rewritten-plan snapshot is not a recovery authorization. The ordinary
   // execution rule must preserve the same abort and explain the gated route.
   const rule = DISPATCH_RULES.find((entry) => entry.name === "executing → execute-task");
   assert.ok(rule);
@@ -649,6 +650,7 @@ test("refreshRecoveryDbForArtifact refuses execute-task recovery after a termina
   if (dispatch?.action !== "stop") return;
   assert.ok(dispatch.reason.includes(`/gsd recover ${route.recoveryActionId}`));
   assert.match(dispatch.reason, /after.*repair/i);
+  assert.match(dispatch.reason, /gsd_task_recovery_resume with concrete repair evidence/);
   assert.match(dispatch.reason, /rewriting plans.*does not authorize/i);
   assert.equal(getTask("M001", "S01", "T01")?.status, "pending");
   assert.equal(readTerminalTaskRecoveryAbort("M001", "S01", "T01")?.recoveryActionId, route.recoveryActionId);

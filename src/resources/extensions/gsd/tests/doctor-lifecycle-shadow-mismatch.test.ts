@@ -340,6 +340,7 @@ test("an unresumed agent-owned abort on a claimed task is a warning naming /gsd 
     "warning must name the gated /gsd recover path",
   );
   assert.match(drifted[0]!.message, /after.*repair/i);
+  assert.match(drifted[0]!.message, /gsd_task_recovery_resume with concrete repair evidence/);
   assert.match(drifted[0]!.message, /rewriting plans.*does not authorize/i);
   assert.doesNotMatch(drifted[0]!.message, /to converge the drift/);
   assert.ok(drifted[0]!.message.includes('"pending"'), "message names the legacy status");
