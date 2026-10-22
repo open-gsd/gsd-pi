@@ -717,6 +717,7 @@ verification_timeout_ms: 120000   # host verification and verification-oriented 
 verification_source_exclude_paths: # git pathspecs skipped by source-revision hashing (default: [])
   - artifacts/**
   - fixtures/**
+verification_reuse_exec_evidence: false # reuse the executor's gsd_exec run of the Task verify in host verification (default: false)
 ```
 
 | Field | Type | Default | Description |
@@ -726,6 +727,7 @@ verification_source_exclude_paths: # git pathspecs skipped by source-revision ha
 | `verification_max_retries` | number | `2` | Maximum auto-fix retry attempts for runnable failures |
 | `verification_timeout_ms` | number | `120000` | Per-command host-verification timeout in milliseconds and the default timeout for verification-oriented `gsd_exec` workloads. Unset keeps the 120s host-verification default. A timeout is reported as `failureClass: timeout`, never as exit 127. |
 | `verification_source_exclude_paths` | string[] | `[]` | Git pathspecs excluded from the verification source-revision snapshot. Each entry becomes a `:(exclude)` pathspec on the `git ls-files` passes, in addition to the built-in `.gsd/**` and `receipts/**` exclusions. Global and project lists merge additively — a project list adds to the global list and cannot clear it. Use for large non-evidence trees (historical test artifacts, committed fixtures) that would otherwise be re-hashed on every dispatch. Changes under excluded paths no longer invalidate recorded verification evidence, so exclude only trees verification evidence never depends on. |
+| `verification_reuse_exec_evidence` | boolean | `false` | Let host verification reuse the executor's own `gsd_exec` run of a Task's Verify command instead of running it again. A run is reused only when it provably ran exactly as the gate runs it: same POSIX shell form with `pipefail`, same child environment (every variable and value), same rewrites, on the exact source revision under test, and inside `verification_timeout_ms`. Any divergence re-runs the command. With this on, Verify-command `gsd_exec` calls see the gate's environment (which may hold credentials) instead of the sandbox allowlist; every other call stays sandboxed. Windows (Git Bash and cmd) never reuses. |
 
 For missing-command handling and the task-evidence exception, see [Auto Mode — Verification Enforcement](./auto-mode.md#verification-enforcement).
 

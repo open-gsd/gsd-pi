@@ -141,6 +141,11 @@ export function registerExecTools(pi: ExtensionAPI): void {
         baseDir,
         preferences: await loadContextModePreferences(baseDir),
         signal: _signal,
+        // In-process only (#2982): this registration may run a Task's Verify
+        // command under the verification gate's own invocation when the
+        // opt-in preference is set. The workflow MCP server's registration
+        // never passes this, so its calls keep the sandboxed allowlist.
+        verificationRunContract: true,
       });
     },
   });

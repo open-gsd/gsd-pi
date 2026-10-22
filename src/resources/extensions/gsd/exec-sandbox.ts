@@ -9,12 +9,33 @@
 // implementation — no upstream code incorporated.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeFileSync,
+} from "node:fs";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { getShellConfig, killProcessTree, SIGKILL_GRACE_MS, HARD_DEADLINE_MS } from "@gsd/pi-coding-agent";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
 import { redactSecrets } from "./redact-secrets.js";
+
+/**
+ * Exact program/argv/environment a run should use instead of the shell plus
+ * env allowlist (#2982). Only honored for the bash runtime; the caller bakes
+ * the script into `args` (the verification gate's argv ends with the command).
+ */
+export interface ExecInvocationOverride {
+  program: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+}
 
 export interface ExecSandboxRequest {
   /** Interpreter to use. */
@@ -27,6 +48,8 @@ export interface ExecSandboxRequest {
   metadata?: Record<string, unknown>;
   /** Per-invocation timeout in ms. Clamped to `clamp_timeout_ms`. */
   timeout_ms?: number;
+  /** Run under this exact invocation instead of the shell + allowlist (#2982). */
+  invocation?: ExecInvocationOverride;
 }
 
 export interface ExecSandboxOptions {
@@ -97,9 +120,45 @@ export interface ExecSandboxResult {
    * its marker), this field carries the stderr diagnostics (issue #2927).
    */
   stderr_excerpt?: string;
+  /**
+   * True when the persisted output differs from what the child wrote —
+   * redaction replaced secret-shaped text, or output over the verification
+   * persistence cap was bounded (#2982). Such a run cannot prove byte parity
+   * with what a fresh gate spawn would have captured, so it never reuses.
+   */
+  output_transformed?: boolean;
 }
 
 const ALWAYS_FORWARD_ENV = ["PATH", "HOME"] as const;
+
+/**
+ * Output above this size is not scanned for redaction in full; it is bounded
+ * with a marker instead (#2982). Both transforms make the run ineligible for
+ * verification reuse.
+ */
+const VERIFICATION_OUTPUT_SCAN_LIMIT = 8 * 1024 * 1024;
+
+/**
+ * Read at most VERIFICATION_OUTPUT_SCAN_LIMIT bytes of a file without ever
+ * allocating for its full size. `full` is false when the file was larger.
+ */
+function readBoundedFile(path: string): { data: Buffer; full: boolean } {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const capped = size > VERIFICATION_OUTPUT_SCAN_LIMIT;
+    const buffer = Buffer.allocUnsafe(Math.min(size, VERIFICATION_OUTPUT_SCAN_LIMIT));
+    let read = 0;
+    while (read < buffer.length) {
+      const bytesRead = readSync(fd, buffer, read, buffer.length - read, read);
+      if (bytesRead <= 0) break;
+      read += bytesRead;
+    }
+    return { data: buffer.subarray(0, read), full: !capped };
+  } finally {
+    closeSync(fd);
+  }
+}
 
 // SIGKILL_GRACE_MS / HARD_DEADLINE_MS are imported from @gsd/pi-coding-agent
 // (shell.ts) — the single source of truth for the graceful-kill timing ladder —
@@ -198,21 +257,49 @@ export function runExecSandbox(
     const metaPath = resolve(execDir, `${id}.meta.json`);
 
     const timeoutMs = clampTimeout(request, opts);
-    const { cmd, args } = resolveCommand(request.runtime);
-    const script = request.runtime === "bash" ? sanitizeBashScriptForWindows(request.script) : request.script;
-    const env = buildChildEnv(opts);
-    const useProcessGroup = process.platform !== "win32";
+    const invocation = request.runtime === "bash" ? request.invocation : undefined;
+    const { cmd, args } = invocation
+      ? { cmd: invocation.program, args: invocation.args }
+      : resolveCommand(request.runtime);
+    const script = request.runtime === "bash" && !invocation
+      ? sanitizeBashScriptForWindows(request.script)
+      : request.script;
+    const env = invocation ? invocation.env : buildChildEnv(opts);
+    // A contract-bearing run matches the gate's spawn shape exactly — the
+    // gate's spawnSync is not detached, so a command observing its session or
+    // process group must see the same thing under both (#2982).
+    const useProcessGroup = process.platform !== "win32" && invocation == null;
 
     const started = Date.now();
     let child;
+    // A contract-bearing run (#2982) gets the gate's I/O shape: the child
+    // writes the run's own output files directly, so the command observes
+    // regular files for stdout/stderr exactly as it would under
+    // runVerificationGate. The sandboxed run keeps its pipes and caps.
+    const fileStdio = invocation != null;
+    let stdoutFd: number | null = null;
+    let stderrFd: number | null = null;
     try {
-      child = spawn(cmd, [...args, script], {
-        cwd: opts.baseDir,
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(useProcessGroup ? { detached: true } : {}),
-      });
+      if (fileStdio) {
+        stdoutFd = openSync(stdoutPath, "w");
+        stderrFd = openSync(stderrPath, "w");
+        child = spawn(cmd, [...args], {
+          cwd: opts.baseDir,
+          env,
+          stdio: ["ignore", stdoutFd, stderrFd],
+          ...(useProcessGroup ? { detached: true } : {}),
+        });
+      } else {
+        child = spawn(cmd, [...args, script], {
+          cwd: opts.baseDir,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+          ...(useProcessGroup ? { detached: true } : {}),
+        });
+      }
     } catch (err) {
+      if (stdoutFd != null) closeSync(stdoutFd);
+      if (stderrFd != null) closeSync(stderrFd);
       const duration = Date.now() - started;
       const message = err instanceof Error ? err.message : String(err);
       writeFileSync(stdoutPath, "");
@@ -323,15 +410,84 @@ export function runExecSandbox(
       clearTimeout(forceResolveTimer);
       removeAbortListener();
       const duration = Date.now() - started;
-      const stdoutBuf = Buffer.concat(stdoutChunks);
-      const stderrBuf = Buffer.concat(stderrChunks);
-      const stdoutSuffix = stdoutTruncated ? "\n[truncated: stdout cap reached]\n" : "";
-      const stderrSuffix = stderrTruncated ? "\n[truncated: stderr cap reached]\n" : "";
-      // Redact secret-shaped substrings before persisting to .gsd/exec/ (skipped by
-      // the secret scanner). The returned digest is derived from the raw buffer
-      // below and is redacted downstream when the session is written to activity/.
-      writeFileSync(stdoutPath, redactSecrets(Buffer.concat([stdoutBuf, Buffer.from(stdoutSuffix, "utf-8")]).toString("utf-8")));
-      writeFileSync(stderrPath, redactSecrets(Buffer.concat([stderrBuf, Buffer.from(stderrSuffix, "utf-8")]).toString("utf-8")));
+      let stdoutBuf: Buffer;
+      let stderrBuf: Buffer;
+      let stdoutBytesFinal: number;
+      let stderrBytesFinal: number;
+      let stdoutTruncatedFinal: boolean;
+      let stderrTruncatedFinal: boolean;
+      let outputTransformedFinal = false;
+      if (fileStdio) {
+        if (stdoutFd != null) closeSync(stdoutFd);
+        if (stderrFd != null) closeSync(stderrFd);
+        // Bounded, redact-then-persist processing of the gate-shaped output:
+        // the child wrote raw bytes; what persists is redacted as any
+        // gsd_exec output is, and output over the scan limit is bounded with
+        // a marker. Any transform — redaction, bounding, invalid UTF-8 whose
+        // decode/re-encode is not byte-stable, or a read/write error — sets
+        // output_transformed: the run cannot prove byte parity with a fresh
+        // capture and never reuses.
+        let stdoutRaw: Buffer = Buffer.alloc(0);
+        let stderrRaw: Buffer = Buffer.alloc(0);
+        let withinLimit = true;
+        try {
+          const stdoutRead = readBoundedFile(stdoutPath);
+          const stderrRead = readBoundedFile(stderrPath);
+          stdoutRaw = stdoutRead.data;
+          stderrRaw = stderrRead.data;
+          withinLimit = stdoutRead.full && stderrRead.full;
+        } catch {
+          // A missing or unreadable output file is itself a transform the
+          // gate will refuse.
+          withinLimit = false;
+        }
+        const stdoutText = withinLimit
+          ? stdoutRaw.toString("utf-8")
+          : stdoutRaw.toString("utf-8") + "\n[truncated: verification output cap reached]\n";
+        const stderrText = withinLimit
+          ? stderrRaw.toString("utf-8")
+          : stderrRaw.toString("utf-8") + "\n[truncated: verification output cap reached]\n";
+        let stdoutRedacted = stdoutText;
+        let stderrRedacted = stderrText;
+        try {
+          stdoutRedacted = redactSecrets(stdoutText);
+          stderrRedacted = redactSecrets(stderrText);
+        } catch {
+          outputTransformedFinal = true;
+        }
+        // A decode/re-encode that is not byte-stable (invalid UTF-8 expands to
+        // replacement characters) changed what the child wrote.
+        if (!Buffer.from(stdoutRedacted, "utf-8").equals(stdoutRaw)
+          || !Buffer.from(stderrRedacted, "utf-8").equals(stderrRaw)) {
+          outputTransformedFinal = true;
+        }
+        try {
+          writeFileSync(stdoutPath, stdoutRedacted);
+          writeFileSync(stderrPath, stderrRedacted);
+        } catch {
+          outputTransformedFinal = true;
+        }
+        stdoutBuf = Buffer.from(stdoutRedacted, "utf-8");
+        stderrBuf = Buffer.from(stderrRedacted, "utf-8");
+        stdoutBytesFinal = stdoutBuf.length;
+        stderrBytesFinal = stderrBuf.length;
+        stdoutTruncatedFinal = false;
+        stderrTruncatedFinal = false;
+      } else {
+        stdoutBuf = Buffer.concat(stdoutChunks);
+        stderrBuf = Buffer.concat(stderrChunks);
+        const stdoutSuffix = stdoutTruncated ? "\n[truncated: stdout cap reached]\n" : "";
+        const stderrSuffix = stderrTruncated ? "\n[truncated: stderr cap reached]\n" : "";
+        // Redact secret-shaped substrings before persisting to .gsd/exec/ (skipped by
+        // the secret scanner). The returned digest is derived from the raw buffer
+        // below and is redacted downstream when the session is written to activity/.
+        writeFileSync(stdoutPath, redactSecrets(Buffer.concat([stdoutBuf, Buffer.from(stdoutSuffix, "utf-8")]).toString("utf-8")));
+        writeFileSync(stderrPath, redactSecrets(Buffer.concat([stderrBuf, Buffer.from(stderrSuffix, "utf-8")]).toString("utf-8")));
+        stdoutBytesFinal = stdoutBytes;
+        stderrBytesFinal = stderrBytes;
+        stdoutTruncatedFinal = stdoutTruncated;
+        stderrTruncatedFinal = stderrTruncated;
+      }
 
       const digestBody = tail(stdoutBuf, opts.digest_chars);
       // Issue #2927: failed executions surface a bounded stderr excerpt
@@ -370,15 +526,16 @@ export function runExecSandbox(
         aborted,
         force_resolved: forceResolved,
         duration_ms: duration,
-        stdout_bytes: stdoutBytes,
-        stderr_bytes: stderrBytes,
-        stdout_truncated: stdoutTruncated,
-        stderr_truncated: stderrTruncated,
+        stdout_bytes: stdoutBytesFinal,
+        stderr_bytes: stderrBytesFinal,
+        stdout_truncated: stdoutTruncatedFinal,
+        stderr_truncated: stderrTruncatedFinal,
         stdout_path: stdoutPath,
         stderr_path: stderrPath,
         meta_path: metaPath,
         digest,
         ...(stderrExcerpt ? { stderr_excerpt: stderrExcerpt } : {}),
+        ...(outputTransformedFinal ? { output_transformed: true } : {}),
       };
       writeMeta(metaPath, result, request, now);
       resolveP(result);
@@ -407,6 +564,10 @@ export function runExecSandbox(
     child.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
       const line = `child error: ${message}\n`;
+      if (fileStdio) {
+        appendFileSync(stderrPath, line);
+        return;
+      }
       const remaining = opts.stderr_cap_bytes - stderrBytes;
       if (remaining > 0) {
         const chunk = Buffer.from(line, "utf-8").subarray(0, remaining);
@@ -434,6 +595,7 @@ function writeMeta(
     runtime: result.runtime,
     purpose: request.purpose ?? null,
     ...(request.metadata ? { metadata: request.metadata } : {}),
+    ...(request.invocation && request.runtime === "bash" ? { invoked_via: "verification-contract" } : {}),
     script_chars: request.script.length,
     started_at: now.toISOString(),
     finished_at: new Date(now.getTime() + result.duration_ms).toISOString(),

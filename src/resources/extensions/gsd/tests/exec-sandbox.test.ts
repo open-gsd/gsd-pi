@@ -616,11 +616,11 @@ test('runExecSandbox: stderr-only timeout surfaces the excerpt the marker digest
   assert.ok(result.stderr_excerpt!.includes('connection refused'), `timeout diagnostics surfaced: ${result.stderr_excerpt}`);
 });
 
-test('executeGsdExec: failed run exposes the stderr section in content and details without losing the recording warning', async (t) => {
+test('executeGsdExec: failed run exposes the stderr section in content and details and records despite lost output', async (t) => {
   const base = freshBase();
   // A workflow database must exist for the run to be recordable at all; the
-  // deleted stdout file then makes the record step fail with a warning while
-  // the run itself fails with stderr diagnostics.
+  // deleted stdout file makes the recorded hash unverifiable while the run
+  // itself fails with stderr diagnostics.
   mkdirSync(join(base, '.gsd'), { recursive: true });
   openDatabase(join(base, '.gsd', 'gsd.db'));
   t.after(() => {
@@ -646,8 +646,8 @@ test('executeGsdExec: failed run exposes the stderr section in content and detai
   assert.ok(text.includes('real cause'), 'stderr diagnostics visible');
   assert.ok(text.includes('partial'), 'stdout preserved');
   assert.ok(typeof result.details.stderr_excerpt === 'string' && result.details.stderr_excerpt.includes('real cause'), `details.stderr_excerpt present: ${String(result.details.stderr_excerpt)}`);
-  assert.ok(result.details.run_not_recorded, 'recording warning retained alongside diagnostics');
-  assert.ok(text.includes('not verification or UAT evidence'), 'warning text present in content');
+  assert.ok(result.details.id, 'the run is recorded with an id');
+  assert.equal(result.details.run_not_recorded, undefined, 'the observation is recorded despite lost output');
 });
 
 test('executeGsdExec: successful run with stderr exposes no stderr section', async (t) => {

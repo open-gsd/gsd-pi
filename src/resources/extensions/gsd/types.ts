@@ -82,6 +82,22 @@ export interface TaskPlanFile {
 // ─── Verification Gate ─────────────────────────────────────────────────────
 
 /** Result of a single verification command execution */
+/**
+ * The recorded `gsd_exec` run a reused verification check stands on (#2982):
+ * ADR-046 provenance naming the host fact instead of a fresh spawn.
+ */
+export interface VerificationCheckReusedRun {
+  /** exec_runs.id of the run that was reused. */
+  runId: string;
+  /** When that run started (ISO). */
+  startedAt: string;
+  /** How long that run took. */
+  durationMs: number;
+  /** Hash of the run's persisted output files. */
+  outputHash: string;
+}
+
+/** Result of a single verification command execution */
 export interface VerificationCheck {
   command: string; // e.g. "npm run lint"
   exitCode: number; // 0 = pass
@@ -90,6 +106,8 @@ export interface VerificationCheck {
   durationMs: number;
   /** Infrastructure/execution faults that prevented the command from producing a requirement verdict. */
   failureClass?: "timeout" | "command-not-found" | "shell-parse";
+  /** Set when the check is a reused exec run instead of a fresh spawn (#2982). */
+  reusedRun?: VerificationCheckReusedRun;
 }
 
 /** A runtime error captured from bg-shell processes or browser console */
