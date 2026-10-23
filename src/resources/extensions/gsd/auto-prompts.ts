@@ -347,6 +347,31 @@ function readPromptCloseoutAuthorization(
   }
 }
 
+/**
+ * The aggregate source revision the validate-milestone tool will enforce on
+ * every evidence entry, computed at prompt-build time with the same reader
+ * the tool uses (#2996). Without it the first validation call must fail on a
+ * placeholder revision and the forced error is the last red message the
+ * operator sees under Validate Milestone. Falls back to pointing at the
+ * tool's mismatch error when the snapshot cannot be computed.
+ */
+function readValidationSourceRevisionForPrompt(base: string, mid: string): string {
+  try {
+    const artifactBasePath = resolveCanonicalMilestoneRoot(base, mid);
+    const preferences = loadEffectiveGSDPreferences(artifactBasePath)?.preferences;
+    const source = captureMilestoneVerificationSourceRevision(artifactBasePath, preferences);
+    if (source.ok) return source.sourceRevision;
+    // The error text is diagnostic, not prompt content: it can name repository
+    // paths, and any {{token}}-shaped substring would be re-expanded by the
+    // prompt renderer. Log it; render only the constant fallback.
+    logWarning("prompt", `validation source revision unavailable: ${source.error}`);
+    return "unavailable; take it from the tool's mismatch error";
+  } catch (err) {
+    logWarning("prompt", `validation source revision lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    return "unavailable; take it from the tool's mismatch error";
+  }
+}
+
 function formatCloseoutReviewInstructions(
   validationContent: string | null,
   validationRel: string,
@@ -3749,10 +3774,16 @@ export async function buildValidateMilestonePrompt(
     allowOmit: false,
   });
 
+  // The tool rejects evidence whose testedSourceRevision differs from the
+  // live snapshot, so hand the validator the value up front instead of
+  // forcing a probe call with a placeholder revision (#2996).
+  const currentSourceRevision = readValidationSourceRevisionForPrompt(base, mid);
+
   return loadPrompt("validate-milestone", {
     workingDirectory: base,
     milestoneId: mid,
     milestoneTitle: midTitle,
+    currentSourceRevision,
     roadmapPath: roadmapOutputPath,
     inlinedContext,
     validationPath: validationOutputPath,
