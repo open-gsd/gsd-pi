@@ -174,6 +174,32 @@ test("UNIT: inspect exposes safe fields and Project ID without writable binding 
   assert.doesNotMatch(shown, /do-not-display|secretPayload/);
 });
 
+for (const eligible of [true, false]) {
+  test(`UNIT: inspect allowlist excludes private diagnostic fields when eligible=${eligible}`, async () => {
+    const h = harness();
+    h.state.snapshot.eligible = eligible;
+    h.state.snapshot.failure = eligible ? undefined : "blocker-not-open";
+    for (const record of [h.state.snapshot, h.state.snapshot.blocker, h.state.snapshot.pause]) {
+      Object.assign(record, { evidenceJson: "private-evidence", requestPayload: "private-request", runtimeMetadata: "private-runtime" });
+    }
+    await h.run("inspect b1");
+    const shown = h.state.notices.join("\n");
+    const details = JSON.parse(shown);
+    assert.deepEqual(Object.keys(details).sort(), ["authorityEpoch", "blocker", "eligible", "guidance", "pause", "projectId", "revision", ...(eligible ? [] : ["failure"])].sort());
+    assert.deepEqual(Object.keys(details.blocker).sort(), ["description", "id", "kind", "lifecycleState", "origin", "owner", "requestedAction", "scope"].sort());
+    assert.deepEqual(Object.keys(details.pause).sort(), ["id", "scope"]);
+    assert.equal(details.blocker.description, h.state.snapshot.blocker.description);
+    assert.equal(details.blocker.requestedAction, h.state.snapshot.blocker.requestedAction);
+    assert.equal(details.eligible, eligible);
+    assert.doesNotMatch(shown, /private-|do-not-display|secretPayload/);
+    assert.equal(h.state.fileReads, 1);
+    assert.equal(h.state.boundReads, 0);
+    assert.equal(h.state.factoryRuns, 0);
+    assert.equal(h.state.confirms, 0);
+    assert.equal(h.state.mutations.length, 0);
+  });
+}
+
 test("UNIT: inspect renders missing legacy context fail-soft as null without changing guidance", async () => {
   const h = harness();
   h.state.snapshot.blocker.description = null;
