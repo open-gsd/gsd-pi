@@ -49,7 +49,10 @@ import {
   type MilestoneCloseoutAuthorization,
 } from "./db/milestone-closeout-readiness.js";
 import { captureMilestoneVerificationSourceRevision } from "./verification-source-integrity.js";
-import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
+import {
+  milestoneWorktreeAbsentForValidation,
+  resolveCanonicalMilestoneRoot,
+} from "./worktree-manager.js";
 import {
   GATE_REGISTRY,
   assertGateCoverage,
@@ -3526,6 +3529,12 @@ export async function buildCompleteMilestonePrompt(
 export async function buildValidateMilestonePrompt(
   mid: string, midTitle: string, base: string, level?: InlineLevel,
 ): Promise<string> {
+  // Fail loud rather than aim the validator at a checkout without the
+  // milestone's code (#2997) — see milestoneWorktreeAbsentForValidation.
+  const worktreeAbsent = milestoneWorktreeAbsentForValidation(base, mid);
+  if (worktreeAbsent) {
+    throw new Error(`Cannot build the validate-milestone prompt: ${worktreeAbsent}`);
+  }
   const inlineLevel = level ?? resolveInlineLevel();
   const inlined: string[] = [];
   const contextTelemetry: PromptContextTelemetryEntry[] = [];

@@ -499,6 +499,35 @@ function throwStaleWorktreeRemovalError(wtPath: string, error: unknown): never {
  *
  * Fixes #4761. Used by the #4762 audit for the pre-completion orphan case.
  */
+/**
+ * Whether milestone validation must refuse to run from `basePath` (#2997):
+ * the milestone has a `milestone/<id>` branch — worktree isolation — while
+ * the worktree directory is absent, so every `resolveCanonicalMilestoneRoot`
+ * consumer would silently hash and label the project root, a checkout that
+ * holds none of the milestone's code; closeout would later block on
+ * validation-source-revision-mismatch against the real tree. Returns the
+ * human-readable reason, or null when validation may proceed (worktree
+ * present, or no milestone branch — never isolated, or fully torn down).
+ */
+export function milestoneWorktreeAbsentForValidation(
+  basePath: string,
+  milestoneId: string,
+): string | null {
+  if (!milestoneId || /[\/\\]|\.\./.test(milestoneId)) return null;
+  // Single source of truth: when the resolver lands in the worktree, the
+  // worktree is present and usable and validation may proceed. Any fallback
+  // to the project root (absent, stale, or unregistered worktree directory —
+  // including .git-directory lookalikes) while the milestone branch exists
+  // is the #2997 wrong-tree hazard, except branch-isolation mode, where the
+  // milestone branch is checked out at the project root itself and the root
+  // IS the milestone tree.
+  if (resolveCanonicalMilestoneRoot(basePath, milestoneId) !== basePath) return null;
+  const branch = `milestone/${milestoneId}`;
+  if (!nativeBranchList(basePath, branch).includes(branch)) return null;
+  if (nativeGetCurrentBranch(basePath) === branch) return null;
+  return `Milestone ${milestoneId} runs under worktree isolation but its worktree is not present; run \`/gsd auto\` to re-enter it before validating.`;
+}
+
 export function resolveCanonicalMilestoneRoot(
   basePath: string,
   milestoneId: string,
