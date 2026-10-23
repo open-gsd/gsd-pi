@@ -1386,10 +1386,12 @@ export async function checkEngineHealth(
           if (!isAfter(row.imported_at, reopenAt)) continue;
           const slice = row.slice_id ? readSlice(row.milestone_id, row.slice_id) : null;
           const task = row.slice_id && row.task_id ? readTask(row.milestone_id, row.slice_id, row.task_id) : null;
-          // Combined terminal predicate — matches the tool gate (#2994) and
-          // the runtime guard's `!slice.closed` flagging, so pre-cutover
-          // deferred slices (done but not closed) are covered too.
-          const isSliceSummary = row.slice_id && !row.task_id && slice && !(slice.done && slice.closed);
+          // Doctor's vocabulary contract: report a completion artifact only
+          // for a slice that still needs work (`!done`; deferred is done for
+          // every reader). The tool gate (#2994) is stricter than this — it
+          // also rejects deferred saves — because the runtime dispatch guard
+          // flags on `!slice.closed`, which still treats deferred as open.
+          const isSliceSummary = row.slice_id && !row.task_id && slice && !slice.done;
           const isTaskSummary = row.slice_id && row.task_id && !task?.done;
           const isTaskArtifactWithoutDbTasks = row.slice_id && row.task_id && Number(row.task_count) === 0;
           if (
@@ -1468,7 +1470,7 @@ export async function checkEngineHealth(
           if (!milestone || milestone.closed) continue;
           if (!isAfter(row.imported_at, latestExplicitReopenAt(row.milestone_id))) continue;
           const slice = readSlice(row.milestone_id, row.slice_id);
-          if (!slice || (slice.done && slice.closed)) continue;
+          if (!slice || slice.done) continue;
           // Mirror the runtime guard's slice-reopen exemption: a missing-file
           // row predating the slice's latest explicit reopen is dead
           // bookkeeping from the pre-reopen completion, not a live wedge.
