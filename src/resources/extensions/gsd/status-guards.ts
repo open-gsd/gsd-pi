@@ -85,6 +85,10 @@ const LEGACY_TO_LIFECYCLE_STATUS: Readonly<Record<string, CanonicalLifecycleStat
   queued: "pending",
   planned: "pending",
   active: "in_progress",
+  // #2985: the unscoped 3.0.0 line's plan-milestone took an unvalidated
+  // status string, so in-flight milestones can carry "planning". It is an
+  // open state: it normalizes as in-flight and adopts as ready, like "active".
+  planning: "in_progress",
   in_progress: "in_progress",
   "in-progress": "in_progress",
   blocked: "paused",
