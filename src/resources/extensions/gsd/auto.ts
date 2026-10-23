@@ -254,6 +254,7 @@ import {
   acknowledgeWedge,
   COMPLETED_NO_ADVANCE_GUARD_ID,
   formatWedgeRefusalNotice,
+  acknowledgeWedgesForParkedMilestones,
   garbageCollectResolvedWedges,
   getOpenWedge,
   recheckCompletedNoAdvanceWedge,
@@ -2950,6 +2951,19 @@ export async function startAuto(
       "error",
     );
     return;
+  }
+  // Wedges scoped to parked milestones cannot protect anything (the dispatcher
+  // skips parked milestones) but would still gate this project (#2991) — clear
+  // them first, including wedges parked before this rule existed. On sweep
+  // failure the gate below refuses with the same backstop error.
+  const parkedWedgeSweep = acknowledgeWedgesForParkedMilestones(scopeId);
+  if (parkedWedgeSweep.ok) {
+    for (const wedge of parkedWedgeSweep.acknowledged) {
+      ctx.ui.notify(
+        `Wedge ${wedge.wedgeId} (${wedge.unitType} ${wedge.unitId}) acknowledged — its milestone is parked, so the unit can no longer be dispatched.`,
+        "info",
+      );
+    }
   }
   const openWedgeResult = getOpenWedge(scopeId);
   if (!openWedgeResult.ok) {
