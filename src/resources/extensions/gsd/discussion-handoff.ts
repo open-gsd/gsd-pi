@@ -3,6 +3,8 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { startAutoDetached } from "./auto.js";
+import { autoSession } from "./auto-runtime-state.js";
+import { captureAutoStartupOwnership, captureAutoStartupCancellation, onAutoStartupCancelled, noteAutoStartupDispatch } from "./auto/startup-ownership.js";
 import { extractDepthVerificationMilestoneId, getPendingGate } from "./bootstrap/write-gate.js";
 import { getAllMilestones, getMilestone, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
 import { registerMilestones } from "./milestone-registration.js";
@@ -36,18 +38,49 @@ export function scheduleAutoStartAfterIdle(
   options?: AutoStartOptions,
   launch: AutoStartLauncher = startAutoDetached,
 ): void {
+  if (!captureAutoStartupOwnership()()) return;
+  const originCancelled = captureAutoStartupCancellation();
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const pending = { cancel: () => {
+    cancelled = true;
+    if (timer !== null) clearTimeout(timer);
+    autoSession.pendingDeferredStarts.delete(pending);
+  } };
+  autoSession.pendingDeferredStarts.add(pending);
+  onAutoStartupCancelled(pending.cancel);
+  // This is a queued handoff, not an acknowledgement that auto-mode started.
+  noteAutoStartupDispatch();
   const waitForIdle =
     typeof (ctx as { waitForIdle?: unknown }).waitForIdle === "function"
       ? ctx.waitForIdle.bind(ctx)
       : async () => {};
-  void waitForIdle()
-    .then(() => {
-      setTimeout(() => launch(ctx, pi, basePath, verboseMode, options), 0);
+  const reportFailure = (err: unknown) => {
+    if (cancelled || originCancelled()) return;
+    const message = err instanceof Error ? err.message : String(err);
+    ctx.ui.notify(`Auto-start failed while waiting for the prior turn to settle: ${message}`, "error");
+    logWarning("guided", `auto-start idle wait failed: ${message}`);
+  };
+  let idle: Promise<void>;
+  try { idle = waitForIdle(); }
+  catch (error) {
+    autoSession.pendingDeferredStarts.delete(pending);
+    reportFailure(error);
+    return;
+  }
+  void idle.then(() => {
+      if (cancelled || originCancelled()) { pending.cancel(); return; }
+      timer = setTimeout(() => {
+        timer = null;
+        autoSession.pendingDeferredStarts.delete(pending);
+        if (cancelled || originCancelled()) return;
+        try { void launch(ctx, pi, basePath, verboseMode, options).catch(reportFailure); }
+        catch (error) { reportFailure(error); }
+      }, 0);
     })
     .catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      ctx.ui.notify(`Auto-start failed while waiting for the prior turn to settle: ${message}`, "error");
-      logWarning("guided", `auto-start idle wait failed: ${message}`);
+      autoSession.pendingDeferredStarts.delete(pending);
+      reportFailure(err);
     });
 }
 

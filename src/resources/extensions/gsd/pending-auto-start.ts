@@ -11,6 +11,7 @@ import {
   writeDiscussionHandoffRow,
 } from "./db/writers/runtime-control.js";
 import { logWarning } from "./workflow-logger.js";
+import { captureAutoStartupOwnership, onAutoStartupCancelled } from "./auto/startup-ownership.js";
 import { createWorkspace, scopeMilestone, type MilestoneScope } from "./workspace.js";
 
 export interface PendingAutoStartEntry {
@@ -72,11 +73,16 @@ function bindPendingAutoStart(basePath: string, entry: PendingAutoStartInput & {
 }
 
 export function setPendingAutoStart(basePath: string, entry: PendingAutoStartInput): void {
+  if (!captureAutoStartupOwnership()()) return;
   if (!entry.ctx || !entry.pi) {
     throw new Error("setPendingAutoStart requires ctx and pi");
   }
   const createdAt = entry.createdAt ?? Date.now();
   bindPendingAutoStart(basePath, { ...entry, createdAt });
+  const owned = pendingAutoStartMap.get(basePath);
+  onAutoStartupCancelled(() => {
+    if (pendingAutoStartMap.get(basePath) === owned) deletePendingAutoStart(basePath);
+  });
   if (!isDbAvailable()) return;
   try {
     writeDiscussionHandoffRow({
