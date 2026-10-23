@@ -812,6 +812,14 @@ describe("workflow MCP tools", () => {
       assert.ok(tool, "summary tool should be registered");
       const originalCwd = process.cwd();
 
+      // A slice-scoped SUMMARY is a completion artifact (#2994): the gate
+      // needs the slice to exist and be terminal.
+      const gsdDb = await import("../../../src/resources/extensions/gsd/gsd-db.ts");
+      gsdDb.openDatabase(join(base, ".gsd", "gsd.db"));
+      gsdDb.insertMilestone({ id: "M001", title: "MCP milestone", status: "active" });
+      gsdDb.insertSlice({ id: "S01", milestoneId: "M001", title: "MCP slice", status: "complete" });
+      gsdDb.closeDatabase();
+
       const result = await tool!.handler({
         projectDir: base,
         milestone_id: "M001",
