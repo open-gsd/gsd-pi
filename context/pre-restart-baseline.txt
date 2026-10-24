@@ -1,0 +1,43 @@
+=== PRE-RESTART BASELINE 2026-09-13T21:06:25Z PID=362699 ===
+Gateway call: projects.list
+{
+  "projects": [
+    {
+      "id": "gsd-pi",
+      "displayName": "gsd-pi",
+      "source": "registered"
+    },
+    {
+      "id": "toolfactory",
+      "displayName": "toolfactory",
+      "source": "cloned"
+    },
+    {
+      "id": "workspace:main",
+      "displayName": "workspace",
+      "source": "workspace",
+      "agentId": "main"
+    }
+  ]
+}
+=== workboard.cards.list attempt ===
+Gateway call: workboard.cards.list
+{
+  "cards": [],
+  "boards": [
+    {
+      "id": "default",
+      "total": 0,
+      "active": 0,
+      "archived": 0,
+      "byStatus": {}
+    }
+  ],
+  "statuses": [
+    "triage",
+    "backlog",
+    "todo",
+    "scheduled",
+    "ready",
+    "running",
+    "review",

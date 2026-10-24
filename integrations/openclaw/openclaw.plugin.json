@@ -1,7 +1,7 @@
 {
   "id": "open-gsd-openclaw",
   "name": "Open GSD",
-  "description": "GSD web UI in native Portals, MCP tools, and automatic project and Workboard synchronization",
+  "description": "GSD web UI in native Portals, MCP tools, and automatic project, TaskFlow, and Workboard synchronization",
   "version": "1.21.1",
   "activation": {
     "onStartup": true

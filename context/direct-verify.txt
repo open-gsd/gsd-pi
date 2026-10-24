@@ -1,0 +1,84 @@
+=== observed at 2026-09-13T21:16:27Z ===
+MainPID: 797441
+active: active
+=== restart2 unit ===
+Unit gsd-plugin-restart2.service could not be found.
+=== journal tail ===
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.023-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.099-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.169-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.241-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.307-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.373-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.440-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.503-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.564-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.628-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.689-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.749-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.812-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.873-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.932-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:45 vado node[797441]: 2026-09-13T14:13:45.994-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:46 vado node[797441]: 2026-09-13T14:13:46.053-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:46 vado node[797441]: 2026-09-13T14:13:46.113-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:46 vado node[797441]: 2026-09-13T14:13:46.174-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:46 vado node[797441]: 2026-09-13T14:13:46.232-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:47 vado node[797441]: 2026-09-13T14:13:47.678-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:48 vado node[797441]: 2026-09-13T14:13:48.348-07:00 [plugins] plugin tool name conflict (toolfactory): secrets
+Sep 13 14:13:48 vado node[797441]: 2026-09-13T14:13:48.466-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:48 vado node[797441]: 2026-09-13T14:13:48.530-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:48 vado node[797441]: 2026-09-13T14:13:48.598-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:48 vado node[797441]: 2026-09-13T14:13:48.661-07:00 [skills] Skill precedence collision: skill="codex-prompt-standard" winner=openclaw-workshop:~/.openclaw/agents/main/agent/workshop-skills/codex-prompt-standard/SKILL.md loser=openclaw-extra:~/.openclaw/plugin-skills/codex-prompt-standard/SKILL.md
+Sep 13 14:13:48 vado node[797441]: 2026-09-13T14:13:48.957-07:00 [bundle-mcp] server "gsd" closed; next request reconnects
+Sep 13 14:13:49 vado node[797441]: [plugins] Honcho memory plugin loaded
+Sep 13 14:14:36 vado node[797441]: 2026-09-13T14:14:36.242-07:00 [plugins] plugin tool name conflict (toolfactory): secrets
+Sep 13 14:14:36 vado node[797441]: 2026-09-13T14:14:36.794-07:00 [bundle-mcp] server "gsd" closed; next request reconnects
+=== openclaw log tail ===
+=== projects.list ===
+Gateway call: projects.list
+{
+  "projects": [
+    {
+      "id": "gsd-pi",
+      "displayName": "gsd-pi",
+      "source": "registered"
+    },
+    {
+      "id": "toolfactory",
+      "displayName": "toolfactory",
+      "source": "cloned"
+    },
+    {
+      "id": "workspace:main",
+      "displayName": "workspace",
+      "source": "workspace",
+      "agentId": "main"
+    }
+  ]
+}
+=== workboard.cards.list ===
+Gateway call: workboard.cards.list
+{
+  "cards": [],
+  "boards": [
+    {
+      "id": "default",
+      "total": 0,
+      "active": 0,
+      "archived": 0,
+      "byStatus": {}
+    }
+  ],
+  "statuses": [
+    "triage",
+    "backlog",
+    "todo",
+    "scheduled",
+    "ready",
+    "running",
+    "review",
+    "blocked",
+    "done"
+  ]
+}

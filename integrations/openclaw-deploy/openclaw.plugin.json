@@ -1,0 +1,23 @@
+{
+  "id": "open-gsd-openclaw",
+  "name": "Open GSD",
+  "description": "GSD Pi over MCP with automatic project, TaskFlow, Workboard, and heartbeat synchronization",
+  "version": "1.19.0",
+  "activation": { "onStartup": true },
+  "mcpServers": {
+    "gsd": {
+      "transport": "stdio",
+      "command": "gsd-mcp-server",
+      "args": [],
+      "requestTimeoutMs": 120000
+    }
+  },
+  "skills": [
+    "./skills"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

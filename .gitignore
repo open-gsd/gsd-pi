@@ -136,3 +136,6 @@ lpt[1-9]
 lpt[1-9].*
 dist/
 integrations/openclaw/reports/
+
+# ── GSD baseline (auto-generated) ──
+.claude/settings.local.json
