@@ -20,7 +20,6 @@
  */
 
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { getIsolationMode } from "./preferences.js";
 import { execFileSync } from "node:child_process";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { GSDError, GSD_PARSE_ERROR, GSD_STALE_STATE, GSD_LOCK_HELD, GSD_GIT_ERROR, GSD_MERGE_CONFLICT } from "./errors.js";
@@ -510,10 +509,10 @@ function throwStaleWorktreeRemovalError(wtPath: string, error: unknown): never {
  * human-readable reason, or null when validation may proceed (worktree
  * present, or no milestone branch — never isolated, or fully torn down).
  */
-export function milestoneWorktreeAbsentForValidation(
+export async function milestoneWorktreeAbsentForValidation(
   basePath: string,
   milestoneId: string,
-): string | null {
+): Promise<string | null> {
   if (!milestoneId || /[\/\\]|\.\./.test(milestoneId)) return null;
   // Only worktree isolation makes the worktree the only home of the
   // milestone's code: under none/branch isolation the project root (or its
@@ -522,6 +521,10 @@ export function milestoneWorktreeAbsentForValidation(
   // removed). Degraded sessions work at the root on the milestone branch —
   // their effective mode is branch, visible here as the root's current
   // branch, since the session's in-memory degradation flag is not.
+  // getIsolationMode is imported lazily: a static edge from this module to
+  // the preferences stack breaks the built worktree CLI's module graph
+  // (e2e: "gsd worktree list loads the built worktree CLI").
+  const { getIsolationMode } = await import("./preferences.js");
   if (getIsolationMode(basePath) !== "worktree") return null;
   const wtPath = worktreePath(basePath, milestoneId);
   // Proceed whenever validation would hash the milestone worktree itself:

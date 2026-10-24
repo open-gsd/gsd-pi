@@ -381,7 +381,7 @@ export async function handleValidateMilestone(
   // to the project root, which holds none of the milestone's code: the tool
   // would record a pass labeled with the wrong tree's revision and closeout
   // would block on validation-source-revision-mismatch afterwards (#2997).
-  const worktreeAbsent = milestoneWorktreeAbsentForValidation(basePath, params.milestoneId);
+  const worktreeAbsent = await milestoneWorktreeAbsentForValidation(basePath, params.milestoneId);
   if (worktreeAbsent) {
     return { error: `${worktreeAbsent} (milestone_worktree_absent)` };
   }

@@ -3531,7 +3531,7 @@ export async function buildValidateMilestonePrompt(
 ): Promise<string> {
   // Fail loud rather than aim the validator at a checkout without the
   // milestone's code (#2997) — see milestoneWorktreeAbsentForValidation.
-  const worktreeAbsent = milestoneWorktreeAbsentForValidation(base, mid);
+  const worktreeAbsent = await milestoneWorktreeAbsentForValidation(base, mid);
   if (worktreeAbsent) {
     throw new Error(`Cannot build the validate-milestone prompt: ${worktreeAbsent}`);
   }
