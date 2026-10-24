@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { Box } from "../src/components/box.ts";
 import { SelectList, type SelectListTheme } from "../src/components/select-list.ts";
 import { Container, type Component, TUI } from "../src/tui.ts";
-import { VirtualTerminal } from "./virtual-terminal.ts";
+import { VirtualTerminal } from "../src/tests/virtual-terminal.ts";
 
 const theme: SelectListTheme = {
 	selectedPrefix: (t) => t,
