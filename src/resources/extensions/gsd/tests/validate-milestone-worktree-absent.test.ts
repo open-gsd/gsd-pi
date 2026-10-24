@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -17,6 +17,11 @@ import { buildValidateMilestonePrompt } from "../auto-prompts.ts";
 import { handleValidateMilestone } from "../tools/validate-milestone.ts";
 import { openDatabase, closeDatabase, insertMilestone } from "../gsd-db.ts";
 import { makeTempRepo, git } from "./test-utils.ts";
+
+/** Opt the fixture into worktree isolation (getIsolationMode reads PREFERENCES.md). */
+function setPreferences(base: string, isolation: "worktree" | "branch" | "none"): void {
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), `---\ngit:\n  isolation: "${isolation}"\n---\n`, "utf-8");
+}
 
 function seed(base: string): void {
   mkdirSync(join(base, ".gsd"), { recursive: true });
@@ -33,6 +38,7 @@ test("validate-milestone tool refuses to run when the isolated milestone's workt
   const base = makeTempRepo("gsd-validate-wt-absent-");
   try {
     seed(base);
+    setPreferences(base, "worktree");
     git(base, "branch", "milestone/M001");
 
     const result = await handleValidateMilestone(
@@ -66,6 +72,7 @@ test("buildValidateMilestonePrompt throws when the isolated milestone's worktree
   const base = makeTempRepo("gsd-validate-wt-absent-prompt-");
   try {
     seed(base);
+    setPreferences(base, "worktree");
     git(base, "branch", "milestone/M001");
 
     await assert.rejects(
@@ -75,6 +82,52 @@ test("buildValidateMilestonePrompt throws when the isolated milestone's worktree
   } finally {
     cleanup(base);
   }
+});
+
+test("validation dispatched from inside the worktree proceeds (#2997 review)", async (t) => {
+  const base = makeTempRepo("gsd-validate-wt-inside-");
+  const savedCwd = process.cwd();
+  process.chdir(base);
+  t.after(() => {
+    try { closeDatabase(); } catch { /* best-effort */ }
+    process.chdir(savedCwd);
+    rmSync(join(base, ".gsd-worktrees"), { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  seed(base);
+  setPreferences(base, "worktree");
+  git(base, "branch", "milestone/M001");
+  const wt = join(base, ".gsd-worktrees", "M001");
+  git(base, "worktree", "add", wt, "milestone/M001");
+  mkdirSync(join(wt, ".gsd"), { recursive: true });
+  closeDatabase();
+  openDatabase(join(wt, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Isolated milestone", status: "active" });
+
+  const prompt = await buildValidateMilestonePrompt("M001", "Isolated milestone", wt);
+  assert.match(prompt, /Milestone Validation/, "dispatch from inside the worktree must proceed");
+});
+
+test("a degraded session working at the root on the milestone branch proceeds (#2997 review)", async (t) => {
+  const base = makeTempRepo("gsd-validate-wt-degraded-");
+  const savedCwd = process.cwd();
+  process.chdir(base);
+  t.after(() => {
+    try { closeDatabase(); } catch { /* best-effort */ }
+    process.chdir(savedCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  seed(base);
+  setPreferences(base, "worktree");
+  git(base, "branch", "milestone/M001");
+  // Degraded worktree isolation checks the milestone branch out at the
+  // project root and works there; effective mode is branch.
+  git(base, "checkout", "milestone/M001");
+
+  const prompt = await buildValidateMilestonePrompt("M001", "Isolated milestone", base);
+  assert.match(prompt, /Milestone Validation/, "degraded-session root work must validate");
 });
 
 test("validation proceeds normally without a milestone branch (never isolated) (#2997)", async (t) => {
@@ -104,6 +157,7 @@ test("branch-isolation mode (milestone branch checked out at the project root) v
   });
 
   seed(base);
+  setPreferences(base, "branch");
   git(base, "branch", "milestone/M001");
   // enterBranchModeForMilestone checks the milestone branch out at the
   // project root: the root IS the milestone tree, so validation runs.
@@ -125,6 +179,7 @@ test("validation proceeds normally with the worktree present (#2997)", async (t)
   });
 
   seed(base);
+  setPreferences(base, "worktree");
   git(base, "branch", "milestone/M001");
   git(base, "worktree", "add", join(base, ".gsd-worktrees", "M001"), "milestone/M001");
 

@@ -20,6 +20,7 @@
  */
 
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { getIsolationMode } from "./preferences.js";
 import { execFileSync } from "node:child_process";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { GSDError, GSD_PARSE_ERROR, GSD_STALE_STATE, GSD_LOCK_HELD, GSD_GIT_ERROR, GSD_MERGE_CONFLICT } from "./errors.js";
@@ -514,17 +515,24 @@ export function milestoneWorktreeAbsentForValidation(
   milestoneId: string,
 ): string | null {
   if (!milestoneId || /[\/\\]|\.\./.test(milestoneId)) return null;
-  // Single source of truth: when the resolver lands in the worktree, the
-  // worktree is present and usable and validation may proceed. Any fallback
-  // to the project root (absent, stale, or unregistered worktree directory —
-  // including .git-directory lookalikes) while the milestone branch exists
-  // is the #2997 wrong-tree hazard, except branch-isolation mode, where the
-  // milestone branch is checked out at the project root itself and the root
-  // IS the milestone tree.
-  if (resolveCanonicalMilestoneRoot(basePath, milestoneId) !== basePath) return null;
-  const branch = `milestone/${milestoneId}`;
-  if (!nativeBranchList(basePath, branch).includes(branch)) return null;
-  if (nativeGetCurrentBranch(basePath) === branch) return null;
+  // Only worktree isolation makes the worktree the only home of the
+  // milestone's code: under none/branch isolation the project root (or its
+  // checked-out milestone branch) is the tree, and validation from the root
+  // is legitimate (the closeout flow depends on it after a worktree is
+  // removed). Degraded sessions work at the root on the milestone branch —
+  // their effective mode is branch, visible here as the root's current
+  // branch, since the session's in-memory degradation flag is not.
+  if (getIsolationMode(basePath) !== "worktree") return null;
+  const wtPath = worktreePath(basePath, milestoneId);
+  // Proceed whenever validation would hash the milestone worktree itself:
+  // dispatched from the project root with the worktree present, or from
+  // inside the worktree (basePath already is the canonical root).
+  if (resolveCanonicalMilestoneRoot(basePath, milestoneId) === wtPath) return null;
+  if (nativeGetCurrentBranch(basePath) === `milestone/${milestoneId}`) return null;
+  // Any other project-root fallback under worktree isolation — absent,
+  // stale, or unregistered worktree directory — means the root does not
+  // hold the milestone's code; hashing it labels the wrong revision (#2997)
+  // and closeout blocks on validation-source-revision-mismatch afterwards.
   return `Milestone ${milestoneId} runs under worktree isolation but its worktree is not present; run \`/gsd auto\` to re-enter it before validating.`;
 }
 
