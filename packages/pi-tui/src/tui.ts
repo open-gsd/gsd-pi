@@ -2733,11 +2733,22 @@ export class TUI extends Container {
 			// phase summary mid-turn. Realigning to the new viewport top would then
 			// repaint scrollback rows a second time. The forced-repaint alignment
 			// applies unchanged: the committed frame is the base, the physical top
-			// the seam (#3000).
+			// the seam (#3000). When the overlap still matches by index the realign
+			// is exact — keep it (a below-seam deletion with a visible-region edit,
+			// which keepsFlushedTop's above-screen model would mis-anchor).
+			let overlapMatchesByIndex = true;
+			for (let i = newLines.length - height; i < Math.min(prevViewportTop, newLines.length); i++) {
+				if (this.previousLines[i] !== newLines[i]) {
+					overlapMatchesByIndex = false;
+					break;
+				}
+			}
 			const alignedTop =
-				this.flushedAtWidth === width && this.flushedAtHeight === height
-					? this.keepsFlushedTop(this.previousLines, newLines, height, prevViewportTop, flushedBeforeShrink)
-					: null;
+				overlapMatchesByIndex ||
+				this.flushedAtWidth !== width ||
+				this.flushedAtHeight !== height
+					? null
+					: this.keepsFlushedTop(this.previousLines, newLines, height, prevViewportTop, flushedBeforeShrink);
 			if (alignedTop !== null) {
 				logRedraw(`tall→tall shrink keeps flushed top (${alignedTop}, retained ${prevViewportTop}) instead of re-emitting scrollback`);
 				// Rows above the aligned top are verified scrollback; the repaint
