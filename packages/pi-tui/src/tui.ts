@@ -2018,6 +2018,106 @@ export class TUI extends Container {
 		return null;
 	}
 
+	/**
+	 * Where the row that sat at the top of the screen (`top` in the committed
+	 * frame) is in the new frame. The flushed mark is a row index, so it only
+	 * stays true while nothing above the screen top moves. A frame that
+	 * deletes rows up there (a tool card in scrollback folding into its phase
+	 * summary) while it grows below — so the shrink demotion never runs —
+	 * moves every on-screen row up: a clean repaint from the mark, or an
+	 * in-place realign from the new viewport top, then starts below the old
+	 * screen-top row and erases it without it ever reaching scrollback. Seen
+	 * as a table missing one row between two identical separators (#3020).
+	 *
+	 * The rows are aligned with a bounded Myers diff from the first changed
+	 * row. If the old screen-top row survives, its new index is returned;
+	 * otherwise the row after the last surviving row above it. Rows above the
+	 * returned index are scrollback (or edits hidden above the screen, as
+	 * before, #2582). Returns `top` when nothing above it changed, and null
+	 * when the diff exceeds `maxEdits` (callers keep their old start row).
+	 */
+	private static seamRowInNewFrame(
+		baseLines: string[],
+		newLines: string[],
+		top: number,
+		maxEdits = 2000,
+	): number | null {
+		if (top <= 0 || top >= baseLines.length) {
+			return null;
+		}
+		const limit = Math.min(top, newLines.length);
+		let common = 0;
+		while (common < limit && baseLines[common] === newLines[common]) {
+			common++;
+		}
+		if (common >= top) {
+			return top;
+		}
+		const match = TUI.matchRows(baseLines, newLines, common, maxEdits);
+		if (!match) {
+			return null;
+		}
+		if (match[top - common] >= 0) {
+			return match[top - common];
+		}
+		for (let i = top - 1; i >= common; i--) {
+			if (match[i - common] >= 0) {
+				return match[i - common] + 1;
+			}
+		}
+		return common;
+	}
+
+	/**
+	 * Myers shortest edit script between a[from..] and b[from..]. Returns, per
+	 * row of a from `from`, the index in b it is kept at, or -1 if deleted;
+	 * null when more than `maxEdits` edits are needed.
+	 */
+	private static matchRows(a: string[], b: string[], from: number, maxEdits: number): Int32Array | null {
+		const n = a.length - from;
+		const m = b.length - from;
+		const max = Math.min(n + m, maxEdits);
+		const offset = max + 1;
+		const v = new Int32Array(2 * max + 3);
+		const trace: Int32Array[] = [];
+		for (let d = 0; d <= max; d++) {
+			// Snapshot of k in [-d-1, d+1] before step d, for the backtrack.
+			trace.push(v.slice(offset - d - 1, offset + d + 2));
+			for (let k = -d; k <= d; k += 2) {
+				let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1]) ? v[offset + k + 1] : v[offset + k - 1] + 1;
+				let y = x - k;
+				while (x < n && y < m && a[from + x] === b[from + y]) {
+					x++;
+					y++;
+				}
+				v[offset + k] = x;
+				if (x >= n && y >= m) {
+					const match = new Int32Array(n).fill(-1);
+					let bx = n;
+					let by = m;
+					for (let e = d; e > 0; e--) {
+						const snap = trace[e];
+						const at = (kk: number) => snap[kk + e + 1];
+						const kk = bx - by;
+						const prevK = kk === -e || (kk !== e && at(kk - 1) < at(kk + 1)) ? kk + 1 : kk - 1;
+						const prevX = at(prevK);
+						const prevY = prevX - prevK;
+						while (bx > prevX && by > prevY) {
+							match[--bx] = from + --by;
+						}
+						bx = prevX;
+						by = prevY;
+					}
+					while (bx > 0 && by > 0) {
+						match[--bx] = from + --by;
+					}
+					return match;
+				}
+			}
+		}
+		return null;
+	}
+
 	/** Whether a rendered line shows nothing — no visible non-blank cell. */
 	private static isVisuallyBlank(line: string): boolean {
 		if (isImageLine(line)) {
@@ -2506,6 +2606,21 @@ export class TUI extends Container {
 		if (newLines.length < this.previousLines.length) {
 			this.flushedLineCount = Math.min(this.flushedLineCount, Math.max(0, newLines.length - height));
 		}
+		// The committed frame and its physical screen top: every clean repaint
+		// starts no lower than where the old screen-top row went (see
+		// seamRowInNewFrame). Computed once, on first use.
+		const seamBase = forcedRender ? forcedRenderBaseLines : this.previousLines;
+		const seamTop = forcedRender ? keptTop : prevViewportTop;
+		let seamRow: number | null | undefined;
+		const shiftedSeamRow = (): number | null => {
+			if (seamRow === undefined) {
+				seamRow =
+					seamBase && seamBase.length > 0 && this.flushedAtWidth === width && this.flushedAtHeight === height
+						? TUI.seamRowInNewFrame(seamBase, newLines, seamTop)
+						: null;
+			}
+			return seamRow;
+		};
 
 		// Shared epilogue for every frame-writing path: record the frame the
 		// terminal now shows and reposition the hardware cursor. Every writer
@@ -2554,7 +2669,14 @@ export class TUI extends Container {
 			// still in the rewritten lines is re-emitted below and replaces its
 			// (now-deleted) prior placement via its stable id.
 			buffer += this.deleteKittyImages(this.previousKittyImageIds);
-			const firstLine = clear ? Math.min(this.flushedLineCount, Math.max(0, newLines.length - height)) : 0;
+			let firstLine = clear ? Math.min(this.flushedLineCount, Math.max(0, newLines.length - height)) : 0;
+			// Rows deleted above the screen top moved the on-screen rows up, past
+			// the index the mark still names: start at the old screen-top row so
+			// it is repainted rather than erased (#3020).
+			const seam = firstLine > 0 ? shiftedSeamRow() : null;
+			if (seam !== null && seam < firstLine) {
+				firstLine = seam;
+			}
 			const startRow = Math.max(1, height - Math.max(1, newLines.length - firstLine) + 1);
 			if (clear) {
 				// Erase line-by-line instead of \x1b[2J: 2J erases the screen in
@@ -2755,6 +2877,16 @@ export class TUI extends Container {
 				// demotes the mark to that top, not to the shrunken viewport top.
 				this.flushedLineCount = flushedBeforeShrink;
 				repaintFromFlushedTop(alignedTop);
+				return;
+			}
+			// More rows went above the screen top than the frame lost: the old
+			// screen-top row now sits above the new viewport top, and an in-place
+			// realign would erase it. A clean repaint from it scrolls the rows up
+			// to the new viewport top into scrollback instead (#3020).
+			const seam = shiftedSeamRow();
+			if (seam !== null && seam < getViewportTop(newLines.length)) {
+				logRedraw(`tall→tall shrink moved the screen top above the viewport (${seam}) — clean repaint from it`);
+				fullRender(true);
 				return;
 			}
 			logRedraw(`tall→tall shrink viewport realign (${this.previousLines.length} -> ${newLines.length})`);
