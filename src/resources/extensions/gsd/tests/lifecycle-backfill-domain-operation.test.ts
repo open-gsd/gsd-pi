@@ -271,7 +271,7 @@ test("/gsd db adopt previews without writing; --apply writes a backup and adopts
   assert.match(before[0]!.message, /^16 milestone, slice or task row\(s\) have no canonical lifecycle row/);
 
   await handleDbAdopt(ctx, base, "");
-  assert.match(notes[0]!.message, /16 row\(s\) would be adopted/);
+  assert.match(notes[0]!.message, /Initial adoptions: 16; projected status changes: 2/);
   assert.equal(unadoptedCount(), 16, "a preview adopts nothing");
   assert.equal(scalar("SELECT COUNT(*) FROM workflow_operations"), 0);
   assert.deepEqual(backups(), []);
@@ -448,7 +448,7 @@ test("under an already completed milestone an unproven completion stays complete
   assert.equal(notes[0]!.level, "info");
   assert.match(
     notes[0]!.message,
-    /Open work under a completed parent, adopted as cancelled:\n  task M001\/S01\/T02: "pending"/,
+    /Open work under a completed parent, adopted as cancelled:\n  "task M001\/S01\/T02": "pending"/,
   );
   assert.equal(unadoptedCount(), 3, "the preview writes nothing");
 
