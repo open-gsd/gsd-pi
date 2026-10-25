@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Adapts shared GSD workflow handlers for MCP executor calls.
 
-import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
+import { dbOpenFailureForObservation, ensureDbOpen, type DatabaseOpenFailureObservation } from "../bootstrap/dynamic-tools.js";
 import { sanitizeCompleteMilestoneParams } from "../bootstrap/sanitize-complete-milestone.js";
 import { loadWriteGateSnapshot, shouldBlockContextArtifactSaveInSnapshot, shouldBlockRootArtifactSaveInSnapshot } from "../bootstrap/write-gate.js";
 import {
@@ -2877,7 +2877,8 @@ export async function executeMilestoneStatus(
   observationContext?: MilestoneStatusObservationContext,
 ): Promise<ToolExecutionResult> {
   try {
-    const dbAvailable = await ensureDbOpen(basePath);
+    const openFailure: DatabaseOpenFailureObservation = {};
+    const dbAvailable = await ensureDbOpen(basePath, {}, openFailure);
     if (!dbAvailable) {
       const response = {
         content: [{ type: "text" as const, text: "Error: GSD database is not available." }],
@@ -2892,7 +2893,7 @@ export async function executeMilestoneStatus(
             projectRevision: 0,
             authorityEpoch: 0,
             items: [],
-            queryError: new Error("GSD database is not available"),
+            queryError: dbOpenFailureForObservation(openFailure.reason),
           },
           observationContext,
         ),
