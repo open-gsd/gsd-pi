@@ -336,20 +336,46 @@ function findMatches(
   claimedCommand: string,
   bashCalls: readonly BashEvidence[],
 ): BashEvidence[] {
-  const normalized = claimedCommand.trim();
+  // The collector prefixes gsd_exec / gsd_uat_exec bodies with a purpose
+  // label line (#3011). Exact and wrapper comparisons strip it from both
+  // sides — otherwise the exact branch can never match a labeled run and the
+  // claim falls through to the substring/token branches, where a later
+  // containing command overrides a real exact pass. Mirrors the
+  // compound-chain path. A claim that is ONLY the label line strips to empty
+  // and keeps its raw text: it matches via the raw substring branch, which
+  // the raw recording (label + body) contains. The substring branch itself
+  // stays on raw text for the same reason.
+  const rawClaim = claimedCommand.trim();
+  const strippedClaim = stripExecutionEvidenceLabel(rawClaim).trim();
+  const normalized = strippedClaim.length > 0 ? strippedClaim : rawClaim;
+  const commandOf = (b: BashEvidence): string => {
+    const stripped = stripExecutionEvidenceLabel(b.command.trim()).trim();
+    return stripped.length > 0 ? stripped : b.command.trim();
+  };
 
-  const exact = bashCalls.filter((b) => b.command.trim() === normalized);
+  const exact = bashCalls.filter(
+    (b) => commandOf(b) === normalized || b.command.trim() === rawClaim,
+  );
 
   // When an exact run exists, also consider wrapper-equivalent reruns (e.g.
   // `cd ... && <command>`) so a newer pass is not shadowed by a stale exact
   // failure. Do not merge arbitrary containing scripts: their exit code may
   // belong to later work, not to the claimed verification command.
   const scriptWrapped = bashCalls.filter((b) => {
-    const command = b.command.trim();
+    const command = commandOf(b);
     if (command.length === 0 || command === normalized) return false;
     return isWrapperEquivalentCommand(command, normalized);
   });
-  if (exact.length > 0) return [...exact, ...scriptWrapped];
+  if (exact.length > 0) {
+    // Merge in the recordings' original order: latestMatch breaks timestamp
+    // ties by array position, and [exact, ...scriptWrapped] would let an
+    // OLDER wrapper run override a newer exact run (or hide a newer failure)
+    // whenever a labeled run appears in both sets (#3011).
+    const seen = new Set(exact);
+    const merged = [...exact, ...scriptWrapped.filter((b) => !seen.has(b))];
+    const order = new Map(bashCalls.map((b, i) => [b, i] as const));
+    return merged.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+  }
 
   // Substring match: claimed is contained in actual or actual in claimed.
   // A claimed verification command typically appears verbatim inside a
@@ -358,7 +384,7 @@ function findMatches(
   // must be excluded — `"x".includes("")` is true, so they'd match anything.
   const substring = bashCalls.filter(
     (b) => b.command.trim().length > 0 &&
-      (b.command.includes(normalized) || normalized.includes(b.command)),
+      (b.command.includes(rawClaim) || rawClaim.includes(b.command.trim())),
   );
   if (substring.length > 0) return substring;
 
@@ -371,7 +397,7 @@ function findMatches(
   if (claimedTokens.length === 0) return [];
 
   return bashCalls.filter((call) => {
-    const callTokens = new Set(call.command.split(/\s+/));
+    const callTokens = new Set(commandOf(call).split(/\s+/));
     const matchCount = claimedTokens.filter(t => callTokens.has(t)).length;
     return matchCount / claimedTokens.length >= 0.5;
   });
@@ -410,6 +436,27 @@ function exitCodeMismatchReason(claimedCommand: string, match: BashEvidence): st
       `"${claimed.slice(0, 80)}". Full persisted script:\n${match.command}\n` +
       `Each passing closeout evidence item must come from an independently executed command.`
     );
+  }
+  // When the recorded command merely contains the claim, name the text it
+  // adds — the mismatch reason truncates the recorded command, and the added
+  // suffix (e.g. an extra nonexistent test file) is exactly what differed
+  // (#3011). Truncation otherwise hides it and the message reads as if the
+  // claim itself failed.
+  if (recorded.includes(claimed) && claimed.length > 0) {
+    const at = recorded.indexOf(claimed);
+    const before = recorded.slice(0, at).trim();
+    const after = recorded.slice(at + claimed.length).trim();
+    const added: string[] = [];
+    if (after.length > 0) added.push(`after the claim: "${summarizeCommand(after)}"`);
+    if (before.length > 0) added.push(`before the claim: "${summarizeCommand(before)}"`);
+    if (added.length > 0) {
+      return (
+        `${base} — the claim does not exactly match the recorded command: the recorded command ` +
+        `contains the claim but adds text ${added.join(" and ")} ` +
+        `(recorded: ${summarizeCommand(recorded)}); exit code ${match.exitCode} belongs to that ` +
+        `recorded command. Verification evidence must match the executed command exactly.`
+      );
+    }
   }
   return (
     `${base} — the claim does not exactly match the recorded command ` +
