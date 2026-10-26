@@ -205,6 +205,14 @@ Standalone GSD keeps its own saved development root and project discovery. Embed
 
 The embedded surface is administrator-only by default. `plugins.entries.open-gsd-openclaw.config.embeddedProjects.projects` is an optional narrowing list of `{ "projectId": "<native-id>", "canonicalRoot": "/canonical/checkout" }` entries. Omit it to use the native catalog; `[]` denies every project. Existing installations with a legacy list must remove it to see all native projects. Explicit entries never grant access to a project absent from the caller's native catalog. Non-admin access requires both `adminOnly: false` and an explicit list, plus native operator scopes exposing the paths.
 
+To restore the full native catalog while preserving other plugin settings, remove only the narrowing property:
+
+```bash
+openclaw config unset plugins.entries.open-gsd-openclaw.config.embeddedProjects.projects
+```
+
+This does not register missing repositories or scan a separate GSD development root. Projects in OpenClaw's default project location are included when the caller's native catalog exposes them. Deliberate allowlists remain supported and are never automatically removed by the plugin.
+
 The plugin declares `contracts.gatewayMethodDispatch: ["authenticated-request"]` for these RPC handlers; it never uses owner CLI credentials to expand the user's project access.
 
 Use OpenClaw's Place picker to select a project or create an OpenClaw-managed worktree. Pass the actual selected execution directory to GSD. Automatic registration does not create a worktree, switch branches, or relocate running work.
@@ -213,9 +221,11 @@ GSD defaults to `git.isolation: none`, which uses the selected checkout's branch
 
 This adapter observes state on the Gateway host. A remote MCP server or cloud execution place needs colocated state and a corresponding integration; paths are not automatically translated. See OpenClaw's [managed worktrees](https://docs.openclaw.ai/concepts/managed-worktrees).
 
-## Embedded theme
+## Embedded presentation
 
 The dashboard tab inherits OpenClaw's current light/dark mode and semantic colors, including live changes while the tab is open. This is a per-document override: it does not change GSD's saved theme or write host colors into GSD settings. Opening GSD outside the dashboard uses GSD's own saved preference. Embedded theme controls defer to the dashboard while that override is active.
+
+Outer page spacing belongs to OpenClaw. As of OpenClaw 2026.10.7, the native `registerPage` API has no full-bleed layout option, so the host's page inset can remain around this native tab. The plugin does not patch OpenClaw, modify host ancestors, or inject global shell CSS to remove it; edge-to-edge native pages require a host layout contract.
 
 ## GSD tools
 

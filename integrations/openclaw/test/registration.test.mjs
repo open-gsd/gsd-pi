@@ -50,8 +50,11 @@ function fixture(t) {
       id, service,
       project: { projectId: id, canonicalRoot: directory },
       async start(policy = { projects: [this.project] }) {
+        await this.startConfig({ webUi: { enabled: true }, embeddedProjects: policy });
+      },
+      async startConfig(config = {}) {
         await service.start({ config: { plugins: { entries: {
-          'open-gsd-openclaw': { config: { webUi: { enabled: true }, embeddedProjects: policy } },
+          'open-gsd-openclaw': { config },
         } } } });
         await flush();
         this.host = hosts.at(-1);
@@ -105,6 +108,29 @@ test('policy withdrawal and removal affect only the registration being reloaded'
   await a.start({});
   assert.equal((await a.call('gsd.ui.projects.list')).payload.length, 2, 'omitting explicit policy uses the native catalog');
   assert.equal((await b.call('gsd.ui.projects.list', { projectId: 'b' })).ok, true);
+});
+
+test('omitted embedded policy uses the entire native catalog and preserves explicit narrowing on later starts', { timeout: 5000 }, async (t) => {
+  const h = fixture(t);
+  const a = h.register('a');
+  h.register('b');
+  const ids = async () => {
+    const result = await a.call('gsd.ui.projects.list');
+    assert.equal(result.ok, true, JSON.stringify(result));
+    return result.payload.map((project) => project.projectId);
+  };
+  await a.startConfig();
+  assert.deepEqual(await ids(), ['a', 'b']);
+  const reader = await a.call('gsd.ui.projects.list', {}, { client: { connId: 'reader' } });
+  assert.equal(reader.error?.message, 'administrator admission required');
+  await a.start({ projects: [a.project] });
+  assert.deepEqual(await ids(), ['a']);
+  await a.start({ projects: [] });
+  assert.deepEqual(await ids(), []);
+  await a.start({});
+  assert.deepEqual(await ids(), ['a', 'b']);
+  await a.startConfig({ webUi: { enabled: true } });
+  assert.deepEqual(await ids(), ['a', 'b'], 'removing the whole policy also restores native discovery');
 });
 
 test('service stop disposes its own subscriptions without closing another registration', { timeout: 5000 }, async (t) => {

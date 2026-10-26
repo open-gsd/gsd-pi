@@ -69,13 +69,16 @@
       },
       "embeddedProjects": {
         "type": "object",
+        "description": "Embedded access to the caller's native OpenClaw project catalog. By default, administrators see all caller-visible projects; an explicit projects list only narrows that catalog.",
         "additionalProperties": false,
         "properties": {
           "adminOnly": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Require an administrator (default true). Non-admin access also requires an explicit projects list and native scopes exposing each project path."
           },
           "projects": {
             "type": "array",
+            "description": "Optional narrowing allowlist, not a discovery root. Omit this property to show all caller-visible native projects; [] denies every project. Remove legacy lists to use the full native catalog.",
             "items": {
               "type": "object",
               "additionalProperties": false,
