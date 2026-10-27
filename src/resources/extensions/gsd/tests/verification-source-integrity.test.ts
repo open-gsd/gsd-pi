@@ -323,3 +323,56 @@ test("verificationSourceSnapshotOptions derives excludePaths from preferences", 
     { excludePaths: ["artifacts/**"] },
   );
 });
+
+test("#3024: an untracked nested repository is captured as an external reference, not a failure", () => {
+  const cwd = createRepository("aggregator-root");
+  const nestedAbs = join(cwd, "nested-external");
+  mkdirSync(nestedAbs, { recursive: true });
+  git(nestedAbs, ["init", "-q"]);
+  git(nestedAbs, ["config", "user.email", "nested@example.com"]);
+  git(nestedAbs, ["config", "user.name", "Nested"]);
+  writeFileSync(join(nestedAbs, "inner.txt"), "inner\n");
+  git(nestedAbs, ["add", "inner.txt"]);
+  git(nestedAbs, ["commit", "-qm", "inner base"]);
+
+  const result = captureVerificationSourceSnapshot([{ id: "root", cwd }]);
+  if (!result.ok) assert.fail(`expected success, got: ${result.error}`);
+
+  const again = captureVerificationSourceSnapshot([{ id: "root", cwd }]);
+  if (!again.ok) assert.fail(`expected success, got: ${again.error}`);
+  assert.equal(again.snapshot.aggregateRevision, result.snapshot.aggregateRevision, "descriptor is stable across captures");
+
+  // A new commit inside the external repo changes the pinned descriptor.
+  writeFileSync(join(nestedAbs, "changed.txt"), "changed\n");
+  git(nestedAbs, ["add", "changed.txt"]);
+  git(nestedAbs, ["commit", "-qm", "change inside nested repo"]);
+  const after = captureVerificationSourceSnapshot([{ id: "root", cwd }]);
+  if (!after.ok) assert.fail(`expected success after external churn, got: ${after.error}`);
+  assert.notEqual(
+    after.snapshot.aggregateRevision,
+    result.snapshot.aggregateRevision,
+    "the external descriptor tracks the nested HEAD",
+  );
+});
+
+test("#3024: a tracked submodule keeps the stricter staged/clean accounting", () => {
+  const upstream = createRepository("submodule-upstream-3024");
+  const cwd = createRepository("submodule-parent-3024");
+  git(cwd, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", upstream, "vendor/dependency"]);
+  git(cwd, ["commit", "-qam", "register submodule"]);
+
+  const result = captureVerificationSourceSnapshot([{ id: "root", cwd }]);
+  if (!result.ok) assert.fail(`expected success, got: ${result.error}`);
+
+  // A commit inside the submodule (HEAD moves past the staged gitlink) still
+  // fails closed with the not-staged classification.
+  const vendor = join(cwd, "vendor/dependency");
+  git(vendor, ["config", "user.email", "nested@example.com"]);
+  git(vendor, ["config", "user.name", "Nested"]);
+  writeFileSync(join(vendor, "moved.txt"), "moved\n");
+  git(vendor, ["add", "moved.txt"]);
+  git(vendor, ["commit", "-qm", "move ahead"]);
+  const moved = captureVerificationSourceSnapshot([{ id: "root", cwd }]);
+  assert.equal(moved.ok, false);
+  if (!moved.ok) assert.match(moved.error, /not staged in its parent/);
+});
