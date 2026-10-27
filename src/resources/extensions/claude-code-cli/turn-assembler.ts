@@ -67,6 +67,24 @@ function normalizeToolResultContent(content: unknown): ExternalToolResultContent
 			blocks.push({ type: "image", data: block.data, mimeType: block.mimeType });
 			continue;
 		}
+		// Anthropic image block (e.g. Claude Code's `Read` on an image file):
+		// `{type: "image", source: {type: "base64", media_type, data}}`. Without
+		// this conversion the base64 payload falls through to `JSON.stringify`
+		// below and is stored as text, re-entering every prompt until the
+		// request exceeds the context limit (#3027). Only `base64` sources are
+		// convertible to the pi shape; anything else keeps the fallback.
+		const source = block.source;
+		if (
+			block.type === "image"
+			&& !!source && typeof source === "object" && !Array.isArray(source)
+			&& (source as Record<string, unknown>).type === "base64"
+			&& typeof (source as Record<string, unknown>).data === "string"
+			&& typeof (source as Record<string, unknown>).media_type === "string"
+		) {
+			const base64Source = source as Record<string, string>;
+			blocks.push({ type: "image", data: base64Source.data, mimeType: base64Source.media_type });
+			continue;
+		}
 
 		blocks.push({ type: "text", text: JSON.stringify(block) });
 	}
