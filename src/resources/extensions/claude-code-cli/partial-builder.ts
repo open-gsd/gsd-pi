@@ -196,6 +196,27 @@ export class PartialMessageBuilder {
 				const block = event.content_block;
 				if (!block) return null;
 
+				// Only map a content index for block types we push below. The SDK
+				// can emit other block types (e.g. advisor_tool_result); mapping
+				// their index without pushing a content entry makes
+				// content_block_stop read an undefined block and throw, losing the
+				// whole turn (#3026). The already-guarded
+				// `contentIndex === undefined` checks in the delta/stop cases make
+				// these blocks a no-op.
+				if (
+					block.type !== "text" &&
+					block.type !== "thinking" &&
+					block.type !== "tool_use" &&
+					block.type !== "server_tool_use"
+				) {
+					// The caller retains this builder across message_start events and
+					// stream indices restart per message: drop any mapping a previous
+					// message left at this index so an unknown block's delta/stop
+					// cannot leak into a prior message's content (#3026).
+					this.indexMap.delete(streamIndex);
+					return null;
+				}
+
 				const contentIndex = this.partial.content.length;
 				this.indexMap.set(streamIndex, contentIndex);
 
