@@ -13,6 +13,7 @@ import {
 	Container,
 	Loader,
 	ProcessTerminal,
+	setKeybindings,
 	type Terminal as TuiTerminal,
 	TUI,
 } from "@gsd/pi-tui";
@@ -216,6 +217,9 @@ export class InteractiveMode {
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
+		// Install the user keybindings globally so pi-tui components (Editor, Input,
+		// SelectList, ...) honor tui.* overrides from keybindings.json (#3028).
+		setKeybindings(this.keybindings);
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
