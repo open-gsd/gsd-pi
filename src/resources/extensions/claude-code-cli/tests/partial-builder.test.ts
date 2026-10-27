@@ -370,8 +370,12 @@ test("#3026: an unknown block at a previously-recognized stream index does not l
 		type: "content_block_start",
 		index: 0,
 		content_block: { type: "advisor_tool_result", content: [] },
-	});
-	builder.handleEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "leak" } });
+	} as unknown as BetaRawMessageStreamEvent);
+	builder.handleEvent({
+		type: "content_block_delta",
+		index: 0,
+		delta: { type: "text_delta", text: "leak" },
+	} as unknown as BetaRawMessageStreamEvent);
 	builder.handleEvent({ type: "content_block_stop", index: 0 });
 
 	const leaked = JSON.stringify(builder.message.content).includes("leak");
