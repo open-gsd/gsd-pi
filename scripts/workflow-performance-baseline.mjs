@@ -5,7 +5,8 @@
 // database — deriveState, one Domain Operation commit (capture.register) and
 // a projection drain — and fails against the committed baseline in
 // scripts/baselines/workflow-performance-baseline.json when a measurement
-// regresses beyond the declared tolerances.
+// regresses beyond the declared tolerances. The gate uses median p50/p95
+// across three complete, independent runs to resist a single noisy run.
 //
 // The tolerances protect against algorithmic regressions (an accidental
 // N+1, a missing index, a full-file rewrite in a hot loop), not against
@@ -187,6 +188,31 @@ export async function measure() {
   }
 }
 
+// Each run builds and warms its own corpus, then closes and removes it.
+// Run sequentially to avoid introducing contention ourselves. Aggregate the
+// complete runs' percentiles, not pooled samples: one noisy run must not
+// dominate the tail, while regressions present in two runs still fail.
+export async function measureRepeated(measureRun = measure) {
+  const runs = [];
+  for (let i = 0; i < 3; i += 1) {
+    runs.push(await measureRun());
+  }
+  const median = (values) => values.sort((a, b) => a - b)[1];
+  const measured = {};
+  for (const metric of Object.keys(runs[0])) {
+    const summary = {
+      p50: median(runs.map((run) => run[metric].p50)),
+      p95: median(runs.map((run) => run[metric].p95)),
+    };
+    const sampleCounts = runs.map((run) => run[metric].samples);
+    if (sampleCounts.every((count) => typeof count === "number")) {
+      summary.samples = median(sampleCounts);
+    }
+    measured[metric] = summary;
+  }
+  return measured;
+}
+
 export function compareAgainstBaseline(measured, baseline) {
   const regressions = [];
   const metrics = new Set([...Object.keys(measured), ...Object.keys(baseline)]);
@@ -213,7 +239,7 @@ export function compareAgainstBaseline(measured, baseline) {
 
 async function main() {
   const updateBaseline = process.argv.includes("--update-baseline");
-  const measured = await measure();
+  const measured = await measureRepeated();
 
   if (updateBaseline) {
     mkdirSync(dirname(BASELINE_FILE), { recursive: true });
