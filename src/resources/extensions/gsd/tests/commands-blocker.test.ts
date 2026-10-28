@@ -34,7 +34,15 @@ function harness() {
   const state = {
     snapshot: {
       eligible: true, projectId: "project-original", revision: 7, authorityEpoch: 2,
-      blocker: { id: "b1", kind: "consent", owner: "user", scope: "M001/S01", origin: "auto-pause", lifecycleState: "in_progress" },
+      failure: undefined as string | undefined,
+      blocker: {
+        id: "b1", kind: "consent", owner: "user", scope: "M001/S01", origin: "auto-pause",
+        lifecycleState: "in_progress",
+        description: "Live acceptance is blocked pending explicit user approval." as string | null,
+        requestedAction: "Grant or deny the pending approval, then resolve this blocker." as string | null,
+        // Sibling field that must stay excluded by the presentation allowlist.
+        evidence: "do-not-display-evidence",
+      },
       pause: { id: "p1", scope: "M001/S01" },
       secretPayload: "do-not-display",
     },
@@ -151,12 +159,83 @@ test("UNIT: inspect exposes safe fields and Project ID without writable binding 
   assert.equal(h.state.fileReads, 1);
   assert.equal(h.state.boundReads, 0);
   assert.equal(h.state.factoryRuns, 0);
-  assert.match(h.state.notices.join("\n"), /project-original/);
-  assert.doesNotMatch(h.state.notices.join("\n"), /do-not-display/);
+  const shown = h.state.notices.join("\n");
+  assert.match(shown, /project-original/);
+  const details = JSON.parse(shown);
+  assert.equal(details.blocker.description, "Live acceptance is blocked pending explicit user approval.");
+  assert.equal(details.blocker.requestedAction, "Grant or deny the pending approval, then resolve this blocker.");
+  assert.match(details.guidance, /clear-only/i);
+  assert.match(details.guidance, /not repair/);
+  assert.match(details.guidance, /not Task success/);
+  assert.match(details.guidance, /not verification success/);
+  assert.match(details.guidance, /no retry authority/);
+  assert.match(details.guidance, /not completion/);
+  assert.match(details.guidance, /never resumes or retries/);
+  assert.doesNotMatch(shown, /do-not-display|secretPayload/);
+});
+
+test("UNIT: eligible epoch-zero inspect distinguishes association from resolution readiness", async () => {
+  const h = harness();
+  h.state.snapshot.authorityEpoch = 0;
+  await h.run("inspect b1");
+  const details = JSON.parse(h.state.notices.join("\n"));
+  assert.equal(details.eligible, true);
+  assert.equal(details.authorityEpoch, 0);
+  assert.match(details.guidance, /association-only/);
+  assert.match(details.guidance, /existing positive-epoch writable binding prerequisite is unmet/);
+  assert.match(details.guidance, /cannot resolve at the current authority epoch/i);
+  assert.match(details.guidance, /no automatic adoption or cutover/i);
+  assert.doesNotMatch(details.guidance, /resolution is available|inspect again/i);
+  assert.equal(h.state.boundReads, 0);
+  assert.equal(h.state.factoryRuns, 0);
+  assert.equal(h.state.mutations.length, 0);
+});
+
+test("UNIT: native epoch-zero refusal never prompts for evidence or mutates", async () => {
+  const h = harness();
+  h.state.snapshot.authorityEpoch = 0;
+  let evidencePrompts = 0;
+  h.state.afterInput = () => { evidencePrompts++; };
+  await h.run();
+  assert.ok(h.state.boundReads >= 1);
+  assert.equal(evidencePrompts, 0);
+  assert.equal(h.state.factoryRuns, 0);
+  assert.equal(h.state.keyEvents, 0);
+  assert.equal(h.state.confirms, 0);
+  assert.equal(h.state.mutations.length, 0);
+  const shown = h.state.notices.join("\n");
+  assert.match(shown, /cannot resolve at the current authority epoch \(0\)/i);
+  assert.match(shown, /No adoption or cutover was attempted/);
+  assert.doesNotMatch(shown, /inspect again/i);
+});
+
+test("UNIT: inspect renders missing legacy context fail-soft as null without changing guidance", async () => {
+  const h = harness();
+  h.state.snapshot.blocker.description = null;
+  h.state.snapshot.blocker.requestedAction = null;
+  await h.run("inspect b1");
+  const shown = h.state.notices.join("\n");
+  const details = JSON.parse(shown);
+  assert.equal(details.blocker.description, null);
+  assert.equal(details.blocker.requestedAction, null);
+  assert.match(details.guidance, /clear-only/i);
+  assert.doesNotMatch(shown, /do-not-display|secretPayload/);
+});
+
+test("UNIT: ineligible inspect explains clear-only unavailability without claiming success", async () => {
+  const h = harness();
+  h.state.snapshot.eligible = false;
+  h.state.snapshot.failure = "blocker-not-open";
+  await h.run("inspect b1");
+  const details = JSON.parse(h.state.notices.join("\n"));
+  assert.equal(details.eligible, false);
+  assert.equal(details.failure, "blocker-not-open");
+  assert.match(details.guidance, /unavailable/);
+  assert.match(details.guidance, /nothing was changed/i);
 });
 
 for (const boundary of ["afterInput", "afterCustom"] as const) {
-  for (const change of ["project-id", "revision", "epoch", "cwd", "binding", "database-path", "owner", "pause", "scope", "lifecycle"]) {
+  for (const change of ["project-id", "revision", "epoch", "cwd", "binding", "database-path", "owner", "pause", "scope", "lifecycle", "description", "requested-action"]) {
     test(`UNIT: rechecks ${change} at ${boundary} before mutation`, async () => {
       const h = harness();
       h.state[boundary] = () => {
@@ -170,6 +249,8 @@ for (const boundary of ["afterInput", "afterCustom"] as const) {
         if (change === "pause") h.state.snapshot.pause.id = "p2";
         if (change === "scope") h.state.snapshot.blocker.scope = "M001/S02";
         if (change === "lifecycle") h.state.snapshot.blocker.lifecycleState = "complete";
+        if (change === "description") h.state.snapshot.blocker.description = "changed-context";
+        if (change === "requested-action") h.state.snapshot.blocker.requestedAction = "changed-action";
       };
       await h.run();
       assert.equal(h.state.mutations.length, 0);

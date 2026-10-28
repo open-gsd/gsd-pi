@@ -30,6 +30,7 @@ function makeMinimalHost(chatContainer: Container, streamingRenderState = create
 		session: { messages: [], retryAttempt: 0 },
 		chatContainer,
 		pendingTools: new Map(),
+		activeToolInvocations: new Set(),
 		pendingMessagesContainer: { clear() {} },
 		pinnedMessageContainer: new Container(),
 		statusContainer: new Container(),

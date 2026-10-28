@@ -46,11 +46,13 @@ import {
 import {
   verifyExpectedArtifact,
   resolveExpectedArtifactPath,
+  proveCompleteMilestoneCloseout,
   writeBlockerPlaceholder,
   diagnoseExpectedArtifact,
   diagnoseWorktreeIntegrityFailure,
   writeReactiveExecuteBlocker,
 } from "./auto-recovery.js";
+import { formatCloseoutProofBlock } from "./milestone-closeout-proof.js";
 import {
   describeMissingUnitResult,
   LATE_RENDERED_MILESTONE_UNITS,
@@ -1189,6 +1191,16 @@ function describeArtifactVerificationFailure(
     return `${worktreeFailure} Unit: ${unitType} ${unitId}.`;
   }
 
+  // A complete-milestone verify-fail is a closeout-proof failure by
+  // construction (verifyExpectedArtifact returns the proof outcome only), so
+  // name the proof reason instead of diagnosing the SUMMARY projection the
+  // model cannot fix by re-writing a file (#2976). Fall through to the
+  // generic artifact diagnosis only when the proof read itself throws.
+  if (unitType === "complete-milestone") {
+    const proofFailure = describeCloseoutProofFailure(unitId, basePath);
+    if (proofFailure) return proofFailure;
+  }
+
   const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
   const expected = diagnoseExpectedArtifact(unitType, unitId, basePath);
   if (!artifactPath) {
@@ -1227,6 +1239,24 @@ function describeArtifactVerificationFailure(
   }
 
   return `Artifact verification failed: ${relPath} exists but did not satisfy the ${unitType} completion contract${expected ? ` (${expected})` : ""}.`;
+}
+
+/**
+ * Re-run the closeout proof read-only and render its failure for retry
+ * context. Returns null when the unit id is malformed, the proof holds, or
+ * the proof read throws — callers fall back to the generic artifact
+ * diagnosis in every null case.
+ */
+function describeCloseoutProofFailure(unitId: string, basePath: string): string | null {
+  const { milestone: mid } = parseUnitId(unitId);
+  if (!mid) return null;
+  try {
+    const proof = proveCompleteMilestoneCloseout(mid, basePath, true);
+    if (proof.ok) return null;
+    return `Artifact verification failed: ${formatCloseoutProofBlock(proof)}`;
+  } catch {
+    return null;
+  }
 }
 export const _describeArtifactVerificationFailureForTest = describeArtifactVerificationFailure;
 export const _missingDurableSaveReceiptForTest = missingDurableSaveReceipt;

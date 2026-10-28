@@ -484,8 +484,12 @@ export function auditOrphanedMilestoneBranches(
     //
     // Gate on the closed answer so we only warn about genuinely open
     // milestones. Other closed milestones go through the complete/unmerged
-    // path below where appropriate.
-    if (!milestone.closed) {
+    // path below where appropriate. Parked milestones are exempt too
+    // (#3001): parking is the user's explicit deferral and the unmerged
+    // branch is a deliberate safety net, not stranded work — the audit must
+    // not gate the rest of the queue on it (the blocker message itself
+    // suggests park as the recovery). Unparking restores the audit.
+    if (!milestone.closed && !milestone.parked) {
       let commitsAhead = 0;
       try {
         commitsAhead = nativeCommitCountBetween(basePath, mainBranch, branch);
@@ -669,7 +673,8 @@ export function auditOrphanedMilestoneBranches(
     completedMilestones = [];
   }
   for (const m of completedMilestones) {
-    if (!m.closed) {
+    // Parked exemption, same as the first pass (#3001).
+    if (!m.closed && !m.parked) {
       if (seenMilestoneIds.has(m.id)) continue;
       const worktreeEvidence = detectWorktreeEvidence(basePath, m.id, hasChanges);
       if (!worktreeEvidence.dirty) continue;

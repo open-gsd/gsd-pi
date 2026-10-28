@@ -29,6 +29,8 @@ import {
   type CancellationWaiverInput,
 } from "./db/writers/lifecycle-commands.js";
 import { removeWorktree } from "./worktree-manager.js";
+import { acknowledgeWedgesForParkedMilestones } from "./auto-liveness-backstop.js";
+import { normalizeRealPath } from "./paths.js";
 import { logWarning } from "./workflow-logger.js";
 import { isAutoActive } from "./auto-runtime-state.js";
 import { adoptionLifecycleStatus } from "./status-guards.js";
@@ -191,6 +193,16 @@ export async function parkMilestone(
   renderParkedMarkerAfterCommit(basePath, milestoneId);
   invalidateAllCaches();
   await renderStateProjection(basePath);
+  // Parking abandons the milestone's units, so open liveness wedges scoped to
+  // them can no longer protect anything and must not gate the queue (#2991).
+  // A failed sweep leaves the wedge for the auto-start sweep to reconcile.
+  const wedgeSweep = acknowledgeWedgesForParkedMilestones(
+    normalizeRealPath(basePath) || basePath,
+    milestoneId,
+  );
+  if (!wedgeSweep.ok) {
+    logWarning("projection", `park wedge sweep failed for ${milestoneId}: ${wedgeSweep.error}`);
+  }
   return true;
 }
 

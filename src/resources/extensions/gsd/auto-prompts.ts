@@ -23,8 +23,9 @@ import {
   relTaskFile, resolveGsdRootFile, relGsdRootFile, resolveRuntimeFile, targetMilestoneFile,
   normalizeRealPath, gsdProjectionRoot,
 } from "./paths.js";
-import { resolveInlineLevel, loadEffectiveGSDPreferences, renderLanguageDirectiveForPrompt } from "./preferences.js";
+import { resolveInlineLevel, getDiscussionQuestionMode, loadEffectiveGSDPreferences, renderLanguageDirectiveForPrompt } from "./preferences.js";
 import { createRepositoryRegistryFromPreferences } from "./repository-registry.js";
+import { discussionChatPromptNote } from "./question-transport.js";
 import { isContextModeEnabled } from "./preferences-types.js";
 import type { GSDState, InlineLevel } from "./types.js";
 import type { GSDPreferences } from "./preferences.js";
@@ -48,7 +49,10 @@ import {
   type MilestoneCloseoutAuthorization,
 } from "./db/milestone-closeout-readiness.js";
 import { captureMilestoneVerificationSourceRevision } from "./verification-source-integrity.js";
-import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
+import {
+  milestoneWorktreeAbsentForValidation,
+  resolveCanonicalMilestoneRoot,
+} from "./worktree-manager.js";
 import {
   GATE_REGISTRY,
   assertGateCoverage,
@@ -343,6 +347,31 @@ function readPromptCloseoutAuthorization(
   } catch (err) {
     logWarning("prompt", `closeout authorization lookup failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
+  }
+}
+
+/**
+ * The aggregate source revision the validate-milestone tool will enforce on
+ * every evidence entry, computed at prompt-build time with the same reader
+ * the tool uses (#2996). Without it the first validation call must fail on a
+ * placeholder revision and the forced error is the last red message the
+ * operator sees under Validate Milestone. Falls back to pointing at the
+ * tool's mismatch error when the snapshot cannot be computed.
+ */
+function readValidationSourceRevisionForPrompt(base: string, mid: string): string {
+  try {
+    const artifactBasePath = resolveCanonicalMilestoneRoot(base, mid);
+    const preferences = loadEffectiveGSDPreferences(artifactBasePath)?.preferences;
+    const source = captureMilestoneVerificationSourceRevision(artifactBasePath, preferences);
+    if (source.ok) return source.sourceRevision;
+    // The error text is diagnostic, not prompt content: it can name repository
+    // paths, and any {{token}}-shaped substring would be re-expanded by the
+    // prompt renderer. Log it; render only the constant fallback.
+    logWarning("prompt", `validation source revision unavailable: ${source.error}`);
+    return "unavailable; take it from the tool's mismatch error";
+  } catch (err) {
+    logWarning("prompt", `validation source revision lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    return "unavailable; take it from the tool's mismatch error";
   }
 }
 
@@ -1838,7 +1867,7 @@ export async function buildDiscussMilestonePrompt(
     structuredQuestionsAvailable,
     commitInstruction,
     fastPathInstruction,
-  });
+  }) + discussionChatPromptNote(getDiscussionQuestionMode(base), structuredQuestionsAvailable);
   const promptWithContextMode = includeContextMode
     ? prependContextModeToBlock("discuss-milestone", base, basePrompt)
     : basePrompt;
@@ -1913,7 +1942,7 @@ export async function buildDiscussProjectPrompt(
     inlinedTemplates,
     structuredQuestionsAvailable,
     commitInstruction: "Do not commit planning artifacts — .gsd/ is managed externally.",
-  }));
+  }) + discussionChatPromptNote(getDiscussionQuestionMode(base), structuredQuestionsAvailable));
 }
 
 /**
@@ -1933,7 +1962,7 @@ export async function buildDiscussRequirementsPrompt(
     inlinedTemplates,
     structuredQuestionsAvailable,
     commitInstruction: "Do not commit planning artifacts — .gsd/ is managed externally.",
-  }));
+  }) + discussionChatPromptNote(getDiscussionQuestionMode(base), structuredQuestionsAvailable));
 }
 
 /**
@@ -3500,6 +3529,12 @@ export async function buildCompleteMilestonePrompt(
 export async function buildValidateMilestonePrompt(
   mid: string, midTitle: string, base: string, level?: InlineLevel,
 ): Promise<string> {
+  // Fail loud rather than aim the validator at a checkout without the
+  // milestone's code (#2997) — see milestoneWorktreeAbsentForValidation.
+  const worktreeAbsent = await milestoneWorktreeAbsentForValidation(base, mid);
+  if (worktreeAbsent) {
+    throw new Error(`Cannot build the validate-milestone prompt: ${worktreeAbsent}`);
+  }
   const inlineLevel = level ?? resolveInlineLevel();
   const inlined: string[] = [];
   const contextTelemetry: PromptContextTelemetryEntry[] = [];
@@ -3748,10 +3783,16 @@ export async function buildValidateMilestonePrompt(
     allowOmit: false,
   });
 
+  // The tool rejects evidence whose testedSourceRevision differs from the
+  // live snapshot, so hand the validator the value up front instead of
+  // forcing a probe call with a placeholder revision (#2996).
+  const currentSourceRevision = readValidationSourceRevisionForPrompt(base, mid);
+
   return loadPrompt("validate-milestone", {
     workingDirectory: base,
     milestoneId: mid,
     milestoneTitle: midTitle,
+    currentSourceRevision,
     roadmapPath: roadmapOutputPath,
     inlinedContext,
     validationPath: validationOutputPath,

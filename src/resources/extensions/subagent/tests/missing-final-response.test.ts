@@ -48,6 +48,45 @@ describe("markMissingFinalResponse", () => {
 		assert.equal(result.stderr, result.errorMessage);
 	});
 
+	for (const diagnostic of [
+		"400 model not accessible via /chat/completions",
+		"401 Unauthorized (synthetic provider diagnostic)",
+		"TransportError: connection reset (synthetic diagnostic)",
+		"  400 model not accessible via /chat/completions\n\n  synthetic provider detail  \n",
+	]) {
+		it(`preserves the existing diagnostic ${JSON.stringify(diagnostic)}`, () => {
+			const stderr = "existing child stderr\n";
+			const result = makeResult({
+				model: "luna",
+				stopReason: "error",
+				errorMessage: diagnostic,
+				stderr,
+				messages: [makeAssistantMessage(" \n\t")],
+			});
+			const context =
+				"Subagent produced no valid final response (child exited 0; model: luna, stopReason: error).";
+
+			markMissingFinalResponse(result);
+
+			assert.equal(result.exitCode, 1);
+			assert.equal(result.stopReason, "error");
+			assert.equal(result.errorMessage, `${diagnostic}\n${context}`);
+			assert.equal(result.stderr, stderr);
+		});
+	}
+
+	it("uses only missing-final context for absent stderr when a diagnostic exists", () => {
+		const diagnostic = "400 model not accessible via /chat/completions";
+		const result = makeResult({ errorMessage: diagnostic });
+		const context =
+			"Subagent produced no valid final response (child exited 0; model: unknown, stopReason: unknown).";
+
+		markMissingFinalResponse(result);
+
+		assert.equal(result.errorMessage, `${diagnostic}\n${context}`);
+		assert.equal(result.stderr, context);
+	});
+
 	it("reports unknown for missing model and missing original stopReason", () => {
 		const result = makeResult();
 
@@ -67,8 +106,11 @@ describe("markMissingFinalResponse", () => {
 			stderr: "boom",
 		});
 
+		const original = structuredClone(result);
+
 		markMissingFinalResponse(result);
 
+		assert.deepEqual(result, original);
 		assert.equal(result.exitCode, 2);
 		assert.equal(result.stopReason, "aborted");
 		assert.equal(result.errorMessage, "child crashed");
@@ -82,8 +124,11 @@ describe("markMissingFinalResponse", () => {
 			messages: [makeAssistantMessage("final answer")],
 		});
 
+		const original = structuredClone(result);
+
 		markMissingFinalResponse(result);
 
+		assert.deepEqual(result, original);
 		assert.equal(result.exitCode, 0);
 		assert.equal(result.stopReason, "stop");
 		assert.equal(result.errorMessage, undefined);

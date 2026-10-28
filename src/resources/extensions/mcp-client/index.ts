@@ -13,18 +13,13 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
-import {
-	truncateHead,
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-} from "@gsd/pi-coding-agent";
 import { Text } from "@gsd/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildHttpTransportOpts } from "./auth.js";
+import { formatMcpOutputText } from "./output-truncation.js";
 import {
 	buildMcpChildEnv,
 	clearMcpConfigCache,
@@ -65,14 +60,31 @@ const MCP_CALL_TIMEOUT_MS = 60_000;
 // Largest delay setTimeout accepts; GSD_MCP_WORKFLOW_TIMEOUT_MS=0 disables the timeout.
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-function mcpCallTimeoutMs(server: string, env: NodeJS.ProcessEnv = process.env): number {
+// Mirrors EXEC_TOOL_DEADLINE_MARGIN_MS in packages/mcp-server/src/workflow-tools.ts
+// (issue #2981) — the allowance the server adds over an exec call's requested
+// timeout_ms for its kill ladder and DB steps. Keep both copies in sync.
+const WORKFLOW_EXEC_DEADLINE_MARGIN_MS = 60_000;
+
+function mcpCallTimeoutMs(server: string, args?: unknown, env: NodeJS.ProcessEnv = process.env): number {
 	const workflowServer = env.GSD_WORKFLOW_MCP_NAME?.trim() || "gsd-workflow";
 	if (server.trim().toLowerCase() !== workflowServer.toLowerCase()) return MCP_CALL_TIMEOUT_MS;
 	const raw = env.GSD_MCP_WORKFLOW_TIMEOUT_MS?.trim();
-	if (!raw) return DEFAULT_WORKFLOW_MCP_CALL_TIMEOUT_MS;
-	const parsed = Number.parseInt(raw, 10);
-	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_WORKFLOW_MCP_CALL_TIMEOUT_MS;
-	return parsed === 0 ? MAX_TIMER_DELAY_MS : parsed;
+	let timeout = DEFAULT_WORKFLOW_MCP_CALL_TIMEOUT_MS;
+	if (raw) {
+		const parsed = Number.parseInt(raw, 10);
+		if (Number.isFinite(parsed) && parsed >= 0) timeout = parsed === 0 ? MAX_TIMER_DELAY_MS : parsed;
+	}
+	// Issue #2981: an explicit per-invocation timeout_ms (gsd_exec/gsd_uat_exec)
+	// must not be cut short by the client-side default — the client deadline
+	// covers the requested command timeout plus the same margin the server's
+	// serialized-operation deadline uses. An operator-disabled timeout (0 →
+	// MAX_TIMER_DELAY_MS) stays disabled.
+	if (timeout === MAX_TIMER_DELAY_MS) return timeout;
+	const requested = (args as { timeout_ms?: unknown } | null | undefined)?.timeout_ms;
+	if (typeof requested === "number" && Number.isFinite(requested) && requested > 0) {
+		timeout = Math.max(timeout, Math.floor(requested) + WORKFLOW_EXEC_DEADLINE_MARGIN_MS);
+	}
+	return timeout;
 }
 const emptyStdioTrustPromptQueue = Promise.resolve();
 let stdioTrustPromptQueue: Promise<void> = emptyStdioTrustPromptQueue;
@@ -519,13 +531,9 @@ export default function (pi: ExtensionAPI) {
 				const cached = toolCache.get(params.server);
 				if (cached) {
 					const text = formatToolList(params.server, cached);
-					const truncation = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-					let finalText = truncation.content;
-					if (truncation.truncated) {
-						finalText += `\n\n[Truncated: ${truncation.outputLines}/${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
-					}
+					const output = formatMcpOutputText(text, "Truncated");
 					return {
-						content: [{ type: "text", text: finalText }],
+						content: [{ type: "text", text: output.text }],
 						details: { server: params.server, toolCount: cached.length, cached: true },
 					};
 				}
@@ -540,14 +548,10 @@ export default function (pi: ExtensionAPI) {
 				toolCache.set(params.server, tools);
 
 				const text = formatToolList(params.server, tools);
-				const truncation = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-				let finalText = truncation.content;
-				if (truncation.truncated) {
-					finalText += `\n\n[Truncated: ${truncation.outputLines}/${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
-				}
+				const output = formatMcpOutputText(text, "Truncated");
 
 				return {
-					content: [{ type: "text", text: finalText }],
+					content: [{ type: "text", text: output.text }],
 					details: { server: params.server, toolCount: tools.length, cached: false },
 				};
 			} catch (err: unknown) {
@@ -618,7 +622,7 @@ export default function (pi: ExtensionAPI) {
 						},
 					},
 					undefined,
-					{ signal, timeout: mcpCallTimeoutMs(params.server) },
+					{ signal, timeout: mcpCallTimeoutMs(params.server, params.args) },
 				);
 
 				// Serialize result content to text
@@ -627,19 +631,17 @@ export default function (pi: ExtensionAPI) {
 					.map((c) => (c.type === "text" ? c.text ?? "" : JSON.stringify(c)))
 					.join("\n");
 
-				const truncation = truncateHead(raw, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-				let finalText = truncation.content;
-				if (truncation.truncated) {
-					finalText += `\n\n[Output truncated: ${truncation.outputLines}/${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
-				}
+				const output = formatMcpOutputText(raw);
 
 				return {
-					content: [{ type: "text", text: finalText }],
+					content: [{ type: "text", text: output.text }],
 					details: {
 						server: params.server,
 						tool: params.tool,
-						charCount: finalText.length,
-						truncated: truncation.truncated,
+						charCount: output.text.length,
+						truncated: output.truncated,
+						totalBytes: output.totalBytes,
+						outputBytes: output.outputBytes,
 					},
 				};
 			} catch (err: unknown) {

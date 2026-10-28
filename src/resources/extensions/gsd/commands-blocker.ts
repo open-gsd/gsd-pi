@@ -22,15 +22,32 @@ const USAGE = "Usage: /gsd blocker inspect <id>\n" +
 type Snapshot = AutoPauseBlockerResolutionInspection;
 
 function describe(snapshot: Snapshot): string {
-  // Explicit allowlist: no stored evidence, request payloads or runtime metadata.
+  // Explicit allowlist: human-facing context plus technical metadata only.
+  // Never stored evidence, request payloads or unrelated runtime metadata.
   return JSON.stringify({
     projectId: snapshot.projectId,
     eligible: snapshot.eligible,
     failure: snapshot.failure,
+    // Clear-only eligibility is not repair, verification success, retry
+    // authority or completion; resolution never resumes or dispatches work.
+    guidance: snapshot.eligible
+      ? snapshot.authorityEpoch < 1
+        ? "eligible is association-only for this blocker; the existing positive-epoch writable binding prerequisite is unmet. " +
+          "Cannot resolve at the current authority epoch; no automatic adoption or cutover is performed. " +
+          "Eligibility is not repair, not Task success, not verification success, no retry authority and not completion. " +
+          "Nothing was changed; resolution never resumes or retries work."
+        : "eligible means clear-only resolution is available for this blocker; it is not repair, " +
+        "not Task success, not verification success, no retry authority and not completion. " +
+        "Address the description/requestedAction (or the human decision it names) before resolving; " +
+        "resolving only clears the blocker and its pause and never resumes or retries work."
+      : "Clear-only resolution is unavailable for this blocker (see failure); nothing was changed. " +
+        "Inspect the failure and any persisted blocker context; resolving requires eligibility.",
     blocker: snapshot.blocker && {
       id: snapshot.blocker.id, kind: snapshot.blocker.kind, owner: snapshot.blocker.owner,
       scope: snapshot.blocker.scope, origin: snapshot.blocker.origin,
       lifecycleState: snapshot.blocker.lifecycleState,
+      description: snapshot.blocker.description,
+      requestedAction: snapshot.blocker.requestedAction,
     },
     pause: snapshot.pause && { id: snapshot.pause.id, scope: snapshot.pause.scope },
     revision: snapshot.revision,
@@ -111,7 +128,10 @@ export async function handleBlocker(
       const db = getDb();
       requirePauseBlockerCheckout(db, project);
       const bound = classifyAutoPauseBlockerResolution(db, blockerId);
-      if (bound.authorityEpoch < 1 || describe(bound) !== describe(snapshot)
+      if (bound.authorityEpoch < 1) {
+        throw new Error(`Cannot resolve at the current authority epoch (${bound.authorityEpoch}); an existing positive-epoch writable binding is required. No adoption or cutover was attempted.`);
+      }
+      if (describe(bound) !== describe(snapshot)
         || Number(db.prepare("PRAGMA query_only").get()?.["query_only"]) !== 0) {
         throw new Error("Existing writable canonical Project binding does not match approval; inspect again. No adoption or cutover was attempted.");
       }

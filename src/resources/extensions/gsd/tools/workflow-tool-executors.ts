@@ -49,7 +49,7 @@ import {
   registerMilestoneRows,
   type MilestoneRegistration,
 } from "../milestone-registration.js";
-import { readMilestoneStatus, readTask } from "../db/lifecycle-read.js";
+import { readMilestoneStatus, readSlice, readTask } from "../db/lifecycle-read.js";
 import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
 import { isClosedStatus } from "../status-guards.js";
@@ -649,6 +649,29 @@ export async function executeSummarySave(
       details: { operation: "save_summary", error: "unexpected_task_id" },
       isError: true,
     };
+  }
+  if (params.artifact_type === "SUMMARY" && params.slice_id && !params.task_id) {
+    // A slice-scoped SUMMARY is a completion artifact: the drift guard flags
+    // SUMMARY on any non-closed slice and doctor flags any not-done slice, so
+    // a save against a non-terminal slice wedges auto-mode on
+    // artifact_db_status_divergence with no sanctioned clear (#2994).
+    // Task-scoped SUMMARY keeps its staging machinery; milestone-scoped
+    // SUMMARY is not drift-flagged.
+    const slice = readSlice(params.milestone_id!, params.slice_id);
+    if (!slice) {
+      return {
+        content: [{ type: "text", text: `Error: slice ${params.slice_id} not found in milestone ${params.milestone_id}; create it through planning before saving a completion artifact.` }],
+        details: { operation: "save_summary", error: "summary_slice_not_found" },
+        isError: true,
+      };
+    }
+    if (!(slice.done && slice.closed)) {
+      return {
+        content: [{ type: "text", text: `Error: slice ${params.slice_id} is ${slice.status}; artifact_type "SUMMARY" is a completion artifact and requires a terminal slice. Record mid-flight findings with artifact_type CONTEXT, CONTEXT-DRAFT, or ASSESSMENT, or complete the slice first.` }],
+        details: { operation: "save_summary", error: "summary_slice_not_terminal", sliceStatus: slice.status },
+        isError: true,
+      };
+    }
   }
   const writeGateSnapshot = loadWriteGateSnapshot(basePath);
   const prefs = loadEffectiveGSDPreferences(basePath)?.preferences;

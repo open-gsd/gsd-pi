@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { type Component, type MouseEvent, type OverlayOptions, TUI } from "../src/tui.ts";
-import { VirtualTerminal } from "./virtual-terminal.ts";
+import { VirtualTerminal } from "../src/tests/virtual-terminal.ts";
 
 class Block implements Component {
 	height: number;

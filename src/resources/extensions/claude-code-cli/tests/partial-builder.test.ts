@@ -254,3 +254,130 @@ describe("PartialMessageBuilder — MCP tool name normalization", () => {
 		assert.deepEqual(mapped.arguments, { taskId: "T001" });
 	});
 });
+
+describe("PartialMessageBuilder — unhandled stream block types (#3026)", () => {
+	test("advisor_tool_result start + stop does not throw or register content", () => {
+		const builder = new PartialMessageBuilder("claude-opus-5-5");
+
+		// The real SDK can emit block types this builder does not map (the
+		// mirror union in sdk-types.ts does not include them, hence the cast).
+		builder.handleEvent({
+			type: "content_block_start",
+			index: 0,
+			content_block: { type: "advisor_tool_result" },
+		} as unknown as BetaRawMessageStreamEvent);
+
+		// Must not throw "Cannot read properties of undefined (reading 'type')"
+		const stop = builder.handleEvent({
+			type: "content_block_stop",
+			index: 0,
+		} as BetaRawMessageStreamEvent);
+
+		assert.equal(stop, null);
+		assert.deepEqual(builder.message.content, []);
+	});
+
+	test("recognized blocks around an unknown block stay intact", () => {
+		const builder = new PartialMessageBuilder("claude-opus-5-5");
+
+		builder.handleEvent({
+			type: "content_block_start",
+			index: 0,
+			content_block: { type: "text" },
+		} as BetaRawMessageStreamEvent);
+		builder.handleEvent({
+			type: "content_block_delta",
+			index: 0,
+			delta: { type: "text_delta", text: "hello " },
+		} as BetaRawMessageStreamEvent);
+
+		// Unknown block interleaves at stream index 1
+		builder.handleEvent({
+			type: "content_block_start",
+			index: 1,
+			content_block: { type: "advisor_tool_result" },
+		} as unknown as BetaRawMessageStreamEvent);
+		builder.handleEvent({
+			type: "content_block_stop",
+			index: 1,
+		} as BetaRawMessageStreamEvent);
+
+		builder.handleEvent({
+			type: "content_block_start",
+			index: 2,
+			content_block: { type: "text" },
+		} as BetaRawMessageStreamEvent);
+		builder.handleEvent({
+			type: "content_block_delta",
+			index: 2,
+			delta: { type: "text_delta", text: "world" },
+		} as BetaRawMessageStreamEvent);
+		const end = builder.handleEvent({
+			type: "content_block_stop",
+			index: 2,
+		} as BetaRawMessageStreamEvent);
+
+		assert.ok(end, "second text block should still complete");
+		assert.equal(end!.type, "text_end");
+		if (end!.type === "text_end") {
+			assert.equal(end!.content, "world");
+		}
+		assert.equal(builder.message.content.length, 2);
+		assert.equal((builder.message.content[0] as any).text, "hello ");
+		assert.equal((builder.message.content[1] as any).text, "world");
+	});
+
+	test("web_search_tool_result start + stop does not throw", () => {
+		const builder = new PartialMessageBuilder("claude-opus-5-5");
+
+		// Mapped by mapContentBlock in the non-streaming path but not pushed by
+		// the streaming builder — must not get an index mapping either.
+		builder.handleEvent({
+			type: "content_block_start",
+			index: 0,
+			content_block: { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] },
+		} as BetaRawMessageStreamEvent);
+
+		const stop = builder.handleEvent({
+			type: "content_block_stop",
+			index: 0,
+		} as BetaRawMessageStreamEvent);
+
+		assert.equal(stop, null);
+		assert.deepEqual(builder.message.content, []);
+	});
+});
+
+
+test("#3026: an unknown block at a previously-recognized stream index does not leak the prior mapping", () => {
+	const builder = new PartialMessageBuilder("claude-sonnet-4-20250514");
+	builder.handleEvent({ type: "message_start" });
+	builder.handleEvent({
+		type: "content_block_start",
+		index: 0,
+		content_block: { type: "text", text: "" },
+	});
+	builder.handleEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "kept" } });
+	builder.handleEvent({ type: "content_block_stop", index: 0 });
+	builder.handleEvent({ type: "message_stop" });
+
+	// Second message reuses stream indices; block 0 is now an unknown type.
+	// The caller retains the builder across message_start events, so a stale
+	// mapping at index 0 would let the delta/stop pair write into (or throw
+	// on) the freshly reset content array.
+	builder.handleEvent({ type: "message_start" });
+	builder.handleEvent({
+		type: "content_block_start",
+		index: 0,
+		content_block: { type: "advisor_tool_result", content: [] },
+	} as unknown as BetaRawMessageStreamEvent);
+	builder.handleEvent({
+		type: "content_block_delta",
+		index: 0,
+		delta: { type: "text_delta", text: "leak" },
+	} as unknown as BetaRawMessageStreamEvent);
+	builder.handleEvent({ type: "content_block_stop", index: 0 });
+
+	const leaked = JSON.stringify(builder.message.content).includes("leak");
+	assert.equal(leaked, false, "no leaked delta text from the reused index");
+});

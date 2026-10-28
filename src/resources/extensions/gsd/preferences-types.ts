@@ -57,6 +57,27 @@ export interface ToolCallLoopGuardConfig {
 }
 
 /**
+ * How discuss units (discuss-milestone, discuss-slice, discuss-project,
+ * discuss-requirements) ask the user questions (#2979).
+ */
+export type DiscussionQuestionMode = "dialog" | "chat";
+
+export interface DiscussionPreferences {
+  /**
+   * Question surface for discussion interviews.
+   * - "dialog" (default): structured `ask_user_questions` choice dialogs when
+   *   the transport supports them.
+   * - "chat": plain-text numbered questions answered in the normal chat. The
+   *   `ask_user_questions` tool stays allowed (the tool-surface readiness
+   *   check still requires it — unlike `GSD_WORKFLOW_MCP_STRUCTURED_QUESTIONS=0`,
+   *   which removes the tool and breaks `/gsd discuss`), but discuss prompts
+   *   take their plain-text branch and a dispatched slice discussion holds its
+   *   picker until the CONTEXT artifact is saved (#2979).
+   */
+  question_mode?: DiscussionQuestionMode;
+}
+
+/**
  * Opt-in tool-output sandboxing for sub-sessions. When enabled, the gsd_exec
  * MCP tool runs scripts in an isolated subprocess and returns only a short
  * digest to the calling agent's context window; capped stdout/stderr persist
@@ -68,7 +89,7 @@ export interface ToolCallLoopGuardConfig {
 export interface ContextModeConfig {
   /** Master switch. Default: true (opt-out via `enabled: false`). */
   enabled?: boolean;
-  /** Per-invocation timeout in milliseconds. Defaults to verification_timeout_ms. Range: 1_000–600_000. */
+  /** Per-invocation timeout in milliseconds. Defaults to verification_timeout_ms. Range: 1_000–3_600_000. */
   exec_timeout_ms?: number;
   /** Cap on persisted stdout bytes per invocation. Default: 1_048_576 (1 MiB). Range: 4_096–16_777_216. */
   exec_stdout_cap_bytes?: number;
@@ -162,6 +183,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "notifications",
   "cmux",
   "remote_questions",
+  "discussion",
   "git",
   "post_unit_hooks",
   "pre_dispatch_hooks",
@@ -179,6 +201,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "verification_auto_fix",
   "verification_max_retries",
   "verification_timeout_ms",
+  "verification_reuse_exec_evidence",
   "verification_source_exclude_paths",
   "per_unit_cost_cap_usd",
   "unit_cost_spike_multiplier",
@@ -574,6 +597,8 @@ export interface GSDPreferences {
   notifications?: NotificationPreferences;
   cmux?: CmuxPreferences;
   remote_questions?: RemoteQuestionsConfig;
+  /** Discussion interview surface controls (#2979). */
+  discussion?: DiscussionPreferences;
   git?: GitPreferences;
   post_unit_hooks?: PostUnitHookConfig[];
   pre_dispatch_hooks?: PreDispatchHookConfig[];
@@ -623,6 +648,13 @@ export interface GSDPreferences {
   verification_max_retries?: number;
   /** Per-command host-verification and verification-oriented gsd_exec timeout in ms. Unset host verification uses 120000. */
   verification_timeout_ms?: number;
+  /**
+   * Opt-in reuse of the executor's own `gsd_exec` run of a Task Verify command
+   * in host verification (#2982). Default false: the gate always re-runs. When
+   * true, a recorded run stands in for the gate only under the gate's own
+   * shell form, child environment, rewrites, source revision and timeout.
+   */
+  verification_reuse_exec_evidence?: boolean;
   /**
    * Git pathspecs excluded from the verification source-revision snapshot
    * (#2873). Each entry becomes a `:(exclude)<entry>` pathspec on every

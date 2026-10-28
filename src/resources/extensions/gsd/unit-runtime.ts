@@ -286,9 +286,14 @@ export function recordUnitHarnessAbort(
       wrapupWarningSent: prev?.wrapupWarningSent ?? false,
       continueHereFired: prev?.continueHereFired ?? false,
       timeoutAt: prev?.timeoutAt ?? null,
-      lastProgressAt: Date.now(),
+      // Harness aborts are not progress (#3005): a flood of blocked calls
+      // must not re-arm the idle watchdog's freshness clock. The abort is
+      // durably recorded on harnessAbort; the last-progress stamps stay at
+      // their prior values, or at the unit's start when no progress was
+      // ever recorded.
+      lastProgressAt: prev?.lastProgressAt ?? startedAt,
       progressCount: prev?.progressCount ?? 0,
-      lastProgressKind: `harness-abort:${abort.kind}`,
+      lastProgressKind: prev?.lastProgressKind ?? "dispatch",
       recovery: prev?.recovery,
       recoveryAttempts: prev?.recoveryAttempts ?? 0,
       lastRecoveryReason: prev?.lastRecoveryReason,

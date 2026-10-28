@@ -6,7 +6,7 @@ Skills follow the open [Agent Skills standard](https://agentskills.io/) and are 
 
 ## Skill Directories
 
-GSD reads skills from these locations, in priority order:
+GSD reads skills from these locations:
 
 | Location                          | Scope   | Description                                              |
 |-----------------------------------|---------|----------------------------------------------------------|
@@ -16,7 +16,9 @@ GSD reads skills from these locations, in priority order:
 | `~/.claude/skills/`              | Compat  | Claude Code compatibility source, lower priority         |
 | `.claude/skills/` (project root) | Compat  | Project-local Claude Code compatibility source           |
 
-Earlier entries take precedence when names collide. Bundled GSD skills win over user-global and project skills; Claude Code compatibility directories are searched after the standard Agent Skills locations.
+On name collisions project skills (`.gsd/skills/`, `.agents/skills/`) win over bundled GSD skills, and bundled GSD skills win over user-global (`~/.agents/skills/`) and Claude compatibility directories.
+
+Project directories resolve against the session's current working directory. Only `.agents/skills/` is discovered from ancestor directories (nearest first, up to the nearest enclosing directory containing a `.git` entry — or the filesystem root when there is none); `.gsd/skills/` and `.claude/skills/` are read from the working directory itself. Subagent children scan from the child's own working directory — see [Skills In Child Sessions](./subagents.md#skills-in-child-sessions).
 
 > **Bundled vs user skills:** GSD bundled skills are managed in `~/.gsd/agent/skills/`. Install your own shared skills into `~/.agents/skills/`, or commit project-specific skills under `.agents/skills/`.
 
@@ -141,7 +143,7 @@ Skills can be referenced by:
 2. **Absolute path** — e.g., `/Users/you/.agents/skills/my-skill/SKILL.md`
 3. **Directory path** — e.g., `~/custom-skills/my-skill` → looks for `SKILL.md` inside
 
-Bundled skills (`~/.gsd/agent/skills/`) take precedence over user-global skills (`~/.agents/skills/`), project skills (`.agents/skills/`), and Claude compatibility directories.
+Project skills (`.agents/skills/`) take precedence over bundled skills (`~/.gsd/agent/skills/`), which take precedence over user-global (`~/.agents/skills/`) and Claude compatibility directories.
 
 ## Custom Skills
 
@@ -176,7 +178,7 @@ GSD tracks skill performance across auto-mode sessions and surfaces health data 
 
 ### Skill Telemetry
 
-Every auto-mode unit records which skills were available and actively loaded. This data is stored in `metrics.json` alongside existing token and cost tracking.
+Every auto-mode unit records which skills were available. This data is stored in `metrics.json` alongside existing token and cost tracking. The recorded `skills` list reflects catalog availability at dispatch, not verified per-skill reads, and it describes the parent unit — not any subagent child it delegated to.
 
 ### Skill Health Dashboard
 

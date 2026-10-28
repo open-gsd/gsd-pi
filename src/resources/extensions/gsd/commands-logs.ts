@@ -1,21 +1,28 @@
 /**
- * /gsd logs — Browse activity logs, debug logs, and metrics.
+ * /gsd logs — Browse activity logs, debug logs, exec output logs, and metrics.
  *
  * Subcommands:
- *   /gsd logs              — List recent activity + debug logs
- *   /gsd logs <N>          — Show summary of activity log #N
- *   /gsd logs debug        — List debug log files
- *   /gsd logs debug <N>    — Show debug log summary #N
- *   /gsd logs tail [N]     — Show last N activity log entries (default 5)
- *   /gsd logs clear        — Remove old activity and debug logs
+ *   /gsd logs                        — List recent activity + debug logs (plus exec run count)
+ *   /gsd logs <N>                    — Show summary of activity log #N
+ *   /gsd logs debug                  — List debug log files
+ *   /gsd logs debug <N>              — Show debug log summary #N
+ *   /gsd logs exec                   — List recent gsd_exec / gsd_uat_exec output logs
+ *   /gsd logs exec <N|run-id>        — Show run metadata with complete original output paths
+ *   /gsd logs exec <N|run-id> copy stdout   — Copy the run's complete original stdout path to the clipboard
+ *   /gsd logs exec <N|run-id> copy stderr   — Copy the run's complete original stderr path to the clipboard
+ *   /gsd logs tail [N]               — Show last N activity log entries (default 5)
+ *   /gsd logs clear                  — Remove old activity and debug logs
  */
 
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
+import { copyToClipboard } from "@gsd/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { gsdRoot } from "./paths.js";
 import { loadJsonFileOrNull } from "./json-persistence.js";
 import { currentDirectoryRoot } from "./commands/context.js";
+import { listExecHistory, type ExecHistoryEntry } from "./exec-history.js";
+import { sanitizeExecDisplayText } from "./tools/exec-tool-renderer.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -261,6 +268,12 @@ export async function handleLogs(args: string, ctx: ExtensionCommandContext): Pr
     return;
   }
 
+  // /gsd logs exec [N] [copy stdout|stderr]
+  if (subCmd === "exec") {
+    await handleLogsExec(basePath, ctx, parts.slice(1));
+    return;
+  }
+
   // /gsd logs tail [N]
   if (subCmd === "tail") {
     const count = parts[1] ? parseInt(parts[1], 10) : 5;
@@ -284,10 +297,16 @@ export async function handleLogs(args: string, ctx: ExtensionCommandContext): Pr
 async function handleLogsList(basePath: string, ctx: ExtensionCommandContext): Promise<void> {
   const activities = listActivityLogs(basePath);
   const debugLogs = listDebugLogs(basePath);
+  // Exec output logs (gsd_exec / gsd_uat_exec) — counted even when no
+  // activity/debug logs exist, so an exec-only workspace still gets a pointer
+  // instead of a bare "No logs found".
+  const execRuns = listExecHistory(basePath);
 
   if (activities.length === 0 && debugLogs.length === 0) {
     ctx.ui.notify(
-      "No logs found.\n\nActivity logs are created during auto-mode.\nDebug logs require GSD_DEBUG=1.",
+      execRuns.length > 0
+        ? "No activity or debug logs found.\n\nExec output logs exist — run /gsd logs exec to browse them."
+        : "No logs found.\n\nActivity logs are created during auto-mode.\nDebug logs require GSD_DEBUG=1.\nExec output logs persist under .gsd/exec/ when gsd_exec or gsd_uat_exec runs.",
       "info",
     );
     return;
@@ -329,6 +348,13 @@ async function handleLogsList(basePath: string, ctx: ExtensionCommandContext): P
     }
     lines.push("");
     lines.push("  View details: /gsd logs debug <#>");
+  }
+
+  // Dedicated listing carries the per-run rows and complete original paths.
+  if (execRuns.length > 0) {
+    lines.push("");
+    lines.push(`Exec Output Logs (.gsd/exec/): ${execRuns.length} run(s)`);
+    lines.push("  Browse + copy paths: /gsd logs exec");
   }
 
   // Metrics summary
@@ -488,6 +514,206 @@ async function handleLogsTail(basePath: string, ctx: ExtensionCommandContext, co
   }
 
   ctx.ui.notify(lines.join("\n"), "info");
+}
+
+// ─── Exec Output Logs (/gsd logs exec) ──────────────────────────────────────
+// #2934 slice: keyboard-reachable complete-path actions over the executor's
+// trusted persisted metadata (.gsd/exec/<id>.meta.json, written by
+// exec-sandbox). Copy-only by construction: the exact stored path string goes
+// to the clipboard on an explicit user action in an interactive terminal — no
+// file launch, no output-supplied command, no path rewriting, and no
+// truncation of the original path, ever. Paths are re-resolved from the
+// current workspace on every invocation, and runs can be addressed by their
+// stable id so a newer run can never hijack a printed hint.
+
+/** Rows shown by `/gsd logs exec` before the "... and N older runs" elision. */
+const EXEC_LIST_LIMIT = 15;
+/** Longest rendered exec purpose before elision (display only — never applied to paths). */
+const EXEC_PURPOSE_MAX_CHARS = 120;
+
+/**
+ * Swappable clipboard dispatcher — exported so tests can stub it (clipboard
+ * writes shell out to platform tools and are environment-dependent).
+ */
+export const logsClipboard = { copy: copyToClipboard };
+
+/**
+ * Original output paths as recorded inside the meta file by the executor.
+ *
+ * Read here — separately from exec-history's entry — because the shared read
+ * side deliberately derives filesystem paths from the meta filename and
+ * discards JSON path fields for its model-facing consumers (a tested security
+ * boundary in exec-history.test.ts). This command is human-facing: the stored
+ * original wins for display/copy so the complete original path survives
+ * host/workspace moves, and it is never used for filesystem access. Absent,
+ * blank, or non-string values fall back to the derived sibling path.
+ */
+function readStoredOutputPaths(metaPath: string): { stdout?: string; stderr?: string } {
+  try {
+    const parsed = JSON.parse(readFileSync(metaPath, "utf-8")) as Record<string, unknown>;
+    const pick = (value: unknown): string | undefined =>
+      typeof value === "string" && value.length > 0 ? value : undefined;
+    return { stdout: pick(parsed.stdout_path), stderr: pick(parsed.stderr_path) };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Display form of a path: control characters (C0/C1/DEL) and any escape
+ * sequence they could start are rendered as reversible \xNN/\uNNNN escapes;
+ * ordinary Unicode (long CJK/emoji paths included) stays verbatim. Never
+ * deletes characters — a path containing \u0001 must not display as a
+ * different location. Clipboard payloads stay raw.
+ */
+function displayPath(path: string): string {
+  return path.replace(/[\u0000-\u001F\u007F-\u009F]/g, (ch) => {
+    const code = ch.charCodeAt(0);
+    return code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
+  });
+}
+
+function execExitText(entry: ExecHistoryEntry): string {
+  if (entry.timed_out) return "timeout";
+  if (entry.signal) return `signal:${sanitizeExecDisplayText(entry.signal)}`;
+  return entry.exit_code === null ? "exit unknown" : `exit ${entry.exit_code}`;
+}
+
+/** Display-normalized purpose: sanitized and bounded; paths are never elided. */
+function execPurposeText(entry: ExecHistoryEntry): string | undefined {
+  const purpose = entry.purpose === null ? undefined : sanitizeExecDisplayText(entry.purpose).replace(/\s+/g, " ").trim();
+  if (!purpose) return undefined;
+  return purpose.length <= EXEC_PURPOSE_MAX_CHARS
+    ? purpose
+    : `${purpose.slice(0, EXEC_PURPOSE_MAX_CHARS - 1)}…`;
+}
+
+/** True when the persisted output file no longer exists on disk (best-effort). */
+function execOutputFileMissing(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Resolve a list position (1-based) or a stable run id against the fresh listing. */
+function resolveExecRun(runs: ExecHistoryEntry[], key: string): { entry: ExecHistoryEntry; position: number } | undefined {
+  const byId = runs.find((e) => e.id === key);
+  if (byId) return { entry: byId, position: runs.indexOf(byId) + 1 };
+  if (/^\d+$/.test(key)) {
+    const idx = parseInt(key, 10);
+    if (idx >= 1 && idx <= runs.length) return { entry: runs[idx - 1], position: idx };
+  }
+  return undefined;
+}
+
+async function handleLogsExec(basePath: string, ctx: ExtensionCommandContext, rest: string[]): Promise<void> {
+  // Re-listed on every invocation — listings never hold stale references
+  // across invocations; identity-sensitive actions (copy) address runs by id.
+  const runs = listExecHistory(basePath);
+
+  // /gsd logs exec — list recent runs
+  if (rest.length === 0) {
+    if (runs.length === 0) {
+      ctx.ui.notify(
+        "No exec output logs found.\n\nExec output logs persist under .gsd/exec/ when gsd_exec or gsd_uat_exec runs.",
+        "info",
+      );
+      return;
+    }
+
+    const lines: string[] = ["Exec Output Logs (.gsd/exec/, newest first):", ""];
+    const recent = runs.slice(0, EXEC_LIST_LIMIT);
+    for (let i = 0; i < recent.length; i++) {
+      const e = recent[i];
+      const purpose = execPurposeText(e);
+      const label = purpose ? ` — ${purpose}` : "";
+      lines.push(`  ${i + 1}. ${sanitizeExecDisplayText(e.id)} · ${sanitizeExecDisplayText(e.runtime)} · ${execExitText(e)} · stdout ${e.stdout_bytes}B / stderr ${e.stderr_bytes}B${label}`);
+    }
+    if (runs.length > recent.length) {
+      lines.push(`  ... and ${runs.length - recent.length} older runs`);
+    }
+    lines.push("");
+    lines.push("  Complete original paths: /gsd logs exec <#|run-id>");
+    ctx.ui.notify(lines.join("\n"), "info");
+    return;
+  }
+
+  const key = rest[0];
+  const resolved = key ? resolveExecRun(runs, key) : undefined;
+  if (!resolved) {
+    ctx.ui.notify(`Exec run "${key ?? ""}" not found. Run /gsd logs exec to list runs.`, "warning");
+    return;
+  }
+  const { entry } = resolved;
+
+  // /gsd logs exec <N|id> — metadata with complete original paths
+  if (rest.length === 1) {
+    const stored = readStoredOutputPaths(entry.meta_path);
+    const lines: string[] = [];
+    lines.push(`Exec Run ${sanitizeExecDisplayText(entry.id)}`);
+    lines.push("─".repeat(60));
+    lines.push(`Runtime: ${sanitizeExecDisplayText(entry.runtime)}  |  Exit: ${execExitText(entry)}  |  ${entry.duration_ms}ms`);
+    lines.push(`Started: ${entry.started_at}${entry.finished_at ? `  |  Finished: ${entry.finished_at}` : ""}`);
+    const purpose = execPurposeText(entry);
+    if (purpose) lines.push(`Purpose: ${purpose}`);
+    lines.push("");
+    for (const kind of ["stdout", "stderr"] as const) {
+      const bytes = kind === "stdout" ? entry.stdout_bytes : entry.stderr_bytes;
+      const truncated = kind === "stdout" ? entry.stdout_truncated : entry.stderr_truncated;
+      const original = stored[kind] ?? (kind === "stdout" ? entry.stdout_path : entry.stderr_path);
+      const derived = kind === "stdout" ? entry.stdout_path : entry.stderr_path;
+      const flags = [`${bytes}B`];
+      if (truncated) flags.push("truncated on disk");
+      if (execOutputFileMissing(derived)) flags.push("local copy missing — original path still valid for its host");
+      lines.push(`${kind} (${flags.join(", ")}):`);
+      // Complete original path — reversible escape display, never shortened.
+      lines.push(`  ${displayPath(original)}`);
+      if (stored[kind] && stored[kind] !== derived) {
+        lines.push(`  local sibling: ${displayPath(derived)}`);
+      }
+    }
+    lines.push("");
+    lines.push(`  Copy full path: /gsd logs exec ${sanitizeExecDisplayText(entry.id)} copy stdout`);
+    lines.push(`                  /gsd logs exec ${sanitizeExecDisplayText(entry.id)} copy stderr`);
+    ctx.ui.notify(lines.join("\n"), "info");
+    return;
+  }
+
+  // /gsd logs exec <N|id> copy stdout|stderr
+  if (rest.length === 3 && rest[1] === "copy" && (rest[2] === "stdout" || rest[2] === "stderr")) {
+    const stream = rest[2];
+    const stored = readStoredOutputPaths(entry.meta_path);
+    const path = (stream === "stdout" ? stored.stdout : stored.stderr)
+      ?? (stream === "stdout" ? entry.stdout_path : entry.stderr_path);
+    // Clipboard writes emit terminal escapes / platform tool output on the
+    // TTY streams; in RPC/print modes stdout is a protocol stream, so fall
+    // back to displaying the complete path instead of writing to it.
+    if (!process.stdout.isTTY) {
+      ctx.ui.notify(
+        `Clipboard is only available in an interactive terminal. Complete original ${stream} path:\n${displayPath(path)}`,
+        "info",
+      );
+      return;
+    }
+    try {
+      await logsClipboard.copy(path);
+      ctx.ui.notify(
+        `Copied complete original ${stream} path (${sanitizeExecDisplayText(entry.id)}) to clipboard:\n${displayPath(path)}`,
+        "success",
+      );
+    } catch (error) {
+      ctx.ui.notify(
+        `Failed to copy ${stream} path: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    }
+    return;
+  }
+
+  ctx.ui.notify("Usage: /gsd logs exec [<N>|<run-id>] [copy stdout|stderr]", "warning");
 }
 
 async function handleLogsClear(basePath: string, ctx: ExtensionCommandContext): Promise<void> {

@@ -23,6 +23,10 @@ Name artifacts per GSD convention: phases/{MM}-{slug}/, files {MM}-SUFFIX.md, sl
 
 Skills discovered on-demand via `read` tool — no catalog block. Use bare skill names in preferences; GSD resolves paths.
 
+## Blockers and Recovery
+
+When a run is blocked, paused on an auto-pause blocker, or a Task attempt failed, read the `gsd-blocker-recovery` skill before acting on recovery. These boundaries are enforced, not advisory: only the human clears an eligible auto-pause blocker (`/gsd blocker resolve` in the native terminal with evidence and explicit approval — never synthesize, simulate, or automate that approval), and clearing resumes nothing. A failed attempt recovers through the gated recovery route — `gsd_task_recovery_resume` (or the operator's `/gsd recover <recoveryActionId>`) authorizes exactly one successor Attempt after a genuine repair with concrete evidence — and it still completes only through normal host verification. Never touch the project database, runtime KV/counters, or rendered `.gsd` files to unblock work, and never manufacture completion evidence. While executing, report blockers honestly via `blockerDiscovered: true`.
+
 ## Database
 
 Never query `.gsd/gsd.db` directly via `sqlite3`, `better-sqlite3`, or `node -e require('better-sqlite3')`; the engine owns a single-writer WAL connection. Use `gsd_*` tools (e.g. `gsd_milestone_status`, `gsd_journal_query`) instead. Direct DB access will cause race conditions and WAL corruption.

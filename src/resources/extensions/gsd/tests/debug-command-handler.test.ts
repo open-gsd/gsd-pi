@@ -1,11 +1,11 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { handleDebug, parseDebugCommand } from "../commands-debug.ts";
-import { createDebugSession, debugSessionArtifactPath, updateDebugSession } from "../debug-session-store.ts";
+import { createDebugSession, debugSessionArtifactPath, debugSessionLogPath, updateDebugSession } from "../debug-session-store.ts";
 import { loadPrompt } from "../prompt-loader.ts";
 
 function makeBase(): string {
@@ -948,5 +948,98 @@ describe("commands-debug module load", () => {
     const mod = await import("../commands-debug.ts");
     assert.equal(typeof mod.parseDebugCommand, "function");
     assert.equal(typeof mod.handleDebug, "function");
+  });
+});
+
+describe("debug log advertisement (#2869)", () => {
+  // createDebugSession stores a reserved logPath that no writer materializes.
+  // The notifications must advertise the companion log only when the file
+  // actually exists, and always point at the real session artifact — agents
+  // following the metadata must not read a path that returns ENOENT.
+  test("start notification omits Log and points at the artifact while the companion log is absent", async () => {
+    const base = makeBase();
+    const ctx = createMockCtx();
+    const saved = process.cwd();
+    process.chdir(base);
+
+    try {
+      await handleDebug("log path advertised before it exists", ctx as any);
+
+      assert.equal(ctx.notifications.length, 1);
+      const note = ctx.notifications[0];
+      assert.match(note.message, /Debug session started: log-path-advertised-before-it-exists/);
+      assert.match(note.message, /Artifact: /);
+      assert.doesNotMatch(note.message, /Log: /);
+      assert.equal(existsSync(join(base, ".gsd", "debug", "log-path-advertised-before-it-exists.log")), false);
+    } finally {
+      process.chdir(saved);
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("start and status notifications advertise the log only once the file exists", async () => {
+    const base = makeBase();
+    const ctx = createMockCtx();
+    const saved = process.cwd();
+    process.chdir(base);
+
+    try {
+      await handleDebug("companion log materialized", ctx as any);
+      assert.doesNotMatch(ctx.notifications[0].message, /Log: /);
+
+      const continueAbsent = createMockCtx();
+      await handleDebug("continue companion-log-materialized", continueAbsent as any);
+      assert.doesNotMatch(continueAbsent.notifications[0].message, /Log: /);
+
+      const statusAbsent = createMockCtx();
+      await handleDebug("status companion-log-materialized", statusAbsent as any);
+      assert.doesNotMatch(statusAbsent.notifications[0].message, /log=/);
+
+      const logPath = debugSessionLogPath(base, "companion-log-materialized");
+      writeFileSync(logPath, "diagnostic line\n", "utf-8");
+
+      const continuePresent = createMockCtx();
+      await handleDebug("continue companion-log-materialized", continuePresent as any);
+      assert.match(continuePresent.notifications[0].message, new RegExp(`Log: ${logPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+
+      const statusPresent = createMockCtx();
+      await handleDebug("status companion-log-materialized", statusPresent as any);
+      assert.match(statusPresent.notifications[0].message, new RegExp(`log=${logPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    } finally {
+      process.chdir(saved);
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("status notification omits log= while the companion log is absent", async () => {
+    const base = makeBase();
+    const saved = process.cwd();
+    process.chdir(base);
+
+    try {
+      createDebugSession(base, { issue: "status view hides absent log" });
+
+      const statusCtx = createMockCtx();
+      await handleDebug("status status-view-hides-absent-log", statusCtx as any);
+
+      assert.equal(statusCtx.notifications.length, 1);
+      const note = statusCtx.notifications[0];
+      assert.match(note.message, /Debug session status: status-view-hides-absent-log/);
+      assert.match(note.message, /artifact=/);
+      assert.doesNotMatch(note.message, /log=/);
+
+      const diagnoseCtx = createMockCtx();
+      await handleDebug("--diagnose diagnose start hides absent log", diagnoseCtx as any);
+      assert.match(diagnoseCtx.notifications[0].message, /Diagnose session started: diagnose-start-hides-absent-log/);
+      assert.doesNotMatch(diagnoseCtx.notifications[0].message, /Log: /);
+
+      const diagnoseStatusCtx = createMockCtx();
+      await handleDebug("--diagnose diagnose-start-hides-absent-log", diagnoseStatusCtx as any);
+      assert.match(diagnoseStatusCtx.notifications[0].message, /Diagnose session: diagnose-start-hides-absent-log/);
+      assert.doesNotMatch(diagnoseStatusCtx.notifications[0].message, /log=/);
+    } finally {
+      process.chdir(saved);
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });

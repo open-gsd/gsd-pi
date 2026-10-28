@@ -89,6 +89,7 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"vercel-ai-gateway/anthropic/claude-sonnet-5-batch",
 	"vercel-ai-gateway/anthropic/claude-sonnet-5.5",
 	"vercel-ai-gateway/anthropic/claude-sonnet-5.5-batch",
+	"vercel-ai-gateway/minimax/minimax-m3.1-flash",
 ];
 
 function getAllModels(): Model<Api>[] {
