@@ -2,7 +2,8 @@
 // File Purpose: Runs the ADR-046 performance baseline (Migration step 8)
 // against the committed baseline file: p50/p95 of deriveState, one Domain
 // Operation commit and a projection drain, measured on the fixed corpus, may
-// not exceed three times the recorded values. Also pins the comparison logic.
+// not exceed three times the recorded values. Uses median p50/p95 of three independent runs and pins
+// the aggregation and comparison logic.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -11,7 +12,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 const scriptModule = await import("../../../scripts/workflow-performance-baseline.mjs");
-const { compareAgainstBaseline, P50_TOLERANCE, P95_TOLERANCE } = scriptModule as {
+type Measurement = Record<string, { p50: number; p95: number; samples?: number }>;
+
+const { measureRepeated, compareAgainstBaseline, P50_TOLERANCE, P95_TOLERANCE } = scriptModule as {
+  measureRepeated: (measureRun?: () => Promise<Measurement>) => Promise<Measurement>;
   compareAgainstBaseline: (measured: Record<string, { p50: number; p95: number }>, baseline: Record<string, { p50: number; p95: number }>) => string[];
   P50_TOLERANCE: number;
   P95_TOLERANCE: number;
@@ -99,4 +103,48 @@ test("the measured corpus does not regress against the committed baseline", { ti
     `performance baseline gate failed (${result.status}):\n${output.slice(-4000)}`,
   );
   assert.match(output, new RegExp(`tolerance p50 x${P50_TOLERANCE}, p95 x${P95_TOLERANCE}`));
+});
+
+test("repeated measurement ignores one outlier using median p50/p95", async () => {
+  const runs: Measurement[] = [
+    { deriveState: { p50: 1, p95: 20, samples: 60 }, projectionDrain: { p50: 30, p95: 40, samples: 20 } },
+    { deriveState: { p50: 100, p95: 200, samples: 60 }, projectionDrain: { p50: 2, p95: 4, samples: 20 } },
+    { deriveState: { p50: 2, p95: 3, samples: 60 }, projectionDrain: { p50: 1, p95: 3, samples: 20 } },
+  ];
+  const original = structuredClone(runs);
+  let calls = 0;
+  let active = false;
+  const measured = await measureRepeated(async () => {
+    assert.equal(active, false, "measurement runs must not overlap");
+    active = true;
+    await Promise.resolve();
+    active = false;
+    return runs[calls++];
+  });
+  assert.equal(calls, 3, "must perform three complete measurement runs");
+  assert.deepEqual(measured, {
+    deriveState: { p50: 2, p95: 20, samples: 60 },
+    projectionDrain: { p50: 2, p95: 4, samples: 20 },
+  });
+  assert.deepEqual(runs, original, "aggregation must not mutate measurements");
+  assert.deepEqual(compareAgainstBaseline(measured, {
+    deriveState: { p50: 1, p95: 10 },
+    projectionDrain: { p50: 1, p95: 2 },
+  }), []);
+});
+
+test("repeated measurement still fails persistent over-threshold p50/p95", async () => {
+  let calls = 0;
+  const runs = [
+    { deriveState: { p50: 1, p95: 2 } },
+    { deriveState: { p50: 4, p95: 8 } },
+    { deriveState: { p50: 5, p95: 10 } },
+  ];
+  const measured = await measureRepeated(async () => runs[calls++]);
+  assert.equal(calls, 3);
+  assert.deepEqual(measured, { deriveState: { p50: 4, p95: 8 } });
+  const failures = compareAgainstBaseline(measured, { deriveState: { p50: 1, p95: 2 } });
+  assert.equal(failures.length, 2);
+  assert.ok(failures.some((failure) => failure.includes("p50")));
+  assert.ok(failures.some((failure) => failure.includes("p95")));
 });
