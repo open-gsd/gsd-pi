@@ -102,6 +102,30 @@ export function supportsStructuredQuestions(
   }).structuredQuestionsAvailable === "true";
 }
 
+/**
+ * Appended to discuss prompts when the user configured
+ * `discussion.question_mode: chat` (#2979). The template's
+ * `structuredQuestionsAvailable: false` branch already asks for plain-text
+ * questions; this note tells the model to stay on that path even though the
+ * `ask_user_questions` tool remains on the surface (it must remain — the
+ * workflow-MCP readiness check requires it, which is exactly what breaks when
+ * the env var removes it). Empty for the default dialog mode.
+ */
+export function discussionChatPromptNote(
+  questionMode: "dialog" | "chat",
+  structuredQuestionsAvailable: string,
+): string {
+  if (questionMode !== "chat" || structuredQuestionsAvailable !== "false") return "";
+  return [
+    "## Chat-mode discussions",
+    "",
+    "This project runs discussions in plain chat (`discussion.question_mode: chat`).",
+    "Ask your questions as numbered plain-text messages and end the turn; the user answers in the normal chat.",
+    "Do NOT call `ask_user_questions` for these interviews — the tool stays available for other flows, but the user has asked for plain-chat discussions.",
+    "The depth-verification gate still applies on the plain-text path: before writing the final artifact, ask for explicit confirmation in plain text and wait for it. No response, ambiguity, or a non-confirmation means re-ask — never write without it.",
+  ].join("\n");
+}
+
 export function resolveWorkflowQuestionToolSurface(
   options: WorkflowQuestionToolSurfaceOptions,
 ): WorkflowQuestionToolSurfaceResolution {

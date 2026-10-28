@@ -220,7 +220,7 @@ export function refreshRecoveryDbForArtifact(
         ok: false,
         fatal: true,
         reason: "execute-task-recovery-aborted",
-        message: `Stuck recovery found execute-task ${unitId} artifacts, but its canonical Task Attempt recovery already aborted (recoveryActionId: ${terminalAbort.recoveryActionId}); re-dispatching would break immediately with task-recovery-abort. Resume it with \`/gsd recover ${terminalAbort.recoveryActionId}\`, or reconcile the projection drift with \`gsd rebuild markdown\` then the database-import form of \`gsd recover\`.`,
+        message: `Stuck recovery found execute-task ${unitId} artifacts, but its canonical Task Attempt recovery already aborted (recoveryActionId: ${terminalAbort.recoveryActionId}); re-dispatching would break immediately with task-recovery-abort. After repairing the recorded failure, resume it with \`/gsd recover ${terminalAbort.recoveryActionId}\`, or use gsd_task_recovery_resume with concrete repair evidence. Rewriting plans, rebuilding projections or running /gsd auto does not authorize a new Attempt; the recovery fence remains in force.`,
       };
     }
     // #1622: unlike the plan-slice/complete-milestone branches below, nothing

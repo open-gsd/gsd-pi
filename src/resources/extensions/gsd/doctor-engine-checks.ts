@@ -16,6 +16,7 @@ import {
   listUnappliedLegacyEscalations,
   pruneArtifactRows,
 } from "./gsd-db.js";
+import { moveProjectionFileToQuarantineSync } from "./atomic-write.js";
 import { MEMORIES_FTS_REBUILT_KEY } from "./db-memory-fts-schema.js";
 import {
   completedEventCoversDispatch,
@@ -39,6 +40,7 @@ import {
   listOrphanableRunningAttempts,
   listUnpublishedSucceededAttempts,
   type DoctorRunningAttemptRow,
+  latestSliceReopenAt,
 } from "./db/lifecycle-queries.js";
 import { readMilestones, readSlice, readTask, type MilestoneRead } from "./db/lifecycle-read.js";
 import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
@@ -458,6 +460,47 @@ function artifactExistsOnDisk(basePath: string, artifactPath: string, row?: Arti
   return resolveArtifactDiskPath(basePath, artifactPath, row) !== null;
 }
 
+/**
+ * Move a divergent artifact file into `.gsd/quarantine/artifacts/<stamp>/`
+ * before its DB row is pruned, so the file's evidence survives the repair.
+ * Returns the quarantine path, or null when the file is already gone.
+ */
+function quarantineArtifactFile(basePath: string, artifactPath: string, row?: ArtifactRow): string[] {
+  // A save from a worktree writes project and worktree projections: every
+  // existing copy must move, or the survivors keep tripping the disk-only
+  // drift guard after the shared row is pruned (#2994).
+  const destinations: string[] = [];
+  for (const abs of resolveAllArtifactDiskPaths(basePath, artifactPath, row)) {
+    const dest = moveProjectionFileToQuarantineSync(abs, join(basePath, ".gsd", "quarantine", "artifacts"));
+    if (dest) destinations.push(dest);
+  }
+  return destinations;
+}
+
+/** Every existing on-disk copy of the artifact, across all candidate roots. */
+function resolveAllArtifactDiskPaths(basePath: string, artifactPath: string, row?: ArtifactRow): string[] {
+  const relativeArtifactPath = artifactPathRelativeToGsd(artifactPath);
+  const found = new Set<string>();
+  if (isAbsolute(relativeArtifactPath)) {
+    if (existsSync(relativeArtifactPath)) found.add(relativeArtifactPath);
+    return [...found];
+  }
+  const roots = [gsdProjectionRoot(basePath), gsdRoot(basePath)];
+  if (row?.milestone_id) {
+    const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, row.milestone_id);
+    if (artifactBasePath !== basePath) roots.push(gsdProjectionRoot(artifactBasePath), gsdRoot(artifactBasePath));
+  }
+  for (const root of roots) {
+    const candidate = join(root, relativeArtifactPath);
+    if (isPathInside(root, candidate) && existsSync(candidate)) found.add(candidate);
+  }
+  if (row && isMilestonesArtifactPath(row.path)) {
+    const flatPath = resolveFlatPhaseArtifactDiskPath(basePath, row);
+    if (flatPath && existsSync(flatPath)) found.add(flatPath);
+  }
+  return [...found];
+}
+
 function resolveLiteralArtifactDiskPath(basePath: string, artifactPath: string, row?: ArtifactRow): string | null {
   const relativeArtifactPath = artifactPathRelativeToGsd(artifactPath);
   if (isAbsolute(relativeArtifactPath)) {
@@ -786,8 +829,9 @@ export function reportMilestoneLifecycleShadowDrift(issues: DoctorIssue[]): void
             message:
               `${statusPair} The canonical Task Attempt recovery has aborted ` +
               `(recoveryActionId: ${terminalAbort.recoveryActionId}) and the dispatch guard refuses ` +
-              `re-dispatch until it is resumed. Run \`/gsd recover ${terminalAbort.recoveryActionId}\` ` +
-              `to converge the drift.`,
+              `re-dispatch until it is resumed. After repairing the recorded failure, run \`/gsd recover ${terminalAbort.recoveryActionId}\` ` +
+              `or use gsd_task_recovery_resume with concrete repair evidence. Rewriting plans or rebuilding projections ` +
+              `does not authorize a new Attempt; the recovery fence remains in force.`,
             file: ".gsd/gsd.db",
             fixable: false,
           });
@@ -1334,6 +1378,7 @@ export async function checkEngineHealth(
 
         const milestoneReads = readMilestonesById();
         const seen = new Set<string>();
+        const divergentSliceSummaryRows: ArtifactRow[] = [];
         for (const row of rows) {
           const milestone = milestoneReads.get(row.milestone_id);
           if (!milestone || milestone.closed) continue;
@@ -1342,6 +1387,11 @@ export async function checkEngineHealth(
           if (!isAfter(row.imported_at, reopenAt)) continue;
           const slice = row.slice_id ? readSlice(row.milestone_id, row.slice_id) : null;
           const task = row.slice_id && row.task_id ? readTask(row.milestone_id, row.slice_id, row.task_id) : null;
+          // Doctor's vocabulary contract: report a completion artifact only
+          // for a slice that still needs work (`!done`; deferred is done for
+          // every reader). The tool gate (#2994) is stricter than this — it
+          // also rejects deferred saves — because the runtime dispatch guard
+          // flags on `!slice.closed`, which still treats deferred as open.
           const isSliceSummary = row.slice_id && !row.task_id && slice && !slice.done;
           const isTaskSummary = row.slice_id && row.task_id && !task?.done;
           const isTaskArtifactWithoutDbTasks = row.slice_id && row.task_id && Number(row.task_count) === 0;
@@ -1375,6 +1425,28 @@ export async function checkEngineHealth(
               : row.milestone_id;
           if (seen.has(unitId)) continue;
           seen.add(unitId);
+          // A slice-scoped SUMMARY row on a non-terminal slice is the
+          // tool-mistake class (#2994): the save itself should have been
+          // rejected, and the sanctioned repair is quarantine + row prune —
+          // the file's evidence is preserved, the slice can be completed
+          // legitimately afterwards. Task/milestone classes keep their own
+          // reconciliation flows and stay unfixable here.
+          const divergentSliceSummaryPath = isSliceSummary ? row.path : null;
+          if (divergentSliceSummaryPath) {
+            divergentSliceSummaryRows.push(row);
+            // Sibling rows for the same slice (legacy + flat-path layouts)
+            // wedge the runtime guard just the same: collect every class row
+            // of the unit, or the survivors keep blocking after the prune.
+            for (const sibling of rows) {
+              if (sibling === row) continue;
+              if (
+                sibling.artifact_type === "SUMMARY"
+                && !sibling.task_id
+                && sibling.slice_id === row.slice_id
+                && sibling.milestone_id === row.milestone_id
+              ) divergentSliceSummaryRows.push(sibling);
+            }
+          }
           issues.push({
             severity: "error",
             code: "artifact_db_status_divergence",
@@ -1383,9 +1455,76 @@ export async function checkEngineHealth(
             message: `Completion artifact ${row.path} exists while DB state for ${unitId} is still open or missing. ${
               legacyReopenImportGuidance(basePath, row.milestone_id, row.imported_at) ??
               "Runtime will not import it silently; run explicit recovery/repair after review."
-            }`,
-            fixable: false,
+            }${divergentSliceSummaryPath ? " For this slice-scoped SUMMARY row, `/gsd doctor --fix` clears it after review: the file is moved to .gsd/quarantine/artifacts/ and the row is pruned; re-complete the slice to record the work legitimately." : ""}`,
+            fixable: divergentSliceSummaryPath !== null,
           });
+        }
+        // Row-only divergence: a slice-scoped SUMMARY row whose file is
+        // already gone (typically quarantined by /gsd rebuild markdown) still
+        // trips the runtime row-record guard while the main loop above skips
+        // missing files — report and repair the row too (#2994). Pre-reopen
+        // rows stay exempt (dead bookkeeping, same as the runtime guard).
+        for (const row of rows) {
+          if (row.artifact_type !== "SUMMARY" || !row.slice_id || row.task_id) continue;
+          if (artifactExistsOnDisk(basePath, row.path, row)) continue;
+          const milestone = milestoneReads.get(row.milestone_id);
+          if (!milestone || milestone.closed) continue;
+          if (!isAfter(row.imported_at, latestExplicitReopenAt(row.milestone_id))) continue;
+          const slice = readSlice(row.milestone_id, row.slice_id);
+          if (!slice || slice.done) continue;
+          // Mirror the runtime guard's slice-reopen exemption: a missing-file
+          // row predating the slice's latest explicit reopen is dead
+          // bookkeeping from the pre-reopen completion, not a live wedge.
+          const latestSliceReopen = latestSliceReopenAt(row.milestone_id, row.slice_id);
+          if (latestSliceReopen !== null && !isAfter(row.imported_at, latestSliceReopen)) continue;
+          const unitId = artifactUnitId(row);
+          if (!seen.has(unitId)) {
+            seen.add(unitId);
+            issues.push({
+              severity: "error",
+              code: "artifact_db_status_divergence",
+              scope: "slice",
+              unitId,
+              message: `Completion artifact row ${row.path} exists in the database while slice ${row.slice_id} is ${slice.status} and its file is absent (typically left behind by /gsd rebuild markdown). \`/gsd doctor --fix\` clears it after review by pruning the row; re-complete the slice to record the work legitimately.`,
+              fixable: true,
+            });
+          } else {
+            // A missing-file sibling of an already-reported unit still needs
+            // its row pruned, but no duplicate diagnostic.
+          }
+          divergentSliceSummaryRows.push(row);
+        }
+        // Operator-gated repair for the slice-scoped SUMMARY mistake class
+        // (#2994): quarantine the file (evidence preserved), prune the row in
+        // one audited Domain Operation. The drift cannot recur — the tool now
+        // rejects SUMMARY saves against non-terminal slices.
+        if (options?.repair && divergentSliceSummaryRows.length > 0) {
+          const quarantined: Array<{ path: string; quarantinePaths: string[] }> = [];
+          for (const row of divergentSliceSummaryRows) {
+            quarantined.push({ path: row.path, quarantinePaths: quarantineArtifactFile(basePath, row.path, row) });
+          }
+          try {
+            pruneArtifactRows({ name: "doctor", actorType: "operator" }, divergentSliceSummaryRows.map((row) => row.path));
+            for (const entry of quarantined) {
+              fixesApplied.push(
+                entry.quarantinePaths.length > 0
+                  ? `Quarantined divergent slice SUMMARY ${artifactPathRelativeToGsd(entry.path)} (${entry.quarantinePaths.length} file${entry.quarantinePaths.length === 1 ? "" : "s"}) and pruned its DB row — re-complete the slice to record the work legitimately.`
+                  : `Pruned divergent slice SUMMARY row ${artifactPathRelativeToGsd(entry.path)} (no file on disk).`,
+              );
+            }
+          } catch (err) {
+            const first = divergentSliceSummaryRows[0]!;
+            // Every collected row is slice-scoped (isSliceSummary gate).
+            const refusedUnitId = `${first.milestone_id}/${first.slice_id}`;
+            issues.push({
+              severity: "error",
+              code: "artifact_db_status_divergence",
+              scope: "slice",
+              unitId: refusedUnitId,
+              message: `Divergent slice SUMMARY repair refused (stale view or revision conflict): ${err instanceof Error ? err.message : String(err)}`,
+              fixable: true,
+            });
+          }
         }
       } catch {
         // Non-fatal — artifact/DB status drift check failed

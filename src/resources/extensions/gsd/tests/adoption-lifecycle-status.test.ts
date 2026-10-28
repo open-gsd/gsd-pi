@@ -36,6 +36,10 @@ test("an adopted legacy row keeps its meaning, except that in-flight adopts as r
     ["queued", "pending"],
     ["planned", "pending"],
     ["active", "ready"],
+    // #2985: 3.0.0's plan-milestone took an unvalidated status string, so an
+    // in-flight milestone can carry "planning"; it is open work like "active",
+    // normalizing as in_progress and adopting as ready.
+    ["planning", "ready"],
     ["in_progress", "ready"],
     ["in-progress", "ready"],
     ["blocked", "paused"],
@@ -51,10 +55,12 @@ test("an adopted legacy row keeps its meaning, except that in-flight adopts as r
   for (const [legacy, adopted] of expected) {
     assert.equal(adoptionLifecycleStatus("task M001/S01/T01", legacy), adopted, `legacy ${legacy}`);
   }
+  // #2985: planning is an open state that normalizes as in-flight, as active does.
+  assert.equal(normalizeLegacyLifecycleStatus("planning"), "in_progress");
 });
 
 test("a seam that plans the row adopts every open status as its open status", () => {
-  for (const legacy of ["pending", "queued", "planned", "active", "in_progress", "blocked", "parked"]) {
+  for (const legacy of ["pending", "queued", "planned", "active", "planning", "in_progress", "blocked", "parked"]) {
     assert.equal(adoptionLifecycleStatus("slice M001/S01", legacy, "ready"), "ready", `legacy ${legacy}`);
     assert.equal(adoptionLifecycleStatus("slice M001/S01", legacy, "pending"), "pending", `sketch ${legacy}`);
   }

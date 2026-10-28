@@ -61,6 +61,8 @@ export function setupEditorSubmitHandler(host: InteractiveModeStateHost & {
 		if (text.startsWith("/") && !looksLikeFilePath(text)) {
 			const handled = await dispatchSlashCommand(text, host.getSlashCommandContext());
 			if (handled) {
+				// Built-in commands are recallable like any other input (#3022).
+				host.editor.addToHistory?.(text);
 				host.editor.setText("");
 				consumePendingImages(host); // discard images on slash command
 				return;
@@ -68,7 +70,11 @@ export function setupEditorSubmitHandler(host: InteractiveModeStateHost & {
 			if (!host.isKnownSlashCommand(text)) {
 				const command = text.split(/\s/)[0];
 				host.showError(`Unknown command: ${command}. Use slash autocomplete to see available commands.`);
-				host.editor.setText("");
+				// Keep the mistyped command so it can be corrected: back in the
+				// editor, and in history for Up (#3022). Matches Alt+Enter, which
+				// leaves the text in the editor for the same error.
+				host.editor.addToHistory?.(text);
+				host.editor.setText(text);
 				return;
 			}
 		}

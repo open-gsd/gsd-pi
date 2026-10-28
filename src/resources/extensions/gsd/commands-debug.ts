@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
+import { existsSync } from "node:fs";
+
 import { isAutoActive } from "./auto-runtime-state.js";
 import {
   assertValidDebugSessionSlug,
@@ -42,6 +44,12 @@ function formatSessionLine(prefix: string, session: {
   updatedAt: number;
 }): string {
   return `${prefix} ${session.slug} [mode=${session.mode} status=${session.status} phase=${session.phase}] — ${session.issue} (updated ${new Date(session.updatedAt).toISOString()})`;
+}
+
+// The companion log is a reserved destination no writer creates yet (#2869):
+// advertise it only when the file actually exists, never as a mere reservation.
+function debugLogLine(logPath: string, prefix: string): string | null {
+  return existsSync(logPath) ? `${prefix}${logPath}` : null;
 }
 
 function usageText(): string {
@@ -137,9 +145,9 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
           `Debug session started: ${s.slug}`,
           formatSessionLine("Session:", s),
           `Artifact: ${created.artifactPath}`,
-          `Log: ${s.logPath}`,
+          debugLogLine(s.logPath, "Log: "),
           `Next: /gsd debug status ${s.slug} or /gsd debug continue ${s.slug}`,
-        ].join("\n") + dispatchNote,
+        ].filter((line): line is string => line !== null).join("\n") + dispatchNote,
         "info",
       );
       if (canDispatch) {
@@ -235,10 +243,10 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
           `phase=${s.phase}`,
           `issue=${s.issue}`,
           `artifact=${loaded.artifactPath}`,
-          `log=${s.logPath}`,
+          debugLogLine(s.logPath, "log="),
           `updated=${new Date(s.updatedAt).toISOString()}`,
           `lastError=${s.lastError ?? "none"}`,
-        ].join("\n"),
+        ].filter((line): line is string => line !== null).join("\n"),
         "info",
       );
     } catch (error) {
@@ -372,9 +380,9 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
         [
           `Resumed debug session: ${resumed.session.slug}`,
           formatSessionLine("Session:", resumed.session),
-          `Log: ${resumed.session.logPath}`,
+          debugLogLine(resumed.session.logPath, "Log: "),
           `Next: /gsd debug status ${resumed.session.slug}`,
-        ].join("\n") + dispatchNote,
+        ].filter((line): line is string => line !== null).join("\n") + dispatchNote,
         "info",
       );
 
@@ -430,10 +438,10 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
           `Diagnose session started: ${s.slug}`,
           formatSessionLine("Session:", s),
           `Artifact: ${created.artifactPath}`,
-          `Log: ${s.logPath}`,
+          debugLogLine(s.logPath, "Log: "),
           `dispatchMode=find_root_cause_only`,
           `Next: /gsd debug status ${s.slug} or /gsd debug --diagnose ${s.slug}`,
-        ].join("\n"),
+        ].filter((line): line is string => line !== null).join("\n"),
         "info",
       );
 
@@ -490,10 +498,10 @@ export async function handleDebug(args: string, ctx: ExtensionCommandContext, pi
             `status=${s.status}`,
             `phase=${s.phase}`,
             `artifact=${loaded.artifactPath}`,
-            `log=${s.logPath}`,
+            debugLogLine(s.logPath, "log="),
             `lastError=${s.lastError ?? "none"}`,
             `malformedArtifactsInStore=${listed.malformed.length}`,
-          ].join("\n"),
+          ].filter((line): line is string => line !== null).join("\n"),
           "info",
         );
         return;

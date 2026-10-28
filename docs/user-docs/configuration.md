@@ -717,6 +717,7 @@ verification_timeout_ms: 120000   # host verification and verification-oriented 
 verification_source_exclude_paths: # git pathspecs skipped by source-revision hashing (default: [])
   - artifacts/**
   - fixtures/**
+verification_reuse_exec_evidence: false # reuse the executor's gsd_exec run of the Task verify in host verification (default: false)
 ```
 
 | Field | Type | Default | Description |
@@ -726,12 +727,15 @@ verification_source_exclude_paths: # git pathspecs skipped by source-revision ha
 | `verification_max_retries` | number | `2` | Maximum auto-fix retry attempts for runnable failures |
 | `verification_timeout_ms` | number | `120000` | Per-command host-verification timeout in milliseconds and the default timeout for verification-oriented `gsd_exec` workloads. Unset keeps the 120s host-verification default. A timeout is reported as `failureClass: timeout`, never as exit 127. |
 | `verification_source_exclude_paths` | string[] | `[]` | Git pathspecs excluded from the verification source-revision snapshot. Each entry becomes a `:(exclude)` pathspec on the `git ls-files` passes, in addition to the built-in `.gsd/**` and `receipts/**` exclusions. Global and project lists merge additively — a project list adds to the global list and cannot clear it. Use for large non-evidence trees (historical test artifacts, committed fixtures) that would otherwise be re-hashed on every dispatch. Changes under excluded paths no longer invalidate recorded verification evidence, so exclude only trees verification evidence never depends on. |
+| `verification_reuse_exec_evidence` | boolean | `false` | Let host verification reuse the executor's own `gsd_exec` run of a Task's Verify command instead of running it again. A run is reused only when it provably ran exactly as the gate runs it: same POSIX shell form with `pipefail`, same child environment (every variable and value), same rewrites, on the exact source revision under test, and inside `verification_timeout_ms`. Any divergence re-runs the command. With this on, Verify-command `gsd_exec` calls see the gate's environment (which may hold credentials) instead of the sandbox allowlist; every other call stays sandboxed. Windows (Git Bash and cmd) never reuses. |
 
 For missing-command handling and the task-evidence exception, see [Auto Mode — Verification Enforcement](./auto-mode.md#verification-enforcement).
 
 Verification commands must be simple executable commands. Shell piping (`|`) is supported, but logical OR (`||`) is rejected. GSD also rejects redirects (`>` and `<`), semicolons, backticks, and command substitution (`$(...)`) because verification is run as a controlled command list, not as an arbitrary shell program.
 
 For `gsd_exec`, verification-oriented workloads include builds, tests, linting, type checks, and verification commands. An explicit `context_mode.exec_timeout_ms` takes precedence over `verification_timeout_ms`; unrelated `gsd_exec` workloads keep the sandbox's 30-second default when `context_mode.exec_timeout_ms` is unset.
+
+An explicit `timeout_ms` on a `gsd_exec` / `gsd_uat_exec` call, and `context_mode.exec_timeout_ms`, accept up to 3600000 ms (one hour), so a long verification command can run in the foreground inside the unit's process tree (bounded by the unit's `auto_supervisor.hard_timeout_minutes`). Note that when `gsd_exec` runs through the workflow MCP server, a silent call is still subject to that server's `GSD_MCP_WORKFLOW_TIMEOUT_MS` deadline for the steps around the command and to the MCP client's own limits (Claude Code ends a stdio MCP call that shows no result and no progress for 30 minutes).
 
 For task-level `verify` commands (`taskPlanVerify`), GSD splits checks on newlines. `<item>...</item>` wrappers around commands are treated as separators, not shell syntax. `&&` chains stay within a single shell invocation, so commands such as `cd path && npm test` preserve directory context. If a task names verify commands but every one is rejected as shell-unsafe (unquoted redirects, `;`, `$(...)`, backticks), GSD does not fall back to preference or `package.json` checks; the task fails with a `task-plan-unsafe` discovery source and asks you to rewrite the Verify field.
 
@@ -1059,6 +1063,20 @@ remote_questions:
 When `notifications.enabled: true` is set **and** a remote channel is configured, informational notifications (milestone complete, blocker, budget alerts, all milestones done) are also sent to the remote channel — not just to the desktop. No additional configuration is needed.
 
 See [Remote Questions](./remote-questions.md) for setup instructions and Telegram command reference.
+
+### `discussion`
+
+Controls how discussion interviews (`/gsd discuss`, milestone/slice/project/requirements interviews) ask for input:
+
+```yaml
+discussion:
+  question_mode: dialog       # "dialog" (default) or "chat"
+```
+
+- `dialog` (default): interviews use `ask_user_questions` choice dialogs when the transport supports them.
+- `chat`: interviews happen in plain chat. The discuss prompts ask numbered questions in the conversation, you answer in your own words, and the interview stays open across turns until the discussion's CONTEXT artifact is saved. Free-form answers, any language, no modal dialogs.
+
+`ask_user_questions` stays available in chat mode (the workflow tool-surface readiness check still requires it) — GSD only stops steering the interviews through it. The milestone depth check still applies: the agent asks for explicit confirmation in plain text before writing CONTEXT, and it unlocks on an explicit approval reply. This is the supported plain-chat switch; do not use `GSD_WORKFLOW_MCP_STRUCTURED_QUESTIONS=0` for this — it removes the tool from the session surface and `/gsd discuss` then waits forever for the workflow tools.
 
 ### `post_unit_hooks`
 

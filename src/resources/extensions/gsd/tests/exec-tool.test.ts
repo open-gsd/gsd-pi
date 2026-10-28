@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { registerExecTools } from "../bootstrap/exec-tools.ts";
-import { executeGsdExec, executeUatExec } from "../tools/exec-tool.ts";
+import { buildExecOptionsForParams, executeGsdExec, executeUatExec } from "../tools/exec-tool.ts";
 import type { ExecSandboxOptions, ExecSandboxRequest, ExecSandboxResult } from "../exec-sandbox.ts";
 
 function makeExecResult(request: ExecSandboxRequest): ExecSandboxResult {
@@ -202,4 +202,100 @@ test("registerExecTools exposes gsd_uat_exec intent as recoverable string schema
   assert.equal("anyOf" in intentSchema, false);
   assert.match(intentSchema.description, /uat-artifact-check/);
   assert.match(intentSchema.description, /artifact/);
+});
+
+// ── One-hour timeout ceiling (issue #2981) ──────────────────────────────────
+
+test("executeGsdExec honors an explicit timeout_ms above the old 600s cap", async () => {
+  let capturedClampTimeout: number | undefined;
+  let capturedRequest: ExecSandboxRequest | undefined;
+
+  const result = await executeGsdExec(
+    { runtime: "bash", script: "pnpm verify:pr", timeout_ms: 1_800_000 },
+    {
+      baseDir: "/tmp/gsd-exec-long-timeout-test",
+      preferences: {
+        context_mode: { enabled: true },
+        verification_timeout_ms: 120_000,
+      },
+      run: async (request, opts) => {
+        capturedClampTimeout = opts.clamp_timeout_ms;
+        capturedRequest = request;
+        return makeExecResult(request);
+      },
+    },
+  );
+
+  assert.equal(result.isError, false);
+  assert.equal(capturedClampTimeout, 3_600_000, "sandbox ceiling must be one hour, not 600s");
+  assert.equal(capturedRequest?.timeout_ms, 1_800_000, "a 30-minute request must reach the sandbox unclamped");
+});
+
+test("registerExecTools advertises the one-hour timeout_ms ceiling on both exec tools", () => {
+  const tools: Array<{ name: string; parameters: any }> = [];
+  registerExecTools({
+    registerTool: (tool: { name: string; parameters: any }) => {
+      tools.push(tool);
+    },
+  } as any);
+
+  for (const name of ["gsd_exec", "gsd_uat_exec"]) {
+    const tool = tools.find((registeredTool) => registeredTool.name === name);
+    assert.ok(tool, `${name} should be registered`);
+    const timeoutSchema = tool.parameters.properties.timeout_ms;
+    assert.ok(timeoutSchema, `${name} should expose timeout_ms`);
+    assert.equal(timeoutSchema.maximum, 3_600_000, `${name} timeout_ms maximum must be one hour`);
+  }
+});
+
+test("buildExecOptionsForParams classifies UAT workloads on the normalized params (issue #2981)", () => {
+  const uatParams = {
+    milestoneId: "M001",
+    sliceId: "S01",
+    checkId: "test-login",
+    intent: "uat-runtime-check",
+    command: "sleep 100",
+  };
+  const preferences = {
+    context_mode: { enabled: true },
+    verification_timeout_ms: 120_000,
+  };
+
+  // The executor injects a purpose naming the checkId ("test-login"), which
+  // makes this UAT call verification-oriented — the deadline helper must see
+  // the same 120s sandbox default the executor will apply, not the 30s
+  // unrelated-workload default.
+  const uat = buildExecOptionsForParams("/tmp/base", uatParams, preferences, true);
+  assert.equal(uat.default_timeout_ms, 120_000);
+
+  // The gsd_exec handler classifies raw params: "sleep 100" stays unrelated.
+  const plain = buildExecOptionsForParams("/tmp/base", { command: "sleep 100" }, preferences);
+  assert.equal(plain.default_timeout_ms, 30_000);
+});
+
+test("executeUatExec hands the sandbox the verification default for a verification-named check", async () => {
+  let capturedDefaultTimeout: number | undefined;
+  const result = await executeUatExec(
+    {
+      milestoneId: "M001",
+      sliceId: "S01",
+      checkId: "test-login",
+      intent: "uat-runtime-check",
+      command: "sleep 100",
+    },
+    {
+      baseDir: "/tmp/gsd-uat-classification-test",
+      preferences: {
+        context_mode: { enabled: true },
+        verification_timeout_ms: 120_000,
+      },
+      run: async (request, opts) => {
+        capturedDefaultTimeout = opts.default_timeout_ms;
+        return makeExecResult(request);
+      },
+    },
+  );
+
+  assert.equal(result.isError, false);
+  assert.equal(capturedDefaultTimeout, 120_000);
 });

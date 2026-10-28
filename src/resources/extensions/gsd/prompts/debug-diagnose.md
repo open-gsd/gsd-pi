@@ -19,6 +19,7 @@ Goal semantics:
 ## Instructions
 
 1. Read `.gsd/debug/sessions/{{slug}}.json` for any prior session context.
+   - The artifact's `logPath` field is a reserved destination, not an availability promise: no writer creates the companion log today. Verify the file exists before reading it, and treat this artifact JSON as the canonical session record.
 1a. Call `memory_query` with keywords from the issue (error text, subsystem, file paths). A prior session may have captured this exact gotcha — finding it now saves the investigation.
 2. Investigate the reported issue in `{{workingDirectory}}`.
 3. Follow the goal constraint above strictly.

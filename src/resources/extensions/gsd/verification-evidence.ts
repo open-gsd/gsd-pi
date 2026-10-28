@@ -11,7 +11,7 @@
 
 import { join } from "node:path";
 import { atomicWriteSync } from "./atomic-write.js";
-import type { VerificationResult } from "./types.ts";
+import type { VerificationCheckReusedRun, VerificationResult } from "./types.ts";
 
 // ─── JSON Evidence Artifact ──────────────────────────────────────────────────
 
@@ -23,6 +23,8 @@ export interface EvidenceCheckJSON {
   failureClass?: "timeout" | "command-not-found" | "shell-parse";
   stdoutExcerpt?: string;
   stderrExcerpt?: string;
+  /** Set when the check is a reused exec run instead of a fresh spawn (#2982). */
+  reusedRun?: VerificationCheckReusedRun;
 }
 
 /** Maximum bytes retained for each stdout/stderr excerpt in VERIFY.json. */
@@ -145,6 +147,7 @@ export function evidenceChecks(result: VerificationResult): EvidenceCheckJSON[] 
       ...(check.failureClass ? { failureClass: check.failureClass } : {}),
       ...(stdoutExcerpt !== undefined ? { stdoutExcerpt } : {}),
       ...(stderrExcerpt !== undefined ? { stderrExcerpt } : {}),
+      ...(check.reusedRun ? { reusedRun: check.reusedRun } : {}),
     };
   });
 }

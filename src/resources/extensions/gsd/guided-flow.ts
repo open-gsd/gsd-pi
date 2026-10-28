@@ -16,7 +16,7 @@ import {
   isInteractiveCommandContext,
 } from "./command-feedback.js";
 import { loadFile } from "./files.js";
-import { isDbAvailable, getMilestoneSlices, hasSavedArtifact, insertMilestone } from "./gsd-db.js";
+import { isDbAvailable, getMilestoneSlices, getScopedArtifact, hasSavedArtifact, insertMilestone } from "./gsd-db.js";
 import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
 import {
@@ -60,7 +60,7 @@ import { readSessionLockData, isSessionLockProcessAlive } from "./session-lock.j
 import { nativeAddAll, nativeCommit, nativeHasCommittedHead, nativeIsRepo, nativeInit } from "./native-git-bridge.js";
 import { isInheritedRepo } from "./repo-identity.js";
 import { ensureGitignore, ensurePreferences, untrackRuntimeFiles } from "./gitignore.js";
-import { getIsolationMode, loadEffectiveGSDPreferences, renderLanguageDirectiveForPrompt } from "./preferences.js";
+import { getDiscussionQuestionMode, getIsolationMode, loadEffectiveGSDPreferences, renderLanguageDirectiveForPrompt } from "./preferences.js";
 import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { ensurePlanV2Graph, isMissingFinalizedContextResult } from "./uok/plan-v2.js";
@@ -93,7 +93,7 @@ import {
   resolveWorkflowMcpProjectRoot,
   supportsStructuredQuestions,
 } from "./workflow-mcp.js";
-import { usesWorkflowMcpTransport } from "./question-transport.js";
+import { discussionChatPromptNote, usesWorkflowMcpTransport } from "./question-transport.js";
 import {
   getCachedWorkflowMcpProbe,
   probeAndCacheWorkflowMcp,
@@ -280,7 +280,7 @@ async function dispatchDiscussForNextMilestoneWithBacklog(
   nextId: string,
 ): Promise<void> {
   const backlogContext = buildRequirementsBacklogDiscussContext(nextId);
-  const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+  const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
   const basePrompt = await buildDiscussMilestonePrompt(
     nextId,
     `New milestone ${nextId}`,
@@ -754,7 +754,10 @@ async function dispatchWorkflow(
   ctx?: ExtensionContext,
   unitType?: string,
   options?: DispatchWorkflowOptions,
-): Promise<void> {
+): Promise<boolean> {
+  // True only when the unit actually dispatched. Callers that hold a
+  // discussion open afterwards (#2979) must not wait on a turn that never
+  // started — every early return below reports false.
   const resolvedOptions = options ?? {};
   const projectRoot = resolveGuidedDispatchProjectRoot(resolvedOptions.basePath);
   const loadPreferences = resolvedOptions.deps?.loadPreferences ?? loadEffectiveGSDPreferences;
@@ -768,7 +771,7 @@ async function dispatchWorkflow(
   const heldProjectionChanges = await heldProjectionChangesBeforeDispatch(projectRoot);
   if (heldProjectionChanges) {
     ctx?.ui.notify(heldProjectionChanges, "error");
-    return;
+    return false;
   }
 
   // Route through the dynamic routing pipeline (complexity classification,
@@ -802,7 +805,7 @@ async function dispatchWorkflow(
     });
     if (compatibilityError) {
       ctx.ui.notify(compatibilityError, "error");
-      return;
+      return false;
     }
 
     // ── Live MCP readiness gate ────────────────────────────────────────
@@ -824,7 +827,7 @@ async function dispatchWorkflow(
           `Run \`/gsd mcp check ${readinessFailure.server}\` for details.`,
           "warning",
         );
-        return;
+        return false;
       }
     }
   }
@@ -852,7 +855,7 @@ async function dispatchWorkflow(
         `Cannot dispatch ${resolvedOptions.claim.unitType} ${resolvedOptions.claim.unitId}: ${claim.reason}.`,
         "warning",
       );
-      return;
+      return false;
     }
     if (claim.kind === "claimed") claimed = claim;
   }
@@ -954,6 +957,7 @@ async function dispatchWorkflow(
     // before_agent_start (#3628, skill token savings).
     restoreGsdWorkflowTools(pi, savedTools);
   }
+  return true;
 }
 
 export const _dispatchWorkflowForTest = dispatchWorkflow;
@@ -977,15 +981,30 @@ function findDiscussTargetMilestone(
 function getStructuredQuestionsAvailability(
   pi: ExtensionAPI,
   ctx: ExtensionContext | undefined,
+  basePath: string,
 ): "true" | "false" {
   if (!ctx) return "false";
 
   const provider = ctx.model?.provider;
   const authMode = provider ? ctx.modelRegistry.getProviderAuthMode(provider) : undefined;
-  return supportsStructuredQuestions(pi.getActiveTools(), {
+  return discussFlagFor(basePath, supportsStructuredQuestions(pi.getActiveTools(), {
     authMode,
     baseUrl: ctx.model?.baseUrl,
-  }) ? "true" : "false";
+  }) ? "true" : "false");
+}
+
+/**
+ * The structured-questions flag a discuss prompt is built with, resolved in
+ * the scope the prompt runs in (#2979). `discussion.question_mode: chat`
+ * forces the plain-text branch while leaving the ask_user_questions tool
+ * surface untouched, so the workflow-MCP readiness check keeps passing
+ * (unlike GSD_WORKFLOW_MCP_STRUCTURED_QUESTIONS=0, which removes the tool and
+ * breaks /gsd discuss). Every discuss call site resolves this against the
+ * SAME basePath it hands the builder, so flag, appended chat note, and the
+ * picker hold can never disagree across preference scopes.
+ */
+export function discussFlagFor(basePath: string, structuredQuestionsAvailable: "true" | "false"): "true" | "false" {
+  return getDiscussionQuestionMode(basePath) === "chat" ? "false" : structuredQuestionsAvailable;
 }
 
 /**
@@ -1032,7 +1051,7 @@ function resolveAvailableModel<T extends { id: string; provider: string }>(
  * Used by all three "new milestone" paths (first ever, no active, all complete).
  */
 function buildDiscussPrompt(nextId: string, preamble: string, basePath: string, pi: ExtensionAPI, ctx: ExtensionCommandContext, preparationContext?: string): string {
-  const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+  const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
   const inlinedTemplates = [
     inlineTemplate("project", "Project"),
     inlineTemplate("requirements", "Requirements"),
@@ -1040,6 +1059,7 @@ function buildDiscussPrompt(nextId: string, preamble: string, basePath: string, 
     inlineTemplate("roadmap", "Roadmap"),
     inlineTemplate("decisions", "Decisions"),
   ].join("\n\n---\n\n");
+  const chatNote = discussionChatPromptNote(getDiscussionQuestionMode(basePath), structuredQuestionsAvailable);
   return prependLanguageDirective(basePath, loadPrompt("discuss", {
     milestoneId: nextId,
     preamble,
@@ -1050,7 +1070,7 @@ function buildDiscussPrompt(nextId: string, preamble: string, basePath: string, 
     inlinedTemplates,
     commitInstruction: buildDocsCommitInstruction(`docs(${nextId}): context, requirements, and roadmap`),
     multiMilestoneCommitInstruction: buildDocsCommitInstruction("docs: project plan — N milestones"),
-  }));
+  }) + chatNote);
 }
 
 /**
@@ -1181,7 +1201,7 @@ async function dispatchNewMilestoneDiscuss(
   }
 
   const preparationContext = await buildDiscussPreparationContext(ctx, basePath, "milestone", true);
-  const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+  const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
   let prompt = await buildDiscussMilestonePrompt(
     nextId,
     `New milestone ${nextId}`,
@@ -1374,6 +1394,11 @@ export async function buildDiscussSlicePrompt(
     : "";
 
   const inlinedTemplates = inlineTemplate("slice-context", "Slice Context");
+  const structuredQuestionsAvailable = options?.structuredQuestionsAvailable ?? "false";
+  const chatNote = discussionChatPromptNote(
+    getDiscussionQuestionMode(base),
+    structuredQuestionsAvailable,
+  );
   return prependLanguageDirective(base, loadPrompt("guided-discuss-slice", {
     milestoneId: mid,
     sliceId: sid,
@@ -1383,9 +1408,9 @@ export async function buildDiscussSlicePrompt(
     contextPath: sliceContextPath,
     projectRoot: base,
     inlinedTemplates,
-    structuredQuestionsAvailable: options?.structuredQuestionsAvailable ?? "false",
+    structuredQuestionsAvailable,
     commitInstruction: buildDocsCommitInstruction(`docs(${mid}/${sid}): slice context from discuss`),
-  }));
+  }) + chatNote);
 }
 
 /**
@@ -1461,7 +1486,7 @@ export async function showDiscuss(
         return;
       }
       const discussBasePath = resolveDiscussSliceBasePath(basePath, targetMilestone.id);
-      const sqAvail = getStructuredQuestionsAvailability(pi, ctx);
+      const sqAvail = getStructuredQuestionsAvailability(pi, ctx, discussBasePath);
       const prompt = await buildDiscussSlicePrompt(targetMilestone.id, sid, chosen.title, discussBasePath, {
         rediscuss: hasSavedArtifact(targetMilestone.id, sid, "CONTEXT"),
         structuredQuestionsAvailable: sqAvail,
@@ -1541,7 +1566,7 @@ export async function showDiscuss(
     });
 
     if (choice === "discuss_draft") {
-      const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+      const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
       const seed = await buildDiscussMilestonePrompt(
         mid,
         milestoneTitle,
@@ -1558,7 +1583,7 @@ export async function showDiscuss(
         claim: { milestoneId: mid, sliceId: null, taskId: null, unitType: "discuss-milestone", unitId: mid },
       });
     } else if (choice === "discuss_fresh") {
-      const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+      const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
       const prompt = await buildDiscussMilestonePrompt(
         mid,
         milestoneTitle,
@@ -1715,12 +1740,18 @@ export async function showDiscuss(
       if (confirm !== "rediscuss") continue;
     }
 
-    const sqAvail = getStructuredQuestionsAvailability(pi, ctx);
+    const sqAvail = getStructuredQuestionsAvailability(pi, ctx, discussBasePath);
+    // Chat mode (#2979): the dispatched turn ends when the agent asks its
+    // question in plain text, so idle no longer means "discussion finished".
+    // Token the artifact row before dispatch so a re-discuss (whose CONTEXT
+    // row already exists) waits for the NEW save, not the old one.
+    const chatMode = getDiscussionQuestionMode(discussBasePath) === "chat";
+    const preDiscussionSave = chatMode ? sliceContextSave(mid, chosen.id) : undefined;
     const prompt = await buildDiscussSlicePrompt(mid, chosen.id, chosen.title, discussBasePath, {
       rediscuss: isRediscuss,
       structuredQuestionsAvailable: sqAvail,
     });
-    await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-slice", {
+    const dispatched = await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-slice", {
       basePath: discussBasePath,
       claim: {
         milestoneId: mid,
@@ -1731,10 +1762,124 @@ export async function showDiscuss(
       },
     });
 
-    // Wait for the discuss session to finish, then loop back to the picker
+    // Wait for the discuss session to finish, then loop back to the picker.
     await ctx.waitForIdle();
+    if (chatMode && dispatched) {
+      // The turn that asked the plain-text question is over but the interview
+      // is still open: hold the picker until the discussion's CONTEXT row is
+      // saved (the same completion signal dialog mode observes after its
+      // in-turn dialog rounds), then let the saving turn settle. When the
+      // session carrying the interview goes away first (/clear, /new, session
+      // switch, shutdown) — the user's explicit leave — the flow exits
+      // instead of reopening a picker over a dead session.
+      const leave = sessionLeaveSignal(pi);
+      let completed: boolean;
+      try {
+        completed = await waitForFreshSliceContext(mid, chosen.id, preDiscussionSave ?? null, { leave: leave.promise });
+      } finally {
+        leave.settle();
+      }
+      if (!completed) return;
+      await ctx.waitForIdle();
+    }
     invalidateAllCaches();
   }
+}
+
+/** Poll interval for the chat-mode discussion hold (#2979). */
+const CHAT_DISCUSSION_POLL_MS = 1_000;
+
+/** The last observed save of a slice CONTEXT row — the re-discuss freshness token. */
+export interface SliceContextSave {
+  importedAt: string;
+  content: string;
+}
+
+function sliceContextSave(milestoneId: string, sliceId: string): SliceContextSave | null {
+  const row = getScopedArtifact(milestoneId, sliceId, null, "CONTEXT");
+  if (!row || row.full_content.trim() === "") return null;
+  return { importedAt: row.imported_at, content: row.full_content };
+}
+
+/**
+ * True when the slice CONTEXT row exists and is NEW relative to
+ * `previousSave`. `previousSave` null means first discussion — any non-empty
+ * row counts. A re-discuss needs a row that differs from the token: either a
+ * new `imported_at` (`insertArtifact` stamps it on every `INSERT OR REPLACE`)
+ * or different content (covers two saves inside the same millisecond).
+ */
+export function hasFreshSliceContext(
+  milestoneId: string,
+  sliceId: string,
+  previousSave: SliceContextSave | null,
+): boolean {
+  const row = getScopedArtifact(milestoneId, sliceId, null, "CONTEXT");
+  if (!row || row.full_content.trim() === "") return false;
+  if (previousSave === null) return true;
+  return row.imported_at !== previousSave.importedAt || row.full_content !== previousSave.content;
+}
+
+interface SessionLeaveSignal {
+  /** Resolves when the session carrying the discussion goes away. */
+  promise: Promise<void>;
+  /** Idempotent manual settle, used when the wait finishes first. */
+  settle(): void;
+}
+
+/**
+ * Leave signal for the chat-mode discussion hold (#2979). Subscribes to the
+ * CONFIRMED departure events: `session_switch` (fires after the switch
+ * decides — a vetoed switch must not release the hold) and `session_shutdown`.
+ * The extension API has no handler removal, so after `settle()` the handlers
+ * become no-ops for the remaining lifetime of the session's pi instance.
+ */
+function sessionLeaveSignal(pi: ExtensionAPI): SessionLeaveSignal {
+  let settle: () => void = () => {};
+  const promise = new Promise<void>((resolve) => { settle = resolve; });
+  let settled = false;
+  const onLeave = () => {
+    if (settled) return;
+    settled = true;
+    settle();
+  };
+  pi.on("session_switch", onLeave);
+  pi.on("session_shutdown", onLeave);
+  return { promise, settle: onLeave };
+}
+
+/**
+ * Chat-mode discussion hold (#2979). Resolves `true` when `hasFreshSliceContext`
+ * turns true — the interview completes by saving the artifact, the same
+ * completion path dialog mode uses — and `false` when `deps.leave` resolves
+ * (session gone; the interview it waited on no longer exists, and the caller
+ * must not reopen its picker). Injectable delay keeps the poll deterministic
+ * in tests.
+ */
+export async function waitForFreshSliceContext(
+  milestoneId: string,
+  sliceId: string,
+  previousSave: SliceContextSave | null,
+  deps: {
+    delay?: (ms: number) => Promise<void>;
+    /** Resolves when the session carrying the discussion goes away. */
+    leave?: Promise<void>;
+  } = {},
+): Promise<boolean> {
+  const delay = deps.delay ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  // Flipped by the leave subscription; checked at the loop top so a leave
+  // that resolves between polls ends the hold without another race.
+  let left = false;
+  deps.leave?.then(() => { left = true; });
+  while (!hasFreshSliceContext(milestoneId, sliceId, previousSave)) {
+    if (left) return false;
+    const waited = delay(CHAT_DISCUSSION_POLL_MS);
+    if (deps.leave) {
+      await Promise.race([waited, deps.leave]);
+    } else {
+      await waited;
+    }
+  }
+  return true;
 }
 
 // ─── Queued Milestone Discussion ─────────────────────────────────────────────
@@ -1840,7 +1985,7 @@ async function dispatchDiscussForMilestone(
         "> Ask only questions where the answer would materially change scope.",
       ].join("\n")
     : "";
-  const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+  const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
   const prompt = await buildDiscussMilestonePrompt(
     mid,
     milestoneTitle,
@@ -2435,7 +2580,7 @@ export async function showSmartEntry(
         milestoneId,
         milestoneTitle,
         basePath,
-        getStructuredQuestionsAvailability(pi, ctx),
+        getStructuredQuestionsAvailability(pi, ctx, basePath),
       ),
       "gsd-discuss",
       ctx,
@@ -2529,7 +2674,7 @@ export async function showSmartEntry(
     });
 
     if (choice === "discuss_draft") {
-      const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+      const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
       const seed = await buildDiscussMilestonePrompt(
         milestoneId,
         milestoneTitle,
@@ -2543,7 +2688,7 @@ export async function showSmartEntry(
       setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId, step: stepMode });
       await dispatchWorkflow(pi, seed, "gsd-discuss", ctx, "discuss-milestone", { basePath });
     } else if (choice === "discuss_fresh") {
-      const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+      const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
       const prompt = await buildDiscussMilestonePrompt(
         milestoneId,
         milestoneTitle,
@@ -2677,7 +2822,7 @@ export async function showSmartEntry(
           { basePath },
         );
       } else if (choice === "discuss") {
-        const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
+        const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx, basePath);
         const prompt = await buildDiscussMilestonePrompt(
           milestoneId,
           milestoneTitle,
@@ -2815,7 +2960,7 @@ export async function showSmartEntry(
       );
     } else if (choice === "discuss") {
       const discussBasePath = resolveDiscussSliceBasePath(basePath, milestoneId);
-      const sqAvail = getStructuredQuestionsAvailability(pi, ctx);
+      const sqAvail = getStructuredQuestionsAvailability(pi, ctx, discussBasePath);
       const prompt = await buildDiscussSlicePrompt(milestoneId, sliceId, sliceTitle, discussBasePath, {
         rediscuss: hasContext,
         structuredQuestionsAvailable: sqAvail,

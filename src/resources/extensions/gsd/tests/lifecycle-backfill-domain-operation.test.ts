@@ -302,6 +302,31 @@ test("an unknown raw status fails the preview with a list and nothing is adopted
   assert.equal(scalar("SELECT COUNT(*) FROM workflow_operations"), 0);
 });
 
+test("a legacy planning milestone adopts as open work and does not stop the preview (#2985)", () => {
+  // The unscoped 3.0.0 line's plan-milestone took an unvalidated status
+  // string, so an in-flight milestone can carry "planning".
+  insertMilestone({ id: "M001", title: "In flight", status: "planning" });
+
+  const preview = previewLifecycleBackfill();
+  assert.deepEqual(preview.unknownStatuses, [], "planning maps to an open lifecycle status");
+  assert.deepEqual(preview.items, [{
+    itemKind: "milestone",
+    milestoneId: "M001",
+    sliceId: null,
+    taskId: null,
+    rawStatus: "planning",
+    completedAt: null,
+    lifecycleStatus: "ready",
+    rule: "legacy-open",
+    projectedLegacyStatus: null,
+  }]);
+
+  applyLifecycleBackfill(base);
+
+  assert.equal(lifecycleStatus("M001"), "ready");
+  assert.equal(scalar("SELECT status FROM milestones WHERE id = 'M001'"), "planning", "the raw status is kept");
+});
+
 test("backfill is refused on a worktree-local database", () => {
   const worktree = join(base, ".gsd-worktrees", "M001");
   mkdirSync(join(worktree, ".gsd"), { recursive: true });

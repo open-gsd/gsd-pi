@@ -179,3 +179,80 @@ test("mcp_call uses the workflow server timeout only for the gsd-workflow server
 		rmSync(gsdHomeDir, { recursive: true, force: true });
 	}
 });
+
+// Issue #2981: an explicit timeout_ms on a gsd-workflow exec call must raise
+// the client-side deadline past the server-wide default, mirroring the
+// server's serialized-operation deadline (requested timeout + margin).
+test("mcp_call lets an explicit timeout_ms carry a gsd-workflow call past the server-wide timeout", async () => {
+	const previousGsdHome = process.env.GSD_HOME;
+	const previousTimeout = process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+	const previousWorkflowName = process.env.GSD_WORKFLOW_MCP_NAME;
+	const originalCwd = process.cwd();
+	const projectDir = mkdtempSync(join(tmpdir(), "mcp-call-exec-timeout-project-"));
+	const gsdHomeDir = mkdtempSync(join(tmpdir(), "mcp-call-exec-timeout-home-"));
+
+	try {
+		process.env.GSD_HOME = gsdHomeDir;
+		delete process.env.GSD_WORKFLOW_MCP_NAME;
+		process.chdir(projectDir);
+		mkdirSync(join(projectDir, ".gsd"), { recursive: true });
+
+		const require = createRequire(import.meta.url);
+		const mcpModuleUrl = pathToFileURL(require.resolve("@modelcontextprotocol/sdk/server/mcp.js")).href;
+		const stdioModuleUrl = pathToFileURL(require.resolve("@modelcontextprotocol/sdk/server/stdio.js")).href;
+		const serverPath = join(projectDir, "slow-exec-mcp-server.mjs");
+		writeFileSync(
+			serverPath,
+			[
+				`const { McpServer } = await import(${JSON.stringify(mcpModuleUrl)});`,
+				`const { StdioServerTransport } = await import(${JSON.stringify(stdioModuleUrl)});`,
+				'const server = new McpServer({ name: "slow-exec", version: "1.0.0" }, { capabilities: { tools: {} } });',
+				'server.tool("long_command", "Finish after a fixed delay", {}, async () => {',
+				"  await new Promise((resolve) => setTimeout(resolve, 500));",
+				'  return { content: [{ type: "text", text: "finished" }] };',
+				"});",
+				"await server.connect(new StdioServerTransport());",
+			].join("\n"),
+			"utf-8",
+		);
+		writeFileSync(
+			join(projectDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					"gsd-workflow": { command: process.execPath, args: [serverPath] },
+				},
+			}),
+			"utf-8",
+		);
+
+		const { pi, tools } = createMockPi();
+		mcpClientExtension(pi as any);
+		const mcpCall = tools.get("mcp_call");
+		assert.ok(mcpCall, "mcp_call must be registered");
+		const ctx = { hasUI: true, ui: { confirm: async () => true } };
+		const callWithTimeout = (timeoutMs: number) => mcpCall.execute(
+			"tool-call-2981",
+			{ server: "gsd-workflow", tool: "long_command", args: { timeout_ms: timeoutMs } },
+			new AbortController().signal,
+			() => {},
+			ctx,
+		);
+
+		// A 100ms server-wide default is far below the 500ms command: only the
+		// explicit timeout_ms (5000) can carry this call on the client side.
+		process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "100";
+		const result = await callWithTimeout(5_000);
+		assert.equal(result.content[0]?.text, "finished");
+	} finally {
+		await _resetMcpClientStateForTest();
+		process.chdir(originalCwd);
+		if (previousGsdHome === undefined) delete process.env.GSD_HOME;
+		else process.env.GSD_HOME = previousGsdHome;
+		if (previousTimeout === undefined) delete process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+		else process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = previousTimeout;
+		if (previousWorkflowName === undefined) delete process.env.GSD_WORKFLOW_MCP_NAME;
+		else process.env.GSD_WORKFLOW_MCP_NAME = previousWorkflowName;
+		rmSync(projectDir, { recursive: true, force: true });
+		rmSync(gsdHomeDir, { recursive: true, force: true });
+	}
+});

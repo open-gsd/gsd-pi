@@ -27,6 +27,8 @@ import {
   closeDatabase,
   getTask,
   insertGateRow,
+  insertMilestone,
+  insertSlice,
   openDatabase,
   _getAdapter,
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
@@ -527,6 +529,10 @@ describe("ADR-008 parity: shared workflow write tools native vs MCP", () => {
         mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
         // Milestone content without gsd.db is authority-missing; give the project its authority.
         openDatabase(join(base, ".gsd", "gsd.db"));
+        // A slice-scoped SUMMARY is a completion artifact (#2994): the gate
+        // needs the slice to exist and be terminal.
+        insertMilestone({ id: "M001", title: "Parity milestone", status: "active" });
+        insertSlice({ id: "S01", milestoneId: "M001", title: "Parity slice", status: "complete" });
         closeDatabase();
       },
       nativeRun: (base, args) => executeSummarySave(args as Parameters<typeof executeSummarySave>[0], base),

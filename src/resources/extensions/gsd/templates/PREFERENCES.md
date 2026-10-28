@@ -91,6 +91,8 @@ remote_questions: false
 #   channel_id: "12345"
 #   timeout_minutes: 5
 #   poll_interval_seconds: 5
+# discussion:
+#   question_mode: chat   # "dialog" (default) or "chat" - plain-chat discussion interviews
 uat_dispatch:
 post_unit_hooks: []
 pre_dispatch_hooks: []

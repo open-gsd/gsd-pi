@@ -476,10 +476,25 @@ test('validatePreferences: rejects invalid context_mode preference values', () =
   } as any);
   assert.ok(result.errors.length > 0);
   assert.ok(result.errors.includes('context_mode.enabled must be a boolean'));
-  assert.ok(result.errors.includes('context_mode.exec_timeout_ms must be a number between 1000 and 600000'));
+  assert.ok(result.errors.includes('context_mode.exec_timeout_ms must be a number between 1000 and 3600000'));
   assert.ok(result.errors.includes('context_mode.exec_stdout_cap_bytes must be a number between 4096 and 16777216'));
   assert.ok(result.errors.includes('context_mode.exec_digest_chars must be a number between 0 and 4000'));
   assert.ok(result.errors.includes('context_mode.exec_env_allowlist must be an array of valid env var names'));
+});
+
+test('validatePreferences: accepts context_mode.exec_timeout_ms up to the one-hour ceiling (issue #2981)', () => {
+  const accepted = validatePreferences({
+    context_mode: { enabled: true, exec_timeout_ms: 3_600_000 },
+  } as any);
+  assert.deepEqual(accepted.errors, [], 'exactly one hour must validate');
+
+  const rejected = validatePreferences({
+    context_mode: { enabled: true, exec_timeout_ms: 3_600_001 },
+  } as any);
+  assert.ok(
+    rejected.errors.includes('context_mode.exec_timeout_ms must be a number between 1000 and 3600000'),
+    'above one hour must be rejected',
+  );
 });
 
 test('isContextModeEnabled: defaults to true; only explicit false disables', () => {
@@ -616,11 +631,11 @@ test('runExecSandbox: stderr-only timeout surfaces the excerpt the marker digest
   assert.ok(result.stderr_excerpt!.includes('connection refused'), `timeout diagnostics surfaced: ${result.stderr_excerpt}`);
 });
 
-test('executeGsdExec: failed run exposes the stderr section in content and details without losing the recording warning', async (t) => {
+test('executeGsdExec: failed run exposes the stderr section in content and details and records despite lost output', async (t) => {
   const base = freshBase();
   // A workflow database must exist for the run to be recordable at all; the
-  // deleted stdout file then makes the record step fail with a warning while
-  // the run itself fails with stderr diagnostics.
+  // deleted stdout file makes the recorded hash unverifiable while the run
+  // itself fails with stderr diagnostics.
   mkdirSync(join(base, '.gsd'), { recursive: true });
   openDatabase(join(base, '.gsd', 'gsd.db'));
   t.after(() => {
@@ -646,8 +661,8 @@ test('executeGsdExec: failed run exposes the stderr section in content and detai
   assert.ok(text.includes('real cause'), 'stderr diagnostics visible');
   assert.ok(text.includes('partial'), 'stdout preserved');
   assert.ok(typeof result.details.stderr_excerpt === 'string' && result.details.stderr_excerpt.includes('real cause'), `details.stderr_excerpt present: ${String(result.details.stderr_excerpt)}`);
-  assert.ok(result.details.run_not_recorded, 'recording warning retained alongside diagnostics');
-  assert.ok(text.includes('not verification or UAT evidence'), 'warning text present in content');
+  assert.ok(result.details.id, 'the run is recorded with an id');
+  assert.equal(result.details.run_not_recorded, undefined, 'the observation is recorded despite lost output');
 });
 
 test('executeGsdExec: successful run with stderr exposes no stderr section', async (t) => {

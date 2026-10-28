@@ -4,7 +4,7 @@ import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { deleteKittyImage, encodeKitty } from "../src/terminal-image.ts";
 import type { MouseEvent } from "../src/mouse.ts";
 import { CURSOR_MARKER, type Component, TUI } from "../src/tui.ts";
-import { VirtualTerminal } from "./virtual-terminal.ts";
+import { VirtualTerminal } from "../src/tests/virtual-terminal.ts";
 
 class TestComponent implements Component {
 	lines: string[] = [];

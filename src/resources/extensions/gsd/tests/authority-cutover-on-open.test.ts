@@ -280,6 +280,28 @@ test("a row with an unmappable status stops the cutover loudly and changes nothi
   assert.equal(countUnadoptedHierarchyRows(), 0);
 });
 
+test("a legacy planning milestone does not stop the cutover (#2985)", () => {
+  // The unscoped 3.0.0 line's plan-milestone took an unvalidated status
+  // string, so an in-flight milestone can carry "planning".
+  const base = createProject();
+  insertMilestone({ id: "M001", title: "In flight", status: "planning" });
+  closeDatabase();
+
+  assert.equal(openWorkflowDatabase(base).ok, true);
+
+  assert.deepEqual(rows("SELECT revision, authority_epoch FROM project_authority"), [{ revision: 2, authority_epoch: 1 }]);
+  assert.deepEqual(
+    rows("SELECT operation_type FROM workflow_operations ORDER BY resulting_revision").map((row) => row["operation_type"]),
+    ["lifecycle.backfill", "authority.cutover"],
+  );
+  assert.deepEqual(
+    rows("SELECT lifecycle_status FROM workflow_item_lifecycles WHERE item_kind = 'milestone'"),
+    [{ lifecycle_status: "ready" }],
+  );
+  assert.deepEqual(rows("SELECT id, status FROM milestones"), [{ id: "M001", status: "planning" }], "the raw status is kept");
+  assert.deepEqual(logged("error"), []);
+});
+
 test("a legacy completion with no evidence stops the cutover loudly and changes nothing", async () => {
   const base = createProject();
   insertMilestone({ id: "M001", title: "Shipped", status: "complete" });

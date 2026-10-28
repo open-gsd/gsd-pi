@@ -754,6 +754,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Root-level artifact paths are PROJECT.md, PROJECT-DRAFT.md, REQUIREMENTS.md, and REQUIREMENTS-DRAFT.md.",
 			"artifact_type must be one of: SUMMARY, RESEARCH, UI-SPEC, AI-SPEC, SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT.",
 			"UAT (despite the tool name) saves the slice's UAT acceptance document: pass milestone_id + slice_id and no task_id; it persists to the slice's UAT record, so corrections to a completed slice's UAT markdown survive projection flushes.",
+			"A slice-scoped SUMMARY (slice_id, no task_id) is a completion artifact: the slice must be terminal (done and closed) or the save is rejected — record mid-flight findings as CONTEXT, CONTEXT-DRAFT, or ASSESSMENT instead. Task-scoped SUMMARY keeps its staging path (#2994).",
 			"Use CONTEXT-DRAFT for incremental draft persistence; use CONTEXT for the final milestone context after depth verification.",
 			`Keep each content payload under ${SUMMARY_SAVE_CONTENT_MAX_LENGTH} characters; save large context incrementally with CONTEXT-DRAFT/PROJECT-DRAFT/REQUIREMENTS-DRAFT instead of one oversized call.`,
 		],

@@ -338,7 +338,7 @@ test("input-controller: /export prefix does not swallow unrelated slash commands
 });
 
 test("input-controller: truly unknown slash commands stop before session.prompt", async () => {
-	const { host, prompted, errors, getEditorText } = createHost();
+	const { host, prompted, errors, history, getEditorText } = createHost();
 
 	await host.defaultEditor.onSubmit("/definitely-not-a-command");
 
@@ -347,7 +347,19 @@ test("input-controller: truly unknown slash commands stop before session.prompt"
 		errors,
 		["Unknown command: /definitely-not-a-command. Use slash autocomplete to see available commands."],
 	);
-	assert.equal(getEditorText(), "", "unknown slash commands should clear the editor after showing the error");
+	// #3022: the mistyped command stays correctable — left in the editor and
+	// recalled by Up — the way a shell keeps a failed command in history.
+	assert.equal(getEditorText(), "/definitely-not-a-command", "unknown slash commands stay in the editor for correction");
+	assert.deepEqual(history, ["/definitely-not-a-command"], "unknown slash commands are recalled by Up");
+});
+
+test("input-controller: handled built-in slash commands are added to history (#3022)", async () => {
+	const { host, history, getEditorText } = createHost();
+
+	await host.defaultEditor.onSubmit("/settings");
+
+	assert.deepEqual(history, ["/settings"], "handled built-in commands are recallable by Up");
+	assert.equal(getEditorText(), "", "handled commands still clear the editor");
 });
 
 test("input-controller: absolute file paths are not treated as slash commands (#3478)", async () => {

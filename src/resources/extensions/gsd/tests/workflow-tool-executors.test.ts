@@ -421,6 +421,10 @@ test("executeSummarySave persists artifact and returns computed path", async () 
   const base = makeTmpBase();
   try {
     openTestDb(base);
+    // Slice-scoped SUMMARY is a completion artifact (#2994): the gate needs a
+    // terminal slice row to exist and be done+closed.
+    insertMilestone({ id: "M001", title: "Foundation", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "complete" });
     const result = await inProjectDir(base, () => executeSummarySave({
       milestone_id: "M001",
       slice_id: "S01",

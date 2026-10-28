@@ -1514,7 +1514,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === null || proto === Object.prototype;
 }
 
-export async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): Promise<T> {
+export async function runSerializedWorkflowOperation<T>(
+  fn: () => Promise<T>,
+  options?: { timeoutMs?: number },
+): Promise<T> {
   // The shared DB adapter and workflow log base path are process-global, so
   // workflow MCP mutations must not overlap within a single server process.
   // A per-operation deadline prevents a single stuck call from wedging its
@@ -1526,6 +1529,12 @@ export async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): P
   // cancellation remains a larger deferred design: it requires threading an
   // AbortSignal through every workflow executor (`workflow-tool-executors.ts`
   // and friends).
+  //
+  // `options.timeoutMs` lets a caller whose operation is already bounded by
+  // its own workmanship (the exec tools: the sandbox kills the command at the
+  // requested `timeout_ms`) raise the deadline past the server-wide default —
+  // otherwise the 5-minute default fires long before a legitimately long
+  // command finishes (issue #2981).
   const prior = workflowExecutionQueue;
   let release!: () => void;
   workflowExecutionQueue = new Promise<void>((resolve) => {
@@ -1533,7 +1542,7 @@ export async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): P
   });
 
   await prior;
-  const timeoutMs = getWorkflowOpTimeoutMs();
+  const timeoutMs = options?.timeoutMs ?? getWorkflowOpTimeoutMs();
   const operationPromise = Promise.resolve().then(fn);
   let timedOut = false;
   try {
@@ -1562,8 +1571,40 @@ export async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): P
 }
 
 /** @internal — exported for testing only */
-export function _runSerializedWorkflowOperationForTest<T>(fn: () => Promise<T>): Promise<T> {
-  return runSerializedWorkflowOperation(fn);
+export function _runSerializedWorkflowOperationForTest<T>(
+  fn: () => Promise<T>,
+  options?: { timeoutMs?: number },
+): Promise<T> {
+  return runSerializedWorkflowOperation(fn, options);
+}
+
+/**
+ * Fixed allowance added on top of the effective command timeout when the exec
+ * tools derive their serialized-operation deadline (issue #2981). Covers the
+ * sandbox kill ladder (SIGKILL grace + hard deadline, ~8s worst case), the
+ * write-gate check, and run recording, so the deadline only fires when the
+ * operation is genuinely wedged — never before the sandbox's own bound.
+ */
+export const EXEC_TOOL_DEADLINE_MARGIN_MS = 60_000;
+
+/**
+ * Deadline for the serialized workflow operation wrapping one
+ * gsd_exec/gsd_uat_exec call: the effective sandbox timeout plus
+ * EXEC_TOOL_DEADLINE_MARGIN_MS. The effective timeout mirrors clampTimeout in
+ * exec-sandbox.ts (requested timeout_ms, else the preferences-derived default,
+ * floored at 1ms and clamped to the sandbox ceiling) so the deadline always
+ * covers the command the sandbox will actually run. @internal — exported for
+ * testing.
+ */
+export function execOperationDeadlineMs(
+  requestedTimeoutMs: number | undefined,
+  sandboxTimeouts: { default_timeout_ms: number; clamp_timeout_ms: number },
+): number {
+  const requested = typeof requestedTimeoutMs === "number" && Number.isFinite(requestedTimeoutMs)
+    ? Math.floor(requestedTimeoutMs)
+    : sandboxTimeouts.default_timeout_ms;
+  const effective = Math.min(Math.max(requested, 1), sandboxTimeouts.clamp_timeout_ms);
+  return effective + EXEC_TOOL_DEADLINE_MARGIN_MS;
 }
 
 async function runSerializedWorkflowDbOperation<T>(
@@ -3109,7 +3150,7 @@ const execParams = {
   cmd: z.string().optional().describe("Short alias for script."),
   code: z.string().optional().describe("Alias for script, useful for node/python snippets."),
   purpose: z.string().optional().describe("Short label recorded in meta.json for later review."),
-  timeout_ms: z.number().int().min(1_000).max(600_000).optional().describe("Per-invocation timeout in milliseconds."),
+  timeout_ms: z.number().int().min(1_000).max(3_600_000).optional().describe("Per-invocation timeout in milliseconds (capped at 3600000, one hour)."),
 };
 const execSchema = z.object(execParams);
 
@@ -3134,7 +3175,7 @@ const uatExecParams = {
   cmd: z.string().optional().describe("Short alias for script."),
   code: z.string().optional().describe("Alias for script, useful for node/python snippets."),
   expected: z.string().optional().describe("Expected outcome for this UAT check."),
-  timeout_ms: z.number().int().min(1_000).max(600_000).optional().describe("Per-invocation timeout in milliseconds."),
+  timeout_ms: z.number().int().min(1_000).max(3_600_000).optional().describe("Per-invocation timeout in milliseconds (capped at 3600000, one hour)."),
 };
 const uatExecSchema = z.object(uatExecParams);
 
@@ -4412,16 +4453,23 @@ export function registerWorkflowTools(
     async (args: Record<string, unknown>, extra?: { signal?: AbortSignal }) => {
       const { projectDir, ...params } = parseWorkflowArgs(uatExecSchema, args);
       await enforceWorkflowWriteGate("gsd_uat_exec", projectDir);
-      const { executeUatExec } = await importLocalModule<any>(
+      const { executeUatExec, buildExecOptionsForParams } = await importLocalModule<any>(
         "../../../src/resources/extensions/gsd/tools/exec-tool.js",
       );
+      const preferences = await loadProjectPreferences(projectDir);
+      const sandboxTimeouts = buildExecOptionsForParams(projectDir, params, preferences, true);
       return adaptExecutorResult(
-        await runSerializedWorkflowOperation(async () =>
-          executeUatExec(params, {
-            baseDir: projectDir,
-            preferences: await loadProjectPreferences(projectDir),
-            signal: extra?.signal,
-          }),
+        await runSerializedWorkflowOperation(
+          async () =>
+            executeUatExec(params, {
+              baseDir: projectDir,
+              preferences,
+              signal: extra?.signal,
+            }),
+          // Issue #2981: the command's own timeout bounds this operation, not
+          // the server-wide 5-minute default, so a long verification command
+          // is not reported as a workflow deadline while it still runs.
+          { timeoutMs: execOperationDeadlineMs(params.timeout_ms, sandboxTimeouts) },
         ),
       );
     },
@@ -4434,16 +4482,23 @@ export function registerWorkflowTools(
     async (args: Record<string, unknown>, extra?: { signal?: AbortSignal }) => {
       const { projectDir, ...params } = parseWorkflowArgs(execSchema, args);
       await enforceWorkflowWriteGate("gsd_exec", projectDir);
-      const { executeGsdExec } = await importLocalModule<any>(
+      const { executeGsdExec, buildExecOptionsForParams } = await importLocalModule<any>(
         "../../../src/resources/extensions/gsd/tools/exec-tool.js",
       );
+      const preferences = await loadProjectPreferences(projectDir);
+      const sandboxTimeouts = buildExecOptionsForParams(projectDir, params, preferences);
       return adaptExecutorResult(
-        await runSerializedWorkflowOperation(async () =>
-          executeGsdExec(params, {
-            baseDir: projectDir,
-            preferences: await loadProjectPreferences(projectDir),
-            signal: extra?.signal,
-          }),
+        await runSerializedWorkflowOperation(
+          async () =>
+            executeGsdExec(params, {
+              baseDir: projectDir,
+              preferences,
+              signal: extra?.signal,
+            }),
+          // Issue #2981: the command's own timeout bounds this operation, not
+          // the server-wide 5-minute default, so a long verification command
+          // is not reported as a workflow deadline while it still runs.
+          { timeoutMs: execOperationDeadlineMs(params.timeout_ms, sandboxTimeouts) },
         ),
       );
     },

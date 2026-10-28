@@ -26,13 +26,25 @@ export interface ExecRunRow {
   check_id: string | null;
   attempt_ref: string | null;
   source_revision: string | null;
+  run_contract: string | null;
 }
 
 export type ExecRunInput =
   & Pick<ExecRunRow, "id" | "runtime" | "command" | "cwd" | "exit_code" | "signal" | "started_at" | "duration_ms" | "output_hash">
   & { timedOut: boolean; aborted: boolean }
   & (
-    | { kind: "exec" }
+    | {
+        kind: "exec";
+        sourceRevision?: string | null;
+        runContract?: string | null;
+        /**
+         * The Attempt the run was resolved against before it executed
+         * (#2982). Given for verification-form runs so a long command records
+         * into the Attempt it started in, not into whichever Attempt is open
+         * when it finishes.
+         */
+        attemptRef?: string;
+      }
     | { kind: "uat_exec"; milestoneId: string; sliceId: string; checkId: string; sourceRevision?: string | null }
   );
 
@@ -66,18 +78,22 @@ function callerScopeOf(cwd: string): string {
  * With no such Attempt, or with more than one, the run is unbound and proves
  * nothing.
  */
-function currentAttemptRef(input: ExecRunInput): string | null {
-  if (input.kind === "uat_exec") {
-    const row = getDb().prepare(`
-      SELECT MAX(attempt) AS attempt
-      FROM gate_runs
-      WHERE gate_id = 'UAT' AND gate_type = 'uat' AND unit_type = 'run-uat'
-        AND milestone_id = :milestone_id AND slice_id = :slice_id
-    `).get({ ":milestone_id": input.milestoneId, ":slice_id": input.sliceId });
-    return uatAttemptRef(input.milestoneId, input.sliceId, Number(row?.["attempt"] ?? 0) + 1);
-  }
+/**
+ * The open Task Attempt a caller-scoped run binds to, with the identity of the
+ * Task it belongs to. The caller is known by the scope of its worker
+ * (`<MID>` for a Milestone, `<MID>-<SID>` for a Slice; the scope is the worker
+ * lock GSD_MILESTONE_LOCK / GSD_SLICE_LOCK, else the name of the worktree the
+ * run is in). With no such Attempt, or with more than one, there is no
+ * unambiguous Attempt and null is returned.
+ */
+function openCallerTaskAttempt(scope: string): {
+  attemptId: string;
+  milestoneId: string;
+  sliceId: string;
+  taskId: string | null;
+} | null {
   const open = getDb().prepare(`
-    SELECT attempt.attempt_id
+    SELECT attempt.attempt_id, lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
     FROM workflow_execution_attempts attempt
     JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.lifecycle_id = attempt.lifecycle_id
@@ -92,8 +108,55 @@ function currentAttemptRef(input: ExecRunInput): string | null {
         )
       )
     LIMIT 2
-  `).all({ ":scope": callerScopeOf(input.cwd) });
-  return open.length === 1 ? String(open[0]!["attempt_id"]) : null;
+  `).all({ ":scope": scope });
+  if (open.length !== 1) return null;
+  const row = open[0]!;
+  return {
+    attemptId: String(row["attempt_id"]),
+    milestoneId: String(row["milestone_id"]),
+    sliceId: String(row["slice_id"]),
+    taskId: row["task_id"] == null ? null : String(row["task_id"]),
+  };
+}
+
+function currentAttemptRef(input: ExecRunInput): string | null {
+  if (input.kind === "uat_exec") {
+    const row = getDb().prepare(`
+      SELECT MAX(attempt) AS attempt
+      FROM gate_runs
+      WHERE gate_id = 'UAT' AND gate_type = 'uat' AND unit_type = 'run-uat'
+        AND milestone_id = :milestone_id AND slice_id = :slice_id
+    `).get({ ":milestone_id": input.milestoneId, ":slice_id": input.sliceId });
+    return uatAttemptRef(input.milestoneId, input.sliceId, Number(row?.["attempt"] ?? 0) + 1);
+  }
+  // A verification-form run was resolved against its Attempt before it
+  // executed; record it there even if the open Attempt changed meanwhile.
+  if (input.attemptRef) return input.attemptRef;
+  return openCallerTaskAttempt(callerScopeOf(input.cwd))?.attemptId ?? null;
+}
+
+/**
+ * The Task whose open Attempt a gsd_exec call in `cwd` belongs to, or null.
+ * This decides whether the call may run a Task Verify command under the
+ * verification gate's own invocation (#2982): only that Task's own commands
+ * are eligible.
+ */
+export function currentCallerTaskRef(cwd: string): {
+  attemptId: string;
+  milestoneId: string;
+  sliceId: string;
+  taskId: string;
+} | null {
+  let ref: ReturnType<typeof openCallerTaskAttempt>;
+  try {
+    ref = openCallerTaskAttempt(callerScopeOf(cwd));
+  } catch {
+    // No readable workflow database: nothing to bind to.
+    return null;
+  }
+  return ref?.taskId
+    ? { attemptId: ref.attemptId, milestoneId: ref.milestoneId, sliceId: ref.sliceId, taskId: ref.taskId }
+    : null;
 }
 
 export function recordExecRun(input: ExecRunInput): ExecRunRow {
@@ -116,7 +179,8 @@ export function recordExecRun(input: ExecRunInput): ExecRunRow {
       slice_id: uat?.sliceId ?? null,
       check_id: uat?.checkId ?? null,
       attempt_ref: currentAttemptRef(input),
-      source_revision: uat?.sourceRevision ?? null,
+      source_revision: input.sourceRevision ?? null,
+      run_contract: input.kind === "exec" ? input.runContract ?? null : null,
     };
     const columns = Object.keys(row);
     getDb().prepare(

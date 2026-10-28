@@ -2,6 +2,7 @@
 // File Purpose: Executor for the gsd_exec MCP tool.
 
 import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import { readFileSync } from "node:fs";
 
 import {
@@ -17,10 +18,18 @@ import {
 } from "../preferences-types.js";
 import { bashReferencesProjectRootOutsideWorktree } from "../worktree-shell-guard.js";
 import { openExistingWorkflowDatabase } from "../db-workspace.js";
-import { recordExecRun } from "../db/writers/exec-runs.js";
+import { currentCallerTaskRef, recordExecRun } from "../db/writers/exec-runs.js";
+import { getTask } from "../db/queries.js";
 import { loadEffectiveGSDPreferences } from "../preferences.js";
 import { redactSecrets } from "../redact-secrets.js";
 import { readSourceRevisionForRecord } from "../verification-source-integrity.js";
+import {
+  execRunContractStorage,
+  execRunOutputHash,
+  runnableTaskPlanCommands,
+  verificationCommandInvocation,
+  type VerificationCommandInvocation,
+} from "../verification-gate.js";
 import { contextModeDisabledResult, type ToolExecutionResult } from "./context-mode-tool-result.js";
 
 export interface ExecToolParams {
@@ -43,9 +52,24 @@ export interface ExecToolDeps {
   now?: () => Date;
   generateId?: () => string;
   signal?: AbortSignal;
+  /**
+   * Test seam for the Task a verification-form run would bind to (#2982).
+   * Default reads the caller's open Task Attempt from the workflow database.
+   */
+  readVerificationTaskRef?: (baseDir: string) => VerificationExecTaskRef | null;
+  /**
+   * Capability for the in-process gsd_exec registration only (#2982): Verify
+   * commands may run under the verification gate's own invocation when the
+   * opt-in preference is set. The workflow MCP server never passes this, so
+   * its calls keep the sandboxed allowlist and nothing changes over MCP.
+   */
+  verificationRunContract?: boolean;
 }
 
-type ExecToolPreferences = Pick<GSDPreferences, "context_mode" | "verification_timeout_ms">;
+type ExecToolPreferences = Pick<
+  GSDPreferences,
+  "context_mode" | "verification_timeout_ms" | "verification_reuse_exec_evidence"
+>;
 
 const UNRELATED_EXEC_DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -131,6 +155,40 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
   if (value < min) return min;
   if (value > max) return max;
   return Math.floor(value);
+}
+
+/**
+ * Sandbox timeout options for a prospective exec call, classified the same way
+ * executeGsdExec classifies the workload (verification-oriented calls inherit
+ * verification_timeout_ms; unrelated calls keep the short sandbox default).
+ * Exported so the workflow MCP handlers can size their serialized-operation
+ * deadline to the exact bound the sandbox will apply (issue #2981).
+ */
+export function buildExecOptionsForParams(
+  baseDir: string,
+  params: ExecToolParams,
+  preferences: ExecToolPreferences | null | undefined,
+  uat = false,
+): ExecSandboxOptions {
+  if (uat) {
+    // Classify on the normalized params — the injected UAT purpose names the
+    // checkId, which is part of what makes a UAT run verification-oriented.
+    const normalized = normalizeUatExecParams(params as UatExecToolParams);
+    if ("error" in normalized) return buildExecOptions(baseDir, preferences, undefined, false);
+    return buildExecOptions(
+      baseDir,
+      preferences,
+      undefined,
+      isVerificationWorkload(normalized.params, normalized.params.script),
+    );
+  }
+  const script = normalizeScript(params);
+  return buildExecOptions(
+    baseDir,
+    preferences,
+    undefined,
+    typeof script === "string" && isVerificationWorkload(params, script),
+  );
 }
 
 function isEnabled(prefs: ExecToolDeps["preferences"]): boolean {
@@ -237,6 +295,111 @@ interface UatExecBinding {
   checkId: string;
 }
 
+interface NormalizedUatExecError {
+  error: ToolExecutionResult;
+  params?: never;
+  uat?: never;
+}
+
+interface NormalizedUatExecOk {
+  error?: never;
+  /** Exactly the params executeGsdExec will run (script resolved, purpose/metadata injected). */
+  params: ExecToolParams & { script: string; purpose: string; metadata: Record<string, unknown> };
+  uat: UatExecBinding;
+  intent: UatExecIntent;
+}
+
+/**
+ * Validate and normalize gsd_uat_exec params into the exact shape
+ * executeGsdExec runs: script resolved, purpose defaulted from the UAT
+ * coordinates, typed metadata attached. Shared with the workflow MCP
+ * handlers so deadline sizing classifies the workload on the same params
+ * the executor uses (issue #2981).
+ */
+function normalizeUatExecParams(params: UatExecToolParams): NormalizedUatExecError | NormalizedUatExecOk {
+  const milestoneId = normalizeRequiredString(params.milestoneId, "milestoneId");
+  if (isToolExecutionResult(milestoneId)) return { error: milestoneId };
+  const sliceId = normalizeRequiredString(params.sliceId, "sliceId");
+  if (isToolExecutionResult(sliceId)) return { error: sliceId };
+  const checkId = normalizeRequiredString(params.checkId, "checkId");
+  if (isToolExecutionResult(checkId)) return { error: checkId };
+  const intent = normalizeUatIntent(params.intent);
+  if (isToolExecutionResult(intent)) return { error: intent };
+  const script = normalizeScript(params);
+  if (isToolExecutionResult(script)) return { error: script };
+  const rejected = rejectUatScript(script);
+  if (rejected) {
+    return {
+      error: {
+        content: [{ type: "text", text: `Error: gsd_uat_exec blocked command — ${rejected}` }],
+        details: { operation: "gsd_uat_exec", error: "uat_exec_policy_block", reason: rejected },
+        isError: true,
+      },
+    };
+  }
+  return {
+    params: {
+      ...params,
+      script,
+      purpose: typeof params.purpose === "string" && params.purpose.trim().length > 0
+        ? params.purpose
+        : `UAT ${milestoneId}/${sliceId}/${checkId} (${intent})`,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId,
+        sliceId,
+        checkId,
+        intent,
+        ...(typeof params.expected === "string" && params.expected.trim().length > 0
+          ? { expected: params.expected.trim() }
+          : {}),
+      },
+    },
+    uat: { milestoneId, sliceId, checkId },
+    intent,
+  };
+}
+
+/** The Task whose open Attempt a gsd_exec call belongs to (#2982). */
+export interface VerificationExecTaskRef {
+  attemptId: string;
+  milestoneId: string;
+  sliceId: string;
+  taskId: string;
+}
+
+/** Default Task-ref lookup: the caller's open Task Attempt in the workflow DB. */
+function readVerificationTaskRef(baseDir: string): VerificationExecTaskRef | null {
+  const opened = openExistingWorkflowDatabase(baseDir);
+  if (!opened.ok) return null;
+  return currentCallerTaskRef(baseDir);
+}
+
+/**
+ * The gate's exact invocation when `script` is a runnable command of the
+ * calling Task's Verify field, with the Attempt it was resolved against
+ * (#2982). Anything else — no open Attempt, no Task, prose verify, a
+ * non-Verify script, a host without an invocation contract — keeps the
+ * sandboxed allowlist run.
+ */
+function resolveVerificationExecInvocation(
+  deps: ExecToolDeps,
+  script: string,
+): { invocation: VerificationCommandInvocation; attemptRef: string } | null {
+  const taskRef = deps.readVerificationTaskRef
+    ? deps.readVerificationTaskRef(deps.baseDir)
+    : readVerificationTaskRef(deps.baseDir);
+  if (!taskRef) return null;
+  const task = getTask(taskRef.milestoneId, taskRef.sliceId, taskRef.taskId);
+  if (!task?.verify) return null;
+  for (const command of runnableTaskPlanCommands(task.verify)) {
+    if (command !== script) continue;
+    const invocation = verificationCommandInvocation(command, deps.baseDir);
+    return invocation ? { invocation, attemptRef: taskRef.attemptId } : null;
+  }
+  return null;
+}
+
 /**
  * Store the run as an exec_runs row. Evidence checks read that row, so a run
  * outside a GSD project (no workflow database) is not evidence of anything.
@@ -248,6 +411,7 @@ function recordRun(
   script: string,
   startedAt: Date,
   uat: UatExecBinding | undefined,
+  verification?: { runContract: string; sourceRevision: string | null; attemptRef: string },
 ): string | null {
   try {
     const opened = openExistingWorkflowDatabase(baseDir);
@@ -255,11 +419,45 @@ function recordRun(
       if (opened.reason === "missing-gsd-dir" || opened.reason === "missing-database") return null;
       return opened.error?.message ?? `workflow database ${opened.reason}`;
     }
-    storeRun(baseDir, result, script, startedAt, uat);
+    storeRun(baseDir, result, script, startedAt, uat, verification);
     return null;
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
   }
+}
+
+/**
+ * The run's output hash. Contract-bearing runs (#2982) hash each stream
+ * separately via the gate's own `execRunOutputHash` — the single source both
+ * sides share, so the formats can never drift — and moving text between the
+ * two persisted files changes the hash. Sandboxed runs keep the legacy
+ * `sha256:<stdout><stderr>` form.
+ */
+function computeOutputHash(
+  result: ExecSandboxResult,
+  framed: boolean,
+): string {
+  const readStream = (path: string): Buffer => {
+    try {
+      return readFileSync(path);
+    } catch {
+      // An unreadable output file must never lose the row: the recorded hash
+      // then matches no file, so the gate refuses to reason over the output.
+      return Buffer.from(`unreadable: ${basename(path)}`);
+    }
+  };
+  if (framed) {
+    return execRunOutputHash(readStream(result.stdout_path), readStream(result.stderr_path));
+  }
+  const hash = createHash("sha256");
+  for (const path of [result.stdout_path, result.stderr_path]) {
+    try {
+      hash.update(readFileSync(path));
+    } catch {
+      hash.update(`unreadable: ${basename(path)}`);
+    }
+  }
+  return `sha256:${hash.digest("hex")}`;
 }
 
 function storeRun(
@@ -268,9 +466,8 @@ function storeRun(
   script: string,
   startedAt: Date,
   uat: UatExecBinding | undefined,
+  verification?: { runContract: string; sourceRevision: string | null; attemptRef: string },
 ): void {
-  const hash = createHash("sha256");
-  for (const path of [result.stdout_path, result.stderr_path]) hash.update(readFileSync(path));
   recordExecRun({
     id: result.id,
     runtime: result.runtime,
@@ -282,15 +479,25 @@ function storeRun(
     aborted: result.aborted === true,
     started_at: startedAt.toISOString(),
     duration_ms: result.duration_ms,
-    output_hash: `sha256:${hash.digest("hex")}`,
-    // Only a UAT run stores the source revision: reading it hashes every source file.
+    output_hash: computeOutputHash(result, verification != null),
+    // Only a UAT run or a verification-form run (#2982) stores the source
+    // revision: reading it hashes every source file.
     ...(uat
       ? {
           kind: "uat_exec",
           ...uat,
           sourceRevision: readSourceRevisionForRecord(baseDir, loadEffectiveGSDPreferences(baseDir)?.preferences),
         }
-      : { kind: "exec" }),
+      : {
+          kind: "exec",
+          ...(verification
+            ? {
+                runContract: verification.runContract,
+                sourceRevision: verification.sourceRevision,
+                attemptRef: verification.attemptRef,
+              }
+            : {}),
+        }),
   });
 }
 
@@ -322,6 +529,26 @@ export async function executeGsdExec(
   );
   const run = deps.run ?? runExecSandbox;
 
+  // With the opt-in reuse preference and the in-process capability (#2982),
+  // a bash script that is a runnable command of the calling Task's Verify
+  // field runs under the verification gate's own invocation instead of the
+  // sandbox shell + allowlist. Every observed run of such a command records
+  // its invocation contract, so a newer failed run is never skipped in favor
+  // of an older passing one; the source revision is kept only when equal and
+  // the run succeeded.
+  const matchedVerification = !uat
+    && deps.verificationRunContract === true
+    && deps.preferences?.verification_reuse_exec_evidence === true
+    && runtime === "bash"
+    ? resolveVerificationExecInvocation(deps, script)
+    : null;
+  const verificationPrefs = matchedVerification
+    ? loadEffectiveGSDPreferences(deps.baseDir)?.preferences
+    : undefined;
+  const sourceRevisionBefore = matchedVerification
+    ? readSourceRevisionForRecord(deps.baseDir, verificationPrefs)
+    : null;
+
   const startedAt = (deps.now ?? (() => new Date()))();
   let result: ExecSandboxResult;
   try {
@@ -332,6 +559,15 @@ export async function executeGsdExec(
         ...(typeof params.purpose === "string" ? { purpose: params.purpose } : {}),
         ...(params.metadata && typeof params.metadata === "object" ? { metadata: params.metadata } : {}),
         ...(typeof params.timeout_ms === "number" ? { timeout_ms: params.timeout_ms } : {}),
+        ...(matchedVerification
+          ? {
+              invocation: {
+                program: matchedVerification.invocation.program,
+                args: matchedVerification.invocation.args,
+                env: matchedVerification.invocation.env,
+              },
+            }
+          : {}),
       },
       opts,
     );
@@ -344,7 +580,26 @@ export async function executeGsdExec(
     };
   }
   const formatted = formatResult(result, typeof params.purpose === "string" ? params.purpose : undefined);
-  const notRecorded = recordRun(deps.baseDir, result, script, startedAt, uat);
+  let verification: { runContract: string; sourceRevision: string | null; attemptRef: string } | undefined;
+  if (matchedVerification) {
+    // Every matched run records its contract — success, failure, timeout or
+    // kill — so the gate's newest-run rule always sees the executor's latest
+    // observation of this command. The revision is kept only for a clean
+    // success whose persisted output is byte-faithful to what the child
+    // wrote (no redaction or bounding) and whose source did not move.
+    const succeeded = result.exit_code === 0 && result.signal === null && !result.timed_out;
+    let sourceRevision: string | null = null;
+    if (succeeded && result.output_transformed !== true && sourceRevisionBefore !== null) {
+      const sourceRevisionAfter = readSourceRevisionForRecord(deps.baseDir, verificationPrefs);
+      if (sourceRevisionAfter === sourceRevisionBefore) sourceRevision = sourceRevisionBefore;
+    }
+    verification = {
+      runContract: execRunContractStorage(matchedVerification.invocation),
+      sourceRevision,
+      attemptRef: matchedVerification.attemptRef,
+    };
+  }
+  const notRecorded = recordRun(deps.baseDir, result, script, startedAt, uat, verification);
   if (notRecorded === null) return formatted;
   return {
     ...formatted,
@@ -361,55 +616,20 @@ export async function executeUatExec(
   params: UatExecToolParams,
   deps: ExecToolDeps,
 ): Promise<ToolExecutionResult> {
-  const milestoneId = normalizeRequiredString(params.milestoneId, "milestoneId");
-  if (isToolExecutionResult(milestoneId)) return milestoneId;
-  const sliceId = normalizeRequiredString(params.sliceId, "sliceId");
-  if (isToolExecutionResult(sliceId)) return sliceId;
-  const checkId = normalizeRequiredString(params.checkId, "checkId");
-  if (isToolExecutionResult(checkId)) return checkId;
-  const intent = normalizeUatIntent(params.intent);
-  if (isToolExecutionResult(intent)) return intent;
-  const script = normalizeScript(params);
-  if (isToolExecutionResult(script)) return script;
-  const rejected = rejectUatScript(script);
-  if (rejected) {
-    return {
-      content: [{ type: "text", text: `Error: gsd_uat_exec blocked command — ${rejected}` }],
-      details: { operation: "gsd_uat_exec", error: "uat_exec_policy_block", reason: rejected },
-      isError: true,
-    };
-  }
+  const normalized = normalizeUatExecParams(params);
+  if (normalized.error) return normalized.error;
+  const { uat, intent } = normalized;
 
-  const result = await executeGsdExec(
-    {
-      ...params,
-      script,
-      purpose: typeof params.purpose === "string" && params.purpose.trim().length > 0
-        ? params.purpose
-        : `UAT ${milestoneId}/${sliceId}/${checkId} (${intent})`,
-      metadata: {
-        kind: "uat_exec",
-        milestoneId,
-        sliceId,
-        checkId,
-        intent,
-        ...(typeof params.expected === "string" && params.expected.trim().length > 0
-          ? { expected: params.expected.trim() }
-          : {}),
-      },
-    },
-    deps,
-    { milestoneId, sliceId, checkId },
-  );
+  const result = await executeGsdExec(normalized.params, deps, uat);
   const details = result.details ?? {};
   return {
     ...result,
     details: {
       ...details,
       operation: "gsd_uat_exec",
-      milestoneId,
-      sliceId,
-      checkId,
+      milestoneId: uat.milestoneId,
+      sliceId: uat.sliceId,
+      checkId: uat.checkId,
       intent,
     },
   };

@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { shouldEnableMouseReporting } from "../src/terminal.ts";
 import { type Component, type MouseEvent, TUI } from "../src/tui.ts";
-import { VirtualTerminal } from "./virtual-terminal.ts";
+import { VirtualTerminal } from "../src/tests/virtual-terminal.ts";
 
 /** Renders a fixed list of lines; mutated by tests to simulate transcript growth. */
 class ListComponent implements Component {

@@ -1223,6 +1223,21 @@ export function resolvePreDispatchHooks(basePath?: string): PreDispatchHookConfi
 // ─── Isolation & Parallel ─────────────────────────────────────────────────────
 
 /**
+ * Resolve the discussion question mode from preferences (#2979).
+ * Returns "dialog" (default) or "chat".
+ *
+ * Default is "dialog" so discussion behavior is unchanged unless the user
+ * explicitly opts into plain-chat interviews. "chat" only changes what the
+ * discuss prompts ask for and how long a discussion stays open — it never
+ * touches the tool surface, so the workflow-MCP readiness check keeps passing.
+ */
+export function getDiscussionQuestionMode(basePath?: string): "dialog" | "chat" {
+  return loadEffectiveGSDPreferences(basePath)?.preferences?.discussion?.question_mode === "chat"
+    ? "chat"
+    : "dialog";
+}
+
+/**
  * Resolve the effective git isolation mode from preferences.
  * Returns "none" (default), "worktree", or "branch".
  *
