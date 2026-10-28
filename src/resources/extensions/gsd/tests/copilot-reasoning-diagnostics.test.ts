@@ -130,7 +130,7 @@ test("offline reasoning diagnostics preserve working paths and correct the chara
     assert.deepEqual(record("gpt-5.6-sol", { supported_reasoning_efforts: [] }).execution.reasoningLevels, []);
   });
   await t.test("Opus adaptive aliases survive synthesis, including implicit minimal-to-low", async () => {
-    const staticModel = getModel("github-copilot", "claude-opus-4.7");
+    const staticModel = getModel("github-copilot", "claude-opus-4.8");
     const overlay = synthesizeCopilotOverlayEntry(record(staticModel.id, { supported_endpoints: ["/v1/messages"] }));
     assertModelApi(overlay, "anthropic-messages");
     for (const effort of ["minimal", "low", "xhigh"] as const) {
