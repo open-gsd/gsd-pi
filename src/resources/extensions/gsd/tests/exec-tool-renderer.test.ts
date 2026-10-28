@@ -464,3 +464,134 @@ test("executeUatExec records the synthesized purpose in details", async () => {
 	assert.equal(result.details?.purpose, "UAT M001/S01/UAT-PRE (uat-artifact-check)");
 	assert.equal(result.details?.digest, "check passed");
 });
+
+// ─── Failed-execution stderr diagnostics (issue #2927) ───────────────────────
+test("gsd_exec renderResult builds the structured failure card with both previews and the warning", () => {
+	const tool = getTool("gsd_exec");
+	const longDigest = Array.from({ length: 30 }, (_, i) => `out ${i}`).join("\n");
+	const contentText =
+		`gsd_exec[exec-1] runtime=bash exit=1 duration=9ms\n--- digest ---\n${longDigest}\n` +
+		"--- stderr (tail) ---\nError: real cause detected\n" +
+		"--- warning ---\nThe command ran, but the host did not record this run: db locked.";
+	const result = {
+		content: [{ type: "text", text: contentText }],
+		details: {
+			operation: "gsd_exec",
+			id: "exec-1",
+			exit_code: 1,
+			timed_out: false,
+			duration_ms: 9,
+			stdout_bytes: 199,
+			stderr_bytes: 27,
+			stdout_path: ".gsd/exec/exec-1.stdout",
+			stderr_path: ".gsd/exec/exec-1.stderr",
+			digest: longDigest,
+			stderr_excerpt: "Error: real cause detected",
+			run_not_recorded: "db locked",
+		},
+		isError: true,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	// A long stdout digest must not push the stderr diagnostics or the
+	// recording warning out of the fixed error budget.
+	assert.ok(text.includes("Error: real cause detected"), `stderr diagnostics hidden by long digest: ${text}`);
+	assert.ok(text.includes("failure diagnostics"), `labeled stderr section missing: ${text}`);
+	assert.ok(text.includes("out 0"), `stdout preview missing: ${text}`);
+	assert.ok(text.includes("not recorded"), `structured warning hidden: ${text}`);
+	assert.ok(text.includes("exit 1"), `status missing: ${text}`);
+	assert.ok(text.includes(".gsd/exec/exec-1.stderr"), `persisted path missing: ${text}`);
+	const rows = text.split("\n").length;
+	assert.ok(rows < 40, `error card not bounded: ${rows} rows`);
+});
+
+test("gsd_exec renderResult falls back to bounded content for failures without preview fields", () => {
+	const tool = getTool("gsd_exec");
+	const result = {
+		content: [{ type: "text", text: "Error: gsd_exec failed — spawn boom" }],
+		details: { operation: "gsd_exec", error: "spawn_boom" },
+		isError: true,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("spawn boom"), `content fallback lost: ${text}`);
+	assert.ok(!text.includes("failure diagnostics"), `unexpected structured card: ${text}`);
+});
+
+test("gsd_exec renderResult keeps the final stderr lines visible for multiline tails", () => {
+	const tool = getTool("gsd_exec");
+	const excerpt = Array.from({ length: 12 }, (_, i) => `context ${i}`).join("\n") + "\nError: final cause";
+	const result = {
+		content: [{ type: "text", text: `gsd_exec[exec-1] runtime=bash exit=1 duration=9ms\n--- digest ---\nout\n--- stderr (tail) ---\n${excerpt}` }],
+		details: {
+			operation: "gsd_exec",
+			id: "exec-1",
+			exit_code: 1,
+			digest: "out",
+			stderr_excerpt: excerpt,
+		},
+		isError: true,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("Error: final cause"), `final diagnostic elided away: ${text}`);
+	assert.ok(text.includes("more lines hidden"), `elision marker missing: ${text}`);
+	const rows = text.split("\n").length;
+	assert.ok(rows < 40, `error card not bounded: ${rows} rows`);
+});
+
+test("gsd_exec renderResult skips the stderr panel for whitespace-only excerpts", () => {
+	const tool = getTool("gsd_exec");
+	const result = {
+		content: [{ type: "text", text: "gsd_exec[exec-1] runtime=bash exit=1 duration=9ms\n--- digest ---\nout" }],
+		details: {
+			operation: "gsd_exec",
+			id: "exec-1",
+			exit_code: 1,
+			digest: "out",
+			stderr_excerpt: "  \n\t\n",
+		},
+		isError: true,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(!text.includes("failure diagnostics"), `blank stderr panel rendered: ${text}`);
+	assert.ok(text.includes("out"), `stdout preview missing: ${text}`);
+});
+
+test("gsd_exec renderResult keeps the final lines of a stderr-only marker digest visible", () => {
+	const tool = getTool("gsd_exec");
+	const stderrTail = Array.from({ length: 12 }, (_, i) => `context ${i}`).join("\n") + "\nError: final cause";
+	const digest = `[no stdout — tail of stderr]\n${stderrTail}`;
+	const result = {
+		content: [{ type: "text", text: `gsd_exec[exec-1] runtime=bash exit=1 duration=9ms\n--- digest ---\n${digest}` }],
+		details: {
+			operation: "gsd_exec",
+			id: "exec-1",
+			exit_code: 1,
+			digest,
+		},
+		isError: true,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(text.includes("Error: final cause"), `marker-digest final diagnostic elided: ${text}`);
+	assert.ok(text.includes("no stdout — tail of stderr"), `marker label missing: ${text}`);
+	const rows = text.split("\n").length;
+	assert.ok(rows < 40, `error card not bounded: ${rows} rows`);
+});
+
+test("gsd_exec renderResult never surfaces a stderr section on success rows", () => {
+	const tool = getTool("gsd_exec");
+	// Successes have no stderr_excerpt by construction; even if stale details
+	// carry one, the success card renders the stdout digest preview only.
+	const result = {
+		content: [{ type: "text", text: "gsd_exec[exec-1] runtime=bash exit=0 duration=5ms\n--- digest ---\nok" }],
+		details: {
+			operation: "gsd_exec",
+			id: "exec-1",
+			exit_code: 0,
+			digest: "ok",
+			stderr_excerpt: "stale",
+		},
+		isError: false,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.ok(!text.includes("failure diagnostics"), `success row gained a stderr section: ${text}`);
+	assert.ok(text.includes("ok"), `digest preview missing: ${text}`);
+});

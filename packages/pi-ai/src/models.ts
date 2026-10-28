@@ -59,6 +59,10 @@ export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage
 
 const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+function isCopilotCompletionsModel(model: Model<Api>): model is Model<"openai-completions"> {
+	return model.provider === "github-copilot" && model.api === "openai-completions";
+}
+
 function getCostRates(cost: Model<Api>["cost"], inputTokens: number) {
 	const tier = cost.tiers
 		?.filter((candidate) => inputTokens > candidate.inputTokensAbove)
@@ -74,6 +78,12 @@ function getCostRates(cost: Model<Api>["cost"], inputTokens: number) {
 
 export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
 	if (!model.reasoning) return ["off"];
+	if (
+		isCopilotCompletionsModel(model)
+		&& model.compat?.supportsReasoningEffort === false
+	) {
+		return model.thinkingLevelMap?.off === null ? [] : ["off"];
+	}
 
 	return EXTENDED_THINKING_LEVELS.filter((level) => {
 		const mapped = model.thinkingLevelMap?.[level];

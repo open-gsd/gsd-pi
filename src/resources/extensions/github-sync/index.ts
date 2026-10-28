@@ -58,14 +58,26 @@ async function showStatus(ctx: import("@gsd/pi-coding-agent").ExtensionCommandCo
   const openSlices = Object.values(mapping.slices).filter(s => s.state === "open").length;
   const openTasks = Object.values(mapping.tasks).filter(t => t.state === "open").length;
 
+  // Persisted sync-step failures (e.g. failed native sub-issue links) that a
+  // later sync will retry — surfaced so they are never silently dropped.
+  const failed = [
+    ...Object.entries(mapping.milestones)
+      .filter(([, r]) => r.lastSyncError)
+      .map(([id, r]) => `  Milestone ${id} → #${r.issueNumber}: ${r.lastSyncError}`),
+    ...Object.entries(mapping.tasks)
+      .filter(([, r]) => r.lastSyncError)
+      .map(([key, r]) => `  Task ${key} → #${r.issueNumber}: ${r.lastSyncError}`),
+  ];
+
   ctx.ui.notify(
     [
       `GitHub sync: repo=${mapping.repo}`,
       `  Milestones: ${milestoneCount} (${openMilestones} open)`,
       `  Slices: ${sliceCount} (${openSlices} open)`,
       `  Tasks: ${taskCount} (${openTasks} open)`,
+      ...(failed.length > 0 ? [`  Failed links (${failed.length}) — retried on next sync:`, ...failed] : []),
     ].join("\n"),
-    "info",
+    failed.length > 0 ? "warning" : "info",
   );
 }
 

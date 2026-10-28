@@ -717,6 +717,34 @@ export function validatePreferences(preferences: GSDPreferences): {
     }
   }
 
+  // ─── Discussion (#2979) ─────────────────────────────────────────────
+  if (preferences.discussion !== undefined) {
+    if (preferences.discussion && typeof preferences.discussion === "object") {
+      const discussion = preferences.discussion as Record<string, unknown>;
+      const validatedDiscussion: NonNullable<GSDPreferences["discussion"]> = {};
+      if (discussion.question_mode !== undefined) {
+        if (discussion.question_mode === "dialog" || discussion.question_mode === "chat") {
+          validatedDiscussion.question_mode = discussion.question_mode;
+        } else {
+          errors.push(`discussion.question_mode must be "dialog" or "chat", got: ${String(discussion.question_mode)}`);
+        }
+      }
+
+      const knownDiscussionKeys = new Set(["question_mode"]);
+      for (const key of Object.keys(discussion)) {
+        if (!knownDiscussionKeys.has(key)) {
+          warnings.push(`unknown discussion key "${key}" — ignored`);
+        }
+      }
+
+      if (Object.keys(validatedDiscussion).length > 0) {
+        validated.discussion = validatedDiscussion;
+      }
+    } else {
+      errors.push("discussion must be an object");
+    }
+  }
+
   // ─── Post-Unit Hooks ─────────────────────────────────────────────────
   if (preferences.post_unit_hooks && Array.isArray(preferences.post_unit_hooks)) {
     const validHooks: PostUnitHookConfig[] = [];
@@ -1163,8 +1191,8 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
       if (cmode.exec_timeout_ms !== undefined) {
         const t = cmode.exec_timeout_ms;
-        if (typeof t === "number" && t >= 1000 && t <= 600_000) validCmode.exec_timeout_ms = Math.floor(t);
-        else errors.push("context_mode.exec_timeout_ms must be a number between 1000 and 600000");
+        if (typeof t === "number" && t >= 1000 && t <= 3_600_000) validCmode.exec_timeout_ms = Math.floor(t);
+        else errors.push("context_mode.exec_timeout_ms must be a number between 1000 and 3600000");
       }
       if (cmode.exec_stdout_cap_bytes !== undefined) {
         const b = cmode.exec_stdout_cap_bytes;
@@ -1454,6 +1482,14 @@ export function validatePreferences(preferences: GSDPreferences): {
       validated.verification_timeout_ms = Math.floor(raw);
     } else {
       errors.push("verification_timeout_ms must be a positive number");
+    }
+  }
+
+  if (preferences.verification_reuse_exec_evidence !== undefined) {
+    if (typeof preferences.verification_reuse_exec_evidence === "boolean") {
+      validated.verification_reuse_exec_evidence = preferences.verification_reuse_exec_evidence;
+    } else {
+      errors.push("verification_reuse_exec_evidence must be a boolean");
     }
   }
 

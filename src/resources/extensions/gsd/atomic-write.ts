@@ -1,4 +1,4 @@
-import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, renameSync, unlinkSync, mkdirSync, promises as fs } from "node:fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, renameSync, unlinkSync, mkdirSync, promises as fs } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { acquireProjectionRootIdentityLock, isProjectionRootIdentityLockAvailable, type ProjectionRootIdentityLock } from "@gsd/native/file-identity";
@@ -336,6 +336,33 @@ export function removeProjectionFileSync(filePath: string): void {
     }
     commitManagedProjectionMutation(mutation);
   });
+}
+
+/**
+ * Move a divergent managed artifact file into `quarantineDir/<stamp>/<name>`
+ * before its database row is pruned, so the file's evidence survives the
+ * repair (#2994). Returns the quarantine destination, or null when the file
+ * is already gone. The move (not a copy+delete) keeps the operation atomic;
+ * the destination keeps the original bytes under a reviewed-repair trail.
+ */
+export function moveProjectionFileToQuarantineSync(filePath: string, quarantineDir: string): string | null {
+  if (!existsSync(filePath)) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  let candidate = join(quarantineDir, stamp, basename(filePath));
+  let suffix = 2;
+  while (existsSync(candidate)) {
+    candidate = `${candidate}.${suffix}`;
+    suffix += 1;
+  }
+  mkdirSync(dirname(candidate), { recursive: true });
+  // Evidence lands before the original is removed: a failed removal leaves
+  // the bytes in quarantine while the error aborts the caller's row prune.
+  copyFileSync(filePath, candidate);
+  // The original is removed through the journal-owned removal so an
+  // interrupted earlier mutation on this path is recovered first — a bare
+  // rename would strand its journal entry and wedge later managed writes.
+  removeProjectionFileSync(filePath);
+  return candidate;
 }
 
 export function removeProjectionTreeSync(directoryPath: string): void {

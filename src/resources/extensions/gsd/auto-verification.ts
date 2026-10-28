@@ -206,9 +206,17 @@ function recordHostTechnicalVerdict(input: {
   if (!isTaskAttemptAwaitingVerification(input.attempt)) {
     throw new Error("Host verification requires the latest succeeded canonical Attempt at the verify stage");
   }
-  const startedAtMs = Number.isFinite(input.result.timestamp) ? input.result.timestamp : Date.now();
+  // A reused set (#2982) reports the runs' own window, not the reuse decision
+  // time: the evidence names when the commands actually ran.
+  const reusedChecks = input.result.checks.filter((check) => check.reusedRun);
+  const allReused = input.result.checks.length > 0 && reusedChecks.length === input.result.checks.length;
+  const startedAtMs = allReused
+    ? Math.min(...reusedChecks.map((check) => Date.parse(check.reusedRun!.startedAt)))
+    : Number.isFinite(input.result.timestamp) ? input.result.timestamp : Date.now();
   const durationMs = input.result.checks.reduce((total, check) => total + Math.max(0, check.durationMs), 0);
-  const endedAtMs = startedAtMs + durationMs;
+  const endedAtMs = allReused
+    ? Math.max(...reusedChecks.map((check) => Date.parse(check.reusedRun!.startedAt) + Math.max(0, check.reusedRun!.durationMs)))
+    : startedAtMs + durationMs;
   const commands = input.result.checks.map((check) => check.command).filter(Boolean);
   const targetSourceRevisions = Object.fromEntries(
     (input.sourceBefore?.targets ?? []).map((target) => [target.targetId, target.revision]),
@@ -862,6 +870,11 @@ export async function runPostUnitVerification(
     // Evidence staged by gsd_task_complete for this Task (#1591), in the form
     // the host recorded: the agent's claim alone proves nothing.
     let taskEvidence: TaskVerificationEvidence[] = [];
+    // The Attempt's recorded exec runs: agent-evidence qualification below and
+    // opt-in gate reuse below (#2982) read the same host facts.
+    const attemptExecRuns = mid && sid && tid && isDbAvailable()
+      ? listExecRunsOfAttempt(latestAttempt.attemptId)
+      : [];
     if (mid && sid && tid) {
       // The Task verify command and its staged evidence exist only in the DB.
       // A gate that runs without them would pass without the Task checks.
@@ -871,7 +884,7 @@ export async function runPostUnitVerification(
       taskPlanVerify = taskRow?.verify;
       taskEvidence = hostRecordedTaskEvidence(
         getTaskVerificationEvidence(mid, sid, tid, latestAttempt.attemptId),
-        listExecRunsOfAttempt(latestAttempt.attemptId).map((run) => ({
+        attemptExecRuns.map((run) => ({
           id: run.id,
           command: run.command,
           succeeded: execRunSucceeded(run),
@@ -958,12 +971,24 @@ export async function runPostUnitVerification(
         timestamp: Date.now(),
       };
     } else if (verificationTargets.length <= 1) {
+      // Opt-in reuse (#2982): the Attempt's own gsd_exec runs may stand in for
+      // the gate when each provably matches this gate's exact invocation.
+      // Multi-target gates never reuse.
+      const reuseEnabled = prefs?.verification_reuse_exec_evidence === true;
       result = await (vctx.runVerificationGate ?? runVerificationGate)({
         cwd: verificationTargets[0]?.cwd ?? s.basePath,
         preferenceCommands: prefs?.verification_commands ?? verificationTargets[0]?.preferenceCommands,
         taskPlanVerify,
         taskEvidence,
         commandTimeoutMs: resolveVerificationTimeoutMs(prefs),
+        ...(reuseEnabled && sourceBeforeResult.ok
+          ? {
+              reuseExecRuns: {
+                runs: attemptExecRuns,
+                sourceRevision: sourceBeforeResult.snapshot.aggregateRevision,
+              },
+            }
+          : {}),
       });
     } else {
       result = await runVerificationGateForTargets({

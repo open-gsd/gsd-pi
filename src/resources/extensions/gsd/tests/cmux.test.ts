@@ -316,7 +316,8 @@ describe("CmuxClient stdio isolation", () => {
       const calls = fs.readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
       const commandPrefixes = calls.map((call) => call.slice(0, 2));
       assert.ok(
-        commandPrefixes.some((prefix) => JSON.stringify(prefix) === JSON.stringify(["set-status", "gsd"])),
+        // Per-session status key (issue #2926): the surface id scopes the row.
+        commandPrefixes.some((prefix) => JSON.stringify(prefix) === JSON.stringify(["set-status", "gsd:surface-0"])),
         "set-status command should be invoked",
       );
       assert.ok(

@@ -61,9 +61,9 @@ export function registerExecTools(pi: ExtensionAPI): void {
       expected: Type.Optional(Type.String({ description: "Expected outcome for this UAT check." })),
       timeout_ms: Type.Optional(
         Type.Number({
-          description: "Per-invocation timeout (ms). Capped at 600000. Default from preferences.",
+          description: "Per-invocation timeout (ms). Capped at 3600000 (1 hour). Default from preferences.",
           minimum: 1_000,
-          maximum: 600_000,
+          maximum: 3_600_000,
         }),
       ),
     }),
@@ -122,9 +122,9 @@ export function registerExecTools(pi: ExtensionAPI): void {
       ),
       timeout_ms: Type.Optional(
         Type.Number({
-          description: "Per-invocation timeout (ms). Capped at 600000. Default from preferences.",
+          description: "Per-invocation timeout (ms). Capped at 3600000 (1 hour). Default from preferences.",
           minimum: 1_000,
-          maximum: 600_000,
+          maximum: 3_600_000,
         }),
       ),
     }),
@@ -141,6 +141,11 @@ export function registerExecTools(pi: ExtensionAPI): void {
         baseDir,
         preferences: await loadContextModePreferences(baseDir),
         signal: _signal,
+        // In-process only (#2982): this registration may run a Task's Verify
+        // command under the verification gate's own invocation when the
+        // opt-in preference is set. The workflow MCP server's registration
+        // never passes this, so its calls keep the sandboxed allowlist.
+        verificationRunContract: true,
       });
     },
   });

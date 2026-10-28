@@ -4,13 +4,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CMUX_CHANNELS, type CmuxSidebarEvent, type CmuxLogEvent, type CmuxPreferencesInput, type CmuxStateInput } from "../shared/cmux-events.js";
 import type { EventBus } from "@gsd/pi-coding-agent";
+import {
+  aggregateProgress,
+  cmuxProgressRegistryDir,
+  hasSessionEntry,
+  listLiveEntries,
+  removeSessionEntry,
+  writeSessionEntry,
+  type CmuxProgressMember,
+} from "./progress-registry.js";
 
 type CmuxPreferences = CmuxPreferencesInput;
 type CmuxState = CmuxStateInput;
 type Phase = string;
 const DEFAULT_SOCKET_PATH = "/tmp/cmux.sock";
 const STATUS_KEY = "gsd";
-const lastSidebarSnapshots = new Map<string, string>();
+// No write-dedup caches for status or progress (issue #2926): every sync and
+// cleanup unconditionally rewrites this session's status row and the
+// deterministic progress fold. Any private cache can suppress a repair after
+// another member interleaved a write and vanished (crash, delayed cleanup) —
+// sidebar syncs are low-frequency state transitions, so the redundant local
+// CLI calls are cheap next to correctness.
+let progressRegistryDirOverride: string | null = null;
 let cmuxPromptedThisSession = false;
 let cachedCliAvailability: boolean | null = null;
 
@@ -109,6 +124,11 @@ export function resetCmuxPromptState(): void {
   cmuxPromptedThisSession = false;
 }
 
+/** Test seam: redirect the progress registry away from the OS temp dir. */
+export function setCmuxProgressRegistryDirForTests(dir: string | null): void {
+  progressRegistryDirOverride = dir;
+}
+
 export function isCmuxCliAvailable(): boolean {
   if (cachedCliAvailability !== null) return cachedCliAvailability;
   try {
@@ -165,8 +185,14 @@ function phaseVisuals(phase: Phase): { icon: string; color: string } {
     case "paused":
       return { icon: "pause", color: "#f59e0b" };
     case "complete":
-    case "completing-milestone":
+      // Authoritative completion (the state machine reaches `complete` only
+      // after the closeout gate passes) keeps the green check.
       return { icon: "check", color: "#22c55e" };
+    case "completing-milestone":
+      // Finalization is still running (issue #2926): it must not share the
+      // authoritative-completed check visuals — distinct icon and color, and
+      // the phase string in the label already reads differently.
+      return { icon: "settings", color: "#eab308" };
     case "planning":
     case "researching":
     case "replanning-slice":
@@ -179,15 +205,29 @@ function phaseVisuals(phase: Phase): { icon: string; color: string } {
   }
 }
 
-function sidebarSnapshotKey(config: ResolvedCmuxConfig): string {
-  return config.workspaceId ?? "default";
+/**
+ * Per-session status key (issue #2926): the cmux surface id is the existing
+ * per-session identity, so each session owns `gsd:<surfaceId>` and cannot
+ * clobber another session's row. Sessions without a surface id keep the
+ * historical shared `gsd` key (the sidebar requires a surface id anyway, so
+ * this only matters for non-cmux fallbacks).
+ */
+function statusKeyFor(config: ResolvedCmuxConfig): string {
+  return config.surfaceId ? `${STATUS_KEY}:${config.surfaceId}` : STATUS_KEY;
+}
+
+function progressRegistryDirFor(config: ResolvedCmuxConfig): string {
+  return cmuxProgressRegistryDir(config.workspaceId, progressRegistryDirOverride ?? undefined);
 }
 
 export class CmuxClient {
   private readonly config: ResolvedCmuxConfig;
+  /** This session's own status key — see statusKeyFor (issue #2926). */
+  private readonly statusKey: string;
 
   constructor(config: ResolvedCmuxConfig) {
     this.config = config;
+    this.statusKey = statusKeyFor(config);
   }
 
   static fromPreferences(preferences: CmuxPreferences | undefined): CmuxClient {
@@ -261,7 +301,7 @@ export class CmuxClient {
     const visuals = phaseVisuals(phase);
     this.runSync(this.appendWorkspace([
       "set-status",
-      STATUS_KEY,
+      this.statusKey,
       label,
       "--icon",
       visuals.icon,
@@ -272,7 +312,13 @@ export class CmuxClient {
 
   clearStatus(): void {
     if (!this.config.sidebar) return;
-    this.runSync(this.appendWorkspace(["clear-status", STATUS_KEY]));
+    this.runSync(this.appendWorkspace(["clear-status", this.statusKey]));
+  }
+
+  /** Clear an arbitrary session's status row — used to reap crashed sessions (issue #2926). */
+  clearStatusFor(key: string): void {
+    if (!this.config.sidebar) return;
+    this.runSync(this.appendWorkspace(["clear-status", key]));
   }
 
   setProgress(progress: CmuxSidebarProgress | null): void {
@@ -398,30 +444,104 @@ export class CmuxClient {
   }
 }
 
+/**
+ * Write the deterministic fold over the live members to the shared slot.
+ * Every session writes the same fold over the same registry state, so
+ * concurrent refreshes converge and there is no owner whose idleness could
+ * freeze a stale bar (issue #2926, ADR-051). The write is unconditional:
+ * another member may have interleaved a different value (then crashed or
+ * cleaned up), and this session cannot read the slot back to detect that.
+ */
+function writeProgressFold(client: CmuxClient, config: ResolvedCmuxConfig, entries: Record<string, CmuxProgressMember>): void {
+  const sums = aggregateProgress(entries);
+  const progress = sums ? buildCmuxProgress({ phase: "", progress: sums }) : null;
+  client.setProgress(progress);
+}
+
+/**
+ * Shared progress slot coordination (issue #2926, ADR-051): cmux exposes one
+ * workspace-scoped slot, so members coordinate over a per-session-entry
+ * registry and each session only mutates its own entry. Every sync rewrites
+ * the deterministic fold, so a member's update is visible without waiting on
+ * any peer, a crashed member is reclaimed by pid liveness (not a timeout), and
+ * no private cache can suppress a repair. A reaped (crashed) member's orphaned
+ * status row is cleared by the survivor that prunes it — the dead pid proves
+ * that identity is gone.
+ */
+function syncOwnedProgress(client: CmuxClient, config: ResolvedCmuxConfig, state: CmuxState): void {
+  if (!config.cliAvailable) return;
+  const registryDir = progressRegistryDirFor(config);
+  const selfKey = statusKeyFor(config);
+  const self: CmuxProgressMember = {
+    pid: process.pid,
+    progress: state.progress ?? null,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const { live: entries, reapedKeys } = listLiveEntries(registryDir);
+  for (const reapedKey of reapedKeys) {
+    if (reapedKey !== selfKey) client.clearStatusFor(reapedKey);
+  }
+  writeSessionEntry(registryDir, selfKey, self);
+  entries[selfKey] = self;
+
+  writeProgressFold(client, config, entries);
+}
+
 export function syncCmuxSidebar(preferences: CmuxPreferences | undefined, state: CmuxState): void {
   const client = CmuxClient.fromPreferences(preferences);
   const config = client.getConfig();
   if (!config.sidebar) return;
 
-  const label = buildCmuxStatusLabel(state);
-  const progress = buildCmuxProgress(state);
-  const snapshot = JSON.stringify({ label, progress, phase: state.phase });
-  const key = sidebarSnapshotKey(config);
-  if (lastSidebarSnapshots.get(key) === snapshot) return;
+  // Status: this session's own key, rewritten on every sync — a sync never
+  // touches another session's row and cannot leave a cleared row missing
+  // (issue #2926).
+  client.setStatus(buildCmuxStatusLabel(state), state.phase);
 
-  client.setStatus(label, state.phase);
-  client.setProgress(progress);
-  lastSidebarSnapshots.set(key, snapshot);
+  syncOwnedProgress(client, config, state);
+}
+
+/**
+ * Release this session's membership (issue #2926, ADR-051): only its own
+ * status key and registry entry. The removal is fenced against the recorded
+ * pid, so a same-key replacement that registered before this process cleaned
+ * up is never removed. After removing itself, the departing session refreshes
+ * the slot with the fold over the remaining members (or clears it when none
+ * remain), so a departure never leaves the bar stale or erases another
+ * session's live state.
+ */
+function clearOwnedProgress(client: CmuxClient, config: ResolvedCmuxConfig): void {
+  if (!config.cliAvailable) return;
+  const registryDir = progressRegistryDirFor(config);
+  const selfKey = statusKeyFor(config);
+  if (!hasSessionEntry(registryDir, selfKey)) {
+    // Never a member (or already removed): the slot is not ours to touch.
+    return;
+  }
+  if (!removeSessionEntry(registryDir, selfKey, process.pid)) {
+    // The entry belongs to a same-key replacement — not ours anymore.
+    return;
+  }
+  // If this departure's listing prunes dead/corrupt entries, reap their
+  // orphaned status rows too — when the last member leaves, no later sync
+  // exists to discover them.
+  const { live: survivors, reapedKeys } = listLiveEntries(registryDir);
+  for (const reapedKey of reapedKeys) {
+    if (reapedKey !== selfKey) client.clearStatusFor(reapedKey);
+  }
+  writeProgressFold(client, config, survivors);
 }
 
 export function clearCmuxSidebar(preferences: CmuxPreferences | undefined): void {
   const config = resolveCmuxConfig(preferences);
   if (!config.available || !config.cliAvailable) return;
   const client = new CmuxClient({ ...config, enabled: true, sidebar: true });
-  const key = sidebarSnapshotKey(config);
+
+  // Only this session's row — one session's cleanup cannot erase another
+  // session's live status (issue #2926).
   client.clearStatus();
-  client.setProgress(null);
-  lastSidebarSnapshots.delete(key);
+
+  clearOwnedProgress(client, config);
 }
 
 export function logCmuxEvent(

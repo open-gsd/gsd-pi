@@ -68,11 +68,16 @@ export function hasImplementationArtifacts(basePath: string, milestoneId?: strin
     if (!branchDiff.ok) return "unknown";
     const changedFiles = branchDiff.files;
 
-    // No branch-diff files can mean the unit retried on main after milestone
-    // commits already landed there. In that topology, inspect GSD-tagged
-    // milestone commits instead of treating the self-diff as proof of no work.
+    // No branch-diff files can mean HEAD's tip is contained in the
+    // integration branch: either the unit retried on the integration branch
+    // itself (self-diff) or the milestone branch was fast-forwarded/merged
+    // into it before closeout (#2976). In both topologies the diff carries no
+    // information about the milestone's work — inspect GSD-tagged milestone
+    // commits instead of treating the self-diff as proof of no work. Branch
+    // containment (`merge-base --is-ancestor`), not branch-name equality, is
+    // the real "work already landed" condition.
     if (changedFiles.length === 0) {
-      if (milestoneId && currentBranch === integrationBranch) {
+      if (milestoneId && isHeadContainedInBranch(basePath, integrationBranch)) {
         const milestoneEvidence = getChangedFilesFromMilestoneEvidence(basePath, milestoneId);
         if (!milestoneEvidence.ok) return "unknown";
         if (milestoneEvidence.matched) return classifyImplementationFiles(milestoneEvidence.files);
@@ -114,6 +119,26 @@ function getCurrentBranch(basePath: string): string | null {
     return branch || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * True when HEAD's tip is already contained in the target branch — the
+ * equal-tip self-diff and the fast-forwarded/merged-early topology (#2976).
+ * `merge-base --is-ancestor` exits 0 for both, which branch-name equality
+ * only approximated: a milestone branch checked out in its worktree stays
+ * named `milestone/<ID>` after the integration branch was fast-forwarded to
+ * its tip.
+ */
+function isHeadContainedInBranch(basePath: string, targetBranch: string): boolean {
+  try {
+    execFileSync(
+      "git", ["merge-base", "--is-ancestor", "HEAD", targetBranch],
+      { cwd: basePath, stdio: "ignore" },
+    );
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -14,6 +14,7 @@ import {
   transaction,
   upsertLivenessBlockSignature,
 } from './gsd-db.js';
+import { readMilestone } from './db/lifecycle-read.js';
 import { getLatestForUnit } from './db/unit-dispatches.js';
 import { parseUnitId } from './unit-id.js';
 
@@ -327,6 +328,57 @@ export function getOpenWedge(scopeId: string): OpenWedgeResult {
        ORDER BY created_at ASC LIMIT 1`,
     ).get({ ':scope': scopeId }) as Record<string, unknown> | undefined;
     return { ok: true, wedge: row ? rowToWedge(row) : null };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export type ParkedMilestoneWedgeSweep
+  = { ok: true; acknowledged: WedgeRecord[] }
+  | { ok: false; error: string };
+
+/**
+ * Acknowledge open wedges whose unit belongs to a parked milestone (#2991).
+ *
+ * Parking is the user's explicit abandonment of the milestone's units: the
+ * dispatcher skips parked milestones (milestone-readiness), so a wedge scoped
+ * to a parked unit can no longer protect anything while it still gates the
+ * whole project at auto-start. Park status is read through the same
+ * `readMilestone().parked` semantics the dispatcher uses. Wedges are
+ * acknowledged, not deleted, so the ADR-047 ledger stays intact — and if the
+ * milestone is later unparked with the unit still stuck, the retained block
+ * signature re-trips and reopens the wedge on unchanged input.
+ *
+ * `milestoneIdFilter` restricts the sweep to one milestone (the park-time
+ * call); omit it to reconcile every open wedge (the auto-start sweep, which
+ * also repairs projects that parked a milestone before this rule existed).
+ */
+export function acknowledgeWedgesForParkedMilestones(
+  scopeId: string,
+  milestoneIdFilter?: string,
+): ParkedMilestoneWedgeSweep {
+  if (!isDbAvailable()) return { ok: false, error: 'workflow database unavailable' };
+  try {
+    const parkedCache = new Map<string, boolean>();
+    const acknowledged: WedgeRecord[] = [];
+    for (const wedge of listOpenWedges(scopeId)) {
+      // Milestone identity is established by the lifecycle reader: unknown
+      // first segments (non-milestone units) read as null and are skipped.
+      // This covers every supported id grammar — M###, suffixed M###-abc123,
+      // and legacy numeric ids.
+      const milestoneId = wedge.unitId.split('/')[0] ?? '';
+      if (milestoneIdFilter !== undefined && milestoneId !== milestoneIdFilter) continue;
+      let parked = parkedCache.get(milestoneId);
+      if (parked === undefined) {
+        parked = readMilestone(milestoneId)?.parked === true;
+        parkedCache.set(milestoneId, parked);
+      }
+      if (!parked) continue;
+      const now = nowIso();
+      acknowledgeLivenessWedgeRecord(wedge.wedgeId, now);
+      acknowledged.push({ ...wedge, acknowledgedAt: now });
+    }
+    return { ok: true, acknowledged };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

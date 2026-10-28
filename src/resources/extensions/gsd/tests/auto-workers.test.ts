@@ -13,6 +13,7 @@ import {
   heartbeatAutoWorker,
   markWorkerCrashed,
   markWorkerStopping,
+  markWorkerStopped,
   markWorkerStoppingByPid,
   getActiveAutoWorkers,
   getAutoWorker,
@@ -180,4 +181,50 @@ test("findStaleWorkerForProject ignores a stopping worker with no active dispatc
     null,
     "a stopping worker with nothing running is a normal shutdown, not an orphan",
   );
+});
+
+test("#3029: markWorkerStopped is the terminal retirement transition", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+
+  const id = registerAutoWorker({ projectRootRealpath: base });
+  markWorkerStopping(id);
+  assert.equal(getAutoWorker(id)!.status, "stopping");
+
+  markWorkerStopped(id);
+  assert.equal(getAutoWorker(id)!.status, "stopped", "graceful shutdown completes in stopped");
+
+  // Terminal: a later stopping/crashed transition cannot resurrect the row.
+  markWorkerStopping(id);
+  markWorkerCrashed(id);
+  assert.equal(getAutoWorker(id)!.status, "stopped", "stopped rows never re-enter the lifecycle");
+});
+
+test("#3029: markWorkerStopped upgrades a crashed row only via active/stopping, never from crashed", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+
+  const id = registerAutoWorker({ projectRootRealpath: base });
+  markWorkerCrashed(id);
+  assert.equal(getAutoWorker(id)!.status, "crashed");
+
+  markWorkerStopped(id);
+  assert.equal(getAutoWorker(id)!.status, "crashed", "crash provenance stays visible — no upgrade to stopped");
+});
+
+test("#3029: a stopped worker leaves the stale-worker scope and no longer counts as live", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+
+  const id = registerAutoWorker({ projectRootRealpath: base });
+  markWorkerStopping(id);
+  // A stopping worker with no active dispatches is already out of the stale
+  // scope; the important half is that stoppage keeps it out.
+  markWorkerStopped(id);
+
+  assert.equal(findStaleWorkerForProject(base)?.worker_id ?? null, null, "stopped worker is not stale-blocking");
+  assert.equal(getActiveAutoWorkers().some((w) => w.worker_id === id), false, "stopped worker is not active");
 });

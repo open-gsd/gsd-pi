@@ -522,7 +522,15 @@ test("a state-directory move whose source cleanup fails still succeeds with the 
     assert.doesNotThrow(() => moveStateDirectory(from, to));
   } finally {
     chmodSync(join(from, "locked"), 0o700);
+    // cpSync preserves the read-only mode in the copy too. Restore it only
+    // after exercising the production cleanup failure so afterEach can unlink it.
+    if (existsSync(join(to, "locked"))) chmodSync(join(to, "locked"), 0o700);
   }
   assert.equal(readFileSync(join(to, "gsd.db"), "utf8"), "db");
   assert.equal(readFileSync(join(to, "locked", "entry"), "utf8"), "x");
+  // cpSync preserves the read-only mode, so the destination copy of `locked`
+  // is 0o500 too (node 24 CI); restore it or the shared afterEach rmSync
+  // cannot empty it and the whole file reports a cleanup failure.
+  const destLocked = join(to, "locked");
+  if (existsSync(destLocked)) chmodSync(destLocked, 0o700);
 });

@@ -86,7 +86,10 @@ export function scanNewContentBlocks(
 			);
 			component.updateArgs(content.arguments);
 		} else if (content.type === "serverToolUse") {
-			registerPendingToolComponent(
+			// Provider-side tools (e.g. native web search) never get
+			// tool_execution_start/end events, so count them from block
+			// registration until their result block arrives (#2925).
+			const { created } = registerPendingToolComponent(
 				host,
 				content.id,
 				content.name,
@@ -101,7 +104,11 @@ export function scanNewContentBlocks(
 						host.ui,
 					),
 			);
+			if (created) {
+				host.activeToolInvocations.add(content.id);
+			}
 		} else if (content.type === "webSearchResult") {
+			host.activeToolInvocations.delete(content.toolUseId);
 			const component = host.pendingTools.get(content.toolUseId);
 			if (component) {
 				if (process.env.PI_OFFLINE === "1") {

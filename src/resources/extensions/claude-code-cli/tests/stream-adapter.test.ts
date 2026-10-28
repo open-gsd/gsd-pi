@@ -2189,6 +2189,116 @@ describe("stream-adapter — Claude Code external tool results", () => {
 		]);
 	});
 
+	test("#3027 extractToolResultsFromSdkUserMessage converts Anthropic base64 image blocks to pi image blocks", () => {
+		// Regression: Claude Code's `Read` on an image file returns the standard
+		// Anthropic shape `{type: "image", source: {type: "base64", media_type,
+		// data}}`. That used to fall through to `JSON.stringify` and was stored
+		// as a text block, re-inlining hundreds of thousands of base64
+		// characters into every later prompt until the request exceeded the
+		// context limit (#3027).
+		const message: SDKUserMessage = {
+			type: "user",
+			session_id: "sess-1",
+			parent_tool_use_id: "tool-read-img-1",
+			message: {
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "tool-read-img-1",
+						content: [
+							{
+								type: "image",
+								source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+							},
+						],
+						is_error: false,
+					},
+				],
+			},
+		};
+
+		const results = extractToolResultsFromSdkUserMessage(message);
+		assert.equal(results.length, 1);
+		assert.deepEqual(results[0].result.content, [
+			{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+		]);
+
+		// The regression signature: no text block may carry the stringified
+		// image block (that is how the base64 payload re-entered the prompt).
+		// `any` here: assert.deepEqual narrows the content array to the expected
+		// literal type, hiding the optional `text` field.
+		const asText = results[0].result.content
+			.map((block: any) => block.type === "text" ? block.text : "")
+			.join("\n");
+		assert.ok(
+			!asText.includes('"source"'),
+			"image payload must not be stored as stringified text",
+		);
+	});
+
+	test("#3027 Anthropic image tool results survive a session JSON round-trip as image blocks", () => {
+		const message: SDKUserMessage = {
+			type: "user",
+			session_id: "sess-1",
+			parent_tool_use_id: "tool-read-img-rt",
+			message: {
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "tool-read-img-rt",
+						content: [
+							{
+								type: "image",
+								source: { type: "base64", media_type: "image/jpeg", data: "/9j/4AAQSkZJRg=" },
+							},
+						],
+						is_error: false,
+					},
+				],
+			},
+		};
+
+		const extracted = extractToolResultsFromSdkUserMessage(message);
+		// Session persistence serializes the content blocks to JSONL and reads
+		// them back; the block must still be an image after that round-trip.
+		const persisted = JSON.parse(JSON.stringify(extracted[0].result.content));
+		assert.deepEqual(persisted, [
+			{ type: "image", data: "/9j/4AAQSkZJRg=", mimeType: "image/jpeg" },
+		]);
+	});
+
+	test("#3027 non-base64 Anthropic image sources keep the stringified-text fallback", () => {
+		// Only `source.type === "base64"` is convertible to the pi image shape;
+		// every other source variant keeps the existing fallback behavior.
+		const anthropicBlock = {
+			type: "image",
+			source: { type: "url", url: "https://example.com/img.png" },
+		};
+		const message: SDKUserMessage = {
+			type: "user",
+			session_id: "sess-1",
+			parent_tool_use_id: "tool-read-img-2",
+			message: {
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "tool-read-img-2",
+						content: [anthropicBlock],
+						is_error: false,
+					},
+				],
+			},
+		};
+
+		const results = extractToolResultsFromSdkUserMessage(message);
+		assert.deepEqual(results[0].result.content, [
+			{ type: "text", text: JSON.stringify(anthropicBlock) },
+		]);
+	});
+
 	test("buildFinalAssistantContent preserves intermediate tool calls with attached external results", () => {
 		const finalContent = buildFinalAssistantContent({
 			intermediateToolBlocks: [

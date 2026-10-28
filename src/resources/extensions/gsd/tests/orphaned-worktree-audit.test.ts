@@ -483,3 +483,69 @@ describe("auditOrphanedMilestoneBranches", () => {
     assert.ok(!existsSync(wtDir), "completed orphan worktree dir should be cleaned in none mode");
   });
 });
+
+describe("auditOrphanedMilestoneBranches — parked milestones (#3001)", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = createRepo();
+    openDatabase(join(dir, ".gsd", "gsd.db"));
+  });
+
+  afterEach(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("parked milestone with an unmerged branch does not block auto (#3001)", () => {
+    run("git checkout -b milestone/M001", dir);
+    writeFileSync(join(dir, "work.ts"), "export {};\n");
+    run("git add work.ts", dir);
+    run("git commit -m 'stranded work'", dir);
+    run("git checkout main", dir);
+    insertMilestone({ id: "M001", title: "Parked", status: "parked" });
+
+    const result = auditOrphanedMilestoneBranches(dir, "worktree");
+
+    const stranded = result.actions.filter((a: { kind: string }) => a.kind === "in-progress-stranded-work");
+    assert.deepStrictEqual(stranded, [], "parked milestone must not be classified as stranded work");
+    assert.equal(result.blockingStrandedWork, null, "parked milestone must not block bootstrap");
+    assert.ok(
+      !result.warnings.some((w: string) => w.includes("M001")),
+      `parked milestone must not warn: ${JSON.stringify(result.warnings)}`,
+    );
+    // Data safety: the branch is the user's safety net and stays.
+    assert.ok(
+      run("git branch --list milestone/M001", dir).includes("milestone/M001"),
+      "parked branch must be preserved",
+    );
+  });
+
+  test("an unparked (active) sibling still blocks while the parked one is exempt (#3001)", () => {
+    run("git checkout -b milestone/M001", dir);
+    writeFileSync(join(dir, "parked-work.ts"), "export {};\n");
+    run("git add parked-work.ts", dir);
+    run("git commit -m 'parked work'", dir);
+    run("git checkout -b milestone/M002 main", dir);
+    writeFileSync(join(dir, "active-work.ts"), "export {};\n");
+    run("git add active-work.ts", dir);
+    run("git commit -m 'active stranded work'", dir);
+    run("git checkout main", dir);
+    insertMilestone({ id: "M001", title: "Parked", status: "parked" });
+    insertMilestone({ id: "M002", title: "Active", status: "active" });
+
+    const result = auditOrphanedMilestoneBranches(dir, "worktree");
+
+    const stranded = result.actions.filter((a: { kind: string; milestoneId: string }) => a.kind === "in-progress-stranded-work");
+    assert.deepEqual(
+      stranded.map((a: { milestoneId: string }) => a.milestoneId),
+      ["M002"],
+      "only the genuinely open milestone is classified as stranded work",
+    );
+    assert.equal(
+      result.blockingStrandedWork?.milestoneId,
+      "M002",
+      "the active milestone's stranded work still blocks",
+    );
+  });
+});

@@ -78,7 +78,12 @@ export interface AutoPauseBlockerResolutionInspection {
   projectId: string;
   revision: number;
   authorityEpoch: number;
-  blocker?: { id: string; kind: string; owner: string; scope: string; origin: string; lifecycleState: string };
+  blocker?: {
+    id: string; kind: string; owner: string; scope: string; origin: string; lifecycleState: string;
+    /** Persisted human-facing context. Null when a legacy row carries no usable value. */
+    description: string | null;
+    requestedAction: string | null;
+  };
   pause?: { id: string; scope: string };
 }
 
@@ -99,6 +104,7 @@ export function classifyAutoPauseBlockerResolution(
   const refuse = (failure: ResolveAutoPauseBlockerFailure) => ({ ...result, failure });
   const blocker = db.prepare(`
     SELECT b.project_id, b.lifecycle_id, b.blocker_kind, b.resolution_owner, b.blocker_status,
+           b.description, b.requested_action,
            l.project_id AS lifecycle_project_id, l.lifecycle_status, l.item_kind, l.milestone_id, l.slice_id, l.task_id
     FROM workflow_blockers b
     LEFT JOIN workflow_item_lifecycles l ON l.lifecycle_id = b.lifecycle_id
@@ -110,6 +116,9 @@ export function classifyAutoPauseBlockerResolution(
     id: blockerId, kind: String(blocker["blocker_kind"]), owner: String(blocker["resolution_owner"]),
     scope: [blocker["milestone_id"], blocker["slice_id"], blocker["task_id"]].filter(Boolean).join("/"),
     origin: "auto-pause", lifecycleState: String(blocker["lifecycle_status"]),
+    // Fail-soft: legacy/pre-migration readers may surface rows without usable text.
+    description: typeof blocker["description"] === "string" ? blocker["description"] : null,
+    requestedAction: typeof blocker["requested_action"] === "string" ? blocker["requested_action"] : null,
   };
   if (blocker["blocker_status"] !== "open") return refuse("blocker-not-open");
   const legacy = db.prepare(`SELECT pause_id, lifecycle_id, milestone_id, unit_type, unit_id, resolved_at

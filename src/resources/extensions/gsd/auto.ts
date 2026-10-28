@@ -254,6 +254,7 @@ import {
   acknowledgeWedge,
   COMPLETED_NO_ADVANCE_GUARD_ID,
   formatWedgeRefusalNotice,
+  acknowledgeWedgesForParkedMilestones,
   garbageCollectResolvedWedges,
   getOpenWedge,
   recheckCompletedNoAdvanceWedge,
@@ -357,7 +358,9 @@ import { gsdHome } from "./gsd-home.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
 import {
   registerAutoWorker,
+  hasOpenUnitDispatches,
   markWorkerStopping,
+  markWorkerStopped,
   getAutoWorker,
   markWorkerStoppingByPid,
   getAllAutoWorkers,
@@ -1647,6 +1650,10 @@ export async function cleanupAfterLoopExit(ctx: ExtensionContext): Promise<void>
   // needs the fencing token, #2429), and retiring it here would fence that
   // resume out. When pause did not preserve coordination it already cleared
   // s.workerId, so this block is a no-op in that case.
+  // Retained so the terminal `stopped` transition can be written after all
+  // loop-exit work completes (#3029); null when coordination was preserved
+  // for a paused surface (the session may resume in-process).
+  const retiredWorkerId = s.workerId;
   if (!preservePausedSurface) {
     try {
       if (s.workerId && s.currentMilestoneId && s.milestoneLeaseToken) {
@@ -1729,6 +1736,20 @@ export async function cleanupAfterLoopExit(ctx: ExtensionContext): Promise<void>
     const workspaceRoot = s.basePath || s.originalBasePath;
     if (workspaceRoot) {
       await maybeRerootStepSessionForHighContext(ctx, workspaceRoot, s.cmdCtx, s.originalBasePath);
+    }
+  }
+
+  // All loop-exit work is done and the database is still open: retire the
+  // worker row terminally (#3029). A paused session may resume in-process,
+  // so its row stays `stopping` until a real exit; a row that still owns
+  // unfinished dispatches keeps #1773 stale recovery instead.
+  if (!s.paused && retiredWorkerId) {
+    try {
+      if (!hasOpenUnitDispatches(retiredWorkerId)) {
+        markWorkerStopped(retiredWorkerId);
+      }
+    } catch (err) {
+      logWarning("session", `worker retirement failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
   }
 }
@@ -1936,6 +1957,10 @@ async function stopAutoSession(
     } catch (e) {
       debugLog("stop-cleanup-coordination", { error: e instanceof Error ? e.message : String(e) });
     }
+    // Retained so the terminal `stopped` transition can be written once the
+    // remaining shutdown steps (worktree exit, projections, DB wind-down)
+    // have completed (#3029).
+    const retiredWorkerId = s.workerId;
     s.workerId = null;
     s.milestoneLeaseToken = null;
 
@@ -2096,6 +2121,19 @@ async function stopAutoSession(
 
     // ── Step 6: DB cleanup ──
     if (isDbAvailable()) {
+      // Shutdown work is complete: retire the worker row terminally before
+      // the database closes (#3029). Best-effort, like every stop step. A
+      // worker that still owns unfinished dispatches stays `stopping` so
+      // #1773 stale recovery keeps applying to it.
+      try {
+        if (retiredWorkerId && !hasOpenUnitDispatches(retiredWorkerId)) {
+          markWorkerStopped(retiredWorkerId);
+        } else if (retiredWorkerId) {
+          debugLog("stop-cleanup-retire-skipped", { workerId: retiredWorkerId, reason: "open dispatches" });
+        }
+      } catch (e) {
+        debugLog("stop-cleanup-retire", { error: e instanceof Error ? e.message : String(e) });
+      }
       // A stop drops the follow-on work that did not run yet. Only a killed
       // process leaves it queued for the next start.
       try {
@@ -3173,6 +3211,19 @@ async function startAutoImplementation(
       "error",
     );
     return;
+  }
+  // Wedges scoped to parked milestones cannot protect anything (the dispatcher
+  // skips parked milestones) but would still gate this project (#2991) — clear
+  // them first, including wedges parked before this rule existed. On sweep
+  // failure the gate below refuses with the same backstop error.
+  const parkedWedgeSweep = acknowledgeWedgesForParkedMilestones(scopeId);
+  if (parkedWedgeSweep.ok) {
+    for (const wedge of parkedWedgeSweep.acknowledged) {
+      ctx.ui.notify(
+        `Wedge ${wedge.wedgeId} (${wedge.unitType} ${wedge.unitId}) acknowledged — its milestone is parked, so the unit can no longer be dispatched.`,
+        "info",
+      );
+    }
   }
   const openWedgeResult = getOpenWedge(scopeId);
   if (!openWedgeResult.ok) {

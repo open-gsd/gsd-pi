@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { getCellDimensions, resetCapabilitiesCache, setCellDimensions } from "../src/terminal-image.ts";
 import { type Component, TUI } from "../src/tui.ts";
-import { VirtualTerminal } from "./virtual-terminal.ts";
+import { VirtualTerminal } from "../src/tests/virtual-terminal.ts";
 
 class InputRecorder implements Component {
 	readonly inputs: string[] = [];

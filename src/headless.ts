@@ -36,6 +36,7 @@ import {
   shouldRestartHeadlessRun,
   classifyHeadlessFinalStatus,
   classifyChildExitWithoutTerminal,
+  applyPendingGateBlock,
   EXIT_SUCCESS,
   EXIT_ERROR,
   EXIT_BLOCKED,
@@ -43,6 +44,8 @@ import {
   mapStatusToExitCode,
   parseWorkflowOutcomeEvent,
 } from './headless-events.js'
+
+import { readPendingWriteGateState } from './headless-gate-state.js'
 
 import type { OutputFormat, HeadlessJsonResult } from './headless-types.js'
 import { VALID_OUTPUT_FORMATS } from './headless-types.js'
@@ -886,7 +889,10 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     if (eventObj.type === 'execution_complete' && !completed && !isMultiTurnCommand) {
       completed = true
       const status = String(eventObj.status ?? 'success')
-      exitCode = mapStatusToExitCode(status)
+      // A blocked notification that raced ahead of this event must keep its
+      // exit code — the summary classifies on `blocked`, but the process exit
+      // code comes from here (#2987 family: never exit 0 over blocked work).
+      exitCode = blocked ? EXIT_BLOCKED : mapStatusToExitCode(status)
       if (eventObj.status === 'blocked') blocked = true
       resolveCompletion()
       return
@@ -1212,6 +1218,35 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
         process.stderr.write(`[headless] Error: ${quickResult.error}\n`)
       }
     }
+  }
+
+  // #2987: a workflow run that ends parked on an unanswered discussion write
+  // gate never finished its work. The durable pending gate lives in the
+  // project database and outlives the run, so read it after the child is
+  // stopped and reclassify a would-be success as blocked with a resume hint —
+  // never `Status: complete` / exit 0 over a parked discussion. An unreadable
+  // database is not silently treated as "no gate": the run keeps its outcome
+  // but the failed verification is surfaced.
+  const isWorkflowRun = !isQuickTask && !isQuickCmd
+  let pendingGateId: string | null = null
+  if (isWorkflowRun && !blocked && exitCode === EXIT_SUCCESS) {
+    const gateRead = readPendingWriteGateState(process.cwd())
+    if (gateRead.readError) {
+      process.stderr.write(`[headless] Warning: could not verify discussion-gate state — ${gateRead.readError}.\n`)
+    }
+    pendingGateId = gateRead.gateId
+  }
+  const gateBlock = applyPendingGateBlock({
+    blocked,
+    exitCode,
+    pendingGateId,
+    isWorkflowRun,
+  })
+  if (gateBlock) {
+    blocked = true
+    exitCode = gateBlock.exitCode
+    process.stderr.write(`[headless] Blocked: the run parked on discussion gate "${pendingGateId}" with no answer — no headless session can answer it.\n`)
+    process.stderr.write('[headless] Answer the pending discussion interactively (/gsd), then re-run headless; the gate clears once confirmed.\n')
   }
 
   // Summary

@@ -22,7 +22,7 @@ import { normalizeLegacyLifecycleStatus } from "../gsd/status-guards.js";
 import { debugLog } from "../gsd/debug-logger.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 
-import type { GitHubSyncConfig, SyncMapping } from "./types.js";
+import type { GitHubSyncConfig, SyncEntityRecord, SyncMapping } from "./types.js";
 import {
   loadSyncMapping,
   saveSyncMapping,
@@ -49,6 +49,8 @@ import {
   ghCreateBranch,
   ghPushBranch,
   ghAddToProject,
+  ghAddSubIssue,
+  ghGetParentIssue,
 } from "./cli.js";
 import {
   formatMilestoneIssueBody,
@@ -59,9 +61,15 @@ import {
 
 type GhCloseIssue = typeof ghCloseIssue;
 type GhCloseMilestone = typeof ghCloseMilestone;
+type GhCreateIssue = typeof ghCreateIssue;
+type GhAddSubIssue = typeof ghAddSubIssue;
+type GhGetParentIssue = typeof ghGetParentIssue;
 
 let _ghCloseIssueImpl: GhCloseIssue = ghCloseIssue;
 let _ghCloseMilestoneImpl: GhCloseMilestone = ghCloseMilestone;
+let _ghCreateIssueImpl: GhCreateIssue = ghCreateIssue;
+let _ghAddSubIssueImpl: GhAddSubIssue = ghAddSubIssue;
+let _ghGetParentIssueImpl: GhGetParentIssue = ghGetParentIssue;
 
 /** Test hook: override gh close calls (reset with null). */
 export function _setGhCloseOverridesForTest(overrides: {
@@ -70,6 +78,17 @@ export function _setGhCloseOverridesForTest(overrides: {
 } | null): void {
   _ghCloseIssueImpl = overrides?.closeIssue ?? ghCloseIssue;
   _ghCloseMilestoneImpl = overrides?.closeMilestone ?? ghCloseMilestone;
+}
+
+/** Test hook: override issue creation and sub-issue linking (reset with null). */
+export function _setGhCreateOverridesForTest(overrides: {
+  createIssue?: GhCreateIssue;
+  addSubIssue?: GhAddSubIssue;
+  getParentIssue?: GhGetParentIssue;
+} | null): void {
+  _ghCreateIssueImpl = overrides?.createIssue ?? ghCreateIssue;
+  _ghAddSubIssueImpl = overrides?.addSubIssue ?? ghAddSubIssue;
+  _ghGetParentIssueImpl = overrides?.getParentIssue ?? ghGetParentIssue;
 }
 
 // ─── DB-Backed Sync Data ────────────────────────────────────────────────────
@@ -301,7 +320,13 @@ async function syncSlicePlan(
   sid: string,
 ): Promise<void> {
   const existingSlice = getSliceRecord(mapping, mid, sid);
-  if (existingSlice) return;
+  if (existingSlice) {
+    // The slice is already mapped — creation is done and must not re-run
+    // (that would duplicate issues). Only repair task records whose native
+    // sub-issue link failed earlier.
+    await reconcileTaskSubIssueLinks(basePath, mapping, mid, sid);
+    return;
+  }
 
   // Ensure milestone is synced first
   if (!getMilestoneRecord(mapping, mid)) {
@@ -320,9 +345,12 @@ async function syncSlicePlan(
   const taskIssueNumbers: Array<{ id: string; title: string; issueNumber?: number }> = [];
 
   for (const task of plan.tasks) {
-    // Skip if already synced
+    // Skip if already synced — but repair a pending failed sub-issue link.
     if (getTaskRecord(mapping, mid, sid, task.id)) {
       const existing = getTaskRecord(mapping, mid, sid, task.id)!;
+      if (existing.lastSyncError) {
+        await reconcileTaskSubIssueLink(basePath, mapping, mid, sid, task.id, existing);
+      }
       taskIssueNumbers.push({ id: task.id, title: task.title, issueNumber: existing.issueNumber });
       continue;
     }
@@ -335,7 +363,7 @@ async function syncSlicePlan(
       verifyCriteria: task.verify ? [task.verify] : undefined,
     });
 
-    const taskResult = ghCreateIssue(basePath, {
+    const taskResult = _ghCreateIssueImpl(basePath, {
       repo: mapping.repo,
       title: `${mid}/${sid}/${task.id}: ${task.title}`,
       body: taskBody,
@@ -345,11 +373,26 @@ async function syncSlicePlan(
     });
 
     if (taskResult.ok) {
-      setTaskRecord(mapping, mid, sid, task.id, {
+      const record: SyncEntityRecord = {
         issueNumber: taskResult.data!,
         lastSyncedAt: new Date().toISOString(),
         state: "open",
-      });
+      };
+      // Creation and attachment are separate outcomes: the created issue is
+      // preserved even when the native link failed, and the failure is
+      // persisted so a later sync retries the link instead of re-creating.
+      if (taskResult.attachmentError) {
+        record.lastSyncError = taskResult.attachmentError;
+        debugLog("github-sync", {
+          phase: "task-subissue-link-failed",
+          mid,
+          sid,
+          tid: task.id,
+          issue: taskResult.data,
+          error: taskResult.attachmentError,
+        });
+      }
+      setTaskRecord(mapping, mid, sid, task.id, record);
       taskIssueNumbers.push({ id: task.id, title: task.title, issueNumber: taskResult.data! });
 
       if (config.project) {
@@ -375,6 +418,118 @@ async function syncSlicePlan(
     pr: 0,
     taskIssues: taskIssueNumbers.filter(t => t.issueNumber).length,
   });
+}
+
+// ─── Sub-Issue Link Reconciliation ──────────────────────────────────────────
+
+/**
+ * Repair a task record whose native sub-issue link failed after creation.
+ * The child's current parent is checked first: an already-correct parent is
+ * idempotent success, a different parent is reported as a conflict without
+ * reparenting, and an unparented issue gets the link retried. Never
+ * re-creates the issue and never deletes the mapping record. Returns true
+ * when the record ends up with a confirmed or restored link.
+ */
+async function reconcileTaskSubIssueLink(
+  basePath: string,
+  mapping: SyncMapping,
+  mid: string,
+  sid: string,
+  tid: string,
+  record: SyncEntityRecord,
+): Promise<boolean> {
+  if (!record.lastSyncError) return false;
+  const milestone = getMilestoneRecord(mapping, mid);
+  if (!milestone) return false; // no known parent to link to; keep the pending error
+
+  const parentResult = _ghGetParentIssueImpl(basePath, mapping.repo, record.issueNumber);
+  if (!parentResult.ok) {
+    // Parent lookup failed (API unavailable etc.) — keep the pending error.
+    debugLog("github-sync", {
+      phase: "task-subissue-reconcile-lookup-failed",
+      mid, sid, tid,
+      error: parentResult.error,
+    });
+    return false;
+  }
+
+  if (parentResult.data != null) {
+    // Compare repository-qualified identity: a same-numbered issue in another
+    // repository (GitHub allows cross-repo sub-issues) is a conflict, not a
+    // confirmed link. A parent whose repository cannot be determined is also
+    // treated as unconfirmed rather than silently accepted.
+    const confirmed =
+      parentResult.data.repo !== null &&
+      parentResult.data.repo === mapping.repo &&
+      parentResult.data.number === milestone.issueNumber;
+    if (confirmed) {
+      // Already correctly linked (e.g. the original mutation landed despite
+      // a lost response) — clear the stale error.
+      delete record.lastSyncError;
+      record.lastSyncedAt = new Date().toISOString();
+      setTaskRecord(mapping, mid, sid, tid, record);
+      debugLog("github-sync", {
+        phase: "task-subissue-already-linked",
+        mid, sid, tid, issue: record.issueNumber,
+      });
+      return true;
+    }
+    // Conflicting parent: surface it, never silently reparent.
+    const actual = parentResult.data.repo
+      ? `${parentResult.data.repo}#${parentResult.data.number}`
+      : `#${parentResult.data.number} (repository unknown)`;
+    const conflict =
+      `native sub-issue link for #${record.issueNumber} points at parent ${actual}, ` +
+      `expected ${mapping.repo}#${milestone.issueNumber}; manual reparent required`;
+    record.lastSyncError = conflict;
+    record.lastSyncedAt = new Date().toISOString();
+    setTaskRecord(mapping, mid, sid, tid, record);
+    debugLog("github-sync", {
+      phase: "task-subissue-parent-conflict",
+      mid, sid, tid, error: conflict,
+    });
+    return false;
+  }
+
+  const linkResult = _ghAddSubIssueImpl(basePath, mapping.repo, milestone.issueNumber, record.issueNumber);
+  if (!linkResult.ok) {
+    record.lastSyncError =
+      `issue created, but native sub-issue link to #${milestone.issueNumber} failed: ${linkResult.error}`;
+    record.lastSyncedAt = new Date().toISOString();
+    setTaskRecord(mapping, mid, sid, tid, record);
+    debugLog("github-sync", {
+      phase: "task-subissue-retry-failed",
+      mid, sid, tid, error: record.lastSyncError,
+    });
+    return false;
+  }
+
+  delete record.lastSyncError;
+  record.lastSyncedAt = new Date().toISOString();
+  setTaskRecord(mapping, mid, sid, tid, record);
+  debugLog("github-sync", {
+    phase: "task-subissue-reconciled",
+    mid, sid, tid, issue: record.issueNumber, parent: milestone.issueNumber,
+  });
+  return true;
+}
+
+/** Reconcile every task of a slice that carries a pending sub-issue link error. */
+async function reconcileTaskSubIssueLinks(
+  basePath: string,
+  mapping: SyncMapping,
+  mid: string,
+  sid: string,
+): Promise<number> {
+  const prefix = `${mid}/${sid}/`;
+  let reconciled = 0;
+  for (const [key, record] of Object.entries(mapping.tasks)) {
+    if (!key.startsWith(prefix) || !record.lastSyncError) continue;
+    if (await reconcileTaskSubIssueLink(basePath, mapping, mid, sid, key.slice(prefix.length), record)) {
+      reconciled++;
+    }
+  }
+  return reconciled;
 }
 
 async function ensureSlicePullRequest(
@@ -447,7 +602,15 @@ async function syncTaskComplete(
   tid: string,
 ): Promise<void> {
   const taskRecord = getTaskRecord(mapping, mid, sid, tid);
-  if (!taskRecord || taskRecord.state === "closed") return;
+  if (!taskRecord) return;
+
+  // Repair a pending failed native sub-issue link first — execute-task is the
+  // recurring sync event for this task and the repair is independent of the
+  // record's state.
+  if (taskRecord.lastSyncError) {
+    await reconcileTaskSubIssueLink(basePath, mapping, mid, sid, tid, taskRecord);
+  }
+  if (taskRecord.state === "closed") return;
 
   // The database decides whether the Task is complete. An execute-task unit
   // whose Task is not complete there (its verification failed or has not run)
@@ -690,6 +853,9 @@ export async function bootstrapSync(basePath: string): Promise<{
       if (!getSliceRecord(mapping, mid, sid)) {
         await syncSlicePlan(basePath, mapping, config, mid, sid);
         counts.slices++;
+      } else {
+        // Already-synced slice: only repair failed native sub-issue links.
+        await reconcileTaskSubIssueLinks(basePath, mapping, mid, sid);
       }
     }
   }

@@ -249,6 +249,27 @@ export function classifyHeadlessFinalStatus(args: {
 }
 
 /**
+ * Reclassify a would-be-successful workflow run that ended parked on an
+ * unanswered discussion write gate (#2987). The durable pending gate in the
+ * project database means the run stopped to ask a question no headless
+ * session can answer — that is a blocked run (exit 10), never a complete one.
+ *
+ * Returns the upgraded outcome, or null when the run keeps its own: quick
+ * commands never touch workflow gates, and runs already blocked or failing
+ * keep their (worse or equal) classification.
+ */
+export function applyPendingGateBlock(args: {
+  blocked: boolean
+  exitCode: number
+  pendingGateId: string | null
+  isWorkflowRun: boolean
+}): { blocked: true; exitCode: typeof EXIT_BLOCKED } | null {
+  if (!args.isWorkflowRun || args.blocked || args.exitCode !== EXIT_SUCCESS) return null
+  if (!args.pendingGateId) return null
+  return { blocked: true, exitCode: EXIT_BLOCKED }
+}
+
+/**
  * Map a child-process exit observed before any terminal notification to the
  * run's exit code. A clean child exit (code 0) counts as success only when
  * the parent-initiated overall timeout has NOT fired: after the deadline the

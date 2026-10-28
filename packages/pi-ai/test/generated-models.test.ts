@@ -3,30 +3,192 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
+import * as ts from "typescript";
 import { describe, expect, test } from "vitest";
+import { applyCopilotGpt6ResponsesRouting } from "../scripts/copilot-gpt6-routing.ts";
 import { isModelsCatalog } from "../src/model-catalog.ts";
-import { calculateCost } from "../src/models.ts";
 import { MODELS } from "../src/models.generated.ts";
+import { calculateCost } from "../src/models.ts";
+
+describe("Copilot GPT-6 generator routing", () => {
+	for (const id of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra"]) {
+		test(`normalizes ingested or synthesized ${id} without changing model limits`, () => {
+			const model = {
+				id,
+				provider: "github-copilot",
+				api: "openai-completions",
+				compat: { supportsReasoningEffort: false },
+				contextWindow: 1050000,
+			};
+			applyCopilotGpt6ResponsesRouting(model);
+			expect(model).toEqual({
+				id,
+				provider: "github-copilot",
+				api: "openai-responses",
+				contextWindow: 1050000,
+			});
+		});
+	}
+
+	for (const [provider, id, api] of [
+		["openai", "gpt-6-luna", "openai-completions"],
+		["github-copilot", "gpt-5.4", "openai-responses"],
+		["github-copilot", "gpt-6-luna-preview", "openai-completions"],
+	]) {
+		test(`does not override ${provider}/${id}`, () => {
+			const model = { provider, id, api, compat: { supportsStore: false } };
+			const before = structuredClone(model);
+			applyCopilotGpt6ResponsesRouting(model);
+			expect(model).toEqual(before);
+		});
+	}
+
+	test("preserves existing Responses compatibility metadata", () => {
+		const compat = { supportsStore: false };
+		const model = {
+			provider: "github-copilot",
+			id: "gpt-6-luna",
+			api: "openai-responses",
+			compat,
+		};
+		applyCopilotGpt6ResponsesRouting(model);
+		expect(model.compat).toBe(compat);
+	});
+});
 
 describe("models.generated.ts", () => {
+	test("evaluates actual generator capability guards without network or absent-catalog fixtures", () => {
+		// allow-source-grep: parse and execute actual generator predicates to lock a latent provider-boundary bug before new catalog entries exist.
+		const source = readFileSync(
+			join(import.meta.dirname, "../scripts/generate-models.ts"),
+			"utf8",
+		);
+		const file = ts.createSourceFile(
+			"generate-models.ts",
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+		);
+		const functions = file.statements.filter(ts.isFunctionDeclaration);
+		const helpers = [
+			"supportsOpenAiXhigh",
+			"isGpt56Variant",
+			"isGpt6MaxVariant",
+		].map((name) => {
+			const fn = functions.find((entry) => entry.name?.text === name);
+			if (!fn) throw new Error(`Missing generator helper: ${name}`);
+			return fn.getText(file);
+		});
+		const metadata = functions.find(
+			(entry) => entry.name?.text === "applyThinkingLevelMetadata",
+		);
+		const guards = ["xhigh", "max"].map((level) => {
+			const statement = metadata?.body?.statements
+				.filter(ts.isIfStatement)
+				.find((entry) =>
+					entry.thenStatement
+						.getText(file)
+						.replace(/\s/g, "")
+						.includes(`${level}:"${level}"`),
+				);
+			if (!statement) throw new Error(`Missing generator guard: ${level}`);
+			return `${level}: (${statement.expression.getText(file)})`;
+		});
+		const code = `${helpers.join("\n")}\nexport function evaluate(model) { return {${guards.join(",")}}; }`;
+		const compiled = ts.transpileModule(code, {
+			compilerOptions: { module: ts.ModuleKind.CommonJS },
+		});
+		const sandbox: {
+			exports: {
+				evaluate?: (model: { provider: string; id: string }) => {
+					xhigh: boolean;
+					max: boolean;
+				};
+			};
+		} = { exports: {} };
+		runInNewContext(compiled.outputText, sandbox, { timeout: 1000 });
+		const evaluate = sandbox.exports.evaluate;
+		if (!evaluate) throw new Error("Generator evaluator was not exported");
+		for (const provider of [
+			"openai",
+			"amazon-bedrock",
+			"openrouter",
+			"vercel",
+			"azure",
+			"custom-proxy",
+		]) {
+			for (const id of [
+				"gpt-6-astra",
+				"gpt-6-sol",
+				"gpt-6-luna",
+				"gpt-6.1-sol",
+				"vendor/gpt-6-astra-suffix",
+			]) {
+				expect(evaluate({ provider, id }), `${provider}/${id}`).toEqual({
+					xhigh: false,
+					max: false,
+				});
+			}
+		}
+		expect(evaluate({ provider: "github-copilot", id: "gpt-6-astra" })).toEqual(
+			{
+				xhigh: true,
+				max: true,
+			},
+		);
+		for (const provider of ["openai", "github-copilot", "custom-proxy"]) {
+			expect(evaluate({ provider, id: "gpt-5.6-sol" })).toEqual({
+				xhigh: true,
+				max: true,
+			});
+		}
+	});
+	for (const modelId of [
+		"gpt-6-luna",
+		"gpt-6-sol",
+		"gpt-6.1-sol",
+		"gpt-6-astra",
+	] as const) {
+		test(`routes Copilot ${modelId} through the supported Responses endpoint`, () => {
+			const model = MODELS["github-copilot"][modelId];
+			expect(model.api).toBe("openai-responses");
+			expect("compat" in model).toBe(false);
+		});
+	}
+
 	test("models.generated.json mirrors the complete generated catalog", () => {
 		// allow-source-grep: reads the generated JSON data snapshot (manifest output), not source, to verify it mirrors MODELS
-		const snapshot = JSON.parse(readFileSync(join(import.meta.dirname, "../src/models.generated.json"), "utf8"));
+		const snapshot = JSON.parse(
+			readFileSync(
+				join(import.meta.dirname, "../src/models.generated.json"),
+				"utf8",
+			),
+		);
 
 		expect(snapshot).toEqual(MODELS);
 	});
 
 	test("models.generated.json satisfies catalog validation", () => {
 		// allow-source-grep: reads the generated JSON data snapshot (manifest output), not source, to validate its shape
-		const snapshot = JSON.parse(readFileSync(join(import.meta.dirname, "../src/models.generated.json"), "utf8"));
+		const snapshot = JSON.parse(
+			readFileSync(
+				join(import.meta.dirname, "../src/models.generated.json"),
+				"utf8",
+			),
+		);
 
 		expect(isModelsCatalog(snapshot)).toBe(true);
 	});
 
 	test("does not include floating-point precision artifacts in cost literals", () => {
 		// allow-source-grep: generated catalog is data output; this test guards numeric literal formatting only
-		const generated = readFileSync(join(import.meta.dirname, "../src/models.generated.ts"), "utf8");
-		const noisyCostLiteral = /^\s+(?:input|output|cacheRead|cacheWrite): \d+\.\d{13,},/m;
+		const generated = readFileSync(
+			join(import.meta.dirname, "../src/models.generated.ts"),
+			"utf8",
+		);
+		const noisyCostLiteral =
+			/^\s+(?:input|output|cacheRead|cacheWrite): \d+\.\d{13,},/m;
 
 		expect(generated).not.toMatch(noisyCostLiteral);
 	});
@@ -43,7 +205,9 @@ describe("models.generated.ts", () => {
 		expect(vertex.api).toBe("anthropic-vertex");
 		expect(vertex.compat).toMatchObject({ forceAdaptiveThinking: true });
 
-		expect(MODELS["amazon-bedrock"]["us.anthropic.claude-fable-5"]).toBeDefined();
+		expect(
+			MODELS["amazon-bedrock"]["us.anthropic.claude-fable-5"],
+		).toBeDefined();
 		expect(MODELS.openrouter["anthropic/claude-fable-5"]).toBeDefined();
 	});
 
@@ -89,7 +253,12 @@ describe("models.generated.ts", () => {
 		expect(anthropic.name).toBe("Claude Opus 5.5");
 		expect(anthropic.contextWindow).toBe(1_000_000);
 		expect(anthropic.maxTokens).toBe(128_000);
-		expect(anthropic.cost).toMatchObject({ input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 });
+		expect(anthropic.cost).toMatchObject({
+			input: 4,
+			output: 20,
+			cacheRead: 0.2,
+			cacheWrite: 5,
+		});
 		expect(anthropic.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
 		expect(anthropic.compat).toMatchObject({ forceAdaptiveThinking: true });
 
@@ -105,9 +274,21 @@ describe("models.generated.ts", () => {
 
 		// models.dev prices the US Bedrock region ~10% above the global regions.
 		for (const [id, name, cost] of [
-			["anthropic.claude-opus-5-5", "Claude Opus 5.5", { input: 4, output: 20 }],
-			["us.anthropic.claude-opus-5-5", "Claude Opus 5.5 (US)", { input: 4.4, output: 22 }],
-			["global.anthropic.claude-opus-5-5", "Claude Opus 5.5 (Global)", { input: 4, output: 20 }],
+			[
+				"anthropic.claude-opus-5-5",
+				"Claude Opus 5.5",
+				{ input: 4, output: 20 },
+			],
+			[
+				"us.anthropic.claude-opus-5-5",
+				"Claude Opus 5.5 (US)",
+				{ input: 4.4, output: 22 },
+			],
+			[
+				"global.anthropic.claude-opus-5-5",
+				"Claude Opus 5.5 (Global)",
+				{ input: 4, output: 20 },
+			],
 		] as const) {
 			const bedrock = MODELS["amazon-bedrock"][id];
 			expect(bedrock).toBeDefined();
@@ -170,7 +351,11 @@ describe("models.generated.ts", () => {
 			expect(copilot.baseUrl).toBe("https://api.individual.githubcopilot.com");
 			expect(copilot.contextWindow).toBe(1_050_000);
 			expect(copilot.maxTokens).toBe(128_000);
-			expect(copilot.thinkingLevelMap).toMatchObject({ minimal: "low", xhigh: "xhigh", max: "max" });
+			expect(copilot.thinkingLevelMap).toMatchObject({
+				minimal: "low",
+				xhigh: "xhigh",
+				max: "max",
+			});
 			expect(copilot.cost.input).toBe(input);
 			expect(copilot.cost.output).toBe(output);
 			expect(copilot.cost.cacheRead).toBe(cacheRead);
@@ -191,19 +376,119 @@ describe("models.generated.ts", () => {
 		expect(model.headers).toMatchObject({
 			"Copilot-Integration-Id": "vscode-chat",
 		});
-		expect(model.thinkingLevelMap).toMatchObject({ off: null, minimal: "low", medium: "medium", xhigh: "high" });
+		expect(model.thinkingLevelMap).toMatchObject({
+			off: null,
+			minimal: "low",
+			medium: "medium",
+			xhigh: "high",
+		});
 	});
 
 	test("includes GPT-6 Astra for GitHub Copilot", () => {
 		const model = MODELS["github-copilot"]["gpt-6-astra"];
 		expect(model).toMatchObject({
 			id: "gpt-6-astra",
-			api: "openai-completions",
+			api: "openai-responses",
 			provider: "github-copilot",
-			contextWindow: 1_050_000,
+			contextWindow: 400_000,
 			maxTokens: 128_000,
 			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 		});
+	});
+
+	test("maps Copilot's responses-only models to the Responses API with served limits", () => {
+		// Live Copilot /models catalog (verified 2026-10-07): these models list
+		// supported_endpoints without /chat/completions. A bundled
+		// openai-completions entry hard-400s every dispatch with
+		// "unsupported_api_for_model", and the completions-only compat block
+		// (supportsReasoningEffort:false) must not survive the api correction.
+		const copilot = MODELS["github-copilot"];
+		const gpt6Ids = [
+			"gpt-6-astra",
+			"gpt-6-luna",
+			"gpt-6-sol",
+			"gpt-6.1-sol",
+		] as const;
+		const grokIds = ["grok-4.5", "grok-4.6", "grok-4.7"] as const;
+		for (const id of [...gpt6Ids, ...grokIds]) {
+			const model = copilot[id];
+			expect(model, id).toBeDefined();
+			expect(model.api, id).toBe("openai-responses");
+			expect(model.compat, id).toBeUndefined();
+		}
+
+		// Copilot serves a smaller window than the platform-native one models.dev
+		// reports (gpt-6 family: 400k, not 1.05M; grok-4.x: 328k, not 500k).
+		for (const id of gpt6Ids) {
+			expect(copilot[id].contextWindow, id).toBe(400_000);
+			expect(copilot[id].maxTokens, id).toBe(128_000);
+		}
+		for (const id of grokIds) {
+			expect(copilot[id].contextWindow, id).toBe(328_000);
+			expect(copilot[id].maxTokens, id).toBe(128_000);
+		}
+
+		// Reasoning-effort metadata mirrors the gpt-5 family pattern: the gpt-6
+		// ladder supports xhigh and max; the grok-4.x ladder only needs the
+		// minimal -> low alias (live ladders: low/medium/high[/xhigh], no "none").
+		for (const id of gpt6Ids) {
+			expect(copilot[id].thinkingLevelMap, id).toMatchObject({
+				off: null,
+				minimal: "low",
+				xhigh: "xhigh",
+				max: "max",
+			});
+		}
+		for (const id of grokIds) {
+			// off must be marked unsupported: the curated Grok ladders have no
+			// "none" effort, so leaving "off" unmapped would advertise it as
+			// supported while silently falling back to the model's default effort.
+			expect(copilot[id].thinkingLevelMap, id).toMatchObject({
+				off: null,
+				minimal: "low",
+			});
+		}
+	});
+
+	test("scopes GPT-6 xhigh/max thinking-level additions to github-copilot only (PR #2735 review)", () => {
+		// GPT-6 ids exist across many providers (OpenAI, Bedrock, OpenRouter,
+		// Vercel, Azure, proxies). The xhigh/max capability checks are curated
+		// from Copilot's own /models catalog and must not leak onto those other
+		// providers' gpt-6 entries, which may have different (or no) live
+		// reasoning-effort ladders.
+		const nonCopilotGpt6: Array<[string, string]> = [
+			["openai", "gpt-6-astra"],
+			["openai", "gpt-6-sol"],
+			["openai", "gpt-6-luna"],
+			["openai", "gpt-6.1-sol"],
+		];
+		for (const [provider, id] of nonCopilotGpt6) {
+			const model = (
+				MODELS as Record<
+					string,
+					Record<string, { thinkingLevelMap?: Record<string, unknown> }>
+				>
+			)[provider]?.[id];
+			expect(model, `${provider}/${id}`).toBeDefined();
+			expect(
+				model?.thinkingLevelMap?.max,
+				`${provider}/${id} must not gain 'max'`,
+			).toBeUndefined();
+		}
+
+		// The github-copilot gpt-6 entries keep both xhigh and max.
+		const copilot = MODELS["github-copilot"];
+		for (const id of [
+			"gpt-6-astra",
+			"gpt-6-sol",
+			"gpt-6-luna",
+			"gpt-6.1-sol",
+		] as const) {
+			expect(copilot[id].thinkingLevelMap, id).toMatchObject({
+				xhigh: "xhigh",
+				max: "max",
+			});
+		}
 	});
 
 	test("includes GPT-6 Astra for OpenAI Codex (#2250)", () => {
@@ -224,7 +509,11 @@ describe("models.generated.ts", () => {
 		expect("gpt-5.6" in MODELS.openai).toBe(true);
 		expect("gpt-5.6" in MODELS["openai-codex"]).toBe(false);
 		expect(MODELS.openai["gpt-5.6"].contextWindow).toBe(1_050_000);
-		expect(MODELS.openai["gpt-5.6"].cost).toMatchObject({ input: 4, output: 20, cacheRead: 0.4 });
+		expect(MODELS.openai["gpt-5.6"].cost).toMatchObject({
+			input: 4,
+			output: 20,
+			cacheRead: 0.4,
+		});
 
 		const variants = [
 			// [id, name, openai input, openai output, codex input, codex output]
@@ -233,14 +522,25 @@ describe("models.generated.ts", () => {
 			["gpt-5.6-luna", "GPT-5.6 Luna", 0.2, 1.2, 1, 6],
 		] as const;
 
-		for (const [id, name, openaiInput, openaiOutput, codexInput, codexOutput] of variants) {
+		for (const [
+			id,
+			name,
+			openaiInput,
+			openaiOutput,
+			codexInput,
+			codexOutput,
+		] of variants) {
 			const openai = MODELS.openai[id];
 			expect(openai).toBeDefined();
 			expect(openai.api).toBe("openai-responses");
 			expect(openai.name).toBe(name);
 			expect(openai.contextWindow).toBe(272_000);
 			expect(openai.maxTokens).toBe(128_000);
-			expect(openai.thinkingLevelMap).toMatchObject({ off: "none", xhigh: "xhigh", max: "max" });
+			expect(openai.thinkingLevelMap).toMatchObject({
+				off: "none",
+				xhigh: "xhigh",
+				max: "max",
+			});
 			expect(openai.cost.input).toBe(openaiInput);
 			expect(openai.cost.output).toBe(openaiOutput);
 
@@ -251,13 +551,21 @@ describe("models.generated.ts", () => {
 			expect(codex.baseUrl).toBe("https://chatgpt.com/backend-api");
 			expect(codex.contextWindow).toBe(372_000);
 			expect(codex.maxTokens).toBe(128_000);
-			expect(codex.thinkingLevelMap).toMatchObject({ xhigh: "xhigh", max: "max", minimal: "low" });
+			expect(codex.thinkingLevelMap).toMatchObject({
+				xhigh: "xhigh",
+				max: "max",
+				minimal: "low",
+			});
 			expect(codex.cost.input).toBe(codexInput);
 			expect(codex.cost.output).toBe(codexOutput);
 		}
 
 		const sol = MODELS["openai-codex"]["gpt-5.6-sol"];
-		expect(sol.cost.tiers?.[0]).toMatchObject({ inputTokensAbove: 272_000, input: 10, output: 45 });
+		expect(sol.cost.tiers?.[0]).toMatchObject({
+			inputTokensAbove: 272_000,
+			input: 10,
+			output: 45,
+		});
 		const usage = {
 			input: 272_001,
 			output: 1_000,
@@ -266,7 +574,9 @@ describe("models.generated.ts", () => {
 			totalTokens: 273_001,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
-		expect(calculateCost(sol, usage).input).toBeCloseTo((10 / 1_000_000) * 272_001);
+		expect(calculateCost(sol, usage).input).toBeCloseTo(
+			(10 / 1_000_000) * 272_001,
+		);
 	});
 
 	test("includes Anthropic Vertex models from the generated catalog", () => {
@@ -276,7 +586,9 @@ describe("models.generated.ts", () => {
 		expect(models["claude-sonnet-4-6"]).toBeDefined();
 		expect(models["claude-opus-4-8"]).toBeDefined();
 		expect(models["claude-haiku-4-5@20251001"]).toBeDefined();
-		expect(Object.keys(models).some((id) => id.includes("@default"))).toBe(false);
+		expect(Object.keys(models).some((id) => id.includes("@default"))).toBe(
+			false,
+		);
 
 		for (const model of Object.values(models)) {
 			expect(model.provider).toBe("anthropic-vertex");
@@ -286,8 +598,16 @@ describe("models.generated.ts", () => {
 
 	test("includes MiniMax M3 for direct MiniMax providers", () => {
 		const providers = [
-			["minimax", "https://api.minimax.io/anthropic", { input: 0.3, output: 1.2, cacheRead: 0.06 }],
-			["minimax-cn", "https://api.minimaxi.com/anthropic", { input: 0.3137, output: 1.2549, cacheRead: 0.0627 }],
+			[
+				"minimax",
+				"https://api.minimax.io/anthropic",
+				{ input: 0.3, output: 1.2, cacheRead: 0.06 },
+			],
+			[
+				"minimax-cn",
+				"https://api.minimaxi.com/anthropic",
+				{ input: 0.3137, output: 1.2549, cacheRead: 0.0627 },
+			],
 		] as const;
 
 		for (const [provider, baseUrl, cost] of providers) {
@@ -311,8 +631,16 @@ describe("models.generated.ts", () => {
 
 	test("includes MiniMax M3.1-Flash first-class for direct MiniMax providers (#2906)", () => {
 		const providers = [
-			["minimax", "https://api.minimax.io/anthropic", { input: 0.15, output: 0.6, cacheRead: 0.015 }],
-			["minimax-cn", "https://api.minimaxi.com/anthropic", { input: 0.1494, output: 0.5976, cacheRead: 0.0149 }],
+			[
+				"minimax",
+				"https://api.minimax.io/anthropic",
+				{ input: 0.15, output: 0.6, cacheRead: 0.015 },
+			],
+			[
+				"minimax-cn",
+				"https://api.minimaxi.com/anthropic",
+				{ input: 0.1494, output: 0.5976, cacheRead: 0.0149 },
+			],
 		] as const;
 
 		for (const [provider, baseUrl, cost] of providers) {
@@ -348,21 +676,26 @@ describe("models.generated.ts", () => {
 		// The Anthropic-compatible endpoint serves only M3.1-Flash + M3; the
 		// OpenRouter/OpenCode gateways only carry the verified M3.1-Flash + M3
 		// routes. Older M2.x entries must not be offered as ordinary choices.
-		expect(Object.keys(MODELS.minimax)).toEqual(["MiniMax-M3", "MiniMax-M3.1-Flash"]);
-		expect(Object.keys(MODELS["minimax-cn"])).toEqual(["MiniMax-M3", "MiniMax-M3.1-Flash"]);
+		expect(Object.keys(MODELS.minimax)).toEqual([
+			"MiniMax-M3",
+			"MiniMax-M3.1-Flash",
+		]);
+		expect(Object.keys(MODELS["minimax-cn"])).toEqual([
+			"MiniMax-M3",
+			"MiniMax-M3.1-Flash",
+		]);
 
-		expect(Object.keys(MODELS.openrouter).filter((id) => id.startsWith("minimax/"))).toEqual([
-			"minimax/minimax-m3",
-			"minimax/minimax-m3.1-flash:free",
-		]);
-		expect(Object.keys(MODELS.opencode).filter((id) => id.startsWith("minimax"))).toEqual([
-			"minimax-m3",
-			"minimax-m3.1-flash-free",
-		]);
-		expect(Object.keys(MODELS["opencode-go"]).filter((id) => id.startsWith("minimax"))).toEqual([
-			"minimax-m3",
-			"minimax-m3.1-flash-free",
-		]);
+		expect(
+			Object.keys(MODELS.openrouter).filter((id) => id.startsWith("minimax/")),
+		).toEqual(["minimax/minimax-m3", "minimax/minimax-m3.1-flash:free"]);
+		expect(
+			Object.keys(MODELS.opencode).filter((id) => id.startsWith("minimax")),
+		).toEqual(["minimax-m3", "minimax-m3.1-flash-free"]);
+		expect(
+			Object.keys(MODELS["opencode-go"]).filter((id) =>
+				id.startsWith("minimax"),
+			),
+		).toEqual(["minimax-m3", "minimax-m3.1-flash-free"]);
 	});
 
 	test("includes Grok 4.5 as a first-class xAI model", () => {
@@ -413,9 +746,9 @@ describe("models.generated.ts", () => {
 
 	test("keeps GitHub Copilot Claude context at Copilot's 200K limit", () => {
 		// models.dev 2026-09 refresh: Copilot dropped the Claude 4.6 generation this test pinned (claude-opus-4.6), so the 200K cap is guarded as a property over the Anthropic-transport Claude entries.
-		const anthropicClaudeModels = Object.values(MODELS["github-copilot"]).filter(
-			(model) => model.api === "anthropic-messages",
-		);
+		const anthropicClaudeModels = Object.values(
+			MODELS["github-copilot"],
+		).filter((model) => model.api === "anthropic-messages");
 
 		expect(anthropicClaudeModels.length).toBeGreaterThan(0);
 		for (const model of anthropicClaudeModels) {
@@ -486,8 +819,13 @@ describe("models.generated.ts", () => {
 			});
 			expect(model.contextWindow).toBeGreaterThanOrEqual(131072);
 			expect(model.maxTokens).toBeGreaterThanOrEqual(98304);
-			expect(model.compat).toMatchObject({ supportsDeveloperRole: false, thinkingFormat: "zai" });
-			expect((model.compat as { zaiToolStream?: boolean }).zaiToolStream ?? false).toBe(zaiToolStream);
+			expect(model.compat).toMatchObject({
+				supportsDeveloperRole: false,
+				thinkingFormat: "zai",
+			});
+			expect(
+				(model.compat as { zaiToolStream?: boolean }).zaiToolStream ?? false,
+			).toBe(zaiToolStream);
 		}
 	});
 

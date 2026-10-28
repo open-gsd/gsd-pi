@@ -15,6 +15,11 @@ import {
 } from "./rpc-display.js";
 import { applySectionCollapseState } from "./section-state.js";
 import {
+	SIDEBAR_DANGER_COLOR,
+	SIDEBAR_PROGRESS_COLOR,
+	sidebarStatusColor,
+} from "./semantic-colors.js";
+import {
 	classifyProgressProvenance,
 	SidebarRefreshCoordinator,
 } from "./sidebar-refresh.js";
@@ -349,7 +354,7 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 		steeringMode: "all" | "one-at-a-time";
 		followUpMode: "all" | "one-at-a-time";
 	}): string {
-		const statusColor = info.connected ? "#4ec9b0" : "#f44747";
+		const statusColor = sidebarStatusColor(info.connected);
 		const statusLabel = info.isStreaming ? "Working" : info.isCompacting ? "Compacting" : info.connected ? "Connected" : "Disconnected";
 
 		// Model short name for header
@@ -510,8 +515,16 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 		}
 		.context-track {
 			width: 100%;
-			height: 3px;
-			background: var(--vscode-panel-border);
+			height: 4px;
+			/* Transparent track + border, not a filled track: in high-contrast
+			   themes progressBar.background and panel.border both resolve to
+			   contrastBorder, so a filled track would make every percentage look
+			   identical to full (#2929). The outline keeps the unfilled remainder
+			   showing the webview background, avoiding the fill/track collision
+			   in the built-in high-contrast themes. */
+			background: transparent;
+			border: 1px solid var(--vscode-panel-border);
+			box-sizing: border-box;
 			border-radius: 2px;
 			overflow: hidden;
 		}
@@ -653,11 +666,11 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 			background: var(--vscode-button-hoverBackground);
 		}
 		.action-btn.danger {
-			border-color: #f44747;
-			color: #f44747;
+			border-color: ${SIDEBAR_DANGER_COLOR};
+			color: ${SIDEBAR_DANGER_COLOR};
 		}
 		.action-btn.danger:hover {
-			background: color-mix(in srgb, #f44747 15%, transparent);
+			background: color-mix(in srgb, ${SIDEBAR_DANGER_COLOR} 15%, transparent);
 		}
 		.action-btn.full {
 			grid-column: 1 / -1;
@@ -805,7 +818,7 @@ export class GsdSidebarProvider implements vscode.WebviewViewProvider {
 		<div class="context-bar">
 			${ui.contextUsage.percent !== null ? `
 			<div class="context-track">
-				<div class="context-fill" style="width:${ui.contextUsage.percent}%;background:#4ec9b0"></div>
+				<div class="context-fill" style="width:${ui.contextUsage.percent}%;background:${SIDEBAR_PROGRESS_COLOR}"></div>
 			</div>
 			` : ""}
 			<div class="context-text">${escapeHtml(ui.contextUsage.text)}${ui.totalTokens ? ` / Session tokens: ${formatNum(ui.totalTokens)}` : ""}</div>

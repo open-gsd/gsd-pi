@@ -1729,6 +1729,14 @@ export function registerHooks(
     // structured ask_user_questions call is already in the partial message, the
     // tool IS the human boundary — do not arm the text-based approval pause.
     if (messageHasPendingAskUserQuestionsTool(event.message)) return;
+    // #2987: no human can answer a prose approval pause in a headless run
+    // (gsd headless sets GSD_HEADLESS=1 on the RPC child). Arming it there
+    // parked a durable pending gate in the project database that outlived the
+    // run and dead-ended every later dispatch, while the wrapper reported the
+    // run complete. Structured ask_user_questions rounds keep their headless
+    // answer paths (answer injector / auto-responder), and headless auto-mode
+    // detects the same awaiting-input boundary in its post-unit checks.
+    if (process.env.GSD_HEADLESS === "1") return;
 
     const dash = getAutoRuntimeSnapshot();
     if (dash.active) return;
