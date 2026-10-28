@@ -16,6 +16,7 @@ import type {
   ExtensionCommandContext,
 } from "@gsd/pi-coding-agent";
 import { deriveState } from "./state.js";
+import { captureAutoStartupOwnership } from "./auto/startup-ownership.js";
 import { findWorktreeSegment, isGsdWorktreePath } from "./worktree-root.js";
 import { getManifestStatus } from "./files.js";
 import type { InterruptedSessionAssessment } from "./interrupted-session.js";
@@ -946,6 +947,8 @@ export async function bootstrapAutoSession(
   deps: BootstrapDeps,
   interrupted: InterruptedSessionAssessment,
 ): Promise<boolean> {
+  const isCurrent = captureAutoStartupOwnership();
+  if (!isCurrent()) return false;
   prepareIsolationForNewRun(s);
 
   const {
@@ -987,6 +990,7 @@ export async function bootstrapAutoSession(
     return false;
   }
 
+  try {
   // Capture the user's session model before guided-flow dispatch can apply a
   // phase-specific planning model for a discuss turn (#2829).
   //
@@ -1010,6 +1014,7 @@ export async function bootstrapAutoSession(
   // External-CLI readiness is cached and refreshed in the background; get a
   // current answer first so a stale one cannot pick the start-model snapshot.
   await ctx.modelRegistry.settleProviderReadiness?.();
+  if (!isCurrent()) return releaseLockAndReturn();
   const manualSessionOverride = getSessionModelOverride(ctx.sessionManager.getSessionId());
   const sessionProviderIsCustom = isCustomProvider(ctx.model?.provider, ctx.modelRegistry);
   const profileModelIds = modelIdsForProfileResolution(
@@ -1027,6 +1032,7 @@ export async function bootstrapAutoSession(
   let validatedPreferredModel: { provider: string; id: string } | undefined;
   if (preferredModel) {
     const { resolveModelId } = await import("./auto-model-selection.js");
+    if (!isCurrent()) return releaseLockAndReturn();
     const available = ctx.modelRegistry.getAvailable();
     const match = resolveModelId(
       `${preferredModel.provider}/${preferredModel.id}`,
@@ -1081,7 +1087,6 @@ export async function bootstrapAutoSession(
     ?? currentSessionModel
     ?? null;
 
-  try {
     // Validate GSD_PROJECT_ID early so the user gets immediate feedback
     const customProjectId = process.env.GSD_PROJECT_ID;
     if (customProjectId && !validateProjectId(customProjectId)) {
@@ -1173,6 +1178,7 @@ export async function bootstrapAutoSession(
 
     {
       const { prepareWorkflowMcpForProject } = await import("./workflow-mcp-auto-prep.js");
+      if (!isCurrent()) return releaseLockAndReturn();
       prepareWorkflowMcpForProject(ctx, base);
     }
 
@@ -1189,6 +1195,7 @@ export async function bootstrapAutoSession(
     if (isDebugEnabled()) {
       const { isNativeParserAvailable } =
         await import("./native-parser-bridge.js");
+      if (!isCurrent()) return releaseLockAndReturn();
       debugLog("debug-start", {
         platform: process.platform,
         arch: process.arch,
@@ -1214,6 +1221,7 @@ export async function bootstrapAutoSession(
     // consult DB status and avoid clearing runtime units for milestones that
     // only have a failure-path SUMMARY on disk (#4663).
     await openProjectDbIfPresent(base);
+    if (!isCurrent()) return releaseLockAndReturn();
     registerAutoWorkerForSession(base);
     // Clean stale runtime unit files for completed milestones (#887).
     // DB-authoritative: when DB is available, require DB status to be closed
@@ -1298,6 +1306,7 @@ export async function bootstrapAutoSession(
     }
 
     let state = await deriveState(base);
+    if (!isCurrent()) return releaseLockAndReturn();
 
     // Stale worktree state recovery (#654)
     if (
@@ -1308,6 +1317,7 @@ export async function bootstrapAutoSession(
       const wtPath = getAutoWorktreePath(base, state.activeMilestone.id);
       if (wtPath) {
         state = await deriveState(wtPath);
+        if (!isCurrent()) return releaseLockAndReturn();
       }
     }
 
@@ -1393,6 +1403,7 @@ export async function bootstrapAutoSession(
     ) {
       const milestoneBranch = `milestone/${survivorMilestoneId}`;
       const { nativeBranchExists } = await import("./native-git-bridge.js");
+      if (!isCurrent()) return releaseLockAndReturn();
       hasSurvivorBranch = nativeBranchExists(base, milestoneBranch);
       if (hasSurvivorBranch) {
         ctx.ui.notify(
@@ -1412,9 +1423,11 @@ export async function bootstrapAutoSession(
     ) {
       const { showSmartEntry } = await import("./guided-flow.js");
       await showSmartEntry(ctx, pi, base, { step: requestedStepMode });
+      if (!isCurrent()) return releaseLockAndReturn();
 
       invalidateAllCaches();
       const postState = await deriveState(base);
+      if (!isCurrent()) return releaseLockAndReturn();
       if (
         postState.activeMilestone &&
         postState.phase !== "needs-discussion"
@@ -1452,6 +1465,7 @@ export async function bootstrapAutoSession(
       }
       invalidateAllCaches();
       state = await deriveState(base);
+      if (!isCurrent()) return releaseLockAndReturn();
       // Clear survivor flag — finalization is done
       hasSurvivorBranch = false;
     }
@@ -1493,6 +1507,7 @@ export async function bootstrapAutoSession(
         }
         invalidateAllCaches();
         state = await deriveState(base);
+        if (!isCurrent()) return releaseLockAndReturn();
       }
     }
 
@@ -1503,6 +1518,7 @@ export async function bootstrapAutoSession(
       startModelSnapshot ? `${startModelSnapshot.provider}/${startModelSnapshot.id}` : undefined,
     )?.preferences;
     const { shouldRunDeepProjectSetup } = await import("./auto-dispatch.js");
+    if (!isCurrent()) return releaseLockAndReturn();
     const deepProjectStagePending = shouldRunDeepProjectSetup(
       state,
       effectivePrefs,
@@ -1537,6 +1553,7 @@ export async function bootstrapAutoSession(
 
         const { showSmartEntry } = await import("./guided-flow.js");
         await showSmartEntry(ctx, pi, base, { step: requestedStepMode });
+        if (!isCurrent()) return releaseLockAndReturn();
 
         // showSmartEntry dispatches via pi.sendMessage() which is fire-and-forget:
         // it queues the message and returns immediately, before the LLM turn runs.
@@ -1556,6 +1573,7 @@ export async function bootstrapAutoSession(
         if (!hasSavedArtifact(mid, null, "CONTEXT") && effectivePrefs?.planning_depth !== "deep") {
           const { showSmartEntry } = await import("./guided-flow.js");
           await showSmartEntry(ctx, pi, base, { step: requestedStepMode });
+          if (!isCurrent()) return releaseLockAndReturn();
 
           // showSmartEntry dispatches via pi.sendMessage() which is fire-and-forget:
           // it queues the message and returns immediately, before the LLM turn runs.
@@ -1574,9 +1592,11 @@ export async function bootstrapAutoSession(
       if (state.phase === "needs-discussion") {
         const { showSmartEntry } = await import("./guided-flow.js");
         await showSmartEntry(ctx, pi, base, { step: requestedStepMode });
+        if (!isCurrent()) return releaseLockAndReturn();
 
         invalidateAllCaches();
         const postState = await deriveState(base);
+        if (!isCurrent()) return releaseLockAndReturn();
         if (
           postState.activeMilestone &&
           postState.phase !== "needs-discussion"
@@ -1596,6 +1616,7 @@ export async function bootstrapAutoSession(
     if (!state.activeMilestone && !deepProjectStagePending && !strandedRecoveryAction) {
       const { showSmartEntry } = await import("./guided-flow.js");
       await showSmartEntry(ctx, pi, base, { step: requestedStepMode });
+      if (!isCurrent()) return releaseLockAndReturn();
       return releaseLockAndReturn();
     }
 
@@ -1605,6 +1626,7 @@ export async function bootstrapAutoSession(
     // ── Initialize session state ──
     // Notify shared phase state so subagent conflict checks can fire
     const { activateGSD: activateGSDPhaseState } = await import("../shared/gsd-phase-state.js");
+    if (!isCurrent()) return releaseLockAndReturn();
     activateGSDPhaseState();
     s.active = true;
     s.stepMode = requestedStepMode;
@@ -1820,9 +1842,11 @@ export async function bootstrapAutoSession(
     if (workerModelOverride && process.env.GSD_PARALLEL_WORKER === "1") {
       const availableModels = ctx.modelRegistry.getAvailable();
       const { resolveModelId } = await import("./auto-model-selection.js");
+      if (!isCurrent()) return releaseLockAndReturn();
       const overrideModel = resolveModelId(workerModelOverride, availableModels, ctx.model?.provider);
       if (overrideModel) {
         const ok = await pi.setModel(overrideModel, { persist: false });
+        if (!isCurrent()) return releaseLockAndReturn();
         if (ok) {
           // Update start model so all subsequent units use this as the baseline
           s.autoModeStartModel = { provider: overrideModel.provider, id: overrideModel.id };
@@ -1875,6 +1899,7 @@ export async function bootstrapAutoSession(
     // FlatRateContext used by selectAndApplyModel so user-declared
     // flat-rate providers and externalCli auto-detection are respected.
     const { isFlatRateProvider, buildFlatRateContext } = await import("./auto-model-selection.js");
+    if (!isCurrent()) return releaseLockAndReturn();
     const bannerPrefs = loadEffectiveGSDPreferencesWithRegistry(
       ctx.modelRegistry,
       base,
@@ -1918,8 +1943,10 @@ export async function bootstrapAutoSession(
     if (mid) {
       try {
         const manifestStatus = await getManifestStatus(base, mid, s.originalBasePath || base);
+        if (!isCurrent()) return releaseLockAndReturn();
         if (manifestStatus && manifestStatus.pending.length > 0) {
           const result = await collectSecretsFromManifest(base, mid, ctx);
+          if (!isCurrent()) return releaseLockAndReturn();
           if (
             result &&
             result.applied &&

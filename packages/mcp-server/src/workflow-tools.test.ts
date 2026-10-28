@@ -861,6 +861,10 @@ describe("workflow MCP tools", () => {
       assert.match(record.content[0].text as string, /context mode default on/);
       assert.equal(record.structuredContent.operation, "gsd_exec");
       assert.equal(record.structuredContent.runtime, "node");
+      assert.equal(record.structuredContent.purpose, "default-on smoke");
+      assert.match(record.structuredContent.digest, /context mode default on/);
+      const meta = JSON.parse(readFileSync(record.structuredContent.meta_path, "utf-8"));
+      assert.equal(meta.purpose, record.structuredContent.purpose);
       assert.ok(existsSync(record.structuredContent.stdout_path), "stdout should be persisted");
       assert.equal(process.cwd(), originalCwd, "gsd_exec must not mutate process.cwd");
       assert.match(
@@ -889,6 +893,8 @@ describe("workflow MCP tools", () => {
       const record = result as any;
       assert.equal(record.isError, false);
       assert.equal(record.structuredContent.runtime, "bash");
+      assert.equal(record.structuredContent.purpose, undefined);
+      assert.match(record.structuredContent.digest, /mcp-command-alias-defaults-to-bash/);
       assert.match(record.content[0].text as string, /mcp-command-alias-defaults-to-bash/);
     } finally {
       cleanup(base);
@@ -961,6 +967,8 @@ describe("workflow MCP tools", () => {
       assert.equal(record.structuredContent.sliceId, "S01");
       assert.equal(record.structuredContent.checkId, "UAT-01");
       assert.equal(record.structuredContent.intent, "uat-runtime-check");
+      assert.equal(record.structuredContent.purpose, "UAT M001/S01/UAT-01 (uat-runtime-check)");
+      assert.match(record.structuredContent.digest, /UAT_OK/);
       assert.equal(typeof record.structuredContent.id, "string");
       assert.ok(existsSync(record.structuredContent.meta_path), "meta should be persisted");
       const meta = JSON.parse(readFileSync(record.structuredContent.meta_path, "utf-8")) as {

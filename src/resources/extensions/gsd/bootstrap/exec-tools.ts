@@ -67,11 +67,11 @@ export function registerExecTools(pi: ExtensionAPI): void {
         }),
       ),
     }),
-    renderCall(args: any, theme: any) {
-      return renderUatExecCall(args, theme);
+    renderCall(args: any, theme: any, context: any) {
+      return renderUatExecCall(args, theme, context);
     },
-    renderResult(result: any, options: any, theme: any) {
-      return renderExecResult(result, options, theme);
+    renderResult(result: any, options: any, theme: any, context: any) {
+      return renderExecResult(result, options, theme, context);
     },
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeUatExec } = await import("../tools/exec-tool.js");
@@ -96,6 +96,7 @@ export function registerExecTools(pi: ExtensionAPI): void {
     promptSnippet:
       "Run a bash/node/python script in a sandbox; capped output is saved to disk and only a digest returns",
     promptGuidelines: [
+      "Include a concise English purpose describing why the script is being run; the UI displays it instead of the script.",
       "Prefer gsd_exec for analyses that would otherwise read >3 files or produce large tool output.",
       "Write scripts that log the finding (counts, matches, summaries) rather than raw dumps.",
       "The digest is the last ~300 chars of stdout — size your log output accordingly.",
@@ -128,11 +129,11 @@ export function registerExecTools(pi: ExtensionAPI): void {
         }),
       ),
     }),
-    renderCall(args: any, theme: any) {
-      return renderExecCall("Exec (Sandboxed)", args, theme);
+    renderCall(args: any, theme: any, context: any) {
+      return renderExecCall("Exec (Sandboxed)", args, theme, context);
     },
-    renderResult(result: any, options: any, theme: any) {
-      return renderExecResult(result, options, theme);
+    renderResult(result: any, options: any, theme: any, context: any) {
+      return renderExecResult(result, options, theme, context);
     },
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { executeGsdExec } = await import("../tools/exec-tool.js");

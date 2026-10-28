@@ -168,13 +168,30 @@ export function formatWorkflowDatabaseOpenFailure(
   );
 }
 
+export interface DatabaseOpenFailureObservation {
+  reason?: string;
+}
+
+// Observation accounting must never copy raw opening errors or filesystem paths.
+export function dbOpenFailureForObservation(reason: unknown): Error {
+  const allowed = [
+    "missing-database", "missing-gsd-dir", "locked", "open-failed",
+    "schema-too-new", "authority-missing", "checkout-unbound",
+  ];
+  const suffix = typeof reason === "string" && allowed.includes(reason) ? ` [open:${reason}]` : "";
+  return new Error(`GSD database is not available${suffix}`);
+}
+
 export async function ensureDbOpen(
   basePath: string = safeWorkspaceCwd(),
   options: OpenWorkflowDatabaseOptions = {},
+  observation?: DatabaseOpenFailureObservation,
 ): Promise<boolean> {
+  if (observation) observation.reason = undefined;
   const result = openWorkflowDatabase(basePath, options);
   if (result.ok) return true;
 
+  if (observation) observation.reason = result.reason;
   logWarning("bootstrap", formatWorkflowDatabaseOpenFailure(result));
   // A too-new schema, a lost authority or another checkout's database is not
   // generic unavailability: throw the typed error so callers cannot degrade.

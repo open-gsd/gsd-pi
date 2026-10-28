@@ -59,4 +59,3 @@ test("buildValidateMilestonePrompt renders the enforced source revision into the
     `no placeholder revision may be used as a value: ${placeholderAsValue?.[0] ?? ""}`,
   );
 });
-

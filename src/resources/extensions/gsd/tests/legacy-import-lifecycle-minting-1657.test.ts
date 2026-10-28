@@ -364,7 +364,8 @@ test("/gsd db adopt --apply stores one unverified-legacy evidence marker for eac
   const lifecyclesBefore = lifecycleRows();
 
   await handleDbAdopt(ctx as any, projectRoot);
-  assert.match(notes[0]!, /5 imported completion\(s\) would get the unverified-legacy evidence marker/);
+  assert.match(notes[0]!, /Existing-row repairs: 0 Waivers; 5 imported-completion markers/);
+  assert.match(notes[0]!, /Initial effects: 0 cancelled-item Waivers; 0 unverified-legacy adoption markers/);
   assert.match(notes[0]!, /import-adopted-completion: 5/);
   assert.doesNotMatch(notes[0]!, /Restore Window/);
   assert.deepEqual(evidenceMarkers(), [], "the preview writes nothing");
@@ -389,7 +390,7 @@ test("/gsd db adopt --apply with a row that has no lifecycle row runs in an open
   insertMilestone({ id: "M900", title: "Old work", status: "active" });
 
   await handleDbAdopt(ctx as any, projectRoot);
-  assert.match(notes[0]!, /1 row\(s\) would be adopted/);
+  assert.match(notes[0]!, /Initial adoptions: 1; projected status changes: 0/);
   assert.match(notes[0]!, /--apply closes it: after that, the import cannot be restored/);
   assert.deepEqual(operationTypes(), ["import.apply"]);
 

@@ -18,6 +18,7 @@ import {
   openDatabase,
 } from "../gsd-db.ts";
 import { executeMilestoneStatus } from "../tools/workflow-tool-executors.ts";
+import { lifecycleShadowErrorHash } from "../lifecycle-shadow-observation.ts";
 
 const tempDirs = new Set<string>();
 
@@ -227,6 +228,30 @@ test("a shadow-query failure preserves the milestone response and persists expli
 
 // The Authority Epoch chooses the read source of the status response. A read
 // that cannot learn the epoch must not answer from either source.
+test("a missing database root retains a classified query cause without changing the status response", async () => {
+  closeDatabase();
+  const basePath = mkdtempSync(join(tmpdir(), "gsd-shadow-missing-db-"));
+  tempDirs.add(basePath);
+
+  const result = await executeMilestoneStatus({ milestoneId: "M001" }, basePath);
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].text, "Error: GSD database is not available.");
+  assert.deepEqual(result.details, { operation: "milestone_status", error: "db_unavailable" });
+
+  const journal = readFileSync(join(basePath, ".gsd", "audit", "events.jsonl"), "utf8");
+  const event = journal.trim().split("\n").map(line => JSON.parse(line))
+    .find(entry => entry.type === "lifecycle-shadow-observation-loss");
+  assert.ok(event);
+  const accounting = event.payload.observationLossAccounting;
+  assert.equal(accounting.lossCount, 2);
+  assert.equal(accounting.persistedCount, 0);
+  assert.equal(accounting.causes[0].reason, "shadow_query_failed");
+  assert.equal(accounting.causes[0].errorHash,
+    lifecycleShadowErrorHash(new Error("GSD database is not available [open:missing-gsd-dir]")));
+  assert.notEqual(accounting.causes[0].errorHash, accounting.causes[1].errorHash);
+  assert.doesNotMatch(journal, /gsd-shadow-missing-db-/);
+});
+
 test("an Authority Epoch query failure fails the status read closed and is loss-accounted", async () => {
   const basePath = makeFixture();
   const db = _getAdapter()!;

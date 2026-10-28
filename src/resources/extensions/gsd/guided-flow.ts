@@ -111,6 +111,7 @@ import {
   formatPriorContextBrief,
 } from "./preparation.js";
 import { verifyExpectedArtifact } from "./auto-recovery.js";
+import { captureAutoStartupOwnership, onAutoStartupCancelled, noteAutoStartupDispatch } from "./auto/startup-ownership.js";
 import { createWorkspace, scopeMilestone, type MilestoneScope } from "./workspace.js";
 import { clearPendingGate, extractDepthVerificationMilestoneId, getPendingGate } from "./bootstrap/write-gate.js";
 import {
@@ -505,6 +506,7 @@ export async function startDeepProjectSetupForeground(
   basePath: string,
   step?: boolean,
 ): Promise<void> {
+  if (!captureAutoStartupOwnership()()) return;
   const entry: PendingDeepProjectSetupEntry = {
     ctx,
     pi,
@@ -514,6 +516,9 @@ export async function startDeepProjectSetupForeground(
     sessionId: getDeepSetupSessionId(ctx),
   };
   pendingDeepProjectSetupMap.set(basePath, entry);
+  onAutoStartupCancelled(() => {
+    if (pendingDeepProjectSetupMap.get(basePath) === entry) pendingDeepProjectSetupMap.delete(basePath);
+  });
   await dispatchNextDeepProjectSetupStage(entry);
 }
 
@@ -553,6 +558,7 @@ export async function checkDeepProjectSetupAfterTurn(
 }
 
 async function dispatchNextDeepProjectSetupStage(entry: PendingDeepProjectSetupEntry): Promise<boolean> {
+  if (!captureAutoStartupOwnership()()) return false;
   // The setup gates read and record database rows.
   const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
   await ensureDbOpen(entry.basePath);
@@ -759,6 +765,8 @@ async function dispatchWorkflow(
   // discussion open afterwards (#2979) must not wait on a turn that never
   // started — every early return below reports false.
   const resolvedOptions = options ?? {};
+  const isCurrent = captureAutoStartupOwnership();
+  if (!isCurrent()) return false;
   const projectRoot = resolveGuidedDispatchProjectRoot(resolvedOptions.basePath);
   const loadPreferences = resolvedOptions.deps?.loadPreferences ?? loadEffectiveGSDPreferences;
   const selectModel = resolvedOptions.deps?.selectModel ?? selectAndApplyModel;
@@ -769,6 +777,7 @@ async function dispatchWorkflow(
   // every guided dispatch until the user imports or discards it.
   const { heldProjectionChangesBeforeDispatch } = await import("./state-reconciliation.js");
   const heldProjectionChanges = await heldProjectionChangesBeforeDispatch(projectRoot);
+  if (!isCurrent()) return false;
   if (heldProjectionChanges) {
     ctx?.ui.notify(heldProjectionChanges, "error");
     return false;
@@ -783,6 +792,7 @@ async function dispatchWorkflow(
       prefs, /* verbose */ false, /* autoModeStartModel */ null,
       /* retryContext */ undefined, /* isAutoMode */ false,
     );
+    if (!isCurrent()) return false;
     if (result.appliedModel) {
       debugLog("guided-flow-model-applied", {
         unitType,
@@ -820,6 +830,7 @@ async function dispatchWorkflow(
       // If the workflow MCP server is configured but still connecting, wait
       // for it instead of dispatching into a child session that will abort.
       const readinessFailure = await awaitWorkflowMcpReadiness(pi, ctx, projectRoot, { unitType });
+      if (!isCurrent()) return false;
       if (readinessFailure) {
         const detail = readinessFailure.error ? ` ${readinessFailure.error}` : "";
         ctx.ui.notify(
@@ -843,6 +854,7 @@ async function dispatchWorkflow(
   // The one-unit bound (ADR-048): claim the unit through the kernel before the
   // turn runs. A refusal stops the dispatch; a claim is settled when the turn
   // ends, below.
+  if (!isCurrent()) return false;
   let claimed: Extract<KernelUnitClaim, { kind: "claimed" }> | null = null;
   if (resolvedOptions.claim) {
     const claim = kernelClaimUnit({
@@ -893,8 +905,10 @@ async function dispatchWorkflow(
     const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(gsdHome(), "agent", "GSD-WORKFLOW.md");
     const workflow = readFileSync(workflowPath, "utf-8");
 
+    let ownedGuidedContext: ReturnType<typeof setGuidedUnitContext> | null = null;
     if (unitType) {
       const guidedContext = setGuidedUnitContext(projectRoot, unitType);
+      ownedGuidedContext = guidedContext;
       // The agent-end handler settles the claim before the discuss-to-auto
       // handoff runs, whichever of the two turn-end paths resolves first.
       if (claimed) {
@@ -910,8 +924,19 @@ async function dispatchWorkflow(
       // The turn runs under the claim's worker heartbeat and lease renewal, so
       // a turn longer than the lease TTL cannot lose the claim to another
       // session's stale-takeover while it runs (the one-unit bound).
-      const send = () =>
-        pi.sendMessage(
+      let dispatched = false;
+      const send = async () => {
+        if (!isCurrent()) {
+          if (ownedGuidedContext && getGuidedUnitContext(projectRoot) === ownedGuidedContext) {
+            clearGuidedUnitContext(projectRoot);
+          }
+          if (claimed) {
+            kernelSettleUnitClaim(claimed, "canceled", "startup-canceled-before-guided-dispatch");
+            claimed = null;
+          }
+          return;
+        }
+        await pi.sendMessage(
           {
             customType,
             content: buildWorkflowDispatchContent({ workflow, workflowPath, task: note }),
@@ -919,11 +944,15 @@ async function dispatchWorkflow(
           },
           { triggerTurn: true },
         );
+        noteAutoStartupDispatch();
+        dispatched = true;
+      };
       if (claimed) {
         await runInteractiveClaimTurn(claimed, send);
       } else {
         await send();
       }
+      if (!dispatched) return false;
     } catch (err) {
       clearGuidedUnitContext(projectRoot);
       if (claimed) {
@@ -2188,6 +2217,7 @@ export async function showSmartEntry(
   basePath: string,
   options?: { step?: boolean },
 ): Promise<void> {
+  if (!captureAutoStartupOwnership()()) return;
   const stepMode = options?.step ?? true;
   warmWorkflowMcpProbeInBackground(basePath);
 

@@ -4,7 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { enableDebug } from "../../debug-logger.js";
-import { getAutoDashboardData, isAutoActive, isAutoPaused, pauseAuto, startAutoDetached, stopAuto, stopAutoRemote } from "../../auto.js";
+import { getAutoDashboardData, isAutoActive, isAutoPaused, isAutoStartPending, pauseAuto, startAutoDetached, stopAuto, stopAutoRemote } from "../../auto.js";
+import { parseAutoRecoverFlag } from "../../auto-recovery-options.js";
 import { acknowledgeWedgeStepMode } from "../../auto-liveness-backstop.js";
 import { handleRate } from "../../commands-rate.js";
 import { notifyPreferenceDiagnostics } from "../../preferences-diagnostics.js";
@@ -105,7 +106,11 @@ export function parseMilestoneTarget(input: string): { milestoneId: string | nul
 }
 
 export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<boolean> {
-  if (trimmed === "next" || trimmed.startsWith("next ")) {
+  if (/^next(?:\s|$)/.test(trimmed)) {
+    if (parseAutoRecoverFlag(trimmed).autoRecover) {
+      ctx.ui.notify("--auto-recover is for /gsd auto, not single-step /gsd next.", "error");
+      return true;
+    }
     if (trimmed.includes("--dry-run")) {
       const { handleDryRun } = await import("../../commands-maintenance.js");
       await handleDryRun(ctx, projectRoot());
@@ -136,10 +141,15 @@ export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandCo
     return true;
   }
 
-  if (trimmed === "auto" || trimmed.startsWith("auto ")) {
-    const { resumeWedgeId, rest: afterWedge } = parseResumeWedgeFlag(trimmed);
+  if (/^auto(?:\s|$)/.test(trimmed)) {
+    const { autoRecover, rest: afterRecovery } = parseAutoRecoverFlag(trimmed);
+    const { resumeWedgeId, rest: afterWedge } = parseResumeWedgeFlag(afterRecovery);
     const { modelQuery, rest: afterModel } = parseModelFlag(afterWedge);
     const { yoloSeedFile, rest: afterYolo } = parseYoloFlag(afterModel);
+    if (autoRecover && yoloSeedFile) {
+      ctx.ui.notify("--auto-recover requires an existing canonical Project; enable it after --yolo bootstrap.", "error");
+      return true;
+    }
     const { milestoneId, rest: afterMilestone } = parseMilestoneTarget(afterYolo);
     const verboseMode = afterMilestone.includes("--verbose");
     const debugMode = afterMilestone.includes("--debug");
@@ -202,9 +212,10 @@ export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandCo
       startAutoDetached(ctx, pi, basePath, verboseMode, {
         milestoneLock: milestoneId,
         resumeWedgeId,
+        autoRecover,
       });
     } else {
-      startAutoDetached(ctx, pi, basePath, verboseMode, { resumeWedgeId });
+      startAutoDetached(ctx, pi, basePath, verboseMode, { resumeWedgeId, autoRecover });
     }
     return true;
   }
@@ -243,7 +254,7 @@ export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandCo
   }
 
   if (trimmed === "stop") {
-    if (!isAutoActive() && !isAutoPaused()) {
+    if (!isAutoActive() && !isAutoPaused() && !isAutoStartPending()) {
       const result = stopAutoRemote(projectRoot());
       if (result.found) {
         ctx.ui.notify(`Sent stop signal to auto-mode session (PID ${result.pid}). It will shut down gracefully.`, "info");

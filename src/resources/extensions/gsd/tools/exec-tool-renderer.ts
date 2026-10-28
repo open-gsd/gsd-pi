@@ -19,6 +19,10 @@ const LEGACY_FALLBACK_MAX_LINES = 12;
 /** Cap for error-content rendering on execution failures (timeouts, nonzero exits). */
 const ERROR_CONTENT_MAX_LINES = 20;
 
+type ExecRendererContext = { state?: Record<string, unknown> };
+const VT_STRING_SEQUENCE = /(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[\s\S]*?(?:\x1b\\|\x9c|$)/g;
+const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/g;
+
 // C0 controls except \n and \t, plus CR, DEL, and C1 — safe Unicode survives.
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\r\u0080-\u009F]/g;
 // OSC sequences (hyperlinks, window titles) including their payload text.
@@ -52,7 +56,8 @@ function detailBoolean(record: Record<string, unknown> | null, key: string): boo
 
 /** Strip terminal escapes (OSC/CSI/SGR) and control sequences; keep safe Unicode, \n and \t. */
 export function sanitizeExecDisplayText(text: string): string {
-	return stripAnsi(text.replace(OSC_SEQUENCE, "").replace(CSI_SEQUENCE, "")).replace(CONTROL_CHARS, "");
+	return stripAnsi(text.replace(VT_STRING_SEQUENCE, "").replace(OSC_SEQUENCE, "").replace(CSI_SEQUENCE, ""))
+		.replace(CONTROL_CHARS, "").replace(BIDI_CONTROLS, "");
 }
 
 /**
@@ -101,15 +106,15 @@ function italicize(theme: ThemeLike, text: string): string {
 
 /** The purpose the UAT executor synthesizes when none was passed (display only). */
 function uatSynthesizedPurpose(record: Record<string, unknown> | null): string | undefined {
-	const milestoneId = detailString(record, "milestoneId");
-	const sliceId = detailString(record, "sliceId");
-	const checkId = detailString(record, "checkId");
-	const intent = detailString(record, "intent");
+	const [milestoneId, sliceId, checkId, intent] = ["milestoneId", "sliceId", "checkId", "intent"]
+		.map(key => normalizeExecPurpose(detailString(record, key)));
 	if (!milestoneId || !sliceId || !checkId || !intent) return undefined;
 	return `UAT ${milestoneId}/${sliceId}/${checkId} (${intent})`;
 }
 
-function buildCallText(label: string, purpose: string | undefined, runtime: unknown, theme: ThemeLike): Text {
+function buildCallText(label: string, purpose: string | undefined, runtime: unknown, theme: ThemeLike, context?: ExecRendererContext): Text {
+	// Only this native host opts in; standalone/older hosts retain the call card.
+	if (context?.state?.gsdExecPurposeInFrame === true) return new Text("", 0, 0);
 	const runtimeLabel = execRuntimeLabel(runtime);
 	const fallback = runtimeLabel === "Script" ? "script" : `${runtimeLabel} script`;
 	const detail = purpose ?? fallback;
@@ -118,16 +123,16 @@ function buildCallText(label: string, purpose: string | undefined, runtime: unkn
 }
 
 /** Compact call card for gsd_exec: label plus the explicit purpose (or runtime label). */
-export function renderExecCall(label: string, args: unknown, theme: ThemeLike): Text {
+export function renderExecCall(label: string, args: unknown, theme: ThemeLike, context?: ExecRendererContext): Text {
 	const record = asRecord(args);
-	return buildCallText(label, normalizeExecPurpose(record?.purpose), record?.runtime, theme);
+	return buildCallText(label, normalizeExecPurpose(record?.purpose), record?.runtime, theme, context);
 }
 
 /** Compact call card for gsd_uat_exec: derives the running purpose from UAT metadata when streaming. */
-export function renderUatExecCall(args: unknown, theme: ThemeLike): Text {
+export function renderUatExecCall(args: unknown, theme: ThemeLike, context?: ExecRendererContext): Text {
 	const record = asRecord(args);
 	const purpose = normalizeExecPurpose(record?.purpose) ?? normalizeExecPurpose(uatSynthesizedPurpose(record));
-	return buildCallText("UAT Exec", purpose, record?.runtime, theme);
+	return buildCallText("UAT Exec", purpose, record?.runtime, theme, context);
 }
 
 function resultContentText(result: Record<string, unknown> | null): string {
@@ -146,6 +151,22 @@ function boundedLines(text: string, maxLines: number, lineChars = Number.POSITIV
 	const kept = lines.slice(0, maxLines).map((line) => (line.length > lineChars ? `${line.slice(0, lineChars - 1)}…` : line));
 	const suffix = lines.length > maxLines ? `\n… (${lines.length - maxLines} more lines hidden)` : "";
 	return kept.join("\n") + suffix;
+}
+
+function previewCard(before: string[], preview: string, warnings: string[], theme: ThemeLike, expanded: boolean): Text {
+	const card = new Text("", 0, 0);
+	card.render = (width: number): string[] => {
+		const columns = Math.max(1, width);
+		const rows = preview ? new Text(preview, 0, 0).render(columns) : [];
+		const limit = expanded ? 20 : 6;
+		return [
+			...(before.length ? new Text(before.join("\n"), 0, 0).render(columns) : []),
+			...rows.slice(0, limit),
+			...(rows.length > limit ? new Text(theme.fg("muted", "(preview rows hidden; open the full logs)"), 0, 0).render(columns) : []),
+			...(warnings.length ? new Text(warnings.join("\n"), 0, 0).render(columns) : []),
+		];
+	};
+	return card;
 }
 
 /**
@@ -220,17 +241,36 @@ function outputRow(kind: "stdout" | "stderr", details: Record<string, unknown> |
  * to the bounded original content plus the structured recording warning
  * otherwise, so a long digest cannot push either out of view.
  */
-export function renderExecResult(result: unknown, _options: unknown, theme: ThemeLike): Text {
+export function renderExecResult(result: unknown, options: unknown, theme: ThemeLike, context?: ExecRendererContext): Text {
 	const record = asRecord(result);
 	const details = asRecord(record?.details);
 	const content = sanitizeExecDisplayText(resultContentText(record)).trim();
 
-	const notRecorded = detailString(details, "run_not_recorded");
-	const notRecordedRow = notRecorded
-		? theme.fg("warning", `not recorded (${sanitizeExecDisplayText(notRecorded)}) — not verification or UAT evidence`)
+	const notRecorded = typeof details?.run_not_recorded === "string" ? details.run_not_recorded : undefined;
+	// An explicit native owner renders the canonical warning outside every body cap.
+	// Older/standalone contexts retain this renderer's structured warning row.
+	const notRecordedRow = notRecorded !== undefined && context?.state?.gsdExecRecordingWarningInFrame !== true
+		? theme.fg("warning", `not recorded (${sanitizeExecDisplayText(notRecorded) || "reason unavailable"}) — not verification or UAT evidence`)
 		: undefined;
+	// Metadata wins even without a digest. Raw-only compatibility requires the
+	// paired historical host footer rather than arbitrary command-output markers.
+	const legacy = Object.keys(details ?? {}).length === 0
+		? /(?:^|\n)--- warning ---\nThe command ran, but the host did not record this run:/.exec(content)
+		: null;
+	const body = legacy ? content.slice(0, legacy.index).trimEnd() : content;
+	let legacyWarning = legacy ? content.slice(legacy.index).trim() : undefined;
+	if (legacyWarning && !legacyWarning.includes("not verification or UAT evidence")) {
+		legacyWarning += "\nThis run is not verification or UAT evidence.";
+	}
+	if (legacyWarning && !legacyWarning.includes("Do not run the command again")) {
+		legacyWarning += " Do not run the command again only to get the output.";
+	}
+	const warnings = [notRecordedRow, legacyWarning ? theme.fg("warning", legacyWarning) : undefined]
+		.filter((row): row is string => row !== undefined);
+	const expanded = asRecord(options)?.expanded === true;
 
 	if (record?.isError === true) {
+		// Original errors remain authoritative; warnings never fall inside preview caps.
 		// Structured failure card (issue #2927): previews are rebuilt from
 		// details so a long stdout digest cannot push the stderr diagnostics —
 		// or the structured recording warning — out of the fixed error budget
@@ -285,13 +325,11 @@ export function renderExecResult(result: unknown, _options: unknown, theme: Them
 		// Content is the authoritative error text (validation, policy block,
 		// execution failure): show it bounded, then guarantee the structured
 		// recording warning regardless of how long the content is.
-		const errorText = content.length > 0 ? boundedLines(content, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
+		const errorText = body.length > 0 ? boundedLines(body, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
 		const lines = [theme.fg("error", errorText)];
 		if (notRecordedRow) lines.push(notRecordedRow);
 		return new Text(lines.join("\n"), 0, 0);
 	}
-
-	if (!details) return legacyFallback(record, theme);
 
 	const lines: string[] = [];
 	const status = execStatusText(details);
@@ -300,20 +338,14 @@ export function renderExecResult(result: unknown, _options: unknown, theme: Them
 	if (stdoutRow) lines.push(theme.fg("toolOutput", stdoutRow));
 	const stderrRow = outputRow("stderr", details);
 	if (stderrRow) lines.push(theme.fg("toolOutput", stderrRow));
-	if (notRecordedRow) lines.push(notRecordedRow);
-
 	const digest = detailString(details, "digest");
 	if (digest) {
-		// Stream-neutral label: the sandbox digest may be a stderr tail when
-		// stdout was empty.
+		// Stream-neutral: a digest can be a stderr tail when stdout was empty.
 		lines.push(theme.fg("muted", "output preview — tail of the run's captured output, not the full log:"));
-		lines.push(theme.fg("toolOutput", boundedLines(sanitizeExecDisplayText(digest), DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
-	} else if (content.length > 0) {
-		// Pre-slice structured rows: output (and any genuine recording warning)
-		// lives only in content — keep it visible without interpreting markers.
-		lines.push(theme.fg("toolOutput", boundedLines(content, LEGACY_FALLBACK_MAX_LINES)));
 	}
-
-	if (lines.length === 0) return legacyFallback(record, theme);
-	return new Text(lines.join("\n"), 0, 0);
+	const preview = digest
+		? boundedLines(sanitizeExecDisplayText(digest), DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)
+		: boundedLines(body, LEGACY_FALLBACK_MAX_LINES);
+	if (lines.length === 0 && !preview && warnings.length === 0) return legacyFallback(record, theme);
+	return previewCard(lines, theme.fg("toolOutput", preview), warnings, theme, expanded);
 }

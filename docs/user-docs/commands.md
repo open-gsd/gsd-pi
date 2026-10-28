@@ -8,6 +8,7 @@
 | `/gsd next` | Explicit step mode (same as `/gsd`) |
 | `/gsd auto` | Autonomous mode — research, plan, execute, commit, repeat |
 | `/gsd auto --resume-wedge <id>` | Resume the currently open liveness wedge; its originating guard must be clear before auto mode re-enters |
+| `/gsd auto --auto-recover` | With native operator approval, automatically resume eligible mechanical retry pauses up to three times in this run; human gates remain enforced |
 | `/gsd quick [--discuss] [--research] [--validate] [--full] <task>` | Execute a quick task with GSD guarantees; optionally add discussion, research, plan checking, and post-execution verification (`--full` enables all three stages) |
 | `/gsd do <text>` | Route freeform text to the right GSD command |
 | `/gsd stop` | Stop auto mode gracefully |
@@ -438,6 +439,32 @@ selector always refuses them, including retries and historical unsafe success
 receipts; a cached receipt cannot grant human authority. Live-session UI responses
 and the legacy persisted-escalation `questionId` / `response` behavior remain
 available.
+
+### Bounded automatic recovery
+
+Use `/gsd auto --auto-recover` on an existing, normally opened canonical Project.
+A native terminal review requires an actual approval key before recording the
+run permission. RPC dialog responses, a PTY, command metadata, or a flag alone
+cannot mint approval. Cancelling does not start auto or record an approval.
+
+The permission is limited to this Project, Authority Epoch and in-memory run,
+expires after 30 minutes, and allows at most three automatic resume reservations.
+Only `machine_fixable` pauses whose Recovery Classifier action is exactly `retry`
+qualify. Each reservation is atomic and bound to the still-open pause; replay
+cannot schedule another resume. Operator stop wins over a queued callback and
+revokes permission. Process restart does not restore the in-memory attachment.
+The authorization, agent reservations and revocation use the canonical Domain
+Operation ledger, never `runtime_kv` soft state.
+
+This is **not** an ignore-UAT or ignore-needs-human mode. All seven human blocker
+kinds, user-owned Blockers, review, credentials/access, security, budgets and
+existing retry limits remain enforced. An automatic resume uses normal startup
+checks; it does not resolve a Blocker, provide repair evidence, authorize a Task
+retry, complete an Attempt/Task, or bypass a liveness wedge. Exhausted, stale,
+expired or mismatched permission leaves the ordinary paused outcome intact.
+
+The flag is not supported with single-step `/gsd next` or `--yolo` bootstrap.
+There is no separate `autonomous` alias: `/gsd auto` is the autonomous entry point.
 
 ## Keyboard Shortcuts
 

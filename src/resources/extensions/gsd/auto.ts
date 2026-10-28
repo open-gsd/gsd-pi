@@ -165,7 +165,7 @@ import { setLogBasePath, logWarning, logError } from "./workflow-logger.js";
 import { preflightCleanRoot, postflightPopStash } from "./clean-root-preflight.js";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, realpathSync } from "node:fs";
 import { atomicWriteSync } from "./atomic-write.js";
 import {
   autoCommitCurrentBranch,
@@ -302,6 +302,7 @@ import { resolveUokFlags } from "./uok/flags.js";
 import { validateDirectory } from "./validate-directory.js";
 import { createAutoOrchestrator } from "./auto/orchestrator.js";
 import { kernelResume, kernelStart, kernelStop } from "./auto/lifecycle-kernel.js";
+import { createAutoStartupOwnership } from "./auto/startup-ownership.js";
 import type { AutoAdvanceResult, AutoOrchestrationModule } from "./auto/contracts.js";
 import {
   repairAutoWorktreeSafetyFailure,
@@ -357,7 +358,9 @@ import { gsdHome } from "./gsd-home.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
 import {
   registerAutoWorker,
+  hasOpenUnitDispatches,
   markWorkerStopping,
+  markWorkerStopped,
   getAutoWorker,
   markWorkerStoppingByPid,
   getAllAutoWorkers,
@@ -371,14 +374,20 @@ import {
   stopNoticeDisplayReason,
 } from "./stop-notice.js";
 import { emitWorkflowOutcomeEvent } from "./workflow-outcome-event.js";
-import { classifyFailure } from "./recovery-classification.js";
+import { classifyFailure, type RecoveryClassification } from "./recovery-classification.js";
+import { AUTO_RECOVERY_MAX_RETRIES, authorizeAutoRecovery, canAutomaticallyRecover,
+  consumeAutoRecoveryRetry, revokeAutoRecovery } from "./auto-recovery-authorization.js";
+import { approveInNativeTerminal } from "./commands-blocker.js";
+import { getDb, getDbPath } from "./db/engine.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { requirePauseBlockerCheckout } from "./pause-blocker-inspection.js";
 import {
   findPauseLifecycleId,
   isHumanPauseBlockerKind,
   openPauseBlockerRow,
   resolvePauseBlockerRow,
 } from "./pause-blocker-domain-operation.js";
-import { readOpenAutoPauseBlockerId, setAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
+import { readOpenAutoPause, readOpenAutoPauseBlockerId, setAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
 import { abortActiveUnitTurn } from "./auto/unit-turn-abort.js";
 
 // ── ENCAPSULATION INVARIANT ─────────────────────────────────────────────────
@@ -712,39 +721,37 @@ function withDetachedAutoKeepalive<T>(run: Promise<T>): Promise<T> {
 
 export const _withDetachedAutoKeepaliveForTest = withDetachedAutoKeepalive;
 
+type AutoStartOptions = {
+  autoRecover?: boolean;
+  step?: boolean;
+  interrupted?: InterruptedSessionAssessment;
+  milestoneLock?: string | null;
+  resumeWedgeId?: string | null;
+};
+
+type AutoStartAttempt = NonNullable<AutoSession["pendingStart"]>;
+
 export function startAutoDetached(
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
   base: string,
   verboseMode: boolean,
-  options?: {
-    step?: boolean;
-    interrupted?: InterruptedSessionAssessment;
-    milestoneLock?: string | null;
-    resumeWedgeId?: string | null;
-  },
-): void {
-  void withDetachedAutoKeepalive(startAuto(ctx, pi, base, verboseMode, options)).catch(async (err) => {
-    const message = getErrorMessage(err);
-    ctx.ui.notify(`Auto-start failed: ${message}`, "error");
-    logWarning("engine", `auto start error: ${message}`, { file: "auto.ts" });
-    debugLog("auto-start-failed", { error: message });
-    // Backstop cleanup (#1235): if startAuto threw after auto-mode was activated
-    // (e.g. an exception during bootstrap, before the loop's try/finally could
-    // run cleanupAfterLoopExit), s.active and the on-disk auto lock leak, so the
-    // re-entry guard silently no-ops every later /gsd auto until restart. Clear
-    // the leaked activation here so a failed start is always recoverable.
-    if (s.active) {
-      try {
-        await cleanupAfterLoopExit(ctx);
-      } catch (cleanupErr) {
-        logWarning(
-          "engine",
-          `auto start cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`,
-          { file: "auto.ts" },
-        );
-      }
-    }
+  options?: AutoStartOptions,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    // Startup acknowledgement is separate from the full detached run lifetime.
+    void withDetachedAutoKeepalive(
+      startAutoWithAcknowledgement(ctx, pi, base, verboseMode, options, resolve),
+    ).catch((err) => {
+      resolve(false);
+      const message = getErrorMessage(err);
+      ctx.ui.notify(`Auto-start failed: ${message}`, "error");
+      logWarning("engine", `auto start error: ${message}`, { file: "auto.ts" });
+      debugLog("auto-start-failed", { error: message });
+    }).catch(() => {
+      // A failing notification surface must not leave an unhandled rejection.
+      resolve(false);
+    });
   });
 }
 
@@ -1643,6 +1650,10 @@ export async function cleanupAfterLoopExit(ctx: ExtensionContext): Promise<void>
   // needs the fencing token, #2429), and retiring it here would fence that
   // resume out. When pause did not preserve coordination it already cleared
   // s.workerId, so this block is a no-op in that case.
+  // Retained so the terminal `stopped` transition can be written after all
+  // loop-exit work completes (#3029); null when coordination was preserved
+  // for a paused surface (the session may resume in-process).
+  const retiredWorkerId = s.workerId;
   if (!preservePausedSurface) {
     try {
       if (s.workerId && s.currentMilestoneId && s.milestoneLeaseToken) {
@@ -1725,6 +1736,20 @@ export async function cleanupAfterLoopExit(ctx: ExtensionContext): Promise<void>
     const workspaceRoot = s.basePath || s.originalBasePath;
     if (workspaceRoot) {
       await maybeRerootStepSessionForHighContext(ctx, workspaceRoot, s.cmdCtx, s.originalBasePath);
+    }
+  }
+
+  // All loop-exit work is done and the database is still open: retire the
+  // worker row terminally (#3029). A paused session may resume in-process,
+  // so its row stays `stopping` until a real exit; a row that still owns
+  // unfinished dispatches keeps #1773 stale recovery instead.
+  if (!s.paused && retiredWorkerId) {
+    try {
+      if (!hasOpenUnitDispatches(retiredWorkerId)) {
+        markWorkerStopped(retiredWorkerId);
+      }
+    } catch (err) {
+      logWarning("session", `worker retirement failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
   }
 }
@@ -1813,13 +1838,53 @@ export function _resolveAutoWorktreeExitActionForTest(
  * dispatch), and resets all engine state. Safe to call when the engine is
  * already stopped.
  */
+export function isAutoStartPending(): boolean {
+  return Boolean(s.pendingStart || s.pendingDeferredStarts.size > 0 || s.stopInProgress || s.autoRecoveryPending ||
+    s.autoRecoveryAuthorizationId || s.autoRecoveryRunId);
+}
+
 export async function stopAuto(
   ctx?: ExtensionContext,
   pi?: ExtensionAPI,
   reason?: string,
   options: StopAutoOptions = {},
 ): Promise<void> {
-  if (!s.active && !s.paused) return;
+  // Cancel and detach before every early return and the first await.
+  if (s.pendingStart) {
+    s.pendingStart.cancelled = true;
+    s.pendingStart.acknowledge(false);
+    s.pendingStart.cancelPending?.();
+  }
+  for (const pending of s.pendingDeferredStarts) pending.cancel();
+  s.pendingDeferredStarts.clear();
+  if (s.autoRecoveryPending) s.autoRecoveryPending.cancelled = true;
+  s.autoRecoveryPending = null;
+  const authorizationId = s.autoRecoveryAuthorizationId;
+  const runId = s.autoRecoveryRunId;
+  s.autoRecoveryAuthorizationId = null;
+  s.autoRecoveryRunId = null;
+  if (authorizationId && runId) {
+    try {
+      revokeAutoRecovery(authorizationId, runId);
+    } catch (error) {
+      debugLog("auto-recovery-revoke-refused", { error: getErrorMessage(error) });
+    }
+  }
+  if ((!s.active && !s.paused) || s.stopInProgress) return;
+  s.stopInProgress = true;
+  try {
+    await stopAutoSession(ctx, pi, reason, options);
+  } finally {
+    s.stopInProgress = false;
+  }
+}
+
+async function stopAutoSession(
+  ctx: ExtensionContext | undefined,
+  pi: ExtensionAPI | undefined,
+  reason: string | undefined,
+  options: StopAutoOptions,
+): Promise<void> {
   const loadedPreferences = loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences;
   const stopNotificationPrefix = formatStopNoticePrefix(reason);
   const displayReason = stopNoticeDisplayReason(reason);
@@ -1892,6 +1957,10 @@ export async function stopAuto(
     } catch (e) {
       debugLog("stop-cleanup-coordination", { error: e instanceof Error ? e.message : String(e) });
     }
+    // Retained so the terminal `stopped` transition can be written once the
+    // remaining shutdown steps (worktree exit, projections, DB wind-down)
+    // have completed (#3029).
+    const retiredWorkerId = s.workerId;
     s.workerId = null;
     s.milestoneLeaseToken = null;
 
@@ -2052,6 +2121,19 @@ export async function stopAuto(
 
     // ── Step 6: DB cleanup ──
     if (isDbAvailable()) {
+      // Shutdown work is complete: retire the worker row terminally before
+      // the database closes (#3029). Best-effort, like every stop step. A
+      // worker that still owns unfinished dispatches stays `stopping` so
+      // #1773 stale recovery keeps applying to it.
+      try {
+        if (retiredWorkerId && !hasOpenUnitDispatches(retiredWorkerId)) {
+          markWorkerStopped(retiredWorkerId);
+        } else if (retiredWorkerId) {
+          debugLog("stop-cleanup-retire-skipped", { workerId: retiredWorkerId, reason: "open dispatches" });
+        }
+      } catch (e) {
+        debugLog("stop-cleanup-retire", { error: e instanceof Error ? e.message : String(e) });
+      }
       // A stop drops the follow-on work that did not run yet. Only a killed
       // process leaves it queued for the next start.
       try {
@@ -2462,12 +2544,14 @@ export async function pauseAuto(
   // advance with that route named on the row instead of re-diagnosing prose.
   // The seven human blocker kinds pause for a person unchanged.
   let pauseReasonText = _errorContext?.message ?? options.pauseReason;
+  let automaticRecoveryClassification: RecoveryClassification | null = null;
   if (blockerKind === "machine_fixable") {
     const classification = classifyFailure({
       error: options.pauseReason ?? _errorContext?.message ?? "machine-fixable failure",
       unitType: s.currentUnit?.type,
       unitId: s.currentUnit?.id,
     });
+    automaticRecoveryClassification = classification;
     pauseReasonText = [
       `recovery:${classification.failureKind}/${classification.action}`,
       classification.reason,
@@ -2630,6 +2714,12 @@ export async function pauseAuto(
   // keep the notification-text classification as a fallback (ADR-046). A
   // non-blocking pause does not need operator intervention, so it is not
   // blocked — the same rule the text classifier applies.
+  // A reserved automatic retry is not a terminal run outcome. If approval or
+  // reservation is refused, publish the original honest paused outcome below.
+  if (_pi && automaticRecoveryClassification && !options.abortActiveTurn &&
+      canAutomaticallyRecover(blockerKind, automaticRecoveryClassification, s.stepMode) &&
+      queueApprovedAutoRecovery(_pi, automaticRecoveryClassification)) return;
+  if (s.autoRecoveryPending) s.autoRecoveryPending.outcomeEmitted = true;
   emitWorkflowOutcomeEvent(_pi, {
     status: isNonBlockingPauseNotice(pauseMessage.toLowerCase()) ? "completed" : "blocked",
     reason: _errorContext?.message ?? lifecycle.notifyPrefix,
@@ -2851,22 +2941,187 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
  * state, enters the milestone worktree or branch, and dispatches the first unit.
  * No-ops if auto-mode is already active.
  */
+type AutoRecoveryApproval = { authorizationId: string; runId: string };
+
+async function approveAutoRecoveryForRun(
+  ctx: ExtensionCommandContext,
+  base: string,
+  startup: AutoStartAttempt,
+): Promise<AutoRecoveryApproval | boolean> {
+  if (!isAutoStartCurrent(startup)) return false;
+  if (s.autoRecoveryAuthorizationId && s.autoRecoveryRunId) return true;
+  // Never bootstrap, migrate or bind a database as a side effect of consent.
+  const databasePath = realpathSync(resolveProjectRootDbPath(base));
+  const checkBinding = () => {
+    const boundPath = getDbPath();
+    if (!boundPath || realpathSync(boundPath) !== databasePath) {
+      throw new Error("--auto-recover requires the existing canonical Project to be opened normally first");
+    }
+    requirePauseBlockerCheckout(getDb(), base);
+  };
+  checkBinding();
+  const fence = readDomainOperationFence();
+  if (fence.authorityEpoch < 1) throw new Error("--auto-recover requires canonical Project authority");
+  const approved = await approveInNativeTerminal(ctx, [
+    `Project: ${fence.projectId}`,
+    `This run only; up to ${AUTO_RECOVERY_MAX_RETRIES} automatic mechanical retry resumes; expires in 30 minutes.`,
+    "Only machine_fixable pauses classified retry are eligible. Step mode is excluded.",
+    "Human Blockers, UAT/review, access, security, evidence and budgets are NOT waived.",
+    "No Task retry or completion is authorized. Restart/stop drops this run permission.",
+  ].join("\n"), "Enable bounded --auto-recover for this run?",
+  "Press y to approve and start/resume auto, n or Escape to cancel. RPC responses cannot approve.");
+  if (!isAutoStartCurrent(startup)) return false;
+  if (!approved) {
+    ctx.ui.notify("Auto-recover was not authorized; auto was not started.", "warning");
+    return false;
+  }
+  checkBinding();
+  const runId = randomUUID();
+  const authorizationId = randomUUID();
+  authorizeAutoRecovery({ authorizationId, runId, expectedProjectId: fence.projectId,
+    expectedRevision: fence.revision, expectedAuthorityEpoch: fence.authorityEpoch });
+  s.autoRecoveryAuthorizationId = authorizationId;
+  s.autoRecoveryRunId = runId;
+  return { authorizationId, runId };
+}
+
+function queueApprovedAutoRecovery(pi: ExtensionAPI, classification: RecoveryClassification,
+  resume: typeof startAutoDetached = startAutoDetached): boolean {
+  const authorizationId = s.autoRecoveryAuthorizationId;
+  const runId = s.autoRecoveryRunId;
+  const commandContext = s.cmdCtx;
+  const pause = readOpenAutoPause();
+  if (!authorizationId || !runId || !commandContext || !pause?.pausedAt || s.autoRecoveryPending) return false;
+  try {
+    if (!consumeAutoRecoveryRetry({ authorizationId, runId, pausedAt: pause.pausedAt,
+      dispatchId: pause.dispatchId ?? null, classification })) return false;
+  } catch (error) {
+    debugLog("auto-recovery-refused", { error: getErrorMessage(error) });
+    return false;
+  }
+  const request = { cancelled: false, outcomeEmitted: false, started: false };
+  s.autoRecoveryPending = request;
+  // Keep this request's identity through startup acknowledgement and stop.
+  setTimeout(() => {
+    void (async () => {
+      let accepted = false;
+      try {
+        if (request.cancelled || request.outcomeEmitted ||
+            s.autoRecoveryAuthorizationId !== authorizationId ||
+            s.autoRecoveryRunId !== runId) return;
+        const currentPause = readOpenAutoPause();
+        if (!s.paused || s.active || !currentPause || currentPause.pausedAt !== pause.pausedAt ||
+            currentPause.blockerKind !== "machine_fixable" ||
+            (currentPause.dispatchId ?? null) !== (pause.dispatchId ?? null)) return;
+        commandContext.ui.notify("Auto-recover: resuming a mechanical retry under this run's bounded approval.", "info");
+        // Only an explicit accepted-start ACK transfers outcome ownership.
+        request.started = true;
+        accepted = (await resume(commandContext, pi, s.originalBasePath || s.basePath, s.verbose,
+          { milestoneLock: pause.milestoneLock ?? null })) === true;
+      } catch (error) {
+        debugLog("auto-recovery-start-refused", { error: getErrorMessage(error) });
+      } finally {
+        if (s.autoRecoveryPending === request) s.autoRecoveryPending = null;
+        if (!accepted && !request.cancelled && !request.outcomeEmitted) {
+          request.outcomeEmitted = true;
+          emitWorkflowOutcomeEvent(pi, { status: "blocked",
+            reason: "Automatic retry could not start; manual resume is required.",
+            unitType: pause.unitType, unitId: pause.unitId });
+        }
+      }
+    })().catch(() => {
+      // A broken logging/outcome surface must not create an unhandled rejection.
+    });
+  }, 0);
+  return true;
+}
+
+export const _queueApprovedAutoRecoveryForTest = queueApprovedAutoRecovery;
+
+function isAutoStartCurrent(startup: AutoStartAttempt): boolean {
+  return s.pendingStart === startup && !startup.cancelled && !s.stopInProgress;
+}
+
+function acceptAutoStart(startup: AutoStartAttempt): boolean {
+  if (!isAutoStartCurrent(startup)) return false;
+  startup.accepted = true;
+  s.pendingStart = null;
+  startup.acknowledge(true);
+  return true;
+}
+
 export async function startAuto(
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
   base: string,
   verboseMode: boolean,
-  options?: {
-    step?: boolean;
-    interrupted?: InterruptedSessionAssessment;
-    milestoneLock?: string | null;
-    resumeWedgeId?: string | null;
-  },
+  options?: AutoStartOptions,
 ): Promise<void> {
-  if (s.active) {
+  // Keep the public full-run lifetime and rejection semantics unchanged.
+  await startAutoWithAcknowledgement(ctx, pi, base, verboseMode, options);
+}
+
+async function startAutoWithAcknowledgement(
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+  base: string,
+  verboseMode: boolean,
+  options?: AutoStartOptions,
+  acknowledge: (accepted: boolean) => void = () => {},
+): Promise<void> {
+  if (s.active || s.pendingStart || s.pendingDeferredStarts.size > 0 || s.stopInProgress) {
     debugLog("startAuto", { phase: "already-active", skipping: true });
+    acknowledge(false);
     return;
   }
+  const startup: AutoStartAttempt = { cancelled: false, accepted: false, acknowledge };
+  s.pendingStart = startup;
+  let issuedApproval: AutoRecoveryApproval | null = null;
+  try {
+    if (options?.autoRecover) {
+      if (options.step) throw new Error("--auto-recover is not available in step mode");
+      const approval = await approveAutoRecoveryForRun(ctx, base, startup);
+      if (!approval) return;
+      if (approval !== true) issuedApproval = approval;
+    }
+    if (!isAutoStartCurrent(startup)) return;
+    await startAutoImplementation(ctx, pi, base, verboseMode, startup, options);
+  } finally {
+    try {
+      if (!startup.accepted) {
+        if (issuedApproval) {
+          const { authorizationId, runId } = issuedApproval;
+          // Roll back only consent issued by this attempt, never a newer attachment.
+          if (s.autoRecoveryAuthorizationId === authorizationId && s.autoRecoveryRunId === runId) {
+            s.autoRecoveryAuthorizationId = null;
+            s.autoRecoveryRunId = null;
+          }
+          try {
+            revokeAutoRecovery(authorizationId, runId);
+          } catch (error) {
+            debugLog("auto-recovery-revoke-refused", { error: getErrorMessage(error) });
+          }
+        }
+        // Retain the historical pre-loop cleanup backstop, scoped to this start.
+        if (s.pendingStart === startup && s.active && !s.stopInProgress) {
+          await cleanupAfterLoopExit(ctx);
+        }
+      }
+    } finally {
+      if (s.pendingStart === startup) s.pendingStart = null;
+      startup.acknowledge(false);
+    }
+  }
+}
+
+async function startAutoImplementation(
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+  base: string,
+  verboseMode: boolean,
+  startup: AutoStartAttempt,
+  options?: AutoStartOptions,
+): Promise<void> {
 
   // On a *fresh* start, drop any stale active-tool baseline left by a prior
   // auto session that didn't run stopAuto cleanly.  Skip on resume: pauseAuto
@@ -2903,6 +3158,7 @@ export async function startAuto(
   }
 
   const unmergedStartMessage = await getUnmergedMilestoneBlockMessageForBase(base, "auto");
+  if (!isAutoStartCurrent(startup)) return;
   if (unmergedStartMessage) {
     ctx.ui.notify(unmergedStartMessage, "warning");
     debugLog("startAuto", { phase: "unmerged-milestone-blocked", base });
@@ -2910,6 +3166,7 @@ export async function startAuto(
   }
 
   const blockedStartMessage = await getValidationBlockMessageForBase(base, "auto");
+  if (!isAutoStartCurrent(startup)) return;
   if (blockedStartMessage) {
     ctx.ui.notify(blockedStartMessage, "warning");
     debugLog("startAuto", { phase: "validation-blocked", base });
@@ -2920,7 +3177,9 @@ export async function startAuto(
   // refuses to re-enter and reprints the exit instructions — restarting is no
   // longer a silent counter reset. `/gsd auto --resume-wedge <id>` is the one
   // sanctioned re-entry.
-  if (!(await ensureDbOpen(base))) {
+  const databaseReady = await ensureDbOpen(base);
+  if (!isAutoStartCurrent(startup)) return;
+  if (!databaseReady) {
     const dbStatus = getWorkflowDatabaseStatus();
     if (dbStatus.lastPhase === "locked") {
       const holderPids = listWorkflowDbLockHolderPids(resolveProjectRootDbPath(base));
@@ -2945,6 +3204,7 @@ export async function startAuto(
     // without a live orchestrator; leave them for --resume-wedge.
     return { blocking: true };
   });
+  if (!isAutoStartCurrent(startup)) return;
   if (!gcResult.ok) {
     ctx.ui.notify(
       `Auto-mode blocked — liveness backstop unavailable: ${gcResult.error}. Run \`/gsd doctor --fix\` before retrying.`,
@@ -2994,6 +3254,7 @@ export async function startAuto(
     const scopeId = normalizeRealPath(base) || base;
     const recheckWedge = s.orchestration.recheckWedge.bind(s.orchestration);
     const ack = await acknowledgeWedge(scopeId, wedgeId, recheckWedge);
+    if (!isAutoStartCurrent(startup)) return false;
     if (!ack.ok) {
       ctx.ui.notify(`Cannot acknowledge wedge ${wedgeId}: ${ack.reason}`, "error");
       return false;
@@ -3010,6 +3271,7 @@ export async function startAuto(
       return ensureDbOpen(base).then(() => assessInterruptedSession(base));
     })());
 
+  if (!isAutoStartCurrent(startup)) return;
   if (freshStartAssessment.classification === "running") {
     const pid = freshStartAssessment.lock?.pid;
     ctx.ui.notify(
@@ -3079,6 +3341,7 @@ export async function startAuto(
           let milestoneRow = dbAvailable ? readMilestone(meta.milestoneId) : null;
           if (!milestoneRow) {
             const opened = await ensureDbOpen(base);
+            if (!isAutoStartCurrent(startup)) return;
             dbAvailable = opened || isDbAvailable();
             if (dbAvailable) {
               milestoneRow = readMilestone(meta.milestoneId);
@@ -3280,6 +3543,7 @@ export async function startAuto(
     if (!getLedger()) initMetrics(base);
     if (s.currentMilestoneId) setActiveMilestoneId(base, s.currentMilestoneId);
     await openProjectDbIfPresent(base);
+    if (!isAutoStartCurrent(startup)) return;
     registerAutoWorkerForSession(s, base);
 
     // Re-register health level notification callback lost across process restart
@@ -3314,7 +3578,9 @@ export async function startAuto(
 
     const loopDeps = buildLoopDeps(pi, ctx);
     ensureOrchestrationModule(ctx, pi, s.basePath || base);
-    if (!(await acknowledgeRequestedWedge())) {
+    const wedgeAcknowledged = await acknowledgeRequestedWedge();
+    if (!isAutoStartCurrent(startup)) return;
+    if (!wedgeAcknowledged) {
       await cleanupAfterLoopExit(ctx);
       return;
     }
@@ -3342,16 +3608,22 @@ export async function startAuto(
     // relative path resolves to ~/.gsd/agent/resource-loader.js which doesn't exist.
     // Using GSD_PKG_ROOT constructs a correct absolute path in both contexts (#3949).
     await refreshResumeResourcesAndDb(s.basePath);
+    if (!isAutoStartCurrent(startup)) return;
     try {
       await rebuildState(s.basePath);
-      pi.events.emit(CMUX_CHANNELS.SIDEBAR, { action: "sync" as const, preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, state: await deriveState(s.basePath) });
+      if (!isAutoStartCurrent(startup)) return;
+      const state = await deriveState(s.basePath);
+      if (!isAutoStartCurrent(startup)) return;
+      pi.events.emit(CMUX_CHANNELS.SIDEBAR, { action: "sync" as const, preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, state });
     } catch (e) {
       debugLog("resume-rebuild-state-failed", {
         error: e instanceof Error ? e.message : String(e),
       });
     }
+    if (!isAutoStartCurrent(startup)) return;
     try {
       const report = await runGSDDoctor(s.basePath, { fix: true });
+      if (!isAutoStartCurrent(startup)) return;
       if (report.fixesApplied.length > 0) {
         ctx.ui.notify(
           `Resume: applied ${report.fixesApplied.length} fix(es) to state.`,
@@ -3363,6 +3635,7 @@ export async function startAuto(
         error: e instanceof Error ? e.message : String(e),
       });
     }
+    if (!isAutoStartCurrent(startup)) return;
     invalidateAllCaches();
 
     handlePausedSessionResumeRecovery(
@@ -3390,6 +3663,7 @@ export async function startAuto(
 
     try {
       const resumeResult = await kernelResume(s);
+      if (!isAutoStartCurrent(startup)) return;
       if (resumeResult?.kind === "blocked" && resumeResult.action === "stop") {
         notifyResumeBlocked(ctx, resumeResult);
         await cleanupAfterLoopExit(ctx);
@@ -3401,7 +3675,9 @@ export async function startAuto(
     } catch (err) {
       debugLog("resume-orchestration-resume", { error: err instanceof Error ? err.message : String(err) });
     }
+    if (!isAutoStartCurrent(startup)) return;
     startAutoCommandPolling(s.basePath);
+    if (!acceptAutoStart(startup)) return;
     try {
       await runAutoLoopWithUok({
         ctx,
@@ -3429,7 +3705,9 @@ export async function startAuto(
   // has been registered or bootstrapped yet.
   if (options?.resumeWedgeId) {
     ensureOrchestrationModule(ctx, pi, s.basePath || base);
-    if (!(await acknowledgeRequestedWedge())) {
+    const wedgeAcknowledged = await acknowledgeRequestedWedge();
+    if (!isAutoStartCurrent(startup)) return;
+    if (!wedgeAcknowledged) {
       restoreMilestoneLockEnv();
       return;
     }
@@ -3448,7 +3726,9 @@ export async function startAuto(
   // for crash-recovery fidelity (#5405).
   registerAutoWorkerForSession(s, base);
 
-  const ready = await bootstrapAutoSession(
+  const startupOwnership = createAutoStartupOwnership(() => isAutoStartCurrent(startup), () => startup.cancelled);
+  startup.cancelPending = startupOwnership.cancel;
+  const ready = await startupOwnership.run(() => bootstrapAutoSession(
     s,
     ctx,
     pi,
@@ -3457,7 +3737,8 @@ export async function startAuto(
     requestedStepMode,
     bootstrapDeps,
     freshStartAssessment,
-  );
+  ));
+  if (!isAutoStartCurrent(startup)) return;
   if (!ready) {
     // bootstrapAutoSession sets s.active = true (auto-start.ts) before several
     // post-activation bail-outs return false without a loop ever running (e.g.
@@ -3479,11 +3760,14 @@ export async function startAuto(
   captureProjectRootEnv(s.originalBasePath || s.basePath);
   registerAutoWorkerForSession(s);
   try {
-    pi.events.emit(CMUX_CHANNELS.SIDEBAR, { action: "sync" as const, preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, state: await deriveState(s.basePath) });
+    const state = await deriveState(s.basePath);
+    if (!isAutoStartCurrent(startup)) return;
+    pi.events.emit(CMUX_CHANNELS.SIDEBAR, { action: "sync" as const, preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, state });
   } catch (err) {
     // Best-effort only — sidebar sync must never block auto-mode startup
     logWarning("engine", `cmux sync failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
   }
+  if (!isAutoStartCurrent(startup)) return;
   pi.events.emit(CMUX_CHANNELS.LOG, { preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, message: requestedStepMode ? "Step-mode started." : "Auto-mode started.", level: "progress" });
 
   try {
@@ -3492,9 +3776,11 @@ export async function startAuto(
     debugLog("start-orchestration-start", { error: err instanceof Error ? err.message : String(err) });
   }
 
+  if (!isAutoStartCurrent(startup)) return;
   startAutoCommandPolling(s.basePath);
 
-  // Dispatch the first unit
+  // Only accepted startup transfers outcome ownership to the loop.
+  if (!acceptAutoStart(startup)) return;
   try {
     await runAutoLoopWithUok({
       ctx,

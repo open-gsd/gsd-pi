@@ -1909,12 +1909,9 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
         }`
         : "");
     if (!/(^|\s)--apply(\s|$)/.test(args)) {
+      const { formatLifecycleBackfillPreview } = await import("./lifecycle-backfill-preview.js");
       ctx.ui.notify(
-        `gsd db adopt: ${preview.items.length} row(s) would be adopted, ` +
-          `${preview.waiverRepairs.length} adopted cancellation(s) would get a Waiver and ` +
-          `${preview.unmarkedImportCompletions.length} imported completion(s) would get the ` +
-          `unverified-legacy evidence marker:\n${summary}\n` +
-          "Run /gsd db adopt --apply to adopt them in one operation (a verified backup is written first)." +
+        formatLifecycleBackfillPreview(preview) +
           (restoreWindowOpen
             ? "\nThe Restore Window of the last import is still open. --apply closes it: after that, the import cannot be restored."
             : ""),
