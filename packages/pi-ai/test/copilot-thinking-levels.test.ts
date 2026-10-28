@@ -6,7 +6,7 @@ import {
 } from "../src/models.js";
 
 describe("Copilot Completions reasoning controls", () => {
-	it.each(["kimi-k3", "gemini-3.6-flash", "claude-fable-5"] as const)(
+	it.each(["kimi-k3", "gemini-3.8-flash", "claude-fable-5"] as const)(
 		"does not advertise ignored effort controls for bundled %s",
 		(id) => {
 			const model = getModel("github-copilot", id);

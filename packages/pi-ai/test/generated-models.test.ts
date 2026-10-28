@@ -674,8 +674,8 @@ describe("models.generated.ts", () => {
 
 	test("filters stale MiniMax entries from the direct and verified gateway routes (#2906)", () => {
 		// The Anthropic-compatible endpoint serves only M3.1-Flash + M3; the
-		// OpenRouter/OpenCode gateways only carry the verified M3.1-Flash + M3
-		// routes. Older M2.x entries must not be offered as ordinary choices.
+		// OpenRouter/OpenCode gateways now list only M3 after delisting free
+		// Flash routes. Older M2.x entries must not be offered as ordinary choices.
 		expect(Object.keys(MODELS.minimax)).toEqual([
 			"MiniMax-M3",
 			"MiniMax-M3.1-Flash",
@@ -687,15 +687,15 @@ describe("models.generated.ts", () => {
 
 		expect(
 			Object.keys(MODELS.openrouter).filter((id) => id.startsWith("minimax/")),
-		).toEqual(["minimax/minimax-m3", "minimax/minimax-m3.1-flash:free"]);
+		).toEqual(["minimax/minimax-m3"]);
 		expect(
 			Object.keys(MODELS.opencode).filter((id) => id.startsWith("minimax")),
-		).toEqual(["minimax-m3", "minimax-m3.1-flash-free"]);
+		).toEqual(["minimax-m3"]);
 		expect(
 			Object.keys(MODELS["opencode-go"]).filter((id) =>
 				id.startsWith("minimax"),
 			),
-		).toEqual(["minimax-m3", "minimax-m3.1-flash-free"]);
+		).toEqual(["minimax-m3"]);
 	});
 
 	test("includes Grok 4.5 as a first-class xAI model", () => {
@@ -760,7 +760,6 @@ describe("models.generated.ts", () => {
 
 	test("includes Copilot Kimi models on the GitHub Copilot OpenAI-compatible transport", () => {
 		for (const [id, contextWindow, maxTokens] of [
-			["kimi-k2.7-code", 256000, 32000],
 			["kimi-k3", 1048576, 131072],
 		] as const) {
 			const model = MODELS["github-copilot"][id];
