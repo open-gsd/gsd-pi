@@ -178,3 +178,53 @@ console.log("\n=== hook unit type sanitization (slash in unitType) ===");
 }
 
 rmSync(base, { recursive: true, force: true });
+
+console.log("\n=== #3005: harness aborts do not advance the progress stamps ===");
+{
+  // Self-contained base: the shared fixture above is torn down (rmSync +
+  // closeDatabase + a different open DB) before this block runs.
+  const abortBase = mkdtempSync(join(tmpdir(), "gsd-unit-runtime-3005-"));
+  mkdirSync(join(abortBase, ".gsd"), { recursive: true });
+  openDatabase(join(abortBase, ".gsd", "gsd.db"));
+  const startedAt = 1000;
+
+  // Real progress first: the dispatch record stamps the start, then an
+  // ordinary progress update moves the freshness clock forward.
+  const progress = writeUnitRuntimeRecord(abortBase, "execute-task", "M100/S02/T09", startedAt, {
+    phase: "dispatched",
+    lastProgressAt: 5000,
+    lastProgressKind: "tool-in-flight",
+  });
+  assert.equal(progress.lastProgressAt, 5000, "seeded progress stamp");
+
+  const afterAbort = recordUnitHarnessAbort(abortBase, "execute-task", "M100/S02/T09", startedAt, {
+    kind: "tool-loop-guard",
+    reason: "blocked call",
+    toolName: "gsd_exec",
+  });
+  assert.equal(
+    afterAbort.lastProgressAt,
+    5000,
+    "a harness abort must not advance lastProgressAt (the idle watchdog stays armed)",
+  );
+  assert.equal(
+    afterAbort.lastProgressKind,
+    "tool-in-flight",
+    "a harness abort must not rewrite the progress kind",
+  );
+  assert.equal(afterAbort.harnessAbort?.kind, "tool-loop-guard", "the abort is still recorded");
+
+  // No prior record at all: the stamps fall back to the unit's start, not
+  // to the abort time.
+  const freshStartedAt = Date.now() - 60_000;
+  const fresh = recordUnitHarnessAbort(abortBase, "execute-task", "M100/S02/fresh", freshStartedAt, {
+    kind: "tool-error",
+    reason: "failed before any progress",
+    toolName: "browser_click",
+  });
+  assert.equal(fresh.lastProgressAt, freshStartedAt, "no prior progress: the stamp falls back to the unit start");
+  assert.equal(fresh.lastProgressKind, "dispatch", "no prior progress: the kind falls back to dispatch");
+
+  closeDatabase();
+  rmSync(abortBase, { recursive: true, force: true });
+}

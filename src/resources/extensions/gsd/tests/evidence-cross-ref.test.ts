@@ -1072,3 +1072,110 @@ test("a compound claim with SOME parts unrecorded falls back to whole-claim matc
 
   assert.deepEqual(mismatches, []);
 });
+
+test("#3011: a later labeled superset failure does not override a labeled exact pass", () => {
+  const command = "bin/rails test a_test.rb b_test.rb";
+  const label = "gsd_exec claude: verify targeted tests\n";
+  const mismatches = crossReferenceEvidence(
+    [{ command, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: `${label}${command}`,
+        exitCode: 0,
+        outputSnippet: "passed",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: `${label}bin/rails test a_test.rb b_test.rb missing_test.rb`,
+        exitCode: 1,
+        outputSnippet: "no such file",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+
+test("#3011: a superset-only mismatch names the extra text", () => {
+  const claim = "bin/rails test a_test.rb b_test.rb";
+  const label = "gsd_exec claude: final rerun\n";
+  const mismatches = crossReferenceEvidence(
+    [{ command: claim, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: `${label}${claim} missing_test.rb`,
+        exitCode: 1,
+        outputSnippet: "no such file",
+        timestamp: 1,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.match(mismatches[0].reason, /adds text after the claim: "missing_test\.rb"/);
+  assert.match(mismatches[0].reason, /Claimed exitCode=0 but actual exitCode=1/);
+});
+
+test("#3011: a later labeled exact failure still overrides a labeled exact pass", () => {
+  const command = "bin/rails test a_test.rb b_test.rb";
+  const label = "gsd_exec claude: verify targeted tests\n";
+  const mismatches = crossReferenceEvidence(
+    [{ command, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: `${label}${command}`,
+        exitCode: 0,
+        outputSnippet: "passed",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: `${label}${command}`,
+        exitCode: 1,
+        outputSnippet: "failed",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+});
+
+test("#3011: equal-timestamp labeled runs decide by recording order, not match-set order", () => {
+  const command = "npm test";
+  const label = "gsd_exec claude: verify\n";
+  const mismatches = crossReferenceEvidence(
+    [{ command, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command: `${label}cd /work && ${command}`,
+        exitCode: 1,
+        outputSnippet: "older wrapper failed",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command: `${label}${command}`,
+        exitCode: 0,
+        outputSnippet: "newer exact pass",
+        timestamp: 1,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, [], "the newer exact pass must win the equal-timestamp tie");
+});

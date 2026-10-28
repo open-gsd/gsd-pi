@@ -299,9 +299,14 @@ describe("TUI pin-to-bottom on clear", () => {
       newlineCount <= height - 1,
       `expected at most ${height - 1} \\r\\n sequences (one per inter-row separator), got ${newlineCount} in ${JSON.stringify(frame.slice(0, 240))}`,
     );
-    // 4. Baseline invariants — same as the pure-shrink test.
-    assert.strictEqual((tui as any).previousViewportTop, 20);
-    assert.strictEqual((tui as any).maxLinesRendered, 40);
+    // 4. Baseline invariants. #3000: an unforced tall→tall shrink whose
+    // overlap carries a visible-region edit no longer realigns from the new
+    // viewport top (that re-emitted flushed rows into scrollback); it now
+    // repaints from the verified first-changed-row anchor instead, so the
+    // viewport baseline is the anchor (the first edit row, 25) and the
+    // working area follows it.
+    assert.strictEqual((tui as any).previousViewportTop, 25);
+    assert.strictEqual((tui as any).maxLinesRendered, 45);
   });
 
   it("uses differential render for same-line-count edit on short content", () => {

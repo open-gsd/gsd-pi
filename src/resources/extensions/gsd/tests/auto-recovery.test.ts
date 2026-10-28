@@ -10,6 +10,8 @@ import { createRequire } from "node:module";
 
 import { verifyExpectedArtifact, hasImplementationArtifacts, resolveExpectedArtifactPath, diagnoseExpectedArtifact, diagnoseWorktreeIntegrityFailure, buildLoopRemediationSteps, writeBlockerPlaceholder, refreshRecoveryDbForArtifact, writeReactiveExecuteBlocker } from "../auto-recovery.ts";
 import { _describeArtifactVerificationFailureForTest } from "../auto-post-unit.ts";
+import { DISPATCH_RULES } from "../auto-dispatch.ts";
+import { readTerminalTaskRecoveryAbort } from "../artifact-verification.ts";
 import { resolveMilestoneFile } from "../paths.ts";
 import { _getAdapter, openDatabase, closeDatabase, insertArtifact, insertMilestone, insertSlice, insertGateRow, insertTask, insertAssessment, getMilestone, getMilestoneCommitAttributionShas, getPlanMilestoneRecoveryBlock, getTask, getSlice, saveGateResult, projectCanonicalStatusToLegacy } from "../gsd-db.ts";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
@@ -589,7 +591,7 @@ test("refreshRecoveryDbForArtifact accepts canonical verify and route Result hea
   );
 });
 
-test("refreshRecoveryDbForArtifact refuses execute-task recovery after a terminal agent abort (#1622)", () => {
+test("refreshRecoveryDbForArtifact refuses execute-task recovery after a terminal agent abort (#1622)", async () => {
   const dir = makeTmpProject();
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Task", status: "pending" });
   const attempt = seedCanonicalTaskAttempt("failed");
@@ -619,6 +621,39 @@ test("refreshRecoveryDbForArtifact refuses execute-task recovery after a termina
   assert.equal(result.reason, "execute-task-recovery-aborted");
   assert.ok(result.message.includes(route.recoveryActionId));
   assert.ok(result.message.includes(`/gsd recover ${route.recoveryActionId}`));
+  assert.match(result.message, /after.*repair/i);
+  assert.match(result.message, /gsd_task_recovery_resume with concrete repair evidence/);
+  assert.match(result.message, /rewriting plans.*does not authorize/i);
+  assert.doesNotMatch(result.message, /or reconcile|database-import form/);
+
+  // A rewritten-plan snapshot is not a recovery authorization. The ordinary
+  // execution rule must preserve the same abort and explain the gated route.
+  const rule = DISPATCH_RULES.find((entry) => entry.name === "executing → execute-task");
+  assert.ok(rule);
+  const dispatch = await rule.match({
+    basePath: dir,
+    mid: "M001",
+    midTitle: "Milestone",
+    prefs: undefined,
+    state: {
+      activeMilestone: { id: "M001", title: "Milestone" },
+      activeSlice: { id: "S01", title: "Slice" },
+      activeTask: { id: "T01", title: "Rewritten task" },
+      phase: "executing",
+      recentDecisions: [],
+      blockers: [],
+      nextAction: "Execute T01",
+      registry: [],
+    },
+  });
+  assert.equal(dispatch?.action, "stop");
+  if (dispatch?.action !== "stop") return;
+  assert.ok(dispatch.reason.includes(`/gsd recover ${route.recoveryActionId}`));
+  assert.match(dispatch.reason, /after.*repair/i);
+  assert.match(dispatch.reason, /gsd_task_recovery_resume with concrete repair evidence/);
+  assert.match(dispatch.reason, /rewriting plans.*does not authorize/i);
+  assert.equal(getTask("M001", "S01", "T01")?.status, "pending");
+  assert.equal(readTerminalTaskRecoveryAbort("M001", "S01", "T01")?.recoveryActionId, route.recoveryActionId);
 });
 
 test("refreshRecoveryDbForArtifact never completes an open milestone from complete-looking artifacts", () => {

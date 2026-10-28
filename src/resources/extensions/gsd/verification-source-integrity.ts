@@ -3,7 +3,7 @@
 
 import { createHash, type Hash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, lstatSync, openSync, readSync, readlinkSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readSync, readlinkSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
 import type { GSDPreferences } from "./preferences-types.js";
@@ -332,6 +332,28 @@ function addSourceEntry(hash: Hash, cwd: string, path: string): void {
     return;
   }
   if (stat.isDirectory()) {
+    // Registered submodules (mode 160000) keep the stricter staged/clean
+    // accounting — checked FIRST, because a submodule directory also contains
+    // a .git entry. Everything else that is itself a git repository is an
+    // external reference, not publishable parent content (#3024): aggregator
+    // workspaces keep vendored/related repos nested by design. Pin its
+    // resolved HEAD as a stable descriptor instead of failing the snapshot.
+    if (trackedEntry(cwd, path)?.mode === "160000") {
+      addHashField(hash, "source-mode", "160000");
+      addSubmoduleRevision(hash, cwd, path);
+      return;
+    }
+    if (existsSync(join(absolutePath, ".git"))) {
+      const head = gitOutput(absolutePath, ["rev-parse", "--verify", "HEAD"])
+        .toString("utf8")
+        .trim();
+      if (!head) {
+        throw new Error(`verification source nested repository has no resolvable HEAD: ${path}`);
+      }
+      addHashField(hash, "source-mode", "external-repo");
+      addHashField(hash, "source-external-repository", head);
+      return;
+    }
     addHashField(hash, "source-mode", "160000");
     addSubmoduleRevision(hash, cwd, path);
     return;

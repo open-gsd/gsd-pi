@@ -829,8 +829,9 @@ export function reportMilestoneLifecycleShadowDrift(issues: DoctorIssue[]): void
             message:
               `${statusPair} The canonical Task Attempt recovery has aborted ` +
               `(recoveryActionId: ${terminalAbort.recoveryActionId}) and the dispatch guard refuses ` +
-              `re-dispatch until it is resumed. Run \`/gsd recover ${terminalAbort.recoveryActionId}\` ` +
-              `to converge the drift.`,
+              `re-dispatch until it is resumed. After repairing the recorded failure, run \`/gsd recover ${terminalAbort.recoveryActionId}\` ` +
+              `or use gsd_task_recovery_resume with concrete repair evidence. Rewriting plans or rebuilding projections ` +
+              `does not authorize a new Attempt; the recovery fence remains in force.`,
             file: ".gsd/gsd.db",
             fixable: false,
           });

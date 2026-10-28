@@ -577,7 +577,7 @@ function readExecuteTaskTerminalAbort(
   if (!terminalAbort) return null;
   return {
     action: "stop",
-    reason: `Cannot dispatch execute-task ${milestoneId}/${sliceId}/${taskId}: canonical Task Attempt recovery already aborted (recoveryActionId: ${terminalAbort.recoveryActionId}). Resume it with /gsd recover ${terminalAbort.recoveryActionId}.`,
+    reason: `Cannot dispatch execute-task ${milestoneId}/${sliceId}/${taskId}: canonical Task Attempt recovery already aborted (recoveryActionId: ${terminalAbort.recoveryActionId}). After repairing the recorded failure, resume it with /gsd recover ${terminalAbort.recoveryActionId}, or use gsd_task_recovery_resume with concrete repair evidence. Rewriting plans or running /gsd auto does not authorize a new Attempt; the recovery fence remains in force.`,
     level: "error",
   };
 }

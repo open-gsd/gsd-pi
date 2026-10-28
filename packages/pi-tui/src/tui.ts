@@ -1646,9 +1646,11 @@ export class TUI extends Container {
 	 * Overlaps without a verified alignment refill the screen so the
 	 * blank-viewport behavior (#613) is preserved; the aligned repairs leave
 	 * at most half the screen blank (the below-seam deletions alone). Unforced
-	 * frames never take this path: there the differential
+	 * frames mostly do not need this path: there the differential
 	 * renderer handles bottom deletions in place over the padded retained
-	 * layout.
+	 * layout; an unforced shrink that also shifted rows above the screen
+	 * top (which defeats that padding) calls this with the committed frame as
+	 * the base.
 	 *
 	 * Returns the screen top to repaint from (the retained top, or the
 	 * deletion-aligned top), or null when the frame must refill.
@@ -1665,8 +1667,9 @@ export class TUI extends Container {
 		newLines: string[],
 		height: number,
 		top: number,
+		flushed: number = this.flushedLineCount,
 	): number | null {
-		if (top <= 0 || top > this.flushedLineCount || this.overlayStack.length > 0) {
+		if (top <= 0 || top > flushed || this.overlayStack.length > 0) {
 			return null;
 		}
 		if (!baseLines || baseLines.length <= newLines.length) {
@@ -1689,7 +1692,12 @@ export class TUI extends Container {
 			// only a deletion-aligned top can help (see repairCompoundShrink).
 			// The blanks it leaves at the bottom are the below-seam deletions
 			// alone, still capped at half the screen (#613).
-			return TUI.alignedTopWithoutImages(newLines, newTop, TUI.repairCompoundShrink(baseLines, newLines, newTop, top, height));
+			return TUI.alignedTopWithoutImages(
+				newLines,
+				newTop,
+				TUI.repairCompoundShrink(baseLines, newLines, newTop, top, height) ??
+					TUI.firstChangeTop(baseLines, newLines, newTop, top, height),
+			);
 		}
 		const matches = (i: number): boolean => baseLines[i] === newLines[i];
 		// The seam row (`top`, the old screen top) is verified alongside the
@@ -1715,8 +1723,86 @@ export class TUI extends Container {
 		}
 		const alignedTop =
 			TUI.repairShiftedOverlap(baseLines, newLines, newTop, top) ??
-			TUI.repairCompoundShrink(baseLines, newLines, newTop, top, height);
+			TUI.repairCompoundShrink(baseLines, newLines, newTop, top, height) ??
+			TUI.firstChangeTop(baseLines, newLines, newTop, top, height);
 		return TUI.alignedTopWithoutImages(newLines, newTop, alignedTop);
+	}
+
+	/**
+	 * Last fallback before a refill: repaint from the frame's first changed
+	 * row when that row lies inside the overlap. The repairs above model pure
+	 * deletions and refuse an edit so the change stays visible, but a refill
+	 * from the new viewport top shows it no better: it also re-emits every
+	 * unchanged overlap row above the edit. A finished tool is exactly that
+	 * shape — its card folds into a one-row phase summary (an edit plus
+	 * deletions), and when the card straddles the screen top the refill
+	 * printed the rows above it a second time (seen as the previous reply's
+	 * last lines printed again once per finished tool) (#3000).
+	 *
+	 * Safe by construction: rows [0, first) equal the committed frame, which
+	 * is in scrollback in order (keepsFlushedTop requires the flushed mark at
+	 * least at the physical top), and every row from `first` down is painted,
+	 * so the terminal shows the whole new frame. The refill leaves the same
+	 * stale rows and re-emits new[newTop, first) on top. Blank rows at the
+	 * bottom are capped like repairCompoundShrink's (#613). Returns null when
+	 * the first change is not inside the overlap (other paths own those) or
+	 * the cap would be exceeded.
+	 */
+	private static firstChangeTop(
+		baseLines: string[],
+		newLines: string[],
+		newTop: number,
+		top: number,
+		height: number,
+	): number | null {
+		const limit = Math.min(top, newLines.length, baseLines.length);
+		let first = 0;
+		while (first < limit && newLines[first] === baseLines[first]) {
+			first++;
+		}
+		if (first < newTop || first >= top) {
+			return null;
+		}
+		// Removed-value guard (mirror of repairCompoundShrink's): rows
+		// [newTop, first) equal the committed frame, but #2582's licensed
+		// hidden above-screen edits make committed copies fictitious. When the
+		// repaint overwrites an old-screen row whose value also appears in the
+		// skipped prefix, the screen's last physical copy of that value could
+		// sit behind a committed count a hidden edit inflated — refuse and
+		// keep the loss-free refill (the refill preserves the physical copy).
+		if (first > newTop) {
+			const oldScreen = new Map<string, number>();
+			for (let i = top; i < Math.min(baseLines.length, top + height); i++) {
+				const value = baseLines[i] ?? "";
+				oldScreen.set(value, (oldScreen.get(value) ?? 0) + 1);
+			}
+			const paintedCounts = new Map<string, number>();
+			for (let i = first; i < newLines.length; i++) {
+				const value = newLines[i] ?? "";
+				paintedCounts.set(value, (paintedCounts.get(value) ?? 0) + 1);
+			}
+			const skipped = new Set<string>();
+			for (let i = newTop; i < first; i++) skipped.add(newLines[i] ?? "");
+			for (const [value, count] of oldScreen) {
+				if (
+					count - (paintedCounts.get(value) ?? 0) > 0 &&
+					visibleWidth(value) > 0 &&
+					skipped.has(value)
+				) {
+					return null;
+				}
+			}
+		}
+		const newLen = newLines.length;
+		let tail = 0;
+		while (tail < newLen && TUI.isVisuallyBlank(newLines[newLen - 1 - tail] ?? "")) {
+			tail++;
+		}
+		const skip = first - newTop;
+		if (skip + Math.min(tail, height - skip) > Math.floor(height / 2)) {
+			return null;
+		}
+		return first;
 	}
 
 	/** The aligned top, or null when an image line would be skipped (the refill re-emits it). */
@@ -1927,6 +2013,106 @@ export class TUI extends Container {
 			}
 			if (anchored) {
 				return aligned;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Where the row that sat at the top of the screen (`top` in the committed
+	 * frame) is in the new frame. The flushed mark is a row index, so it only
+	 * stays true while nothing above the screen top moves. A frame that
+	 * deletes rows up there (a tool card in scrollback folding into its phase
+	 * summary) while it grows below — so the shrink demotion never runs —
+	 * moves every on-screen row up: a clean repaint from the mark, or an
+	 * in-place realign from the new viewport top, then starts below the old
+	 * screen-top row and erases it without it ever reaching scrollback. Seen
+	 * as a table missing one row between two identical separators (#3020).
+	 *
+	 * The rows are aligned with a bounded Myers diff from the first changed
+	 * row. If the old screen-top row survives, its new index is returned;
+	 * otherwise the row after the last surviving row above it. Rows above the
+	 * returned index are scrollback (or edits hidden above the screen, as
+	 * before, #2582). Returns `top` when nothing above it changed, and null
+	 * when the diff exceeds `maxEdits` (callers keep their old start row).
+	 */
+	private static seamRowInNewFrame(
+		baseLines: string[],
+		newLines: string[],
+		top: number,
+		maxEdits = 2000,
+	): number | null {
+		if (top <= 0 || top >= baseLines.length) {
+			return null;
+		}
+		const limit = Math.min(top, newLines.length);
+		let common = 0;
+		while (common < limit && baseLines[common] === newLines[common]) {
+			common++;
+		}
+		if (common >= top) {
+			return top;
+		}
+		const match = TUI.matchRows(baseLines, newLines, common, maxEdits);
+		if (!match) {
+			return null;
+		}
+		if (match[top - common] >= 0) {
+			return match[top - common];
+		}
+		for (let i = top - 1; i >= common; i--) {
+			if (match[i - common] >= 0) {
+				return match[i - common] + 1;
+			}
+		}
+		return common;
+	}
+
+	/**
+	 * Myers shortest edit script between a[from..] and b[from..]. Returns, per
+	 * row of a from `from`, the index in b it is kept at, or -1 if deleted;
+	 * null when more than `maxEdits` edits are needed.
+	 */
+	private static matchRows(a: string[], b: string[], from: number, maxEdits: number): Int32Array | null {
+		const n = a.length - from;
+		const m = b.length - from;
+		const max = Math.min(n + m, maxEdits);
+		const offset = max + 1;
+		const v = new Int32Array(2 * max + 3);
+		const trace: Int32Array[] = [];
+		for (let d = 0; d <= max; d++) {
+			// Snapshot of k in [-d-1, d+1] before step d, for the backtrack.
+			trace.push(v.slice(offset - d - 1, offset + d + 2));
+			for (let k = -d; k <= d; k += 2) {
+				let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1]) ? v[offset + k + 1] : v[offset + k - 1] + 1;
+				let y = x - k;
+				while (x < n && y < m && a[from + x] === b[from + y]) {
+					x++;
+					y++;
+				}
+				v[offset + k] = x;
+				if (x >= n && y >= m) {
+					const match = new Int32Array(n).fill(-1);
+					let bx = n;
+					let by = m;
+					for (let e = d; e > 0; e--) {
+						const snap = trace[e];
+						const at = (kk: number) => snap[kk + e + 1];
+						const kk = bx - by;
+						const prevK = kk === -e || (kk !== e && at(kk - 1) < at(kk + 1)) ? kk + 1 : kk - 1;
+						const prevX = at(prevK);
+						const prevY = prevX - prevK;
+						while (bx > prevX && by > prevY) {
+							match[--bx] = from + --by;
+						}
+						bx = prevX;
+						by = prevY;
+					}
+					while (bx > 0 && by > 0) {
+						match[--bx] = from + --by;
+					}
+					return match;
+				}
 			}
 		}
 		return null;
@@ -2414,9 +2600,27 @@ export class TUI extends Container {
 			forcedRender && this.flushedAtWidth === width && this.flushedAtHeight === height
 				? this.keepsFlushedTop(forcedRenderBaseLines, newLines, height, keptTop)
 				: null;
+		// The mark before the shrink demotion below: the tall→tall shrink path
+		// verifies its retained top against it (keepsFlushedTop).
+		const flushedBeforeShrink = this.flushedLineCount;
 		if (newLines.length < this.previousLines.length) {
 			this.flushedLineCount = Math.min(this.flushedLineCount, Math.max(0, newLines.length - height));
 		}
+		// The committed frame and its physical screen top: every clean repaint
+		// starts no lower than where the old screen-top row went (see
+		// seamRowInNewFrame). Computed once, on first use.
+		const seamBase = forcedRender ? forcedRenderBaseLines : this.previousLines;
+		const seamTop = forcedRender ? keptTop : prevViewportTop;
+		let seamRow: number | null | undefined;
+		const shiftedSeamRow = (): number | null => {
+			if (seamRow === undefined) {
+				seamRow =
+					seamBase && seamBase.length > 0 && this.flushedAtWidth === width && this.flushedAtHeight === height
+						? TUI.seamRowInNewFrame(seamBase, newLines, seamTop)
+						: null;
+			}
+			return seamRow;
+		};
 
 		// Shared epilogue for every frame-writing path: record the frame the
 		// terminal now shows and reposition the hardware cursor. Every writer
@@ -2465,7 +2669,14 @@ export class TUI extends Container {
 			// still in the rewritten lines is re-emitted below and replaces its
 			// (now-deleted) prior placement via its stable id.
 			buffer += this.deleteKittyImages(this.previousKittyImageIds);
-			const firstLine = clear ? Math.min(this.flushedLineCount, Math.max(0, newLines.length - height)) : 0;
+			let firstLine = clear ? Math.min(this.flushedLineCount, Math.max(0, newLines.length - height)) : 0;
+			// Rows deleted above the screen top moved the on-screen rows up, past
+			// the index the mark still names: start at the old screen-top row so
+			// it is repainted rather than erased (#3020).
+			const seam = firstLine > 0 ? shiftedSeamRow() : null;
+			if (seam !== null && seam < firstLine) {
+				firstLine = seam;
+			}
 			const startRow = Math.max(1, height - Math.max(1, newLines.length - firstLine) + 1);
 			if (clear) {
 				// Erase line-by-line instead of \x1b[2J: 2J erases the screen in
@@ -2638,6 +2849,46 @@ export class TUI extends Container {
 			newLines.length < this.previousLines.length &&
 			this.overlayStack.length === 0
 		) {
+			// A shrink that also moved rows above the physical screen top fails the
+			// padding check at the top of doRender (the overlap no longer matches by
+			// index), e.g. a tool card straddling the seam folding into its one-row
+			// phase summary mid-turn. Realigning to the new viewport top would then
+			// repaint scrollback rows a second time. The forced-repaint alignment
+			// applies unchanged: the committed frame is the base, the physical top
+			// the seam (#3000). When the overlap still matches by index the realign
+			// is exact — keep it (a below-seam deletion with a visible-region edit,
+			// which keepsFlushedTop's above-screen model would mis-anchor).
+			let overlapMatchesByIndex = true;
+			for (let i = newLines.length - height; i < Math.min(prevViewportTop, newLines.length); i++) {
+				if (this.previousLines[i] !== newLines[i]) {
+					overlapMatchesByIndex = false;
+					break;
+				}
+			}
+			const alignedTop =
+				overlapMatchesByIndex ||
+				this.flushedAtWidth !== width ||
+				this.flushedAtHeight !== height
+					? null
+					: this.keepsFlushedTop(this.previousLines, newLines, height, prevViewportTop, flushedBeforeShrink);
+			if (alignedTop !== null) {
+				logRedraw(`tall→tall shrink keeps flushed top (${alignedTop}, retained ${prevViewportTop}) instead of re-emitting scrollback`);
+				// Rows above the aligned top are verified scrollback; the repaint
+				// demotes the mark to that top, not to the shrunken viewport top.
+				this.flushedLineCount = flushedBeforeShrink;
+				repaintFromFlushedTop(alignedTop);
+				return;
+			}
+			// More rows went above the screen top than the frame lost: the old
+			// screen-top row now sits above the new viewport top, and an in-place
+			// realign would erase it. A clean repaint from it scrolls the rows up
+			// to the new viewport top into scrollback instead (#3020).
+			const seam = shiftedSeamRow();
+			if (seam !== null && seam < getViewportTop(newLines.length)) {
+				logRedraw(`tall→tall shrink moved the screen top above the viewport (${seam}) — clean repaint from it`);
+				fullRender(true);
+				return;
+			}
 			logRedraw(`tall→tall shrink viewport realign (${this.previousLines.length} -> ${newLines.length})`);
 			const newViewportTop = getViewportTop(newLines.length);
 			const currentScreenRow = Math.max(0, hardwareCursorRow - prevViewportTop);
