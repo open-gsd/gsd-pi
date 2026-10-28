@@ -65,7 +65,8 @@ test("last guided send checks ownership even after model readiness has passed", 
   let current = true;
   const scope = createAutoStartupOwnership(() => current);
   h.onTools(() => { current = false; scope.cancel(); });
-  await scope.run(h.dispatch);
+  const dispatched = await scope.run(h.dispatch);
+  assert.equal(dispatched, false, "cancelled final send reports that no turn started");
   assert.equal(current, false, "fixture must reach the pre-send tool setup boundary");
   assert.equal(h.sent, 0, "late cancellation cannot publish a guided turn");
 });

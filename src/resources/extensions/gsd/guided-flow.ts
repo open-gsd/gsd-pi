@@ -924,6 +924,7 @@ async function dispatchWorkflow(
       // The turn runs under the claim's worker heartbeat and lease renewal, so
       // a turn longer than the lease TTL cannot lose the claim to another
       // session's stale-takeover while it runs (the one-unit bound).
+      let dispatched = false;
       const send = async () => {
         if (!isCurrent()) {
           if (ownedGuidedContext && getGuidedUnitContext(projectRoot) === ownedGuidedContext) {
@@ -944,12 +945,14 @@ async function dispatchWorkflow(
           { triggerTurn: true },
         );
         noteAutoStartupDispatch();
+        dispatched = true;
       };
       if (claimed) {
         await runInteractiveClaimTurn(claimed, send);
       } else {
         await send();
       }
+      if (!dispatched) return false;
     } catch (err) {
       clearGuidedUnitContext(projectRoot);
       if (claimed) {
