@@ -109,7 +109,7 @@ test("exec registrations share renderers, request UI purpose, and preserve the U
   assert.equal(tools.find((entry) => entry.name === "gsd_uat_exec").parameters.properties.purpose, undefined);
 });
 
-test("purpose and digest survive a recording warning without changing execution success", async () => {
+test("purpose and digest survive unreadable output without changing execution success", async () => {
   const baseDir = mkdtempSync(join(tmpdir(), "gsd-exec-purpose-warning-"));
   try {
     mkdirSync(join(baseDir, ".gsd"));
@@ -129,9 +129,9 @@ test("purpose and digest survive a recording warning without changing execution 
     assert.equal(result.details.exit_code, 0);
     assert.equal(result.details.purpose, "Inspect output");
     assert.equal(result.details.digest, "check passed");
-    assert.match(String(result.details.run_not_recorded), /ENOENT/);
-    assert.match(result.content[0].text, /--- warning ---\nThe command ran, but the host did not record this run:/);
-    assert.match(result.content[0].text, /not verification or UAT evidence\. Do not run the command again/);
+    assert.equal(result.details.run_not_recorded, undefined);
+    assert.doesNotMatch(result.content[0].text, /--- warning ---/);
+    assert.match(result.content[0].text, /--- digest ---\ncheck passed/);
   } finally {
     closeDatabase();
     rmSync(baseDir, { recursive: true, force: true });
