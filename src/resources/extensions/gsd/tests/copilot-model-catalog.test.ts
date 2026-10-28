@@ -279,8 +279,8 @@ test("sanitizeGitHubCopilotModels preserves missing tool-call metadata as unknow
 test("sanitizeGitHubCopilotModels uses provider-qualified compatibility to resolve endpoint alternatives", () => {
   const record = sanitizeGitHubCopilotModels({
     data: [{
-      id: "gpt-5.4",
-      name: "GPT-5.4",
+      id: "gpt-5.3-codex",
+      name: "GPT-5.3 Codex",
       supported_endpoints: ["/chat/completions", "/responses"],
     }],
   })[0]!;
@@ -292,8 +292,8 @@ test("sanitizeGitHubCopilotModels uses provider-qualified compatibility to resol
 test("sanitizeGitHubCopilotModels records a conflict when single live transport disagrees with provider-static transport", () => {
   const record = sanitizeGitHubCopilotModels({
     data: [{
-      id: "gpt-5.4",
-      name: "GPT-5.4",
+      id: "gpt-5.3-codex",
+      name: "GPT-5.3 Codex",
       supported_endpoints: ["/chat/completions"],
     }],
   })[0]!;

@@ -1681,6 +1681,15 @@ describe("model-router registry keys", () => {
     );
   });
 
+  test("gpt-6.1-terra retains Terra routing capabilities at its catalog price", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["gpt-6-1-terra"], "standard");
+    assert.deepEqual(MODEL_CAPABILITY_PROFILES["gpt-6-1-terra"], MODEL_CAPABILITY_PROFILES["gpt-5-6-terra"]);
+    assert.deepEqual(
+      getEligibleModels("standard", ["gpt-5.6-terra", "gpt-6.1-terra", "gemini-2.5-pro"], defaultRoutingConfig()),
+      ["gpt-6.1-terra", "gemini-2.5-pro", "gpt-5.6-terra"],
+    );
+  });
+
   test("all bundled GitHub Copilot chat models have router tier and capability profiles", () => {
     const catalogPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..", "packages", "pi-ai", "src", "models.generated.json");
     const catalog = JSON.parse(readFileSync(catalogPath, "utf8"))["github-copilot"] as Record<string, Model<Api>>;

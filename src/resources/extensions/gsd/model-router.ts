@@ -193,6 +193,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "kimi-k2-7-code": "standard",
   "deepseek-chat": "standard",
   "gpt-5-6-terra": "standard",          // GitHub Copilot: "balanced everyday interactive and agentic coding"; was misclassified heavy (fixed 2026-09-20)
+  "gpt-6-1-terra": "standard",
 
   // Heavy-tier models (most capable)
   "claude-opus-4-5": "heavy",
@@ -277,6 +278,7 @@ const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
   "gpt-5-6-luna": 0.001,
   "gpt-6-sol": 0.002,
   "gpt-6-1-sol": 0.002,
+  "gpt-6-1-terra": 0.001,
   "gpt-6-luna": 0.0001,
   "gpt-6-astra": 0.01,
   "o4-mini": 0.005,
@@ -359,6 +361,8 @@ export const MODEL_CAPABILITY_PROFILES: Record<string, ModelCapabilities> = {
   // GPT-6 Sol/Luna are provisional until official eval results are available.
   "gpt-6-sol":                    { coding: 97, debugging: 95, research: 91, reasoning: 97, speed: 42, longContext: 91, instruction: 95 },
   "gpt-6-1-sol":                  { coding: 97, debugging: 95, research: 91, reasoning: 97, speed: 42, longContext: 91, instruction: 95 },
+  // Terra retains its prior profile provisionally until official eval deltas are available.
+  "gpt-6-1-terra":                { coding: 96, debugging: 93, research: 89, reasoning: 95, speed: 48, longContext: 91, instruction: 93 },
   "gpt-6-luna":                   { coding: 93, debugging: 89, research: 85, reasoning: 92, speed: 72, longContext: 91, instruction: 90 },
   "gpt-6-astra":                  { coding: 98, debugging: 96, research: 93, reasoning: 98, speed: 40, longContext: 94, instruction: 96 },
 

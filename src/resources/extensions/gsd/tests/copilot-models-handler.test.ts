@@ -384,7 +384,7 @@ test("getGsdArgumentCompletions: copilot-models pricing and why complete real mo
   const why = getGsdArgumentCompletions("copilot-models why kimi");
 
   assert.ok(
-    pricing.some((entry) => entry.value === "copilot-models pricing gpt-5.4"),
+    pricing.some((entry) => entry.value === "copilot-models pricing gpt-5.3-codex"),
     "pricing subcommand should complete concrete GitHub Copilot model IDs",
   );
   assert.ok(
