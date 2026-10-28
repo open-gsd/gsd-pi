@@ -53,7 +53,7 @@ test("cancelled startup cannot send after awaited guided model preparation; inde
   const running = scope.run(h.dispatch);
   await ready;
   current = false; scope.cancel(); release();
-  await running;
+  assert.equal(await running, false, "cancelled guided dispatch reports that no turn started");
   assert.equal(h.sent, 0);
   assert.equal(captureAutoStartupOwnership()(), true, "cancelled ownership must not leak outside its async invocation");
   await h.dispatch();

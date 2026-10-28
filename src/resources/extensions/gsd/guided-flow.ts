@@ -766,7 +766,7 @@ async function dispatchWorkflow(
   // started — every early return below reports false.
   const resolvedOptions = options ?? {};
   const isCurrent = captureAutoStartupOwnership();
-  if (!isCurrent()) return;
+  if (!isCurrent()) return false;
   const projectRoot = resolveGuidedDispatchProjectRoot(resolvedOptions.basePath);
   const loadPreferences = resolvedOptions.deps?.loadPreferences ?? loadEffectiveGSDPreferences;
   const selectModel = resolvedOptions.deps?.selectModel ?? selectAndApplyModel;
@@ -777,7 +777,7 @@ async function dispatchWorkflow(
   // every guided dispatch until the user imports or discards it.
   const { heldProjectionChangesBeforeDispatch } = await import("./state-reconciliation.js");
   const heldProjectionChanges = await heldProjectionChangesBeforeDispatch(projectRoot);
-  if (!isCurrent()) return;
+  if (!isCurrent()) return false;
   if (heldProjectionChanges) {
     ctx?.ui.notify(heldProjectionChanges, "error");
     return false;
@@ -792,7 +792,7 @@ async function dispatchWorkflow(
       prefs, /* verbose */ false, /* autoModeStartModel */ null,
       /* retryContext */ undefined, /* isAutoMode */ false,
     );
-    if (!isCurrent()) return;
+    if (!isCurrent()) return false;
     if (result.appliedModel) {
       debugLog("guided-flow-model-applied", {
         unitType,
@@ -830,7 +830,7 @@ async function dispatchWorkflow(
       // If the workflow MCP server is configured but still connecting, wait
       // for it instead of dispatching into a child session that will abort.
       const readinessFailure = await awaitWorkflowMcpReadiness(pi, ctx, projectRoot, { unitType });
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       if (readinessFailure) {
         const detail = readinessFailure.error ? ` ${readinessFailure.error}` : "";
         ctx.ui.notify(
@@ -854,7 +854,7 @@ async function dispatchWorkflow(
   // The one-unit bound (ADR-048): claim the unit through the kernel before the
   // turn runs. A refusal stops the dispatch; a claim is settled when the turn
   // ends, below.
-  if (!isCurrent()) return;
+  if (!isCurrent()) return false;
   let claimed: Extract<KernelUnitClaim, { kind: "claimed" }> | null = null;
   if (resolvedOptions.claim) {
     const claim = kernelClaimUnit({
