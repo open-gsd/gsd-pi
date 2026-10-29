@@ -28,16 +28,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.22.0**
+Latest release: **v1.23.0**
 
-- **gsd:** Make Claude Haiku 5.5 the default light-tier model (#2702).
-- **pi-ai:** Add Claude Haiku 5.5 to the model catalog with adaptive-only and temperature guards (#2701).
-- **models:** Refresh generated model catalog (#2737).
-- **vscode:** Guard canonical native Copilot project-context reads (#2699).
-- **mcp-server:** Bound Windows process queries and prepare complete SDK graph for Windows MCP tests (#2718).
-- **native:** Correct macOS descendant PID count handling (#2736).
-- **gsd:** Make complete-milestone prompt receipt-aware like the closeout guards (#2772) (#2773).
-- **gsd:** Let accepted milestone validation cover historical UAT failures at closure (#2770) (#2771).
+- **auto:** Add native-approved bounded mechanical recovery (#2920).
+- **gsd:** Opt-in reuse of the executor's gsd_exec run in host verification (#2984).
+- **gsd:** Discussion.question_mode preference for plain-chat interviews (#2979) (#2980).
+- **pi-tui:** Opt-in fullscreen (alternate-screen) mode with pinned editor (#2952).
+- **gsd:** Surface bounded stderr diagnostics in failed exec previews (#2927) (#2943).
+- **gsd:** Keyboard-reachable complete-path copy actions for exec output logs (#2934) (#2939).
+- **gsd:** Surface exec purpose and output logs in tool rendering (#2914) (#2922).
+- **subagent:** Surface provider-reported child model (#2859).
 
 <!-- release-highlights:end -->
 

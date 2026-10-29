@@ -1,6 +1,6 @@
 {
   "name": "@gsd/pi-tui",
-  "version": "1.22.0",
+  "version": "1.23.0",
   "description": "Terminal UI library (vendored from earendil-works/pi)",
   "type": "module",
   "gsd": {
