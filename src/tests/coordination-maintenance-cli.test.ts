@@ -92,11 +92,13 @@ test("unit: engine refusal terminates with nonzero and closes", async () => {
 });
 
 test("unit: factory/method/close exceptions never expose payloads", async () => {
-  const f = fixture(Readable.from([request("prepare", { token: "DO-NOT-EMIT" })]));
+  const fixtureSentinel = "fixture-token-value";
+  const f = fixture(Readable.from([request("prepare", { token: fixtureSentinel })]));
   f.host.prepare = () => { throw new Error("/private/hostname DO-NOT-EMIT argv env"); };
   assert.equal(await run(f), 1);
   assert.equal(f.closes, 1);
   assert.doesNotMatch(f.lines.join(""), /private|hostname|DO-NOT-EMIT|argv|env/);
+  assert.ok(!f.lines.join("").includes(fixtureSentinel));
   const g = fixture(Readable.from([request("prepare")]));
   assert.equal(await runCoordinationMaintenanceProtocol("/unit-project", g, async () => { throw new Error("DO-NOT-EMIT"); }), 1);
   assert.doesNotMatch(g.lines.join(""), /DO-NOT-EMIT/);
