@@ -1,6 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Atomic, revision-checked Domain Operation writer boundary.
 
+import type { DbAdapter } from "../db-adapter.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -22,6 +23,8 @@ import { describeLifecycleCoverageRefusal } from "../db-lifecycle-coverage-schem
 import { isSqliteBusyError } from "../sqlite-errors.js";
 import {
   assertDatabaseReplacementReceiptIntent,
+  _assertOwnedCoordinationMaintenance,
+  _releaseOwnedCoordinationMaintenanceTarget,
   getDb,
   immediateTransaction,
   isInTransaction,
@@ -214,6 +217,7 @@ export function _setDomainOperationFaultForTest(
 }
 
 function hitFault(point: DomainOperationFaultPoint, operationType: string): void {
+  if (operationType === "coordination.expired-lease.release") return;
   if (faultPoint === point && (faultOperationType === null || faultOperationType === operationType)) {
     throw new Error(`domain operation fault: ${point}`);
   }
@@ -546,8 +550,7 @@ function validateMutation(mutation: DomainOperationMutation): string[] {
   return eventPayloads;
 }
 
-function loadReceipt(operation: OperationRow, status: DomainOperationResult["status"]): DomainOperationResult {
-  const db = getDb();
+function loadReceipt(operation: OperationRow, status: DomainOperationResult["status"], db: DbAdapter = getDb()): DomainOperationResult {
   const eventIds = db.prepare(`
     SELECT event_id FROM workflow_domain_events
     WHERE operation_id = :operation_id ORDER BY event_index
@@ -593,8 +596,9 @@ function loadReceipt(operation: OperationRow, status: DomainOperationResult["sta
 export function inspectDomainOperationReceipt(
   operationType: string,
   idempotencyKey: string,
+  db: DbAdapter = getDb(),
 ): DomainOperationResult | null {
-  const operation = getDb().prepare(`
+  const operation = db.prepare(`
     SELECT operation_id, project_id, operation_type, idempotency_key,
            expected_revision, resulting_revision,
            expected_authority_epoch, resulting_authority_epoch,
@@ -606,16 +610,16 @@ export function inspectDomainOperationReceipt(
     ":operation_type": operationType,
     ":idempotency_key": idempotencyKey,
   }) as unknown as OperationRow | undefined;
-  return operation ? loadReceipt(operation, "replayed") : null;
+  return operation ? loadReceipt(operation, "replayed", db) : null;
 }
 
 export function assertDomainOperationReceiptComponents(
   receipt: DomainOperationResult,
   request: DomainOperationRequest,
   mutation: DomainOperationMutation,
+  db: DbAdapter = getDb(),
 ): void {
-  const db = getDb();
-  const operation = loadOperation(receipt.operationId);
+  const operation = loadOperation(receipt.operationId, db);
   const headerMatches = operation !== undefined
     && operation.operation_id === receipt.operationId
     && operation.project_id === receipt.projectId
@@ -717,8 +721,8 @@ function requireReplayMatch(
   }
 }
 
-function loadOperation(operationId: string): OperationRow | undefined {
-  return getDb().prepare(`
+function loadOperation(operationId: string, db: DbAdapter = getDb()): OperationRow | undefined {
+  return db.prepare(`
     SELECT operation_id, project_id, operation_type, idempotency_key,
            expected_revision, resulting_revision,
            expected_authority_epoch, resulting_authority_epoch,
@@ -993,9 +997,20 @@ function staleAuthority(request: DomainOperationRequestIdentity, authority: Auth
   );
 }
 
-function runDomainOperationTransaction(fn: () => DomainOperationResult): DomainOperationResult {
+function runDomainOperationTransaction(fn: () => DomainOperationResult, ownedDb?: DbAdapter, rollbackDb?: DbAdapter): DomainOperationResult {
   try {
-    return immediateTransaction(fn);
+    if (!ownedDb) return immediateTransaction(fn);
+    if (!rollbackDb) throw new Error("maintenance rollback connection required");
+    ownedDb.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      ownedDb.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try { rollbackDb.exec("ROLLBACK"); }
+      catch (rollbackError) { throw new AggregateError([error, rollbackError], "maintenance transaction rollback failed"); }
+      throw error;
+    }
   } catch (error) {
     if (isSqliteBusyError(error)) {
       throw new GSDError(
@@ -1017,9 +1032,11 @@ function executeDomainOperationCore(
   mutate: (context: Readonly<DomainOperationContext>) => DomainOperationMutation,
   preCommit: (() => void) | null = null,
   importForwardRepair: Readonly<LegacyImportForwardRepairPlan> | null = null,
+  ownedDb?: DbAdapter,
+  rollbackDb?: DbAdapter,
 ): DomainOperationResult {
   const result = runDomainOperationTransaction((): DomainOperationResult => {
-    const db = getDb();
+    const db = ownedDb ?? getDb();
     const authority = db.prepare(`
       SELECT project_id, revision, authority_epoch
       FROM project_authority WHERE singleton = 1
@@ -1047,7 +1064,7 @@ function executeDomainOperationCore(
       if (importRestore) requireMatchingImportRestore(existing, importRestore);
       if (importForwardRepair) requireMatchingImportForwardRepair(existing, importForwardRepair);
       preCommit?.();
-      return loadReceipt(existing, "replayed");
+      return loadReceipt(existing, "replayed", db);
     }
 
     const readKey = sessionReadKey(authority.project_id);
@@ -1126,7 +1143,7 @@ function executeDomainOperationCore(
     const mutation = mutate(context);
     const eventPayloads = validateMutation(mutation);
     const storedOperation = requireCommittedProvenance(
-      loadOperation(operationId),
+      loadOperation(operationId, db),
       request,
       hash,
       context,
@@ -1259,8 +1276,8 @@ function executeDomainOperationCore(
     }
 
     preCommit?.();
-    return loadReceipt(storedOperation, "committed");
-  });
+    return loadReceipt(storedOperation, "committed", db);
+  }, ownedDb, rollbackDb);
 
   noteAuthorityEpochReceipt(result.projectId, result.resultingAuthorityEpoch);
 
@@ -1274,6 +1291,37 @@ function executeDomainOperationCore(
   return result;
 }
 
+export type CoordinationMaintenanceDomainOperationRequest = DomainOperationRequest & {
+  operationType: "coordination.expired-lease.release";
+};
+
+/** Fixed engine-only writer; a process-owned seal supplies the raw target. */
+export function _executeCoordinationMaintenanceDomainOperation(
+  request: CoordinationMaintenanceDomainOperationRequest,
+  db: DbAdapter,
+  rollbackDb: DbAdapter,
+): DomainOperationResult {
+  _assertOwnedCoordinationMaintenance(db, request);
+  const snapshot = snapshotDomainOperationRequest(request);
+  validateRequestScalars(snapshot.identity);
+  if (snapshot.identity.operationType !== "coordination.expired-lease.release") {
+    throw new Error("invalid maintenance operation");
+  }
+  return executeDomainOperationCore(snapshot.identity, requestHash({ ...snapshot.identity, payload: snapshot.payload as DomainJsonValue }), null, null, null, (context) => {
+    _releaseOwnedCoordinationMaintenanceTarget(db, request);
+    return {
+      events: [{
+        eventType: "coordination.expired-lease.released",
+        entityType: "project",
+        entityId: context.projectId,
+        payload: request.payload,
+        destinations: ["projection"],
+      }],
+      projections: [{ projectionKey: "state", projectionKind: "state", rendererVersion: "1" }],
+    };
+  }, () => _assertOwnedCoordinationMaintenance(db, request), null, db, rollbackDb);
+}
+
 export function executeDomainOperation(
   request: DomainOperationRequest,
   /**
@@ -1285,6 +1333,9 @@ export function executeDomainOperation(
 ): DomainOperationResult {
   const snapshot = snapshotDomainOperationRequest(request);
   validateRequestScalars(snapshot.identity);
+  if (snapshot.identity.operationType === "coordination.expired-lease.release") {
+    throw new Error("expired lease maintenance requires the engine-owned maintenance mode");
+  }
   if (snapshot.identity.operationType === "import.apply") {
     throw new Error("import.apply requires executeImportDomainOperation");
   }

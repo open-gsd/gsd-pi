@@ -114,7 +114,20 @@ const invokedDirectly = (() => {
   }
 })();
 
-if (invokedDirectly) {
+if (invokedDirectly && process.argv.slice(2).some(arg =>
+  arg === "coordination-maintenance" || arg.startsWith("coordination-maintenance=") ||
+  arg === "--coordination-maintenance" || arg.startsWith("--coordination-maintenance="),
+)) {
+  // Native maintenance must branch before link repair AND the ordinary loader.
+  // Even malformed/misplaced command tokens cannot fall back to a session.
+  try {
+    const { runCoordinationMaintenanceCli } = await import("./coordination-maintenance-cli.js");
+    process.exitCode = await runCoordinationMaintenanceCli(process.argv.slice(2));
+  } catch {
+    process.stdout.write('{"requestId":null,"result":{"status":"refused","code":"maintenance-unavailable"}}\n');
+    process.exitCode = 1;
+  }
+} else if (invokedDirectly) {
   const { repaired, failed } = ensureWorkspaceLinks(packageRoot);
   if (failed.length > 0) {
     console.error(
