@@ -1,0 +1,46 @@
+{
+  "format": "gsd-graphify-known-answer-fixture",
+  "version": 1,
+  "claimBoundary": "Fixture source oracle only; not a provider response or runtime contract.",
+  "facts": [
+    {
+      "id": "primary-direct-call",
+      "relation": "calls",
+      "source": "caller-primary.ts#renderPrimary",
+      "target": "helper.ts#formatLabel",
+      "sourceEvidence": "return formatLabel(value);"
+    },
+    {
+      "id": "secondary-direct-call",
+      "relation": "calls",
+      "source": "caller-secondary.ts#renderSecondary",
+      "target": "helper.ts#formatLabel",
+      "sourceEvidence": "formatLabel(value)"
+    },
+    {
+      "id": "import-with-value-reference-is-not-a-call",
+      "relation": "imports",
+      "source": "import-only.ts",
+      "target": "helper.ts#formatLabel",
+      "sourceEvidence": "import { formatLabel } from \"./helper.js\";",
+      "mustNotInfer": "calls"
+    },
+    {
+      "id": "dynamic-dispatch-target-is-unresolved",
+      "relation": "dynamic-call",
+      "source": "dynamic-dispatch.ts#invokeByName",
+      "target": "unresolved",
+      "sourceEvidence": "const handler = registry[name];",
+      "callEvidence": "handler(value)",
+      "mustNotResolveTo": "helper.ts#formatLabel"
+    }
+  ],
+  "boundaryScenarios": [
+    "dirty-working-tree",
+    "new-untracked-source",
+    "deleted-source",
+    "relevant-config-change",
+    "same-relative-path-in-two-worktrees",
+    "source-changes-during-query"
+  ]
+}
