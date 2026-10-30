@@ -16,7 +16,7 @@ test("bare fixed backend refuses without an IPC parent", () => {
   assert.match(result.stderr, /maintenance-supervision-required/);
 });
 
-for (const mode of ["startup", "import", "signal", "eof"] as const) {
+for (const mode of ["startup", "import", "signal", "eof", "blocked-output"] as const) {
   test(`native supervisor reaps its own backend: ${mode}`, { timeout: 10_000 }, async t => {
     const root = mkdtempSync(join(tmpdir(), "w067-supervisor-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -42,6 +42,17 @@ if (!isWorker) {
     }, 20);
     return poll;
   };
+  if (${JSON.stringify(mode)} === "blocked-output") {
+    const write = process.stdout.write.bind(process.stdout);
+    let flooded = false;
+    process.stdout.write = function(chunk, ...args) {
+      if (!flooded && typeof chunk === "string" && chunk.includes('"termination"')) {
+        flooded = true;
+        for (let index = 0; index < 512; index++) write(Buffer.alloc(1024, 97));
+      }
+      return write(chunk, ...args);
+    };
+  }
 } else {
   fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
   if (${JSON.stringify(mode)} === 'startup') while (true) {}
@@ -59,29 +70,50 @@ if (!isWorker) {
       env: { ...process.env, NODE_OPTIONS: `--require=${preload}`, JITI_FS_CACHE: "false" },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+    t.after(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      if (mode === "blocked-output") child.stdout.destroy();
+    });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", chunk => { stdout += chunk; });
+    if (mode !== "blocked-output") child.stdout.on("data", chunk => { stdout += chunk; });
     child.stderr.on("data", chunk => { stderr += chunk; });
     const exited = new Promise<number | null>((resolve, reject) => {
-      child.once("error", reject); child.once("close", resolve);
+      child.once("error", reject);
+      if (mode === "blocked-output") child.once("exit", resolve);
+      else child.once("close", resolve);
     });
-    if (mode === "signal" || mode === "eof") {
+    if (mode === "signal" || mode === "eof" || mode === "blocked-output") {
       const until = Date.now() + 4_000;
       while (!existsSync(pidFile) && Date.now() < until && child.exitCode === null) {
         await new Promise(resolve => setTimeout(resolve, 20));
       }
       assert.ok(existsSync(pidFile), `backend did not start; stdout=${stdout}; stderr=${stderr}`);
-      if (mode === "signal") child.kill("SIGTERM"); else child.stdin.end();
+      if (mode === "signal" || mode === "blocked-output") child.kill("SIGTERM"); else child.stdin.end();
     }
-    const code = await exited;
+    const code = mode === "blocked-output"
+      ? await Promise.race([exited, new Promise<"timeout">(resolve => setTimeout(() => resolve("timeout"), 5_000))])
+      : await exited;
+    assert.notEqual(code, "timeout", "frontend must exit after bounded output flush");
+    if (mode === "blocked-output") child.stdout.destroy();
     assert.equal(code, 1, stderr);
     let pid: number;
     try { pid = Number(readFileSync(pidFile, "utf8")); }
     catch { assert.fail(`backend PID not recorded; stdout=${stdout}; stderr=${stderr}`); }
     assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
-    if (mode !== "eof") assert.match(stdout, /"termination":"confirmed"/);
+    if (mode !== "eof" && mode !== "blocked-output") {
+      const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+      const reply = JSON.parse(lines[lines.length - 1]) as {
+        requestId: unknown;
+        result: { status?: unknown; code?: unknown; termination?: unknown };
+      };
+      assert.deepEqual(Object.keys(reply).sort(), ["requestId", "result"]);
+      assert.equal(reply.requestId, null);
+      assert.deepEqual(Object.keys(reply.result).sort(), ["code", "status", "termination"]);
+      assert.equal(reply.result.status, "refused");
+      assert.equal(reply.result.code, "maintenance-unavailable");
+      assert.ok(reply.result.termination === "confirmed" || reply.result.termination === "unconfirmed");
+    }
     assert.doesNotMatch(stdout + stderr, /stack|SELECT|UPDATE/);
   });
 }

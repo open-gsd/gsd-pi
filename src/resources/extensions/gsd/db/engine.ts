@@ -2942,7 +2942,7 @@ export function _resetProvider(): void {
 
 export function getDb(): DbAdapter {
   refuseCoordinationMaintenanceAccessor();
-  if (!currentDb) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open. Call openDatabase() first.");
+  if (!currentDb) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   return currentDb;
 }
 
@@ -3115,8 +3115,14 @@ function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): 
     const rows = workerAndLease();
     if (rows.length !== 1 || digest(rows[0]) !== digest(selected)) fail();
     eligible(rows[0]);
-    const otherWorker = db!.prepare("SELECT 1 FROM workers WHERE worker_id != ? AND status != 'stopped' LIMIT 1").get(selected!.worker_id);
-    if (otherWorker
+    const otherWorkers = db!.prepare(`SELECT pid AS owner_pid, host AS owner_host, project_root_realpath, status
+      FROM workers WHERE worker_id != ? AND status != 'stopped'`).all(selected!.worker_id);
+    const unprovableWorker = otherWorkers.some(row =>
+      (row.status !== "stopping" && row.status !== "crashed")
+      || row.owner_host !== hostname()
+      || row.project_root_realpath !== root
+      || !pidAbsent(row.owner_pid));
+    if (unprovableWorker
       || db!.prepare("SELECT 1 FROM unit_dispatches WHERE status IN ('pending', 'claimed', 'running') LIMIT 1").get()
       || db!.prepare("SELECT 1 FROM workflow_execution_attempts WHERE attempt_state IN ('claimed', 'running') LIMIT 1").get()) fail();
     const changed = db!.prepare(`UPDATE milestone_leases SET status = 'released'
@@ -3156,6 +3162,7 @@ function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): 
     root = realpathSync(projectDirectory);
     path = resolve(root, ".gsd", "gsd.db");
     assertDatabaseReplacementFenceAllowsPath(path);
+    assertDatabaseMaintenanceAllowsReplacement(path);
     assertDatabaseMaintenanceFenceAllowsWrite(path);
     const { raw, identity } = openCorrelatedRawDatabase(path, () => providerLoader.openRaw(path, { createIfMissing: false }), false);
     rollback = createDbAdapter(raw);

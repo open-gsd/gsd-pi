@@ -9,7 +9,17 @@ if (!process.send || !process.connected || process.argv.length !== 2) {
 } else {
   const parentPid = process.ppid;
   const startup = setTimeout(() => process.exit(1), 5_000);
-  process.once("disconnect", () => process.exit(1));
+  let disconnected = false;
+  let backendRunning = false;
+  let cleanupMs = 0;
+  let disconnectDeadline: ReturnType<typeof setTimeout> | undefined;
+  const onDisconnect = () => {
+    disconnected = true;
+    if (!backendRunning) { process.exit(1); return; }
+    process.emit("SIGTERM");
+    disconnectDeadline = setTimeout(() => process.exit(1), cleanupMs);
+  };
+  process.once("disconnect", onDisconnect);
   process.once("message", async message => {
     // once() removes the last IPC listener before this async callback runs.
     // Keep ownership live across cold imports, which need not hold a JS handle.
@@ -28,12 +38,20 @@ if (!process.send || !process.connected || process.argv.length !== 2) {
       // Source execution already inherits its Node TS loader from the frontend.
       // Do not nest a second compiler around the transport and its IPC lifecycle.
       const backend = await import(backendUrl.href);
+      const { MAINTENANCE_LIMITS } = await import("./coordination-maintenance-limits.js");
+      cleanupMs = MAINTENANCE_LIMITS.cleanupMs;
       const { runCoordinationMaintenanceProtocol } = backend as typeof import("./coordination-maintenance-backend.js");
       const running = runCoordinationMaintenanceProtocol(start.projectDir, { input: process.stdin, output: process.stdout, signals: process });
+      backendRunning = true;
+      if (disconnected) process.emit("SIGTERM");
       process.send?.({ type: "maintenance-ready", token: start.token });
       const code = await running;
+      if (disconnectDeadline) clearTimeout(disconnectDeadline);
+      process.off("disconnect", onDisconnect);
       process.exit(code);
     } catch {
+      if (disconnectDeadline) clearTimeout(disconnectDeadline);
+      process.off("disconnect", onDisconnect);
       process.exit(1);
     }
   });

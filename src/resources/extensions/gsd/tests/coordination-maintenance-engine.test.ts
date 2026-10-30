@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { openCoordinationMaintenanceHost } from "../coordination-maintenance.ts";
+import { databaseMaintenanceIntentPath } from "../database-maintenance-fence.ts";
 import { _getAdapter, closeDatabase, getDb, getDbOrNull, openDatabase, openExistingDatabase } from "../gsd-db.ts";
 import { _executeCoordinationMaintenanceDomainOperation, _setDomainOperationFaultForTest, executeDomainOperation } from "../db/domain-operation.ts";
 import { immediateTransaction } from "../db/engine.ts";
@@ -228,6 +229,57 @@ test("two genuinely held leases refuse as target ambiguity", (t) => {
   assert.equal(f.raw.prepare("SELECT count(*) AS n FROM milestone_leases WHERE status = 'held'").get()?.n, 2);
   assert.equal(f.raw.prepare("SELECT count(*) AS n FROM workflow_operations").get()?.n, 0);
   assert.deepEqual(f.raw.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("dead local stopping and crashed workers do not block maintenance", (t) => {
+  const f = fixture(t);
+  const stamp = new Date().toISOString();
+  for (const [workerId, status] of [["previous-stopping", "stopping"], ["previous-crashed", "crashed"]] as const) {
+    f.raw.prepare(`INSERT INTO workers (
+      worker_id, pid, host, started_at, last_heartbeat_at, status, version, project_root_realpath
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(workerId, f.witness.ownerPid, hostname(), stamp, stamp, status, "test", f.root);
+  }
+  const sealId = prepare(f);
+  assert.equal(f.host.apply({ sealId }).status, "committed");
+  assert.equal(released(f), "released");
+});
+
+test("live local stopping worker still blocks maintenance", (t) => {
+  const f = fixture(t);
+  const stamp = new Date().toISOString();
+  const sealId = prepare(f);
+  f.raw.prepare(`INSERT INTO workers (
+    worker_id, pid, host, started_at, last_heartbeat_at, status, version, project_root_realpath
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("live-stopping", process.pid, hostname(), stamp, stamp, "stopping", "test", f.root);
+  assert.equal(f.host.apply({ sealId }).status, "refused");
+  assert.equal(released(f), "held");
+});
+
+test("remote crashed worker remains unprobeable and blocks maintenance", (t) => {
+  const f = fixture(t);
+  const stamp = new Date().toISOString();
+  const sealId = prepare(f);
+  f.raw.prepare(`INSERT INTO workers (
+    worker_id, pid, host, started_at, last_heartbeat_at, status, version, project_root_realpath
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("remote-crashed", f.witness.ownerPid, "unprobeable-remote-host", stamp, stamp, "crashed", "test", f.root);
+  assert.equal(f.host.apply({ sealId }).status, "refused");
+  assert.equal(released(f), "held");
+});
+
+test("stale local maintenance intent is recovered before the write fence", (t) => {
+  const f = fixture(t);
+  const marker = databaseMaintenanceIntentPath(f.path);
+  f.host.close();
+  fs.writeFileSync(marker, JSON.stringify({
+    schemaVersion: 1,
+    ownerPid: f.witness.ownerPid,
+    ownerProcessStartIdentity: `sha256:${"0".repeat(64)}`,
+    ownerNonce: "00000000-0000-4000-8000-000000000001",
+  }), { mode: 0o600 });
+
+  const recovered = openCoordinationMaintenanceHost({ projectDir: f.root });
+  recovered.close();
+  assert.equal(fs.existsSync(marker), false);
 });
 
 test("ambiguous leases and other active workers refuse", (t) => {

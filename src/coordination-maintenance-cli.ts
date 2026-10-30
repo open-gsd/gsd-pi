@@ -34,16 +34,45 @@ export async function runCoordinationMaintenanceCli(args: readonly string[]): Pr
     let inputBytes = 0;
     let cleanup: ReturnType<typeof setTimeout> | undefined;
     let hardStop: ReturnType<typeof setTimeout> | undefined;
+    let flushDeadline: ReturnType<typeof setTimeout> | undefined;
+    let pendingWrites = 0;
+    let finishCode = 1;
+    const finishIfOutputFlushed = () => {
+      if (!finished || pendingWrites > 0) return;
+      clearTimeout(flushDeadline);
+      flushDeadline = undefined;
+      resolve(finishCode);
+    };
+    const writeOutput = (destination: NodeJS.WriteStream, chunk: string | Buffer): boolean => {
+      pendingWrites++;
+      try {
+        return destination.write(chunk, error => {
+          pendingWrites--;
+          if (error) stop();
+          finishIfOutputFlushed();
+        });
+      } catch {
+        pendingWrites--;
+        stop();
+        finishIfOutputFlushed();
+        return false;
+      }
+    };
     const finish = (code: number) => {
       if (finished) return;
       finished = true;
+      finishCode = code;
       clearTimeout(deadline); clearTimeout(cleanup); clearTimeout(hardStop);
       process.stdin.off("data", input); process.stdin.pause();
-      resolve(code);
+      if (pendingWrites === 0) finishIfOutputFlushed();
+      else flushDeadline = setTimeout(() => process.exit(code), MAINTENANCE_LIMITS.cleanupMs);
     };
     const status = (termination: string) => {
-      // Fixed, redacted diagnostic only. Never wait for an obstructed output sink.
-      if (!inputRefused && !process.stdout.destroyed) process.stdout.write(`${JSON.stringify({ status: "refused", code: "maintenance-unavailable", termination })}\n`);
+      // Fixed, redacted diagnostic only; finish bounds any blocked final flush.
+      if (!inputRefused && !process.stdout.destroyed) writeOutput(process.stdout, `${JSON.stringify({
+        requestId: null,
+        result: { status: "refused", code: "maintenance-unavailable", termination },
+      })}\n`);
     };
     const stop = () => {
       if (stopping || finished) return;
@@ -90,7 +119,7 @@ export async function runCoordinationMaintenanceCli(args: readonly string[]): Pr
     const refuseInput = () => {
       if (inputRefused || stopping || finished) return;
       inputRefused = true;
-      process.stdout.write('{"requestId":null,"result":{"status":"refused","code":"maintenance-refused"}}\n');
+      writeOutput(process.stdout, '{"requestId":null,"result":{"status":"refused","code":"maintenance-refused"}}\n');
       stop();
     };
     process.stdin.on("data", input);
@@ -123,7 +152,7 @@ export async function runCoordinationMaintenanceCli(args: readonly string[]): Pr
         stream.on("data", (chunk: Buffer) => {
           outputBytes += chunk.length;
           if (outputBytes > MAINTENANCE_LIMITS.totalBytes) { stop(); return; }
-          if (!destination.write(chunk)) stream.pause();
+          if (!writeOutput(destination, chunk)) stream.pause();
         });
         destination.on("drain", () => { if (!stopping) stream.resume(); });
       };

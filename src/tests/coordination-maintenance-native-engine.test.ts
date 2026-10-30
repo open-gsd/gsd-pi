@@ -1,7 +1,7 @@
 // Real source-bootstrap + real owned-engine integration; temporary fixtures only.
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { _getAdapter, closeDatabase, openDatabase } from "../resources/extensions/gsd/gsd-db.ts";
+import { databaseMaintenanceIntentPath } from "../resources/extensions/gsd/database-maintenance-fence.ts";
 import { MAINTENANCE_LIMITS } from "../coordination-maintenance-limits.ts";
 
 // The fixture watchdog must allow the fixed native supervisor to enforce its own
@@ -210,6 +211,37 @@ test("real native bootstrap commits one sealed lease with a complete receipt, th
   assert.equal((await lostSealHost.send("apply", { sealId: prepared.sealId })).status, "refused");
   await lostSealHost.finish(1);
   assert.deepEqual(snapshot(f.raw), afterCommit);
+});
+
+test("backend closes maintenance ownership after its IPC parent disappears", { timeout: 2 * hostWatchdogMs + 10_000 }, async t => {
+  const f = fixture(t);
+  const host = nativeHost(f);
+  const prepared = await host.send("prepare", f.input);
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  const marker = databaseMaintenanceIntentPath(join(f.root, ".gsd", "gsd.db"));
+  assert.ok(existsSync(marker), "prepare must hold maintenance ownership");
+  const ownerPid = Number((JSON.parse(readFileSync(marker, "utf8")) as { ownerPid: number }).ownerPid);
+  assert.ok(ownerPid > 0);
+  t.after(() => {
+    try { process.kill(ownerPid, "SIGKILL"); } catch { /* The cleanup path already reaped it. */ }
+  });
+
+  host.owned.child.kill("SIGKILL");
+  await host.owned.exited;
+  const deadline = Date.now() + MAINTENANCE_LIMITS.cleanupMs * 3 + 1_000;
+  while (existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(existsSync(marker), false, "disconnect cleanup must release the maintenance intent");
+  let ownerAlive = true;
+  const ownerExitDeadline = Date.now() + MAINTENANCE_LIMITS.cleanupMs * 5;
+  while (ownerAlive && Date.now() < ownerExitDeadline) {
+    try { process.kill(ownerPid, 0); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") ownerAlive = false;
+      else throw error;
+    }
+    if (ownerAlive) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(ownerAlive, false, "disconnected backend must exit after cleanup");
 });
 
 test("packaged bootstrap loads the copied resource and commits a maintenance receipt", { skip: !existsSync(packagedBootstrap), timeout: 2 * hostWatchdogMs + 10_000 }, async t => {
