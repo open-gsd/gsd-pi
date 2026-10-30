@@ -1,0 +1,114 @@
+{
+  "id": "open-gsd-openclaw",
+  "name": "Open GSD",
+  "description": "GSD web UI in native Portals, MCP tools, and automatic project and Workboard synchronization",
+  "version": "1.23.0",
+  "activation": {
+    "onStartup": true
+  },
+  "mcpServers": {
+    "gsd": {
+      "transport": "stdio",
+      "command": "gsd-mcp-server",
+      "args": [],
+      "env": {
+        "GSD_MCP_CLIENT_MANAGED": "1"
+      },
+      "requestTimeoutMs": 120000
+    }
+  },
+  "skills": [
+    "./skills"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "projectSessions": {
+        "type": "array",
+        "description": "Optional per-project destinations for factual status events and heartbeat context. Otherwise follows the default agent's configured heartbeat session.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "projectDir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sessionKey": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "projectDir",
+            "sessionKey"
+          ]
+        }
+      },
+      "webUi": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Serve the existing GSD web UI in native OpenClaw Portals (default true)."
+          },
+          "packageRoot": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local GSD installation root; otherwise resolved from GSD_CLI_PATH or gsd on PATH."
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Optional loopback web host port; otherwise an available port is selected."
+          }
+        }
+      },
+      "embeddedProjects": {
+        "type": "object",
+        "description": "Embedded access to the caller's native OpenClaw project catalog. By default, administrators see all caller-visible projects; an explicit projects list only narrows that catalog.",
+        "additionalProperties": false,
+        "properties": {
+          "adminOnly": {
+            "type": "boolean",
+            "description": "Require an administrator (default true). Non-admin access also requires an explicit projects list and native scopes exposing each project path."
+          },
+          "projects": {
+            "type": "array",
+            "description": "Optional narrowing allowlist, not a discovery root. Omit this property to show all caller-visible native projects; [] denies every project. Remove legacy lists to use the full native catalog.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "projectId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "canonicalRoot": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "projectId",
+                "canonicalRoot"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "controlUi": {
+    "entry": "dist/control-ui/80b853b127690d69a1cf3a0553feb619327f3187b36ef29fa3a79319b9a9cbcb/index.js"
+  },
+  "contracts": {
+    "gatewayMethodDispatch": [
+      "authenticated-request"
+    ],
+    "tools": []
+  }
+}

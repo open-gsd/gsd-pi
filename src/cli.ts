@@ -22,6 +22,7 @@ import { applySecurityOverrides } from './security-overrides.js'
 import { formatModelFallbackNotice, validateConfiguredModel } from './startup-model-validation.js'
 import { migrateAnthropicDefaultToClaudeCode, migrateGeminiCliDefaultToAntigravity } from './provider-migrations.js'
 import { applyModelOverride } from './cli-model-override.js'
+import { assertModelSelectionAllowed } from '@gsd/pi-ai/model-request-policy.js'
 import {
   buildHeadlessCommandArgs,
   parseCliArgs,
@@ -176,6 +177,7 @@ async function reapplyValidatedModelOnFallback(
 let cliFlags: ReturnType<typeof parseCliArgs>
 try {
   cliFlags = parseCliArgs(process.argv)
+  assertModelSelectionAllowed(cliFlags.model)
 } catch (err) {
   // `--help`/`-h` is a meta-request that must always resolve to help, even when
   // another argument is an unrecognized flag (e.g. `gsd --foo --help`). This

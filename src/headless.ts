@@ -18,7 +18,9 @@ import { resolve } from 'node:path'
 import { ChildProcess } from 'node:child_process'
 
 import { RpcClient } from '@gsd/agent-modes/modes/rpc/rpc-client.js'
+import { verifyQualifiedModelBinding } from '@opengsd/rpc-client'
 import { SessionManager } from '@gsd/pi-coding-agent'
+import { assertModelSelectionAllowed, inheritModelRequestPolicy } from '@gsd/pi-ai/model-request-policy.js'
 import type { SessionInfo } from '@gsd/pi-coding-agent'
 import { getProjectSessionsDir } from './project-sessions.js'
 import { loadAndValidateAnswerFile, AnswerInjector } from './headless-answers.js'
@@ -292,6 +294,7 @@ export function parseHeadlessArgs(argv: string[]): HeadlessOptions {
 // ---------------------------------------------------------------------------
 
 export async function runHeadless(options: HeadlessOptions): Promise<void> {
+  assertModelSelectionAllowed(options.model)
   if (options.command === 'quick' && options.commandArgs.join(' ').trim().length === 0) {
     process.stderr.write('[headless] Error: quick requires a task description.\n')
     process.stderr.write('[headless] Usage: gsd headless quick "<task description>"\n')
@@ -534,6 +537,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     clientOptions.args = [...((clientOptions.args as string[]) || []), '--bare']
   }
 
+  clientOptions.env = inheritModelRequestPolicy(clientOptions.env as Record<string, string | undefined>)
   const client = new RpcClient(clientOptions)
 
   // Event tracking
@@ -1081,6 +1085,18 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       process.exit(1)
     }
     process.stderr.write(`[headless] Resuming session ${matched.id}\n`)
+  }
+
+  // A resumed session can restore a different model. Verify the explicit
+  // provider binding after switching sessions and before sending any prompt.
+  try {
+    await verifyQualifiedModelBinding(client, options.model)
+  } catch (err) {
+    process.stderr.write(`[headless] Error: ${err instanceof Error ? err.message : String(err)}\n`)
+    await client.stop()
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    if (idleTimer) clearTimeout(idleTimer)
+    process.exit(EXIT_ERROR)
   }
 
   // Build injector adapter — wraps client.sendUIResponse for AnswerInjector's writeToStdin interface

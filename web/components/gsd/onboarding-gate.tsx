@@ -22,6 +22,7 @@ import { StepOptional } from "./onboarding/step-optional"
 import { StepRemote } from "./onboarding/step-remote"
 import { StepReady } from "./onboarding/step-ready"
 import { StepProject } from "./onboarding/step-project"
+import { withBasePath } from "@/lib/auth"
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -167,8 +168,8 @@ export function OnboardingGate() {
       <header className="relative z-10 flex h-12 shrink-0 items-center justify-between px-5 md:px-8">
         {/* Left — logo */}
         <div className="flex w-24 items-center gap-2">
-          <Image src="/logo-white.svg" alt="GSD-Pi Web" width={57} height={16} className="hidden h-4 w-auto dark:block" />
-          <Image src="/logo-black.svg" alt="GSD-Pi Web" width={57} height={16} className="h-4 w-auto dark:hidden" />
+          <Image src={withBasePath("/logo-white.svg")} alt="GSD-Pi Web" width={57} height={16} className="hidden h-4 w-auto dark:block" />
+          <Image src={withBasePath("/logo-black.svg")} alt="GSD-Pi Web" width={57} height={16} className="h-4 w-auto dark:hidden" />
         </div>
 
         {/* Center — step indicator */}

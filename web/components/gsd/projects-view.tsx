@@ -35,7 +35,8 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { authFetch } from "@/lib/auth"
+import { authFetch, withBasePath } from "@/lib/auth"
+import { projectCatalogRequest, type ProjectCatalogPreferences } from "@/lib/project-catalog"
 import {
   Dialog,
   DialogContent,
@@ -264,11 +265,12 @@ export function ProjectsPanel({
 
   const [projects, setProjects] = useState<ProjectMetadata[]>([])
   const [devRoot, setDevRoot] = useState<string | null>(null)
+  const [hostManaged, setHostManaged] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const loadProjects = useCallback(async (root: string) => {
-    const projRes = await authFetch(`/api/projects?root=${encodeURIComponent(root)}&detail=true`)
+  const loadProjects = useCallback(async (request: string) => {
+    const projRes = await authFetch(request)
     if (!projRes.ok) throw new Error(`Failed to discover projects: ${projRes.status}`)
     return (await projRes.json()) as ProjectMetadata[]
   }, [])
@@ -284,17 +286,20 @@ export function ProjectsPanel({
       try {
         const prefsRes = await authFetch("/api/preferences")
         if (!prefsRes.ok) throw new Error(`Failed to load preferences: ${prefsRes.status}`)
-        const prefs = await prefsRes.json()
+        const prefs = await prefsRes.json() as ProjectCatalogPreferences
+        if (cancelled) return
+        setHostManaged(prefs.projectSource === "openclaw")
+        setDevRoot(prefs.devRoot ?? null)
+        const request = projectCatalogRequest(prefs)
 
-        if (!prefs.devRoot) {
+        if (!request) {
           setDevRoot(null)
           setProjects([])
           setLoading(false)
           return
         }
 
-        setDevRoot(prefs.devRoot)
-        const discovered = await loadProjects(prefs.devRoot)
+        const discovered = await loadProjects(request)
         if (!cancelled) setProjects(discovered)
       } catch (err) {
         if (!cancelled) {
@@ -398,7 +403,7 @@ export function ProjectsPanel({
         <p className="text-sm text-destructive">{error}</p>
       </div>
     )
-  } else if (!devRoot) {
+  } else if (!devRoot && !hostManaged) {
     content = <DevRootSetup onSaved={handleDevRootSaved} />
   } else if (sortedProjects.length === 0) {
     content = (
@@ -409,10 +414,10 @@ export function ProjectsPanel({
         <div className="space-y-2">
           <h3 className="text-base font-semibold text-foreground">No projects found</h3>
           <p className="text-sm text-muted-foreground leading-relaxed">
-            No project directories discovered in{" "}
-            <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono text-foreground">
-              {devRoot}
-            </code>
+            {hostManaged ? "Register a project in OpenClaw Settings → Projects, then reopen this panel." : <>
+              No project directories discovered in{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono text-foreground">{devRoot}</code>
+            </>}
           </p>
         </div>
       </div>
@@ -430,7 +435,8 @@ export function ProjectsPanel({
           />
         ))}
 
-        {/* Create new project button */}
+        {/* Standalone project creation stays local to GSD. */}
+        {!hostManaged && devRoot && <>
         <button
           type="button"
           onClick={() => setNewProjectOpen(true)}
@@ -457,6 +463,7 @@ export function ProjectsPanel({
           existingNames={projects.map((p) => p.name)}
           onCreated={handleProjectCreated}
         />
+        </>}
       </div>
     )
   }
@@ -473,7 +480,8 @@ export function ProjectsPanel({
         <div className="flex items-center justify-between border-b border-border/50 px-5 py-4">
           <div>
             <h2 className="text-base font-semibold text-foreground">Projects</h2>
-            {devRoot && !loading && (
+            {hostManaged && !loading && <p className="mt-0.5 text-xs text-muted-foreground">OpenClaw projects · {projects.length}</p>}
+            {devRoot && !hostManaged && !loading && (
               <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
                 <code className="rounded bg-muted px-1 py-0.5 font-mono text-[10px] truncate max-w-[200px]">{devRoot}</code>
                 <button
@@ -926,12 +934,16 @@ function DevRootSetup({
 
 export function DevRootSettingsSection() {
   const [devRoot, setDevRoot] = useState<string | null>(null)
+  const [hostManaged, setHostManaged] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     authFetch("/api/preferences")
       .then((r) => r.json())
-      .then((prefs) => setDevRoot(prefs.devRoot ?? null))
+      .then((prefs: ProjectCatalogPreferences) => {
+        setHostManaged(prefs.projectSource === "openclaw")
+        setDevRoot(prefs.devRoot ?? null)
+      })
       .catch(() => setDevRoot(null))
       .finally(() => setLoading(false))
   }, [])
@@ -944,6 +956,13 @@ export function DevRootSettingsSection() {
       </div>
     )
   }
+
+  if (hostManaged) return (
+    <div className="space-y-3" data-testid="settings-managed-projects">
+      <h3 className="text-[13px] font-semibold">OpenClaw projects</h3>
+      <p className="text-xs text-muted-foreground">Manage projects in OpenClaw Settings → Projects.</p>
+    </div>
+  )
 
   return (
     <div className="space-y-3" data-testid="settings-devroot">
@@ -973,14 +992,15 @@ export function ProjectSelectionGate() {
 
   const [projects, setProjects] = useState<ProjectMetadata[]>([])
   const [devRoot, setDevRoot] = useState<string | null>(null)
+  const [hostManaged, setHostManaged] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [changeRootOpen, setChangeRootOpen] = useState(false)
   const [filter, setFilter] = useState("")
 
-  const loadProjects = useCallback(async (root: string) => {
-    const projRes = await authFetch(`/api/projects?root=${encodeURIComponent(root)}&detail=true`)
+  const loadProjects = useCallback(async (request: string) => {
+    const projRes = await authFetch(request)
     if (!projRes.ok) throw new Error(`Failed to discover projects: ${projRes.status}`)
     return (await projRes.json()) as ProjectMetadata[]
   }, [])
@@ -994,17 +1014,20 @@ export function ProjectSelectionGate() {
       try {
         const prefsRes = await authFetch("/api/preferences")
         if (!prefsRes.ok) throw new Error(`Failed to load preferences: ${prefsRes.status}`)
-        const prefs = await prefsRes.json()
+        const prefs = await prefsRes.json() as ProjectCatalogPreferences
+        if (cancelled) return
+        setHostManaged(prefs.projectSource === "openclaw")
+        setDevRoot(prefs.devRoot ?? null)
+        const request = projectCatalogRequest(prefs)
 
-        if (!prefs.devRoot) {
+        if (!request) {
           setDevRoot(null)
           setProjects([])
           setLoading(false)
           return
         }
 
-        setDevRoot(prefs.devRoot)
-        const discovered = await loadProjects(prefs.devRoot)
+        const discovered = await loadProjects(request)
         if (!cancelled) setProjects(discovered)
       } catch (err) {
         if (!cancelled) {
@@ -1094,14 +1117,14 @@ export function ProjectSelectionGate() {
           {/* ─── Logo + subtitle ─── */}
           <div className="flex flex-col items-center text-center mb-10">
             <Image
-              src="/logo-black.svg"
+              src={withBasePath("/logo-black.svg")}
               alt="GSD-Pi Web"
               width={100}
               height={28}
               className="h-7 w-auto dark:hidden"
             />
             <Image
-              src="/logo-white.svg"
+              src={withBasePath("/logo-white.svg")}
               alt="GSD-Pi Web"
               width={100}
               height={28}
@@ -1128,7 +1151,7 @@ export function ProjectSelectionGate() {
             )}
 
             {/* No dev root — show setup */}
-            {!devRoot && !loading && !error && (
+            {!devRoot && !hostManaged && !loading && !error && (
               <div className="space-y-6">
                 <div>
                   <h2 className="text-lg font-semibold tracking-tight text-foreground">
@@ -1143,30 +1166,31 @@ export function ProjectSelectionGate() {
             )}
 
             {/* No projects found */}
-            {devRoot && !loading && sortedProjects.length === 0 && !error && (
+            {(devRoot || hostManaged) && !loading && sortedProjects.length === 0 && !error && (
               <div className="space-y-6">
                 <div>
                   <h2 className="text-lg font-semibold tracking-tight text-foreground">No projects found</h2>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    No project directories were discovered. Create one to get started.
+                    {hostManaged ? "Register a project in OpenClaw Settings → Projects, then reload this view." : "No project directories were discovered. Create one to get started."}
                   </p>
                 </div>
-                <button
+                {!hostManaged && <button
                   type="button"
                   onClick={() => setNewProjectOpen(true)}
                   className="flex items-center gap-3 rounded-md border border-dashed border-border px-4 py-3 text-sm text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground"
                 >
                   <Plus className="h-4 w-4" />
                   Create a new project
-                </button>
+                </button>}
               </div>
             )}
 
             {/* ─── Project list ─── */}
             {hasProjects && (
               <div className="space-y-5">
-                {/* Dev root + change button */}
-                {devRoot && (
+                {/* Host registry has no GSD development-root setting. */}
+                {hostManaged && <p className="text-xs text-muted-foreground">OpenClaw projects</p>}
+                {devRoot && !hostManaged && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <FolderRoot className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                     <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground truncate">{devRoot}</code>
@@ -1281,14 +1305,14 @@ export function ProjectSelectionGate() {
                 </div>
 
                 {/* Create new row */}
-                <button
+                {!hostManaged && <button
                   type="button"
                   onClick={() => setNewProjectOpen(true)}
                   className="flex items-center gap-3 rounded-md border border-dashed border-border px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground w-full"
                 >
                   <Plus className="h-3.5 w-3.5" />
                   New project
-                </button>
+                </button>}
 
                 {devRoot && (
                   <NewProjectDialog

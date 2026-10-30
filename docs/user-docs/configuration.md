@@ -1389,3 +1389,37 @@ post_unit_hooks:
     artifact: REVIEW.md
 ---
 ```
+
+
+### Exact-model launch policy (`GSD_MODEL_ALLOWLIST`)
+
+For an unattended run that must never fall back to another model, set a nonempty
+JSON array of exact `provider/model` IDs in its launch environment:
+
+```sh
+GSD_MODEL_ALLOWLIST='["local/my-model"]' gsd headless --model local/my-model auto
+```
+
+This is opt-in. Without the variable, existing model selection remains unchanged.
+Empty, malformed, unqualified or wildcard lists abort initialization. The native
+runtime snapshots the list before extensions load; later environment/preferences
+changes cannot broaden it within that process. Headless RPC children, native
+subagents (including frontmatter/tool overrides and forked contexts), and parallel
+workers inherit the captured policy. A forbidden or unavailable explicit CLI
+model fails instead of silently using a configured default.
+
+The native registry filters exact model IDs and rejects forbidden auth resolution
+before reading credentials. The pi-ai dispatch boundary also rejects forbidden
+stream/complete calls before invoking any provider adapter, covering phase
+switches, restored sessions, retries, compaction and built-in direct completions.
+The policy does not limit tools, context windows, reasoning or output budgets.
+`getModelRequestPolicy()` exposes the immutable active list for native readiness
+readback; an independent RPC preflight or extension observer is not enforcement.
+
+Apply the environment to each separately launched GSD owner, including a GSD MCP
+server if it is allowed to create model sessions. It does not modify the calling
+OpenClaw agent's model. This is a native model-dispatch contract, not a security
+sandbox for arbitrary shell commands, third-party SDKs or extensions deliberately
+bypassing GSD's provider APIs. Continue using preferences to select intended phase
+models and to report configuration mistakes; the launch policy is the final
+pre-request guard when those selections drift.

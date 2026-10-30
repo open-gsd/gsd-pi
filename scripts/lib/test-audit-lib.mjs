@@ -43,7 +43,7 @@ export const INTEGRATION_EXTENSION_GLOBS = new Set([
   'slash-commands',
 ]);
 
-export const SOURCE_ROOTS = ['src', 'packages', 'scripts', 'web', 'vscode-extension'];
+export const SOURCE_ROOTS = ['src', 'packages', 'scripts', 'web', 'vscode-extension', 'integrations'];
 
 // Archived material is kept for provenance only: nothing imports it and no
 // runner executes it, so it must not register as live test or source surface.
@@ -104,6 +104,10 @@ export function classifyRunner(testPath) {
     return 'ui-sparse-manual';
   }
   if (testPath.startsWith('packages/')) return 'packages';
+  // Host integrations (integrations/<host>) run their own test script in their
+  // own workflow (hermes-integration.yml, openclaw-integration.yml), not in a
+  // root npm lane.
+  if (testPath.startsWith('integrations/')) return 'integrations';
 
   if (testPath.startsWith('src/resources/extensions/')) {
     const ext = testPath.split('/')[3];
@@ -119,7 +123,7 @@ export function classifyRunner(testPath) {
 }
 
 export function isReachableTest(runner) {
-  return VERIFY_FAST_RUNNERS.has(runner) || runner === 'release-pipeline' || runner === 'ui-sparse-manual';
+  return VERIFY_FAST_RUNNERS.has(runner) || runner === 'release-pipeline' || runner === 'ui-sparse-manual' || runner === 'integrations';
 }
 
 export function isInNpmTest(runner) {
@@ -233,6 +237,10 @@ export function resolveSourceTestMapping(sourcePath, testIndex) {
       const pkg = sourcePath.split('/')[1];
       return t.startsWith(`packages/${pkg}/`);
     }
+    if (sourcePath.startsWith('integrations/')) {
+      const host = sourcePath.split('/')[1];
+      return t.startsWith(`integrations/${host}/`);
+    }
     if (sourcePath.startsWith('src/resources/extensions/')) {
       const ext = sourcePath.split('/')[3];
       return t.includes(`/extensions/${ext}/`) || t.startsWith('src/tests/');
@@ -284,6 +292,9 @@ export function sourceSuiteCoverageKeys(sourcePath) {
   if (p.startsWith('packages/')) {
     return [`pkg:${p.split('/')[1]}`];
   }
+  if (p.startsWith('integrations/')) {
+    return [`integration:${p.split('/')[1]}`];
+  }
   if (p.startsWith('src/resources/extensions/')) {
     const ext = p.split('/')[3];
     const keys = [`root:src`];
@@ -302,6 +313,9 @@ export function testSuiteCoverageKeys(testPath) {
   if (!isReachableTest(runner)) return [];
   if (testPath.startsWith('packages/')) {
     return [`pkg:${testPath.split('/')[1]}`];
+  }
+  if (testPath.startsWith('integrations/')) {
+    return [`integration:${testPath.split('/')[1]}`];
   }
   if (testPath.startsWith('src/resources/extensions/')) {
     return [`ext:${testPath.split('/')[3]}`, 'root:src'];

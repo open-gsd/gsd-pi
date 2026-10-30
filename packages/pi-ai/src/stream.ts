@@ -1,5 +1,6 @@
 import "./providers/register-builtins.js";
 
+import { assertModelRequestAllowed } from "./model-request-policy.js";
 import { getApiProviderForModel } from "./api-registry.js";
 import type {
 	Api,
@@ -15,6 +16,7 @@ import type {
 export { getEnvApiKey } from "./env-api-keys.js";
 
 function resolveApiProvider(model: Model<Api>) {
+	assertModelRequestAllowed(model);
 	const provider = getApiProviderForModel(model);
 	if (!provider) {
 		throw new Error(`No API provider registered for provider/api: ${model.provider}/${model.api}`);

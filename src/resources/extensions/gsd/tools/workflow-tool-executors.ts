@@ -41,6 +41,7 @@ export {
   executeMilestoneUnpark,
 } from "./milestone-hierarchy.js";
 export { executeResearchDecisionSave } from "./research-decision.js";
+export { executeProjectInit } from "./project-init.js";
 export { executeCaptureComplete, executeCaptureResolve } from "./capture-tools.js";
 import { emitLifecycleShadowObservation } from "../uok/audit.js";
 import { extractMilestoneSeq } from "../milestone-ids.js";

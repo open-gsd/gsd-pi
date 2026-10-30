@@ -2,6 +2,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { assertModelSelectionAllowed, inheritModelRequestPolicy } from "@gsd/pi-ai/model-request-policy.js";
 import { SessionManager } from "@gsd/pi-coding-agent";
 import { shellEscape } from "../cmux/index.js";
 import type { AgentConfig } from "./agents.js";
@@ -54,7 +55,7 @@ export function buildSubagentProcessEnv(
 	runtimeContractRoot?: string,
 ): NodeJS.ProcessEnv {
 	const childEnv: NodeJS.ProcessEnv = {
-		...env,
+		...inheritModelRequestPolicy(env),
 		[SUBAGENT_CHILD_ENV_VAR]: SUBAGENT_CHILD_ENV_VALUE,
 	};
 	if (runtimeContractRoot) childEnv[SUBAGENT_RUNTIME_CONTRACT_ROOT_ENV_VAR] = path.resolve(runtimeContractRoot);
@@ -63,8 +64,9 @@ export function buildSubagentProcessEnv(
 }
 
 export function buildShellEnvAssignments(env: NodeJS.ProcessEnv = process.env): string[] {
-	return [SUBAGENT_CHILD_ENV_VAR, SUBAGENT_RUNTIME_CONTRACT_ROOT_ENV_VAR]
-		.flatMap((name) => env[name] ? [`${name}=${shellEscape(env[name])}`] : []);
+	const inherited = inheritModelRequestPolicy(env);
+	return [SUBAGENT_CHILD_ENV_VAR, SUBAGENT_RUNTIME_CONTRACT_ROOT_ENV_VAR, "GSD_MODEL_ALLOWLIST"]
+		.flatMap((name) => inherited[name] ? [`${name}=${shellEscape(inherited[name])}`] : []);
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -152,6 +154,7 @@ export function resolveSubagentSessionArgs(
 }
 
 export function createSubagentLaunchPlan(input: SubagentLaunchInput): SubagentLaunchPlan {
+	assertModelSelectionAllowed(input.modelOverride ?? input.agent.model);
 	const session = input.session ?? resolveSubagentSessionArgs(input.contextMode ?? "fresh", input.parentSessionManager);
 	const requestedCwd = path.resolve(input.cwd ?? input.defaultCwd);
 	const resolvedCwd = resolveExistingPath(requestedCwd);
