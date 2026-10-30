@@ -1,0 +1,81 @@
+[
+  {
+    "from": "module:caller-primary",
+    "to": "module:helper",
+    "type": "depends-on",
+    "evidence": {
+      "path": "caller-primary.ts",
+      "startLine": 1,
+      "endLine": 1,
+      "expression": "import { formatLabel } from \"./helper.js\";",
+      "targetPath": "helper.ts",
+      "targetStartLine": 1,
+      "targetEndLine": 3,
+      "basis": "Explicit static import; fixture TypeScript source correspondence for ./helper.js."
+    }
+  },
+  {
+    "from": "module:caller-secondary",
+    "to": "module:helper",
+    "type": "depends-on",
+    "evidence": {
+      "path": "caller-secondary.ts",
+      "startLine": 1,
+      "endLine": 1,
+      "expression": "import { formatLabel } from \"./helper.js\";",
+      "targetPath": "helper.ts",
+      "targetStartLine": 1,
+      "targetEndLine": 3,
+      "basis": "Explicit static import; fixture TypeScript source correspondence for ./helper.js."
+    }
+  },
+  {
+    "from": "module:import-only",
+    "to": "module:helper",
+    "type": "depends-on",
+    "evidence": {
+      "path": "import-only.ts",
+      "startLine": 1,
+      "endLine": 1,
+      "expression": "import { formatLabel } from \"./helper.js\";",
+      "targetPath": "helper.ts",
+      "targetStartLine": 1,
+      "targetEndLine": 3,
+      "basis": "Explicit import only; line 3 exports the function reference, not a call."
+    }
+  },
+  {
+    "from": "module:caller-primary",
+    "to": "module:helper",
+    "type": "calls",
+    "evidence": {
+      "path": "caller-primary.ts",
+      "startLine": 4,
+      "endLine": 4,
+      "expression": "return formatLabel(value);",
+      "sourceSymbol": "renderPrimary",
+      "targetSymbol": "formatLabel",
+      "targetPath": "helper.ts",
+      "targetStartLine": 1,
+      "targetEndLine": 3,
+      "basis": "Observed direct call expression bound to the named import on line 1; not runtime evidence."
+    }
+  },
+  {
+    "from": "module:caller-secondary",
+    "to": "module:helper",
+    "type": "calls",
+    "evidence": {
+      "path": "caller-secondary.ts",
+      "startLine": 3,
+      "endLine": 3,
+      "expression": "export const renderSecondary = (value: string): string => formatLabel(value);",
+      "sourceSymbol": "renderSecondary",
+      "targetSymbol": "formatLabel",
+      "targetPath": "helper.ts",
+      "targetStartLine": 1,
+      "targetEndLine": 3,
+      "basis": "Observed direct call expression bound to the named import on line 1; not runtime evidence."
+    }
+  }
+]
