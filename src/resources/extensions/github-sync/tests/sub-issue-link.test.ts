@@ -534,6 +534,109 @@ describe("task sub-issue link handling", () => {
   });
 });
 
+// ─── bootstrap creation failures ────────────────────────────────────────────
+//
+// Regression (#3045): a failing `gh issue create` was silently dropped, the
+// slice was still marked synced with a zero-record (issueNumber 0), and
+// bootstrap counters were incremented regardless of outcome — reporting
+// fictional creations while the mapping was permanently poisoned.
+
+describe("bootstrap creation failures", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "gsd-gh-bootstrap-fail-"));
+    seedDb(tmpDir);
+    seedPreferences(tmpDir);
+    _resetGhCache();
+    _resetConfigCache();
+    _setGhAvailableForTest(true);
+    _setGhRateLimitOkForTest(true);
+    _setGhCreateOverridesForTest(null);
+  });
+
+  afterEach(() => {
+    _setGhCreateOverridesForTest(null);
+    _setGhAvailableForTest(null);
+    _setGhRateLimitOkForTest(null);
+    _resetGhCache();
+    _resetConfigCache();
+    closeDatabase();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("a failing task issue creation writes no slice/task records and is reported", async () => {
+    openMilestoneMapping(tmpDir);
+    _setGhCreateOverridesForTest({
+      createIssue: () => ({ ok: false, error: "could not add to milestone '107': '107' not found" }),
+    });
+
+    const counts = await bootstrapSync(tmpDir);
+
+    assert.equal(counts.milestones, 0, "the already-synced milestone must not be counted as created");
+    assert.equal(counts.slices, 0, "a slice whose task creation failed must not be counted as created");
+    assert.equal(counts.tasks, 0, "a failed task creation must not be counted");
+    const errors = (counts as { errors?: string[] }).errors ?? [];
+    assert.equal(errors.length, 1, "the failure must be reported, not dropped");
+    assert.match(errors[0] ?? "", /T01/);
+    assert.match(errors[0] ?? "", /could not add to milestone/);
+
+    const loaded = loadSyncMapping(tmpDir);
+    assert.equal(
+      loaded?.slices["M001/S01"],
+      undefined,
+      "a failed slice creation must not poison the mapping with a zero-record",
+    );
+    assert.equal(loaded?.tasks["M001/S01/T01"], undefined, "a failed task creation must not be recorded");
+    assert.ok(loaded?.milestones.M001, "the pre-existing milestone record must be untouched");
+  });
+
+  it("a failing tracking issue creation records nothing and aggregates the error", async () => {
+    // No mapping file at all — bootstrap starts from scratch.
+    _setGhCreateOverridesForTest({
+      createMilestone: () => ({ ok: true, data: 107 }),
+      createIssue: () => ({ ok: false, error: "could not add to milestone '107': '107' not found" }),
+    });
+
+    const counts = await bootstrapSync(tmpDir);
+
+    assert.equal(counts.milestones, 0, "a milestone whose tracking issue failed must not be counted as created");
+    assert.equal(counts.slices, 0, "slices under a failed milestone must not be counted as created");
+    assert.equal(counts.tasks, 0);
+    const errors = (counts as { errors?: string[] }).errors ?? [];
+    assert.ok(errors.length > 0, "failures must be aggregated and reported");
+    assert.equal(errors.some((e) => /could not add to milestone/.test(e)), true);
+
+    const loaded = loadSyncMapping(tmpDir);
+    assert.deepEqual(loaded?.milestones, {}, "no milestone record for a failed tracking issue");
+    assert.deepEqual(loaded?.slices, {}, "no slice zero-record under a failed milestone");
+    assert.deepEqual(loaded?.tasks, {}, "no task records under a failed milestone");
+  });
+
+  it("successful creations are counted and recorded", async () => {
+    _setGhCreateOverridesForTest({
+      createMilestone: () => ({ ok: true, data: 107 }),
+      createIssue: (() => {
+        let n = 54;
+        return () => ({ ok: true, data: ++n });
+      })(),
+    });
+
+    const counts = await bootstrapSync(tmpDir);
+
+    assert.equal(counts.milestones, 1);
+    assert.equal(counts.slices, 1);
+    assert.equal(counts.tasks, 1);
+    assert.deepEqual((counts as { errors?: string[] }).errors ?? [], []);
+
+    const loaded = loadSyncMapping(tmpDir);
+    assert.equal(loaded?.milestones.M001?.ghMilestoneNumber, 107);
+    assert.equal(loaded?.milestones.M001?.issueNumber, 55);
+    assert.ok(loaded?.slices["M001/S01"], "a successful slice creation must be recorded");
+    assert.equal(loaded?.tasks["M001/S01/T01"]?.issueNumber, 56);
+  });
+});
+
 // ─── cli-level: ghCreateIssue attachment capture ────────────────────────────
 //
 // The silent drop lived in cli.ts (the ghAddSubIssue result was discarded),

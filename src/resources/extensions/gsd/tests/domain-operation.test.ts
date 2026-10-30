@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test, type TestContext } from "node:test";
@@ -297,16 +297,23 @@ function execute(
   return executeDomainOperation(operationRequest, mutate);
 }
 
-function rows(sql: string): Array<Record<string, unknown>> {
+function rows(sql: string, bindings: string[] = []): Array<Record<string, unknown>> {
   const db = _getAdapter();
   assert.ok(db);
-  return db.prepare(sql).all();
+  return db.prepare(sql).all(...bindings);
 }
 
-function row(sql: string): Record<string, unknown> {
+function row(sql: string, bindings: string[] = []): Record<string, unknown> {
   const db = _getAdapter();
   assert.ok(db);
-  return db.prepare(sql).get() ?? {};
+  return db.prepare(sql).get(...bindings) ?? {};
+}
+
+function exec(sql: string, bindings: string[] = []): void {
+  const db = _getAdapter();
+  assert.ok(db);
+  if (bindings.length > 0) db.prepare(sql).run(...bindings);
+  else db.exec(sql);
 }
 
 function durableSnapshot(): Record<string, unknown> {
@@ -450,6 +457,187 @@ test("failed projection delivery records diagnostic retry state", (t) => {
   assert.equal(projection["last_error"], "disk full");
   assert.deepEqual(listDueProjectionWork(now), [], "the row is not due before its retry time");
   assert.equal(listDueProjectionWork(retryAt).length, 1, "the row is due at its retry time");
+});
+
+// W067 step 1: receipt compatibility only, not lease maintenance or cutover.
+// Unlike createV30Backup, this fixture preserves every current schema trigger.
+function openEpochZeroReceiptFixture(t: TestContext): string {
+  const path = openFixture(t);
+  exec(`
+    UPDATE project_authority SET revision = 3711 WHERE singleton = 1;
+    INSERT INTO milestones (id, title, status) VALUES ('M001', 'Unadopted fixture', 'active');
+    INSERT INTO slices (milestone_id, id, title, status) VALUES ('M001', 'S01', 'Unadopted fixture', 'pending');
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+    VALUES ('M001', 'S01', 'T01', 'Unadopted fixture', 'pending');
+  `);
+  assert.equal(row("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")?.version, SCHEMA_VERSION);
+  assert.equal(row("PRAGMA foreign_keys")?.foreign_keys, 1);
+  assert.equal(row("SELECT COUNT(*) AS count FROM workflow_item_lifecycles")?.count, 0);
+  assert.deepEqual(row("SELECT revision, authority_epoch FROM project_authority"), { revision: 3711, authority_epoch: 0 });
+  return path;
+}
+
+function allTableImages(): Record<string, Record<string, unknown>[]> {
+  return Object.fromEntries(rows("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").map(({ name }) => {
+    assert.equal(typeof name, "string");
+    const quoted = `"${String(name).replaceAll('"', '""')}"`;
+    // Include sqlite_sequence; do not assume every table has a rowid or the same PK.
+    return [String(name), rows(`SELECT * FROM ${quoted}`).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))];
+  }));
+}
+
+function epochZeroReceiptRequest(overrides: Partial<DomainOperationRequest> = {}): DomainOperationRequest {
+  return request({
+    operationType: "coordination.receipt-fixture",
+    idempotencyKey: "epoch-zero-receipt",
+    expectedRevision: 3711,
+    expectedAuthorityEpoch: 0,
+    actorType: "operator",
+    actorId: "fixture-only-operator",
+    sourceTransport: "fixture",
+    payload: { scope: "coordination-only-receipt-proof" },
+    ...overrides,
+  });
+}
+
+function epochZeroReceiptWork(): DomainOperationMutation {
+  return {
+    events: [{
+      eventType: "coordination.receipt-fixture.recorded",
+      entityType: "project",
+      entityId: "fixture-project",
+      payload: { scope: "coordination-only-receipt-proof" },
+      destinations: ["projection"],
+    }],
+    projections: [{ projectionKey: "state", projectionKind: "state", rendererVersion: "1" }],
+  };
+}
+
+function assertOnlyReceiptTablesChanged(before: ReturnType<typeof allTableImages>): void {
+  const after = allTableImages();
+  assert.deepEqual(Object.keys(after), Object.keys(before));
+  const added = new Set(["workflow_operations", "workflow_domain_events", "workflow_outbox", "workflow_projection_work"]);
+  for (const [table, image] of Object.entries(before)) {
+    if (added.has(table)) {
+      assert.equal(after[table]?.length, image.length + 1, table);
+    } else if (table === "project_authority") {
+      const committedAt = after.workflow_operations?.[0]?.created_at;
+      assert.equal(typeof committedAt, "string");
+      assert.ok(Number.isFinite(Date.parse(String(committedAt))));
+      assert.deepEqual(after[table], image.map((entry) => ({ ...entry, revision: 3712, updated_at: committedAt })), table);
+    } else if (table === "sqlite_sequence") {
+      assert.deepEqual(after[table]?.filter((entry) => entry.name !== "workflow_outbox"), image.filter((entry) => entry.name !== "workflow_outbox"), table);
+      assert.deepEqual(after[table]?.filter((entry) => entry.name === "workflow_outbox"), [{ name: "workflow_outbox", seq: 1 }]);
+    } else {
+      assert.deepEqual(after[table], image, table);
+    }
+  }
+}
+
+test("epoch-zero receipt proof commits at revision 3711 without lifecycle adoption or rendering", (t) => {
+  const path = openEpochZeroReceiptFixture(t);
+  const schema = rows("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name");
+  const files = readdirSync(dirname(path)).sort();
+  const before = allTableImages();
+  const req = epochZeroReceiptRequest();
+  const result = executeDomainOperation(req, () => epochZeroReceiptWork());
+  assert.equal(result.status, "committed");
+  assert.equal(result.resultingRevision, 3712);
+  assert.equal(result.resultingAuthorityEpoch, 0);
+  assert.equal(result.eventIds.length, 1);
+  assert.equal(result.projectionWorkIds.length, 1);
+  assertOnlyReceiptTablesChanged(before);
+  assert.deepEqual(row(`SELECT operation_type, expected_revision, resulting_revision,
+    expected_authority_epoch, resulting_authority_epoch, actor_type, actor_id, source_transport
+    FROM workflow_operations WHERE operation_id = ?`, [result.operationId]), {
+    operation_type: req.operationType, expected_revision: 3711, resulting_revision: 3712,
+    expected_authority_epoch: 0, resulting_authority_epoch: 0, actor_type: "operator",
+    actor_id: "fixture-only-operator", source_transport: "fixture",
+  });
+  const authority = row("SELECT project_id FROM project_authority");
+  assert.deepEqual(row(`SELECT operation_id, project_id, project_revision, authority_epoch,
+    event_index, event_type, entity_type, entity_id, caused_by_event_id, payload_json
+    FROM workflow_domain_events WHERE event_id = ?`, [result.eventIds[0]]), {
+    operation_id: result.operationId, project_id: authority?.project_id, project_revision: 3712,
+    authority_epoch: 0, event_index: 0, event_type: "coordination.receipt-fixture.recorded",
+    entity_type: "project", entity_id: "fixture-project", caused_by_event_id: null,
+    payload_json: JSON.stringify({ scope: "coordination-only-receipt-proof" }),
+  });
+  assert.deepEqual(rows("SELECT event_id, destination, available_at FROM workflow_outbox"), [{
+    event_id: result.eventIds[0], destination: "projection",
+    available_at: row("SELECT created_at FROM workflow_operations WHERE operation_id = ?", [result.operationId]).created_at,
+  }]);
+  assert.deepEqual(row(`SELECT project_id, projection_key, projection_kind, renderer_version,
+    source_project_revision, source_authority_epoch, enqueue_operation_id,
+    supersedes_projection_work_id, delivery_state FROM workflow_projection_work
+    WHERE projection_work_id = ?`, [result.projectionWorkIds[0]]), {
+    project_id: authority?.project_id, projection_key: "state", projection_kind: "state", renderer_version: "1",
+    source_project_revision: 3712, source_authority_epoch: 0, enqueue_operation_id: result.operationId,
+    supersedes_projection_work_id: null, delivery_state: "pending",
+  });
+  assert.deepEqual(rows("PRAGMA foreign_key_check"), []);
+  assert.deepEqual(row("PRAGMA quick_check"), { quick_check: "ok" });
+  const committed = allTableImages();
+  const replay = executeDomainOperation(req, () => { throw new Error("receipt replay reran callback"); });
+  assert.equal(replay.status, "replayed");
+  assert.equal(replay.operationId, result.operationId);
+  assert.deepEqual(replay.eventIds, result.eventIds);
+  assert.deepEqual(replay.projectionWorkIds, result.projectionWorkIds);
+  assert.deepEqual(allTableImages(), committed);
+  assert.deepEqual(rows("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"), schema);
+  assert.deepEqual(readdirSync(dirname(path)).sort(), files);
+});
+
+test("epoch-zero receipt proof retains missing-work and stale revision/epoch guards", (t) => {
+  openEpochZeroReceiptFixture(t);
+  const before = allTableImages();
+  const req = epochZeroReceiptRequest();
+  assert.throws(() => executeDomainOperation(req, () => ({ ...epochZeroReceiptWork(), events: [] })), /at least one event/);
+  assert.deepEqual(allTableImages(), before);
+  assert.throws(() => executeDomainOperation(req, () => ({
+    ...epochZeroReceiptWork(), events: epochZeroReceiptWork().events.map((event) => ({ ...event, destinations: [] })),
+  })), /at least one outbox destination/);
+  assert.deepEqual(allTableImages(), before);
+  assert.throws(() => executeDomainOperation(req, () => ({ ...epochZeroReceiptWork(), projections: [] })), /at least one projection target/);
+  assert.deepEqual(allTableImages(), before);
+  for (const overrides of [{ expectedRevision: 3710 }, { expectedAuthorityEpoch: 1 }]) {
+    let called = false;
+    assertErrorCode(() => executeDomainOperation(epochZeroReceiptRequest(overrides), () => {
+      called = true;
+      return epochZeroReceiptWork();
+    }), GSD_REVISION_CONFLICT, /revision|epoch/i);
+    assert.equal(called, false);
+    assert.deepEqual(allTableImages(), before);
+  }
+});
+
+test("epoch-zero receipt proof retains operation FK, projection lineage and positive-epoch coverage guards", (t) => {
+  openEpochZeroReceiptFixture(t);
+  const result = executeDomainOperation(epochZeroReceiptRequest(), () => epochZeroReceiptWork());
+  const before = allTableImages();
+  assert.throws(() => exec(`INSERT INTO workflow_domain_events (
+    event_id, operation_id, event_index, project_id, project_revision, authority_epoch,
+    event_type, entity_type, entity_id, payload_json, created_at
+  ) SELECT 'bad-operation-event', 'missing-operation', 0, project_id, project_revision,
+    authority_epoch, event_type, entity_type, entity_id, payload_json, created_at
+    FROM workflow_domain_events WHERE event_id = ?`, [result.eventIds[0]]), /FOREIGN KEY constraint failed/);
+  assert.deepEqual(allTableImages(), before);
+  assert.throws(() => exec(`INSERT INTO workflow_domain_events (
+    event_id, operation_id, event_index, project_id, project_revision, authority_epoch,
+    event_type, entity_type, entity_id, payload_json, created_at
+  ) SELECT 'bad-revision-event', operation_id, 1, project_id, project_revision + 1,
+    authority_epoch, event_type, entity_type, entity_id, payload_json, created_at
+    FROM workflow_domain_events WHERE event_id = ?`, [result.eventIds[0]]), /FOREIGN KEY constraint failed/);
+  assert.deepEqual(allTableImages(), before);
+  assert.throws(() => exec(`INSERT INTO workflow_projection_work (
+    projection_work_id, project_id, projection_key, projection_kind, source_project_revision,
+    source_authority_epoch, renderer_version, enqueue_operation_id, delivery_state, created_at, updated_at
+  ) SELECT 'bad-lineage-projection', project_id, 'bad-lineage-state', 'state', source_project_revision + 1,
+    source_authority_epoch, renderer_version, enqueue_operation_id, 'pending', created_at, updated_at
+    FROM workflow_projection_work WHERE projection_work_id = ?`, [result.projectionWorkIds[0]]), /FOREIGN KEY constraint failed/);
+  assert.deepEqual(allTableImages(), before);
+  assert.throws(() => exec("UPDATE project_authority SET revision = revision + 1, authority_epoch = 1 WHERE singleton = 1"), /a hierarchy row has no lifecycle row/);
+  assert.deepEqual(allTableImages(), before);
 });
 
 test("failed projection delivery without a retry time is dead-lettered", (t) => {

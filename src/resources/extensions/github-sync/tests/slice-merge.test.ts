@@ -63,6 +63,11 @@ describe("slice PR merge strategy (#2279)", () => {
 
     // Fake `gh` that records its args and succeeds. Platform-aware: POSIX
     // gets a sh script, Windows gets a batch file (cmd.exe).
+    // The POSIX shim also emits the outputs the creation flow parses: the
+    // milestone POST returns a number, a milestone lookup returns its title
+    // (`gh issue create --milestone` resolves by name), and `issue create`
+    // returns the issue URL. With honest counters (#3045) bootstrap only
+    // counts creations whose parsed outputs proved success.
     if (process.platform === "win32") {
       // The space before `>>` keeps cmd.exe from reading a trailing digit
       // in the args (e.g. "pr ready 42") as an fd-redirection prefix.
@@ -73,7 +78,21 @@ describe("slice PR merge strategy (#2279)", () => {
     } else {
       writeFileSync(
         join(ghShimDir, "gh"),
-        ['#!/bin/sh', 'printf \'%s\\n\' "$*" >> "$GSD_GH_LOG"', 'exit 0', ''].join("\n"),
+        [
+          '#!/bin/sh',
+          'printf \'%s\\n\' "$*" >> "$GSD_GH_LOG"',
+          'case "$*" in',
+          '  *"repos/owner/repo/milestones/"*)',
+          '    case "$*" in',
+          '      *"-X POST"*) echo \'{"number": 107}\' ;;',
+          '      *) echo \'{"title": "M001: Platform"}\' ;;',
+          '    esac ;;',
+          '  *"repos/owner/repo/milestones"*) echo \'{"number": 107}\' ;;',
+          '  "issue create"*) echo "https://github.com/owner/repo/issues/11" ;;',
+          'esac',
+          'exit 0',
+          '',
+        ].join("\n"),
         { mode: 0o755 },
       );
       chmodSync(join(ghShimDir, "gh"), 0o755);
@@ -226,19 +245,30 @@ describe("slice PR merge strategy (#2279)", () => {
     assert.doesNotMatch(log, /Summary from the file/);
   });
 
-  it("bootstrap creates entities for database milestones and slices that have no directory", async () => {
-    writePreferences(["github:", "  enabled: true", "  repo: owner/repo"]);
-    assert.equal(openDatabase(join(tmpDir, ".gsd", "gsd.db")), true);
-    insertMilestone({ id: "M001", title: "Platform", status: "active" });
-    insertMilestone({ id: "M002", title: "Dropped", status: "cancelled" });
-    insertSlice({ milestoneId: "M001", id: "S01", title: "Foundation", status: "pending", sequence: 1 });
-    process.env.GSD_GH_LOG = ghLogPath;
+  it(
+    "bootstrap creates entities for database milestones and slices that have no directory",
+    // The creation flow parses shim outputs (milestone number/title, issue
+    // URL); the minimal win32 .cmd shim above does not emit them.
+    { skip: process.platform === "win32" ? "gh shim outputs require a POSIX shell" : false },
+    async () => {
+      writePreferences(["github:", "  enabled: true", "  repo: owner/repo"]);
+      assert.equal(openDatabase(join(tmpDir, ".gsd", "gsd.db")), true);
+      insertMilestone({ id: "M001", title: "Platform", status: "active" });
+      insertMilestone({ id: "M002", title: "Dropped", status: "cancelled" });
+      insertSlice({ milestoneId: "M001", id: "S01", title: "Foundation", status: "pending", sequence: 1 });
+      process.env.GSD_GH_LOG = ghLogPath;
 
-    const counts = await bootstrapSync(tmpDir);
+      const counts = await bootstrapSync(tmpDir);
 
-    assert.deepEqual({ milestones: counts.milestones, slices: counts.slices }, { milestones: 1, slices: 1 });
-    assert.ok(ghLines().length > 0, "the sync called gh for the database milestone");
-  });
+      assert.deepEqual({ milestones: counts.milestones, slices: counts.slices }, { milestones: 1, slices: 1 });
+      assert.deepEqual(counts.errors, [], `no creation errors expected, got: ${JSON.stringify(counts.errors)}`);
+      assert.ok(ghLines().length > 0, "the sync called gh for the database milestone");
+      const mapping = JSON.parse(readFileSync(join(tmpDir, ".gsd", "github-sync.json"), "utf-8"));
+      assert.equal(mapping.milestones.M001.issueNumber, 11, "the tracking issue must be recorded");
+      assert.equal(mapping.milestones.M001.ghMilestoneNumber, 107);
+      assert.ok(mapping.slices["M001/S01"], "the slice must be recorded as synced");
+    },
+  );
 
   it("merges with --merge when git.merge_strategy is merge", async () => {
     const lines = await runSliceMergeScenario([

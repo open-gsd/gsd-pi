@@ -10,6 +10,16 @@
 // writer layer.
 import { createRequire } from "node:module";
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { hostname } from "node:os";
+import type { CoordinationMaintenanceHost, CoordinationMaintenanceReply } from "../../../shared/coordination-maintenance-contract.js";
+import {
+  _executeCoordinationMaintenanceDomainOperation,
+  assertDomainOperationReceiptComponents,
+  inspectDomainOperationReceipt,
+  type DomainOperationRequest,
+  type CoordinationMaintenanceDomainOperationRequest,
+} from "./domain-operation.js";
 import {
   closeSync,
   constants,
@@ -212,8 +222,8 @@ interface StartupRepairAssessment {
   readonly forceMemoriesFtsRebuild: boolean;
 }
 
-function assessStartupRepair(db: DbAdapter): StartupRepairAssessment {
-  _startupSchemaDetectionForTest?.();
+function assessStartupRepair(db: DbAdapter, allowTestHook = true): StartupRepairAssessment {
+  if (allowTestHook) _startupSchemaDetectionForTest?.();
   const schemaMetadata = db.prepare(`
     SELECT 1 AS present
     FROM sqlite_master
@@ -2349,6 +2359,7 @@ function runStartupRepair(adapter: DbAdapter, path: string, forceMemoriesFtsRebu
 const _receiptAuthorityEpochs = new Map<string, number>();
 
 export function noteAuthorityEpochReceipt(projectId: string, authorityEpoch: number): void {
+  if (_coordinationMaintenance.getStore()) return;
   if (authorityEpoch > (_receiptAuthorityEpochs.get(projectId) ?? 0)) {
     _receiptAuthorityEpochs.set(projectId, authorityEpoch);
   }
@@ -2401,6 +2412,7 @@ function retainOrCloseFailedOpen(
 }
 
 function openDatabaseInternal(path: string, allowReplacementWrite: boolean, createIfMissing = true): boolean {
+  refuseCoordinationMaintenanceAccessor();
   _dbOpenState.markAttempted();
   cleanupPendingDatabaseMaintenance();
   cleanupPendingStartup();
@@ -2563,6 +2575,7 @@ function openDatabaseWithMode(path: string, createIfMissing: boolean): boolean {
 }
 
 export function openDatabase(path: string): boolean {
+  refuseCoordinationMaintenanceAccessor();
   return openDatabaseWithMode(path, true);
 }
 
@@ -2869,7 +2882,8 @@ export function readIndependentDatabaseTransaction<T>(
  * and would mask the original error with a secondary "cannot VACUUM" throw.
  */
 export function isInTransaction(): boolean {
-  return _transactionRunner.isInTransaction();
+  const owned = _coordinationMaintenance.getStore();
+  return owned ? owned.transactionOpen : _transactionRunner.isInTransaction();
 }
 
 export function transaction<T>(fn: () => T): T {
@@ -2884,6 +2898,7 @@ export function transaction<T>(fn: () => T): T {
  * nested calls run inside the outer transaction without a nested BEGIN.
  */
 export function immediateTransaction<T>(fn: () => T): T {
+  refuseCoordinationMaintenanceAccessor();
   if (!currentDb) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   if (!_transactionRunner.isInTransaction()) assertDatabaseReplacementFenceAllowsWrite();
   return _transactionRunner.immediateTransaction(createTransactionControls(currentDb), fn);
@@ -2917,6 +2932,7 @@ export function getDbPath(): string | null {
 }
 
 export function _getAdapter(): DbAdapter | null {
+  refuseCoordinationMaintenanceAccessor();
   return currentDb;
 }
 
@@ -2924,21 +2940,14 @@ export function _resetProvider(): void {
   providerLoader.reset();
 }
 
-/**
- * The active engine handle, or throw if no database is open. Use in write
- * wrappers — replaces the historical `if (!currentDb) throw ...; currentDb.X`
- * guard with `getDb().X`.
- */
 export function getDb(): DbAdapter {
+  refuseCoordinationMaintenanceAccessor();
   if (!currentDb) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   return currentDb;
 }
 
-/**
- * The active engine handle or null. Use in read wrappers that no-op (return
- * [] / null) when no database is open.
- */
 export function getDbOrNull(): DbAdapter | null {
+  refuseCoordinationMaintenanceAccessor();
   return currentDb;
 }
 
@@ -2978,4 +2987,296 @@ export function probeDbWritable(): DbWritableProbeResult {
   } catch (err) {
     return { ok: false, detail: (err as Error).message };
   }
+}
+
+// This context is never installed as currentDb or admitted to an ordinary runtime.
+interface CoordinationMaintenanceOwned {
+  db: DbAdapter;
+  rollback: DbAdapter;
+  transactionOpen: boolean;
+  check(): void;
+  release(): void;
+  ownsRequest(request: object): boolean;
+}
+const _coordinationMaintenance = new AsyncLocalStorage<CoordinationMaintenanceOwned>();
+let coordinationMaintenanceDepth = 0;
+let coordinationMaintenanceHosts = 0;
+
+function inCoordinationMaintenance<T>(run: () => T): T {
+  coordinationMaintenanceDepth++;
+  try { return run(); } finally { coordinationMaintenanceDepth--; }
+}
+
+function refuseCoordinationMaintenanceAccessor(): void {
+  if (coordinationMaintenanceDepth > 0 || coordinationMaintenanceHosts > 0 || _coordinationMaintenance.getStore()) {
+    throw new GSDError(GSD_STALE_STATE, "gsd-db: Generic database access is unavailable during coordination maintenance");
+  }
+}
+
+export function _assertOwnedCoordinationMaintenance(db: DbAdapter, request: object): void {
+  const owned = _coordinationMaintenance.getStore();
+  if (!owned || !owned.ownsRequest(request) || owned.db !== db) throw new Error("maintenance ownership required");
+  owned.check();
+}
+
+export function _releaseOwnedCoordinationMaintenanceTarget(db: DbAdapter, request: object): void {
+  _assertOwnedCoordinationMaintenance(db, request);
+  _coordinationMaintenance.getStore()!.release();
+}
+
+/** Existing-file-only lifetime. No startup repair, admission, migration or adapter swap. */
+export function openCoordinationMaintenanceHost(options: { projectDir: string }): CoordinationMaintenanceHost {
+  return inCoordinationMaintenance(() => openOwnedCoordinationMaintenanceHost(options));
+}
+
+function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): CoordinationMaintenanceHost {
+  let closed = false;
+  let lifetimeHeld = false;
+  let db: DbAdapter | undefined;
+  let rollback: DbAdapter | undefined;
+  let maintenance: DatabaseMaintenanceCleanupState | undefined;
+  let root = "";
+  let projectDirectory = "";
+  let path = "";
+  let binding = "";
+  let projectId = "";
+  let selected: Record<string, unknown> | undefined;
+  let selectedRequest: CoordinationMaintenanceDomainOperationRequest | undefined;
+  let selectedSeal: string | undefined;
+  const digest = (value: unknown): string => `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+  const exact = (value: unknown, keys: string[]): value is Record<string, unknown> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    const own = Reflect.ownKeys(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    return own.length === keys.length && keys.every((key) => own.includes(key) && "value" in descriptors[key]);
+  };
+  // Snapshot untrusted input before entering the private adapter context. Even a
+  // Proxy trap or accessor must never run while that context is reachable.
+  const snapshotInput = (input: unknown): unknown => {
+    const copy = (value: unknown, depth: number): unknown => {
+      if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+      if (depth > 1 || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid input");
+      const proto = Object.getPrototypeOf(value);
+      if (proto !== null && proto !== Object.prototype) throw new Error("invalid input");
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const keys = Reflect.ownKeys(descriptors);
+      if (keys.length > 5) throw new Error("invalid input");
+      const result: Record<string, unknown> = Object.create(null);
+      for (const key of keys) {
+        if (typeof key !== "string" || !("value" in descriptors[key])) throw new Error("invalid input");
+        result[key] = copy(descriptors[key].value, depth + 1);
+      }
+      return result;
+    };
+    try { return copy(input, 0); } catch { return null; }
+  };
+  const integer = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
+  const fail = (): never => { throw new Error("maintenance refused"); };
+  const timestamp = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  const pidAbsent = (value: unknown): boolean => {
+    if (!integer(value) || value <= 0) return false;
+    try { process.kill(value, 0); return false; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  };
+  const check = (): void => {
+    if (closed || !db || !rollback) fail();
+    assertDatabaseAdapterMatchesPath(db!, path);
+    assertDatabaseReplacementFenceAllowsPath(path);
+    assertDatabaseMaintenanceFenceAllowsWrite(path);
+    if (realpathSync(projectDirectory) !== root || assessStartupRepair(db!, false).required) fail();
+    const authority = db!.prepare("SELECT project_id, project_root_realpath FROM project_authority WHERE singleton = 1").get();
+    if (authority?.project_id !== projectId || authority?.project_root_realpath !== root) fail();
+  };
+  const workerAndLease = (): Record<string, unknown>[] => {
+    // Count the lease table itself: a corrupt/dangling lease must not disappear
+    // behind the worker join and accidentally make the target seem unique.
+    const count = db!.prepare("SELECT COUNT(*) AS count FROM milestone_leases WHERE status = 'held'").get()?.count;
+    if (count !== 1) return [];
+    return db!.prepare(`
+      SELECT w.worker_id, w.pid AS owner_pid, w.host AS owner_host, w.started_at, w.last_heartbeat_at AS heartbeat_at,
+             w.project_root_realpath, w.status AS worker_status,
+             l.milestone_id, l.fencing_token, l.acquired_at, l.expires_at, l.status AS lease_status
+      FROM workers w JOIN milestone_leases l ON l.worker_id = w.worker_id
+      WHERE l.status = 'held'
+    `).all();
+  };
+  const eligible = (row: Record<string, unknown>): void => {
+    if (row.worker_status !== "stopping" || row.owner_host !== hostname()
+      || row.project_root_realpath !== root || !pidAbsent(row.owner_pid)
+      || !timestamp(row.started_at) || !timestamp(row.heartbeat_at)
+      || !timestamp(row.acquired_at) || !timestamp(row.expires_at)
+      || !integer(row.fencing_token) || Number(row.fencing_token) < 1
+      || Date.parse(String(row.expires_at)) > Date.now() || Date.parse(String(row.acquired_at)) > Date.parse(String(row.expires_at))
+      || Date.parse(String(row.started_at)) > Date.parse(String(row.heartbeat_at))) fail();
+  };
+  const release = (): void => {
+    check();
+    if (!selected || !selectedRequest) fail();
+    const rows = workerAndLease();
+    if (rows.length !== 1 || digest(rows[0]) !== digest(selected)) fail();
+    eligible(rows[0]);
+    const otherWorkers = db!.prepare(`SELECT pid AS owner_pid, host AS owner_host, project_root_realpath, status
+      FROM workers WHERE worker_id != ? AND status != 'stopped'`).all(selected!.worker_id);
+    const unprovableWorker = otherWorkers.some(row =>
+      (row.status !== "stopping" && row.status !== "crashed")
+      || row.owner_host !== hostname()
+      || row.project_root_realpath !== root
+      || !pidAbsent(row.owner_pid));
+    if (unprovableWorker
+      || db!.prepare("SELECT 1 FROM unit_dispatches WHERE status IN ('pending', 'claimed', 'running') LIMIT 1").get()
+      || db!.prepare("SELECT 1 FROM workflow_execution_attempts WHERE attempt_state IN ('claimed', 'running') LIMIT 1").get()) fail();
+    const changed = db!.prepare(`UPDATE milestone_leases SET status = 'released'
+      WHERE milestone_id = ? AND worker_id = ? AND fencing_token = ? AND status = 'held'
+        AND acquired_at = ? AND expires_at = ? RETURNING milestone_id`).all(
+      selected!.milestone_id, selected!.worker_id, selected!.fencing_token,
+      selected!.acquired_at, selected!.expires_at,
+    );
+    if (changed.length !== 1) fail();
+  };
+  const cleanup = (): void => {
+    closed = true;
+    selected = undefined;
+    selectedRequest = undefined;
+    selectedSeal = undefined;
+    // A failed close must retain the descriptor and maintenance ownership. A
+    // subsequent close may finish cleanup, but this service can never write again.
+    const closing = db ?? rollback;
+    if (closing) {
+      closing.close();
+      db = undefined;
+      rollback = undefined;
+    }
+    if (maintenance) {
+      releaseDatabaseMaintenanceCleanup(maintenance);
+      maintenance = undefined;
+    }
+    if (lifetimeHeld) {
+      coordinationMaintenanceHosts--;
+      lifetimeHeld = false;
+    }
+  };
+  try {
+    if (currentDb || _dbCache.asReadonlyMap().size !== 0) fail();
+    if (!exact(options, ["projectDir"]) || typeof options.projectDir !== "string") fail();
+    projectDirectory = options.projectDir;
+    root = realpathSync(projectDirectory);
+    path = resolve(root, ".gsd", "gsd.db");
+    assertDatabaseReplacementFenceAllowsPath(path);
+    assertDatabaseMaintenanceAllowsReplacement(path);
+    assertDatabaseMaintenanceFenceAllowsWrite(path);
+    const { raw, identity } = openCorrelatedRawDatabase(path, () => providerLoader.openRaw(path, { createIfMissing: false }), false);
+    rollback = createDbAdapter(raw);
+    db = createFileBoundDatabaseAdapter(raw, path, identity);
+    if (assessStartupRepair(db, false).required || db.prepare("PRAGMA application_id").get()?.application_id !== GSD_APPLICATION_ID) fail();
+    const authority = db.prepare("SELECT project_id, project_root_realpath FROM project_authority WHERE singleton = 1").get();
+    if (typeof authority?.project_id !== "string" || authority.project_root_realpath !== root) fail();
+    projectId = String(authority!.project_id);
+    const file = strictFileIdentity(path, "maintenance database");
+    try { binding = digest([root, projectId, SCHEMA_VERSION, String(file.device), String(file.inode)]); }
+    finally { file.release?.(); }
+    maintenance = acquireDatabaseMaintenance(path);
+    withDatabaseMaintenanceOwner(path, check);
+    coordinationMaintenanceHosts++;
+    lifetimeHeld = true;
+  } catch {
+    cleanup();
+  }
+  const owned: CoordinationMaintenanceOwned = {
+    get db() { if (!db) return fail(); return db; },
+    get rollback() { if (!rollback) return fail(); return rollback; },
+    transactionOpen: false,
+    check,
+    release,
+    ownsRequest: (request) => selectedRequest !== undefined && request === selectedRequest,
+  };
+  const run = (operation: () => CoordinationMaintenanceReply): CoordinationMaintenanceReply => {
+    if (closed) return { status: "refused", reason: "unavailable" };
+    try {
+      return inCoordinationMaintenance(() => withDatabaseMaintenanceOwner(path, () => _coordinationMaintenance.run(owned, () => {
+        check();
+        return operation();
+      })));
+    } catch (error) {
+      if (error instanceof AggregateError) {
+        closed = true;
+        throw error;
+      }
+      return { status: "refused", reason: "validation-failed" };
+    }
+  };
+  const sealInput = (input: unknown): string => {
+    if (!exact(input, ["sealId"]) || typeof input.sealId !== "string" || !/^[0-9a-f-]{36}$/.test(input.sealId)) return fail();
+    return input.sealId;
+  };
+  const lookup = (sealId: string): CoordinationMaintenanceReply => {
+    const receipt = inspectDomainOperationReceipt("coordination.expired-lease.release", sealId, db!);
+    if (!receipt) return fail();
+    const row = db!.prepare("SELECT actor_type, actor_id, source_transport, expected_revision, expected_authority_epoch FROM workflow_operations WHERE operation_id = ?").get(receipt.operationId);
+    if (!row || row.actor_type !== "system" || row.source_transport !== "native-coordination-maintenance"
+      || typeof row.actor_id !== "string" || !/^native-maintenance:sha256:[a-f0-9]{64}$/.test(row.actor_id)) return fail();
+    const event = db!.prepare("SELECT payload_json FROM workflow_domain_events WHERE operation_id = ? AND event_index = 0").get(receipt.operationId);
+    const storedPayload: unknown = JSON.parse(String(event?.payload_json));
+    if (!exact(storedPayload, ["binding", "target", "provenance"]) || storedPayload.binding !== binding
+      || storedPayload.provenance !== row.actor_id || !/^sha256:[a-f0-9]{64}$/.test(String(storedPayload.target))) return fail();
+    const payload = { binding, target: String(storedPayload.target), provenance: String(storedPayload.provenance) };
+    const request: DomainOperationRequest = {
+      operationType: "coordination.expired-lease.release", idempotencyKey: sealId,
+      expectedRevision: Number(row.expected_revision), expectedAuthorityEpoch: Number(row.expected_authority_epoch),
+      actorType: "system", actorId: String(row.actor_id), sourceTransport: "native-coordination-maintenance",
+      payload,
+    };
+    assertDomainOperationReceiptComponents(receipt, request, {
+      events: [{ eventType: "coordination.expired-lease.released", entityType: "project", entityId: projectId, payload, destinations: ["projection"] }],
+      projections: [{ projectionKey: "state", projectionKind: "state", rendererVersion: "1" }],
+    }, db!);
+    return { status: "replayed", sealId, operationId: receipt.operationId, resultingRevision: receipt.resultingRevision, resultingAuthorityEpoch: receipt.resultingAuthorityEpoch };
+  };
+  return Object.freeze({
+    prepare(input: unknown): CoordinationMaintenanceReply {
+      input = snapshotInput(input);
+      return run(() => {
+        if (selected || !exact(input, ["expectedRevision", "expectedAuthorityEpoch", "witness"])
+          || !integer(input.expectedRevision) || !integer(input.expectedAuthorityEpoch)
+          || !exact(input.witness, ["ownerPid", "ownerStartedAt", "ownerHeartbeatAt", "leaseAcquiredAt", "leaseExpiresAt"])
+          || !integer(input.witness.ownerPid) || ![input.witness.ownerStartedAt, input.witness.ownerHeartbeatAt, input.witness.leaseAcquiredAt, input.witness.leaseExpiresAt].every(timestamp)) return fail();
+        const authority = db!.prepare("SELECT revision, authority_epoch FROM project_authority WHERE singleton = 1").get();
+        if (authority?.revision !== input.expectedRevision || authority.authority_epoch !== input.expectedAuthorityEpoch) return fail();
+        const rows = workerAndLease();
+        if (rows.length !== 1) return fail();
+        const row = rows[0];
+        eligible(row);
+        const witness = input.witness;
+        if (row.owner_pid !== witness.ownerPid || row.started_at !== witness.ownerStartedAt
+          || row.heartbeat_at !== witness.ownerHeartbeatAt || row.acquired_at !== witness.leaseAcquiredAt
+          || row.expires_at !== witness.leaseExpiresAt) return fail();
+        const seal = randomUUID();
+        const provenance = `native-maintenance:${digest([hostname(), process.pid, processStartIdentity(process.pid), randomUUID()])}`;
+        const request: CoordinationMaintenanceDomainOperationRequest = {
+          operationType: "coordination.expired-lease.release", idempotencyKey: seal,
+          expectedRevision: input.expectedRevision, expectedAuthorityEpoch: input.expectedAuthorityEpoch,
+          actorType: "system", actorId: provenance, sourceTransport: "native-coordination-maintenance",
+          payload: { binding, target: digest(row), provenance },
+        };
+        selected = row;
+        selectedRequest = request;
+        selectedSeal = seal;
+        return { status: "prepared", sealId: seal };
+      });
+    },
+    apply(input: unknown): CoordinationMaintenanceReply {
+      input = snapshotInput(input);
+      return run(() => {
+        const seal = sealInput(input);
+        if (!selectedRequest || selectedSeal !== seal) return fail();
+        const result = _executeCoordinationMaintenanceDomainOperation(selectedRequest, db!, rollback!);
+        lookup(seal);
+        return { status: result.status, sealId: seal, operationId: result.operationId, resultingRevision: result.resultingRevision, resultingAuthorityEpoch: result.resultingAuthorityEpoch };
+      });
+    },
+    receipt(input: unknown): CoordinationMaintenanceReply {
+      input = snapshotInput(input);
+      return run(() => lookup(sealInput(input)));
+    },
+    close(): void { cleanup(); },
+  });
 }

@@ -207,7 +207,10 @@ function sliceKey(milestoneId: string, sliceId: string): string {
  * a parent already adopted as completed is adopted as cancelled and listed;
  * a legacy completion without evidence under such a parent stays completed
  * as unverified legacy, with a finding (owner decisions 2026-10-03). A
- * lifecycle row already adopted as cancelled with no active Waiver is listed
+ * parent counts as completed when its lifecycle row says so or, unadopted,
+ * when its raw status maps to completed with completed_at set (#3047): the
+ * rule then holds on a first backfill too, independent of adoption order.
+ * A lifecycle row already adopted as cancelled with no active Waiver is listed
  * for its one legacy-attested Waiver, and a completion that an Import
  * Application adopted is listed for its `unverified-legacy` evidence marker.
  * Pure read: writes nothing.
@@ -234,7 +237,21 @@ export function previewLifecycleBackfill(): LifecycleBackfillPreview {
       .map((row) => sliceKey(row.milestoneId, row.sliceId!)),
   );
 
-  const adoptedCompleted = new Set(rows.filter((row) => row.lifecycleStatus === "completed").map(rowLabel));
+  // A parent counts as completed for the under-completed-parent rule when its
+  // lifecycle says so, or (unadopted) its raw status maps to completed with
+  // completed_at set (#3047): legacy completion propagates through the
+  // hierarchy within one pass, so the outcome does not depend on the order
+  // parent and child are adopted in.
+  const isCompleted = (row: HierarchyRow) =>
+    row.lifecycleStatus === "completed" ||
+    (row.lifecycleStatus === null && normalized.get(row) === "completed" && row.completedAt !== null);
+  const completedMilestones = new Set(
+    rows.filter((row) => row.itemKind === "milestone" && isCompleted(row)).map((row) => row.milestoneId),
+  );
+  const completedSlices = new Set(
+    rows.filter((row) => row.itemKind === "slice" && isCompleted(row))
+      .map((row) => sliceKey(row.milestoneId, row.sliceId!)),
+  );
   const openUnderCompletedParent: LifecycleBackfillPreview["openUnderCompletedParent"] = [];
 
   const resolved = new Map<HierarchyRow, string>();
@@ -254,8 +271,8 @@ export function previewLifecycleBackfill(): LifecycleBackfillPreview {
     let lifecycleStatus: CanonicalLifecycleStatus;
     let rule: LifecycleBackfillRule;
     let projectedLegacyStatus: string | null = null;
-    const underCompletedParent = adoptedCompleted.has(row.milestoneId) ||
-      (row.taskId !== null && adoptedCompleted.has(sliceKey(row.milestoneId, row.sliceId!)));
+    const underCompletedParent = completedMilestones.has(row.milestoneId) ||
+      (row.taskId !== null && completedSlices.has(sliceKey(row.milestoneId, row.sliceId!)));
     if (status === "completed") {
       if (completionProven) {
         lifecycleStatus = "completed";

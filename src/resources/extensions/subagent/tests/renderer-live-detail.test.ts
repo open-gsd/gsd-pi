@@ -215,3 +215,86 @@ describe("parallel detail container while running (#2834)", () => {
 		assert.ok(text.includes(LONG_TASK), "full task text still renders with no activity yet");
 	});
 });
+
+describe("single-child renderer running state (#3044)", () => {
+	const tool = registerSubagentTool();
+
+	const usage = { input: 40, output: 20, cacheRead: 0, cacheWrite: 0, cost: 0.02, contextTokens: 0, turns: 1 };
+
+	function renderCard(result: unknown, expanded: boolean): string {
+		const rendered = tool.renderResult(
+			{
+				content: [{ type: "text", text: "(running...)" }],
+				details: { mode: "single", agentScope: "both", projectAgentsDir: null, results: [result] },
+			},
+			{ expanded },
+			fakeTheme,
+		) as { render: (width: number) => string[] };
+		return renderComponent(rendered);
+	}
+
+	it("renders a running child with stopReason toolUse as in progress, not failed", () => {
+		const running = {
+			agent: "reviewer",
+			agentSource: "project",
+			task: "review the module",
+			exitCode: -1,
+			running: true,
+			stopReason: "toolUse",
+			startedAt: Date.now() - 5_000,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "read", arguments: { file_path: "/repo/mod.mjs" } }],
+				},
+			],
+			stderr: "",
+			usage,
+		};
+		for (const expanded of [false, true]) {
+			const text = renderCard(running, expanded);
+			assert.match(text, /⏳/, "running child shows the in-progress mark");
+			assert.doesNotMatch(text, /✗/, "running child must not render the failure mark");
+			assert.doesNotMatch(text, /\[toolUse\]/, "a normal tool-call stop reason is not an error suffix");
+			assert.doesNotMatch(text, /Error:/, "running child shows no error line");
+		}
+	});
+
+	it("terminal success still renders ✓", () => {
+		const done = {
+			agent: "reviewer",
+			agentSource: "project",
+			task: "review the module",
+			exitCode: 0,
+			running: false,
+			stopReason: "stop",
+			messages: [{ role: "assistant", content: [{ type: "text", text: "all clear" }] }],
+			stderr: "",
+			usage,
+		};
+		const text = renderCard(done, false);
+		assert.match(text, /✓/);
+		assert.doesNotMatch(text, /✗/);
+		assert.doesNotMatch(text, /⏳/);
+	});
+
+	it("terminal failure still renders ✗ with the stop reason suffix", () => {
+		const failed = {
+			agent: "reviewer",
+			agentSource: "project",
+			task: "review the module",
+			exitCode: 1,
+			running: false,
+			stopReason: "error",
+			errorMessage: "child crashed",
+			messages: [],
+			stderr: "boom",
+			usage,
+		};
+		const text = renderCard(failed, false);
+		assert.match(text, /✗/);
+		assert.match(text, /\[error\]/);
+		assert.match(text, /Error: child crashed/);
+		assert.doesNotMatch(text, /⏳/);
+	});
+});

@@ -169,7 +169,21 @@ export function ghCreateIssue(cwd: string, opts: CreateIssueOpts): CreateIssueRe
     args.push("--label", opts.labels.join(","));
   }
   if (opts.milestone) {
-    args.push("--milestone", String(opts.milestone));
+    // `gh issue create --milestone` resolves by NAME (the milestone title),
+    // not by number — ghCreateMilestone returns the REST number, so resolve
+    // it to its title first. Passing the raw number makes gh fail with
+    // "could not add to milestone '<n>': not found" and no issue is created.
+    const milestoneTitle = runGhJson<{ title: string }>(
+      ["api", `repos/${opts.repo}/milestones/${opts.milestone}`, "--jq", "{title: .title}"],
+      cwd,
+    );
+    if (!milestoneTitle.ok || !milestoneTitle.data?.title) {
+      return {
+        ok: false,
+        error: `could not resolve milestone #${opts.milestone} to its title: ${milestoneTitle.error ?? "empty title"}`,
+      };
+    }
+    args.push("--milestone", milestoneTitle.data.title);
   }
 
   const result = runGh(args, cwd);

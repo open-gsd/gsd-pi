@@ -62,12 +62,14 @@ import {
 type GhCloseIssue = typeof ghCloseIssue;
 type GhCloseMilestone = typeof ghCloseMilestone;
 type GhCreateIssue = typeof ghCreateIssue;
+type GhCreateMilestone = typeof ghCreateMilestone;
 type GhAddSubIssue = typeof ghAddSubIssue;
 type GhGetParentIssue = typeof ghGetParentIssue;
 
 let _ghCloseIssueImpl: GhCloseIssue = ghCloseIssue;
 let _ghCloseMilestoneImpl: GhCloseMilestone = ghCloseMilestone;
 let _ghCreateIssueImpl: GhCreateIssue = ghCreateIssue;
+let _ghCreateMilestoneImpl: GhCreateMilestone = ghCreateMilestone;
 let _ghAddSubIssueImpl: GhAddSubIssue = ghAddSubIssue;
 let _ghGetParentIssueImpl: GhGetParentIssue = ghGetParentIssue;
 
@@ -83,10 +85,12 @@ export function _setGhCloseOverridesForTest(overrides: {
 /** Test hook: override issue creation and sub-issue linking (reset with null). */
 export function _setGhCreateOverridesForTest(overrides: {
   createIssue?: GhCreateIssue;
+  createMilestone?: GhCreateMilestone;
   addSubIssue?: GhAddSubIssue;
   getParentIssue?: GhGetParentIssue;
 } | null): void {
   _ghCreateIssueImpl = overrides?.createIssue ?? ghCreateIssue;
+  _ghCreateMilestoneImpl = overrides?.createMilestone ?? ghCreateMilestone;
   _ghAddSubIssueImpl = overrides?.addSubIssue ?? ghAddSubIssue;
   _ghGetParentIssueImpl = overrides?.getParentIssue ?? ghGetParentIssue;
 }
@@ -239,32 +243,38 @@ export function shouldCreateSlicePrForSyncEvent(
 
 // ─── Per-Event Sync Functions ───────────────────────────────────────────────
 
+/**
+ * Create the GitHub milestone and tracking issue for a planned milestone.
+ * Returns the errors of failed creation steps (empty on success). A mapping
+ * record is written only when both entities were created — mapping records
+ * must only ever describe successfully created pairs.
+ */
 async function syncMilestonePlan(
   basePath: string,
   mapping: SyncMapping,
   config: GitHubSyncConfig,
   mid: string,
-): Promise<void> {
+): Promise<string[]> {
   // Skip if already synced
-  if (getMilestoneRecord(mapping, mid)) return;
+  if (getMilestoneRecord(mapping, mid)) return [];
 
   // Load milestone data from the DB (post-cutover read authority)
   ensureSyncDb(basePath);
   const roadmap = loadMilestoneSyncData(mid);
-  if (!roadmap) return;
+  if (!roadmap) return [];
 
   const title = `${mid}: ${roadmap.title || "Milestone"}`;
 
   // Create GitHub Milestone
-  const milestoneResult = ghCreateMilestone(
+  const milestoneResult = _ghCreateMilestoneImpl(
     basePath,
     mapping.repo,
     title,
     roadmap.vision || "",
   );
   if (!milestoneResult.ok) {
-    debugLog("github-sync", { phase: "create-milestone", error: milestoneResult.error });
-    return;
+    debugLog("github-sync", { phase: "create-milestone", mid, error: milestoneResult.error });
+    return [`milestone ${mid}: could not create GitHub milestone: ${milestoneResult.error}`];
   }
   const ghMilestoneNumber = milestoneResult.data!;
 
@@ -280,7 +290,7 @@ async function syncMilestonePlan(
     })),
   });
 
-  const issueResult = ghCreateIssue(basePath, {
+  const issueResult = _ghCreateIssueImpl(basePath, {
     repo: mapping.repo,
     title: `${mid}: ${roadmap.title || "Milestone"} — Tracking`,
     body: issueBody,
@@ -288,8 +298,8 @@ async function syncMilestonePlan(
     milestone: ghMilestoneNumber,
   });
   if (!issueResult.ok) {
-    debugLog("github-sync", { phase: "create-tracking-issue", error: issueResult.error });
-    return;
+    debugLog("github-sync", { phase: "create-tracking-issue", mid, error: issueResult.error });
+    return [`milestone ${mid}: could not create tracking issue: ${issueResult.error}`];
   }
 
   // Add to project if configured
@@ -310,39 +320,52 @@ async function syncMilestonePlan(
     milestone: ghMilestoneNumber,
     issue: issueResult.data,
   });
+  return [];
 }
 
+/**
+ * Create the task sub-issues of a planned slice. Returns the errors of failed
+ * creation steps (empty on success). The slice record is written only when
+ * every task issue creation succeeded — a record would mark the slice synced
+ * and block retries of the failed creations.
+ */
 async function syncSlicePlan(
   basePath: string,
   mapping: SyncMapping,
   config: GitHubSyncConfig,
   mid: string,
   sid: string,
-): Promise<void> {
+): Promise<string[]> {
   const existingSlice = getSliceRecord(mapping, mid, sid);
   if (existingSlice) {
     // The slice is already mapped — creation is done and must not re-run
     // (that would duplicate issues). Only repair task records whose native
     // sub-issue link failed earlier.
     await reconcileTaskSubIssueLinks(basePath, mapping, mid, sid);
-    return;
+    return [];
   }
 
   // Ensure milestone is synced first
   if (!getMilestoneRecord(mapping, mid)) {
-    await syncMilestonePlan(basePath, mapping, config, mid);
+    const milestoneErrors = await syncMilestonePlan(basePath, mapping, config, mid);
+    if (!getMilestoneRecord(mapping, mid)) {
+      // Without the milestone record there is no tracking issue to attach the
+      // task issues to — creating them would orphan them on GitHub.
+      return [`milestone ${mid} is not synced (${milestoneErrors[0] ?? "no milestone data"}); skipped creating issues for slice ${mid}/${sid}`];
+    }
   }
-  const milestoneRecord = getMilestoneRecord(mapping, mid);
+  const milestoneRecord = getMilestoneRecord(mapping, mid)!;
 
   // Load slice plan data from the DB (post-cutover read authority)
   ensureSyncDb(basePath);
   const plan = loadSliceSyncData(mid, sid);
-  if (!plan) return;
+  if (!plan) return [];
 
   const sliceBranch = `milestone/${mid}/${sid}`;
 
   // Create task sub-issues first (so we can link them in the PR body)
   const taskIssueNumbers: Array<{ id: string; title: string; issueNumber?: number }> = [];
+  const taskErrors: string[] = [];
 
   for (const task of plan.tasks) {
     // Skip if already synced — but repair a pending failed sub-issue link.
@@ -399,9 +422,21 @@ async function syncSlicePlan(
         ghAddToProject(basePath, mapping.repo, config.project, taskResult.data!);
       }
     } else {
+      debugLog("github-sync", {
+        phase: "task-issue-creation-failed",
+        mid,
+        sid,
+        tid: task.id,
+        error: taskResult.error,
+      });
+      taskErrors.push(`task ${mid}/${sid}/${task.id}: ${taskResult.error}`);
       taskIssueNumbers.push({ id: task.id, title: task.title });
     }
   }
+
+  // A slice with failed task creations must not be marked synced — the
+  // zero-record would hide the failure and block retries forever.
+  if (taskErrors.length > 0) return taskErrors;
 
   setSliceRecord(mapping, mid, sid, {
     issueNumber: 0,
@@ -418,6 +453,7 @@ async function syncSlicePlan(
     pr: 0,
     taskIssues: taskIssueNumbers.filter(t => t.issueNumber).length,
   });
+  return [];
 }
 
 // ─── Sub-Issue Link Reconciliation ──────────────────────────────────────────
@@ -822,37 +858,45 @@ async function syncMilestoneComplete(
  * Walk the Milestones and Slices of the database and create GitHub entities
  * for any that are missing from the sync mapping. A discarded Milestone is
  * skipped. Safe to run multiple times.
+ *
+ * Counters only include creations that were verified written to the mapping
+ * (records exist only for successfully created entities). Failed creations
+ * are aggregated in `errors` and recorded nowhere — they retry on the next
+ * bootstrap.
  */
 export async function bootstrapSync(basePath: string): Promise<{
   milestones: number;
   slices: number;
   tasks: number;
+  errors: string[];
 }> {
   const config = loadGitHubSyncConfig(basePath);
-  if (!config?.enabled) return { milestones: 0, slices: 0, tasks: 0 };
-  if (!ghIsAvailable()) return { milestones: 0, slices: 0, tasks: 0 };
+  if (!config?.enabled) return { milestones: 0, slices: 0, tasks: 0, errors: [] };
+  if (!ghIsAvailable()) return { milestones: 0, slices: 0, tasks: 0, errors: [] };
 
   const repo = config.repo ?? resolveRepo(basePath);
-  if (!repo) return { milestones: 0, slices: 0, tasks: 0 };
+  if (!repo) return { milestones: 0, slices: 0, tasks: 0, errors: [] };
 
   let mapping = loadSyncMapping(basePath) ?? createEmptyMapping(repo);
   mapping.repo = repo;
 
   const taskCountBefore = Object.keys(mapping.tasks).length;
-  const counts = { milestones: 0, slices: 0, tasks: 0 };
+  const counts = { milestones: 0, slices: 0, tasks: 0, errors: [] as string[] };
   ensureSyncDb(basePath);
   if (!isDbAvailable()) return counts;
 
   for (const { id: mid } of readMilestones().filter((milestone) => !milestone.discarded)) {
     if (!getMilestoneRecord(mapping, mid)) {
-      await syncMilestonePlan(basePath, mapping, config, mid);
-      counts.milestones++;
+      counts.errors.push(...await syncMilestonePlan(basePath, mapping, config, mid));
+      // A milestone record is written only when both the GitHub milestone and
+      // its tracking issue were created — its presence is the verification.
+      if (getMilestoneRecord(mapping, mid)) counts.milestones++;
     }
 
     for (const { id: sid } of readMilestoneSlices(mid)) {
       if (!getSliceRecord(mapping, mid, sid)) {
-        await syncSlicePlan(basePath, mapping, config, mid, sid);
-        counts.slices++;
+        counts.errors.push(...await syncSlicePlan(basePath, mapping, config, mid, sid));
+        if (getSliceRecord(mapping, mid, sid)) counts.slices++;
       } else {
         // Already-synced slice: only repair failed native sub-issue links.
         await reconcileTaskSubIssueLinks(basePath, mapping, mid, sid);
