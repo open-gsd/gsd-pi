@@ -504,6 +504,92 @@ test("under an already completed milestone an unproven completion stays complete
   assert.equal(activeWaiverCount("M001", "S01", "T02"), 0);
 });
 
+test("on a first backfill a legacy completion under a legacy-completed parent adopts as completed (#3047)", () => {
+  // A shipped milestone whose rows keep the raw completion but no DB
+  // evidence. Before #3047 these rows reopened here, while the same rows
+  // stayed completed when the milestone was adopted first.
+  insertMilestone({ id: "M001", title: "Shipped", status: "complete" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "complete" });
+  insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending" });
+  db().exec(`
+    UPDATE milestones SET completed_at = '${COMPLETED_AT}' WHERE id = 'M001';
+    UPDATE slices SET completed_at = '${COMPLETED_AT}' WHERE milestone_id = 'M001' AND id = 'S01';
+  `);
+
+  assert.deepEqual(
+    previewLifecycleBackfill().items.map((item) => [
+      item.itemKind, item.lifecycleStatus, item.rule, item.projectedLegacyStatus,
+    ]),
+    [
+      ["task", "completed", "legacy-complete-under-completed-parent", null],
+      ["task", "cancelled", "cancelled-under-completed-parent", "skipped"],
+      ["slice", "completed", "legacy-complete-under-completed-parent", null],
+      ["milestone", "completed", "legacy-complete-evidenced", null],
+    ],
+  );
+
+  const result = applyLifecycleBackfill(base);
+
+  assert.equal(result.adopted, 4);
+  assert.equal(lifecycleStatus("M001"), "completed");
+  assert.equal(lifecycleStatus("M001", "S01"), "completed");
+  assert.equal(lifecycleStatus("M001", "S01", "T01"), "completed");
+  assert.equal(lifecycleStatus("M001", "S01", "T02"), "cancelled");
+  // Nothing reopened: every raw status keeps its completion.
+  assert.equal(scalar("SELECT status FROM milestones WHERE id = 'M001'"), "complete");
+  assert.equal(scalar("SELECT status FROM slices WHERE milestone_id = 'M001' AND id = 'S01'"), "complete");
+  assert.equal(getTask("M001", "S01", "T01")?.status, "complete");
+  // The unverified-legacy marker rides the three completions, not the cancellation.
+  assert.equal(scalar(`
+    SELECT COUNT(*) FROM workflow_domain_events
+    WHERE event_type = 'lifecycle.backfilled' AND json_extract(payload_json, '$.evidence') = 'unverified-legacy'
+  `), 3);
+  // Findings name the task and the slice; the milestone is evidenced.
+  assert.equal(result.findings.length, 2);
+  assert.match(
+    result.findings[0]!,
+    /task M001\/S01\/T01 was legacy "complete" without completion evidence under a completed parent; adopted as completed/,
+  );
+  assert.match(
+    result.findings[1]!,
+    /slice M001\/S01 was legacy "complete" without completion evidence under a completed parent; adopted as completed/,
+  );
+  // Open work under the completed parent is cancelled, like under an adopted one.
+  assert.equal(result.waivers, 1);
+  assert.equal(activeWaiverCount("M001", "S01", "T02"), 1);
+  assert.match(result.cancelledUnderCompletedParent[0]!, /task M001\/S01\/T02 was legacy "pending" under a completed parent/);
+});
+
+test("a legacy completion under a parent without completion evidence still reopens (#3047)", () => {
+  // The milestone keeps the raw completion but has no completed_at: it is not
+  // a completed parent, so its unproven descendants reopen as before.
+  insertMilestone({ id: "M001", title: "Stale complete", status: "complete" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "complete" });
+
+  assert.deepEqual(
+    previewLifecycleBackfill().items.map((item) => [
+      item.itemKind, item.lifecycleStatus, item.rule, item.projectedLegacyStatus,
+    ]),
+    [
+      ["task", "ready", "legacy-complete-unproven", "pending"],
+      ["slice", "ready", "legacy-complete-unproven", "pending"],
+      ["milestone", "ready", "legacy-complete-unproven", "active"],
+    ],
+  );
+
+  const result = applyLifecycleBackfill(base);
+
+  assert.equal(result.adopted, 3);
+  assert.equal(lifecycleStatus("M001"), "ready");
+  assert.equal(lifecycleStatus("M001", "S01"), "ready");
+  assert.equal(lifecycleStatus("M001", "S01", "T01"), "ready");
+  assert.equal(scalar("SELECT status FROM milestones WHERE id = 'M001'"), "active");
+  assert.equal(getTask("M001", "S01", "T01")?.status, "pending");
+  assert.equal(result.findings.length, 3);
+});
+
 test("backfill grants one Waiver to each lifecycle row already adopted as cancelled with none, once", () => {
   insertMilestone({ id: "M001", title: "Imported by an earlier build", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
