@@ -3001,6 +3001,11 @@ export class TUI extends Container {
 				if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
 				this.terminal.write(buffer);
 			}
+			// This path never scrolls and keeps the working area, so the screen top stays at
+			// prevViewportTop while the shrink demotion lowered the mark to newLines.length - height.
+			// Every row above both the screen top and the first change is unchanged and already in
+			// scrollback: the mark may claim it (see the differential epilogue below).
+			this.flushedLineCount = Math.max(this.flushedLineCount, Math.min(firstChanged, prevViewportTop));
 			commitFrame("keep");
 			return;
 		}
@@ -3133,6 +3138,14 @@ export class TUI extends Container {
 		// with the cursor (no-op when the frame never reached the bottom row) —
 		// established against the current dimensions.
 		this.flushedLineCount = Math.max(this.flushedLineCount, finalCursorRow - height + 1);
+		// A shrink drawn here (a docked overlay is open, so the tall→tall path was skipped) clears
+		// the freed rows in place and keeps the working area: the screen top stays at prevViewportTop
+		// although the shrink demotion lowered the mark to newLines.length - height. The differential
+		// only runs when firstChanged >= the screen top, so every row above the screen top is
+		// unchanged and already in scrollback, and the mark may claim it. Left demoted, the next tall
+		// shrink (the overlay closing, the loader going) rejects the kept top as "top > flushed" and
+		// its realign repaints from newLines.length - height, re-emitting the rows in between.
+		this.flushedLineCount = Math.max(this.flushedLineCount, Math.min(firstChanged, prevViewportTop));
 		this.flushedAtWidth = width;
 		this.flushedAtHeight = height;
 
