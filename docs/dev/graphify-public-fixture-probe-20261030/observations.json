@@ -1,0 +1,40 @@
+{
+  "format": "gsd-graphify-c07-observations",
+  "version": 1,
+  "fixture": "graphify-known-answer",
+  "availability": "available",
+  "provenance": {
+    "kind": "source-grounded",
+    "reference": "docs/dev/graphify-public-fixture-probe-20261030/; prompt-only extraction and parent source-anchor verification, not native-handler execution",
+    "sourceRevision": "f2756216ccf6bbe9af2fc677f5eafef986727e4e"
+  },
+  "facts": [
+    {
+      "source": "caller-primary.ts#renderPrimary",
+      "relation": "calls",
+      "target": "helper.ts#formatLabel",
+      "anchors": [{ "line": 4, "text": "return formatLabel(value);" }]
+    },
+    {
+      "source": "caller-secondary.ts#renderSecondary",
+      "relation": "calls",
+      "target": "helper.ts#formatLabel",
+      "anchors": [{ "line": 3, "text": "formatLabel(value)" }]
+    },
+    {
+      "source": "import-only.ts",
+      "relation": "imports",
+      "target": "helper.ts#formatLabel",
+      "anchors": [{ "line": 1, "text": "import { formatLabel } from \"./helper.js\";" }]
+    },
+    {
+      "source": "dynamic-dispatch.ts#invokeByName",
+      "relation": "dynamic-call",
+      "target": "unresolved",
+      "anchors": [
+        { "line": 6, "text": "const handler = registry[name];" },
+        { "line": 7, "text": "handler(value)" }
+      ]
+    }
+  ]
+}

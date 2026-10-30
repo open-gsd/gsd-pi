@@ -1,0 +1,95 @@
+{
+  "format": "gsd-graphify-public-fixture-probe-record",
+  "version": 1,
+  "scope": "Prompt-only extraction/query on the five public C07-A inputs; not a native-handler or real-host acceptance record.",
+  "sourceRevision": "f2756216ccf6bbe9af2fc677f5eafef986727e4e",
+  "assessorRevision": "a22284055a8e72f18af79a4a9353fbae43504777",
+  "installedRuntime": {
+    "version": "1.23.0-fork.9",
+    "sourceRevision": "f4739cac7de23568fe2606bfade9589413fcdbd1",
+    "promptSha256": "d34d28d02f773e3b49ef7fd055807045eaa7d1f4146ab577e79739539182c8b0",
+    "candidateReadSafetyFixInstalled": false
+  },
+  "execution": {
+    "route": "Subagent reads installed graphify prompt; build/query over explicit public source inputs. Native slash-command handler is not invoked by this route.",
+    "startedAt": "2026-10-30T21:26:06.207Z",
+    "endedAt": "2026-10-30T21:29:23.438Z",
+    "exitCode": 0,
+    "stopReason": "stop",
+    "requestedModel": "github-copilot/gpt-6.1-sol",
+    "requestedThinking": "xhigh",
+    "reportedModel": "gpt-6.1-sol",
+    "wireEffortVerified": false,
+    "fixtureGitHead": null,
+    "fixtureGitDirtyState": null,
+    "costMeasured": false
+  },
+  "sourceHashesSha256": {
+    "caller-secondary.ts": "0026a0b6f6d6ca88f81090e2a15eb1baab8716ac1f898e51f52a97e74018452b",
+    "import-only.ts": "b127aa341dd843e9b15c79d656fbbfe2ac55b744ec1dd24ec34b960350075bd7",
+    "helper.ts": "cab208950e850228343028b66ccf9120d801d35ca56a304a4843a78dd5d9c342",
+    "caller-primary.ts": "82e3a12804e49d915f21faadca17cbfc604bff394d2e97bf6911c8f3f8fc31a5",
+    "dynamic-dispatch.ts": "e4dca4554b3e657e119cdd4f84e77aad602571b8450c95069c5a66e53eff5ce1"
+  },
+  "sourceHashesUnchanged": true,
+  "graph": {
+    "moduleNodes": 5,
+    "edges": 5,
+    "imports": 3,
+    "directCallSites": 2,
+    "queryTerm": "helper",
+    "queryLimit": 10,
+    "queryReturnedEdges": 5,
+    "queryOmittedEdges": 0,
+    "dynamicTarget": "unresolved",
+    "functionLevelCallerIndexComplete": false
+  },
+  "publishedArtifacts": {
+    "edges.json": {
+      "sha256": "3b8eb330dfce21802df2f49bb9ba00253faf3a4f76f52132afdd50e8a339d503",
+      "transformation": "Byte-for-byte copy of generated public graph data."
+    },
+    "nodes.md": {
+      "sha256": "906d7d93e165d8db2adc03d044896b4df8d7a374839d91177488519b64714ac6",
+      "originalSha256": "2229caec558da984f36145ff89210a2943a3e5459d21e134c2b6d2645cd7a54b",
+      "transformation": "Only the absolute scratch path was replaced with PUBLIC_FIXTURE_ROOT."
+    }
+  },
+  "observationProjection": "Parent hand-recorded source-grounded facts from graph edges, unresolved-target notes and independently checked original source anchors. Not a raw graph/provider response.",
+  "nativeHostAttempts": [
+    {
+      "mode": "print",
+      "cliExitCode": 0,
+      "durationSeconds": 8.037,
+      "customGraphifyPromptObserved": true,
+      "assistantTerminalResultObserved": false,
+      "graphArtifactsObserved": false,
+      "outcome": "inconclusive: dispatch only, not extraction proof"
+    },
+    {
+      "mode": "interactive PTY, early input",
+      "commandDeliveryEstablished": false,
+      "graphArtifactsObserved": false,
+      "outcome": "inconclusive: input preceded startup readiness"
+    },
+    {
+      "mode": "interactive PTY, readiness-gated",
+      "configuredDeadlineSeconds": 180,
+      "asyncJobReportedDurationSeconds": 320.0,
+      "terminalReceiptSaved": false,
+      "cleanupWaitErrored": true,
+      "laterOwnedProcessMatchCount": 0,
+      "outcome": "inconclusive harness failure, not a product-behavior verdict"
+    }
+  ],
+  "acceptance": {
+    "fixtureComparisonOnly": true,
+    "nativeHandlerVerified": false,
+    "realHostAdoptionVerified": false,
+    "upstreamMainRuntimeVerified": false,
+    "runtimeCallsVerified": false,
+    "fullFreshnessScenarioMatrixExecuted": false,
+    "mcpOrProviderContractAccepted": false,
+    "lifecycleAuthorityGranted": false
+  }
+}
