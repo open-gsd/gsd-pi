@@ -20,6 +20,29 @@ export interface WorkflowDbLockHolder {
   processStartedAtMs: number | null;
 }
 
+/**
+ * What the workers registry says about the lock-holder PIDs (#3052).
+ *
+ * `staleStartedAtByPid` holds active/stopping rows whose last heartbeat is
+ * older than the staleness cutoff; `livePids` holds PIDs whose row still has a
+ * fresh heartbeat — treated as a live session. Terminal (`stopped`/`crashed`)
+ * rows and processes that never registered appear in neither: a holder's
+ * registry row is exactly the artifact an orphaned process can no longer
+ * maintain, so its absence counts toward orphaned, not against it. That
+ * absence is weak evidence — only auto-mode registers rows — and is accepted
+ * as the orphan signal because the alternative is the permanent
+ * doctor→auto guidance wedge (#3052).
+ */
+export interface WorkflowDbWorkerSnapshot {
+  staleStartedAtByPid: ReadonlyMap<number, number>;
+  livePids: ReadonlySet<number>;
+}
+
+export const NO_WORKER_ROWS: WorkflowDbWorkerSnapshot = {
+  staleStartedAtByPid: new Map(),
+  livePids: new Set(),
+};
+
 function commandOutput(command: string, args: string[]): string | null {
   try {
     return execFileSync(command, args, {
@@ -128,7 +151,7 @@ function processIsAlive(pid: number): boolean {
 
 export async function terminateDormantWorkflowDbLockHolders(
   holders: WorkflowDbLockHolder[],
-  staleWorkerStartedAtByPid: ReadonlyMap<number, number>,
+  workerSnapshot: WorkflowDbWorkerSnapshot,
   dependencies?: {
     signal?: (pid: number) => void;
     isAlive?: (pid: number) => boolean;
@@ -141,7 +164,7 @@ export async function terminateDormantWorkflowDbLockHolders(
   const isAlive = dependencies?.isAlive ?? processIsAlive;
   const identity = dependencies?.processIdentity ?? processStartIdentity;
   for (const holder of holders) {
-    if (!isDormantWorkflowDbLockHolderSafeToTerminate(holder, staleWorkerStartedAtByPid)) continue;
+    if (!isDormantWorkflowDbLockHolderSafeToTerminate(holder, workerSnapshot)) continue;
     if (holder.processStartIdentity === null || identity(holder.pid) !== holder.processStartIdentity) continue;
     try {
       signal(holder.pid);
@@ -163,19 +186,42 @@ export async function terminateDormantWorkflowDbLockHolders(
   };
 }
 
+/**
+ * Why this holder must not be signaled, or null when every safety gate passes.
+ *
+ * #3052 inverted the registry-row trust model: a missing or terminal workers
+ * row is evidence of orphaning (the holder can no longer maintain its row),
+ * so only a row with a fresh heartbeat — a genuinely live session — refuses
+ * termination. The OS-level gates (same user, gsd-looking command, dormant
+ * for at least DORMANT_HOLDER_SECONDS, known start time/identity) are
+ * unchanged and still apply to every holder.
+ */
+export function describeDormantWorkflowDbLockHolderSkip(
+  holder: WorkflowDbLockHolder,
+  workerSnapshot: WorkflowDbWorkerSnapshot,
+): string | null {
+  if (!holder.sameUser) return `PID ${holder.pid}: owned by a different user`;
+  if (!holder.gsdProcess) return `PID ${holder.pid}: command does not look like a GSD process`;
+  if (!holder.dormant) {
+    return `PID ${holder.pid}: not dormant (state ${holder.state || "unknown"}, up ${Math.round(holder.elapsedSeconds / 60)}m)`;
+  }
+  if (holder.processStartedAtMs === null) return `PID ${holder.pid}: process start time unavailable`;
+  if (holder.processStartIdentity === null) return `PID ${holder.pid}: process start identity unavailable`;
+  if (workerSnapshot.livePids.has(holder.pid)) {
+    return `PID ${holder.pid}: workers row is active/stopping with a fresh heartbeat`;
+  }
+  const workerStartedAtMs = workerSnapshot.staleStartedAtByPid.get(holder.pid);
+  if (workerStartedAtMs !== undefined && holder.processStartedAtMs > workerStartedAtMs + 60_000) {
+    return `PID ${holder.pid}: stale workers row started after this process (PID reuse)`;
+  }
+  return null;
+}
+
 export function isDormantWorkflowDbLockHolderSafeToTerminate(
   holder: WorkflowDbLockHolder,
-  staleWorkerStartedAtByPid: ReadonlyMap<number, number>,
+  workerSnapshot: WorkflowDbWorkerSnapshot,
 ): boolean {
-  const workerStartedAtMs = staleWorkerStartedAtByPid.get(holder.pid);
-  return holder.sameUser
-    && holder.gsdProcess
-    && holder.dormant
-    && holder.processStartedAtMs !== null
-    && workerStartedAtMs !== undefined
-    // A worker registers after its containing process starts. If the current
-    // process started later, the stale row belongs to an earlier PID instance.
-    && holder.processStartedAtMs <= workerStartedAtMs + 60_000;
+  return describeDormantWorkflowDbLockHolderSkip(holder, workerSnapshot) === null;
 }
 
 export function formatLockedWorkflowDatabaseNotice(
@@ -191,6 +237,7 @@ export function formatLockedWorkflowDatabaseNotice(
       : "";
   return (
     `${subject}: workflow database is locked by another GSD process${pidDetail}. ` +
-    "Run `/gsd doctor --fix` to clean orphaned holders or stop that process."
+    "Run `/gsd doctor --fix` to release orphaned holders (it reports any holder it cannot safely stop) " +
+    "or stop that process yourself."
   );
 }

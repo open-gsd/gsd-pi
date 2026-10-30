@@ -16,6 +16,7 @@ import {
 } from "../gsd-db.ts";
 import { noteSessionRead, runInToolSession } from "../db/domain-operation.ts";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { filterDoctorIssues } from "../doctor-format.ts";
@@ -129,8 +130,227 @@ test("checkEngineHealth reports a busy workflow DB as fixable db_locked", async 
   const locked = issues.find((issue) => issue.code === "db_locked");
   assert.ok(locked);
   assert.equal(locked.severity, "error");
-  assert.equal(locked.fixable, process.platform !== "win32");
+  // #3052: no holder is discoverable here, so --fix has nothing to terminate
+  // and must not advertise the issue as automatically fixable.
+  assert.equal(locked.fixable, false);
   assert.equal(issues.some((issue) => issue.code === "db_unavailable"), false);
+});
+
+test("checkEngineHealth partitions workers rows by heartbeat freshness for the repair (#3052)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-db-lock-snapshot-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  mkdirSync(gsdDir, { recursive: true });
+  assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+  const now = Date.now();
+  const insertWorker = _getAdapter()!.prepare(
+    `INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  // Terminal row: excluded from both partitions — the orphan class #3052 exists for.
+  insertWorker.run("w-terminal", hostname(), 111, new Date(now - 10 * 60_000).toISOString(), "test", new Date(now - 10 * 60_000).toISOString(), "stopped", base);
+  // Fresh active row: a genuinely live session.
+  insertWorker.run("w-live", hostname(), 222, new Date(now - 60_000).toISOString(), "test", new Date(now - 1_000).toISOString(), "active", base);
+  // Stale active row: registry debris that still tracks its process start.
+  insertWorker.run("w-stale", hostname(), 333, new Date(now - 10 * 60_000).toISOString(), "test", new Date(now - 10 * 60_000).toISOString(), "active", base);
+  closeDatabase();
+  _setStartupSchemaDetectionForTest(() => {
+    throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY", errcode: 5 });
+  });
+  assert.equal(openWorkflowDatabase(base).ok, false);
+  _setStartupSchemaDetectionForTest(null);
+
+  let capturedSnapshot: unknown;
+  const issues: any[] = [];
+  await checkEngineHealth(base, issues, [], {
+    repairDbLock: true,
+    lockRecovery: {
+      inspectHolders: () => [],
+      terminateHolders: async (_holders, snapshot) => {
+        capturedSnapshot = snapshot;
+        return { signaled: [], terminated: [], remaining: [] };
+      },
+      reopen: (path) => openWorkflowDatabase(path),
+    },
+  });
+
+  const snapshot = capturedSnapshot as { staleStartedAtByPid: Map<number, number>; livePids: Set<number> };
+  assert.ok(snapshot, "repair must receive the workers-row snapshot");
+  assert.deepEqual([...snapshot.livePids], [222], "fresh-heartbeat rows are live sessions");
+  assert.deepEqual(
+    [...snapshot.staleStartedAtByPid.keys()],
+    [333],
+    "stale rows keep their process start; terminal rows are absent (orphan evidence)",
+  );
+});
+
+test("checkEngineHealth marks db_locked unfixable and explains the skip for a live-row holder (#3052)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-db-lock-live-holder-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  mkdirSync(gsdDir, { recursive: true });
+  assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+  const now = Date.now();
+  _getAdapter()!.prepare(
+    `INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run("w-live", hostname(), 222, new Date(now - 60_000).toISOString(), "test", new Date(now - 1_000).toISOString(), "active", base);
+  closeDatabase();
+  _setStartupSchemaDetectionForTest(() => {
+    throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY", errcode: 5 });
+  });
+  assert.equal(openWorkflowDatabase(base).ok, false);
+  _setStartupSchemaDetectionForTest(null);
+
+  const dormantHolder = {
+    pid: 222,
+    command: "node /opt/@opengsd/gsd-pi/dist/loader.js",
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+    state: "S",
+    elapsedSeconds: 600,
+    sameUser: true,
+    gsdProcess: true,
+    dormant: true,
+    processStartIdentity: "sha256:test-process",
+    processStartedAtMs: now - 600_000,
+  };
+
+  // Detection (no --fix): fixable must already be false — doctor knows the
+  // holder's row has a fresh heartbeat and will refuse to signal it.
+  const detectIssues: any[] = [];
+  await checkEngineHealth(base, detectIssues, [], {
+    lockRecovery: {
+      inspectHolders: () => [dormantHolder as any],
+      terminateHolders: async () => ({ signaled: [], terminated: [], remaining: [] }),
+      reopen: (path) => openWorkflowDatabase(path),
+    },
+  });
+  const detected = detectIssues.find((issue) => issue.code === "db_locked");
+  assert.ok(detected, "detection still reports the lock");
+  assert.equal(detected.fixable, false, "a live-row holder is not auto-terminable");
+  assert.doesNotMatch(detected.message, /Automated fix skipped/);
+
+  // With --fix: the skip is named, not silent.
+  const repairIssues: any[] = [];
+  await checkEngineHealth(base, repairIssues, [], {
+    repairDbLock: true,
+    lockRecovery: {
+      inspectHolders: () => [dormantHolder as any],
+      terminateHolders: async () => ({ signaled: [], terminated: [], remaining: [] }),
+      reopen: (path) => openWorkflowDatabase(path),
+    },
+  });
+  const repaired = repairIssues.find((issue) => issue.code === "db_locked");
+  assert.ok(repaired);
+  assert.equal(repaired.fixable, false);
+  assert.match(repaired.message, /Automated fix skipped — PID 222: workers row is active\/stopping with a fresh heartbeat/);
+  assert.match(repaired.message, /Stop them manually if active: kill 222/);
+});
+
+test("checkEngineHealth does not call the repair when the read-only probe fails (#3052)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-db-lock-probe-fail-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  mkdirSync(gsdDir, { recursive: true });
+  assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+  closeDatabase();
+  _setStartupSchemaDetectionForTest(() => {
+    throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY", errcode: 5 });
+  });
+  assert.equal(openWorkflowDatabase(base).ok, false);
+  _setStartupSchemaDetectionForTest(null);
+
+  // A pending replacement intent blocks the isolated read-only probe, the
+  // same path a live-restore owner uses — doctor must refuse to signal any
+  // holder and must not advertise the lock as automatically fixable.
+  const dormantHolder = {
+    pid: 222,
+    command: "node /opt/@opengsd/gsd-pi/dist/loader.js",
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+    state: "S",
+    elapsedSeconds: 600,
+    sameUser: true,
+    gsdProcess: true,
+    dormant: true,
+    processStartIdentity: "sha256:test-process",
+    processStartedAtMs: Date.now() - 600_000,
+  };
+  mkdirSync(join(gsdDir, "gsd.db.recovery"), { recursive: true });
+  writeFileSync(join(gsdDir, "gsd.db.recovery", "active.json"), "{}", "utf-8");
+
+  let terminateCalls = 0;
+  const issues: any[] = [];
+  await checkEngineHealth(base, issues, [], {
+    repairDbLock: true,
+    lockRecovery: {
+      inspectHolders: () => [dormantHolder as any],
+      terminateHolders: async () => {
+        terminateCalls += 1;
+        return { signaled: [], terminated: [], remaining: [] };
+      },
+      reopen: (path) => openWorkflowDatabase(path),
+    },
+  });
+
+  assert.equal(terminateCalls, 0, "a failed probe must block the repair");
+  const locked = issues.find((issue) => issue.code === "db_locked");
+  assert.ok(locked);
+  assert.equal(locked.fixable, false);
+  assert.match(locked.message, /also failed/);
+});
+
+test("checkEngineHealth omits the skip detail for holders it signaled (#3052)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-db-lock-signaled-reopen-fail-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  mkdirSync(gsdDir, { recursive: true });
+  assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+  closeDatabase();
+  _setStartupSchemaDetectionForTest(() => {
+    throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY", errcode: 5 });
+  });
+  assert.equal(openWorkflowDatabase(base).ok, false);
+  _setStartupSchemaDetectionForTest(null);
+
+  const dormantHolder = {
+    pid: 222,
+    command: "node /opt/@opengsd/gsd-pi/dist/loader.js",
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+    state: "S",
+    elapsedSeconds: 600,
+    sameUser: true,
+    gsdProcess: true,
+    dormant: true,
+    processStartIdentity: "sha256:test-process",
+    processStartedAtMs: Date.now() - 600_000,
+  };
+
+  // The holder was signaled and died, but the reopen still failed: it was
+  // not "skipped", so the message must not claim a start-identity failure.
+  const issues: any[] = [];
+  await checkEngineHealth(base, issues, [], {
+    repairDbLock: true,
+    lockRecovery: {
+      inspectHolders: () => [dormantHolder as any],
+      terminateHolders: async () => ({ signaled: [222], terminated: [222], remaining: [] }),
+      reopen: () => ({
+        ok: false as const,
+        reason: "locked" as const,
+        location: { projectRoot: base, projectGsd: join(base, ".gsd"), projectDb: join(base, ".gsd", "gsd.db") },
+      }),
+    },
+  });
+
+  const locked = issues.find((issue) => issue.code === "db_locked");
+  assert.ok(locked, "a failed reopen still reports the lock");
+  assert.doesNotMatch(locked.message, /Automated fix skipped/);
+  assert.doesNotMatch(locked.message, /start-identity recheck failed/);
 });
 
 test("checkEngineHealth repair signals proven holders and reopens the database", async (t) => {
