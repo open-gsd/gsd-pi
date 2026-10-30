@@ -54,7 +54,7 @@ The unavailable native-command observations are separately assessed as **INCONCL
 The adjacent [evidence directory](graphify-public-fixture-probe-20261030/) contains:
 
 - [probe-summary.json](graphify-public-fixture-probe-20261030/probe-summary.json): exact revisions, source hashes, graph counts, model qualifications, invocation limits and explicit false adoption flags.
-- [nodes.md](graphify-public-fixture-probe-20261030/nodes.md): generated entity graph; only its absolute scratch path was replaced with `PUBLIC_FIXTURE_ROOT`.
+- [nodes.md](graphify-public-fixture-probe-20261030/nodes.md): generated entity graph; only its absolute scratch path was replaced with `PUBLIC_FIXTURE_ROOT`. Its original `provenance.json` reference names a private capture artifact that is not published here. The published source hashes and prompt identity are in [probe-summary.json](graphify-public-fixture-probe-20261030/probe-summary.json); this clarification leaves the graph bytes and recorded hash unchanged.
 - [edges.json](graphify-public-fixture-probe-20261030/edges.json): byte-for-byte copy of the generated public graph data.
 - [observations.json](graphify-public-fixture-probe-20261030/observations.json) and [assessment.json](graphify-public-fixture-probe-20261030/assessment.json): parent-recorded prompt/source observations and their fixture comparison.
 - [native-command-observations.json](graphify-public-fixture-probe-20261030/native-command-observations.json) and [native-command-assessment.json](graphify-public-fixture-probe-20261030/native-command-assessment.json): missing native-host extraction evidence and its inconclusive assessment.
