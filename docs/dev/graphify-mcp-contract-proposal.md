@@ -77,7 +77,9 @@ These are proposed acceptance checks, not completed proof. The #3039 integrity t
 Maintainers should record the following before a runtime integration PR:
 
 1. **Placement:** retain R0 if native TUI and host source-read routes meet the need; evaluate an opt-in R1 host-neutral MCP companion if the VS Code pilot shows a material gap; choose R2 core execution changes only if the existing seam cannot satisfy the accepted contract.
-2. **Binding:** accept the GSD-session-owned workspace/worktree authority rule and define the source snapshot identity available to the provider.
+2. **Binding:** accept the host-owned workspace/worktree authority rule,
+   independent of whether a `gsd_execute` session is active, and define the
+   source snapshot identity available to the provider.
 3. **Privacy/consent:** decide whether source-context calls require project-level and/or per-request opt-in, and approve path redaction, logging, and excerpt policy.
 4. **Coverage:** define how dirty, untracked, ignored, generated, deleted, stale, and unsupported source is represented.
 5. **Compatibility:** accept the versioning and client-test bar before claiming broad platform support.
