@@ -45,7 +45,7 @@ The assessor returns **PASS for those four fixture observations**. This means th
 | Interactive PTY with early input | Input preceded the startup banner; no extraction artifacts | Command delivery not established |
 | Readiness-gated PTY | Supervisor raised `TimeoutExpired` during cleanup before saving a terminal receipt | Harness failure, not a product-behavior verdict |
 
-The readiness supervisor requested a 180-second execution deadline, but the job reported 320 seconds including the failed cleanup path. Therefore no reliable hard-deadline guarantee or successful terminal receipt is claimed for that attempt. Follow-up process-argument and open-file checks found no remaining holder associated with the owned scratch fixture.
+The readiness supervisor requested a 180-second execution deadline. Two harness reports disagree: the earlier `await_job` display showed 320 seconds, while the delayed completion notification for the same job showed 192.4 seconds. A later job lookup returned `No jobs found`, so neither display is treated as independently verified execution wall time. The cleanup path raised `TimeoutExpired` and saved no terminal receipt; no reliable hard-deadline guarantee or successful terminal receipt is claimed for that attempt. Follow-up process-argument and open-file checks found no remaining holder associated with the owned scratch fixture.
 
 The unavailable native-command observations are separately assessed as **INCONCLUSIVE**, not as a successful empty graph. These host attempts do not establish that the native command is broken or unsupported, that the requested model ran, or that a real selected host has adopted anything. The successful prompt-only probe must not replace the missing host receipt.
 
