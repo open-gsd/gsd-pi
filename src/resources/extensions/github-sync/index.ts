@@ -91,14 +91,21 @@ async function runBootstrap(ctx: import("@gsd/pi-coding-agent").ExtensionCommand
 
   try {
     const counts = await bootstrapSync(ctx.cwd);
-    if (counts.milestones === 0 && counts.slices === 0 && counts.tasks === 0) {
+    if (counts.milestones === 0 && counts.slices === 0 && counts.tasks === 0 && counts.errors.length === 0) {
       ctx.ui.notify("GitHub sync: everything already synced (or no milestones found).", "info");
-    } else {
-      ctx.ui.notify(
-        `GitHub sync: created ${counts.milestones} milestone(s), ${counts.slices} slice(s), ${counts.tasks} task(s).`,
-        "info",
+      return;
+    }
+
+    const lines = [
+      `GitHub sync: created ${counts.milestones} milestone(s), ${counts.slices} slice(s), ${counts.tasks} task(s).`,
+    ];
+    if (counts.errors.length > 0) {
+      lines.push(
+        `GitHub sync: ${counts.errors.length} creation(s) FAILED and were not recorded in the mapping (they retry on the next bootstrap). ` +
+        `First error: ${counts.errors[0]}`,
       );
     }
+    ctx.ui.notify(lines.join("\n"), counts.errors.length > 0 ? "warning" : "info");
   } catch (err) {
     ctx.ui.notify(`GitHub sync bootstrap failed: ${err}`, "error");
   }

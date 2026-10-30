@@ -1,6 +1,9 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { ghIsAvailable, _resetGhCache } from "../cli.ts";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { ghCreateIssue, ghIsAvailable, _resetGhCache } from "../cli.ts";
 
 describe("github-sync/cli.ghIsAvailable", () => {
   let originalPath: string | undefined;
@@ -84,6 +87,121 @@ describe("github-sync/cli.ghIsAvailable", () => {
     assert.ok(
       typeof afterReset === "boolean",
       "re-probe must return a boolean",
+    );
+  });
+});
+
+// ─── cli-level: ghCreateIssue milestone flag ────────────────────────────────
+//
+// Regression (#3045): `gh issue create --milestone` resolves by NAME (the
+// milestone title), not by number. ghCreateMilestone returns the REST number,
+// so the number must be resolved to its title before invoking gh — otherwise
+// every issue creation fails with "could not add to milestone '<n>': not
+// found" and no issue is created. The shim is POSIX-only; the tests skip on
+// win32 (same convention as sub-issue-link.test.ts).
+
+describe("github-sync/cli.ghCreateIssue milestone flag", () => {
+  let shimDir: string;
+  let cwdDir: string;
+  let originalPath: string | undefined;
+
+  const skipPosix = process.platform === "win32" ? "gh shim requires a POSIX shell" : false;
+
+  function writeShim(config: {
+    createIssueNumber: number;
+    milestoneTitle: string;
+    milestoneLookupFail?: boolean;
+  }): string {
+    const binDir = join(shimDir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const configPath = join(shimDir, "shim-config.json");
+    const argsFile = join(shimDir, "create-args.json");
+    writeFileSync(configPath, JSON.stringify({ ...config, argsFile }), "utf-8");
+    const ghPath = join(binDir, "gh");
+    writeFileSync(
+      ghPath,
+      [
+        "#!/usr/bin/env node",
+        "const fs = require('node:fs');",
+        `const cfg = JSON.parse(fs.readFileSync(${JSON.stringify(configPath)}, 'utf-8'));`,
+        "const args = process.argv.slice(2);",
+        "if (args[0] === 'issue' && args[1] === 'create') {",
+        "  fs.writeFileSync(cfg.argsFile, JSON.stringify(args));",
+        "  console.log('https://github.com/owner/repo/issues/' + cfg.createIssueNumber);",
+        "  process.exit(0);",
+        "}",
+        "if (args[0] === 'api' && /\\/milestones\\/\\d+$/.test(args[1] || '')) {",
+        "  if (cfg.milestoneLookupFail) { console.error('gh: API error (HTTP 404): not found'); process.exit(1); }",
+        "  console.log(JSON.stringify({ number: 107, title: cfg.milestoneTitle }));",
+        "  process.exit(0);",
+        "}",
+        "console.error('gh shim: unexpected args ' + JSON.stringify(args));",
+        "process.exit(1);",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    return binDir;
+  }
+
+  beforeEach(() => {
+    shimDir = mkdtempSync(join(tmpdir(), "gsd-gh-ms-shim-"));
+    cwdDir = mkdtempSync(join(tmpdir(), "gsd-gh-ms-shim-cwd-"));
+    originalPath = process.env.PATH;
+  });
+
+  afterEach(() => {
+    if (originalPath !== undefined) {
+      process.env.PATH = originalPath;
+    } else {
+      delete process.env.PATH;
+    }
+    rmSync(shimDir, { recursive: true, force: true });
+    rmSync(cwdDir, { recursive: true, force: true });
+  });
+
+  it("passes the milestone title, not the REST number, to gh issue create", { skip: skipPosix }, () => {
+    process.env.PATH = `${writeShim({ createIssueNumber: 42, milestoneTitle: "M1: Platform" })}:${originalPath}`;
+
+    const result = ghCreateIssue(cwdDir, {
+      repo: "owner/repo",
+      title: "T",
+      body: "b",
+      milestone: 107,
+    });
+
+    assert.equal(result.ok, true, `issue creation must succeed: ${result.error}`);
+    assert.ok(existsSync(join(shimDir, "create-args.json")), "gh issue create must have been invoked");
+    const args = JSON.parse(readFileSync(join(shimDir, "create-args.json"), "utf-8")) as string[];
+    const milestoneIdx = args.indexOf("--milestone");
+    assert.notEqual(milestoneIdx, -1, "--milestone flag must be present");
+    assert.equal(
+      args[milestoneIdx + 1],
+      "M1: Platform",
+      "--milestone must receive the milestone title (gh resolves by name); pre-fix it received the REST number '107'",
+    );
+  });
+
+  it("fails without creating the issue when the milestone cannot be resolved", { skip: skipPosix }, () => {
+    process.env.PATH = `${writeShim({
+      createIssueNumber: 42,
+      milestoneTitle: "M1: Platform",
+      milestoneLookupFail: true,
+    })}:${originalPath}`;
+
+    const result = ghCreateIssue(cwdDir, {
+      repo: "owner/repo",
+      title: "T",
+      body: "b",
+      milestone: 107,
+    });
+
+    assert.equal(result.ok, false, "a stale/unresolvable milestone must fail the creation, not drop the flag silently");
+    assert.match(result.error ?? "", /milestone/);
+    assert.equal(
+      existsSync(join(shimDir, "create-args.json")),
+      false,
+      "gh issue create must not run when the milestone cannot be resolved (would create an unrecorded duplicate on retry)",
     );
   });
 });
