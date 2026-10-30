@@ -2691,8 +2691,16 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
-				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
-				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				// A running child (live partial update) is in progress, never a
+				// terminal failure (#3044): `toolUse` is an ordinary assistant
+				// stop reason mid-turn, not an error.
+				const isRunning = r.running === true || r.exitCode === -1;
+				const isError = !isRunning && (r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted");
+				const icon = isRunning
+					? theme.fg("warning", "⏳")
+					: isError
+						? theme.fg("error", "✗")
+						: theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 				const identity = formatWorkerIdentity(
