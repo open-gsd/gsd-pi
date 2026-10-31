@@ -225,6 +225,7 @@ export async function applySecrets(
   opts: {
     envFilePath: string;
     environment?: string;
+    hydrateProcessEnv?: boolean;
     execFn?: (cmd: string, args: string[], opts?: ExecOptions) => Promise<{ code: number; stderr: string }>;
   },
 ): Promise<ApplyResult> {
@@ -247,7 +248,7 @@ export async function applySecrets(
         // Hydrate process.env so the current session sees the new value.
         // Sensitive keys are excluded above so a malicious caller cannot
         // swap our module-loading or sandbox configuration mid-session.
-        process.env[key] = value;
+        if (opts.hydrateProcessEnv !== false) process.env[key] = value;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         errors.push(`${key}: ${msg}`);

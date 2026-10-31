@@ -2090,6 +2090,13 @@ async function inferSaveGateResultScope(
   projectDir: string,
   prepared: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  return runSerializedWorkflowOperation(() => inferSaveGateResultScopeInQueue(projectDir, prepared));
+}
+
+async function inferSaveGateResultScopeInQueue(
+  projectDir: string,
+  prepared: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
   const out = { ...prepared };
   const gateId = stringValue(out.gateId)?.toUpperCase();
   const taskId = stringValue(out.taskId);
@@ -3182,6 +3189,10 @@ export type ProjectInitResult = {
  * MCP-only clients need a scriptable subset, which this provides.
  */
 export async function initProjectWorkflowState(rawProjectDir: string): Promise<ProjectInitResult> {
+  return runSerializedWorkflowOperation(() => initProjectWorkflowStateInQueue(rawProjectDir));
+}
+
+async function initProjectWorkflowStateInQueue(rawProjectDir: string): Promise<ProjectInitResult> {
   const projectDir = resolve(rawProjectDir);
   const gsdDir = join(projectDir, ".gsd");
   const dbPath = join(gsdDir, "gsd.db");
@@ -4389,7 +4400,8 @@ export function registerWorkflowTools(
     async (args: Record<string, unknown>) => {
       const { projectDir, limit, ...filters } = parseWorkflowArgs(journalQuerySchema, args);
       const bridge = await importBridgeModule();
-      const entries = bridge.queryJournal(projectDir, filters).slice(0, limit ?? 100);
+      const entries = await runSerializedWorkflowOperation(async () =>
+        bridge.queryJournal(projectDir, filters).slice(0, limit ?? 100));
       if (entries.length === 0) {
         return { content: [{ type: "text" as const, text: "No matching journal entries found." }] };
       }

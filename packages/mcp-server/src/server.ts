@@ -405,6 +405,7 @@ export interface McpToolExtra {
 interface ElicitRequestOptions {
   timeout?: number;
   signal?: AbortSignal;
+  relatedRequestId?: string | number;
 }
 
 interface McpServerInstance {
@@ -911,6 +912,7 @@ export async function askUserQuestionsHandler(
         deps.elicitInput(buildAskUserQuestionsElicitRequest(questions), {
           timeout: ELICIT_TIMEOUT_MS,
           ...(extra?.signal ? { signal: extra.signal } : {}),
+          ...(extra?.requestId !== undefined ? { relatedRequestId: extra.requestId } : {}),
         }),
         'ask_user_questions',
         undefined,
@@ -1077,6 +1079,7 @@ export async function secureEnvCollectHandler(
   args: Record<string, unknown>,
   elicitInput: ElicitInputFn,
   signal?: AbortSignal,
+  options: { hydrateProcessEnv?: boolean } = {},
 ): Promise<ToolContent> {
   const { projectDir, keys, destination, envFilePath, environment } = args as {
     projectDir: string;
@@ -1164,6 +1167,7 @@ export async function secureEnvCollectHandler(
       envFilePath: resolvedEnvPath,
       environment,
       execFn: defaultExecFn,
+      hydrateProcessEnv: options.hydrateProcessEnv,
     });
 
     // (7) Build result — NEVER include secret values
@@ -1201,7 +1205,13 @@ export async function secureEnvCollectHandler(
  */
 export async function createMcpServer(
   sessionManager: SessionManager,
-  options: { includeWorkflowTools?: boolean; clientManaged?: boolean } = {},
+  options: {
+    includeWorkflowTools?: boolean;
+    clientManaged?: boolean;
+    connectionLifetime?: 'client' | 'server';
+    onToolStart?: () => void;
+    onToolEnd?: () => void;
+  } = {},
 ): Promise<{
   server: McpServerInstance;
 }> {
@@ -1211,12 +1221,11 @@ export async function createMcpServer(
     await warmWorkflowToolBridges();
   }
 
-  // This surface is stdio-only: the packaged server is connected through
-  // StdioServerTransport, so its sessions cannot outlive the client connection.
-  // `clientManaged` does not change that lifetime (shutdown on connection close
-  // is unconditional) — it only marks clients that own the server's lifecycle
-  // and do not need the disclosure.
-  const discloseConnectionLifetime = options.clientManaged !== true;
+  // The default stdio CLI stops its manager when the connection closes. HTTP
+  // hosts share a process-owned manager: closing one protocol session must not
+  // cancel managed work. Keep the existing stdio catalog/disclosure unchanged.
+  const discloseConnectionLifetime = options.clientManaged !== true
+    && options.connectionLifetime !== 'server';
 
   // Dynamic import — same workaround as src/mcp-server.ts
   const mcpMod = await import(`${MCP_PKG}/server/mcp.js`);
@@ -1229,6 +1238,16 @@ export async function createMcpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: {}, elicitation: {} } },
   );
+
+  // Host-local activity accounting; never changes the advertised tool surface.
+  if (options.onToolStart || options.onToolEnd) {
+    const register = server.tool.bind(server);
+    server.tool = (name, description, schema, handler) => register(name, description, schema, async (args, extra) => {
+      options.onToolStart?.();
+      try { return await handler(args, extra); }
+      finally { options.onToolEnd?.(); }
+    });
+  }
 
   // -----------------------------------------------------------------------
   // gsd_execute — start a new GSD auto-mode session.
@@ -1510,8 +1529,13 @@ export async function createMcpServer(
     async (args: Record<string, unknown>, extra?: McpToolExtra) =>
       secureEnvCollectHandler(
         args,
-        (params) => server.server.elicitInput(params as ElicitRequestFormParams),
+        (params) => server.server.elicitInput(params as ElicitRequestFormParams, {
+          timeout: ELICIT_TIMEOUT_MS,
+          ...(extra?.signal ? { signal: extra.signal } : {}),
+          ...(extra?.requestId !== undefined ? { relatedRequestId: extra.requestId } : {}),
+        }),
         extra?.signal,
+        { hydrateProcessEnv: options.connectionLifetime !== 'server' },
       ),
   );
 

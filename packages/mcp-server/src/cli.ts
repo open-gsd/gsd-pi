@@ -8,10 +8,18 @@
 
 import { installGlobalErrorHandlers } from './cli-errors.js';
 import { runMcpServerCli } from './cli-runner.js';
+import { runMcpHttpServerCli } from './http-server.js';
 
 installGlobalErrorHandlers();
 
-runMcpServerCli().catch((err) => {
+const transport = process.env.GSD_MCP_TRANSPORT?.trim() || 'stdio';
+const run = async () => {
+  if (transport === 'stdio') return runMcpServerCli();
+  if (transport === 'streamable-http') return runMcpHttpServerCli();
+  throw new Error('GSD_MCP_TRANSPORT must be stdio or streamable-http');
+};
+
+run().catch((err) => {
   process.stderr.write(
     `[gsd-mcp-server] Fatal: ${err instanceof Error ? err.message : String(err)}\n`
   );

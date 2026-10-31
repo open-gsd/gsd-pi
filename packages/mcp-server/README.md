@@ -76,6 +76,38 @@ Add to `.cursor/mcp.json`:
 }
 ```
 
+### Shared loopback Streamable HTTP (opt-in)
+
+Stdio remains the default. To run one process for multiple clients:
+
+```bash
+GSD_MCP_TRANSPORT=streamable-http GSD_MCP_HTTP_PORT=8788 gsd-mcp-server
+```
+
+The endpoint is `http://127.0.0.1:8788/mcp`; remote binding is not supported.
+Each client has its own MCP protocol session, including elicitation and
+cancellation. Managed GSD runs belong to the server process: disconnecting one
+client does not cancel them; shutting down the server does. Use `gsd_cancel` to
+stop a run explicitly.
+
+Use an explicit absolute `projectDir` on every project tool call. A shared
+process has only one cwd; it cannot infer each client's selected project.
+For a multi-project service, run from the user's home directory and leave
+`GSD_WORKFLOW_PROJECT_ROOT` unset, so omitted workflow project paths fail
+closed instead of selecting an arbitrary project. Database operations use the
+workflow queue, including read tools and project initialization.
+
+Idle protocol sessions expire after ten minutes when no request/stream or tool
+handler is active. An active elicitation is an active tool call. HTTP
+`secure_env_collect` writes its chosen destination but does not hydrate shared
+`process.env`; stdio retains its existing hydration behavior.
+
+The real-runtime cross-project regression is opt-in: set
+`GSD_HTTP_INTEGRATION_ROOT` to an existing throwaway evidence directory when
+running `http-workflow-isolation.test`. It retains its two fixture projects.
+Cancellation reaches held handlers, but HTTP adds protocol overhead; do not
+assume its cancellation latency equals stdio.
+
 ## Tools
 
 ### Workflow tools
