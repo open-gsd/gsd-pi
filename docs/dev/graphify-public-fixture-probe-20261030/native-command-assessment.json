@@ -1,0 +1,13 @@
+{
+  "scope": "C07-A-fixture-only",
+  "verdict": "INCONCLUSIVE",
+  "reasons": [
+    "Evidence is failed; caller completeness is not established."
+  ],
+  "provenance": {
+    "kind": "source-grounded",
+    "reference": "probe-summary.json nativeHostAttempts; no trustworthy native-host extraction result",
+    "sourceRevision": "f2756216ccf6bbe9af2fc677f5eafef986727e4e"
+  },
+  "claimBoundary": "Fixture comparison only; provenance is declared, not authenticated. No native-route or provider accuracy proof."
+}

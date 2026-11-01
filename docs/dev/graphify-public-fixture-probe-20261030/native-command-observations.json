@@ -1,0 +1,12 @@
+{
+  "format": "gsd-graphify-c07-observations",
+  "version": 1,
+  "fixture": "graphify-known-answer",
+  "availability": "failed",
+  "provenance": {
+    "kind": "source-grounded",
+    "reference": "probe-summary.json nativeHostAttempts; no trustworthy native-host extraction result",
+    "sourceRevision": "f2756216ccf6bbe9af2fc677f5eafef986727e4e"
+  },
+  "facts": []
+}

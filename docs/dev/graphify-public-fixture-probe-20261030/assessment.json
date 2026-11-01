@@ -1,0 +1,11 @@
+{
+  "scope": "C07-A-fixture-only",
+  "verdict": "PASS",
+  "reasons": [],
+  "provenance": {
+    "kind": "source-grounded",
+    "reference": "docs/dev/graphify-public-fixture-probe-20261030/; prompt-only extraction and parent source-anchor verification, not native-handler execution",
+    "sourceRevision": "f2756216ccf6bbe9af2fc677f5eafef986727e4e"
+  },
+  "claimBoundary": "Fixture comparison only; provenance is declared, not authenticated. No native-route or provider accuracy proof."
+}
