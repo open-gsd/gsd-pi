@@ -239,6 +239,65 @@ describe("harness compaction", () => {
 		expect(findCutPoint([user, compaction, assistant], 0, 3, 1).firstKeptEntryIndex).toBe(2);
 	});
 
+	it("cuts before a tool-heavy turn whose results alone exceed the budget (#3064)", () => {
+		// The budget threshold lands inside the trailing tool-result run with
+		// no cut point after it, so the old fallback kept cutPoints[0] — the
+		// whole session stayed "kept" and nothing was summarized.
+		const entries: SessionTreeEntry[] = [];
+		let parentId: string | null = null;
+		const push = (message: AgentMessage) => {
+			const entry = createMessageEntry(message, parentId);
+			entries.push(entry);
+			parentId = entry.id;
+		};
+		for (let i = 0; i < 5; i++) {
+			push(createUserMessage(`Turn ${i}`));
+			push(createAssistantMessage(`A${i}`, createMockUsage(0, 50, 400, 0)));
+			push({
+				role: "toolResult",
+				toolCallId: `call-${i}`,
+				toolName: "read",
+				content: [{ type: "text", text: "r".repeat(4000) }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+		}
+		push(createUserMessage("Heavy turn"));
+		push({
+			role: "assistant",
+			content: Array.from({ length: 60 }, (_, i) => ({
+				type: "toolCall",
+				id: `hc-${i}`,
+				name: "read",
+				arguments: { path: `f${i}.ts` },
+			})),
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: createMockUsage(0, 50, 0, 0),
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		for (let i = 0; i < 60; i++) {
+			push({
+				role: "toolResult",
+				toolCallId: `hc-${i}`,
+				toolName: "read",
+				content: [{ type: "text", text: "x".repeat(24000) }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+		}
+
+		const result = findCutPoint(entries, 0, entries.length, 20000);
+		// Pre-fix this was 0: everything kept, nothing summarized.
+		expect(result.firstKeptEntryIndex).toBeGreaterThan(0);
+		const cutEntry = entries[result.firstKeptEntryIndex];
+		if (cutEntry?.type === "message") {
+			expect(["user", "assistant"]).toContain(cutEntry.message.role);
+		}
+	});
+
 	it("estimates tokens and context usage across supported message roles", () => {
 		const usage = createMockUsage(10, 5, 3, 2);
 		const assistant = createAssistantMessage("assistant", usage);

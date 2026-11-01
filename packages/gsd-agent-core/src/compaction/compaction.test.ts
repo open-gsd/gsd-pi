@@ -13,6 +13,8 @@ import {
 	compact,
 	generateSummary,
 	estimateTokens,
+	findCutPoint,
+	prepareCompaction,
 	chunkMessages,
 	isDegenerateSummary,
 	CompactionInvalidInputError,
@@ -992,5 +994,88 @@ describe("degenerate middle-chunk handling", () => {
 			"the oldest carried message must be dropped to keep the merged input within the chunk budget",
 		);
 		assert.ok(!isDegenerateSummary(summary), "final summary must not be degenerate");
+	});
+});
+
+describe("findCutPoint — tool-heavy turn fallback (#3064)", () => {
+	interface TestEntry {
+		type: "message";
+		id: string;
+		parentId: string | null;
+		timestamp: string;
+		message: AgentMessage;
+	}
+
+	const makeEntry = (message: AgentMessage, parentId: string | null): TestEntry => ({
+		type: "message",
+		id: `e-${Math.random().toString(36).slice(2)}`,
+		parentId,
+		timestamp: new Date().toISOString(),
+		message,
+	});
+
+	it("cuts before a tool-heavy turn whose results alone exceed the budget", () => {
+		// The budget threshold lands inside the trailing tool-result run with
+		// no cut point after it, so the old fallback kept cutPoints[0] — the
+		// whole session stayed "kept", nothing was summarized, and the
+		// session_before_compact hook cancelled compaction.
+		const entries: TestEntry[] = [];
+		let parentId: string | null = null;
+		const push = (message: AgentMessage) => {
+			const entry = makeEntry(message, parentId);
+			entries.push(entry);
+			parentId = entry.id;
+		};
+		for (let i = 0; i < 5; i++) {
+			push(makeUserMessage(100));
+			push({ role: "assistant", content: [{ type: "text", text: `A${i}` }], api: "anthropic-messages", provider: "anthropic", model: "claude-sonnet-4-5", usage: { input: 0, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 50, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() } as unknown as AgentMessage);
+			push({ role: "toolResult", toolCallId: `call-${i}`, toolName: "read", content: "r".repeat(4000), isError: false, timestamp: Date.now() } as unknown as AgentMessage);
+		}
+		push(makeUserMessage(100));
+		push({ role: "assistant", content: Array.from({ length: 60 }, (_, i) => ({ type: "toolCall", id: `hc-${i}`, name: "read", arguments: { path: `f${i}.ts` } })), api: "anthropic-messages", provider: "anthropic", model: "claude-sonnet-4-5", usage: { input: 0, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 50, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse", timestamp: Date.now() } as unknown as AgentMessage);
+		for (let i = 0; i < 60; i++) {
+			push({ role: "toolResult", toolCallId: `hc-${i}`, toolName: "read", content: "x".repeat(24000), isError: false, timestamp: Date.now() } as unknown as AgentMessage);
+		}
+
+		const sessionEntries = entries as unknown as Parameters<typeof findCutPoint>[0];
+		const result = findCutPoint(sessionEntries, 0, sessionEntries.length, 20000);
+		// The fallback cuts at the closest cut point BEFORE the threshold — the
+		// heavy turn's assistant message (index 16) — splitting the turn, not
+		// at cutPoints[0] (pre-fix: everything kept, nothing summarized).
+		assert.equal(result.firstKeptEntryIndex, 16);
+		assert.equal(result.isSplitTurn, true);
+		assert.equal(result.turnStartIndex, 15);
+
+		const preparation = prepareCompaction(sessionEntries, {
+			enabled: true,
+			reserveTokens: 16384,
+			keepRecentTokens: 20000,
+		});
+		assert.ok(preparation, "compaction must be preparable");
+		assert.ok(preparation.messagesToSummarize.length > 0, "there must be history to summarize");
+	});
+
+	it("regular shape is unchanged: budget crossed at a user message cuts there", () => {
+		const entries: TestEntry[] = [];
+		let parentId: string | null = null;
+		const push = (message: AgentMessage) => {
+			const entry = makeEntry(message, parentId);
+			entries.push(entry);
+			parentId = entry.id;
+		};
+		for (let i = 0; i < 10; i++) {
+			push(makeUserMessage(2500));
+			push({ role: "assistant", content: [{ type: "text", text: `A${i}` }], api: "anthropic-messages", provider: "anthropic", model: "claude-sonnet-4-5", usage: { input: 0, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 50, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() } as unknown as AgentMessage);
+		}
+
+		const sessionEntries = entries as unknown as Parameters<typeof findCutPoint>[0];
+		const result = findCutPoint(sessionEntries, 0, sessionEntries.length, 20000);
+		// ~2550 tokens/turn: walking back from the newest turn, the budget
+		// crosses exactly at turn 2's user message — itself a valid cut point —
+		// so the forward search must win over the new fallback default.
+		assert.equal(result.firstKeptEntryIndex, 4);
+		const cutEntry = sessionEntries[result.firstKeptEntryIndex] as TestEntry;
+		assert.equal(cutEntry.message.role, "user");
+		assert.equal(result.isSplitTurn, false);
 	});
 });

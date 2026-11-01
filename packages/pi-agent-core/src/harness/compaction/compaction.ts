@@ -345,6 +345,11 @@ export function findCutPoint(
 		const messageTokens = estimateTokens(entry.message as AgentMessage);
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
+			// No cut point at or after the threshold (one long tool-heavy turn
+			// whose results alone exceed the budget): keep from the closest one
+			// before it, never from cutPoints[0] — that kept the whole session
+			// and left nothing to summarize (#3064).
+			cutIndex = cutPoints[cutPoints.length - 1];
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
 					cutIndex = cutPoints[c];

@@ -443,7 +443,13 @@ export function findCutPoint(
 
 		// Check if we've exceeded the budget
 		if (accumulatedTokens >= keepRecentTokens) {
-			// Find the closest valid cut point at or after this entry
+			// Find the closest valid cut point at or after this entry. When the
+			// budget is crossed inside a run of tool results with no cut point
+			// after it (one long tool-heavy turn whose results alone exceed the
+			// budget), keep slightly more instead: the closest cut point before
+			// it. Falling through to cutPoints[0] kept the whole session and
+			// left nothing to summarize (#3064).
+			cutIndex = cutPoints[cutPoints.length - 1];
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
 					cutIndex = cutPoints[c];
