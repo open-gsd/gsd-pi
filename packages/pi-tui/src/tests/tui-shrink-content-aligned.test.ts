@@ -83,9 +83,16 @@ describe("forced shrink that deletes rows above the overlap and below the screen
 		});
 	}
 
-	it("keeps the refill when a row it would re-emit was edited, so the edit stays visible", async () => {
-		const { all } = await endTurn(80, 30, 2, 20, 63);
-		assert.ok(all.some((l) => l.startsWith("T063 transcript EDITED")), "the edited row is shown");
+	// An edit inside the overlap (already in scrollback, below the new
+	// viewport top) is treated like one above the viewport (next test): it
+	// stays hidden in scrollback rather than refilling, which re-emitted every
+	// unchanged row around it.
+	it("keeps the aligned repaint when a row inside the overlap was edited", async () => {
+		const { all, viewport } = await endTurn(80, 30, 2, 20, 63);
+		const duplicated = [...countLines(all, /^T\d{3}/)].filter(([, n]) => n > 1).map(([id]) => id);
+		assert.deepStrictEqual(duplicated, [], `duplicated transcript lines: ${duplicated.join(", ")}`);
+		assert.strictEqual(countLines(all, /^T\d{3}/).size, 80, "every transcript line is still there");
+		assert.ok(viewport.some((l) => l.startsWith("FOOTER")), "the frame tail is on screen");
 	});
 
 	// An above-screen edit (a reply header gaining its timestamp, #2582) must
