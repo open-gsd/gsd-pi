@@ -35,6 +35,91 @@ This test checks that the fixture and its expected facts remain internally align
 It does **not** run Graphify, a provider, an MCP server, or a host session, and must not
 be reported as provider-accuracy evidence.
 
+## Assess observations (C07 test only)
+
+`assess-observations.mjs` exports `assessFixtureObservations(observation)`. It compares
+hand-recorded observations with the **unchanged** `expected-facts.json` oracle and checks
+literal evidence at one-based lines in the local fixture files. It does not extract calls,
+consume a native entity graph, invoke a provider, or define the C02 runtime contract.
+
+This complete **mock** input illustrates the fixture-only representation:
+
+```json
+{
+  "format": "gsd-graphify-c07-observations",
+  "version": 1,
+  "fixture": "graphify-known-answer",
+  "availability": "available",
+  "provenance": {
+    "kind": "mock",
+    "reference": "example-only-not-a-pilot-log",
+    "sourceRevision": "0000000000000000000000000000000000000000"
+  },
+  "facts": [
+    {
+      "source": "caller-primary.ts#renderPrimary", "relation": "calls", "target": "helper.ts#formatLabel",
+      "anchors": [{ "line": 4, "text": "return formatLabel(value);" }]
+    },
+    {
+      "source": "caller-secondary.ts#renderSecondary", "relation": "calls", "target": "helper.ts#formatLabel",
+      "anchors": [{ "line": 3, "text": "formatLabel(value)" }]
+    },
+    {
+      "source": "import-only.ts", "relation": "imports", "target": "helper.ts#formatLabel",
+      "anchors": [{ "line": 1, "text": "import { formatLabel } from \"./helper.js\";" }]
+    },
+    {
+      "source": "dynamic-dispatch.ts#invokeByName", "relation": "dynamic-call", "target": "unresolved",
+      "anchors": [
+        { "line": 6, "text": "const handler = registry[name];" },
+        { "line": 7, "text": "handler(value)" }
+      ]
+    }
+  ]
+}
+```
+
+For an actual bounded pilot, transcribe what the route **actually reports**, cross-check its
+anchors against source, and retain the original output and run metadata from the recipe below.
+Use `kind: "source-grounded"`, a reference to that durable evidence, and its full Git source
+revision (40 or 64 lowercase hex characters). Do not fill missing observations from the oracle.
+Provenance is declared, not authenticated: the assessor does not verify the revision, freshness,
+worktree identity, evidence-log contents, or whether the reported facts genuinely came from a route.
+The caller must check those boundaries separately. `kind: "mock"` proves only assessor behavior.
+
+The object keys shown above are exact; unknown fields reject. Each fact needs all oracle evidence
+quotes, including both dynamic lookup and invocation. Fact/anchor order is irrelevant.
+Availability describes the **whole** observation: use `missing`, `unsupported`, `partial`,
+`truncated`, `stale`, or `failed` when coverage is not complete, even if some facts are known.
+A native graph that only represents entities/imports is not a function-call graph: record
+`unsupported` with `facts: []`, not invented callers or an authoritative empty answer.
+
+- `PASS`: all four oracle facts and source anchors match, with `availability: "available"`.
+  This is a fixture comparison only, **not** native-route, provider-accuracy, or host-adoption proof.
+- `FAIL`: malformed/out-of-scope facts, bad anchors, duplicate/contradictory facts, wrong relations
+  or targets, or missing facts under claimed complete availability (including an empty answer).
+- `INCONCLUSIVE`: valid but unavailable/incomplete evidence, whether empty or otherwise correct.
+  Contradictory or malformed facts still fail; unavailable coverage never becomes PASS.
+
+To assess a saved JSON observation from the repository root (exit 0/1/2 for PASS/FAIL/INCONCLUSIVE):
+
+```bash
+node --input-type=module - ./c07-observations.json <<'JS'
+import { readFileSync } from "node:fs";
+import { assessFixtureObservations } from "./src/resources/extensions/gsd/tests/fixtures/graphify-known-answer/assess-observations.mjs";
+const observation = JSON.parse(readFileSync(process.argv[2], "utf8"));
+const result = assessFixtureObservations(observation);
+console.log(JSON.stringify(result, null, 2));
+process.exitCode = { PASS: 0, FAIL: 1, INCONCLUSIVE: 2 }[result.verdict];
+JS
+```
+
+Run the assessor's mocked positive/negative cases together with the original integrity assertions:
+
+```bash
+node --test src/resources/extensions/gsd/tests/graphify-known-answer-assessor.test.mjs src/resources/extensions/gsd/tests/graphify-known-answer-fixture.test.mjs
+```
+
 ## Future proof recipe
 
 After C02/C03 select and approve a route and its contract, a provider-specific acceptance
