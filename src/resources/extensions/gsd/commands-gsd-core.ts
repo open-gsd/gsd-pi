@@ -421,8 +421,8 @@ export async function handleDocsUpdate(args: string, ctx: ExtensionCommandContex
 export async function handleGraphify(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
   const basePath = currentDirectoryRoot();
   const knowledgeDir = join(basePath, ".gsd", "knowledge");
-  if (!existsSync(knowledgeDir)) mkdirSync(knowledgeDir, { recursive: true });
   const action = args.trim() || "build";
+  if (action === "build" && !existsSync(knowledgeDir)) mkdirSync(knowledgeDir, { recursive: true });
   dispatchPrompt(
     { prompt: "graphify", customType: "gsd-graphify", verb: "Graphify", vars: { action } },
     ctx,
