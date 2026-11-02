@@ -271,6 +271,72 @@ describe("checkVerifyPathOperands", () => {
     );
   });
 
+  test("resets cd state across newline and pipeline execution contexts", () => {
+    scaffold("src/root.txt", "packages/api/");
+    for (const verify of [
+      "cd packages/api\ncat src/root.txt",
+      "cd packages/api | cat && cat src/root.txt",
+    ]) {
+      assert.deepEqual(checkVerifyPathOperands([createTask({ verify })], isolatedBase), [], verify);
+    }
+  });
+
+  test("does not interpret quoted redirection operators as shell syntax", () => {
+    scaffold("test/");
+    const results = checkVerifyPathOperands(
+      [createTask({ verify: "cmp '>' test/missing.txt" })],
+      isolatedBase,
+    );
+    assert.equal(results.length, 1);
+    assert.match(results[0].message, /test\/missing\.txt/);
+  });
+
+  test("anchors Git refs before resolving them from a nested cd directory", () => {
+    scaffold("packages/api/");
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "cd packages/api && git diff origin/main" })],
+        isolatedBase,
+      ),
+      [],
+    );
+  });
+
+  test("does not let later writes satisfy earlier reads", () => {
+    scaffold("test/");
+    const results = checkVerifyPathOperands(
+      [createTask({ verify: "cat test/later.txt && touch test/later.txt" })],
+      isolatedBase,
+    );
+    assert.equal(results.length, 1);
+    assert.match(results[0].message, /test\/later\.txt/);
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "touch test/later.txt && cat test/later.txt" })],
+        isolatedBase,
+      ),
+      [],
+    );
+  });
+
+  test("maps recursive copies under existing destinations to the source basename", () => {
+    scaffold("test/fixtures/case.txt", "test/run/");
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "mkdir -p test/run && cp -R test/fixtures test/run && test -f test/run/fixtures/case.txt" })],
+        isolatedBase,
+      ),
+      [],
+    );
+    assert.equal(
+      checkVerifyPathOperands(
+        [createTask({ verify: "mkdir -p test/run && cp -R test/fixtures test/run && test -f test/run/case.txt" })],
+        isolatedBase,
+      ).length,
+      1,
+    );
+  });
+
   test("ignores absence assertions and search patterns even when anchored", () => {
     scaffold("src/");
     for (const verify of [
