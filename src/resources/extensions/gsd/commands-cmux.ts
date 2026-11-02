@@ -27,7 +27,6 @@ export function autoEnableCmuxPreferences(basePath?: string): boolean {
     sidebar: true,
     splits: false,
     browser: false,
-    vault: false,
     ...((prefs.cmux as Record<string, unknown> | undefined) ?? {}),
   };
   (prefs.cmux as Record<string, unknown>).enabled = true;
@@ -138,7 +137,6 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
         sidebar: true,
         splits: false,
         browser: false,
-        vault: false,
         ...((prefs.cmux as Record<string, unknown> | undefined) ?? {}),
       };
       (prefs.cmux as Record<string, unknown>).enabled = true;

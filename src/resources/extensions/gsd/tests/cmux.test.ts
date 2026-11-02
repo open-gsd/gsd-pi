@@ -17,7 +17,7 @@ import {
   shouldPromptToEnableCmux,
 } from "../../cmux/index.ts";
 import { autoEnableCmuxPreferences, handleCmux } from "../commands-cmux.ts";
-import { clearGSDPreferencesCache } from "../preferences.ts";
+import { clearGSDPreferencesCache, loadEffectiveGSDPreferences, getGlobalGSDPreferencesPath } from "../preferences.ts";
 import type { CmuxStateInput } from "../../shared/cmux-events.ts";
 
 test("detectCmuxEnvironment requires workspace, surface, and socket", () => {
@@ -132,7 +132,7 @@ describe("autoEnableCmuxPreferences", () => {
     assert.ok(content.includes("notifications: true"), "should default notifications on");
     assert.ok(content.includes("sidebar: true"), "should default sidebar on");
     assert.ok(content.includes("splits: false"), "should default splits off");
-    assert.ok(content.includes("vault: false"), "detection must never opt in to Vault");
+    assert.doesNotMatch(content, /vault:/, "detection must not add a project override for Vault");
   });
 
   test("returns false when preferences file does not exist", () => {
@@ -211,6 +211,63 @@ describe("autoEnableCmuxPreferences", () => {
     assert.match(content, /vault: true/);
     await handleCmux("status", ctx);
     assert.match(notices.at(-1)!, /vault=off/);
+  });
+
+  test("master off/on preserves inherited Vault settings without creating a project override", async (t) => {
+    const originalEnv = process.env;
+    const home = path.join(tmp, "isolated-home");
+    fs.mkdirSync(home);
+    const socket = path.join(tmp, "cmux.sock");
+    fs.writeFileSync(socket, "");
+    process.env = {
+      ...process.env, GSD_HOME: home,
+      CMUX_WORKSPACE_ID: "workspace:1", CMUX_SURFACE_ID: "surface:2",
+      CMUX_SOCKET_PATH: socket, GSD_CMUX_VAULT: undefined,
+    };
+    t.after(() => { process.env = originalEnv; clearGSDPreferencesCache(); });
+    const prefsPath = path.join(tmp, ".gsd", "preferences.md");
+    const ctx = {
+      cwd: tmp, ui: { notify() {} },
+      waitForIdle: async () => {}, reload: async () => {},
+    } as any;
+    for (const vault of [true, false, undefined]) {
+      const globalContent = `---\nversion: 1\ncmux:\n  enabled: true\n${vault === undefined ? "" : `  vault: ${vault}\n`}---\n`;
+      fs.writeFileSync(getGlobalGSDPreferencesPath(), globalContent);
+      fs.writeFileSync(prefsPath, "---\nversion: 1\n---\n");
+      clearGSDPreferencesCache();
+      await handleCmux("off", ctx);
+      assert.equal(loadEffectiveGSDPreferences(tmp)?.preferences.cmux?.enabled, false);
+      await handleCmux("on", ctx);
+      assert.doesNotMatch(fs.readFileSync(prefsPath, "utf8"), /vault:/);
+      const effective = loadEffectiveGSDPreferences(tmp)?.preferences.cmux;
+      assert.equal(effective?.enabled, true);
+      assert.equal(effective?.vault, vault);
+      assert.equal(fs.readFileSync(getGlobalGSDPreferencesPath(), "utf8"), globalContent);
+    }
+    fs.writeFileSync(prefsPath, "---\nversion: 1\ncmux:\n  vault: false\n---\n");
+    fs.writeFileSync(getGlobalGSDPreferencesPath(), "---\nversion: 1\ncmux:\n  vault: true\n---\n");
+    clearGSDPreferencesCache();
+    await handleCmux("on", ctx);
+    assert.equal(loadEffectiveGSDPreferences(tmp)?.preferences.cmux?.vault, false, "explicit project opt-out wins");
+  });
+
+  test("auto-enabling preserves the inherited global Vault choice", (t) => {
+    const originalHome = process.env.GSD_HOME;
+    const home = path.join(tmp, "isolated-home");
+    fs.mkdirSync(home);
+    process.env.GSD_HOME = home;
+    t.after(() => {
+      if (originalHome === undefined) delete process.env.GSD_HOME;
+      else process.env.GSD_HOME = originalHome;
+      clearGSDPreferencesCache();
+    });
+    fs.writeFileSync(getGlobalGSDPreferencesPath(), "---\nversion: 1\ncmux:\n  vault: true\n---\n");
+    const prefsPath = path.join(tmp, ".gsd", "preferences.md");
+    fs.writeFileSync(prefsPath, "---\nversion: 1\n---\n");
+    clearGSDPreferencesCache();
+    assert.equal(autoEnableCmuxPreferences(tmp), true);
+    assert.doesNotMatch(fs.readFileSync(prefsPath, "utf8"), /vault:/);
+    assert.equal(loadEffectiveGSDPreferences(tmp)?.preferences.cmux?.vault, true);
   });
 
   test("preserves existing cmux sub-preferences when auto-enabling", () => {

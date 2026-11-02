@@ -12,6 +12,7 @@ import {
 import {
   CmuxVaultBridge,
   CMUX_VAULT_MAX_PENDING_SESSIONS,
+  CMUX_VAULT_DEFAULT_SOCKET_PATH,
   clearCmuxVaultBinding,
   cmuxVaultEnabled,
   cmuxVaultConfigured,
@@ -576,7 +577,7 @@ test('extension factory attaches supported post-switch lifecycle events without 
   const handlers = new Map<string, Function>()
   const factory = createCmuxVaultExtension(f.options)
   await factory({ on: (name: string, handler: Function) => handlers.set(name, handler) } as never)
-  assert.deepEqual([...handlers.keys()], ['session_start', 'turn_end', 'agent_end', 'session_shutdown'])
+  assert.deepEqual([...handlers.keys()], ['session_start', 'session_tree', 'turn_end', 'agent_end', 'session_shutdown'])
   const ctx = { sessionManager: f.manager, hasUI: false }
   assert.doesNotThrow(() => handlers.get('agent_end')!({ messages: ['secret'] }, ctx))
   await handlers.get('session_shutdown')!()
@@ -608,6 +609,51 @@ test('enabled lifecycle handlers return immediately, refresh on agent_end and dr
   assert.equal(f.calls.filter(call => call[2] === 'set').length, 2)
   assert.equal(f.clears.length, 1)
   assert.equal((f.feedCalls.at(-1)?.event as { hook_event_name: string }).hook_event_name, 'SessionEnd')
+})
+
+test('session_tree refreshes selected branch modes and removes abandoned workflow and delegation context', async t => {
+  const f = await fixture(t)
+  const handlers = new Map<string, Function>()
+  const waiters: Array<() => void> = []
+  await createCmuxVaultExtension({
+    ...f.options,
+    transport: async args => {
+      const result = await f.options.transport(args)
+      if (args[0] === 'rpc') waiters.shift()?.()
+      return result
+    },
+  })({ on: (name: string, handler: Function) => handlers.set(name, handler) } as never)
+  const ctx = { sessionManager: f.manager, hasUI: true }
+  const originSessionId = f.manager.getSessionId()
+  f.setBranch([
+    { type: 'custom_message', customType: 'gsd-quick-task' },
+    { type: 'custom_message', customType: 'gsd-debug-start' },
+    { type: 'custom', customType: GSD_WORKFLOW_CONTEXT, data: {
+      version: 1, originSessionId, milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+    } },
+    { type: 'custom', customType: GSD_DELEGATION_CONTEXT, data: {
+      version: 1, originSessionId, id: '32fd3341-a765-46af-ae2d-2f82051749a0',
+      mode: 'parallel', count: 2, forkCount: 0, background: false, status: 'requested',
+    } },
+  ])
+  const started = new Promise<void>(resolve => waiters.push(resolve))
+  handlers.get('session_start')!({}, ctx)
+  await started
+  assert.deepEqual((await f.metadata())[0].data.gsdModes, ['quick', 'debug'])
+  f.setBranch([{ type: 'message', message: { role: 'user' } }])
+  const refreshed = new Promise<void>(resolve => waiters.push(resolve))
+  assert.equal(handlers.get('session_tree')!({
+    get summaryEntry(): never { throw new Error('must not inspect branch summaries') },
+  }, ctx), undefined)
+  await refreshed
+  const [record] = await f.metadata()
+  assert.deepEqual(record.data.gsdModes, ['chat'])
+  assert.equal(record.data.title, 'GSD — Chat')
+  assert.equal(record.data.gsdWorkflow, undefined)
+  assert.equal(record.data.gsdDelegations, undefined)
+  assert.equal(record.data.sessionId, f.manager.getSessionFile())
+  assert.equal(f.calls.at(-1)?.[f.calls.at(-1)!.indexOf('--name') + 1], 'GSD — Chat')
+  await handlers.get('session_shutdown')!()
 })
 
 test('real subprocess transport preserves argv and rejects malformed output, failure and timeout', { skip: process.platform === 'win32' }, async t => {
@@ -740,6 +786,18 @@ test('guarded socket clear uses verified RPC, numeric generation and bounded saf
     expected_updated_at: 1793615000.123,
   }
   assert.deepEqual(await clearCmuxVaultBinding(socketPath, params), { cleared: true })
+  assert.equal(CMUX_VAULT_DEFAULT_SOCKET_PATH, '/tmp/cmux.sock', 'cmux protocol default must not follow TMPDIR')
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, CMUX_SOCKET_PATH: socketPath },
+    clearBinding: undefined,
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  bridge.stop()
+  await bridge.idle()
+  assert.equal((f.feedCalls.at(-1)?.event as { hook_event_name: string }).hook_event_name, 'SessionEnd',
+    'bridge cleanup uses the explicit socket override')
   assert.deepEqual(received[0], {
     id: (received[0] as { id: string }).id, method: 'surface.resume.clear', params,
   })

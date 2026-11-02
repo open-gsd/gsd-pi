@@ -73,6 +73,10 @@ const ALLOW_HARDCODED_TMP: Array<[string, string]> = [
   // cmux DEFAULT_SOCKET_PATH is a Unix-domain socket convention; cmux is
   // macOS/Linux only and the path is overridden by $CMUX_SOCKET at runtime.
   ["resources/extensions/cmux/index.ts", 'DEFAULT_SOCKET_PATH = "/tmp/cmux.sock"'],
+  // The Vault bridge connects to the same fixed cmux Unix socket, not a
+  // temporary file it creates. CMUX_SOCKET_PATH overrides this protocol default;
+  // os.tmpdir() can differ on macOS and would connect to the wrong server.
+  ["cmux-vault.ts", "CMUX_VAULT_DEFAULT_SOCKET_PATH = '/tmp/cmux.sock'"],
 ];
 
 /** Pattern 3 — rmSync without force: true */

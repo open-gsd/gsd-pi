@@ -12,6 +12,8 @@ import {
 
 export const CMUX_VAULT_TIMEOUT_MS = 1000
 export const CMUX_VAULT_MAX_PENDING_SESSIONS = 64
+// cmux's Unix socket convention is independent of the client's temporary directory.
+export const CMUX_VAULT_DEFAULT_SOCKET_PATH = '/tmp/cmux.sock'
 
 export type CmuxVaultTransport = (args: string[]) => Promise<unknown>
 
@@ -345,7 +347,7 @@ export class CmuxVaultBridge {
     }
     const result = await (this.options.clearBinding
       ? this.options.clearBinding(params)
-      : clearCmuxVaultBinding(this.env.CMUX_SOCKET_PATH ?? '/tmp/cmux.sock', params))
+      : clearCmuxVaultBinding(this.env.CMUX_SOCKET_PATH ?? CMUX_VAULT_DEFAULT_SOCKET_PATH, params))
     if (!result || typeof result !== 'object' || typeof (result as { cleared?: unknown }).cleared !== 'boolean') {
       throw new Error('invalid cmux clear result')
     }
@@ -450,6 +452,7 @@ export function createCmuxVaultExtension(options: CmuxVaultOptions): ExtensionFa
     // session_start also follows new/switch/resume/fork. Listening to the legacy
     // session_switch as well would notify twice for the same transition.
     pi.on('session_start', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI))
+    pi.on('session_tree', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI, true))
     // Auto may create the next unit's session inside agent_end. Capture the
     // persisted branch before that handoff, without inspecting event content.
     pi.on('turn_end', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI, true))
