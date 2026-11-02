@@ -58,6 +58,12 @@ import {
 import type { IterationContext, IterationData, LoopState, PhaseResult } from "./types.js";
 import { MAX_RECOVERY_CHARS } from "./types.js";
 
+export const DEFECTIVE_VERIFY_GUIDANCE =
+  " If the failing check itself is defective (a nonexistent path or target, or an incorrect Verify command)," +
+  " and cannot be fixed within this task, do not record it only as a deviation or change code to satisfy the" +
+  " defective check. This unit cannot edit Verify: call `gsd_task_complete` with `blockerDiscovered: true` and" +
+  " name the defective Verify command so the blocker can be surfaced for replanning instead of retried.";
+
 const ZERO_TOOL_PROVIDER_ERROR_PREFIX_RE =
   /^(?:api error(?::|$|\s*\()|provider error(?::|$|\s*\()|request failed\b|(?:http\s*)?(?:429|500|502|503)\b|\b(?:econnreset|etimedout|econnrefused|epipe)\b|socket hang up\b|fetch failed\b|(?:network|connection|server) error(?::|$)|connection (?:reset|refused)(?::|$|\s+by\b)|dns\b.*(?:fail|error|timeout)|unexpected eof\b|stream idle timeout\b|partial response received\b|stream_exhausted\b|terminated(?::|$)|(?:connection|stream|request)\b.{0,40}\bterminated\b|other side closed\b|rate.?limit(?:ed| exceeded| reached| error)|too many requests\b|you(?:'ve| have) (?:hit|reached) your (?:\w+ )?limit\b|.*\b(?:usage|session|weekly|daily|monthly|quota) limit\b|limit\b.{0,40}\bresets?\b|out of extra usage\b|service.?unavailable\b|internal(?: server)? error(?::|$)|internal(?:[_-]server)?[_-]error\b|server[_-]error\b|(?:provider|server|api|model|codex|claude|openai|anthropic|gemini)\b.{0,80}\boverloaded\b|overloaded\b.{0,80}\b(?:provider|server|api|model)\b|context (?:window|length) exceed|context window exceed)/i;
 const ZERO_TOOL_PROVIDER_ERROR_SIGNAL_RE =
@@ -291,7 +297,7 @@ export async function runUnitPhase(
         ? retryCtx.failureContext.slice(0, MAX_RECOVERY_CHARS) +
           "\n\n[...failure context truncated]"
         : retryCtx.failureContext;
-    finalPrompt = `**VERIFICATION FAILED — AUTO-FIX ATTEMPT ${retryCtx.attempt}**\n\nThe verification gate ran after your previous attempt and found failures. Fix these issues before completing the task.\n\n${capped}\n\n---\n\n${finalPrompt}`;
+    finalPrompt = `**VERIFICATION FAILED — AUTO-FIX ATTEMPT ${retryCtx.attempt}**\n\nThe verification gate ran after your previous attempt and found failures. Fix these issues before completing the task.${unitType === "execute-task" ? DEFECTIVE_VERIFY_GUIDANCE : ""}\n\n${capped}\n\n---\n\n${finalPrompt}`;
   }
 
   if (s.pendingCrashRecovery) {

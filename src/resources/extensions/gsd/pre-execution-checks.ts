@@ -9,6 +9,7 @@
  *   2. File path consistency — verify files exist or are in prior expected_output
  *   3. Task ordering — detect impossible ordering (task reads file created later)
  *   4. Interface contracts — detect contradictory function signatures (warn only)
+ *   5. Verify path operands — referenced repo paths must exist or be produced
  *
  * Design principles:
  *   - Pure functions taking (tasks: TaskRow[], basePath: string) for testability
@@ -17,7 +18,7 @@
  *   - No AST parsers — interface parsing is heuristic (regex on code blocks)
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -832,6 +833,191 @@ export function checkTaskOrdering(
   return results;
 }
 
+// ─── Verify Path Operand Check ───────────────────────────────────────────────
+
+const PATH_CREATING_PROGRAMS = new Set(["mkdir", "touch", "tee", "cp", "mv", "ln", "rm", "install", "rsync"]);
+const SEARCH_PROGRAMS = new Set(["grep", "egrep", "fgrep", "rg"]);
+const PROGRAM_PREFIX_WORDS = new Set(["!", "time", "env", "exec"]);
+const ENV_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const PATH_OPERAND_RE = /^(?:\.\/)?[\w.@+-]+(?:\/[\w.@+-]+)*\/?$/;
+const SELECTOR_SUFFIX_RE = /(?:::.*|:\d[\d:-]*)$/;
+const REDIRECTION_RE = /^(?:\d+|&)?(?:>>?|<<?)&?/;
+
+interface VerifyToken {
+  text: string;
+  quoted: boolean;
+}
+
+/**
+ * A conservative shell tokenizer, not a shell parser. Quoted/escaped words
+ * remain opaque; only unquoted separators start a new program segment.
+ */
+function tokenizeVerifySegments(command: string): VerifyToken[][] {
+  const segments: VerifyToken[][] = [[]];
+  let text = "";
+  let quoted = false;
+  let inToken = false;
+  let quote: string | null = null;
+  const flush = () => {
+    if (inToken) segments[segments.length - 1].push({ text, quoted });
+    text = "";
+    quoted = false;
+    inToken = false;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "\\" && quote !== "'" && i + 1 < command.length) {
+      text += command[++i];
+      quoted = true;
+      inToken = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else text += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      quoted = true;
+      inToken = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush();
+      continue;
+    }
+    // The ampersand in descriptor redirections is not a command separator.
+    if (ch === "&" && (text.endsWith(">") || text.endsWith("<") || (!inToken && command[i + 1] === ">"))) {
+      text += ch;
+      inToken = true;
+      continue;
+    }
+    if (ch === ";" || ch === "|" || ch === "&") {
+      flush();
+      if (command[i + 1] === ch) i++;
+      segments.push([]);
+      continue;
+    }
+    text += ch;
+    inToken = true;
+  }
+  flush();
+  return segments;
+}
+
+/**
+ * Extract only confident path operands, ignoring programs, prefixes, flags,
+ * redirections, globs and commands whose operands may be created or removed.
+ */
+export function extractVerifyPathOperands(verify: string): string[] {
+  const operands: string[] = [];
+  const created = new Set<string>();
+  for (const segment of tokenizeVerifySegments(verify)) {
+    let index = 0;
+    while (
+      index < segment.length &&
+      (ENV_ASSIGNMENT_RE.test(segment[index].text) ||
+        (!segment[index].quoted && PROGRAM_PREFIX_WORDS.has(segment[index].text)))
+    ) index++;
+    const program = segment[index];
+    if (!program) continue;
+    const programName = program.text.split("/").pop() ?? program.text;
+    // Search patterns can be indistinguishable from paths without interpreting
+    // each program's options. Absence assertions must allow missing paths.
+    if (SEARCH_PROGRAMS.has(programName)) continue;
+    if ((programName === "test" || programName === "[") && segment.some((token) => token.text === "!")) continue;
+    const createsPaths = PATH_CREATING_PROGRAMS.has(programName);
+    for (let i = index + 1; i < segment.length; i++) {
+      const token = segment[i];
+      if (token.quoted && !createsPaths) continue;
+      const redirection = token.text.match(REDIRECTION_RE);
+      if (redirection) {
+        if (redirection[0] === token.text) i++;
+        continue;
+      }
+      if (token.text.startsWith("-") || token.text.includes("=")) continue;
+      const candidate = token.text.replace(SELECTOR_SUFFIX_RE, "");
+      if (candidate.includes("/") && PATH_OPERAND_RE.test(candidate) && !containsGlobPattern(candidate)) {
+        const normalized = normalizeFilePath(candidate);
+        if (createsPaths) {
+          if (programName !== "rm") created.add(normalized);
+        } else if (!anyOutputUnderDirectory(normalized, created)) {
+          operands.push(candidate);
+        }
+      }
+    }
+  }
+  return operands;
+}
+
+function isDirectoryAt(root: string, path: string): boolean {
+  try {
+    return statSync(resolve(root, path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Git refs, MIME types and patterns are not paths unless anchored in the checkout. */
+function isAnchoredInCheckout(path: string, roots: string[]): boolean {
+  const first = path.split("/")[0];
+  return !!first && first !== "." && first !== ".." && roots.some((root) => isDirectoryAt(root, first));
+}
+
+function nearestExistingAncestor(path: string, roots: string[]): string {
+  const parts = path.split("/");
+  for (let n = parts.length - 1; n > 0; n--) {
+    const candidate = parts.slice(0, n).join("/");
+    if (roots.some((root) => isDirectoryAt(root, candidate))) return `${candidate}/`;
+  }
+  return "./";
+}
+
+/**
+ * The host runs Verify verbatim after execution. Reject missing anchored paths
+ * here, where the plan can still be repaired, rather than retrying unchanged
+ * commands that no implementation fix can satisfy.
+ */
+export function checkVerifyPathOperands(
+  tasks: TaskRow[],
+  basePath: string,
+  context?: PreExecutionCheckContext,
+): PreExecutionCheckJSON[] {
+  const results: PreExecutionCheckJSON[] = [];
+  const roots = [basePath, context?.canonicalProjectRoot, ...(context?.additionalRoots ?? [])].filter(
+    (root): root is string => typeof root === "string",
+  );
+  const produced = new Set<string>();
+  for (const task of tasks) {
+    // Planners list new test files in files as well as expected_output.
+    for (const path of [...(task.files ?? []), ...task.expected_output]) {
+      produced.add(toComparisonPath(path, basePath));
+    }
+    if (isClosedStatus(task.status)) continue;
+    const reported = new Set<string>();
+    for (const operand of extractVerifyPathOperands(task.verify ?? "")) {
+      const normalized = toComparisonPath(operand, basePath);
+      if (reported.has(normalized) || !isAnchoredInCheckout(normalized, roots)) continue;
+      if (inputExistsOnDisk(normalized, basePath, context)) continue;
+      if (anyOutputUnderDirectory(normalized, produced)) continue;
+      reported.add(normalized);
+      results.push({
+        category: "file",
+        target: `${task.id} Verify`,
+        passed: false,
+        message:
+          `Task ${task.id} Verify names '${operand}', which doesn't exist and isn't created by this or a prior task ` +
+          `(nearest existing directory: ${nearestExistingAncestor(normalized, roots)}). ` +
+          `The verification gate runs this command verbatim, so it would fail on every attempt; ` +
+          `point it at the real path or list the file in this task's expected_output.`,
+        blocking: true,
+      });
+    }
+  }
+  return results;
+}
+
 // ─── Shared Path-Check Composition ───────────────────────────────────────────
 
 /**
@@ -850,6 +1036,7 @@ export function runTaskPathChecks(
     ...checkPlanningArtifactReferences(tasks, basePath, context),
     ...checkFilePathConsistency(tasks, basePath, context),
     ...checkTaskOrdering(tasks, basePath, context),
+    ...checkVerifyPathOperands(tasks, basePath, context),
   ];
 }
 
