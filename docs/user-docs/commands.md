@@ -359,6 +359,144 @@ Shell package commands use the same extension registry. A successful `gsd instal
 | `/gsd cmux sidebar on/off` | Toggle cmux sidebar metadata |
 | `/gsd cmux splits on/off` | Toggle cmux visual subagent splits |
 
+### Optional cmux Vault bridge
+
+The Vault bridge is **separate from sidebar/progress preferences** and is off by
+default. It uses GSD's own `gsd` identity, not stock Pi or Oh My Pi (OMP).
+Launching `gsd` does not run cmux's stock `pi` wrapper, and installing OMP hooks
+does not enable this bridge.
+
+#### One-time setup
+
+Merge the following registration into your cmux global
+`~/.config/cmux/cmux.json`, preserving existing configuration. Replace both
+absolute paths with your actual GSD home and `gsd` executable. For custom
+`GSD_HOME`, change **both** `sessionDirectory` and the home in `resumeCommand`.
+cmux does not expand `$GSD_HOME` in this JSON.
+
+```json
+{
+  "vault": {
+    "agents": [
+      {
+        "id": "gsd",
+        "name": "GSD",
+        "detect": { "processName": "gsd" },
+        "sessionIdSource": { "type": "argvOption", "argvOption": "--session" },
+        "resumeCommand": "env GSD_HOME=/Users/you/.gsd /usr/local/bin/gsd --session {{sessionId}}",
+        "cwd": "preserve",
+        "sessionDirectory": "/Users/you/.gsd/cmux/vault"
+      }
+    ]
+  }
+}
+```
+
+Quote literal template arguments that contain spaces, for example
+`env 'GSD_HOME=/Users/you/GSD Home' '/path with spaces/gsd' --session {{sessionId}}`.
+Leave `{{sessionId}}` as the template placeholder; cmux substitutes the actual
+native session-file identity. **Do not point `sessionDirectory` at the native
+session store**, and do not add `forkCommand`. A project-only `cmux.json` is not
+sufficient for cmux's default unscoped Vault history scan.
+
+Restart/reload cmux as required by your installed version, then launch normally
+inside a cmux surface:
+
+```sh
+GSD_CMUX_VAULT=1 gsd
+```
+
+You may export `GSD_CMUX_VAULT=1` in your shell to retain the usual `gsd` command.
+Unset it (or use `GSD_CMUX_VAULT=0`) before launching to opt out. Startup never
+changes cmux or GSD settings and never installs another agent.
+
+#### Behavior and capability limits
+
+- The bridge reads the **active session manager's UUID, file and cwd**. It does
+  not infer session locations from `~/.pi`, `~/.gsd/agent/sessions`, or directory
+  existence. Interactive storage normally uses `$GSD_HOME/sessions`; explicit
+  `--session`/`--session-dir` paths remain authoritative.
+- After the first persisted assistant message, one private JSONL metadata
+  record is atomically written under `$GSD_HOME/cmux/vault`. Completed turns
+  refresh that same record. Resume/new/switch follows the current manager;
+  starting an empty, unpersisted session clears the previous surface binding.
+- Records contain only the actual native file path (`sessionId`), runtime UUID
+  (`gsdSessionId`), cwd and static title `GSD`. Vault's generic custom-agent index
+  uses the **file path** as its identity, matching the surface binding. It must
+  not try to open the metadata sidecar as a conversation.
+- Generic cmux Feed `SessionStart`/`SessionEnd` events associate this identity
+  with the current surface and GSD PID. They contain no `transcript_path`,
+  prompt, assistant response, tool input/output, session title derived from
+  conversation text, credential, or auth-file content.
+- A manual surface continuation command uses this GSD launcher, exact native
+  session file and `GSD_HOME`. **Automatic resume remains off.** The cmux
+  registration schema requires a manual resume template; this is not a claim
+  that application-restart restoration, checkpoint mapping or Vault forking
+  has been validated. Those integrations belong to #3014 and #3015. Do not
+  interpret a visible row as proof of them.
+- Native transcripts remain in GSD's store. There is no transcript preview,
+  message search or checkpoint export through the metadata index. Old opted-in
+  records remain discoverable after exit; there is no historical-session
+  crawl/import. Deleting `$GSD_HOME/cmux/vault` removes exported metadata only,
+  not conversations.
+- Print, RPC, web, headless and subagent processes do not install the bridge.
+  An interactive parent's in-process auto-mode follows its current session;
+  children inherit an owner-PID fence and cannot replace its binding.
+- A loaded extension with cmux's exact managed Pi bridge marker suppresses the
+  built-in bridge. For another externally provided lifecycle bridge, set
+  `GSD_CMUX_VAULT_EXTERNAL_BRIDGE=1`. This does not disable or change that
+  external bridge's own data-sharing behavior.
+- Startup/turn handlers never wait for cmux. Commands and socket cleanup have
+  one-second deadlines and 64 KiB response limits, with only one active update
+  and one coalesced pending update. Shutdown drains bounded pending work.
+  Foreign bindings are not replaced; cleanup is guarded by checkpoint,
+  source **and exact binding generation**, including same-session replacements.
+  cmux has no compare-and-swap set API, so independent processes must not be
+  deliberately launched concurrently on the same surface.
+
+#### Troubleshooting and local smoke test
+
+The implementation was checked against public cmux source
+[`855f87d9043c078afd7a4c94f6987235ee19ce63`](https://github.com/manaflow-ai/cmux/tree/855f87d9043c078afd7a4c94f6987235ee19ce63):
+[Vault registration](https://github.com/manaflow-ai/cmux/blob/855f87d9043c078afd7a4c94f6987235ee19ce63/docs/vault.md),
+[generic metadata indexing](https://github.com/manaflow-ai/cmux/blob/855f87d9043c078afd7a4c94f6987235ee19ce63/Sources/SessionIndexRegisteredAgents.swift),
+and [guarded surface RPC](https://github.com/manaflow-ai/cmux/blob/855f87d9043c078afd7a4c94f6987235ee19ce63/Packages/macOS/CmuxControlSocket/Sources/CmuxControlSocket/Coordinator/Surface/ControlCommandCoordinator%2BSurface3.swift).
+**This is automated contract evidence, not an installed-cmux compatibility claim.**
+The implementation environment had GSD 1.23.0 and no cmux executable/application.
+A real Vault smoke test is still required on the host.
+
+1. Record `gsd --version`, `cmux --version`, `type -a gsd pi cmux`, and the tested
+   GSD commit. Do not install stock Pi solely as a control.
+2. Use a disposable project and isolated absolute `GSD_HOME` (include spaces and
+   Unicode). Register its metadata directory explicitly in cmux as above.
+3. Run `GSD_CMUX_VAULT=1 gsd` inside cmux and complete a harmless turn. Inspect the
+   single JSONL metadata record: its `gsdSessionId` must match the native file's
+   session header and `sessionId` must be that actual file, not a guessed path.
+4. Run `cmux vault sessions --agent gsd --limit 3` and
+   `cmux --json surface resume show`. Confirm one matching entry/binding and
+   `auto_resume: false`. Complete another turn: the metadata filename and
+   identity stay unchanged, but its modification time advances. Check the
+   conversation sidebar's Open sessions and focusing the existing surface.
+5. Test `/new` and `/resume`; verify the binding follows the current persisted
+   session and old bindings do not remain on the surface. Exit normally and
+   verify only this bridge's binding/Open presence is cleared.
+6. Repeat disabled, outside cmux and with headless/subagent runs. None may publish
+   metadata or overwrite a parent's binding. Test with an already-loaded managed
+   bridge to confirm suppression.
+7. Record actual version/revision, CLI outputs and UI observations separately
+   from automated test results. Only claim manual resume/restart/fork round trips
+   that you actually perform; they are not established by registration alone.
+
+If Vault is empty, check the literal opt-in, actual cmux environment, `cmux` on
+`PATH`, the matching **global** agent registration, and whether the native file
+has been persisted. `/gsd cmux status` reports the older sidebar integration, not
+this separate bridge. Missing/old cmux, malformed output, stale contexts/sockets
+and filesystem failures are deliberately nonfatal and retried on a later
+completed turn. A later turn also reannounces presence after a cmux restart.
+Socket cleanup uses `CMUX_SOCKET_PATH` (default `/tmp/cmux.sock`); inaccessible
+or authentication-restricted sockets fail safely without an unfenced CLI-clear
+fallback. If an external integration took ownership, GSD will not erase it.
+
 ## Subagents
 
 | Command | Description |

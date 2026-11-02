@@ -941,6 +941,7 @@ export function bareResourceLoaderOptions(bare: boolean | undefined): BareResour
 
 interface BuildResourceLoaderOptions {
   additionalExtensionPaths?: string[]
+  extensionFactories?: ConstructorParameters<typeof DefaultResourceLoaderType>[0]['extensionFactories']
   /** --bare: minimal context (see bareResourceLoaderOptions) */
   bare?: boolean
 }
@@ -961,6 +962,7 @@ export async function buildResourceLoader(
     agentDir,
     cwd: process.cwd(),
     additionalExtensionPaths,
+    extensionFactories: options.extensionFactories,
     bundledExtensionKeys: bundledKeys,
     ...bareResourceLoaderOptions(options.bare),
     extensionPathsTransform: (paths: string[]) => {

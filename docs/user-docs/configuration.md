@@ -293,6 +293,8 @@ With this configuration, a Haiku-4-5 subagent sees only `gsd-workflow` and `goog
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GSD_HOME` | `~/.gsd` | Global GSD directory. All paths derive from this unless individually overridden. Affects preferences, skills, sessions, and per-project state. |
+| `GSD_CMUX_VAULT` | (unset/off) | Set to literal `1` for the optional interactive cmux Vault metadata bridge. Requires explicit cmux agent configuration; see [cmux Vault setup](commands.md#optional-cmux-vault-bridge). Independent of `/gsd cmux on/off`. |
+| `GSD_CMUX_VAULT_EXTERNAL_BRIDGE` | (unset) | Set to `1` when another integration owns lifecycle registration; suppresses the built-in Vault bridge. |
 | `GSD_PROJECT_ID` | (auto-hash) | Override the automatic project identity hash. Per-project state goes to `$GSD_HOME/projects/<GSD_PROJECT_ID>/` instead of the computed hash. Useful for CI/CD or sharing state across clones of the same repo. |
 | `GSD_STATE_DIR` | `$GSD_HOME` | Per-project state root. Controls where `projects/<repo-hash>/` directories are created. Takes precedence over `GSD_HOME` for project state. |
 | `GSD_CODING_AGENT_DIR` | `$GSD_HOME/agent` | Agent directory containing managed resources, extensions, and auth. Takes precedence over `GSD_HOME` for agent paths. |
