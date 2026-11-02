@@ -8,7 +8,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { loadPrompt } from "./prompt-loader.js";
@@ -419,12 +419,12 @@ export async function handleDocsUpdate(args: string, ctx: ExtensionCommandContex
 
 /** /gsd graphify [build|query <term>|status|diff] — knowledge graph. */
 export async function handleGraphify(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
-  const basePath = currentDirectoryRoot();
-  const knowledgeDir = join(basePath, ".gsd", "knowledge");
+  const workingDirectory = currentDirectoryRoot(ctx.cwd);
+  const graphDirectory = join(workingDirectory, ".gsd", "knowledge");
   const action = args.trim() || "build";
-  if (action === "build" && !existsSync(knowledgeDir)) mkdirSync(knowledgeDir, { recursive: true });
+  const invocation = JSON.stringify({ action, workingDirectory, graphDirectory });
   dispatchPrompt(
-    { prompt: "graphify", customType: "gsd-graphify", verb: "Graphify", vars: { action } },
+    { prompt: "graphify", customType: "gsd-graphify", verb: "Graphify", vars: { invocation } },
     ctx,
     pi,
   );
