@@ -27,12 +27,14 @@ import { createDefaultCommandContextActions } from "../shared/command-context-ac
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import { RemoteTerminal } from "./remote-terminal.js";
 import type {
+	RpcBindingSnapshot,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcInitResult,
 	ProjectProgress,
 	ProjectSnapshot,
+	RpcProjectBindingRead,
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
@@ -41,10 +43,12 @@ import type {
 
 // Re-export types for consumers
 export type {
+	RpcBindingSnapshot,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcInitResult,
+	RpcProjectBindingRead,
 	RpcProtocolVersion,
 	RpcResponse,
 	RpcSessionState,
@@ -79,6 +83,67 @@ export async function invokeProjectSnapshotRead(
 	}
 }
 
+function isRpcProjectBindingRead(value: unknown): value is RpcProjectBindingRead {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const binding = value as Partial<RpcProjectBindingRead>;
+	const authority = binding.authority;
+	const validAuthority =
+		authority === null ||
+		(typeof authority === "object" &&
+			typeof authority.projectId === "string" &&
+			(typeof authority.schemaVersion === "number" || authority.schemaVersion === null) &&
+			Number.isInteger(authority.revision) &&
+			Number.isInteger(authority.authorityEpoch));
+	return (
+		validAuthority &&
+		(binding.projectRoot === null || typeof binding.projectRoot === "string") &&
+		(binding.worktreeRoot === null || typeof binding.worktreeRoot === "string") &&
+		(binding.rootResolution === "verified" ||
+			binding.rootResolution === "partial" ||
+			binding.rootResolution === "unavailable")
+	);
+}
+
+export async function invokeProjectBindingRead(
+	handler: ((input: unknown) => Promise<unknown>) | undefined,
+	id: string | undefined,
+	cwd: string,
+	producer: RpcBindingSnapshot["producer"],
+	isCurrent: () => boolean,
+): Promise<RpcResponse> {
+	let project: RpcProjectBindingRead | null = null;
+	let projectStatus: RpcBindingSnapshot["projectStatus"] = "unavailable";
+	if (handler) {
+		try {
+			const result = await handler({ cwd });
+			if (isRpcProjectBindingRead(result)) {
+				project = result;
+				projectStatus = result.authority && result.rootResolution === "verified" ? "authoritative" : "partial";
+			}
+		} catch {
+			// Preserve the owner/session identity when project authority is unavailable.
+		}
+	}
+
+	if (!isCurrent()) {
+		return {
+			id,
+			type: "response",
+			command: "get_binding_snapshot",
+			success: false,
+			error: "Session or working directory changed during binding read; retry",
+		};
+	}
+
+	const data: RpcBindingSnapshot = {
+		producer,
+		project,
+		projectStatus,
+		capturedAt: new Date().toISOString(),
+	};
+	return { id, type: "response", command: "get_binding_snapshot", success: true, data };
+}
+
 /** Run a typed workflow command through the extension handler, with the session CWD. */
 export async function invokeWorkflowCommand(
 	handler: (input: unknown) => Promise<unknown>,
@@ -100,6 +165,7 @@ export async function invokeWorkflowCommand(
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession): Promise<never> {
+	const processInstanceId = crypto.randomUUID();
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		process.stdout.write(serializeJsonLine(obj));
 	};
@@ -681,6 +747,22 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					return error(id, "get_project_snapshot", "Project snapshot is unavailable");
 				}
 				return await invokeProjectSnapshotRead(handler, id, session.sessionManager.getCwd());
+			}
+
+			case "get_binding_snapshot": {
+				if (protocolVersion !== 2) {
+					return error(id, "get_binding_snapshot", "Binding snapshots require RPC protocol v2");
+				}
+				const sessionId = session.sessionId;
+				const cwd = session.sessionManager.getCwd();
+				const handler = extensionsReady ? session.extensionRunner?.getRuntimeReadHandler("project_binding") : undefined;
+				return await invokeProjectBindingRead(
+					handler,
+					id,
+					cwd,
+					{ sessionId, processInstanceId },
+					() => session.sessionId === sessionId && session.sessionManager.getCwd() === cwd,
+				);
 			}
 
 			case "workflow_command": {

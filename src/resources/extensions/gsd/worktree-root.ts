@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { gsdHome } from "./gsd-home.js";
 
 export interface WorktreeSegment {
@@ -169,6 +170,77 @@ export function resolveWorktreeProjectRoot(
 
 export function resolveWorktreeOwningProjectRoot(basePath: string): string {
   return resolveProjectRootFromPath(basePath);
+}
+
+export interface WorktreeRootIdentity {
+  projectRoot: string | null;
+  worktreeRoot: string | null;
+  status: "verified" | "partial" | "unavailable";
+}
+
+/**
+ * Return path evidence only when the requested path resolves to a live Git
+ * working tree and the recognized worktree layout agrees with Git's root.
+ * This verifies filesystem layout, not process ownership or permission to
+ * attach to a session.
+ */
+export function resolveWorktreeIdentity(path: string): WorktreeRootIdentity {
+  try {
+    const gitRoot = resolveVerifiedGitWorkingTreeRoot(path);
+    if (!gitRoot || !existsSync(gitRoot) || !statSync(gitRoot).isDirectory()) {
+      return { projectRoot: null, worktreeRoot: null, status: "unavailable" };
+    }
+
+    const projectRoot = resolveWorktreeOwningProjectRoot(path);
+    if (!existsSync(projectRoot) || !statSync(projectRoot).isDirectory()) {
+      return { projectRoot: null, worktreeRoot: null, status: "partial" };
+    }
+
+    const normalizedGitRoot = normalizeWorktreePathForCompare(gitRoot);
+    const candidateWorktreeRoot = worktreeRootFromWorktreePath(path);
+    if (candidateWorktreeRoot) {
+      if (
+        !existsSync(candidateWorktreeRoot) ||
+        !statSync(candidateWorktreeRoot).isDirectory() ||
+        normalizeWorktreePathForCompare(candidateWorktreeRoot) !== normalizedGitRoot
+      ) {
+        return { projectRoot: null, worktreeRoot: null, status: "partial" };
+      }
+    } else if (!pathIsWithinRoot(gitRoot, projectRoot) || !pathIsWithinRoot(projectRoot, path)) {
+      return { projectRoot: null, worktreeRoot: null, status: "partial" };
+    }
+
+    return {
+      projectRoot: realpathSync(projectRoot),
+      worktreeRoot: candidateWorktreeRoot ? realpathSync(candidateWorktreeRoot) : null,
+      status: "verified",
+    };
+  } catch {
+    return { projectRoot: null, worktreeRoot: null, status: "unavailable" };
+  }
+}
+
+function resolveVerifiedGitWorkingTreeRoot(path: string): string | null {
+  try {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+    const output = execFileSync("git", ["-C", path, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      env,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2_000,
+    });
+    const root = output.trim();
+    return root && isAbsolute(root) ? realpathSync(root) : null;
+  } catch {
+    return null;
+  }
+}
+
+function pathIsWithinRoot(root: string, candidate: string): boolean {
+  const normalizedRoot = normalizeWorktreePathForCompare(root);
+  const normalizedCandidate = normalizeWorktreePathForCompare(candidate);
+  const prefix = normalizedRoot.endsWith("/") ? normalizedRoot : `${normalizedRoot}/`;
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(prefix);
 }
 
 function resolveProjectRootFromPath(path: string): string {

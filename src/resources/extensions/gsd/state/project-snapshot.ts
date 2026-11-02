@@ -32,8 +32,9 @@ import {
   openWorkflowDatabasePath as openDatabase,
 } from "../db-workspace.js";
 import { normalizeCanonicalLifecycleStatus, type CanonicalLifecycleStatus } from "../status-guards.js";
+import { resolveWorktreeIdentity } from "../worktree-root.js";
 import type { GSDState } from "../types.js";
-import { LIFECYCLE_STATUS_VERSION } from "@opengsd/contracts";
+import { LIFECYCLE_STATUS_VERSION, type RpcProjectBindingRead } from "@opengsd/contracts";
 
 const MAX_REVISION_ATTEMPTS = 3;
 
@@ -87,6 +88,45 @@ export interface DbProjectSnapshot {
 
 export interface ReadProjectSnapshotOptions {
   preserveGlobalDbHandle?: boolean;
+}
+
+/** Read identity evidence without treating path or authority as session identity. */
+export function readProjectBindingFromDb(basePath: string, opts: ReadProjectSnapshotOptions = {}): RpcProjectBindingRead {
+  const rootEvidence = resolveWorktreeIdentity(basePath);
+  const roots = {
+    projectRoot: rootEvidence.projectRoot,
+    worktreeRoot: rootEvidence.worktreeRoot,
+    rootResolution: rootEvidence.status,
+  };
+  const previousDbPath = opts.preserveGlobalDbHandle ? getDbPath() : null;
+
+  try {
+    const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath);
+    if (!openedRequestedDb || !isDbAvailable()) {
+      return { authority: null, ...roots };
+    }
+
+    const authority = readTransaction(() => {
+      const row = getProjectAuthorityRow();
+      if (!row) return null;
+      return {
+        projectId: row.projectId,
+        schemaVersion: getSchemaVersion(),
+        revision: row.revision,
+        authorityEpoch: row.authorityEpoch,
+      };
+    });
+
+    return { authority, ...roots };
+  } finally {
+    if (opts.preserveGlobalDbHandle && getDbPath() !== previousDbPath) {
+      if (previousDbPath) {
+        openDatabase(previousDbPath);
+      } else {
+        closeDatabase();
+      }
+    }
+  }
 }
 
 interface SnapshotStabilityToken {

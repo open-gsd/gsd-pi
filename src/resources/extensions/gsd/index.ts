@@ -23,7 +23,7 @@ export default async function registerExtension(pi: ExtensionAPI) {
   registerGSDCommand(pi);
 
   if (typeof pi.registerRuntimeRead === "function") {
-    const { readProjectProgressFromDb, readProjectSnapshotFromDb } = await import("./mcp-bridge.js");
+    const { readProjectBindingFromDb, readProjectProgressFromDb, readProjectSnapshotFromDb } = await import("./mcp-bridge.js");
     pi.registerRuntimeRead("project_progress", async (input) => {
       if (!input || typeof input !== "object" || typeof (input as { cwd?: unknown }).cwd !== "string") {
         throw new Error("Project progress requires a session CWD");
@@ -35,6 +35,12 @@ export default async function registerExtension(pi: ExtensionAPI) {
         throw new Error("Project snapshot requires a session CWD");
       }
       return readProjectSnapshotFromDb((input as { cwd: string }).cwd, { preserveGlobalDbHandle: true });
+    });
+    pi.registerRuntimeRead("project_binding", async (input) => {
+      if (!input || typeof input !== "object" || typeof (input as { cwd?: unknown }).cwd !== "string") {
+        throw new Error("Project binding requires a session CWD");
+      }
+      return readProjectBindingFromDb((input as { cwd: string }).cwd, { preserveGlobalDbHandle: true });
     });
     // The host-only capability seam is named for reads. The typed workflow
     // command is the one mutation it carries: the RPC `workflow_command`.

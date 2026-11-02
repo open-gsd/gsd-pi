@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { resolveWorktreeProjectRoot } from "../worktree-root.ts";
+import { resolveWorktreeIdentity, resolveWorktreeProjectRoot } from "../worktree-root.ts";
 
 test("resolveWorktreeProjectRoot: explicit non-worktree cwd beats stale GSD_PROJECT_ROOT", (t) => {
   const previous = process.env.GSD_PROJECT_ROOT;
@@ -66,4 +67,66 @@ test("resolveWorktreeProjectRoot: GSD_PROJECT_ROOT still anchors auto-worktree p
   });
 
   assert.equal(resolveWorktreeProjectRoot(worktreeDir), projectDir);
+});
+
+test("resolveWorktreeIdentity verifies a live Git root and its nested CWD", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-identity-root-"));
+  const projectDir = join(dir, "project");
+  const cwd = join(projectDir, "packages", "app");
+  mkdirSync(projectDir, { recursive: true });
+  execFileSync("git", ["init", projectDir], { stdio: "ignore" });
+  mkdirSync(cwd, { recursive: true });
+
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  assert.deepEqual(resolveWorktreeIdentity(cwd), {
+    projectRoot: realpathSync(projectDir),
+    worktreeRoot: null,
+    status: "verified",
+  });
+});
+
+test("resolveWorktreeIdentity rejects a directory with only a fake .git marker", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-identity-fake-git-"));
+  const projectDir = join(dir, "project");
+  mkdirSync(join(projectDir, ".git"), { recursive: true });
+
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  assert.deepEqual(resolveWorktreeIdentity(projectDir), {
+    projectRoot: null,
+    worktreeRoot: null,
+    status: "unavailable",
+  });
+});
+
+test("resolveWorktreeIdentity rejects a recognized worktree path that is not its Git root", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-identity-wrong-root-"));
+  const projectDir = join(dir, "project");
+  const fakeWorktree = join(projectDir, ".gsd", "worktrees", "fake");
+  mkdirSync(projectDir, { recursive: true });
+  execFileSync("git", ["init", projectDir], { stdio: "ignore" });
+  mkdirSync(fakeWorktree, { recursive: true });
+
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  assert.deepEqual(resolveWorktreeIdentity(fakeWorktree), {
+    projectRoot: null,
+    worktreeRoot: null,
+    status: "partial",
+  });
+});
+
+test("resolveWorktreeIdentity does not claim an unrelated directory as a project root", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-identity-unrooted-"));
+  const cwd = join(dir, "project");
+  mkdirSync(cwd, { recursive: true });
+
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  assert.deepEqual(resolveWorktreeIdentity(cwd), {
+    projectRoot: null,
+    worktreeRoot: null,
+    status: "unavailable",
+  });
 });

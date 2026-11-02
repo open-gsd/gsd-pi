@@ -7,6 +7,7 @@
 
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,6 +30,7 @@ import { readProgressFromDb } from "../state/progress-from-db.ts";
 import {
   MAX_SNAPSHOT_MILESTONES,
   MAX_SNAPSHOT_OPEN_ITEMS,
+  readProjectBindingFromDb,
   readProjectSnapshotFromDb,
 } from "../state/project-snapshot.ts";
 import { truncateContextResultMessages } from "../context-masker.ts";
@@ -690,4 +692,49 @@ test("readProjectSnapshotFromDb returns null for a missing requested DB instead 
   const missingSnapshot = await readProjectSnapshotFromDb(missingRoot);
 
   assert.equal(missingSnapshot, null);
+});
+
+test("readProjectBindingFromDb marks authority authoritative only with a verified Git root", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  t.after(() => fixture.cleanup());
+  execFileSync("git", ["init", fixture.root], { stdio: "ignore" });
+
+  const binding = readProjectBindingFromDb(fixture.root);
+
+  assert.equal(binding.authority?.projectId, fixtureProjectId());
+  assert.equal(binding.projectRoot, fixture.root);
+  assert.equal(binding.worktreeRoot, null);
+  assert.equal(binding.rootResolution, "verified");
+});
+
+test("readProjectBindingFromDb keeps project authority separate from unverified path evidence", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  t.after(() => fixture.cleanup());
+
+  const binding = readProjectBindingFromDb(fixture.root);
+
+  assert.equal(binding.authority?.projectId, fixtureProjectId());
+  assert.equal(binding.rootResolution, "unavailable");
+  assert.equal(binding.projectRoot, null);
+  assert.equal(binding.worktreeRoot, null);
+});
+
+test("readProjectBindingFromDb does not reuse an open global DB for a missing project", async (t) => {
+  const existing = await createWorkflowAuthorityFixture();
+  const missingRoot = join(tmpdir(), `gsd-project-binding-missing-${randomUUID()}`);
+  mkdirSync(join(missingRoot, ".gsd"), { recursive: true });
+  t.after(() => {
+    existing.cleanup();
+    rmSync(missingRoot, { recursive: true, force: true });
+  });
+
+  existing.reopen();
+  const existingAuthority = getProjectAuthorityRow();
+  assert.ok(existingAuthority);
+
+  const binding = readProjectBindingFromDb(missingRoot);
+
+  assert.equal(binding.authority, null);
+  assert.equal(binding.rootResolution, "unavailable");
+  assert.equal(binding.projectRoot, null);
 });

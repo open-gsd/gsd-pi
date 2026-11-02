@@ -14,6 +14,7 @@ export const RPC_COMMAND_TYPES = [
 	"get_state",
 	"get_project_progress",
 	"get_project_snapshot",
+	"get_binding_snapshot",
 	"workflow_command",
 	"set_model",
 	"cycle_model",
@@ -219,6 +220,27 @@ export interface ProjectSnapshot {
 	capturedAt: string;
 }
 
+export type RpcRootResolution = "verified" | "partial" | "unavailable";
+
+/** Project authority and root evidence, kept separate from producer identity. */
+export interface RpcProjectBindingRead {
+	authority: ProjectSnapshot["authority"] | null;
+	projectRoot: string | null;
+	worktreeRoot: string | null;
+	rootResolution: RpcRootResolution;
+}
+
+/** One owner-produced identity read for the current live RPC process/session. */
+export interface RpcBindingSnapshot {
+	producer: {
+		sessionId: string;
+		processInstanceId: string;
+	};
+	project: RpcProjectBindingRead | null;
+	projectStatus: "authoritative" | "partial" | "unavailable";
+	capturedAt: string;
+}
+
 /**
  * A workflow mutation that a host sends as a typed command, not as
  * slash-command text. It runs the same executor as the workflow tool of the
@@ -274,6 +296,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_project_progress" }
 	| { id?: string; type: "get_project_snapshot" }
+	| { id?: string; type: "get_binding_snapshot" }
 	| ({ id?: string; type: "workflow_command" } & WorkflowCommandRequest & WorkflowCommandIdentity)
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
@@ -340,6 +363,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
 	| { id?: string; type: "response"; command: "get_project_progress"; success: true; data: ProjectProgress | null }
 	| { id?: string; type: "response"; command: "get_project_snapshot"; success: true; data: ProjectSnapshot | null }
+	| { id?: string; type: "response"; command: "get_binding_snapshot"; success: true; data: RpcBindingSnapshot }
 	| { id?: string; type: "response"; command: "workflow_command"; success: true; data: WorkflowCommandResult }
 	| { id?: string; type: "response"; command: "set_model"; success: true; data: ModelInfo }
 	| {
