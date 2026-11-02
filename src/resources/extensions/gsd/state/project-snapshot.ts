@@ -35,6 +35,7 @@ import {
   openWorkflowDatabasePath as openDatabase,
 } from "../db-workspace.js";
 import { normalizeCanonicalLifecycleStatus, type CanonicalLifecycleStatus } from "../status-guards.js";
+import { normalizeRealPath } from "../paths.js";
 import { resolveWorktreeIdentity } from "../worktree-root.js";
 import type { GSDState } from "../types.js";
 import { LIFECYCLE_STATUS_VERSION, type RpcProjectBindingRead } from "@opengsd/contracts";
@@ -124,6 +125,14 @@ export function readProjectBindingFromDb(basePath: string, opts: ReadProjectBind
     const authority = readTransaction(() => {
       const row = getProjectAuthorityRow();
       if (!row) return null;
+      if (
+        rootEvidence.status === "verified" &&
+        (!rootEvidence.projectRoot ||
+          !row.projectRootRealpath ||
+          normalizeRealPath(row.projectRootRealpath) !== normalizeRealPath(rootEvidence.projectRoot))
+      ) {
+        return null;
+      }
       return {
         projectId: row.projectId,
         schemaVersion: getSchemaVersion(),

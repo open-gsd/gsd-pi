@@ -8,7 +8,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -21,6 +21,7 @@ import {
   getSchemaVersion,
   insertMilestone,
   setMilestoneQueueOrder,
+  setProjectRootBinding,
   transaction,
 } from "../gsd-db.ts";
 import { LIFECYCLE_STATUSES as CONTRACT_LIFECYCLE_STATUSES, LIFECYCLE_STATUS_VERSION } from "@opengsd/contracts";
@@ -34,6 +35,7 @@ import {
   readProjectSnapshotFromDb,
 } from "../state/project-snapshot.ts";
 import { truncateContextResultMessages } from "../context-masker.ts";
+import { normalizeRealPath } from "../paths.ts";
 import {
   createWorkflowAuthorityFixture,
 } from "./workflow-authority-fixture.ts";
@@ -698,6 +700,7 @@ test("readProjectBindingFromDb marks authority authoritative only with a verifie
   const fixture = await createWorkflowAuthorityFixture();
   t.after(() => fixture.cleanup());
   execFileSync("git", ["init", fixture.root], { stdio: "ignore" });
+  setProjectRootBinding(fixture.root);
 
   const binding = readProjectBindingFromDb(fixture.root);
 
@@ -724,8 +727,10 @@ test("readProjectBindingFromDb rejects authority from a mismatched project-root 
 
   projectA.reopen();
   const projectAId = fixtureProjectId();
+  setProjectRootBinding(projectA.root);
   projectB.reopen();
   const projectBId = fixtureProjectId();
+  setProjectRootBinding(projectB.root);
   mkdirSync(join(projectA.root, ".gsd", "worktrees"), { recursive: true });
   execFileSync("git", ["init", projectA.root], { stdio: "ignore" });
   execFileSync("git", [
@@ -755,6 +760,50 @@ test("readProjectBindingFromDb rejects authority from a mismatched project-root 
   });
   assert.equal(matched.authority?.projectId, projectAId);
   assert.equal(getProjectAuthorityRow()?.projectId, projectBId, "the prior process-global DB handle is restored");
+});
+
+test("readProjectBindingFromDb rejects a shared DB bound to another verified checkout", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  const sharedCheckout = mkdtempSync(join(tmpdir(), "gsd-shared-binding-other-checkout-"));
+  const previousProjectRoot = process.env.GSD_PROJECT_ROOT;
+  const previousProjectId = process.env.GSD_PROJECT_ID;
+  t.after(() => {
+    if (previousProjectRoot === undefined) {
+      delete process.env.GSD_PROJECT_ROOT;
+    } else {
+      process.env.GSD_PROJECT_ROOT = previousProjectRoot;
+    }
+    if (previousProjectId === undefined) {
+      delete process.env.GSD_PROJECT_ID;
+    } else {
+      process.env.GSD_PROJECT_ID = previousProjectId;
+    }
+    rmSync(sharedCheckout, { recursive: true, force: true });
+    fixture.cleanup();
+  });
+
+  delete process.env.GSD_PROJECT_ROOT;
+  delete process.env.GSD_PROJECT_ID;
+  fixture.reopen();
+  execFileSync("git", ["init", fixture.root], { stdio: "ignore" });
+  setProjectRootBinding(fixture.root);
+  execFileSync("git", ["init", sharedCheckout], { stdio: "ignore" });
+  symlinkSync(
+    join(fixture.root, ".gsd"),
+    join(sharedCheckout, ".gsd"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+
+  const binding = readProjectBindingFromDb(sharedCheckout, {
+    preserveGlobalDbHandle: true,
+    executionPath: sharedCheckout,
+  });
+
+  assert.equal(binding.authority, null);
+  assert.ok(binding.projectRoot);
+  assert.equal(normalizeRealPath(binding.projectRoot), normalizeRealPath(sharedCheckout));
+  assert.equal(binding.rootResolution, "verified");
+  assert.equal(getProjectAuthorityRow()?.projectRootRealpath, fixture.root);
 });
 
 test("readProjectBindingFromDb drops authority for an unrelated repository under a worktree path", async (t) => {
