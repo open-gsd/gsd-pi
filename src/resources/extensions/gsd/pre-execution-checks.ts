@@ -841,16 +841,31 @@ const PROGRAM_PREFIX_WORDS = new Set(["!", "time", "env", "exec"]);
 const ENV_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const PATH_OPERAND_RE = /^(?:\.\/)?[\w.@+-]+(?:\/[\w.@+-]+)*\/?$/;
 const SELECTOR_SUFFIX_RE = /(?:::.*|:\d[\d:-]*)$/;
-const REDIRECTION_RE = /^(?:\d+|&)?(?:>>?|<<?)&?/;
+const REDIRECTION_RE = /^(?:(?:\d+)?(?:<<<|>>?|<<|<)|&>>?)(.*)$/;
+const GENERATED_OUTPUT_OPTIONS: Record<string, Set<string>> = {
+  node: new Set(["--test-reporter-destination"]),
+  pytest: new Set(["--junitxml"]),
+};
 
 interface VerifyToken {
   text: string;
   quoted: boolean;
 }
 
+interface VerifyPathOperand {
+  path: string;
+  workingDirectory: string | null;
+}
+
+interface VerifyPathAnalysis {
+  operands: VerifyPathOperand[];
+  createdPaths: Set<string>;
+  directoryCopies: Array<{ source: string; destination: string }>;
+}
+
 /**
  * A conservative shell tokenizer, not a shell parser. Quoted/escaped words
- * remain opaque; only unquoted separators start a new program segment.
+ * remain opaque; unquoted shell separators and newlines start new segments.
  */
 function tokenizeVerifySegments(command: string): VerifyToken[][] {
   const segments: VerifyToken[][] = [[]];
@@ -883,6 +898,11 @@ function tokenizeVerifySegments(command: string): VerifyToken[][] {
       inToken = true;
       continue;
     }
+    if (ch === "\n") {
+      flush();
+      segments.push([]);
+      continue;
+    }
     if (/\s/.test(ch)) {
       flush();
       continue;
@@ -906,13 +926,22 @@ function tokenizeVerifySegments(command: string): VerifyToken[][] {
   return segments;
 }
 
+function resolveVerifyPath(path: string, workingDirectory: string | null, basePath: string): string {
+  if (isAbsolute(path)) return toComparisonPath(path, basePath);
+  if (workingDirectory === null) return normalizeFilePath(path);
+  return toComparisonPath(resolve(workingDirectory, path), basePath);
+}
+
 /**
  * Extract only confident path operands, ignoring programs, prefixes, flags,
  * redirections, globs and commands whose operands may be created or removed.
  */
-export function extractVerifyPathOperands(verify: string): string[] {
-  const operands: string[] = [];
-  const created = new Set<string>();
+function analyzeVerifyPathOperands(verify: string, basePath: string): VerifyPathAnalysis {
+  const operands: VerifyPathOperand[] = [];
+  const createdPaths = new Set<string>();
+  const directoryCopies: Array<{ source: string; destination: string }> = [];
+  let workingDirectory: string | null = resolve(basePath);
+
   for (const segment of tokenizeVerifySegments(verify)) {
     let index = 0;
     while (
@@ -923,32 +952,104 @@ export function extractVerifyPathOperands(verify: string): string[] {
     const program = segment[index];
     if (!program) continue;
     const programName = program.text.split("/").pop() ?? program.text;
+    if (programName === "cd") {
+      const target = segment[index + 1];
+      if (!target || target.text.startsWith("-") || /[$`*?]/.test(target.text) || target.text.startsWith("~")) {
+        workingDirectory = null;
+        continue;
+      }
+      operands.push({ path: target.text, workingDirectory });
+      if (workingDirectory === null) continue;
+      const resolvedTarget = resolve(workingDirectory, target.text);
+      workingDirectory = isDirectoryAt(basePath, relative(basePath, resolvedTarget)) ? resolvedTarget : null;
+      continue;
+    }
     // Search patterns can be indistinguishable from paths without interpreting
     // each program's options. Absence assertions must allow missing paths.
     if (SEARCH_PROGRAMS.has(programName)) continue;
     if ((programName === "test" || programName === "[") && segment.some((token) => token.text === "!")) continue;
     const createsPaths = PATH_CREATING_PROGRAMS.has(programName);
+    const commandPaths: string[] = [];
+    const isGoPackageCommand =
+      programName === "go" && ["test", "list", "vet"].includes(segment[index + 1]?.text ?? "");
+    const findPaths = programName === "find";
+    let findExpressionStart = segment.length;
+    if (findPaths) {
+      for (let i = index + 1; i < segment.length; i++) {
+        const token = segment[i];
+        if (!token.quoted && ["-P", "-L", "-H"].includes(token.text)) continue;
+        if (!token.quoted && ["-D", "-O"].includes(token.text)) {
+          i++;
+          continue;
+        }
+        if (!token.quoted && token.text === "--") continue;
+        if (!token.quoted && (token.text.startsWith("-") || token.text === "!" || token.text === "(")) {
+          findExpressionStart = i;
+          break;
+        }
+      }
+    }
+
     for (let i = index + 1; i < segment.length; i++) {
       const token = segment[i];
-      if (token.quoted && !createsPaths) continue;
       const redirection = token.text.match(REDIRECTION_RE);
       if (redirection) {
-        if (redirection[0] === token.text) i++;
+        const operator = token.text.slice(0, token.text.length - redirection[1].length);
+        const destination = redirection[1] || segment[i + 1]?.text || "";
+        if (operator.includes(">") && destination && !/^&\d+$/.test(destination)) {
+          const candidate = destination.replace(SELECTOR_SUFFIX_RE, "");
+          if (PATH_OPERAND_RE.test(candidate) && workingDirectory !== null) {
+            const normalized = resolveVerifyPath(candidate, workingDirectory, basePath);
+            createdPaths.add(normalized);
+          }
+        }
+        if (!redirection[1]) i++;
+        continue;
+      }
+      if (token.quoted && !createsPaths && !findPaths) continue;
+      if (findPaths && i >= findExpressionStart) continue;
+      if (GENERATED_OUTPUT_OPTIONS[programName]?.has(token.text)) {
+        i++;
         continue;
       }
       if (token.text.startsWith("-") || token.text.includes("=")) continue;
       const candidate = token.text.replace(SELECTOR_SUFFIX_RE, "");
-      if (candidate.includes("/") && PATH_OPERAND_RE.test(candidate) && !containsGlobPattern(candidate)) {
-        const normalized = normalizeFilePath(candidate);
+      const isGoPattern = isGoPackageCommand && candidate.split("/").includes("...");
+      const isPathCandidate =
+        (candidate.includes("/") || findPaths) && PATH_OPERAND_RE.test(candidate) && !containsGlobPattern(candidate);
+      if (isPathCandidate && !isGoPattern) {
+        commandPaths.push(candidate);
+        const normalized = resolveVerifyPath(candidate, workingDirectory, basePath);
         if (createsPaths) {
-          if (programName !== "rm") created.add(normalized);
-        } else if (!anyOutputUnderDirectory(normalized, created)) {
-          operands.push(candidate);
+          if (programName !== "rm" && workingDirectory !== null) createdPaths.add(normalized);
+        } else if (!anyOutputUnderDirectory(normalized, createdPaths)) {
+          operands.push({ path: candidate, workingDirectory });
+        }
+      }
+    }
+    if (
+      programName === "cp" &&
+      workingDirectory !== null &&
+      segment.slice(index + 1).some((token) => token.text === "-R" || token.text === "-r")
+    ) {
+      const destination = commandPaths.at(-1);
+      const source = commandPaths.at(-2);
+      if (destination) {
+        const normalizedDestination = resolveVerifyPath(destination, workingDirectory, basePath);
+        if (source && commandPaths.length === 2) {
+          directoryCopies.push({
+            source: resolveVerifyPath(source, workingDirectory, basePath),
+            destination: normalizedDestination,
+          });
         }
       }
     }
   }
-  return operands;
+  return { operands, createdPaths, directoryCopies };
+}
+
+export function extractVerifyPathOperands(verify: string): string[] {
+  return analyzeVerifyPathOperands(verify, ".").operands.map(({ path }) => path);
 }
 
 function isDirectoryAt(root: string, path: string): boolean {
@@ -996,11 +1097,21 @@ export function checkVerifyPathOperands(
     }
     if (isClosedStatus(task.status)) continue;
     const reported = new Set<string>();
-    for (const operand of extractVerifyPathOperands(task.verify ?? "")) {
-      const normalized = toComparisonPath(operand, basePath);
+    const analysis = analyzeVerifyPathOperands(task.verify ?? "", basePath);
+    for (const { path: operand, workingDirectory } of analysis.operands) {
+      if (workingDirectory === null && !isAbsolute(operand)) continue;
+      const normalized = resolveVerifyPath(operand, workingDirectory, basePath);
       if (reported.has(normalized) || !isAnchoredInCheckout(normalized, roots)) continue;
       if (inputExistsOnDisk(normalized, basePath, context)) continue;
       if (anyOutputUnderDirectory(normalized, produced)) continue;
+      if (
+        anyOutputUnderDirectory(normalized, analysis.createdPaths) ||
+        analysis.directoryCopies.some(({ source, destination }) => {
+          if (!normalized.startsWith(`${destination}/`)) return false;
+          const sourceRoot = isAbsolute(source) ? source : resolve(basePath, source);
+          return inputExistsOnDisk(resolve(sourceRoot, relative(destination, normalized)), basePath, context);
+        })
+      ) continue;
       reported.add(normalized);
       results.push({
         category: "file",
