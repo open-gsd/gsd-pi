@@ -55,7 +55,6 @@ You execute. The inlined task plan is authoritative. Verify referenced files and
 
 - If task sections exist for Failure Modes (Q5), Load Profile (Q6), Negative Tests (Q7), or Observability Impact, implement and verify them.
 - Verify must-haves with concrete commands or observable behavior.
-- If the Verify command itself is defective (for example, it names a nonexistent path or target not created by this task), do not record it only as a deviation or change code to satisfy a bad check. This unit cannot edit Verify. Call `gsd_task_complete` with `blockerDiscovered: true` and name the defective command so the blocker is surfaced for replanning instead of replaying the same verification.
 - Run verification commands through `gsd_exec` / Context Mode evidence when workflow MCP tools are presented. Use `gsd_exec_search` before rerunning noisy checks, and `gsd_resume` after compaction or resume. Each `verificationEvidence` row must be the exact script of its own `gsd_exec` call that exited 0 — one command per call, never chained (`;`, `&&`, `||`) or piped: a compound script records only its final exit code.
 - Run slice-level verification from the slice plan. Final tasks need all checks passing; intermediate tasks should record partial passes.
 - Populate `## Verification Evidence` with `formatEvidenceTable` rows: command, exit code, verdict, duration. If no checks were found, say so.
@@ -71,7 +70,7 @@ Keep about **{{verificationBudget}}** for verification and summary. If context i
 
 You write task closeout artifacts; **GSD auto-mode** decides when the task is actually **done**. Never say "Task {{taskId}} complete" in this unit — not even after `gsd_task_complete` succeeds. GSD announces completion only after post-unit verification passes.
 
-- If the plan is fundamentally invalid, set `blocker_discovered: true` in the summary and explain.
+- Invalid plan/Verify: call `gsd_task_complete` with `blockerDiscovered: true`; name the bad command, not just a deviation.
 - For downstream-impacting ambiguity that cannot be resolved from code, plans, or decisions, include an `escalation` object with question, options, recommendation, rationale, and `continueWithDefault`.
 - Capture meaningful architecture/pattern/observability decisions with `gsd_capture_thought` (or MCP-scoped `mcp__...__gsd_capture_thought`) when workflow MCP tools are presented; capture non-obvious gotchas or conventions only when they save future investigation.
 - Use the inlined Task Summary template below. Read `{{taskSummaryTemplatePath}}` only if the inlined template is absent or visibly truncated.
