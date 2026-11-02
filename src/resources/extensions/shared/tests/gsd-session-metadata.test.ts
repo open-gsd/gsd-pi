@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  GSD_DELEGATION_CONTEXT, GSD_WORKFLOW_CONTEXT,
-  readWorkflowContext, readDelegationContext, recordWorkflowContext, recordDelegation,
+  GSD_AUTO_MODE, GSD_DELEGATION_CONTEXT, GSD_WORKFLOW_CONTEXT,
+  readWorkflowContext, readDelegationContext, recordAutoMode, recordWorkflowContext, recordDelegation,
 } from "../gsd-session-metadata.ts";
 
 const id = "32fd3341-a765-46af-ae2d-2f82051749a0";
 const delegation = { id, mode: "parallel" as const, count: 3, forkCount: 1, background: true };
+
+test("Auto mode uses a content-free custom session marker", () => {
+  const entries: Array<{ type: string; data: unknown }> = [];
+  recordAutoMode({ appendEntry: (type, data) => entries.push({ type, data }) });
+  assert.deepEqual(entries, [{ type: GSD_AUTO_MODE, data: { version: 1 } }]);
+});
 
 test("workflow provenance accepts only canonical hierarchical identifiers", () => {
   const entries: Array<{ type: string; data: unknown }> = [];

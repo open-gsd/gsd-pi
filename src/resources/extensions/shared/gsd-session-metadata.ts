@@ -4,6 +4,7 @@
  */
 export const GSD_WORKFLOW_CONTEXT = "gsd-workflow-context";
 export const GSD_DELEGATION_CONTEXT = "gsd-delegation-context";
+export const GSD_AUTO_MODE = "gsd-auto";
 
 export interface GsdWorkflowContext {
   originSessionId: string;
@@ -26,6 +27,12 @@ export interface GsdDelegationContext {
 
 interface MetadataWriter {
   appendEntry?(type: string, data: unknown): void;
+}
+
+/** Record an Auto-mode start without creating an assistant turn or storing prompt text. */
+export function recordAutoMode(pi: MetadataWriter): void {
+  try { pi.appendEntry?.(GSD_AUTO_MODE, { version: 1 }); }
+  catch { /* Optional mode metadata must never block Auto. */ }
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {

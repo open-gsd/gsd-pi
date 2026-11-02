@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { SessionManager } from '../../packages/pi-coding-agent/src/core/session-manager.ts'
 import {
-  GSD_WORKFLOW_CONTEXT, GSD_DELEGATION_CONTEXT, recordWorkflowContext, recordDelegation,
+  GSD_AUTO_MODE, GSD_WORKFLOW_CONTEXT, GSD_DELEGATION_CONTEXT, recordWorkflowContext, recordDelegation,
 } from '../resources/extensions/shared/gsd-session-metadata.ts'
 import {
   CmuxVaultBridge,
@@ -167,7 +167,7 @@ test('uses actual session identity and literal argv; indexes only minimal metada
   ]])
   const [record] = await f.metadata()
   assert.deepEqual(record.data, {
-    sessionId: f.manager.getSessionFile(), gsdSessionId: 'runtime-session-id', cwd: f.cwd, title: 'GSD', gsdModes: [],
+    sessionId: f.manager.getSessionFile(), gsdSessionId: 'runtime-session-id', cwd: f.cwd, title: 'GSD', gsdModes: [], gsdModels: [],
   })
   if (process.platform !== 'win32') {
     assert.equal(record.mode, 0o600)
@@ -577,7 +577,7 @@ test('extension factory attaches supported post-switch lifecycle events without 
   const handlers = new Map<string, Function>()
   const factory = createCmuxVaultExtension(f.options)
   await factory({ on: (name: string, handler: Function) => handlers.set(name, handler) } as never)
-  assert.deepEqual([...handlers.keys()], ['session_start', 'session_tree', 'turn_end', 'agent_end', 'session_shutdown'])
+  assert.deepEqual([...handlers.keys()], ['session_start', 'session_tree', 'model_select', 'turn_end', 'agent_end', 'session_shutdown'])
   const ctx = { sessionManager: f.manager, hasUI: false }
   assert.doesNotThrow(() => handlers.get('agent_end')!({ messages: ['secret'] }, ctx))
   await handlers.get('session_shutdown')!()
@@ -653,6 +653,21 @@ test('session_tree refreshes selected branch modes and removes abandoned workflo
   assert.equal(record.data.gsdDelegations, undefined)
   assert.equal(record.data.sessionId, f.manager.getSessionFile())
   assert.equal(f.calls.at(-1)?.[f.calls.at(-1)!.indexOf('--name') + 1], 'GSD — Chat')
+
+  f.setBranch([
+    { type: 'model_change', provider: 'github-copilot', modelId: 'claude-fable-5' },
+    { type: 'message', message: { role: 'user' } },
+  ])
+  const modelSelected = new Promise<void>(resolve => waiters.push(resolve))
+  assert.equal(handlers.get('model_select')!({
+    get model(): never { throw new Error('must not inspect model selection event') },
+  }, ctx), undefined)
+  await modelSelected
+  const [selectedModelRecord] = await f.metadata()
+  assert.deepEqual(selectedModelRecord.data.gsdModels, [
+    { provider: 'github-copilot', modelId: 'claude-fable-5' },
+  ])
+  assert.equal(selectedModelRecord.data.title, 'GSD — Chat · github-copilot:claude-fable-5')
   await handlers.get('session_shutdown')!()
 })
 
@@ -759,6 +774,28 @@ test('effective set responses must retain the requested identity, argv and manua
   assert.equal(f.clears.length, 0)
   assert.equal(f.feedCalls.length, 0)
   await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+})
+
+test('indexes Auto metadata and provider/model provenance from the selected native branch', async t => {
+  const f = await fixture(t)
+  f.setBranch([
+    { type: 'message', message: { role: 'assistant', provider: 'openai', model: 'gpt-6.1-sol' } },
+    { type: 'model_change', provider: 'github-copilot', modelId: 'claude-fable-5' },
+    { type: 'model_change', provider: 'github-copilot', modelId: 'claude-fable-5' },
+    { type: 'model_change', provider: 'github-copilot\ninvalid', modelId: 'ignored' },
+    { type: 'custom', customType: GSD_AUTO_MODE, data: { version: 1 } },
+  ])
+  assert.deepEqual(cmuxVaultModes(f.manager), ['auto'])
+  const bridge = new CmuxVaultBridge(f.options)
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  const [record] = await f.metadata()
+  assert.deepEqual(record.data.gsdModes, ['auto'])
+  assert.deepEqual(record.data.gsdModels, [
+    { provider: 'github-copilot', modelId: 'claude-fable-5' },
+    { provider: 'openai', modelId: 'gpt-6.1-sol' },
+  ])
+  assert.equal(record.data.title, 'GSD — Auto · github-copilot:claude-fable-5 + openai:gpt-6.1-sol')
 })
 
 test('guarded socket clear uses verified RPC, numeric generation and bounded safe failure', { skip: process.platform === 'win32' }, async t => {

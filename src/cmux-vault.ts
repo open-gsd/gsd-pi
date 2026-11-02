@@ -5,7 +5,7 @@ import { createConnection } from 'node:net'
 import { isAbsolute, join } from 'node:path'
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from '@gsd/pi-coding-agent'
 import {
-  GSD_WORKFLOW_CONTEXT, GSD_DELEGATION_CONTEXT,
+  GSD_AUTO_MODE, GSD_WORKFLOW_CONTEXT, GSD_DELEGATION_CONTEXT,
   readWorkflowContext, readDelegationContext,
   type GsdWorkflowContext, type GsdDelegationContext,
 } from './resources/extensions/shared/gsd-session-metadata.js'
@@ -88,7 +88,9 @@ interface VaultModeEntry {
   parentId?: string | null
   customType?: string
   data?: unknown
-  message?: { role: string; customType?: string }
+  provider?: string
+  modelId?: string
+  message?: { role: string; customType?: string; provider?: string; model?: string; modelId?: string }
 }
 
 export interface CmuxVaultSession {
@@ -127,22 +129,43 @@ export function cmuxVaultModes(manager: CmuxVaultSession): CmuxVaultMode[] {
   return sessionContext(manager).modes
 }
 
+interface VaultModel {
+  provider: string
+  modelId: string
+}
+
 interface VaultSessionContext {
   modes: CmuxVaultMode[]
+  models: VaultModel[]
   workflow?: GsdWorkflowContext
   delegations: GsdDelegationContext[]
   parentPath?: string
 }
 
+function vaultModelPart(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed && trimmed.length <= 128 && !/[\u0000-\u001f\u007f]/.test(trimmed) ? trimmed : undefined
+}
+
 function sessionContext(manager: CmuxVaultSession): VaultSessionContext {
   const modes = new Set<CmuxVaultMode>()
+  const models = new Map<string, VaultModel>()
   const delegations = new Map<string, GsdDelegationContext>()
   const sessionId = manager.getSessionId()
   let workflow: GsdWorkflowContext | undefined
   for (const entry of modeEntries(manager)) {
     const tag = entry.type === 'custom_message' ? entry.customType
-      : entry.type === 'message' && entry.message?.role === 'custom' ? entry.message.customType : undefined
-    const mode = tag === 'gsd-auto' ? 'auto'
+      : entry.type === 'message' && entry.message?.role === 'custom' ? entry.message.customType
+      : entry.type === 'custom' ? entry.customType : undefined
+    const modelProvider = entry.type === 'model_change' ? entry.provider
+      : entry.type === 'message' && entry.message?.role === 'assistant' ? entry.message.provider : undefined
+    const modelId = entry.type === 'model_change' ? entry.modelId
+      : entry.type === 'message' && entry.message?.role === 'assistant' ? entry.message.model ?? entry.message.modelId : undefined
+    const provider = vaultModelPart(modelProvider)
+    const model = vaultModelPart(modelId)
+    if (provider && model) models.set(`${provider}\0${model}`, { provider, modelId: model })
+    const mode = tag === GSD_AUTO_MODE ? 'auto'
       : tag === 'gsd-quick-task' ? 'quick'
       : tag === 'gsd-debug-start' || tag === 'gsd-debug-continue' || tag === 'gsd-debug-diagnose' ? 'debug'
       : entry.type === 'message' && entry.message?.role === 'user' ? 'chat' : undefined
@@ -159,6 +182,7 @@ function sessionContext(manager: CmuxVaultSession): VaultSessionContext {
   const parent = manager.getHeader?.()?.parentSession
   return {
     modes: (['chat', 'auto', 'quick', 'debug'] as const).filter(mode => modes.has(mode)),
+    models: [...models.values()],
     workflow, delegations: [...delegations.values()],
     parentPath: typeof parent === 'string' && isAbsolute(parent) ? parent : undefined,
   }
@@ -174,6 +198,11 @@ function vaultTitle(context: VaultSessionContext): string {
   if (context.delegations.length) {
     const kinds = [...new Set(context.delegations.map(item => item.mode))].sort().join('/')
     title += ` · Subagents ×${context.delegations.reduce((sum, item) => sum + item.count, 0)} (${kinds})`
+  }
+  if (context.models.length) {
+    const labels = context.models.slice(0, 2).map(model => `${model.provider}:${model.modelId}`)
+    if (context.models.length > labels.length) labels.push(`+${context.models.length - labels.length} more`)
+    title += ` · ${labels.join(' + ')}`
   }
   return title
 }
@@ -420,6 +449,7 @@ export class CmuxVaultBridge {
         cwd: identity.cwd,
         title: vaultTitle(identity),
         gsdModes: identity.modes,
+        gsdModels: identity.models,
         ...(identity.workflow ? { gsdWorkflow: identity.workflow } : {}),
         ...(identity.delegations.length ? { gsdDelegations: identity.delegations } : {}),
         ...(identity.parentPath ? { gsdParentSessionId: identity.parentPath } : {}),
@@ -453,6 +483,8 @@ export function createCmuxVaultExtension(options: CmuxVaultOptions): ExtensionFa
     // session_switch as well would notify twice for the same transition.
     pi.on('session_start', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI))
     pi.on('session_tree', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI, true))
+    // A model selection is persisted before this event; refresh so Vault metadata stays current while idle.
+    pi.on('model_select', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI, true))
     // Auto may create the next unit's session inside agent_end. Capture the
     // persisted branch before that handoff, without inspecting event content.
     pi.on('turn_end', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI, true))

@@ -22,6 +22,7 @@ import type {
 import { setBeforeAgentStartContext } from "@gsd/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 
+import { GSD_AUTO_MODE, recordAutoMode } from "../shared/gsd-session-metadata.js";
 import { deriveState, invalidateStateCache } from "./state.js";
 import {
   buildRequirementsBacklogSummaryLines,
@@ -741,9 +742,13 @@ export function startAutoDetached(
   options?: AutoStartOptions,
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
+    const acknowledge = (accepted: boolean) => {
+      if (accepted) recordAutoMode(pi);
+      resolve(accepted);
+    };
     // Startup acknowledgement is separate from the full detached run lifetime.
     void withDetachedAutoKeepalive(
-      startAutoWithAcknowledgement(ctx, pi, base, verboseMode, options, resolve),
+      startAutoWithAcknowledgement(ctx, pi, base, verboseMode, options, acknowledge),
     ).catch((err) => {
       resolve(false);
       const message = getErrorMessage(err);
@@ -4085,7 +4090,7 @@ export async function dispatchHookUnit(
     promptLength: hookPrompt.length,
   });
   pi.sendMessage(
-    { customType: "gsd-auto", content: hookPrompt, display: true },
+    { customType: GSD_AUTO_MODE, content: hookPrompt, display: true },
     { triggerTurn: true },
   );
 
