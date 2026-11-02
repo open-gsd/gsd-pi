@@ -86,7 +86,7 @@ rendered pixels or terminal selections reproduce original bytes.
 | --- | --- |
 | Native TUI | Use the allocated display-cell width passed through the component tree, after applicable frame/prefix/padding deductions. Reflow when that allocation changes. |
 | cmux terminal pane | Treat pane PTY dimensions as terminal-host input. A split pane can be narrower than the window. `src/resources/extensions/cmux/index.ts` manages sidebar/status/progress integration, not report layout; do not use sidebar metadata or workspace size as the report measure. |
-| Web terminal | `web/components/gsd/main-session-terminal.tsx` fits xterm and submits columns/rows; `web/app/api/terminal/resize/route.ts` delegates to `web/lib/pty-manager.ts`. The PTY/TUI allocation remains authoritative, not browser window pixels. Font loading, initial attachment, and resize need observations. |
+| Web terminal | `web/components/gsd/main-session-terminal.tsx` fits xterm and submits columns/rows to `/api/bridge-terminal/resize`; `web/app/api/bridge-terminal/resize/route.ts` delegates to the project bridge's `resizeTerminal`. The separate `/api/terminal/resize` route delegates to `pty-manager` and is a different host path. The PTY/TUI allocation remains authoritative, not browser window pixels. Font loading, initial attachment, and resize need observations. |
 | VS Code extension WebView/chat | Not the native component tree. `vscode-extension/src/conversation-history.ts` escapes text and uses container CSS (`white-space: pre-wrap`, `word-break: break-word`); `chat-participant.ts` streams Markdown through VS Code's chat API. Neither is proof that subagent `renderResult` runs there. Retain current behavior until an explicit authored-content path and host-owned container-width contract are demonstrated. |
 
 Do not derive terminal columns from CSS pixels, impose native cell counts on
@@ -254,8 +254,8 @@ no-mutation assertions there rather than replacing those regressions.
 Extend `packages/pi-tui/test/markdown.test.ts` for opt-in block/span widths,
 nesting, tables, ANSI/Unicode and resize/cache behavior. Cover default behavior
 unchanged when the policy is absent. Host framing integration belongs alongside
-`packages/pi-coding-agent/test/tool-execution-component.test.ts`; execution
-renderer fidelity should remain unchanged in
+`packages/gsd-agent-modes/src/modes/interactive/components/__tests__/tool-execution.test.ts`;
+execution renderer fidelity should remain unchanged in
 `src/resources/extensions/gsd/tools/exec-tool-renderer.ts`.
 
 After an accepted design, use the then-current repository test/toolchain
