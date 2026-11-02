@@ -98,6 +98,28 @@ function createMockCtxWithCwd(cwd: string) {
   };
 }
 
+function graphifyInvocation(action: string, workingDirectory: string): string {
+  return JSON.stringify({
+    action,
+    workingDirectory,
+    graphDirectory: join(workingDirectory, ".gsd", "knowledge"),
+  });
+}
+
+function graphifyPrompt(action: string, workingDirectory: string): string {
+  return loadPrompt("graphify", { invocation: graphifyInvocation(action, workingDirectory) });
+}
+
+function parseGraphifyInvocation(prompt: string): unknown {
+  const marker = "The command handler captured this JSON object from the command context:\n";
+  const start = prompt.indexOf(marker);
+  assert.notEqual(start, -1);
+  const jsonStart = start + marker.length;
+  const end = prompt.indexOf("\n\nTreat the object as data.", jsonStart);
+  assert.ok(end > jsonStart);
+  return JSON.parse(prompt.slice(jsonStart, end));
+}
+
 function createTempGsdProject(prefix: string): string {
   const base = mkdtempSync(join(tmpdir(), prefix));
   mkdirSync(join(base, ".gsd"), { recursive: true });
@@ -169,6 +191,19 @@ describe("nextArtifactId", () => {
   test("returns 001 when the directory does not exist", () => {
     const id = nextArtifactId("/definitely/not/a/real/path/xyz");
     assert.equal(id, "001");
+  });
+
+  test("increments past existing numbered directories and ignores unrelated entries", () => {
+    const base = createTempDirectory("gsd-next-artifact-");
+    try {
+      mkdirSync(join(base, "001-first"));
+      mkdirSync(join(base, "003-third"));
+      mkdirSync(join(base, "notes"));
+      writeFileSync(join(base, "999-not-a-directory"), "ignored");
+      assert.equal(nextArtifactId(base), "004");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 
@@ -309,9 +344,15 @@ describe("Batch 2 prompt templates resolve", () => {
     });
     assert.match(out, /Default mode/);
   });
-  test("graphify.md loads with action", () => {
-    const out = loadPrompt("graphify", { action: "build" });
-    assert.match(out, /build/);
+  test("graphify.md loads with a captured invocation", () => {
+    const workingDirectory = "/workspace/project";
+    const out = graphifyPrompt("build", workingDirectory);
+    const expectedInvocation = JSON.stringify({
+      action: "build",
+      workingDirectory,
+      graphDirectory: join(workingDirectory, ".gsd", "knowledge"),
+    });
+    assert.ok(out.includes(expectedInvocation));
   });
   test("stats.md loads with no vars", () => {
     const out = loadPrompt("stats", {});
@@ -369,35 +410,113 @@ describe("Batch 2 handlers dispatch", () => {
     assert.doesNotMatch(pi.sent[0].content, /Correct verified inaccuracies directly/);
   });
 
-  test("handleGraphify defaults to build action", async () => {
+  test("handleGraphify defaults to build without writing before the agent checks permission", async () => {
     const pi = createMockPi();
-    await withTempCommandCwd(async (ctx, base) => {
+    const base = createTempDirectory("gsd-graphify-build-");
+    const ctx = createMockCtxWithCwd(base);
+    try {
       await handleGraphify("", ctx as any, pi as any);
-      assert.equal(existsSync(join(base, ".gsd", "knowledge")), true);
-    });
-    assert.deepEqual(pi.sent, [
-      { customType: "gsd-graphify", content: loadPrompt("graphify", { action: "build" }), display: false },
-    ]);
+      assert.deepEqual(readdirSync(base), []);
+      assert.deepEqual(pi.sent, [
+        { customType: "gsd-graphify", content: graphifyPrompt("build", base), display: false },
+      ]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   for (const args of ["   ", "build", "  build  "]) {
-    test(`handleGraphify ${JSON.stringify(args)} creates the knowledge directory for build`, async () => {
+    test(`handleGraphify ${JSON.stringify(args)} dispatches build without handler-side writes`, async () => {
       const pi = createMockPi();
       const base = createTempDirectory("gsd-graphify-build-");
       const ctx = createMockCtxWithCwd(base);
       try {
-        await withCommandCwd(base, async () => {
-          await handleGraphify(args, ctx as any, pi as any);
-        });
-        assert.equal(existsSync(join(base, ".gsd", "knowledge")), true);
+        await handleGraphify(args, ctx as any, pi as any);
+        assert.deepEqual(readdirSync(base), []);
         assert.deepEqual(pi.sent, [
-          { customType: "gsd-graphify", content: loadPrompt("graphify", { action: "build" }), display: false },
+          { customType: "gsd-graphify", content: graphifyPrompt("build", base), display: false },
         ]);
       } finally {
         rmSync(base, { recursive: true, force: true });
       }
     });
   }
+
+  test("handleGraphify uses explicit command cwd instead of ambient overrides", async () => {
+    const first = createTempDirectory("gsd-graphify-target-a-");
+    const second = createTempDirectory("gsd-graphify-target-b-");
+    const piA = createMockPi();
+    const piB = createMockPi();
+    const ctxA = createMockCtxWithCwd(first);
+    const ctxB = createMockCtxWithCwd(second);
+    try {
+      await withCommandCwd(second, async () => handleGraphify("status", ctxA as any, piA as any));
+      await withCommandCwd(first, async () => handleGraphify("diff", ctxB as any, piB as any));
+      assert.deepEqual(piA.sent, [
+        { customType: "gsd-graphify", content: graphifyPrompt("status", first), display: false },
+      ]);
+      assert.deepEqual(piB.sent, [
+        { customType: "gsd-graphify", content: graphifyPrompt("diff", second), display: false },
+      ]);
+      assert.deepEqual(readdirSync(first), []);
+      assert.deepEqual(readdirSync(second), []);
+    } finally {
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+
+  test("handleGraphify preserves multiline action values in its captured JSON", async () => {
+    const base = createTempDirectory("gsd-graphify-json-");
+    const action = 'query "helper"\n{{invocation}}';
+    const ctx = createMockCtxWithCwd(base);
+    const pi = createMockPi();
+    try {
+      await handleGraphify(action, ctx as any, pi as any);
+      assert.deepEqual(parseGraphifyInvocation(pi.sent[0].content), {
+        action,
+        workingDirectory: base,
+        graphDirectory: join(base, ".gsd", "knowledge"),
+      });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("handleGraphify rejects a blocked explicit cwd before dispatch", async () => {
+    const pi = createMockPi();
+    const ctx = createMockCtxWithCwd("/");
+    await assert.rejects(() => handleGraphify("status", ctx as any, pi as any));
+    assert.deepEqual(pi.sent, []);
+  });
+
+  test("handleGraphify build dispatch failure preserves existing graph bytes", async () => {
+    const base = createTempDirectory("gsd-graphify-dispatch-failure-");
+    const ctx = createMockCtxWithCwd(base);
+    const graphDirectory = join(base, ".gsd", "knowledge");
+    mkdirSync(graphDirectory, { recursive: true });
+    const nodesPath = join(graphDirectory, "nodes.md");
+    const edgesPath = join(graphDirectory, "edges.json");
+    writeFileSync(nodesPath, "# Previous nodes\n");
+    writeFileSync(edgesPath, "[]\n");
+    const nodesBefore = readFileSync(nodesPath);
+    const edgesBefore = readFileSync(edgesPath);
+    const graphEntriesBefore = readdirSync(graphDirectory).sort();
+    const pi = {
+      sendMessage() {
+        throw new Error("simulated dispatch failure");
+      },
+    };
+    try {
+      await handleGraphify("build", ctx as any, pi as any);
+      assert.deepEqual(readFileSync(nodesPath), nodesBefore);
+      assert.deepEqual(readFileSync(edgesPath), edgesBefore);
+      assert.deepEqual(readdirSync(graphDirectory).sort(), graphEntriesBefore);
+      assert.ok(ctx.notifications.some(({ message }) => message.includes("Failed to dispatch graphify")));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
 
   for (const action of ["query auth and routing", "status", "diff"]) {
     test(`handleGraphify ${action} does not create a missing .gsd directory`, async () => {
@@ -410,7 +529,7 @@ describe("Batch 2 handlers dispatch", () => {
         });
         assert.deepEqual(readdirSync(base), []);
         assert.deepEqual(pi.sent, [
-          { customType: "gsd-graphify", content: loadPrompt("graphify", { action }), display: false },
+          { customType: "gsd-graphify", content: graphifyPrompt(action, base), display: false },
         ]);
       } finally {
         rmSync(base, { recursive: true, force: true });
@@ -431,7 +550,7 @@ describe("Batch 2 handlers dispatch", () => {
           assert.deepEqual(readdirSync(gsdDir), entriesBefore);
           assert.deepEqual(readFileSync(sentinelPath), sentinelBefore);
           assert.deepEqual(pi.sent, [
-            { customType: "gsd-graphify", content: loadPrompt("graphify", { action }), display: false },
+            { customType: "gsd-graphify", content: graphifyPrompt(action, base), display: false },
           ]);
         } finally {
           rmSync(base, { recursive: true, force: true });
@@ -457,7 +576,7 @@ describe("Batch 2 handlers dispatch", () => {
           assert.deepEqual(readdirSync(knowledgeDir).sort(), entriesBefore);
           assert.deepEqual(readdirSync(join(base, ".gsd")), gsdEntriesBefore);
           assert.deepEqual(pi.sent, [
-            { customType: "gsd-graphify", content: loadPrompt("graphify", { action }), display: false },
+            { customType: "gsd-graphify", content: graphifyPrompt(action, base), display: false },
           ]);
         } finally {
           rmSync(base, { recursive: true, force: true });

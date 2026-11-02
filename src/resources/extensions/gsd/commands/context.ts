@@ -6,6 +6,7 @@ import { resolveProjectRoot } from "../worktree.js";
 import { showNextAction } from "../../shared/tui.js";
 import { handleStatus } from "./handlers/core.js";
 import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 export interface GsdDispatchContext {
   ctx: ExtensionCommandContext;
@@ -57,9 +58,11 @@ export function projectRoot(): string {
   return root;
 }
 
-export function currentDirectoryRoot(): string {
+export function currentDirectoryRoot(explicitCwd?: string): string {
   let cwd: string;
-  if (commandCwdOverride) {
+  if (explicitCwd !== undefined) {
+    cwd = resolve(explicitCwd);
+  } else if (commandCwdOverride) {
     cwd = commandCwdOverride;
   } else {
     try {
