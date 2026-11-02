@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { invokeProjectBindingRead, invokeProjectProgressRead, invokeProjectSnapshotRead, invokeWorkflowCommand } from "./rpc-mode.js";
+import { RpcClient } from "./rpc-client.js";
 
 test("project progress read forwards the active session CWD and request ID", async () => {
 	let receivedInput: unknown;
@@ -236,4 +237,29 @@ test("binding read rejects a torn session read conservatively", async () => {
 		success: false,
 		error: "Session workspace or execution directory changed during binding read; retry",
 	});
+});
+
+test("typed RPC client exposes binding snapshots without requiring v2 negotiation", async () => {
+	const client = new RpcClient();
+	const sent: unknown[] = [];
+	const snapshot = {
+		producer: { sessionId: "session-client", processInstanceId: "process-client" },
+		project: null,
+		projectStatus: "unavailable" as const,
+		capturedAt: "2026-11-02T00:00:00.000Z",
+	};
+	const clientWithStub = client as unknown as { send: (command: unknown) => Promise<unknown> };
+	clientWithStub.send = async (command) => {
+		sent.push(command);
+		return {
+			type: "response",
+			id: "client-read-1",
+			command: "get_binding_snapshot",
+			success: true,
+			data: snapshot,
+		} as never;
+	};
+
+	assert.deepEqual(await client.getBindingSnapshot(), snapshot);
+	assert.deepEqual(sent, [{ type: "get_binding_snapshot" }]);
 });

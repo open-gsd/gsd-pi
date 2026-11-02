@@ -759,9 +759,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			}
 
 			case "get_binding_snapshot": {
-				if (protocolVersion !== 2) {
-					return error(id, "get_binding_snapshot", "Binding snapshots require RPC protocol v2");
-				}
+				// Additive owner read: keep it usable by hosts that already locked the session to v1.
 				const sessionId = session.sessionId;
 				const cwd = session.sessionManager.getCwd();
 				const executionCwd = safeProcessCwd();

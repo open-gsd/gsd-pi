@@ -269,7 +269,11 @@ function resolveVerifiedGitCommonDirectory(path: string, workingTreeRoot?: strin
 }
 
 function gitEnvironmentWithoutInheritedContext() {
-  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("GIT_")) delete env[key];
+  }
+  return env;
 }
 
 function pathIsWithinRoot(root: string, candidate: string): boolean {

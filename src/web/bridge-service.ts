@@ -95,6 +95,7 @@ const READ_ONLY_RPC_COMMAND_TYPES = new Set<RpcCommand["type"]>([
   "get_state",
   "get_project_progress",
   "get_project_snapshot",
+  "get_binding_snapshot",
   "get_available_models",
   "get_session_stats",
   "get_messages",

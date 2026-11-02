@@ -296,6 +296,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_project_progress" }
 	| { id?: string; type: "get_project_snapshot" }
+	/** Additive owner read supported by both protocol versions. */
 	| { id?: string; type: "get_binding_snapshot" }
 	| ({ id?: string; type: "workflow_command" } & WorkflowCommandRequest & WorkflowCommandIdentity)
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
