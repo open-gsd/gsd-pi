@@ -836,6 +836,7 @@ export function checkTaskOrdering(
 // ─── Verify Path Operand Check ───────────────────────────────────────────────
 
 const PATH_CREATING_PROGRAMS = new Set(["mkdir", "touch", "tee", "cp", "mv", "ln", "rm", "install", "rsync"]);
+const SEARCH_PROGRAMS = new Set(["grep", "egrep", "fgrep", "rg"]);
 const PROGRAM_PREFIX_WORDS = new Set(["!", "time", "env", "exec"]);
 const ENV_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const PATH_OPERAND_RE = /^(?:\.\/)?[\w.@+-]+(?:\/[\w.@+-]+)*\/?$/;
@@ -911,6 +912,7 @@ function tokenizeVerifySegments(command: string): VerifyToken[][] {
  */
 export function extractVerifyPathOperands(verify: string): string[] {
   const operands: string[] = [];
+  const created = new Set<string>();
   for (const segment of tokenizeVerifySegments(verify)) {
     let index = 0;
     while (
@@ -920,10 +922,15 @@ export function extractVerifyPathOperands(verify: string): string[] {
     ) index++;
     const program = segment[index];
     if (!program) continue;
-    if (PATH_CREATING_PROGRAMS.has(program.text.split("/").pop() ?? program.text)) continue;
+    const programName = program.text.split("/").pop() ?? program.text;
+    // Search patterns can be indistinguishable from paths without interpreting
+    // each program's options. Absence assertions must allow missing paths.
+    if (SEARCH_PROGRAMS.has(programName)) continue;
+    if ((programName === "test" || programName === "[") && segment.some((token) => token.text === "!")) continue;
+    const createsPaths = PATH_CREATING_PROGRAMS.has(programName);
     for (let i = index + 1; i < segment.length; i++) {
       const token = segment[i];
-      if (token.quoted) continue;
+      if (token.quoted && !createsPaths) continue;
       const redirection = token.text.match(REDIRECTION_RE);
       if (redirection) {
         if (redirection[0] === token.text) i++;
@@ -932,7 +939,12 @@ export function extractVerifyPathOperands(verify: string): string[] {
       if (token.text.startsWith("-") || token.text.includes("=")) continue;
       const candidate = token.text.replace(SELECTOR_SUFFIX_RE, "");
       if (candidate.includes("/") && PATH_OPERAND_RE.test(candidate) && !containsGlobPattern(candidate)) {
-        operands.push(candidate);
+        const normalized = normalizeFilePath(candidate);
+        if (createsPaths) {
+          if (programName !== "rm") created.add(normalized);
+        } else if (!anyOutputUnderDirectory(normalized, created)) {
+          operands.push(candidate);
+        }
       }
     }
   }

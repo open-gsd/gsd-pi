@@ -161,6 +161,36 @@ describe("checkVerifyPathOperands", () => {
     }
   });
 
+  test("accepts paths created by preceding Verify segments without hiding unrelated missing paths", () => {
+    scaffold("test/");
+    assert.deepEqual(
+      checkVerifyPathOperands([createTask({ verify: "mkdir -p test/smoke && test -d test/smoke" })], isolatedBase),
+      [],
+    );
+    assert.deepEqual(
+      extractVerifyPathOperands("touch test/smoke.rb && bin/rails test ./test/smoke.rb test/db"),
+      ["test/db"],
+    );
+    assert.deepEqual(extractVerifyPathOperands('mkdir -p "test/smoke" && test -d test/smoke'), []);
+  });
+
+  test("ignores absence assertions and search patterns even when anchored", () => {
+    scaffold("src/");
+    for (const verify of [
+      "test ! -e src/obsolete.ts",
+      "! test -f src/obsolete.ts",
+      "[ ! -e src/obsolete.ts ]",
+      "grep -q src/obsolete.ts README.md",
+      "rg --glob '*.ts' src/obsolete.ts",
+    ]) {
+      assert.deepEqual(checkVerifyPathOperands([createTask({ verify })], isolatedBase), [], verify);
+    }
+    assert.equal(
+      checkVerifyPathOperands([createTask({ verify: "test -f src/required.ts" })], isolatedBase).length,
+      1,
+    );
+  });
+
   test("skips terminal tasks", () => {
     scaffold("test/");
     for (const status of ["complete", "done", "skipped", "closed"]) {
