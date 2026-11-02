@@ -94,6 +94,7 @@ export interface CmuxVaultOptions {
   transport?: CmuxVaultTransport
   clearBinding?: (params: CmuxVaultClearRequest) => Promise<unknown>
   extensionPaths?: () => string[]
+  getPreferences?: (cwd: string) => Promise<{ enabled?: boolean; vault?: boolean } | undefined>
 }
 
 interface VaultBinding {
@@ -118,10 +119,17 @@ function resumeResult(value: unknown): { result: Record<string, unknown>, bindin
 }
 
 export function cmuxVaultEnabled(env: NodeJS.ProcessEnv, pid: number): boolean {
-  return env.GSD_CMUX_VAULT === '1'
-    && env.GSD_CMUX_VAULT_OWNER_PID === String(pid)
+  return env.GSD_CMUX_VAULT_OWNER_PID === String(pid)
     && Boolean(env.CMUX_WORKSPACE_ID?.trim() && env.CMUX_SURFACE_ID?.trim())
     && env.GSD_CMUX_VAULT_EXTERNAL_BRIDGE !== '1'
+}
+
+export function cmuxVaultConfigured(
+  env: NodeJS.ProcessEnv,
+  preferences: { enabled?: boolean; vault?: boolean } | undefined,
+): boolean {
+  return preferences?.enabled === true && env.GSD_CMUX_VAULT !== '0'
+    && (env.GSD_CMUX_VAULT === '1' || preferences.vault === true)
 }
 
 /** Recognize only the upstream managed Pi bridge, not arbitrary "cmux" filenames. */
@@ -195,11 +203,6 @@ export class CmuxVaultBridge {
   }
 
   private async drain(): Promise<void> {
-    this.injected ??= hasManagedCmuxBridge(this.options.extensionPaths?.() ?? [])
-    if (await this.injected) {
-      this.pending = undefined
-      return
-    }
     while (this.pending !== undefined) {
       const identity = this.pending
       this.pending = undefined
@@ -208,6 +211,12 @@ export class CmuxVaultBridge {
           await this.clear()
           continue
         }
+        if (!cmuxVaultConfigured(this.env, await this.options.getPreferences?.(identity.cwd))) {
+          await this.clear()
+          continue
+        }
+        this.injected ??= hasManagedCmuxBridge(this.options.extensionPaths?.() ?? [])
+        if (await this.injected) continue
         // A fresh session may have a path before its first assistant is persisted.
         // Do not advertise a file that cannot yet be opened.
         const persisted = await stat(identity.path).then(info => info.isFile(), () => false)

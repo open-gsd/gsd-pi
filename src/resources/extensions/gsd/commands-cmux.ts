@@ -27,6 +27,7 @@ export function autoEnableCmuxPreferences(basePath?: string): boolean {
     sidebar: true,
     splits: false,
     browser: false,
+    vault: false,
     ...((prefs.cmux as Record<string, unknown> | undefined) ?? {}),
   };
   (prefs.cmux as Record<string, unknown>).enabled = true;
@@ -103,7 +104,7 @@ async function formatCmuxStatus(): Promise<string> {
     `Socket: ${detected.socketPath}`,
     `Workspace: ${detected.workspaceId ?? "(none)"}`,
     `Surface: ${detected.surfaceId ?? "(none)"}`,
-    `Features: notifications=${resolved.notifications ? "on" : "off"}, sidebar=${resolved.sidebar ? "on" : "off"}, splits=${resolved.splits ? "on" : "off"}, browser=${resolved.browser ? "on" : "off"}`,
+    `Features: notifications=${resolved.notifications ? "on" : "off"}, sidebar=${resolved.sidebar ? "on" : "off"}, splits=${resolved.splits ? "on" : "off"}, browser=${resolved.browser ? "on" : "off"}, vault=${resolved.vault ? "on" : "off"}`,
     `Capabilities: access=${accessMode}, methods=${methods}`,
   ].join("\n");
 }
@@ -135,6 +136,7 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
         sidebar: true,
         splits: false,
         browser: false,
+        vault: false,
         ...((prefs.cmux as Record<string, unknown> | undefined) ?? {}),
       };
       (prefs.cmux as Record<string, unknown>).enabled = true;
@@ -155,8 +157,8 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
   }
 
   const parts = trimmed.split(/\s+/);
-  if (parts.length === 2 && ["notifications", "sidebar", "splits", "browser"].includes(parts[0]) && ["on", "off"].includes(parts[1])) {
-    const feature = parts[0] as "notifications" | "sidebar" | "splits" | "browser";
+  if (parts.length === 2 && ["notifications", "sidebar", "splits", "browser", "vault"].includes(parts[0]) && ["on", "off"].includes(parts[1])) {
+    const feature = parts[0] as "notifications" | "sidebar" | "splits" | "browser" | "vault";
     const enabled = parts[1] === "on";
     if (enabled && !await ensureCmuxAvailableForEnable(ctx)) return;
 
@@ -174,13 +176,15 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
 
     const note = feature === "browser" && enabled
       ? " Browser surfaces are still a follow-up path."
-      : "";
+      : feature === "vault" && enabled
+        ? " Vault discovery requires the one-time cmux agent registration described in the user docs."
+        : "";
     ctx.ui.notify(`cmux ${feature} ${enabled ? "enabled" : "disabled"}.${note}`, "info");
     return;
   }
 
   ctx.ui.notify(
-    "Usage: /gsd cmux <status|on|off|notifications on|notifications off|sidebar on|sidebar off|splits on|splits off|browser on|browser off>",
+    "Usage: /gsd cmux <status|on|off|notifications on|notifications off|sidebar on|sidebar off|splits on|splits off|browser on|browser off|vault on|vault off>",
     "info",
   );
 }

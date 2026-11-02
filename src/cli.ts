@@ -919,8 +919,8 @@ const sessionManager = cliFlags._selectedSessionPath
 // Only this interactive root may publish a cmux surface binding. Children
 // inherit the owner's pid and cannot claim it, even if they inherit a TTY.
 const { createCmuxVaultExtension } = await import('./cmux-vault.js')
-const vaultOwner = process.env.GSD_CMUX_VAULT === '1'
-  && process.stdin.isTTY && process.stdout.isTTY
+const vaultOwner = process.stdin.isTTY && process.stdout.isTTY
+  && Boolean(process.env.CMUX_WORKSPACE_ID?.trim() && process.env.CMUX_SURFACE_ID?.trim())
   && !process.env.GSD_CMUX_VAULT_OWNER_PID
 if (vaultOwner) process.env.GSD_CMUX_VAULT_OWNER_PID = String(process.pid)
 
@@ -938,6 +938,10 @@ const resourceLoader: DefaultResourceLoaderInstance = await buildResourceLoader(
     home: resolve(appRoot),
     launcher: [process.execPath, process.env.GSD_BIN_PATH ?? process.argv[1]],
     extensionPaths: () => resourceLoader.getExtensions().extensions.map(extension => extension.resolvedPath),
+    getPreferences: async (sessionCwd) => {
+      const { loadEffectiveGSDPreferences } = await import('./resources/extensions/gsd/preferences.js')
+      return loadEffectiveGSDPreferences(sessionCwd)?.preferences.cmux
+    },
   })] : undefined,
 })
 const resourceLoadPromise = resourceLoader.reload()

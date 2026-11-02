@@ -152,7 +152,7 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd model          Switch active session model  [provider/model|model-id]",
     "  /gsd mode           Set workflow mode (solo/team)  [global|project]",
     "  /gsd prefs          Manage preferences  [global|project|status|wizard|setup|import-claude]  (alias for /gsd setup prefs)",
-    "  /gsd cmux           Manage cmux integration  [status|on|off|notifications|sidebar|splits|browser]",
+    "  /gsd cmux           Manage cmux integration  [status|on|off|notifications|sidebar|splits|browser|vault]",
     "  /gsd keys           API key manager (LLM + tool keys)  [list|add|remove|test|rotate|doctor]",
     "  /gsd config         (deprecated) Set tool API keys — use /gsd keys instead",
     "  /gsd show-config    Show effective configuration (models, routing, toggles)",

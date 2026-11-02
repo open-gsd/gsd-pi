@@ -43,6 +43,7 @@ export interface ResolvedCmuxConfig extends CmuxEnvironment {
   sidebar: boolean;
   splits: boolean;
   browser: boolean;
+  vault: boolean;
 }
 
 export interface CmuxSidebarProgress {
@@ -101,6 +102,8 @@ export function resolveCmuxConfig(
     sidebar: enabled && cmux.sidebar !== false,
     splits: enabled && cmux.splits === true,
     browser: enabled && cmux.browser === true,
+    vault: enabled && env.GSD_CMUX_VAULT !== "0"
+      && (env.GSD_CMUX_VAULT === "1" || cmux.vault === true),
   };
 }
 

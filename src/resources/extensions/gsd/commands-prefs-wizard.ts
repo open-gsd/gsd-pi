@@ -1633,8 +1633,8 @@ async function configureIntegrations(ctx: ExtensionCommandContext, prefs: Record
 
   // cmux
   const cmux = (prefs.cmux as Record<string, unknown> | undefined) ?? {};
-  for (const field of ["enabled", "notifications", "sidebar", "splits", "browser"] as const) {
-    const val = await promptBoolean(ctx, `cmux — ${field}`, cmux[field]);
+  for (const field of ["enabled", "notifications", "sidebar", "splits", "browser", "vault"] as const) {
+    const val = await promptBoolean(ctx, `cmux — ${field}`, cmux[field], field === "vault" ? false : undefined);
     if (val !== undefined) cmux[field] = val;
   }
   if (Object.keys(cmux).length > 0) prefs.cmux = cmux;

@@ -9,6 +9,7 @@ import {
   CmuxVaultBridge,
   clearCmuxVaultBinding,
   cmuxVaultEnabled,
+  cmuxVaultConfigured,
   createCmuxVaultExtension,
   hasManagedCmuxBridge,
   runCmuxVaultCommand,
@@ -49,6 +50,7 @@ async function fixture(t: test.TestContext) {
     launcher: ['/absolute/node', '/absolute/gsd launcher.js'],
     pid: 123,
     env,
+    getPreferences: async () => ({ enabled: true, vault: true }),
     transport: async (args: string[]) => {
       allCalls.push(args)
       if (args[0] === 'rpc') {
@@ -97,11 +99,47 @@ test('only an explicitly enabled interactive owner in cmux is eligible', () => {
     CMUX_WORKSPACE_ID: 'workspace:1', CMUX_SURFACE_ID: 'surface:2',
   }
   assert.equal(cmuxVaultEnabled(env, 42), true)
-  for (const key of Object.keys(env)) {
+  for (const key of ['GSD_CMUX_VAULT_OWNER_PID', 'CMUX_WORKSPACE_ID', 'CMUX_SURFACE_ID']) {
     assert.equal(cmuxVaultEnabled({ ...env, [key]: '' }, 42), false, key)
   }
   assert.equal(cmuxVaultEnabled(env, 43), false, 'children inherit a different owner pid')
   assert.equal(cmuxVaultEnabled({ ...env, GSD_CMUX_VAULT_EXTERNAL_BRIDGE: '1' }, 42), false)
+})
+
+test('Vault preferences default off, respect master disable and allow explicit environment overrides', () => {
+  assert.equal(cmuxVaultConfigured({}, undefined), false)
+  assert.equal(cmuxVaultConfigured({}, { enabled: true }), false)
+  assert.equal(cmuxVaultConfigured({}, { enabled: true, vault: false }), false)
+  assert.equal(cmuxVaultConfigured({}, { enabled: true, vault: true }), true)
+  assert.equal(cmuxVaultConfigured({ GSD_CMUX_VAULT: '0' }, { enabled: true, vault: true }), false)
+  assert.equal(cmuxVaultConfigured({ GSD_CMUX_VAULT: '1' }, { enabled: true }), true)
+  assert.equal(cmuxVaultConfigured({ GSD_CMUX_VAULT: '1' }, { enabled: false, vault: true }), false)
+  assert.equal(cmuxVaultConfigured({ GSD_CMUX_VAULT: '1' }, undefined), false)
+})
+
+test('runtime uses current project settings without an env opt-in and clears on disable', async t => {
+  const f = await fixture(t)
+  let settings = { enabled: true, vault: false }
+  const projects: string[] = []
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+    getPreferences: async cwd => { projects.push(cwd); return settings },
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.equal(f.allCalls.length, 0)
+  settings = { enabled: true, vault: true }
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(f.calls[0][2], 'set')
+  settings = { enabled: false, vault: true }
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(f.clears.length, 1)
+  assert.deepEqual(projects, [f.cwd, f.cwd, f.cwd])
+  bridge.stop()
+  await bridge.idle()
 })
 
 test('uses actual session identity and literal argv; indexes only minimal metadata', async t => {

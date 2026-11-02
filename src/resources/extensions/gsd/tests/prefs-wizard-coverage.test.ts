@@ -41,7 +41,7 @@ const PREF_SAMPLE_VALUES: Record<string, unknown> = {
     on_milestone: true,
     on_attention: true,
   },
-  cmux: { enabled: true },
+  cmux: { enabled: true, vault: false },
   remote_questions: { provider: "slack", channel: "C123" },
   discussion: { question_mode: "chat" },
   git: {
@@ -362,6 +362,48 @@ test("models wizard offers discovered models for enabled providers", async () =>
     const saved = readFileSync(prefsPath, "utf-8");
     assert.match(saved, /research:\s+local\/discovered-model/);
     assert.doesNotMatch(saved, /hidden-model/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("integrations wizard exposes default-off cmux Vault and persists both toggle values", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-prefs-cmux-vault-"));
+  const prefsPath = join(dir, "PREFERENCES.md");
+  try {
+    for (const enabled of [true, false]) {
+      let visits = 0;
+      let prompted = false;
+      const ctx = {
+        ui: {
+          notify() {},
+          select: async (label: string, options: string[]) => {
+            if (label === "GSD Preferences") {
+              return ++visits === 1
+                ? options.find(option => option.startsWith("Integrations"))
+                : "── Save & Exit ──";
+            }
+            if (label.startsWith("cmux — vault")) {
+              prompted = true;
+              if (enabled) assert.match(label, /default: false/);
+              return String(enabled);
+            }
+            return options.includes("(keep current)") ? "(keep current)"
+              : options.includes("Done") ? "Done" : undefined;
+          },
+          input: async () => null,
+        },
+        waitForIdle: async () => {},
+        reload: async () => {},
+      } as any;
+      await handlePrefsWizard(ctx, "project", { cmux: { enabled: true } }, { pathOverride: prefsPath });
+      assert.equal(prompted, true);
+      const parsed = parsePreferencesMarkdown(readFileSync(prefsPath, "utf8"));
+      assert.notEqual(parsed, null);
+      const { preferences, errors } = validatePreferences(parsed!);
+      assert.deepEqual(errors, []);
+      assert.equal(preferences.cmux?.vault, enabled);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

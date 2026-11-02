@@ -689,8 +689,12 @@ export function validatePreferences(preferences: GSDPreferences): {
       if (cmux.sidebar !== undefined) validatedCmux.sidebar = !!cmux.sidebar;
       if (cmux.splits !== undefined) validatedCmux.splits = !!cmux.splits;
       if (cmux.browser !== undefined) validatedCmux.browser = !!cmux.browser;
+      if (cmux.vault !== undefined) {
+        if (typeof cmux.vault === "boolean") validatedCmux.vault = cmux.vault;
+        else errors.push("cmux.vault must be a boolean");
+      }
 
-      const knownCmuxKeys = new Set(["enabled", "notifications", "sidebar", "splits", "browser"]);
+      const knownCmuxKeys = new Set(["enabled", "notifications", "sidebar", "splits", "browser", "vault"]);
       for (const key of Object.keys(cmux)) {
         if (!knownCmuxKeys.has(key)) {
           warnings.push(`unknown cmux key "${key}" — ignored`);

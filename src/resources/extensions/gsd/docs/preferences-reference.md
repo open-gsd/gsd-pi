@@ -262,6 +262,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `sidebar`: boolean — publish status, progress, and log metadata to the cmux sidebar. Default: `true` when enabled.
   - `splits`: boolean — run supported subagent work in visible cmux splits. Default: `false`.
   - `browser`: boolean — reserve the future browser integration flag. Default: `false`.
+  - `vault`: boolean — opt in to metadata-only Vault catalog and active-session registration. Default: `false`, including when cmux is detected or enabled. Requires `enabled: true` and a one-time cmux agent registration; see the user docs' **Optional cmux Vault bridge** section. Configure through `/gsd prefs` → **Integrations** or `/gsd cmux vault on|off`. `/gsd cmux off` disables Vault too. `GSD_CMUX_VAULT=0` forces it off; `=1` overrides only `vault`, never the master toggle.
 
 - `dynamic_routing`: configures the dynamic model router that adjusts model selection based on task complexity. Keys:
   - `enabled`: boolean — enable dynamic routing. Default: `false`.
@@ -724,6 +725,7 @@ cmux:
   sidebar: true
   splits: true
   browser: false
+  vault: false
 ---
 ```
 

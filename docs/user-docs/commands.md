@@ -358,11 +358,16 @@ Shell package commands use the same extension registry. A successful `gsd instal
 | `/gsd cmux notifications on/off` | Toggle cmux desktop notifications |
 | `/gsd cmux sidebar on/off` | Toggle cmux sidebar metadata |
 | `/gsd cmux splits on/off` | Toggle cmux visual subagent splits |
+| `/gsd cmux vault on/off` | Toggle optional Vault metadata and active-session registration (default off) |
 
 ### Optional cmux Vault bridge
 
-The Vault bridge is **separate from sidebar/progress preferences** and is off by
-default. It uses GSD's own `gsd` identity, not stock Pi or Oh My Pi (OMP).
+The Vault bridge is an **optional cmux feature**, off by default, including when
+cmux is detected or enabled. Configure it under `/gsd prefs` → **Integrations**,
+or run `/gsd cmux vault on` / `/gsd cmux vault off`. `/gsd cmux off` disables
+Vault along with the other cmux features; `/gsd cmux on` alone does not opt in to
+Vault. `/gsd cmux status` includes its effective `vault=on/off` state.
+It uses GSD's own `gsd` identity, not stock Pi or Oh My Pi (OMP).
 Launching `gsd` does not run cmux's stock `pi` wrapper, and installing OMP hooks
 does not enable this bridge.
 
@@ -399,16 +404,32 @@ native session-file identity. **Do not point `sessionDirectory` at the native
 session store**, and do not add `forkCommand`. A project-only `cmux.json` is not
 sufficient for cmux's default unscoped Vault history scan.
 
-Restart/reload cmux as required by your installed version, then launch normally
-inside a cmux surface:
+Restart/reload cmux as required by your installed version, then launch `gsd`
+normally inside a cmux surface and enable the feature:
 
-```sh
-GSD_CMUX_VAULT=1 gsd
+```text
+/gsd cmux vault on
 ```
 
-You may export `GSD_CMUX_VAULT=1` in your shell to retain the usual `gsd` command.
-Unset it (or use `GSD_CMUX_VAULT=0`) before launching to opt out. Startup never
-changes cmux or GSD settings and never installs another agent.
+The command saves project preferences and reloads the session's extensions. You
+can also set global or project GSD preferences directly:
+
+```yaml
+cmux:
+  enabled: true
+  vault: true
+```
+
+Omitting `vault`, or setting it to `false`, keeps the bridge off. Global/project
+precedence is the same as other cmux preferences. Existing cmux users are not
+automatically opted in. Runtime checks follow the active session cwd, so switching
+to a project where the feature is disabled clears only this bridge's binding.
+Startup itself never changes cmux or GSD settings and never installs another
+agent; only explicit settings commands persist your selection.
+
+For temporary overrides, `GSD_CMUX_VAULT=0` forces Vault off and `=1` overrides
+`cmux.vault`, but **never** enables the `cmux.enabled` master switch. Unset the
+variable to return to preference control.
 
 #### Behavior and capability limits
 
@@ -469,7 +490,8 @@ A real Vault smoke test is still required on the host.
    GSD commit. Do not install stock Pi solely as a control.
 2. Use a disposable project and isolated absolute `GSD_HOME` (include spaces and
    Unicode). Register its metadata directory explicitly in cmux as above.
-3. Run `GSD_CMUX_VAULT=1 gsd` inside cmux and complete a harmless turn. Inspect the
+3. Run `gsd` inside cmux, enable `/gsd cmux vault on` (or use the preferences
+   wizard), and complete a harmless turn. Inspect the
    single JSONL metadata record: its `gsdSessionId` must match the native file's
    session header and `sessionId` must be that actual file, not a guessed path.
 4. Run `cmux vault sessions --agent gsd --limit 3` and
@@ -480,17 +502,20 @@ A real Vault smoke test is still required on the host.
 5. Test `/new` and `/resume`; verify the binding follows the current persisted
    session and old bindings do not remain on the surface. Exit normally and
    verify only this bridge's binding/Open presence is cleared.
-6. Repeat disabled, outside cmux and with headless/subagent runs. None may publish
+6. Repeat with `/gsd cmux vault off`, `/gsd cmux off`, outside cmux and with
+   headless/subagent runs. None may publish
    metadata or overwrite a parent's binding. Test with an already-loaded managed
    bridge to confirm suppression.
 7. Record actual version/revision, CLI outputs and UI observations separately
    from automated test results. Only claim manual resume/restart/fork round trips
    that you actually perform; they are not established by registration alone.
 
-If Vault is empty, check the literal opt-in, actual cmux environment, `cmux` on
+If Vault is empty, check `cmux.enabled: true`, `cmux.vault: true`, any environment
+override, the actual cmux environment, `cmux` on
 `PATH`, the matching **global** agent registration, and whether the native file
-has been persisted. `/gsd cmux status` reports the older sidebar integration, not
-this separate bridge. Missing/old cmux, malformed output, stale contexts/sockets
+has been persisted. `/gsd cmux status` reports the effective Vault switch alongside
+the other cmux features, not proof of a registered Vault row. Missing/old cmux,
+malformed output, stale contexts/sockets
 and filesystem failures are deliberately nonfatal and retried on a later
 completed turn. A later turn also reannounces presence after a cmux restart.
 Socket cleanup uses `CMUX_SOCKET_PATH` (default `/tmp/cmux.sock`); inaccessible
