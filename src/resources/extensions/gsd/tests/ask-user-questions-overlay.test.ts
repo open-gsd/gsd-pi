@@ -64,7 +64,10 @@ describe("ask_user_questions interview overlay (#2333)", () => {
 		const result = await tool.execute("t1", { questions: [question] }, undefined, () => {}, ctx);
 
 		assert.equal(customCalls.length, 1, "interview should be dispatched through ui.custom");
-		assert.deepEqual(customCalls[0], { overlay: true, overlayOptions: { reserveSpace: true } });
+		// Docked (#2866) + full terminal width: pi-tui defaults unspecified overlay
+		// widths to min(80, available) — without an explicit width the dock renders
+		// as an 80-column box with dead space beside it on wide terminals.
+		assert.deepEqual(customCalls[0], { overlay: true, overlayOptions: { reserveSpace: true, width: "100%" } });
 		assert.equal((result.details as any).cancelled, false);
 	});
 });

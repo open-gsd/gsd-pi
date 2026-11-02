@@ -957,5 +957,5 @@ export async function showInterviewRound(
 			invalidate: () => { cachedLines = undefined; },
 			handleInput,
 		};
-	}, opts.overlay ? { overlay: true, overlayOptions: { reserveSpace: true } } : undefined);
+	}, opts.overlay ? { overlay: true, overlayOptions: { reserveSpace: true, width: '100%' } } : undefined);
 }
