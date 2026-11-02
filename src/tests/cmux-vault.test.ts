@@ -11,6 +11,7 @@ import {
 } from '../resources/extensions/shared/gsd-session-metadata.ts'
 import {
   CmuxVaultBridge,
+  CMUX_VAULT_MAX_PENDING_SESSIONS,
   clearCmuxVaultBinding,
   cmuxVaultEnabled,
   cmuxVaultConfigured,
@@ -397,6 +398,42 @@ test('slow surface transport coalesces bindings without dropping completed auto-
   assert.ok(records.every(record => record.data.gsdModes.join() === 'auto'))
   assert.equal(f.calls.filter(call => call[2] === 'set').length, 2, 'surface target still coalesces')
   assert.equal(f.calls.at(-1)?.[f.calls.at(-1)!.indexOf('--checkpoint-id') + 1], f.manager.getSessionFile())
+})
+
+test('pending session catalogs and exported delegation history remain bounded', async t => {
+  const f = await fixture(t)
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    transport: async args => { entered(); await gate; return f.options.transport(args) },
+  })
+  bridge.update(f.manager, true)
+  await started
+  for (let i = 0; i < CMUX_VAULT_MAX_PENDING_SESSIONS + 2; i++) {
+    const file = join(f.cwd, `buffered-${i}.jsonl`)
+    await writeFile(file, 'private transcript')
+    f.setSession(file)
+    bridge.update(f.manager, true)
+  }
+  const originSessionId = f.manager.getSessionId()
+  f.setBranch(Array.from({ length: 70 }, (_, index) => ({
+    type: 'custom', customType: GSD_DELEGATION_CONTEXT, data: {
+      version: 1, originSessionId, id: `${index.toString(16).padStart(8, '0')}-a765-46af-ae2d-2f82051749a0`,
+      mode: 'single', count: 1, forkCount: 0, background: false, status: 'requested',
+    },
+  })))
+  bridge.update(f.manager, true, true)
+  release()
+  await bridge.idle()
+  const records = await f.metadata()
+  assert.equal(records.length, CMUX_VAULT_MAX_PENDING_SESSIONS + 1, 'one active plus bounded pending snapshots')
+  assert.ok(!records.some(record => record.data.sessionId.endsWith('buffered-0.jsonl')))
+  const latest = records.find(record => record.data.sessionId === f.manager.getSessionFile())!
+  assert.equal(latest.data.gsdDelegations.length, 64)
+  assert.equal(latest.data.gsdDelegations[0].id.startsWith('00000045-'), true, 'newest observations win')
 })
 
 test('switch/resume updates only this surface; in-memory/new unsaved session clears its binding', async t => {
