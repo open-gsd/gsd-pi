@@ -32,7 +32,7 @@ import type { LoopDeps } from "../auto/loop-deps.js";
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import type { IterationContext, LoopState, IterationData } from "../auto/types.js";
 import type { SessionLockStatus } from "../session-lock.js";
-import { runUnitPhase } from "../auto/unit-phase.js";
+import { DEFECTIVE_VERIFY_GUIDANCE, runUnitPhase } from "../auto/unit-phase.js";
 import { runFinalize } from "../auto/finalize.js";
 import { readUnitRuntimeRecord } from "../unit-runtime.js";
 import { ModelPolicyDispatchBlockedError } from "../auto-model-selection.js";
@@ -831,6 +831,83 @@ test("runUnitPhase gives a restarted planner the retry context stored on its dis
     "the planner prompt must carry the stored findings",
   );
   assert.ok(sentPrompts[0].includes("plan the slice"), "the planner prompt must keep the unit prompt");
+  assert.ok(!sentPrompts[0].includes(DEFECTIVE_VERIFY_GUIDANCE), "planner retries must not carry executor guidance");
+});
+
+test("runUnitPhase tells a retried executor to raise a blocker for a defective Verify command", async (t) => {
+  const base = await setupGateEvaluateFixture(t, "gsd-stored-executor-retry-", { q3: "absent", q4: "absent" });
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const claim = recordDispatchClaim({
+    traceId: "trace",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+  storeUnitRetry("execute-task", {
+    unitId: "M001/S01/T01",
+    failureContext: "bin/rails test test/db (exit code 1): cannot load such file -- test/db (LoadError)",
+    attempt: 1,
+  });
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+  const sentPrompts: string[] = [];
+  const ic = makeIC(makeMockDeps(capture), {
+    pi: {
+      sendMessage: (msg: { content?: unknown }) => {
+        sentPrompts.push(String(msg?.content ?? ""));
+      },
+      setModel: async () => true,
+      getThinkingLevel: () => "off",
+      setThinkingLevel: () => {},
+    } as any,
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+    prompt: "execute the task",
+    finalPrompt: "execute the task",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "executing",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice 1" },
+      activeTask: { id: "T01", title: "Task 1" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+
+  const run = runUnitPhase(ic, iterData, { consecutiveFinalizeTimeouts: 0 });
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+  await run;
+
+  assert.ok(sentPrompts.length >= 1, "the executor is dispatched");
+  assert.ok(sentPrompts[0].includes("VERIFICATION FAILED — AUTO-FIX ATTEMPT 1"));
+  assert.ok(sentPrompts[0].includes(DEFECTIVE_VERIFY_GUIDANCE));
+  assert.ok(sentPrompts[0].includes("gsd_task_complete"));
+  assert.ok(sentPrompts[0].includes("blockerDiscovered: true"));
+  assert.ok(sentPrompts[0].includes("test/db"), "the retry keeps the failing command");
+  assert.ok(sentPrompts[0].includes("execute the task"), "the retry keeps the unit prompt");
 });
 
 test("runUnitPhase gives a re-planned unit a prompt with no failure context from before its retries ran out", async (t) => {

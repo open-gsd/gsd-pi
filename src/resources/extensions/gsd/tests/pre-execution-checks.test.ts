@@ -25,6 +25,9 @@ import {
   checkTaskOrdering,
   checkInterfaceContracts,
   checkVerificationCommands,
+  checkVerifyPathOperands,
+  extractVerifyPathOperands,
+  runTaskPathChecks,
   runPreExecutionChecks,
   normalizeFilePath,
   type PreExecutionResult,
@@ -32,6 +35,160 @@ import {
 import type { TaskRow } from "../gsd-db.ts";
 
 // ─── Test Fixtures ───────────────────────────────────────────────────────────
+
+describe("checkVerifyPathOperands", () => {
+  function scaffold(...paths: string[]): void {
+    for (const path of paths) {
+      const full = join(isolatedBase, path);
+      mkdirSync(path.endsWith("/") ? full : join(full, ".."), { recursive: true });
+      if (!path.endsWith("/")) writeFileSync(full, "");
+    }
+  }
+
+  test("rejects the incident's nonexistent Rails test directory", () => {
+    scaffold("test/services/billing/", "test/services/invoicing/", "test/models/invoice_test.rb", "test/migrations/", "bin/rails");
+    const task = createTask({
+      id: "T03",
+      verify: "bin/rails test test/services/billing test/services/invoicing test/models/invoice_test.rb test/db",
+    });
+    const results = checkVerifyPathOperands([task], isolatedBase);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].target, "T03 Verify");
+    assert.equal(results[0].blocking, true);
+    assert.match(results[0].message, /'test\/db'/);
+    assert.match(results[0].message, /nearest existing directory: test\//);
+    assert.match(results[0].message, /fail on every attempt/);
+  });
+
+  test("is shared by the plan-persist and dispatch gates", async () => {
+    scaffold("test/");
+    const task = createTask({ verify: "bin/rails test test/db" });
+    assert.ok(runTaskPathChecks([task], isolatedBase).some((c) => c.target === "T01 Verify" && c.blocking));
+    const result = await runPreExecutionChecks([task], isolatedBase);
+    assert.equal(result.status, "fail");
+    assert.ok(result.checks.some((c) => c.target === "T01 Verify" && c.category === "file"));
+  });
+
+  test("accepts existing files and directories, including relative and trailing slashes", () => {
+    scaffold("test/models/a_test.rb", "test/services/");
+    const task = createTask({ verify: "bin/rails test test/models/a_test.rb test/services ./test/services/" });
+    assert.deepEqual(checkVerifyPathOperands([task], isolatedBase), []);
+  });
+
+  test("accepts own and prior files and expected_output, including produced directories", () => {
+    scaffold("test/");
+    const prior = createTask({
+      id: "T01",
+      files: ["./test/prior/a_test.rb"],
+      expected_output: ["test/prior/b_test.rb"],
+    });
+    const task = createTask({
+      id: "T02",
+      sequence: 1,
+      files: ["test/own/a_test.rb"],
+      expected_output: ["test/own/b_test.rb"],
+      verify: "bin/rails test test/prior/a_test.rb test/prior/b_test.rb test/own/a_test.rb test/own/b_test.rb test/own test/prior/",
+    });
+    assert.deepEqual(checkVerifyPathOperands([prior, task], isolatedBase), []);
+  });
+
+  test("rejects files and directories only a later task creates", () => {
+    scaffold("test/");
+    const task = createTask({ verify: "pytest test/later/a.py test/later/b.py test/later" });
+    const later = createTask({
+      id: "T02",
+      sequence: 1,
+      files: ["test/later/a.py"],
+      expected_output: ["test/later/b.py"],
+    });
+    assert.equal(checkVerifyPathOperands([task, later], isolatedBase).length, 3);
+  });
+
+  test("ignores unanchored refs, MIME types, programs, quoted words, flags, globs and assignments", () => {
+    scaffold("test/");
+    const task = createTask({
+      verify: "bin/missing origin/main text/plain 'test/missing' \"test/other\" --test/missing --file=test/missing FOO=test/missing test/*.rb",
+    });
+    assert.deepEqual(checkVerifyPathOperands([task], isolatedBase), []);
+  });
+
+  test("finds operands in each shell segment after program prefixes", () => {
+    assert.deepEqual(
+      extractVerifyPathOperands(
+        "! env FOO=bar time bin/rails test test/a.rb && pytest test/b.py || cat test/c.txt; cat test/d.txt | cat test/e.txt & cat test/f.txt",
+      ),
+      ["test/a.rb", "test/b.py", "test/c.txt", "test/d.txt", "test/e.txt", "test/f.txt"],
+    );
+  });
+
+  test("keeps quoted separators and escaped quotes opaque", () => {
+    assert.deepEqual(
+      extractVerifyPathOperands('node -e "say \\"hello\\"; test/quoted" && cat test/real.txt'),
+      ["test/real.txt"],
+    );
+  });
+
+  test("skips quoted environment assignments without mistaking the program for an operand", () => {
+    assert.deepEqual(
+      extractVerifyPathOperands('env FOO="test/missing" bin/missing test/real.txt'),
+      ["test/real.txt"],
+    );
+  });
+
+  test("ignores redirection targets and descriptor redirections without losing following operands", () => {
+    assert.deepEqual(
+      extractVerifyPathOperands(
+        "cat test/input > test/log 2>&1 && cat test/next 2>>test/log &> test/log; cat test/last < test/stdin",
+      ),
+      ["test/input", "test/next", "test/last"],
+    );
+  });
+
+  test("strips test-runner selectors and deduplicates missing paths", () => {
+    scaffold("test/existing.py");
+    const task = createTask({
+      verify: "pytest test/existing.py::test_ok test/missing.py::test_a test/missing.py:42 test/other.rb:3-9",
+    });
+    const results = checkVerifyPathOperands([task], isolatedBase);
+    assert.equal(results.length, 2);
+    assert.match(results[0].message, /test\/missing.py/);
+    assert.match(results[1].message, /test\/other.rb/);
+  });
+
+  test("skips operands of path-creating or removing programs", () => {
+    for (const program of ["mkdir", "touch", "tee", "cp", "mv", "ln", "rm", "install", "rsync"]) {
+      assert.deepEqual(extractVerifyPathOperands(`env FOO=bar /usr/bin/${program} test/source test/destination`), []);
+    }
+  });
+
+  test("skips terminal tasks", () => {
+    scaffold("test/");
+    for (const status of ["complete", "done", "skipped", "closed"]) {
+      assert.deepEqual(checkVerifyPathOperands([createTask({ status, verify: "pytest test/missing" })], isolatedBase), []);
+    }
+  });
+
+  test("uses canonical and additional roots for anchoring and existence", () => {
+    scaffold("canonical/test/existing.py", "additional/test/other.py");
+    const context = {
+      canonicalProjectRoot: join(isolatedBase, "canonical"),
+      additionalRoots: [join(isolatedBase, "additional")],
+    };
+    const task = createTask({ verify: "pytest test/existing.py test/other.py test/missing.py" });
+    const results = checkVerifyPathOperands([task], isolatedBase, context);
+    assert.equal(results.length, 1);
+    assert.match(results[0].message, /'test\/missing.py'/);
+    assert.match(results[0].message, /nearest existing directory: test\//);
+  });
+
+  test("retains the input checker monorepo fallback", () => {
+    scaffold("test/", "frontend/test/existing.py");
+    assert.deepEqual(
+      checkVerifyPathOperands([createTask({ verify: "pytest test/existing.py" })], isolatedBase),
+      [],
+    );
+  });
+});
 
 /**
  * Create a minimal TaskRow for testing.

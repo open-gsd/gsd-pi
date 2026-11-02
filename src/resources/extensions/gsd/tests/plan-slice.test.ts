@@ -53,6 +53,8 @@ function makeTmpBase(): string {
   mkdirSync(join(base, 'src', 'resources', 'extensions', 'gsd', 'tools'), { recursive: true });
   writeFileSync(join(base, 'src', 'resources', 'extensions', 'gsd', 'tools', 'plan-milestone.ts'), '// fixture\n', 'utf-8');
   writeFileSync(join(base, 'src', 'resources', 'extensions', 'gsd', 'tools', 'plan-task.ts'), '// fixture\n', 'utf-8');
+  mkdirSync(join(base, 'src', 'resources', 'extensions', 'gsd', 'tests'), { recursive: true });
+  writeFileSync(join(base, 'src', 'resources', 'extensions', 'gsd', 'tests', 'plan-slice.test.ts'), '// fixture\n', 'utf-8');
   writeFileSync(join(base, 'stale-input.py'), '# fixture\n', 'utf-8');
   return base;
 }
@@ -175,6 +177,27 @@ test('handlePlanSlice writes slice/task planning state and renders plan artifact
     assert.equal(parsedPlan.tasks[0]?.id, 'T01');
 
     // Flat-phase: no per-task plan files — tasks are checkboxes inside the slice plan.
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handlePlanSlice rejects missing Verify path operands before persistence', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+    const input = validParams();
+    input.tasks[0]!.verify = 'node --test src/resources/extensions/gsd/tests/nonexistent.test.ts';
+
+    const result = await handlePlanSlice(input, base);
+
+    assert.ok('error' in result);
+    assert.match(result.error, /T01 Verify/);
+    assert.match(result.error, /nonexistent\.test\.ts/);
+    assert.match(result.error, /fail on every attempt/);
+    assert.equal(getSliceTasks('M001', 'S02').length, 0, 'defective Verify must fail before DB persistence');
   } finally {
     cleanup(base);
   }
