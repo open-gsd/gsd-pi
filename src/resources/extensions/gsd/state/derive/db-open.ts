@@ -26,6 +26,18 @@ function isSameOpenDatabase(currentDbPath: string | null, requestedDbPath: strin
   return canonical(currentDbPath) === canonical(requestedDbPath);
 }
 
+/** Confirm the currently open durable DB resolves to the requested project's authority path. */
+export function isWorkflowDbBoundToBasePath(basePath: string): boolean {
+  if (!isDbAvailable()) return false;
+  const currentDbPath = getDbPath();
+  if (!currentDbPath || currentDbPath === ":memory:") return false;
+  try {
+    return isSameOpenDatabase(currentDbPath, resolveProjectRootDbPath(basePath));
+  } catch {
+    return false;
+  }
+}
+
 export function ensureExistingWorkflowDbOpen(
   basePath: string,
   options: { throwOnOpenFailure?: boolean } = {},

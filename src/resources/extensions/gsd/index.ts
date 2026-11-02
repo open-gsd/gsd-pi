@@ -37,10 +37,19 @@ export default async function registerExtension(pi: ExtensionAPI) {
       return readProjectSnapshotFromDb((input as { cwd: string }).cwd, { preserveGlobalDbHandle: true });
     });
     pi.registerRuntimeRead("project_binding", async (input) => {
-      if (!input || typeof input !== "object" || typeof (input as { cwd?: unknown }).cwd !== "string") {
-        throw new Error("Project binding requires a session CWD");
+      if (
+        !input ||
+        typeof input !== "object" ||
+        typeof (input as { cwd?: unknown }).cwd !== "string" ||
+        typeof (input as { executionCwd?: unknown }).executionCwd !== "string"
+      ) {
+        throw new Error("Project binding requires the session and execution CWDs");
       }
-      return readProjectBindingFromDb((input as { cwd: string }).cwd, { preserveGlobalDbHandle: true });
+      const { cwd, executionCwd } = input as { cwd: string; executionCwd: string };
+      return readProjectBindingFromDb(cwd, {
+        preserveGlobalDbHandle: true,
+        executionPath: executionCwd,
+      });
     });
     // The host-only capability seam is named for reads. The typed workflow
     // command is the one mutation it carries: the RPC `workflow_command`.

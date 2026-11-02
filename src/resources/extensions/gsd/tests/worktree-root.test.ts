@@ -117,6 +117,49 @@ test("resolveWorktreeIdentity rejects a recognized worktree path that is not its
   });
 });
 
+test("resolveWorktreeIdentity rejects an unrelated repository nested under a GSD worktree path", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-identity-unrelated-worktree-"));
+  const projectDir = join(dir, "project");
+  const foreignRepo = join(projectDir, ".gsd", "worktrees", "M001");
+  mkdirSync(projectDir, { recursive: true });
+  execFileSync("git", ["init", projectDir], { stdio: "ignore" });
+  mkdirSync(foreignRepo, { recursive: true });
+  execFileSync("git", ["init", foreignRepo], { stdio: "ignore" });
+
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  assert.deepEqual(resolveWorktreeIdentity(foreignRepo), {
+    projectRoot: realpathSync(projectDir),
+    worktreeRoot: null,
+    status: "partial",
+  });
+});
+
+test("resolveWorktreeIdentity accepts a linked worktree of its owning repository", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-identity-linked-worktree-"));
+  const projectDir = join(dir, "project");
+  const worktree = join(projectDir, ".gsd", "worktrees", "M001");
+  mkdirSync(join(projectDir, ".gsd", "worktrees"), { recursive: true });
+  execFileSync("git", ["init", projectDir], { stdio: "ignore" });
+  execFileSync("git", [
+    "-C", projectDir,
+    "-c", "user.name=GSD Test",
+    "-c", "user.email=gsd-test@example.invalid",
+    "commit", "--allow-empty", "-m", "test base",
+  ], { stdio: "ignore" });
+  execFileSync("git", ["-C", projectDir, "worktree", "add", "--detach", worktree, "HEAD"], {
+    stdio: "ignore",
+  });
+
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  assert.deepEqual(resolveWorktreeIdentity(worktree), {
+    projectRoot: realpathSync(projectDir),
+    worktreeRoot: realpathSync(worktree),
+    status: "verified",
+  });
+});
+
 test("resolveWorktreeIdentity does not claim an unrelated directory as a project root", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "gsd-identity-unrooted-"));
   const cwd = join(dir, "project");

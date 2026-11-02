@@ -131,6 +131,10 @@ describe("extension bootstrap isolation (#4168, #4172)", () => {
       /Project snapshot requires a session CWD/,
     );
     await assert.rejects(
+      async () => runtimeReads.get("project_binding")?.({ cwd: "/workspace/project" }),
+      /Project binding requires the session and execution CWDs/,
+    );
+    await assert.rejects(
       async () => runtimeReads.get("workflow_command")?.({}),
       /Workflow command requires a session CWD/,
     );

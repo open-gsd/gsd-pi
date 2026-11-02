@@ -180,11 +180,15 @@ test("binding read keeps producer identity separate from project authority", asy
 		},
 		"request-binding-1",
 		"/workspace/project",
+		"/workspace/project/.gsd/worktrees/M001",
 		{ sessionId: "session-a", processInstanceId: "process-a" },
 		() => true,
 	);
 
-	assert.deepEqual(receivedInput, { cwd: "/workspace/project" });
+	assert.deepEqual(receivedInput, {
+		cwd: "/workspace/project",
+		executionCwd: "/workspace/project/.gsd/worktrees/M001",
+	});
 	assert.equal(response.success, true);
 	if (!response.success || response.command !== "get_binding_snapshot") assert.fail("expected binding snapshot");
 	assert.deepEqual(response.data.producer, { sessionId: "session-a", processInstanceId: "process-a" });
@@ -203,6 +207,7 @@ test("binding read preserves producer identity when project authority is unavail
 		undefined,
 		"request-binding-2",
 		"/workspace/project",
+		"/workspace/project/.gsd/worktrees/M001",
 		{ sessionId: "session-b", processInstanceId: "process-b" },
 		() => true,
 	);
@@ -219,6 +224,7 @@ test("binding read rejects a torn session read conservatively", async () => {
 		async () => ({ authority: null, projectRoot: null, worktreeRoot: null, rootResolution: "unavailable" }),
 		"request-binding-3",
 		"/workspace/project",
+		"/workspace/project/.gsd/worktrees/M001",
 		{ sessionId: "session-c", processInstanceId: "process-c" },
 		() => false,
 	);
@@ -228,6 +234,6 @@ test("binding read rejects a torn session read conservatively", async () => {
 		type: "response",
 		command: "get_binding_snapshot",
 		success: false,
-		error: "Session or working directory changed during binding read; retry",
+		error: "Session workspace or execution directory changed during binding read; retry",
 	});
 });

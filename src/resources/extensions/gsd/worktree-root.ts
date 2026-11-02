@@ -198,6 +198,7 @@ export function resolveWorktreeIdentity(path: string): WorktreeRootIdentity {
 
     const normalizedGitRoot = normalizeWorktreePathForCompare(gitRoot);
     const candidateWorktreeRoot = worktreeRootFromWorktreePath(path);
+    const resolvedProjectRoot = realpathSync(projectRoot);
     if (candidateWorktreeRoot) {
       if (
         !existsSync(candidateWorktreeRoot) ||
@@ -206,12 +207,22 @@ export function resolveWorktreeIdentity(path: string): WorktreeRootIdentity {
       ) {
         return { projectRoot: null, worktreeRoot: null, status: "partial" };
       }
+
+      const projectCommonDirectory = resolveVerifiedGitCommonDirectory(projectRoot);
+      const worktreeCommonDirectory = resolveVerifiedGitCommonDirectory(candidateWorktreeRoot, gitRoot);
+      if (
+        !projectCommonDirectory ||
+        !worktreeCommonDirectory ||
+        projectCommonDirectory !== worktreeCommonDirectory
+      ) {
+        return { projectRoot: resolvedProjectRoot, worktreeRoot: null, status: "partial" };
+      }
     } else if (!pathIsWithinRoot(gitRoot, projectRoot) || !pathIsWithinRoot(projectRoot, path)) {
       return { projectRoot: null, worktreeRoot: null, status: "partial" };
     }
 
     return {
-      projectRoot: realpathSync(projectRoot),
+      projectRoot: resolvedProjectRoot,
       worktreeRoot: candidateWorktreeRoot ? realpathSync(candidateWorktreeRoot) : null,
       status: "verified",
     };
@@ -222,10 +233,9 @@ export function resolveWorktreeIdentity(path: string): WorktreeRootIdentity {
 
 function resolveVerifiedGitWorkingTreeRoot(path: string): string | null {
   try {
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
     const output = execFileSync("git", ["-C", path, "rev-parse", "--show-toplevel"], {
       encoding: "utf8",
-      env,
+      env: gitEnvironmentWithoutInheritedContext(),
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 2_000,
     });
@@ -234,6 +244,32 @@ function resolveVerifiedGitWorkingTreeRoot(path: string): string | null {
   } catch {
     return null;
   }
+}
+
+function resolveVerifiedGitCommonDirectory(path: string, workingTreeRoot?: string): string | null {
+  const root = workingTreeRoot ?? resolveVerifiedGitWorkingTreeRoot(path);
+  if (!root) return null;
+
+  try {
+    const output = execFileSync("git", ["-C", root, "rev-parse", "--git-common-dir"], {
+      encoding: "utf8",
+      env: gitEnvironmentWithoutInheritedContext(),
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2_000,
+    });
+    const commonDirectory = output.trim();
+    if (!commonDirectory) return null;
+    const absoluteCommonDirectory = isAbsolute(commonDirectory)
+      ? commonDirectory
+      : resolve(root, commonDirectory);
+    return normalizeWorktreePathForCompare(absoluteCommonDirectory);
+  } catch {
+    return null;
+  }
+}
+
+function gitEnvironmentWithoutInheritedContext() {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
 }
 
 function pathIsWithinRoot(root: string, candidate: string): boolean {

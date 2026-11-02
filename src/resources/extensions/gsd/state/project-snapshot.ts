@@ -5,7 +5,10 @@
 // milestone registry — modeled on readProgressFromDb.
 
 import { deriveState, invalidateStateCache } from "./derive/index.js";
-import { ensureExistingWorkflowDbOpen } from "./derive/db-open.js";
+import {
+  ensureExistingWorkflowDbOpen,
+  isWorkflowDbBoundToBasePath,
+} from "./derive/db-open.js";
 import { noteSessionRead } from "../db/domain-operation.js";
 import {
   _getAdapter,
@@ -90,9 +93,13 @@ export interface ReadProjectSnapshotOptions {
   preserveGlobalDbHandle?: boolean;
 }
 
+export interface ReadProjectBindingOptions extends ReadProjectSnapshotOptions {
+  executionPath?: string;
+}
+
 /** Read identity evidence without treating path or authority as session identity. */
-export function readProjectBindingFromDb(basePath: string, opts: ReadProjectSnapshotOptions = {}): RpcProjectBindingRead {
-  const rootEvidence = resolveWorktreeIdentity(basePath);
+export function readProjectBindingFromDb(basePath: string, opts: ReadProjectBindingOptions = {}): RpcProjectBindingRead {
+  const rootEvidence = resolveWorktreeIdentity(opts.executionPath ?? basePath);
   const roots = {
     projectRoot: rootEvidence.projectRoot,
     worktreeRoot: rootEvidence.worktreeRoot,
@@ -103,6 +110,14 @@ export function readProjectBindingFromDb(basePath: string, opts: ReadProjectSnap
   try {
     const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath);
     if (!openedRequestedDb || !isDbAvailable()) {
+      return { authority: null, ...roots };
+    }
+
+    if (
+      rootEvidence.status === "partial" ||
+      (rootEvidence.status === "verified" &&
+        (!rootEvidence.projectRoot || !isWorkflowDbBoundToBasePath(rootEvidence.projectRoot)))
+    ) {
       return { authority: null, ...roots };
     }
 

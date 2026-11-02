@@ -707,6 +707,82 @@ test("readProjectBindingFromDb marks authority authoritative only with a verifie
   assert.equal(binding.rootResolution, "verified");
 });
 
+test("readProjectBindingFromDb rejects authority from a mismatched project-root override", async (t) => {
+  const projectA = await createWorkflowAuthorityFixture();
+  const projectB = await createWorkflowAuthorityFixture();
+  const previousProjectRoot = process.env.GSD_PROJECT_ROOT;
+  const worktreePath = join(projectA.root, ".gsd", "worktrees", "M001");
+  t.after(() => {
+    if (previousProjectRoot === undefined) {
+      delete process.env.GSD_PROJECT_ROOT;
+    } else {
+      process.env.GSD_PROJECT_ROOT = previousProjectRoot;
+    }
+    projectA.cleanup();
+    projectB.cleanup();
+  });
+
+  projectA.reopen();
+  const projectAId = fixtureProjectId();
+  projectB.reopen();
+  const projectBId = fixtureProjectId();
+  mkdirSync(join(projectA.root, ".gsd", "worktrees"), { recursive: true });
+  execFileSync("git", ["init", projectA.root], { stdio: "ignore" });
+  execFileSync("git", [
+    "-C", projectA.root,
+    "-c", "user.name=GSD Test",
+    "-c", "user.email=gsd-test@example.invalid",
+    "commit", "--allow-empty", "-m", "test base",
+  ], { stdio: "ignore" });
+  execFileSync("git", ["-C", projectA.root, "worktree", "add", "--detach", worktreePath, "HEAD"], {
+    stdio: "ignore",
+  });
+
+  process.env.GSD_PROJECT_ROOT = projectB.root;
+  const mismatched = readProjectBindingFromDb(worktreePath, {
+    preserveGlobalDbHandle: true,
+    executionPath: worktreePath,
+  });
+  assert.equal(mismatched.authority, null);
+  assert.equal(mismatched.projectRoot, projectA.root);
+  assert.equal(mismatched.worktreeRoot, worktreePath);
+  assert.equal(mismatched.rootResolution, "verified");
+
+  process.env.GSD_PROJECT_ROOT = projectA.root;
+  const matched = readProjectBindingFromDb(worktreePath, {
+    preserveGlobalDbHandle: true,
+    executionPath: worktreePath,
+  });
+  assert.equal(matched.authority?.projectId, projectAId);
+  assert.equal(getProjectAuthorityRow()?.projectId, projectBId, "the prior process-global DB handle is restored");
+});
+
+test("readProjectBindingFromDb drops authority for an unrelated repository under a worktree path", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  const previousProjectRoot = process.env.GSD_PROJECT_ROOT;
+  const foreignRepo = join(fixture.root, ".gsd", "worktrees", "M001");
+  t.after(() => {
+    if (previousProjectRoot === undefined) {
+      delete process.env.GSD_PROJECT_ROOT;
+    } else {
+      process.env.GSD_PROJECT_ROOT = previousProjectRoot;
+    }
+    fixture.cleanup();
+  });
+
+  process.env.GSD_PROJECT_ROOT = fixture.root;
+  execFileSync("git", ["init", fixture.root], { stdio: "ignore" });
+  mkdirSync(foreignRepo, { recursive: true });
+  execFileSync("git", ["init", foreignRepo], { stdio: "ignore" });
+
+  const binding = readProjectBindingFromDb(foreignRepo, { executionPath: foreignRepo });
+
+  assert.equal(binding.authority, null);
+  assert.equal(binding.projectRoot, fixture.root);
+  assert.equal(binding.worktreeRoot, null);
+  assert.equal(binding.rootResolution, "partial");
+});
+
 test("readProjectBindingFromDb keeps project authority separate from unverified path evidence", async (t) => {
   const fixture = await createWorkflowAuthorityFixture();
   t.after(() => fixture.cleanup());

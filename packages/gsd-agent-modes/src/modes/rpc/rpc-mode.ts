@@ -104,10 +104,19 @@ function isRpcProjectBindingRead(value: unknown): value is RpcProjectBindingRead
 	);
 }
 
+function safeProcessCwd(): string | null {
+	try {
+		return process.cwd();
+	} catch {
+		return null;
+	}
+}
+
 export async function invokeProjectBindingRead(
 	handler: ((input: unknown) => Promise<unknown>) | undefined,
 	id: string | undefined,
 	cwd: string,
+	executionCwd: string,
 	producer: RpcBindingSnapshot["producer"],
 	isCurrent: () => boolean,
 ): Promise<RpcResponse> {
@@ -115,7 +124,7 @@ export async function invokeProjectBindingRead(
 	let projectStatus: RpcBindingSnapshot["projectStatus"] = "unavailable";
 	if (handler) {
 		try {
-			const result = await handler({ cwd });
+			const result = await handler({ cwd, executionCwd });
 			if (isRpcProjectBindingRead(result)) {
 				project = result;
 				projectStatus = result.authority && result.rootResolution === "verified" ? "authoritative" : "partial";
@@ -131,7 +140,7 @@ export async function invokeProjectBindingRead(
 			type: "response",
 			command: "get_binding_snapshot",
 			success: false,
-			error: "Session or working directory changed during binding read; retry",
+			error: "Session workspace or execution directory changed during binding read; retry",
 		};
 	}
 
@@ -755,13 +764,21 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				}
 				const sessionId = session.sessionId;
 				const cwd = session.sessionManager.getCwd();
+				const executionCwd = safeProcessCwd();
+				if (executionCwd === null) {
+					return error(id, "get_binding_snapshot", "Execution working directory is unavailable");
+				}
 				const handler = extensionsReady ? session.extensionRunner?.getRuntimeReadHandler("project_binding") : undefined;
 				return await invokeProjectBindingRead(
 					handler,
 					id,
 					cwd,
+					executionCwd,
 					{ sessionId, processInstanceId },
-					() => session.sessionId === sessionId && session.sessionManager.getCwd() === cwd,
+					() =>
+						session.sessionId === sessionId &&
+						session.sessionManager.getCwd() === cwd &&
+						safeProcessCwd() === executionCwd,
 				);
 			}
 
