@@ -178,7 +178,7 @@ node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs \
   src/resources/extensions/gsd/tests/notifications.test.ts
 ```
 
-The resolver redirects imports to built artifacts, so source SHA alone is insufficient to identify what it tests. VS Code's package test script is `node --experimental-strip-types --test "test/*.test.ts"`; use its package workflow only if that surface changes. No tests, installs, builds or runtime experiments were performed for this proposal.
+The repository resolver redirects covered workspace and extension imports to TypeScript source; this is a source-level test command, not proof of a built or installed artifact. Record build/runtime artifact identity separately for host acceptance. VS Code's package test script is `node --experimental-strip-types --test "test/*.test.ts"`; use its package workflow only if that surface changes. No tests, installs, builds or runtime experiments were performed for this proposal.
 
 ## Required host evidence and approval receipt
 
