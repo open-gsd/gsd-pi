@@ -350,6 +350,59 @@ describe('hasBrowserRequiredText — LLM snapshot wording', () => {
   });
 });
 
+describe('hasBrowserRequiredText — data-artifact snapshot wording', () => {
+  // #3055 (#766 → #2081 → #2436 → #2909 follow-up): "calibration snapshot",
+  // "telemetry snapshot", "cost snapshot" — data/report artifacts — satisfied
+  // none of the DB/LLM/desktop guards, so headless CLI milestones whose
+  // planning text uses "snapshot" for a data artifact escalated to
+  // browser-required and gsd_validate_milestone `verdict: pass` became
+  // unreachable. A data-artifact word forming the compound directly before
+  // `snapshot` joins the adjacent-only exclusion guards, like the LLM words.
+  test('data/report snapshot compounds are not browser requirements', () => {
+    assert.ok(
+      !hasBrowserRequiredText(
+        '- A sanitized versioned calibration snapshot retains every completed telemetry row, distinguishes repeated attempts, records capture time and source-byte SHA-256, and reconciles row/model/unit-type totals with executable assertions.',
+      ),
+      'the reported calibration-snapshot acceptance line must not escalate',
+    );
+    assert.ok(!hasBrowserRequiredText('a telemetry snapshot'), 'telemetry snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('a cost snapshot of the ledger'), 'cost snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('calibration-snapshot versioning'), 'hyphenated compound must not escalate');
+    assert.ok(!hasBrowserRequiredText('metrics snapshot per run'), 'metrics snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('ledger snapshot before closeout'), 'ledger snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('report snapshot attached to the milestone'), 'report snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('store the calibrated snapshot per run'), 'calibrated snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('the reporting snapshot lands with the milestone'), 'reporting snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('calibration  snapshot retention'), 'double-spaced compound must not escalate');
+  });
+
+  test('data words not forming the compound do not suppress a browser snapshot', () => {
+    assert.ok(
+      hasBrowserRequiredText('Review the calibration report, then take a page snapshot.'),
+      'page snapshot beside calibration wording must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Check the telemetry dashboard, then capture a DOM snapshot.'),
+      'DOM snapshot beside telemetry wording must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('take a browser snapshot of the cost ledger view'),
+      'browser snapshot of a ledger view must escalate',
+    );
+  });
+
+  test('browser-qualified data compounds escalate through their browser token', () => {
+    assert.ok(
+      hasBrowserRequiredText('Capture a page metrics snapshot with Playwright.'),
+      'Playwright-qualified metrics snapshot must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('open the browser and check the calibration snapshot'),
+      'browser-qualified calibration snapshot must escalate',
+    );
+  });
+});
+
 describe('hasBrowserRequiredText — desktop screenshot/snapshot wording', () => {
   // #2909 (#766 → #2081 → #2436 follow-up): `screenshot` sat unconditionally in
   // the first alternation, so desktop-app acceptance texts ("the farm saves a

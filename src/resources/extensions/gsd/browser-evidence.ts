@@ -15,20 +15,27 @@ const BROWSER_TOOL_SIGNAL = `browser_(?:${
 // lines, so requiring nearby context broke wrapped ("Take a rendered page\nsnapshot")
 // and labeled ("Browser: take a snapshot") UAT lines, plus vocabulary like
 // "accessibility snapshot". Instead, drop the match when the snapshot names
-// database/backup work (#2081, #766 follow-up), LLM-runtime work (#2436), or
-// desktop/graphics work (#2909): a DB-CLI verb immediately follows ("snapshot
-// create", "snapshot restore-check"), a database-ish word shares the clause
-// ("database snapshot", "purge / snapshot / export"), or an unambiguous
-// LLM/desktop word forms a compound directly before it ("prompt snapshot",
-// "byte-snapshot", "save snapshot", "state snapshot" unless browser-qualified —
-// "browser/DOM state snapshot" are genuine Playwright steps). Clause-bounded
-// like NEGATED_BROWSER_CLAUSE_RE. LLM and save words are adjacent-only — they
-// double as browser vocabulary ("dismiss the prompt, then take an accessibility
-// snapshot"; "save a visual snapshot of the layout") — and the ambiguous ones
+// database/backup work (#2081, #766 follow-up), LLM-runtime work (#2436),
+// desktop/graphics work (#2909), or data/report artifacts (#3055): a DB-CLI
+// verb immediately follows ("snapshot create", "snapshot restore-check"), a
+// database-ish word shares the clause ("database snapshot", "purge / snapshot /
+// export"), or an unambiguous LLM/desktop/data word forms a compound directly
+// before it ("prompt snapshot", "byte-snapshot", "save snapshot", "state
+// snapshot" unless browser-qualified — "browser/DOM state snapshot" are genuine
+// Playwright steps; "calibration snapshot", "telemetry snapshot", "cost
+// snapshot", "ledger/metrics/report snapshot"). Clause-bounded
+// like NEGATED_BROWSER_CLAUSE_RE. LLM, save, and data words are adjacent-only —
+// they double as browser vocabulary ("dismiss the prompt, then take an
+// accessibility snapshot"; "review the telemetry dashboard, then take a page
+// snapshot") — and the ambiguous ones
 // are left out entirely ("context snapshot"; "save a ... snapshot" with a
-// modifier). Extend on evidence like #766→#2081→#2436→#2909.
+// modifier). A browser-qualified data compound ("page metrics snapshot with
+// Playwright") still escalates through its explicit browser token; without
+// one it stays suppressed — the same accepted exposure as the LLM guard
+// (#2436). Extend on evidence like #766→#2081→#2436→#2909→#3055.
 const DB_SNAPSHOT_TERMS = String.raw`(?:databases?|db|backups?|export)`;
 const LLM_SNAPSHOT_TERMS = String.raw`(?:prompts?|templates?|models?|conversations?|configs?)`;
+const DATA_SNAPSHOT_TERMS = String.raw`(?:calibrations?|calibrated|telemetry|costs?|ledgers?|metrics?|reporting|reports?)`;
 const DB_SNAPSHOT_VERB = String.raw`(?:create|restore|export|purge|import|prune|verify)`;
 const SNAPSHOT_SAVE_TERMS = String.raw`(?:sav(?:e|es|ed|ing))`;
 
@@ -59,7 +66,7 @@ export const BROWSER_REQUIREMENT_RE = new RegExp(
     String.raw`|(?<=\b${SCREENSHOT_BROWSER_CONTEXT}\b[^.;:!?]{0,80})\bscreenshot\b` +
     String.raw`|\bscreenshot\b(?=[^.;:!?]{0,80}\b${SCREENSHOT_BROWSER_CONTEXT}\b)` +
     String.raw`|(?<!\b${GRAPHICS_SCREENSHOT_TERMS}[\s-]?)(?<!\b${SCREENSHOT_FILE_VERBS}(?:[\s-]+(?:a|an|the|its|their|each|every))?[\s-]+)\bscreenshot\b(?![\s-]+(?:renderers?|rendering|pipelines?|atlas(?:es)?|frame\s?-?buffers?|pixels?|gpu|canvases?|bitmaps?|files?)\b)` +
-    String.raw`|(?<!\b${DB_SNAPSHOT_TERMS}\b[^.;:!?]{0,60})(?<!\b${LLM_SNAPSHOT_TERMS}\s+)(?<!\bbytes?[\s-]?)(?<!\b${SNAPSHOT_SAVE_TERMS}[\s-]+)(?<!\b(?!(?:browsers?|dom|pages?|tabs?|ui|accessibility|viewport)\b)\w+\s+states?\s+)\bsnapshot\b(?!\s+(?:${DB_SNAPSHOT_VERB})\b)(?![^.;:!?]{0,60}\b${DB_SNAPSHOT_TERMS}\b)` +
+    String.raw`|(?<!\b${DB_SNAPSHOT_TERMS}\b[^.;:!?]{0,60})(?<!\b${LLM_SNAPSHOT_TERMS}\s+)(?<!\b${DATA_SNAPSHOT_TERMS}[\s-]+)(?<!\bbytes?[\s-]?)(?<!\b${SNAPSHOT_SAVE_TERMS}[\s-]+)(?<!\b(?!(?:browsers?|dom|pages?|tabs?|ui|accessibility|viewport)\b)\w+\s+states?\s+)\bsnapshot\b(?!\s+(?:${DB_SNAPSHOT_VERB})\b)(?![^.;:!?]{0,60}\b${DB_SNAPSHOT_TERMS}\b)` +
     String.raw`|\bin\s+(?:the\s+)?browser\b` +
     String.raw`|\b(?:open|launch|navigate|load|visit|serve|start)\b.{0,80}\b(?:browser|page|localhost|file://)\b|\bbrowser\s+(?:check|session|test|uat|tool|automation|interaction|flow)\b`,
   "i",
