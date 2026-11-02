@@ -104,8 +104,10 @@ test("standalone error output retains a genuine historical recording warning", (
     assert.match(normalized, /database offline/);
     assert.match(normalized, /not verification or UAT evidence/);
     assert.match(normalized, /Do not run the command again only to get the output/);
-  }
 
-  const nativeOwned = renderExecResult(result, { expanded: false }, theme, { state: { gsdExecRecordingWarningInFrame: true } }).render(40).join("\n");
-  assert.doesNotMatch(nativeOwned, /database offline/);
+    const nativeOwned = renderExecResult(result, { expanded }, theme, { state: { gsdExecRecordingWarningInFrame: true } }).render(40).join("\n");
+    const normalizedOwned = nativeOwned.replace(/\s+/g, " ");
+    assert.match(normalizedOwned, /error line 0/);
+    assert.doesNotMatch(normalizedOwned, /database offline|host did not record|not verification or UAT evidence/);
+  }
 });
