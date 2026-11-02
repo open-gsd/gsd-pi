@@ -1696,6 +1696,7 @@ export class TUI extends Container {
 				newLines,
 				newTop,
 				TUI.repairCompoundShrink(baseLines, newLines, newTop, top, height) ??
+					TUI.hiddenEditTop(baseLines, newLines, newTop, top, height) ??
 					TUI.firstChangeTop(baseLines, newLines, newTop, top, height),
 			);
 		}
@@ -1724,8 +1725,109 @@ export class TUI extends Container {
 		const alignedTop =
 			TUI.repairShiftedOverlap(baseLines, newLines, newTop, top) ??
 			TUI.repairCompoundShrink(baseLines, newLines, newTop, top, height) ??
+			TUI.hiddenEditTop(baseLines, newLines, newTop, top, height) ??
 			TUI.firstChangeTop(baseLines, newLines, newTop, top, height);
 		return TUI.alignedTopWithoutImages(newLines, newTop, alignedTop);
+	}
+
+	/**
+	 * Repaint from where the old screen-top row went when the rows above it
+	 * are already in scrollback. firstChangeTop repaints from the first
+	 * changed row, which shows the change but also prints every unchanged row
+	 * between it and the old screen top a second time, and refuses outright
+	 * when the frame also changed far above (the refill then re-emits the
+	 * whole overlap). Seen at turn end, when a tool card that had just
+	 * scrolled off folds into its summary, or a reply row just above the
+	 * screen is re-rendered, while the pinned zone below is torn down in the
+	 * same frame: the rows in between appear twice. When the change is a few
+	 * rows further up (above the new viewport top) the existing paths already
+	 * leave it hidden in scrollback, as every unforced render does (#2582);
+	 * this extends that rule to changes inside the overlap whenever showing
+	 * them would print unchanged rows again, so the outcome no longer depends
+	 * on how far the change had scrolled off. A change that can be shown
+	 * without any row reading twice is left to firstChangeTop.
+	 *
+	 * seamRowInNewFrame aligns the frames with an order-preserving diff
+	 * (#3020): every surviving row of the old screen lands at or below the
+	 * returned row, so painting from it destroys nothing unflushed, and no row
+	 * at or below it is a scrollback row, so nothing prints twice. Rows above
+	 * it are not repainted: the unchanged ones are in scrollback, the changed
+	 * ones stay stale there. Edits on the screen are simply repainted. Blank
+	 * rows are capped at half the screen (#613) and the removed-value guard is
+	 * repairCompoundShrink's. Returns null when the seam did not move into
+	 * the overlap or a check fails; firstChangeTop and the refill stay as
+	 * fallbacks.
+	 */
+	private static hiddenEditTop(
+		baseLines: string[],
+		newLines: string[],
+		newTop: number,
+		top: number,
+		height: number,
+	): number | null {
+		const newLen = newLines.length;
+		const seam = TUI.seamRowInNewFrame(baseLines, newLines, top);
+		if (seam === null || seam <= newTop || seam > top) {
+			return null;
+		}
+		// Prefer showing the change when that prints nothing twice: when the
+		// first change is inside the overlap, firstChangeTop repaints from it,
+		// and that is fine unless a row it repaints reads the same as one of
+		// the old rows it lands below (an unchanged row, or a re-render that
+		// changed only styling), which the reader sees twice.
+		const limit = Math.min(top, newLen, baseLines.length);
+		let first = 0;
+		while (first < limit && newLines[first] === baseLines[first]) {
+			first++;
+		}
+		if (first >= newTop) {
+			const old = new Set<string>();
+			for (let i = first; i < top; i++) old.add(TUI.visibleText(baseLines[i] ?? ""));
+			let readsTwice = false;
+			for (let i = first; i < seam && !readsTwice; i++) {
+				const text = TUI.visibleText(newLines[i] ?? "");
+				readsTwice = text !== "" && old.has(text);
+			}
+			if (!readsTwice) {
+				return null;
+			}
+		}
+		const skip = seam - newTop;
+		let tail = 0;
+		while (tail < newLen && TUI.isVisuallyBlank(newLines[newLen - 1 - tail] ?? "")) {
+			tail++;
+		}
+		if (skip + Math.min(tail, height - skip) > Math.floor(height / 2)) {
+			return null;
+		}
+		let anchored = false;
+		for (let i = seam; i < newLen && !anchored; i++) {
+			anchored = visibleWidth(newLines[i] ?? "") > 0;
+		}
+		if (!anchored) {
+			return null;
+		}
+		// Removed-value guard (repairCompoundShrink's): a value the repaint
+		// removes from the screen that the new frame still shows above the seam
+		// may exist there only as a hidden, never-printed copy, so refuse
+		// rather than risk losing its last physical copy.
+		const remaining = new Map<string, number>();
+		for (let i = top; i < Math.min(baseLines.length, top + height); i++) {
+			const value = baseLines[i] ?? "";
+			remaining.set(value, (remaining.get(value) ?? 0) + 1);
+		}
+		for (let i = seam; i < newLen; i++) {
+			const value = newLines[i] ?? "";
+			remaining.set(value, (remaining.get(value) ?? 0) - 1);
+		}
+		const above = new Set<string>();
+		for (let i = 0; i < seam; i++) above.add(newLines[i] ?? "");
+		for (const [value, count] of remaining) {
+			if (count > 0 && visibleWidth(value) > 0 && above.has(value)) {
+				return null;
+			}
+		}
+		return seam;
 	}
 
 	/**
@@ -1744,9 +1846,14 @@ export class TUI extends Container {
 	 * least at the physical top), and every row from `first` down is painted,
 	 * so the terminal shows the whole new frame. The refill leaves the same
 	 * stale rows and re-emits new[newTop, first) on top. Blank rows at the
-	 * bottom are capped like repairCompoundShrink's (#613). Returns null when
-	 * the first change is not inside the overlap (other paths own those) or
-	 * the cap would be exceeded.
+	 * bottom are capped like repairCompoundShrink's (#613). The first change
+	 * may also be the old screen-top row itself (a card whose first row was
+	 * the screen top folding into its summary): every row above it is then
+	 * unchanged scrollback, and the overlap check refuses only because the
+	 * seam row differs, so repainting from it prints nothing twice where the
+	 * refill re-emitted the whole overlap. Returns null when the first change
+	 * is outside [newTop, top] (other paths own those) or the cap would be
+	 * exceeded.
 	 */
 	private static firstChangeTop(
 		baseLines: string[],
@@ -1760,7 +1867,7 @@ export class TUI extends Container {
 		while (first < limit && newLines[first] === baseLines[first]) {
 			first++;
 		}
-		if (first < newTop || first >= top) {
+		if (first < newTop || first > top) {
 			return null;
 		}
 		// Removed-value guard (mirror of repairCompoundShrink's): rows
@@ -2116,6 +2223,21 @@ export class TUI extends Container {
 			}
 		}
 		return null;
+	}
+
+	/** What the terminal shows for a line: its text without escape sequences or trailing whitespace. */
+	private static visibleText(line: string): string {
+		let text = "";
+		for (let i = 0; i < line.length; ) {
+			const ansi = extractAnsiCode(line, i);
+			if (ansi) {
+				i += ansi.length;
+				continue;
+			}
+			text += line[i];
+			i++;
+		}
+		return text.trimEnd();
 	}
 
 	/** Whether a rendered line shows nothing — no visible non-blank cell. */
