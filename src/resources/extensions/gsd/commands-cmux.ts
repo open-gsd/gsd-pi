@@ -56,10 +56,11 @@ async function writeProjectCmuxPreferences(
   ctx: ExtensionCommandContext,
   updater: (prefs: Record<string, unknown>) => void,
 ): Promise<void> {
-  const path = resolveProjectPreferencesWritePath();
+  const basePath = ctx.sessionManager?.getCwd() ?? ctx.cwd;
+  const path = resolveProjectPreferencesWritePath(basePath);
   await ensurePreferencesFile(path, ctx, "project");
 
-  const existing = loadProjectGSDPreferences();
+  const existing = loadProjectGSDPreferences(basePath);
   const prefs: Record<string, unknown> = existing?.preferences ? { ...existing.preferences } : { version: 1 };
   updater(prefs);
   prefs.version = prefs.version || 1;
@@ -81,10 +82,10 @@ function resolveProjectPreferencesWritePath(basePath?: string): string {
   return loadProjectGSDPreferences(basePath)?.path ?? getProjectGSDPreferencesPath(basePath);
 }
 
-async function formatCmuxStatus(): Promise<string> {
+async function formatCmuxStatus(basePath?: string): Promise<string> {
   const { CmuxClient, detectCmuxEnvironment, resolveCmuxConfig } =
     await import("../cmux/index.js");
-  const loaded = loadEffectiveGSDPreferences();
+  const loaded = loadEffectiveGSDPreferences(basePath);
   const detected = detectCmuxEnvironment();
   const resolved = resolveCmuxConfig(loaded?.preferences);
   const capabilities = new CmuxClient(resolved).getCapabilities() as Record<string, unknown> | null;
@@ -122,8 +123,9 @@ async function ensureCmuxAvailableForEnable(ctx: ExtensionCommandContext): Promi
 
 export async function handleCmux(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const trimmed = args.trim();
+  const basePath = ctx.sessionManager?.getCwd() ?? ctx.cwd;
   if (!trimmed || trimmed === "status") {
-    ctx.ui.notify(await formatCmuxStatus(), "info");
+    ctx.ui.notify(await formatCmuxStatus(basePath), "info");
     return;
   }
 
@@ -146,7 +148,7 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
   }
 
   if (trimmed === "off") {
-    const effective = loadEffectiveGSDPreferences()?.preferences;
+    const effective = loadEffectiveGSDPreferences(basePath)?.preferences;
     await writeProjectCmuxPreferences(ctx, (prefs) => {
       prefs.cmux = { ...((prefs.cmux as Record<string, unknown> | undefined) ?? {}), enabled: false };
     });
@@ -171,7 +173,7 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
 
     if (!enabled && feature === "sidebar") {
       const { clearCmuxSidebar } = await import("../cmux/index.js");
-      clearCmuxSidebar(loadEffectiveGSDPreferences()?.preferences);
+      clearCmuxSidebar(loadEffectiveGSDPreferences(basePath)?.preferences);
     }
 
     const note = feature === "browser" && enabled

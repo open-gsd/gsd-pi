@@ -159,6 +159,26 @@ describe("autoEnableCmuxPreferences", () => {
     assert.ok(notices.some(message => message.includes("cmux vault disabled")));
   });
 
+  test("Vault commands update the resumed session's project rather than the launch cwd", async () => {
+    const otherProject = path.join(tmp, "resumed-project");
+    fs.mkdirSync(path.join(otherProject, ".gsd"), { recursive: true });
+    const content = "---\nversion: 1\ncmux:\n  enabled: true\n  vault: true\n---\n";
+    const launchPrefs = path.join(tmp, ".gsd", "preferences.md");
+    const sessionPrefs = path.join(otherProject, ".gsd", "preferences.md");
+    fs.writeFileSync(launchPrefs, content);
+    fs.writeFileSync(sessionPrefs, content);
+    clearGSDPreferencesCache();
+    await handleCmux("vault off", {
+      cwd: tmp,
+      sessionManager: { getCwd: () => otherProject },
+      ui: { notify() {} },
+      waitForIdle: async () => {},
+      reload: async () => {},
+    } as any);
+    assert.match(fs.readFileSync(sessionPrefs, "utf8"), /vault: false/);
+    assert.equal(fs.readFileSync(launchPrefs, "utf8"), content);
+  });
+
   test("Vault on command opts in explicitly, and master off disables it without losing the choice", async (t) => {
     const prefsPath = path.join(tmp, ".gsd", "preferences.md");
     fs.writeFileSync(prefsPath, "---\nversion: 1\ncmux:\n  enabled: false\n  sidebar: false\n---\n");
@@ -373,6 +393,7 @@ describe("CmuxClient stdio isolation", () => {
         sidebar: true,
         splits: true,
         browser: false,
+        vault: false,
         workspaceId: "workspace-1",
         surfaceId: "surface-0",
         socketPath: "/tmp/cmux.sock",
@@ -432,6 +453,7 @@ describe("CmuxClient surface id parsing (current cmux CLI output shapes, #2050 r
       sidebar: true,
       splits: true,
       browser: false,
+      vault: false,
       workspaceId: "workspace:1000040001",
       surfaceId: "surface:1000040003",
       socketPath: "/tmp/cmux.sock",
