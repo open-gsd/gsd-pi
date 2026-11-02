@@ -121,6 +121,16 @@ describe("checkVerifyPathOperands", () => {
     );
   });
 
+  test("treats unquoted newlines as command separators", () => {
+    scaffold("test/");
+    const results = checkVerifyPathOperands(
+      [createTask({ verify: "grep -q ok README.md\ncat test/missing.txt" })],
+      isolatedBase,
+    );
+    assert.equal(results.length, 1);
+    assert.match(results[0].message, /test\/missing\.txt/);
+  });
+
   test("keeps quoted separators and escaped quotes opaque", () => {
     assert.deepEqual(
       extractVerifyPathOperands('node -e "say \\"hello\\"; test/quoted" && cat test/real.txt'),
@@ -142,6 +152,57 @@ describe("checkVerifyPathOperands", () => {
       ),
       ["test/input", "test/next", "test/last"],
     );
+  });
+
+  test("accepts files created by preceding output redirections", () => {
+    scaffold("test/");
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "printf ok > test/smoke.txt && cat test/smoke.txt" })],
+        isolatedBase,
+      ),
+      [],
+    );
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "printf ok > test/smoke.txt && cat test/missing.txt" })],
+        isolatedBase,
+      ).map(({ message }) => message.match(/'([^']+)'/)?.[1]),
+      ["test/missing.txt"],
+    );
+  });
+
+  test("does not treat find predicates as required input paths", () => {
+    scaffold("test/");
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "find test -path test/obsolete.txt -print" })],
+        isolatedBase,
+      ),
+      [],
+    );
+    assert.equal(
+      checkVerifyPathOperands([createTask({ verify: "find test/missing -print" })], isolatedBase).length,
+      1,
+    );
+  });
+
+  test("ignores Go recursive package patterns", () => {
+    scaffold("pkg/");
+    assert.deepEqual(
+      checkVerifyPathOperands([createTask({ verify: "go test ./pkg/..." })], isolatedBase),
+      [],
+    );
+  });
+
+  test("skips generated output option values", () => {
+    scaffold("test/existing.py", "test/existing.js");
+    for (const verify of [
+      "pytest --junitxml test/results.xml test/existing.py",
+      "node --test-reporter-destination test/report.xml test/existing.js",
+    ]) {
+      assert.deepEqual(checkVerifyPathOperands([createTask({ verify })], isolatedBase), [], verify);
+    }
   });
 
   test("strips test-runner selectors and deduplicates missing paths", () => {
@@ -172,6 +233,108 @@ describe("checkVerifyPathOperands", () => {
       ["test/db"],
     );
     assert.deepEqual(extractVerifyPathOperands('mkdir -p "test/smoke" && test -d test/smoke'), []);
+  });
+
+  test("accepts descendants copied from a known directory and checks unknown descendants", () => {
+    scaffold("test/fixtures/case.txt", "test/");
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "cp -R test/fixtures test/run && test -f test/run/case.txt" })],
+        isolatedBase,
+      ),
+      [],
+    );
+    assert.equal(
+      checkVerifyPathOperands(
+        [createTask({ verify: "cp -R test/fixtures test/run && test -f test/run/missing.txt" })],
+        isolatedBase,
+      ).length,
+      1,
+    );
+  });
+
+  test("resolves relative operands from a literal cd working directory", () => {
+    scaffold("src/", "packages/api/src/ready.txt");
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "cd packages/api && cat src/ready.txt" })],
+        isolatedBase,
+      ),
+      [],
+    );
+    assert.equal(
+      checkVerifyPathOperands(
+        [createTask({ verify: "cd packages/api && cat src/missing.txt" })],
+        isolatedBase,
+      ).length,
+      1,
+    );
+  });
+
+  test("resets cd state across newline and pipeline execution contexts", () => {
+    scaffold("src/root.txt", "packages/api/");
+    for (const verify of [
+      "cd packages/api\ncat src/root.txt",
+      "cd packages/api | cat && cat src/root.txt",
+    ]) {
+      assert.deepEqual(checkVerifyPathOperands([createTask({ verify })], isolatedBase), [], verify);
+    }
+  });
+
+  test("does not interpret quoted redirection operators as shell syntax", () => {
+    scaffold("test/");
+    const results = checkVerifyPathOperands(
+      [createTask({ verify: "cmp '>' test/missing.txt" })],
+      isolatedBase,
+    );
+    assert.equal(results.length, 1);
+    assert.match(results[0].message, /test\/missing\.txt/);
+  });
+
+  test("anchors Git refs before resolving them from a nested cd directory", () => {
+    scaffold("packages/api/");
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "cd packages/api && git diff origin/main" })],
+        isolatedBase,
+      ),
+      [],
+    );
+  });
+
+  test("does not let later writes satisfy earlier reads", () => {
+    scaffold("test/");
+    const results = checkVerifyPathOperands(
+      [createTask({ verify: "cat test/later.txt && touch test/later.txt" })],
+      isolatedBase,
+    );
+    assert.equal(results.length, 1);
+    assert.match(results[0].message, /test\/later\.txt/);
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "touch test/later.txt && cat test/later.txt" })],
+        isolatedBase,
+      ),
+      [],
+    );
+  });
+
+  test("maps recursive copies under existing destinations to the source basename", () => {
+    scaffold("test/fixtures/case.txt", "test/run/");
+    assert.deepEqual(
+      checkVerifyPathOperands(
+        [createTask({ verify: "mkdir -p test/run && cp -R test/fixtures test/run && test -f test/run/fixtures/case.txt" })],
+        isolatedBase,
+      ),
+      [],
+    );
+    assert.equal(
+      checkVerifyPathOperands(
+        [createTask({ verify: "mkdir -p test/run && cp -R test/fixtures test/run && test -f test/run/case.txt" })],
+        isolatedBase,
+      ).length,
+      1,
+    );
   });
 
   test("ignores absence assertions and search patterns even when anchored", () => {
