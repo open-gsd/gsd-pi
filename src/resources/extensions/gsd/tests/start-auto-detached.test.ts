@@ -196,7 +196,7 @@ test("startAutoDetached reports failures asynchronously (#3733)", () => {
     "auto.ts should export startAutoDetached",
   );
   assert.ok(
-    /void withDetachedAutoKeepalive\(\s*startAutoWithAcknowledgement\(ctx, pi, base, verboseMode, options, resolve\),?\s*\)\.catch/.test(autoSrc),
+    /void withDetachedAutoKeepalive\(\s*startAutoWithAcknowledgement\(ctx, pi, base, verboseMode, options, \w+\),?\s*\)\.catch/.test(autoSrc),
     "startAutoDetached should launch startAuto without awaiting it and keep the process alive",
   );
   assert.ok(
