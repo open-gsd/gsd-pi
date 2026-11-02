@@ -150,7 +150,7 @@ import {
 import { getInstalledSkillNames } from "./skills.js";
 import { effectiveSkillNamesForUnit } from "./skill-scope.js";
 import { getRtkSessionSavings } from "../shared/rtk-session-stats.js";
-import { deactivateGSD } from "../shared/gsd-phase-state.js";
+import { activateGSD, deactivateGSD } from "../shared/gsd-phase-state.js";
 import {
   initMetrics,
   resetMetrics,
@@ -3543,6 +3543,10 @@ async function startAutoImplementation(
     }
 
     s.paused = false;
+    // pauseAuto() deactivated the shared phase state; re-activate it with the
+    // session, as bootstrapAutoSession does on a fresh start. Otherwise every
+    // unit's setCurrentPhase() is refused until the next fresh start (#3084).
+    activateGSD();
     s.active = true;
     s.verbose = verboseMode;
     s.stepMode = requestedStepMode;
