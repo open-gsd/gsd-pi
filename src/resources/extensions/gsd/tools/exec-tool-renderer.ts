@@ -323,10 +323,13 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 		}
 
 		// Content is the authoritative error text (validation, policy block,
-		// execution failure): show it bounded, then guarantee the structured
-		// recording warning regardless of how long the content is.
+		// execution failure): show it bounded, then retain recording warnings
+		// outside that preview budget.
 		const errorText = body.length > 0 ? boundedLines(body, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
 		const lines = [theme.fg("error", errorText)];
+		if (legacyWarning && context?.state?.gsdExecRecordingWarningInFrame !== true) {
+			lines.push(theme.fg("warning", legacyWarning));
+		}
 		if (notRecordedRow) lines.push(notRecordedRow);
 		return new Text(lines.join("\n"), 0, 0);
 	}
