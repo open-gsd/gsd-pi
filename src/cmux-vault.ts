@@ -210,7 +210,8 @@ export class CmuxVaultBridge {
         }
         // A fresh session may have a path before its first assistant is persisted.
         // Do not advertise a file that cannot yet be opened.
-        if (!(await stat(identity.path)).isFile()) {
+        const persisted = await stat(identity.path).then(info => info.isFile(), () => false)
+        if (!persisted) {
           await this.clear()
           continue
         }

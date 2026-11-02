@@ -119,8 +119,10 @@ test('uses actual session identity and literal argv; indexes only minimal metada
   assert.deepEqual(record.data, {
     sessionId: f.manager.getSessionFile(), gsdSessionId: 'runtime-session-id', cwd: f.cwd, title: 'GSD',
   })
-  assert.equal(record.mode, 0o600)
-  assert.equal((await stat(join(f.home, 'cmux', 'vault'))).mode & 0o777, 0o700)
+  if (process.platform !== 'win32') {
+    assert.equal(record.mode, 0o600)
+    assert.equal((await stat(join(f.home, 'cmux', 'vault'))).mode & 0o777, 0o700)
+  }
   assert.equal(JSON.stringify([f.calls, record.data]).includes('private conversation'), false)
   assert.equal((await readFile(f.manager.getSessionFile()!, 'utf8')), 'private conversation must never be copied\n')
   assert.deepEqual(f.feedCalls, [{
@@ -189,6 +191,21 @@ test('fresh session is published only after the actual runtime file is persisted
   bridge.update(f.manager, true, true)
   await bridge.idle()
   assert.equal(f.calls.length, 1)
+})
+
+test('switching from a persisted session to a missing file clears the old generation immediately', async t => {
+  const f = await fixture(t)
+  const previous = f.manager.getSessionFile()
+  const bridge = new CmuxVaultBridge(f.options)
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  f.setSession(join(f.cwd, 'not-persisted-yet.jsonl'))
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.equal(f.calls.length, 2)
+  assert.equal(f.calls[1][2], 'clear')
+  assert.equal(f.clears[0].checkpoint_id, previous)
+  assert.equal(f.clears[0].expected_updated_at, 101)
 })
 
 test('disabled, outside cmux, child, noninteractive and external-owner sessions do nothing', async t => {
@@ -280,7 +297,33 @@ test('extension factory attaches supported post-switch lifecycle events without 
   assert.deepEqual(f.calls, [])
 })
 
-test('real subprocess transport preserves argv and rejects malformed output, failure and timeout', async t => {
+test('enabled lifecycle handlers return immediately, refresh on agent_end and drain on shutdown', async t => {
+  const f = await fixture(t)
+  const handlers = new Map<string, Function>()
+  const waiters: Array<() => void> = []
+  await createCmuxVaultExtension({
+    ...f.options,
+    transport: async args => {
+      const result = await f.options.transport(args)
+      if (args[0] === 'rpc') waiters.shift()?.()
+      return result
+    },
+  })({ on: (name: string, handler: Function) => handlers.set(name, handler) } as never)
+  const ctx = { sessionManager: f.manager, hasUI: true }
+  const first = new Promise<void>(resolve => waiters.push(resolve))
+  assert.equal(handlers.get('session_start')!({}, ctx), undefined)
+  await first
+  const next = new Promise<void>(resolve => waiters.push(resolve))
+  const privateEvent = { get messages() { throw new Error('must not inspect transcript') } }
+  assert.equal(handlers.get('agent_end')!(privateEvent, ctx), undefined)
+  await next
+  await handlers.get('session_shutdown')!()
+  assert.equal(f.calls.filter(call => call[2] === 'set').length, 2)
+  assert.equal(f.clears.length, 1)
+  assert.equal((f.feedCalls.at(-1)?.event as { hook_event_name: string }).hook_event_name, 'SessionEnd')
+})
+
+test('real subprocess transport preserves argv and rejects malformed output, failure and timeout', { skip: process.platform === 'win32' }, async t => {
   const f = await fixture(t)
   const cli = join(f.root, 'cmux')
   await writeFile(cli, `#!${process.execPath}
@@ -300,6 +343,9 @@ else process.stdout.write(JSON.stringify({args}));
   const start = Date.now()
   await assert.rejects(runCmuxVaultCommand(['hang']))
   assert.ok(Date.now() - start < 5000, 'timeout is bounded')
+  process.env.PATH = join(f.root, 'no-executables')
+  await assert.rejects(runCmuxVaultCommand(['missing']), { code: 'ENOENT' })
+  process.env.PATH = `${f.root}:${previous}`
   // Exercise an inherited owner marker in a real child without cmux or history.
   const output = await new Promise<string>((resolve, reject) => {
     execFile(process.execPath, [
@@ -353,7 +399,35 @@ test('a replaced same-session generation cannot be cleared by its predecessor', 
   assert.equal(probe.resume_binding, replacement)
 })
 
-test('guarded socket clear uses verified RPC, numeric generation and bounded safe failure', async t => {
+test('effective set responses must retain the requested identity, argv and manual-only capability', async t => {
+  const f = await fixture(t)
+  for (const invalid of [
+    { auto_resume: true },
+    { kind: 'pi' },
+    { checkpoint_id: '/retained/other-session.jsonl' },
+    { updated_at: 'not-a-generation' },
+    { launch_command: { arguments: ['pi', '--continue'] } },
+  ]) {
+    f.setBinding(null)
+    const bridge = new CmuxVaultBridge({
+      ...f.options,
+      transport: async args => {
+        const response = await f.options.transport(args)
+        if (args[2] !== 'set') return response
+        return { ...response, resume_binding: { ...response.resume_binding, ...invalid } }
+      },
+    })
+    bridge.update(f.manager, true)
+    await bridge.idle()
+    bridge.stop()
+    await bridge.idle()
+  }
+  assert.equal(f.clears.length, 0)
+  assert.equal(f.feedCalls.length, 0)
+  await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+})
+
+test('guarded socket clear uses verified RPC, numeric generation and bounded safe failure', { skip: process.platform === 'win32' }, async t => {
   const f = await fixture(t)
   const socketPath = join(f.root, 'cmux.sock')
   const received: unknown[] = []
