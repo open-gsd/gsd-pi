@@ -4,8 +4,14 @@ import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promis
 import { createConnection } from 'node:net'
 import { isAbsolute, join } from 'node:path'
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from '@gsd/pi-coding-agent'
+import {
+  GSD_WORKFLOW_CONTEXT, GSD_DELEGATION_CONTEXT,
+  readWorkflowContext, readDelegationContext,
+  type GsdWorkflowContext, type GsdDelegationContext,
+} from './resources/extensions/shared/gsd-session-metadata.js'
 
 export const CMUX_VAULT_TIMEOUT_MS = 1000
+export const CMUX_VAULT_MAX_PENDING_SESSIONS = 64
 
 export type CmuxVaultTransport = (args: string[]) => Promise<unknown>
 
@@ -74,13 +80,103 @@ export function clearCmuxVaultBinding(socketPath: string, params: CmuxVaultClear
   })
 }
 
+interface VaultModeEntry {
+  type: string
+  id?: string
+  parentId?: string | null
+  customType?: string
+  data?: unknown
+  message?: { role: string; customType?: string }
+}
+
 export interface CmuxVaultSession {
   getSessionId(): string
   getSessionFile(): string | undefined
   getCwd(): string
+  getBranch?(): readonly VaultModeEntry[]
+  getLeafEntry?(): VaultModeEntry | undefined
+  getEntry?(id: string): VaultModeEntry | undefined
+  getHeader?(): { parentSession?: string } | null
 }
 
-interface VaultIdentity {
+export type CmuxVaultMode = 'chat' | 'auto' | 'quick' | 'debug'
+
+function* modeEntries(manager: CmuxVaultSession): Iterable<VaultModeEntry> {
+  if (!manager.getLeafEntry || !manager.getEntry) {
+    yield* Array.from(manager.getBranch?.() ?? []).reverse()
+    return
+  }
+  // Walk tags directly instead of constructing getBranch()'s full transcript
+  // array with repeated unshift operations on long conversations.
+  const seen = new Set<string>()
+  let entry = manager.getLeafEntry()
+  while (entry) {
+    if (entry.id) {
+      if (seen.has(entry.id)) break
+      seen.add(entry.id)
+    }
+    yield entry
+    entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
+  }
+}
+
+/** Classify runtime message tags only, never prompts, titles, tool data or artifacts. */
+export function cmuxVaultModes(manager: CmuxVaultSession): CmuxVaultMode[] {
+  return sessionContext(manager).modes
+}
+
+interface VaultSessionContext {
+  modes: CmuxVaultMode[]
+  workflow?: GsdWorkflowContext
+  delegations: GsdDelegationContext[]
+  parentPath?: string
+}
+
+function sessionContext(manager: CmuxVaultSession): VaultSessionContext {
+  const modes = new Set<CmuxVaultMode>()
+  const delegations = new Map<string, GsdDelegationContext>()
+  const sessionId = manager.getSessionId()
+  let workflow: GsdWorkflowContext | undefined
+  for (const entry of modeEntries(manager)) {
+    const tag = entry.type === 'custom_message' ? entry.customType
+      : entry.type === 'message' && entry.message?.role === 'custom' ? entry.message.customType : undefined
+    const mode = tag === 'gsd-auto' ? 'auto'
+      : tag === 'gsd-quick-task' ? 'quick'
+      : tag === 'gsd-debug-start' || tag === 'gsd-debug-continue' || tag === 'gsd-debug-diagnose' ? 'debug'
+      : entry.type === 'message' && entry.message?.role === 'user' ? 'chat' : undefined
+    if (mode) modes.add(mode)
+    if (entry.type === 'custom' && entry.customType === GSD_WORKFLOW_CONTEXT && !workflow) {
+      const context = readWorkflowContext(entry.data)
+      if (context?.originSessionId === sessionId) workflow = context
+    }
+    if (entry.type === 'custom' && entry.customType === GSD_DELEGATION_CONTEXT && delegations.size < 64) {
+      const context = readDelegationContext(entry.data)
+      if (context?.originSessionId === sessionId && !delegations.has(context.id)) delegations.set(context.id, context)
+    }
+  }
+  const parent = manager.getHeader?.()?.parentSession
+  return {
+    modes: (['chat', 'auto', 'quick', 'debug'] as const).filter(mode => modes.has(mode)),
+    workflow, delegations: [...delegations.values()],
+    parentPath: typeof parent === 'string' && isAbsolute(parent) ? parent : undefined,
+  }
+}
+
+function vaultTitle(context: VaultSessionContext): string {
+  const labels = { chat: 'Chat', auto: 'Auto', quick: 'Quick', debug: 'Debug' }
+  let title = context.modes.length ? `GSD — ${context.modes.map(mode => labels[mode]).join(' / ')}` : 'GSD'
+  if (context.workflow) {
+    const { milestoneId, sliceId, taskId } = context.workflow
+    title += ` · ${[milestoneId, sliceId, taskId].filter(Boolean).join('/')}`
+  }
+  if (context.delegations.length) {
+    const kinds = [...new Set(context.delegations.map(item => item.mode))].sort().join('/')
+    title += ` · Subagents ×${context.delegations.reduce((sum, item) => sum + item.count, 0)} (${kinds})`
+  }
+  return title
+}
+
+interface VaultIdentity extends VaultSessionContext {
   id: string
   path: string
   cwd: string
@@ -159,6 +255,7 @@ export class CmuxVaultBridge {
   private stopped = false
   private injected: Promise<boolean> | undefined
   private lastIdentity: string | undefined
+  private readonly snapshots = new Map<string, VaultIdentity>()
 
   constructor(options: CmuxVaultOptions) {
     this.options = options
@@ -173,10 +270,17 @@ export class CmuxVaultBridge {
       const path = manager.getSessionFile()
       const cwd = manager.getCwd()
       const id = manager.getSessionId()
-      const key = JSON.stringify([id, path, cwd])
+      const context = sessionContext(manager)
+      const key = JSON.stringify([id, path, cwd, context])
       if (!refresh && this.lastIdentity === key) return
       this.lastIdentity = key
-      this.pending = path && isAbsolute(path) && isAbsolute(cwd) && id ? { id, path, cwd } : null
+      this.pending = path && isAbsolute(path) && isAbsolute(cwd) && id ? { id, path, cwd, ...context } : null
+      if (this.pending) {
+        this.snapshots.set(this.pending.path, this.pending)
+        if (this.snapshots.size > CMUX_VAULT_MAX_PENDING_SESSIONS) {
+          this.snapshots.delete(this.snapshots.keys().next().value!)
+        }
+      }
       this.start()
     } catch { /* Observability must never reject a core lifecycle event. */ }
   }
@@ -212,6 +316,7 @@ export class CmuxVaultBridge {
           continue
         }
         if (!cmuxVaultConfigured(this.env, await this.options.getPreferences?.(identity.cwd))) {
+          this.snapshots.clear()
           await this.clear()
           continue
         }
@@ -264,7 +369,7 @@ export class CmuxVaultBridge {
     }
     const { result, binding } = resumeResult(await this.transport([
       'surface', 'resume', 'set', ...this.target,
-      '--name', 'GSD', '--kind', 'gsd', '--checkpoint-id', identity.path,
+      '--name', vaultTitle(identity), '--kind', 'gsd', '--checkpoint-id', identity.path,
       '--source', 'agent-hook', '--cwd', identity.cwd, '--',
       ...argv,
     ]))
@@ -282,6 +387,23 @@ export class CmuxVaultBridge {
       cwd: identity.cwd,
       workspace: result.workspace_id as string, surface: result.surface_id as string,
     }
+    // Surface updates may coalesce across auto's rapid session handoffs. Keep
+    // the latest metadata per native file, not just the latest surface target.
+    const snapshots = new Map(this.snapshots)
+    if (!snapshots.has(identity.path)) snapshots.set(identity.path, identity)
+    this.snapshots.clear()
+    for (const snapshot of snapshots.values()) {
+      try {
+        if (!cmuxVaultConfigured(this.env, await this.options.getPreferences?.(snapshot.cwd))) continue
+        if (!await stat(snapshot.path).then(info => info.isFile(), () => false)) continue
+        await this.writeMetadata(snapshot)
+      } catch { /* One failed metadata write must not discard other observed sessions. */ }
+    }
+    if (previousBinding && previousBinding.path !== identity.path) await this.feed('SessionEnd', previousBinding)
+    await this.feed('SessionStart', this.binding)
+  }
+
+  private async writeMetadata(identity: VaultIdentity): Promise<void> {
     const directory = join(this.options.home, 'cmux', 'vault')
     await mkdir(directory, { recursive: true, mode: 0o700 })
     const key = createHash('sha256').update(identity.path).digest('hex')
@@ -294,14 +416,16 @@ export class CmuxVaultBridge {
         sessionId: identity.path,
         gsdSessionId: identity.id,
         cwd: identity.cwd,
-        title: 'GSD',
+        title: vaultTitle(identity),
+        gsdModes: identity.modes,
+        ...(identity.workflow ? { gsdWorkflow: identity.workflow } : {}),
+        ...(identity.delegations.length ? { gsdDelegations: identity.delegations } : {}),
+        ...(identity.parentPath ? { gsdParentSessionId: identity.parentPath } : {}),
       }) + '\n', { mode: 0o600, flag: 'wx' })
       await rename(temporary, destination)
     } finally {
       await unlink(temporary).catch(() => {})
     }
-    if (previousBinding && previousBinding.path !== identity.path) await this.feed('SessionEnd', previousBinding)
-    await this.feed('SessionStart', this.binding)
   }
 
   private async feed(event: 'SessionStart' | 'SessionEnd', binding: VaultBinding): Promise<void> {
@@ -326,6 +450,9 @@ export function createCmuxVaultExtension(options: CmuxVaultOptions): ExtensionFa
     // session_start also follows new/switch/resume/fork. Listening to the legacy
     // session_switch as well would notify twice for the same transition.
     pi.on('session_start', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI))
+    // Auto may create the next unit's session inside agent_end. Capture the
+    // persisted branch before that handoff, without inspecting event content.
+    pi.on('turn_end', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI, true))
     pi.on('agent_end', (_event, ctx: ExtensionContext) => bridge.update(ctx.sessionManager, ctx.hasUI, true))
     pi.on('session_shutdown', async () => {
       bridge.stop()

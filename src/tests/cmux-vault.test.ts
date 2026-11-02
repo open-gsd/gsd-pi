@@ -5,15 +5,21 @@ import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import test from 'node:test'
+import { SessionManager } from '../../packages/pi-coding-agent/src/core/session-manager.ts'
+import {
+  GSD_WORKFLOW_CONTEXT, GSD_DELEGATION_CONTEXT, recordWorkflowContext, recordDelegation,
+} from '../resources/extensions/shared/gsd-session-metadata.ts'
 import {
   CmuxVaultBridge,
   clearCmuxVaultBinding,
   cmuxVaultEnabled,
   cmuxVaultConfigured,
+  cmuxVaultModes,
   createCmuxVaultExtension,
   hasManagedCmuxBridge,
   runCmuxVaultCommand,
   type CmuxVaultClearRequest,
+  type CmuxVaultSession,
 } from '../cmux-vault.ts'
 
 async function fixture(t: test.TestContext) {
@@ -24,11 +30,13 @@ async function fixture(t: test.TestContext) {
   await mkdir(cwd)
   let path: string | undefined = join(cwd, 'actual session.jsonl')
   let id = 'runtime-session-id'
+  let branch: ReturnType<NonNullable<CmuxVaultSession['getBranch']>> = []
   await writeFile(path, 'private conversation must never be copied\n')
   const manager = {
     getSessionId: () => id,
     getSessionFile: () => path,
     getCwd: () => cwd,
+    getBranch: () => branch,
   }
   const calls: string[][] = []
   const allCalls: string[][] = []
@@ -83,6 +91,7 @@ async function fixture(t: test.TestContext) {
     root, home, cwd, calls, allCalls, clears, feedCalls, env, options, manager,
     setBinding: (value: Record<string, unknown> | null) => { binding = value },
     setSession: (file: string | undefined, sessionId = 'switched-id') => { path = file; id = sessionId },
+    setBranch: (entries: typeof branch) => { branch = entries },
     metadata: async () => {
       const directory = join(home, 'cmux', 'vault')
       return Promise.all((await readdir(directory)).map(async file => ({
@@ -137,7 +146,8 @@ test('runtime uses current project settings without an env opt-in and clears on 
   bridge.update(f.manager, true, true)
   await bridge.idle()
   assert.equal(f.clears.length, 1)
-  assert.deepEqual(projects, [f.cwd, f.cwd, f.cwd])
+  assert.ok(projects.length >= 3)
+  assert.ok(projects.every(cwd => cwd === f.cwd))
   bridge.stop()
   await bridge.idle()
 })
@@ -155,7 +165,7 @@ test('uses actual session identity and literal argv; indexes only minimal metada
   ]])
   const [record] = await f.metadata()
   assert.deepEqual(record.data, {
-    sessionId: f.manager.getSessionFile(), gsdSessionId: 'runtime-session-id', cwd: f.cwd, title: 'GSD',
+    sessionId: f.manager.getSessionFile(), gsdSessionId: 'runtime-session-id', cwd: f.cwd, title: 'GSD', gsdModes: [],
   })
   if (process.platform !== 'win32') {
     assert.equal(record.mode, 0o600)
@@ -185,6 +195,208 @@ test('duplicate startup is idempotent and completed turns refresh one record', a
   await bridge.idle()
   assert.equal(f.calls.length, 2)
   assert.equal((await f.metadata()).length, 1)
+})
+
+test('mode classification reads only runtime tags, never conversation or workflow contents', async t => {
+  const f = await fixture(t)
+  const secret = {
+    get content(): never { throw new Error('must not inspect conversation') },
+    get details(): never { throw new Error('must not inspect workflow metadata') },
+  }
+  const tagged = (customType: string) => Object.assign(Object.create(secret), { type: 'custom_message', customType })
+  f.setBranch([
+    { type: 'message', message: Object.assign(Object.create(secret), { role: 'user' }) },
+    tagged('gsd-auto'), tagged('gsd-quick-task'),
+    tagged('gsd-debug-start'), tagged('gsd-debug-continue'), tagged('gsd-debug-diagnose'),
+    tagged('gsd-auto'), tagged('arbitrary-private-workflow-name'),
+    { type: 'custom', customType: 'gsd-auto' },
+    { type: 'message', message: { role: 'assistant' } },
+    { type: 'message', message: { role: 'toolResult' } },
+  ])
+  assert.deepEqual(cmuxVaultModes(f.manager), ['chat', 'auto', 'quick', 'debug'])
+  const bridge = new CmuxVaultBridge(f.options)
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  const [record] = await f.metadata()
+  assert.deepEqual(record.data.gsdModes, ['chat', 'auto', 'quick', 'debug'])
+  assert.equal(record.data.title, 'GSD — Chat / Auto / Quick / Debug')
+  assert.equal(f.calls[0][f.calls[0].indexOf('--name') + 1], record.data.title)
+  assert.equal(JSON.stringify(record.data).includes('arbitrary-private-workflow-name'), false)
+})
+
+test('quick/debug mix in one native conversation and resume reconstructs modes without sidecar reads', async t => {
+  const f = await fixture(t)
+  const bridge = new CmuxVaultBridge(f.options)
+  f.setBranch([{ type: 'message', message: { role: 'user' } }])
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  f.setBranch([
+    ...f.manager.getBranch(),
+    { type: 'custom_message', customType: 'gsd-quick-task' },
+    { type: 'custom_message', customType: 'gsd-debug-start' },
+  ])
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal((await f.metadata()).length, 1, 'commands do not create synthetic Vault sessions')
+  assert.deepEqual((await f.metadata())[0].data.gsdModes, ['chat', 'quick', 'debug'])
+  const resumed = new CmuxVaultBridge(f.options)
+  resumed.update(f.manager, true)
+  await resumed.idle()
+  assert.equal((await f.metadata())[0].data.title, 'GSD — Chat / Quick / Debug')
+  const file = join(f.cwd, 'auto-unit.jsonl')
+  await writeFile(file, 'private unit transcript')
+  f.setSession(file, 'auto-unit-id')
+  f.setBranch([{ type: 'custom_message', customType: 'gsd-auto' }])
+  resumed.update(f.manager, true)
+  await resumed.idle()
+  const records = await f.metadata()
+  assert.equal(records.length, 2)
+  assert.deepEqual(records.find(record => record.data.sessionId === file)?.data.gsdModes, ['auto'])
+  assert.deepEqual(records.find(record => record.data.sessionId !== file)?.data.gsdModes, ['chat', 'quick', 'debug'])
+})
+
+test('real session persistence, branch selection and resume retain only native-branch mode tags', async t => {
+  const f = await fixture(t)
+  const session = SessionManager.create(f.cwd, join(f.root, 'native-sessions'))
+  const user = session.appendMessage({ role: 'user', content: 'private user task', timestamp: 1 })
+  const writer = { appendEntry: (type: string, data: unknown) => { session.appendCustomEntry(type, data) } }
+  recordWorkflowContext(writer, () => session.getSessionId(), 'M003-ab12cd/S02/T03')
+  const finish = recordDelegation(writer, () => session.getSessionId(), {
+    id: '32fd3341-a765-46af-ae2d-2f82051749a0', mode: 'parallel', count: 3, forkCount: 1, background: true,
+  })
+  finish(2, 1)
+  session.appendCustomMessageEntry('gsd-quick-task', 'private quick plan', false, { secret: 'private details' })
+  session.appendCustomMessageEntry('gsd-debug-start', 'private issue and stack trace', false)
+  session.appendMessage({
+    role: 'assistant', content: [{ type: 'text', text: 'private response' }],
+    api: 'openai-completions', provider: 'openai', model: 'test',
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'stop', timestamp: 2,
+  })
+  const bridge = new CmuxVaultBridge(f.options)
+  bridge.update(session, true)
+  await bridge.idle()
+  assert.deepEqual((await f.metadata())[0].data.gsdModes, ['chat', 'quick', 'debug'])
+  assert.equal((await f.metadata())[0].data.gsdWorkflow.taskId, 'T03')
+  assert.equal((await f.metadata())[0].data.gsdDelegations[0].status, 'settled')
+  const resumed = SessionManager.open(session.getSessionFile()!)
+  assert.deepEqual(cmuxVaultModes(resumed), ['chat', 'quick', 'debug'])
+  bridge.update(resumed, true, true)
+  await bridge.idle()
+  assert.equal((await f.metadata())[0].data.gsdWorkflow.milestoneId, 'M003-ab12cd')
+  assert.equal((await f.metadata())[0].data.gsdDelegations[0].successCount, 2)
+  resumed.branch(user)
+  assert.deepEqual(cmuxVaultModes(resumed), ['chat'], 'abandoned branch tags do not bleed into current branch')
+  resumed.appendCustomMessageEntry('gsd-auto', 'private auto instructions', false)
+  assert.deepEqual(cmuxVaultModes(resumed), ['chat', 'auto'])
+  resumed.newSession()
+  assert.deepEqual(cmuxVaultModes(resumed), [], 'new auto unit does not inherit the previous conversation modes')
+})
+
+test('hierarchy and parallel delegation annotations expose only validated owning-session metadata', async t => {
+  const f = await fixture(t)
+  const originSessionId = f.manager.getSessionId()
+  const request = {
+    version: 1, originSessionId, id: '32fd3341-a765-46af-ae2d-2f82051749a0',
+    mode: 'parallel', count: 3, forkCount: 1, background: true, status: 'requested',
+  }
+  f.setBranch([
+    { type: 'custom_message', customType: 'gsd-auto' },
+    { type: 'custom', customType: GSD_WORKFLOW_CONTEXT, data: {
+      version: 1, originSessionId, milestoneId: 'M001-ab12cd', sliceId: 'S02', taskId: 'T03',
+      get title(): never { throw new Error('must not inspect artifact titles') },
+    } },
+    { type: 'custom', customType: GSD_DELEGATION_CONTEXT, data: request },
+    { type: 'custom', customType: GSD_DELEGATION_CONTEXT, data: {
+      ...request, status: 'settled', successCount: 1, failureCount: 1,
+      get output(): never { throw new Error('must not inspect subagent output') },
+    } },
+    { type: 'custom', customType: GSD_DELEGATION_CONTEXT, data: {
+      ...request, id: '22fd3341-a765-46af-ae2d-2f82051749a0', originSessionId: 'fork-parent',
+    } },
+    { type: 'custom', customType: GSD_WORKFLOW_CONTEXT, data: {
+      version: 1, originSessionId, milestoneId: 'secret project title',
+    } },
+    { type: 'custom', customType: 'external-usage',
+      get data(): never { throw new Error('must not inspect name-bearing usage or workflow logs') } },
+  ])
+  const bridge = new CmuxVaultBridge(f.options)
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  const [record] = await f.metadata()
+  assert.equal(record.data.title, 'GSD — Auto · M001-ab12cd/S02/T03 · Subagents ×3 (parallel)')
+  assert.deepEqual(record.data.gsdWorkflow, { originSessionId, milestoneId: 'M001-ab12cd', sliceId: 'S02', taskId: 'T03' })
+  assert.equal(record.data.gsdDelegations.length, 1)
+  assert.deepEqual(record.data.gsdDelegations[0], {
+    originSessionId, id: request.id, mode: 'parallel', count: 3, forkCount: 1,
+    background: true, status: 'settled', successCount: 1, failureCount: 1,
+  })
+  assert.equal(JSON.stringify(record.data).includes('secret'), false)
+  assert.equal(JSON.stringify(f.feedCalls).includes('M001'), false, 'Feed remains content-free lifecycle presence')
+})
+
+test('turn_end snapshots the persisted auto session before an agent_end session handoff', async t => {
+  const f = await fixture(t)
+  const handlers = new Map<string, Function>()
+  let published!: () => void
+  const done = new Promise<void>(resolve => { published = resolve })
+  await createCmuxVaultExtension({
+    ...f.options,
+    transport: async args => {
+      const result = await f.options.transport(args)
+      if (args[0] === 'rpc') published()
+      return result
+    },
+  })({ on: (name: string, handler: Function) => handlers.set(name, handler) } as never)
+  f.setBranch([{ type: 'custom_message', customType: 'gsd-auto' }])
+  const file = f.manager.getSessionFile()
+  const ctx = { sessionManager: f.manager, hasUI: true }
+  const privateEvent = {
+    get message(): never { throw new Error('must not inspect response') },
+    get toolResults(): never { throw new Error('must not inspect tool output') },
+  }
+  assert.equal(handlers.get('turn_end')!(privateEvent, ctx), undefined)
+  f.setSession(join(f.cwd, 'next-not-persisted.jsonl'))
+  f.setBranch([])
+  await done
+  const [record] = await f.metadata()
+  assert.equal(record.data.sessionId, file)
+  assert.deepEqual(record.data.gsdModes, ['auto'])
+  handlers.get('agent_end')!({}, ctx)
+  await handlers.get('session_shutdown')!()
+})
+
+test('slow surface transport coalesces bindings without dropping completed auto-session metadata', async t => {
+  const f = await fixture(t)
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    transport: async args => { entered(); await gate; return f.options.transport(args) },
+  })
+  bridge.update(f.manager, true)
+  await started
+  f.setBranch([{ type: 'custom_message', customType: 'gsd-auto' }])
+  bridge.update(f.manager, true, true)
+  const files = [f.manager.getSessionFile()!]
+  for (let i = 0; i < 3; i++) {
+    const file = join(f.cwd, `auto-unit-${i}.jsonl`)
+    await writeFile(file, 'private unit transcript')
+    files.push(file)
+    f.setSession(file, `auto-${i}`)
+    f.setBranch([{ type: 'custom_message', customType: 'gsd-auto' }])
+    bridge.update(f.manager, true, true)
+  }
+  release()
+  await bridge.idle()
+  const records = await f.metadata()
+  assert.deepEqual(records.map(record => record.data.sessionId).sort(), files.sort())
+  assert.ok(records.every(record => record.data.gsdModes.join() === 'auto'))
+  assert.equal(f.calls.filter(call => call[2] === 'set').length, 2, 'surface target still coalesces')
+  assert.equal(f.calls.at(-1)?.[f.calls.at(-1)!.indexOf('--checkpoint-id') + 1], f.manager.getSessionFile())
 })
 
 test('switch/resume updates only this surface; in-memory/new unsaved session clears its binding', async t => {
@@ -327,7 +539,7 @@ test('extension factory attaches supported post-switch lifecycle events without 
   const handlers = new Map<string, Function>()
   const factory = createCmuxVaultExtension(f.options)
   await factory({ on: (name: string, handler: Function) => handlers.set(name, handler) } as never)
-  assert.deepEqual([...handlers.keys()], ['session_start', 'agent_end', 'session_shutdown'])
+  assert.deepEqual([...handlers.keys()], ['session_start', 'turn_end', 'agent_end', 'session_shutdown'])
   const ctx = { sessionManager: f.manager, hasUI: false }
   assert.doesNotThrow(() => handlers.get('agent_end')!({ messages: ['secret'] }, ctx))
   await handlers.get('session_shutdown')!()
@@ -387,6 +599,7 @@ else process.stdout.write(JSON.stringify({args}));
   // Exercise an inherited owner marker in a real child without cmux or history.
   const output = await new Promise<string>((resolve, reject) => {
     execFile(process.execPath, [
+      '--import', new URL('../resources/extensions/gsd/tests/resolve-ts.mjs', import.meta.url).href,
       '--experimental-strip-types', '--input-type=module', '-e',
       `import { cmuxVaultEnabled } from ${JSON.stringify(new URL('../cmux-vault.ts', import.meta.url).href)};
        console.log(cmuxVaultEnabled(process.env, process.pid));`,

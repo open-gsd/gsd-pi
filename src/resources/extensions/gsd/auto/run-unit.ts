@@ -7,6 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
+import { recordWorkflowContext } from "../../shared/gsd-session-metadata.js";
 import { randomUUID } from "node:crypto";
 
 import type { AutoSession } from "./session.js";
@@ -324,6 +325,7 @@ export async function runUnit(
       );
     };
 
+    recordWorkflowContext(pi, () => ctx.sessionManager.getSessionId(), unitId);
     pi.sendMessage(
       { customType: "gsd-auto", content: prompt, display: s.verbose },
       { triggerTurn: true },

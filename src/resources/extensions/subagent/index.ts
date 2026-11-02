@@ -24,6 +24,7 @@ import { type ExtensionAPI, getMarkdownTheme } from "@gsd/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@gsd/pi-tui";
 import { formatTokenCount } from "../shared/mod.js";
 import { getCurrentPhase } from "../shared/gsd-phase-state.js";
+import { recordDelegation } from "../shared/gsd-session-metadata.js";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.js";
 import {
 	type IsolationEnvironment,
@@ -1687,6 +1688,9 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 				const selected = preflight.child;
+				const settleDelegation = recordDelegation(pi, () => ctx.sessionManager.getSessionId(), {
+					id: crypto.randomUUID(), mode: "single", count: 1, forkCount: 1, background: false,
+				});
 				const result = await runSingleAgent(
 					ctx.cwd,
 					agents,
@@ -1707,6 +1711,8 @@ export default function (pi: ExtensionAPI) {
 						questionCtx: ctx,
 					},
 				);
+				const delegationSucceeded = result.exitCode === 0 && result.stopReason !== "error" && result.stopReason !== "aborted";
+				settleDelegation(delegationSucceeded ? 1 : 0, delegationSucceeded ? 0 : 1);
 				return {
 					content: [{ type: "text", text: getFinalOutput(result.messages) || result.errorMessage || result.stderr || "(no output)" }],
 					details: makeDetails("single")([result]),
@@ -1761,6 +1767,15 @@ export default function (pi: ExtensionAPI) {
 					: hasTasks && taskParams.some((task) => (task.context ?? contextMode) === "fork")
 						? "fork"
 						: contextMode;
+			const forkCount = hasChain
+				? chainParams.filter((step) => (step.context ?? contextMode) === "fork").length
+				: hasTasks
+					? taskParams.filter((task) => (task.context ?? contextMode) === "fork").length
+					: contextMode === "fork" ? 1 : 0;
+			const settleDelegation = recordDelegation(pi, () => ctx.sessionManager.getSessionId(), {
+				id: dispatchId, mode: dispatchMode, count: dispatchAgents.length,
+				forkCount, background: params.background === true,
+			});
 			const dispatchChildren = dispatchAgents.map((agent, index) => {
 				const rawCwd = hasChain
 					? chainParams[index]?.cwd
@@ -1969,6 +1984,8 @@ export default function (pi: ExtensionAPI) {
 				persistRunResults(results, true);
 				const successCount = results.filter((r) => r.exitCode === 0).length;
 				const failureCount = results.filter((r) => r.exitCode !== 0).length;
+				const observedSuccesses = results.filter((r) => r.exitCode === 0 && r.stopReason !== "error" && r.stopReason !== "aborted").length;
+				settleDelegation(observedSuccesses, results.length - observedSuccesses);
 				const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
 				const totalInputTokens = results.reduce((s, r) => s + (r.usage?.input ?? 0), 0);
 				const totalOutputTokens = results.reduce((s, r) => s + (r.usage?.output ?? 0), 0);
