@@ -88,6 +88,112 @@ async function registeredExecDefinition(name: string): Promise<any> {
 
 describe("ToolExecutionComponent", () => {
 
+	test("collapsed successful Read shows one sanitized preview row beneath target and status", () => {
+		const rendered = renderToolCollapsed(
+			"read",
+			{ path: "docs/guide.md" },
+			{
+				content: [{ type: "text", text: "first line \u001b[31mactive\u001b[0m\u202e\nsecond line stays hidden" }],
+				isError: false,
+			},
+			undefined,
+			120,
+		);
+		const rows = rendered.split("\n");
+		assert.equal(rows.length, 2);
+		assert.match(rows[0]!, /READ/);
+		assert.match(rows[0]!, /docs\/guide\.md/);
+		assert.match(rows[0]!, /success/);
+		assert.match(rows[1]!, /preview · ctrl\+o expand/);
+		assert.match(rows[1]!, /first line active/);
+		assert.doesNotMatch(rendered, /second line stays hidden|\u202e/);
+		assert.ok(rows.every((row) => visibleWidth(row) <= 120));
+	});
+
+	test("collapsed successful empty Read labels the empty result", () => {
+		const rendered = renderToolCollapsed(
+			"read",
+			{ path: "empty.txt" },
+			{ content: [{ type: "text", text: "" }], isError: false },
+			undefined,
+			120,
+		);
+		assert.match(rendered, /empty file/);
+		assert.match(rendered, /preview/);
+	});
+
+	test("narrow collapsed Read keeps the existing one-row status and omits the preview", () => {
+		const rendered = renderToolCollapsed(
+			"read",
+			{ path: "f.txt" },
+			{ content: [{ type: "text", text: "first line\nsecond line" }], isError: false },
+			undefined,
+			64,
+		);
+		assert.equal(rendered.split("\n").length, 1);
+		assert.match(rendered, /READ/);
+		assert.match(rendered, /f\.txt/);
+		assert.match(rendered, /output hidden/);
+		assert.doesNotMatch(rendered, /first line|second line/);
+		assert.ok(visibleWidth(rendered) <= 64);
+	});
+
+	test("compact Read preview respects the 71/72-column boundary and line accounting", () => {
+		for (const [width, expectsPreview] of [[71, false], [72, true]] as const) {
+			const component = new ToolExecutionComponent(
+				"read", { path: "f.txt" }, {}, undefined, { requestRender() {} } as any,
+			);
+			component.updateResult({ content: [{ type: "text", text: "boundary sample" }], isError: false });
+			const rendered = stripAnsi(component.render(width).join("\n"));
+			assert.equal(rendered.split("\n").length, expectsPreview ? 2 : 1);
+			assert.equal(component.getDisplayedLineCount(width), rendered.split("\n").length);
+			assert.equal(rendered.includes("preview · ctrl+o expand"), expectsPreview);
+		}
+	});
+
+	test("compact Read preview bounds cleanup for very long first lines", () => {
+		const tail = "UNRENDERED_READ_TAIL";
+		const rendered = renderToolCollapsed(
+			"read",
+			{ path: "long-line.txt" },
+			{ content: [{ type: "text", text: `${"x".repeat(600)}${tail}` }], isError: false },
+			undefined,
+			700,
+		);
+		assert.ok(rendered.includes("preview · ctrl+o expand"));
+		assert.ok(rendered.includes("x".repeat(512)));
+		assert.doesNotMatch(rendered, new RegExp(tail));
+		assert.match(rendered, /…/);
+	});
+
+	test("compact Read preview is suppressed for partial, error, and image results", () => {
+		const partial = new ToolExecutionComponent(
+			"read", { path: "partial.txt" }, {}, undefined, { requestRender() {} } as any,
+		);
+		partial.updateResult({ content: [{ type: "text", text: "partial content" }], isError: false }, true);
+		const partialText = stripAnsi(partial.render(120).join("\n"));
+		assert.ok(!partialText.includes("preview · ctrl+o expand"));
+		assert.equal(partial.getDisplayedLineCount(120), partialText.split("\n").length);
+
+		const error = renderToolCollapsed(
+			"read", { path: "error.txt" }, { content: [{ type: "text", text: "read failed" }], isError: true },
+		);
+		assert.ok(!error.includes("preview · ctrl+o expand"));
+
+		const image = new ToolExecutionComponent(
+			"read", { path: "image.png" }, {}, undefined, { requestRender() {} } as any,
+		);
+		image.setShowImages(false);
+		image.updateResult({
+			content: [
+				{ type: "text", text: "image description" },
+				{ type: "image", data: tinyPngBase64(1, 1), mimeType: "image/png" },
+			],
+			isError: false,
+		});
+		assert.ok(!stripAnsi(image.render(120).join("\n")).includes("preview · ctrl+o expand"));
+	});
+
 	test("registered exec callbacks leave purpose to the native frame across lifecycle and history", async () => {
 		for (const name of ["gsd_exec", "gsd_uat_exec"]) {
 			const definition = await registeredExecDefinition(name);
@@ -652,7 +758,7 @@ describe("ToolExecutionComponent", () => {
 		assert.deepEqual(component.getRollupPhase()?.label, "Other tool actions");
 	});
 
-	test("renders compact read rows with target metadata", () => {
+	test("renders compact read rows with target metadata and bounded preview", () => {
 		const rendered = renderToolCollapsed(
 			"read",
 			{ path: "src/Inspector.tsx" },
@@ -673,11 +779,11 @@ describe("ToolExecutionComponent", () => {
 
 		assert.match(rendered, /READ/);
 		assert.match(rendered, /src\/Inspector\.tsx:4-12/);
-		assert.doesNotMatch(rendered, /source/);
-		assert.doesNotMatch(rendered, /output hidden\n\s*│\s*ctrl\+o expand/);
+		assert.match(rendered, /preview · ctrl\+o expand: source/);
+		assert.doesNotMatch(rendered, /output hidden/);
 	});
 
-	test("renders compact capitalized read rows from file_path args", () => {
+	test("renders compact capitalized read rows from file_path args with a preview", () => {
 		const rendered = renderToolCollapsed(
 			"Read",
 			{ file_path: "~/projects/gsd-pi/src/resources/extensions/gsd/health-widget-core.ts" },
@@ -686,10 +792,10 @@ describe("ToolExecutionComponent", () => {
 
 		assert.match(rendered, /READ/);
 		assert.match(rendered, /health-widget-core\.ts/);
-		assert.doesNotMatch(rendered, /hidden body output/);
+		assert.match(rendered, /preview · ctrl\+o expand: hidden body output/);
 	});
 
-	test("renders compact read rows from direct result details path", () => {
+	test("renders compact read rows from direct result details path with a preview", () => {
 		const rendered = renderToolCollapsed(
 			"read",
 			{},
@@ -705,7 +811,7 @@ describe("ToolExecutionComponent", () => {
 
 		assert.match(rendered, /READ/);
 		assert.match(rendered, /health-widget-core\.ts:1-12/);
-		assert.doesNotMatch(rendered, /hidden body output/);
+		assert.match(rendered, /preview · ctrl\+o expand: hidden body output/);
 	});
 
 	test("truncates expanded read output lines to the display cap", () => {
