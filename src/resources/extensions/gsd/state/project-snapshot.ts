@@ -36,7 +36,12 @@ import {
 } from "../db-workspace.js";
 import { normalizeCanonicalLifecycleStatus, type CanonicalLifecycleStatus } from "../status-guards.js";
 import { normalizeRealPath } from "../paths.js";
-import { resolveWorktreeIdentity } from "../worktree-root.js";
+import {
+  resolveWorktreeIdentity,
+  resolveWorktreeIdentityAsync,
+  WORKTREE_IDENTITY_PROBE_BUDGET_MS,
+  type WorktreeRootIdentity,
+} from "../worktree-root.js";
 import type { GSDState } from "../types.js";
 import { LIFECYCLE_STATUS_VERSION, type RpcProjectBindingRead } from "@opengsd/contracts";
 
@@ -98,9 +103,60 @@ export interface ReadProjectBindingOptions extends ReadProjectSnapshotOptions {
   executionPath?: string;
 }
 
-/** Read identity evidence without treating path or authority as session identity. */
+/** Synchronous variant retained for direct callers; RPC uses the async variant below. */
 export function readProjectBindingFromDb(basePath: string, opts: ReadProjectBindingOptions = {}): RpcProjectBindingRead {
-  const rootEvidence = resolveWorktreeIdentity(opts.executionPath ?? basePath);
+  const executionPath = opts.executionPath ?? basePath;
+  const sessionRoots = resolveWorktreeIdentity(basePath);
+  if (sameCanonicalPath(basePath, executionPath)) {
+    return readProjectBindingWithRootEvidence(basePath, opts, sessionRoots);
+  }
+  const executionRoots = resolveWorktreeIdentity(executionPath);
+  return readProjectBindingWithRootEvidence(basePath, opts, combineBindingRootEvidence(sessionRoots, executionRoots));
+}
+
+/** Resolve both producer contexts without blocking the RPC event loop. */
+export async function readProjectBindingFromDbAsync(
+  basePath: string,
+  opts: ReadProjectBindingOptions = {},
+): Promise<RpcProjectBindingRead> {
+  const executionPath = opts.executionPath ?? basePath;
+  const deadlineAt = Date.now() + WORKTREE_IDENTITY_PROBE_BUDGET_MS;
+  if (sameCanonicalPath(basePath, executionPath)) {
+    const rootEvidence = await resolveWorktreeIdentityAsync(basePath, deadlineAt);
+    return readProjectBindingWithRootEvidence(basePath, opts, rootEvidence);
+  }
+  const [sessionRoots, executionRoots] = await Promise.all([
+    resolveWorktreeIdentityAsync(basePath, deadlineAt),
+    resolveWorktreeIdentityAsync(executionPath, deadlineAt),
+  ]);
+  return readProjectBindingWithRootEvidence(basePath, opts, combineBindingRootEvidence(sessionRoots, executionRoots));
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+  return normalizeRealPath(left) === normalizeRealPath(right);
+}
+
+function combineBindingRootEvidence(
+  session: WorktreeRootIdentity,
+  execution: WorktreeRootIdentity,
+): WorktreeRootIdentity {
+  if (
+    session.status === "verified" &&
+    execution.status === "verified" &&
+    session.projectRoot &&
+    execution.projectRoot &&
+    sameCanonicalPath(session.projectRoot, execution.projectRoot)
+  ) {
+    return execution;
+  }
+  return { ...execution, status: "partial" };
+}
+
+function readProjectBindingWithRootEvidence(
+  basePath: string,
+  opts: ReadProjectBindingOptions,
+  rootEvidence: WorktreeRootIdentity,
+): RpcProjectBindingRead {
   const roots = {
     projectRoot: rootEvidence.projectRoot,
     worktreeRoot: rootEvidence.worktreeRoot,

@@ -9,7 +9,7 @@ export { openExistingWorkflowDatabase } from "./db-workspace.js";
 export { hasLiveAutoWorkerForProject } from "./db/auto-workers.js";
 export { readStoredPausedSession } from "./interrupted-session.js";
 export { readProgressFromDb, readProjectProgressFromDb } from "./state/progress-from-db.js";
-export { readProjectBindingFromDb, readProjectSnapshotFromDb } from "./state/project-snapshot.js";
+export { readProjectBindingFromDb, readProjectBindingFromDbAsync, readProjectSnapshotFromDb } from "./state/project-snapshot.js";
 export {
   readProjectQueryFromDb,
   readRoadmapFromDb,

@@ -5,7 +5,11 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { resolveWorktreeIdentity, resolveWorktreeProjectRoot } from "../worktree-root.ts";
+import {
+  resolveWorktreeIdentity,
+  resolveWorktreeIdentityAsync,
+  resolveWorktreeProjectRoot,
+} from "../worktree-root.ts";
 
 test("resolveWorktreeProjectRoot: explicit non-worktree cwd beats stale GSD_PROJECT_ROOT", (t) => {
   const previous = process.env.GSD_PROJECT_ROOT;
@@ -158,6 +162,44 @@ test("resolveWorktreeIdentity accepts a linked worktree of its owning repository
     worktreeRoot: realpathSync(worktree),
     status: "verified",
   });
+});
+
+test("resolveWorktreeIdentity recovers a linked worktree under a custom external state directory", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-identity-custom-state-"));
+  const projectDir = join(dir, "repo");
+  const stateDir = join(dir, "state-outside-gsd-home");
+  const worktree = join(stateDir, "projects", "custom-project", "worktrees", "M001");
+  const previousStateDir = process.env.GSD_STATE_DIR;
+  mkdirSync(projectDir, { recursive: true });
+  mkdirSync(join(stateDir, "projects", "custom-project", "worktrees"), { recursive: true });
+  process.env.GSD_STATE_DIR = stateDir;
+  execFileSync("git", ["init", projectDir], { stdio: "ignore" });
+  execFileSync("git", [
+    "-C", projectDir,
+    "-c", "user.name=GSD Test",
+    "-c", "user.email=gsd-test@example.invalid",
+    "commit", "--allow-empty", "-m", "test base",
+  ], { stdio: "ignore" });
+  execFileSync("git", ["-C", projectDir, "worktree", "add", "--detach", worktree, "HEAD"], {
+    stdio: "ignore",
+  });
+
+  t.after(() => {
+    if (previousStateDir === undefined) {
+      delete process.env.GSD_STATE_DIR;
+    } else {
+      process.env.GSD_STATE_DIR = previousStateDir;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const expected = {
+    projectRoot: realpathSync(projectDir),
+    worktreeRoot: realpathSync(worktree),
+    status: "verified",
+  } as const;
+  assert.deepEqual(resolveWorktreeIdentity(worktree), expected);
+  assert.deepEqual(await resolveWorktreeIdentityAsync(worktree), expected);
 });
 
 test("resolveWorktreeIdentity does not claim an unrelated directory as a project root", (t) => {

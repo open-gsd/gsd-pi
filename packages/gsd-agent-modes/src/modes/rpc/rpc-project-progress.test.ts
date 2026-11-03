@@ -220,14 +220,19 @@ test("binding read preserves producer identity when project authority is unavail
 	assert.equal(response.data.projectStatus, "unavailable");
 });
 
-test("binding read rejects a torn session read conservatively", async () => {
+test("binding read rechecks captured context after asynchronous root verification", async () => {
+	let contextStable = true;
 	const response = await invokeProjectBindingRead(
-		async () => ({ authority: null, projectRoot: null, worktreeRoot: null, rootResolution: "unavailable" }),
+		async () => {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			contextStable = false;
+			return { authority: null, projectRoot: null, worktreeRoot: null, rootResolution: "unavailable" };
+		},
 		"request-binding-3",
 		"/workspace/project",
 		"/workspace/project/.gsd/worktrees/M001",
 		{ sessionId: "session-c", processInstanceId: "process-c" },
-		() => false,
+		() => contextStable,
 	);
 
 	assert.deepEqual(response, {

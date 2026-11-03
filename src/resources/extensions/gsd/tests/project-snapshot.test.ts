@@ -32,6 +32,7 @@ import {
   MAX_SNAPSHOT_MILESTONES,
   MAX_SNAPSHOT_OPEN_ITEMS,
   readProjectBindingFromDb,
+  readProjectBindingFromDbAsync,
   readProjectSnapshotFromDb,
 } from "../state/project-snapshot.ts";
 import { truncateContextResultMessages } from "../context-masker.ts";
@@ -760,6 +761,49 @@ test("readProjectBindingFromDb rejects authority from a mismatched project-root 
   });
   assert.equal(matched.authority?.projectId, projectAId);
   assert.equal(getProjectAuthorityRow()?.projectId, projectBId, "the prior process-global DB handle is restored");
+});
+
+test("readProjectBindingFromDbAsync rejects unrelated session and execution checkouts", async (t) => {
+  const sessionProject = await createWorkflowAuthorityFixture();
+  const executionProject = await createWorkflowAuthorityFixture();
+  const previousProjectRoot = process.env.GSD_PROJECT_ROOT;
+  const previousProjectId = process.env.GSD_PROJECT_ID;
+  t.after(() => {
+    if (previousProjectRoot === undefined) {
+      delete process.env.GSD_PROJECT_ROOT;
+    } else {
+      process.env.GSD_PROJECT_ROOT = previousProjectRoot;
+    }
+    if (previousProjectId === undefined) {
+      delete process.env.GSD_PROJECT_ID;
+    } else {
+      process.env.GSD_PROJECT_ID = previousProjectId;
+    }
+    sessionProject.cleanup();
+    executionProject.cleanup();
+  });
+
+  delete process.env.GSD_PROJECT_ROOT;
+  delete process.env.GSD_PROJECT_ID;
+  sessionProject.reopen();
+  execFileSync("git", ["init", sessionProject.root], { stdio: "ignore" });
+  setProjectRootBinding(sessionProject.root);
+  const sessionProjectId = fixtureProjectId();
+  executionProject.reopen();
+  execFileSync("git", ["init", executionProject.root], { stdio: "ignore" });
+  setProjectRootBinding(executionProject.root);
+
+  const binding = await readProjectBindingFromDbAsync(sessionProject.root, {
+    preserveGlobalDbHandle: true,
+    executionPath: executionProject.root,
+  });
+
+  assert.equal(binding.authority, null);
+  assert.equal(binding.rootResolution, "partial");
+  assert.ok(binding.projectRoot);
+  assert.equal(normalizeRealPath(binding.projectRoot), normalizeRealPath(executionProject.root));
+  assert.equal(getProjectAuthorityRow()?.projectId, fixtureProjectId(), "the prior DB handle is preserved");
+  assert.notEqual(sessionProjectId, fixtureProjectId());
 });
 
 test("readProjectBindingFromDb rejects a shared DB bound to another verified checkout", async (t) => {

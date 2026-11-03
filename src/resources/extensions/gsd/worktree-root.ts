@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { gsdHome } from "./gsd-home.js";
@@ -191,7 +191,7 @@ export function resolveWorktreeIdentity(path: string): WorktreeRootIdentity {
       return { projectRoot: null, worktreeRoot: null, status: "unavailable" };
     }
 
-    const projectRoot = resolveWorktreeOwningProjectRoot(path);
+    const projectRoot = resolveProjectRootFromPathWithGitRoot(path, gitRoot);
     if (!existsSync(projectRoot) || !statSync(projectRoot).isDirectory()) {
       return { projectRoot: null, worktreeRoot: null, status: "partial" };
     }
@@ -229,6 +229,102 @@ export function resolveWorktreeIdentity(path: string): WorktreeRootIdentity {
   } catch {
     return { projectRoot: null, worktreeRoot: null, status: "unavailable" };
   }
+}
+
+export const WORKTREE_IDENTITY_PROBE_BUDGET_MS = 2_000;
+
+/** Resolve Git-backed root evidence without blocking the RPC event loop. */
+export async function resolveWorktreeIdentityAsync(
+  path: string,
+  deadlineAt = Date.now() + WORKTREE_IDENTITY_PROBE_BUDGET_MS,
+): Promise<WorktreeRootIdentity> {
+  try {
+    const gitProbe = await resolveVerifiedGitWorkingTreeProbeAsync(path, deadlineAt);
+    if (!gitProbe || !existsSync(gitProbe.root) || !statSync(gitProbe.root).isDirectory()) {
+      return { projectRoot: null, worktreeRoot: null, status: "unavailable" };
+    }
+
+    const projectRoot = resolveProjectRootFromPathWithGitRoot(path, gitProbe.root);
+    if (!existsSync(projectRoot) || !statSync(projectRoot).isDirectory()) {
+      return { projectRoot: null, worktreeRoot: null, status: "partial" };
+    }
+
+    const candidateWorktreeRoot = worktreeRootFromWorktreePath(path);
+    const resolvedProjectRoot = realpathSync(projectRoot);
+    if (candidateWorktreeRoot) {
+      if (
+        !existsSync(candidateWorktreeRoot) ||
+        !statSync(candidateWorktreeRoot).isDirectory() ||
+        normalizeWorktreePathForCompare(candidateWorktreeRoot) !== normalizeWorktreePathForCompare(gitProbe.root)
+      ) {
+        return { projectRoot: null, worktreeRoot: null, status: "partial" };
+      }
+
+      const projectCommonDirectory = await resolveVerifiedGitCommonDirectoryAsync(projectRoot, deadlineAt);
+      if (!projectCommonDirectory || projectCommonDirectory !== gitProbe.commonDirectory) {
+        return { projectRoot: resolvedProjectRoot, worktreeRoot: null, status: "partial" };
+      }
+    } else if (!pathIsWithinRoot(gitProbe.root, projectRoot) || !pathIsWithinRoot(projectRoot, path)) {
+      return { projectRoot: null, worktreeRoot: null, status: "partial" };
+    }
+
+    return {
+      projectRoot: resolvedProjectRoot,
+      worktreeRoot: candidateWorktreeRoot ? realpathSync(candidateWorktreeRoot) : null,
+      status: "verified",
+    };
+  } catch {
+    return { projectRoot: null, worktreeRoot: null, status: "unavailable" };
+  }
+}
+
+interface GitWorktreeProbe {
+  root: string;
+  commonDirectory: string;
+}
+
+async function resolveVerifiedGitWorkingTreeProbeAsync(
+  path: string,
+  deadlineAt: number,
+): Promise<GitWorktreeProbe | null> {
+  const output = await runGitOutputAsync(path, ["rev-parse", "--show-toplevel", "--git-common-dir"], deadlineAt);
+  if (!output) return null;
+  const [rawRoot, rawCommonDirectory] = output.split(/\r?\n/).map((value) => value.trim());
+  if (!rawRoot || !rawCommonDirectory || !isAbsolute(rawRoot)) return null;
+  const root = realpathSync(rawRoot);
+  const commonDirectory = isAbsolute(rawCommonDirectory)
+    ? rawCommonDirectory
+    : resolve(root, rawCommonDirectory);
+  return { root, commonDirectory: normalizeWorktreePathForCompare(commonDirectory) };
+}
+
+async function resolveVerifiedGitCommonDirectoryAsync(path: string, deadlineAt: number): Promise<string | null> {
+  const commonDirectory = await runGitOutputAsync(path, ["rev-parse", "--git-common-dir"], deadlineAt);
+  if (!commonDirectory) return null;
+  const absoluteCommonDirectory = isAbsolute(commonDirectory)
+    ? commonDirectory
+    : resolve(path, commonDirectory);
+  return normalizeWorktreePathForCompare(absoluteCommonDirectory);
+}
+
+function runGitOutputAsync(path: string, args: string[], deadlineAt: number): Promise<string | null> {
+  const timeout = Math.floor(deadlineAt - Date.now());
+  if (timeout <= 0) return Promise.resolve(null);
+
+  return new Promise((resolveOutput) => {
+    execFile(
+      "git",
+      ["-C", path, ...args],
+      {
+        encoding: "utf8",
+        env: gitEnvironmentWithoutInheritedContext(),
+        maxBuffer: 1024 * 1024,
+        timeout,
+        windowsHide: true,
+      },
+      (error, stdout) => resolveOutput(error ? null : stdout.trim()),
+    );
+  });
 }
 
 function resolveVerifiedGitWorkingTreeRoot(path: string): string | null {
@@ -286,17 +382,24 @@ function pathIsWithinRoot(root: string, candidate: string): boolean {
 function resolveProjectRootFromPath(path: string): string {
   const normalizedPath = path.replaceAll("\\", "/");
   const segment = findWorktreeSegment(normalizedPath);
+  const gitRoot = segment ? null : resolveGitWorkingTreeRoot(path);
+  return resolveProjectRootFromPathWithGitRoot(path, gitRoot);
+}
+
+function resolveProjectRootFromPathWithGitRoot(path: string, gitRoot: string | null): string {
+  const normalizedPath = path.replaceAll("\\", "/");
+  const segment = findWorktreeSegment(normalizedPath);
   if (!segment) {
     // Walk up to an ancestor `.gsd` only inside one git working tree — the same
     // rule as probeGsdRoot in paths.ts. A folder in no git repository is its own
     // project root: without a git boundary the walk adopts an unrelated
     // ancestor project, and init then runs `git init` and writes setup files
     // in a folder the user never opened.
-    const gitRoot = resolveGitWorkingTreeRoot(path);
     if (!gitRoot) return path;
     const nearest = resolveNearestBootstrappedGsdRoot(path);
     if (nearest) return nearest;
-    const externalStateParent = normalizeWorktreePathForCompare(resolve(gsdHome(), ".."));
+    const stateDirectory = process.env.GSD_STATE_DIR || gsdHome();
+    const externalStateParent = normalizeWorktreePathForCompare(resolve(stateDirectory, ".."));
     return normalizeWorktreePathForCompare(gitRoot) === externalStateParent ? path : gitRoot;
   }
 
@@ -310,10 +413,14 @@ function resolveProjectRootFromPath(path: string): string {
   const sliceIdx = markerIdx !== -1 ? Math.min(markerIdx, segment.gsdIdx) : segment.gsdIdx;
   const candidate = path.slice(0, sliceIdx);
 
-  const gsdHomeNorm = normalizeWorktreePathForCompare(gsdHome());
-  const candidateGsdPath = normalizeWorktreePathForCompare(join(candidate, ".gsd"));
+  const stateDirectory = process.env.GSD_STATE_DIR || gsdHome();
+  const stateDirectoryNorm = normalizeWorktreePathForCompare(stateDirectory);
+  const candidateStatePath = normalizeWorktreePathForCompare(candidate);
 
-  if (candidateGsdPath === gsdHomeNorm || candidateGsdPath.startsWith(`${gsdHomeNorm}/`)) {
+  if (
+    candidateStatePath === stateDirectoryNorm ||
+    candidateStatePath.startsWith(`${stateDirectoryNorm}/`)
+  ) {
     const realRoot = resolveProjectRootFromGitFile(path);
     return realRoot ?? path;
   }
@@ -326,7 +433,8 @@ function resolveNearestBootstrappedGsdRoot(path: string): string | null {
     let dir = existsSync(path) && !statSync(path).isDirectory()
       ? resolve(path, "..")
       : path;
-    const externalStateParent = normalizeWorktreePathForCompare(resolve(gsdHome(), ".."));
+    const stateDirectory = process.env.GSD_STATE_DIR || gsdHome();
+    const externalStateParent = normalizeWorktreePathForCompare(resolve(stateDirectory, ".."));
 
     for (let i = 0; i < 30; i++) {
       if (normalizeWorktreePathForCompare(dir) === externalStateParent) return null;
@@ -359,7 +467,8 @@ function resolveGitWorkingTreeRoot(path: string): string | null {
     let dir = existsSync(path) && !statSync(path).isDirectory()
       ? resolve(path, "..")
       : path;
-    const externalStateParent = normalizeWorktreePathForCompare(resolve(gsdHome(), ".."));
+    const stateDirectory = process.env.GSD_STATE_DIR || gsdHome();
+    const externalStateParent = normalizeWorktreePathForCompare(resolve(stateDirectory, ".."));
 
     for (let i = 0; i < 30; i++) {
       const gitPath = join(dir, ".git");

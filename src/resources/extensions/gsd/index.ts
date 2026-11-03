@@ -23,7 +23,7 @@ export default async function registerExtension(pi: ExtensionAPI) {
   registerGSDCommand(pi);
 
   if (typeof pi.registerRuntimeRead === "function") {
-    const { readProjectBindingFromDb, readProjectProgressFromDb, readProjectSnapshotFromDb } = await import("./mcp-bridge.js");
+    const { readProjectBindingFromDbAsync, readProjectProgressFromDb, readProjectSnapshotFromDb } = await import("./mcp-bridge.js");
     pi.registerRuntimeRead("project_progress", async (input) => {
       if (!input || typeof input !== "object" || typeof (input as { cwd?: unknown }).cwd !== "string") {
         throw new Error("Project progress requires a session CWD");
@@ -46,7 +46,7 @@ export default async function registerExtension(pi: ExtensionAPI) {
         throw new Error("Project binding requires the session and execution CWDs");
       }
       const { cwd, executionCwd } = input as { cwd: string; executionCwd: string };
-      return readProjectBindingFromDb(cwd, {
+      return await readProjectBindingFromDbAsync(cwd, {
         preserveGlobalDbHandle: true,
         executionPath: executionCwd,
       });
