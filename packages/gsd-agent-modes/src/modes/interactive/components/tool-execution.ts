@@ -44,6 +44,10 @@ import { truncateToVisualLines } from "./visual-truncate.js";
 
 // Preview line limit for bash when not expanded
 const BASH_PREVIEW_LINES = 5;
+// Keep the successful Read preview off narrow compact rows, where status and target matter more.
+const READ_COMPACT_PREVIEW_MIN_WIDTH = 72;
+// Bound per-render cleanup when a file starts with a very long line.
+const READ_COMPACT_PREVIEW_SOURCE_LIMIT = 512;
 // During partial write tool-call streaming, re-highlight the first N lines fully
 // to keep multiline tokenization mostly correct without re-highlighting the full file.
 const WRITE_PARTIAL_FULL_HIGHLIGHT_LINES = 50;
@@ -935,11 +939,10 @@ export class ToolExecutionComponent extends Container {
 	 * mirrors text that is still visible (duplicate "Working · Latest Output"
 	 * content).
 	 *
-	 * Except recording warnings, both collapsed forms render exactly one row.
-	 * render()'s two non-expanded early returns delegate to renderCompactToolStrip() and
-	 * renderCommandCard(), and each of those returns a single-element array
-	 * (see transcript-design.ts). If either ever grows a header/detail split,
-	 * update this method to match.
+	 * Except recording warnings, compact cards render one row; a successful text Read
+	 * adds one bounded preview row when the width permits. render()'s non-expanded
+	 * early returns delegate to renderCompactToolStrip() and renderCommandCard(),
+	 * with the Read preview as the only two-row compact form.
 	 */
 	getDisplayedLineCount(width: number): number {
 		if (this.hideComponent) return 0;
@@ -951,7 +954,7 @@ export class ToolExecutionComponent extends Container {
 		const hasImages = this.result?.content?.some((block) => block.type === "image") ?? false;
 		// Other tools collapsed (non-error, no images): renderCompactToolStrip() → one row.
 		if (!this.showExpandedBody() && !this.result?.isError && !hasImages) {
-			return 1;
+			return this.getCompactReadPreview(width) ? 2 : 1;
 		}
 		return this.render(width).length;
 	}
@@ -993,11 +996,16 @@ export class ToolExecutionComponent extends Container {
 		}
 		const hasImages = this.result?.content?.some((block) => block.type === "image") ?? false;
 		if (!this.showExpandedBody() && !this.result?.isError && !hasImages && !recordingWarning) {
-			return renderCompactToolStrip(frameLabel, displayTarget, frameWidth, {
+			const readPreview = this.getCompactReadPreview(frameWidth);
+			const rows = renderCompactToolStrip(frameLabel, displayTarget, frameWidth, {
 				status: frameStatus,
 				tone: recommendedTone,
-				hidden: !this.isPartial && !!this.result,
+				hidden: !readPreview && !this.isPartial && !!this.result,
 			});
+			if (!readPreview) return rows;
+
+			const previewLine = theme.fg("muted", `  ↳ preview · ctrl+o expand: ${readPreview}`);
+			return [...rows, padRight(truncateToWidth(previewLine, frameWidth, "…"), frameWidth)];
 		}
 		// collapseBlankLines merges consecutive blank rows. An inline image reserves
 		// its height as (rows-1) trailing blank padding lines after the sequence;
@@ -1110,6 +1118,38 @@ export class ToolExecutionComponent extends Container {
 			return glob ? `${label} (${glob})` : label;
 		}
 		return undefined;
+	}
+
+	private getCompactReadPreview(width: number): string | undefined {
+		if (
+			width < READ_COMPACT_PREVIEW_MIN_WIDTH ||
+			this.normalizedToolName !== "read" ||
+			this.showExpandedBody() ||
+			this.isPartial ||
+			!this.result ||
+			this.result.isError ||
+			this.result.content.some((block) => block.type === "image")
+		) {
+			return undefined;
+		}
+
+		const text = this.result.content.find((block) => block.type === "text")?.text;
+		if (typeof text !== "string") return undefined;
+		if (text.length === 0) return "[empty result]";
+
+		const details = this.result.details as
+			| { truncation?: { firstLineExceedsLimit?: unknown; truncated?: unknown } }
+			| undefined;
+		if (details?.truncation?.firstLineExceedsLimit === true) return "[first line exceeds the Read output limit]";
+
+		const sample = text.slice(0, READ_COMPACT_PREVIEW_SOURCE_LIMIT);
+		const lineEnd = sample.search(/[\r\n]/);
+		const rawFirstLine = lineEnd === -1 ? sample : sample.slice(0, lineEnd);
+		const firstLine = singleRowDisplayText(rawFirstLine.replace(/[\u061c\u200e\u200f]/g, ""));
+		if (!firstLine) return "[blank first line]";
+		const hasMore =
+			sample.length < text.length || lineEnd !== -1 || details?.truncation?.truncated === true;
+		return hasMore ? `${firstLine} …` : firstLine;
 	}
 
 	private getExecPurpose(): string | undefined {
