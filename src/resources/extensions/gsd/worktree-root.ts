@@ -389,6 +389,10 @@ function resolveProjectRootFromPath(path: string): string {
 function resolveProjectRootFromPathWithGitRoot(path: string, gitRoot: string | null): string {
   const normalizedPath = path.replaceAll("\\", "/");
   const segment = findWorktreeSegment(normalizedPath);
+  if (segment && resolveExternalStateProjectGsdFromWorktreePath(path)) {
+    const gitFileProjectRoot = resolveProjectRootFromGitFile(path);
+    if (gitFileProjectRoot) return gitFileProjectRoot;
+  }
   if (!segment) {
     // Walk up to an ancestor `.gsd` only inside one git working tree — the same
     // rule as probeGsdRoot in paths.ts. A folder in no git repository is its own

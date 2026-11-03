@@ -171,15 +171,14 @@ function readProjectBindingWithRootEvidence(
   }
   if (!database) return { authority: null, ...roots };
 
-  let transactionOpen = false;
   try {
-    database.exec("BEGIN");
-    transactionOpen = true;
     const row = database.prepare(
-      "SELECT project_id, project_root_realpath, revision, authority_epoch FROM project_authority WHERE singleton = 1",
+      `SELECT project_id, project_root_realpath, revision, authority_epoch,
+              (SELECT MAX(version) FROM schema_version) AS schema_version
+         FROM project_authority
+        WHERE singleton = 1`,
     ).get();
-    const versionRow = database.prepare("SELECT MAX(version) AS version FROM schema_version").get();
-    const rawVersion = versionRow?.["version"];
+    const rawVersion = row?.["schema_version"];
     const schemaVersion = rawVersion === null || rawVersion === undefined ? null : Number(rawVersion);
     const rawRevision = row?.["revision"];
     const rawAuthorityEpoch = row?.["authority_epoch"];
@@ -209,13 +208,8 @@ function readProjectBindingWithRootEvidence(
       };
     }
 
-    database.exec("COMMIT");
-    transactionOpen = false;
     return { authority, ...roots };
   } catch {
-    if (transactionOpen) {
-      try { database.exec("ROLLBACK"); } catch { /* read transaction already ended */ }
-    }
     return { authority: null, ...roots };
   } finally {
     database.close();
