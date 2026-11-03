@@ -88,18 +88,21 @@ async function registeredExecDefinition(name: string): Promise<any> {
 
 describe("ToolExecutionComponent", () => {
 
-	test("collapsed successful Read shows one sanitized preview row beneath target and status", () => {
-		const rendered = renderToolCollapsed(
-			"read",
-			{ path: "docs/guide.md" },
-			{
-				content: [{ type: "text", text: "first line \u001b[31mactive\u001b[0m\u202e\nsecond line stays hidden" }],
-				isError: false,
-			},
-			undefined,
-			120,
+	test("collapsed successful Read shows a sanitized preview without mutating arguments or results", () => {
+		const args = { path: "docs/guide.md" };
+		const result = {
+			content: [{ type: "text", text: "first line \u001b[31mactive\u001b[0m\u202e\nsecond line stays hidden" }],
+			isError: false,
+		};
+		const originalArgs = structuredClone(args);
+		const originalResult = structuredClone(result);
+		const component = new ToolExecutionComponent(
+			"read", args, {}, undefined, { requestRender() {} } as any,
 		);
+		component.updateResult(result);
+		const rendered = stripAnsi(component.render(120).join("\n"));
 		const rows = rendered.split("\n");
+
 		assert.equal(rows.length, 2);
 		assert.match(rows[0]!, /READ/);
 		assert.match(rows[0]!, /docs\/guide\.md/);
@@ -108,6 +111,8 @@ describe("ToolExecutionComponent", () => {
 		assert.match(rows[1]!, /first line active/);
 		assert.doesNotMatch(rendered, /second line stays hidden|\u202e/);
 		assert.ok(rows.every((row) => visibleWidth(row) <= 120));
+		assert.deepEqual(args, originalArgs);
+		assert.deepEqual(result, originalResult);
 	});
 
 	test("collapsed successful empty Read labels the empty result", () => {
