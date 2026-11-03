@@ -84,6 +84,7 @@ cmux:
   sidebar:
   splits:
   browser:
+  vault: false
 remote_questions: false
 # To enable remote questions, replace `false` with:
 # remote_questions:

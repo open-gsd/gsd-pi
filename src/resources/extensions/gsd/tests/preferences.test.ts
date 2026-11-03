@@ -847,12 +847,24 @@ test("cmux fields validate correctly", () => {
       sidebar: false,
       splits: true,
       browser: false,
+      vault: true,
     },
   });
   assert.equal(errors.length, 0);
   assert.equal(preferences.cmux?.enabled, true);
   assert.equal(preferences.cmux?.sidebar, false);
   assert.equal(preferences.cmux?.splits, true);
+  assert.equal(preferences.cmux?.vault, true);
+});
+
+test("cmux Vault is opt-in and rejects non-boolean values", () => {
+  assert.equal(validatePreferences({ cmux: { enabled: true } }).preferences.cmux?.vault, undefined);
+  assert.equal(validatePreferences({ cmux: { vault: false } }).preferences.cmux?.vault, false);
+  for (const vault of ["false", "true", 1, null]) {
+    const result = validatePreferences({ cmux: { vault } } as any);
+    assert.ok(result.errors.includes("cmux.vault must be a boolean"));
+    assert.equal(result.preferences.cmux?.vault, undefined);
+  }
 });
 
 test("cmux unknown keys produce warnings", () => {

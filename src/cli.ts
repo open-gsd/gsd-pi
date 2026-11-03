@@ -5,8 +5,8 @@ import type {
   SettingsManager as SettingsManagerInstance,
 } from '@gsd/pi-coding-agent'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { agentDir, sessionsDir, authFilePath } from './app-paths.js'
+import { join, resolve } from 'node:path'
+import { agentDir, appRoot, sessionsDir, authFilePath } from './app-paths.js'
 import { initResources, buildResourceLoader, bareResourceLoaderOptions, getNewerManagedResourceVersion } from './resource-loader.js'
 import { ensureManagedTools } from './tool-bootstrap.js'
 import { loadStoredEnvKeys } from './wizard.js'
@@ -916,6 +916,14 @@ const sessionManager = cliFlags._selectedSessionPath
       ? SessionManager.continueRecent(cwd, projectSessionsDir)
       : SessionManager.create(cwd, cliFlags.sessionDir ?? projectSessionsDir)
 
+// Only this interactive root may publish a cmux surface binding. Children
+// inherit the owner's pid and cannot claim it, even if they inherit a TTY.
+const { createCmuxVaultExtension } = await import('./cmux-vault.js')
+const vaultOwner = process.stdin.isTTY && process.stdout.isTTY
+  && Boolean(process.env.CMUX_WORKSPACE_ID?.trim() && process.env.CMUX_SURFACE_ID?.trim())
+  && !process.env.GSD_CMUX_VAULT_OWNER_PID
+if (vaultOwner) process.env.GSD_CMUX_VAULT_OWNER_PID = String(process.pid)
+
 exitIfManagedResourcesAreNewer(agentDir)
 initResources(agentDir)
 markStartup('initResources')
@@ -923,9 +931,18 @@ markStartup('initResources')
 // Overlap resource loading with session manager setup — both are independent.
 // resourceLoader.reload() is the most expensive step (jiti compilation), so
 // starting it early shaves ~50-200ms off interactive startup.
-const resourceLoader = await buildResourceLoader(agentDir, {
+const resourceLoader: DefaultResourceLoaderInstance = await buildResourceLoader(agentDir, {
   additionalExtensionPaths: cliFlags.extensions.length > 0 ? cliFlags.extensions : undefined,
   bare: cliFlags.bare,
+  extensionFactories: vaultOwner ? [createCmuxVaultExtension({
+    home: resolve(appRoot),
+    launcher: [process.execPath, process.env.GSD_BIN_PATH ?? process.argv[1]],
+    extensionPaths: () => resourceLoader.getExtensions().extensions.map(extension => extension.resolvedPath),
+    getPreferences: async (sessionCwd) => {
+      const { loadEffectiveGSDPreferences } = await import('./resources/extensions/gsd/preferences.js')
+      return loadEffectiveGSDPreferences(sessionCwd)?.preferences.cmux
+    },
+  })] : undefined,
 })
 const resourceLoadPromise = resourceLoader.reload()
 

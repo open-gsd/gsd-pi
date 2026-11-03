@@ -82,7 +82,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "new-milestone", desc: "Create a milestone from a specification document (headless)" },
   { cmd: "new-project", desc: "Bootstrap a new project (use --deep for staged project-level discovery)" },
   { cmd: "parallel", desc: "Parallel milestone orchestration (start, status, stop, merge, watch)" },
-  { cmd: "cmux", desc: "Manage cmux integration (status, sidebar, notifications, splits)" },
+  { cmd: "cmux", desc: "Manage cmux integration (status, sidebar, notifications, splits, vault)" },
   { cmd: "park", desc: "Park a milestone — skip without deleting" },
   { cmd: "unpark", desc: "Reactivate a parked milestone" },
   { cmd: "discard", desc: "Permanently discard one milestone (with confirmation)" },
@@ -476,10 +476,11 @@ export function getGsdArgumentCompletions(prefix: string) {
         { cmd: "notifications", desc: "Toggle cmux desktop notifications" },
         { cmd: "sidebar", desc: "Toggle cmux sidebar metadata" },
         { cmd: "splits", desc: "Toggle cmux visual subagent splits" },
+        { cmd: "vault", desc: "Toggle optional cmux Vault session metadata" },
         { cmd: "browser", desc: "Toggle future browser integration flag" },
       ], "cmux");
     }
-    if (parts.length <= 3 && ["notifications", "sidebar", "splits", "browser"].includes(subcommand)) {
+    if (parts.length <= 3 && ["notifications", "sidebar", "splits", "browser", "vault"].includes(subcommand)) {
       return filterOptions(third, [
         { cmd: "on", desc: "Enable this cmux area" },
         { cmd: "off", desc: "Disable this cmux area" },

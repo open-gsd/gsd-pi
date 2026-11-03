@@ -55,10 +55,11 @@ async function writeProjectCmuxPreferences(
   ctx: ExtensionCommandContext,
   updater: (prefs: Record<string, unknown>) => void,
 ): Promise<void> {
-  const path = resolveProjectPreferencesWritePath();
+  const basePath = ctx.sessionManager?.getCwd() ?? ctx.cwd;
+  const path = resolveProjectPreferencesWritePath(basePath);
   await ensurePreferencesFile(path, ctx, "project");
 
-  const existing = loadProjectGSDPreferences();
+  const existing = loadProjectGSDPreferences(basePath);
   const prefs: Record<string, unknown> = existing?.preferences ? { ...existing.preferences } : { version: 1 };
   updater(prefs);
   prefs.version = prefs.version || 1;
@@ -80,10 +81,10 @@ function resolveProjectPreferencesWritePath(basePath?: string): string {
   return loadProjectGSDPreferences(basePath)?.path ?? getProjectGSDPreferencesPath(basePath);
 }
 
-async function formatCmuxStatus(): Promise<string> {
+async function formatCmuxStatus(basePath?: string): Promise<string> {
   const { CmuxClient, detectCmuxEnvironment, resolveCmuxConfig } =
     await import("../cmux/index.js");
-  const loaded = loadEffectiveGSDPreferences();
+  const loaded = loadEffectiveGSDPreferences(basePath);
   const detected = detectCmuxEnvironment();
   const resolved = resolveCmuxConfig(loaded?.preferences);
   const capabilities = new CmuxClient(resolved).getCapabilities() as Record<string, unknown> | null;
@@ -103,7 +104,7 @@ async function formatCmuxStatus(): Promise<string> {
     `Socket: ${detected.socketPath}`,
     `Workspace: ${detected.workspaceId ?? "(none)"}`,
     `Surface: ${detected.surfaceId ?? "(none)"}`,
-    `Features: notifications=${resolved.notifications ? "on" : "off"}, sidebar=${resolved.sidebar ? "on" : "off"}, splits=${resolved.splits ? "on" : "off"}, browser=${resolved.browser ? "on" : "off"}`,
+    `Features: notifications=${resolved.notifications ? "on" : "off"}, sidebar=${resolved.sidebar ? "on" : "off"}, splits=${resolved.splits ? "on" : "off"}, browser=${resolved.browser ? "on" : "off"}, vault=${resolved.vault ? "on" : "off"}`,
     `Capabilities: access=${accessMode}, methods=${methods}`,
   ].join("\n");
 }
@@ -121,8 +122,9 @@ async function ensureCmuxAvailableForEnable(ctx: ExtensionCommandContext): Promi
 
 export async function handleCmux(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const trimmed = args.trim();
+  const basePath = ctx.sessionManager?.getCwd() ?? ctx.cwd;
   if (!trimmed || trimmed === "status") {
-    ctx.ui.notify(await formatCmuxStatus(), "info");
+    ctx.ui.notify(await formatCmuxStatus(basePath), "info");
     return;
   }
 
@@ -144,7 +146,7 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
   }
 
   if (trimmed === "off") {
-    const effective = loadEffectiveGSDPreferences()?.preferences;
+    const effective = loadEffectiveGSDPreferences(basePath)?.preferences;
     await writeProjectCmuxPreferences(ctx, (prefs) => {
       prefs.cmux = { ...((prefs.cmux as Record<string, unknown> | undefined) ?? {}), enabled: false };
     });
@@ -155,8 +157,8 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
   }
 
   const parts = trimmed.split(/\s+/);
-  if (parts.length === 2 && ["notifications", "sidebar", "splits", "browser"].includes(parts[0]) && ["on", "off"].includes(parts[1])) {
-    const feature = parts[0] as "notifications" | "sidebar" | "splits" | "browser";
+  if (parts.length === 2 && ["notifications", "sidebar", "splits", "browser", "vault"].includes(parts[0]) && ["on", "off"].includes(parts[1])) {
+    const feature = parts[0] as "notifications" | "sidebar" | "splits" | "browser" | "vault";
     const enabled = parts[1] === "on";
     if (enabled && !await ensureCmuxAvailableForEnable(ctx)) return;
 
@@ -169,18 +171,20 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
 
     if (!enabled && feature === "sidebar") {
       const { clearCmuxSidebar } = await import("../cmux/index.js");
-      clearCmuxSidebar(loadEffectiveGSDPreferences()?.preferences);
+      clearCmuxSidebar(loadEffectiveGSDPreferences(basePath)?.preferences);
     }
 
     const note = feature === "browser" && enabled
       ? " Browser surfaces are still a follow-up path."
-      : "";
+      : feature === "vault" && enabled
+        ? " Vault discovery requires the one-time cmux agent registration described in the user docs."
+        : "";
     ctx.ui.notify(`cmux ${feature} ${enabled ? "enabled" : "disabled"}.${note}`, "info");
     return;
   }
 
   ctx.ui.notify(
-    "Usage: /gsd cmux <status|on|off|notifications on|notifications off|sidebar on|sidebar off|splits on|splits off|browser on|browser off>",
+    "Usage: /gsd cmux <status|on|off|notifications on|notifications off|sidebar on|sidebar off|splits on|splits off|browser on|browser off|vault on|vault off>",
     "info",
   );
 }

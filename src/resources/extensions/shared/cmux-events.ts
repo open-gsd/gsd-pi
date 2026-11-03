@@ -25,6 +25,7 @@ export interface CmuxPreferencesInput {
     sidebar?: boolean;
     splits?: boolean;
     browser?: boolean;
+    vault?: boolean;
   };
 }
 
