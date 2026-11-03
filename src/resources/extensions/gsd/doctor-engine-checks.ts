@@ -71,7 +71,9 @@ import {
   openWorkflowDatabaseIsolated,
 } from "./db-workspace.js";
 import {
+  describeDormantWorkflowDbLockHolderSkip,
   inspectWorkflowDbLockHolders,
+  isDormantWorkflowDbLockHolderSafeToTerminate,
   terminateDormantWorkflowDbLockHolders,
 } from "./workflow-db-locks.js";
 import { readTerminalTaskRecoveryAbort, taskAttemptArtifactReadiness } from "./artifact-verification.js";
@@ -914,23 +916,35 @@ export async function checkEngineHealth(
     const status = getWorkflowDatabaseStatus();
     if (status.lastPhase === "locked") {
       const readOnly = openWorkflowDatabaseIsolated(dbPath);
-      const staleWorkerStartedAtByPid = new Map<number, number>();
+      // #3052: partition the workers registry by heartbeat freshness. Only a
+      // row with a fresh heartbeat is treated as a live session; stale,
+      // terminal, and never-registered holders are exactly the orphans this
+      // repair exists to release.
+      const workerSnapshot: {
+        staleStartedAtByPid: Map<number, number>;
+        livePids: Set<number>;
+      } = { staleStartedAtByPid: new Map(), livePids: new Set() };
       if (readOnly) {
         try {
-          const cutoff = new Date(Date.now() - 5 * 60_000).toISOString();
+          const cutoffMs = Date.now() - 5 * 60_000;
           const rows = readOnly.prepare(
-            `SELECT pid, started_at FROM workers
+            `SELECT pid, started_at, last_heartbeat_at FROM workers
              WHERE host = :host
-               AND status IN ('active', 'stopping')
-               AND last_heartbeat_at < :cutoff`,
-          ).all({ ":host": hostname(), ":cutoff": cutoff });
+               AND status IN ('active', 'stopping')`,
+          ).all({ ":host": hostname() });
           for (const row of rows) {
             const pid = Number(row["pid"]);
             const startedAtMs = Date.parse(String(row["started_at"]));
-            if (Number.isSafeInteger(pid) && pid > 0 && Number.isFinite(startedAtMs)) {
-              staleWorkerStartedAtByPid.set(
+            const heartbeatMs = Date.parse(String(row["last_heartbeat_at"]));
+            if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(startedAtMs)) continue;
+            // An unparsable heartbeat is ambiguous evidence — treat the row as
+            // live (fail closed) rather than routable to the terminable bucket.
+            if (!Number.isFinite(heartbeatMs) || heartbeatMs >= cutoffMs) {
+              workerSnapshot.livePids.add(pid);
+            } else {
+              workerSnapshot.staleStartedAtByPid.set(
                 pid,
-                Math.max(staleWorkerStartedAtByPid.get(pid) ?? 0, startedAtMs),
+                Math.max(workerSnapshot.staleStartedAtByPid.get(pid) ?? 0, startedAtMs),
               );
             }
           }
@@ -944,12 +958,16 @@ export async function checkEngineHealth(
       const holders = (lockRecovery?.inspectHolders ?? inspectWorkflowDbLockHolders)(dbPath);
       let repaired = false;
       let remainingAfterFix: number[] = [];
+      let signaledPids: number[] = [];
+      let fixRan = false;
       if (options?.repairDbLock && readOnlyProbeSucceeded) {
+        fixRan = true;
         const result = await (lockRecovery?.terminateHolders ?? terminateDormantWorkflowDbLockHolders)(
           holders,
-          staleWorkerStartedAtByPid,
+          workerSnapshot,
         );
         remainingAfterFix = result.remaining;
+        signaledPids = result.signaled;
         if (result.signaled.length > 0 && (lockRecovery?.reopen ?? openExistingWorkflowDatabase)(basePath).ok) {
           fixesApplied.push(`released workflow database lock held by dormant PID(s): ${result.signaled.join(", ")}`);
           repaired = true;
@@ -971,6 +989,26 @@ export async function checkEngineHealth(
           : killablePids.length > 0
             ? ` Stop them manually if active: ${killablePids.map((pid) => `kill ${pid}`).join("; ")}.`
             : "";
+        // #3052: `fixable` must reflect what --fix can actually do, and a
+        // --fix run that signaled nobody must say why instead of implying
+        // only the manual-kill branch applies. A failed read-only probe
+        // blocks the repair, so the issue is not fixable in that case either.
+        const fixable = process.platform !== "win32"
+          && readOnlyProbeSucceeded
+          && holders.some((holder) => isDormantWorkflowDbLockHolderSafeToTerminate(holder, workerSnapshot));
+        const skipDetail = fixRan
+          ? holders
+            .filter((holder) => !signaledPids.includes(holder.pid))
+            .filter((holder) => !remainingAfterFix.includes(holder.pid))
+            .map((holder) =>
+              describeDormantWorkflowDbLockHolderSkip(holder, workerSnapshot)
+                ?? `PID ${holder.pid}: start-identity recheck failed at signal time`
+            )
+            .join("; ")
+          : "";
+        const skippedDetail = fixRan && pids.length > 0 && skipDetail
+          ? ` Automated fix skipped — ${skipDetail}.`
+          : "";
         issues.push({
           severity: "error",
           code: "db_locked",
@@ -978,9 +1016,9 @@ export async function checkEngineHealth(
           unitId: "project",
           message:
             `Workflow database is write-locked by another process; the read-only probe ${readOnlyProbeSucceeded ? "succeeded" : "also failed"}.` +
-            holderDetail + killDetail,
+            holderDetail + skippedDetail + killDetail,
           file: ".gsd/gsd.db",
-          fixable: process.platform !== "win32",
+          fixable,
         });
       }
     } else {
