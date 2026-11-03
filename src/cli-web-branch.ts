@@ -13,6 +13,7 @@ export interface CliFlags {
   noSession?: boolean
   session?: string
   sessionDir?: string
+  resumeExact?: { sessionFile: string; sessionId: string }
   worktree?: boolean | string
   model?: string
   thinking?: CliThinkingLevel
@@ -99,6 +100,9 @@ export function parseCliArgs(argv: string[]): CliFlags {
       flags.session = args[++i]
     } else if (arg === '--session-dir' && i + 1 < args.length) {
       flags.sessionDir = args[++i]
+    } else if (arg === '--resume-exact') {
+      if (i + 2 >= args.length) throw new Error('--resume-exact requires a session file path and session id')
+      flags.resumeExact = { sessionFile: args[++i], sessionId: args[++i] }
     } else if (arg === '--worktree' || arg === '-w') {
       // -w with no value → auto-generate name; -w <name> → use that name
       if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
@@ -154,6 +158,9 @@ export function parseCliArgs(argv: string[]): CliFlags {
     } else {
       throw new Error(`Unknown option: ${arg}`)
     }
+  }
+  if (flags.resumeExact && (flags.noSession || flags.session || flags.continue)) {
+    throw new Error('--resume-exact cannot be combined with --no-session, --session, or --continue')
   }
   return flags
 }

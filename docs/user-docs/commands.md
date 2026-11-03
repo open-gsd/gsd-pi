@@ -359,6 +359,36 @@ Shell package commands use the same extension registry. A successful `gsd instal
 | `/gsd cmux sidebar on/off` | Toggle cmux sidebar metadata |
 | `/gsd cmux splits on/off` | Toggle cmux visual subagent splits |
 | `/gsd cmux vault on/off` | Toggle optional Vault metadata and active-session registration (default off) |
+| `/gsd cmux resume on/off` | Allow cmux-trusted automatic restore for exact GSD sessions (default off) |
+
+### Exact GSD session restore
+
+Enable the optional restore policy with `/gsd cmux resume on`, or under
+`/gsd prefs` → **Integrations**. It is off by default and independent of Vault
+metadata. It permits GSD to retain a binding that cmux marks for automatic
+restore. With resume off, a Vault-owned binding remains manual; if cmux reports
+that it would auto-run, GSD clears it and withholds that update's Vault
+metadata rather than violate the opt-out.
+
+The binding captures the active native session file, session ID, working
+directory and GSD launcher. It restores through GSD's `--resume-exact` path,
+not stock `pi --session` or `--continue`; it does not scan other sessions,
+copy session files, or include transcript/auth-file contents. Explicit
+`GSD_HOME` is preserved without dumping the process environment.
+
+cmux stores custom surface bindings as manual commands unless its trusted-prefix
+policy approves them. Automatic restore also follows **Settings > Terminal >
+Resume Agent Sessions**. GSD never approves a command prefix or bypasses cmux's
+policy; an untrusted binding remains manually restorable. When `/gsd cmux resume
+off`, GSD clears any binding cmux reports as automatic. A binding owned by a
+different agent is never replaced, and GSD never falls back to stock Pi. Clear
+an obsolete conflicting binding in cmux before enabling GSD restore. See cmux's
+[session restore documentation](https://cmux.com/docs/session-restore.md).
+
+If the exact file is missing, malformed, has a different native ID, or was
+launched from a different cwd, GSD exits with a recoverable error rather than
+creating or selecting a replacement session. Missing cmux, stale sockets and
+transport timeouts do not block normal GSD startup or conversation persistence.
 
 ### Optional cmux Vault bridge
 
@@ -453,12 +483,11 @@ variable to return to preference control.
   with the current surface and GSD PID. They contain no `transcript_path`,
   prompt, assistant response, tool input/output, session title derived from
   conversation text, credential, or auth-file content.
-- A manual surface continuation command uses this GSD launcher, exact native
-  session file and `GSD_HOME`. **Automatic resume remains off.** The cmux
-  registration schema requires a manual resume template; this is not a claim
-  that application-restart restoration, checkpoint mapping or Vault forking
-  has been validated. Those integrations belong to #3014 and #3015. Do not
-  interpret a visible row as proof of them.
+- The surface binding uses this GSD launcher, exact native session file and
+  `GSD_HOME`. GSD does not request automatic execution; cmux's trusted-prefix
+  and **Resume Agent Sessions** policies decide whether to auto-run it. See
+  [Exact GSD session restore](#exact-gsd-session-restore). A Vault row is not
+  proof of checkpoint mapping or Vault forking; those remain separate scope.
 - Native transcripts remain in GSD's store. There is no transcript preview,
   message search or checkpoint export through the metadata index. Old opted-in
   records remain discoverable after exit; there is no historical-session

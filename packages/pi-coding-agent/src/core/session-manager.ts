@@ -51,6 +51,7 @@ import {
 	getDefaultSessionDir,
 	listSessionsFromDir,
 	loadEntriesFromFile,
+	loadExistingEntriesFromFile,
 	type SessionListProgress,
 } from "./session-manager-list.js";
 import {
@@ -91,6 +92,7 @@ export {
 	getDefaultSessionDir,
 	listSessionsFromDir,
 	loadEntriesFromFile,
+	loadExistingEntriesFromFile,
 	type SessionListProgress,
 } from "./session-manager-list.js";
 
@@ -221,25 +223,56 @@ export class SessionManager {
 		this.externalUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 	}
 
-	private constructor(cwd: string, sessionDir: string, sessionFile: string | undefined, persist: boolean) {
+	private constructor(
+		cwd: string,
+		sessionDir: string,
+		sessionFile: string | undefined,
+		persist: boolean,
+		exactSession?: { expectedSessionId: string; expectedCwd: string },
+	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
-		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
+		if (persist && this.sessionDir && !exactSession && !existsSync(this.sessionDir)) {
 			mkdirSync(this.sessionDir, { recursive: true });
 		}
 
 		if (sessionFile) {
-			this.setSessionFile(sessionFile);
+			this.setSessionFile(sessionFile, exactSession);
 		} else {
 			this.newSession();
+		}
+
+		if (persist && this.sessionDir && exactSession && !existsSync(this.sessionDir)) {
+			mkdirSync(this.sessionDir, { recursive: true });
 		}
 	}
 
 	/** Switch to a different session file (used for resume and branching) */
-	setSessionFile(sessionFile: string): void {
+	setSessionFile(
+		sessionFile: string,
+		exactSession?: { expectedSessionId: string; expectedCwd: string },
+	): void {
 		this._resetExternalUsage();
 		this.sessionFile = resolvePath(sessionFile);
+		if (exactSession) {
+			this.fileEntries = loadExistingEntriesFromFile(this.sessionFile);
+			const header = this.fileEntries[0] as SessionHeader;
+			if (header.id !== exactSession.expectedSessionId) {
+				throw new Error("Cannot resume exact GSD session: session identity did not match");
+			}
+			if (resolvePath(header.cwd) !== exactSession.expectedCwd) {
+				throw new Error("Cannot resume exact GSD session: working directory did not match");
+			}
+			this.sessionId = header.id;
+			if (migrateToCurrentVersion(this.fileEntries)) {
+				this._rewriteFile();
+			}
+			this._buildIndex();
+			this._reconstructExternalUsage();
+			this.flushed = true;
+			return;
+		}
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 
@@ -860,6 +893,34 @@ export class SessionManager {
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
 		return new SessionManager(cwd, dir, resolvedPath, true);
+	}
+
+	/**
+	 * Open one existing session file without repairing, replacing, or silently
+	 * selecting another session when the requested identity is unavailable.
+	 */
+	static openExisting(
+		path: string,
+		options: { expectedSessionId: string; expectedCwd?: string; sessionDir?: string },
+	): SessionManager {
+		if (!options.expectedSessionId.trim()) {
+			throw new Error("Cannot resume exact GSD session: expected session identity is required");
+		}
+		const resolvedPath = resolvePath(path);
+		const cwd = resolvePath(options.expectedCwd ?? process.cwd());
+		const entries = loadExistingEntriesFromFile(resolvedPath);
+		const header = entries[0] as SessionHeader;
+		if (header.id !== options.expectedSessionId) {
+			throw new Error("Cannot resume exact GSD session: session identity did not match");
+		}
+		if (resolvePath(header.cwd) !== cwd) {
+			throw new Error("Cannot resume exact GSD session: working directory did not match");
+		}
+		const dir = options.sessionDir ? normalizePath(options.sessionDir) : resolve(resolvedPath, "..");
+		return new SessionManager(cwd, dir, resolvedPath, true, {
+			expectedSessionId: options.expectedSessionId,
+			expectedCwd: cwd,
+		});
 	}
 
 	/**

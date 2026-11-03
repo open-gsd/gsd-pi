@@ -104,7 +104,7 @@ async function formatCmuxStatus(basePath?: string): Promise<string> {
     `Socket: ${detected.socketPath}`,
     `Workspace: ${detected.workspaceId ?? "(none)"}`,
     `Surface: ${detected.surfaceId ?? "(none)"}`,
-    `Features: notifications=${resolved.notifications ? "on" : "off"}, sidebar=${resolved.sidebar ? "on" : "off"}, splits=${resolved.splits ? "on" : "off"}, browser=${resolved.browser ? "on" : "off"}, vault=${resolved.vault ? "on" : "off"}`,
+    `Features: notifications=${resolved.notifications ? "on" : "off"}, sidebar=${resolved.sidebar ? "on" : "off"}, splits=${resolved.splits ? "on" : "off"}, browser=${resolved.browser ? "on" : "off"}, vault=${resolved.vault ? "on" : "off"}, resume=${resolved.resume ? "on" : "off"}`,
     `Capabilities: access=${accessMode}, methods=${methods}`,
   ].join("\n");
 }
@@ -157,8 +157,8 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
   }
 
   const parts = trimmed.split(/\s+/);
-  if (parts.length === 2 && ["notifications", "sidebar", "splits", "browser", "vault"].includes(parts[0]) && ["on", "off"].includes(parts[1])) {
-    const feature = parts[0] as "notifications" | "sidebar" | "splits" | "browser" | "vault";
+  if (parts.length === 2 && ["notifications", "sidebar", "splits", "browser", "vault", "resume"].includes(parts[0]) && ["on", "off"].includes(parts[1])) {
+    const feature = parts[0] as "notifications" | "sidebar" | "splits" | "browser" | "vault" | "resume";
     const enabled = parts[1] === "on";
     if (enabled && !await ensureCmuxAvailableForEnable(ctx)) return;
 
@@ -184,7 +184,7 @@ export async function handleCmux(args: string, ctx: ExtensionCommandContext): Pr
   }
 
   ctx.ui.notify(
-    "Usage: /gsd cmux <status|on|off|notifications on|notifications off|sidebar on|sidebar off|splits on|splits off|browser on|browser off|vault on|vault off>",
+    "Usage: /gsd cmux <status|on|off|notifications on|notifications off|sidebar on|sidebar off|splits on|splits off|browser on|browser off|vault on|vault off|resume on|resume off>",
     "info",
   );
 }
