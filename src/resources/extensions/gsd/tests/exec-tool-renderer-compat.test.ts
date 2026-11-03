@@ -90,3 +90,24 @@ test("genuine paired historical host warnings survive a long preview but normal 
     assert.match(output.replace(/\s/g, ""), /notverificationorUATevidence/);
   }
 });
+
+test("standalone error output retains a genuine historical recording warning", () => {
+  const body = Array.from({ length: 40 }, (_, index) => `error line ${index}`).join("\n");
+  const footer = "--- warning ---\nThe command ran, but the host did not record this run: database offline.";
+  const result = { isError: true, content: [{ type: "text", text: `${body}\n${footer}` }] };
+
+  for (const expanded of [false, true]) {
+    const output = render(result, expanded, 40);
+    const normalized = output.replace(/\s+/g, " ");
+    assert.match(normalized, /error line 0/);
+    assert.doesNotMatch(normalized, /error line 39/);
+    assert.match(normalized, /database offline/);
+    assert.match(normalized, /not verification or UAT evidence/);
+    assert.match(normalized, /Do not run the command again only to get the output/);
+
+    const nativeOwned = renderExecResult(result, { expanded }, theme, { state: { gsdExecRecordingWarningInFrame: true } }).render(40).join("\n");
+    const normalizedOwned = nativeOwned.replace(/\s+/g, " ");
+    assert.match(normalizedOwned, /error line 0/);
+    assert.doesNotMatch(normalizedOwned, /database offline|host did not record|not verification or UAT evidence/);
+  }
+});
