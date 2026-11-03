@@ -20,6 +20,7 @@ import {
   getProjectAuthorityRow,
   getSchemaVersion,
   insertMilestone,
+  isDbAvailable,
   setMilestoneQueueOrder,
   setProjectRootBinding,
   transaction,
@@ -709,6 +710,42 @@ test("readProjectBindingFromDb marks authority authoritative only with a verifie
   assert.equal(binding.projectRoot, fixture.root);
   assert.equal(binding.worktreeRoot, null);
   assert.equal(binding.rootResolution, "verified");
+});
+
+test("readProjectBindingFromDb cold read does not open or mutate the workflow database", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  const previousProjectRoot = process.env.GSD_PROJECT_ROOT;
+  const previousProjectId = process.env.GSD_PROJECT_ID;
+  t.after(() => {
+    if (previousProjectRoot === undefined) {
+      delete process.env.GSD_PROJECT_ROOT;
+    } else {
+      process.env.GSD_PROJECT_ROOT = previousProjectRoot;
+    }
+    if (previousProjectId === undefined) {
+      delete process.env.GSD_PROJECT_ID;
+    } else {
+      process.env.GSD_PROJECT_ID = previousProjectId;
+    }
+    fixture.cleanup();
+  });
+
+  delete process.env.GSD_PROJECT_ROOT;
+  delete process.env.GSD_PROJECT_ID;
+  execFileSync("git", ["init", fixture.root], { stdio: "ignore" });
+  const before = getProjectAuthorityRow();
+  assert.ok(before);
+  assert.equal(before.projectRootRealpath, null);
+  closeDatabase();
+
+  const binding = readProjectBindingFromDb(fixture.root, { preserveGlobalDbHandle: true });
+
+  assert.equal(binding.authority, null);
+  assert.equal(binding.rootResolution, "verified");
+  assert.equal(isDbAvailable(), false, "cold read must leave the process-global DB closed");
+
+  fixture.reopen();
+  assert.deepEqual(getProjectAuthorityRow(), before, "read-only binding must not alter owner, revision, or epoch");
 });
 
 test("readProjectBindingFromDb rejects authority from a mismatched project-root override", async (t) => {

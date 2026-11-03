@@ -5,10 +5,7 @@
 // milestone registry — modeled on readProgressFromDb.
 
 import { deriveState, invalidateStateCache } from "./derive/index.js";
-import {
-  ensureExistingWorkflowDbOpen,
-  isWorkflowDbBoundToBasePath,
-} from "./derive/db-open.js";
+import { ensureExistingWorkflowDbOpen } from "./derive/db-open.js";
 import { noteSessionRead } from "../db/domain-operation.js";
 import {
   _getAdapter,
@@ -32,7 +29,9 @@ import {
 import {
   closeWorkflowDatabase as closeDatabase,
   getWorkflowDatabasePath as getDbPath,
+  openWorkflowDatabaseIsolated,
   openWorkflowDatabasePath as openDatabase,
+  resolveProjectRootDbPath,
 } from "../db-workspace.js";
 import { normalizeCanonicalLifecycleStatus, type CanonicalLifecycleStatus } from "../status-guards.js";
 import { normalizeRealPath } from "../paths.js";
@@ -154,7 +153,7 @@ function combineBindingRootEvidence(
 
 function readProjectBindingWithRootEvidence(
   basePath: string,
-  opts: ReadProjectBindingOptions,
+  _opts: ReadProjectBindingOptions,
   rootEvidence: WorktreeRootIdentity,
 ): RpcProjectBindingRead {
   const roots = {
@@ -162,50 +161,64 @@ function readProjectBindingWithRootEvidence(
     worktreeRoot: rootEvidence.worktreeRoot,
     rootResolution: rootEvidence.status,
   };
-  const previousDbPath = opts.preserveGlobalDbHandle ? getDbPath() : null;
+  if (rootEvidence.status === "partial") return { authority: null, ...roots };
 
+  let database: ReturnType<typeof openWorkflowDatabaseIsolated>;
   try {
-    const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath);
-    if (!openedRequestedDb || !isDbAvailable()) {
-      return { authority: null, ...roots };
-    }
+    database = openWorkflowDatabaseIsolated(resolveProjectRootDbPath(basePath));
+  } catch {
+    return { authority: null, ...roots };
+  }
+  if (!database) return { authority: null, ...roots };
 
+  let transactionOpen = false;
+  try {
+    database.exec("BEGIN");
+    transactionOpen = true;
+    const row = database.prepare(
+      "SELECT project_id, project_root_realpath, revision, authority_epoch FROM project_authority WHERE singleton = 1",
+    ).get();
+    const versionRow = database.prepare("SELECT MAX(version) AS version FROM schema_version").get();
+    const rawVersion = versionRow?.["version"];
+    const schemaVersion = rawVersion === null || rawVersion === undefined ? null : Number(rawVersion);
+    const rawRevision = row?.["revision"];
+    const rawAuthorityEpoch = row?.["authority_epoch"];
+    const revision = Number(rawRevision);
+    const authorityEpoch = Number(rawAuthorityEpoch);
+    const rootBinding = row?.["project_root_realpath"];
+    const projectRootRealpath = typeof rootBinding === "string" && rootBinding.trim() ? rootBinding : null;
+
+    let authority: DbProjectSnapshotAuthority | null = null;
     if (
-      rootEvidence.status === "partial" ||
-      (rootEvidence.status === "verified" &&
-        (!rootEvidence.projectRoot || !isWorkflowDbBoundToBasePath(rootEvidence.projectRoot)))
-    ) {
-      return { authority: null, ...roots };
-    }
-
-    const authority = readTransaction(() => {
-      const row = getProjectAuthorityRow();
-      if (!row) return null;
-      if (
+      row &&
+      Number.isSafeInteger(revision) && revision >= 0 &&
+      Number.isSafeInteger(authorityEpoch) && authorityEpoch >= 0 &&
+      (schemaVersion === null || Number.isSafeInteger(schemaVersion)) &&
+      !(
         rootEvidence.status === "verified" &&
         (!rootEvidence.projectRoot ||
-          !row.projectRootRealpath ||
-          normalizeRealPath(row.projectRootRealpath) !== normalizeRealPath(rootEvidence.projectRoot))
-      ) {
-        return null;
-      }
-      return {
-        projectId: row.projectId,
-        schemaVersion: getSchemaVersion(),
-        revision: row.revision,
-        authorityEpoch: row.authorityEpoch,
+          !projectRootRealpath ||
+          normalizeRealPath(projectRootRealpath) !== normalizeRealPath(rootEvidence.projectRoot))
+      )
+    ) {
+      authority = {
+        projectId: String(row["project_id"] ?? ""),
+        schemaVersion,
+        revision,
+        authorityEpoch,
       };
-    });
-
-    return { authority, ...roots };
-  } finally {
-    if (opts.preserveGlobalDbHandle && getDbPath() !== previousDbPath) {
-      if (previousDbPath) {
-        openDatabase(previousDbPath);
-      } else {
-        closeDatabase();
-      }
     }
+
+    database.exec("COMMIT");
+    transactionOpen = false;
+    return { authority, ...roots };
+  } catch {
+    if (transactionOpen) {
+      try { database.exec("ROLLBACK"); } catch { /* read transaction already ended */ }
+    }
+    return { authority: null, ...roots };
+  } finally {
+    database.close();
   }
 }
 
