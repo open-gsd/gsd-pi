@@ -91,7 +91,7 @@ describe("ToolExecutionComponent", () => {
 	test("collapsed successful Read shows a sanitized preview without mutating arguments or results", () => {
 		const args = { path: "docs/guide.md" };
 		const result = {
-			content: [{ type: "text", text: "first line \u001b[31mactive\u001b[0m\u202e\nsecond line stays hidden" }],
+			content: [{ type: "text", text: "first line \u001b[31mactive\u001b[0m\u202e\u061c\u200e\u200f\nsecond line stays hidden" }],
 			isError: false,
 		};
 		const originalArgs = structuredClone(args);
@@ -109,7 +109,8 @@ describe("ToolExecutionComponent", () => {
 		assert.match(rows[0]!, /success/);
 		assert.match(rows[1]!, /preview · ctrl\+o expand/);
 		assert.match(rows[1]!, /first line active/);
-		assert.doesNotMatch(rendered, /second line stays hidden|\u202e/);
+		assert.doesNotMatch(rendered, /second line stays hidden/);
+		assert.ok(!/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(rendered));
 		assert.ok(rows.every((row) => visibleWidth(row) <= 120));
 		assert.deepEqual(args, originalArgs);
 		assert.deepEqual(result, originalResult);
@@ -123,8 +124,22 @@ describe("ToolExecutionComponent", () => {
 			undefined,
 			120,
 		);
-		assert.match(rendered, /empty file/);
+		assert.match(rendered, /empty result/);
+		assert.doesNotMatch(rendered, /empty file/);
 		assert.match(rendered, /preview/);
+	});
+
+	test("empty ranged Read does not claim that the file itself is empty", () => {
+		const rendered = renderToolCollapsed(
+			"read",
+			{ path: "guide.md", offset: 2, limit: 1 },
+			{ content: [{ type: "text", text: "" }], isError: false },
+			undefined,
+			120,
+		);
+		assert.match(rendered, /guide\.md:2/);
+		assert.match(rendered, /empty result/);
+		assert.doesNotMatch(rendered, /empty file/);
 	});
 
 	test("narrow collapsed Read keeps the existing one-row status and omits the preview", () => {

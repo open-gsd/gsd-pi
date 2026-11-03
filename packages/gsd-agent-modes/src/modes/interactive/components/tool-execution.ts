@@ -1135,7 +1135,7 @@ export class ToolExecutionComponent extends Container {
 
 		const text = this.result.content.find((block) => block.type === "text")?.text;
 		if (typeof text !== "string") return undefined;
-		if (text.length === 0) return "[empty file]";
+		if (text.length === 0) return "[empty result]";
 
 		const details = this.result.details as
 			| { truncation?: { firstLineExceedsLimit?: unknown; truncated?: unknown } }
@@ -1144,7 +1144,8 @@ export class ToolExecutionComponent extends Container {
 
 		const sample = text.slice(0, READ_COMPACT_PREVIEW_SOURCE_LIMIT);
 		const lineEnd = sample.search(/[\r\n]/);
-		const firstLine = singleRowDisplayText(lineEnd === -1 ? sample : sample.slice(0, lineEnd));
+		const rawFirstLine = lineEnd === -1 ? sample : sample.slice(0, lineEnd);
+		const firstLine = singleRowDisplayText(rawFirstLine.replace(/[\u061c\u200e\u200f]/g, ""));
 		if (!firstLine) return "[blank first line]";
 		const hasMore =
 			sample.length < text.length || lineEnd !== -1 || details?.truncation?.truncated === true;
