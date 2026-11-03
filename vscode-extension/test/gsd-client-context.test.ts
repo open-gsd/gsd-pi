@@ -123,3 +123,20 @@ test("client: runtime errors invalidate trust and reject pending reads without e
 	h.processes[0].emit("error", new Error(PRIVATE_SENTINEL)); await rejection;
 	assert.equal(c.isProjectContextTrusted, false); assert.equal(c.isConnected, false);
 });
+
+test("client exposes binding snapshots without requiring v2 initialization", async (t) => {
+	const h = createHarness(); const c = h.client; await c.start(); t.after(() => c.stop());
+	const snapshot = {
+		producer: { sessionId: "session-vscode", processInstanceId: "process-vscode" },
+		project: null,
+		projectStatus: "unavailable",
+		capturedAt: "2026-11-02T00:00:00.000Z",
+	};
+	const read = c.getBindingSnapshot(); const command = h.processes[0].lastCommand();
+	assert.equal(command.type, "get_binding_snapshot");
+	h.processes[0].respond(command, snapshot);
+	const result = await read;
+	assert.equal(result?.producer.processInstanceId, "process-vscode");
+	assert.equal(result?.projectStatus, "unavailable");
+	assert.equal(result?.capturedAt, snapshot.capturedAt);
+});

@@ -112,6 +112,7 @@ export function getProjectAuthorityVersion(): ProjectAuthorityVersion {
 
 export interface ProjectAuthorityRow {
   projectId: string;
+  projectRootRealpath: string | null;
   revision: number;
   authorityEpoch: number;
 }
@@ -121,11 +122,15 @@ export function getProjectAuthorityRow(): ProjectAuthorityRow | null {
   const db = getDbOrNull();
   if (!db) return null;
   const row = db.prepare(
-    "SELECT project_id, revision, authority_epoch FROM project_authority WHERE singleton = 1",
+    "SELECT project_id, project_root_realpath, revision, authority_epoch FROM project_authority WHERE singleton = 1",
   ).get();
   if (!row) return null;
+  const projectRootRealpath = row["project_root_realpath"];
   return {
     projectId: String(row["project_id"] ?? ""),
+    projectRootRealpath: typeof projectRootRealpath === "string" && projectRootRealpath.trim()
+      ? projectRootRealpath
+      : null,
     revision: numberColumn(row, "revision"),
     authorityEpoch: numberColumn(row, "authority_epoch"),
   };

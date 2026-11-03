@@ -13,6 +13,7 @@ import type {
 	CompactionResult,
 	ImageContent,
 	ModelInfo,
+	RpcBindingSnapshot,
 	RpcCommand,
 	RpcInitResult,
 	RpcResponse,
@@ -446,6 +447,11 @@ export class RpcClient {
 
 	async getProjectSnapshot(): Promise<import("@opengsd/contracts").ProjectSnapshot | null> {
 		const response = await this.send({ type: "get_project_snapshot" });
+		return this.getData(response);
+	}
+
+	async getBindingSnapshot(): Promise<RpcBindingSnapshot> {
+		const response = await this.send({ type: "get_binding_snapshot" });
 		return this.getData(response);
 	}
 

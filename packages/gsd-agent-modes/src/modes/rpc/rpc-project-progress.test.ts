@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { invokeProjectProgressRead, invokeProjectSnapshotRead, invokeWorkflowCommand } from "./rpc-mode.js";
+import { invokeProjectBindingRead, invokeProjectProgressRead, invokeProjectSnapshotRead, invokeWorkflowCommand } from "./rpc-mode.js";
+import { RpcClient } from "./rpc-client.js";
 
 test("project progress read forwards the active session CWD and request ID", async () => {
 	let receivedInput: unknown;
@@ -164,4 +165,106 @@ test("workflow command failures preserve the request ID", async () => {
 		success: false,
 		error: "Unknown workflow command: nope",
 	});
+});
+
+test("binding read keeps producer identity separate from project authority", async () => {
+	let receivedInput: unknown;
+	const response = await invokeProjectBindingRead(
+		async (input) => {
+			receivedInput = input;
+			return {
+				authority: { projectId: "project-a", schemaVersion: 1, revision: 4, authorityEpoch: 2 },
+				projectRoot: "/workspace/project",
+				worktreeRoot: null,
+				rootResolution: "verified",
+			};
+		},
+		"request-binding-1",
+		"/workspace/project",
+		"/workspace/project/.gsd/worktrees/M001",
+		{ sessionId: "session-a", processInstanceId: "process-a" },
+		() => true,
+	);
+
+	assert.deepEqual(receivedInput, {
+		cwd: "/workspace/project",
+		executionCwd: "/workspace/project/.gsd/worktrees/M001",
+	});
+	assert.equal(response.success, true);
+	if (!response.success || response.command !== "get_binding_snapshot") assert.fail("expected binding snapshot");
+	assert.deepEqual(response.data.producer, { sessionId: "session-a", processInstanceId: "process-a" });
+	assert.deepEqual(response.data.project?.authority, {
+		projectId: "project-a",
+		schemaVersion: 1,
+		revision: 4,
+		authorityEpoch: 2,
+	});
+	assert.equal(response.data.projectStatus, "authoritative");
+	assert.ok(Number.isFinite(Date.parse(response.data.capturedAt)));
+});
+
+test("binding read preserves producer identity when project authority is unavailable", async () => {
+	const response = await invokeProjectBindingRead(
+		undefined,
+		"request-binding-2",
+		"/workspace/project",
+		"/workspace/project/.gsd/worktrees/M001",
+		{ sessionId: "session-b", processInstanceId: "process-b" },
+		() => true,
+	);
+
+	assert.equal(response.success, true);
+	if (!response.success || response.command !== "get_binding_snapshot") assert.fail("expected partial binding snapshot");
+	assert.deepEqual(response.data.producer, { sessionId: "session-b", processInstanceId: "process-b" });
+	assert.equal(response.data.project, null);
+	assert.equal(response.data.projectStatus, "unavailable");
+});
+
+test("binding read rechecks captured context after asynchronous root verification", async () => {
+	let contextStable = true;
+	const response = await invokeProjectBindingRead(
+		async () => {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			contextStable = false;
+			return { authority: null, projectRoot: null, worktreeRoot: null, rootResolution: "unavailable" };
+		},
+		"request-binding-3",
+		"/workspace/project",
+		"/workspace/project/.gsd/worktrees/M001",
+		{ sessionId: "session-c", processInstanceId: "process-c" },
+		() => contextStable,
+	);
+
+	assert.deepEqual(response, {
+		id: "request-binding-3",
+		type: "response",
+		command: "get_binding_snapshot",
+		success: false,
+		error: "Session workspace or execution directory changed during binding read; retry",
+	});
+});
+
+test("typed RPC client exposes binding snapshots without requiring v2 negotiation", async () => {
+	const client = new RpcClient();
+	const sent: unknown[] = [];
+	const snapshot = {
+		producer: { sessionId: "session-client", processInstanceId: "process-client" },
+		project: null,
+		projectStatus: "unavailable" as const,
+		capturedAt: "2026-11-02T00:00:00.000Z",
+	};
+	const clientWithStub = client as unknown as { send: (command: unknown) => Promise<unknown> };
+	clientWithStub.send = async (command) => {
+		sent.push(command);
+		return {
+			type: "response",
+			id: "client-read-1",
+			command: "get_binding_snapshot",
+			success: true,
+			data: snapshot,
+		} as never;
+	};
+
+	assert.deepEqual(await client.getBindingSnapshot(), snapshot);
+	assert.deepEqual(sent, [{ type: "get_binding_snapshot" }]);
 });

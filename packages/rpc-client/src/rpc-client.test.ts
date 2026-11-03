@@ -615,6 +615,24 @@ describe("v2 command serialization", () => {
 		assert.equal(result.sessionId, "s1");
 	});
 
+	it("getBindingSnapshot sends a protocol-neutral read command", async () => {
+		const { client, sent, respondNext } = createMockClient();
+		const snapshot = {
+			producer: { sessionId: "s1", processInstanceId: "p1" },
+			project: null,
+			projectStatus: "unavailable" as const,
+			capturedAt: "2026-11-02T00:00:00.000Z",
+		};
+		respondNext({ data: snapshot });
+
+		const result = await client.getBindingSnapshot();
+
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0].type, "get_binding_snapshot");
+		assert.equal(sent[0].protocolVersion, undefined);
+		assert.deepEqual(result, snapshot);
+	});
+
 	it("shutdown sends shutdown command", async () => {
 		const { client, sent, respondNext } = createMockClient();
 

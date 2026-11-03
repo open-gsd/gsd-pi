@@ -125,10 +125,14 @@ describe("extension bootstrap isolation (#4168, #4172)", () => {
 
     await registerExtension(pi as any);
 
-    assert.deepEqual([...runtimeReads.keys()].sort(), ["project_progress", "project_snapshot", "workflow_command"]);
+    assert.deepEqual([...runtimeReads.keys()].sort(), ["project_binding", "project_progress", "project_snapshot", "workflow_command"]);
     await assert.rejects(
       async () => runtimeReads.get("project_snapshot")?.({}),
       /Project snapshot requires a session CWD/,
+    );
+    await assert.rejects(
+      async () => runtimeReads.get("project_binding")?.({ cwd: "/workspace/project" }),
+      /Project binding requires the session and execution CWDs/,
     );
     await assert.rejects(
       async () => runtimeReads.get("workflow_command")?.({}),

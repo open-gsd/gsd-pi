@@ -29,11 +29,20 @@ import {
 import {
   closeWorkflowDatabase as closeDatabase,
   getWorkflowDatabasePath as getDbPath,
+  openWorkflowDatabaseIsolated,
   openWorkflowDatabasePath as openDatabase,
+  resolveProjectRootDbPath,
 } from "../db-workspace.js";
 import { normalizeCanonicalLifecycleStatus, type CanonicalLifecycleStatus } from "../status-guards.js";
+import { normalizeRealPath } from "../paths.js";
+import {
+  resolveWorktreeIdentity,
+  resolveWorktreeIdentityAsync,
+  WORKTREE_IDENTITY_PROBE_BUDGET_MS,
+  type WorktreeRootIdentity,
+} from "../worktree-root.js";
 import type { GSDState } from "../types.js";
-import { LIFECYCLE_STATUS_VERSION } from "@opengsd/contracts";
+import { LIFECYCLE_STATUS_VERSION, type RpcProjectBindingRead } from "@opengsd/contracts";
 
 const MAX_REVISION_ATTEMPTS = 3;
 
@@ -87,6 +96,124 @@ export interface DbProjectSnapshot {
 
 export interface ReadProjectSnapshotOptions {
   preserveGlobalDbHandle?: boolean;
+}
+
+export interface ReadProjectBindingOptions extends ReadProjectSnapshotOptions {
+  executionPath?: string;
+}
+
+/** Synchronous variant retained for direct callers; RPC uses the async variant below. */
+export function readProjectBindingFromDb(basePath: string, opts: ReadProjectBindingOptions = {}): RpcProjectBindingRead {
+  const executionPath = opts.executionPath ?? basePath;
+  const sessionRoots = resolveWorktreeIdentity(basePath);
+  if (sameCanonicalPath(basePath, executionPath)) {
+    return readProjectBindingWithRootEvidence(basePath, opts, sessionRoots);
+  }
+  const executionRoots = resolveWorktreeIdentity(executionPath);
+  return readProjectBindingWithRootEvidence(basePath, opts, combineBindingRootEvidence(sessionRoots, executionRoots));
+}
+
+/** Resolve both producer contexts without blocking the RPC event loop. */
+export async function readProjectBindingFromDbAsync(
+  basePath: string,
+  opts: ReadProjectBindingOptions = {},
+): Promise<RpcProjectBindingRead> {
+  const executionPath = opts.executionPath ?? basePath;
+  const deadlineAt = Date.now() + WORKTREE_IDENTITY_PROBE_BUDGET_MS;
+  if (sameCanonicalPath(basePath, executionPath)) {
+    const rootEvidence = await resolveWorktreeIdentityAsync(basePath, deadlineAt);
+    return readProjectBindingWithRootEvidence(basePath, opts, rootEvidence);
+  }
+  const [sessionRoots, executionRoots] = await Promise.all([
+    resolveWorktreeIdentityAsync(basePath, deadlineAt),
+    resolveWorktreeIdentityAsync(executionPath, deadlineAt),
+  ]);
+  return readProjectBindingWithRootEvidence(basePath, opts, combineBindingRootEvidence(sessionRoots, executionRoots));
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+  return normalizeRealPath(left) === normalizeRealPath(right);
+}
+
+function combineBindingRootEvidence(
+  session: WorktreeRootIdentity,
+  execution: WorktreeRootIdentity,
+): WorktreeRootIdentity {
+  if (
+    session.status === "verified" &&
+    execution.status === "verified" &&
+    session.projectRoot &&
+    execution.projectRoot &&
+    sameCanonicalPath(session.projectRoot, execution.projectRoot)
+  ) {
+    return execution;
+  }
+  return { ...execution, status: "partial" };
+}
+
+function readProjectBindingWithRootEvidence(
+  basePath: string,
+  _opts: ReadProjectBindingOptions,
+  rootEvidence: WorktreeRootIdentity,
+): RpcProjectBindingRead {
+  const roots = {
+    projectRoot: rootEvidence.projectRoot,
+    worktreeRoot: rootEvidence.worktreeRoot,
+    rootResolution: rootEvidence.status,
+  };
+  if (rootEvidence.status === "partial") return { authority: null, ...roots };
+
+  let database: ReturnType<typeof openWorkflowDatabaseIsolated>;
+  try {
+    database = openWorkflowDatabaseIsolated(resolveProjectRootDbPath(basePath));
+  } catch {
+    return { authority: null, ...roots };
+  }
+  if (!database) return { authority: null, ...roots };
+
+  try {
+    const row = database.prepare(
+      `SELECT project_id, project_root_realpath, revision, authority_epoch,
+              (SELECT MAX(version) FROM schema_version) AS schema_version
+         FROM project_authority
+        WHERE singleton = 1`,
+    ).get();
+    const rawVersion = row?.["schema_version"];
+    const schemaVersion = rawVersion === null || rawVersion === undefined ? null : Number(rawVersion);
+    const rawRevision = row?.["revision"];
+    const rawAuthorityEpoch = row?.["authority_epoch"];
+    const revision = Number(rawRevision);
+    const authorityEpoch = Number(rawAuthorityEpoch);
+    const rootBinding = row?.["project_root_realpath"];
+    const projectRootRealpath = typeof rootBinding === "string" && rootBinding.trim() ? rootBinding : null;
+
+    let authority: DbProjectSnapshotAuthority | null = null;
+    if (
+      row &&
+      Number.isSafeInteger(revision) && revision >= 0 &&
+      Number.isSafeInteger(authorityEpoch) && authorityEpoch >= 0 &&
+      (schemaVersion === null || Number.isSafeInteger(schemaVersion)) &&
+      !(
+        rootEvidence.status === "verified" &&
+        (!rootEvidence.projectRoot ||
+          !projectRootRealpath ||
+          normalizeRealPath(projectRootRealpath) !== normalizeRealPath(rootEvidence.projectRoot))
+      )
+    ) {
+      authority = {
+        projectId: String(row["project_id"] ?? ""),
+        schemaVersion,
+        revision,
+        authorityEpoch,
+      };
+    }
+
+    return { authority, ...roots };
+  } catch {
+    return { authority: null, ...roots };
+  } finally {
+    database.close();
+  }
 }
 
 interface SnapshotStabilityToken {

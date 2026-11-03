@@ -265,6 +265,23 @@ function configureBridgeRuntime(
             );
             return;
           }
+          case "get_binding_snapshot": {
+            child!.stdout.write(
+              serializeJsonLine({
+                id: message.id,
+                type: "response",
+                command: "get_binding_snapshot",
+                success: true,
+                data: {
+                  producer: { sessionId: "sess-web-onboarding", processInstanceId: "proc-web-onboarding" },
+                  project: null,
+                  projectStatus: "unavailable",
+                  capturedAt: "2026-11-02T00:00:00.000Z",
+                },
+              }),
+            );
+            return;
+          }
           case "prompt": {
             generation.promptMessages.push(String(message.message ?? ""));
             child!.stdout.write(
@@ -347,6 +364,17 @@ test("successful browser onboarding restarts the stale bridge child and unlocks 
   assert.equal(blockedPayload.code, "onboarding_locked");
   assert.equal(blockedPayload.details.reason, "required_setup");
   assert.equal(harness.promptCount, 0);
+
+  const bindingResponse = await commandRoute.POST(
+    new Request("http://localhost/api/session/command", {
+      method: "POST",
+      body: JSON.stringify({ type: "get_binding_snapshot" }),
+    }),
+  );
+  assert.equal(bindingResponse.status, 200);
+  const bindingPayload = (await bindingResponse.json()) as any;
+  assert.equal(bindingPayload.success, true);
+  assert.equal(bindingPayload.data.producer.processInstanceId, "proc-web-onboarding");
 
   const validationResponse = await onboardingRoute.POST(
     new Request("http://localhost/api/onboarding", {
