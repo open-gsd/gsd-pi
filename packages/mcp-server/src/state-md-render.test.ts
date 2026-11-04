@@ -7,6 +7,7 @@
 
 import { describe, it, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -264,7 +265,33 @@ for (const transport of ["native", "mcp"] as const) {
     it("UAT result renders STATE.md", async (t) => {
       const fixture = await openFixture(t);
       const evidenceId = `state-md-uat-${transport}`;
-      // The host record of the gsd_uat_exec run the check cites.
+      const execDir = join(fixture.root, ".gsd", "exec");
+      mkdirSync(execDir, { recursive: true });
+      const stdout = Buffer.from(`UAT artifact check passed for ${transport}\\n`);
+      const stderr = Buffer.alloc(0);
+      const stdoutPath = join(execDir, `${evidenceId}.stdout`);
+      const stderrPath = join(execDir, `${evidenceId}.stderr`);
+      const metadataPath = join(execDir, `${evidenceId}.meta.json`);
+      const startedAt = new Date().toISOString();
+      writeFileSync(stdoutPath, stdout);
+      writeFileSync(stderrPath, stderr);
+      writeFileSync(metadataPath, JSON.stringify({
+        id: evidenceId,
+        runtime: "bash",
+        started_at: startedAt,
+        exit_code: 0,
+        signal: null,
+        timed_out: false,
+        aborted: false,
+        duration_ms: 1,
+        stdout_bytes: stdout.length,
+        stderr_bytes: stderr.length,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        stdout_path: stdoutPath,
+        stderr_path: stderrPath,
+      }));
+      // The host record and all persisted artifacts for the gsd_uat_exec run.
       recordExecRun({
         kind: "uat_exec",
         milestoneId: "M001",
@@ -278,9 +305,9 @@ for (const transport of ["native", "mcp"] as const) {
         signal: null,
         timedOut: false,
         aborted: false,
-        started_at: new Date().toISOString(),
+        started_at: startedAt,
         duration_ms: 1,
-        output_hash: "sha256:test",
+        output_hash: `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`,
       });
       await assertRendersState(fixture.root, `${transport} UAT`, () => callTool(transport, fixture.root, "gsd_uat_result_save", {
         milestoneId: "M001",
