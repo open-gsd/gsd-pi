@@ -376,6 +376,7 @@ test("runProviderChecks ignores empty placeholder keys in auth.json", () => {
     GH_TOKEN: undefined,
     GITHUB_TOKEN: undefined,
     HOME: tmpHome,
+    GSD_HOME: join(tmpHome, ".gsd"),
     // Exclude AI CLI binaries so the claude-code route is not considered available
     PATH: tmpHome,
   }, () => {
@@ -962,6 +963,7 @@ test("runProviderChecks ignores external CLI auth sentinels when the CLI is miss
     withEnv({
       ...env,
       HOME: tmpHome,
+      GSD_HOME: join(tmpHome, ".gsd"),
       PATH: tmpHome,
     }, () => {
       withCwd(repo, () => {

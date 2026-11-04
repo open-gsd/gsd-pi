@@ -263,6 +263,24 @@ test("gsd_exec renderResult surfaces run_not_recorded from structured details on
 	const warned = renderText(tool.renderResult(recorded, {}, fakeTheme));
 	assert.ok(warned.includes("not recorded"), `structured warning missing: ${warned}`);
 	assert.ok(warned.includes("workflow database locked"), `warning reason missing: ${warned}`);
+
+	const longLegacyOutput = [
+		...Array.from({ length: 20 }, (_, index) => `ordinary output line ${index}`),
+		"--- warning ---",
+		"The command ran, but the host did not record this run: workflow database locked. This run is not verification or UAT evidence. Do not run the command again only to get the output.",
+	].join("\n");
+	const withoutDetails = renderText(tool.renderResult({
+		content: [{ type: "text", text: longLegacyOutput }],
+		isError: false,
+	}, {}, fakeTheme));
+	const emptyDetails = renderText(tool.renderResult({
+		content: [{ type: "text", text: longLegacyOutput }],
+		details: {},
+		isError: false,
+	}, {}, fakeTheme));
+	assert.match(withoutDetails, /not verification or UAT evidence/);
+	assert.doesNotMatch(withoutDetails, /ordinary output line 19/);
+	assert.doesNotMatch(emptyDetails, /not verification or UAT evidence/);
 });
 
 test("gsd_exec renderResult keeps genuine warning visibility for legacy rows without details", () => {
@@ -274,6 +292,23 @@ test("gsd_exec renderResult keeps genuine warning visibility for legacy rows wit
 	const text = renderText(tool.renderResult(result, {}, fakeTheme));
 	assert.ok(text.includes("did not record this run"), `legacy warning lost: ${text}`);
 	assert.ok(!text.includes("undefined"), `undefined leaked: ${text}`);
+});
+
+test("gsd_exec renderResult parses only the terminal legacy footer and keeps output bounded", () => {
+	const tool = getTool("gsd_exec");
+	const intervening = Array.from({ length: 20 }, (_, index) => `intervening command output ${index}`).join("\n");
+	const finalFooter = "--- warning ---\nThe command ran, but the host did not record this run: final database reason. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
+	const result = {
+		content: [{
+			type: "text",
+			text: `initial output\n--- warning ---\nThe command ran, but the host did not record this run: incomplete imitation.\n${intervening}\n${finalFooter}`,
+		}],
+		isError: false,
+	};
+	const text = renderText(tool.renderResult(result, {}, fakeTheme));
+	assert.match(text, /final database reason/);
+	assert.match(text, /intervening command output 0/);
+	assert.doesNotMatch(text, /intervening command output 9/);
 });
 
 test("gsd_exec renderResult keeps recorded output visible for historical rows that have details but no digest", () => {

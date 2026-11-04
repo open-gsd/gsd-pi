@@ -45,7 +45,16 @@ import { truncateToVisualLines } from "./visual-truncate.js";
 // Preview line limit for bash when not expanded
 const BASH_PREVIEW_LINES = 5;
 // Exact historical footer emitted by exec-tool before recording warnings moved to details.
-const LEGACY_RECORDING_FOOTER = /(?:^|\n)--- warning ---\n(The command ran, but the host did not record this run: [\s\S]*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
+const LEGACY_RECORDING_FOOTER_MARKER = "\n--- warning ---\n";
+const LEGACY_RECORDING_FOOTER = /^--- warning ---\n(The command ran, but the host did not record this run: [\s\S]*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
+
+function extractLegacyRecordingFooter(content: string): string | undefined {
+	const markerIndex = content.lastIndexOf(LEGACY_RECORDING_FOOTER_MARKER);
+	const markerStart = markerIndex >= 0 ? markerIndex : content.startsWith("--- warning ---\n") ? 0 : -1;
+	if (markerStart < 0) return undefined;
+	const match = LEGACY_RECORDING_FOOTER.exec(content.slice(markerStart).replace(/^\n/, ""));
+	return match?.[1];
+}
 // Keep the successful Read preview off narrow compact rows, where status and target matter more.
 const READ_COMPACT_PREVIEW_MIN_WIDTH = 72;
 // Bound per-render cleanup when a file starts with a very long line.
@@ -1188,8 +1197,7 @@ export class ToolExecutionComponent extends Container {
 			// complete details-less historical footer qualifies for text fallback.
 			if (this.result.details !== undefined) return undefined;
 			const raw = this.result.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
-			const legacy = LEGACY_RECORDING_FOOTER.exec(raw);
-			const warningLine = singleRowDisplayText(legacy?.[1]);
+			const warningLine = singleRowDisplayText(extractLegacyRecordingFooter(raw));
 			if (!warningLine) return undefined;
 			warning = warningLine;
 		}

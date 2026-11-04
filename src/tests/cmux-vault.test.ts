@@ -679,7 +679,7 @@ test('real subprocess transport preserves argv and rejects malformed output, fai
 case "$4" in
   bad-json) [ "$#" -eq 4 ] || exit 5; printf 'not json' ;;
   fail) [ "$#" -eq 4 ] || exit 5; exit 1 ;;
-  hang) [ "$#" -eq 4 ] || exit 5; sleep 10 ;;
+  hang) [ "$#" -eq 4 ] || exit 5; exec sleep 10 ;;
   literal)
     [ "$#" -eq 5 ] || exit 5
     [ "$5" = '日本語 spaces; $(touch not-a-command)' ] || exit 2

@@ -19,7 +19,17 @@ const LEGACY_FALLBACK_MAX_LINES = 12;
 /** Cap for error-content rendering on execution failures (timeouts, nonzero exits). */
 const ERROR_CONTENT_MAX_LINES = 20;
 /** Exact historical footer emitted by exec-tool before recording warnings moved to details. */
-const LEGACY_RECORDING_FOOTER = /(?:^|\n)--- warning ---\n(The command ran, but the host did not record this run: [\s\S]*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
+const LEGACY_RECORDING_FOOTER_MARKER = "\n--- warning ---\n";
+const LEGACY_RECORDING_FOOTER = /^--- warning ---\n(The command ran, but the host did not record this run: [\s\S]*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
+
+function extractLegacyRecordingFooter(content: string): { body: string; warning: string } | undefined {
+  const markerIndex = content.lastIndexOf(LEGACY_RECORDING_FOOTER_MARKER);
+  const markerStart = markerIndex >= 0 ? markerIndex : content.startsWith("--- warning ---\n") ? 0 : -1;
+  if (markerStart < 0) return undefined;
+  const match = LEGACY_RECORDING_FOOTER.exec(content.slice(markerStart).replace(/^\n/, ""));
+  if (!match) return undefined;
+  return { body: content.slice(0, markerStart).trimEnd(), warning: match[1]! };
+}
 
 type ExecRendererContext = { state?: Record<string, unknown> };
 const VT_STRING_SEQUENCE = /(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[\s\S]*?(?:\x1b\\|\x9c|$)/g;
@@ -259,9 +269,9 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 	// is available. The details-less fallback accepts only the complete
 	// historical footer, anchored at the end of the content.
 	const hasStructuredDetails = record?.details !== undefined;
-	const legacy = !hasStructuredDetails ? LEGACY_RECORDING_FOOTER.exec(content) : null;
-	const body = legacy ? content.slice(0, legacy.index).trimEnd() : content;
-	const legacyWarning = legacy?.[1];
+	const legacy = !hasStructuredDetails ? extractLegacyRecordingFooter(content) : undefined;
+	const body = legacy?.body ?? content;
+	const legacyWarning = legacy?.warning;
 	const warnings = [notRecordedRow, legacyWarning ? theme.fg("warning", legacyWarning) : undefined]
 		.filter((row): row is string => row !== undefined);
 	const expanded = asRecord(options)?.expanded === true;

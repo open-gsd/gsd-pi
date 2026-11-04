@@ -305,6 +305,20 @@ describe("ToolExecutionComponent", () => {
 		}
 	});
 
+	test("legacy footer parsing uses the terminal marker without unbounding the output preview", () => {
+		const body = Array.from({ length: 20 }, (_, index) => `intervening command output ${index}`).join("\n");
+		const footer = "--- warning ---\nThe command ran, but the host did not record this run: final database reason. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
+		const text = `initial output\n--- warning ---\nThe command ran, but the host did not record this run: incomplete imitation.\n${body}\n${footer}`;
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const component = new ToolExecutionComponent(toolName, {}, {}, undefined, { requestRender() {} } as any);
+			component.updateResult({ content: [{ type: "text", text }], isError: false });
+			component.setExpanded(false);
+			const output = component.render(180).map(stripAnsi).join("\n");
+			assert.match(output, /final database reason/);
+			assert.doesNotMatch(output, /intervening command output 19/);
+		}
+	});
+
 	test("ordinary warning-like output without a digest remains compact and rollup eligible", () => {
 		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
 			for (const details of [undefined, { id: "exec-1", exit_code: 0 }]) {
