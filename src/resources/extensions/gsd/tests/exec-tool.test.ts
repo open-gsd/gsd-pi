@@ -31,34 +31,41 @@ function makeExecResult(request: ExecSandboxRequest): ExecSandboxResult {
   };
 }
 
-test("executeUatExec accepts evidence-mode aliases for intent", async () => {
+test("executeUatExec normalizes evidence-mode aliases but rejects unrecorded output", async () => {
   const requests: ExecSandboxRequest[] = [];
-  const result = await executeUatExec(
-    {
-      milestoneId: "M001",
-      sliceId: "S01",
-      checkId: "UAT-PRE",
-      intent: "artifact",
-      runtime: "bash",
-      script: "printf ok",
-    },
-    {
-      baseDir: "/tmp/gsd-uat-exec-test",
-      preferences: null,
-      run: async (request) => {
-        requests.push(request);
-        return makeExecResult(request);
+  const baseDir = mkdtempSync(join(tmpdir(), "gsd-uat-exec-alias-"));
+  try {
+    const result = await executeUatExec(
+      {
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-PRE",
+        intent: "artifact",
+        runtime: "bash",
+        script: "printf ok",
       },
-    },
-  );
+      {
+        baseDir,
+        preferences: null,
+        run: async (request) => {
+          requests.push(request);
+          return makeExecResult(request);
+        },
+      },
+    );
 
-  assert.equal(result.isError, false);
-  assert.equal(result.details?.operation, "gsd_uat_exec");
-  assert.equal(result.details?.intent, "uat-artifact-check");
-  assert.equal(requests[0]?.metadata?.intent, "uat-artifact-check");
-  assert.equal(result.details.purpose, "UAT M001/S01/UAT-PRE (uat-artifact-check)");
-  assert.equal(requests[0]?.purpose, result.details.purpose);
-  assert.equal(result.details.digest, "check passed");
+    assert.equal(result.isError, true);
+    assert.equal(result.details?.evidence_recorded, false);
+    assert.match(result.content[0]?.text ?? "", /workflow database missing-gsd-dir/);
+    assert.equal(result.details?.operation, "gsd_uat_exec");
+    assert.equal(result.details?.intent, "uat-artifact-check");
+    assert.equal(requests[0]?.metadata?.intent, "uat-artifact-check");
+    assert.equal(result.details.purpose, "UAT M001/S01/UAT-PRE (uat-artifact-check)");
+    assert.equal(requests[0]?.purpose, result.details.purpose);
+    assert.equal(result.details.digest, "check passed");
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
 });
 
 test("executeGsdExec adds unchanged purpose and digest without changing raw text", async () => {
@@ -358,29 +365,36 @@ test("buildExecOptionsForParams classifies UAT workloads on the normalized param
   assert.equal(plain.default_timeout_ms, 30_000);
 });
 
-test("executeUatExec hands the sandbox the verification default for a verification-named check", async () => {
+test("executeUatExec applies the verification default but rejects unrecorded output", async () => {
   let capturedDefaultTimeout: number | undefined;
-  const result = await executeUatExec(
-    {
-      milestoneId: "M001",
-      sliceId: "S01",
-      checkId: "test-login",
-      intent: "uat-runtime-check",
-      command: "sleep 100",
-    },
-    {
-      baseDir: "/tmp/gsd-uat-classification-test",
-      preferences: {
-        context_mode: { enabled: true },
-        verification_timeout_ms: 120_000,
+  const baseDir = mkdtempSync(join(tmpdir(), "gsd-uat-classification-"));
+  try {
+    const result = await executeUatExec(
+      {
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "test-login",
+        intent: "uat-runtime-check",
+        command: "sleep 100",
       },
-      run: async (request, opts) => {
-        capturedDefaultTimeout = opts.default_timeout_ms;
-        return makeExecResult(request);
+      {
+        baseDir,
+        preferences: {
+          context_mode: { enabled: true },
+          verification_timeout_ms: 120_000,
+        },
+        run: async (request, opts) => {
+          capturedDefaultTimeout = opts.default_timeout_ms;
+          return makeExecResult(request);
+        },
       },
-    },
-  );
+    );
 
-  assert.equal(result.isError, false);
-  assert.equal(capturedDefaultTimeout, 120_000);
+    assert.equal(result.isError, true);
+    assert.equal(result.details?.evidence_recorded, false);
+    assert.match(result.content[0]?.text ?? "", /workflow database missing-gsd-dir/);
+    assert.equal(capturedDefaultTimeout, 120_000);
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
 });

@@ -1,6 +1,6 @@
 // Project/App: gsd-pi
-// File Purpose: Host-executed commands are exec_runs rows, and UAT evidence is
-// judged from those rows, not from `.gsd/exec` or `.gsd/uat` files (ADR-046).
+// File Purpose: UAT evidence requires a host exec_runs row and matching persisted
+// output artifacts; a database row alone cannot authorize a PASS.
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
@@ -212,16 +212,18 @@ describe("UAT runs are bound to the source revision", () => {
   });
 });
 
-describe("UAT evidence is judged from exec_runs rows", () => {
-  test("a PASS is accepted after .gsd/exec and .gsd/uat are deleted", async () => {
+describe("UAT evidence requires persisted exec artifacts", () => {
+  test("a PASS is rejected when .gsd/exec artifacts are deleted", async () => {
     const id = await uatExec("S01", "printf ok");
     rmSync(join(base, ".gsd", "exec"), { recursive: true, force: true });
     rmSync(join(base, ".gsd", "uat"), { recursive: true, force: true });
 
     const result = prepareUatRun(base, uatResult("S01", [{ kind: "gsd_uat_exec", ref: id }]));
 
-    if (!result.ok) assert.fail(result.error.message);
-    assert.equal(result.run.runId, "uat:M001:S01:attempt-1");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, "invalid_evidence");
+    assert.match(result.error.message, /complete persisted output artifacts/);
   });
 
   test("an exec id of another slice is rejected for a UAT PASS", async () => {
