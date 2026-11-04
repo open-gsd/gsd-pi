@@ -352,14 +352,14 @@ async function seedAdoptedCompletedMilestone(base: string): Promise<void> {
 /** Record a gsd_exec / gsd_uat_exec run as the host does when the command ends. */
 function recordUatExecEvidence(run: {
   id: string;
-  cwd?: string;
+  cwd: string;
   exit_code?: number | null;
   signal?: string | null;
   timed_out?: boolean;
   aborted?: boolean;
   metadata: { kind: string; milestoneId?: string; sliceId?: string; checkId?: string };
 }): void {
-  const cwd = run.cwd ?? process.cwd();
+  const cwd = run.cwd;
   const execDir = join(cwd, ".gsd", "exec");
   mkdirSync(execDir, { recursive: true });
   const stdout = Buffer.from(`synthetic output for ${run.id}\\n`);
@@ -2743,6 +2743,7 @@ test("executeUatResultSave rejects artifact-driven PASS with human follow-up che
     seedSlice("M001", "S01", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       exit_code: 0,
       signal: null,

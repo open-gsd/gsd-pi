@@ -244,8 +244,8 @@ test('runExecSandbox: failed file-backed rewrite removes raw secret capture', as
         runtime: 'bash',
         script: 'unused',
         invocation: {
-          program: '/bin/sh',
-          args: ['-c', `printf '%s' '${syntheticSecret}'`],
+          program: process.execPath,
+          args: ['-e', `process.stdout.write(${JSON.stringify(syntheticSecret)})`],
           env: {},
         },
       },

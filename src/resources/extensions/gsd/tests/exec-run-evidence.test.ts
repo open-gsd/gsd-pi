@@ -226,6 +226,20 @@ describe("UAT evidence requires persisted exec artifacts", () => {
     assert.match(result.error.message, /complete persisted output artifacts/);
   });
 
+  test("a FAIL remains recordable when captured output artifacts are missing", async () => {
+    const id = await uatExec("S01", "printf failed-check >&2; exit 1");
+    rmSync(join(base, ".gsd", "exec"), { recursive: true, force: true });
+
+    const result = uatResult("S01", [{ kind: "gsd_uat_exec", ref: id }]);
+    result.verdict = "FAIL";
+    result.checks[0]!.result = "FAIL";
+    const prepared = prepareUatRun(base, result);
+
+    if (!prepared.ok) assert.fail(prepared.error.message);
+    assert.equal(prepared.run.params.verdict, "FAIL");
+    assert.equal(prepared.run.gateVerdict, "flag");
+  });
+
   test("an exec id of another slice is rejected for a UAT PASS", async () => {
     const otherSliceRun = await uatExec("S02", "printf ok");
 

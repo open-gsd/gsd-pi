@@ -366,7 +366,9 @@ function validateExecEvidenceRef(
       return `gsd_uat_exec evidence id "${evidence.ref}" was recorded in ${run.attempt_ref}, not in this run (${runId}); re-run the check`;
     }
   }
-  const artifactError = validatePersistedExecEvidence(basePath, run);
+  // Persisted outputs corroborate a passing check. Preserve failed UAT results
+  // even when artifact capture is incomplete so the failure remains visible.
+  const artifactError = check.result === "PASS" ? validatePersistedExecEvidence(basePath, run) : null;
   if (artifactError) return artifactError;
   if (check.result === "PASS" && !execRunSucceeded(run)) {
     return (
