@@ -675,11 +675,13 @@ test('real subprocess transport preserves argv and rejects malformed output, fai
   const f = await fixture(t)
   const cli = join(f.root, 'cmux')
   await writeFile(cli, `#!/bin/sh
+[ "$1" = '--json' ] && [ "$2" = '--id-format' ] && [ "$3" = 'both' ] || exit 4
 case "$4" in
-  bad-json) printf 'not json' ;;
-  fail) exit 1 ;;
-  hang) sleep 10 ;;
+  bad-json) [ "$#" -eq 4 ] || exit 5; printf 'not json' ;;
+  fail) [ "$#" -eq 4 ] || exit 5; exit 1 ;;
+  hang) [ "$#" -eq 4 ] || exit 5; sleep 10 ;;
   literal)
+    [ "$#" -eq 5 ] || exit 5
     [ "$5" = '日本語 spaces; $(touch not-a-command)' ] || exit 2
     printf '%s' '{"args":["--json","--id-format","both","literal","日本語 spaces; $(touch not-a-command)"]}'
     ;;
