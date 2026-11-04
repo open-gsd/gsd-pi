@@ -30,6 +30,14 @@ test("cloudModelKey strips the '-cloud' marker (tag-form cloud names)", () => {
 	assert.equal(cloudModelKey("qwen3.5:397b-cloud"), "qwen3.5:397b");
 });
 
+test("cloudModelKey does not classify bare '-cloud' local names as cloud-routed", () => {
+	// Real daemon cloud names are always "name:tag-cloud" — a colon precedes
+	// the tag. A local model named "my-model-cloud" (no colon) must stay
+	// local: free, and no drift notice.
+	assert.equal(cloudModelKey("my-model-cloud"), undefined);
+	assert.equal(cloudModelKey("cloud"), undefined);
+});
+
 test("cloudModelKey returns undefined for local models", () => {
 	assert.equal(cloudModelKey("qwen2.5-coder:7b"), undefined);
 	assert.equal(cloudModelKey("llama3"), undefined);
@@ -116,6 +124,12 @@ test("stalePriceSnapshotMessage stays quiet for a fresh snapshot", () => {
 });
 
 test("stalePriceSnapshotMessage names the snapshot date once the threshold passes", () => {
+	// Exactly at the threshold — the message must already be present.
+	const atThreshold = new Date(`${CLOUD_PRICES_SNAPSHOT_DATE}T00:00:00Z`);
+	atThreshold.setUTCDate(atThreshold.getUTCDate() + STALE_PRICE_SNAPSHOT_DAYS);
+	const atThresholdMessage = stalePriceSnapshotMessage(atThreshold);
+	assert.ok(atThresholdMessage, "message must be present exactly at the threshold");
+
 	const stale = new Date(`${CLOUD_PRICES_SNAPSHOT_DATE}T00:00:00Z`);
 	stale.setUTCDate(stale.getUTCDate() + STALE_PRICE_SNAPSHOT_DAYS + 10);
 	const message = stalePriceSnapshotMessage(stale);

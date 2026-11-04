@@ -116,10 +116,15 @@ export function stalePriceSnapshotMessage(now: Date = new Date()): string | unde
 /**
  * Strip the cloud marker from a daemon model name; undefined when the
  * model is not cloud-routed (local inference).
+ *
+ * Real daemon cloud names are always "name:tag-cloud" or "name:cloud" —
+ * ollama's Cloud Usage API reports them under the stripped name. A bare
+ * "-cloud" suffix without a colon is a local model name ("my-model-cloud")
+ * and must not be classified as cloud-routed.
  */
 export function cloudModelKey(name: string): string | undefined {
 	if (name.endsWith(":cloud")) return name.slice(0, -":cloud".length);
-	if (name.endsWith("-cloud")) return name.slice(0, -"-cloud".length);
+	if (name.endsWith("-cloud") && name.includes(":")) return name.slice(0, -"-cloud".length);
 	return undefined;
 }
 
