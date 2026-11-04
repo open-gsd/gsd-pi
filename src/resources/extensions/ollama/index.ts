@@ -21,6 +21,39 @@ import * as client from "./ollama-client.js";
 import { discoverModels } from "./ollama-discovery.js";
 import { registerOllamaCommands } from "./ollama-commands.js";
 import { streamOllamaChat } from "./ollama-chat-provider.js";
+import { stalePriceSnapshotMessage } from "./cloud-prices.js";
+
+/**
+ * Observers for cost-reporting drift, fired by probeAndRegister so hosts
+ * can surface them through their own channels (TUI notify, worker stderr).
+ */
+export interface ProbeHooks {
+	/** Fires once per cloud-routed model that has no price entry. */
+	onUnpricedCloudModel?: (name: string) => void;
+}
+
+/** Cost-drift notices already emitted in this process (one-time per notice). */
+const emittedCostNotices = new Set<string>();
+
+/**
+ * Emit a cost-drift notice through the channel the session mode provides:
+ * TUI notify interactively, stderr in headless workers (the same forensics
+ * channel `.gsd/parallel/*.stderr.log` is collected from). One-time per
+ * notice per process — session switches and auto-mode session resets must
+ * not spam it.
+ */
+function emitCostNotice(
+	notice: string,
+	ctx: { hasUI?: boolean; ui?: { notify?: (message: string, type?: "warning" | "info" | "error" | "success") => void } },
+): void {
+	if (emittedCostNotices.has(notice)) return;
+	emittedCostNotices.add(notice);
+	if (ctx.hasUI) {
+		ctx.ui?.notify?.(notice, "warning");
+	} else {
+		process.stderr.write(`${notice}\n`);
+	}
+}
 
 let toolsPromise: Promise<void> | null = null;
 
@@ -50,7 +83,7 @@ let providerRegistered = false;
  * so a fake HTTP endpoint can drive the registration/unregistration paths.
  * Production callers always go through the session_start handler below.
  */
-export async function probeAndRegister(pi: ExtensionAPI): Promise<boolean> {
+export async function probeAndRegister(pi: ExtensionAPI, hooks?: ProbeHooks): Promise<boolean> {
 	const running = await client.isRunning();
 	if (!running) {
 		if (providerRegistered) {
@@ -69,6 +102,10 @@ export async function probeAndRegister(pi: ExtensionAPI): Promise<boolean> {
 			providerRegistered = false;
 		}
 		return false;
+	}
+
+	for (const model of models) {
+		if (model.unpricedCloud) hooks?.onUnpricedCloudModel?.(model.id);
 	}
 
 	const baseUrl = client.getOllamaHost();
@@ -130,16 +167,38 @@ export default function ollama(pi: ExtensionAPI) {
 			}
 		};
 
+		// Collect cost-reporting drift from the probe and surface it through
+		// the mode's channel: a $0 nobody can distinguish from "local and
+		// free" is the twin of the zero-cost bug the price table fixes.
+		const unpricedCloud: string[] = [];
+		const hooks: ProbeHooks = {
+			onUnpricedCloudModel: (name) => {
+				unpricedCloud.push(name);
+			},
+		};
+		const emitCostDriftNotices = (): void => {
+			if (unpricedCloud.length > 0) {
+				emitCostNotice(
+					`[ollama] no price entry for cloud model(s) ${unpricedCloud.join(", ")} — reporting $0; add them to cloud-prices.ts`,
+					ctx,
+				);
+			}
+			const stale = stalePriceSnapshotMessage();
+			if (stale) emitCostNotice(stale, ctx);
+		};
+
 		if (!ctx.hasUI) {
 			try {
-				await probeAndRegister(pi);
+				await probeAndRegister(pi, hooks);
 			} catch (error) {
 				debugOllama("headless", error);
 			}
+			emitCostDriftNotices();
 		} else {
-			probeAndRegister(pi)
+			probeAndRegister(pi, hooks)
 				.then((found) => {
 					ctx.ui.setStatus("ollama", found ? "Ollama" : undefined);
+					emitCostDriftNotices();
 				})
 				.catch((error) => {
 					ctx.ui.setStatus("ollama", undefined);

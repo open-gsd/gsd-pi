@@ -14,6 +14,10 @@ import {
 	resolveCloudModelCost,
 	CLOUD_MODEL_PRICES,
 	CLOUD_MODEL_ALIASES,
+	CLOUD_PRICES_SNAPSHOT_DATE,
+	STALE_PRICE_SNAPSHOT_DAYS,
+	priceSnapshotAgeDays,
+	stalePriceSnapshotMessage,
 } from "./cloud-prices.js";
 
 test("cloudModelKey strips the ':cloud' marker", () => {
@@ -90,4 +94,32 @@ test("every table entry has positive rates", () => {
 		assert.ok(rates.input > 0, `${id} input rate must be positive`);
 		assert.ok(rates.output > 0, `${id} output rate must be positive`);
 	}
+});
+
+test("snapshot date is a valid ISO date at or before today", () => {
+	const parsed = new Date(`${CLOUD_PRICES_SNAPSHOT_DATE}T00:00:00Z`);
+	assert.ok(!Number.isNaN(parsed.getTime()), "snapshot date must parse as ISO yyyy-mm-dd");
+	assert.ok(parsed.getTime() <= Date.now(), "snapshot date must not be in the future");
+});
+
+test("priceSnapshotAgeDays counts days since the snapshot, not since the epoch", () => {
+	assert.equal(priceSnapshotAgeDays(new Date("2026-11-04T00:00:00Z")), 0);
+	assert.equal(priceSnapshotAgeDays(new Date("2026-12-04T00:00:00Z")), 30);
+});
+
+test("stalePriceSnapshotMessage stays quiet for a fresh snapshot", () => {
+	assert.equal(stalePriceSnapshotMessage(new Date("2026-11-04T12:00:00Z")), undefined);
+	// Just inside the staleness threshold.
+	const justStale = new Date(`${CLOUD_PRICES_SNAPSHOT_DATE}T00:00:00Z`);
+	justStale.setUTCDate(justStale.getUTCDate() + STALE_PRICE_SNAPSHOT_DAYS - 1);
+	assert.equal(stalePriceSnapshotMessage(justStale), undefined);
+});
+
+test("stalePriceSnapshotMessage names the snapshot date once the threshold passes", () => {
+	const stale = new Date(`${CLOUD_PRICES_SNAPSHOT_DATE}T00:00:00Z`);
+	stale.setUTCDate(stale.getUTCDate() + STALE_PRICE_SNAPSHOT_DAYS + 10);
+	const message = stalePriceSnapshotMessage(stale);
+	assert.ok(message, "message must be present");
+	assert.ok(message.includes(CLOUD_PRICES_SNAPSHOT_DATE), "message must name the snapshot date");
+	assert.ok(message.includes("ollama.com/pricing"), "message must point at the authoritative source");
 });

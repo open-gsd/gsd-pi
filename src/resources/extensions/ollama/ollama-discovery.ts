@@ -50,6 +50,8 @@ export interface DiscoveredOllamaModel {
 	parameterSize: string;
 	/** Ollama-specific inference options for this model */
 	ollamaOptions?: OllamaChatOptions;
+	/** Cloud-routed but absent from the price table (reports $0 — surfaced, not silent). */
+	unpricedCloud: boolean;
 }
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -136,6 +138,7 @@ async function enrichModel(info: OllamaModelInfo, deps: ClientDeps): Promise<Dis
 		sizeBytes: info.size,
 		parameterSize,
 		ollamaOptions,
+		unpricedCloud: cloudCost === undefined && cloudModelKey(info.name) !== undefined,
 	};
 }
 

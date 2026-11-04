@@ -85,6 +85,35 @@ export const CLOUD_MODEL_ALIASES: Record<string, string> = {
 };
 
 /**
+ * Date the ollama.com/pricing snapshot was taken (ISO yyyy-mm-dd). Surfaced
+ * through a staleness warning so a rotting table announces itself instead
+ * of silently mispricing.
+ */
+export const CLOUD_PRICES_SNAPSHOT_DATE = "2026-11-04";
+
+/** Age at which the snapshot warns that its rates may have drifted. */
+export const STALE_PRICE_SNAPSHOT_DAYS = 90;
+
+/** Whole days between the snapshot date and `now`. */
+export function priceSnapshotAgeDays(now: Date = new Date()): number {
+	const snapshot = new Date(`${CLOUD_PRICES_SNAPSHOT_DATE}T00:00:00Z`);
+	return Math.floor((now.getTime() - snapshot.getTime()) / 86_400_000);
+}
+
+/**
+ * Staleness warning for a snapshot older than STALE_PRICE_SNAPSHOT_DAYS,
+ * or undefined while fresh. Pure/deterministic for tests.
+ */
+export function stalePriceSnapshotMessage(now: Date = new Date()): string | undefined {
+	const age = priceSnapshotAgeDays(now);
+	if (age < STALE_PRICE_SNAPSHOT_DAYS) return undefined;
+	return (
+		`[ollama] cloud price snapshot from ${CLOUD_PRICES_SNAPSHOT_DATE} is ${age} days old — ` +
+		`rates may have drifted; verify and refresh from https://ollama.com/pricing`
+	);
+}
+
+/**
  * Strip the cloud marker from a daemon model name; undefined when the
  * model is not cloud-routed (local inference).
  */
