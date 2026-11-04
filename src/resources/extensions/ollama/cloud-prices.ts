@@ -121,8 +121,14 @@ export function stalePriceSnapshotMessage(now: Date = new Date()): string | unde
  * ollama's Cloud Usage API reports them under the stripped name. A bare
  * "-cloud" suffix without a colon is a local model name ("my-model-cloud")
  * and must not be classified as cloud-routed.
+ *
+ * Known limit, undetectable by name: a local copy made with
+ * `ollama cp` into a colliding tag (e.g. renaming a small model to
+ * "gpt-oss:120b-cloud") would be priced at the cloud rates. Ollama offers
+ * no API signal to distinguish such a tag from the real cloud entry.
  */
 export function cloudModelKey(name: string): string | undefined {
+	if (name === ":cloud" || name === "-cloud") return undefined;
 	if (name.endsWith(":cloud")) return name.slice(0, -":cloud".length);
 	if (name.endsWith("-cloud") && name.includes(":")) return name.slice(0, -"-cloud".length);
 	return undefined;
@@ -135,5 +141,6 @@ export function cloudModelKey(name: string): string | undefined {
 export function resolveCloudModelCost(name: string): CloudModelCost | undefined {
 	const key = cloudModelKey(name);
 	if (key === undefined) return undefined;
-	return CLOUD_MODEL_PRICES[key] ?? CLOUD_MODEL_PRICES[CLOUD_MODEL_ALIASES[key]];
+	const aliasTarget = CLOUD_MODEL_ALIASES[key];
+	return CLOUD_MODEL_PRICES[key] ?? (aliasTarget !== undefined ? CLOUD_MODEL_PRICES[aliasTarget] : undefined);
 }
