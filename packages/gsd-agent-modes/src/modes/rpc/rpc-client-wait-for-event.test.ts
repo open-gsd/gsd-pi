@@ -11,6 +11,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 
 import { RpcClient } from "./rpc-client.js";
 
@@ -62,4 +63,54 @@ test("waitForEvent does not mistake a response for an event", async () => {
 
 	const seen = await client.waitForEvent("extensions_ready", 50);
 	assert.equal(seen, false, "a response line must not be recorded as an event type");
+});
+
+test("concurrent waiters both resolve when the event arrives", async () => {
+	const client = new RpcClient();
+	const first = client.waitForEvent("extensions_ready", 1_000);
+	const second = client.waitForEvent("extensions_ready", 1_000);
+
+	feed(client, { type: "extensions_ready" });
+	assert.equal(await first, true, "the first waiter must resolve");
+	assert.equal(await second, true, "a waiter unsubsribed during dispatch must not skip the second");
+});
+
+test("stop() clears the observed-event buffer for the next child", async () => {
+	const client = new RpcClient();
+	feed(client, { type: "extensions_ready" });
+	assert.equal(await client.waitForEvent("extensions_ready", 1_000), true, "buffered event resolves");
+
+	await client.stop();
+	assert.equal(
+		await client.waitForEvent("extensions_ready", 50),
+		false,
+		"buffered readiness must not survive stop() — a replacement child starts with a fresh buffer",
+	);
+});
+
+test("waitForEvent resolves false when the child process exits", async () => {
+	const client = new RpcClient();
+	const fakeProcess = new EventEmitter();
+	(client as unknown as { process: unknown }).process = fakeProcess;
+
+	const startedAt = Date.now();
+	const seen = client.waitForEvent("extensions_ready", 5_000);
+	fakeProcess.emit("exit");
+	assert.equal(await seen, false, "a dead child must resolve the wait instead of hanging");
+	assert.ok(Date.now() - startedAt < 1_000, "the exit must not wait out the full timeout");
+});
+
+test("waitForEvent aborts promptly when the signal fires", async () => {
+	const client = new RpcClient();
+	const controller = new AbortController();
+
+	const startedAt = Date.now();
+	const seen = client.waitForEvent("extensions_ready", 5_000, { signal: controller.signal });
+	controller.abort();
+	assert.equal(await seen, false, "an aborted wait must resolve false");
+	assert.ok(Date.now() - startedAt < 1_000, "the abort must not wait out the full timeout");
+
+	// A late event is still buffered for subsequent waiters.
+	feed(client, { type: "extensions_ready" });
+	assert.equal(await client.waitForEvent("extensions_ready", 50), true);
 });

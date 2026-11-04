@@ -111,6 +111,55 @@ function isHeadlessThinkingLevel(value: string): value is HeadlessThinkingLevel 
   return VALID_THINKING_LEVELS.has(value as HeadlessThinkingLevel)
 }
 
+/**
+ * Outcome of the extension readiness gate for the headless command send.
+ * - 'ready': extensions_ready observed — send the command.
+ * - 'timeout': the bounded wait expired with the run still live — send the
+ *   command, with a breadcrumb, so a wedged session_start handler cannot
+ *   wedge the first command invisibly; the model-policy gate stays the loud
+ *   backstop for a genuinely empty registry.
+ * - 'terminated': the run terminated (overall --timeout fired, terminal
+ *   notification, or child exit) — do not dispatch into an expired run.
+ */
+export type ExtensionReadiness = "ready" | "timeout" | "terminated";
+
+/**
+ * Decide whether the headless command can be sent after waiting for the
+ * child's extensions_ready event. Races the bounded readiness wait against
+ * run termination and re-checks termination when the wait settles, so the
+ * prompt is never dispatched after the run has expired. Cancels the pending
+ * wait (abort signal) when termination wins so no dangling timer survives.
+ * Injectable/pure so the race is unit-testable without spawning a child.
+ */
+export async function waitForExtensionReadiness(opts: {
+  waitForEvent: (timeoutMs: number, signal: AbortSignal) => Promise<boolean>;
+  termination: Promise<unknown>;
+  isTerminated: () => boolean;
+  waitMs: number;
+  onTimeout: () => void;
+}): Promise<ExtensionReadiness> {
+  const controller = new AbortController();
+  let terminated = false;
+  const terminator = opts.termination.then(
+    () => {
+      terminated = true;
+    },
+    () => {
+      terminated = true;
+    },
+  );
+  const seen = await Promise.race([opts.waitForEvent(opts.waitMs, controller.signal), terminator]);
+  if (terminated || (seen === false && opts.isTerminated())) {
+    controller.abort();
+    return "terminated";
+  }
+  if (seen === true) {
+    return "ready";
+  }
+  opts.onTimeout();
+  return "timeout";
+}
+
 export function buildHeadlessSlashCommand(options: Pick<HeadlessOptions, 'command' | 'commandArgs' | 'auto'>): string {
   const commandArgs = [...options.commandArgs]
   if (options.command === 'new-milestone' && options.auto && !commandArgs.includes(HEADLESS_CHAIN_AUTO_FLAG)) {
@@ -1138,15 +1187,21 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   // registration (the ollama probe awaits under GSD_HEADLESS) — must finish
   // before /gsd auto can snapshot the model registry, or workers boot
   // against an empty registry (unknown/unknown banner, model-policy deny).
-  // Bounded so a wedged session_start handler cannot wedge the first command
-  // invisibly; the model-policy gate stays the loud backstop for a genuinely
-  // empty registry.
+  // The gate races the wait against run termination so a prompt is never
+  // dispatched into an expired run, and cancels the wait when termination
+  // wins (no dangling timer). The model-policy gate stays the loud backstop
+  // for a genuinely empty registry.
   const EXTENSIONS_READY_WAIT_MS = 10_000
-  async function waitForExtensionsReady() {
-    const seen = await client.waitForEvent('extensions_ready', EXTENSIONS_READY_WAIT_MS)
-    if (!seen) {
-      process.stderr.write(`[headless] extensions not ready after ${EXTENSIONS_READY_WAIT_MS / 1000}s; sending command anyway\n`)
-    }
+  async function awaitExtensionReadiness(termination: Promise<void>): Promise<ExtensionReadiness> {
+    return waitForExtensionReadiness({
+      waitForEvent: (ms, signal) => client.waitForEvent('extensions_ready', ms, { signal }),
+      termination,
+      isTerminated: () => completed || timedOut,
+      waitMs: EXTENSIONS_READY_WAIT_MS,
+      onTimeout: () => {
+        process.stderr.write(`[headless] extensions not ready after ${EXTENSIONS_READY_WAIT_MS / 1000}s; sending command anyway\n`)
+      },
+    })
   }
 
   // Send the command
@@ -1155,8 +1210,9 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     process.stderr.write(`[headless] Running ${command}...\n`)
   }
   try {
-    await waitForExtensionsReady()
-    await client.prompt(command)
+    if ((await awaitExtensionReadiness(completionPromise)) !== 'terminated') {
+      await client.prompt(command)
+    }
   } catch (err) {
     process.stderr.write(`[headless] Error: Failed to send prompt: ${err instanceof Error ? err.message : String(err)}\n`)
     exitCode = EXIT_ERROR
@@ -1200,8 +1256,9 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     })
 
     try {
-      await waitForExtensionsReady()
-      await client.prompt('/gsd auto')
+      if ((await awaitExtensionReadiness(autoCompletionPromise)) !== 'terminated') {
+        await client.prompt('/gsd auto')
+      }
     } catch (err) {
       process.stderr.write(`[headless] Error: Failed to start auto-mode: ${err instanceof Error ? err.message : String(err)}\n`)
       exitCode = EXIT_ERROR

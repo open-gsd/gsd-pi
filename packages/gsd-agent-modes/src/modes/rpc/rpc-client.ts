@@ -144,6 +144,10 @@ export class RpcClient {
 	 * Stop the RPC agent process.
 	 */
 	async stop(): Promise<void> {
+		// The next start() spawns a fresh child: buffered readiness from this
+		// run must not satisfy waiters for it (stale extensions_ready would
+		// recreate the registration race the wait exists to prevent).
+		this.seenEventTypes.clear();
 		if (!this.process) return;
 
 		this.stopReadingStdout?.();
@@ -514,24 +518,42 @@ export class RpcClient {
 	 * Wait (bounded) for an event of the given type. Resolves immediately if
 	 * the type was already observed — events can arrive before the caller
 	 * attaches (e.g. `extensions_ready` during client startup). Resolves
-	 * false on timeout; never rejects, so callers decide how to degrade.
+	 * false on timeout, on child-process exit, or when the optional abort
+	 * signal fires; never rejects, so callers decide how to degrade.
 	 */
-	waitForEvent(type: string, timeout = 10_000): Promise<boolean> {
+	waitForEvent(type: string, timeout = 10_000, options?: { signal?: AbortSignal }): Promise<boolean> {
 		if (this.seenEventTypes.has(type)) {
 			return Promise.resolve(true);
 		}
+		const signal = options?.signal;
+		if (signal?.aborted) {
+			return Promise.resolve(false);
+		}
 		return new Promise((resolve) => {
-			const timer = setTimeout(() => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let unsubscribe: () => void = () => {};
+			const onExit = (): void => settle(false);
+			const onAbort = (): void => settle(false);
+			let settled = false;
+			const settle = (value: boolean): void => {
+				if (settled) return;
+				settled = true;
+				if (timer !== undefined) clearTimeout(timer);
 				unsubscribe();
-				resolve(false);
-			}, timeout);
-			const unsubscribe = this.onEvent((event) => {
-				if (event.type === type) {
-					clearTimeout(timer);
-					unsubscribe();
-					resolve(true);
-				}
+				this.process?.removeListener("exit", onExit);
+				signal?.removeEventListener("abort", onAbort);
+				resolve(value);
+			};
+			unsubscribe = this.onEvent((event) => {
+				if (event.type === type) settle(true);
 			});
+			timer = setTimeout(() => settle(false), timeout);
+			if (this.process) {
+				this.process.once("exit", onExit);
+			}
+			if (signal) {
+				signal.addEventListener("abort", onAbort);
+			}
 		});
 	}
 
@@ -582,11 +604,13 @@ export class RpcClient {
 				return;
 			}
 
-			// Otherwise it's an event
+			// Otherwise it's an event. Iterate a snapshot: a listener that
+			// unsubscribes itself during dispatch must not skip the listeners
+			// after it in the live array.
 			if (typeof data.type === "string") {
 				this.seenEventTypes.add(data.type);
 			}
-			for (const listener of this.eventListeners) {
+			for (const listener of [...this.eventListeners]) {
 				listener(data as AgentEvent);
 			}
 		} catch {
