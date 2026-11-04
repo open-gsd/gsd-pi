@@ -119,7 +119,7 @@ test("genuine paired historical host warnings survive a long preview but normal 
 
 test("standalone error output retains a genuine historical recording warning", () => {
   const body = Array.from({ length: 40 }, (_, index) => `error line ${index}`).join("\n");
-  const footer = "--- warning ---\nThe command ran, but the host did not record this run: database offline. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
+  const footer = "--- warning ---\nThe command ran, but the host did not record this run: database\noffline. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
   const result = { isError: true, content: [{ type: "text", text: `${body}\n${footer}` }] };
 
   for (const expanded of [false, true]) {
