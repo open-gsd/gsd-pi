@@ -132,6 +132,11 @@ export function setCmuxProgressRegistryDirForTests(dir: string | null): void {
   progressRegistryDirOverride = dir;
 }
 
+/** Test seam: make CLI availability independent of process-wide probe timing. */
+export function setCmuxCliAvailabilityForTests(available: boolean | null): void {
+  cachedCliAvailability = available;
+}
+
 export function isCmuxCliAvailable(): boolean {
   if (cachedCliAvailability !== null) return cachedCliAvailability;
   try {

@@ -2,7 +2,7 @@
  * Unit tests for the gsd CLI package.
  *
  * Tests the glue code that IS the product:
- * - app-paths resolve to ~/.gsd/
+ * - app-paths follow the effective GSD_HOME
  * - loader sets all required env vars
  * - resource-loader syncs bundled resources
  * - wizard loadStoredEnvKeys hydrates env
@@ -32,16 +32,16 @@ function assertExtensionIndexExists(agentDir: string, extensionName: string): vo
 // 1. app-paths
 // ═══════════════════════════════════════════════════════════════════════════
 
-test("app-paths resolve to ~/.gsd/", async () => {
+test("app-paths follow the effective GSD_HOME", async () => {
   const { appRoot, agentDir, sessionsDir, authFilePath } = await import("../app-paths.ts");
   // Use homedir() — process.env.HOME is undefined on Windows (uses USERPROFILE instead)
   const { homedir } = await import("node:os");
-  const home = homedir();
+  const expectedRoot = process.env.GSD_HOME || join(homedir(), ".gsd");
 
-  assert.equal(appRoot, join(home, ".gsd"), "appRoot is ~/.gsd/");
-  assert.equal(agentDir, join(home, ".gsd", "agent"), "agentDir is ~/.gsd/agent/");
-  assert.equal(sessionsDir, join(home, ".gsd", "sessions"), "sessionsDir is ~/.gsd/sessions/");
-  assert.equal(authFilePath, join(home, ".gsd", "agent", "auth.json"), "authFilePath is ~/.gsd/agent/auth.json");
+  assert.equal(appRoot, expectedRoot, "appRoot follows the effective GSD home");
+  assert.equal(agentDir, join(expectedRoot, "agent"), "agentDir follows the effective GSD home");
+  assert.equal(sessionsDir, join(expectedRoot, "sessions"), "sessionsDir follows the effective GSD home");
+  assert.equal(authFilePath, join(expectedRoot, "agent", "auth.json"), "authFilePath follows the effective GSD home");
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -93,7 +93,9 @@ test("loader sets all 4 GSD_ env vars and PI_PACKAGE_DIR", async (t) => {
 
   // Direct logic verification (no subprocess needed)
   const { agentDir: ad } = await import("../app-paths.ts");
-  assert.ok(ad.endsWith(join(".gsd", "agent")), "agentDir ends with .gsd/agent");
+  const { homedir } = await import("node:os");
+  const expectedRoot = process.env.GSD_HOME || join(homedir(), ".gsd");
+  assert.equal(ad, join(expectedRoot, "agent"), "agentDir follows the effective GSD home");
 
   // Verify that the env var is populated at runtime by checking the actual
   // extensions directory has discoverable entry points

@@ -29,7 +29,7 @@ You execute. The inlined task plan is authoritative. Verify referenced files and
 ## Backing Source Artifacts
 
 - Slice plan: `{{planPath}}`
-- Task plan source: `{{taskPlanPath}}`
+- Task plan: `{{taskPlanPath}}`
 - Prior task summaries:
 {{priorTaskLines}}
 
