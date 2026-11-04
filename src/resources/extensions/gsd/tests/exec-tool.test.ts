@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -64,6 +64,37 @@ test("executeUatExec normalizes evidence-mode aliases but rejects unrecorded out
     assert.equal(requests[0]?.purpose, result.details.purpose);
     assert.equal(result.details.digest, "check passed");
   } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("executeUatExec does not expose raw output when persisted artifacts cannot be written", async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), "gsd-uat-redaction-failure-"));
+  const gsdDir = join(baseDir, ".gsd");
+  const syntheticSecret = `sk_test_${"c".repeat(24)}`;
+  mkdirSync(gsdDir, { recursive: true });
+  openDatabase(join(gsdDir, "gsd.db"));
+  writeFileSync(join(gsdDir, "exec"), "not a directory");
+  try {
+    const result = await executeUatExec(
+      {
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-RAW-FAIL",
+        intent: "uat-runtime-check",
+        runtime: "node",
+        script: `process.stdout.write(${JSON.stringify(syntheticSecret)})`,
+      },
+      { baseDir, preferences: null },
+    );
+    const publicText = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\\n");
+    assert.equal(result.isError, true);
+    assert.equal(result.details?.evidence_recorded, false);
+    assert.match(publicText, /redacted/);
+    assert.doesNotMatch(publicText, new RegExp(syntheticSecret));
+    assert.doesNotMatch(JSON.stringify(result.details), new RegExp(syntheticSecret));
+  } finally {
+    closeDatabase();
     rmSync(baseDir, { recursive: true, force: true });
   }
 });

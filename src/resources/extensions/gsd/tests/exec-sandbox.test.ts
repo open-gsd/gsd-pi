@@ -269,6 +269,33 @@ test('runExecSandbox: failed file-backed rewrite removes raw secret capture', as
   }
 });
 
+test('runExecSandbox: failed pipe-backed persistence returns redacted output only', async () => {
+  const base = freshBase();
+  const gsdDir = join(base, '.gsd');
+  const syntheticSecret = `sk_test_${'b'.repeat(24)}`;
+  mkdirSync(gsdDir, { recursive: true });
+  writeFileSync(join(gsdDir, 'exec'), 'not a directory');
+  try {
+    const result = await runExecSandbox(
+      {
+        runtime: 'node',
+        script: `process.stdout.write(${JSON.stringify(syntheticSecret)})`,
+      },
+      baseOpts(base),
+    );
+    assert.equal(result.exit_code, 0);
+    assert.match(String(result.run_not_recorded), /execution output could not be persisted/);
+    assert.equal(result.output_transformed, true);
+    assert.ok(result.digest.includes('«redacted»'), 'only the redacted digest is returned');
+    assert.ok(!result.digest.includes(syntheticSecret));
+    assert.ok(!String(result.stderr_excerpt ?? '').includes(syntheticSecret));
+    assert.equal(existsSync(result.stdout_path), false, 'failed artifact path contains no raw output');
+    assert.equal(readFileSync(join(gsdDir, 'exec'), 'utf-8'), 'not a directory');
+  } finally {
+    cleanup(base);
+  }
+});
+
 // ── exec-tool executor ────────────────────────────────────────────────────
 
 test('executeGsdExec: runs by default when context_mode is unset', async () => {

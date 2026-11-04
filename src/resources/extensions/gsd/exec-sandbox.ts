@@ -531,17 +531,39 @@ export function runExecSandbox(
         stdoutTruncatedFinal = false;
         stderrTruncatedFinal = false;
       } else {
-        stdoutBuf = Buffer.concat(stdoutChunks);
-        stderrBuf = Buffer.concat(stderrChunks);
+        const stdoutRaw = Buffer.concat(stdoutChunks);
+        const stderrRaw = Buffer.concat(stderrChunks);
         const stdoutSuffix = stdoutTruncated ? "\n[truncated: stdout cap reached]\n" : "";
         const stderrSuffix = stderrTruncated ? "\n[truncated: stderr cap reached]\n" : "";
-        // Redact secret-shaped substrings before persisting to .gsd/exec/ (skipped by
-        // the secret scanner). The returned digest is derived from the raw buffer
-        // below and is redacted downstream when the session is written to activity/.
+        const withheldOutput = "[output withheld: secret redaction failed]\n";
+        const stdoutRawText = stdoutRaw.toString("utf-8");
+        const stderrRawText = stderrRaw.toString("utf-8");
+        let stdoutSafeText = withheldOutput;
+        let stderrSafeText = withheldOutput;
         try {
-          writeFileSync(stdoutPath, redactSecrets(Buffer.concat([stdoutBuf, Buffer.from(stdoutSuffix, "utf-8")]).toString("utf-8")));
-          writeFileSync(stderrPath, redactSecrets(Buffer.concat([stderrBuf, Buffer.from(stderrSuffix, "utf-8")]).toString("utf-8")));
+          stdoutSafeText = redactSecrets(stdoutRawText);
+          stderrSafeText = redactSecrets(stderrRawText);
+          if (
+            stdoutSafeText !== stdoutRawText
+            || stderrSafeText !== stderrRawText
+            || !Buffer.from(stdoutSafeText, "utf-8").equals(stdoutRaw)
+            || !Buffer.from(stderrSafeText, "utf-8").equals(stderrRaw)
+          ) {
+            outputTransformedFinal = true;
+          }
+        } catch {
+          // A redactor failure is never permission to expose the raw stream.
+          runNotRecorded ??= "secret redaction failed";
+          outputTransformedFinal = true;
+        }
+        if (stdoutTruncated || stderrTruncated) outputTransformedFinal = true;
+        stdoutBuf = Buffer.from(stdoutSafeText, "utf-8");
+        stderrBuf = Buffer.from(stderrSafeText, "utf-8");
+        try {
+          writeFileSync(stdoutPath, `${stdoutSafeText}${stdoutSuffix}`);
+          writeFileSync(stderrPath, `${stderrSafeText}${stderrSuffix}`);
         } catch (error) {
+          outputTransformedFinal = true;
           runNotRecorded ??= recordingFailureReason(error);
         }
         stdoutBytesFinal = stdoutBytes;
