@@ -26,7 +26,7 @@ You execute. The inlined task plan is authoritative. Verify referenced files and
 
 {{gatesToClose}}
 
-## Backing Source Artifacts
+## Backing Artifacts
 
 - Slice plan: `{{planPath}}`
 - Task plan source: `{{taskPlanPath}}`
