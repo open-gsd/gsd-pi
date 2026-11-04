@@ -273,3 +273,29 @@ test("headless session writes unpriced cloud models to stderr (worker forensics 
 	// Priced cloud model must not be flagged.
 	assert.equal(stderr.includes("glm-5.3-flash"), false);
 });
+
+test("no cost notices when the daemon has no models (non-ollama users stay noise-free)", async () => {
+	tagCatalog = [];
+
+	const { pi, calls } = makeMockPi();
+	ollamaExtension(pi);
+	const handlers = calls.onHandlers.get("session_start") ?? [];
+
+	const stderrChunks: string[] = [];
+	const originalWrite = process.stderr.write;
+	process.stderr.write = ((chunk: Uint8Array | string) => {
+		stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+		return true;
+	}) as typeof process.stderr.write;
+	try {
+		await handlers[0]({}, { hasUI: false, ui: undefined });
+	} finally {
+		process.stderr.write = originalWrite;
+	}
+
+	assert.equal(
+		stderrChunks.length,
+		0,
+		`cost notices without a usable ollama catalog are noise — got: ${stderrChunks.join("")}`,
+	);
+});

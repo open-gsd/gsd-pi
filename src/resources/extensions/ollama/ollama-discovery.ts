@@ -117,8 +117,9 @@ async function enrichModel(info: OllamaModelInfo, deps: ClientDeps): Promise<Dis
 	// Cloud-routed models (":cloud"/"-cloud" marker) carry official
 	// ollama.com rates; local inference stays free. Cost derives from the
 	// /api/tags name, so a failing /api/show above never affects pricing.
+	const isCloud = cloudModelKey(info.name) !== undefined;
 	const cloudCost = resolveCloudModelCost(info.name);
-	if (cloudCost === undefined && cloudModelKey(info.name) !== undefined && process.env.GSD_DEBUG) {
+	if (cloudCost === undefined && isCloud && process.env.GSD_DEBUG) {
 		// Surface the unpriced cloud model instead of staying silent — a $0
 		// that nobody can distinguish from "local and free" is the twin of
 		// the zero-cost bug this table fixes.
@@ -138,7 +139,7 @@ async function enrichModel(info: OllamaModelInfo, deps: ClientDeps): Promise<Dis
 		sizeBytes: info.size,
 		parameterSize,
 		ollamaOptions,
-		unpricedCloud: cloudCost === undefined && cloudModelKey(info.name) !== undefined,
+		unpricedCloud: cloudCost === undefined && isCloud,
 	};
 }
 

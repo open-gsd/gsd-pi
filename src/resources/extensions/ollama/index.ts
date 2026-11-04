@@ -189,16 +189,18 @@ export default function ollama(pi: ExtensionAPI) {
 
 		if (!ctx.hasUI) {
 			try {
-				await probeAndRegister(pi, hooks);
+				// Notices only when ollama is actually usable — a user with no
+				// daemon or an empty catalog must not receive price-drift
+				// noise at every boot.
+				if (await probeAndRegister(pi, hooks)) emitCostDriftNotices();
 			} catch (error) {
 				debugOllama("headless", error);
 			}
-			emitCostDriftNotices();
 		} else {
 			probeAndRegister(pi, hooks)
 				.then((found) => {
 					ctx.ui.setStatus("ollama", found ? "Ollama" : undefined);
-					emitCostDriftNotices();
+					if (found) emitCostDriftNotices();
 				})
 				.catch((error) => {
 					ctx.ui.setStatus("ollama", undefined);
