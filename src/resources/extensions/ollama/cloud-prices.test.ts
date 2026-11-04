@@ -38,6 +38,11 @@ test("cloudModelKey does not classify bare '-cloud' local names as cloud-routed"
 	assert.equal(cloudModelKey("cloud"), undefined);
 });
 
+test("cloudModelKey rejects degenerate marker-only names", () => {
+	assert.equal(cloudModelKey(":cloud"), undefined);
+	assert.equal(cloudModelKey("-cloud"), undefined);
+});
+
 test("cloudModelKey returns undefined for local models", () => {
 	assert.equal(cloudModelKey("qwen2.5-coder:7b"), undefined);
 	assert.equal(cloudModelKey("llama3"), undefined);
@@ -66,13 +71,20 @@ test("deepseek siblings stay distinct", () => {
 });
 
 test("explicit aliases resolve to their target's rates", () => {
+	// Each alias in the daemon-form suffix it actually appears with — both
+	// stripping rules are exercised through the alias path.
+	assert.deepEqual(resolveCloudModelCost("gemma4:31b-cloud"), resolveCloudModelCost("gemma4:cloud"));
 	assert.deepEqual(resolveCloudModelCost("gemma4:31b:cloud"), resolveCloudModelCost("gemma4:cloud"));
 	assert.deepEqual(
 		resolveCloudModelCost("mistral-large-3:675b-cloud"),
 		resolveCloudModelCost("mistral-large-3:cloud"),
 	);
 	assert.deepEqual(
-		resolveCloudModelCost("deepseek-v4.1-flash:1017:cloud"),
+		resolveCloudModelCost("nemotron-3-nano:30b-cloud"),
+		resolveCloudModelCost("nemotron-3-nano:cloud"),
+	);
+	assert.deepEqual(
+		resolveCloudModelCost("deepseek-v4.1-flash:1017-cloud"),
 		resolveCloudModelCost("deepseek-v4.1-flash:cloud"),
 	);
 });

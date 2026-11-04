@@ -59,6 +59,9 @@ const LOCAL_MODELS = ["qwen2.5-coder:7b"];
 /** Mutable catalog served by the fake daemon (per-test control). */
 let tagCatalog: string[] = [...CLOUD_MODELS, ...LOCAL_MODELS];
 
+/** When true, /api/show answers 500 (pricing must not depend on it). */
+let showFails = false;
+
 function fakeModelInfo(name: string) {
 	return {
 		name,
@@ -103,6 +106,11 @@ before(async () => {
 			return;
 		}
 		if (req.method === "POST" && req.url === "/api/show") {
+			if (showFails) {
+				res.writeHead(500);
+				res.end(JSON.stringify({ error: "show failed" }));
+				return;
+			}
 			res.writeHead(200, { "Content-Type": "application/json" });
 			res.end(
 				JSON.stringify({
@@ -172,6 +180,22 @@ test("cloud-routed models register with their official per-model rates", async (
 	assert.deepEqual(byId.get("glm-5.3-flash:cloud")?.cost, { input: 0.15, output: 0.5, cacheRead: 0, cacheWrite: 0 });
 	// gemma4 has an official row (models.dev lacks it — ollama.com is the source).
 	assert.deepEqual(byId.get("gemma4:cloud")?.cost, { input: 0.14, output: 0.4, cacheRead: 0, cacheWrite: 0 });
+	// Discovery-internal metadata must not leak into the provider config.
+	for (const model of models) {
+		assert.equal("unpricedCloud" in model, false, `${model.id} must not carry discovery metadata`);
+	}
+});
+
+test("cloud pricing survives a failing /api/show", async () => {
+	// Pricing derives from the /api/tags name — a 500-ing /api/show must
+	// cost capability fidelity, never cost data.
+	showFails = true;
+	const { spec } = await registerAndCaptureWarn();
+	const byId = new Map(registeredModels(spec).map((m) => [m.id, m]));
+	const cost = byId.get("glm-5.3:cloud")?.cost;
+	assert.ok(cost, "cloud model must still register when /api/show fails");
+	assert.equal(cost.input, 1.4);
+	assert.equal(cost.output, 4.4);
 });
 
 test("local models register at zero cost", async () => {
@@ -196,6 +220,7 @@ test("unpriced cloud model registers at zero cost with a GSD_DEBUG warning", asy
 
 beforeEach(() => {
 	tagCatalog = [...CLOUD_MODELS, ...LOCAL_MODELS];
+	showFails = false;
 });
 
 test("probeAndRegister reports unpriced cloud models through hooks", async () => {
@@ -293,9 +318,90 @@ test("no cost notices when the daemon has no models (non-ollama users stay noise
 		process.stderr.write = originalWrite;
 	}
 
+	// Scope the assertion to cost notices — unrelated stderr output from
+	// the extension is not this test's subject.
+	const costNotices = stderrChunks.filter((c) => c.includes("[ollama]"));
 	assert.equal(
-		stderrChunks.length,
+		costNotices.length,
 		0,
-		`cost notices without a usable ollama catalog are noise — got: ${stderrChunks.join("")}`,
+		`cost notices without a usable ollama catalog are noise — got: ${costNotices.join("")}`,
+	);
+});
+
+test("unpriced-model notice is order-stable and never repeats an already-reported model", async () => {
+	const capture = async (catalog: string[]) => {
+		tagCatalog = catalog;
+		const { pi, calls } = makeMockPi();
+		ollamaExtension(pi);
+		const handlers = calls.onHandlers.get("session_start") ?? [];
+		const stderrChunks: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: Uint8Array | string) => {
+			stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await handlers[0]({}, { hasUI: false, ui: undefined });
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+		return stderrChunks.join("");
+	};
+
+	// First probe: two unpriced models.
+	let stderr = await capture(["order-z:cloud", "order-a:cloud"]);
+	assert.ok(stderr.includes("order-a:cloud") && stderr.includes("order-z:cloud"), `first notice must name both, sorted — got: ${stderr}`);
+	assert.equal(stderr.includes("order-"), true);
+
+	// Same models, opposite order: nothing new to report, no second notice.
+	stderr = await capture(["order-a:cloud", "order-z:cloud"]);
+	assert.equal(
+		stderr.includes("no price entry"),
+		false,
+		`re-probing the same unpriced models in a different order must not re-notice — got: ${stderr}`,
+	);
+
+	// A superset adds exactly the new model, not the already-reported ones.
+	stderr = await capture(["order-z:cloud", "order-new:cloud", "order-a:cloud"]);
+	assert.ok(stderr.includes("order-new:cloud"), `the new model must be named — got: ${stderr}`);
+	assert.equal(
+		stderr.includes("order-a:cloud"),
+		false,
+		`already-reported models must not repeat in the superset notice — got: ${stderr}`,
+	);
+});
+
+test("a throwing notify never clobbers the ollama status set by a successful registration", async () => {
+	tagCatalog = ["glm-5.3-flash:cloud", "notice-throw-fixture:cloud"];
+
+	const { pi, calls } = makeMockPi();
+	ollamaExtension(pi);
+	const handlers = calls.onHandlers.get("session_start") ?? [];
+
+	const statusCalls: Array<[string, string | undefined]> = [];
+	const ctx = {
+		hasUI: true,
+		ui: {
+			setStatus: (slot: string, value: string | undefined) => {
+				statusCalls.push([slot, value]);
+			},
+			notify: () => {
+				throw new Error("notify exploded");
+			},
+		},
+	};
+
+	await handlers[0]({}, ctx);
+	for (let i = 0; i < 50; i++) {
+		if (statusCalls.length > 0) break;
+		await new Promise((r) => setTimeout(r, 20));
+	}
+	// Give the failing notice chain time to (wrongly) run the catch branch.
+	await new Promise((r) => setTimeout(r, 200));
+	const last = statusCalls[statusCalls.length - 1];
+	assert.deepEqual(
+		last,
+		["ollama", "Ollama"],
+		"a display-layer throw must not make a successful registration look unavailable",
 	);
 });
