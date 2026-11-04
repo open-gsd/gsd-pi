@@ -305,8 +305,22 @@ describe("ToolExecutionComponent", () => {
 		}
 	});
 
+	test("marker-like legacy output remains visible without becoming a recording warning", async () => {
+		const text = "command output\n--- warning ---\nThe command ran, but the host did not record this run: user text.";
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const definition = await registeredExecDefinition(toolName);
+			const component = new ToolExecutionComponent(toolName, {}, {}, definition, { requestRender() {} } as any);
+			component.updateResult({ content: [{ type: "text", text }], isError: false });
+			component.setExpanded(true);
+			const output = component.render(180).map(stripAnsi).join("\n");
+			assert.match(output, /--- warning ---/);
+			assert.match(output, /user text/);
+			assert.doesNotMatch(output, /not verification or UAT evidence/);
+		}
+	});
+
 	test("digest-less warning metadata wins over output and raw paired legacy warnings survive", () => {
-		const footer = "--- warning ---\nThe command ran, but the host did not record this run: misleading output.";
+		const footer = "--- warning ---\nThe command ran, but the host did not record this run: misleading output. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
 		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
 			const component = new ToolExecutionComponent(toolName, {}, {}, undefined, { requestRender() {} } as any);
 			component.updateResult({ content: [{ type: "text", text: footer }], details: { run_not_recorded: "stored database reason" }, isError: false });
@@ -315,6 +329,12 @@ describe("ToolExecutionComponent", () => {
 			component.updateResult({ content: [{ type: "text", text: footer }], isError: false });
 			assert.equal(component.getRollupPhase(), null);
 			assert.match(component.render(180).map(stripAnsi).join("\n"), /did not record this run: misleading output/);
+			component.updateResult({ content: [{ type: "text", text: footer }], details: {}, isError: false });
+			assert.ok(component.getRollupPhase());
+			assert.doesNotMatch(component.render(180).map(stripAnsi).join("\n"), /not verification or UAT evidence/);
+			component.updateResult({ content: [{ type: "text", text: "ready" }], details: { digest: footer }, isError: false });
+			assert.ok(component.getRollupPhase());
+			assert.doesNotMatch(component.render(180).map(stripAnsi).join("\n"), /not verification or UAT evidence/);
 		}
 	});
 

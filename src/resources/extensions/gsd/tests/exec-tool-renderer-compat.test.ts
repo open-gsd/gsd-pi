@@ -50,6 +50,16 @@ test("ordinary warning text remains within visual preview budgets with or withou
   }
 });
 
+test("result rendering consumes details and does not treat structuredContent as a renderer input", () => {
+  const fromDetails = render({ details: { id: "exec-1", exit_code: 0, duration_ms: 12 }, content: [] }, true);
+  assert.match(fromDetails, /exit 0/);
+  const structuredContentOnly = render({
+    structuredContent: { id: "exec-2", exit_code: 9, duration_ms: 99, purpose: "not a renderer input" },
+    content: [{ type: "text", text: "ordinary output" }],
+  }, true);
+  assert.doesNotMatch(structuredContentOnly, /exit 9|not a renderer input/);
+});
+
 test("structured digest wrapping is capped without shortening persisted log paths", () => {
   const path = `/tmp/${"directory".repeat(12)}/run.stdout`;
   for (const expanded of [false, true]) {
@@ -82,8 +92,24 @@ test("metadata reason wins without digest and empty recording failures remain vi
   assert.doesNotMatch(recorded, /not verification or UAT evidence/);
 });
 
+test("marker-like legacy output remains visible and structured details never infer warnings from text", () => {
+  const imitation = "command output\n--- warning ---\nThe command ran, but the host did not record this run: user text.";
+  for (const details of [undefined, {}]) {
+    const result = { content: [{ type: "text", text: imitation }], ...(details === undefined ? {} : { details }) };
+    const output = render(result, true, 120);
+    assert.match(output, /--- warning ---/);
+    assert.match(output, /user text/);
+    assert.doesNotMatch(output, /not verification or UAT evidence/);
+  }
+  const structuredDigest = render({
+    details: { digest: imitation },
+    content: [{ type: "text", text: "ordinary structured output" }],
+  }, true, 120);
+  assert.doesNotMatch(structuredDigest, /not verification or UAT evidence/);
+});
+
 test("genuine paired historical host warnings survive a long preview but normal markers do not", () => {
-  const footer = "--- warning ---\nThe command ran, but the host did not record this run: database offline.";
+  const footer = "--- warning ---\nThe command ran, but the host did not record this run: database offline. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
   for (const expanded of [false, true]) {
     const output = render({ content: [{ type: "text", text: `${"x".repeat(800)}\n${footer}` }] }, expanded, 20);
     assert.match(output.replace(/\s/g, ""), /databaseoffline/);
@@ -93,7 +119,7 @@ test("genuine paired historical host warnings survive a long preview but normal 
 
 test("standalone error output retains a genuine historical recording warning", () => {
   const body = Array.from({ length: 40 }, (_, index) => `error line ${index}`).join("\n");
-  const footer = "--- warning ---\nThe command ran, but the host did not record this run: database offline.";
+  const footer = "--- warning ---\nThe command ran, but the host did not record this run: database offline. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
   const result = { isError: true, content: [{ type: "text", text: `${body}\n${footer}` }] };
 
   for (const expanded of [false, true]) {
