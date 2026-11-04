@@ -6,19 +6,26 @@
  * Ollama endpoint, point OLLAMA_HOST at it, invoke probeAndRegister with a
  * mock pi, and assert the per-model `cost` passed to registerProvider.
  */
-import { test, before, after } from "node:test";
+import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { probeAndRegister } from "./index.js";
+import ollamaExtension, { probeAndRegister } from "./index.js";
 
 type RegisterCall = [string, Record<string, unknown>];
 
 function makeMockPi() {
-	const calls: { registerProvider: RegisterCall[]; unregisterProvider: string[] } = {
+	const calls: {
+		registerProvider: RegisterCall[];
+		unregisterProvider: string[];
+		registerTool: unknown[];
+		onHandlers: Map<string, Array<(...args: unknown[]) => unknown>>;
+	} = {
 		registerProvider: [],
 		unregisterProvider: [],
+		registerTool: [],
+		onHandlers: new Map(),
 	};
 	const pi = {
 		registerProvider(id: string, spec: Record<string, unknown>) {
@@ -26,6 +33,16 @@ function makeMockPi() {
 		},
 		unregisterProvider(id: string) {
 			calls.unregisterProvider.push(id);
+		},
+		registerTool(tool: unknown) {
+			calls.registerTool.push(tool);
+		},
+		registerCommand() {
+			/* no-op */
+		},
+		on(event: string, handler: (...args: unknown[]) => unknown) {
+			if (!calls.onHandlers.has(event)) calls.onHandlers.set(event, []);
+			calls.onHandlers.get(event)!.push(handler);
 		},
 	} as unknown as Parameters<typeof probeAndRegister>[0];
 	return { pi, calls };
@@ -38,6 +55,9 @@ const CLOUD_MODELS = [
 	"qwen3.5:397b-cloud",
 ];
 const LOCAL_MODELS = ["qwen2.5-coder:7b"];
+
+/** Mutable catalog served by the fake daemon (per-test control). */
+let tagCatalog: string[] = [...CLOUD_MODELS, ...LOCAL_MODELS];
 
 function fakeModelInfo(name: string) {
 	return {
@@ -77,7 +97,7 @@ before(async () => {
 			res.writeHead(200, { "Content-Type": "application/json" });
 			res.end(
 				JSON.stringify({
-					models: [...CLOUD_MODELS, ...LOCAL_MODELS].map(fakeModelInfo),
+					models: tagCatalog.map(fakeModelInfo),
 				}),
 			);
 			return;
@@ -172,4 +192,84 @@ test("unpriced cloud model registers at zero cost with a GSD_DEBUG warning", asy
 	// The warning must not fire for priced cloud or local models.
 	assert.equal(warnings.some((w) => w.includes("glm-5.3")), false);
 	assert.equal(warnings.some((w) => w.includes("qwen2.5-coder:7b")), false);
+});
+
+beforeEach(() => {
+	tagCatalog = [...CLOUD_MODELS, ...LOCAL_MODELS];
+});
+
+test("probeAndRegister reports unpriced cloud models through hooks", async () => {
+	const seen: string[] = [];
+	const { pi } = makeMockPi();
+	const found = await probeAndRegister(pi, { onUnpricedCloudModel: (name) => seen.push(name) });
+	assert.equal(found, true);
+	// Only the unpriced cloud model — priced cloud and local models stay silent.
+	assert.deepEqual(seen, ["qwen3.5:397b-cloud"]);
+});
+
+test("interactive session notifies (once) about unpriced cloud models", async () => {
+	const { pi, calls } = makeMockPi();
+	ollamaExtension(pi);
+	const handlers = calls.onHandlers.get("session_start") ?? [];
+	assert.equal(handlers.length, 1, "extension registers one session_start handler");
+
+	const notifyCalls: Array<[string, string | undefined]> = [];
+	const ctx = {
+		hasUI: true,
+		ui: {
+			setStatus: () => {},
+			notify: (message: string, level?: string) => {
+				notifyCalls.push([message, level]);
+			},
+		},
+	};
+
+	// First session_start: the notify must arrive via the async probe chain.
+	await handlers[0]({}, ctx);
+	for (let i = 0; i < 50; i++) {
+		if (notifyCalls.length > 0) break;
+		await new Promise((r) => setTimeout(r, 20));
+	}
+	assert.equal(notifyCalls.length, 1, `expected exactly one notify, got ${notifyCalls.length}`);
+	assert.ok(
+		notifyCalls[0][0].includes("qwen3.5:397b-cloud"),
+		`notify must name the unpriced model: ${notifyCalls[0]?.[0]}`,
+	);
+	assert.equal(notifyCalls[0][1], "warning");
+
+	// A session switch re-fires session_start — the notice must not repeat.
+	await handlers[0]({}, ctx);
+	await new Promise((r) => setTimeout(r, 200));
+	assert.equal(notifyCalls.length, 1, "interactive unpriced-model notice must be one-time per process");
+});
+
+test("headless session writes unpriced cloud models to stderr (worker forensics channel)", async () => {
+	// Distinct unpriced model so the process-level once-set from the
+	// interactive test cannot swallow this emission.
+	tagCatalog = ["glm-5.3-flash:cloud", "brand-new-model:cloud"];
+
+	const { pi, calls } = makeMockPi();
+	ollamaExtension(pi);
+	const handlers = calls.onHandlers.get("session_start") ?? [];
+
+	const stderrChunks: string[] = [];
+	const originalWrite = process.stderr.write;
+	process.stderr.write = ((chunk: Uint8Array | string) => {
+		stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+		return true;
+	}) as typeof process.stderr.write;
+	try {
+		// hasUI: false identifies headless (ctx installs no UI bridge).
+		await handlers[0]({}, { hasUI: false, ui: undefined });
+	} finally {
+		process.stderr.write = originalWrite;
+	}
+
+	const stderr = stderrChunks.join("");
+	assert.ok(
+		stderr.includes("brand-new-model:cloud"),
+		`headless stderr must name the unpriced cloud model — got: ${stderr}`,
+	);
+	// Priced cloud model must not be flagged.
+	assert.equal(stderr.includes("glm-5.3-flash"), false);
 });
