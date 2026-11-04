@@ -19,7 +19,7 @@ const LEGACY_FALLBACK_MAX_LINES = 12;
 /** Cap for error-content rendering on execution failures (timeouts, nonzero exits). */
 const ERROR_CONTENT_MAX_LINES = 20;
 /** Exact historical footer emitted by exec-tool before recording warnings moved to details. */
-const LEGACY_RECORDING_FOOTER = /(?:^|\n)--- warning ---\n(The command ran, but the host did not record this run: [^\r\n]*\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
+const LEGACY_RECORDING_FOOTER = /(?:^|\n)--- warning ---\n(The command ran, but the host did not record this run: [\s\S]*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
 
 type ExecRendererContext = { state?: Record<string, unknown> };
 const VT_STRING_SEQUENCE = /(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[\s\S]*?(?:\x1b\\|\x9c|$)/g;
