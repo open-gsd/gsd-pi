@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
-import { showNextAction } from "../shared/tui.js";
+import { showNextAction } from "../shared/next-action-ui.js";
 import { isInteractiveCommandContext } from "./command-feedback.js";
 import { getActiveRequirements } from "./gsd-db.js";
 import type { GSDState, Requirement } from "./types.js";
