@@ -25,7 +25,7 @@ Baseline ownership, cancellation, privacy, and failure handling must ship with t
 | --- | --- |
 | G-01: supported owner/route | Maintainer explicitly adopts the optional adapter **and shared GSD desktop guard**, conditional on the inherited ordinary-agent handoff below. Docs review/merge is the proposed decision point, not proof this choice was already granted on #3017. Record the decision permalink on that issue. |
 | G-02: expanded source scope | Approval must name `mac-tools` and subagent enforcement, not merely a new extension directory. If this requires core/loader/orchestration changes or a built-in/core-tier change, obtain the approved RFC required by [CONTRIBUTING.md](../../CONTRIBUTING.md#architecture-guidelines) **before implementation**. Do not silently narrow the coordination boundary instead. |
-| G-03: operational safety | Prove native result schemas; the exact managed/unmanaged session lifecycle handshake (`start_session`/`end_session` arguments, results, and identity checks); trusted socket endpoint binding before capability transmission; terminal-invocation evidence; and cross-process enforcement against the pinned backend before enabling actions. Unverifiable recovery remains blocked; no invented cancellation/fencing API. |
+| G-03: operational safety | Prove native result schemas and non-replaying dispatch for each enabled operation; the exact managed/unmanaged session lifecycle handshake (`start_session`/`end_session` arguments, results, and identity checks); trusted socket endpoint binding before capability transmission; terminal-invocation evidence; and cross-process enforcement against the pinned backend before enabling actions. The pinned background `type_text` path may fall back to CGEvent after an AX write is not positively verified, with `clear_first:false`; keep typing disabled until backend semantics and regression tests prove no replay or definite non-delivery. Unverifiable recovery remains blocked; no invented cancellation/fencing API. |
 
 Required G-01/G-02 decision record: approving maintainer GitHub identity, UTC date,
 review/decision URL, reviewed source SHA, selected route, inherited-handoff limit,
@@ -129,6 +129,9 @@ passthrough. Inspect returns opaque local grant, target, and observer IDs. Actio
 accepts only `{grant_id, target_id, operation, postcondition}` and `text` for
 `type_text`; operation is exactly `click` or `type_text`. All objects reject unknown
 fields. PID/window/token/session values come **only** from adapter-bound state.
+Although the schema names both operations, v1 exposes `click` only; `type_text`
+remains hard-disabled until G-03 proves the pinned backend cannot replay an
+uncertain insertion within one native call.
 
 Before enabling, require exact engine version and validate every enabled input
 schema plus annotations against a committed, reviewed canonical-schema SHA-256
@@ -148,7 +151,16 @@ is not yet a complete runtime contract. All other keys are rejected:
 | `list_windows` (interactive setup) | Adapter-bound positive integer `pid`, `on_screen_only:true`. Never global/model-facing enumeration. |
 | `get_window_state` | Bound positive integer `pid`, `window_id`; `capture_mode:"ax"`, `include_screenshot:false`, `max_elements:200`, `max_depth:8`. No `query` or output path. `capture_mode` is deprecated/ignored natively: **explicit `include_screenshot:false`**, not that mode, prevents a grab. |
 | `click` | Bound `pid`, `window_id`, nonempty native `element_token` from the exact snapshot; `action:"press"`, `button:"left"`, `count:1`, `delivery_mode:"background"`. No modifiers, menus, alternate buttons/actions, coordinates, or foreground fallback. |
-| `type_text` | Same bound PID/window/token; `delivery_mode:"background"`, `delay_ms:0`, `text` of 1–256 Unicode scalar values **and** at most 1024 UTF-8 bytes. No controls/newlines, secure fields, secrets, credentials, or coordinate focus. |
+| `type_text` | **Disabled in v1 pending G-03 non-replay proof.** Proposed future request: same bound PID/window/token; `delivery_mode:"background"`, `delay_ms:0`, `text` of 1–256 Unicode scalar values **and** at most 1024 UTF-8 bytes. No controls/newlines, secure fields, secrets, credentials, or coordinate focus. |
+
+The pinned macOS backend first writes `AXSelectedText`; if a subsequent read-back
+cannot positively confirm insertion, the background path falls back to CGEvent
+with `clear_first:false`. An AX API success followed by an unconfirmed read-back
+can therefore replay text before the adapter receives a result. See the pinned
+[`type_text.rs` implementation](https://github.com/manaflow-ai/cmux-cua/blob/e0f738807dbff2f35fe67d7fbcc99c7082cffc23/libs/cmux-cua/rust/crates/platform-macos/src/tools/type_text.rs#L631-L660).
+Postcondition checking or adapter-level retry suppression cannot prevent this
+within-call fallback. Do not expose text insertion until a backend contract
+provides non-replaying dispatch or proves the first attempt was not delivered.
 
 The pinned proxy has two source-confirmed session modes. Without
 `CMUX_CUA_DEFAULT_SESSION`, it uses an unmanaged `mcp-<pid>-<nanos>` identity and
@@ -390,15 +402,19 @@ and record BLOCKED; do not reinterpret E1 as success or change targets blindly.
 
 ## Verification commands
 
-Docs-only checks (no Markdown linter binary is present; do not claim it ran):
+Docs-only checks (no Markdownlint binary was available in the local checkout; do
+not claim it ran):
 
 ```bash
 git diff --no-index --check /dev/null docs/dev/cmux-computer-use-contract.md
 bash scripts/docs-prompt-injection-scan.sh --file docs/dev/cmux-computer-use-contract.md
-bash scripts/secret-scan.sh --file docs/dev/cmux-computer-use-contract.md
+gitleaks dir --redact=100 docs/dev/cmux-computer-use-contract.md
 bash scripts/base64-scan.sh --file docs/dev/cmux-computer-use-contract.md
 ```
 
+`secret-scan.sh --file` is **not applicable** to Markdown: `should_scan` excludes
+`*.md` even in file mode, so a zero exit status is not a secret-scan pass. The
+Markdown-capable Gitleaks 8.30.1 scan above reported no leaks with full redaction.
 Record the actual diff-check exit/output: a no-index new-file difference is not a
 staged review or an implementation test. No package/type/native pass is implied.
 After approved implementation/tests exist, run the smallest scoped tests first,
