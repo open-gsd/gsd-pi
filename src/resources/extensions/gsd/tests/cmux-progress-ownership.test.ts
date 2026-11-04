@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 import {
   clearCmuxSidebar,
+  setCmuxCliAvailabilityForTests,
   setCmuxProgressRegistryDirForTests,
   syncCmuxSidebar,
 } from "../../cmux/index.ts";
@@ -83,6 +84,7 @@ function makeHarness(): Harness {
 
 function cleanup(h: Harness, originalPath: string | undefined): void {
   process.env.PATH = originalPath;
+  setCmuxCliAvailabilityForTests(null);
   fs.rmSync(h.binDir, { recursive: true, force: true });
   fs.rmSync(h.registryDir, { recursive: true, force: true });
 }
@@ -99,6 +101,7 @@ function withFakeCli(t: import("node:test").TestContext): Harness {
   const originalPath = process.env.PATH;
   process.env.PATH = `${h.binDir}:${originalPath ?? ""}`;
   t.after(() => cleanup(h, originalPath));
+  setCmuxCliAvailabilityForTests(true);
   setCmuxProgressRegistryDirForTests(h.registryDir);
   return h;
 }
