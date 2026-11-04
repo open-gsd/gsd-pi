@@ -16,6 +16,7 @@ import type {
   ExtensionCommandContext,
 } from "@gsd/pi-coding-agent";
 import { deriveState } from "./state.js";
+import { formatDynamicRoutingBanner } from "./auto-start-banner.js";
 import { captureAutoStartupOwnership } from "./auto/startup-ownership.js";
 import { findWorktreeSegment, isGsdWorktreePath } from "./worktree-root.js";
 import { getManifestStatus } from "./files.js";
@@ -1888,9 +1889,6 @@ export async function bootstrapAutoSession(
     // Use the same effective logic as selectAndApplyModel: check flat-rate
     // provider suppression and resolve the actual ceiling model.
     const routingConfig = resolveDynamicRoutingConfig();
-    const startModelLabel = s.autoModeStartModel
-      ? `${s.autoModeStartModel.provider}/${s.autoModeStartModel.id}`
-      : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "default";
 
     // Flat-rate providers (e.g. GitHub Copilot, claude-code, user-declared
     // subscription proxies, externalCli CLIs) suppress routing only when the
@@ -1907,29 +1905,25 @@ export async function bootstrapAutoSession(
       s.autoModeStartModel ? `${s.autoModeStartModel.provider}/${s.autoModeStartModel.id}` : undefined,
     )?.preferences;
     const effectiveProvider = s.autoModeStartModel?.provider ?? ctx.model?.provider;
-    const effectivelyEnabled = routingConfig.enabled
+    const effectivelyEnabled = routingConfig.enabled === true
       && (routingConfig.allow_flat_rate_providers !== false
         || !(effectiveProvider && isFlatRateProvider(
           effectiveProvider,
           buildFlatRateContext(effectiveProvider, ctx, bannerPrefs),
         )));
 
-    // The actual ceiling may come from tier_models.heavy, not the start model.
-    const effectiveCeiling = (routingConfig.enabled && routingConfig.tier_models?.heavy)
-      ? routingConfig.tier_models.heavy
-      : startModelLabel;
-
-    if (effectivelyEnabled) {
-      ctx.ui.notify(
-        `Dynamic routing: enabled — simple tasks may use cheaper models (ceiling: ${effectiveCeiling})`,
-        "info",
-      );
-    } else {
-      ctx.ui.notify(
-        `Dynamic routing: disabled — all tasks will use ${startModelLabel}`,
-        "info",
-      );
-    }
+    // A session model still on the unknown/unknown placeholder (provider
+    // registration in flight) is reported as unresolved, never as the model
+    // every task will use.
+    ctx.ui.notify(
+      formatDynamicRoutingBanner({
+        effectivelyEnabled,
+        startModel: s.autoModeStartModel,
+        sessionModel: ctx.model,
+        heavyTierModel: routingConfig.tier_models?.heavy,
+      }),
+      "info",
+    );
 
     updateSessionLock(
       lockBase(),
