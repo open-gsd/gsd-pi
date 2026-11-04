@@ -1133,12 +1133,29 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     ? captureMilestoneExecutionSnapshot(process.cwd())
     : null
 
+  // Wait (bounded) for the child's extensions_ready event before sending a
+  // command: session_start handlers — including headless provider
+  // registration (the ollama probe awaits under GSD_HEADLESS) — must finish
+  // before /gsd auto can snapshot the model registry, or workers boot
+  // against an empty registry (unknown/unknown banner, model-policy deny).
+  // Bounded so a wedged session_start handler cannot wedge the first command
+  // invisibly; the model-policy gate stays the loud backstop for a genuinely
+  // empty registry.
+  const EXTENSIONS_READY_WAIT_MS = 10_000
+  async function waitForExtensionsReady() {
+    const seen = await client.waitForEvent('extensions_ready', EXTENSIONS_READY_WAIT_MS)
+    if (!seen) {
+      process.stderr.write(`[headless] extensions not ready after ${EXTENSIONS_READY_WAIT_MS / 1000}s; sending command anyway\n`)
+    }
+  }
+
   // Send the command
   const command = buildHeadlessSlashCommand(options)
   if (!options.json) {
     process.stderr.write(`[headless] Running ${command}...\n`)
   }
   try {
+    await waitForExtensionsReady()
     await client.prompt(command)
   } catch (err) {
     process.stderr.write(`[headless] Error: Failed to send prompt: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -1183,6 +1200,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     })
 
     try {
+      await waitForExtensionsReady()
       await client.prompt('/gsd auto')
     } catch (err) {
       process.stderr.write(`[headless] Error: Failed to start auto-mode: ${err instanceof Error ? err.message : String(err)}\n`)
