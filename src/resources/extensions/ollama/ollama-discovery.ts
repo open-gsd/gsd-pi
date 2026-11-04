@@ -15,6 +15,7 @@ import {
 	getModelCapabilities,
 	humanizeModelName,
 } from "./model-capabilities.js";
+import { cloudModelKey, resolveCloudModelCost } from "./cloud-prices.js";
 import type { OllamaChatOptions, OllamaModelInfo, OllamaShowResponse } from "./types.js";
 
 /**
@@ -111,12 +112,25 @@ async function enrichModel(info: OllamaModelInfo, deps: ClientDeps): Promise<Dis
 			? { ...caps.ollamaOptions, num_ctx: showContextWindow }
 			: caps.ollamaOptions;
 
+	// Cloud-routed models (":cloud"/"-cloud" marker) carry official
+	// ollama.com rates; local inference stays free. Cost derives from the
+	// /api/tags name, so a failing /api/show above never affects pricing.
+	const cloudCost = resolveCloudModelCost(info.name);
+	if (cloudCost === undefined && cloudModelKey(info.name) !== undefined && process.env.GSD_DEBUG) {
+		// Surface the unpriced cloud model instead of staying silent — a $0
+		// that nobody can distinguish from "local and free" is the twin of
+		// the zero-cost bug this table fixes.
+		console.warn(`[ollama] no price entry for cloud model ${info.name}; reporting $0`);
+	}
+
 	return {
 		id: info.name,
 		name: humanizeModelName(info.name),
 		reasoning,
 		input: hasVision ? ["text", "image"] : ["text"],
-		cost: ZERO_COST,
+		cost: cloudCost
+			? { input: cloudCost.input, output: cloudCost.output, cacheRead: 0, cacheWrite: 0 }
+			: ZERO_COST,
 		contextWindow,
 		maxTokens,
 		sizeBytes: info.size,
