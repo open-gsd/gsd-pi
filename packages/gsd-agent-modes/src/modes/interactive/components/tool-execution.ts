@@ -45,7 +45,7 @@ import { truncateToVisualLines } from "./visual-truncate.js";
 // Preview line limit for bash when not expanded
 const BASH_PREVIEW_LINES = 5;
 // Exact historical footer emitted by exec-tool before recording warnings moved to details.
-const LEGACY_RECORDING_FOOTER = /(?:^|\n)--- warning ---\n(The command ran, but the host did not record this run: [\s\S]*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
+const LEGACY_RECORDING_FOOTER = /(?:^|\n)--- warning ---\n(The command ran, but the host did not record this run: (?:(?!\n--- warning ---)[\s\S])*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
 // Keep the successful Read preview off narrow compact rows, where status and target matter more.
 const READ_COMPACT_PREVIEW_MIN_WIDTH = 72;
 // Bound per-render cleanup when a file starts with a very long line.

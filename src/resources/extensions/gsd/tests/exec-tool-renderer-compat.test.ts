@@ -117,6 +117,21 @@ test("genuine paired historical host warnings survive a long preview but normal 
   }
 });
 
+test("incomplete warning lookalikes cannot absorb intervening output before a genuine footer", () => {
+  const lookalike = "--- warning ---\nThe command ran, but the host did not record this run: incomplete lookalike";
+  const commandOutput = Array.from({ length: 40 }, (_, index) => `intervening command output ${index}`).join("\n");
+  const footer = "--- warning ---\nThe command ran, but the host did not record this run: database\noffline. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
+  for (const expanded of [false, true]) {
+    const output = render({ content: [{ type: "text", text: `${lookalike}\n${commandOutput}\n${footer}` }] }, expanded, 120);
+    assert.match(output, /intervening command output 0/);
+    assert.doesNotMatch(output, /intervening command output 39/);
+    const visibleLines = output.match(/intervening command output \d+/g) ?? [];
+    assert.ok(visibleLines.length > 0 && visibleLines.length < 40, `expected bounded output, got ${visibleLines.length} lines`);
+    assert.ok(output.includes("database"));
+    assert.ok(output.includes("offline"));
+  }
+});
+
 test("standalone error output retains a genuine historical recording warning", () => {
   const body = Array.from({ length: 40 }, (_, index) => `error line ${index}`).join("\n");
   const footer = "--- warning ---\nThe command ran, but the host did not record this run: database\noffline. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
