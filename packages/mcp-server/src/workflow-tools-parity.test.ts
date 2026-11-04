@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -471,6 +471,32 @@ const SUMMARY_SAVE_ARGS = {
 
 /** The host record of a gsd_uat_exec run of M001/S01, bound to the run-uat attempt not saved yet. */
 function recordUatRun(base: string, id: string): void {
+  const execDir = join(base, ".gsd", "exec");
+  mkdirSync(execDir, { recursive: true });
+  const stdout = Buffer.from(`synthetic UAT output for ${id}\n`);
+  const stderr = Buffer.alloc(0);
+  const stdoutPath = join(execDir, `${id}.stdout`);
+  const stderrPath = join(execDir, `${id}.stderr`);
+  const metaPath = join(execDir, `${id}.meta.json`);
+  const startedAt = new Date().toISOString();
+  writeFileSync(stdoutPath, stdout);
+  writeFileSync(stderrPath, stderr);
+  writeFileSync(metaPath, JSON.stringify({
+    id,
+    runtime: "bash",
+    started_at: startedAt,
+    exit_code: 0,
+    signal: null,
+    timed_out: false,
+    aborted: false,
+    duration_ms: 1,
+    stdout_path: stdoutPath,
+    stderr_path: stderrPath,
+    stdout_bytes: stdout.length,
+    stderr_bytes: stderr.length,
+    stdout_truncated: false,
+    stderr_truncated: false,
+  }));
   recordExecRun({
     kind: "uat_exec",
     milestoneId: "M001",
@@ -484,9 +510,9 @@ function recordUatRun(base: string, id: string): void {
     signal: null,
     timedOut: false,
     aborted: false,
-    started_at: new Date().toISOString(),
+    started_at: startedAt,
     duration_ms: 1,
-    output_hash: "sha256:test",
+    output_hash: `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`,
   });
 }
 

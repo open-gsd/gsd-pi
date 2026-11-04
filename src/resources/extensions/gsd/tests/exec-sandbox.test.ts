@@ -9,8 +9,9 @@ import { join } from 'node:path';
 
 import { getShellConfig } from '@gsd/pi-coding-agent';
 import { closeDatabase, openDatabase } from '../gsd-db.ts';
+import { readExecRun } from '../db/writers/exec-runs.ts';
 import { EXEC_DEFAULTS, runExecSandbox, type ExecSandboxOptions } from '../exec-sandbox.ts';
-import { buildExecOptions, executeGsdExec } from '../tools/exec-tool.ts';
+import { buildExecOptions, executeGsdExec, executeUatExec } from '../tools/exec-tool.ts';
 import { isContextModeEnabled } from '../preferences-types.ts';
 import { validatePreferences } from '../preferences-validation.ts';
 
@@ -202,6 +203,72 @@ test('runExecSandbox: rewrites NUL redirects for bash on Windows', async () => {
   }
 });
 
+test('runExecSandbox: file-backed child error append failure stays observable', async () => {
+  const base = freshBase();
+  let appendAttempted = false;
+  try {
+    const result = await runExecSandbox(
+      {
+        runtime: 'bash',
+        script: 'unused',
+        invocation: { program: join(base, 'missing-command'), args: [], env: {} },
+      },
+      baseOpts(base, {
+        append_file_sync: () => {
+          appendAttempted = true;
+          throw Object.assign(new Error('synthetic append failure'), { code: 'EACCES' });
+        },
+      }),
+    );
+    assert.equal(appendAttempted, true);
+    assert.notEqual(result.exit_code, 0, 'a failed spawn cannot appear successful');
+    assert.equal(result.output_transformed, true);
+    assert.ok(result.digest.includes('child error'));
+    assert.equal(result.run_not_recorded, undefined, 'final persistence repairs the failed append');
+    assert.match(readFileSync(result.stderr_path, 'utf-8'), /child error/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('runExecSandbox: failed file-backed rewrite removes raw secret capture', async () => {
+  const base = freshBase();
+  const gsdDir = join(base, '.gsd');
+  const rawScratchDir = join(base, 'raw-capture');
+  const syntheticSecret = `sk_test_${'a'.repeat(24)}`;
+  mkdirSync(gsdDir, { recursive: true });
+  writeFileSync(join(gsdDir, 'exec'), 'not a directory');
+  try {
+    const result = await runExecSandbox(
+      {
+        runtime: 'bash',
+        script: 'unused',
+        invocation: {
+          program: '/bin/sh',
+          args: ['-c', `printf '%s' '${syntheticSecret}'`],
+          env: {},
+        },
+      },
+      baseOpts(base, {
+        create_raw_scratch_dir: () => {
+          mkdirSync(rawScratchDir, { mode: 0o700 });
+          return rawScratchDir;
+        },
+      }),
+    );
+    assert.equal(result.exit_code, 0);
+    assert.equal(result.output_transformed, true);
+    assert.match(String(result.run_not_recorded), /execution output could not be persisted/);
+    assert.ok(result.digest.includes('«redacted»'), 'only the redacted digest is returned');
+    assert.ok(!result.digest.includes(syntheticSecret));
+    assert.equal(existsSync(rawScratchDir), false, 'private raw capture is removed on failure');
+    assert.equal(existsSync(result.stdout_path), false, 'failed artifact path contains no raw output');
+    assert.equal(readFileSync(join(gsdDir, 'exec'), 'utf-8'), 'not a directory');
+  } finally {
+    cleanup(base);
+  }
+});
+
 // ── exec-tool executor ────────────────────────────────────────────────────
 
 test('executeGsdExec: runs by default when context_mode is unset', async () => {
@@ -215,6 +282,84 @@ test('executeGsdExec: runs by default when context_mode is unset', async () => {
     assert.equal(result.details.operation, 'gsd_exec');
     assert.equal(result.details.exit_code, 0);
     assert.ok(result.content[0].text.includes('default-on-run'));
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('executeGsdExec: warns and records the run when exit-zero output cannot be persisted', async (t) => {
+  const base = freshBase();
+  const gsdDir = join(base, '.gsd');
+  mkdirSync(gsdDir, { recursive: true });
+  openDatabase(join(gsdDir, 'gsd.db'));
+  writeFileSync(join(gsdDir, 'exec'), 'not a directory');
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+
+  const result = await executeGsdExec(
+    { runtime: 'bash', script: 'printf UNRECORDED_SUCCESS' },
+    { baseDir: base, preferences: {} },
+  );
+  assert.equal(result.isError, false);
+  assert.equal(result.details.exit_code, 0);
+  assert.equal(result.details.output_transformed, true);
+  assert.match(String(result.details.run_not_recorded), /execution output could not be persisted/);
+  assert.match(result.content[0].text, /The command ran, but the host did not record this run/);
+  assert.match(result.content[0].text, /UNRECORDED_SUCCESS/);
+  const row = readExecRun(String(result.details.id));
+  assert.ok(row, 'the latest run is recorded so a prior pass cannot be reused');
+  assert.equal(row.exit_code, 0);
+  assert.equal(row.source_revision, null, 'unpersisted output cannot bind verification evidence');
+});
+
+test('executeUatExec: unrecorded exit-zero output cannot pass UAT', async () => {
+  const base = freshBase();
+  const gsdDir = join(base, '.gsd');
+  mkdirSync(gsdDir, { recursive: true });
+  writeFileSync(join(gsdDir, 'exec'), 'not a directory');
+  try {
+    const result = await executeUatExec(
+      {
+        milestoneId: 'M999',
+        sliceId: 'S99',
+        checkId: 'UAT-2916-unrecorded',
+        intent: 'uat-runtime-check',
+        runtime: 'bash',
+        script: 'printf UAT_EVIDENCE_NOT_RECORDED',
+      },
+      { baseDir: base, preferences: {} },
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.details.evidence_recorded, false);
+    assert.match(String(result.details.run_not_recorded), /execution output could not be persisted/);
+    assert.match(result.content[0].text, /UAT_EVIDENCE_NOT_RECORDED/);
+    assert.match(result.content[0].text, /The command ran, but the host did not record this run/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('executeUatExec: refuses evidence without a workflow database', async () => {
+  const base = freshBase();
+  try {
+    const result = await executeUatExec(
+      {
+        milestoneId: 'M999',
+        sliceId: 'S99',
+        checkId: 'UAT-2916-no-database',
+        intent: 'uat-runtime-check',
+        runtime: 'bash',
+        script: 'printf UAT_NO_DB_EXIT0',
+      },
+      { baseDir: base, preferences: {} },
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.details.evidence_recorded, false);
+    assert.equal(result.details.exit_code, 0);
+    assert.match(String(result.details.run_not_recorded), /workflow database missing-(?:gsd-dir|database)/);
+    assert.match(result.content[0].text, /UAT_NO_DB_EXIT0/);
   } finally {
     cleanup(base);
   }

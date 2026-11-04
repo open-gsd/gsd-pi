@@ -416,7 +416,9 @@ function recordRun(
   try {
     const opened = openExistingWorkflowDatabase(baseDir);
     if (!opened.ok) {
-      if (opened.reason === "missing-gsd-dir" || opened.reason === "missing-database") return null;
+      if (opened.reason === "missing-gsd-dir" || opened.reason === "missing-database") {
+        return uat ? `workflow database ${opened.reason}` : null;
+      }
       return opened.error?.message ?? `workflow database ${opened.reason}`;
     }
     storeRun(baseDir, result, script, startedAt, uat, verification);
@@ -599,8 +601,13 @@ export async function executeGsdExec(
       attemptRef: matchedVerification.attemptRef,
     };
   }
-  const notRecorded = recordRun(deps.baseDir, result, script, startedAt, uat, verification);
-  if (notRecorded === null) return formatted;
+  // Always record the newest observation when a workflow DB exists, even if its output files are missing;
+  // the unreadable-output hash and null source revision must prevent reuse of an older passing run.
+  const databaseRecordError = recordRun(deps.baseDir, result, script, startedAt, uat, verification);
+  const notRecorded = [result.run_not_recorded, databaseRecordError]
+    .filter((reason): reason is string => typeof reason === "string" && reason.length > 0)
+    .join("; ");
+  if (!notRecorded) return formatted;
   return {
     ...formatted,
     content: [{
@@ -622,8 +629,11 @@ export async function executeUatExec(
 
   const result = await executeGsdExec(normalized.params, deps, uat);
   const details = result.details ?? {};
+  const evidenceNotRecorded =
+    typeof details.run_not_recorded === "string" && details.run_not_recorded.length > 0;
   return {
     ...result,
+    isError: result.isError || evidenceNotRecorded,
     details: {
       ...details,
       operation: "gsd_uat_exec",
@@ -631,6 +641,7 @@ export async function executeUatExec(
       sliceId: uat.sliceId,
       checkId: uat.checkId,
       intent,
+      ...(evidenceNotRecorded ? { evidence_recorded: false } : {}),
     },
   };
 }
@@ -672,6 +683,7 @@ function formatResult(result: ExecSandboxResult, purpose?: string): ToolExecutio
       // renderers display-normalize it without mutating these values.
       ...(typeof purpose === "string" ? { purpose } : {}),
       digest: result.digest,
+      ...(result.output_transformed ? { output_transformed: true } : {}),
       // Additive (issue #2927): bounded labeled stderr diagnostics for failed
       // executions; absent (never null) when not applicable.
       ...(result.stderr_excerpt ? { stderr_excerpt: result.stderr_excerpt } : {}),

@@ -1,7 +1,8 @@
 // Project/App: gsd-pi
 // File Purpose: Owns the durable UAT run lifecycle behind gsd_uat_result_save.
 
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, isAbsolute, join, normalize, resolve } from "node:path";
 
 import {
@@ -25,6 +26,7 @@ import {
 } from "./tool-presentation-plan.js";
 import { getLatestUatAttempt, isSavedUatRun } from "./db/queries.js";
 import { execRunSucceeded, readExecRun, uatAttemptRef, type ExecRunRow } from "./db/writers/exec-runs.js";
+import { execRunOutputHash } from "./verification-gate.js";
 import { saveFile } from "./files.js";
 import { relSliceFile, resolveGsdPathContract } from "./paths.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
@@ -236,6 +238,70 @@ export function readExecRunOfRef(basePath: string, ref: string): ExecRunRow | nu
   return underExecRoot ? readExecRun(basename(normalizedRef, ".meta.json")) : null;
 }
 
+function validatePersistedExecEvidence(basePath: string, run: ExecRunRow): string | null {
+  const runRoot = isAbsolute(run.cwd) ? resolve(run.cwd) : resolve(basePath, run.cwd);
+  const execDir = resolve(runRoot, ".gsd", "exec");
+  const stdoutPath = join(execDir, `${run.id}.stdout`);
+  const stderrPath = join(execDir, `${run.id}.stderr`);
+  const metaPath = join(execDir, `${run.id}.meta.json`);
+
+  try {
+    const stdout = readFileSync(stdoutPath);
+    const stderr = readFileSync(stderrPath);
+    const meta = JSON.parse(readFileSync(metaPath, "utf-8")) as Record<string, unknown>;
+    if (meta.id !== run.id || meta.runtime !== run.runtime) {
+      return `execution evidence id "${run.id}" does not match its persisted metadata identity`;
+    }
+    if (
+      meta.exit_code !== run.exit_code
+      || meta.signal !== run.signal
+      || meta.timed_out !== (run.timed_out === 1)
+      || meta.aborted !== (run.aborted === 1)
+      || meta.duration_ms !== run.duration_ms
+    ) {
+      return `execution evidence id "${run.id}" outcome metadata does not match the host record`;
+    }
+    if (
+      typeof meta.duration_ms !== "number"
+      || !Number.isFinite(meta.duration_ms)
+      || meta.duration_ms < 0
+      || typeof meta.started_at !== "string"
+      || !Number.isFinite(Date.parse(meta.started_at))
+      || typeof meta.stdout_bytes !== "number"
+      || !Number.isFinite(meta.stdout_bytes)
+      || meta.stdout_bytes < 0
+      || typeof meta.stderr_bytes !== "number"
+      || !Number.isFinite(meta.stderr_bytes)
+      || meta.stderr_bytes < 0
+      || typeof meta.stdout_truncated !== "boolean"
+      || typeof meta.stderr_truncated !== "boolean"
+    ) {
+      return `execution evidence id "${run.id}" has incomplete persisted metadata`;
+    }
+    const recordedStdoutPath = typeof meta.stdout_path === "string"
+      ? isAbsolute(meta.stdout_path) ? resolve(meta.stdout_path) : resolve(runRoot, meta.stdout_path)
+      : null;
+    const recordedStderrPath = typeof meta.stderr_path === "string"
+      ? isAbsolute(meta.stderr_path) ? resolve(meta.stderr_path) : resolve(runRoot, meta.stderr_path)
+      : null;
+    if (recordedStdoutPath !== stdoutPath || recordedStderrPath !== stderrPath) {
+      return `execution evidence id "${run.id}" artifact paths do not match the host record`;
+    }
+    if (typeof meta.run_not_recorded === "string" && meta.run_not_recorded.length > 0) {
+      return `execution evidence id "${run.id}" was marked run_not_recorded`;
+    }
+    const outputHash = run.run_contract
+      ? execRunOutputHash(stdout, stderr)
+      : `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`;
+    if (outputHash !== run.output_hash) {
+      return `execution evidence id "${run.id}" outputs do not match the host-recorded digest`;
+    }
+  } catch {
+    return `execution evidence id "${run.id}" has no complete persisted output artifacts`;
+  }
+  return null;
+}
+
 /** Every place a relative evidence path can be: the work root, and the .gsd and browser artifact roots. */
 function evidenceFileExists(basePath: string, ref: string): boolean {
   if (isAbsolute(ref)) return existsSync(ref);
@@ -300,6 +366,8 @@ function validateExecEvidenceRef(
       return `gsd_uat_exec evidence id "${evidence.ref}" was recorded in ${run.attempt_ref}, not in this run (${runId}); re-run the check`;
     }
   }
+  const artifactError = validatePersistedExecEvidence(basePath, run);
+  if (artifactError) return artifactError;
   if (check.result === "PASS" && !execRunSucceeded(run)) {
     return (
       `PASS cites ${evidence.kind} evidence id "${evidence.ref}" whose execution ` +

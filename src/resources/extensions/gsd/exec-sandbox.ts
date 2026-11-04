@@ -15,13 +15,16 @@ import {
   existsSync,
   fstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { getShellConfig, killProcessTree, SIGKILL_GRACE_MS, HARD_DEADLINE_MS } from "@gsd/pi-coding-agent";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
 import { redactSecrets } from "./redact-secrets.js";
@@ -73,6 +76,10 @@ export interface ExecSandboxOptions {
   now?: () => Date;
   /** Optional override for id generation (tests). */
   generateId?: () => string;
+  /** Optional append override for file-backed child-error tests. */
+  append_file_sync?: typeof appendFileSync;
+  /** Optional private scratch-directory factory for file-backed tests. */
+  create_raw_scratch_dir?: () => string;
   /** Optional request cancellation signal. Aborting kills the child process tree. */
   signal?: AbortSignal;
   /**
@@ -127,6 +134,8 @@ export interface ExecSandboxResult {
    * with what a fresh gate spawn would have captured, so it never reuses.
    */
   output_transformed?: boolean;
+  /** The command ran, but its captured output/metadata could not be persisted. */
+  run_not_recorded?: string;
 }
 
 const ALWAYS_FORWARD_ENV = ["PATH", "HOME"] as const;
@@ -255,7 +264,12 @@ export function runExecSandbox(
     const id = (opts.generateId ?? defaultGenerateId)();
     const now = (opts.now ?? (() => new Date()))();
     const execDir = resolve(opts.baseDir, ".gsd", "exec");
-    if (!existsSync(execDir)) mkdirSync(execDir, { recursive: true });
+    let runNotRecorded: string | undefined;
+    try {
+      if (!existsSync(execDir)) mkdirSync(execDir, { recursive: true });
+    } catch (error) {
+      runNotRecorded = recordingFailureReason(error);
+    }
     const stdoutPath = resolve(execDir, `${id}.stdout`);
     const stderrPath = resolve(execDir, `${id}.stderr`);
     const metaPath = resolve(execDir, `${id}.meta.json`);
@@ -281,12 +295,29 @@ export function runExecSandbox(
     // regular files for stdout/stderr exactly as it would under
     // runVerificationGate. The sandboxed run keeps its pipes and caps.
     const fileStdio = invocation != null;
+    let fileStdioScratchDir: string | undefined;
+    let fileStdioStdoutPath = stdoutPath;
+    let fileStdioStderrPath = stderrPath;
+    let fileStdioAppendFailed = false;
+    let fileStdioErrorLine: Buffer | undefined;
+    const cleanupFileStdioScratch = () => {
+      if (!fileStdioScratchDir) return;
+      try {
+        rmSync(fileStdioScratchDir, { recursive: true, force: true });
+        fileStdioScratchDir = undefined;
+      } catch (error) {
+        runNotRecorded ??= recordingFailureReason(error);
+      }
+    };
     let stdoutFd: number | null = null;
     let stderrFd: number | null = null;
     try {
       if (fileStdio) {
-        stdoutFd = openSync(stdoutPath, "w");
-        stderrFd = openSync(stderrPath, "w");
+        fileStdioScratchDir = (opts.create_raw_scratch_dir ?? (() => mkdtempSync(join(tmpdir(), "gsd-exec-raw-"))))();
+        fileStdioStdoutPath = join(fileStdioScratchDir, `${id}.stdout.raw`);
+        fileStdioStderrPath = join(fileStdioScratchDir, `${id}.stderr.raw`);
+        stdoutFd = openSync(fileStdioStdoutPath, "wx", 0o600);
+        stderrFd = openSync(fileStdioStderrPath, "wx", 0o600);
         child = spawn(cmd, [...args], {
           cwd: opts.baseDir,
           env,
@@ -304,10 +335,15 @@ export function runExecSandbox(
     } catch (err) {
       if (stdoutFd != null) closeSync(stdoutFd);
       if (stderrFd != null) closeSync(stderrFd);
+      cleanupFileStdioScratch();
       const duration = Date.now() - started;
       const message = err instanceof Error ? err.message : String(err);
-      writeFileSync(stdoutPath, "");
-      writeFileSync(stderrPath, `spawn error: ${message}\n`);
+      try {
+        writeFileSync(stdoutPath, "");
+        writeFileSync(stderrPath, `spawn error: ${message}\n`);
+      } catch {
+        // Preserve the spawn error result even when the evidence directory is unavailable.
+      }
       const result: ExecSandboxResult = {
         id,
         runtime: request.runtime,
@@ -325,7 +361,11 @@ export function runExecSandbox(
         meta_path: metaPath,
         digest: `[spawn error: ${message}]`,
       };
-      writeMeta(metaPath, result, request, now);
+      try {
+        writeMeta(metaPath, result, request, now);
+      } catch {
+        // The command did not start; its spawn error remains available in the returned digest.
+      }
       resolveP(result);
       return;
     }
@@ -435,28 +475,38 @@ export function runExecSandbox(
         let stderrRaw: Buffer = Buffer.alloc(0);
         let withinLimit = true;
         try {
-          const stdoutRead = readBoundedFile(stdoutPath);
-          const stderrRead = readBoundedFile(stderrPath);
+          const stdoutRead = readBoundedFile(fileStdioStdoutPath);
+          const stderrRead = readBoundedFile(fileStdioStderrPath);
           stdoutRaw = stdoutRead.data;
           stderrRaw = stderrRead.data;
           withinLimit = stdoutRead.full && stderrRead.full;
-        } catch {
-          // A missing or unreadable output file is itself a transform the
-          // gate will refuse.
+        } catch (error) {
+          // A missing or unreadable raw output file is itself a transform the
+          // gate will refuse, and no raw artifact may be published.
           withinLimit = false;
+          runNotRecorded ??= recordingFailureReason(error);
         }
+        if (fileStdioErrorLine) {
+          if (!stderrRaw.includes(fileStdioErrorLine)) {
+            stderrRaw = Buffer.concat([stderrRaw, fileStdioErrorLine]);
+          }
+          outputTransformedFinal = true;
+        }
+        if (fileStdioAppendFailed) outputTransformedFinal = true;
         const stdoutText = withinLimit
           ? stdoutRaw.toString("utf-8")
           : stdoutRaw.toString("utf-8") + "\n[truncated: verification output cap reached]\n";
         const stderrText = withinLimit
           ? stderrRaw.toString("utf-8")
           : stderrRaw.toString("utf-8") + "\n[truncated: verification output cap reached]\n";
-        let stdoutRedacted = stdoutText;
-        let stderrRedacted = stderrText;
+        const withheldOutput = "[output withheld: secret redaction failed]\n";
+        let stdoutRedacted = withheldOutput;
+        let stderrRedacted = withheldOutput;
         try {
           stdoutRedacted = redactSecrets(stdoutText);
           stderrRedacted = redactSecrets(stderrText);
         } catch {
+          runNotRecorded ??= "secret redaction failed; output was withheld";
           outputTransformedFinal = true;
         }
         // A decode/re-encode that is not byte-stable (invalid UTF-8 expands to
@@ -465,11 +515,14 @@ export function runExecSandbox(
           || !Buffer.from(stderrRedacted, "utf-8").equals(stderrRaw)) {
           outputTransformedFinal = true;
         }
+        cleanupFileStdioScratch();
+        if (runNotRecorded) outputTransformedFinal = true;
         try {
           writeFileSync(stdoutPath, stdoutRedacted);
           writeFileSync(stderrPath, stderrRedacted);
-        } catch {
+        } catch (error) {
           outputTransformedFinal = true;
+          runNotRecorded ??= recordingFailureReason(error);
         }
         stdoutBuf = Buffer.from(stdoutRedacted, "utf-8");
         stderrBuf = Buffer.from(stderrRedacted, "utf-8");
@@ -485,8 +538,12 @@ export function runExecSandbox(
         // Redact secret-shaped substrings before persisting to .gsd/exec/ (skipped by
         // the secret scanner). The returned digest is derived from the raw buffer
         // below and is redacted downstream when the session is written to activity/.
-        writeFileSync(stdoutPath, redactSecrets(Buffer.concat([stdoutBuf, Buffer.from(stdoutSuffix, "utf-8")]).toString("utf-8")));
-        writeFileSync(stderrPath, redactSecrets(Buffer.concat([stderrBuf, Buffer.from(stderrSuffix, "utf-8")]).toString("utf-8")));
+        try {
+          writeFileSync(stdoutPath, redactSecrets(Buffer.concat([stdoutBuf, Buffer.from(stdoutSuffix, "utf-8")]).toString("utf-8")));
+          writeFileSync(stderrPath, redactSecrets(Buffer.concat([stderrBuf, Buffer.from(stderrSuffix, "utf-8")]).toString("utf-8")));
+        } catch (error) {
+          runNotRecorded ??= recordingFailureReason(error);
+        }
         stdoutBytesFinal = stdoutBytes;
         stderrBytesFinal = stderrBytes;
         stdoutTruncatedFinal = stdoutTruncated;
@@ -539,9 +596,15 @@ export function runExecSandbox(
         meta_path: metaPath,
         digest,
         ...(stderrExcerpt ? { stderr_excerpt: stderrExcerpt } : {}),
-        ...(outputTransformedFinal ? { output_transformed: true } : {}),
+        ...(outputTransformedFinal || runNotRecorded ? { output_transformed: true } : {}),
+        ...(runNotRecorded ? { run_not_recorded: runNotRecorded } : {}),
       };
-      writeMeta(metaPath, result, request, now);
+      try {
+        writeMeta(metaPath, result, request, now);
+      } catch (error) {
+        result.run_not_recorded ??= recordingFailureReason(error);
+        result.output_transformed = true;
+      }
       resolveP(result);
     };
 
@@ -569,7 +632,12 @@ export function runExecSandbox(
       const message = err instanceof Error ? err.message : String(err);
       const line = `child error: ${message}\n`;
       if (fileStdio) {
-        appendFileSync(stderrPath, line);
+        try {
+          (opts.append_file_sync ?? appendFileSync)(fileStdioStderrPath, line);
+        } catch {
+          fileStdioAppendFailed = true;
+          fileStdioErrorLine = Buffer.from(line, "utf-8");
+        }
         return;
       }
       const remaining = opts.stderr_cap_bytes - stderrBytes;
@@ -586,6 +654,16 @@ export function runExecSandbox(
 
 function defaultGenerateId(): string {
   return randomUUID();
+}
+
+function recordingFailureReason(error: unknown): string {
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return typeof code === "string"
+    ? `execution output could not be persisted (${code})`
+    : "execution output could not be persisted";
 }
 
 function writeMeta(
@@ -613,6 +691,8 @@ function writeMeta(
     stderr_bytes: result.stderr_bytes,
     stdout_truncated: result.stdout_truncated,
     stderr_truncated: result.stderr_truncated,
+    output_transformed: result.output_transformed === true,
+    ...(result.run_not_recorded ? { run_not_recorded: result.run_not_recorded } : {}),
     stdout_path: result.stdout_path,
     stderr_path: result.stderr_path,
   };
