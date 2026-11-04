@@ -59,6 +59,8 @@ export class RpcClient {
 	private stopReadingStdout: (() => void) | null = null;
 	private _stderrHandler?: (data: Buffer) => void;
 	private eventListeners: RpcEventListener[] = [];
+	/** Event types observed so far, so late waiters cannot miss an early event. */
+	private seenEventTypes = new Set<string>();
 	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	private requestId = 0;
@@ -509,6 +511,31 @@ export class RpcClient {
 	}
 
 	/**
+	 * Wait (bounded) for an event of the given type. Resolves immediately if
+	 * the type was already observed — events can arrive before the caller
+	 * attaches (e.g. `extensions_ready` during client startup). Resolves
+	 * false on timeout; never rejects, so callers decide how to degrade.
+	 */
+	waitForEvent(type: string, timeout = 10_000): Promise<boolean> {
+		if (this.seenEventTypes.has(type)) {
+			return Promise.resolve(true);
+		}
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				unsubscribe();
+				resolve(false);
+			}, timeout);
+			const unsubscribe = this.onEvent((event) => {
+				if (event.type === type) {
+					clearTimeout(timer);
+					unsubscribe();
+					resolve(true);
+				}
+			});
+		});
+	}
+
+	/**
 	 * Collect events until agent becomes idle.
 	 */
 	collectEvents(timeout = 60000): Promise<AgentEvent[]> {
@@ -556,6 +583,9 @@ export class RpcClient {
 			}
 
 			// Otherwise it's an event
+			if (typeof data.type === "string") {
+				this.seenEventTypes.add(data.type);
+			}
 			for (const listener of this.eventListeners) {
 				listener(data as AgentEvent);
 			}
