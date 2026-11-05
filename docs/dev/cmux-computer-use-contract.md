@@ -234,7 +234,10 @@ durably record owner/connection generation, invocation ID, and unresolved state
 (no desktop content); fsync the file and containing directory for atomic
 replacement before dispatch. Invalid/unreadable/unwritable state denies mutations.
 The OS mutex is **not** this journal. Every driver checks it while holding the
-lease; unresolved state quarantines current **and subsequent** owners.
+lease; unresolved state quarantines current **and subsequent** owners. The
+quarantine epoch is scoped to the affected cmux session/invocation. Authenticated
+daemon identity identifies the peer; it is not an admission epoch. Advancing a
+daemon-wide generation must not invalidate unrelated sessions.
 
 An accepted/dispatched request can outlive proxy death and lock/session closure.
 Pinned proxy EOF cleanup and server ended-session checks do **not** demonstrate
@@ -243,14 +246,16 @@ plus reinspection is **insufficient** to clear quarantine. Resume only with:
 
 1. Operation-specific evidence that the previous invocation is terminal, not
    merely a transport/dispatch acknowledgement; or
-2. A supported backend-generation fence/controlled **host-owned** helper
-   replacement proven to prevent all future execution of that invocation.
+2. A supported **session-scoped backend-generation fence**, proven to prevent
+   all future execution of that invocation without invalidating unrelated sessions.
 
-Neither mechanism is established for unresolved calls by this evidence. If it
-cannot be verified, remain blocked, report recovery unavailable, and require
-manual external resolution through supported host controls plus terminal/fence
-evidence. The adapter must not kill/restart a shared helper or offer a “clear by
-acknowledgement” escape. Never claim lock/session close cancels posted OS events.
+A daemon-wide generation bump or shared-helper restart is not an approved
+recovery mechanism: it may invalidate unrelated sessions. A session-scoped fence
+is not established for unresolved calls by this evidence. If that fence cannot be
+verified, remain blocked, report recovery unavailable, and require
+operation-specific terminal proof or a separately reviewed RFC change. The
+adapter must not kill/restart a shared helper or offer a “clear by acknowledgement”
+escape. Never claim lock/session close cancels posted OS events.
 Clear a marker only under the lease with matching owner, generation, epoch, and
 invocation ID; a late completion cannot clear a newer marker. Persist recovery
 proof identity/classification, not payloads. Normal verified completion also needs
