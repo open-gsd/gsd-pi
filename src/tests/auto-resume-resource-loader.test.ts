@@ -20,7 +20,12 @@ test("source dev CLI remains the child-process GSD_BIN_PATH", (t) => {
   writeFileSync(devCliPath, "#!/usr/bin/env node\n");
 
   assert.equal(
-    resolveLoaderCliEntrypoint({ gsdRoot: root, invokedBinPath: invokedLoader, existsSync }),
+    resolveLoaderCliEntrypoint({
+      gsdRoot: root,
+      invokedBinPath: invokedLoader,
+      env: {} as NodeJS.ProcessEnv,
+      existsSync,
+    }),
     resolve(devCliPath),
   );
 });

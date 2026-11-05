@@ -346,7 +346,7 @@ test("runProviderChecks detects key from auth.json", () => {
     };
     writeFileSync(join(agentDir, "auth.json"), JSON.stringify(authData));
 
-    withEnv({ HOME: tmpHome }, () => {
+    withEnv({ HOME: tmpHome, GSD_HOME: join(tmpHome, ".gsd") }, () => {
       const results = runProviderChecks();
       const anthropic = results.find(r => r.name === "anthropic");
       assert.ok(anthropic, "anthropic should be present");
@@ -376,6 +376,7 @@ test("runProviderChecks ignores empty placeholder keys in auth.json", () => {
     GH_TOKEN: undefined,
     GITHUB_TOKEN: undefined,
     HOME: tmpHome,
+    GSD_HOME: join(tmpHome, ".gsd"),
     // Exclude AI CLI binaries so the claude-code route is not considered available
     PATH: tmpHome,
   }, () => {
@@ -626,7 +627,7 @@ test("runProviderChecks reports ok via Copilot auth.json for Anthropic", () => {
     };
     writeFileSync(join(agentDir, "auth.json"), JSON.stringify(authData));
 
-    withEnv({ HOME: tmpHome }, () => {
+    withEnv({ HOME: tmpHome, GSD_HOME: join(tmpHome, ".gsd") }, () => {
       const results = runProviderChecks();
       const anthropic = results.find(r => r.name === "anthropic");
       assert.ok(anthropic, "anthropic result should exist");
@@ -738,6 +739,7 @@ test("runProviderChecks reports ok for Google via google-gemini-cli auth.json (#
 
   withEnv({
     HOME: tmpHome,
+    GSD_HOME: join(tmpHome, ".gsd"),
     PATH: tmpHome,
     GEMINI_API_KEY: undefined,
     GOOGLE_API_KEY: undefined,
@@ -781,6 +783,7 @@ test("runProviderChecks reports ok for OpenAI via openai-codex auth.json (#2922)
 
   withEnv({
     HOME: tmpHome,
+    GSD_HOME: join(tmpHome, ".gsd"),
     OPENAI_API_KEY: undefined,
     // Clear Copilot env vars so it doesn't route through Copilot
     COPILOT_GITHUB_TOKEN: undefined,
@@ -960,6 +963,7 @@ test("runProviderChecks ignores external CLI auth sentinels when the CLI is miss
     withEnv({
       ...env,
       HOME: tmpHome,
+      GSD_HOME: join(tmpHome, ".gsd"),
       PATH: tmpHome,
     }, () => {
       withCwd(repo, () => {

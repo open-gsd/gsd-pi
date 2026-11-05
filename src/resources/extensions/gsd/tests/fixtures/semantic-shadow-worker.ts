@@ -13,7 +13,6 @@ import {
   _setLifecycleShadowRepairBeforeCommitForTest,
   repairLifecycleShadowForward,
 } from "../../lifecycle-shadow-repair-domain-operation.ts";
-import * as workflowExecutors from "../../tools/workflow-tool-executors.ts";
 
 interface BarrierPaths {
   ready?: string;
@@ -79,18 +78,16 @@ function reachBarrier(paths: BarrierPaths): void {
   if (paths.release) waitForFile(paths.release);
 }
 
-function statusReadInterleaveSetter(): StatusReadInterleaveSetter | undefined {
-  return (
-    workflowExecutors as typeof workflowExecutors & {
-      _setMilestoneStatusReadInterleaveForTest?: StatusReadInterleaveSetter;
-    }
-  )._setMilestoneStatusReadInterleaveForTest;
-}
-
 async function runStatusRead(input: StatusReadInput): Promise<unknown> {
   if (!openDatabase(input.databasePath)) throw new Error("status worker could not open database");
+  let setInterleave: StatusReadInterleaveSetter | undefined;
   try {
-    const setInterleave = statusReadInterleaveSetter();
+    const workflowExecutors = await import("../../tools/workflow-tool-executors.ts");
+    setInterleave = (
+      workflowExecutors as typeof workflowExecutors & {
+        _setMilestoneStatusReadInterleaveForTest?: StatusReadInterleaveSetter;
+      }
+    )._setMilestoneStatusReadInterleaveForTest;
     if (!setInterleave) throw new Error("milestone status read interleave hook is unavailable");
     setInterleave(() => reachBarrier(input));
     return await workflowExecutors.executeMilestoneStatus(
@@ -105,7 +102,7 @@ async function runStatusRead(input: StatusReadInput): Promise<unknown> {
       },
     );
   } finally {
-    statusReadInterleaveSetter()?.(null);
+    setInterleave?.(null);
     closeDatabase();
   }
 }
