@@ -184,11 +184,9 @@ function runAuthorityProcess(
   const script = `
     const [
       { openDatabase, closeDatabase, getSlice, getTask },
-      { deriveStateFromDb },
       { createWorkflowFaultHarness },
     ] = await Promise.all([
       import(${JSON.stringify(databaseModule)}),
-      import(${JSON.stringify(stateModule)}),
       import(${JSON.stringify(faultHarnessModule)}),
     ]);
     const [root, dbPath, faultPoint] = process.argv.slice(-3);
@@ -197,6 +195,7 @@ function runAuthorityProcess(
       process.stderr.write("DATABASE_OPENED_BEFORE_FAULT=" + process.pid + "\\n");
       createWorkflowFaultHarness(faultPoint).hit(faultPoint, "fresh-process-reopen");
     }
+    const { deriveStateFromDb } = await import(${JSON.stringify(stateModule)});
     const state = await deriveStateFromDb(root);
     const snapshot = {
       pid: process.pid,

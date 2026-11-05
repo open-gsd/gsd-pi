@@ -952,7 +952,7 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: {
 				content: normalizeToolResultContent(externalResult.content),
-				details: externalResult.details ?? {},
+				details: externalResult.details,
 				// The provider (claude-code-cli) already executed this tool inside its
 				// own agentic session and emitted ONE final assistant message carrying
 				// both the tool blocks and the post-tool text. There is no follow-up

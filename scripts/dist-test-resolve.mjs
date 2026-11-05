@@ -24,6 +24,16 @@ mkdirSync(join(gitTemplateDir, 'info'), { recursive: true });
 writeFileSync(join(gitTemplateDir, 'info', 'exclude'), '');
 process.env.GIT_TEMPLATE_DIR = gitTemplateDir;
 
+// Disposable project fixtures must not inherit a developer's global GSD
+// preferences (for example git.isolation: worktree). A valid isolated file
+// also prevents the legacy ~/.pi preferences fallback from leaking in.
+if (!process.env.GSD_HOME) {
+  const gsdTestHome = join(GIT_TEST_ENV_DIR, 'gsd-home');
+  mkdirSync(gsdTestHome, { recursive: true });
+  writeFileSync(join(gsdTestHome, 'PREFERENCES.md'), '---\nversion: 1\ngit:\n  isolation: none\n---\n');
+  process.env.GSD_HOME = gsdTestHome;
+}
+
 // dist-test root — everything compiled lands here
 const DIST_TEST = new URL('../dist-test/', import.meta.url).href;
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
