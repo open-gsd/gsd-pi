@@ -46,6 +46,7 @@ import { emitJournalEvent } from "../gsd/journal.js";
 import { CmuxClient, shellEscape } from "../cmux/index.js";
 import {
 	buildShellEnvAssignments,
+	buildShellEnvUnsets,
 	buildSubagentProcessArgs,
 	createSubagentLaunchPlan,
 	isSubagentChildProcess,
@@ -1361,12 +1362,13 @@ export async function runSingleAgentInCmuxSplit(
 		// On Windows, backslashes are interpreted as escape characters by bash,
 		// mangling paths like C:\Users\user into C:Useruser (#1436).
 		const bashPath = (p: string) => shellEscape(p.replaceAll("\\", "/"));
+		const envUnsets = buildShellEnvUnsets(process.env).map(shellEscape);
 		const envAssignments = buildShellEnvAssignments(launch.env);
 		if (questionChannelDir) {
 			envAssignments.push(`${QUESTION_CHANNEL_DIR_ENV}=${shellEscape(questionChannelDir)}`);
 		}
-		const envPrefix = envAssignments.join(" ");
-		const commandPrefix = envPrefix ? `${envPrefix} ` : "";
+		const envPrefix = [...envUnsets, ...envAssignments].join(" ");
+		const commandPrefix = envPrefix ? `/usr/bin/env ${envPrefix} ` : "";
 		const innerScript = [
 			// Publish the wrapper shell's pid first (#2652): it is the process
 			// that owns the exit.code write, so its death is exactly the

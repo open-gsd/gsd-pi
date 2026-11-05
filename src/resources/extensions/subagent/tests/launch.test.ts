@@ -15,6 +15,7 @@ import {
 	SUBAGENT_CHILD_ENV_VALUE,
 	SUBAGENT_RUNTIME_CONTRACT_ROOT_ENV_VAR,
 	buildShellEnvAssignments,
+	buildShellEnvUnsets,
 	buildSubagentProcessEnv,
 	createSubagentLaunchPlan,
 	isSubagentChildProcess,
@@ -87,6 +88,40 @@ describe("subagent launch module", () => {
 		assert.equal(plan.cwd, "/repo");
 		assert.deepEqual(plan.session, { mode: "fresh" });
 		assert.deepEqual(plan.args.slice(plan.args.indexOf("--tools"), plan.args.indexOf("--tools") + 2), ["--tools", "read,write"]);
+	});
+
+	it("builds safe shell unsets for inherited cmux CUA capabilities", () => {
+		const unsets = buildShellEnvUnsets({
+			CMUX_CUA_SOCKET_PATH: "/test-only/socket",
+			CMUX_CUA_SOCKET_HOST_AUTH_TOKEN: "test-only-token",
+			CMUX_CUA_DEFAULT_SESSION: "test-only-session",
+			KEEP_FOR_CHILD: "yes",
+		});
+		assert.equal(unsets.length % 2, 0);
+		for (const name of [
+			"CMUX_CUA_SOCKET_PATH",
+			"CMUX_CUA_SOCKET_AUTH_TOKEN",
+			"CMUX_CUA_SOCKET_HOST_AUTH_TOKEN",
+			"CMUX_CUA_AUTH_TOKEN_FILE",
+			"CMUX_CUA_DEFAULT_SESSION",
+			"CMUX_CUA_STATE_OWNER_PID",
+		]) {
+			assert.ok(unsets.includes(name), `child shell must unset ${name}`);
+		}
+		assert.equal(unsets.includes("KEEP_FOR_CHILD"), false);
+	});
+
+	it("strips cmux CUA capabilities from child process environments", () => {
+		const childEnv = buildSubagentProcessEnv({
+			CMUX_CUA_SOCKET_PATH: "/test-only/socket",
+			CMUX_CUA_AUTH_TOKEN_FILE: "/test-only/token-file",
+			CMUX_CUA_DEFAULT_SESSION: "test-only-session",
+			KEEP_FOR_CHILD: "yes",
+		});
+
+		assert.equal(childEnv[SUBAGENT_CHILD_ENV_VAR], SUBAGENT_CHILD_ENV_VALUE);
+		assert.equal(childEnv.KEEP_FOR_CHILD, "yes");
+		assert.deepEqual(Object.keys(childEnv).filter((name) => name.startsWith("CMUX_CUA_")), []);
 	});
 
 	it("propagates the parent authority to a nested repository child", (t) => {

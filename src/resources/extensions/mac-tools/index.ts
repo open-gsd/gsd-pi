@@ -21,6 +21,13 @@ import {
 	constrainScreenshot,
 	getScreenshotBufferDimensions,
 } from "../browser-tools/screenshot-constraints.js";
+import {
+	assertDesktopDriverProcessAllowed,
+	desktopOwnershipManager,
+	withDesktopOperation,
+	type DesktopOperationKind,
+	type DesktopOwnershipManager,
+} from "../shared/desktop-ownership.js";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -100,6 +107,16 @@ interface MacAgentResponse {
 	error?: string;
 }
 
+function isMacAgentResponse(value: unknown): value is MacAgentResponse {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const response = value as Record<string, unknown>;
+	return (
+		typeof response.success === "boolean" &&
+		(response.data === undefined || (typeof response.data === "object" && response.data !== null)) &&
+		(response.error === undefined || typeof response.error === "string")
+	);
+}
+
 interface MacScreenshotPayload {
 	imageData: string;
 	width: number;
@@ -143,12 +160,43 @@ export async function prepareMacScreenshotPayload(
  * Invoke the mac-agent CLI with a command and optional params.
  * Handles compilation caching, stdin/stdout JSON protocol, and error surfacing.
  */
-function execMacAgent(command: string, params?: Record<string, any>): MacAgentResponse {
-	ensureCompiled();
+function macAgentOperationKind(command: string): DesktopOperationKind {
+	if (command === "screenshotWindow") return "capture";
+	if (command === "clickElement" || command === "typeText" || command === "launchApp" || command === "activateApp" || command === "quitApp") {
+		return "action";
+	}
+	return "inspect";
+}
 
+export function runMacAgentWithOwnership(
+	command: string,
+	execute: () => MacAgentResponse,
+	manager: DesktopOwnershipManager = desktopOwnershipManager,
+): MacAgentResponse {
+	const kind = macAgentOperationKind(command);
+	const response = withDesktopOperation("mac-tools", kind, () => {
+		const result = execute();
+		if (!isMacAgentResponse(result)) {
+			throw new Error(`mac-agent returned an invalid result (command: ${command}); desktop ownership is quarantined.`);
+		}
+		if (!result.success && kind === "action") {
+			throw new Error(`mac-agent returned an unverified result (command: ${command}); desktop ownership is quarantined.`);
+		}
+		return result;
+	}, manager);
+	if (!response.success) throw new Error(`mac-agent returned a terminal failure (command: ${command}).`);
+	return response;
+}
+
+function execMacAgent(command: string, params?: Record<string, any>): MacAgentResponse {
+	assertDesktopDriverProcessAllowed();
+	ensureCompiled();
+	return runMacAgentWithOwnership(command, () => execMacAgentUnlocked(command, params));
+}
+
+function execMacAgentUnlocked(command: string, params?: Record<string, any>): MacAgentResponse {
 	const input = JSON.stringify({ command, params: params ?? {} });
 	let stdout: string;
-	let stderr: string = "";
 
 	// Interaction commands (click, type) can block while the target app
 	// processes the action — e.g. TextEdit's AXPress on "New Document"
@@ -167,30 +215,25 @@ function execMacAgent(command: string, params?: Record<string, any>): MacAgentRe
 		});
 		stdout = typeof result === "string" ? result : String(result);
 	} catch (err: any) {
-		stderr = err.stderr?.toString() || "";
 		const isTimeout = err.killed || err.signal === "SIGTERM";
-		// If the process exited non-zero but produced stdout, try to parse it
-		if (err.stdout) {
-			stdout = err.stdout.toString();
-		} else if (isTimeout) {
+		if (isTimeout) {
 			throw new Error(
-				`mac-agent timed out after ${timeout / 1000}s (command: ${command}). ` +
-				`The target app may be slow to respond — AXPress can block while the app processes the action.`
-			);
-		} else {
-			throw new Error(
-				`mac-agent CLI failed (command: ${command}):\n${stderr || err.message}`
+				`mac-agent timed out after ${timeout / 1000}s (command: ${command}); desktop ownership is quarantined.`
 			);
 		}
+		throw new Error(`mac-agent CLI failed (command: ${command}); desktop ownership is quarantined.`);
 	}
 
+	let response: unknown;
 	try {
-		return JSON.parse(stdout.trim()) as MacAgentResponse;
+		response = JSON.parse(stdout.trim()) as unknown;
 	} catch {
-		throw new Error(
-			`mac-agent returned invalid JSON (command: ${command}):\nstdout: ${stdout}\nstderr: ${stderr}`
-		);
+		throw new Error(`mac-agent returned invalid JSON (command: ${command}); desktop ownership is quarantined.`);
 	}
+	if (!isMacAgentResponse(response)) {
+		throw new Error(`mac-agent returned an invalid result (command: ${command}); desktop ownership is quarantined.`);
+	}
+	return response;
 }
 
 // ---------------------------------------------------------------------------

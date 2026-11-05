@@ -13,7 +13,7 @@ import {
 	type LifecycleHookPhase,
 	type LifecycleHookScope,
 } from "@gsd/pi-coding-agent/core/extensions/index.js";
-import type { DefaultPackageManager } from "@gsd/pi-coding-agent/core/package-manager.js";
+import type { PackageManager } from "@gsd/pi-coding-agent/core/package-manager.js";
 
 interface ExtensionManifest {
 	dependencies?: {
@@ -27,7 +27,7 @@ export interface PackageLifecycleHooksOptions {
 	cwd: string;
 	agentDir: string;
 	appName: string;
-	packageManager: DefaultPackageManager;
+	packageManager: Pick<PackageManager, "getInstalledPath" | "resolveExtensionSources">;
 	stdout: NodeJS.WriteStream;
 	stderr: NodeJS.WriteStream;
 }
