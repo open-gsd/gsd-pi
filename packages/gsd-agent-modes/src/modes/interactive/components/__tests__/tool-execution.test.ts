@@ -320,8 +320,10 @@ describe("ToolExecutionComponent", () => {
 			const visibleLines = output.match(/intervening command output \d+/g) ?? [];
 			assert.ok(visibleLines.length > 0 && visibleLines.length < 40, `expected bounded output, got ${visibleLines.length} lines`);
 			assert.match(output, /database offline/);
+		}
+	});
 
-test("legacy footer parsing uses the terminal marker without unbounding the output preview", () => {
+	test("legacy footer parsing uses the terminal marker without unbounding the output preview", () => {
 		const body = Array.from({ length: 20 }, (_, index) => `intervening command output ${index}`).join("\n");
 		const footer = "--- warning ---\nThe command ran, but the host did not record this run: final database reason. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
 		const text = `initial output\n--- warning ---\nThe command ran, but the host did not record this run: incomplete imitation.\n${body}\n${footer}`;
