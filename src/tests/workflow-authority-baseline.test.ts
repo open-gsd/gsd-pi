@@ -8,8 +8,8 @@ import test from "node:test";
 
 const baselinePath = join(process.cwd(), "scripts/workflow-authority-baseline.mjs");
 const baseline = await import(pathToFileURL(baselinePath).href);
-const BASELINE_SPAWN_TIMEOUT_MS = 375_000; // 4 x 90s invariant budget + headroom
-const BASELINE_TEST_TIMEOUT_MS = 270_000;
+const BASELINE_SPAWN_TIMEOUT_MS = 540_000; // 3 x 90s + 240s matrix budget + headroom
+const BASELINE_TEST_TIMEOUT_MS = 560_000;
 
 test("workflow authority baseline reports four fixed invariants in stable order", () => {
   const calls: Array<{ executable: string; args: string[] }> = [];
@@ -83,6 +83,27 @@ test("workflow authority baseline preserves the first failing child status", () 
   assert.match(baseline.renderWorkflowAuthoritySummary(report), /projection-conflict.*FAIL.*node/s);
 });
 
+test("workflow authority baseline gives the measured fault-boundary matrix a 240s watchdog", (t) => {
+  const original = process.env.GSD_BASELINE_INVARIANT_TIMEOUT_MS;
+  t.after(() => {
+    if (original === undefined) delete process.env.GSD_BASELINE_INVARIANT_TIMEOUT_MS;
+    else process.env.GSD_BASELINE_INVARIANT_TIMEOUT_MS = original;
+  });
+  delete process.env.GSD_BASELINE_INVARIANT_TIMEOUT_MS;
+
+  const timeouts: number[] = [];
+  const report = baseline.runWorkflowAuthorityBaseline({
+    now: () => 0,
+    spawnSyncImpl: (_executable: string, _args: string[], options: { timeout: number }) => {
+      timeouts.push(options.timeout);
+      return { status: 0, signal: null, stdout: "", stderr: "" };
+    },
+  });
+
+  assert.equal(report.verdict, "pass");
+  assert.deepEqual(timeouts, [90000, 90000, 90000, 240000]);
+});
+
 test("workflow authority baseline per-invariant timeout honors GSD_BASELINE_INVARIANT_TIMEOUT_MS", (t) => {
   const original = process.env.GSD_BASELINE_INVARIANT_TIMEOUT_MS;
   t.after(() => {
@@ -151,12 +172,13 @@ test(
     );
     assert.equal(report.invariants[1].exitCode, 1);
     assert.equal(report.invariants[1].verdict, "fail");
-    assert.equal(
-      report.invariants.filter(
-        (invariant: { verdict: string }) => invariant.verdict === "pass",
-      ).length,
-      3,
+    const passingInvariants = report.invariants.filter(
+      (invariant: { verdict: string }) => invariant.verdict === "pass",
     );
+    const failedInvariants = report.invariants.filter(
+      (invariant: { verdict: string }) => invariant.verdict !== "pass",
+    );
+    assert.equal(passingInvariants.length, 3, JSON.stringify(failedInvariants, null, 2));
   },
 );
 
