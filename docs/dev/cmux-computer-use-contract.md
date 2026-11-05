@@ -1,12 +1,10 @@
 # Optional cmux Computer Use contract
 
 > [!IMPORTANT]
-> Revised proposal, 2026-11-04; not an approved owner choice or shipped integration.
-> This docs-only change does not complete
-> [#3017](https://github.com/open-gsd/gsd-pi/issues/3017),
-> [#3018](https://github.com/open-gsd/gsd-pi/issues/3018), or
-> [#3019](https://github.com/open-gsd/gsd-pi/issues/3019).
-> No native action/verification or fresh Pi/GSD acceptance has passed.
+> Updated 2026-11-05 to reflect maintainer approval of RFC [#3103](https://github.com/open-gsd/gsd-pi/issues/3103).
+> G-01/G-02 authorize only the RFC's scoped, disabled implementation; they are not G-03 operational proof or permission to enable native actions.
+> G-03 remains open, `type_text` remains disabled pending proof of non-replaying behavior, and no fresh integrated Pi/GSD acceptance has passed.
+> This document does not complete implementation acceptance for [#3018](https://github.com/open-gsd/gsd-pi/issues/3018) or [#3019](https://github.com/open-gsd/gsd-pi/issues/3019).
 
 ## Recommendation and adoption gates
 
@@ -21,18 +19,13 @@ Keep this separate from cmux progress, Vault, resume, themes, and browser toolin
 Baseline ownership, cancellation, privacy, and failure handling must ship with the
 **first working connection** (#3017), not be deferred to #3018/#3019.
 
-| Gate | Decision required before implementation |
+| Gate | Approved status and remaining proof |
 | --- | --- |
-| G-01: supported owner/route | Maintainer explicitly adopts the optional adapter **and shared GSD desktop guard**, conditional on the inherited ordinary-agent handoff below. Docs review/merge is the proposed decision point, not proof this choice was already granted on #3017. Record the decision permalink on that issue. |
-| G-02: expanded source scope | Approval must name `mac-tools` and subagent enforcement, not merely a new extension directory. If this requires core/loader/orchestration changes or a built-in/core-tier change, obtain the approved RFC required by [CONTRIBUTING.md](../../CONTRIBUTING.md#architecture-guidelines) **before implementation**. Do not silently narrow the coordination boundary instead. |
-| G-03: operational safety | Prove native result schemas and non-replaying dispatch for each enabled operation; the exact managed/unmanaged session lifecycle handshake (`start_session`/`end_session` arguments, results, and identity checks); trusted socket endpoint binding before capability transmission; terminal-invocation evidence; and cross-process enforcement against the pinned backend before enabling actions. The pinned background `type_text` path may fall back to CGEvent after an AX write is not positively verified, with `clear_first:false`; keep typing disabled until backend semantics and regression tests prove no replay or definite non-delivery. Unverifiable recovery remains blocked; no invented cancellation/fencing API. |
+| G-01: supported owner/route | Approved: the optional adapter and shared GSD desktop guard are limited to the inherited ordinary-agent handoff below. RFC #3103 and the dated [#3017 decision comment](https://github.com/open-gsd/gsd-pi/issues/3017#issuecomment-6634964004) authorize gated implementation only. |
+| G-02: expanded source scope | RFC #3103 already approves the `cmux-cua` adapter plus shared desktop guard across the exact adapter, `shared/desktop-ownership.ts`, `mac-tools`, and `subagent` paths/tests listed in its decision record. Any additional core/loader/orchestration or built-in/core-tier path remains out of scope and requires a separately reviewed and approved RFC before implementation; do not silently narrow the coordination boundary. |
+| G-03: operational safety | Prove native result schemas and non-replaying dispatch for each enabled operation; the exact inherited-managed-session lifecycle handshake (`start_session`/`end_session` arguments, results, and identity checks); trusted socket endpoint binding before capability transmission; terminal-invocation evidence; and cross-process enforcement against the pinned backend before enabling actions. The pinned background `type_text` path may fall back to CGEvent after an AX write is not positively verified, with `clear_first:false`; keep typing disabled until backend semantics and regression tests prove no replay or definite non-delivery. Unverifiable recovery remains blocked; no invented cancellation/fencing API. |
 
-Required G-01/G-02 decision record: approving maintainer GitHub identity, UTC date,
-review/decision URL, reviewed source SHA, selected route, inherited-handoff limit,
-explicit approved source paths, and RFC URL/disposition. Proposed decision text is
-“Adopt the optional cmux-cua adapter plus shared desktop guard under this contract;
-no core exception is granted.” This is a **requested signature**, not an approval.
-Delegated maintainer review/merge authority does not itself supply that signature.
+**Recorded approval:** maintainer `@pimmink` approved RFC #3103 on 2026-11-04 against source baseline `fae322618b3b64bdaa21689df3d3937fa6af459b`. The decision adopts the optional adapter and shared desktop guard for the inherited ordinary-agent route only, with the exact source paths and exclusions in the RFC. This authorizes gated implementation; it does not establish G-03 proof, authorize native use, or complete #3018/#3019. See the [decision record](https://github.com/open-gsd/gsd-pi/issues/3017#issuecomment-6634964004).
 
 ## Version-bound boundary and present evidence
 
@@ -52,9 +45,7 @@ Primary sources: [official guide](https://cmux.com/docs/computer-use),
 [proxy](https://github.com/manaflow-ai/cmux-cua/blob/e0f738807dbff2f35fe67d7fbcc99c7082cffc23/libs/cmux-cua/rust/crates/cmux-cua/src/proxy.rs),
 and [server](https://github.com/manaflow-ai/cmux-cua/blob/e0f738807dbff2f35fe67d7fbcc99c7082cffc23/libs/cmux-cua/rust/crates/cmux-cua/src/serve.rs).
 Automatic attachment is documented for Claude Code/Codex, **not Pi**. The
-[#3017 owner gate](https://github.com/open-gsd/gsd-pi/issues/3017#issuecomment-6398319213)
-and [docs-first sequence](https://github.com/open-gsd/gsd-pi/issues/3017#issuecomment-6629146646)
-are context, not evidence that the recommendation above has been adopted.
+[RFC #3103](https://github.com/open-gsd/gsd-pi/issues/3103) and the [dated decision record](https://github.com/open-gsd/gsd-pi/issues/3017#issuecomment-6634964004) document the approved gated route; the earlier comments are historical context.
 
 | Evidence class | Observed limit |
 | --- | --- |
@@ -162,20 +153,19 @@ Postcondition checking or adapter-level retry suppression cannot prevent this
 within-call fallback. Do not expose text insertion until a backend contract
 provides non-replaying dispatch or proves the first attempt was not delivered.
 
-The pinned proxy has two source-confirmed session modes. Without
-`CMUX_CUA_DEFAULT_SESSION`, it uses an unmanaged `mcp-<pid>-<nanos>` identity and
-does not rewrite forwarded `session`/`_session_id` arguments. With that variable,
-it appends the proxy suffix to the configured base and rewrites those arguments.
-The native `start_session` handler returns a resolved identity, not necessarily
-the proxy identity. Do not accept model-supplied session/host-owner values, copy a
-host-owned default, or claim implicit identity binding.
+The pinned proxy source exposes two session modes, but RFC #3103 authorizes only
+the inherited managed route using `CMUX_CUA_DEFAULT_SESSION`; unmanaged mode is
+out of scope and must never be selected as a fallback. The managed proxy appends
+its suffix to the configured base and rewrites forwarded `session`/`_session_id`
+arguments. The native `start_session` handler returns a resolved identity, not
+necessarily the proxy identity. Never accept model-supplied session/host-owner
+values or treat environment-variable presence as proof of identity binding.
 
-G-03 remains open: before enabling any native action, implementation must choose
-one mode and add fixtures for exact internal `start_session`/`end_session`
-request keys and values, returned-identity checks, and subsequent request/session
-ownership. These lifecycle calls are internal and never model-exposed; their
-allowlist and response decoders are not yet specified here. No mode fallback is
-allowed; fail closed if the selected mode or identity cannot be established.
+G-03 remains open: before enabling any native action, prove the exact internal
+`start_session`/`end_session` request keys and values, returned-identity checks,
+subsequent routing, session ownership, and cleanup. These lifecycle calls are
+internal and never model-exposed. No mode fallback is allowed; fail closed if the
+inherited managed mode or resolved identity cannot be established.
 Require `element_token` only: no `element_index`, even alongside a token.
 Index-only targeting needs separate proof of server-side snapshot binding/stale
 rejection.
@@ -240,11 +230,15 @@ Use the OS account database's home for the login UID, not environment `HOME` or
 `GSD_HOME`: `Library/Application Support/gsd-desktop-safety/state.json` beneath it,
 with owner-only directories (0700), file (0600), and no symlink traversal. No
 version-specific alternate path on incompatibility. Before any desktop mutation,
-durably record owner/connection generation, invocation ID, and unresolved state
+durably record the owner, authenticated daemon identity, resolved CMUX session
+identity, session admission epoch, invocation ID, and unresolved state
 (no desktop content); fsync the file and containing directory for atomic
 replacement before dispatch. Invalid/unreadable/unwritable state denies mutations.
 The OS mutex is **not** this journal. Every driver checks it while holding the
-lease; unresolved state quarantines current **and subsequent** owners.
+lease; unresolved state quarantines current **and subsequent** owners. The
+quarantine epoch is scoped to the affected cmux session/invocation. Authenticated
+daemon identity identifies the peer; it is not an admission epoch. Advancing a
+daemon-wide generation must not invalidate unrelated sessions.
 
 An accepted/dispatched request can outlive proxy death and lock/session closure.
 Pinned proxy EOF cleanup and server ended-session checks do **not** demonstrate
@@ -253,16 +247,19 @@ plus reinspection is **insufficient** to clear quarantine. Resume only with:
 
 1. Operation-specific evidence that the previous invocation is terminal, not
    merely a transport/dispatch acknowledgement; or
-2. A supported backend-generation fence/controlled **host-owned** helper
-   replacement proven to prevent all future execution of that invocation.
+2. A supported **session-scoped backend-generation fence**, proven to prevent
+   all future execution of that invocation without invalidating unrelated sessions.
 
-Neither mechanism is established for unresolved calls by this evidence. If it
-cannot be verified, remain blocked, report recovery unavailable, and require
-manual external resolution through supported host controls plus terminal/fence
-evidence. The adapter must not kill/restart a shared helper or offer a “clear by
-acknowledgement” escape. Never claim lock/session close cancels posted OS events.
-Clear a marker only under the lease with matching owner, generation, epoch, and
-invocation ID; a late completion cannot clear a newer marker. Persist recovery
+A daemon-wide generation bump or shared-helper restart is not an approved
+recovery mechanism: it may invalidate unrelated sessions. A session-scoped fence
+is not established for unresolved calls by this evidence. If that fence cannot be
+verified, remain blocked, report recovery unavailable, and require
+operation-specific terminal proof or a separately reviewed RFC change. The
+adapter must not kill/restart a shared helper or offer a “clear by acknowledgement”
+escape. Never claim lock/session close cancels posted OS events.
+Clear a marker only under the lease with matching owner, daemon identity,
+session identity, session admission epoch, and invocation ID; a late completion
+cannot clear a newer marker. Persist recovery
 proof identity/classification, not payloads. Normal verified completion also needs
 terminal-invocation evidence; an acknowledgement alone cannot authorize reuse.
 
@@ -333,16 +330,48 @@ in `finally`, with sanitized cleanup errors. Never terminate unrelated apps or a
 shared helper. A native test may stop only its own generation-verified benign app.
 No “2-second cleanup” or “no children remain” promise without measured evidence.
 
+## Proposed G-03 protocol contract (not yet implemented)
+
+This section makes the missing G-03 requirements executable as a backend contract. It is a proposal for future implementation; it is **not evidence** that the currently pinned CMUX 0.65.0 / cmux-cua 0.7.1 runtime provides these guarantees. G-03 proof remains open, runtime admission remains closed, and this document authorizes no native action or capability transmission.
+
+### Authenticate the endpoint before MCP initialization
+
+1. The proxy must authenticate the intended CMUX host/daemon on the exact connection it will use. Establish a fresh, connection-bound challenge that identifies the expected signed host, the live daemon process generation, and the protocol version. The response must be verifiable through a maintainer-supported macOS peer-binding mechanism; a filesystem/socket path, ownership/mode check, PID, code signature, bearer token, or schema hash alone is insufficient.
+2. Do not send MCP `initialize` (including client capabilities), request `tools/list`, deliver tool schemas, or transmit the inherited session/bearer capability until the peer proof succeeds. If the SDK automatically initializes during `Client.connect`, the proxy must perform the authenticated preflight before invoking that call or provide an equivalent pre-initialize transport.
+3. Bind the proof to a fresh nonce and the exact socket/process generation. Reject missing, stale, replayed, ambiguous, or mismatched identities. Every reconnect requires new proof; no fallback to pathname/PID-only trust is allowed.
+4. Keep caller authorization and endpoint authentication distinct: the host may authenticate the calling proxy, but the proxy must independently authenticate the host before disclosing capabilities or bearer credentials.
+
+The authenticated daemon process generation identifies the peer only; it is not the CUA admission or quarantine epoch. After resolving a CMUX session, the adapter must bind a separate session-scoped admission epoch to that session identity. Revoking or fencing that epoch affects only that session; daemon-generation rotation is not a substitute.
+
+### Require operation-specific terminal evidence
+
+1. Assign each action a unique adapter-generated `operation_id` and bind it to the authenticated daemon identity, resolved CMUX session identity, and that session's admission epoch. The model cannot select or reuse any identifier.
+2. Distinguish accepted/acknowledged, running, terminal-success, terminal-failure, and unknown outcomes. A terminal receipt must be authenticated on the established host-bound channel and match the operation ID and generation. Both terminal-success and terminal-failure require proof that the operation has no remaining dispatch, queued native events, or deferred work capable of executing. An error without that proof is unknown or nonterminal and preserves quarantine. A successful AX postcondition is separate evidence and cannot substitute.
+3. After response loss, query authoritative status by the original operation ID and generation or use a demonstrated host-controlled generation fence. Never replay a possibly dispatched click. A missing, conflicting, stale, or nonterminal receipt leaves the desktop quarantined.
+4. A fence must establish an atomic admission boundary for the affected session-scoped admission epoch, distinct from daemon process generation: reject only requests in that session/epoch that were not admitted before the fence, including delayed or reconnect-delivered requests; prove every previously admitted invocation in that session/epoch is terminal; and guarantee no deferred event from it can execute afterward. The fence must not terminate or invalidate unrelated concurrent sessions. Proxy exit, session close, child exit, lock release, reinspection, and acknowledgement are not fences.
+
+### Required conformance evidence before enabling actions
+
+- Negative handshake tests prove that no MCP initialize, tool schema, or bearer capability is sent to a wrong, stale, replaying, or unidentifiable peer; reconnect performs fresh authentication.
+- Backend tests cover duplicate IDs, lost responses, late receipts, cancellation ignored, a terminal-failure report while deferred work is still pending (must remain unknown/quarantined), generation mismatch, concurrent sessions, and a fence racing with a pending action. Requests arriving after atomic fence closure—including delayed and reconnect-delivered requests—must be rejected. Unknown outcomes remain quarantined and are never retried automatically.
+- Source-bound operational evidence must tie the tested host/backend versions to the installed runtime and show that the same authenticated channel and generation are used for each receipt/fence. Mock tests alone do not close G-03.
+- Until the implementation and evidence are independently reviewed and the operator explicitly authorizes any first native verification, keep `G03_RUNTIME_ADMISSION_ENABLED = false` and do not send capabilities or perform native actions.
+
 ## Implementation plan (gated; no code delivered here)
 
-| Scope / owner | Source boundary and focused required proof |
+The order below keeps desktop ownership load-bearing before the adapter. Tests are
+written alongside implementation; this table separates implementation, CI coverage,
+and the later G-03 operational gate.
+
+| Stage / status | Scoped source boundary and focused required proof |
 | --- | --- |
-| Adapter implementer; G-01/G-02 | New `src/resources/extensions/cmux-cua/` with manifest, lifecycle/state/result guards and tests; proposed `src/resources/extensions/desktop-safety.ts` shared by **both** drivers. No new daemon or provider framework. |
-| Native-tool owner; G-02 | `src/resources/extensions/mac-tools/index.ts` and `tests/`: guard real desktop execution, not just model hooks. Separate-process adapter owner vs ordinary `mac_click`/`mac_type`/capture tests; zero native calls on busy/quarantine; disabled compatibility. |
-| Subagent owner; G-02 | `src/resources/extensions/subagent/launch.ts`, `src/resources/extensions/subagent/index.ts`, and `src/resources/extensions/subagent/tests/`: fresh/fork children with adapter absent, tool-selection overrides, guard-disabled/missing and incompatible versions; no inherited consent/lease and no bypass. |
-| Pi boundary owner; conditional RFC | Inspect `packages/pi-coding-agent/src/core/extensions/runner.ts` and lifecycle sources linked above; existing hooks supplement driver guards. Prove reload/tree/fork/shutdown invalidation. If mandatory enforcement cannot be achieved without core/loader changes, stop for approved RFC, not implementation by assumption. |
-| Conformance owner; G-03 | Adapter `tests/` with real temporary SDK MCP server plus separate OS processes: file FIFO/symlink/growing/4097-byte/special-mode cases, strict permissions/results, schemas/hashes, predicate fixtures, stale tokens, races, crash-after-admission/late completion, no marker clear without quiescence, cleanup escalation/exact exit, images/errors/privacy. Wire tests into normal tiers. |
-| Docs/native operator; after implementation | Operator guide and result ledger; fresh explicitly opted-in Pi/GSD benign-window run, then second-owner new inspection/action/verification. Direct proxy scripts are not substitutes. No install, permission grant, native action, deployment, or release approval is authorized here. |
+| 1. Shared ownership guard | Implement `src/resources/extensions/shared/desktop-ownership.ts` and `src/resources/extensions/shared/tests/desktop-ownership.test.ts`. Prove account-wide cross-process ownership, durable quarantine, generation/epoch/invocation checks, fail-closed persistence, crash and late-completion behavior. |
+| 2. Native-driver and child enforcement | Use only `src/resources/extensions/mac-tools/index.ts` with tests under `src/resources/extensions/mac-tools/tests/`, plus `src/resources/extensions/subagent/launch.ts`, `src/resources/extensions/subagent/index.ts`, and tests under `src/resources/extensions/subagent/tests/`. Prove direct driver calls are guarded, disabled compatibility is unchanged, and children inherit neither consent nor usable capability. |
+| 3. Optional adapter | Implement only `src/resources/extensions/cmux-cua/index.ts` and tests under `src/resources/extensions/cmux-cua/tests/`. Keep default loading side-effect-free and runtime admission closed; use the approved inherited managed route only, with no unmanaged fallback, new dependency, loader, or separate registration path. |
+| 4. Portable tests and CI discovery (RFC amendment not approved) | Add contract tests only under RFC-approved test directories and run omitted suites explicitly. Current CI invokes `pnpm run test:unit:compiled`, whose globs omit `cmux-cua/tests/` and `mac-tools/tests/`; adding those globs requires a reviewed RFC amendment for the `package.json` test script. No CI-coverage claim is valid until the approved suites run in CI. |
+| 5. G-03 operational prerequisites | Obtain source-bound proof for endpoint trust, exact managed-session identity/routing, operation-terminal evidence, and cleanup/quiescence against pinned backend versions. This RFC authorizes no external CMUX repository edits; if changes are required, obtain separate owner approval and reviewed scope. Adapter mocks cannot close G-03. |
+| 6. Integrated acceptance | Only after G-03 passes and a first native run is explicitly authorized: use a fresh Pi/GSD session and owned benign window, verify one unambiguous action, stop and measure cleanup, then prove a second owner performs a fresh inspection and new action. Direct-proxy scripts are not substitutes. |
+| Scope boundary | Inspect core/loader/lifecycle seams read-only only. No core, loader, session-lifecycle, dependency-manifest, workflow, or other unlisted source edits are approved. If a required change falls outside RFC #3103, stop for a reviewed RFC amendment before touching it. |
 
 ## Acceptance ledger
 
