@@ -60,7 +60,7 @@ describe("cmux CUA pinned contract", () => {
 	test("proxy PID generation is captured before SDK close can clear the transport handle", async () => {
 		let transportPid: number | null = 4521;
 		const events: string[] = [];
-		const identity = { pid: 4521, startToken: "captured-generation" };
+		const identity = { pid: 4521, startToken: "gen-1" };
 		const result = await closeProxyAndVerifyExit({
 			currentPid: () => { events.push("read-pid"); return transportPid; },
 			knownIdentity: null,
@@ -102,7 +102,7 @@ describe("cmux CUA pinned contract", () => {
 		assert.equal(closedAfterPidFailure, true);
 		assert.equal(pidLookupFailure.exited, false);
 
-		const identity = { pid: 4521, startToken: "captured-generation" };
+		const identity = { pid: 4521, startToken: "gen-1" };
 		const unresolved = await closeProxyAndVerifyExit({
 			currentPid: () => 4521,
 			knownIdentity: identity,

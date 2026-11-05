@@ -93,7 +93,7 @@ describe("subagent launch module", () => {
 	it("builds safe shell unsets for inherited cmux CUA capabilities", () => {
 		const unsets = buildShellEnvUnsets({
 			CMUX_CUA_SOCKET_PATH: "/test-only/socket",
-			CMUX_CUA_SOCKET_HOST_AUTH_TOKEN: "test-only-token",
+			CMUX_CUA_SOCKET_HOST_AUTH_TOKEN: "stub",
 			CMUX_CUA_DEFAULT_SESSION: "test-only-session",
 			KEEP_FOR_CHILD: "yes",
 		});
