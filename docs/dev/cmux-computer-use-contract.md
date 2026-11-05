@@ -230,7 +230,8 @@ Use the OS account database's home for the login UID, not environment `HOME` or
 `GSD_HOME`: `Library/Application Support/gsd-desktop-safety/state.json` beneath it,
 with owner-only directories (0700), file (0600), and no symlink traversal. No
 version-specific alternate path on incompatibility. Before any desktop mutation,
-durably record owner/connection generation, invocation ID, and unresolved state
+durably record the owner, authenticated daemon identity, resolved CMUX session
+identity, session admission epoch, invocation ID, and unresolved state
 (no desktop content); fsync the file and containing directory for atomic
 replacement before dispatch. Invalid/unreadable/unwritable state denies mutations.
 The OS mutex is **not** this journal. Every driver checks it while holding the
@@ -256,8 +257,9 @@ verified, remain blocked, report recovery unavailable, and require
 operation-specific terminal proof or a separately reviewed RFC change. The
 adapter must not kill/restart a shared helper or offer a “clear by acknowledgement”
 escape. Never claim lock/session close cancels posted OS events.
-Clear a marker only under the lease with matching owner, generation, epoch, and
-invocation ID; a late completion cannot clear a newer marker. Persist recovery
+Clear a marker only under the lease with matching owner, daemon identity,
+session identity, session admission epoch, and invocation ID; a late completion
+cannot clear a newer marker. Persist recovery
 proof identity/classification, not payloads. Normal verified completion also needs
 terminal-invocation evidence; an acknowledgement alone cannot authorize reuse.
 
@@ -339,12 +341,14 @@ This section makes the missing G-03 requirements executable as a backend contrac
 3. Bind the proof to a fresh nonce and the exact socket/process generation. Reject missing, stale, replayed, ambiguous, or mismatched identities. Every reconnect requires new proof; no fallback to pathname/PID-only trust is allowed.
 4. Keep caller authorization and endpoint authentication distinct: the host may authenticate the calling proxy, but the proxy must independently authenticate the host before disclosing capabilities or bearer credentials.
 
+The authenticated daemon process generation identifies the peer only; it is not the CUA admission or quarantine epoch. After resolving a CMUX session, the adapter must bind a separate session-scoped admission epoch to that session identity. Revoking or fencing that epoch affects only that session; daemon-generation rotation is not a substitute.
+
 ### Require operation-specific terminal evidence
 
-1. Assign each action a unique adapter-generated `operation_id` and bind it to the authenticated daemon generation. The model cannot select or reuse either identifier.
+1. Assign each action a unique adapter-generated `operation_id` and bind it to the authenticated daemon identity, resolved CMUX session identity, and that session's admission epoch. The model cannot select or reuse any identifier.
 2. Distinguish accepted/acknowledged, running, terminal-success, terminal-failure, and unknown outcomes. A terminal receipt must be authenticated on the established host-bound channel and match the operation ID and generation. Both terminal-success and terminal-failure require proof that the operation has no remaining dispatch, queued native events, or deferred work capable of executing. An error without that proof is unknown or nonterminal and preserves quarantine. A successful AX postcondition is separate evidence and cannot substitute.
 3. After response loss, query authoritative status by the original operation ID and generation or use a demonstrated host-controlled generation fence. Never replay a possibly dispatched click. A missing, conflicting, stale, or nonterminal receipt leaves the desktop quarantined.
-4. A generation fence must establish an atomic admission boundary for that generation: reject every request not admitted before the fence, including delayed or reconnect-delivered requests; prove every previously admitted invocation is terminal; and guarantee no deferred event from that generation can execute afterward. The fence must not terminate or invalidate unrelated concurrent sessions. Proxy exit, session close, child exit, lock release, reinspection, and acknowledgement are not fences.
+4. A fence must establish an atomic admission boundary for the affected session-scoped admission epoch, distinct from daemon process generation: reject only requests in that session/epoch that were not admitted before the fence, including delayed or reconnect-delivered requests; prove every previously admitted invocation in that session/epoch is terminal; and guarantee no deferred event from it can execute afterward. The fence must not terminate or invalidate unrelated concurrent sessions. Proxy exit, session close, child exit, lock release, reinspection, and acknowledgement are not fences.
 
 ### Required conformance evidence before enabling actions
 
