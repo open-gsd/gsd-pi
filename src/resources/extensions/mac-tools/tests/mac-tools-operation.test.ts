@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import type { DesktopOwnershipLease, DesktopOwnershipManager, DesktopTerminalEvidence } from "../desktop-ownership.ts";
-import { runMacAgentWithOwnership } from "../../mac-tools/index.ts";
+import type { DesktopOwnershipLease, DesktopOwnershipManager, DesktopTerminalEvidence } from "../../shared/desktop-ownership.ts";
+import { runMacAgentWithOwnership } from "../index.ts";
 
 const lease = { driver: "mac-tools" } as DesktopOwnershipLease;
 const evidence = {} as DesktopTerminalEvidence;

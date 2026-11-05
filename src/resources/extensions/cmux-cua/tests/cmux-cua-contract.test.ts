@@ -10,7 +10,7 @@ import registerCmuxCua, {
 	decodeEndSessionResult,
 	decodeStartSessionResult,
 	validateNativeToolInventory,
-} from "../../cmux-cua/index.ts";
+} from "../index.ts";
 
 function envelope(structured: Record<string, unknown>) {
 	return { isError: false, structured };

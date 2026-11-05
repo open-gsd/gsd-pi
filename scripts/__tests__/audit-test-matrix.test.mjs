@@ -3,7 +3,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildMatrix, collectTestFiles, strictMatrixFailures } from "../lib/test-audit-lib.mjs";
+import { buildMatrix, classifyRunner, collectTestFiles, loadPackageScripts, strictMatrixFailures } from "../lib/test-audit-lib.mjs";
+
+test("cmux-cua tests are classified and wired as unit tests", () => {
+  const testPath = "src/resources/extensions/cmux-cua/tests/cmux-cua-contract.test.ts";
+  assert.equal(classifyRunner(testPath), "unit");
+  const scripts = loadPackageScripts(process.cwd());
+  assert.match(scripts["test:unit:compiled"], /dist-test\/src\/resources\/extensions\/cmux-cua\/tests\/\*\.test\.js/);
+});
 
 test("audit:test-matrix strict passes after P0 extension backfill", async () => {
   const { spawnSync } = await import("node:child_process");
