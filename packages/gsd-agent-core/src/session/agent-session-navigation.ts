@@ -63,58 +63,63 @@ export class AgentSessionNavigationModule {
 			}
 		}
 
-		await this.settleCurrentTurnForSessionTransition();
+		this.host.emit({ type: "session_state_changed", reason: "new_session", phase: "starting" });
+		try {
+			await this.settleCurrentTurnForSessionTransition();
 
-		if (options?.abortSignal?.aborted) {
-			return false;
-		}
+			if (options?.abortSignal?.aborted) {
+				return false;
+			}
 
-		this.host.disconnectFromAgent();
-		this.host.agent.reset();
+			this.host.disconnectFromAgent();
+			this.host.agent.reset();
 
-		const previousCwd = this.host._cwd;
-		this.host._cwd = options?.workspaceRoot ?? process.cwd();
+			const previousCwd = this.host._cwd;
+			this.host._cwd = options?.workspaceRoot ?? process.cwd();
 
-		this.host.sessionManager.newSession({
-			cwd: this.host._cwd,
-			parentSession: options?.parentSession,
-		});
-		this.host.agent.sessionId = this.host.sessionManager.getSessionId();
-		this.host._steeringMessages = [];
-		this.host._followUpMessages = [];
-		this.host._pendingNextTurnMessages = [];
-
-		this.host.sessionManager.appendThinkingLevelChange(this.host.thinkingLevel);
-
-		if (this.host._cwd !== previousCwd) {
-			this.host.buildRuntime({
-				activeToolNames: this.host.getActiveToolNames(),
-				includeAllExtensionTools: true,
+			this.host.sessionManager.newSession({
+				cwd: this.host._cwd,
+				parentSession: options?.parentSession,
 			});
-		} else {
-			this.host.refreshToolRegistry({
-				activeToolNames: this.host.getActiveToolNames(),
-				includeAllExtensionTools: true,
-			});
+			this.host.agent.sessionId = this.host.sessionManager.getSessionId();
+			this.host._steeringMessages = [];
+			this.host._followUpMessages = [];
+			this.host._pendingNextTurnMessages = [];
+
+			this.host.sessionManager.appendThinkingLevelChange(this.host.thinkingLevel);
+
+			if (this.host._cwd !== previousCwd) {
+				this.host.buildRuntime({
+					activeToolNames: this.host.getActiveToolNames(),
+					includeAllExtensionTools: true,
+				});
+			} else {
+				this.host.refreshToolRegistry({
+					activeToolNames: this.host.getActiveToolNames(),
+					includeAllExtensionTools: true,
+				});
+			}
+
+			if (options?.setup) {
+				await options.setup(this.host.sessionManager);
+				const sessionContext = this.host.sessionManager.buildSessionContext();
+				this.host.agent.state.messages = sessionContext.messages;
+			}
+
+			this.host.reconnectToAgent();
+
+			if (this.host._extensionRunner) {
+				await this.host.emitSessionStartWithLegacySwitch({
+					type: "session_start",
+					reason: "new",
+					previousSessionFile,
+				});
+			}
+
+			return true;
+		} finally {
+			this.host.emit({ type: "session_state_changed", reason: "new_session", phase: "settled" });
 		}
-
-		if (options?.setup) {
-			await options.setup(this.host.sessionManager);
-			const sessionContext = this.host.sessionManager.buildSessionContext();
-			this.host.agent.state.messages = sessionContext.messages;
-		}
-
-		this.host.reconnectToAgent();
-
-		if (this.host._extensionRunner) {
-			await this.host.emitSessionStartWithLegacySwitch({
-				type: "session_start",
-				reason: "new",
-				previousSessionFile,
-			});
-		}
-
-		return true;
 	}
 
 	async switchSession(sessionPath: string): Promise<boolean> {
@@ -132,55 +137,62 @@ export class AgentSessionNavigationModule {
 			}
 		}
 
-		await this.settleCurrentTurnForSessionTransition();
-		this.host.disconnectFromAgent();
+		this.host.emit({ type: "session_state_changed", reason: "switch_session", phase: "starting" });
+		try {
+			await this.settleCurrentTurnForSessionTransition();
+			this.host.disconnectFromAgent();
 
-		this.host._steeringMessages = [];
-		this.host._followUpMessages = [];
-		this.host._pendingNextTurnMessages = [];
+			this.host._steeringMessages = [];
+			this.host._followUpMessages = [];
+			this.host._pendingNextTurnMessages = [];
 
-		this.host.sessionManager.setSessionFile(sessionPath);
-		this.host.agent.sessionId = this.host.sessionManager.getSessionId();
+			this.host.sessionManager.setSessionFile(sessionPath);
+			this.host.agent.sessionId = this.host.sessionManager.getSessionId();
 
-		const sessionContext = this.host.sessionManager.buildSessionContext();
-		this.host.agent.state.messages = sessionContext.messages;
+			const sessionContext = this.host.sessionManager.buildSessionContext();
+			this.host.agent.state.messages = sessionContext.messages;
 
-		if (sessionContext.model) {
-			const previousModel = this.host.model;
-			const availableModels = await this.host.modelRegistry.getAvailable();
-			const match = availableModels.find(
-				(m) => m.provider === sessionContext.model!.provider && m.id === sessionContext.model!.modelId,
-			);
-			if (match) {
-				this.host.agent.state.model = match;
-				await this.host.emitModelSelect(match, previousModel, "restore");
+			if (sessionContext.model) {
+				const previousModel = this.host.model;
+				const availableModels = await this.host.modelRegistry.getAvailable();
+				const match = availableModels.find(
+					(m) => m.provider === sessionContext.model!.provider && m.id === sessionContext.model!.modelId,
+				);
+				if (match) {
+					this.host.agent.state.model = match;
+					await this.host.emitModelSelect(match, previousModel, "restore");
+				}
 			}
+
+			const hasThinkingEntry = this.host.sessionManager
+				.getBranch()
+				.some((entry) => entry.type === "thinking_level_change");
+			const defaultThinkingLevel = this.host.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+
+			if (hasThinkingEntry) {
+				this.host.setThinkingLevel(sessionContext.thinkingLevel as ThinkingLevel);
+			} else {
+				const availableLevels = this.host.getAvailableThinkingLevels();
+				const effectiveLevel = availableLevels.includes(defaultThinkingLevel)
+					? defaultThinkingLevel
+					: this.host.clampThinkingLevel(defaultThinkingLevel, availableLevels);
+				this.host.agent.state.thinkingLevel = effectiveLevel;
+				this.host.sessionManager.appendThinkingLevelChange(effectiveLevel);
+			}
+
+			if (this.host._extensionRunner) {
+				await this.host.emitSessionStartWithLegacySwitch({
+					type: "session_start",
+					reason: "resume",
+					previousSessionFile,
+				});
+			}
+
+			this.host.reconnectToAgent();
+			return true;
+		} finally {
+			this.host.emit({ type: "session_state_changed", reason: "switch_session", phase: "settled" });
 		}
-
-		const hasThinkingEntry = this.host.sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
-		const defaultThinkingLevel = this.host.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
-
-		if (hasThinkingEntry) {
-			this.host.setThinkingLevel(sessionContext.thinkingLevel as ThinkingLevel);
-		} else {
-			const availableLevels = this.host.getAvailableThinkingLevels();
-			const effectiveLevel = availableLevels.includes(defaultThinkingLevel)
-				? defaultThinkingLevel
-				: this.host.clampThinkingLevel(defaultThinkingLevel, availableLevels);
-			this.host.agent.state.thinkingLevel = effectiveLevel;
-			this.host.sessionManager.appendThinkingLevelChange(effectiveLevel);
-		}
-
-		if (this.host._extensionRunner) {
-			await this.host.emitSessionStartWithLegacySwitch({
-				type: "session_start",
-				reason: "resume",
-				previousSessionFile,
-			});
-		}
-
-		this.host.reconnectToAgent();
-		return true;
 	}
 
 	async fork(entryId: string): Promise<{ selectedText: string; cancelled: boolean }> {
@@ -208,30 +220,35 @@ export class AgentSessionNavigationModule {
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
 
-		this.host._pendingNextTurnMessages = [];
+		this.host.emit({ type: "session_state_changed", reason: "fork", phase: "starting" });
+		try {
+			this.host._pendingNextTurnMessages = [];
 
-		if (!selectedEntry.parentId) {
-			this.host.sessionManager.newSession({ parentSession: previousSessionFile });
-		} else {
-			this.host.sessionManager.createBranchedSession(selectedEntry.parentId);
+			if (!selectedEntry.parentId) {
+				this.host.sessionManager.newSession({ parentSession: previousSessionFile });
+			} else {
+				this.host.sessionManager.createBranchedSession(selectedEntry.parentId);
+			}
+			this.host.agent.sessionId = this.host.sessionManager.getSessionId();
+
+			const sessionContext = this.host.sessionManager.buildSessionContext();
+
+			if (this.host._extensionRunner) {
+				await this.host._extensionRunner.emit({
+					type: "session_start",
+					reason: "fork",
+					previousSessionFile,
+				});
+			}
+
+			if (!skipConversationRestore) {
+				this.host.agent.state.messages = sessionContext.messages;
+			}
+
+			return { selectedText, cancelled: false };
+		} finally {
+			this.host.emit({ type: "session_state_changed", reason: "fork", phase: "settled" });
 		}
-		this.host.agent.sessionId = this.host.sessionManager.getSessionId();
-
-		const sessionContext = this.host.sessionManager.buildSessionContext();
-
-		if (this.host._extensionRunner) {
-			await this.host._extensionRunner.emit({
-				type: "session_start",
-				reason: "fork",
-				previousSessionFile,
-			});
-		}
-
-		if (!skipConversationRestore) {
-			this.host.agent.state.messages = sessionContext.messages;
-		}
-
-		return { selectedText, cancelled: false };
 	}
 
 	getLastTurnCost(): number {

@@ -235,6 +235,12 @@ export interface RpcBindingSnapshot {
 	producer: {
 		sessionId: string;
 		processInstanceId: string;
+		/**
+		 * Owner-generation token for freshness within this RPC process. New servers always
+		 * provide it; absence remains representable for older v1 servers. It is observation
+		 * metadata, not an authorization credential.
+		 */
+		ownerGeneration?: string;
 	};
 	project: RpcProjectBindingRead | null;
 	projectStatus: "authoritative" | "partial" | "unavailable";

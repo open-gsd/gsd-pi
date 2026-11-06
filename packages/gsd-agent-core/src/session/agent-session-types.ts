@@ -88,7 +88,11 @@ export type AgentSessionEvent =
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "session_state_changed"; reason: SessionStateChangeReason }
+	| {
+			type: "session_state_changed";
+			reason: SessionStateChangeReason;
+			phase?: "starting" | "settled";
+	  }
 	| { type: "auto_compaction_start"; reason: "threshold" | "overflow" }
 	| {
 			type: "auto_compaction_end";

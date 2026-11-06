@@ -112,6 +112,34 @@ function safeProcessCwd(): string | null {
 	}
 }
 
+const OWNER_GENERATION_TRANSITION_REASONS = new Set([
+	"new_session",
+	"switch_session",
+	"fork",
+	"reload",
+]);
+
+export function shouldAdvanceOwnerGeneration(event: { type: string; reason?: string; phase?: string }): boolean {
+	return (
+		event.type === "session_state_changed" &&
+		OWNER_GENERATION_TRANSITION_REASONS.has(event.reason ?? "")
+	);
+}
+
+export function updateOwnerTransitionCount(
+	activeTransitions: number,
+	event: { type: string; phase?: string },
+): number {
+	if (event.type !== "session_state_changed") return activeTransitions;
+	if (event.phase === "starting") return activeTransitions + 1;
+	if (event.phase === "settled") return Math.max(0, activeTransitions - 1);
+	return activeTransitions;
+}
+
+export function canReadProjectBinding(extensionsReady: boolean, activeTransitions: number): boolean {
+	return extensionsReady && activeTransitions === 0;
+}
+
 export async function invokeProjectBindingRead(
 	handler: ((input: unknown) => Promise<unknown>) | undefined,
 	id: string | undefined,
@@ -175,6 +203,8 @@ export async function invokeWorkflowCommand(
  */
 export async function runRpcMode(session: AgentSession): Promise<never> {
 	const processInstanceId = crypto.randomUUID();
+	let ownerGeneration = crypto.randomUUID();
+	let activeOwnerTransitions = 0;
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		process.stdout.write(serializeJsonLine(obj));
 	};
@@ -594,6 +624,11 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 
 	// Output all agent events as JSON
 	const unsubscribe = session.subscribe((event) => {
+		if (shouldAdvanceOwnerGeneration(event)) {
+			ownerGeneration = crypto.randomUUID();
+			activeOwnerTransitions = updateOwnerTransitionCount(activeOwnerTransitions, event);
+		}
+
 		// v2: emit synthesized events before the regular event
 		if (protocolVersion === 2) {
 			// cost_update on assistant message_end
@@ -761,22 +796,26 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			case "get_binding_snapshot": {
 				// Additive owner read: keep it usable by hosts that already locked the session to v1.
 				const sessionId = session.sessionId;
+				const bindingOwnerGeneration = ownerGeneration;
 				const cwd = session.sessionManager.getCwd();
 				const executionCwd = safeProcessCwd();
 				if (executionCwd === null) {
 					return error(id, "get_binding_snapshot", "Execution working directory is unavailable");
 				}
-				const handler = extensionsReady ? session.extensionRunner?.getRuntimeReadHandler("project_binding") : undefined;
+				const handler = canReadProjectBinding(extensionsReady, activeOwnerTransitions)
+					? session.extensionRunner?.getRuntimeReadHandler("project_binding")
+					: undefined;
 				return await invokeProjectBindingRead(
 					handler,
 					id,
 					cwd,
 					executionCwd,
-					{ sessionId, processInstanceId },
+					{ sessionId, processInstanceId, ownerGeneration: bindingOwnerGeneration },
 					() =>
 						session.sessionId === sessionId &&
 						session.sessionManager.getCwd() === cwd &&
-						safeProcessCwd() === executionCwd,
+						safeProcessCwd() === executionCwd &&
+						ownerGeneration === bindingOwnerGeneration,
 				);
 			}
 

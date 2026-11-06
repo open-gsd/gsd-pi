@@ -61,6 +61,36 @@ describe("AgentSessionExtensionsModule", () => {
     assert.equal(received?.extensionUIContext, uiContext);
   });
 
+  test("reload emits owner-generation invalidation before extension teardown", async () => {
+    const emittedEvents: unknown[] = [];
+    const host = {
+      emit: (event: unknown) => emittedEvents.push(event),
+      _extensionRunner: {
+        getFlagValues: () => ({}),
+        hasHandlers: () => false,
+        emit: async () => {},
+      },
+      settingsManager: { reload: async () => {} },
+      resourceLoader: { reload: async () => {} },
+      modelRegistry: { settleProviderReadiness: async () => {} },
+      _extensionUIContext: undefined,
+      _extensionCommandContextActions: undefined,
+      _extensionShutdownHandler: undefined,
+      _extensionErrorListener: undefined,
+      getActiveToolNames: () => [],
+    };
+    const mod = new AgentSessionExtensionsModule(host as any);
+    (mod as any).buildRuntime = () => {};
+    (mod as any).extendResourcesFromExtensions = async () => {};
+
+    await mod.reload();
+
+    assert.deepEqual(emittedEvents, [
+      { type: "session_state_changed", reason: "reload", phase: "starting" },
+      { type: "session_state_changed", reason: "reload", phase: "settled" },
+    ]);
+  });
+
   test("bindExtensions repairs the placeholder model after session_start (#2782)", async () => {
     const order: string[] = [];
     const host = {
@@ -418,6 +448,9 @@ describe("AgentSessionNavigationModule", () => {
     const projectRoot = resolvePath("/tmp/project-root");
     const worktreeRoot = resolvePath("/tmp/project-root/.gsd-worktrees/M001");
     const sessionManager = SessionManager.inMemory(projectRoot);
+    const emittedEvents: Array<{ type: string; reason?: string; phase?: string }> = [];
+    let sessionIdAtTransitionStart: string | undefined;
+    let sessionIdAtTransitionSettled: string | undefined;
     let rebuiltRuntime = false;
 
     const host = {
@@ -435,6 +468,15 @@ describe("AgentSessionNavigationModule", () => {
         reset: () => {},
       },
       sessionManager,
+      emit: (event: { type: string; reason?: string; phase?: string }) => {
+        emittedEvents.push(event);
+        if (event.type === "session_state_changed" && event.phase === "starting") {
+          sessionIdAtTransitionStart = sessionManager.getSessionId();
+        }
+        if (event.type === "session_state_changed" && event.phase === "settled") {
+          sessionIdAtTransitionSettled = sessionManager.getSessionId();
+        }
+      },
       abortRetry: () => {},
       abort: async () => {},
       disconnectFromAgent: () => {},
@@ -452,6 +494,12 @@ describe("AgentSessionNavigationModule", () => {
     });
 
     assert.equal(result, true);
+    assert.deepEqual(emittedEvents, [
+      { type: "session_state_changed", reason: "new_session", phase: "starting" },
+      { type: "session_state_changed", reason: "new_session", phase: "settled" },
+    ]);
+    assert.notEqual(sessionIdAtTransitionStart, sessionIdAtTransitionSettled);
+    assert.equal(sessionIdAtTransitionSettled, sessionManager.getSessionId());
     assert.equal(host._cwd, worktreeRoot);
     assert.equal(sessionManager.getHeader()?.cwd, worktreeRoot);
     assert.equal(sessionManager.getCwd(), worktreeRoot);
