@@ -297,7 +297,7 @@ export async function executeCompaction(host: InteractiveModeDelegateHost, custo
 			result = await host.session.compact(customInstructions);
 
 			// Rebuild UI
-			host.rebuildChatFromMessages();
+			host.rebuildChatFromMessages({ omitCompactionSummary: true });
 
 			// Add compaction component at bottom so user sees it without scrolling
 			const msg = createCompactionSummaryMessage(result.summary, result.tokensBefore, new Date().toISOString());

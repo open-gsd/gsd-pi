@@ -366,11 +366,24 @@ export async function getUserInput(host: InteractiveModeDelegateHost): Promise<s
 		});
 	}
 
-export function rebuildChatFromMessages(host: InteractiveModeDelegateHost): void {
+	/**
+	 * @param options.omitCompactionSummary Leave out the compaction card. A caller
+	 * reporting a compaction that just finished adds it below the kept messages
+	 * instead, where it is on screen; drawing both shows one compaction twice.
+	 */
+export function rebuildChatFromMessages(
+		host: InteractiveModeDelegateHost,
+		options: { omitCompactionSummary?: boolean } = {},
+	): void {
 		host.chatContainer.clear();
 		host.pinnedMessageContainer.clear();
 		const context = host.sessionManager.buildSessionContext();
-		renderSessionContext(host, context);
+		renderSessionContext(
+			host,
+			options.omitCompactionSummary
+				? { ...context, messages: context.messages.filter((message: AgentMessage) => message.role !== "compactionSummary") }
+				: context,
+		);
 		// Pinned content NOT re-populated here — the streaming lifecycle in
 		// chat-controller.ts manages the pinned zone during active work.
 		// populatePinnedFromMessages() remains in renderInitialMessages()
