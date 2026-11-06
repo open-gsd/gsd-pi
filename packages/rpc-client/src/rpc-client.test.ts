@@ -618,7 +618,7 @@ describe("v2 command serialization", () => {
 	it("getBindingSnapshot sends a protocol-neutral read command", async () => {
 		const { client, sent, respondNext } = createMockClient();
 		const snapshot = {
-			producer: { sessionId: "s1", processInstanceId: "p1" },
+			producer: { sessionId: "s1", processInstanceId: "p1", ownerGeneration: "owner-1" },
 			project: null,
 			projectStatus: "unavailable" as const,
 			capturedAt: "2026-11-02T00:00:00.000Z",

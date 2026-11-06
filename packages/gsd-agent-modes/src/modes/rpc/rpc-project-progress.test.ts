@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { invokeProjectBindingRead, invokeProjectProgressRead, invokeProjectSnapshotRead, invokeWorkflowCommand } from "./rpc-mode.js";
+import {
+	invokeProjectBindingRead,
+	invokeProjectProgressRead,
+	invokeProjectSnapshotRead,
+	invokeWorkflowCommand,
+	shouldAdvanceOwnerGeneration,
+	canReadProjectBinding,
+	updateOwnerTransitionCount,
+} from "./rpc-mode.js";
 import { RpcClient } from "./rpc-client.js";
 
 test("project progress read forwards the active session CWD and request ID", async () => {
@@ -182,7 +190,7 @@ test("binding read keeps producer identity separate from project authority", asy
 		"request-binding-1",
 		"/workspace/project",
 		"/workspace/project/.gsd/worktrees/M001",
-		{ sessionId: "session-a", processInstanceId: "process-a" },
+		{ sessionId: "session-a", processInstanceId: "process-a", ownerGeneration: "owner-a" },
 		() => true,
 	);
 
@@ -192,7 +200,11 @@ test("binding read keeps producer identity separate from project authority", asy
 	});
 	assert.equal(response.success, true);
 	if (!response.success || response.command !== "get_binding_snapshot") assert.fail("expected binding snapshot");
-	assert.deepEqual(response.data.producer, { sessionId: "session-a", processInstanceId: "process-a" });
+	assert.deepEqual(response.data.producer, {
+		sessionId: "session-a",
+		processInstanceId: "process-a",
+		ownerGeneration: "owner-a",
+	});
 	assert.deepEqual(response.data.project?.authority, {
 		projectId: "project-a",
 		schemaVersion: 1,
@@ -209,13 +221,17 @@ test("binding read preserves producer identity when project authority is unavail
 		"request-binding-2",
 		"/workspace/project",
 		"/workspace/project/.gsd/worktrees/M001",
-		{ sessionId: "session-b", processInstanceId: "process-b" },
+		{ sessionId: "session-b", processInstanceId: "process-b", ownerGeneration: "owner-b" },
 		() => true,
 	);
 
 	assert.equal(response.success, true);
 	if (!response.success || response.command !== "get_binding_snapshot") assert.fail("expected partial binding snapshot");
-	assert.deepEqual(response.data.producer, { sessionId: "session-b", processInstanceId: "process-b" });
+	assert.deepEqual(response.data.producer, {
+		sessionId: "session-b",
+		processInstanceId: "process-b",
+		ownerGeneration: "owner-b",
+	});
 	assert.equal(response.data.project, null);
 	assert.equal(response.data.projectStatus, "unavailable");
 });
@@ -231,7 +247,7 @@ test("binding read rechecks captured context after asynchronous root verificatio
 		"request-binding-3",
 		"/workspace/project",
 		"/workspace/project/.gsd/worktrees/M001",
-		{ sessionId: "session-c", processInstanceId: "process-c" },
+		{ sessionId: "session-c", processInstanceId: "process-c", ownerGeneration: "owner-c" },
 		() => contextStable,
 	);
 
@@ -248,7 +264,7 @@ test("typed RPC client exposes binding snapshots without requiring v2 negotiatio
 	const client = new RpcClient();
 	const sent: unknown[] = [];
 	const snapshot = {
-		producer: { sessionId: "session-client", processInstanceId: "process-client" },
+		producer: { sessionId: "session-client", processInstanceId: "process-client", ownerGeneration: "owner-client" },
 		project: null,
 		projectStatus: "unavailable" as const,
 		capturedAt: "2026-11-02T00:00:00.000Z",
@@ -267,4 +283,90 @@ test("typed RPC client exposes binding snapshots without requiring v2 negotiatio
 
 	assert.deepEqual(await client.getBindingSnapshot(), snapshot);
 	assert.deepEqual(sent, [{ type: "get_binding_snapshot" }]);
+});
+
+test("owner generation advances at both session transition boundaries only", () => {
+	for (const reason of ["new_session", "switch_session", "fork", "reload"]) {
+		for (const phase of ["starting", "settled"]) {
+			assert.equal(shouldAdvanceOwnerGeneration({ type: "owner_generation_transition", reason, phase }), true);
+		}
+	}
+	for (const reason of ["set_model", "set_thinking_level", "set_session_name"]) {
+		assert.equal(shouldAdvanceOwnerGeneration({ type: "session_state_changed", reason }), false);
+	}
+	assert.equal(shouldAdvanceOwnerGeneration({ type: "session_state_changed", reason: "new_session" }), false);
+	assert.equal(shouldAdvanceOwnerGeneration({ type: "message_end" }), false);
+});
+
+test("overlapping owner transitions keep project binding unavailable until all settle", () => {
+	const starting = { type: "owner_generation_transition", phase: "starting" };
+	const settled = { type: "owner_generation_transition", phase: "settled" };
+	let activeTransitions = 0;
+
+	activeTransitions = updateOwnerTransitionCount(activeTransitions, starting);
+	activeTransitions = updateOwnerTransitionCount(activeTransitions, starting);
+	assert.equal(activeTransitions, 2);
+	assert.equal(canReadProjectBinding(true, activeTransitions), false);
+
+	activeTransitions = updateOwnerTransitionCount(activeTransitions, settled);
+	assert.equal(activeTransitions, 1);
+	assert.equal(canReadProjectBinding(true, activeTransitions), false);
+	assert.equal(updateOwnerTransitionCount(activeTransitions, { type: "message_end" }), 1);
+
+	activeTransitions = updateOwnerTransitionCount(activeTransitions, settled);
+	assert.equal(activeTransitions, 0);
+	assert.equal(canReadProjectBinding(true, activeTransitions), true);
+	assert.equal(canReadProjectBinding(false, activeTransitions), false);
+});
+
+test("binding read started during reload is rejected if it resolves after reload settles", async () => {
+	let ownerGeneration = "reload-start";
+	let finishRead: (() => void) | undefined;
+	const producer = { sessionId: "session-d", processInstanceId: "process-d", ownerGeneration };
+	const pendingRead = invokeProjectBindingRead(
+		async () => {
+			await new Promise<void>((resolve) => {
+				finishRead = resolve;
+			});
+			return { authority: null, projectRoot: null, worktreeRoot: null, rootResolution: "unavailable" };
+		},
+		"request-binding-4",
+		"/workspace/project",
+		"/workspace/project/.gsd/worktrees/M001",
+		producer,
+		() => ownerGeneration === producer.ownerGeneration,
+	);
+
+	if (!finishRead) assert.fail("binding handler did not start");
+	ownerGeneration = "reload-settled";
+	finishRead();
+	const response = await pendingRead;
+
+	assert.deepEqual(response, {
+		id: "request-binding-4",
+		type: "response",
+		command: "get_binding_snapshot",
+		success: false,
+		error: "Session workspace or execution directory changed during binding read; retry",
+	});
+});
+
+test("typed RPC client accepts legacy binding snapshots without owner generation", async () => {
+	const client = new RpcClient();
+	const clientWithStub = client as unknown as { send: (command: unknown) => Promise<unknown> };
+	clientWithStub.send = async () => ({
+		type: "response",
+		id: "client-read-legacy",
+		command: "get_binding_snapshot",
+		success: true,
+		data: {
+			producer: { sessionId: "session-legacy", processInstanceId: "process-legacy" },
+			project: null,
+			projectStatus: "unavailable",
+			capturedAt: "2026-11-02T00:00:00.000Z",
+		},
+	} as never);
+
+	const snapshot = await client.getBindingSnapshot();
+	assert.equal(snapshot.producer.ownerGeneration, undefined);
 });

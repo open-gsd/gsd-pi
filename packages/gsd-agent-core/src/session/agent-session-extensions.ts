@@ -602,28 +602,33 @@ export class AgentSessionExtensionsModule {
 	}
 
 	async reload(): Promise<void> {
-		const previousFlagValues = this.host._extensionRunner.getFlagValues();
-		await emitSessionShutdownEvent(this.host._extensionRunner, { type: "session_shutdown", reason: "reload" });
-		await this.host.settingsManager.reload();
-		resetApiProviders();
-		await this.host.resourceLoader.reload();
-		this.buildRuntime({
-			activeToolNames: this.host.getActiveToolNames(),
-			flagValues: previousFlagValues,
-			includeAllExtensionTools: true,
-		});
-		// Reloaded extensions start with cold readiness caches; wait for their
-		// async probes so external-CLI providers do not read as "not ready".
-		await this.host.modelRegistry.settleProviderReadiness?.();
+		this.host.emit({ type: "owner_generation_transition", reason: "reload", phase: "starting" });
+		try {
+			const previousFlagValues = this.host._extensionRunner.getFlagValues();
+			await emitSessionShutdownEvent(this.host._extensionRunner, { type: "session_shutdown", reason: "reload" });
+			await this.host.settingsManager.reload();
+			resetApiProviders();
+			await this.host.resourceLoader.reload();
+			this.buildRuntime({
+				activeToolNames: this.host.getActiveToolNames(),
+				flagValues: previousFlagValues,
+				includeAllExtensionTools: true,
+			});
+			// Reloaded extensions start with cold readiness caches; wait for their
+			// async probes so external-CLI providers do not read as "not ready".
+			await this.host.modelRegistry.settleProviderReadiness?.();
 
-		const hasBindings =
-			this.host._extensionUIContext ||
-			this.host._extensionCommandContextActions ||
-			this.host._extensionShutdownHandler ||
-			this.host._extensionErrorListener;
-		if (hasBindings) {
-			await this.host._extensionRunner.emit({ type: "session_start", reason: "reload" });
-			await this.extendResourcesFromExtensions("reload");
+			const hasBindings =
+				this.host._extensionUIContext ||
+				this.host._extensionCommandContextActions ||
+				this.host._extensionShutdownHandler ||
+				this.host._extensionErrorListener;
+			if (hasBindings) {
+				await this.host._extensionRunner.emit({ type: "session_start", reason: "reload" });
+				await this.extendResourcesFromExtensions("reload");
+			}
+		} finally {
+			this.host.emit({ type: "owner_generation_transition", reason: "reload", phase: "settled" });
 		}
 	}
 

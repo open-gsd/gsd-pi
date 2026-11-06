@@ -127,7 +127,7 @@ test("client: runtime errors invalidate trust and reject pending reads without e
 test("client exposes binding snapshots without requiring v2 initialization", async (t) => {
 	const h = createHarness(); const c = h.client; await c.start(); t.after(() => c.stop());
 	const snapshot = {
-		producer: { sessionId: "session-vscode", processInstanceId: "process-vscode" },
+		producer: { sessionId: "session-vscode", processInstanceId: "process-vscode", ownerGeneration: "owner-vscode" },
 		project: null,
 		projectStatus: "unavailable",
 		capturedAt: "2026-11-02T00:00:00.000Z",
