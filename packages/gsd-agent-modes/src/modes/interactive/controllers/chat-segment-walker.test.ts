@@ -19,12 +19,18 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Container } from "@gsd/pi-tui";
+import { getMarkdownTheme, initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
 
+import { createStreamingRenderState } from "../streaming-render-state.js";
+import { rebuildSegmentsOnMessageEnd, runSegmentWalker } from "./chat-segment-walker.js";
 import {
 	buildDesiredSegmentsForMessage,
 	getTextLengthFromContentBlocks,
 	getTextFromContentBlocks,
 } from "./chat-handoff-filter.js";
+
+initTheme();
 
 // ── tests ────────────────────────────────────────────────────────────
 
@@ -133,4 +139,88 @@ test("buildDesiredSegmentsForMessage: returns consistent segments for same conte
 		assert.equal(segs1[i].endIndex, segs2[i].endIndex);
 		assert.equal(segs1[i].contentType, segs2[i].contentType);
 	}
+});
+
+// ── message_end rebuild keeps the rest of the chat in place ─────────
+
+function streamingHost(content: unknown[]) {
+	const chatContainer = new Container();
+	return {
+		chatContainer,
+		streamingMessage: { role: "assistant", provider: "test", content },
+		streamingComponent: undefined,
+		pendingTools: new Map(),
+		hideThinkingBlock: true,
+		toolOutputExpanded: false,
+		session: { messages: [] },
+		settingsManager: { getShowImages: () => false },
+		getMarkdownThemeWithSettings: () => getMarkdownTheme(),
+		getRegisteredToolDefinition: () => undefined,
+		ui: { requestRender() {} },
+	} as any;
+}
+
+function row(text: string) {
+	return { render: () => [text], invalidate() {} };
+}
+
+// The order the given markers appear in the rendered chat.
+function orderOf(host: any, markers: string[]) {
+	const rendered = host.chatContainer.render(80).join("\n");
+	return markers
+		.filter((marker) => rendered.includes(marker))
+		.sort((a, b) => rendered.indexOf(a) - rendered.indexOf(b));
+}
+
+function streamedTurn(blocks: unknown[]) {
+	const host = streamingHost(blocks);
+	const rs = createStreamingRenderState();
+	host.chatContainer.addChild(row("BEFORE-TURN"));
+	runSegmentWalker(host, rs, "date-time-iso");
+	return { host, rs };
+}
+
+test("rebuildSegmentsOnMessageEnd: a notice added below the streaming reply stays below it", () => {
+	// A notice posted mid-stream (the approval-question hook) sits right below the
+	// growing reply. Lifting it above the turn moved a visible row across the
+	// scrollback seam, so the turn-end repaint refilled and printed rows twice (#3106).
+	const { host, rs } = streamedTurn([{ type: "text", text: "FIRST-TEXT" }]);
+	host.chatContainer.addChild(row("NOTICE"));
+
+	rebuildSegmentsOnMessageEnd(host, rs, "date-time-iso");
+
+	assert.deepEqual(orderOf(host, ["BEFORE-TURN", "FIRST-TEXT", "NOTICE"]), ["BEFORE-TURN", "FIRST-TEXT", "NOTICE"]);
+});
+
+test("rebuildSegmentsOnMessageEnd: a row added between two segments stays between them", () => {
+	const blocks: any[] = [{ type: "text", text: "FIRST-TEXT" }];
+	const { host, rs } = streamedTurn(blocks);
+	host.chatContainer.addChild(row("MIDDLE"));
+	blocks.push({ type: "toolCall", id: "t1", name: "custom_tool", arguments: {} }, { type: "text", text: "SECOND-TEXT" });
+	runSegmentWalker(host, rs, "date-time-iso");
+
+	rebuildSegmentsOnMessageEnd(host, rs, "date-time-iso");
+
+	assert.deepEqual(orderOf(host, ["FIRST-TEXT", "MIDDLE", "SECOND-TEXT"]), ["FIRST-TEXT", "MIDDLE", "SECOND-TEXT"]);
+});
+
+test("rebuildSegmentsOnMessageEnd: a block only the final payload carries lands with the turn, above a later notice", () => {
+	const blocks: any[] = [{ type: "text", text: "FIRST-TEXT" }];
+	const { host, rs } = streamedTurn(blocks);
+	host.chatContainer.addChild(row("NOTICE"));
+	blocks.push({ type: "toolCall", id: "t1", name: "custom_tool", arguments: {} }, { type: "text", text: "LATE-TEXT" });
+
+	rebuildSegmentsOnMessageEnd(host, rs, "date-time-iso");
+
+	assert.deepEqual(orderOf(host, ["FIRST-TEXT", "LATE-TEXT", "NOTICE"]), ["FIRST-TEXT", "LATE-TEXT", "NOTICE"]);
+	assert.equal(rs.renderedSegments.filter((seg: any) => seg.kind === "text-run").length, 2);
+});
+
+test("rebuildSegmentsOnMessageEnd: a turn with no slot left in the chat is appended", () => {
+	const { host, rs } = streamedTurn([{ type: "text", text: "FIRST-TEXT" }]);
+	host.chatContainer.children = [row("BEFORE-TURN"), row("NOTICE")];
+
+	rebuildSegmentsOnMessageEnd(host, rs, "date-time-iso");
+
+	assert.deepEqual(orderOf(host, ["BEFORE-TURN", "NOTICE", "FIRST-TEXT"]), ["BEFORE-TURN", "NOTICE", "FIRST-TEXT"]);
 });
