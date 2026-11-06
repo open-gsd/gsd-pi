@@ -290,10 +290,12 @@ function validatePersistedExecEvidence(basePath: string, run: ExecRunRow): strin
     if (typeof meta.run_not_recorded === "string" && meta.run_not_recorded.length > 0) {
       return `execution evidence id "${run.id}" was marked run_not_recorded`;
     }
-    const outputHash = run.run_contract
+    const outputHash = run.output_hash.startsWith("sha256s:")
       ? execRunOutputHash(stdout, stderr)
-      : `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`;
-    if (outputHash !== run.output_hash) {
+      : run.output_hash.startsWith("sha256:")
+        ? `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`
+        : null;
+    if (outputHash === null || outputHash !== run.output_hash) {
       return `execution evidence id "${run.id}" outputs do not match the host-recorded digest`;
     }
   } catch {

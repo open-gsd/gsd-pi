@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -35,6 +35,8 @@ function writeUatExecEvidence(
   base: string,
   outcome: { exit_code: number | null; signal: string | null; timed_out: boolean; aborted: boolean },
   id = "fresh-uat-evidence",
+  hashOutput = (stdout: Buffer, stderr: Buffer): string =>
+    `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`,
 ): string {
   const execDir = join(base, ".gsd", "exec");
   mkdirSync(execDir, { recursive: true });
@@ -77,7 +79,7 @@ function writeUatExecEvidence(
     aborted: outcome.aborted,
     started_at: startedAt,
     duration_ms: 1,
-    output_hash: `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`,
+    output_hash: hashOutput(stdout, stderr),
   });
   return id;
 }
@@ -174,6 +176,53 @@ test("prepareUatRun rejects successful exec rows whose output artifact is missin
   } finally {
     cleanup(base);
   }
+});
+
+test("prepareUatRun accepts legacy sha256 UAT evidence without a run contract", (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  const evidenceId = writeFreshUatEvidence(base, "legacy-uat-evidence");
+  const result = prepareUatRun(base, buildParams([
+    { kind: "gsd_uat_exec", ref: evidenceId },
+  ]));
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("prepareUatRun rejects redistributed UAT output streams without a run contract", (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  const evidenceId = writeUatExecEvidence(
+    base,
+    { exit_code: 0, signal: null, timed_out: false, aborted: false },
+    "per-stream-uat-evidence",
+    execRunOutputHash,
+  );
+  const params = buildParams([{ kind: "gsd_uat_exec", ref: evidenceId }]);
+  const original = prepareUatRun(base, params);
+  assert.equal(original.ok, true, JSON.stringify(original));
+
+  const execDir = join(base, ".gsd", "exec");
+  const stdoutPath = join(execDir, `${evidenceId}.stdout`);
+  const stderrPath = join(execDir, `${evidenceId}.stderr`);
+  const metaPath = join(execDir, `${evidenceId}.meta.json`);
+  const combined = Buffer.concat([readFileSync(stdoutPath), readFileSync(stderrPath)]);
+  const stdout = combined.subarray(0, 1);
+  const stderr = combined.subarray(1);
+  writeFileSync(stdoutPath, stdout);
+  writeFileSync(stderrPath, stderr);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+  meta.stdout_bytes = stdout.length;
+  meta.stderr_bytes = stderr.length;
+  writeFileSync(metaPath, JSON.stringify(meta));
+
+  const modified = prepareUatRun(base, params);
+  assert.equal(modified.ok, false);
+  if (modified.ok) assert.fail("expected redistributed UAT output streams to be rejected");
+  assert.equal(modified.error.code, "invalid_evidence");
+  assert.match(modified.error.message, /check UAT-01/);
+  assert.match(modified.error.message, /per-stream-uat-evidence/);
+  assert.match(modified.error.message, /outputs do not match the host-recorded digest/);
 });
 
 test("prepareUatRun validates contract-bearing exec hashes and rejects modified output", () => {

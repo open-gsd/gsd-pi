@@ -429,15 +429,14 @@ function recordRun(
 }
 
 /**
- * The run's output hash. Contract-bearing runs (#2982) hash each stream
- * separately via the gate's own `execRunOutputHash` — the single source both
- * sides share, so the formats can never drift — and moving text between the
- * two persisted files changes the hash. Sandboxed runs keep the legacy
- * `sha256:<stdout><stderr>` form.
+ * Contract-bearing runs (#2982) and new UAT rows hash each stream separately
+ * via the gate's `execRunOutputHash`, so moving bytes between persisted files
+ * changes the hash. Existing unbound sandboxed rows retain the legacy
+ * `sha256:<stdout><stderr>` format for stored-row compatibility.
  */
 function computeOutputHash(
   result: ExecSandboxResult,
-  framed: boolean,
+  perStream: boolean,
 ): string {
   const readStream = (path: string): Buffer => {
     try {
@@ -448,7 +447,7 @@ function computeOutputHash(
       return Buffer.from(`unreadable: ${basename(path)}`);
     }
   };
-  if (framed) {
+  if (perStream) {
     return execRunOutputHash(readStream(result.stdout_path), readStream(result.stderr_path));
   }
   const hash = createHash("sha256");
@@ -481,7 +480,7 @@ function storeRun(
     aborted: result.aborted === true,
     started_at: startedAt.toISOString(),
     duration_ms: result.duration_ms,
-    output_hash: computeOutputHash(result, verification != null),
+    output_hash: computeOutputHash(result, verification != null || uat != null),
     // Only a UAT run or a verification-form run (#2982) stores the source
     // revision: reading it hashes every source file.
     ...(uat
