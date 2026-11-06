@@ -416,7 +416,9 @@ function recordRun(
   try {
     const opened = openExistingWorkflowDatabase(baseDir);
     if (!opened.ok) {
-      if (opened.reason === "missing-gsd-dir" || opened.reason === "missing-database") return null;
+      if (opened.reason === "missing-gsd-dir" || opened.reason === "missing-database") {
+        return uat ? `workflow database ${opened.reason}` : null;
+      }
       return opened.error?.message ?? `workflow database ${opened.reason}`;
     }
     storeRun(baseDir, result, script, startedAt, uat, verification);
@@ -427,15 +429,14 @@ function recordRun(
 }
 
 /**
- * The run's output hash. Contract-bearing runs (#2982) hash each stream
- * separately via the gate's own `execRunOutputHash` — the single source both
- * sides share, so the formats can never drift — and moving text between the
- * two persisted files changes the hash. Sandboxed runs keep the legacy
- * `sha256:<stdout><stderr>` form.
+ * Contract-bearing runs (#2982) and new UAT rows hash each stream separately
+ * via the gate's `execRunOutputHash`, so moving bytes between persisted files
+ * changes the hash. Existing unbound sandboxed rows retain the legacy
+ * `sha256:<stdout><stderr>` format for stored-row compatibility.
  */
 function computeOutputHash(
   result: ExecSandboxResult,
-  framed: boolean,
+  perStream: boolean,
 ): string {
   const readStream = (path: string): Buffer => {
     try {
@@ -446,7 +447,7 @@ function computeOutputHash(
       return Buffer.from(`unreadable: ${basename(path)}`);
     }
   };
-  if (framed) {
+  if (perStream) {
     return execRunOutputHash(readStream(result.stdout_path), readStream(result.stderr_path));
   }
   const hash = createHash("sha256");
@@ -479,7 +480,7 @@ function storeRun(
     aborted: result.aborted === true,
     started_at: startedAt.toISOString(),
     duration_ms: result.duration_ms,
-    output_hash: computeOutputHash(result, verification != null),
+    output_hash: computeOutputHash(result, verification != null || uat != null),
     // Only a UAT run or a verification-form run (#2982) stores the source
     // revision: reading it hashes every source file.
     ...(uat
@@ -599,8 +600,13 @@ export async function executeGsdExec(
       attemptRef: matchedVerification.attemptRef,
     };
   }
-  const notRecorded = recordRun(deps.baseDir, result, script, startedAt, uat, verification);
-  if (notRecorded === null) return formatted;
+  // Always record the newest observation when a workflow DB exists, even if its output files are missing;
+  // the unreadable-output hash and null source revision must prevent reuse of an older passing run.
+  const databaseRecordError = recordRun(deps.baseDir, result, script, startedAt, uat, verification);
+  const notRecorded = [result.run_not_recorded, databaseRecordError]
+    .filter((reason): reason is string => typeof reason === "string" && reason.length > 0)
+    .join("; ");
+  if (!notRecorded) return formatted;
   return {
     ...formatted,
     content: [{
@@ -622,8 +628,11 @@ export async function executeUatExec(
 
   const result = await executeGsdExec(normalized.params, deps, uat);
   const details = result.details ?? {};
+  const evidenceNotRecorded =
+    typeof details.run_not_recorded === "string" && details.run_not_recorded.length > 0;
   return {
     ...result,
+    isError: result.isError || evidenceNotRecorded,
     details: {
       ...details,
       operation: "gsd_uat_exec",
@@ -631,6 +640,7 @@ export async function executeUatExec(
       sliceId: uat.sliceId,
       checkId: uat.checkId,
       intent,
+      ...(evidenceNotRecorded ? { evidence_recorded: false } : {}),
     },
   };
 }
@@ -672,6 +682,7 @@ function formatResult(result: ExecSandboxResult, purpose?: string): ToolExecutio
       // renderers display-normalize it without mutating these values.
       ...(typeof purpose === "string" ? { purpose } : {}),
       digest: result.digest,
+      ...(result.output_transformed ? { output_transformed: true } : {}),
       // Additive (issue #2927): bounded labeled stderr diagnostics for failed
       // executions; absent (never null) when not applicable.
       ...(result.stderr_excerpt ? { stderr_excerpt: result.stderr_excerpt } : {}),

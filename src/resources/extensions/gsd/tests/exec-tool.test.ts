@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +10,8 @@ import { buildExecOptionsForParams, executeGsdExec, executeUatExec } from "../to
 import type { ExecSandboxOptions, ExecSandboxRequest, ExecSandboxResult } from "../exec-sandbox.ts";
 import { renderExecCall, renderExecResult, renderUatExecCall } from "../tools/exec-tool-renderer.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { readExecRun } from "../db/writers/exec-runs.ts";
+import { execRunOutputHash } from "../verification-gate.ts";
 
 function makeExecResult(request: ExecSandboxRequest): ExecSandboxResult {
   return {
@@ -31,34 +34,114 @@ function makeExecResult(request: ExecSandboxRequest): ExecSandboxResult {
   };
 }
 
-test("executeUatExec accepts evidence-mode aliases for intent", async () => {
+test("executeUatExec normalizes evidence-mode aliases but rejects unrecorded output", async () => {
   const requests: ExecSandboxRequest[] = [];
-  const result = await executeUatExec(
-    {
-      milestoneId: "M001",
-      sliceId: "S01",
-      checkId: "UAT-PRE",
-      intent: "artifact",
-      runtime: "bash",
-      script: "printf ok",
-    },
-    {
-      baseDir: "/tmp/gsd-uat-exec-test",
-      preferences: null,
-      run: async (request) => {
-        requests.push(request);
-        return makeExecResult(request);
+  const baseDir = mkdtempSync(join(tmpdir(), "gsd-uat-exec-alias-"));
+  try {
+    const result = await executeUatExec(
+      {
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-PRE",
+        intent: "artifact",
+        runtime: "bash",
+        script: "printf ok",
       },
-    },
-  );
+      {
+        baseDir,
+        preferences: null,
+        run: async (request) => {
+          requests.push(request);
+          return makeExecResult(request);
+        },
+      },
+    );
 
-  assert.equal(result.isError, false);
-  assert.equal(result.details?.operation, "gsd_uat_exec");
-  assert.equal(result.details?.intent, "uat-artifact-check");
-  assert.equal(requests[0]?.metadata?.intent, "uat-artifact-check");
-  assert.equal(result.details.purpose, "UAT M001/S01/UAT-PRE (uat-artifact-check)");
-  assert.equal(requests[0]?.purpose, result.details.purpose);
-  assert.equal(result.details.digest, "check passed");
+    assert.equal(result.isError, true);
+    assert.equal(result.details?.evidence_recorded, false);
+    assert.match(result.content[0]?.text ?? "", /workflow database missing-gsd-dir/);
+    assert.equal(result.details?.operation, "gsd_uat_exec");
+    assert.equal(result.details?.intent, "uat-artifact-check");
+    assert.equal(requests[0]?.metadata?.intent, "uat-artifact-check");
+    assert.equal(result.details.purpose, "UAT M001/S01/UAT-PRE (uat-artifact-check)");
+    assert.equal(requests[0]?.purpose, result.details.purpose);
+    assert.equal(result.details.digest, "check passed");
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("executeUatExec records the per-stream output hash instead of the legacy concatenated hash", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gsd-uat-exec-output-hash-"));
+  const previousHome = process.env.GSD_HOME;
+  const base = join(root, "project");
+  process.env.GSD_HOME = join(root, "home");
+  const stdout = Buffer.from("distinct stdout bytes\n");
+  const stderr = Buffer.from("distinct stderr bytes\n");
+  try {
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+
+    const result = await executeUatExec(
+      {
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-01",
+        intent: "uat-runtime-check",
+        runtime: "node",
+        script: "process.stdout.write('distinct stdout bytes\\n'); process.stderr.write('distinct stderr bytes\\n');",
+      },
+      { baseDir: base, preferences: null },
+    );
+
+    assert.equal(result.isError, false);
+    assert.equal(result.details?.exit_code, 0);
+    assert.deepEqual(readFileSync(String(result.details?.stdout_path)), stdout);
+    assert.deepEqual(readFileSync(String(result.details?.stderr_path)), stderr);
+
+    const row = readExecRun(String(result.details?.id));
+    assert.ok(row, "gsd_uat_exec must record an exec_runs row");
+    assert.equal(row.kind, "uat_exec");
+    const legacyHash = `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`;
+    assert.notEqual(row.output_hash, legacyHash, "UAT evidence must not use the legacy concatenated hash");
+    assert.equal(row.output_hash, execRunOutputHash(stdout, stderr));
+  } finally {
+    closeDatabase();
+    if (previousHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = previousHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("executeUatExec does not expose raw output when persisted artifacts cannot be written", async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), "gsd-uat-redaction-failure-"));
+  const gsdDir = join(baseDir, ".gsd");
+  const syntheticSecret = `sk_test_${"c".repeat(24)}`;
+  mkdirSync(gsdDir, { recursive: true });
+  openDatabase(join(gsdDir, "gsd.db"));
+  writeFileSync(join(gsdDir, "exec"), "not a directory");
+  try {
+    const result = await executeUatExec(
+      {
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-RAW-FAIL",
+        intent: "uat-runtime-check",
+        runtime: "node",
+        script: `process.stdout.write(${JSON.stringify(syntheticSecret)})`,
+      },
+      { baseDir, preferences: null },
+    );
+    const publicText = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\\n");
+    assert.equal(result.isError, true);
+    assert.equal(result.details?.evidence_recorded, false);
+    assert.match(publicText, /redacted/);
+    assert.doesNotMatch(publicText, new RegExp(syntheticSecret));
+    assert.doesNotMatch(JSON.stringify(result.details), new RegExp(syntheticSecret));
+  } finally {
+    closeDatabase();
+    rmSync(baseDir, { recursive: true, force: true });
+  }
 });
 
 test("executeGsdExec adds unchanged purpose and digest without changing raw text", async () => {
@@ -358,29 +441,36 @@ test("buildExecOptionsForParams classifies UAT workloads on the normalized param
   assert.equal(plain.default_timeout_ms, 30_000);
 });
 
-test("executeUatExec hands the sandbox the verification default for a verification-named check", async () => {
+test("executeUatExec applies the verification default but rejects unrecorded output", async () => {
   let capturedDefaultTimeout: number | undefined;
-  const result = await executeUatExec(
-    {
-      milestoneId: "M001",
-      sliceId: "S01",
-      checkId: "test-login",
-      intent: "uat-runtime-check",
-      command: "sleep 100",
-    },
-    {
-      baseDir: "/tmp/gsd-uat-classification-test",
-      preferences: {
-        context_mode: { enabled: true },
-        verification_timeout_ms: 120_000,
+  const baseDir = mkdtempSync(join(tmpdir(), "gsd-uat-classification-"));
+  try {
+    const result = await executeUatExec(
+      {
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "test-login",
+        intent: "uat-runtime-check",
+        command: "sleep 100",
       },
-      run: async (request, opts) => {
-        capturedDefaultTimeout = opts.default_timeout_ms;
-        return makeExecResult(request);
+      {
+        baseDir,
+        preferences: {
+          context_mode: { enabled: true },
+          verification_timeout_ms: 120_000,
+        },
+        run: async (request, opts) => {
+          capturedDefaultTimeout = opts.default_timeout_ms;
+          return makeExecResult(request);
+        },
       },
-    },
-  );
+    );
 
-  assert.equal(result.isError, false);
-  assert.equal(capturedDefaultTimeout, 120_000);
+    assert.equal(result.isError, true);
+    assert.equal(result.details?.evidence_recorded, false);
+    assert.match(result.content[0]?.text ?? "", /workflow database missing-gsd-dir/);
+    assert.equal(capturedDefaultTimeout, 120_000);
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
 });

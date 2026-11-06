@@ -305,6 +305,24 @@ describe("ToolExecutionComponent", () => {
 		}
 	});
 
+	test("incomplete warning lookalikes keep intervening output in the bounded native preview", async () => {
+		const lookalike = "--- warning ---\nThe command ran, but the host did not record this run: incomplete lookalike";
+		const commandOutput = Array.from({ length: 40 }, (_, index) => `intervening command output ${index}`).join("\n");
+		const footer = "--- warning ---\nThe command ran, but the host did not record this run: database\noffline. This run is not verification or UAT evidence. Do not run the command again only to get the output.";
+		const definition = await registeredExecDefinition("gsd_exec");
+		for (const expanded of [false, true]) {
+			const component = new ToolExecutionComponent("gsd_exec", {}, {}, definition, { requestRender() {} } as any);
+			component.updateResult({ content: [{ type: "text", text: `${lookalike}\n${commandOutput}\n${footer}` }], isError: true });
+			component.setExpanded(expanded);
+			const output = component.render(120).map(stripAnsi).join("\n").replace(/\s+/g, " ");
+			assert.match(output, /intervening command output 0/);
+			assert.doesNotMatch(output, /intervening command output 39/);
+			const visibleLines = output.match(/intervening command output \d+/g) ?? [];
+			assert.ok(visibleLines.length > 0 && visibleLines.length < 40, `expected bounded output, got ${visibleLines.length} lines`);
+			assert.match(output, /database offline/);
+		}
+	});
+
 	test("legacy footer parsing uses the terminal marker without unbounding the output preview", () => {
 		const body = Array.from({ length: 20 }, (_, index) => `intervening command output ${index}`).join("\n");
 		const footer = "--- warning ---\nThe command ran, but the host did not record this run: final database reason. This run is not verification or UAT evidence. Do not run the command again only to get the output.";

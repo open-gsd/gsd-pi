@@ -486,7 +486,7 @@ test("executeGsdExec omits the purpose detail (absent, not null) when not provid
 	assert.ok(!("purpose" in (result.details ?? {})), `purpose should be absent, got: ${result.details?.purpose}`);
 });
 
-test("executeUatExec records the synthesized purpose in details", async () => {
+test("executeUatExec preserves its purpose when the workflow database is absent", async () => {
 	const result = await executeUatExec(
 		{ milestoneId: "M001", sliceId: "S01", checkId: "UAT-PRE", intent: "artifact", runtime: "bash", script: "printf ok" },
 		{
@@ -495,7 +495,9 @@ test("executeUatExec records the synthesized purpose in details", async () => {
 			run: async (request) => makeExecResult(request),
 		},
 	);
-	assert.equal(result.isError, false);
+	assert.equal(result.isError, true);
+	assert.equal(result.details?.evidence_recorded, false);
+	assert.match(String(result.details?.run_not_recorded), /workflow database missing-(?:gsd-dir|database)/);
 	assert.equal(result.details?.purpose, "UAT M001/S01/UAT-PRE (uat-artifact-check)");
 	assert.equal(result.details?.digest, "check passed");
 });

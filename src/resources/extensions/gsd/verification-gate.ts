@@ -1921,8 +1921,10 @@ export async function runVerificationGate(options: RunVerificationGateOptions): 
         ?? shell.argsFor(rewrittenCommand);
     const stdoutPath = join(outputDir, "stdout");
     const stderrPath = join(outputDir, "stderr");
-    const stdoutFd = openSync(stdoutPath, "w");
-    const stderrFd = openSync(stderrPath, "w");
+    // Match the sandbox's private capture descriptors so permission-sensitive
+    // Verify commands behave identically on a fresh run and a reusable run.
+    const stdoutFd = openSync(stdoutPath, "w", 0o600);
+    const stderrFd = openSync(stderrPath, "w", 0o600);
     let result: VerificationSpawnResult;
     let stdout: string;
     let capturedStderr: string;
