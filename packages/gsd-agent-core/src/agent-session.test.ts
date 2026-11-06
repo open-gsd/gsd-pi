@@ -35,10 +35,12 @@ describe("AgentSessionExtensionsModule", () => {
   test("bindExtensions forwards extension UI context into provider stream options", async () => {
     const uiContext = { notify: () => {} };
     let received: Record<string, unknown> | undefined;
+    let localInteractiveDesktop = false;
     const host = {
       _extensionUIContext: undefined as typeof uiContext | undefined,
       _extensionRunner: {
-        setUIContext: () => {},
+        setLocalInteractiveDesktop: (value: boolean) => { localInteractiveDesktop = value; },
+        setUIContext: () => { localInteractiveDesktop = false; },
         bindCommandContext: () => {},
         onError: () => () => {},
         emit: async () => {},
@@ -55,16 +57,30 @@ describe("AgentSessionExtensionsModule", () => {
     };
 
     const mod = new AgentSessionExtensionsModule(host as any);
-    await mod.bindExtensions({ uiContext: uiContext as any });
+    await mod.bindExtensions({ uiContext: uiContext as any, localInteractiveDesktop: true });
 
     host.agent.streamFn({}, {}, { maxTokens: 1 });
     assert.equal(received?.extensionUIContext, uiContext);
+    assert.equal(localInteractiveDesktop, true);
+
+    // Replacing the runner during reload must restore the persisted host signal.
+    let replacementAdmission = false;
+    mod.applyExtensionBindings({
+      setUIContext: () => { replacementAdmission = false; },
+      setLocalInteractiveDesktop: (value: boolean) => { replacementAdmission = value; },
+      bindCommandContext: () => {},
+    } as any);
+    assert.equal(replacementAdmission, true);
+
+    await mod.bindExtensions({});
+    assert.equal(localInteractiveDesktop, false);
   });
 
   test("bindExtensions repairs the placeholder model after session_start (#2782)", async () => {
     const order: string[] = [];
     const host = {
       _extensionRunner: {
+        setLocalInteractiveDesktop: (value: boolean) => { order.push(`desktop:${value}`); },
         setUIContext: () => {},
         bindCommandContext: () => {},
         onError: () => () => {},
@@ -81,8 +97,10 @@ describe("AgentSessionExtensionsModule", () => {
 
     await new AgentSessionExtensionsModule(host as any).bindExtensions({});
 
+    // The host signal resets to fail-closed when the binding does not explicitly grant it.
+    assert.equal(order[0], "desktop:false");
     // The repair must observe the registry AFTER session_start handlers ran.
-    assert.deepEqual(order, ["session_start", "repair"]);
+    assert.deepEqual(order.slice(1), ["session_start", "repair"]);
   });
 
   test("skills are no longer embedded in the system prompt (discovered on-demand)", () => {

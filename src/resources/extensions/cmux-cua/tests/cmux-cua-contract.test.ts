@@ -10,11 +10,75 @@ import registerCmuxCua, {
 	decodeEndSessionResult,
 	decodeStartSessionResult,
 	validateNativeToolInventory,
+	approveAxTextSharing,
+	beginInspection,
+	registerCuaSessionCleanup,
+	revokeCuaSessionState,
 } from "../index.ts";
 
 function envelope(structured: Record<string, unknown>) {
 	return { isError: false, structured };
 }
+
+describe("cmux CUA consent and inspection invalidation", () => {
+	test("requires separate AX-text sharing approval and remembers it only for the session", async () => {
+		const session = { axTextSharingApproved: false };
+		const prompts: string[] = [];
+		const ctx = {
+			hasUI: true,
+			ui: { confirm: async (title: string, message: string) => { prompts.push(`${title}: ${message}`); return true; } },
+		} as unknown as Parameters<typeof approveAxTextSharing>[1];
+
+		assert.equal(await approveAxTextSharing(session, ctx), true);
+		assert.equal(session.axTextSharingApproved, true);
+		assert.equal(await approveAxTextSharing(session, ctx), true);
+		assert.equal(prompts.length, 1);
+		assert.match(prompts[0], /accessibility text/i);
+		assert.match(prompts[0], /conversation history/i);
+	});
+
+	test("fails closed when AX-text sharing is denied or no UI is available", async () => {
+		const deniedSession = { axTextSharingApproved: false };
+		const deniedContext = {
+			hasUI: true,
+			ui: { confirm: async () => false },
+		} as unknown as Parameters<typeof approveAxTextSharing>[1];
+		assert.equal(await approveAxTextSharing(deniedSession, deniedContext), false);
+		assert.equal(deniedSession.axTextSharingApproved, false);
+
+		let promptCount = 0;
+		const headlessContext = {
+			hasUI: false,
+			ui: { confirm: async () => { promptCount += 1; return true; } },
+		} as unknown as Parameters<typeof approveAxTextSharing>[1];
+		assert.equal(await approveAxTextSharing({ axTextSharingApproved: false }, headlessContext), false);
+		assert.equal(promptCount, 0);
+	});
+
+	test("invalidates an old inspection grant before any reinspection failure", () => {
+		const session = { grant: { id: "old-grant" }, hadAction: false };
+		beginInspection(session);
+		assert.equal(session.grant, null);
+	});
+
+	test("revokes session-local CUA state before a fork", async () => {
+		const handlers = new Map<string, () => Promise<void>>();
+		const api = {
+			on: (event: string, handler: () => Promise<void>) => { handlers.set(event, handler); },
+		} as unknown as Pick<ExtensionAPI, "on">;
+		const session = { stopping: false, grant: { id: "live-grant" }, target: { id: "selected-window" }, axTextSharingApproved: true };
+		let cleanupCount = 0;
+		registerCuaSessionCleanup(api, async () => { cleanupCount += 1; revokeCuaSessionState(session); });
+
+		assert.ok(handlers.has("session_before_fork"));
+		await handlers.get("session_before_fork")?.();
+		assert.equal(cleanupCount, 1);
+		assert.equal(session.stopping, true);
+		assert.equal(session.grant, null);
+		assert.equal(session.target, null);
+		assert.equal(session.axTextSharingApproved, false);
+	});
+});
 
 describe("cmux CUA pinned contract", () => {
 	test("server identity, tool count, required names, and uniqueness are enforced", () => {

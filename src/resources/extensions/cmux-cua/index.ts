@@ -148,6 +148,7 @@ interface ActiveCuaSession {
 	handoff: CmuxHandoff;
 	target: SelectedWindow | null;
 	grant: InspectionGrant | null;
+	axTextSharingApproved: boolean;
 	started: boolean;
 	startAttempted: boolean;
 	hadAction: boolean;
@@ -508,6 +509,27 @@ async function requestConsent(ctx: ExtensionContext, signal?: AbortSignal): Prom
 	);
 }
 
+export async function approveAxTextSharing(
+	session: { axTextSharingApproved: boolean },
+	ctx: ExtensionContext,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	if (session.axTextSharingApproved) return true;
+	if (!ctx.hasUI) return false;
+	const approved = await ctx.ui.confirm(
+		"Share Accessibility Text with the Model?",
+		"Accessibility labels and visible text from the selected app window will be returned to the selected model and saved in this Pi session's conversation history. This is separate from permission to drive the app. Approve sharing for this session?",
+		{ signal, timeout: 30_000 },
+	);
+	if (approved) session.axTextSharingApproved = true;
+	return approved;
+}
+
+export function beginInspection(session: { grant: unknown; hadAction: boolean }): void {
+	session.grant = null;
+	if (session.hadAction) throw new Error("this session has dispatched a click; G-03 backend-quiescence proof is required before further native access");
+}
+
 async function listAllTools(client: Client, signal?: AbortSignal): Promise<unknown[]> {
 	const tools: unknown[] = [];
 	let cursor: string | undefined;
@@ -541,8 +563,10 @@ async function runNativeRead<T>(session: ActiveCuaSession, name: string, args: R
 }
 
 async function startCuaSession(ctx: ExtensionContext, signal?: AbortSignal): Promise<ActiveCuaSession> {
-	assertDesktopDriverProcessAllowed();
-	if (!ctx.hasUI || !(await requestConsent(ctx, signal))) throw new Error("explicit interactive driving consent was not granted");
+	assertDesktopDriverProcessAllowed(process.env, process.argv, ctx.isLocalInteractiveDesktop);
+	if (!ctx.isLocalInteractiveDesktop || !ctx.hasUI || !(await requestConsent(ctx, signal))) {
+		throw new Error("explicit local interactive driving consent was not granted");
+	}
 	const sessionBase = requiredManagedSessionBase(process.env);
 	const handoff = verifyHostHandoff(process.env);
 	const token = readCapabilityToken(handoff.tokenFilePath);
@@ -558,7 +582,7 @@ async function startCuaSession(ctx: ExtensionContext, signal?: AbortSignal): Pro
 	const lease = desktopOwnershipManager.acquire("cmux-cua", "session", randomUUID());
 	const session: ActiveCuaSession = {
 		client, transport, lease, proxyIdentity: null, sessionId: null, sessionBase, handoff,
-		target: null, grant: null, started: false, startAttempted: false, hadAction: false, stopping: false, lost: false,
+		target: null, grant: null, axTextSharingApproved: false, started: false, startAttempted: false, hadAction: false, stopping: false, lost: false,
 	};
 	activeSession = session;
 	transport.onclose = () => {
@@ -610,7 +634,9 @@ async function startCuaSession(ctx: ExtensionContext, signal?: AbortSignal): Pro
 
 async function selectTarget(session: ActiveCuaSession, ctx: ExtensionContext, signal?: AbortSignal): Promise<SelectedWindow> {
 	const apps = await runNativeRead(session, "list_apps", {}, signal, decodeApps);
-	if (!ctx.hasUI || apps.length === 0) throw new Error("interactive app selection is unavailable");
+	if (!ctx.isLocalInteractiveDesktop || !ctx.hasUI || apps.length === 0) {
+		throw new Error("local interactive app selection is unavailable");
+	}
 	const appOptions = apps.map((app) => `${app.name} (${app.bundleId})`);
 	const selectedAppLabel = await ctx.ui.select("Choose one running app for cmux Computer Use", appOptions);
 	if (typeof selectedAppLabel !== "string" || !selectedAppLabel) throw new Error("cmux CUA target selection was cancelled");
@@ -627,8 +653,9 @@ async function selectTarget(session: ActiveCuaSession, ctx: ExtensionContext, si
 }
 
 async function inspect(session: ActiveCuaSession, ctx: ExtensionContext, signal?: AbortSignal) {
-	if (session.hadAction) throw new Error("this session has dispatched a click; G-03 backend-quiescence proof is required before further native access");
+	beginInspection(session);
 	const target = session.target ?? await selectTarget(session, ctx, signal);
+	if (!(await approveAxTextSharing(session, ctx, signal))) throw new Error("separate AX-text sharing consent was not granted");
 	const snapshot = await runNativeRead(session, "get_window_state", { pid: target.pid, window_id: target.windowId, capture_mode: "ax", include_screenshot: false, max_elements: MAX_ELEMENTS, max_depth: MAX_TREE_DEPTH }, signal, (value) => decodeWindowState(value, target));
 	const bindings = buildSnapshotBindings(snapshot, target);
 	if (bindings.elements.size === 0 || bindings.observers.size === 0) throw new Error("selected window has no uniquely identifiable safe click target with a verifiable postcondition");
@@ -787,13 +814,23 @@ async function releaseUnstartedSession(session: ActiveCuaSession): Promise<void>
 	}
 }
 
+export function revokeCuaSessionState(session: {
+	stopping: boolean;
+	grant: unknown;
+	target: unknown;
+	axTextSharingApproved: boolean;
+}): void {
+	session.stopping = true;
+	session.grant = null;
+	session.target = null;
+	session.axTextSharingApproved = false;
+}
+
 async function stopSession(): Promise<void> {
 	const session = activeSession;
 	if (!session) return;
 	activeSession = null;
-	session.stopping = true;
-	session.grant = null;
-	session.target = null;
+	revokeCuaSessionState(session);
 	let endEvidence: DesktopTerminalEvidence | undefined;
 	if (session.started && session.sessionId && !session.lost) {
 		try {
@@ -829,6 +866,14 @@ function publicError(error: unknown) {
 	return toolResult({ status: "blocked", code, message: "cmux Computer Use failed closed; no automatic retry was made." }, true);
 }
 
+export function registerCuaSessionCleanup(pi: Pick<ExtensionAPI, "on">, cleanup: () => Promise<void>): void {
+	const handleBoundary = async () => { await cleanup(); };
+	pi.on("session_shutdown", handleBoundary);
+	pi.on("session_before_tree", handleBoundary);
+	pi.on("session_before_switch", handleBoundary);
+	pi.on("session_before_fork", handleBoundary);
+}
+
 export default function (pi: ExtensionAPI): void {
 	if (!G03_RUNTIME_ADMISSION_ENABLED) return;
 	pi.registerTool({
@@ -839,8 +884,10 @@ export default function (pi: ExtensionAPI): void {
 		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
 			return serialize(async () => {
 				try {
-					assertDesktopDriverProcessAllowed();
-					if (!ctx.hasUI) throw new Error("cmux CUA requires an interactive session");
+					assertDesktopDriverProcessAllowed(process.env, process.argv, ctx.isLocalInteractiveDesktop);
+					if (!ctx.isLocalInteractiveDesktop || !ctx.hasUI) {
+						throw new Error("cmux CUA requires a trusted local interactive session");
+					}
 					const session = activeSession ?? await startCuaSession(ctx, signal);
 					return toolResult(await inspect(session, ctx, signal));
 				} catch (error) {
@@ -854,10 +901,13 @@ export default function (pi: ExtensionAPI): void {
 		label: "Click and Verify in cmux",
 		description: "Perform one click on the previously inspected, approved target and verify its explicit AX-value postcondition. Click-only v1; text entry, coordinates, foreground fallback, retries, and raw native passthrough are unavailable.",
 		parameters: cmuxCuaActionParameters,
-		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			return serialize(async () => {
 				try {
-					assertDesktopDriverProcessAllowed();
+					assertDesktopDriverProcessAllowed(process.env, process.argv, ctx.isLocalInteractiveDesktop);
+					if (!ctx.isLocalInteractiveDesktop || !ctx.hasUI) {
+						throw new Error("cmux CUA requires a trusted local interactive session");
+					}
 					if (!activeSession || activeSession.lost || activeSession.stopping) throw new Error("inspect one window and obtain fresh consent before acting");
 					return toolResult(await act(activeSession, params as unknown as JsonRecord, signal));
 				} catch (error) {
@@ -866,7 +916,7 @@ export default function (pi: ExtensionAPI): void {
 			});
 		},
 	});
-	pi.on("session_shutdown", async () => { await serialize(async () => { await stopSession(); return undefined; }); });
-	pi.on("session_before_tree", async () => { await serialize(async () => { await stopSession(); return undefined; }); });
-	pi.on("session_before_switch", async () => { await serialize(async () => { await stopSession(); return undefined; }); });
+	registerCuaSessionCleanup(pi, async () => {
+		await serialize(async () => { await stopSession(); return undefined; });
+	});
 }

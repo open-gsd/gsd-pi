@@ -358,8 +358,10 @@ export interface CompactOptions {
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
-	/** Whether UI is available (false in print/RPC mode) */
+	/** Whether extension UI interactions are available; this may also be true in RPC mode. */
 	hasUI: boolean;
+	/** Trusted host signal, true only for the local interactive terminal UI. */
+	isLocalInteractiveDesktop: boolean;
 	/** Current working directory */
 	cwd: string;
 	/** Session manager (read-only) */

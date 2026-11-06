@@ -195,11 +195,25 @@ describe("desktop ownership manager", () => {
 		);
 	});
 
+	test("fails closed before lease access when trusted local admission is omitted", (t) => {
+		const lockDirectory = makeLockDirectory();
+		t.after(() => cleanupLockDirectory(lockDirectory));
+		const manager = createDesktopOwnershipManager(lockDirectory);
+		let executed = false;
+
+		assert.throws(
+			() => withDesktopOperation("mac-tools", "inspect", () => { executed = true; }, manager),
+			(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
+		);
+		assert.equal(executed, false);
+		assert.equal(manager.currentLease(), null);
+	});
+
 	test("releases an operation-scoped lease only after a validated callback returns", (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const manager = createDesktopOwnershipManager(lockDirectory);
-		const result = withDesktopOperation("mac-tools", "inspect", () => "terminal-result", manager);
+		const result = withDesktopOperation("mac-tools", "inspect", () => "terminal-result", manager, true);
 		assert.equal(result, "terminal-result");
 		assert.equal(manager.currentLease(), null);
 	});
@@ -212,7 +226,7 @@ describe("desktop ownership manager", () => {
 		assert.throws(() => {
 			withDesktopOperation("mac-tools", "action", () => {
 				throw new Error("simulated uncertain dispatch");
-			}, manager);
+			}, manager, true);
 		});
 		assert.throws(
 			() => manager.acquire("cmux-cua", "session"),
@@ -234,18 +248,74 @@ describe("desktop driver process admission", () => {
 
 	test("rejects standard subagent and parallel-worker processes", () => {
 		assert.throws(
-			() => assertDesktopDriverProcessAllowed({ GSD_SUBAGENT_CHILD: "1" }, []),
+			() => assertDesktopDriverProcessAllowed({ GSD_SUBAGENT_CHILD: "1" }, [], true),
 			(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
 		);
 		assert.throws(
-			() => assertDesktopDriverProcessAllowed({ GSD_PARALLEL_WORKER: "1" }, []),
+			() => assertDesktopDriverProcessAllowed({ GSD_PARALLEL_WORKER: "1" }, [], true),
 			(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
 		);
 	});
 
 	test("rejects direct headless workers even if a marker is missing", () => {
 		assert.throws(
-			() => assertDesktopDriverProcessAllowed({}, ["/path/to/gsd", "headless", "--json", "auto"]),
+			() => assertDesktopDriverProcessAllowed({}, ["/path/to/gsd", "headless", "--json", "auto"], true),
+			(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
+		);
+	});
+
+	test("rejects GSD-owned headless RPC children and non-interactive CLI entry points", () => {
+		const blockedInvocations: Array<[NodeJS.ProcessEnv, string[]]> = [
+			[{ GSD_HEADLESS: "1" }, ["node", "rpc-client.js", "--mode", "rpc"]],
+			[{}, ["node", "gsd.js", "--print", "prompt"]],
+			[{}, ["node", "pi.js", "-p", "prompt"]],
+			[{}, ["node", "gsd.js", "--append-system-prompt", "--", "--mode", "rpc"]],
+			[{}, ["node", "gsd.js", "--append-system-prompt", "--", "--print"]],
+			[{}, ["node", "pi.js", "--host", "--print", "prompt"]],
+			[{}, ["node", "pi.js", "--host", "--mode", "rpc"]],
+			[{}, ["node", "gsd.js", "--host", "--append-system-prompt", "--print", "prompt"]],
+			[{}, ["node", "gsd.js", "--host", "--model", "--mode", "rpc"]],
+			[{}, ["node", "pi.js", "--system-prompt", "--append-system-prompt", "--print", "prompt"]],
+			[{}, ["node", "pi.js", "--system-prompt", "--model", "--mode", "rpc"]],
+			[{}, ["node", "pi.js", "-e", "--append-system-prompt", "--print", "prompt"]],
+			[{}, ["node", "pi.js", "--mode", "rpc"]],
+			[{}, ["node", "pi.js", "--mode=text"]],
+			[{}, ["node", "pi.js", "--system-prompt", "--", "--mode", "rpc"]],
+			[{}, ["node", "pi.js", "--system-prompt", "--", "--print"]],
+			[{}, ["node", "pi.js", "--", "--mode", "rpc"]],
+			[{}, ["node", "pi.js", "--", "--print"]],
+		];
+		for (const [env, argv] of blockedInvocations) {
+			assert.throws(
+				() => assertDesktopDriverProcessAllowed(env, argv, true),
+				(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
+			);
+		}
+	});
+
+	test("fails closed when a consumed prompt value resembles a non-interactive flag", () => {
+		assert.throws(
+			() => assertDesktopDriverProcessAllowed({}, ["node", "gsd.js", "--append-system-prompt", "--print"], true),
+			(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
+		);
+		assert.throws(
+			() => assertDesktopDriverProcessAllowed({}, ["node", "pi.js", "-e", "--append-system-prompt", "--print"], true),
+			(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
+		);
+		assert.doesNotThrow(() => assertDesktopDriverProcessAllowed({}, ["node", "gsd.js", "--append-system-prompt", "safe prompt"], true));
+	});
+
+	test("fails closed when parser-specific values resemble non-interactive flags", () => {
+		assert.throws(
+			() => assertDesktopDriverProcessAllowed({}, ["node", "pi.js", "--system-prompt", "--print"], true),
+			(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
+		);
+	});
+
+	test("allows terminal-supervised auto and blocks auto without an interactive TTY", () => {
+		assert.doesNotThrow(() => assertDesktopDriverProcessAllowed({}, ["node", "gsd.js", "auto"], true));
+		assert.throws(
+			() => assertDesktopDriverProcessAllowed({}, ["node", "gsd.js", "auto"], false),
 			(error: unknown) => error instanceof DesktopOwnershipError && error.code === "child-process",
 		);
 	});

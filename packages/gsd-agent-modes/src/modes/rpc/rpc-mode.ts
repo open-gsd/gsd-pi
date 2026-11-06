@@ -571,6 +571,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 	// Track readiness so consumers can know when extension commands are available.
 	let extensionsReady = false;
 	const extensionsReadyPromise = session.bindExtensions({
+		localInteractiveDesktop: false,
 		uiContext: createExtensionUIContext(),
 		commandContextActions: createDefaultCommandContextActions(session),
 		shutdownHandler: () => {

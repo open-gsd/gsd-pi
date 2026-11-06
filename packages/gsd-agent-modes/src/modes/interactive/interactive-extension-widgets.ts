@@ -24,6 +24,7 @@ export async function initExtensions(host: InteractiveModeDelegateHost): Promise
 		if (host.options.bindExtensions !== false) {
 			const uiContext = host.createExtensionUIContext();
 			await host.session.bindExtensions({
+				localInteractiveDesktop: Boolean(process.stdin.isTTY && process.stdout.isTTY),
 				uiContext,
 				commandContextActions: {
 					waitForIdle: () => host.session.agent.waitForIdle(),

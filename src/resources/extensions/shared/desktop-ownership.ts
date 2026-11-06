@@ -546,14 +546,38 @@ function readOwnedState(active: ActiveLease, lease: DesktopOwnershipLease): Owne
 	return state;
 }
 
+// Do not parse option arity here: GSD, Pi, and extensions have different
+// value-taking flags, so a consumed argument can hide a later noninteractive
+// mode. Any explicit --print/-p or noninteractive --mode marker fails closed.
+function isNonInteractiveCliInvocation(argv: readonly string[]): boolean {
+	const command = argv[2];
+	if (command === "headless") return true;
+
+	for (let index = 2; index < argv.length; index += 1) {
+		const argument = argv[index];
+		if (argument === "--mode") {
+			const mode = argv[index + 1];
+			if (mode !== "interactive") return true;
+			continue;
+		}
+		if (argument.startsWith("--mode=") && argument.slice("--mode=".length) !== "interactive") return true;
+		if (argument === "--print" || argument === "-p" || argument.startsWith("--print=")) return true;
+	}
+	return false;
+}
+
 export function assertDesktopDriverProcessAllowed(
-	env: NodeJS.ProcessEnv = process.env,
-	argv: readonly string[] = process.argv,
+	env: NodeJS.ProcessEnv,
+	argv: readonly string[],
+	isLocalInteractiveDesktop: boolean,
 ): void {
 	if (
+		!isLocalInteractiveDesktop ||
 		env.GSD_SUBAGENT_CHILD === "1" ||
 		env.GSD_PARALLEL_WORKER === "1" ||
-		argv.some((argument) => argument === "headless")
+		env.GSD_HEADLESS === "1" ||
+		argv.some((argument) => argument === "headless") ||
+		isNonInteractiveCliInvocation(argv)
 	) {
 		throw ownershipError("child-process");
 	}
@@ -576,7 +600,6 @@ export function createDesktopOwnershipManager(requestedSafetyDirectory?: string)
 
 	return {
 		acquire(driver, scope, requestedGeneration) {
-			assertDesktopDriverProcessAllowed();
 			if (active) throw ownershipError("busy");
 			const safeDirectory = getSafetyDirectory();
 			const mutex = openKernelMutex(safeDirectory);
@@ -660,7 +683,6 @@ export function createDesktopOwnershipManager(requestedSafetyDirectory?: string)
 		},
 
 		beginOperation(lease, kind) {
-			assertDesktopDriverProcessAllowed();
 			const current = assertActiveLease(lease);
 			const state = readOwnedState(current, lease);
 			if (state.status === "quarantined") throw ownershipError("quarantined");
@@ -804,8 +826,9 @@ export function withDesktopOperation<T>(
 	kind: DesktopOperationKind,
 	execute: () => T,
 	manager: DesktopOwnershipManager = desktopOwnershipManager,
+	isInteractive: boolean = false,
 ): T {
-	assertDesktopDriverProcessAllowed();
+	assertDesktopDriverProcessAllowed(process.env, process.argv, isInteractive);
 	let lease = manager.currentLease();
 	let acquiredHere = false;
 	if (!lease) {

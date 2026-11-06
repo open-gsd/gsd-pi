@@ -38,6 +38,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	}
 	// Set up extensions for print mode (no UI)
 	await session.bindExtensions({
+		localInteractiveDesktop: false,
 		commandContextActions: createDefaultCommandContextActions(session),
 		onError: (err) => {
 			console.error(`Extension error (${err.extensionPath}): ${err.error}`);

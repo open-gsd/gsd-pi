@@ -12,7 +12,7 @@
  *  - All Swift debug output goes to stderr; only JSON on stdout
  */
 
-import type { ExtensionAPI } from "@gsd/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 import { StringEnum, Type } from "@gsd/pi-ai";
 import { execFileSync } from "node:child_process";
 import { statSync, readdirSync } from "node:fs";
@@ -172,6 +172,7 @@ export function runMacAgentWithOwnership(
 	command: string,
 	execute: () => MacAgentResponse,
 	manager: DesktopOwnershipManager = desktopOwnershipManager,
+	isInteractive: boolean = false,
 ): MacAgentResponse {
 	const kind = macAgentOperationKind(command);
 	const response = withDesktopOperation("mac-tools", kind, () => {
@@ -183,15 +184,24 @@ export function runMacAgentWithOwnership(
 			throw new Error(`mac-agent returned an unverified result (command: ${command}); desktop ownership is quarantined.`);
 		}
 		return result;
-	}, manager);
+	}, manager, isInteractive);
 	if (!response.success) throw new Error(`mac-agent returned a terminal failure (command: ${command}).`);
 	return response;
 }
 
-function execMacAgent(command: string, params?: Record<string, any>): MacAgentResponse {
-	assertDesktopDriverProcessAllowed();
+export function isMacToolsContextInteractive(
+	isLocalInteractiveDesktop: boolean,
+	stdinIsTTY: boolean | undefined,
+	stdoutIsTTY: boolean | undefined,
+): boolean {
+	return isLocalInteractiveDesktop && Boolean(stdinIsTTY && stdoutIsTTY);
+}
+
+function execMacAgent(command: string, params: Record<string, any> | undefined, isLocalInteractiveDesktop: boolean): MacAgentResponse {
+	const isInteractive = isMacToolsContextInteractive(isLocalInteractiveDesktop, process.stdin.isTTY, process.stdout.isTTY);
+	assertDesktopDriverProcessAllowed(process.env, process.argv, isInteractive);
 	ensureCompiled();
-	return runMacAgentWithOwnership(command, () => execMacAgentUnlocked(command, params));
+	return runMacAgentWithOwnership(command, () => execMacAgentUnlocked(command, params), desktopOwnershipManager, isInteractive);
 }
 
 function execMacAgentUnlocked(command: string, params?: Record<string, any>): MacAgentResponse {
@@ -256,8 +266,8 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({}),
 
-		async execute(_toolCallId: any) {
-			const result = execMacAgent("checkPermissions");
+		async execute(_toolCallId: any, _params: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+			const result = execMacAgent("checkPermissions", undefined, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_check_permissions: " + result.error);
 			}
@@ -296,8 +306,8 @@ export default function (pi: ExtensionAPI) {
 			includeBackground: Type.Optional(Type.Boolean({ description: "Include background/accessory apps (default: false)" })),
 		}),
 
-		async execute(_toolCallId: any, { includeBackground }: { includeBackground?: boolean }) {
-			const result = execMacAgent("listApps", includeBackground ? { includeBackground: true } : undefined);
+		async execute(_toolCallId: any, { includeBackground }: { includeBackground?: boolean }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+			const result = execMacAgent("listApps", includeBackground ? { includeBackground: true } : undefined, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_list_apps: " + result.error);
 			}
@@ -328,7 +338,7 @@ export default function (pi: ExtensionAPI) {
 			bundleId: Type.Optional(Type.String({ description: "Bundle identifier (e.g. 'com.apple.TextEdit')" })),
 		}),
 
-		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }) {
+		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!name && !bundleId) {
 				throw new Error("mac_launch_app: provide either 'name' or 'bundleId' parameter");
 			}
@@ -336,7 +346,7 @@ export default function (pi: ExtensionAPI) {
 			if (name) params.name = name;
 			if (bundleId) params.bundleId = bundleId;
 
-			const result = execMacAgent("launchApp", params);
+			const result = execMacAgent("launchApp", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_launch_app: " + result.error);
 			}
@@ -366,7 +376,7 @@ export default function (pi: ExtensionAPI) {
 			bundleId: Type.Optional(Type.String({ description: "Bundle identifier" })),
 		}),
 
-		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }) {
+		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!name && !bundleId) {
 				throw new Error("mac_activate_app: provide either 'name' or 'bundleId' parameter");
 			}
@@ -374,7 +384,7 @@ export default function (pi: ExtensionAPI) {
 			if (name) params.name = name;
 			if (bundleId) params.bundleId = bundleId;
 
-			const result = execMacAgent("activateApp", params);
+			const result = execMacAgent("activateApp", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_activate_app: " + result.error);
 			}
@@ -403,7 +413,7 @@ export default function (pi: ExtensionAPI) {
 			bundleId: Type.Optional(Type.String({ description: "Bundle identifier" })),
 		}),
 
-		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }) {
+		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!name && !bundleId) {
 				throw new Error("mac_quit_app: provide either 'name' or 'bundleId' parameter");
 			}
@@ -411,7 +421,7 @@ export default function (pi: ExtensionAPI) {
 			if (name) params.name = name;
 			if (bundleId) params.bundleId = bundleId;
 
-			const result = execMacAgent("quitApp", params);
+			const result = execMacAgent("quitApp", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_quit_app: " + result.error);
 			}
@@ -441,8 +451,8 @@ export default function (pi: ExtensionAPI) {
 			app: Type.String({ description: "Application name (e.g. 'TextEdit') or bundle identifier (e.g. 'com.apple.TextEdit')" }),
 		}),
 
-		async execute(_toolCallId: any, { app }: { app: string }) {
-			const result = execMacAgent("listWindows", { app });
+		async execute(_toolCallId: any, { app }: { app: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+			const result = execMacAgent("listWindows", { app }, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_list_windows: " + result.error);
 			}
@@ -503,12 +513,12 @@ export default function (pi: ExtensionAPI) {
 			matchType?: string;
 			maxDepth?: number;
 			maxCount?: number;
-		}) {
+		}, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const mode = args.mode ?? "search";
 
 			// --- Focused mode ---
 			if (mode === "focused") {
-				const result = execMacAgent("getFocusedElement", { app: args.app });
+				const result = execMacAgent("getFocusedElement", { app: args.app }, ctx.isLocalInteractiveDesktop);
 				if (!result.success) {
 					throw new Error("mac_find (focused): " + result.error);
 				}
@@ -528,7 +538,7 @@ export default function (pi: ExtensionAPI) {
 				if (args.maxDepth !== undefined) params.maxDepth = args.maxDepth;
 				if (args.maxCount !== undefined) params.maxCount = args.maxCount;
 
-				const result = execMacAgent("getTree", params);
+				const result = execMacAgent("getTree", params, ctx.isLocalInteractiveDesktop);
 				if (!result.success) {
 					throw new Error("mac_find (tree): " + result.error);
 				}
@@ -566,7 +576,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.maxDepth !== undefined) params.maxDepth = args.maxDepth;
 			if (args.maxCount !== undefined) params.maxCount = args.maxCount;
 
-			const result = execMacAgent("findElements", params);
+			const result = execMacAgent("findElements", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_find (search): " + result.error);
 			}
@@ -619,12 +629,12 @@ export default function (pi: ExtensionAPI) {
 			maxCount: Type.Optional(Type.Number({ description: "Maximum elements to include (default: 50)" })),
 		}),
 
-		async execute(_toolCallId: any, args: { app: string; maxDepth?: number; maxCount?: number }) {
+		async execute(_toolCallId: any, args: { app: string; maxDepth?: number; maxCount?: number }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const params: Record<string, any> = { app: args.app };
 			params.maxDepth = args.maxDepth ?? 3;
 			params.maxCount = args.maxCount ?? 50;
 
-			const result = execMacAgent("getTree", params);
+			const result = execMacAgent("getTree", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_get_tree: " + result.error);
 			}
@@ -685,7 +695,7 @@ export default function (pi: ExtensionAPI) {
 			value?: string;
 			identifier?: string;
 			matchType?: string;
-		}) {
+		}, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!args.role && !args.title && !args.value && !args.identifier) {
 				throw new Error("mac_click: provide at least one search criterion (role, title, value, or identifier)");
 			}
@@ -696,7 +706,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.identifier) params.identifier = args.identifier;
 			if (args.matchType) params.matchType = args.matchType;
 
-			const result = execMacAgent("clickElement", params);
+			const result = execMacAgent("clickElement", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_click: " + result.error);
 			}
@@ -744,7 +754,7 @@ export default function (pi: ExtensionAPI) {
 			value?: string;
 			identifier?: string;
 			matchType?: string;
-		}) {
+		}, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!args.role && !args.title && !args.value && !args.identifier) {
 				throw new Error("mac_type: provide at least one search criterion (role, title, value, or identifier)");
 			}
@@ -755,7 +765,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.identifier) params.identifier = args.identifier;
 			if (args.matchType) params.matchType = args.matchType;
 
-			const result = execMacAgent("typeText", params);
+			const result = execMacAgent("typeText", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_type: " + result.error);
 			}
@@ -793,13 +803,13 @@ export default function (pi: ExtensionAPI) {
 			retina: Type.Optional(Type.Boolean({ description: "Capture at full pixel resolution (default: false)" })),
 		}),
 
-		async execute(_toolCallId: any, args: { windowId: number; format?: string; quality?: number; retina?: boolean }) {
+		async execute(_toolCallId: any, args: { windowId: number; format?: string; quality?: number; retina?: boolean }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const params: Record<string, any> = { windowId: args.windowId };
 			if (args.format) params.format = args.format;
 			if (args.quality !== undefined) params.quality = args.quality;
 			if (args.retina !== undefined) params.retina = args.retina;
 
-			const result = execMacAgent("screenshotWindow", params);
+			const result = execMacAgent("screenshotWindow", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_screenshot: " + result.error);
 			}
@@ -855,7 +865,7 @@ export default function (pi: ExtensionAPI) {
 			value?: string;
 			identifier?: string;
 			matchType?: string;
-		}) {
+		}, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!args.attribute && (!args.attributes || args.attributes.length === 0)) {
 				throw new Error("mac_read: provide 'attribute' (single) or 'attributes' (array) parameter");
 			}
@@ -871,7 +881,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.identifier) params.identifier = args.identifier;
 			if (args.matchType) params.matchType = args.matchType;
 
-			const result = execMacAgent("readAttribute", params);
+			const result = execMacAgent("readAttribute", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_read: " + result.error);
 			}
