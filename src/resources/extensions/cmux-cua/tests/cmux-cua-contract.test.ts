@@ -182,12 +182,16 @@ describe("cmux CUA pinned contract", () => {
 			captureIdentity: (pid) => { events.push(`capture-${pid}`); return identity; },
 			closeClient: async () => { events.push("client-close"); transportPid = null; },
 			closeTransport: async () => { events.push("transport-close"); },
-			isExited: (candidate) => { events.push(`check-${candidate.pid}`); return false; },
-			budgetMs: 25,
+			isExited: (candidate) => {
+				events.push(`check-${candidate.pid}`);
+				assert.equal(candidate, identity);
+				return true;
+			},
+			budgetMs: 1_000,
 		});
 		assert.deepEqual(events, ["read-pid", "capture-4521", "client-close", "transport-close", "check-4521"]);
 		assert.equal(result.identity, identity);
-		assert.equal(result.exited, false);
+		assert.equal(result.exited, true);
 	});
 
 	test("the cleanup deadline includes client and transport close operations", async () => {
