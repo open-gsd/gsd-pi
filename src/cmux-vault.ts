@@ -221,7 +221,7 @@ export interface CmuxVaultOptions {
   transport?: CmuxVaultTransport
   clearBinding?: (params: CmuxVaultClearRequest) => Promise<unknown>
   extensionPaths?: () => string[]
-  getPreferences?: (cwd: string) => Promise<{ enabled?: boolean; vault?: boolean } | undefined>
+  getPreferences?: (cwd: string) => Promise<{ enabled?: boolean; vault?: boolean; resume?: boolean } | undefined>
 }
 
 interface VaultBinding {
@@ -230,6 +230,7 @@ interface VaultBinding {
   updatedAt: number
   workspace: string
   surface: string
+  vaultEnabled: boolean
 }
 
 function resumeResult(value: unknown): { result: Record<string, unknown>, binding: Record<string, unknown> | null } {
@@ -245,10 +246,13 @@ function resumeResult(value: unknown): { result: Record<string, unknown>, bindin
   return { result, binding: binding as Record<string, unknown> | null }
 }
 
-export function cmuxVaultEnabled(env: NodeJS.ProcessEnv, pid: number): boolean {
+export function cmuxSurfaceOwnerEnabled(env: NodeJS.ProcessEnv, pid: number): boolean {
   return env.GSD_CMUX_VAULT_OWNER_PID === String(pid)
     && Boolean(env.CMUX_WORKSPACE_ID?.trim() && env.CMUX_SURFACE_ID?.trim())
-    && env.GSD_CMUX_VAULT_EXTERNAL_BRIDGE !== '1'
+}
+
+export function cmuxVaultEnabled(env: NodeJS.ProcessEnv, pid: number): boolean {
+  return cmuxSurfaceOwnerEnabled(env, pid) && env.GSD_CMUX_VAULT_EXTERNAL_BRIDGE !== '1'
 }
 
 export function cmuxVaultConfigured(
@@ -257,6 +261,14 @@ export function cmuxVaultConfigured(
 ): boolean {
   return preferences?.enabled === true && env.GSD_CMUX_VAULT !== '0'
     && (env.GSD_CMUX_VAULT === '1' || preferences.vault === true)
+}
+
+export function cmuxResumeConfigured(
+  env: NodeJS.ProcessEnv,
+  preferences: { enabled?: boolean; resume?: boolean } | undefined,
+): boolean {
+  return preferences?.enabled === true && env.GSD_CMUX_RESUME !== '0'
+    && (env.GSD_CMUX_RESUME === '1' || preferences.resume === true)
 }
 
 /** Recognize only the upstream managed Pi bridge, not arbitrary "cmux" filenames. */
@@ -286,6 +298,8 @@ export class CmuxVaultBridge {
   private stopped = false
   private injected: Promise<boolean> | undefined
   private lastIdentity: string | undefined
+  private blockedAutoResumeIdentity: string | undefined
+  private unsafeAutoResumeIdentity: string | undefined
   private readonly snapshots = new Map<string, VaultIdentity>()
 
   constructor(options: CmuxVaultOptions) {
@@ -296,7 +310,7 @@ export class CmuxVaultBridge {
   }
 
   update(manager: CmuxVaultSession, hasUI: boolean, refresh = false): void {
-    if (this.stopped || !hasUI || !cmuxVaultEnabled(this.env, this.options.pid ?? process.pid)) return
+    if (this.stopped || !hasUI || !cmuxSurfaceOwnerEnabled(this.env, this.options.pid ?? process.pid)) return
     try {
       const path = manager.getSessionFile()
       const cwd = manager.getCwd()
@@ -319,7 +333,7 @@ export class CmuxVaultBridge {
   stop(): void {
     if (this.stopped) return
     this.stopped = true
-    if (!cmuxVaultEnabled(this.env, this.options.pid ?? process.pid)) return
+    if (!cmuxSurfaceOwnerEnabled(this.env, this.options.pid ?? process.pid)) return
     this.pending = null
     this.start()
   }
@@ -343,16 +357,32 @@ export class CmuxVaultBridge {
       this.pending = undefined
       try {
         if (!identity) {
+          // End this session's local Vault presence even if guarded binding clear fails.
+          await this.endPresence()
           await this.clear()
           continue
         }
-        if (!cmuxVaultConfigured(this.env, await this.options.getPreferences?.(identity.cwd))) {
-          this.snapshots.clear()
-          await this.clear()
-          continue
-        }
+        const preferences = await this.options.getPreferences?.(identity.cwd)
         this.injected ??= hasManagedCmuxBridge(this.options.extensionPaths?.() ?? [])
-        if (await this.injected) continue
+        const vaultEnabled = cmuxVaultEnabled(this.env, this.options.pid ?? process.pid)
+          && cmuxVaultConfigured(this.env, preferences) && !await this.injected
+        const resumeEnabled = cmuxResumeConfigured(this.env, preferences)
+        const identityKey = JSON.stringify([identity.id, identity.path, identity.cwd])
+        if (resumeEnabled) {
+          this.blockedAutoResumeIdentity = undefined
+          this.unsafeAutoResumeIdentity = undefined
+        }
+        if (!vaultEnabled) await this.endPresence()
+        // Retry only on a later lifecycle update, not by re-registering an unsafe
+        // automatic binding or spinning until a guarded clear succeeds.
+        if (!resumeEnabled && this.unsafeAutoResumeIdentity && !await this.clearAutomaticBinding()) continue
+        if (!vaultEnabled && !resumeEnabled) {
+          this.snapshots.clear()
+          if (this.binding) await this.clear()
+          else if (this.blockedAutoResumeIdentity !== identityKey) await this.clearPersistedAutomaticBinding(identity)
+          continue
+        }
+        if (!resumeEnabled && this.blockedAutoResumeIdentity === identityKey) continue
         // A fresh session may have a path before its first assistant is persisted.
         // Do not advertise a file that cannot yet be opened.
         const persisted = await stat(identity.path).then(info => info.isFile(), () => false)
@@ -360,13 +390,13 @@ export class CmuxVaultBridge {
           await this.clear()
           continue
         }
-        await this.publish(identity)
+        await this.publish(identity, vaultEnabled, resumeEnabled)
       } catch { /* Missing CLI, old protocol, stale socket and I/O failures are optional. */ }
     }
   }
 
-  private async clear(): Promise<void> {
-    if (!this.binding) return
+  private async clear(): Promise<boolean> {
+    if (!this.binding) return true
     const params: CmuxVaultClearRequest = {
       workspace_id: this.binding.workspace,
       surface_id: this.binding.surface,
@@ -380,12 +410,76 @@ export class CmuxVaultBridge {
     if (!result || typeof result !== 'object' || typeof (result as { cleared?: unknown }).cleared !== 'boolean') {
       throw new Error('invalid cmux clear result')
     }
-    if ((result as { cleared: boolean }).cleared) await this.feed('SessionEnd', this.binding)
-    this.binding = undefined
+    const cleared = (result as { cleared: boolean }).cleared
+    if (cleared) {
+      await this.endPresence()
+      this.binding = undefined
+    } else {
+      this.lastIdentity = undefined
+    }
+    return cleared
   }
 
-  private async publish(identity: VaultIdentity): Promise<void> {
-    const argv = ['env', `GSD_HOME=${this.options.home}`, ...this.options.launcher, '--session', identity.path]
+  private async endPresence(binding = this.binding): Promise<void> {
+    if (!binding?.vaultEnabled) return
+    binding.vaultEnabled = false
+    await this.feed('SessionEnd', binding)
+  }
+
+  private launchArguments(identity: VaultIdentity): string[] {
+    return [
+      'env', `GSD_HOME=${this.options.home}`, ...this.options.launcher,
+      '--resume-exact', identity.path, identity.id,
+    ]
+  }
+
+  private matchesIdentity(
+    identity: VaultIdentity, result: Record<string, unknown>, binding: Record<string, unknown> | null,
+  ): boolean {
+    const launch = binding?.launch_command as { arguments?: unknown } | null
+    return binding?.kind === 'gsd' && binding.source === 'agent-hook'
+      && binding.checkpoint_id === identity.path && binding.cwd === identity.cwd
+      && typeof binding.updated_at === 'number' && Number.isFinite(binding.updated_at)
+      && typeof result.workspace_id === 'string' && typeof result.surface_id === 'string'
+      && JSON.stringify(launch?.arguments) === JSON.stringify(this.launchArguments(identity))
+  }
+
+  private async clearPersistedAutomaticBinding(identity: VaultIdentity): Promise<void> {
+    const { result, binding } = resumeResult(await this.transport(['surface', 'resume', 'show', ...this.target]))
+    // No local ownership: adopt only this exact launch identity and generation.
+    // A disabled bridge must not claim manual, foreign or other-session bindings.
+    if (!binding || binding.auto_resume !== true || !this.matchesIdentity(identity, result, binding)) return
+    this.binding = {
+      path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
+      workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
+    }
+    this.unsafeAutoResumeIdentity = JSON.stringify([identity.id, identity.path, identity.cwd])
+    await this.clearAutomaticBinding()
+  }
+
+  private async clearAutomaticBinding(): Promise<boolean> {
+    await this.endPresence()
+    let cleared: boolean
+    try {
+      cleared = await this.clear()
+    } catch (error) {
+      this.lastIdentity = undefined
+      console.warn('[gsd/cmux] Automatic restore is disabled, but clearing the GSD binding failed; a later lifecycle update will retry.')
+      throw error
+    }
+    if (!cleared) {
+      console.warn('[gsd/cmux] Automatic restore is disabled, but cmux changed the GSD binding before it could be cleared.')
+      return false
+    }
+    this.blockedAutoResumeIdentity = this.unsafeAutoResumeIdentity
+    this.unsafeAutoResumeIdentity = undefined
+    console.warn('[gsd/cmux] Cleared a cmux automatic-restore binding because cmux.resume is disabled; enable it with /gsd cmux resume on to retain it.')
+    return true
+  }
+
+  private async publish(identity: VaultIdentity, vaultEnabled: boolean, resumeEnabled: boolean): Promise<void> {
+    const argv = this.launchArguments(identity)
+    const name = vaultEnabled ? vaultTitle(identity) : 'GSD session'
     const observed = resumeResult(await this.transport(['surface', 'resume', 'show', ...this.target]))
     if (observed.binding) {
       const previous = observed.binding
@@ -400,24 +494,36 @@ export class CmuxVaultBridge {
     }
     const { result, binding } = resumeResult(await this.transport([
       'surface', 'resume', 'set', ...this.target,
-      '--name', vaultTitle(identity), '--kind', 'gsd', '--checkpoint-id', identity.path,
+      '--name', name, '--kind', 'gsd', '--checkpoint-id', identity.path,
       '--source', 'agent-hook', '--cwd', identity.cwd, '--',
       ...argv,
     ]))
-    const launch = binding?.launch_command as { arguments?: unknown } | null
-    if (binding?.kind !== 'gsd' || binding.source !== 'agent-hook'
-      || binding.checkpoint_id !== identity.path || binding.cwd !== identity.cwd
-      || binding.auto_resume !== false || typeof binding.updated_at !== 'number'
-      || !Number.isFinite(binding.updated_at)
-      || JSON.stringify(launch?.arguments) !== JSON.stringify(argv)) {
-      throw new Error('cmux did not accept the requested manual GSD binding')
+    const bindingMatchesRequest = this.matchesIdentity(identity, result, binding)
+    if (binding && bindingMatchesRequest && binding.auto_resume === true && !resumeEnabled) {
+      await this.endPresence()
+      this.binding = {
+        path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
+        workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
+      }
+      this.unsafeAutoResumeIdentity = JSON.stringify([identity.id, identity.path, identity.cwd])
+      if (!await this.clearAutomaticBinding()) {
+        throw new Error('cmux changed the GSD binding before the disabled auto-resume binding could be cleared')
+      }
+      throw new Error('cmux marked GSD restore automatic while cmux.resume is disabled; binding cleared')
+    }
+    // cmux owns the trusted-prefix decision. GSD never approves a command or
+    // requests auto-resume; this field only reports cmux's effective policy.
+    if (!binding || !bindingMatchesRequest || typeof binding.auto_resume !== 'boolean') {
+      throw new Error('cmux did not accept the requested GSD session binding')
     }
     const previousBinding = this.binding
-    this.binding = {
-      path: identity.path, updatedAt: binding.updated_at,
+    const currentBinding: VaultBinding = {
+      path: identity.path, updatedAt: binding.updated_at as number,
       cwd: identity.cwd,
       workspace: result.workspace_id as string, surface: result.surface_id as string,
+      vaultEnabled,
     }
+    this.binding = currentBinding
     // Surface updates may coalesce across auto's rapid session handoffs. Keep
     // the latest metadata per native file, not just the latest surface target.
     const snapshots = new Map(this.snapshots)
@@ -425,13 +531,16 @@ export class CmuxVaultBridge {
     this.snapshots.clear()
     for (const snapshot of snapshots.values()) {
       try {
-        if (!cmuxVaultConfigured(this.env, await this.options.getPreferences?.(snapshot.cwd))) continue
+        if (await this.injected || !cmuxVaultEnabled(this.env, this.options.pid ?? process.pid)
+          || !cmuxVaultConfigured(this.env, await this.options.getPreferences?.(snapshot.cwd))) continue
         if (!await stat(snapshot.path).then(info => info.isFile(), () => false)) continue
         await this.writeMetadata(snapshot)
       } catch { /* One failed metadata write must not discard other observed sessions. */ }
     }
-    if (previousBinding && previousBinding.path !== identity.path) await this.feed('SessionEnd', previousBinding)
-    await this.feed('SessionStart', this.binding)
+    if (previousBinding && (previousBinding.path !== identity.path || !vaultEnabled)) {
+      await this.endPresence(previousBinding)
+    }
+    if (vaultEnabled) await this.feed('SessionStart', currentBinding)
   }
 
   private async writeMetadata(identity: VaultIdentity): Promise<void> {

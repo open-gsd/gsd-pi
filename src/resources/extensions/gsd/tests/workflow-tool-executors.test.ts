@@ -4,7 +4,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, readFileSync, existsSync, symlinkSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, relative } from "node:path";
 import { hostname, tmpdir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   openDatabase,
@@ -352,12 +352,39 @@ async function seedAdoptedCompletedMilestone(base: string): Promise<void> {
 /** Record a gsd_exec / gsd_uat_exec run as the host does when the command ends. */
 function recordUatExecEvidence(run: {
   id: string;
+  cwd: string;
   exit_code?: number | null;
   signal?: string | null;
   timed_out?: boolean;
   aborted?: boolean;
   metadata: { kind: string; milestoneId?: string; sliceId?: string; checkId?: string };
 }): void {
+  const cwd = run.cwd;
+  const execDir = join(cwd, ".gsd", "exec");
+  mkdirSync(execDir, { recursive: true });
+  const stdout = Buffer.from(`synthetic output for ${run.id}\\n`);
+  const stderr = Buffer.alloc(0);
+  const stdoutPath = join(execDir, `${run.id}.stdout`);
+  const stderrPath = join(execDir, `${run.id}.stderr`);
+  const startedAt = new Date().toISOString();
+  writeFileSync(stdoutPath, stdout);
+  writeFileSync(stderrPath, stderr);
+  writeFileSync(join(execDir, `${run.id}.meta.json`), JSON.stringify({
+    id: run.id,
+    runtime: "bash",
+    started_at: startedAt,
+    exit_code: run.exit_code ?? 0,
+    signal: run.signal ?? null,
+    timed_out: run.timed_out ?? false,
+    aborted: run.aborted ?? false,
+    duration_ms: 1,
+    stdout_bytes: stdout.length,
+    stderr_bytes: stderr.length,
+    stdout_truncated: false,
+    stderr_truncated: false,
+    stdout_path: stdoutPath,
+    stderr_path: stderrPath,
+  }));
   recordExecRun({
     ...(run.metadata.kind === "uat_exec"
       ? {
@@ -370,14 +397,14 @@ function recordUatExecEvidence(run: {
     id: run.id,
     runtime: "bash",
     command: "node check.js",
-    cwd: process.cwd(),
+    cwd,
     exit_code: run.exit_code ?? 0,
     signal: run.signal ?? null,
     timedOut: run.timed_out ?? false,
     aborted: run.aborted ?? false,
-    started_at: new Date().toISOString(),
+    started_at: startedAt,
     duration_ms: 1,
-    output_hash: "sha256:test",
+    output_hash: `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`,
   });
 }
 
@@ -2041,6 +2068,7 @@ test("executeUatResultSave accepts gsd_uat_exec evidence written in a milestone 
     writeFileSync(browserTimelinePath, JSON.stringify({ summary: "browser timeline evidence" }), "utf-8");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       exit_code: 0,
       signal: null,
@@ -2144,6 +2172,7 @@ test("executeUatResultSave rejects a PASS verdict citing failed gsd_uat_exec evi
   seedSlice("M001", "S08", "complete");
   mkdirSync(worktree, { recursive: true });
   recordUatExecEvidence({
+    cwd: worktree,
     id: evidenceId,
     exit_code: 1,
     signal: null,
@@ -2226,6 +2255,7 @@ test("executeUatResultSave leaves UAT pending after a harness-aborted turn", asy
     seedSlice("M001", "S04", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       metadata: {
         kind: "uat_exec",
@@ -2317,6 +2347,7 @@ test("executeUatResultSave supplies canonical presentation and normalizes verdic
     seedSlice("M001", "S03", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       exit_code: 0,
       signal: null,
@@ -2372,6 +2403,7 @@ test("executeUatResultSave supplies direct browser tools for browser-executable 
     seedSlice("M001", "S06", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       exit_code: 0,
       signal: null,
@@ -2431,6 +2463,7 @@ test("executeUatResultSave merges canonical plan ID and read-only tools when pre
     seedSlice("M001", "S05", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       exit_code: 0,
       signal: null,
@@ -2502,6 +2535,7 @@ test("executeUatResultSave surfaces the worktree validation path and notificatio
     seedSlice("M001", "S07", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       exit_code: 0,
       signal: null,
@@ -2582,6 +2616,7 @@ test("executeUatResultSave omits manual-validation guidance when no human checks
     seedSlice("M001", "S08", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       exit_code: 0,
       signal: null,
@@ -2637,6 +2672,7 @@ test("executeUatResultSave rejects saved UAT without fresh UAT-owned evidence", 
     seedSlice("M001", "S04", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       metadata: { kind: "exec" },
     });
@@ -2707,6 +2743,7 @@ test("executeUatResultSave rejects artifact-driven PASS with human follow-up che
     seedSlice("M001", "S01", "complete");
     mkdirSync(worktree, { recursive: true });
     recordUatExecEvidence({
+      cwd: worktree,
       id: evidenceId,
       exit_code: 0,
       signal: null,

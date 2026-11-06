@@ -14,8 +14,10 @@ import {
   CMUX_VAULT_MAX_PENDING_SESSIONS,
   CMUX_VAULT_DEFAULT_SOCKET_PATH,
   clearCmuxVaultBinding,
+  cmuxSurfaceOwnerEnabled,
   cmuxVaultEnabled,
   cmuxVaultConfigured,
+  cmuxResumeConfigured,
   cmuxVaultModes,
   createCmuxVaultExtension,
   hasManagedCmuxBridge,
@@ -104,6 +106,20 @@ async function fixture(t: test.TestContext) {
   }
 }
 
+function automaticBinding(f: Awaited<ReturnType<typeof fixture>>): Record<string, unknown> {
+  return {
+    kind: 'gsd', source: 'agent-hook', checkpoint_id: f.manager.getSessionFile(), cwd: f.cwd,
+    auto_resume: true, updated_at: 101,
+    launch_command: { arguments: [
+      'env', `GSD_HOME=${f.home}`, ...f.options.launcher,
+      '--resume-exact', f.manager.getSessionFile(), f.manager.getSessionId(),
+    ] },
+  }
+}
+
+const presenceEvents = (f: Awaited<ReturnType<typeof fixture>>) => f.feedCalls.map(call =>
+  (call.event as { hook_event_name: string }).hook_event_name)
+
 test('only an explicitly enabled interactive owner in cmux is eligible', () => {
   const env = {
     GSD_CMUX_VAULT: '1', GSD_CMUX_VAULT_OWNER_PID: '42',
@@ -115,6 +131,7 @@ test('only an explicitly enabled interactive owner in cmux is eligible', () => {
   }
   assert.equal(cmuxVaultEnabled(env, 43), false, 'children inherit a different owner pid')
   assert.equal(cmuxVaultEnabled({ ...env, GSD_CMUX_VAULT_EXTERNAL_BRIDGE: '1' }, 42), false)
+  assert.equal(cmuxSurfaceOwnerEnabled({ ...env, GSD_CMUX_VAULT_EXTERNAL_BRIDGE: '1' }, 42), true)
 })
 
 test('Vault preferences default off, respect master disable and allow explicit environment overrides', () => {
@@ -128,6 +145,17 @@ test('Vault preferences default off, respect master disable and allow explicit e
   assert.equal(cmuxVaultConfigured({ GSD_CMUX_VAULT: '1' }, undefined), false)
 })
 
+test('resume preferences are opt-in and still require the cmux master switch', () => {
+  assert.equal(cmuxResumeConfigured({}, undefined), false)
+  assert.equal(cmuxResumeConfigured({}, { enabled: true }), false)
+  assert.equal(cmuxResumeConfigured({}, { enabled: true, resume: false }), false)
+  assert.equal(cmuxResumeConfigured({}, { enabled: true, resume: true }), true)
+  assert.equal(cmuxResumeConfigured({ GSD_CMUX_RESUME: '0' }, { enabled: true, resume: true }), false)
+  assert.equal(cmuxResumeConfigured({ GSD_CMUX_RESUME: '1' }, { enabled: true }), true)
+  assert.equal(cmuxResumeConfigured({ GSD_CMUX_RESUME: '1' }, { enabled: false, resume: true }), false)
+  assert.equal(cmuxResumeConfigured({ GSD_CMUX_RESUME: '1' }, undefined), false)
+})
+
 test('runtime uses current project settings without an env opt-in and clears on disable', async t => {
   const f = await fixture(t)
   let settings = { enabled: true, vault: false }
@@ -139,7 +167,8 @@ test('runtime uses current project settings without an env opt-in and clears on 
   })
   bridge.update(f.manager, true)
   await bridge.idle()
-  assert.equal(f.allCalls.length, 0)
+  assert.deepEqual(f.allCalls.map(args => args.slice(0, 3)), [['surface', 'resume', 'show']],
+    'disabled startup only inspects for an exact persisted automatic binding')
   settings = { enabled: true, vault: true }
   bridge.update(f.manager, true, true)
   await bridge.idle()
@@ -148,6 +177,7 @@ test('runtime uses current project settings without an env opt-in and clears on 
   bridge.update(f.manager, true, true)
   await bridge.idle()
   assert.equal(f.clears.length, 1)
+  assert.deepEqual(presenceEvents(f), ['SessionStart', 'SessionEnd'])
   assert.ok(projects.length >= 3)
   assert.ok(projects.every(cwd => cwd === f.cwd))
   bridge.stop()
@@ -163,7 +193,7 @@ test('uses actual session identity and literal argv; indexes only minimal metada
     'surface', 'resume', 'set', '--workspace', 'workspace:1', '--surface', 'surface:2',
     '--name', 'GSD', '--kind', 'gsd', '--checkpoint-id', f.manager.getSessionFile(),
     '--source', 'agent-hook', '--cwd', f.cwd, '--',
-    'env', `GSD_HOME=${f.home}`, ...f.options.launcher, '--session', f.manager.getSessionFile(),
+    'env', `GSD_HOME=${f.home}`, ...f.options.launcher, '--resume-exact', f.manager.getSessionFile(), f.manager.getSessionId(),
   ]])
   const [record] = await f.metadata()
   assert.deepEqual(record.data, {
@@ -182,6 +212,332 @@ test('uses actual session identity and literal argv; indexes only minimal metada
     },
     wait_timeout_seconds: 0,
   }])
+})
+
+test('resume preference registers the exact GSD session without Vault metadata', async t => {
+  const f = await fixture(t)
+  let resumeEnabled = true
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: '0' },
+    getPreferences: async () => ({ enabled: true, resume: resumeEnabled, vault: false }),
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+
+  assert.equal(f.calls.length, 1)
+  assert.ok(f.calls[0].includes('--resume-exact'))
+  assert.equal(f.calls[0][f.calls[0].indexOf('--resume-exact') + 1], f.manager.getSessionFile())
+  assert.equal(f.calls[0][f.calls[0].indexOf('--resume-exact') + 2], f.manager.getSessionId())
+  assert.equal(f.calls[0][f.calls[0].indexOf('--name') + 1], 'GSD session')
+  assert.equal(f.calls[0].includes('--shell'), false)
+  await assert.rejects(stat(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+  assert.deepEqual(f.feedCalls, [], 'resume-only does not register Vault feed presence')
+
+  resumeEnabled = false
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(f.clears.length, 1, 'turning restore off clears its owned binding')
+
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('accepts automatic restore only as reported by cmux trust policy', async t => {
+  const f = await fixture(t)
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_RESUME: '1' },
+    getPreferences: async () => ({ enabled: true, resume: true, vault: false }),
+    transport: async args => {
+      const response = await f.options.transport(args) as { resume_binding?: Record<string, unknown> }
+      if (args[2] !== 'set' || !response.resume_binding) return response
+      return { ...response, resume_binding: { ...response.resume_binding, auto_resume: true } }
+    },
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].includes('--auto-resume'), false)
+  assert.equal(f.calls[0].includes('--shell'), false)
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('Vault-only registration clears a cmux-approved automatic binding while resume is off', async t => {
+  const f = await fixture(t)
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    transport: async args => {
+      const response = await f.options.transport(args) as { resume_binding?: Record<string, unknown> }
+      if (args[2] !== 'set' || !response.resume_binding) return response
+      return { ...response, resume_binding: { ...response.resume_binding, auto_resume: true } }
+    },
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+
+  assert.equal(f.clears.length, 1)
+  const probe = await f.options.transport(['surface', 'resume', 'show'])
+  assert.equal((probe as { resume_binding?: unknown }).resume_binding, null)
+  await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+  const expectedBlocked = JSON.stringify([f.manager.getSessionId(), f.manager.getSessionFile(), f.cwd])
+  const resumeEnabled = cmuxResumeConfigured(f.env, await f.options.getPreferences(f.cwd))
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1,
+    `blockedMatch=${(bridge as any).blockedAutoResumeIdentity === expectedBlocked}, resumeEnabled=${resumeEnabled}`)
+  assert.equal(f.clears.length, 1)
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('disabled fresh bridge guarded-clears only its exact persisted automatic binding', async t => {
+  const f = await fixture(t)
+  f.setBinding(automaticBinding(f))
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+    getPreferences: async () => ({ enabled: true, vault: false, resume: false }),
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.deepEqual(f.allCalls, [[
+    'surface', 'resume', 'show', '--workspace', 'workspace:1', '--surface', 'surface:2',
+  ]])
+  assert.deepEqual(f.clears, [{
+    workspace_id: 'workspace-uuid', surface_id: 'surface-uuid',
+    checkpoint_id: f.manager.getSessionFile(), source: 'agent-hook', expected_updated_at: 101,
+  }])
+  assert.equal((await f.options.transport(['surface', 'resume', 'show'])).resume_binding, null)
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  bridge.stop()
+  await bridge.idle()
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 0)
+  assert.equal(f.clears.length, 1, 'successful cleanup is not repeated')
+  assert.deepEqual(f.feedCalls, [], 'recovered ownership never invents Vault presence')
+  await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+})
+
+test('disabled fresh bridge preserves manual, foreign, malformed and different-session bindings', async t => {
+  for (const [name, overrides] of [
+    ['manual', { auto_resume: false }],
+    ['foreign kind', { kind: 'pi' }],
+    ['foreign source', { source: 'cli' }],
+    ['different file', { checkpoint_id: '/other/session.jsonl' }],
+    ['different cwd', { cwd: '/other/project' }],
+    ['different native session', { launch_command: { arguments: ['gsd', '--resume-exact', 'other-id'] } }],
+    ['missing generation', { updated_at: undefined }],
+    ['non-finite generation', { updated_at: NaN }],
+  ] as const) {
+    await t.test(name, async t => {
+      const f = await fixture(t)
+      const binding: Record<string, unknown> = { ...automaticBinding(f), ...overrides }
+      if (name === 'different native session') {
+        const argv = [...(automaticBinding(f).launch_command as { arguments: string[] }).arguments]
+        argv[argv.length - 1] = 'other-native-session-id'
+        binding.launch_command = { arguments: argv }
+      }
+      f.setBinding(binding)
+      const bridge = new CmuxVaultBridge({
+        ...f.options,
+        env: { ...f.env, GSD_CMUX_VAULT: undefined },
+        getPreferences: async () => ({ enabled: false, vault: false, resume: false }),
+      })
+      bridge.update(f.manager, true)
+      await bridge.idle()
+      bridge.stop()
+      await bridge.idle()
+      assert.deepEqual(f.clears, [])
+      assert.deepEqual(f.calls, [])
+      assert.deepEqual(f.feedCalls, [])
+      assert.equal((await f.options.transport(['surface', 'resume', 'show'])).resume_binding, binding)
+      await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+    })
+  }
+})
+
+test('automatic-binding cleanup retries later without latching a failed clear or re-registering', async t => {
+  for (const failure of ['rejected', 'throws']) {
+    await t.test(failure, async t => {
+      const f = await fixture(t)
+      const attempts: CmuxVaultClearRequest[] = []
+      const bridge = new CmuxVaultBridge({
+        ...f.options,
+        transport: async args => {
+          const response = await f.options.transport(args)
+          if (args[2] !== 'set') return response
+          const binding = { ...response.resume_binding, auto_resume: true }
+          f.setBinding(binding)
+          return { ...response, resume_binding: binding }
+        },
+        clearBinding: async params => {
+          attempts.push(params)
+          if (attempts.length === 1) {
+            if (failure === 'throws') throw new Error('socket unavailable')
+            return { cleared: false }
+          }
+          return f.options.clearBinding(params)
+        },
+      })
+      bridge.update(f.manager, true)
+      await bridge.idle()
+      assert.equal(attempts.length, 1)
+      const state = bridge as unknown as {
+        blockedAutoResumeIdentity?: string
+        binding?: { updatedAt: number }
+      }
+      assert.equal(state.blockedAutoResumeIdentity, undefined, 'a failed clear must not latch the block')
+      assert.equal(state.binding?.updatedAt, 101, 'retain local ownership until clear succeeds')
+      assert.equal(f.calls.filter(args => args[2] === 'set').length, 1)
+      await bridge.idle()
+      assert.equal(attempts.length, 1, 'idle does not spin on failed cleanup')
+      bridge.update(f.manager, true)
+      await bridge.idle()
+      assert.equal(attempts.length, 2, 'next lifecycle update retries the owned generation')
+      assert.deepEqual(attempts[1], attempts[0])
+      assert.equal(state.blockedAutoResumeIdentity, JSON.stringify([
+        f.manager.getSessionId(), f.manager.getSessionFile(), f.cwd,
+      ]))
+      assert.equal(state.binding, undefined)
+      assert.equal((await f.options.transport(['surface', 'resume', 'show'])).resume_binding, null)
+      bridge.update(f.manager, true, true)
+      await bridge.idle()
+      bridge.stop()
+      await bridge.idle()
+      assert.equal(attempts.length, 2, 'only a successful clear latches the block')
+      assert.equal(f.calls.filter(args => args[2] === 'set').length, 1)
+      assert.deepEqual(f.feedCalls, [])
+      await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+    })
+  }
+})
+
+test('fresh disabled cleanup retains its guarded generation when a foreign owner replaces it', async t => {
+  const f = await fixture(t)
+  f.setBinding(automaticBinding(f))
+  const foreign = { ...automaticBinding(f), kind: 'pi', updated_at: 999 }
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+    getPreferences: async () => ({ enabled: true, vault: false, resume: false }),
+    clearBinding: async params => {
+      f.setBinding(foreign)
+      return f.options.clearBinding(params)
+    },
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.equal(f.clears.length, 1)
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.equal(f.clears.length, 2, 'later update retries instead of forgetting ownership')
+  bridge.stop()
+  await bridge.idle()
+  assert.equal(f.clears.length, 3)
+  assert.ok(f.clears.every(params => params.expected_updated_at === 101))
+  assert.equal(f.allCalls.filter(args => args[2] === 'show').length, 1,
+    'a failed clear never adopts the replacement generation')
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 0)
+  assert.equal((await f.options.transport(['surface', 'resume', 'show'])).resume_binding, foreign)
+  assert.deepEqual(f.feedCalls, [])
+})
+
+test('disabling Vault for the same file ends presence once while keeping the resume binding', async t => {
+  const f = await fixture(t)
+  let vault = true
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+    getPreferences: async () => ({ enabled: true, vault, resume: true }),
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.deepEqual(presenceEvents(f), ['SessionStart'])
+  vault = false
+  for (let i = 0; i < 2; i++) {
+    bridge.update(f.manager, true, true)
+    await bridge.idle()
+  }
+  assert.deepEqual(presenceEvents(f), ['SessionStart', 'SessionEnd'])
+  assert.equal(f.clears.length, 0, 'Vault disable does not remove opted-in resume')
+  const binding = (await f.options.transport(['surface', 'resume', 'show'])).resume_binding
+  assert.equal(binding?.checkpoint_id, f.manager.getSessionFile())
+  assert.equal((await f.metadata()).length, 1)
+  bridge.stop()
+  await bridge.idle()
+  assert.equal(f.clears.length, 1)
+  assert.deepEqual(presenceEvents(f), ['SessionStart', 'SessionEnd'], 'shutdown does not end twice')
+})
+
+test('safety cleanup ends prior Vault presence once even when the guarded clear must retry', async t => {
+  const f = await fixture(t)
+  let automatic = false
+  const attempts: CmuxVaultClearRequest[] = []
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    transport: async args => {
+      const response = await f.options.transport(args)
+      if (args[2] !== 'set' || !automatic) return response
+      const binding = { ...response.resume_binding, auto_resume: true }
+      f.setBinding(binding)
+      return { ...response, resume_binding: binding }
+    },
+    clearBinding: async params => {
+      attempts.push(params)
+      if (attempts.length === 1) return { cleared: false }
+      return f.options.clearBinding(params)
+    },
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.deepEqual(presenceEvents(f), ['SessionStart'])
+  automatic = true
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(attempts.length, 1)
+  assert.deepEqual(presenceEvents(f), ['SessionStart', 'SessionEnd'])
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.equal(attempts.length, 2)
+  assert.deepEqual(attempts[1], attempts[0])
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 2)
+  bridge.stop()
+  await bridge.idle()
+  assert.deepEqual(presenceEvents(f), ['SessionStart', 'SessionEnd'])
+  assert.equal(attempts.length, 2)
+})
+
+test('shutdown ends Vault presence even when guarded binding clear fails', async t => {
+  for (const failure of ['changed', 'throws']) {
+    await t.test(failure, async t => {
+      const f = await fixture(t)
+      const foreign = {
+        kind: 'pi', source: 'cli', checkpoint_id: '/foreign/session.jsonl', cwd: '/foreign/project',
+        auto_resume: false, updated_at: 999, launch_command: { arguments: ['pi'] },
+      }
+      let attempts = 0
+      const bridge = new CmuxVaultBridge({
+        ...f.options,
+        clearBinding: async params => {
+          attempts++
+          f.setBinding(foreign)
+          if (failure === 'throws') throw new Error('socket unavailable')
+          return f.options.clearBinding(params)
+        },
+      })
+      bridge.update(f.manager, true)
+      await bridge.idle()
+      assert.deepEqual(presenceEvents(f), ['SessionStart'])
+      bridge.stop()
+      await bridge.idle()
+      assert.equal(attempts, 1)
+      assert.deepEqual(presenceEvents(f), ['SessionStart', 'SessionEnd'])
+      assert.equal((await f.options.transport(['surface', 'resume', 'show'])).resume_binding, foreign)
+    })
+  }
 })
 
 test('duplicate startup is idempotent and completed turns refresh one record', async t => {
@@ -496,7 +852,7 @@ test('switching from a persisted session to a missing file clears the old genera
   assert.equal(f.clears[0].expected_updated_at, 101)
 })
 
-test('disabled, outside cmux, child, noninteractive and external-owner sessions do nothing', async t => {
+test('disabled owners only inspect; outside cmux, child and noninteractive sessions do nothing', async t => {
   const f = await fixture(t)
   for (const overrides of [
     { GSD_CMUX_VAULT: '0' }, { CMUX_SURFACE_ID: '' },
@@ -513,7 +869,9 @@ test('disabled, outside cmux, child, noninteractive and external-owner sessions 
   bridge.stop()
   await bridge.idle()
   assert.deepEqual(f.calls, [])
-  assert.deepEqual(f.allCalls, [])
+  assert.deepEqual(f.allCalls.map(args => args.slice(0, 3)), [
+    ['surface', 'resume', 'show'], ['surface', 'resume', 'show'],
+  ], 'disabled and external-Vault owners may only inspect for stale automatic bindings')
   await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
 })
 
@@ -528,6 +886,88 @@ test('upstream managed injection marker suppresses the bridge, not merely a file
   bridge.stop()
   await bridge.idle()
   assert.deepEqual(f.calls, [])
+})
+
+test('resume opt-in keeps the GSD launcher when the managed Pi bridge is installed', async t => {
+  const f = await fixture(t)
+  const extension = join(f.root, 'cmux-pi-session.ts')
+  await writeFile(extension, '// cmux-pi-session-extension-marker v4\\n')
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: '0' },
+    extensionPaths: () => [extension],
+    getPreferences: async () => ({ enabled: true, resume: true, vault: false }),
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+
+  assert.equal(f.calls.length, 1)
+  const args = f.calls[0].slice(f.calls[0].indexOf('--') + 1)
+  assert.deepEqual(args.slice(0, 2), ['env', `GSD_HOME=${f.home}`])
+  assert.ok(args.includes('--resume-exact'))
+  assert.ok(args.includes('/absolute/gsd launcher.js'))
+  assert.equal(args.includes('pi'), false)
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('managed Pi Vault ownership suppresses GSD publish and queued snapshots but retains exact resume', async t => {
+  const f = await fixture(t)
+  const extension = join(f.root, 'cmux-pi-session.ts')
+  await writeFile(extension, '// cmux-pi-session-extension-marker v4\n')
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    extensionPaths: () => [extension],
+    getPreferences: async () => ({ enabled: true, vault: true, resume: true }),
+    transport: async args => { entered(); await gate; return f.options.transport(args) },
+  })
+  bridge.update(f.manager, true)
+  await started
+  const second = join(f.cwd, 'managed-vault-next.jsonl')
+  await writeFile(second, 'private native session')
+  f.setSession(second)
+  bridge.update(f.manager, true)
+  release()
+  await bridge.idle()
+  assert.equal(f.calls.length, 2)
+  assert.ok(f.calls.every(args => args[args.indexOf('--name') + 1] === 'GSD session'))
+  const binding = (await f.options.transport(['surface', 'resume', 'show'])).resume_binding
+  assert.equal(binding?.checkpoint_id, second)
+  assert.deepEqual((binding?.launch_command as { arguments: string[] }).arguments, [
+    'env', `GSD_HOME=${f.home}`, ...f.options.launcher, '--resume-exact', second, f.manager.getSessionId(),
+  ])
+  assert.deepEqual(f.feedCalls, [], 'managed Pi bridge is the sole Vault presence writer')
+  await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+  bridge.stop()
+  await bridge.idle()
+  assert.equal(f.clears.length, 1)
+  assert.deepEqual(f.feedCalls, [], 'resume cleanup does not invent a GSD Vault end')
+})
+
+test('resume opt-in never overwrites a different agent binding on the surface', async t => {
+  const f = await fixture(t)
+  f.setBinding({
+    kind: 'pi', source: 'agent-hook', checkpoint_id: f.manager.getSessionFile(), cwd: f.cwd,
+    updated_at: 99, launch_command: { arguments: ['pi', '--session', f.manager.getSessionId()] },
+  })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: '0' },
+    getPreferences: async () => ({ enabled: true, resume: true, vault: false }),
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+
+  assert.deepEqual(f.calls, [])
+  const probe = await f.options.transport(['surface', 'resume', 'show'])
+  assert.equal((probe as { resume_binding?: { kind?: string } }).resume_binding?.kind, 'pi')
+  await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+  bridge.stop()
+  await bridge.idle()
 })
 
 test('transport failure never rejects lifecycle; next turn retries safely', async t => {
@@ -755,10 +1195,10 @@ test('a replaced same-session generation cannot be cleared by its predecessor', 
   assert.equal(probe.resume_binding, replacement)
 })
 
-test('effective set responses must retain the requested identity, argv and manual-only capability', async t => {
+test('effective set responses must retain the requested identity, argv and cmux policy', async t => {
   const f = await fixture(t)
   for (const invalid of [
-    { auto_resume: true },
+    { auto_resume: 'not-a-boolean' },
     { kind: 'pi' },
     { checkpoint_id: '/retained/other-session.jsonl' },
     { updated_at: 'not-a-generation' },

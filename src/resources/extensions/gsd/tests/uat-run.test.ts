@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 
 import {
   prepareUatRun,
@@ -12,6 +13,7 @@ import {
 import { buildRunUatPresentationForType } from "../tool-presentation-plan.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { recordExecRun } from "../db/writers/exec-runs.ts";
+import { execRunOutputHash } from "../verification-gate.ts";
 
 type EvidenceInput = UatEvidenceRef | { kind: string; ref: string };
 
@@ -33,7 +35,35 @@ function writeUatExecEvidence(
   base: string,
   outcome: { exit_code: number | null; signal: string | null; timed_out: boolean; aborted: boolean },
   id = "fresh-uat-evidence",
+  hashOutput = (stdout: Buffer, stderr: Buffer): string =>
+    `sha256:${createHash("sha256").update(stdout).update(stderr).digest("hex")}`,
 ): string {
+  const execDir = join(base, ".gsd", "exec");
+  mkdirSync(execDir, { recursive: true });
+  const stdout = Buffer.from(`synthetic UAT output for ${id}\n`);
+  const stderr = Buffer.alloc(0);
+  const stdoutPath = join(execDir, `${id}.stdout`);
+  const stderrPath = join(execDir, `${id}.stderr`);
+  const metaPath = join(execDir, `${id}.meta.json`);
+  const startedAt = new Date().toISOString();
+  writeFileSync(stdoutPath, stdout);
+  writeFileSync(stderrPath, stderr);
+  writeFileSync(metaPath, JSON.stringify({
+    id,
+    runtime: "bash",
+    started_at: startedAt,
+    exit_code: outcome.exit_code,
+    signal: outcome.signal,
+    timed_out: outcome.timed_out,
+    aborted: outcome.aborted,
+    duration_ms: 1,
+    stdout_path: stdoutPath,
+    stderr_path: stderrPath,
+    stdout_bytes: stdout.length,
+    stderr_bytes: stderr.length,
+    stdout_truncated: false,
+    stderr_truncated: false,
+  }));
   recordExecRun({
     kind: "uat_exec",
     milestoneId: "M001",
@@ -47,15 +77,60 @@ function writeUatExecEvidence(
     signal: outcome.signal,
     timedOut: outcome.timed_out,
     aborted: outcome.aborted,
-    started_at: new Date().toISOString(),
+    started_at: startedAt,
     duration_ms: 1,
-    output_hash: "sha256:test",
+    output_hash: hashOutput(stdout, stderr),
   });
   return id;
 }
 
 function writeFreshUatEvidence(base: string, id = "fresh-uat-evidence"): string {
   return writeUatExecEvidence(base, { exit_code: 0, signal: null, timed_out: false, aborted: false }, id);
+}
+
+function writeContractExecEvidence(base: string, id: string, stdoutText: string): string {
+  const execDir = join(base, ".gsd", "exec");
+  mkdirSync(execDir, { recursive: true });
+  const stdout = Buffer.from(stdoutText);
+  const stderr = Buffer.alloc(0);
+  const stdoutPath = join(execDir, `${id}.stdout`);
+  const stderrPath = join(execDir, `${id}.stderr`);
+  const startedAt = new Date().toISOString();
+  writeFileSync(stdoutPath, stdout);
+  writeFileSync(stderrPath, stderr);
+  writeFileSync(join(execDir, `${id}.meta.json`), JSON.stringify({
+    id,
+    runtime: "bash",
+    started_at: startedAt,
+    exit_code: 0,
+    signal: null,
+    timed_out: false,
+    aborted: false,
+    duration_ms: 1,
+    stdout_bytes: stdout.length,
+    stderr_bytes: stderr.length,
+    stdout_truncated: false,
+    stderr_truncated: false,
+    stdout_path: stdoutPath,
+    stderr_path: stderrPath,
+  }));
+  recordExecRun({
+    kind: "exec",
+    id,
+    runtime: "bash",
+    command: "verified check",
+    cwd: base,
+    exit_code: 0,
+    signal: null,
+    timedOut: false,
+    aborted: false,
+    started_at: startedAt,
+    duration_ms: 1,
+    output_hash: execRunOutputHash(stdout, stderr),
+    runContract: "test-invocation-contract",
+    sourceRevision: "sha256:test-source",
+  });
+  return id;
 }
 
 function buildParams(
@@ -86,6 +161,144 @@ function buildParams(
     notes: `UAT ${verdict}.`,
   };
 }
+
+test("prepareUatRun rejects successful exec rows whose output artifact is missing", () => {
+  const base = makeTmpBase();
+  try {
+    const evidenceId = writeFreshUatEvidence(base);
+    rmSync(join(base, ".gsd", "exec", `${evidenceId}.stdout`));
+    const result = prepareUatRun(base, buildParams([{ kind: "gsd_uat_exec", ref: evidenceId }]));
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error.code, "invalid_evidence");
+      assert.match(result.error.message, /persisted output artifacts/);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("prepareUatRun accepts legacy sha256 UAT evidence without a run contract", (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  const evidenceId = writeFreshUatEvidence(base, "legacy-uat-evidence");
+  const result = prepareUatRun(base, buildParams([
+    { kind: "gsd_uat_exec", ref: evidenceId },
+  ]));
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("prepareUatRun rejects redistributed UAT output streams without a run contract", (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  const evidenceId = writeUatExecEvidence(
+    base,
+    { exit_code: 0, signal: null, timed_out: false, aborted: false },
+    "per-stream-uat-evidence",
+    execRunOutputHash,
+  );
+  const params = buildParams([{ kind: "gsd_uat_exec", ref: evidenceId }]);
+  const original = prepareUatRun(base, params);
+  assert.equal(original.ok, true, JSON.stringify(original));
+
+  const execDir = join(base, ".gsd", "exec");
+  const stdoutPath = join(execDir, `${evidenceId}.stdout`);
+  const stderrPath = join(execDir, `${evidenceId}.stderr`);
+  const metaPath = join(execDir, `${evidenceId}.meta.json`);
+  const combined = Buffer.concat([readFileSync(stdoutPath), readFileSync(stderrPath)]);
+  const stdout = combined.subarray(0, 1);
+  const stderr = combined.subarray(1);
+  writeFileSync(stdoutPath, stdout);
+  writeFileSync(stderrPath, stderr);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+  meta.stdout_bytes = stdout.length;
+  meta.stderr_bytes = stderr.length;
+  writeFileSync(metaPath, JSON.stringify(meta));
+
+  const modified = prepareUatRun(base, params);
+  assert.equal(modified.ok, false);
+  if (modified.ok) assert.fail("expected redistributed UAT output streams to be rejected");
+  assert.equal(modified.error.code, "invalid_evidence");
+  assert.match(modified.error.message, /check UAT-01/);
+  assert.match(modified.error.message, /per-stream-uat-evidence/);
+  assert.match(modified.error.message, /outputs do not match the host-recorded digest/);
+});
+
+test("prepareUatRun validates contract-bearing exec hashes and rejects modified output", () => {
+  const base = makeTmpBase();
+  try {
+    const uatEvidenceId = writeFreshUatEvidence(base);
+    const execEvidenceId = writeContractExecEvidence(base, "contract-exec-evidence", "verified output\\n");
+    const evidence = [
+      { kind: "gsd_uat_exec", ref: uatEvidenceId },
+      { kind: "gsd_exec", ref: execEvidenceId },
+    ];
+    const valid = prepareUatRun(base, buildParams(evidence));
+    assert.equal(valid.ok, true, valid.ok ? undefined : valid.error.message);
+
+    writeFileSync(join(base, ".gsd", "exec", `${execEvidenceId}.stdout`), "modified output\\n");
+    const modified = prepareUatRun(base, buildParams(evidence));
+    assert.equal(modified.ok, false);
+    if (!modified.ok) {
+      assert.equal(modified.error.code, "invalid_evidence");
+      assert.match(modified.error.message, /outputs do not match the host-recorded digest/);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("prepareUatRun rejects mismatched and ID-only exec metadata", () => {
+  const base = makeTmpBase();
+  try {
+    const uatEvidenceId = writeFreshUatEvidence(base);
+    const execEvidenceId = writeContractExecEvidence(base, "contract-metadata-evidence", "verified output\\n");
+    const evidence = [
+      { kind: "gsd_uat_exec", ref: uatEvidenceId },
+      { kind: "gsd_exec", ref: execEvidenceId },
+    ];
+    const execDir = join(base, ".gsd", "exec");
+    const metaPath = join(execDir, `${execEvidenceId}.meta.json`);
+    const stdoutPath = join(execDir, `${execEvidenceId}.stdout`);
+    const stderrPath = join(execDir, `${execEvidenceId}.stderr`);
+
+    const metadata = {
+      id: execEvidenceId,
+      runtime: "bash",
+      started_at: new Date().toISOString(),
+      exit_code: 7,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      duration_ms: 1,
+      stdout_bytes: Buffer.byteLength("verified output\\n"),
+      stderr_bytes: 0,
+      stdout_truncated: false,
+      stderr_truncated: false,
+      stdout_path: stdoutPath,
+      stderr_path: stderrPath,
+    };
+    writeFileSync(metaPath, JSON.stringify(metadata));
+    const mismatch = prepareUatRun(base, buildParams(evidence));
+    assert.equal(mismatch.ok, false);
+    if (!mismatch.ok) assert.match(mismatch.error.message, /outcome metadata does not match/);
+
+    metadata.exit_code = 0;
+    metadata.duration_ms = 99;
+    writeFileSync(metaPath, JSON.stringify(metadata));
+    const durationMismatch = prepareUatRun(base, buildParams(evidence));
+    assert.equal(durationMismatch.ok, false);
+    if (!durationMismatch.ok) assert.match(durationMismatch.error.message, /outcome metadata does not match/);
+
+    writeFileSync(metaPath, JSON.stringify({ id: execEvidenceId }));
+    const idOnly = prepareUatRun(base, buildParams(evidence));
+    assert.equal(idOnly.ok, false);
+    if (!idOnly.ok) assert.match(idOnly.error.message, /metadata identity/);
+  } finally {
+    cleanup(base);
+  }
+});
 
 test("prepareUatRun accepts browser evidence backed by an http URL", () => {
   const base = makeTmpBase();

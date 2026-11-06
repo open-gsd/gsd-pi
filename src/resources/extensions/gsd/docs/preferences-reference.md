@@ -263,6 +263,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `splits`: boolean — run supported subagent work in visible cmux splits. Default: `false`.
   - `browser`: boolean — reserve the future browser integration flag. Default: `false`.
   - `vault`: boolean — opt in to metadata-only Vault catalog and active-session registration. Default: `false`, including when cmux is detected or enabled. Requires `enabled: true` and a one-time cmux agent registration; see the user docs' **Optional cmux Vault bridge** section. Configure through `/gsd prefs` → **Integrations** or `/gsd cmux vault on|off`. `/gsd cmux off` disables Vault too. `GSD_CMUX_VAULT=0` forces it off; `=1` overrides only `vault`, never the master toggle.
+  - `resume`: boolean — allow a cmux-trusted exact GSD session binding to auto-restore, independent of Vault metadata. Default: `false`. Requires `enabled: true`; GSD uses the native session file, ID, cwd and GSD launcher. cmux's trusted-prefix policy remains the gate; GSD never approves a prefix. When this is off, a Vault-owned binding stays manual and any binding cmux reports as automatic is cleared. Configure through `/gsd prefs` → **Integrations** or `/gsd cmux resume on|off`. `GSD_CMUX_RESUME=0` forces it off; `=1` overrides only `resume`, never the master toggle.
 
 - `dynamic_routing`: configures the dynamic model router that adjusts model selection based on task complexity. Keys:
   - `enabled`: boolean — enable dynamic routing. Default: `false`.

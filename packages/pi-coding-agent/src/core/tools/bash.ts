@@ -25,7 +25,18 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult
 
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)." })),
+	// Issue #3095: the model-facing unit is MILLISECONDS, matching the sibling
+	// GSD exec tools (gsd_exec / gsd_uat_exec `timeout_ms`) that share this
+	// surface. The old seconds-based bare `timeout` made ms values transfer
+	// silently and arm ~55-hour deadlines. The executor contract
+	// (BashOperations.exec) stays SECONDS so existing implementers are not
+	// broken — execute() below owns the single ms→s normalization.
+	timeout_ms: Type.Optional(
+		Type.Number({
+			description:
+				"Timeout in milliseconds (optional, no default timeout). 30000 = 30 seconds. Unit is milliseconds, NOT seconds.",
+		}),
+	),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -53,6 +64,7 @@ export interface BashOperations {
 		options: {
 			onData: (data: Buffer) => void;
 			signal?: AbortSignal;
+			/** Deadline in SECONDS. The bash tool normalizes its ms schema value to seconds exactly once, here (issue #3095). */
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
 		},
@@ -225,10 +237,23 @@ function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
+/**
+ * Issue #3095: render the schema's `timeout_ms` value in human form. The raw
+ * ms value must never be echoed with an `s` suffix (a 200000ms deadline once
+ * rendered as the absurd "(timeout 200000s)"). Sub-second deadlines stay in
+ * ms; everything above renders as (possibly fractional) seconds.
+ */
+function formatTimeoutSuffix(timeoutMs: number | undefined): string {
+	if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return "";
+	if (timeoutMs < 1000) return theme.fg("muted", ` (timeout ${timeoutMs}ms)`);
+	const secs = timeoutMs / 1000;
+	const secsText = Number.isInteger(secs) ? String(secs) : secs.toFixed(1);
+	return theme.fg("muted", ` (timeout ${secsText}s)`);
+}
+
+function formatBashCall(args: { command?: string; timeout_ms?: number } | undefined): string {
 	const command = str(args?.command);
-	const timeout = args?.timeout as number | undefined;
-	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
+	const timeoutSuffix = formatTimeoutSuffix(args?.timeout_ms);
 	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
 	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
 }
@@ -330,11 +355,22 @@ export function createBashToolDefinition(
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
+			{ command, timeout_ms }: { command: string; timeout_ms?: number },
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
 		) {
+			// Issue #3095 — the single ms→s normalization boundary. The schema speaks
+			// MILLISECONDS (matching gsd_exec/gsd_uat_exec's `timeout_ms` on the same
+			// surface); BashOperations.exec speaks SECONDS and its implementers (local
+			// shell, SSH/sandbox examples) keep that contract unchanged. Fractional
+			// seconds preserve sub-second deadlines exactly. A legacy seconds-shaped
+			// `timeout` argument no longer exists in the schema, so it is ignored
+			// rather than silently mis-scaled.
+			const timeoutSecs =
+				typeof timeout_ms === "number" && Number.isFinite(timeout_ms) && timeout_ms > 0
+					? timeout_ms / 1000
+					: undefined;
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
 			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
@@ -424,7 +460,7 @@ export function createBashToolDefinition(
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
-						timeout,
+						timeout: timeoutSecs,
 						env: spawnContext.env,
 					});
 					exitCode = result.exitCode;
@@ -442,7 +478,10 @@ export function createBashToolDefinition(
 						// Hard-deadline force-resolve: the child never closed even after SIGKILL
 						// (D-state symptom). Surface a distinct marker so an operator/agent can
 						// tell this apart from a clean SIGTERM exit. Partial output is preserved.
-						const suffix = timeout ? `Command timed out after ${timeout} seconds (force-killed)` : "Command force-killed";
+						const suffix =
+							timeoutSecs !== undefined
+								? `Command timed out after ${timeoutSecs} seconds (force-killed)`
+								: "Command force-killed";
 						throw new Error(appendStatus(text, suffix));
 					}
 					throw err;

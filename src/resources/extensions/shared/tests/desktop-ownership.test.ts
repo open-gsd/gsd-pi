@@ -24,6 +24,14 @@ function cleanupLockDirectory(safetyDirectory: string): void {
 	rmSync(safetyDirectory, { recursive: true, force: true });
 }
 
+const supportsPosixDesktopOwnership =
+	(process.platform === "darwin" || process.platform === "linux") && typeof process.getuid === "function";
+const posixLockSkipReason =
+	supportsPosixDesktopOwnership && existsSync("/bin/ps")
+		? undefined
+		: "Requires Darwin/Linux flock, process.getuid, and /bin/ps";
+const processLivenessSkipReason = posixLockSkipReason;
+
 describe("desktop ownership manager", () => {
 	test("does not touch the ownership path until a lease is requested", (t) => {
 		const lockDirectory = makeLockDirectory();
@@ -34,7 +42,7 @@ describe("desktop ownership manager", () => {
 		assert.equal(existsSync(path.join(lockDirectory, "desktop-ownership.lock")), false);
 	});
 
-	test("rejects symlinked safety directories and journals", (t) => {
+	test("rejects symlinked safety directories and journals", { skip: posixLockSkipReason }, (t) => {
 		const baseDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(baseDirectory));
 		const targetDirectory = path.join(baseDirectory, "target");
@@ -57,7 +65,7 @@ describe("desktop ownership manager", () => {
 		);
 	});
 
-	test("serializes independent managers using the same lock directory", (t) => {
+	test("serializes independent managers using the same lock directory", { skip: posixLockSkipReason }, (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const owner = createDesktopOwnershipManager(lockDirectory);
@@ -85,7 +93,7 @@ describe("desktop ownership manager", () => {
 		contender.release(nextLease, terminalEvidence);
 	});
 
-	test("requires a terminal operation result before releasing a lease", (t) => {
+	test("requires a terminal operation result before releasing a lease", { skip: posixLockSkipReason }, (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const manager = createDesktopOwnershipManager(lockDirectory);
@@ -104,7 +112,7 @@ describe("desktop ownership manager", () => {
 		manager.release(lease, evidence);
 	});
 
-	test("quarantines uncertain work across manager instances", (t) => {
+	test("quarantines uncertain work across manager instances", { skip: posixLockSkipReason }, (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const owner = createDesktopOwnershipManager(lockDirectory);
@@ -123,7 +131,7 @@ describe("desktop ownership manager", () => {
 		);
 	});
 
-	test("reclaims a dead-process mutex but preserves durable quarantine", (t) => {
+	test("reclaims a dead-process mutex but preserves durable quarantine", { skip: posixLockSkipReason }, (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const moduleUrl = new URL("../desktop-ownership.ts", import.meta.url).href;
@@ -157,7 +165,7 @@ describe("desktop ownership manager", () => {
 		);
 	});
 
-	test("blocks new actions until a dispatched action has an observed postcondition", (t) => {
+	test("blocks new actions until a dispatched action has an observed postcondition", { skip: posixLockSkipReason }, (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const manager = createDesktopOwnershipManager(lockDirectory);
@@ -176,7 +184,7 @@ describe("desktop ownership manager", () => {
 		manager.release(lease, endEvidence);
 	});
 
-	test("quarantines a contradicted postcondition", (t) => {
+	test("quarantines a contradicted postcondition", { skip: posixLockSkipReason }, (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const manager = createDesktopOwnershipManager(lockDirectory);
@@ -209,7 +217,7 @@ describe("desktop ownership manager", () => {
 		assert.equal(manager.currentLease(), null);
 	});
 
-	test("releases an operation-scoped lease only after a validated callback returns", (t) => {
+	test("releases an operation-scoped lease only after a validated callback returns", { skip: posixLockSkipReason }, (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const manager = createDesktopOwnershipManager(lockDirectory);
@@ -218,7 +226,7 @@ describe("desktop ownership manager", () => {
 		assert.equal(manager.currentLease(), null);
 	});
 
-	test("keeps ownership quarantined when an operation outcome is uncertain", (t) => {
+	test("keeps ownership quarantined when an operation outcome is uncertain", { skip: posixLockSkipReason }, (t) => {
 		const lockDirectory = makeLockDirectory();
 		t.after(() => cleanupLockDirectory(lockDirectory));
 		const manager = createDesktopOwnershipManager(lockDirectory);
@@ -236,7 +244,7 @@ describe("desktop ownership manager", () => {
 });
 
 describe("desktop driver process admission", () => {
-	test("binds process liveness to the captured PID generation", () => {
+	test("binds process liveness to the captured PID generation", { skip: processLivenessSkipReason }, () => {
 		const identity = captureDesktopProcessIdentity(process.pid);
 			assert.ok(identity);
 		assert.equal(isDesktopProcessIdentityAlive(identity), true);

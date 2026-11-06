@@ -294,7 +294,8 @@ With this configuration, a Haiku-4-5 subagent sees only `gsd-workflow` and `goog
 |----------|---------|-------------|
 | `GSD_HOME` | `~/.gsd` | Global GSD directory. All paths derive from this unless individually overridden. Affects preferences, skills, sessions, and per-project state. |
 | `GSD_CMUX_VAULT` | (unset/use preferences) | Optional override for `cmux.vault`: `0` forces off, `1` enables only while the `cmux.enabled` master switch is on. Configure normally via `/gsd cmux vault on/off` or `/gsd prefs` → Integrations. Requires explicit cmux agent configuration; see [cmux Vault setup](commands.md#optional-cmux-vault-bridge). |
-| `GSD_CMUX_VAULT_EXTERNAL_BRIDGE` | (unset) | Set to `1` when another integration owns lifecycle registration; suppresses the built-in Vault bridge. |
+| `GSD_CMUX_RESUME` | (unset/use preferences) | Optional override for `cmux.resume`: `0` forces automatic restore off, `1` permits it while the `cmux.enabled` master switch is on. Configure via `/gsd cmux resume on/off` or `/gsd prefs` → Integrations. cmux's [trusted-command policy](https://cmux.com/docs/session-restore.md) still gates automatic execution. |
+| `GSD_CMUX_VAULT_EXTERNAL_BRIDGE` | (unset) | Set to `1` when another integration owns Vault lifecycle registration; suppresses Vault metadata publication only. The independent `cmux.resume` setting remains available. |
 | `GSD_PROJECT_ID` | (auto-hash) | Override the automatic project identity hash. Per-project state goes to `$GSD_HOME/projects/<GSD_PROJECT_ID>/` instead of the computed hash. Useful for CI/CD or sharing state across clones of the same repo. |
 | `GSD_STATE_DIR` | `$GSD_HOME` | Per-project state root. Controls where `projects/<repo-hash>/` directories are created. Takes precedence over `GSD_HOME` for project state. |
 | `GSD_CODING_AGENT_DIR` | `$GSD_HOME/agent` | Agent directory containing managed resources, extensions, and auth. Takes precedence over `GSD_HOME` for agent paths. |

@@ -4434,6 +4434,7 @@ describe("exec tools one-hour timeout ceiling (issue #2981)", () => {
   it("gsd_uat_exec accepts timeout_ms up to the one-hour ceiling", async (t) => {
     const base = makeTmpBase();
     t.after(() => cleanup(base));
+    seedContextModeFixture(base);
     const tool = registeredTool("gsd_uat_exec");
 
     const result = await tool.handler({
@@ -4513,6 +4514,7 @@ describe("exec tools one-hour timeout ceiling (issue #2981)", () => {
       else process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = previousTimeout;
       cleanup(base);
     });
+    seedContextModeFixture(base);
     process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "20";
     const tool = registeredTool("gsd_uat_exec");
 

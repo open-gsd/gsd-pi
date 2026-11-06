@@ -481,6 +481,7 @@ export interface CmuxPreferences {
   splits?: boolean;
   browser?: boolean;
   vault?: boolean;
+  resume?: boolean;
 }
 
 export type UokTurnActionMode = "commit" | "snapshot" | "status-only";

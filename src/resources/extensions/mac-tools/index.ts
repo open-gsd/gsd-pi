@@ -168,25 +168,97 @@ function macAgentOperationKind(command: string): DesktopOperationKind {
 	return "inspect";
 }
 
+function sanitizeMacAgentFailureReason(error: string | undefined, command: string): string {
+	const reason = (error ?? "")
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 240)
+		.trim();
+	return reason || `mac-agent ${command} failed without details`;
+}
+
+const processExitWaitCell = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+
+function isMacAgentProcessRunning(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+		throw error;
+	}
+}
+
+function sleepSynchronously(milliseconds: number): void {
+	Atomics.wait(processExitWaitCell, 0, 0, milliseconds);
+}
+
+export function waitForMacAgentProcessExit(
+	pid: number,
+	options: {
+		timeoutMs?: number;
+		pollIntervalMs?: number;
+		isProcessRunning?: (pid: number) => boolean;
+		sleep?: (milliseconds: number) => void;
+		now?: () => number;
+	} = {},
+): void {
+	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("mac-agent returned an invalid app process identifier.");
+	const timeoutMs = options.timeoutMs ?? 10_000;
+	const pollIntervalMs = options.pollIntervalMs ?? 50;
+	const isProcessRunning = options.isProcessRunning ?? isMacAgentProcessRunning;
+	const sleep = options.sleep ?? sleepSynchronously;
+	const now = options.now ?? (() => Number(process.hrtime.bigint()) / 1_000_000);
+	const deadline = now() + timeoutMs;
+
+	while (true) {
+		let running: boolean;
+		try {
+			running = isProcessRunning(pid);
+		} catch {
+			throw new Error("Unable to verify app process exit; desktop ownership is quarantined.");
+		}
+		if (!running) return;
+
+		const remainingMs = deadline - now();
+		if (remainingMs <= 0) {
+			throw new Error(`Timed out waiting for app process ${pid} to exit; desktop ownership is quarantined.`);
+		}
+		sleep(Math.min(pollIntervalMs, remainingMs));
+	}
+}
+
 export function runMacAgentWithOwnership(
 	command: string,
 	execute: () => MacAgentResponse,
 	manager: DesktopOwnershipManager = desktopOwnershipManager,
 	isInteractive: boolean = false,
+	waitForProcessExit: typeof waitForMacAgentProcessExit = waitForMacAgentProcessExit,
 ): MacAgentResponse {
 	const kind = macAgentOperationKind(command);
-	const response = withDesktopOperation("mac-tools", kind, () => {
+	return withDesktopOperation("mac-tools", kind, () => {
 		const result = execute();
 		if (!isMacAgentResponse(result)) {
 			throw new Error(`mac-agent returned an invalid result (command: ${command}); desktop ownership is quarantined.`);
 		}
-		if (!result.success && kind === "action") {
-			throw new Error(`mac-agent returned an unverified result (command: ${command}); desktop ownership is quarantined.`);
+		if (!result.success) {
+			const reason = sanitizeMacAgentFailureReason(result.error, command);
+			if (kind === "action") {
+				throw new Error(`mac-agent returned an unverified result (command: ${command}): ${reason}; desktop ownership is quarantined.`);
+			}
+			return { ...result, error: reason };
+		}
+		if (command === "quitApp") {
+			const pid = result.data?.pid;
+			if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) {
+				throw new Error("mac-agent did not return a valid app process identifier; desktop ownership is quarantined.");
+			}
+			waitForProcessExit(pid);
+			return { ...result, data: { ...result.data, terminated: true } };
 		}
 		return result;
 	}, manager, isInteractive);
-	if (!response.success) throw new Error(`mac-agent returned a terminal failure (command: ${command}).`);
-	return response;
 }
 
 export function isMacToolsContextInteractive(
@@ -211,8 +283,8 @@ function execMacAgentUnlocked(command: string, params?: Record<string, any>): Ma
 	// Interaction commands (click, type) can block while the target app
 	// processes the action — e.g. TextEdit's AXPress on "New Document"
 	// takes ~12s while it dismisses the Open dialog and creates a window.
-	// Screenshots can also be slow for large retina windows.
-	const slowCommands = new Set(["clickElement", "typeText", "screenshotWindow"]);
+	// Screenshots can also be slow for large retina windows. quitApp waits for the target process to exit while holding ownership.
+	const slowCommands = new Set(["clickElement", "typeText", "screenshotWindow", "quitApp"]);
 	const timeout = slowCommands.has(command) ? 30_000 : 10_000;
 
 	try {

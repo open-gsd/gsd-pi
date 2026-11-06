@@ -257,6 +257,7 @@ export function printHelp(version: string): void {
   process.stdout.write('  --print, -p              Single-shot print mode\n')
   process.stdout.write('  --continue, -c           Resume the most recent session\n')
   process.stdout.write('  --session <path|id>      Resume a specific session file or ID\n')
+  process.stdout.write('  --resume-exact <file> <id> Resume one existing session identity (cmux restore)\n')
   process.stdout.write('  --session-dir <dir>      Store and look up sessions in a custom directory\n')
   process.stdout.write('  --worktree, -w [name]    Start in an isolated worktree (auto-named if omitted)\n')
   process.stdout.write('  --model <id>             Override model (e.g. provider/model-id)\n')

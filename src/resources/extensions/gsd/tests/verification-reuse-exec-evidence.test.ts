@@ -415,6 +415,50 @@ describePosix("gsd_exec records verification contracts (#2982)", () => {
     assert.equal(gate.checks[0]?.reusedRun?.runId, id);
   });
 
+  test("fresh and reused verification see the same private output modes across umasks", async () => {
+    makeRepo();
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const verify = `node -e 'const fs = require("node:fs"); const modes = [1, 2].map((fd) => fs.fstatSync(fd).mode & 0o777); process.stdout.write(modes.join(":")); process.exit(modes.every((mode) => mode === 0o600) ? 0 : 1)'`;
+    seedTask(verify);
+    const originalUmask = process.umask();
+    try {
+      for (const umask of [0o022, 0o077]) {
+        process.umask(umask);
+        const result = await executeGsdExec(
+          { script: verify, purpose: "verify stdout and stderr modes" },
+          {
+            baseDir: base,
+            preferences: { verification_reuse_exec_evidence: true },
+            readVerificationTaskRef: taskRef,
+            verificationRunContract: true,
+          },
+        );
+        assert.equal(result.isError, false, result.content[0]?.text);
+        assert.match(String(result.details?.digest), /384:384/);
+        const id = String(result.details?.id);
+        const row = readExecRun(id);
+        assert.ok(row, "the sandboxed contract row is recorded");
+        const revision = sourceRevision();
+        assert.equal(row.source_revision, revision);
+
+        const reused = await runVerificationGate({
+          cwd: base,
+          taskPlanVerify: verify,
+          reuseExecRuns: { runs: [row], sourceRevision: revision },
+        });
+        assert.equal(reused.passed, true, `reused run must pass under umask ${umask.toString(8)}`);
+        assert.equal(reused.checks[0]?.reusedRun?.runId, id);
+
+        const fresh = await runVerificationGate({ cwd: base, taskPlanVerify: verify });
+        assert.equal(fresh.passed, true, `fresh gate must match the sandbox under umask ${umask.toString(8)}`);
+        assert.match(fresh.checks[0]?.stdout ?? "", /384:384/);
+      }
+    } finally {
+      process.umask(originalUmask);
+    }
+  });
+
   test("without the preference the sandboxed run stores no contract", async () => {
     makeRepo();
     mkdirSync(join(base, ".gsd"), { recursive: true });
