@@ -415,6 +415,10 @@ function decodeApps(value: unknown): SelectedApp[] {
 	return apps.slice(0, 100);
 }
 
+export function formatAppOption(app: SelectedApp): string {
+	return `PID ${app.pid}: ${app.name} (${app.bundleId})`;
+}
+
 function decodeWindowsForPid(pid: number): (value: unknown) => Array<{ windowId: number; appName: string; title: string }> {
 	return (value) => {
 		const result = parseMcpEnvelope(value);
@@ -468,6 +472,14 @@ export function buildSnapshotBindings(snapshot: JsonRecord, target: SelectedWind
 	const observers = new Map<string, BoundObserver>();
 	const publicElements: Array<{ target_id: string; role: string; label: string | null }> = [];
 	const publicObservers: Array<{ observer_id: string; role: string; label: string; current_value: string }> = [];
+	const selectorCounts = new Map<string, number>();
+	for (const item of snapshot.elements as unknown[]) {
+		if (!isRecord(item) || typeof item.role !== "string" || typeof item.element_index !== "number") continue;
+		const identifier = identifiers.get(item.element_index);
+		if (!identifier) continue;
+		const selectorKey = JSON.stringify([item.role, identifier]);
+		selectorCounts.set(selectorKey, (selectorCounts.get(selectorKey) ?? 0) + 1);
+	}
 	for (const item of snapshot.elements as unknown[]) {
 		if (!isRecord(item) || typeof item.role !== "string" || /secure|password|textfield|textarea/iu.test(item.role)) continue;
 		const label = sanitizeLabel(item.label);
@@ -475,7 +487,12 @@ export function buildSnapshotBindings(snapshot: JsonRecord, target: SelectedWind
 		const index = typeof item.element_index === "number" && Number.isInteger(item.element_index) ? item.element_index : null;
 		const identifier = index === null ? undefined : identifiers.get(index);
 		let observerId: string | undefined;
-		if (identifier && typeof item.value === "string" && safeValue(item.value, item.role, label)) {
+		if (
+			identifier
+			&& selectorCounts.get(JSON.stringify([item.role, identifier])) === 1
+			&& typeof item.value === "string"
+			&& safeValue(item.value, item.role, label)
+		) {
 			observerId = randomUUID();
 			observers.set(observerId, { observerId, pid: target.pid, windowId: target.windowId, role: item.role, identifier, label, initialValue: item.value });
 			publicObservers.push({ observer_id: observerId, role: item.role, label, current_value: item.value });
@@ -638,7 +655,7 @@ async function selectTarget(session: ActiveCuaSession, ctx: ExtensionContext, si
 	if (!ctx.isLocalInteractiveDesktop || !ctx.hasUI || apps.length === 0) {
 		throw new Error("local interactive app selection is unavailable");
 	}
-	const appOptions = apps.map((app) => `${app.name} (${app.bundleId})`);
+	const appOptions = apps.map(formatAppOption);
 	const selectedAppLabel = await ctx.ui.select("Choose one running app for cmux Computer Use", appOptions);
 	if (typeof selectedAppLabel !== "string" || !selectedAppLabel) throw new Error("cmux CUA target selection was cancelled");
 	const app = apps[appOptions.indexOf(selectedAppLabel)];

@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import registerCmuxCua, {
 	cmuxCuaActionParameters,
 	buildSnapshotBindings,
+	formatAppOption,
 	closeProxyAndVerifyExit,
 	settleDesktopClose,
 	decodeClickResult,
@@ -33,6 +34,41 @@ test("rejected accessibility labels cannot fall back to a role and expose values
 	assert.deepEqual(bindings.publicObservers.map((observer) => observer.label), ["Name"]);
 	assert.deepEqual(bindings.publicObservers.map((observer) => observer.current_value), ["public-value"]);
 	assert.equal(bindings.observers.size, 1);
+});
+
+test("duplicate AX selectors are excluded from postcondition observers", () => {
+	for (const duplicateLabel of ["Duplicate two", "Password"]) {
+		const bindings = buildSnapshotBindings({
+			tree_markdown: "- [0] AXStaticText [id=shared-value]\n- [1] AXStaticText [id=shared-value]\n- [2] AXStaticText [id=unique-value]\n- [3] AXCheckBox [id=shared-value]",
+			elements: [
+				{ element_index: 0, role: "AXStaticText", label: "Duplicate one", value: "before-one" },
+				{ element_index: 1, role: "AXStaticText", label: duplicateLabel, value: "before-two" },
+				{ element_index: 2, role: "AXStaticText", label: "Unique value", value: "before-unique" },
+				{ element_index: 3, role: "AXCheckBox", label: "Choice", value: "off", element_token: "x" },
+			],
+		} as any, { pid: 4521, windowId: 7, appName: "Test", title: "Test" } as any);
+
+		assert.deepEqual(bindings.publicObservers.map((observer) => observer.label), ["Unique value", "Choice"]);
+		assert.equal(bindings.observers.size, 2);
+		assert.deepEqual(bindings.publicElements.map((element) => element.label), ["Choice"]);
+		assert.equal(bindings.elements.size, 1);
+	}
+});
+
+test("app chooser labels disambiguate running instances by PID", () => {
+	const apps = [
+		{ pid: 101, name: "Example", bundleId: "org.example.App" },
+		{ pid: 202, name: "Example", bundleId: "org.example.App" },
+	];
+	const appOptions = apps.map(formatAppOption);
+	const selectedAppLabel = appOptions[1];
+
+	assert.deepEqual(appOptions, [
+		"PID 101: Example (org.example.App)",
+		"PID 202: Example (org.example.App)",
+	]);
+	assert.equal(new Set(appOptions).size, 2);
+	assert.equal(apps[appOptions.indexOf(selectedAppLabel)]?.pid, 202);
 });
 
 describe("cmux CUA consent and inspection invalidation", () => {
