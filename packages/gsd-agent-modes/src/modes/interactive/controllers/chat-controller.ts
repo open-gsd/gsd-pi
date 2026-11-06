@@ -101,7 +101,7 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 	formatWebSearchResult: (content: unknown) => string;
 	getRegisteredToolDefinition: (toolName: string) => any;
 	checkShutdownRequested: () => Promise<void>;
-	rebuildChatFromMessages: () => void;
+	rebuildChatFromMessages: (options?: { omitCompactionSummary?: boolean }) => void;
 	flushCompactionQueue: (options?: { willRetry?: boolean }) => Promise<void>;
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
@@ -509,7 +509,7 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 				host.showStatus("Auto-compaction cancelled");
 			} else if (event.result) {
 				host.chatContainer.clear();
-				host.rebuildChatFromMessages();
+				host.rebuildChatFromMessages({ omitCompactionSummary: true });
 				host.addMessageToChat({
 					role: "compactionSummary",
 					tokensBefore: event.result.tokensBefore,

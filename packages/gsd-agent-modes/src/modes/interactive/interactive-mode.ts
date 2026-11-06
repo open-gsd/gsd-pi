@@ -541,7 +541,7 @@ export class InteractiveMode {
 	private addMessageToChat(message: import("@gsd/pi-agent-core").AgentMessage, options?: { populateHistory?: boolean }): void { chatRender.addMessageToChat(this, message, options); }
 	private trimChatHistory(): void { chatRender.trimChatHistory(this); }
 	private renderSessionContext(sessionContext: import("@gsd/pi-coding-agent/core/session-manager.js").SessionContext, options?: Parameters<typeof chatRender.renderSessionContext>[2]): void { chatRender.renderSessionContext(this, sessionContext, options); }
-	private rebuildChatFromMessages(): void { chatRender.rebuildChatFromMessages(this); }
+	private rebuildChatFromMessages(options?: Parameters<typeof chatRender.rebuildChatFromMessages>[1]): void { chatRender.rebuildChatFromMessages(this, options); }
 	private populatePinnedFromMessages(messages: import("@gsd/pi-agent-core").AgentMessage[]): void { chatRender.populatePinnedFromMessages(this, messages); }
 
 	private handleCtrlC(): void { keyHandlers.handleCtrlC(this); }
