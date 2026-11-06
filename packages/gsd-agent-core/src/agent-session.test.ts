@@ -86,8 +86,8 @@ describe("AgentSessionExtensionsModule", () => {
     await mod.reload();
 
     assert.deepEqual(emittedEvents, [
-      { type: "session_state_changed", reason: "reload", phase: "starting" },
-      { type: "session_state_changed", reason: "reload", phase: "settled" },
+      { type: "owner_generation_transition", reason: "reload", phase: "starting" },
+      { type: "owner_generation_transition", reason: "reload", phase: "settled" },
     ]);
   });
 
@@ -470,10 +470,10 @@ describe("AgentSessionNavigationModule", () => {
       sessionManager,
       emit: (event: { type: string; reason?: string; phase?: string }) => {
         emittedEvents.push(event);
-        if (event.type === "session_state_changed" && event.phase === "starting") {
+        if (event.type === "owner_generation_transition" && event.phase === "starting") {
           sessionIdAtTransitionStart = sessionManager.getSessionId();
         }
-        if (event.type === "session_state_changed" && event.phase === "settled") {
+        if (event.type === "owner_generation_transition" && event.phase === "settled") {
           sessionIdAtTransitionSettled = sessionManager.getSessionId();
         }
       },
@@ -495,8 +495,8 @@ describe("AgentSessionNavigationModule", () => {
 
     assert.equal(result, true);
     assert.deepEqual(emittedEvents, [
-      { type: "session_state_changed", reason: "new_session", phase: "starting" },
-      { type: "session_state_changed", reason: "new_session", phase: "settled" },
+      { type: "owner_generation_transition", reason: "new_session", phase: "starting" },
+      { type: "owner_generation_transition", reason: "new_session", phase: "settled" },
     ]);
     assert.notEqual(sessionIdAtTransitionStart, sessionIdAtTransitionSettled);
     assert.equal(sessionIdAtTransitionSettled, sessionManager.getSessionId());

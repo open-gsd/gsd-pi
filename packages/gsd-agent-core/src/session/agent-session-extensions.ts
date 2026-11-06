@@ -602,7 +602,7 @@ export class AgentSessionExtensionsModule {
 	}
 
 	async reload(): Promise<void> {
-		this.host.emit({ type: "session_state_changed", reason: "reload", phase: "starting" });
+		this.host.emit({ type: "owner_generation_transition", reason: "reload", phase: "starting" });
 		try {
 			const previousFlagValues = this.host._extensionRunner.getFlagValues();
 			await emitSessionShutdownEvent(this.host._extensionRunner, { type: "session_shutdown", reason: "reload" });
@@ -628,7 +628,7 @@ export class AgentSessionExtensionsModule {
 				await this.extendResourcesFromExtensions("reload");
 			}
 		} finally {
-			this.host.emit({ type: "session_state_changed", reason: "reload", phase: "settled" });
+			this.host.emit({ type: "owner_generation_transition", reason: "reload", phase: "settled" });
 		}
 	}
 

@@ -121,7 +121,7 @@ const OWNER_GENERATION_TRANSITION_REASONS = new Set([
 
 export function shouldAdvanceOwnerGeneration(event: { type: string; reason?: string; phase?: string }): boolean {
 	return (
-		event.type === "session_state_changed" &&
+		event.type === "owner_generation_transition" &&
 		OWNER_GENERATION_TRANSITION_REASONS.has(event.reason ?? "")
 	);
 }
@@ -130,7 +130,7 @@ export function updateOwnerTransitionCount(
 	activeTransitions: number,
 	event: { type: string; phase?: string },
 ): number {
-	if (event.type !== "session_state_changed") return activeTransitions;
+	if (event.type !== "owner_generation_transition") return activeTransitions;
 	if (event.phase === "starting") return activeTransitions + 1;
 	if (event.phase === "settled") return Math.max(0, activeTransitions - 1);
 	return activeTransitions;

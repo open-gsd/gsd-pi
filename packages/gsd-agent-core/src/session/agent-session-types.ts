@@ -88,10 +88,12 @@ export type AgentSessionEvent =
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| { type: "session_state_changed"; reason: SessionStateChangeReason }
 	| {
-			type: "session_state_changed";
-			reason: SessionStateChangeReason;
-			phase?: "starting" | "settled";
+			/** Freshness boundary for RPC owner observations; this does not authorize actions. */
+			type: "owner_generation_transition";
+			reason: "new_session" | "switch_session" | "fork" | "reload";
+			phase: "starting" | "settled";
 	  }
 	| { type: "auto_compaction_start"; reason: "threshold" | "overflow" }
 	| {

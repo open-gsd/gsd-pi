@@ -218,6 +218,23 @@ test("session rebind reasons settle unfinished rows; cosmetic reasons do not", (
 	}
 });
 
+test("owner-generation boundaries do not settle activity before a terminal agent event", () => {
+	const model = new ActivityModel();
+	start(model);
+	toolStart(model, "t1");
+
+	for (const phase of ["starting", "settled"]) {
+		assert.equal(
+			model.handleEvent({ type: "owner_generation_transition", reason: "new_session", phase }),
+			false,
+		);
+	}
+	assert.equal(agentRows(model)[0].status, "running");
+
+	end(model, { abortOrigin: "error" });
+	assert.equal(agentRows(model)[0].status, "error");
+});
+
 test("a tool still running when the run ends abnormally is settled as outcome unknown", () => {
 	const model = new ActivityModel();
 	start(model);

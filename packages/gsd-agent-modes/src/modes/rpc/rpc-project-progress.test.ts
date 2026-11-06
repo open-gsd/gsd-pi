@@ -288,18 +288,19 @@ test("typed RPC client exposes binding snapshots without requiring v2 negotiatio
 test("owner generation advances at both session transition boundaries only", () => {
 	for (const reason of ["new_session", "switch_session", "fork", "reload"]) {
 		for (const phase of ["starting", "settled"]) {
-			assert.equal(shouldAdvanceOwnerGeneration({ type: "session_state_changed", reason, phase }), true);
+			assert.equal(shouldAdvanceOwnerGeneration({ type: "owner_generation_transition", reason, phase }), true);
 		}
 	}
 	for (const reason of ["set_model", "set_thinking_level", "set_session_name"]) {
 		assert.equal(shouldAdvanceOwnerGeneration({ type: "session_state_changed", reason }), false);
 	}
+	assert.equal(shouldAdvanceOwnerGeneration({ type: "session_state_changed", reason: "new_session" }), false);
 	assert.equal(shouldAdvanceOwnerGeneration({ type: "message_end" }), false);
 });
 
 test("overlapping owner transitions keep project binding unavailable until all settle", () => {
-	const starting = { type: "session_state_changed", phase: "starting" };
-	const settled = { type: "session_state_changed", phase: "settled" };
+	const starting = { type: "owner_generation_transition", phase: "starting" };
+	const settled = { type: "owner_generation_transition", phase: "settled" };
 	let activeTransitions = 0;
 
 	activeTransitions = updateOwnerTransitionCount(activeTransitions, starting);

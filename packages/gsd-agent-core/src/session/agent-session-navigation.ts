@@ -63,7 +63,7 @@ export class AgentSessionNavigationModule {
 			}
 		}
 
-		this.host.emit({ type: "session_state_changed", reason: "new_session", phase: "starting" });
+		this.host.emit({ type: "owner_generation_transition", reason: "new_session", phase: "starting" });
 		try {
 			await this.settleCurrentTurnForSessionTransition();
 
@@ -118,7 +118,7 @@ export class AgentSessionNavigationModule {
 
 			return true;
 		} finally {
-			this.host.emit({ type: "session_state_changed", reason: "new_session", phase: "settled" });
+			this.host.emit({ type: "owner_generation_transition", reason: "new_session", phase: "settled" });
 		}
 	}
 
@@ -137,7 +137,7 @@ export class AgentSessionNavigationModule {
 			}
 		}
 
-		this.host.emit({ type: "session_state_changed", reason: "switch_session", phase: "starting" });
+		this.host.emit({ type: "owner_generation_transition", reason: "switch_session", phase: "starting" });
 		try {
 			await this.settleCurrentTurnForSessionTransition();
 			this.host.disconnectFromAgent();
@@ -191,7 +191,7 @@ export class AgentSessionNavigationModule {
 			this.host.reconnectToAgent();
 			return true;
 		} finally {
-			this.host.emit({ type: "session_state_changed", reason: "switch_session", phase: "settled" });
+			this.host.emit({ type: "owner_generation_transition", reason: "switch_session", phase: "settled" });
 		}
 	}
 
@@ -220,7 +220,7 @@ export class AgentSessionNavigationModule {
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
 
-		this.host.emit({ type: "session_state_changed", reason: "fork", phase: "starting" });
+		this.host.emit({ type: "owner_generation_transition", reason: "fork", phase: "starting" });
 		try {
 			this.host._pendingNextTurnMessages = [];
 
@@ -247,7 +247,7 @@ export class AgentSessionNavigationModule {
 
 			return { selectedText, cancelled: false };
 		} finally {
-			this.host.emit({ type: "session_state_changed", reason: "fork", phase: "settled" });
+			this.host.emit({ type: "owner_generation_transition", reason: "fork", phase: "settled" });
 		}
 	}
 
