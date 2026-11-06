@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
-import { setExtensionWidget } from "./interactive-extension-widgets.js";
+import { inferLocalInteractiveDesktop, setExtensionWidget } from "./interactive-extension-widgets.js";
 
 function createWidgetHost() {
 	const renderCalls: Array<true | undefined> = [];
@@ -23,6 +23,14 @@ function createWidgetHost() {
 		renderCalls,
 	};
 }
+
+test("local desktop admission requires the default process terminal and a TTY host", () => {
+	assert.equal(inferLocalInteractiveDesktop(undefined, true, true), true);
+	assert.equal(inferLocalInteractiveDesktop({ columns: 80 }, true, true), false);
+	assert.equal(inferLocalInteractiveDesktop(null, true, true), false);
+	assert.equal(inferLocalInteractiveDesktop(undefined, false, true), false);
+	assert.equal(inferLocalInteractiveDesktop(undefined, true, false), false);
+});
 
 test("setExtensionWidget: forces viewport realign when key is gsd-outcome", () => {
 	initTheme("dark", false);

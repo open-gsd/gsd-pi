@@ -20,11 +20,19 @@ import type { InteractiveModeDelegateHost } from "./interactive-mode-delegate-ho
 import { getEditorTheme } from "@gsd/pi-coding-agent/theme/theme.js";
 import type { EditorComponent, EditorTheme, KeybindingsManager, OverlayHandle, OverlayOptions } from "@gsd/pi-tui";
 
+export function inferLocalInteractiveDesktop(terminalOverride: unknown, stdinIsTTY: boolean, stdoutIsTTY: boolean): boolean {
+	return terminalOverride === undefined && stdinIsTTY && stdoutIsTTY;
+}
+
 export async function initExtensions(host: InteractiveModeDelegateHost): Promise<void> {
 		if (host.options.bindExtensions !== false) {
 			const uiContext = host.createExtensionUIContext();
 			await host.session.bindExtensions({
-				localInteractiveDesktop: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+				localInteractiveDesktop: inferLocalInteractiveDesktop(
+					host.options.terminal,
+					Boolean(process.stdin.isTTY),
+					Boolean(process.stdout.isTTY),
+				),
 				uiContext,
 				commandContextActions: {
 					waitForIdle: () => host.session.agent.waitForIdle(),

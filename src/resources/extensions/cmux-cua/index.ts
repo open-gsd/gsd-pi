@@ -462,7 +462,7 @@ function sanitizeLabel(value: unknown): string | null {
 	return safeText(value, MAX_LABEL_CHARS) ? value : null;
 }
 
-function buildSnapshotBindings(snapshot: JsonRecord, target: SelectedWindow) {
+export function buildSnapshotBindings(snapshot: JsonRecord, target: SelectedWindow) {
 	const identifiers = mapTreeIdentifiers(snapshot.tree_markdown as string);
 	const elements = new Map<string, BoundElement>();
 	const observers = new Map<string, BoundObserver>();
@@ -470,7 +470,8 @@ function buildSnapshotBindings(snapshot: JsonRecord, target: SelectedWindow) {
 	const publicObservers: Array<{ observer_id: string; role: string; label: string; current_value: string }> = [];
 	for (const item of snapshot.elements as unknown[]) {
 		if (!isRecord(item) || typeof item.role !== "string" || /secure|password|textfield|textarea/iu.test(item.role)) continue;
-		const label = sanitizeLabel(item.label) ?? item.role;
+		const label = sanitizeLabel(item.label);
+		if (label === null) continue;
 		const index = typeof item.element_index === "number" && Number.isInteger(item.element_index) ? item.element_index : null;
 		const identifier = index === null ? undefined : identifiers.get(index);
 		let observerId: string | undefined;
@@ -743,7 +744,23 @@ export interface ProxyCloseResult {
 	exited: boolean;
 }
 
+function settledBeforeDeadline(promise: Promise<void>, deadline: number): Promise<boolean> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const timeoutPromise = new Promise<boolean>((resolve) => {
+		timeout = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now()));
+	});
+	const settled = promise.then(() => true, () => true);
+	return Promise.race([settled, timeoutPromise])
+		.then((completed) => completed && Date.now() <= deadline)
+		.finally(() => {
+			if (timeout !== undefined) clearTimeout(timeout);
+		});
+}
+
 export async function closeProxyAndVerifyExit(dependencies: ProxyCloseDependencies): Promise<ProxyCloseResult> {
+	const configuredBudget = dependencies.budgetMs ?? CLEANUP_BUDGET_MS;
+	const budgetMs = Number.isFinite(configuredBudget) ? Math.max(0, configuredBudget) : CLEANUP_BUDGET_MS;
+	const deadline = Date.now() + budgetMs;
 	let identity = dependencies.knownIdentity;
 	if (!identity) {
 		try {
@@ -753,20 +770,26 @@ export async function closeProxyAndVerifyExit(dependencies: ProxyCloseDependenci
 			// Close both handles, but absence of a captured identity must quarantine.
 		}
 	}
-	try { await dependencies.closeClient(); } catch { /* process identity check remains authoritative */ }
-	try { await dependencies.closeTransport(); } catch { /* process identity check remains authoritative */ }
-	if (!identity) return { identity: null, exited: false };
+	const clientClose = Promise.resolve().then(() => dependencies.closeClient());
+	const clientClosed = await settledBeforeDeadline(clientClose, deadline);
+	const transportClose = Promise.resolve().then(() => dependencies.closeTransport());
+	const transportClosed = await settledBeforeDeadline(transportClose, deadline);
+	if (!clientClosed || !transportClosed || !identity || Date.now() >= deadline) return { identity, exited: false };
+
 	const isExited = dependencies.isExited ?? isDesktopProcessIdentityExited;
-	const deadline = Date.now() + (dependencies.budgetMs ?? CLEANUP_BUDGET_MS);
 	while (Date.now() < deadline) {
+		let exited: boolean;
 		try {
-			if (isExited(identity)) return { identity, exited: true };
+			exited = isExited(identity);
 		} catch {
 			return { identity, exited: false };
 		}
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		if (exited) return { identity, exited: Date.now() <= deadline };
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) break;
+		await new Promise((resolve) => setTimeout(resolve, Math.min(100, remainingMs)));
 	}
-	try { return { identity, exited: isExited(identity) }; } catch { return { identity, exited: false }; }
+	return { identity, exited: false };
 }
 
 export function settleDesktopClose(

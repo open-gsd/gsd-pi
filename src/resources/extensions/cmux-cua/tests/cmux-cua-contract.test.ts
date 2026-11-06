@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import registerCmuxCua, {
 	cmuxCuaActionParameters,
+	buildSnapshotBindings,
 	closeProxyAndVerifyExit,
 	settleDesktopClose,
 	decodeClickResult,
@@ -19,6 +20,20 @@ import registerCmuxCua, {
 function envelope(structured: Record<string, unknown>) {
 	return { isError: false, structured };
 }
+
+test("rejected accessibility labels cannot fall back to a role and expose values", () => {
+	const bindings = buildSnapshotBindings({
+		tree_markdown: "- [0] AXStaticText [id=password-field]\n- [1] AXStaticText [id=name-field]",
+		elements: [
+			{ element_index: 0, role: "AXStaticText", label: "Password", value: "sensitive-value" },
+			{ element_index: 1, role: "AXStaticText", label: "Name", value: "public-value" },
+		],
+	} as any, { pid: 4521, windowId: 7, appName: "Test", title: "Test" } as any);
+
+	assert.deepEqual(bindings.publicObservers.map((observer) => observer.label), ["Name"]);
+	assert.deepEqual(bindings.publicObservers.map((observer) => observer.current_value), ["public-value"]);
+	assert.equal(bindings.observers.size, 1);
+});
 
 describe("cmux CUA consent and inspection invalidation", () => {
 	test("requires separate AX-text sharing approval and remembers it only for the session", async () => {
@@ -132,11 +147,39 @@ describe("cmux CUA pinned contract", () => {
 			closeClient: async () => { events.push("client-close"); transportPid = null; },
 			closeTransport: async () => { events.push("transport-close"); },
 			isExited: (candidate) => { events.push(`check-${candidate.pid}`); return false; },
-			budgetMs: 0,
+			budgetMs: 25,
 		});
 		assert.deepEqual(events, ["read-pid", "capture-4521", "client-close", "transport-close", "check-4521"]);
 		assert.equal(result.identity, identity);
 		assert.equal(result.exited, false);
+	});
+
+	test("the cleanup deadline includes client and transport close operations", async () => {
+		const identity = { pid: 4521, startToken: "gen-1" };
+		for (const stalledClose of ["client", "transport"] as const) {
+			const calls: string[] = [];
+			let exitChecks = 0;
+			const startedAt = Date.now();
+			const delayedClose = () => new Promise<void>((resolve) => setTimeout(resolve, 250));
+			const result = await closeProxyAndVerifyExit({
+				currentPid: () => identity.pid,
+				knownIdentity: identity,
+				closeClient: () => {
+					calls.push("client");
+					return stalledClose === "client" ? delayedClose() : Promise.resolve();
+				},
+				closeTransport: () => {
+					calls.push("transport");
+					return stalledClose === "transport" ? delayedClose() : Promise.resolve();
+				},
+				isExited: () => { exitChecks += 1; return true; },
+				budgetMs: 25,
+			});
+			assert.deepEqual(calls, ["client", "transport"]);
+			assert.equal(exitChecks, 0);
+			assert.equal(result.exited, false);
+			assert.ok(Date.now() - startedAt < 200, "stalled close must not extend cleanup beyond its budget");
+		}
 	});
 
 	test("missing, indeterminate, and failed exit checks cannot become positive process-exit evidence", async () => {
@@ -149,7 +192,7 @@ describe("cmux CUA pinned contract", () => {
 			closeClient: close,
 			closeTransport: close,
 			isExited: () => true,
-			budgetMs: 0,
+			budgetMs: 25,
 		});
 		assert.equal(closed, true);
 		assert.equal(missing.exited, false);
@@ -161,7 +204,7 @@ describe("cmux CUA pinned contract", () => {
 			closeClient: async () => { closedAfterPidFailure = true; },
 			closeTransport: async () => { closedAfterPidFailure = true; },
 			isExited: () => true,
-			budgetMs: 0,
+			budgetMs: 25,
 		});
 		assert.equal(closedAfterPidFailure, true);
 		assert.equal(pidLookupFailure.exited, false);
@@ -173,7 +216,7 @@ describe("cmux CUA pinned contract", () => {
 			closeClient: close,
 			closeTransport: close,
 			isExited: () => false,
-			budgetMs: 0,
+			budgetMs: 25,
 		});
 		assert.equal(unresolved.exited, false);
 		const failedCheck = await closeProxyAndVerifyExit({
@@ -182,7 +225,7 @@ describe("cmux CUA pinned contract", () => {
 			closeClient: close,
 			closeTransport: close,
 			isExited: () => { throw new Error("identity lookup unavailable"); },
-			budgetMs: 0,
+			budgetMs: 25,
 		});
 		assert.equal(failedCheck.exited, false);
 		const exited = await closeProxyAndVerifyExit({
@@ -191,7 +234,7 @@ describe("cmux CUA pinned contract", () => {
 			closeClient: close,
 			closeTransport: close,
 			isExited: () => true,
-			budgetMs: 0,
+			budgetMs: 25,
 		});
 		assert.equal(exited.exited, true);
 	});
