@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcessByStdio } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
@@ -99,17 +99,28 @@ const closeout: MilestoneCompletionCloseout = {
 };
 
 const WORKER_SCRIPT = `
-  import { existsSync, writeFileSync } from "node:fs";
+  import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 
-  const [databaseHref, lifecycleHref, dbPath, readyPath, attemptPath, releasePath, requestJson] = process.argv.slice(-7);
-  const [{ openDatabase, closeDatabase }, { completeMilestone }] = await Promise.all([
-    import(databaseHref),
-    import(lifecycleHref),
-  ]);
+  const [databaseHref, lifecycleHref, dbPath, readyPath, stagePath, attemptPath, releasePath, requestJson] = process.argv.slice(-8);
+  writeFileSync(stagePath, "script-started\\n", "utf8");
+  const databasePromise = import(databaseHref).then((module) => {
+    appendFileSync(stagePath, "database-module-loaded\\n", "utf8");
+    return module;
+  });
+  const lifecyclePromise = import(lifecycleHref).then((module) => {
+    appendFileSync(stagePath, "lifecycle-module-loaded\\n", "utf8");
+    return module;
+  });
+  const [{ openDatabase, closeDatabase }, { completeMilestone }] = await Promise.all([databasePromise, lifecyclePromise]);
+  appendFileSync(stagePath, "modules-loaded\\n", "utf8");
   if (!openDatabase(dbPath)) throw new Error("contention worker could not open the workflow database");
+  appendFileSync(stagePath, "database-opened\\n", "utf8");
   writeFileSync(readyPath, String(process.pid), "utf8");
+  appendFileSync(stagePath, "ready-marker-written\\nwaiting-for-release\\n", "utf8");
   while (!existsSync(releasePath)) await new Promise((resolve) => setTimeout(resolve, 2));
+  appendFileSync(stagePath, "release-observed\\n", "utf8");
   writeFileSync(attemptPath, String(process.pid), "utf8");
+  appendFileSync(stagePath, "attempt-marker-written\\n", "utf8");
 
   const outcome = {};
   try {
@@ -430,6 +441,7 @@ async function proveFaultAndLostResponse(
 function spawnWorker(
   fixture: CapstoneFixture,
   readyPath: string,
+  stagePath: string,
   attemptPath: string,
   releasePath: string,
   request: ReturnType<typeof completionRequest>,
@@ -454,6 +466,7 @@ function spawnWorker(
     lifecycleHref,
     fixture.dbPath,
     readyPath,
+    stagePath,
     attemptPath,
     releasePath,
     JSON.stringify(request),
@@ -464,12 +477,31 @@ function spawnWorker(
   });
 }
 
-async function waitForFiles(paths: string[], children: ContentionWorker[]): Promise<void> {
+async function waitForFiles(
+  paths: string[],
+  children: ContentionWorker[],
+  stagePaths: string[],
+  fence: "ready" | "attempt",
+): Promise<void> {
   const deadline = Date.now() + 30_000;
+  const diagnostics = () => children.map((child, index) => {
+    let stage = "not started";
+    try {
+      stage = readFileSync(stagePaths[index]!, "utf8").trim() || "empty";
+    } catch { /* The stage file has not been written yet. */ }
+    return `worker ${index + 1}(pid=${child.pid ?? "unknown"}, exit=${child.exitCode}, signal=${child.signalCode}, marker=${existsSync(paths[index]!)}, stage=${stage})`;
+  }).join("; ");
   while (!paths.every(existsSync)) {
-    const exited = children.find((child) => child.exitCode !== null);
-    assert.equal(exited, undefined, "a contention worker exited before the release fence");
-    assert.ok(Date.now() < deadline, "contention workers did not reach the release fence");
+    const exited = children.find((child) => child.exitCode !== null || child.signalCode !== null);
+    if (exited !== undefined) {
+      assert.equal(exited, undefined, `${fence} fence worker exited before required markers: ${diagnostics()}`);
+    }
+    assert.equal(exited, undefined);
+    const withinDeadline = Date.now() < deadline;
+    if (!withinDeadline) {
+      assert.ok(withinDeadline, `${fence} workers did not reach the release fence: ${diagnostics()}`);
+    }
+    assert.ok(withinDeadline);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
@@ -498,6 +530,7 @@ async function runContention(sameKey: boolean): Promise<WorkerOutcome[]> {
   const fixture = createFixture();
   await validate(fixture.root, `capstone/contention/${sameKey ? "same" : "different"}/validate`);
   const readyPaths = [join(fixture.root, "worker-1-ready"), join(fixture.root, "worker-2-ready")];
+  const stagePaths = [join(fixture.root, "worker-1-stage"), join(fixture.root, "worker-2-stage")];
   const attemptPaths = [join(fixture.root, "worker-1-attempt"), join(fixture.root, "worker-2-attempt")];
   const releasePath = join(fixture.root, "workers-release");
   const firstKey = `capstone/contention/${sameKey ? "same" : "different"}/complete`;
@@ -506,15 +539,15 @@ async function runContention(sameKey: boolean): Promise<WorkerOutcome[]> {
     completionRequest(sameKey ? firstKey : `${firstKey}/competitor`, fixture.sourceRevision),
   ];
   const children = readyPaths.map((readyPath, index) =>
-    spawnWorker(fixture, readyPath, attemptPaths[index]!, releasePath, requests[index]!));
+    spawnWorker(fixture, readyPath, stagePaths[index]!, attemptPaths[index]!, releasePath, requests[index]!));
   const results = children.map(collectChild);
   let lockHeld = false;
   try {
-    await waitForFiles(readyPaths, children);
+    await waitForFiles(readyPaths, children, stagePaths, "ready");
     db().exec("BEGIN IMMEDIATE");
     lockHeld = true;
     writeFileSync(releasePath, "go\n");
-    await waitForFiles(attemptPaths, children);
+    await waitForFiles(attemptPaths, children, stagePaths, "attempt");
     await new Promise((resolve) => setTimeout(resolve, 50));
     db().exec("COMMIT");
     lockHeld = false;

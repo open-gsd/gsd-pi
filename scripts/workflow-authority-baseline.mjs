@@ -62,17 +62,20 @@ function commandForInvariant(invariant) {
   };
 }
 
-// Per-invariant hang watchdog. The default covers fault-boundary-matrix on
-// slower machines, where it has been measured at 67-85s against the
-// historical 60s cap (that cap turned a slow machine into a false timeout).
-// Four invariants run sequentially, so 4 x this value must stay under
-// BASELINE_SPAWN_TIMEOUT_MS in src/tests/workflow-authority-baseline.test.ts,
-// which wraps the whole CLI run.
+// Per-invariant hang watchdog. The fault-boundary matrix passed in 147s on
+// this developer host and exceeded 180s in a sabotage run; retain headroom with
+// a matrix-specific 240s budget while other invariants retain 90s. The full
+// 510s worst case stays within the outer baseline-test budget.
 export const INVARIANT_TIMEOUT_ENV = "GSD_BASELINE_INVARIANT_TIMEOUT_MS";
 const DEFAULT_INVARIANT_TIMEOUT_MS = 90_000;
+const FAULT_BOUNDARY_MATRIX_TIMEOUT_MS = 240_000;
 
-export function invariantTimeoutMs(env = process.env) {
-  return Number(env[INVARIANT_TIMEOUT_ENV]) || DEFAULT_INVARIANT_TIMEOUT_MS;
+export function invariantTimeoutMs(invariant, env = process.env) {
+  return Number(env[INVARIANT_TIMEOUT_ENV]) || (
+    invariant.id === "fault-boundary-matrix"
+      ? FAULT_BOUNDARY_MATRIX_TIMEOUT_MS
+      : DEFAULT_INVARIANT_TIMEOUT_MS
+  );
 }
 
 export function runInvariant(
@@ -85,7 +88,7 @@ export function runInvariant(
   const command = commandForInvariant(invariant);
   const childEnv = { ...process.env };
   delete childEnv.NODE_TEST_CONTEXT;
-  const timeout = invariantTimeoutMs();
+  const timeout = invariantTimeoutMs(invariant);
   const startedAt = now();
   const child = spawnSyncImpl(command.executable, command.args, {
     cwd: REPO_ROOT,

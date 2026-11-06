@@ -28,19 +28,24 @@ function registerAndCaptureBash(): any {
 // 1. Cap removal: the GSD bash tool no longer injects a default timeout. The
 //    schema's timeout stays optional (no `default`), so an omitted timeout
 //    means "no timeout" rather than a silent 120s cap.
-test("GSD bash tool exposes an optional timeout with no injected default", () => {
+test("GSD bash tool exposes an optional timeout_ms with no injected default", () => {
   const bash = registerAndCaptureBash();
-  const timeout = bash.parameters?.properties?.timeout;
-  assert.ok(timeout, "bash tool must expose a `timeout` parameter");
+  const timeout = bash.parameters?.properties?.timeout_ms;
+  assert.ok(timeout, "bash tool must expose a `timeout_ms` parameter");
   assert.equal(
     "default" in timeout,
     false,
-    "the timeout schema must not carry a default — an omitted timeout means uncapped",
+    "the timeout_ms schema must not carry a default — an omitted timeout means uncapped",
   );
   assert.equal(
-    bash.parameters?.required?.includes?.("timeout") ?? false,
+    bash.parameters?.required?.includes?.("timeout_ms") ?? false,
     false,
-    "timeout must remain optional",
+    "timeout_ms must remain optional",
+  );
+  assert.match(
+    String(timeout.description ?? ""),
+    /millisecond/i,
+    "timeout_ms description must state its unit explicitly (issue #3095)",
   );
 });
 
@@ -56,10 +61,10 @@ test("core bash tool does not advertise the auto-mode watchdog", () => {
   );
   assert.equal(
     /stalled-tool watchdog/.test(
-      (core.parameters as any)?.properties?.timeout?.description ?? "",
+      (core.parameters as any)?.properties?.timeout_ms?.description ?? "",
     ),
     false,
-    "core bash timeout schema must not advertise a watchdog",
+    "core bash timeout_ms schema must not advertise a watchdog",
   );
 });
 
@@ -72,10 +77,10 @@ test("GSD-registered bash tool advertises the stalled-tool watchdog", () => {
   );
   assert.equal(
     /stalled-tool watchdog/.test(
-      bash.parameters?.properties?.timeout?.description ?? "",
+      bash.parameters?.properties?.timeout_ms?.description ?? "",
     ),
     true,
-    "the GSD bash timeout schema must name the stalled-tool watchdog",
+    "the GSD bash timeout_ms schema must name the stalled-tool watchdog",
   );
 });
 
@@ -100,7 +105,8 @@ test("async_bash guidance is non-blocking and drops the sync-cap implication", (
 });
 
 // 4. Behavioral passthrough: an explicitly-set timeout is still honored after
-//    the cap removal. A 1s timeout on a 5s sleep must fire well under 5s.
+//    the cap removal. A 1s timeout (1000ms, the tool's unit — issue #3095) on a
+//    5s sleep must fire well under 5s.
 test("GSD bash still forwards an explicit timeout (cap removal did not break passthrough)", async () => {
   const bash = registerAndCaptureBash();
 
@@ -109,7 +115,7 @@ test("GSD bash still forwards an explicit timeout (cap removal did not break pas
   try {
     const result: any = await bash.execute(
       "t1",
-      { command: "sleep 5", timeout: 1 },
+      { command: "sleep 5", timeout_ms: 1000 },
       undefined,
       undefined,
       { cwd: process.cwd() },

@@ -984,7 +984,7 @@ describe("agentLoop with AgentMessage", () => {
 								arguments: { projectDir: "/tmp/project" },
 								externalResult: {
 									content: [{ type: "text", text: "{\"status\":\"ok\"}" }],
-									details: { source: "gsd-workflow" },
+									/* external result intentionally has no structured details */
 									isError: false,
 								},
 							},
@@ -1015,6 +1015,10 @@ describe("agentLoop with AgentMessage", () => {
 			["tool-gsd", false, "{\"status\":\"ok\"}"],
 		]);
 		expect(toolResults.map((event) => event.result.content[0]?.text).join("\n")).not.toContain("not found");
+		expect(toolResults.map((event) => event.result.details)).toEqual([
+			{ source: "claude-code" },
+			undefined,
+		]);
 	});
 
 	it("does not request another assistant turn after externalResult tool calls (issue #654)", async () => {

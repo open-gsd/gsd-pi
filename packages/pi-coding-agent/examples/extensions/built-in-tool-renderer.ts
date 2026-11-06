@@ -107,8 +107,10 @@ export default function (pi: ExtensionAPI) {
 			let text = theme.fg("toolTitle", theme.bold("$ "));
 			const cmd = args.command.length > 80 ? `${args.command.slice(0, 77)}...` : args.command;
 			text += theme.fg("accent", cmd);
-			if (args.timeout) {
-				text += theme.fg("dim", ` (timeout: ${args.timeout}s)`);
+			if (args.timeout_ms) {
+				// bash timeout is milliseconds (#3095) — never echo the raw value with an s suffix.
+				const secs = args.timeout_ms / 1000;
+				text += theme.fg("dim", ` (timeout: ${secs}s)`);
 			}
 			return new Text(text, 0, 0);
 		},

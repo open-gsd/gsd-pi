@@ -4,14 +4,17 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Tests must isolate per-process to avoid clobbering the user's real ~/.gsd/agent/onboarding.json.
 // We point GSD_HOME at a fresh tmp dir before importing the modules under test.
 const tmpHome = mkdtempSync(join(tmpdir(), "gsd-onboarding-state-test-"));
+const codingAgentDir = join(tmpHome, "agent");
+mkdirSync(codingAgentDir, { recursive: true });
 process.env.GSD_HOME = tmpHome;
+process.env.GSD_CODING_AGENT_DIR = codingAgentDir;
 
 const state = await import("../onboarding-state.ts");
 const catalog = await import("../setup-catalog.ts");

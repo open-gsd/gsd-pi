@@ -429,7 +429,11 @@ function detectArtifactDbStatusDriftForMilestone(
   milestoneId: string,
 ): ArtifactDbStatusDivergenceDrift[] {
   const milestone = readMilestone(milestoneId);
-  if (!milestone || milestone.closed) return [];
+  // Parked exemption (#3108), same family as the orphan-audit parked skips
+  // (#2993/#3003): parking is the user's explicit deferral, so parked
+  // history's internal artifact/lifecycle disagreement must not be collected
+  // as drift that fences the pipeline.
+  if (!milestone || milestone.closed || milestone.parked) return [];
 
   const latestReopen = latestExplicitReopenAt(milestoneId);
   const artifacts = safeListArtifactRows(milestoneId).filter((row) =>
@@ -807,7 +811,12 @@ function computeArtifactDbDrift(
   };
 
   for (const milestone of readMilestones()) {
-    if (milestone.closed) continue;
+    // Parked exemption (#3108): drift inside a parked milestone — including
+    // disk-slice-id divergence and completed-dispatch history — is deliberately
+    // shelved work, and collecting it fences planning of a different, active
+    // milestone with a repair path nothing sanctioned can clear. Same class of
+    // parked skip as the orphan audits (#2993/#3003).
+    if (milestone.closed || milestone.parked) continue;
 
     // #2398: a completed `complete-milestone` dispatch row alone is not proof
     // the milestone was ever completed — a closeout whose attempts all fail

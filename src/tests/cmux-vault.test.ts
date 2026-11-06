@@ -812,12 +812,19 @@ test('session_tree refreshes selected branch modes and removes abandoned workflo
 test('real subprocess transport preserves argv and rejects malformed output, failure and timeout', { skip: process.platform === 'win32' }, async t => {
   const f = await fixture(t)
   const cli = join(f.root, 'cmux')
-  await writeFile(cli, `#!${process.execPath}
-const args = process.argv.slice(2);
-if (args.includes('hang')) setTimeout(() => {}, 10000);
-else if (args.includes('bad-json')) process.stdout.write('not json');
-else if (args.includes('fail')) process.exit(1);
-else process.stdout.write(JSON.stringify({args}));
+  await writeFile(cli, `#!/bin/sh
+[ "$1" = '--json' ] && [ "$2" = '--id-format' ] && [ "$3" = 'both' ] || exit 4
+case "$4" in
+  bad-json) [ "$#" -eq 4 ] || exit 5; printf 'not json' ;;
+  fail) [ "$#" -eq 4 ] || exit 5; exit 1 ;;
+  hang) [ "$#" -eq 4 ] || exit 5; exec sleep 10 ;;
+  literal)
+    [ "$#" -eq 5 ] || exit 5
+    [ "$5" = '日本語 spaces; $(touch not-a-command)' ] || exit 2
+    printf '%s' '{"args":["--json","--id-format","both","literal","日本語 spaces; $(touch not-a-command)"]}'
+    ;;
+  *) exit 3 ;;
+esac
 `, { mode: 0o700 })
   const previous = process.env.PATH
   process.env.PATH = `${f.root}:${previous}`
