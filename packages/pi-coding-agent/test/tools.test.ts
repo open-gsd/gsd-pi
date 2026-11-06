@@ -451,7 +451,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should respect timeout", async () => {
-			await expect(bashTool.execute("test-call-10", { command: "sleep 5", timeout: 1 })).rejects.toThrow(
+			await expect(bashTool.execute("test-call-10", { command: "sleep 5", timeout_ms: 1000 })).rejects.toThrow(
 				/timed out/i,
 			);
 		});
