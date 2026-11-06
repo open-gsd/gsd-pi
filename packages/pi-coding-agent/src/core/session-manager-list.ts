@@ -16,6 +16,7 @@ import { join } from "path";
 import { getAgentDir as getDefaultAgentDir } from "../config.js";
 import { normalizePath, resolvePath } from "../utils/paths.js";
 import {
+	CURRENT_SESSION_VERSION,
 	type FileEntry,
 	type SessionEntryBase,
 	type SessionHeader,
@@ -59,6 +60,163 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		return [];
 	}
 
+	return entries;
+}
+
+const SESSION_ENTRY_TYPES = new Set([
+	"message",
+	"thinking_level_change",
+	"model_change",
+	"compaction",
+	"branch_summary",
+	"custom",
+	"custom_message",
+	"label",
+	"session_info",
+]);
+
+function isValidExactSessionEntry(entry: FileEntry, version: number): boolean {
+	const value = entry as unknown as Record<string, unknown>;
+	if (typeof value.timestamp !== "string" || !value.timestamp.trim()) return false;
+	if (version >= 2 && (typeof value.id !== "string" || !value.id.trim()
+		|| (value.parentId !== null && typeof value.parentId !== "string"))) return false;
+
+	switch (value.type) {
+		case "message": {
+			const message = value.message;
+			if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+			const messageValue = message as Record<string, unknown>;
+			// Native !/!! messages persist execution fields, not a content array.
+			if (messageValue.role === "bashExecution") {
+				return typeof messageValue.command === "string"
+					&& typeof messageValue.output === "string"
+					&& (messageValue.exitCode === undefined || typeof messageValue.exitCode === "number")
+					&& typeof messageValue.cancelled === "boolean"
+					&& typeof messageValue.truncated === "boolean"
+					&& typeof messageValue.timestamp === "number";
+			}
+			return typeof messageValue.role === "string"
+				&& (typeof messageValue.content === "string" || Array.isArray(messageValue.content));
+		}
+		case "thinking_level_change":
+			return typeof value.thinkingLevel === "string";
+		case "model_change":
+			return typeof value.provider === "string" && typeof value.modelId === "string";
+		case "compaction":
+			return typeof value.summary === "string" && typeof value.tokensBefore === "number"
+				&& (typeof value.firstKeptEntryId === "string"
+					|| (version < 2 && typeof value.firstKeptEntryIndex === "number"));
+		case "branch_summary":
+			return typeof value.fromId === "string" && typeof value.summary === "string";
+		case "custom":
+			return typeof value.customType === "string";
+		case "custom_message":
+			return typeof value.customType === "string"
+				&& (typeof value.content === "string" || Array.isArray(value.content));
+		case "label":
+			return typeof value.targetId === "string"
+				&& (value.label === undefined || typeof value.label === "string");
+		case "session_info":
+			return value.name === undefined || typeof value.name === "string";
+		default:
+			return false;
+	}
+}
+
+/**
+ * Load a session for an exact resume. Unlike loadEntriesFromFile, this never
+ * skips malformed lines or treats a missing/invalid header as an empty session.
+ */
+export function loadExistingEntriesFromFile(filePath: string): FileEntry[] {
+	const resolvedFilePath = normalizePath(filePath);
+	let info: ReturnType<typeof statSync>;
+	try {
+		info = statSync(resolvedFilePath);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		throw new Error(code === "ENOENT"
+			? "Cannot resume exact GSD session: session file was not found"
+			: "Cannot resume exact GSD session: session file could not be read");
+	}
+	if (!info.isFile()) {
+		throw new Error("Cannot resume exact GSD session: path is not a regular file");
+	}
+
+	let content: string;
+	try {
+		content = readFileSync(resolvedFilePath, "utf8");
+	} catch {
+		throw new Error("Cannot resume exact GSD session: session file could not be read");
+	}
+
+	const lines = content.split(/\r?\n/).filter((line) => line.trim().length > 0);
+	if (lines.length === 0) {
+		throw new Error("Cannot resume exact GSD session: session file is empty");
+	}
+
+	const entries = lines.map((line, index) => {
+		let entry: unknown;
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			throw new Error(`Cannot resume exact GSD session: malformed entry at line ${index + 1}`);
+		}
+		if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof (entry as FileEntry).type !== "string") {
+			throw new Error(`Cannot resume exact GSD session: invalid entry at line ${index + 1}`);
+		}
+		const type = (entry as FileEntry).type;
+		if (index === 0 ? type !== "session" : !SESSION_ENTRY_TYPES.has(type)) {
+			throw new Error(`Cannot resume exact GSD session: unsupported entry type at line ${index + 1}`);
+		}
+		return entry as FileEntry;
+	});
+
+	const header = entries[0] as SessionHeader;
+	if (header.type !== "session" || typeof header.id !== "string" || !header.id.trim()
+		|| typeof header.cwd !== "string" || !header.cwd.trim()
+		|| typeof header.timestamp !== "string" || !header.timestamp.trim()
+		|| (header.version !== undefined && (!Number.isInteger(header.version) || header.version < 1))) {
+		throw new Error("Cannot resume exact GSD session: session header is invalid");
+	}
+	const version = header.version ?? 1;
+	if (version > CURRENT_SESSION_VERSION) {
+		throw new Error("Cannot resume exact GSD session: session version is newer than this GSD runtime");
+	}
+	const parentsById = new Map<string, string | null>();
+	for (let index = 1; index < entries.length; index++) {
+		if (!isValidExactSessionEntry(entries[index], version)) {
+			throw new Error(`Cannot resume exact GSD session: malformed entry at line ${index + 1}`);
+		}
+		// v1 has no persisted tree: migration assigns fresh IDs and linear parents.
+		if (version >= 2) {
+			const { id, parentId } = entries[index] as SessionEntryBase;
+			if (parentsById.has(id)) {
+				throw new Error(`Cannot resume exact GSD session: duplicate entry ID at line ${index + 1}`);
+			}
+			parentsById.set(id, parentId);
+		}
+	}
+
+	// Visit each parent edge once, including disconnected branches and forward
+	// references. Iteration avoids stack overflow on long valid histories.
+	const states = new Map<string, "visiting" | "visited">();
+	for (const id of parentsById.keys()) {
+		const path: string[] = [];
+		let currentId: string | null = id;
+		while (currentId !== null) {
+			const state = states.get(currentId);
+			if (state === "visiting") {
+				throw new Error("Cannot resume exact GSD session: parent cycle detected");
+			}
+			if (state === "visited") break;
+			const parentId = parentsById.get(currentId);
+			if (parentId === undefined) break;
+			states.set(currentId, "visiting");
+			path.push(currentId);
+			currentId = parentId;
+		}
+		for (const visitedId of path) states.set(visitedId, "visited");
+	}
 	return entries;
 }
 

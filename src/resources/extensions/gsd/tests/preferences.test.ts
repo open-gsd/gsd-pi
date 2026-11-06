@@ -848,6 +848,7 @@ test("cmux fields validate correctly", () => {
       splits: true,
       browser: false,
       vault: true,
+      resume: true,
     },
   });
   assert.equal(errors.length, 0);
@@ -855,6 +856,7 @@ test("cmux fields validate correctly", () => {
   assert.equal(preferences.cmux?.sidebar, false);
   assert.equal(preferences.cmux?.splits, true);
   assert.equal(preferences.cmux?.vault, true);
+  assert.equal(preferences.cmux?.resume, true);
 });
 
 test("cmux Vault is opt-in and rejects non-boolean values", () => {
@@ -864,6 +866,16 @@ test("cmux Vault is opt-in and rejects non-boolean values", () => {
     const result = validatePreferences({ cmux: { vault } } as any);
     assert.ok(result.errors.includes("cmux.vault must be a boolean"));
     assert.equal(result.preferences.cmux?.vault, undefined);
+  }
+});
+
+test("cmux resume is opt-in and rejects non-boolean values", () => {
+  assert.equal(validatePreferences({ cmux: { enabled: true } }).preferences.cmux?.resume, undefined);
+  assert.equal(validatePreferences({ cmux: { resume: false } }).preferences.cmux?.resume, false);
+  for (const resume of ["false", "true", 1, null]) {
+    const result = validatePreferences({ cmux: { resume } } as any);
+    assert.ok(result.errors.includes("cmux.resume must be a boolean"));
+    assert.equal(result.preferences.cmux?.resume, undefined);
   }
 });
 

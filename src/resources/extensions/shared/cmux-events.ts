@@ -26,6 +26,7 @@ export interface CmuxPreferencesInput {
     splits?: boolean;
     browser?: boolean;
     vault?: boolean;
+    resume?: boolean;
   };
 }
 

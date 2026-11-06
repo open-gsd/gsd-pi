@@ -50,6 +50,7 @@ test("resolveCmuxConfig enables only when preference and environment are both ac
   assert.equal(config.sidebar, true);
   assert.equal(config.splits, true);
   assert.equal(config.vault, false);
+  assert.equal(config.resume, false);
 });
 
 test("cmux Vault config matches settings, master toggle and environment precedence", () => {
@@ -61,6 +62,17 @@ test("cmux Vault config matches settings, master toggle and environment preceden
   assert.equal(resolve({ enabled: false, vault: true }, "1").vault, false);
   assert.equal(resolve({ enabled: true, vault: true }, "0").vault, false);
   assert.equal(resolve({ enabled: true, vault: false }, "1").vault, true);
+});
+
+test("cmux resume config is a separate opt-in and follows trusted-resume override", () => {
+  const env = { CMUX_WORKSPACE_ID: "workspace:1", CMUX_SURFACE_ID: "surface:2" };
+  const resolve = (cmux: { enabled?: boolean; resume?: boolean }, override?: string) =>
+    resolveCmuxConfig({ cmux }, { ...env, GSD_CMUX_RESUME: override }, () => true, () => true);
+  assert.equal(resolve({ enabled: true }).resume, false);
+  assert.equal(resolve({ enabled: true, resume: true }).resume, true);
+  assert.equal(resolve({ enabled: false, resume: true }, "1").resume, false);
+  assert.equal(resolve({ enabled: true, resume: true }, "0").resume, false);
+  assert.equal(resolve({ enabled: true }, "1").resume, true);
 });
 
 test("shouldPromptToEnableCmux only prompts once per session", () => {
@@ -133,6 +145,7 @@ describe("autoEnableCmuxPreferences", () => {
     assert.ok(content.includes("sidebar: true"), "should default sidebar on");
     assert.ok(content.includes("splits: false"), "should default splits off");
     assert.doesNotMatch(content, /vault:/, "detection must not add a project override for Vault");
+    assert.doesNotMatch(content, /resume:/, "detection must not opt in to session restore");
   });
 
   test("returns false when preferences file does not exist", () => {
@@ -211,6 +224,37 @@ describe("autoEnableCmuxPreferences", () => {
     assert.match(content, /vault: true/);
     await handleCmux("status", ctx);
     assert.match(notices.at(-1)!, /vault=off/);
+  });
+
+  test("resume toggle is independent from Vault and remains opt-in", async (t) => {
+    const prefsPath = path.join(tmp, ".gsd", "preferences.md");
+    fs.writeFileSync(prefsPath, "---\nversion: 1\ncmux:\n  enabled: false\n  vault: false\n---\n");
+    clearGSDPreferencesCache();
+    const originalEnv = process.env;
+    const socket = path.join(tmp, "resume-cmux.sock");
+    fs.writeFileSync(socket, "");
+    process.env = {
+      ...process.env, CMUX_WORKSPACE_ID: "workspace:1", CMUX_SURFACE_ID: "surface:2",
+      CMUX_SOCKET_PATH: socket, GSD_CMUX_RESUME: undefined,
+    };
+    t.after(() => { process.env = originalEnv; clearGSDPreferencesCache(); });
+    const notices: string[] = [];
+    const ctx = {
+      ui: { notify: (message: string) => notices.push(message) },
+      waitForIdle: async () => {},
+      reload: async () => {},
+    } as any;
+
+    await handleCmux("resume on", ctx);
+    let content = fs.readFileSync(prefsPath, "utf8");
+    assert.match(content, /resume: true/);
+    assert.match(content, /enabled: true/);
+    assert.match(content, /vault: false/);
+
+    await handleCmux("resume off", ctx);
+    content = fs.readFileSync(prefsPath, "utf8");
+    assert.match(content, /resume: false/);
+    assert.match(content, /vault: false/);
   });
 
   test("master off/on preserves inherited Vault settings without creating a project override", async (t) => {
@@ -451,6 +495,7 @@ describe("CmuxClient stdio isolation", () => {
         splits: true,
         browser: false,
         vault: false,
+        resume: false,
         workspaceId: "workspace-1",
         surfaceId: "surface-0",
         socketPath: "/tmp/cmux.sock",
@@ -511,6 +556,7 @@ describe("CmuxClient surface id parsing (current cmux CLI output shapes, #2050 r
       splits: true,
       browser: false,
       vault: false,
+      resume: false,
       workspaceId: "workspace:1000040001",
       surfaceId: "surface:1000040003",
       socketPath: "/tmp/cmux.sock",

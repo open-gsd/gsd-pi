@@ -757,11 +757,17 @@ markStartup('startupSettings')
 // ---------------------------------------------------------------------------
 if (isPrintMode) {
   await ensureRtkBootstrap()
-  const sessionManager = cliFlags.noSession
-    ? SessionManager.inMemory()
-    : cliFlags.session
-      ? SessionManager.open(cliFlags.session, cliFlags.sessionDir)
-      : SessionManager.create(process.cwd(), cliFlags.sessionDir)
+  const sessionManager = cliFlags.resumeExact
+    ? SessionManager.openExisting(cliFlags.resumeExact.sessionFile, {
+      expectedSessionId: cliFlags.resumeExact.sessionId,
+      expectedCwd: process.cwd(),
+      sessionDir: cliFlags.sessionDir,
+    })
+    : cliFlags.noSession
+      ? SessionManager.inMemory()
+      : cliFlags.session
+        ? SessionManager.open(cliFlags.session, cliFlags.sessionDir)
+        : SessionManager.create(process.cwd(), cliFlags.sessionDir)
 
   // Read --append-system-prompt file content (subagent writes agent system prompts to temp files)
   let appendSystemPrompt: string | undefined
@@ -901,20 +907,29 @@ await ensureRtkBootstrap()
 // Per-directory session storage — same encoding as the upstream SDK so that
 // /resume only shows sessions from the current working directory.
 const cwd = process.cwd()
-const projectSessionsDir = getProjectSessionsDir(cwd)
+const projectSessionsDir = cliFlags.resumeExact
+  ? resolve(cliFlags.resumeExact.sessionFile, '..')
+  : getProjectSessionsDir(cwd)
 
 // Migrate legacy flat sessions: before per-directory scoping, all .jsonl session
 // files lived directly in ~/.gsd/sessions/. Move them into the correct per-cwd
-// subdirectory so /resume can find them.
-migrateLegacyFlatSessions(sessionsDir, projectSessionsDir)
+// subdirectory so /resume can find them. Exact cmux restore bypasses migrations
+// because it must open the path that was originally bound to the surface.
+if (!cliFlags.resumeExact) migrateLegacyFlatSessions(sessionsDir, projectSessionsDir)
 
-const sessionManager = cliFlags._selectedSessionPath
-  ? SessionManager.open(cliFlags._selectedSessionPath, projectSessionsDir)
-  : cliFlags.session
-    ? SessionManager.open(cliFlags.session, cliFlags.sessionDir)
-    : cliFlags.continue
-      ? SessionManager.continueRecent(cwd, projectSessionsDir)
-      : SessionManager.create(cwd, cliFlags.sessionDir ?? projectSessionsDir)
+const sessionManager = cliFlags.resumeExact
+  ? SessionManager.openExisting(cliFlags.resumeExact.sessionFile, {
+    expectedSessionId: cliFlags.resumeExact.sessionId,
+    expectedCwd: cwd,
+    sessionDir: cliFlags.sessionDir,
+  })
+  : cliFlags._selectedSessionPath
+    ? SessionManager.open(cliFlags._selectedSessionPath, projectSessionsDir)
+    : cliFlags.session
+      ? SessionManager.open(cliFlags.session, cliFlags.sessionDir)
+      : cliFlags.continue
+        ? SessionManager.continueRecent(cwd, projectSessionsDir)
+        : SessionManager.create(cwd, cliFlags.sessionDir ?? projectSessionsDir)
 
 // Only this interactive root may publish a cmux surface binding. Children
 // inherit the owner's pid and cannot claim it, even if they inherit a TTY.
