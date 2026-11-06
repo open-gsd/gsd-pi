@@ -1,5 +1,6 @@
 // Project/App: gsd-pi
 // File Purpose: Segment walker and message_end rebuild for interactive chat streaming.
+import type { Component, Container } from "@gsd/pi-tui";
 import type { InteractiveModeStateHost } from "../interactive-mode-state.js";
 import type { RenderedSegment, StreamingRenderState } from "../streaming-render-state.js";
 import { AssistantMessageComponent } from "../components/assistant-message.js";
@@ -299,6 +300,31 @@ export function runSegmentWalker(
 	}
 }
 
+/**
+ * Put a rebuilt turn in the slots the old one held. Other chat children added
+ * while it streamed (an extension notice, a status line) keep their place next
+ * to it: appending the turn to the end of the chat would lift every such row
+ * above the whole turn, and when that row was on screen the renderer has to
+ * refill and prints the rows at the screen top a second time (#3106).
+ */
+function layRebuiltTurnInPlace(chat: Container, previous: Set<Component>, rebuilt: Component[]): void {
+	const rebuiltSet = new Set(rebuilt);
+	const waiting = [...rebuilt];
+	const laid: Component[] = [];
+	let afterLastSlot = -1;
+	for (const child of chat.children) {
+		if (previous.has(child)) {
+			const next = waiting.shift();
+			if (next) laid.push(next);
+			afterLastSlot = laid.length;
+		} else if (!rebuiltSet.has(child)) {
+			laid.push(child);
+		}
+	}
+	laid.splice(afterLastSlot === -1 ? laid.length : afterLastSlot, 0, ...waiting);
+	chat.children = laid;
+}
+
 export function rebuildSegmentsOnMessageEnd(
 	host: ChatStreamHost,
 	rs: StreamingRenderState,
@@ -319,8 +345,9 @@ export function rebuildSegmentsOnMessageEnd(
 		toolComponentsById.set(toolId, component);
 	}
 
+	const previous = new Set<Component>();
 	for (const seg of rs.renderedSegments) {
-		host.chatContainer.removeChild(seg.component);
+		previous.add(seg.component);
 		if (seg.kind === "tool") {
 			const priorBlocks = host.streamingMessage.content;
 			const priorBlock = priorBlocks[seg.contentIndex] as any;
@@ -332,6 +359,7 @@ export function rebuildSegmentsOnMessageEnd(
 	rs.renderedSegments = [];
 	host.streamingComponent = undefined;
 
+	const rebuilt: Component[] = [];
 	for (const seg of desired) {
 		if (seg.kind === "tool") {
 			const finalBlock = finalBlocks[seg.contentIndex] as any;
@@ -363,8 +391,7 @@ export function rebuildSegmentsOnMessageEnd(
 				toolComponentsById.set(finalBlock.id, component);
 			}
 			if (component) {
-				host.chatContainer.removeChild(component);
-				host.chatContainer.addChild(component);
+				rebuilt.push(component);
 				rs.renderedSegments.push({ kind: "tool", contentIndex: seg.contentIndex, component });
 			}
 			continue;
@@ -390,7 +417,7 @@ export function rebuildSegmentsOnMessageEnd(
 		) {
 			continue;
 		}
-		host.chatContainer.addChild(comp);
+		rebuilt.push(comp);
 		markFirstVisibleAssistantOutput(host, seg.contentType, {
 			contentIndex: seg.startIndex,
 			source: "message_end_rebuild",
@@ -406,5 +433,6 @@ export function rebuildSegmentsOnMessageEnd(
 		});
 		host.streamingComponent = comp;
 	}
+	layRebuiltTurnInPlace(host.chatContainer, previous, rebuilt);
 	reconcileChatTurnConnections(host.chatContainer.children);
 }

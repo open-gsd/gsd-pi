@@ -108,7 +108,10 @@ test(
 		await wallClockGuard(
 			(async () => {
 				try {
-					const result = await bashTool.execute("hard-deadline-test", { command, timeout: TIMEOUT_SECS });
+					const result = await bashTool.execute("hard-deadline-test", {
+					command,
+					timeout_ms: TIMEOUT_SECS * 1000,
+				});
 					// Should not reach here — a non-closing child must force-resolve via throw.
 					settledText = getTextOutput(result as any);
 					throw new Error(`Expected force-resolve throw, but resolved with: ${settledText}`);

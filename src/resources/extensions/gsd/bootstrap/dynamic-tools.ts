@@ -214,14 +214,14 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
   const gsdBashDescription = `${(baseBash as any).description} ${WATCHDOG_DETAIL}`;
   const gsdBashParameters = (() => {
     const params: any = (baseBash as any).parameters;
-    if (!params?.properties?.timeout) return params;
+    if (!params?.properties?.timeout_ms) return params;
     return {
       ...params,
       properties: {
         ...params.properties,
-        timeout: {
-          ...params.properties.timeout,
-          description: `${params.properties.timeout.description} ${WATCHDOG_DETAIL}`,
+        timeout_ms: {
+          ...params.properties.timeout_ms,
+          description: `${params.properties.timeout_ms.description} ${WATCHDOG_DETAIL}`,
         },
       },
     };
@@ -232,7 +232,7 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
     parameters: gsdBashParameters,
     execute: async (
       toolCallId: string,
-      params: { command: string; timeout?: number },
+      params: { command: string; timeout_ms?: number },
       signal?: AbortSignal,
       onUpdate?: unknown,
       ctx?: unknown,
