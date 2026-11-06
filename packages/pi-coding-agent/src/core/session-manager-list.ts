@@ -85,7 +85,16 @@ function isValidExactSessionEntry(entry: FileEntry, version: number): boolean {
 		case "message": {
 			const message = value.message;
 			if (!message || typeof message !== "object" || Array.isArray(message)) return false;
-			const messageValue = message as { role?: unknown; content?: unknown };
+			const messageValue = message as Record<string, unknown>;
+			// Native !/!! messages persist execution fields, not a content array.
+			if (messageValue.role === "bashExecution") {
+				return typeof messageValue.command === "string"
+					&& typeof messageValue.output === "string"
+					&& (messageValue.exitCode === undefined || typeof messageValue.exitCode === "number")
+					&& typeof messageValue.cancelled === "boolean"
+					&& typeof messageValue.truncated === "boolean"
+					&& typeof messageValue.timestamp === "number";
+			}
 			return typeof messageValue.role === "string"
 				&& (typeof messageValue.content === "string" || Array.isArray(messageValue.content));
 		}
@@ -173,10 +182,40 @@ export function loadExistingEntriesFromFile(filePath: string): FileEntry[] {
 	if (version > CURRENT_SESSION_VERSION) {
 		throw new Error("Cannot resume exact GSD session: session version is newer than this GSD runtime");
 	}
+	const parentsById = new Map<string, string | null>();
 	for (let index = 1; index < entries.length; index++) {
 		if (!isValidExactSessionEntry(entries[index], version)) {
 			throw new Error(`Cannot resume exact GSD session: malformed entry at line ${index + 1}`);
 		}
+		// v1 has no persisted tree: migration assigns fresh IDs and linear parents.
+		if (version >= 2) {
+			const { id, parentId } = entries[index] as SessionEntryBase;
+			if (parentsById.has(id)) {
+				throw new Error(`Cannot resume exact GSD session: duplicate entry ID at line ${index + 1}`);
+			}
+			parentsById.set(id, parentId);
+		}
+	}
+
+	// Visit each parent edge once, including disconnected branches and forward
+	// references. Iteration avoids stack overflow on long valid histories.
+	const states = new Map<string, "visiting" | "visited">();
+	for (const id of parentsById.keys()) {
+		const path: string[] = [];
+		let currentId: string | null = id;
+		while (currentId !== null) {
+			const state = states.get(currentId);
+			if (state === "visiting") {
+				throw new Error("Cannot resume exact GSD session: parent cycle detected");
+			}
+			if (state === "visited") break;
+			const parentId = parentsById.get(currentId);
+			if (parentId === undefined) break;
+			states.set(currentId, "visiting");
+			path.push(currentId);
+			currentId = parentId;
+		}
+		for (const visitedId of path) states.set(visitedId, "visited");
 	}
 	return entries;
 }

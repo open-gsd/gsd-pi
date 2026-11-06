@@ -253,17 +253,20 @@ export class SessionManager {
 		sessionFile: string,
 		exactSession?: { expectedSessionId: string; expectedCwd: string },
 	): void {
-		this._resetExternalUsage();
-		this.sessionFile = resolvePath(sessionFile);
+		const resolvedSessionFile = resolvePath(sessionFile);
 		if (exactSession) {
-			this.fileEntries = loadExistingEntriesFromFile(this.sessionFile);
-			const header = this.fileEntries[0] as SessionHeader;
+			// Validate the candidate before changing any current-session state.
+			const entries = loadExistingEntriesFromFile(resolvedSessionFile);
+			const header = entries[0] as SessionHeader;
 			if (header.id !== exactSession.expectedSessionId) {
 				throw new Error("Cannot resume exact GSD session: session identity did not match");
 			}
 			if (resolvePath(header.cwd) !== exactSession.expectedCwd) {
 				throw new Error("Cannot resume exact GSD session: working directory did not match");
 			}
+			this._resetExternalUsage();
+			this.sessionFile = resolvedSessionFile;
+			this.fileEntries = entries;
 			this.sessionId = header.id;
 			if (migrateToCurrentVersion(this.fileEntries)) {
 				this._rewriteFile();
@@ -273,6 +276,8 @@ export class SessionManager {
 			this.flushed = true;
 			return;
 		}
+		this._resetExternalUsage();
+		this.sessionFile = resolvedSessionFile;
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 
