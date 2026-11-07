@@ -490,4 +490,4 @@ This snapshot compares the reviewed local adapter with an immutable upstream cmu
 
 - The findings are source-level. No fresh tests, real MCP handshake, installed-layer activation or native acceptance were verified for this snapshot.
 - G-03 remains closed. Neither upstream skill instructions nor a version label authorizes activation.
-- The historical smoke stopped with `missing-inherited-native-socket` and zero actions. It is a prerequisite failure, not acceptance evidence.
+- The historical smoke stopped with `missing-inherited-native-socket` and zero actions (`actionAttempts: 0`, `nativeContractProven: false`). Source: sanitized artifact `cmux-cua-native-contract-c9bc8789-1349-4865-91d4-c6dec8253905.json` in the CUA implementation checkout. It is a prerequisite failure, not acceptance evidence.
