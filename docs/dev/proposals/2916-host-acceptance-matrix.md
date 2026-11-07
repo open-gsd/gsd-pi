@@ -24,7 +24,8 @@ Use synthetic public fixtures. Evidence must not contain credentials, customer c
 | H06 | Empty, missing and capped streams | Distinct zero/missing/truncation explanations and captured-byte wording | No promise of an unlimited full log or exact on-disk file size | Pending |
 | H07 | Nonzero exit; spawn, validation and policy errors; timeout; abort | Each existing status and diagnostic remains distinct | stderr content alone is not failure; timeout and abort are not success | Pending |
 | H08 | Genuine unrecorded-evidence result, including exit zero and empty reason | Recording warning and available reason remain visible | No generic success rollup hides an evidence-recording failure | Pending |
-| H09 | Ordinary output with warning-like marker text; structured details present | Literal output remains output | Do not infer warnings from content when structured details exist | Pending |
+| H09 | Ordinary output with warning-like marker text, with structured details and with historical rows that lack details | Literal output remains output in both paths; no warning is inferred from content when structured details exist | No fabricated recording failure or preview-budget escape | Pending |
+| H12 | Historical session without new fields | Compatible existing output; a genuine legacy recording footer shows only when it matches the exact legacy shape and survives preview limits | No crash, no silently discarded diagnostics, and no render-time metadata-file access | Pending |
 | H10 | Unrelated native tools | Existing rendering, rollups and hints remain unchanged | Do not apply a generic purpose contract to arbitrary tools | Pending |
 | H11 | Real MCP registration, executor and adapter | Raw content preserved; additive structuredContent fields observed | No transport-level details property, native-renderer conflation or invented MCP protocol | Pending |
 
