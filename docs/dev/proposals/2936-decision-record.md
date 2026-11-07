@@ -15,7 +15,7 @@ This record resolves the "Maintainer decisions required" table in [2936-truthful
 | Decision | Recorded choice | Acceptance condition carried forward |
 | --- | --- | --- |
 | Composition | Option A: separate facets (workflow, assistant, foreground tool, async job, subagent, attention, availability, freshness). Option B's single work total is rejected. | No global running/done bit. No sum of overlapping inventories unless identities are proven disjoint. |
-| First surface | Native TUI first. VS Code is a named follow-up with its own owner and parity-gap list. | Record surfaces, owner and parity gaps. Do not advertise cross-host parity before the follow-up lands. |
+| First surface | Native TUI first. VS Code is a deferred follow-up. Its owner and parity-gap list are NOT yet recorded and remain an open gate. | Before the follow-up starts, record its owner and a tracked parity-gap list. Until then, do not advertise cross-host parity. |
 | Identity | Consume the scope/connection mapping agreed in #2933. | Real envelopes show attribution, rebind, and rejection of late events from an old scope. |
 | Attention | Consume the reason/action contract from #2932. | Every actionable label has an authoritative source, identity, resolution rule and a valid destination. |
 | Telemetry | Start with individually verified providers. Unsupported facets stay unavailable. | Each provider documents inventory completeness, subscription/teardown and reconnect behaviour. A missing producer API is a separate prerequisite, not a guessed field. |
@@ -29,6 +29,10 @@ This record resolves the "Maintainer decisions required" table in [2936-truthful
 - Unknown and stale states remain representable. Nothing here adds a state engine.
 - The optional log-context proposal (#2934) and the security boundary plan (#2933 pairing and grants) are not expanded by this record.
 
-## Evidence still required before closure
+## Design closure versus implementation closure
 
-Native implementation, CI, and each fixture from the regression plan in the proposal. Real-host evidence under #2916 remains pending until a plain-terminal installation is explicitly authorized.
+This record closes the design decision for the native-first slice only, as defined by the proposal. It does not close implementation.
+
+- Native implementation requires its own accepted design claim, CI, and the native subset of the regression fixtures.
+- VS Code fixtures belong to the deferred follow-up and are not gates for the native slice.
+- Real-host evidence under #2916 remains pending until a plain-terminal installation is explicitly authorized.
