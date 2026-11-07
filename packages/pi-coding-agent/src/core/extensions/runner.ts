@@ -435,13 +435,16 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
-	/** Get a host-only extension read capability by name. */
+	/** Get a host-only extension read capability by name. Fails closed when more than one extension registers the name. */
 	getRuntimeReadHandler(name: string): ((input: unknown) => Promise<unknown>) | undefined {
+		let found: ((input: unknown) => Promise<unknown>) | undefined;
 		for (const ext of this.extensions) {
 			const handler = ext.runtimeReadHandlers.get(name);
-			if (handler) return handler;
+			if (!handler) continue;
+			if (found) return undefined;
+			found = handler;
 		}
-		return undefined;
+		return found;
 	}
 
 	getFlags(): Map<string, ExtensionFlag> {
