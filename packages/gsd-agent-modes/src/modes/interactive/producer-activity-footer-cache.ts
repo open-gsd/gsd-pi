@@ -1,6 +1,6 @@
-import type { NativeProducerRead, RuntimeReader } from "./producer-activity-read.ts";
-import { PRODUCER_READ_NAMES, readProducer } from "./producer-activity-read.ts";
-import { formatProducerFacets, type ActivityFacetLine } from "./producer-activity-format.ts";
+import type { NativeProducerRead, RuntimeReader } from "./producer-activity-read.js";
+import { PRODUCER_READ_NAMES, readProducer } from "./producer-activity-read.js";
+import { formatProducerFacets, type ActivityFacetLine } from "./producer-activity-format.js";
 
 /**
  * Synchronous footer cache for producer activity facets (#2936).

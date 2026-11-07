@@ -1,4 +1,4 @@
-import type { NativeProducerRead } from "./producer-activity-read.ts";
+import type { NativeProducerRead } from "./producer-activity-read.js";
 
 /**
  * Native presentation of producer activity facets (#2936). Pure formatting.
