@@ -455,3 +455,39 @@ After approved implementation/tests exist, run the smallest scoped tests first,
 `pnpm run verify:merge:needed -- --base upstream/main` on committed changes and
 satisfy applicable merge gates per contribution policy. Portable or remote CI
 cannot replace fresh Pi/GSD native proof; retain all unavailable/blocked outcomes.
+
+## Upstream comparison snapshot (2026-11-07)
+
+This snapshot compares the reviewed local adapter with an immutable upstream cmux reference. It is documentation only. It does not change the adapter, enable any runtime admission, or authorize native desktop actions.
+
+### Baselines recorded separately
+
+| Baseline | Reference | Use |
+| --- | --- | --- |
+| Reviewed local runtime | cmux `dda24fbd2`, engine `e0f738807dbff2f35fe67d7fbcc99c7082cffc23` | Contract pinned in the sections above. |
+| Upstream comparison | `manaflow-ai/cmux` commit `be5e24339c6eabb8e929a7029c4e6f834e257c97` | Reference for compatibility review only. |
+
+### Compatibility table
+
+| Area | Upstream reference | Local adapter | Status |
+| --- | --- | --- | --- |
+| Executable identity | Helper selected through `client-policy.sh` with canonicalization and ownership checks. | Requires the client executable inside `cmux.app/Contents/Resources/bin/`. | Compatibility gap with the current upstream helper layout. Not a demonstrated bypass. |
+| TCC attribution | Accessibility and Screen Recording are assigned to cmux Computer Use. | Requires `attribution: "host"` and `embedded: true`. | Conflicts with the helper-owned permission contract. Must be resolved before any enablement. |
+| Native and Codex profiles | Upstream exposes a broader profile for Codex compatibility. | Declares a narrower native subset with click and AX access only. | Intentional difference. Do not copy the upstream profile. |
+| Session ownership | Upstream tells agents not to call `start_session` or `end_session`. | Lifecycle is internal and not exposed to the model. | Intentional difference. The internal handshake needs revalidation against current proxy semantics. |
+| Hard kill policy | `CMUX_COMPUTER_USE_MCP_DISABLED=1` or managed policy disables the integration. | No explicit handling of this flag in the adapter or shared desktop-ownership guard. | Policy-integration gap. Daemon-side enforcement is not verified. |
+| Skill discovery | Skill sets `disable-model-invocation: true` and `allow_implicit_invocation: false`. | No skill-link reconciler in the runtime adapter. | Intentional difference. Any future invocation contract needs its own review. |
+
+### Required proof before any enablement
+
+- Connection-bound authentication of the endpoint before MCP initialization, as required by the G-03 protocol above.
+- Exact validation of the tool contract: schemas, annotations and the complete roster, not only names and counts.
+- Immediate session-scoped revocation that invalidates an epoch before queued work is aborted.
+- Operation-specific terminal and quiescence evidence before any further action is accepted.
+- Negative tests for the hard kill policy, including a daemon-side check.
+
+### Limits
+
+- The findings are source-level. No fresh tests, real MCP handshake, installed-layer activation or native acceptance were verified for this snapshot.
+- G-03 remains closed. Neither upstream skill instructions nor a version label authorizes activation.
+- The historical smoke stopped with `missing-inherited-native-socket` and zero actions. It is a prerequisite failure, not acceptance evidence.
