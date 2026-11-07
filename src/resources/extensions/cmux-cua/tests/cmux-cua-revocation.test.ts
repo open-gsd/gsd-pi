@@ -62,4 +62,14 @@ describe("session-scoped revocation (offline model)", () => {
 		const reg = createRegistry();
 		assert.deepEqual(admit(reg, "nope", 1, "A"), { admitted: false, reason: "unknown-session" });
 	});
+
+	test("reopening a revoked session does not discard unquiesced work from the prior epoch", () => {
+		const reg = createRegistry();
+		const epoch = openSession(reg, "s1");
+		admit(reg, "s1", epoch, "A");
+		revoke(reg, "s1");
+		// Reopen must not clear A: it is still physically open until it has terminal proof.
+		openSession(reg, "s1");
+		assert.equal(revoke(reg, "s1").ownershipReleasable, false);
+	});
 });

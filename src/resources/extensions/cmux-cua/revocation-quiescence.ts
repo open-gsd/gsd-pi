@@ -24,7 +24,10 @@ export function openSession(reg: RevocationRegistry, sessionId: string): number 
 	const existing = reg.sessions.get(sessionId);
 	if (existing && !existing.revoked) return existing.epoch;
 	const epoch = (existing?.epoch ?? 0) + 1;
-	reg.sessions.set(sessionId, { epoch, revoked: false, admittedOpen: new Set(), quiesced: new Set() });
+	// Work admitted under an earlier epoch stays open until terminal proof, even if the session is reopened.
+	const carriedOpen = existing ? new Set(existing.admittedOpen) : new Set<string>();
+	const quiesced = existing ? new Set(existing.quiesced) : new Set<string>();
+	reg.sessions.set(sessionId, { epoch, revoked: false, admittedOpen: carriedOpen, quiesced });
 	return epoch;
 }
 
