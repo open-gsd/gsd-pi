@@ -8,9 +8,11 @@ This matrix implements the observation contract in [#2916](https://github.com/op
 
 Before executing observations, record the exact source commit, immutable package/artifact identity, installed package version, managed-resource identity, host/adapter version, operating system, terminal dimensions, theme and observation timestamp. Bind each evidence reference to the actual tested source/artifact, not merely a CI workflow's checkout SHA.
 
-Installation/restart is a separate operator-controlled step outside an active GSD session. This plan authorizes neither rebuilding/installing the runtime from a live session nor restarting another session. Verify source, installed package and managed-resource layers before claiming an observation applies to the release candidate. Never infer layer parity from a version label alone.
+Installation/restart is a separate operator-controlled step outside an active GSD session. This plan authorizes neither rebuilding/installing the runtime from a live session nor restarting another session, and it does not authorize shared installation or app restart while other consumers remain active. Verify source, installed package and managed-resource layers before claiming an observation applies to the release candidate. Never infer layer parity from a version label alone.
 
-Use synthetic public fixtures. Evidence must not contain credentials, customer content or private workspace paths. Preserve durable evidence outside ephemeral terminal scrollback and reference it individually below.
+Execute observations only against the final reviewed candidate, after its required exact-head checks are green. If installed-resource provenance does not match that candidate, stop the affected check and report the mismatch; do not patch the running environment.
+
+Use synthetic public fixtures. Evidence must not contain credentials, customer content or private workspace paths. Purpose labels are display text, not secret redaction: never place sensitive values in a purpose, and do not publish raw logs or absolute paths. Preserve durable evidence outside ephemeral terminal scrollback and reference it individually below.
 
 ## Required native and MCP observations
 
