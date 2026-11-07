@@ -96,16 +96,23 @@ function readRecord(filePath: string): SubagentRunSummary | null {
 	) {
 		return null;
 	}
+	// Every child must carry its required fields. A malformed child rejects the
+	// whole record as invalid, so no fabricated defaults enter the inventory.
+	const children: { index: number; agent: string; status: string }[] = [];
+	for (const c of parsed.children as unknown[]) {
+		if (!c || typeof c !== "object") return null;
+		const child = c as Record<string, unknown>;
+		if (typeof child.index !== "number" || typeof child.agent !== "string" || typeof child.status !== "string") {
+			return null;
+		}
+		children.push({ index: child.index, agent: child.agent, status: child.status });
+	}
 	return {
 		runId: parsed.runId,
 		mode: parsed.mode,
 		status: parsed.status,
 		startedAt: parsed.startedAt,
 		updatedAt: parsed.updatedAt,
-		children: parsed.children.map((c) => ({
-			index: typeof c.index === "number" ? c.index : -1,
-			agent: typeof c.agent === "string" ? c.agent : "",
-			status: typeof c.status === "string" ? c.status : "",
-		})),
+		children,
 	};
 }

@@ -70,3 +70,17 @@ test("shape check rejects an available envelope without items or gaps", () => {
 	assert.equal(isSnapshotShape({ schemaVersion: 1, readAt: "x", availability: "available", completeness: "complete" }), false);
 	assert.equal(isSnapshotShape(available), true);
 });
+
+test("a basis mismatch for the requested producer is invalid-response, not an inventory", async () => {
+	const wrongBasis = { ...available, basis: "persisted", items: [{ id: "a", label: "x", status: "running" }] };
+	const r = await readProducer(runnerWith(async () => wrongBasis), "async_jobs_snapshot", () => true);
+	assert.equal(r.status, "unavailable");
+	assert.equal((r.snapshot as { reason: string }).reason, "invalid-response");
+});
+
+test("malformed item fields are invalid-response, not counted", async () => {
+	const badItem = { ...available, basis: "memory", items: [null] };
+	const r = await readProducer(runnerWith(async () => badItem), "async_jobs_snapshot", () => true);
+	assert.equal(r.status, "unavailable");
+	assert.equal((r.snapshot as { reason: string }).reason, "invalid-response");
+});

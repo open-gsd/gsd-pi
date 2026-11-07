@@ -82,3 +82,35 @@ test("the scan is bounded and says so", () => {
 	assert.equal(scan.completeness, "partial");
 	assert.ok(scan.gaps.includes("bounded-scan"));
 });
+
+test("a null child rejects only that record; the scan completes with an invalid-record gap", () => {
+	const base = tmpDir();
+	fs.writeFileSync(
+		path.join(base, "nullchild.json"),
+		JSON.stringify({ runId: "nc", mode: "single", status: "running", startedAt: "a", updatedAt: "b", children: [null] }),
+	);
+	fs.writeFileSync(
+		path.join(base, "ok.json"),
+		JSON.stringify({ runId: "ok", mode: "single", status: "succeeded", startedAt: "a", updatedAt: "b", children: [] }),
+	);
+	const scan = scanPersistedSubagentRuns(base, readAt);
+	assert.equal(scan.availability, "available");
+	if (scan.availability !== "available") return;
+	assert.equal(scan.items.length, 1);
+	assert.equal(scan.items[0]?.runId, "ok");
+	assert.equal(scan.completeness, "partial");
+	assert.deepEqual(scan.gaps, ["invalid-record"]);
+});
+
+test("a child missing required fields is rejected, not filled with defaults", () => {
+	const base = tmpDir();
+	fs.writeFileSync(
+		path.join(base, "partialchild.json"),
+		JSON.stringify({ runId: "pc", mode: "single", status: "running", startedAt: "a", updatedAt: "b", children: [{ index: 0 }] }),
+	);
+	const scan = scanPersistedSubagentRuns(base, readAt);
+	assert.equal(scan.availability, "available");
+	if (scan.availability !== "available") return;
+	assert.equal(scan.items.length, 0);
+	assert.deepEqual(scan.gaps, ["invalid-record"]);
+});

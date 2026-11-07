@@ -105,20 +105,22 @@ export default function AsyncJobs(pi: ExtensionAPI) {
 
 	// ── Host-only read snapshot (#2936). Read-only; never mutates jobs or delivery flags. ──
 
-	pi.registerRuntimeRead("async_jobs_snapshot", async () => {
-		const readAt = new Date().toISOString();
-		if (!manager) return projectAsyncJobs(null, readAt);
-		return projectAsyncJobs(
-			manager.getAllJobs().map((j: Job) => ({
-				id: j.id,
-				type: j.type,
-				status: j.status,
-				label: j.label,
-				startTime: j.startTime,
-			})),
-			readAt,
-		);
-	});
+	if (typeof pi.registerRuntimeRead === "function") {
+		pi.registerRuntimeRead("async_jobs_snapshot", async () => {
+			const readAt = new Date().toISOString();
+			if (!manager) return projectAsyncJobs(null, readAt);
+			return projectAsyncJobs(
+				manager.getAllJobs().map((j: Job) => ({
+					id: j.id,
+					type: j.type,
+					status: j.status,
+					label: j.label,
+					startTime: j.startTime,
+				})),
+				readAt,
+			);
+		});
+	}
 
 	// ── Tools ──────────────────────────────────────────────────────────────
 

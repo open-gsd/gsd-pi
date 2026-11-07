@@ -26,6 +26,15 @@ function formatOne(r: NativeProducerRead): ActivityFacetLine {
 	const items = Array.isArray(s.items) ? (s.items as Array<{ status?: unknown }>) : [];
 	const completeness = s.completeness === "partial" ? "partial" : "complete";
 	const basis = r.name === "subagent_runs_snapshot" ? "stored" : "live";
-	const count = items.length;
-	return { label, text: `${count} ${basis}, ${completeness}` };
+	// Lifecycle counts stay separate so a terminal failure is never hidden behind
+	// a running total. Per-status counts are taken from the snapshot items.
+	const counts = new Map<string, number>();
+	for (const item of items) {
+		const st = typeof item.status === "string" ? item.status : "unknown";
+		counts.set(st, (counts.get(st) ?? 0) + 1);
+	}
+	const order = ["running", "completed", "failed", "cancelled", "succeeded", "interrupted", "queued", "unknown"];
+	const parts = order.filter((k) => counts.has(k)).map((k) => `${counts.get(k)} ${k}`);
+	const detail = parts.length > 0 ? parts.join(", ") : `0 ${basis}`;
+	return { label, text: `${detail} (${basis}, ${completeness})` };
 }

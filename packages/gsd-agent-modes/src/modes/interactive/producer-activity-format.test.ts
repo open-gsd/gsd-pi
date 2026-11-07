@@ -15,10 +15,10 @@ test("available async jobs are labelled live and show completeness", () => {
 		{
 			name: "async_jobs_snapshot",
 			status: "available",
-			snapshot: { availability: "available", completeness: "complete", items: [{ id: "a" }, { id: "b" }], gaps: [] },
+			snapshot: { availability: "available", completeness: "complete", items: [{ id: "a", status: "running" }, { id: "b", status: "running" }], gaps: [] },
 		},
 	]);
-	assert.deepEqual(lines, [{ label: "async jobs", text: "2 live, complete" }]);
+	assert.deepEqual(lines, [{ label: "async jobs", text: "2 running (live, complete)" }]);
 });
 
 test("subagent runs are labelled stored, never live", () => {
@@ -29,7 +29,7 @@ test("subagent runs are labelled stored, never live", () => {
 			snapshot: { availability: "available", completeness: "partial", items: [{ status: "running" }], gaps: ["invalid-record"] },
 		},
 	]);
-	assert.deepEqual(lines, [{ label: "subagent runs", text: "1 stored, partial" }]);
+	assert.deepEqual(lines, [{ label: "subagent runs", text: "1 running (stored, partial)" }]);
 	assert.ok(!lines[0]!.text.includes("live"));
 });
 
@@ -39,4 +39,16 @@ test("facets stay separate: one line per producer, no combined total", () => {
 		{ name: "subagent_runs_snapshot", status: "unavailable", snapshot: { availability: "unavailable", completeness: "unknown", reason: "no-runner" } },
 	]);
 	assert.equal(lines.length, 2);
+});
+
+test("a failed job alongside a running job is not rendered like two running jobs", () => {
+	const running = formatProducerFacets([
+		{ name: "async_jobs_snapshot", status: "available", snapshot: { availability: "available", completeness: "complete", items: [{ status: "running" }, { status: "running" }], gaps: [] } },
+	]);
+	const mixed = formatProducerFacets([
+		{ name: "async_jobs_snapshot", status: "available", snapshot: { availability: "available", completeness: "complete", items: [{ status: "running" }, { status: "failed" }], gaps: [] } },
+	]);
+	assert.notEqual(mixed[0]!.text, running[0]!.text);
+	assert.ok(mixed[0]!.text.includes("1 failed"));
+	assert.ok(mixed[0]!.text.includes("1 running"));
 });

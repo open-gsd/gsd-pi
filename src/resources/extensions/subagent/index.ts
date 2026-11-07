@@ -1568,9 +1568,13 @@ const SubagentParams = Type.Object({
 export default function (pi: ExtensionAPI) {
 	// Host-only read snapshot (#2936). Pure read of persisted run records: never
 	// creates the directory, never writes, never revalidates or probes PIDs.
-	pi.registerRuntimeRead("subagent_runs_snapshot", async () => {
-		return scanPersistedSubagentRuns(defaultSubagentRunStoreDir(), new Date().toISOString());
-	});
+	// Some host harnesses expose a partial ExtensionAPI without runtime reads.
+	// Registration is optional there; the tool surface must still register.
+	if (typeof pi.registerRuntimeRead === "function") {
+		pi.registerRuntimeRead("subagent_runs_snapshot", async () => {
+			return scanPersistedSubagentRuns(defaultSubagentRunStoreDir(), new Date().toISOString());
+		});
+	}
 	if (isSubagentChildProcess()) return;
 
 	pi.on("session_shutdown", async () => {

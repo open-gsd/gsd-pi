@@ -48,22 +48,32 @@ export async function readProducer(
 		return unavailable("read-threw");
 	}
 	if (!isCurrent()) return unavailable("stale-response");
-	if (!isSnapshotShape(raw)) return unavailable("invalid-response");
+	if (!isSnapshotShape(raw, name)) return unavailable("invalid-response");
 	return { name, status: "available", snapshot: raw };
 }
 
-/** Minimal structural check of the public snapshot envelope. Not a trust decision. */
-export function isSnapshotShape(v: unknown): boolean {
+/** Structural check of the public envelope and the requested producer's item shape. Not a trust decision. */
+export function isSnapshotShape(v: unknown, name?: (typeof PRODUCER_READ_NAMES)[number]): boolean {
 	if (!v || typeof v !== "object") return false;
 	const o = v as Record<string, unknown>;
 	if (o.schemaVersion !== 1 || typeof o.readAt !== "string") return false;
 	if (o.availability === "unavailable") return o.completeness === "unknown" && typeof o.reason === "string";
-	if (o.availability === "available") {
-		return (
-			(o.completeness === "complete" || o.completeness === "partial") &&
-			Array.isArray(o.items) &&
-			Array.isArray(o.gaps)
-		);
+	if (o.availability !== "available") return false;
+	if (o.completeness !== "complete" && o.completeness !== "partial") return false;
+	if (!Array.isArray(o.items) || !Array.isArray(o.gaps)) return false;
+	if (!o.gaps.every((g) => typeof g === "string")) return false;
+	if (name) {
+		const expectedBasis = name === "async_jobs_snapshot" ? "memory" : "persisted";
+		if (o.basis !== expectedBasis) return false;
+		for (const item of o.items) {
+			if (!item || typeof item !== "object") return false;
+			const it = item as Record<string, unknown>;
+			if (name === "async_jobs_snapshot") {
+				if (typeof it.id !== "string" || typeof it.label !== "string" || typeof it.status !== "string") return false;
+			} else {
+				if (typeof it.runId !== "string" || typeof it.status !== "string" || !Array.isArray(it.children)) return false;
+			}
+		}
 	}
-	return false;
+	return true;
 }
