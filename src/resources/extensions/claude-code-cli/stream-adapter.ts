@@ -3337,7 +3337,13 @@ async function pumpSdkMessages(
 									if (assistantEvent.type === "toolcall_start" && builder) {
 										// Local index — the block lives in the builder's own content.
 										const toolBlock = builder.message.content[localContentIndex];
-										if (toolBlock?.type === "toolCall") {
+										if (toolBlock?.type === "toolCall"
+											// #3061: if the complete `assistant` message for this id
+											// landed before its content_block_start (protocol
+											// reordering), the block was already synthesized and
+											// recorded — a replayed start must not record it twice.
+											&& !intermediateToolBlocks.some((b) => b.type === "toolCall" && b.id === toolBlock.id)
+										) {
 											try {
 												await onExternalToolCall?.(toolBlock);
 											} catch (error) {
@@ -3403,6 +3409,52 @@ async function pumpSdkMessages(
 							};
 							if (builder) backfillToolArguments(builder.message.content);
 							backfillToolArguments(intermediateToolBlocks);
+
+							// #3061 (#2585 follow-up): a parallel tool_use whose
+							// content_block_start arrives after this response's first
+							// synthetic tool-result never finds a builder — the boundary
+							// nulls it and no message_start recreates it mid-response — so
+							// no block exists anywhere and the backfill above has nothing
+							// to patch. The call was really executed, but it never reaches
+							// the activity log or safety evidence, and evidence-xref can
+							// then token-overlap an unrelated failed command into a false
+							// block. Each dropped call still gets its own complete
+							// `assistant` message carrying the full input: synthesize its
+							// block from that message and run it through the same
+							// start/execution/result path as a streamed call. Main-loop
+							// messages only — subagent tool calls flow through their own
+							// recorder.
+							if (sdkAssistant.parent_tool_use_id === null) {
+								for (const block of sdkAssistant.message.content) {
+									if (block.type !== "tool_use" || !block.id) continue;
+									const alreadyTracked =
+										builder?.message.content.some((b) => b.type === "toolCall" && b.id === block.id)
+										|| intermediateToolBlocks.some((b) => b.type === "toolCall" && b.id === block.id);
+									if (alreadyTracked) continue;
+									const toolBlock: ToolCall = {
+										type: "toolCall",
+										id: block.id,
+										name: block.name,
+										arguments: (block.input ?? {}) as Record<string, unknown>,
+									};
+									const contentIndex = nextContentIndexBase();
+									emittedContentCount = Math.max(emittedContentCount, contentIndex + 1);
+									initialPartial.content[contentIndex] = toolBlock;
+									stream.push({ type: "toolcall_start", contentIndex });
+									intermediateToolBlocks.push(markCaptureOrder(toolBlock));
+									// The synthetic partial carries only `.content` — the one
+									// field toolCompletionTargetsById consumers read.
+									toolCompletionTargetsById.set(block.id, {
+										partial: { content: [toolBlock] } as AssistantMessage,
+										contentIndex,
+									});
+									try {
+										await onExternalToolCall?.(toolBlock);
+									} catch (error) {
+										console.warn("[claude-code] onExternalToolCall callback failed:", error);
+									}
+								}
+							}
 
 							// Subagent events carry their own (smaller) context; only
 							// main-loop events (parent_tool_use_id === null) see the
