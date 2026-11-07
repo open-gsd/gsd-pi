@@ -436,7 +436,8 @@ test('fresh disabled cleanup retains its guarded generation when a foreign owner
   assert.equal(f.clears.length, 2, 'later update retries instead of forgetting ownership')
   bridge.stop()
   await bridge.idle()
-  assert.equal(f.clears.length, 3)
+  // Shutdown ends presence only; the durable binding is not cleared at quit.
+  assert.equal(f.clears.length, 2, 'shutdown does not clear the durable binding')
   assert.ok(f.clears.every(params => params.expected_updated_at === 101))
   assert.equal(f.allCalls.filter(args => args[2] === 'show').length, 1,
     'a failed clear never adopts the replacement generation')
@@ -468,7 +469,9 @@ test('disabling Vault for the same file ends presence once while keeping the res
   assert.equal((await f.metadata()).length, 1)
   bridge.stop()
   await bridge.idle()
-  assert.equal(f.clears.length, 1)
+  // Shutdown ends presence but keeps the durable resume binding (see the
+  // graceful-shutdown regression test); it must not clear it.
+  assert.equal(f.clears.length, 0, 'shutdown keeps the durable resume binding')
   assert.deepEqual(presenceEvents(f), ['SessionStart', 'SessionEnd'], 'shutdown does not end twice')
 })
 
@@ -510,7 +513,7 @@ test('safety cleanup ends prior Vault presence once even when the guarded clear 
   assert.equal(attempts.length, 2)
 })
 
-test('shutdown ends Vault presence even when guarded binding clear fails', async t => {
+test('shutdown ends Vault presence and never clears a foreign or durable binding', async t => {
   for (const failure of ['changed', 'throws']) {
     await t.test(failure, async t => {
       const f = await fixture(t)
@@ -523,7 +526,6 @@ test('shutdown ends Vault presence even when guarded binding clear fails', async
         ...f.options,
         clearBinding: async params => {
           attempts++
-          f.setBinding(foreign)
           if (failure === 'throws') throw new Error('socket unavailable')
           return f.options.clearBinding(params)
         },
@@ -531,9 +533,12 @@ test('shutdown ends Vault presence even when guarded binding clear fails', async
       bridge.update(f.manager, true)
       await bridge.idle()
       assert.deepEqual(presenceEvents(f), ['SessionStart'])
+      // Another owner takes the surface after our publish. Shutdown must neither
+      // clear it nor even try the guarded clear.
+      f.setBinding(foreign)
       bridge.stop()
       await bridge.idle()
-      assert.equal(attempts, 1)
+      assert.equal(attempts, 0, 'shutdown never attempts the guarded clear')
       assert.deepEqual(presenceEvents(f), ['SessionStart', 'SessionEnd'])
       assert.equal((await f.options.transport(['surface', 'resume', 'show'])).resume_binding, foreign)
     })
@@ -944,7 +949,8 @@ test('managed Pi Vault ownership suppresses GSD publish and queued snapshots but
   await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
   bridge.stop()
   await bridge.idle()
-  assert.equal(f.clears.length, 1)
+  // Shutdown keeps the durable binding; only the earlier explicit opt-out cleared.
+  assert.equal(f.clears.length, 0, 'shutdown keeps the durable resume binding')
   assert.deepEqual(f.feedCalls, [], 'resume cleanup does not invent a GSD Vault end')
 })
 
@@ -989,9 +995,11 @@ test('transport failure never rejects lifecycle; next turn retries safely', asyn
   assert.equal(f.calls.length, 1)
   bridge.stop()
   await bridge.idle()
+  // A stopped bridge ignores later lifecycle updates (update() returns on
+  // this.stopped); shutdown must not trigger another surface call.
   bridge.update(f.manager, true, true)
   await bridge.idle()
-  assert.equal(f.calls.length, 2)
+  assert.equal(f.calls.length, 1)
 })
 
 test('queue coalesces updates and shutdown wins over pending session changes', async t => {
@@ -1008,8 +1016,11 @@ test('queue coalesces updates and shutdown wins over pending session changes', a
   bridge.stop()
   release()
   await bridge.idle()
-  assert.ok(f.calls.length <= 2)
-  assert.equal(f.calls.at(-1)?.[2], 'clear')
+  // Shutdown must not clear the durable binding. The in-flight publish completes,
+  // and the queued refresh that was already waiting is drained first (one set each),
+  // so a refresh queued before shutdown is never silently dropped.
+  assert.equal(f.calls.some(args => args[2] === 'clear'), false, 'shutdown never clears the durable binding')
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 2, 'in-flight publish and the queued refresh both drain')
 })
 
 test('extension factory attaches supported post-switch lifecycle events without reading event content', async t => {
@@ -1047,7 +1058,8 @@ test('enabled lifecycle handlers return immediately, refresh on agent_end and dr
   await next
   await handlers.get('session_shutdown')!()
   assert.equal(f.calls.filter(call => call[2] === 'set').length, 2)
-  assert.equal(f.clears.length, 1)
+  // Shutdown drains presence but keeps the durable exact-resume binding.
+  assert.equal(f.clears.length, 0, 'shutdown keeps the durable resume binding')
   assert.equal((f.feedCalls.at(-1)?.event as { hook_event_name: string }).hook_event_name, 'SessionEnd')
 })
 
@@ -1190,7 +1202,9 @@ test('a replaced same-session generation cannot be cleared by its predecessor', 
   assert.equal(f.calls.length, 1, 'preflight refuses replacement ownership')
   bridge.stop()
   await bridge.idle()
-  assert.equal(f.clears[0].expected_updated_at, 101, 'clear fences the exact accepted generation')
+  // Shutdown never clears; the predecessor must not touch the replacement that
+  // cmux now owns, so no clear is issued and the replacement is left in place.
+  assert.equal(f.clears.length, 0, 'shutdown never clears, so a replacement is never removed')
   const probe = await f.options.transport(['surface', 'resume', 'show'])
   assert.equal(probe.resume_binding, replacement)
 })
@@ -1294,4 +1308,69 @@ test('guarded socket clear uses verified RPC, numeric generation and bounded saf
   await assert.rejects(clearCmuxVaultBinding(socketPath, params))
   assert.ok(Date.now() - start < 5000)
   await assert.rejects(clearCmuxVaultBinding(join(f.root, 'missing.sock'), params))
+})
+
+test('graceful shutdown keeps the durable exact-resume binding for a later cmux restore', async t => {
+	const f = await fixture(t)
+	const handlers = new Map<string, Function>()
+	const waiters: Array<() => void> = []
+	await createCmuxVaultExtension({
+		...f.options,
+		transport: async args => {
+			const result = await f.options.transport(args)
+			if (args[0] === 'rpc') waiters.shift()?.()
+			return result
+		},
+	})({ on: (name: string, handler: Function) => handlers.set(name, handler) } as never)
+	const ctx = { sessionManager: f.manager, hasUI: true }
+	const first = new Promise<void>(resolve => waiters.push(resolve))
+	assert.equal(handlers.get('session_start')!({}, ctx), undefined)
+	await first
+	await handlers.get('session_shutdown')!()
+	// Shutdown ends live presence only. The exact-resume binding is the durable
+	// contract that Reopen Closed / cmux restore needs, so it must survive quit.
+	assert.equal(f.clears.length, 0, 'shutdown must not delete the durable resume binding')
+})
+
+test('an unsaved-session invalidation already queued before shutdown still clears the binding', async t => {
+  const f = await fixture(t)
+  const bridge = new CmuxVaultBridge(f.options)
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1)
+  // Session becomes unsaved, then shutdown races in before the drain runs.
+  f.setSession(undefined)
+  bridge.update(f.manager, true)
+  bridge.stop()
+  await bridge.idle()
+  assert.equal(f.clears.length, 1, 'the unsaved invalidation is not erased by shutdown')
+})
+
+test('a queued opt-out behind an in-flight publish still clears before shutdown ends presence', async t => {
+  const f = await fixture(t)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let resume = true
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    // Turn Vault presence off at the env level too, so only resume governs the binding.
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+    transport: async args => { if (args[2] === 'set') await gate; return f.options.transport(args) },
+    // Resume starts on, so the first publish writes a durable exact-resume binding.
+    getPreferences: async () => ({ enabled: true, vault: false, resume }),
+  })
+  bridge.update(f.manager, true)
+  await new Promise(resolve => setImmediate(resolve))
+  // Let the publish land first: only a binding this bridge published is its own to
+  // clear. (A foreign or auto_resume=false binding is never adopted, by design.)
+  release()
+  await new Promise(resolve => setImmediate(resolve))
+  await bridge.idle()
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1, 'the binding is published first')
+  // Now the race: the opt-out is queued, then shutdown arrives before the drain runs.
+  resume = false
+  bridge.update(f.manager, true, true)
+  bridge.stop()
+  await bridge.idle()
+  assert.equal(f.clears.length, 1, 'opt-out queued before shutdown still clears the durable binding')
 })

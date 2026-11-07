@@ -293,9 +293,12 @@ export class CmuxVaultBridge {
   private readonly transport: CmuxVaultTransport
   private readonly target: string[]
   private pending: VaultIdentity | null | undefined
+  private shutdownRequested = false
   private running: Promise<void> | undefined
   private binding: VaultBinding | undefined
   private stopped = false
+  // Set only by stop() (shutdown). A null identity from update() means an unsaved
+  // session and must still clear its binding; shutdown must keep the durable one.
   private injected: Promise<boolean> | undefined
   private lastIdentity: string | undefined
   private blockedAutoResumeIdentity: string | undefined
@@ -334,7 +337,10 @@ export class CmuxVaultBridge {
     if (this.stopped) return
     this.stopped = true
     if (!cmuxSurfaceOwnerEnabled(this.env, this.options.pid ?? process.pid)) return
-    this.pending = null
+    // Shutdown is recorded separately so it never overwrites an invalidation that
+    // is already queued in `pending`. drain() handles that invalidation first, then
+    // ends presence once.
+    this.shutdownRequested = true
     this.start()
   }
 
@@ -352,12 +358,19 @@ export class CmuxVaultBridge {
   }
 
   private async drain(): Promise<void> {
-    while (this.pending !== undefined) {
+    while (this.pending !== undefined || this.shutdownRequested) {
+      if (this.pending === undefined) {
+        // No queued invalidation left: finish shutdown once. It ends live presence
+        // and keeps the durable exact-resume binding for cmux restore / Reopen Closed.
+        this.shutdownRequested = false
+        await this.endPresence()
+        continue
+      }
       const identity = this.pending
       this.pending = undefined
       try {
         if (!identity) {
-          // End this session's local Vault presence even if guarded binding clear fails.
+          // Unsaved session: end presence and clear, since there is no file to resume.
           await this.endPresence()
           await this.clear()
           continue
