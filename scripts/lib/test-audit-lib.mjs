@@ -22,6 +22,7 @@ export const SKIP_DIRS = new Set([
 export const UNIT_EXTENSION_GLOBS = new Set([
   'gsd',
   'shared',
+  'cmux-cua',
   'subagent',
   'claude-code-cli',
   'cursor-cli',

@@ -52,6 +52,8 @@ export class AgentSessionExtensionsModule {
 	// Tool definition cache (see ToolDefinitionCacheEntry for key inputs)
 	private _toolCacheKey: string | null = null;
 	private _toolCacheEntry: ToolDefinitionCacheEntry | null = null;
+	// Preserve host admission across buildRuntime() replacing the extension runner.
+	private _localInteractiveDesktop = false;
 
 	/** Forward ExtensionUIContext into provider stream options (claude-code-cli elicitation). */
 	private ensureExtensionUiStreamBridge(): void {
@@ -118,6 +120,7 @@ export class AgentSessionExtensionsModule {
 	}
 
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+		this._localInteractiveDesktop = bindings.localInteractiveDesktop === true;
 		if (bindings.uiContext !== undefined) {
 			this.host._extensionUIContext = bindings.uiContext;
 			this.ensureExtensionUiStreamBridge();
@@ -208,6 +211,7 @@ export class AgentSessionExtensionsModule {
 
 	applyExtensionBindings(runner: ExtensionRunner): void {
 		runner.setUIContext(this.host._extensionUIContext);
+		runner.setLocalInteractiveDesktop(this._localInteractiveDesktop);
 		runner.bindCommandContext(this.host._extensionCommandContextActions);
 
 		this.host._extensionErrorUnsubscriber?.();

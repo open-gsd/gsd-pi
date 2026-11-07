@@ -12,7 +12,7 @@
  *  - All Swift debug output goes to stderr; only JSON on stdout
  */
 
-import type { ExtensionAPI } from "@gsd/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 import { StringEnum, Type } from "@gsd/pi-ai";
 import { execFileSync } from "node:child_process";
 import { statSync, readdirSync } from "node:fs";
@@ -21,6 +21,13 @@ import {
 	constrainScreenshot,
 	getScreenshotBufferDimensions,
 } from "../browser-tools/screenshot-constraints.js";
+import {
+	assertDesktopDriverProcessAllowed,
+	desktopOwnershipManager,
+	withDesktopOperation,
+	type DesktopOperationKind,
+	type DesktopOwnershipManager,
+} from "../shared/desktop-ownership.js";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -100,6 +107,16 @@ interface MacAgentResponse {
 	error?: string;
 }
 
+function isMacAgentResponse(value: unknown): value is MacAgentResponse {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const response = value as Record<string, unknown>;
+	return (
+		typeof response.success === "boolean" &&
+		(response.data === undefined || (typeof response.data === "object" && response.data !== null)) &&
+		(response.error === undefined || typeof response.error === "string")
+	);
+}
+
 interface MacScreenshotPayload {
 	imageData: string;
 	width: number;
@@ -143,18 +160,131 @@ export async function prepareMacScreenshotPayload(
  * Invoke the mac-agent CLI with a command and optional params.
  * Handles compilation caching, stdin/stdout JSON protocol, and error surfacing.
  */
-function execMacAgent(command: string, params?: Record<string, any>): MacAgentResponse {
-	ensureCompiled();
+function macAgentOperationKind(command: string): DesktopOperationKind {
+	if (command === "screenshotWindow") return "capture";
+	if (command === "clickElement" || command === "typeText" || command === "launchApp" || command === "activateApp" || command === "quitApp") {
+		return "action";
+	}
+	return "inspect";
+}
 
+function sanitizeMacAgentFailureReason(error: string | undefined, command: string): string {
+	const reason = (error ?? "")
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 240)
+		.trim();
+	return reason || `mac-agent ${command} failed without details`;
+}
+
+const processExitWaitCell = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+
+function isMacAgentProcessRunning(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+		throw error;
+	}
+}
+
+function sleepSynchronously(milliseconds: number): void {
+	Atomics.wait(processExitWaitCell, 0, 0, milliseconds);
+}
+
+export function waitForMacAgentProcessExit(
+	pid: number,
+	options: {
+		timeoutMs?: number;
+		pollIntervalMs?: number;
+		isProcessRunning?: (pid: number) => boolean;
+		sleep?: (milliseconds: number) => void;
+		now?: () => number;
+	} = {},
+): void {
+	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("mac-agent returned an invalid app process identifier.");
+	const timeoutMs = options.timeoutMs ?? 10_000;
+	const pollIntervalMs = options.pollIntervalMs ?? 50;
+	const isProcessRunning = options.isProcessRunning ?? isMacAgentProcessRunning;
+	const sleep = options.sleep ?? sleepSynchronously;
+	const now = options.now ?? (() => Number(process.hrtime.bigint()) / 1_000_000);
+	const deadline = now() + timeoutMs;
+
+	while (true) {
+		let running: boolean;
+		try {
+			running = isProcessRunning(pid);
+		} catch {
+			throw new Error("Unable to verify app process exit; desktop ownership is quarantined.");
+		}
+		if (!running) return;
+
+		const remainingMs = deadline - now();
+		if (remainingMs <= 0) {
+			throw new Error(`Timed out waiting for app process ${pid} to exit; desktop ownership is quarantined.`);
+		}
+		sleep(Math.min(pollIntervalMs, remainingMs));
+	}
+}
+
+export function runMacAgentWithOwnership(
+	command: string,
+	execute: () => MacAgentResponse,
+	manager: DesktopOwnershipManager = desktopOwnershipManager,
+	isInteractive: boolean = false,
+	waitForProcessExit: typeof waitForMacAgentProcessExit = waitForMacAgentProcessExit,
+): MacAgentResponse {
+	const kind = macAgentOperationKind(command);
+	return withDesktopOperation("mac-tools", kind, () => {
+		const result = execute();
+		if (!isMacAgentResponse(result)) {
+			throw new Error(`mac-agent returned an invalid result (command: ${command}); desktop ownership is quarantined.`);
+		}
+		if (!result.success) {
+			const reason = sanitizeMacAgentFailureReason(result.error, command);
+			if (kind === "action") {
+				throw new Error(`mac-agent returned an unverified result (command: ${command}): ${reason}; desktop ownership is quarantined.`);
+			}
+			return { ...result, error: reason };
+		}
+		if (command === "quitApp") {
+			const pid = result.data?.pid;
+			if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) {
+				throw new Error("mac-agent did not return a valid app process identifier; desktop ownership is quarantined.");
+			}
+			waitForProcessExit(pid);
+			return { ...result, data: { ...result.data, terminated: true } };
+		}
+		return result;
+	}, manager, isInteractive);
+}
+
+export function isMacToolsContextInteractive(
+	isLocalInteractiveDesktop: boolean,
+	stdinIsTTY: boolean | undefined,
+	stdoutIsTTY: boolean | undefined,
+): boolean {
+	return isLocalInteractiveDesktop && Boolean(stdinIsTTY && stdoutIsTTY);
+}
+
+function execMacAgent(command: string, params: Record<string, any> | undefined, isLocalInteractiveDesktop: boolean): MacAgentResponse {
+	const isInteractive = isMacToolsContextInteractive(isLocalInteractiveDesktop, process.stdin.isTTY, process.stdout.isTTY);
+	assertDesktopDriverProcessAllowed(process.env, process.argv, isInteractive);
+	ensureCompiled();
+	return runMacAgentWithOwnership(command, () => execMacAgentUnlocked(command, params), desktopOwnershipManager, isInteractive);
+}
+
+function execMacAgentUnlocked(command: string, params?: Record<string, any>): MacAgentResponse {
 	const input = JSON.stringify({ command, params: params ?? {} });
 	let stdout: string;
-	let stderr: string = "";
 
 	// Interaction commands (click, type) can block while the target app
 	// processes the action — e.g. TextEdit's AXPress on "New Document"
 	// takes ~12s while it dismisses the Open dialog and creates a window.
-	// Screenshots can also be slow for large retina windows.
-	const slowCommands = new Set(["clickElement", "typeText", "screenshotWindow"]);
+	// Screenshots can also be slow for large retina windows. quitApp waits for the target process to exit while holding ownership.
+	const slowCommands = new Set(["clickElement", "typeText", "screenshotWindow", "quitApp"]);
 	const timeout = slowCommands.has(command) ? 30_000 : 10_000;
 
 	try {
@@ -167,30 +297,25 @@ function execMacAgent(command: string, params?: Record<string, any>): MacAgentRe
 		});
 		stdout = typeof result === "string" ? result : String(result);
 	} catch (err: any) {
-		stderr = err.stderr?.toString() || "";
 		const isTimeout = err.killed || err.signal === "SIGTERM";
-		// If the process exited non-zero but produced stdout, try to parse it
-		if (err.stdout) {
-			stdout = err.stdout.toString();
-		} else if (isTimeout) {
+		if (isTimeout) {
 			throw new Error(
-				`mac-agent timed out after ${timeout / 1000}s (command: ${command}). ` +
-				`The target app may be slow to respond — AXPress can block while the app processes the action.`
-			);
-		} else {
-			throw new Error(
-				`mac-agent CLI failed (command: ${command}):\n${stderr || err.message}`
+				`mac-agent timed out after ${timeout / 1000}s (command: ${command}); desktop ownership is quarantined.`
 			);
 		}
+		throw new Error(`mac-agent CLI failed (command: ${command}); desktop ownership is quarantined.`);
 	}
 
+	let response: unknown;
 	try {
-		return JSON.parse(stdout.trim()) as MacAgentResponse;
+		response = JSON.parse(stdout.trim()) as unknown;
 	} catch {
-		throw new Error(
-			`mac-agent returned invalid JSON (command: ${command}):\nstdout: ${stdout}\nstderr: ${stderr}`
-		);
+		throw new Error(`mac-agent returned invalid JSON (command: ${command}); desktop ownership is quarantined.`);
 	}
+	if (!isMacAgentResponse(response)) {
+		throw new Error(`mac-agent returned an invalid result (command: ${command}); desktop ownership is quarantined.`);
+	}
+	return response;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,8 +338,8 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({}),
 
-		async execute(_toolCallId: any) {
-			const result = execMacAgent("checkPermissions");
+		async execute(_toolCallId: any, _params: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+			const result = execMacAgent("checkPermissions", undefined, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_check_permissions: " + result.error);
 			}
@@ -253,8 +378,8 @@ export default function (pi: ExtensionAPI) {
 			includeBackground: Type.Optional(Type.Boolean({ description: "Include background/accessory apps (default: false)" })),
 		}),
 
-		async execute(_toolCallId: any, { includeBackground }: { includeBackground?: boolean }) {
-			const result = execMacAgent("listApps", includeBackground ? { includeBackground: true } : undefined);
+		async execute(_toolCallId: any, { includeBackground }: { includeBackground?: boolean }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+			const result = execMacAgent("listApps", includeBackground ? { includeBackground: true } : undefined, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_list_apps: " + result.error);
 			}
@@ -285,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 			bundleId: Type.Optional(Type.String({ description: "Bundle identifier (e.g. 'com.apple.TextEdit')" })),
 		}),
 
-		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }) {
+		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!name && !bundleId) {
 				throw new Error("mac_launch_app: provide either 'name' or 'bundleId' parameter");
 			}
@@ -293,7 +418,7 @@ export default function (pi: ExtensionAPI) {
 			if (name) params.name = name;
 			if (bundleId) params.bundleId = bundleId;
 
-			const result = execMacAgent("launchApp", params);
+			const result = execMacAgent("launchApp", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_launch_app: " + result.error);
 			}
@@ -323,7 +448,7 @@ export default function (pi: ExtensionAPI) {
 			bundleId: Type.Optional(Type.String({ description: "Bundle identifier" })),
 		}),
 
-		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }) {
+		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!name && !bundleId) {
 				throw new Error("mac_activate_app: provide either 'name' or 'bundleId' parameter");
 			}
@@ -331,7 +456,7 @@ export default function (pi: ExtensionAPI) {
 			if (name) params.name = name;
 			if (bundleId) params.bundleId = bundleId;
 
-			const result = execMacAgent("activateApp", params);
+			const result = execMacAgent("activateApp", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_activate_app: " + result.error);
 			}
@@ -360,7 +485,7 @@ export default function (pi: ExtensionAPI) {
 			bundleId: Type.Optional(Type.String({ description: "Bundle identifier" })),
 		}),
 
-		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }) {
+		async execute(_toolCallId: any, { name, bundleId }: { name?: string; bundleId?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!name && !bundleId) {
 				throw new Error("mac_quit_app: provide either 'name' or 'bundleId' parameter");
 			}
@@ -368,7 +493,7 @@ export default function (pi: ExtensionAPI) {
 			if (name) params.name = name;
 			if (bundleId) params.bundleId = bundleId;
 
-			const result = execMacAgent("quitApp", params);
+			const result = execMacAgent("quitApp", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_quit_app: " + result.error);
 			}
@@ -398,8 +523,8 @@ export default function (pi: ExtensionAPI) {
 			app: Type.String({ description: "Application name (e.g. 'TextEdit') or bundle identifier (e.g. 'com.apple.TextEdit')" }),
 		}),
 
-		async execute(_toolCallId: any, { app }: { app: string }) {
-			const result = execMacAgent("listWindows", { app });
+		async execute(_toolCallId: any, { app }: { app: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+			const result = execMacAgent("listWindows", { app }, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_list_windows: " + result.error);
 			}
@@ -460,12 +585,12 @@ export default function (pi: ExtensionAPI) {
 			matchType?: string;
 			maxDepth?: number;
 			maxCount?: number;
-		}) {
+		}, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const mode = args.mode ?? "search";
 
 			// --- Focused mode ---
 			if (mode === "focused") {
-				const result = execMacAgent("getFocusedElement", { app: args.app });
+				const result = execMacAgent("getFocusedElement", { app: args.app }, ctx.isLocalInteractiveDesktop);
 				if (!result.success) {
 					throw new Error("mac_find (focused): " + result.error);
 				}
@@ -485,7 +610,7 @@ export default function (pi: ExtensionAPI) {
 				if (args.maxDepth !== undefined) params.maxDepth = args.maxDepth;
 				if (args.maxCount !== undefined) params.maxCount = args.maxCount;
 
-				const result = execMacAgent("getTree", params);
+				const result = execMacAgent("getTree", params, ctx.isLocalInteractiveDesktop);
 				if (!result.success) {
 					throw new Error("mac_find (tree): " + result.error);
 				}
@@ -523,7 +648,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.maxDepth !== undefined) params.maxDepth = args.maxDepth;
 			if (args.maxCount !== undefined) params.maxCount = args.maxCount;
 
-			const result = execMacAgent("findElements", params);
+			const result = execMacAgent("findElements", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_find (search): " + result.error);
 			}
@@ -576,12 +701,12 @@ export default function (pi: ExtensionAPI) {
 			maxCount: Type.Optional(Type.Number({ description: "Maximum elements to include (default: 50)" })),
 		}),
 
-		async execute(_toolCallId: any, args: { app: string; maxDepth?: number; maxCount?: number }) {
+		async execute(_toolCallId: any, args: { app: string; maxDepth?: number; maxCount?: number }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const params: Record<string, any> = { app: args.app };
 			params.maxDepth = args.maxDepth ?? 3;
 			params.maxCount = args.maxCount ?? 50;
 
-			const result = execMacAgent("getTree", params);
+			const result = execMacAgent("getTree", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_get_tree: " + result.error);
 			}
@@ -642,7 +767,7 @@ export default function (pi: ExtensionAPI) {
 			value?: string;
 			identifier?: string;
 			matchType?: string;
-		}) {
+		}, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!args.role && !args.title && !args.value && !args.identifier) {
 				throw new Error("mac_click: provide at least one search criterion (role, title, value, or identifier)");
 			}
@@ -653,7 +778,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.identifier) params.identifier = args.identifier;
 			if (args.matchType) params.matchType = args.matchType;
 
-			const result = execMacAgent("clickElement", params);
+			const result = execMacAgent("clickElement", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_click: " + result.error);
 			}
@@ -701,7 +826,7 @@ export default function (pi: ExtensionAPI) {
 			value?: string;
 			identifier?: string;
 			matchType?: string;
-		}) {
+		}, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!args.role && !args.title && !args.value && !args.identifier) {
 				throw new Error("mac_type: provide at least one search criterion (role, title, value, or identifier)");
 			}
@@ -712,7 +837,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.identifier) params.identifier = args.identifier;
 			if (args.matchType) params.matchType = args.matchType;
 
-			const result = execMacAgent("typeText", params);
+			const result = execMacAgent("typeText", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_type: " + result.error);
 			}
@@ -750,13 +875,13 @@ export default function (pi: ExtensionAPI) {
 			retina: Type.Optional(Type.Boolean({ description: "Capture at full pixel resolution (default: false)" })),
 		}),
 
-		async execute(_toolCallId: any, args: { windowId: number; format?: string; quality?: number; retina?: boolean }) {
+		async execute(_toolCallId: any, args: { windowId: number; format?: string; quality?: number; retina?: boolean }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const params: Record<string, any> = { windowId: args.windowId };
 			if (args.format) params.format = args.format;
 			if (args.quality !== undefined) params.quality = args.quality;
 			if (args.retina !== undefined) params.retina = args.retina;
 
-			const result = execMacAgent("screenshotWindow", params);
+			const result = execMacAgent("screenshotWindow", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_screenshot: " + result.error);
 			}
@@ -812,7 +937,7 @@ export default function (pi: ExtensionAPI) {
 			value?: string;
 			identifier?: string;
 			matchType?: string;
-		}) {
+		}, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			if (!args.attribute && (!args.attributes || args.attributes.length === 0)) {
 				throw new Error("mac_read: provide 'attribute' (single) or 'attributes' (array) parameter");
 			}
@@ -828,7 +953,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.identifier) params.identifier = args.identifier;
 			if (args.matchType) params.matchType = args.matchType;
 
-			const result = execMacAgent("readAttribute", params);
+			const result = execMacAgent("readAttribute", params, ctx.isLocalInteractiveDesktop);
 			if (!result.success) {
 				throw new Error("mac_read: " + result.error);
 			}

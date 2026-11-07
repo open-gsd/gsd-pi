@@ -252,6 +252,7 @@ export class ExtensionRunner {
 	private extensions: Extension[];
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
+	private localInteractiveDesktop = false;
 	private cwd: string;
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
@@ -391,6 +392,11 @@ export class ExtensionRunner {
 
 	setUIContext(uiContext?: ExtensionUIContext): void {
 		this.uiContext = uiContext ?? noOpUIContext;
+		this.localInteractiveDesktop = false;
+	}
+
+	setLocalInteractiveDesktop(isLocalInteractiveDesktop: boolean): void {
+		this.localInteractiveDesktop = isLocalInteractiveDesktop && this.hasUI();
 	}
 
 	getUIContext(): ExtensionUIContext {
@@ -639,6 +645,10 @@ export class ExtensionRunner {
 			get hasUI() {
 				runner.assertActive();
 				return runner.hasUI();
+			},
+			get isLocalInteractiveDesktop() {
+				runner.assertActive();
+				return runner.localInteractiveDesktop;
 			},
 			get cwd() {
 				runner.assertActive();

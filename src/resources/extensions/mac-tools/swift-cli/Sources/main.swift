@@ -262,15 +262,21 @@ func handleQuitApp(_ params: [String: AnyCodable]?) -> CommandResponse {
     }
 
     let appName = app.localizedName ?? "Unknown"
-    let terminated = app.terminate()
-    if terminated {
-        return .ok([
-            "quit": true,
-            "name": appName
-        ] as [String: Any])
-    } else {
+    let processIdentifier = Int(app.processIdentifier)
+    guard processIdentifier > 0 else {
+        return .fail("Unable to verify app process before quitting: \(appName)")
+    }
+
+    let terminationAccepted = app.terminate()
+    guard terminationAccepted else {
         return .fail("Failed to quit app: \(appName). The app may have unsaved changes or refused to terminate.")
     }
+
+    return .ok([
+        "quit": true,
+        "name": appName,
+        "pid": processIdentifier
+    ] as [String: Any])
 }
 
 // MARK: - AX Element Helpers

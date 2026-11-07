@@ -162,6 +162,8 @@ export interface AgentSessionConfig {
 }
 
 export interface ExtensionBindings {
+	/** Host-trusted local TUI admission; absent/false for RPC, embedded, and print modes. */
+	localInteractiveDesktop?: boolean;
 	uiContext?: ExtensionUIContext;
 	commandContextActions?: ExtensionCommandContextActions;
 	abortHandler?: () => void;

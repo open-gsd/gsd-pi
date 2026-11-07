@@ -35,6 +35,26 @@ describe("ExtensionRunner", () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	describe("local desktop admission context", () => {
+		it("does not infer local terminal ownership from UI availability", () => {
+			const runner = new ExtensionRunner([], createExtensionRuntime(), tempDir, sessionManager, modelRegistry);
+			runner.setUIContext({} as any);
+			const context = runner.createContext();
+
+			expect(context.hasUI).toBe(true);
+			expect(context.isLocalInteractiveDesktop).toBe(false);
+
+			runner.setLocalInteractiveDesktop(true);
+			expect(context.isLocalInteractiveDesktop).toBe(true);
+			runner.setLocalInteractiveDesktop(false);
+			expect(context.isLocalInteractiveDesktop).toBe(false);
+
+			const headlessRunner = new ExtensionRunner([], createExtensionRuntime(), tempDir, sessionManager, modelRegistry);
+			headlessRunner.setLocalInteractiveDesktop(true);
+			expect(headlessRunner.createContext().isLocalInteractiveDesktop).toBe(false);
+		});
+	});
+
 	const providerModelConfig: ProviderConfig = {
 		baseUrl: "https://provider.test/v1",
 		apiKey: "PROVIDER_TEST_KEY",

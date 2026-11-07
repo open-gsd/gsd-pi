@@ -57,9 +57,37 @@ export function buildSubagentProcessEnv(
 		...env,
 		[SUBAGENT_CHILD_ENV_VAR]: SUBAGENT_CHILD_ENV_VALUE,
 	};
+	for (const name of Object.keys(childEnv)) {
+		if (name.startsWith("CMUX_CUA_")) delete childEnv[name];
+	}
 	if (runtimeContractRoot) childEnv[SUBAGENT_RUNTIME_CONTRACT_ROOT_ENV_VAR] = path.resolve(runtimeContractRoot);
 	else delete childEnv[SUBAGENT_RUNTIME_CONTRACT_ROOT_ENV_VAR];
 	return childEnv;
+}
+
+const CMUX_CUA_CHILD_ENV_NAMES = [
+	"CMUX_CUA_SOCKET_PATH",
+	"CMUX_CUA_CODEX_SOCKET_PATH",
+	"CMUX_CUA_STATE_DIR",
+	"CMUX_CUA_RUNTIME_SCOPE",
+	"CMUX_CUA_CLIENT_PATH",
+	"CMUX_CUA_SOCKET_AUTH_TOKEN",
+	"CMUX_CUA_SOCKET_HOST_AUTH_TOKEN",
+	"CMUX_CUA_AUTH_TOKEN_FILE",
+	"CMUX_CUA_DEFAULT_SESSION",
+	"CMUX_CUA_STATE_OWNER_PID",
+	"CMUX_CUA_MCP_FORCE_PROXY",
+	"CMUX_CUA_EXTERNAL_PERMISSION_FLOW",
+	"CMUX_CUA_TELEMETRY_ENABLED",
+	"CMUX_CUA_UPDATE_CHECK",
+] as const;
+
+export function buildShellEnvUnsets(env: NodeJS.ProcessEnv = process.env): string[] {
+	const names = new Set<string>(CMUX_CUA_CHILD_ENV_NAMES);
+	for (const name of Object.keys(env)) {
+		if (/^CMUX_CUA_[A-Z0-9_]+$/.test(name)) names.add(name);
+	}
+	return [...names].sort().flatMap((name) => ["-u", name]);
 }
 
 export function buildShellEnvAssignments(env: NodeJS.ProcessEnv = process.env): string[] {
