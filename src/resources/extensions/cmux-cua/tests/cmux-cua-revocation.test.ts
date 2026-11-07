@@ -72,4 +72,25 @@ describe("session-scoped revocation (offline model)", () => {
 		openSession(reg, "s1");
 		assert.equal(revoke(reg, "s1").ownershipReleasable, false);
 	});
+
+	test("reusing an open operation ID across reopening is rejected", () => {
+		const reg = createRegistry();
+		const epoch = openSession(reg, "s1");
+		admit(reg, "s1", epoch, "A");
+		revoke(reg, "s1");
+		const epoch2 = openSession(reg, "s1");
+		assert.deepEqual(admit(reg, "s1", epoch2, "A"), { admitted: false, reason: "duplicate-operation" });
+	});
+
+	test("reusing a completed operation ID across reopening is rejected and late proof cannot close new work", () => {
+		const reg = createRegistry();
+		const epoch = openSession(reg, "s1");
+		admit(reg, "s1", epoch, "A");
+		recordTerminal(reg, "s1", "A", true);
+		revoke(reg, "s1");
+		const epoch2 = openSession(reg, "s1");
+		assert.deepEqual(admit(reg, "s1", epoch2, "A"), { admitted: false, reason: "duplicate-operation" });
+		recordTerminal(reg, "s1", "A", true);
+		assert.equal(revoke(reg, "s1").ownershipReleasable, true);
+	});
 });

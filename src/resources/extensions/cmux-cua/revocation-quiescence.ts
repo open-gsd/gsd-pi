@@ -33,7 +33,7 @@ export function openSession(reg: RevocationRegistry, sessionId: string): number 
 
 export type AdmitResult =
 	| { admitted: true }
-	| { admitted: false; reason: "unknown-session" | "stale-epoch" | "revoked" };
+	| { admitted: false; reason: "unknown-session" | "stale-epoch" | "revoked" | "duplicate-operation" };
 
 // Admission requires the current, non-revoked epoch. A request that carries an older
 // epoch (delayed, or delivered after reconnect) is rejected even if the session was reopened.
@@ -42,6 +42,11 @@ export function admit(reg: RevocationRegistry, sessionId: string, epoch: number,
 	if (!s) return { admitted: false, reason: "unknown-session" };
 	if (s.revoked) return { admitted: false, reason: "revoked" };
 	if (epoch !== s.epoch) return { admitted: false, reason: "stale-epoch" };
+	// An operation ID already open or completed in this session must not be reused: a late
+	// terminal proof for the old invocation would otherwise close the new one.
+	if (s.admittedOpen.has(operationId) || s.quiesced.has(operationId)) {
+		return { admitted: false, reason: "duplicate-operation" };
+	}
 	s.admittedOpen.add(operationId);
 	return { admitted: true };
 }
