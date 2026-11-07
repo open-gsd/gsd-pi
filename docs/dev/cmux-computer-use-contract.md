@@ -504,12 +504,15 @@ Proof classes: **P** is offline and portable. **D** is a direct run on a real cm
 | --- | --- | --- |
 | Authenticate the endpoint before initialization | Conformance report, redacted NDJSON transport trace, peer-verification result | A fresh nonce binds the expected signed host, daemon process generation and protocol version to the same connection. No MCP `initialize`, capabilities, schemas, `tools/list` or session capability is sent before verification. Wrong peer, missing proof, replayed proof and reconnect with old proof must fail before the fix. Path, PID, signature or token checks alone are insufficient. |
 | Operation-specific terminal and quiescence evidence | Versioned protocol fixtures, TAP reports before and after the fix, receipt and fence traces | An adapter-generated `operation_id` binds daemon identity, resolved session and admission epoch. Terminal success and terminal failure both prove that no dispatch, queued event or deferred work remains. Acknowledgement, AX postcondition, timeout and process exit do not count. Red tests: lost reply, late conflicting receipt, wrong generation or operation, ignored cancellation, and terminal failure while deferred work is pending. Uncertainty keeps the operation quarantined. |
-| Immediate session-scoped revocation | Scheduler or model-check report and trace of linearization points | Revocation invalidates the session epoch before queued work is aborted, without waiting behind the serial queue. Old requests, including delayed ones and ones after reconnect, are rejected. Work admitted before revocation needs terminal or quiescence proof before release. Other sessions remain valid. Red tests, each with its violating behavior and green assertion:
-  - **Epoch before abort:** block action A, queue B, revoke. Red if the epoch stays valid while A is blocked or if revocation waits behind the serial queue. Green if the epoch is invalid before B is aborted, while A is still blocked.
-  - **Delayed and reconnect delivery:** deliver a request with the revoked epoch late and after reconnect. Red if it is admitted. Green if it is rejected.
-  - **Unrelated session:** revoke session 1 while session 2 is active. Red if session 2 is blocked. Green if session 2 still dispatches.
-  - **Ownership release:** revoke while previously admitted work has no terminal or quiescence proof. Red if ownership is released. Green if it stays quarantined until proof exists. |
+| Immediate session-scoped revocation | Scheduler or model-check report and trace of linearization points | Revocation invalidates the session epoch before queued work is aborted, without waiting behind the serial queue. Old requests, including delayed ones and ones after reconnect, are rejected. Work admitted before revocation needs terminal or quiescence proof before release. Other sessions remain valid. Red tests, each with its violating behavior and green assertion: |
 | Hard kill policy | Separate adapter and daemon TAP reports with a configuration matrix and dispatch counters | With `CMUX_COMPUTER_USE_MCP_DISABLED=1`, the adapter performs no registration, spawn, capability transmission or native dispatch. The daemon must also refuse a client that bypasses the adapter check. Each layer needs its own red test. One shared block does not prove both layers. |
+
+Revocation red tests:
+
+- **Epoch before abort:** block action A, queue B, revoke. Red if the epoch stays valid while A is blocked or if revocation waits behind the serial queue. Green if the epoch is invalid before B is aborted, while A is still blocked.
+- **Delayed and reconnect delivery:** deliver a request with the revoked epoch late and after reconnect. Red if it is admitted. Green if it is rejected.
+- **Unrelated session:** revoke session 1 while session 2 is active. Red if session 2 is blocked. Green if session 2 still dispatches.
+- **Ownership release:** revoke while previously admitted work has no terminal or quiescence proof. Red if ownership is released. Green if it stays quarantined until proof exists.
 
 Offline-provable (P): transport ordering against instrumented peers, exact decoders, epoch and queue races, and adapter hard kill. Daemon logic counts only when the pinned daemon source is available and testable. Regression tests must exercise the future internal execution paths. A flag set to `false` is not evidence of implementation.
 
@@ -530,3 +533,37 @@ Offline (P): dispatch and fallback policy, durable recording of uncertainty, and
 ### Manifest rules
 
 Every evidence manifest records: ledger ID, criterion, owner and dependencies, proof class, outcome, source SHA with dirty and untracked scope, binary digests, OS, GSD, cmux and SDK versions, tool, UTC start and end times, exit or blocker, and durable redacted evidence references with digests. Without a reference there is no evidence.
+
+## Host-run preparation (not executed)
+
+This section prepares the real-host checks that the evidence plan requires. It is a plan only. Nothing here has been run, and it does not open G-03 or `type_text`. Each run needs explicit, per-run approval from the maintainer before anything touches a desktop.
+
+### Preconditions
+
+- Offline suites are green on the exact source revision: `cmux-cua-admission` (9 tests) and `cmux-cua-revocation` (10 tests) at `0b212e054` or later.
+- `G03_RUNTIME_ADMISSION_ENABLED` is `false` and no `type_text` tool is registered on the revision under test.
+- A disposable macOS session is available, with a synthetic, non-secret text target. No real customer data is open.
+- The operator has approved one named run in writing. Each run uses a single checklist item.
+
+### Checks to run, one at a time
+
+| Check | Gate | What is observed | What is recorded |
+| --- | --- | --- | --- |
+| D1: peer binding on the live connection | A | Whether the supported host proves its identity on the same connection before MCP initialize. | Redacted transport trace, verification result, and daemon generation. |
+| D2: hard kill, daemon side | A | Whether the daemon refuses a client that bypasses the adapter check when `CMUX_COMPUTER_USE_MCP_DISABLED=1`. | Separate daemon TAP report and dispatch counter. |
+| D3: revocation of a live operation | A | Whether an operation admitted before revoke reaches terminal proof before ownership is released. | Trace of linearization points and terminal evidence. |
+| D4: typed insertion, no replay | B | Whether one typing action yields at most one insertion, including the AX-to-CGEvent fallback. | Redacted trace of dispatch, fallback, and receipts. |
+
+### Stop conditions
+
+Stop and report, without retrying, when any of these happens:
+
+- A native action runs without an approved run.
+- The live connection carries capabilities before peer proof.
+- A check targets a real application or real data.
+- The same check fails twice with the same reason.
+- Any failure is ambiguous. Treat that as unproven, not as a pass.
+
+### Evidence rules
+
+Each result is a manifest entry with: ledger ID, criterion, proof class, outcome, source SHA and dirty scope, binary digests, OS and cmux versions, UTC times, exit or blocker, and digested, redacted references. Without a reference there is no evidence. A process exit or an empty mock queue does not prove a host check.
