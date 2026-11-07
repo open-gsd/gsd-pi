@@ -1,3 +1,4 @@
+import { getModelRequestPolicy } from '@gsd/pi-ai/model-request-policy.js'
 import type { ModelRegistry as ModelRegistryInstance } from '@gsd/pi-coding-agent'
 
 /**
@@ -21,6 +22,9 @@ export function applyModelOverride(
   if (match) {
     void session.setModel(match)
   } else {
+    if (getModelRequestPolicy() !== undefined) {
+      throw new Error(`Model override "${modelFlag}" is unavailable under GSD_MODEL_ALLOWLIST; refusing fallback`)
+    }
     process.stderr.write(`[gsd] Warning: Model "${modelFlag}" not found. Using configured default.\n`)
   }
 }

@@ -80,7 +80,7 @@ echo "── build:core ──"
 pnpm run build:core
 
 echo "── web host (stale-aware; required by validate-pack) ──"
-node scripts/build-web-if-stale.cjs
+node scripts/build-web-if-stale.cjs --openclaw
 
 echo "── typecheck:extensions ──"
 pnpm run typecheck:extensions

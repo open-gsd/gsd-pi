@@ -1,3 +1,4 @@
+import { assertModelSelectionAllowed, inheritModelRequestPolicy } from "@gsd/pi-ai/model-request-policy.js";
 /**
  * GSD Parallel Orchestrator — Core engine for parallel milestone orchestration.
  *
@@ -605,8 +606,9 @@ export function spawnWorker(
 
   let child: ChildProcess;
   try {
+    assertModelSelectionAllowed(state.config.worker_model);
     const workerEnv: Record<string, string | undefined> = {
-      ...process.env,
+      ...inheritModelRequestPolicy(process.env),
       GSD_MILESTONE_LOCK: milestoneId,
       // Pass the real project root so workers don't need to re-derive it.
       // Without this, process.cwd() resolves symlinks and the worktree

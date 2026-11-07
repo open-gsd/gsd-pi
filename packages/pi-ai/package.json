@@ -58,6 +58,10 @@
     "./bedrock-provider": {
       "types": "./dist/bedrock-provider.d.ts",
       "import": "./dist/bedrock-provider.js"
+    },
+    "./model-request-policy.js": {
+      "types": "./dist/model-request-policy.d.ts",
+      "import": "./dist/model-request-policy.js"
     }
   },
   "bin": {

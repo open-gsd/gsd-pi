@@ -38,6 +38,7 @@ export * from "./providers/register-builtins.js";
 export * from "./providers/api-family.js";
 export * from "./session-resources.js";
 export * from "./stream.js";
+export * from "./model-request-policy.js";
 export * from "./types.js";
 export * from "./tool-result-content.js";
 export * from "./utils/diagnostics.js";

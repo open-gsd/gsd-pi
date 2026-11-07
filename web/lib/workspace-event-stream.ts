@@ -1,4 +1,5 @@
 import type { WorkspaceConnectionState } from "./gsd-workspace-store"
+import { createModeAwareEventSource } from "./embedded-gate.ts"
 
 export interface WorkspaceEventSource {
   onopen: ((event: Event) => void) | null
@@ -31,7 +32,7 @@ export class WorkspaceEventStream {
 
   constructor(
     handlers: WorkspaceEventStreamHandlers,
-    createEventSource: WorkspaceEventSourceFactory = (url) => new EventSource(url),
+    createEventSource: WorkspaceEventSourceFactory = (url) => createModeAwareEventSource(url) as unknown as WorkspaceEventSource,
   ) {
     this.handlers = handlers
     this.createEventSource = createEventSource

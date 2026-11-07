@@ -8,7 +8,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, join, delimiter } from 'node:path';
-import { RpcClient } from '@opengsd/rpc-client';
+import { RpcClient, verifyQualifiedModelBinding } from '@opengsd/rpc-client';
 import { parseWorkflowOutcomeCustomMessage, type RpcWorkflowOutcomeEvent } from '@opengsd/contracts';
 import type { SdkAgentEvent, RpcInitResult, RpcCostUpdateEvent, RpcExtensionUIRequest } from '@opengsd/contracts';
 import type {
@@ -187,6 +187,10 @@ export class SessionManager {
       ]) as RpcInitResult;
 
       session.sessionId = initResult.sessionId;
+      // Qualified overrides are an explicit provider binding, not a hint.
+      // The CLI may warn and use its default when --model is unavailable;
+      // resolve and read back the RPC model before sending any execution prompt.
+      await verifyQualifiedModelBinding(client, options.model, INIT_TIMEOUT_MS);
       session.status = 'running';
 
       // Wire event tracking

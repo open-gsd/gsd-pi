@@ -6,7 +6,7 @@ import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 
-import { discoverProjects } from "../../web/project-discovery-service.ts";
+import { discoverProjects, inspectProject } from "../../web/project-discovery-service.ts";
 import { detectMonorepo } from "../../web/bridge-service.ts";
 import { closeDatabase, insertArtifact, insertMilestone, openDatabase, setMilestoneQueueOrder } from "../../resources/extensions/gsd/gsd-db.ts";
 import { renderStateContent } from "../../resources/extensions/gsd/workflow-projections.ts";
@@ -503,4 +503,22 @@ describe("project-discovery — database progress", () => {
     assert.deepStrictEqual(readFileSync(dbPath), before, "the database file is unchanged");
     assert.deepStrictEqual(readdirSync(gsdDir).sort(), ["STATE.md", "gsd.db"], "the read leaves no other file");
   });
+});
+
+
+test("host-managed inspection returns only the selected ordinary checkout, including Git worktrees", () => {
+  const root = mkdtempSync(join(tmpdir(), "gsd-exact-project-"));
+  try {
+    writeFileSync(join(root, ".git"), "gitdir: /source/.git/worktrees/test\n");
+    mkdirSync(join(root, "child"));
+    writeFileSync(join(root, "child", "package.json"), "{}");
+    const metadata = inspectProject(root, true);
+    assert.ok(metadata);
+    assert.equal(metadata.path, root);
+    assert.equal(metadata.name, basename(root));
+    assert.equal(metadata.signals.hasGitRepo, true);
+    assert.equal(metadata.progress, null);
+    assert.equal(inspectProject(join(root, "missing")), null);
+    assert.equal(inspectProject(join(root, ".git")), null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
