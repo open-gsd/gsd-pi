@@ -1088,4 +1088,20 @@ describe("ExtensionRunner", () => {
 		});
 		expect(runner.getAllRegisteredTools()).toHaveLength(0);
 	});
+
+	it("fails closed when two extensions register the same runtime read name", async () => {
+		fs.writeFileSync(
+			path.join(extensionsDir, "dup-a.ts"),
+			`export default function(pi) { pi.registerRuntimeRead("async_jobs_snapshot", async () => ({ from: "a" })); }`,
+		);
+		fs.writeFileSync(
+			path.join(extensionsDir, "dup-b.ts"),
+			`export default function(pi) { pi.registerRuntimeRead("async_jobs_snapshot", async () => ({ from: "b" })); }`,
+		);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+		const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+		expect(runner.getRuntimeReadHandler("async_jobs_snapshot")).toBeUndefined();
+	});
 });
