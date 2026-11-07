@@ -1387,26 +1387,25 @@ test('an opt-out queued behind an in-flight publish still clears its newly accep
   assert.equal(f.clears.length, 1, 'the binding accepted by the in-flight publish is cleared by the opt-out')
 })
 
-test('shutdown requested after drain exits but before its finally callback still sends SessionEnd', async t => {
+test('shutdown requested after drain resolves but before the wrapper finally still sends SessionEnd', async t => {
   const f = await fixture(t)
-  let bridge!: CmuxVaultBridge
-  let stopped = false
-  // Call stop() from inside the transport of the publish's final readback, which
-  // is the last awaited step of the drain. The drain then ends right after it, so
-  // stop() lands in the window before the running promise's finally callback runs.
-  bridge = new CmuxVaultBridge({
-    ...f.options,
-    transport: async args => {
-      const result = await f.options.transport(args)
-      if (args[2] === 'set' && !stopped) { stopped = true; bridge.stop() }
-      return result
-    },
-  })
+  const bridge = new CmuxVaultBridge(f.options)
+  // Intercept the drain the bridge runs, so shutdown can be requested in the exact
+  // window after the original drain resolves and before the running wrapper finishes.
+  const internal = bridge as unknown as { drain: () => Promise<void> }
+  const originalDrain = internal.drain.bind(bridge)
+  let requested = false
+  internal.drain = async () => {
+    await originalDrain()
+    if (!requested) {
+      requested = true
+      bridge.stop()
+    }
+  }
   bridge.update(f.manager, true)
   await bridge.idle()
-  assert.equal(stopped, true, 'stop() was requested during the publish')
-  // The shutdown must still be drained: presence ends with a SessionEnd.
-  assert.deepEqual(presenceEvents(f).at(-1), 'SessionEnd', 'shutdown is drained even when it lands in the finally window')
+  assert.equal(requested, true, 'shutdown was requested after the original drain resolved')
+  assert.deepEqual(presenceEvents(f).at(-1), 'SessionEnd', 'the late shutdown is still drained')
 })
 
 test('a successor never takes over another session binding, even when its file still exists', async t => {
