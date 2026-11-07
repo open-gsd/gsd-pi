@@ -242,8 +242,6 @@ export class InteractiveMode {
 			manuallyExpanded: this.gsdStatusExpanded,
 			gsdProgress: this.gsdProgressState,
 		}), this.producerActivity);
-		// One refresh at startup. No poll loop: the footer shows the last applied view.
-		void this.producerActivity.refresh(session.extensionRunner ?? null, Date.now());
 		this.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.toolOutputExpanded = this.settingsManager.getToolsExpanded();
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -292,6 +290,9 @@ export class InteractiveMode {
 		this.setupKeyHandlers();
 		this.setupEditorSubmitHandler();
 		await this.initExtensions();
+		// Producers initialize on session_start, so the one-shot refresh runs only
+		// after extensions are up. Its result is rendered when it applies.
+		void this.refreshProducerActivity();
 		this.renderInitialMessages();
 
 		this.ui.start();
@@ -500,6 +501,19 @@ export class InteractiveMode {
 	private showLoadedResources(options?: Parameters<typeof resourceDisplay.showLoadedResources>[1]): void { resourceDisplay.showLoadedResources(this, options); }
 
 	private async initExtensions(): Promise<void> { return extensionSystem.initExtensions(this); }
+
+	/** Refresh producer activity facets and re-render when the result applies. */
+	private async refreshProducerActivity(): Promise<void> {
+		if (!this.producerActivity) return;
+		const applied = await this.producerActivity.refresh(this.session.extensionRunner ?? null, Date.now());
+		if (applied) this.ui.requestRender();
+	}
+
+	/** Session transition: drop the previous session's producer view (#2936). */
+	resetProducerActivityForSessionChange(): void {
+		this.producerActivity?.reset();
+		this.ui.requestRender();
+	}
 	private getRegisteredToolDefinition(toolName: string) { return extensionSystem.getRegisteredToolDefinition(this, toolName); }
 	private formatWebSearchResult(content: unknown): string { return extensionSystem.formatWebSearchResult(this, content); }
 	private setupExtensionShortcuts(extensionRunner: ExtensionRunner): void { extensionSystem.setupExtensionShortcuts(this, extensionRunner); }

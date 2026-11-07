@@ -205,7 +205,6 @@ export class FooterComponent implements Component {
 			costSegment,
 			providerSuffix ? theme.fg("dim", providerSuffix) : undefined,
 			secondaryExtText ? theme.fg("dim", secondaryExtText) : undefined,
-			producerFacetText ? theme.fg("dim", producerFacetText) : undefined,
 		].filter((segment): segment is string => !!segment);
 
 		const cwd = gsdState?.cwd ?? process.cwd();
@@ -222,6 +221,12 @@ export class FooterComponent implements Component {
 			return truncateToWidth(styled, budget, "…");
 		});
 
-		return renderMinimalFooterLine(line, width);
+		const mainLines = renderMinimalFooterLine(line, width);
+		// Producer facets get their own bounded row so they never compete with, or
+		// get clipped by, the main status row. Each facet keeps its label and its
+		// stored/unavailable qualifier.
+		if (!producerFacetText) return mainLines;
+		const facetRow = truncateToWidth(theme.fg("dim", producerFacetText), width, "…");
+		return [...mainLines, facetRow];
 	}
 }

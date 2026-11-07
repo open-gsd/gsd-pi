@@ -242,7 +242,9 @@ export async function handleResumeSession(host: InteractiveModeDelegateHost, ses
 		host.clearBlockingError();
 
 		// Switch session via AgentSession (emits extension session events)
+		host.resetProducerActivityForSessionChange();
 		await host.session.switchSession(sessionPath);
+		void host.refreshProducerActivity();
 
 		// Clear and re-render the chat
 		host.chatContainer.clear();

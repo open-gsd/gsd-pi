@@ -32,6 +32,17 @@ export class ProducerActivityFooterCache {
 	}
 
 	/**
+	 * Session transition: drop the previous session's view and invalidate any
+	 * in-flight refresh. Until the next refresh applies, the footer shows
+	 * "pending" rather than another session's facets.
+	 */
+	reset(): void {
+		this.generation += 1;
+		this.lines = [];
+		this.refreshedAt = null;
+	}
+
+	/**
 	 * Refresh from the runner. Results are applied only if no invalidation happened
 	 * while the reads were in flight. Returns whether the refresh was applied.
 	 */

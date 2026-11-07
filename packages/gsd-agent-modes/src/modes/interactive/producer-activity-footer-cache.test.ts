@@ -58,3 +58,23 @@ test("no runner yields unavailable lines, never zero", async () => {
 	assert.ok(text.includes("unavailable"));
 	assert.ok(!text.startsWith("0 "));
 });
+
+test("the facet line keeps each producer label and its unavailable qualifier", async () => {
+	const cache = new ProducerActivityFooterCache();
+	await cache.refresh(null, 4000);
+	const lines = cache.snapshot().lines;
+	assert.equal(lines.length, 2);
+	assert.ok(lines.every((l) => l.text.startsWith("unavailable")));
+	assert.deepEqual(lines.map((l) => l.label), ["async jobs", "subagent runs"]);
+});
+
+test("reset drops the previous session view and invalidates an in-flight refresh", async () => {
+	const cache = new ProducerActivityFooterCache();
+	await cache.refresh(null, 5000);
+	assert.ok(cache.snapshot().lines.length > 0);
+	cache.reset();
+	assert.deepEqual(cache.snapshot().lines, []);
+	assert.equal(cache.snapshot().refreshedAt, null);
+	const applied = await cache.refresh(null, 6000);
+	assert.equal(applied, true);
+});
