@@ -530,3 +530,37 @@ Offline (P): dispatch and fallback policy, durable recording of uncertainty, and
 ### Manifest rules
 
 Every evidence manifest records: ledger ID, criterion, owner and dependencies, proof class, outcome, source SHA with dirty and untracked scope, binary digests, OS, GSD, cmux and SDK versions, tool, UTC start and end times, exit or blocker, and durable redacted evidence references with digests. Without a reference there is no evidence.
+
+## Host-run preparation (not executed)
+
+This section prepares the real-host checks that the evidence plan requires. It is a plan only. Nothing here has been run, and it does not open G-03 or `type_text`. Each run needs explicit, per-run approval from the maintainer before anything touches a desktop.
+
+### Preconditions
+
+- Offline suites are green on the exact source revision: `cmux-cua-admission` (9 tests) and `cmux-cua-revocation` (10 tests) at `0b212e054` or later.
+- `G03_RUNTIME_ADMISSION_ENABLED` is `false` and no `type_text` tool is registered on the revision under test.
+- A disposable macOS session is available, with a synthetic, non-secret text target. No real customer data is open.
+- The operator has approved one named run in writing. Each run uses a single checklist item.
+
+### Checks to run, one at a time
+
+| Check | Gate | What is observed | What is recorded |
+| --- | --- | --- | --- |
+| D1: peer binding on the live connection | A | Whether the supported host proves its identity on the same connection before MCP initialize. | Redacted transport trace, verification result, and daemon generation. |
+| D2: hard kill, daemon side | A | Whether the daemon refuses a client that bypasses the adapter check when `CMUX_COMPUTER_USE_MCP_DISABLED=1`. | Separate daemon TAP report and dispatch counter. |
+| D3: revocation of a live operation | A | Whether an operation admitted before revoke reaches terminal proof before ownership is released. | Trace of linearization points and terminal evidence. |
+| D4: typed insertion, no replay | B | Whether one typing action yields at most one insertion, including the AX-to-CGEvent fallback. | Redacted trace of dispatch, fallback, and receipts. |
+
+### Stop conditions
+
+Stop and report, without retrying, when any of these happens:
+
+- A native action runs without an approved run.
+- The live connection carries capabilities before peer proof.
+- A check targets a real application or real data.
+- The same check fails twice with the same reason.
+- Any failure is ambiguous. Treat that as unproven, not as a pass.
+
+### Evidence rules
+
+Each result is a manifest entry with: ledger ID, criterion, proof class, outcome, source SHA and dirty scope, binary digests, OS and cmux versions, UTC times, exit or blocker, and digested, redacted references. Without a reference there is no evidence. A process exit or an empty mock queue does not prove a host check.
