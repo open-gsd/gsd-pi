@@ -97,9 +97,7 @@ export async function handleClearCommand(host: InteractiveModeDelegateHost): Pro
 		host.statusContainer.clear();
 
 		// New session via session (emits extension session events)
-		host.resetProducerActivityForSessionChange();
 		await host.session.newSession();
-		void host.refreshProducerActivity();
 
 		// Keep the old conversation readable in scrollback before the screen
 		// is reset (#2637): the next, shorter frame would otherwise erase the

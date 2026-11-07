@@ -398,8 +398,27 @@ export class InteractiveMode {
 	private subscribeToAgent(): void {
 		let eventQueue: Promise<void> = Promise.resolve();
 		this.unsubscribe = this.session.subscribe((event) => {
+			// Session-lifecycle invalidation (#2936) runs synchronously, before the
+			// event enters the async queue, so a stale view is dropped in time.
+			this.applyProducerActivityLifecycle(event);
 			eventQueue = eventQueue.then(() => this.handleEvent(event)).catch(() => {});
 		});
+	}
+
+	/**
+	 * One central boundary for producer activity (#2936), driven by the core's
+	 * owner_generation_transition event (starting/settled for new, switch, fork).
+	 * starting: drop the previous session view and invalidate in-flight reads.
+	 * settled: refresh from the current runner. settled runs in a finally block and
+	 * does not imply success; the refresh reads whatever the runner exposes now.
+	 */
+	private applyProducerActivityLifecycle(event: AgentSessionEvent): void {
+		if (event.type !== "owner_generation_transition") return;
+		if (event.phase === "starting") {
+			this.resetProducerActivityForSessionChange();
+			return;
+		}
+		void this.refreshProducerActivity();
 	}
 
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {

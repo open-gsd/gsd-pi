@@ -68,13 +68,34 @@ test("the facet line keeps each producer label and its unavailable qualifier", a
 	assert.deepEqual(lines.map((l) => l.label), ["async jobs", "subagent runs"]);
 });
 
-test("reset drops the previous session view and invalidates an in-flight refresh", async () => {
+test("reset invalidates a refresh that is genuinely still in flight", async () => {
 	const cache = new ProducerActivityFooterCache();
-	await cache.refresh(null, 5000);
-	assert.ok(cache.snapshot().lines.length > 0);
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const slowRunner: RuntimeReader = {
+		getRuntimeReadHandler: () => async () => {
+			await gate;
+			return availableEmpty;
+		},
+	};
+	const pending = cache.refresh(slowRunner, 8000);
+	// The refresh is now suspended inside the runner read: a real in-flight read.
 	cache.reset();
+	release();
+	const applied = await pending;
+	assert.equal(applied, false, "an in-flight refresh must not publish after a session transition");
 	assert.deepEqual(cache.snapshot().lines, []);
 	assert.equal(cache.snapshot().refreshedAt, null);
-	const applied = await cache.refresh(null, 6000);
-	assert.equal(applied, true);
+});
+
+test("each facet is its own line, so both labels survive independently of each other", async () => {
+	const cache = new ProducerActivityFooterCache();
+	await cache.refresh(null, 7000);
+	const rows = cache.snapshot().lines.map((l) => `${l.label}: ${l.text}`);
+	assert.equal(rows.length, 2, "one row per producer, never one shared string");
+	assert.ok(rows[0]!.startsWith("async jobs:"));
+	assert.ok(rows[1]!.startsWith("subagent runs:"));
+	assert.ok(rows.every((r) => r.includes("unavailable")));
 });

@@ -167,12 +167,9 @@ export class FooterComponent implements Component {
 
 		// Producer activity facets (#2936): read synchronously from the cache only.
 		// Each facet stays a separate labelled part; there is no combined total.
-		const producerFacetText = this.producerActivity
-			? this.producerActivity
-					.snapshot()
-					.lines.map((l) => `${l.label}: ${l.text}`)
-					.join("  ")
-			: "";
+		const producerFacetLines = this.producerActivity
+			? this.producerActivity.snapshot().lines.map((l) => `${l.label}: ${l.text}`)
+			: [];
 
 		let providerSuffix = "";
 		if (this.footerData.getAvailableProviderCount() > 1 && displayModel) {
@@ -225,8 +222,10 @@ export class FooterComponent implements Component {
 		// Producer facets get their own bounded row so they never compete with, or
 		// get clipped by, the main status row. Each facet keeps its label and its
 		// stored/unavailable qualifier.
-		if (!producerFacetText) return mainLines;
-		const facetRow = truncateToWidth(theme.fg("dim", producerFacetText), width, "…");
-		return [...mainLines, facetRow];
+		if (producerFacetLines.length === 0) return mainLines;
+		// Each facet is bounded on its own, so a narrow terminal keeps every
+		// producer's label and unavailable/stored qualifier visible.
+		const facetRows = producerFacetLines.map((line) => truncateToWidth(theme.fg("dim", line), width, "…"));
+		return [...mainLines, ...facetRows];
 	}
 }
