@@ -1,7 +1,8 @@
 // Project/App: gsd-pi
 // File Purpose: Interactive terminal footer renderer for workspace, model, usage, context, and extension status.
 
-import { type Component, truncateToWidth } from "@gsd/pi-tui";
+import { type Component, truncateToWidth, visibleWidth } from "@gsd/pi-tui";
+import { producerFacetRows } from "../producer-facet-rows.js";
 import type { AgentSession } from "@gsd/agent-core";
 import type { ReadonlyFooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
@@ -167,8 +168,13 @@ export class FooterComponent implements Component {
 
 		// Producer activity facets (#2936): read synchronously from the cache only.
 		// Each facet stays a separate labelled part; there is no combined total.
-		const producerFacetLines = this.producerActivity
-			? this.producerActivity.snapshot().lines.map((l) => `${l.label}: ${l.text}`)
+		const producerSnapshot = this.producerActivity?.snapshot();
+		const producerStamp =
+			producerSnapshot?.refreshedAt != null
+				? ` (as of ${new Date(producerSnapshot.refreshedAt).toTimeString().slice(0, 5)})`
+				: "";
+		const producerFacetLines = producerSnapshot
+			? producerSnapshot.lines.map((l, i) => (i === 0 ? `${l.label}: ${l.text}${producerStamp}` : `${l.label}: ${l.text}`))
 			: [];
 
 		let providerSuffix = "";
@@ -225,7 +231,7 @@ export class FooterComponent implements Component {
 		if (producerFacetLines.length === 0) return mainLines;
 		// Each facet is bounded on its own, so a narrow terminal keeps every
 		// producer's label and unavailable/stored qualifier visible.
-		const facetRows = producerFacetLines.map((line) => truncateToWidth(theme.fg("dim", line), width, "…"));
+		const facetRows = producerFacetRows(producerSnapshot?.lines ?? [], width, "", { visibleWidth, truncateToWidth }).map((row) => theme.fg("dim", row));
 		return [...mainLines, ...facetRows];
 	}
 }

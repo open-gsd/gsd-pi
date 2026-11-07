@@ -20,6 +20,7 @@ export class ProducerActivityFooterCache {
 	private lines: ActivityFacetLine[] = [];
 	private refreshedAt: number | null = null;
 	private generation = 0;
+	private ticket = 0;
 
 	/** Current view for the synchronous footer render. Never performs I/O. */
 	snapshot(): ProducerActivityCache {
@@ -47,8 +48,13 @@ export class ProducerActivityFooterCache {
 	 * while the reads were in flight. Returns whether the refresh was applied.
 	 */
 	async refresh(runner: RuntimeReader | null, nowMs: number): Promise<boolean> {
+		// Each refresh takes its own ticket. Only the most recently started refresh
+		// may publish, so an older read that finishes last cannot overwrite a newer
+		// session view, even when both were started in the same generation.
+		this.ticket += 1;
+		const myTicket = this.ticket;
 		const gen = this.generation;
-		const isCurrent = () => gen === this.generation;
+		const isCurrent = () => gen === this.generation && myTicket === this.ticket;
 		const reads: NativeProducerRead[] = [];
 		for (const name of PRODUCER_READ_NAMES) {
 			reads.push(await readProducer(runner, name, isCurrent));

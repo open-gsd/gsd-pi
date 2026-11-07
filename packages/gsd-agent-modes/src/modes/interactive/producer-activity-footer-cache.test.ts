@@ -99,3 +99,38 @@ test("each facet is its own line, so both labels survive independently of each o
 	assert.ok(rows[1]!.startsWith("subagent runs:"));
 	assert.ok(rows.every((r) => r.includes("unavailable")));
 });
+
+test("an older refresh finishing last cannot overwrite a newer session view", async () => {
+	const cache = new ProducerActivityFooterCache();
+	// One gate per refresh label. Every read of that refresh waits on the same gate,
+	// so releasing a label completes all of its reads (the refresh issues four reads).
+	const gates = new Map<string, { promise: Promise<void>; open: () => void }>();
+	const gateFor = (label: string) => {
+		let g = gates.get(label);
+		if (!g) {
+			let open!: () => void;
+			const promise = new Promise<void>((resolve) => {
+				open = resolve;
+			});
+			g = { promise, open };
+			gates.set(label, g);
+		}
+		return g;
+	};
+	const runnerFor = (label: string): RuntimeReader => ({
+		getRuntimeReadHandler: () => async () => {
+			await gateFor(label).promise;
+			return { ...availableEmpty, basis: "memory" };
+		},
+	});
+	const older = cache.refresh(runnerFor("older"), 1000);
+	const newer = cache.refresh(runnerFor("newer"), 2000);
+	// The newer refresh completes first; the older one completes last.
+	gateFor("newer").open();
+	const newerApplied = await newer;
+	gateFor("older").open();
+	const olderApplied = await older;
+	assert.equal(newerApplied, true, "the latest-started refresh publishes");
+	assert.equal(olderApplied, false, "the older refresh must not overwrite the newer view");
+	assert.equal(cache.snapshot().refreshedAt, 2000);
+});

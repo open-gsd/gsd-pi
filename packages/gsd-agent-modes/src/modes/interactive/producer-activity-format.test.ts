@@ -18,7 +18,7 @@ test("available async jobs are labelled live and show completeness", () => {
 			snapshot: { availability: "available", completeness: "complete", items: [{ id: "a", status: "running" }, { id: "b", status: "running" }], gaps: [] },
 		},
 	]);
-	assert.deepEqual(lines, [{ label: "async jobs", text: "2 running (live, complete)" }]);
+	assert.deepEqual(lines, [{ label: "async jobs", text: "2 running (snapshot, complete)", qualifier: "(snapshot, complete)", detail: "2 running" }]);
 });
 
 test("subagent runs are labelled stored, never live", () => {
@@ -29,7 +29,7 @@ test("subagent runs are labelled stored, never live", () => {
 			snapshot: { availability: "available", completeness: "partial", items: [{ status: "running" }], gaps: ["invalid-record"] },
 		},
 	]);
-	assert.deepEqual(lines, [{ label: "subagent runs", text: "1 running (stored, partial)" }]);
+	assert.deepEqual(lines, [{ label: "subagent runs", text: "1 running (stored, partial)", qualifier: "(stored, partial)", detail: "1 running" }]);
 	assert.ok(!lines[0]!.text.includes("live"));
 });
 
