@@ -525,7 +525,8 @@ export class InteractiveMode {
 	private async refreshProducerActivity(): Promise<void> {
 		if (!this.producerActivity) return;
 		const applied = await this.producerActivity.refresh(this.session.extensionRunner ?? null, Date.now());
-		if (applied) this.ui.requestRender();
+		// A refresh that finishes after shutdown must not re-render a stopped UI.
+		if (applied && !this.isShuttingDown) this.ui.requestRender();
 	}
 
 	/** Session transition: drop the previous session's producer view (#2936). */
