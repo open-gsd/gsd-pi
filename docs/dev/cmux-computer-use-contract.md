@@ -491,3 +491,42 @@ This snapshot compares the reviewed local adapter with an immutable upstream cmu
 - The findings are source-level. No fresh tests, real MCP handshake, installed-layer activation or native acceptance were verified for this snapshot.
 - G-03 remains closed. Neither upstream skill instructions nor a version label authorizes activation.
 - The historical smoke stopped with `missing-inherited-native-socket` and zero actions (`actionAttempts: 0`, `nativeContractProven: false`). Source: sanitized artifact `cmux-cua-native-contract-c9bc8789-1349-4865-91d4-c6dec8253905.json` in the CUA implementation checkout. It is a prerequisite failure, not acceptance evidence.
+
+## Evidence plan for conditional gates (2026-11-07)
+
+The operator decision (D309) makes G-03 runtime admission and `type_text` registration conditional. Neither gate opens on the decision alone. Each needs the source-bound evidence below. Until a reviewed run produces that evidence, the adapter stays fail-closed with `G03_RUNTIME_ADMISSION_ENABLED=false` and no `type_text` tool.
+
+Proof classes: **P** is offline and portable. **D** is a direct run on a real cmux host. **G** is a fresh integrated Pi/GSD run. Offline proof never opens the runtime gate by itself.
+
+### Gate A: G-03 runtime admission
+
+| Requirement | Evidence artifact | Pass criterion and required prior failure |
+| --- | --- | --- |
+| Authenticate the endpoint before initialization | Conformance report, redacted NDJSON transport trace, peer-verification result | A fresh nonce binds the expected signed host, daemon process generation and protocol version to the same connection. No MCP `initialize`, capabilities, schemas, `tools/list` or session capability is sent before verification. Wrong peer, missing proof, replayed proof and reconnect with old proof must fail before the fix. Path, PID, signature or token checks alone are insufficient. |
+| Operation-specific terminal and quiescence evidence | Versioned protocol fixtures, TAP reports before and after the fix, receipt and fence traces | An adapter-generated `operation_id` binds daemon identity, resolved session and admission epoch. Terminal success and terminal failure both prove that no dispatch, queued event or deferred work remains. Acknowledgement, AX postcondition, timeout and process exit do not count. Red tests: lost reply, late conflicting receipt, wrong generation or operation, ignored cancellation, and terminal failure while deferred work is pending. Uncertainty keeps the operation quarantined. |
+| Immediate session-scoped revocation | Scheduler or model-check report and trace of linearization points | Revocation invalidates the session epoch before queued work is aborted, without waiting behind the serial queue. Old requests, including delayed ones and ones after reconnect, are rejected. Work admitted before revocation needs terminal or quiescence proof before release. Other sessions remain valid. Red tests, each with its violating behavior and green assertion:
+  - **Epoch before abort:** block action A, queue B, revoke. Red if the epoch stays valid while A is blocked or if revocation waits behind the serial queue. Green if the epoch is invalid before B is aborted, while A is still blocked.
+  - **Delayed and reconnect delivery:** deliver a request with the revoked epoch late and after reconnect. Red if it is admitted. Green if it is rejected.
+  - **Unrelated session:** revoke session 1 while session 2 is active. Red if session 2 is blocked. Green if session 2 still dispatches.
+  - **Ownership release:** revoke while previously admitted work has no terminal or quiescence proof. Red if ownership is released. Green if it stays quarantined until proof exists. |
+| Hard kill policy | Separate adapter and daemon TAP reports with a configuration matrix and dispatch counters | With `CMUX_COMPUTER_USE_MCP_DISABLED=1`, the adapter performs no registration, spawn, capability transmission or native dispatch. The daemon must also refuse a client that bypasses the adapter check. Each layer needs its own red test. One shared block does not prove both layers. |
+
+Offline-provable (P): transport ordering against instrumented peers, exact decoders, epoch and queue races, and adapter hard kill. Daemon logic counts only when the pinned daemon source is available and testable. Regression tests must exercise the future internal execution paths. A flag set to `false` is not evidence of implementation.
+
+Requires a real host (D), after separate approval: supported macOS peer binding on the actual connection, daemon hard kill, real event and deferred-work quiescence, and D then G tests with exactly bound binaries. A process exit or an empty mock queue proves none of these.
+
+Stop conditions: if supported pre-initialize peer binding, operational status or fencing, or evidence about OS-deferred events is unavailable, the gate stays closed. Mocks do not replace those guarantees.
+
+### Gate B: `type_text` registration
+
+Artifact: a JSON no-replay conformance report, red and green TAP results, and redacted NDJSON traces of native dispatch, fallback, receipts and recovery. Record P, D and G results separately.
+
+Pass criterion: one typing action produces at most one semantic insertion, including internal AX-to-CGEvent fallback. After an ambiguous reply to a possibly completed insertion, only a status query or fence is allowed, never a redispatch. A new model call, grant, reconnect, or adapter or daemon restart must not bypass that uncertainty. Deduplication must hold, or old epochs must be provably and permanently rejected.
+
+Red tests required before the fix: AX insertion succeeds but read-back fails or times out (no CGEvent retry with `clear_first:false`); lost reply before and after insertion; delayed insertion after adapter timeout; duplicate operation ID; the same ID with a different payload; a new ID during quarantine; restart or reconnect; late receipts; cancellation that the backend ignores.
+
+Offline (P): dispatch and fallback policy, durable recording of uncertainty, and recovery rules. Host (D): real AX and CGEvent insertion and delayed events, using a synthetic non-secret text field. Registration follows only after review, exact-SHA CI, and separately approved host runs. If fallback cannot prove definite non-delivery, stop.
+
+### Manifest rules
+
+Every evidence manifest records: ledger ID, criterion, owner and dependencies, proof class, outcome, source SHA with dirty and untracked scope, binary digests, OS, GSD, cmux and SDK versions, tool, UTC start and end times, exit or blocker, and durable redacted evidence references with digests. Without a reference there is no evidence.
