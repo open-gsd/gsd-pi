@@ -6,6 +6,7 @@ import type { AgentSession } from "@gsd/agent-core";
 import type { ReadonlyFooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { providerAuthBadge, providerDisplayName } from "./model-selector.js";
+import type { ProducerActivityFooterCache } from "../producer-activity-footer-cache.js";
 import {
 	badge,
 	layoutFullWidthMinimalFooter,
@@ -101,6 +102,7 @@ export class FooterComponent implements Component {
 		private session: AgentSession,
 		private footerData: ReadonlyFooterDataProvider,
 		private readonly getGsdStatus?: () => GsdStatusWidgetState,
+		private readonly producerActivity?: ProducerActivityFooterCache,
 	) {}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -163,6 +165,15 @@ export class FooterComponent implements Component {
 			primaryStatus ? new Set([primaryStatus.key]) : new Set(),
 		);
 
+		// Producer activity facets (#2936): read synchronously from the cache only.
+		// Each facet stays a separate labelled part; there is no combined total.
+		const producerFacetText = this.producerActivity
+			? this.producerActivity
+					.snapshot()
+					.lines.map((l) => `${l.label}: ${l.text}`)
+					.join("  ")
+			: "";
+
 		let providerSuffix = "";
 		if (this.footerData.getAvailableProviderCount() > 1 && displayModel) {
 			const authMode = this.session.modelRegistry.getProviderAuthMode(displayModel.provider);
@@ -194,6 +205,7 @@ export class FooterComponent implements Component {
 			costSegment,
 			providerSuffix ? theme.fg("dim", providerSuffix) : undefined,
 			secondaryExtText ? theme.fg("dim", secondaryExtText) : undefined,
+			producerFacetText ? theme.fg("dim", producerFacetText) : undefined,
 		].filter((segment): segment is string => !!segment);
 
 		const cwd = gsdState?.cwd ?? process.cwd();

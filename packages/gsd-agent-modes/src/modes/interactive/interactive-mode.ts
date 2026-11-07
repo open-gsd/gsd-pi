@@ -31,6 +31,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
+import { ProducerActivityFooterCache } from "./producer-activity-footer-cache.js";
 import { ToolExecutionComponent } from "./components/tool-execution.js";
 import { setRailAnimationEnabled } from "./components/transcript-design.js";
 import { ContextualTips } from "@gsd/agent-core";
@@ -112,6 +113,7 @@ export class InteractiveMode {
 	private autocompleteProvider: CombinedAutocompleteProvider | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
+	private producerActivity: ProducerActivityFooterCache | undefined;
 	private footerDataProvider: FooterDataProvider;
 	private keybindings: KeybindingsManager;
 	private version: string;
@@ -230,6 +232,7 @@ export class InteractiveMode {
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as import("@gsd/pi-tui").Component);
 		this.footerDataProvider = new FooterDataProvider(process.cwd());
+		this.producerActivity = new ProducerActivityFooterCache();
 		this.footer = new FooterComponent(session, this.footerDataProvider, () => ({
 			override: this.settingsManager.getAdaptiveMode(),
 			activeToolCount: this.activeToolInvocations.size,
@@ -238,7 +241,9 @@ export class InteractiveMode {
 			cwd: this.gsdProgressState?.path ?? process.cwd(),
 			manuallyExpanded: this.gsdStatusExpanded,
 			gsdProgress: this.gsdProgressState,
-		}));
+		}), this.producerActivity);
+		// One refresh at startup. No poll loop: the footer shows the last applied view.
+		void this.producerActivity.refresh(session.extensionRunner ?? null, Date.now());
 		this.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.toolOutputExpanded = this.settingsManager.getToolsExpanded();
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
