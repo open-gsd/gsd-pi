@@ -4,15 +4,18 @@ This page describes how `gsd_exec` and `gsd_uat_exec` results are presented in t
 
 ## Purpose
 
-- `purpose` is an optional argument for `gsd_exec`. When omitted or blank it is treated as absent, not as `null`.
-- For `gsd_uat_exec`, when no `purpose` is given the display label is derived from `milestoneId`, `sliceId`, `checkId`, and `intent`: `UAT <milestone>/<slice>/<check> (<intent>)`. The derivation is display-only; the persisted value is not overwritten.
+- `purpose` is an optional argument for `gsd_exec`. Supplied strings, including blank ones, are preserved in the request and in result `details`.
+- Display fallback and storage are separate. An omitted purpose is absent from `details` for display, but it is stored as `null` in `.meta.json`. Callers must not expect blank strings to be removed, and must not expect persisted purpose values to be non-null.
+- For `gsd_uat_exec`, the public schema has no `purpose` argument. While the check runs, the label is derived from `milestoneId`, `sliceId`, `checkId`, and `intent` (`UAT <milestone>/<slice>/<check> (<intent>)`). That running label is display-only.
+- The completed purpose is canonical: it is generated from normalized identifiers and the canonical intent, then stored in run metadata and result `details`.
 - Precedence for a completed run: the purpose stored in the result `details` wins, then the call argument, then a runtime-based label (for example "Run a Bash script").
-- Display text is sanitized (terminal escapes, bidi controls, and control characters removed), whitespace-collapsed, and capped at 80 characters.
+- Display text is sanitized (terminal escapes, bidi controls, and control characters removed) and whitespace-collapsed. The standalone call renderer caps it at 80 characters. The native host frame has no fixed length cap; see below.
 
 ## Where the purpose appears
 
 - Standalone call card: shows the purpose once beneath the tool title.
 - Native host frame: when the host owns the purpose (`gsdExecPurposeInFrame`), the call card renders nothing, so the purpose is shown once in the frame header.
+- Native frame width: the header uses `singleRowDisplayText` without a length cap, then `truncateToWidth` with the width left in the header. A wide terminal can therefore show more than 80 characters.
 
 ## Output
 
