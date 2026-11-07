@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { isAbsolute, join } from 'node:path'
@@ -353,7 +354,9 @@ export class CmuxVaultBridge {
     if (this.running) return
     this.running = this.drain().catch(() => {}).finally(() => {
       this.running = undefined
-      if (this.pending !== undefined) this.start()
+      // Restart for shutdown too: stop() can land after drain() exits but before this
+      // callback runs, and that shutdown must still be drained (it sends SessionEnd).
+      if (this.pending !== undefined || this.shutdownRequested) this.start()
     })
   }
 
@@ -490,6 +493,15 @@ export class CmuxVaultBridge {
     return true
   }
 
+  /** A predecessor counts as ended only when its own session file still exists and it is not this process's identity. */
+  private predecessorEnded(checkpointId: string): boolean {
+    try {
+      return isAbsolute(checkpointId) && existsSync(checkpointId)
+    } catch {
+      return false
+    }
+  }
+
   private async publish(identity: VaultIdentity, vaultEnabled: boolean, resumeEnabled: boolean): Promise<void> {
     const argv = this.launchArguments(identity)
     const name = vaultEnabled ? vaultTitle(identity) : 'GSD session'
@@ -502,7 +514,15 @@ export class CmuxVaultBridge {
       } else {
         // A relaunch may adopt its own exact binding, never another agent/session.
         const launch = previous.launch_command as { arguments?: unknown } | null
-        if (previous.checkpoint_id !== identity.path || JSON.stringify(launch?.arguments) !== JSON.stringify(argv)) return
+        const ownExact = previous.checkpoint_id === identity.path
+          && JSON.stringify(launch?.arguments) === JSON.stringify(argv)
+        // Explicit successor handoff: a new process on this surface may take over the
+        // exact-resume binding left by a session that has since ended. Only a GSD
+        // agent-hook binding is eligible; any other publisher is still rejected.
+        const endedGsdPredecessor = previous.kind === 'gsd' && previous.source === 'agent-hook'
+          && typeof previous.checkpoint_id === 'string' && previous.checkpoint_id !== identity.path
+          && this.predecessorEnded(previous.checkpoint_id)
+        if (!ownExact && !endedGsdPredecessor) return
       }
     }
     const { result, binding } = resumeResult(await this.transport([

@@ -1332,45 +1332,104 @@ test('graceful shutdown keeps the durable exact-resume binding for a later cmux 
 	assert.equal(f.clears.length, 0, 'shutdown must not delete the durable resume binding')
 })
 
-test('an unsaved-session invalidation already queued before shutdown still clears the binding', async t => {
-  const f = await fixture(t)
-  const bridge = new CmuxVaultBridge(f.options)
-  bridge.update(f.manager, true)
-  await bridge.idle()
-  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1)
-  // Session becomes unsaved, then shutdown races in before the drain runs.
-  f.setSession(undefined)
-  bridge.update(f.manager, true)
-  bridge.stop()
-  await bridge.idle()
-  assert.equal(f.clears.length, 1, 'the unsaved invalidation is not erased by shutdown')
-})
-
-test('a queued opt-out behind an in-flight publish still clears before shutdown ends presence', async t => {
+test('an unsaved-session invalidation queued behind an in-flight publish still clears on shutdown', async t => {
   const f = await fixture(t)
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
-  let resume = true
+  let blocked!: () => void
+  const sawBlockedSet = new Promise<void>(resolve => { blocked = resolve })
+  let firstSet = true
   const bridge = new CmuxVaultBridge({
     ...f.options,
-    // Turn Vault presence off at the env level too, so only resume governs the binding.
+    transport: async args => {
+      if (args[2] === 'set' && firstSet) { firstSet = false; blocked(); await gate }
+      return f.options.transport(args)
+    },
+  })
+  bridge.update(f.manager, true)
+  await sawBlockedSet
+  // Refresh is in flight. The session becomes unsaved and is queued behind it, then
+  // shutdown arrives before the publish is released.
+  f.setSession(undefined)
+  bridge.update(f.manager, true)
+  bridge.stop()
+  release()
+  await bridge.idle()
+  assert.equal(f.clears.length, 1, 'the queued unsaved invalidation is not erased by shutdown')
+})
+
+test('an opt-out queued behind an in-flight publish still clears its newly accepted binding', async t => {
+  const f = await fixture(t)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let blocked!: () => void
+  const sawBlockedSet = new Promise<void>(resolve => { blocked = resolve })
+  let resume = true
+  let firstSet = true
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
     env: { ...f.env, GSD_CMUX_VAULT: undefined },
-    transport: async args => { if (args[2] === 'set') await gate; return f.options.transport(args) },
-    // Resume starts on, so the first publish writes a durable exact-resume binding.
+    transport: async args => {
+      if (args[2] === 'set' && firstSet) { firstSet = false; blocked(); await gate }
+      return f.options.transport(args)
+    },
     getPreferences: async () => ({ enabled: true, vault: false, resume }),
   })
   bridge.update(f.manager, true)
-  await new Promise(resolve => setImmediate(resolve))
-  // Let the publish land first: only a binding this bridge published is its own to
-  // clear. (A foreign or auto_resume=false binding is never adopted, by design.)
-  release()
-  await new Promise(resolve => setImmediate(resolve))
-  await bridge.idle()
-  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1, 'the binding is published first')
-  // Now the race: the opt-out is queued, then shutdown arrives before the drain runs.
+  await sawBlockedSet
+  // The publish is still in flight. Resume is turned off, the change is queued,
+  // shutdown arrives, and only then is the publish released.
   resume = false
   bridge.update(f.manager, true, true)
   bridge.stop()
+  release()
   await bridge.idle()
-  assert.equal(f.clears.length, 1, 'opt-out queued before shutdown still clears the durable binding')
+  assert.equal(f.clears.length, 1, 'the binding accepted by the in-flight publish is cleared by the opt-out')
+})
+
+test('shutdown requested after drain exits but before its finally callback still sends SessionEnd', async t => {
+  const f = await fixture(t)
+  let bridge!: CmuxVaultBridge
+  let stopped = false
+  // Call stop() from inside the transport of the publish's final readback, which
+  // is the last awaited step of the drain. The drain then ends right after it, so
+  // stop() lands in the window before the running promise's finally callback runs.
+  bridge = new CmuxVaultBridge({
+    ...f.options,
+    transport: async args => {
+      const result = await f.options.transport(args)
+      if (args[2] === 'set' && !stopped) { stopped = true; bridge.stop() }
+      return result
+    },
+  })
+  bridge.update(f.manager, true)
+  await bridge.idle()
+  assert.equal(stopped, true, 'stop() was requested during the publish')
+  // The shutdown must still be drained: presence ends with a SessionEnd.
+  assert.deepEqual(presenceEvents(f).at(-1), 'SessionEnd', 'shutdown is drained even when it lands in the finally window')
+})
+
+test('a fresh successor session on the same surface takes over a binding left by an ended GSD session', async t => {
+  const f = await fixture(t)
+  // Session A publishes its exact-resume binding, then ends.
+  const a = new CmuxVaultBridge(f.options)
+  a.update(f.manager, true)
+  await a.idle()
+  const aPath = f.manager.getSessionFile()
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1, 'A publishes')
+  a.stop()
+  await a.idle()
+  // Session B starts on the same surface with a different session file that still exists.
+  const bPath = join(f.cwd, 'successor.jsonl')
+  await writeFile(bPath, 'successor conversation')
+  f.setSession(bPath)
+  const b = new CmuxVaultBridge(f.options)
+  b.update(f.manager, true)
+  await b.idle()
+  const sets = f.calls.filter(args => args[2] === 'set')
+  assert.equal(sets.length, 2, 'B takes over the ended predecessor binding')
+  assert.equal(sets.at(-1)![sets.at(-1)!.indexOf('--checkpoint-id') + 1], bPath, 'the binding now points at B')
+  assert.notEqual(aPath, bPath)
+  b.stop()
+  await b.idle()
 })
