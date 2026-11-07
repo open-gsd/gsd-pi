@@ -5011,6 +5011,144 @@ describe("stream-adapter — concurrent Claude Code process warning (#1464)", ()
 		}
 	});
 
+	const concurrentProcess = (cwd: string, pid = 1234) => ({
+		pid,
+		cwd,
+		command: "claude --output-format stream-json --input-format stream-json",
+	});
+
+	async function runConcurrentScanTurn(
+		cwd: string,
+		findProcesses: () => unknown[],
+		extraOptions: Record<string, unknown> = {},
+	): Promise<{ warningText: string; notifications: string[]; scans: number }> {
+		const notifications: string[] = [];
+		let scans = 0;
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Continue." } as Message] },
+			{
+				cwd,
+				extensionUIContext: {
+					notify(message: string) {
+						notifications.push(message);
+					},
+				},
+				_findConcurrentClaudeCodeProcessesForTest: () => {
+					scans += 1;
+					return findProcesses();
+				},
+				_concurrentProcessSettleMsForTest: 40,
+				async *_sdkQueryForTest() {
+					yield makeSdkSuccessResult("finished");
+				},
+				...extraOptions,
+			} as any,
+		);
+		const deltas: string[] = [];
+		for await (const event of stream) {
+			if (event.type === "text_delta") deltas.push(event.delta);
+		}
+		return { warningText: deltas.join("\n"), notifications, scans };
+	}
+
+	// The previous turn's CLI is still exiting when the next turn starts: gsd closes its
+	// input and moves on without waiting for the exit, which takes about 0.6 s.
+	test("does not warn about a process that exits within the settle window", async () => {
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-concurrent-exiting-")));
+		try {
+			let scan = 0;
+			const turn = await runConcurrentScanTurn(cwd, () => (++scan === 1 ? [concurrentProcess(cwd)] : []));
+			assert.doesNotMatch(turn.warningText, /Another Claude Code SDK process/);
+			assert.deepEqual(turn.notifications, []);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("an exiting process does not use up the one warning per cwd", async () => {
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-concurrent-once-")));
+		try {
+			let scan = 0;
+			await runConcurrentScanTurn(cwd, () => (++scan === 1 ? [concurrentProcess(cwd)] : []));
+			const genuine = await runConcurrentScanTurn(cwd, () => [concurrentProcess(cwd, 5678)]);
+			assert.match(genuine.warningText, /PID 5678/);
+			assert.equal(genuine.notifications.length, 1);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	// #1464: the process this warning exists for, kept alive by a background Agent task.
+	test("warns about a process that outlives the settle window, naming only the survivors", async () => {
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-concurrent-survivor-")));
+		try {
+			let scan = 0;
+			const turn = await runConcurrentScanTurn(cwd, () => (
+				++scan === 1 ? [concurrentProcess(cwd, 1234), concurrentProcess(cwd, 5678)] : [concurrentProcess(cwd, 5678)]
+			));
+			assert.match(turn.warningText, /\(PID 5678\)/);
+			assert.equal(turn.notifications.length, 1);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("a process that appears during the wait is left to the next turn's scan", async () => {
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-concurrent-newcomer-")));
+		try {
+			let scan = 0;
+			const turn = await runConcurrentScanTurn(cwd, () => (
+				++scan === 1 ? [concurrentProcess(cwd, 1234)] : [concurrentProcess(cwd, 5678)]
+			));
+			assert.deepEqual(turn.notifications, []);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("a turn aborted on the last recheck does not warn", async () => {
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-concurrent-late-abort-")));
+		try {
+			const controller = new AbortController();
+			let scan = 0;
+			const turn = await runConcurrentScanTurn(cwd, () => {
+				if (++scan === 2) controller.abort();
+				return [concurrentProcess(cwd)];
+			}, { signal: controller.signal });
+			assert.deepEqual(turn.notifications, []);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("a turn with no other process does not wait", async () => {
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-concurrent-none-")));
+		try {
+			const turn = await runConcurrentScanTurn(cwd, () => [], { _concurrentProcessSettleMsForTest: 60_000 });
+			assert.equal(turn.scans, 1);
+			assert.deepEqual(turn.notifications, []);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("an aborted turn stops waiting and does not warn", async () => {
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-concurrent-abort-")));
+		try {
+			const controller = new AbortController();
+			const startedAt = Date.now();
+			const turn = await runConcurrentScanTurn(cwd, () => {
+				controller.abort();
+				return [concurrentProcess(cwd)];
+			}, { _concurrentProcessSettleMsForTest: 60_000, signal: controller.signal });
+			assert.ok(Date.now() - startedAt < 5_000);
+			assert.deepEqual(turn.notifications, []);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	test("emits a visible startup warning before continuing the SDK session", async () => {
 		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-concurrent-warning-")));
 		const events: any[] = [];
@@ -5032,6 +5170,7 @@ describe("stream-adapter — concurrent Claude Code process warning (#1464)", ()
 						cwd,
 						command: "claude --output-format stream-json --input-format stream-json",
 					}],
+					_concurrentProcessSettleMsForTest: 40,
 					async *_sdkQueryForTest() {
 						yield makeSdkSuccessResult("finished");
 					},
