@@ -1409,27 +1409,23 @@ test('shutdown requested after drain exits but before its finally callback still
   assert.deepEqual(presenceEvents(f).at(-1), 'SessionEnd', 'shutdown is drained even when it lands in the finally window')
 })
 
-test('a fresh successor session on the same surface takes over a binding left by an ended GSD session', async t => {
+test('a successor never takes over another session binding, even when its file still exists', async t => {
   const f = await fixture(t)
-  // Session A publishes its exact-resume binding, then ends.
   const a = new CmuxVaultBridge(f.options)
   a.update(f.manager, true)
   await a.idle()
-  const aPath = f.manager.getSessionFile()
-  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1, 'A publishes')
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1, 'A publishes its binding')
   a.stop()
   await a.idle()
-  // Session B starts on the same surface with a different session file that still exists.
+  // B starts on the same surface. A's file still exists, but nothing proves A ended,
+  // so B must not overwrite the binding (a live owner would otherwise be broken).
   const bPath = join(f.cwd, 'successor.jsonl')
   await writeFile(bPath, 'successor conversation')
   f.setSession(bPath)
   const b = new CmuxVaultBridge(f.options)
   b.update(f.manager, true)
   await b.idle()
-  const sets = f.calls.filter(args => args[2] === 'set')
-  assert.equal(sets.length, 2, 'B takes over the ended predecessor binding')
-  assert.equal(sets.at(-1)![sets.at(-1)!.indexOf('--checkpoint-id') + 1], bPath, 'the binding now points at B')
-  assert.notEqual(aPath, bPath)
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1, 'B does not take over A binding')
   b.stop()
   await b.idle()
 })
