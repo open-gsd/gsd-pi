@@ -32,6 +32,12 @@ function snapshot(value = "before", overrides: Record<string, unknown> = {}) {
 	};
 }
 function result(structuredContent: Record<string, unknown>) { return { content: [], structuredContent }; }
+function containsExactPid(value: unknown, pid: number): boolean {
+	if (value === pid || value === String(pid)) return true;
+	if (Array.isArray(value)) return value.some((entry) => containsExactPid(entry, pid));
+	if (value !== null && typeof value === "object") return Object.values(value).some((entry) => containsExactPid(entry, pid));
+	return false;
+}
 function barrier() {
 	let resolve!: () => void;
 	const promise = new Promise<void>((done) => { resolve = done; });
@@ -147,6 +153,13 @@ function assertQuarantined(f: Awaited<ReturnType<typeof fixture>>) {
 	assert.throws(() => createDesktopOwnershipManager(path.join(f.root, "guard")).acquire("mac-tools", "operation"), { code: "busy" });
 }
 
+test("PID redaction compares exact scalar values without rejecting opaque UUID substrings", () => {
+	const opaqueId = `000${selectedWindow.pid}-0000-4000-8000-000000000000`;
+	assert.equal(opaqueId.includes(String(selectedWindow.pid)), true);
+	assert.equal(containsExactPid({ grant_id: opaqueId, nested: [{ observer_id: opaqueId }] }, selectedWindow.pid), false);
+	assert.equal(containsExactPid({ nested: [{ pid: selectedWindow.pid }] }, selectedWindow.pid), true);
+	assert.equal(containsExactPid({ nested: [{ pid: String(selectedWindow.pid) }] }, selectedWindow.pid), true);
+});
 test("default-off registration touches no API, discovery or desktop path", () => {
 	let accesses = 0;
 	registerCmuxCua(new Proxy({}, { get() { accesses += 1; throw new Error("default-off touched API"); } }) as ExtensionAPI);
@@ -214,9 +227,10 @@ guardTest("source inspect-click-verify redacts metadata and quarantines even a m
 	const { output, params } = await ready(f);
 	const originalGrant = f.session.grant!;
 	const serialized = JSON.stringify(output);
-	for (const forbidden of ["fx-cap", "synthetic-redacted-value", "synthetic-status", "tree_markdown", "snapshot_id", "element_token", String(selectedWindow.pid)]) {
+	for (const forbidden of ["fx-cap", "synthetic-redacted-value", "synthetic-status", "tree_markdown", "snapshot_id", "element_token"]) {
 		assert.equal(serialized.includes(forbidden), false, forbidden);
 	}
+	assert.equal(containsExactPid(output, selectedWindow.pid), false);
 	assert.ok(Buffer.byteLength(serialized) <= 32 * 1024);
 	assert.deepEqual(await act(f.session, params), { status: "quarantined", ui_postcondition_met: true, backend_quiescence: "unproven", target_id: params.target_id, observer_id: params.postcondition.observer_id });
 	const readArgs = { pid: selectedWindow.pid, window_id: selectedWindow.windowId, capture_mode: "ax", include_screenshot: false, max_elements: 200, max_depth: 8 };
