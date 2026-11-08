@@ -1,5 +1,7 @@
 # Optional cmux Computer Use contract
 
+For incremental production-transaction fixture coverage and explicit remaining operator/native gates, see [Portable conformance and operator boundary](cmux-cua-conformance.md). That evidence is partial; it does not advance this document's full acceptance ledger or authorize runtime admission.
+
 > [!IMPORTANT]
 > Updated 2026-11-05 to reflect maintainer approval of RFC [#3103](https://github.com/open-gsd/gsd-pi/issues/3103).
 > On 2026-11-06, the maintainer separately authorized the host-derived local-interactive admission signal in PR #3115; G-03 remains disabled and no runtime acceptance is claimed.

@@ -23,6 +23,7 @@ import {
 	isDesktopProcessIdentityAlive,
 	isDesktopProcessIdentityExited,
 	type DesktopOwnershipLease,
+	type DesktopOwnershipManager,
 	type DesktopProcessIdentity,
 	type DesktopTerminalEvidence,
 } from "../shared/desktop-ownership.js";
@@ -138,20 +139,28 @@ interface InspectionGrant {
 	observers: Map<string, BoundObserver>;
 }
 
-interface ActiveCuaSession {
+// Connected transactions require an explicit peer assertion; there is no unbound mode.
+// Production binds this to the verified native handoff. Portable fixtures may only
+// assert a synthetic protocol generation, not claim native peer authentication.
+export interface ConnectedCuaSession {
 	client: Client;
-	transport: StdioClientTransport;
+	ownershipManager: DesktopOwnershipManager;
+	assertPeerBound: () => void;
 	lease: DesktopOwnershipLease;
+	target: SelectedWindow | null;
+	grant: InspectionGrant | null;
+	axTextSharingApproved: boolean;
+	hadAction: boolean;
+}
+
+interface ActiveCuaSession extends ConnectedCuaSession {
+	transport: StdioClientTransport;
 	proxyIdentity: DesktopProcessIdentity | null;
 	sessionId: string | null;
 	sessionBase: string;
 	handoff: CmuxHandoff;
-	target: SelectedWindow | null;
-	grant: InspectionGrant | null;
-	axTextSharingApproved: boolean;
 	started: boolean;
 	startAttempted: boolean;
-	hadAction: boolean;
 	stopping: boolean;
 	lost: boolean;
 }
@@ -562,19 +571,25 @@ async function listAllTools(client: Client, signal?: AbortSignal): Promise<unkno
 	throw new Error("cmux CUA tools/list pagination exceeded the limit");
 }
 
-async function runNativeRead<T>(session: ActiveCuaSession, name: string, args: Record<string, unknown>, signal: AbortSignal | undefined, decode: (value: unknown) => T): Promise<T> {
-	const operationId = desktopOwnershipManager.beginOperation(session.lease, "inspect");
+export async function discoverNativeContract(client: Client, signal?: AbortSignal): Promise<void> {
+	const server = client.getServerVersion();
+	const tools = await listAllTools(client, signal);
+	validateNativeToolInventory(server?.name, server?.version, tools);
+}
+
+async function runNativeRead<T>(session: ConnectedCuaSession, name: string, args: Record<string, unknown>, signal: AbortSignal | undefined, decode: (value: unknown) => T): Promise<T> {
+	const operationId = session.ownershipManager.beginOperation(session.lease, "inspect");
 	let terminal = false;
 	try {
-		assertPeerStillBound(session.handoff);
+		session.assertPeerBound();
 		const raw = await session.client.callTool({ name, arguments: args }, undefined, { signal, timeout: MCP_CALL_TIMEOUT_MS });
 		const decoded = decode(raw);
-		desktopOwnershipManager.completeOperation(session.lease, operationId);
+		session.ownershipManager.completeOperation(session.lease, operationId);
 		terminal = true;
 		return decoded;
 	} catch (error) {
 		if (!terminal) {
-			try { desktopOwnershipManager.quarantine(session.lease, operationId, "dispatch-uncertain"); } catch { /* journal remains fail-closed */ }
+			try { session.ownershipManager.quarantine(session.lease, operationId, "dispatch-uncertain"); } catch { /* journal remains fail-closed */ }
 		}
 		throw error;
 	}
@@ -600,6 +615,8 @@ async function startCuaSession(ctx: ExtensionContext, signal?: AbortSignal): Pro
 	const lease = desktopOwnershipManager.acquire("cmux-cua", "session", randomUUID());
 	const session: ActiveCuaSession = {
 		client, transport, lease, proxyIdentity: null, sessionId: null, sessionBase, handoff,
+		ownershipManager: desktopOwnershipManager,
+		assertPeerBound: () => assertPeerStillBound(handoff),
 		target: null, grant: null, axTextSharingApproved: false, started: false, startAttempted: false, hadAction: false, stopping: false, lost: false,
 	};
 	activeSession = session;
@@ -617,9 +634,7 @@ async function startCuaSession(ctx: ExtensionContext, signal?: AbortSignal): Pro
 		if (!proxyIdentity) throw new Error("cmux CUA proxy process identity is not stable");
 		session.proxyIdentity = proxyIdentity;
 		assertPeerStillBound(handoff);
-		const server = client.getServerVersion();
-		const tools = await listAllTools(client, signal);
-		validateNativeToolInventory(server?.name, server?.version, tools);
+		await discoverNativeContract(client, signal);
 		await runNativeRead(session, "check_permissions", { prompt: false }, signal, (value) => {
 			decodeHostPermissions(parseMcpEnvelope(value), handoff.hostBundleId);
 		});
@@ -650,7 +665,7 @@ async function startCuaSession(ctx: ExtensionContext, signal?: AbortSignal): Pro
 	}
 }
 
-async function selectTarget(session: ActiveCuaSession, ctx: ExtensionContext, signal?: AbortSignal): Promise<SelectedWindow> {
+async function selectTarget(session: ConnectedCuaSession, ctx: ExtensionContext, signal?: AbortSignal): Promise<SelectedWindow> {
 	const apps = await runNativeRead(session, "list_apps", {}, signal, decodeApps);
 	if (!ctx.isLocalInteractiveDesktop || !ctx.hasUI || apps.length === 0) {
 		throw new Error("local interactive app selection is unavailable");
@@ -670,7 +685,7 @@ async function selectTarget(session: ActiveCuaSession, ctx: ExtensionContext, si
 	return { ...window, targetId: randomUUID(), pid: app.pid };
 }
 
-async function inspect(session: ActiveCuaSession, ctx: ExtensionContext, signal?: AbortSignal) {
+export async function inspect(session: ConnectedCuaSession, ctx: ExtensionContext, signal?: AbortSignal) {
 	beginInspection(session);
 	const target = session.target ?? await selectTarget(session, ctx, signal);
 	if (!(await approveAxTextSharing(session, ctx, signal))) throw new Error("separate AX-text sharing consent was not granted");
@@ -685,7 +700,7 @@ async function inspect(session: ActiveCuaSession, ctx: ExtensionContext, signal?
 	return output;
 }
 
-async function act(session: ActiveCuaSession, params: JsonRecord, signal?: AbortSignal) {
+export async function act(session: ConnectedCuaSession, params: JsonRecord, signal?: AbortSignal) {
 	const grant = session.grant;
 	if (session.hadAction) throw new Error("this session has already dispatched a click; G-03 backend-quiescence proof is required before another action");
 	if (!grant || grant.consumed || Date.now() > grant.expiresAt || params.grant_id !== grant.id) {
@@ -709,30 +724,30 @@ async function act(session: ActiveCuaSession, params: JsonRecord, signal?: Abort
 	}
 	grant.consumed = true;
 	session.grant = null;
-	const actionId = desktopOwnershipManager.beginOperation(session.lease, "action");
+	const actionId = session.ownershipManager.beginOperation(session.lease, "action");
 	let clickResult: ReturnType<typeof decodeClickResult>;
 	try {
-		assertPeerStillBound(session.handoff);
+		session.assertPeerBound();
 		session.hadAction = true;
 		const raw = await session.client.callTool({ name: "click", arguments: { pid: target.pid, window_id: target.windowId, element_token: target.elementToken, action: "press", button: "left", count: 1, delivery_mode: "background" } }, undefined, { signal, timeout: MCP_CALL_TIMEOUT_MS });
-		assertPeerStillBound(session.handoff);
+		session.assertPeerBound();
 		clickResult = decodeClickResult(parseMcpEnvelope(raw));
-		desktopOwnershipManager.completeOperation(session.lease, actionId, { requiresVerification: true });
+		session.ownershipManager.completeOperation(session.lease, actionId, { requiresVerification: true });
 	} catch (error) {
-		try { desktopOwnershipManager.quarantine(session.lease, actionId, "dispatch-uncertain"); } catch { /* unresolved journal remains */ }
+		try { session.ownershipManager.quarantine(session.lease, actionId, "dispatch-uncertain"); } catch { /* unresolved journal remains */ }
 		throw error;
 	}
-	const verificationId = desktopOwnershipManager.beginOperation(session.lease, "verify");
+	const verificationId = session.ownershipManager.beginOperation(session.lease, "verify");
 	try {
-		assertPeerStillBound(session.handoff);
+		session.assertPeerBound();
 		const rawAfter = await session.client.callTool({ name: "get_window_state", arguments: { pid: target.pid, window_id: target.windowId, capture_mode: "ax", include_screenshot: false, max_elements: MAX_ELEMENTS, max_depth: MAX_TREE_DEPTH } }, undefined, { signal, timeout: MCP_CALL_TIMEOUT_MS });
-		assertPeerStillBound(session.handoff);
+		session.assertPeerBound();
 		const after = decodePostClickWindowState(rawAfter, grant.target);
 		const matched = verifyObserver(after, observer, post.expected) && clickResult.effect !== "suspected_noop";
 		// An AX postcondition is not evidence that the backend has quiesced.
 		// Persist quarantine even when the visible UI changed; never enable a retry.
 		try {
-			desktopOwnershipManager.completeVerification(session.lease, verificationId, false);
+			session.ownershipManager.completeVerification(session.lease, verificationId, false);
 		} catch (error) {
 			if (error instanceof DesktopOwnershipError && error.code === "quarantined") {
 				return { status: "quarantined", ui_postcondition_met: matched, backend_quiescence: "unproven", target_id: target.targetId, observer_id: observer.observerId };
@@ -741,7 +756,7 @@ async function act(session: ActiveCuaSession, params: JsonRecord, signal?: Abort
 		}
 		throw new Error("desktop ownership manager did not quarantine the unproven backend operation");
 	} catch (error) {
-		try { desktopOwnershipManager.quarantine(session.lease, verificationId, "terminal-unverified"); } catch { /* unresolved journal remains */ }
+		try { session.ownershipManager.quarantine(session.lease, verificationId, "terminal-unverified"); } catch { /* unresolved journal remains */ }
 		throw error;
 	}
 }
