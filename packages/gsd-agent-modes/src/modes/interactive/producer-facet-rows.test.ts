@@ -9,48 +9,34 @@ const ascii: WidthOps = {
 	truncateToWidth: (s, width, ellipsis) => (s.length <= width ? s : s.slice(0, Math.max(0, width - ellipsis.length)) + ellipsis),
 };
 
-const mixedSubagents = {
-	label: "subagent runs",
-	text: "1 running, 1 succeeded (stored, partial)",
-	qualifier: "(stored, partial)",
-	detail: "1 running, 1 succeeded",
-};
-const mixedJobs = {
-	label: "async jobs",
-	text: "1 running, 1 completed, 1 failed (snapshot, complete)",
-	qualifier: "(snapshot, complete)",
-	detail: "1 running, 1 completed, 1 failed",
-};
+const mixedSubagents = { label: "subagent runs", text: "", qualifier: "(stored, partial)", detail: "1 running, 1 succeeded" };
+const mixedJobs = { label: "async jobs", text: "", qualifier: "(snapshot, complete)", detail: "1 running, 1 completed, 1 failed" };
 
-test("at 40 columns the qualifier survives, even when the count is shortened", () => {
-	const rows = producerFacetRows([mixedJobs, mixedSubagents], 40, "", ascii);
-	assert.equal(rows.length, 2, "one row per facet");
-	for (const row of rows) {
-		assert.ok(row.length <= 40, `row fits width: ${row}`);
+test("every row fits the width, from 30 to 200 columns", () => {
+	for (const width of [30, 40, 60, 200]) {
+		for (const row of producerFacetRows([mixedJobs, mixedSubagents], width, " (as of 12:00)", ascii)) {
+			assert.ok(row.length <= width, `width ${width}: ${JSON.stringify(row)}`);
+		}
 	}
-	assert.ok(rows[0]!.endsWith("(snapshot, complete)"), `jobs qualifier intact: ${rows[0]}`);
-	assert.ok(rows[1]!.endsWith("(stored, partial)"), `subagent qualifier intact: ${rows[1]}`);
 });
 
-test("a wide terminal keeps the full count and qualifier unshortened", () => {
-	const rows = producerFacetRows([mixedSubagents], 200, "", ascii);
-	assert.equal(rows[0], "subagent runs: 1 running, 1 succeeded (stored, partial)");
+test("a timestamped mixed-state facet keeps every count and the qualifier at 40 and 60 columns", () => {
+	for (const width of [40, 60]) {
+		const text = producerFacetRows([mixedJobs], width, " (as of 12:00)", ascii).join("\n");
+		assert.ok(text.includes("1 running"), `running kept at ${width}`);
+		assert.ok(text.includes("1 completed"), `completed kept at ${width}`);
+		assert.ok(text.includes("1 failed"), `failed kept at ${width}: ${text}`);
+		assert.ok(text.includes("(snapshot, complete)"), `qualifier kept at ${width}`);
+	}
 });
 
-test("the stamp is shown on the first facet row only", () => {
+test("a wide terminal keeps the single-line form and the stamp", () => {
+	const rows = producerFacetRows([mixedSubagents], 200, " (as of 12:00)", ascii);
+	assert.equal(rows[0], "subagent runs: 1 running, 1 succeeded (stored, partial) (as of 12:00)");
+});
+
+test("the stamp is part of the rendered first row, not only a length check", () => {
 	const rows = producerFacetRows([mixedJobs, mixedSubagents], 200, " (as of 12:00)", ascii);
 	assert.ok(rows[0]!.includes("(as of 12:00)"));
 	assert.ok(!rows[1]!.includes("(as of 12:00)"));
-});
-
-test("no row exceeds the width, even when the fixed text alone is too wide (Copilot: 30 columns)", () => {
-	const rows = producerFacetRows([mixedJobs, mixedSubagents], 30, " (as of 12:00)", ascii);
-	for (const row of rows) {
-		assert.ok(row.length <= 30, `row must fit 30 columns, got ${row.length}: ${row}`);
-	}
-});
-
-test("the stamp is part of the rendered first row, not only a length check (Copilot)", () => {
-	const rows = producerFacetRows([mixedJobs, mixedSubagents], 200, " (as of 12:00)", ascii);
-	assert.ok(rows[0]!.includes("(as of 12:00)"), `stamp missing from rendered row: ${rows[0]}`);
 });

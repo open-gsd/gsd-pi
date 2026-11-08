@@ -14,19 +14,47 @@ export function producerFacetRows(
 	stamp = "",
 	ops: WidthOps,
 ): string[] {
-	return lines.map((l, i) => {
-		const head = i === 0 ? stamp : "";
+	const rows: string[] = [];
+	lines.forEach((l, i) => {
 		const qualifier = l.qualifier ?? "";
 		const detail = l.detail ?? l.text;
 		const prefix = `${l.label}: `;
-		const tail = `${qualifier ? ` ${qualifier}` : ""}${head}`;
-		const fixed = ops.visibleWidth(prefix) + ops.visibleWidth(tail) + 1;
-		// The fixed text (label, qualifier, stamp) is bounded too. If it alone does
-		// not fit, the whole row is shortened, so no row ever exceeds the width.
-		if (fixed >= width) return ops.truncateToWidth(`${prefix}${detail}${tail}`, width, "…");
-		const detailBudget = width - fixed;
-		const shortDetail = detailBudget >= ops.visibleWidth(detail) ? detail : ops.truncateToWidth(detail, detailBudget, "…");
-		return `${prefix}${shortDetail}${tail}`;
+		const base = qualifier ? ` ${qualifier}` : "";
+		const withStamp = i === 0 && stamp ? stamp : "";
+		const fitsOneLine = ops.visibleWidth(prefix + detail + base + withStamp) <= width;
+		if (fitsOneLine) {
+			rows.push(`${prefix}${detail}${base}${withStamp}`);
+			return;
+		}
+		// The count does not fit on one line with its qualifier. Keep every count by
+		// wrapping: the label and qualifier on the first row, the count on the next
+		// row(s) under it, so no terminal state is clipped.
+		const head = `${prefix.trimEnd()}${base}`;
+		const headRow = ops.visibleWidth(head) <= width ? head : ops.truncateToWidth(head, width, "…");
+		rows.push(headRow);
+		const indent = "  ";
+		const avail = Math.max(1, width - indent.length);
+		const wrapped = wrapWords(detail, avail, ops);
+		for (const w of wrapped) rows.push(`${indent}${w}`);
+		if (withStamp) rows.push(`${indent}${withStamp.trim()}`);
 	});
+	return rows;
 }
 
+/** Greedy word wrap by visible width. A single word wider than `width` is truncated. */
+function wrapWords(text: string, width: number, ops: WidthOps): string[] {
+	const words = text.split(" ");
+	const out: string[] = [];
+	let cur = "";
+	for (const w of words) {
+		const next = cur ? `${cur} ${w}` : w;
+		if (ops.visibleWidth(next) <= width) {
+			cur = next;
+		} else {
+			if (cur) out.push(cur);
+			cur = ops.visibleWidth(w) <= width ? w : ops.truncateToWidth(w, width, "…");
+		}
+	}
+	if (cur) out.push(cur);
+	return out;
+}
