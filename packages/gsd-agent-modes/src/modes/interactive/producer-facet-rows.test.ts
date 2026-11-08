@@ -40,3 +40,11 @@ test("the stamp is part of the rendered first row, not only a length check", () 
 	assert.ok(rows[0]!.includes("(as of 12:00)"));
 	assert.ok(!rows[1]!.includes("(as of 12:00)"));
 });
+
+test("timestamped rows stay within the width down to 1 column (Copilot)", () => {
+	for (const width of [1, 2, 3, 4, 6, 8, 12, 20]) {
+		for (const row of producerFacetRows([mixedJobs, mixedSubagents], width, " (as of 12:00)", ascii)) {
+			assert.ok(row.length <= width, `width ${width}: ${JSON.stringify(row)}`);
+		}
+	}
+});

@@ -32,13 +32,19 @@ export function producerFacetRows(
 		const head = `${prefix.trimEnd()}${base}`;
 		const headRow = ops.visibleWidth(head) <= width ? head : ops.truncateToWidth(head, width, "…");
 		rows.push(headRow);
-		const indent = "  ";
+		// The indent shrinks to fit a narrow width (never wider than the row itself),
+		// and every continuation row, including the stamp, is bounded to the width.
+		const indent = width >= 4 ? "  " : "";
 		const avail = Math.max(1, width - indent.length);
-		const wrapped = wrapWords(detail, avail, ops);
-		for (const w of wrapped) rows.push(`${indent}${w}`);
-		if (withStamp) rows.push(`${indent}${withStamp.trim()}`);
+		for (const w of wrapWords(detail, avail, ops)) rows.push(clip(`${indent}${w}`, width, ops));
+		if (withStamp) rows.push(clip(`${indent}${withStamp.trim()}`, width, ops));
 	});
 	return rows;
+}
+
+/** Clip one row to the width. Never returns a row wider than `width`. */
+function clip(row: string, width: number, ops: WidthOps): string {
+	return ops.visibleWidth(row) <= width ? row : ops.truncateToWidth(row, width, "…");
 }
 
 /** Greedy word wrap by visible width. A single word wider than `width` is truncated. */
