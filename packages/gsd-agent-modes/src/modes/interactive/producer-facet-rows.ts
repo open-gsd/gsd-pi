@@ -19,10 +19,14 @@ export function producerFacetRows(
 		const qualifier = l.qualifier ?? "";
 		const detail = l.detail ?? l.text;
 		const prefix = `${l.label}: `;
-		const fixed = ops.visibleWidth(prefix) + ops.visibleWidth(qualifier) + ops.visibleWidth(head) + 1;
-		const detailBudget = Math.max(0, width - fixed);
+		const tail = `${qualifier ? ` ${qualifier}` : ""}${head}`;
+		const fixed = ops.visibleWidth(prefix) + ops.visibleWidth(tail) + 1;
+		// The fixed text (label, qualifier, stamp) is bounded too. If it alone does
+		// not fit, the whole row is shortened, so no row ever exceeds the width.
+		if (fixed >= width) return ops.truncateToWidth(`${prefix}${detail}${tail}`, width, "…");
+		const detailBudget = width - fixed;
 		const shortDetail = detailBudget >= ops.visibleWidth(detail) ? detail : ops.truncateToWidth(detail, detailBudget, "…");
-		return `${prefix}${shortDetail}${qualifier ? ` ${qualifier}` : ""}${head}`;
+		return `${prefix}${shortDetail}${tail}`;
 	});
 }
 

@@ -231,7 +231,7 @@ export class FooterComponent implements Component {
 		if (producerFacetLines.length === 0) return mainLines;
 		// Each facet is bounded on its own, so a narrow terminal keeps every
 		// producer's label and unavailable/stored qualifier visible.
-		const facetRows = producerFacetRows(producerSnapshot?.lines ?? [], width, "", { visibleWidth, truncateToWidth }).map((row) => theme.fg("dim", row));
+		const facetRows = producerFacetRows(producerSnapshot?.lines ?? [], width, producerStamp, { visibleWidth, truncateToWidth }).map((row) => theme.fg("dim", row));
 		return [...mainLines, ...facetRows];
 	}
 }

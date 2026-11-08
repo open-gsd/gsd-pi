@@ -42,3 +42,15 @@ test("the stamp is shown on the first facet row only", () => {
 	assert.ok(rows[0]!.includes("(as of 12:00)"));
 	assert.ok(!rows[1]!.includes("(as of 12:00)"));
 });
+
+test("no row exceeds the width, even when the fixed text alone is too wide (Copilot: 30 columns)", () => {
+	const rows = producerFacetRows([mixedJobs, mixedSubagents], 30, " (as of 12:00)", ascii);
+	for (const row of rows) {
+		assert.ok(row.length <= 30, `row must fit 30 columns, got ${row.length}: ${row}`);
+	}
+});
+
+test("the stamp is part of the rendered first row, not only a length check (Copilot)", () => {
+	const rows = producerFacetRows([mixedJobs, mixedSubagents], 200, " (as of 12:00)", ascii);
+	assert.ok(rows[0]!.includes("(as of 12:00)"), `stamp missing from rendered row: ${rows[0]}`);
+});
