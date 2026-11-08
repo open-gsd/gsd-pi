@@ -2,7 +2,7 @@
 // File Purpose: Interactive terminal footer renderer for workspace, model, usage, context, and extension status.
 
 import { type Component, truncateToWidth, visibleWidth } from "@gsd/pi-tui";
-import { producerFacetRows } from "../producer-facet-rows.js";
+import { producerFooterRows } from "../producer-footer-rows.js";
 import type { AgentSession } from "@gsd/agent-core";
 import type { ReadonlyFooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
@@ -168,14 +168,6 @@ export class FooterComponent implements Component {
 
 		// Producer activity facets (#2936): read synchronously from the cache only.
 		// Each facet stays a separate labelled part; there is no combined total.
-		const producerSnapshot = this.producerActivity?.snapshot();
-		const producerStamp =
-			producerSnapshot?.refreshedAt != null
-				? ` (as of ${new Date(producerSnapshot.refreshedAt).toTimeString().slice(0, 5)})`
-				: "";
-		const producerFacetLines = producerSnapshot
-			? producerSnapshot.lines.map((l, i) => (i === 0 ? `${l.label}: ${l.text}${producerStamp}` : `${l.label}: ${l.text}`))
-			: [];
 
 		let providerSuffix = "";
 		if (this.footerData.getAvailableProviderCount() > 1 && displayModel) {
@@ -228,10 +220,7 @@ export class FooterComponent implements Component {
 		// Producer facets get their own bounded row so they never compete with, or
 		// get clipped by, the main status row. Each facet keeps its label and its
 		// stored/unavailable qualifier.
-		if (producerFacetLines.length === 0) return mainLines;
-		// Each facet is bounded on its own, so a narrow terminal keeps every
-		// producer's label and unavailable/stored qualifier visible.
-		const facetRows = producerFacetRows(producerSnapshot?.lines ?? [], width, producerStamp, { visibleWidth, truncateToWidth }).map((row) => theme.fg("dim", row));
+		const facetRows = producerFooterRows(this.producerActivity?.snapshot(), width, { visibleWidth, truncateToWidth }, (t) => `as of ${new Date(t).toTimeString().slice(0, 5)}`).map((row) => theme.fg("dim", row));
 		return [...mainLines, ...facetRows];
 	}
 }
