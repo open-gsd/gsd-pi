@@ -1,13 +1,13 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { lstatSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
 import { createDesktopOwnershipManager } from "../../shared/desktop-ownership.ts";
 import registerCmuxCua, { act, discoverNativeContract, inspect, type ConnectedCuaSession } from "../index.ts";
 
@@ -55,23 +55,32 @@ function fixtureTempParent(): string {
 	}
 	return temporary;
 }
-async function fixture(options: FixtureOptions = {}) {
-	const root = mkdtempSync(path.join(fixtureTempParent(), "cmux-cua-conformance-"));
-	const manager = createDesktopOwnershipManager(path.join(root, "guard"));
+function supportsGuardFixture(platform: string, hasGetuid: boolean, hasPs: boolean): boolean {
+	return (platform === "darwin" || platform === "linux") && hasGetuid && hasPs;
+}
+const guardSkip = supportsGuardFixture(process.platform, typeof process.getuid === "function", existsSync("/bin/ps"))
+	? false : "POSIX desktop ownership guard requires getuid and /bin/ps";
+function guardTest(name: string, run: (t: TestContext) => Promise<void>): void {
+	test(name, { skip: guardSkip }, run);
+}
+// Protocol setup initializes no filesystem root, ownership guard or lease.
+async function protocolFixture(options: FixtureOptions = {}) {
 	const client = new Client({ name: "synthetic-conformance", version: "1.0.0" });
 	const server = new Server({ name: options.name ?? "cmux-cua", version: options.version ?? "0.7.1" }, { capabilities: { tools: {} } });
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
 	const cursors: Array<string | undefined> = [];
 	const binding = { expectedGeneration: "SYNTHETIC-generation-1", peerGeneration: "SYNTHETIC-generation-1", assertions: 0 };
+	// Malformed peer replies intentionally remain unknown until this fixture-only
+	// SDK boundary. These casts never validate or admit production peer data.
 	server.setRequestHandler(ListToolsRequestSchema, async (request) => {
 		cursors.push(request.params?.cursor);
-		return options.list ? options.list(request.params?.cursor) : { tools: partialInventory };
+		return (options.list ? await options.list(request.params?.cursor) : { tools: partialInventory }) as ListToolsResult;
 	});
 	server.setRequestHandler(CallToolRequestSchema, async (request) => {
 		const args = request.params.arguments ?? {};
 		calls.push({ name: request.params.name, args });
-		if (options.call) return options.call(request.params.name, args);
+		if (options.call) return await options.call(request.params.name, args) as CallToolResult;
 		if (request.params.name === "get_window_state") return result(snapshot(calls.length === 1 ? "before" : "after"));
 		if (request.params.name === "click") return result({ path: "ax", verified: false, effect: "unverifiable" });
 		throw new Error("unexpected synthetic tool call");
@@ -79,7 +88,30 @@ async function fixture(options: FixtureOptions = {}) {
 	try {
 		await server.connect(serverTransport);
 		await client.connect(clientTransport);
+		return {
+			client, server, calls, cursors, binding,
+			async close() {
+				// Fixture transport cleanup is NEVER proof of OS proxy exit.
+				await client.close();
+				await server.close();
+			},
+		};
+	} catch (error) {
+		await client.close();
+		await server.close();
+		throw error;
+	}
+}
+// Source inspect/act retains the actual isolated guard on qualified POSIX hosts.
+async function fixture(options: FixtureOptions = {}) {
+	assert.equal(guardSkip, false, "POSIX desktop ownership guard requires getuid and /bin/ps");
+	const protocol = await protocolFixture(options);
+	let root: string | undefined;
+	try {
+		root = mkdtempSync(path.join(fixtureTempParent(), "cmux-cua-conformance-"));
+		const manager = createDesktopOwnershipManager(path.join(root, "guard"));
 		const lease = manager.acquire("cmux-cua", "session", "SYNTHETIC-connection-1");
+		const { client, binding } = protocol;
 		const session: ConnectedCuaSession = {
 			client, ownershipManager: manager, lease,
 			assertPeerBound: () => {
@@ -88,19 +120,17 @@ async function fixture(options: FixtureOptions = {}) {
 			},
 			target: { ...selectedWindow }, grant: null, axTextSharingApproved: true, hadAction: false,
 		};
+		const fixtureRoot = root;
 		return {
-			client, server, session, manager, calls, cursors, binding, root,
+			...protocol, session, manager, root: fixtureRoot,
 			async close() {
-				// Fixture transport cleanup is NEVER proof of OS proxy exit.
-				await client.close();
-				await server.close();
-				rmSync(root, { recursive: true, force: true });
+				await protocol.close();
+				rmSync(fixtureRoot, { recursive: true, force: true });
 			},
 		};
 	} catch (error) {
-		await client.close();
-		await server.close();
-		rmSync(root, { recursive: true, force: true });
+		await protocol.close();
+		if (root) rmSync(root, { recursive: true, force: true });
 		throw error;
 	}
 }
@@ -122,8 +152,39 @@ test("default-off registration touches no API, discovery or desktop path", () =>
 	registerCmuxCua(new Proxy({}, { get() { accesses += 1; throw new Error("default-off touched API"); } }) as ExtensionAPI);
 	assert.equal(accesses, 0);
 });
+test("protocol fixture stays guard-free across the deterministic platform qualification boundary", async (t) => {
+	for (const platform of ["darwin", "linux", "win32", "freebsd"]) {
+		for (const hasGetuid of [false, true]) for (const hasPs of [false, true]) {
+			assert.equal(supportsGuardFixture(platform, hasGetuid, hasPs), (platform === "darwin" || platform === "linux") && hasGetuid && hasPs);
+		}
+	}
+	const f = await protocolFixture();
+	t.after(() => f.close());
+	assert.deepEqual(Object.keys(f).sort(), ["binding", "calls", "client", "close", "cursors", "server"]);
+	await assert.rejects(discoverNativeContract(f.client), /identity\/version/);
+	assert.deepEqual(f.calls, []);
+});
+test("real SDK protocol cancellation remains guard-free and never replays", async (t) => {
+	const entered = barrier();
+	const finish = barrier();
+	const f = await protocolFixture({ call: async () => {
+		entered.resolve();
+		await finish.promise;
+		return result({ synthetic: true });
+	} });
+	t.after(async () => { finish.resolve(); await f.close(); });
+	const controller = new AbortController();
+	const pending = f.client.callTool({ name: "get_window_state", arguments: {} }, undefined, { signal: controller.signal, timeout: 5_000 });
+	const rejected = assert.rejects(pending);
+	await entered.promise;
+	controller.abort();
+	await rejected;
+	finish.resolve();
+	assert.equal(f.calls.length, 1);
+	assert.equal(f.calls[0].name, "get_window_state");
+});
 test("real SDK discovery paginates the partial supported-version contract without inventing tools", async (t) => {
-	const f = await fixture({ list: (cursor) => cursor ? { tools: partialInventory.slice(3) } : { tools: partialInventory.slice(0, 3), nextCursor: "synthetic-page-2" } });
+	const f = await protocolFixture({ list: (cursor) => cursor ? { tools: partialInventory.slice(3) } : { tools: partialInventory.slice(0, 3), nextCursor: "synthetic-page-2" } });
 	t.after(() => f.close());
 	assert.deepEqual(f.client.getServerVersion(), { name: "cmux-cua", version: "0.7.1" });
 	await assert.rejects(discoverNativeContract(f.client), /identity\/version/);
@@ -140,14 +201,14 @@ for (const [label, options, expected] of [
 	["pagination limit", { list: (cursor: string | undefined) => ({ tools: [], nextCursor: String(Number(cursor ?? 0) + 1) }) }, /pagination exceeded/],
 ] as const) {
 	test(`real SDK discovery rejects ${label}`, async (t) => {
-		const f = await fixture(options);
+		const f = await protocolFixture(options);
 		t.after(() => f.close());
 		await assert.rejects(discoverNativeContract(f.client), expected);
 		assert.equal(f.calls.length, 0);
 		assert.ok(f.cursors.length <= 8);
 	});
 }
-test("source inspect-click-verify redacts metadata and quarantines even a matching UI", async (t) => {
+guardTest("source inspect-click-verify redacts metadata and quarantines even a matching UI", async (t) => {
 	const f = await fixture();
 	t.after(() => f.close());
 	const { output, params } = await ready(f);
@@ -173,7 +234,7 @@ test("source inspect-click-verify redacts metadata and quarantines even a matchi
 	assert.equal(f.calls.length, 3);
 });
 for (const mode of ["stale target", "stale observer", "extra action key", "already satisfied"] as const) {
-	test(`source action rejects ${mode} before dispatch`, async (t) => {
+	guardTest(`source action rejects ${mode} before dispatch`, async (t) => {
 		const f = await fixture();
 		t.after(() => f.close());
 		const { params } = await ready(f);
@@ -188,7 +249,7 @@ for (const mode of ["stale target", "stale observer", "extra action key", "alrea
 		assert.equal(f.calls.length, 1);
 	});
 }
-test("a second real inspection invalidates the previous target/grant", async (t) => {
+guardTest("a second real inspection invalidates the previous target/grant", async (t) => {
 	const f = await fixture();
 	t.after(() => f.close());
 	const first = await ready(f);
@@ -198,7 +259,7 @@ test("a second real inspection invalidates the previous target/grant", async (t)
 	await assert.rejects(act(f.session, first.params), /absent or expired/);
 	assert.equal(f.calls.length, 2);
 });
-test("grant expiry uses the actual source deadline and real clock", async (t) => {
+guardTest("grant expiry uses the actual source deadline and real clock", async (t) => {
 	const f = await fixture();
 	t.after(() => f.close());
 	const { params } = await ready(f);
@@ -215,7 +276,7 @@ for (const [label, raw] of [
 	["wrong window", result(snapshot("before", { window_id: 43 }))],
 	["degraded snapshot", result(snapshot("before", { degraded: true }))],
 ] as const) {
-	test(`source native read rejects ${label} without a grant or retry`, async (t) => {
+	guardTest(`source native read rejects ${label} without a grant or retry`, async (t) => {
 		const f = await fixture({ call: () => raw });
 		t.after(() => f.close());
 		await assert.rejects(inspect(f.session, context));
@@ -225,7 +286,7 @@ for (const [label, raw] of [
 		assert.equal(f.calls.length, 1);
 	});
 }
-test("explicit synthetic binding detects a changed peer before dispatch", async (t) => {
+guardTest("explicit synthetic binding detects a changed peer before dispatch", async (t) => {
 	const f = await fixture();
 	t.after(() => f.close());
 	const { params } = await ready(f);
@@ -234,7 +295,7 @@ test("explicit synthetic binding detects a changed peer before dispatch", async 
 	assert.equal(f.calls.length, 1);
 	assertQuarantined(f);
 });
-test("missing peer assertion cannot silently create an unbound read", async (t) => {
+guardTest("missing peer assertion cannot silently create an unbound read", async (t) => {
 	const f = await fixture();
 	t.after(() => f.close());
 	const { assertPeerBound: _assertPeerBound, ...unbound } = f.session;
@@ -244,7 +305,7 @@ test("missing peer assertion cannot silently create an unbound read", async (t) 
 	assertQuarantined(f);
 });
 for (const mode of ["abort", "disconnect", "timeout"] as const) {
-	test(`real SDK ${mode} of an ambiguous click never replays or releases`, async (t) => {
+	guardTest(`real SDK ${mode} of an ambiguous click never replays or releases`, async (t) => {
 		const entered = barrier();
 		const finish = barrier();
 		const f = await fixture({ call: async (name) => {
@@ -270,7 +331,7 @@ for (const mode of ["abort", "disconnect", "timeout"] as const) {
 		assert.deepEqual(f.calls.map((call) => call.name), ["get_window_state", "click"]);
 	});
 }
-test("real guard excludes a competing driver during a source read; clean guard close evidence permits reacquisition", async (t) => {
+guardTest("real guard excludes a competing driver during a source read; clean guard close evidence permits reacquisition", async (t) => {
 	const entered = barrier();
 	const finish = barrier();
 	const f = await fixture({ call: async () => { entered.resolve(); await finish.promise; return result(snapshot()); } });
