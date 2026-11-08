@@ -29,9 +29,18 @@ export function producerFacetRows(
 		// The count does not fit on one line with its qualifier. Keep every count by
 		// wrapping: the label and qualifier on the first row, the count on the next
 		// row(s) under it, so no terminal state is clipped.
+		// The qualifier is the contract: it must survive intact on the header row
+		// whenever it fits on its own. The label wraps onto the rows below instead
+		// of pushing the qualifier out of the header.
 		const head = `${prefix.trimEnd()}${base}`;
-		const headRow = ops.visibleWidth(head) <= width ? head : ops.truncateToWidth(head, width, "…");
-		rows.push(headRow);
+		if (ops.visibleWidth(head) <= width) {
+			rows.push(head);
+		} else if (ops.visibleWidth(base.trimStart()) <= width) {
+			rows.push(base.trimStart());
+			for (const w of wrapWords(prefix.trimEnd(), width, ops)) rows.push(clip(w, width, ops));
+		} else {
+			rows.push(clip(head, width, ops));
+		}
 		// The indent shrinks to fit a narrow width (never wider than the row itself),
 		// and every continuation row, including the stamp, is bounded to the width.
 		const indent = width >= 4 ? "  " : "";

@@ -48,3 +48,17 @@ test("timestamped rows stay within the width down to 1 column (Copilot)", () => 
 		}
 	}
 });
+
+// Regression (PR #3146 review): at 20 columns the qualifier used to be clipped to
+// "(sto…", losing both "stored" and "partial". Width tests alone cannot catch that,
+// so this asserts content, not only row width.
+test("20-column header keeps the full qualifier and every count", () => {
+	const rows = producerFacetRows([mixedSubagents], 20, " (as of 12:00)", ascii);
+	assert.ok(rows.includes("(stored, partial)"), `qualifier intact on its own row: ${JSON.stringify(rows)}`);
+	// Counts may wrap across rows; compare on whitespace-normalised words, not on line breaks.
+	const text = rows.join(" ").replace(/\s+/g, " ");
+	for (const field of ["subagent runs:", "1 running", "1 succeeded", "(as of 12:00)"]) {
+		assert.ok(text.includes(field), `missing ${field}: ${JSON.stringify(rows)}`);
+	}
+	for (const row of rows) assert.ok(row.length <= 20, `fits 20: ${row}`);
+});

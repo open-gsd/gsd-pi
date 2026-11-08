@@ -114,6 +114,8 @@ export class InteractiveMode {
 	private editorContainer: Container;
 	private footer: FooterComponent;
 	private producerActivity: ProducerActivityFooterCache | undefined;
+	/** Owner transitions that have started but not yet settled (#2936, PR #3146 review). */
+	private activeOwnerTransitions = 0;
 	private footerDataProvider: FooterDataProvider;
 	private keybindings: KeybindingsManager;
 	private version: string;
@@ -415,9 +417,15 @@ export class InteractiveMode {
 	private applyProducerActivityLifecycle(event: AgentSessionEvent): void {
 		if (event.type !== "owner_generation_transition") return;
 		if (event.phase === "starting") {
+			this.activeOwnerTransitions += 1;
 			this.resetProducerActivityForSessionChange();
 			return;
 		}
+		// An earlier transition's settled must not publish while a later transition is
+		// still pending. Refresh only once every outstanding transition has settled.
+		if (this.activeOwnerTransitions === 0) return;
+		this.activeOwnerTransitions -= 1;
+		if (this.activeOwnerTransitions !== 0) return;
 		void this.refreshProducerActivity();
 	}
 
@@ -523,7 +531,7 @@ export class InteractiveMode {
 
 	/** Refresh producer activity facets and re-render when the result applies. */
 	private async refreshProducerActivity(): Promise<void> {
-		if (!this.producerActivity) return;
+		if (!this.producerActivity || this.activeOwnerTransitions !== 0) return;
 		const applied = await this.producerActivity.refresh(this.session.extensionRunner ?? null, Date.now());
 		// A refresh that finishes after shutdown must not re-render a stopped UI.
 		if (applied && !this.isShuttingDown) this.ui.requestRender();

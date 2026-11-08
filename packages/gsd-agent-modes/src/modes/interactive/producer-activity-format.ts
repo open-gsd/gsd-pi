@@ -1,4 +1,4 @@
-import type { NativeProducerRead } from "./producer-activity-read.js";
+import { isProducerItemStatus, type NativeProducerRead } from "./producer-activity-read.js";
 
 /**
  * Native presentation of producer activity facets (#2936). Pure formatting.
@@ -36,10 +36,12 @@ function formatOne(r: NativeProducerRead): ActivityFacetLine {
 	// a running total. Per-status counts are taken from the snapshot items.
 	const counts = new Map<string, number>();
 	for (const item of items) {
-		const st = typeof item.status === "string" ? item.status : "unknown";
+		// Defensive: a status outside the producer's enum is counted as unknown, never dropped.
+		const st = isProducerItemStatus(r.name as never, item.status) ? (item.status as string) : "unknown";
 		counts.set(st, (counts.get(st) ?? 0) + 1);
 	}
 	const order = ["running", "completed", "failed", "cancelled", "succeeded", "interrupted", "queued", "unknown"];
+	// Every bucket is in `order`, so no count can be silently omitted from the display.
 	const parts = order.filter((k) => counts.has(k)).map((k) => `${counts.get(k)} ${k}`);
 	const detail = parts.length > 0 ? parts.join(", ") : `0 ${basis}`;
 	// The qualifier is the part that must survive narrow widths, so it leads the

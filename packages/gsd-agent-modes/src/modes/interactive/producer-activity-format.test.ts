@@ -52,3 +52,15 @@ test("a failed job alongside a running job is not rendered like two running jobs
 	assert.ok(mixed[0]!.text.includes("1 failed"));
 	assert.ok(mixed[0]!.text.includes("1 running"));
 });
+
+// Defensive path: a status outside the enum is counted as unknown, never dropped.
+for (const [name, basis] of [
+	["async_jobs_snapshot", "snapshot"],
+	["subagent_runs_snapshot", "stored"],
+] as const) {
+	test(`${name} keeps an unexpected status in the unknown bucket`, () => {
+		const snapshot = { availability: "available", completeness: "complete", items: [{ status: "running" }, { status: "pending" }], gaps: [] };
+		const [line] = formatProducerFacets([{ name, status: "available", snapshot }]);
+		assert.equal(line!.text, `1 running, 1 unknown (${basis}, complete)`);
+	});
+}
