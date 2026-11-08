@@ -24,9 +24,14 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "notificationSession": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Default destination for factual status events and heartbeat context. Without it, the legacy agent heartbeat session is used, then the agent main session."
+      },
       "projectSessions": {
         "type": "array",
-        "description": "Optional per-project destinations for factual status events and heartbeat context. Otherwise follows the default agent's configured heartbeat session.",
+        "description": "Optional per-project destinations for factual status events and heartbeat context. Otherwise follows notificationSession, the legacy agent heartbeat session, or the agent main session.",
         "items": {
           "type": "object",
           "additionalProperties": false,

@@ -100,20 +100,32 @@ binding is fabricated. Archived cards remain untouched. User notes outside the
 managed block are preserved.
 
 Heartbeat receives current project facts through a native context-contribution
-hook in the system owner's configured heartbeat session (or main session when
-none is configured). The owner follows `agents.defaults.systemAgent.agentId`;
-an ambiguous multi-agent configuration without an owner fails closed.
-Significant changes enqueue
-factual system events and request a native heartbeat wake, after a successful
-Workboard write. With Workboard disabled, the adapter keeps observations only in
-memory and backfills cards when enabled again; it creates no replacement ledger.
-Memory-only observations do not survive Gateway restarts. Heartbeat enablement,
-delivery policy, and model availability remain OpenClaw settings.
+hook in the configured notification session. OpenClaw 2026.11.5 and later run
+that hook only for receipt-owned proactive automation jobs: those Doctor creates
+or converts from heartbeat config, and the system owner's default proactive job
+from setup or agent creation. Other scheduled jobs don't get it.
+The default destination is
+`plugins.entries["open-gsd-openclaw"].config.notificationSession`, then the
+system owner's legacy heartbeat session, then its main session. The owner
+follows `agents.defaults.systemAgent.agentId`; an ambiguous multi-agent
+configuration without an owner fails closed. Significant changes enqueue a
+factual system event for that destination after a successful Workboard write,
+replacing the project's previous unread event, and request a native heartbeat
+wake where the host still provides one. OpenClaw 2026.11.5 and later have no
+heartbeat wake, and their scheduled automation turns don't read passive events,
+so the event waits for the destination session's next ordinary turn, which
+receives it as timestamped `System:` lines. A session that only runs automations
+never reads it; the Workboard card still carries the status. With Workboard
+disabled, the adapter keeps observations only in memory and backfills cards when
+enabled again; it creates no replacement ledger. Memory-only observations do not
+survive Gateway restarts. Heartbeat enablement, delivery policy, and model
+availability remain OpenClaw settings.
 
-Optional exact-project routes belong in plugin config:
+Optional default and exact-project routes belong in plugin config:
 
 ```json
 {
+  "notificationSession": "agent:main:dashboard:oversight",
   "projectSessions": [
     { "projectDir": "/absolute/selected/checkout", "sessionKey": "agent:main:dashboard:oversight" }
   ]
@@ -121,11 +133,11 @@ Optional exact-project routes belong in plugin config:
 ```
 
 These routes select the destination for that project's events and context only.
-Use the canonical selected checkout path; unrelated paths retain the native
-heartbeat destination. The agent is derived from the session key, not assumed to
-be main. Invalid or duplicate routes are rejected; removal takes effect on
-service restart. Routing does not change the destination's model or the native
-heartbeat model, delivery, enablement, or cadence.
+Use the canonical selected checkout path; unrelated paths retain the default
+notification destination. The agent is derived from the session key, not
+assumed to be main. Invalid or duplicate routes are rejected; removal takes
+effect on service restart. Routing does not change the destination's model or
+the native heartbeat model, delivery, enablement, or cadence.
 
 ## Execution binding and connection lifetime
 

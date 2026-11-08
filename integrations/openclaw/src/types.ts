@@ -33,7 +33,8 @@ export interface PluginApi {
     };
     system: {
       enqueueSystemEvent(text: string, options: { sessionKey: string; contextKey: string; replace: boolean }): boolean;
-      requestHeartbeat(options: { source: "other"; intent: "event"; reason: string; sessionKey: string; agentId: string }): void;
+      /** Removed in OpenClaw 2026.11.5; call it only when the host provides it. */
+      requestHeartbeat?(options: { source: "other"; intent: "event"; reason: string; sessionKey: string; agentId: string }): void;
     };
   };
   registerService(service: {

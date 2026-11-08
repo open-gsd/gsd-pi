@@ -36,3 +36,34 @@ test('invalid or duplicate explicit routes fail closed instead of notifying main
     { projectDir: '/beer/.', sessionKey: oversight },
   ])), /Duplicate GSD/);
 });
+
+
+test('explicit setting only selects the notification session', () => {
+  const cfg = config();
+  delete cfg.agents.entries.main.heartbeat;
+  cfg.plugins.entries['open-gsd-openclaw'].config.notificationSession = oversight;
+  assert.deepEqual(new NotificationRoutes(cfg).forProject('/other'),
+    { agentId: 'reviewer', sessionKey: oversight });
+});
+
+test('explicit notification session wins over the legacy heartbeat session', () => {
+  const cfg = config();
+  cfg.plugins.entries['open-gsd-openclaw'].config.notificationSession = '  ' + oversight + '  ';
+  assert.deepEqual(new NotificationRoutes(cfg).forProject('/other'),
+    { agentId: 'reviewer', sessionKey: oversight });
+});
+
+test('neither setting uses the agent main session', () => {
+  const cfg = config();
+  delete cfg.agents.entries.main.heartbeat;
+  assert.deepEqual(new NotificationRoutes(cfg).forProject('/other'),
+    { agentId: 'main', sessionKey: 'agent:main:main' });
+});
+
+test('invalid explicit default routes fail closed even when a legacy route exists', () => {
+  for (const value of ['', '   ', 1, null, 'invalid', 'agent:missing:main']) {
+    const cfg = config();
+    cfg.plugins.entries['open-gsd-openclaw'].config.notificationSession = value;
+    assert.throws(() => new NotificationRoutes(cfg), /Invalid GSD/);
+  }
+});

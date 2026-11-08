@@ -20,6 +20,7 @@ test('runtime, authored manifest and generated metadata retain identical config 
 
 const project = { projectId: 'fixture', canonicalRoot: '/fixture/project' };
 const valid = [
+  ['notification session', { notificationSession: 'agent:main:dashboard:oversight' }],
   ['project notification route', { projectSessions: [{ projectDir: '/fixture', sessionKey: 'agent:main:dashboard:oversight' }] }],
   ['empty project notification routes', { projectSessions: [] }],
   ['defaults', {}],
@@ -33,6 +34,8 @@ const valid = [
   ['combined config', { webUi: { enabled: true, port: 33277 }, embeddedProjects: { projects: [project] } }],
 ];
 const invalid = [
+  ['empty notification session', { notificationSession: '' }],
+  ['non-string notification session', { notificationSession: 42 }],
   ['project notification non-array', { projectSessions: {} }],
   ['project notification missing session', { projectSessions: [{ projectDir: '/fixture' }] }],
   ['project notification unknown property', { projectSessions: [{ projectDir: '/fixture', sessionKey: 'agent:main:main', extra: true }] }],

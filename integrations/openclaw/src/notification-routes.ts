@@ -20,8 +20,14 @@ export class NotificationRoutes {
       return { agentId: parsed.agentId, sessionKey: `agent:${parsed.agentId}:${parsed.rest}` };
     };
     const heartbeat = resolveAgentConfig(cfg, agentId)?.heartbeat;
-    this.fallback = target(heartbeat?.session?.trim() || "main");
-    const bindings = cfg.plugins?.entries?.["open-gsd-openclaw"]?.config?.projectSessions ?? [];
+    const settings = cfg.plugins?.entries?.["open-gsd-openclaw"]?.config;
+    const explicitSession = settings?.notificationSession;
+    if (explicitSession !== undefined &&
+        (typeof explicitSession !== "string" || !explicitSession.trim())) {
+      throw new Error("Invalid GSD notification session");
+    }
+    this.fallback = target(explicitSession?.trim() || heartbeat?.session?.trim() || "main");
+    const bindings = settings?.projectSessions ?? [];
     if (!Array.isArray(bindings)) throw new Error("Invalid GSD project notification routes");
     for (const binding of bindings) {
       if (typeof binding?.projectDir !== "string" || !isAbsolute(binding.projectDir) ||
