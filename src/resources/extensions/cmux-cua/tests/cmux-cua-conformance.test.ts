@@ -345,6 +345,193 @@ for (const mode of ["abort", "disconnect", "timeout"] as const) {
 		assert.deepEqual(f.calls.map((call) => call.name), ["get_window_state", "click"]);
 	});
 }
+// Portable source partitions; neither the synthetic peer assertion nor SDK
+// callbacks establish native peer identity or exercise the private start queue.
+for (const stage of ["application", "window"] as const) {
+	for (const outcome of ["cancelled", "unknown option"] as const) {
+		guardTest(`source partition selection/${stage}/${outcome} stops before snapshot`, async (t) => {
+			const f = await fixture({ call: (name) => {
+				if (name === "list_apps") return result({ apps: [{ pid: selectedWindow.pid, running: true, name: selectedWindow.appName, bundle_id: "synthetic.app" }] });
+				if (name === "list_windows") return result({ windows: [{ pid: selectedWindow.pid, window_id: selectedWindow.windowId, is_on_screen: true, app_name: selectedWindow.appName, title: selectedWindow.title }] });
+				throw new Error("unexpected snapshot after failed selection");
+			} });
+			t.after(() => f.close());
+			f.session.target = null;
+			let selections = 0;
+			const ctx: ExtensionContext = { ...context, hasUI: true, isLocalInteractiveDesktop: true, ui: { ...context.ui, select: async (_title, options) => {
+				selections += 1;
+				if (selections === (stage === "application" ? 1 : 2)) return outcome === "cancelled" ? undefined : "not an offered option";
+				return options[0];
+			} } };
+			await assert.rejects(inspect(f.session, ctx), outcome === "cancelled" ? /selection was cancelled/ : /not in the current .* snapshot/);
+			assert.deepEqual(f.calls.map((call) => call.name), stage === "application" ? ["list_apps"] : ["list_apps", "list_windows"]);
+			assert.equal(selections, stage === "application" ? 1 : 2);
+			assert.equal(f.session.target, null);
+			assert.equal(f.session.grant, null);
+			assert.equal(f.session.hadAction, false);
+		});
+	}
+}
+for (const outcome of ["mismatch", "suspected noop", "degraded", "wrong observer role", "duplicate observer"] as const) {
+	guardTest(`source partition verification/${outcome} cannot authorize another action`, async (t) => {
+		let reads = 0;
+		const f = await fixture({ call: (name) => {
+			if (name === "click") return result({ path: "ax", verified: false, effect: outcome === "suspected noop" ? "suspected_noop" : "unverifiable" });
+			if (name !== "get_window_state") throw new Error("unexpected tool");
+			reads += 1;
+			if (reads === 1) return result(snapshot());
+			const after = snapshot(outcome === "mismatch" ? "different" : "after", outcome === "degraded" ? { degraded: true } : {});
+			if (outcome === "wrong observer role") after.elements[1].role = "AXButton";
+			if (outcome === "duplicate observer") after.elements.push({ ...after.elements[1] });
+			return result(after);
+		} });
+		t.after(() => f.close());
+		const { params } = await ready(f);
+		if (outcome === "degraded") await assert.rejects(act(f.session, params), /incomplete or degraded/);
+		else {
+			const output = await act(f.session, params);
+			assert.equal(output.status, "quarantined");
+			assert.equal(output.ui_postcondition_met, false);
+			assert.equal(output.backend_quiescence, "unproven");
+		}
+		assert.deepEqual(f.calls.map((call) => call.name), ["get_window_state", "click", "get_window_state"]);
+		assertQuarantined(f);
+		await assert.rejects(act(f.session, params), /already dispatched/);
+		assert.equal(f.calls.length, 3);
+	});
+}
+for (const partition of ["unknown operation", "unknown postcondition", "oversized expected value"] as const) {
+	guardTest(`source partition action-validation/${partition} rejects without dispatch`, async (t) => {
+		const f = await fixture();
+		t.after(() => f.close());
+		const { params } = await ready(f);
+		if (partition === "unknown operation") params.operation = "unknown-operation";
+		if (partition === "unknown postcondition") params.postcondition.kind = "unknown-condition";
+		if (partition === "oversized expected value") params.postcondition.expected = "x".repeat(129);
+		await assert.rejects(act(f.session, params), /outside the click-only contract|postcondition is malformed/);
+		assert.equal(f.calls.length, 1);
+		assert.equal(f.binding.assertions, 1);
+		assert.equal(f.session.hadAction, false);
+		assert.equal(f.session.grant, null);
+	});
+}
+for (const stage of ["inspection", "verification"] as const) {
+	guardTest(`source partition cancellation/${stage} uses SDK AbortSignal without replay`, async (t) => {
+		const entered = barrier();
+		const finish = barrier();
+		let reads = 0;
+		const f = await fixture({ call: async (name) => {
+			if (name === "click") return result({ path: "ax", verified: false, effect: "unverifiable" });
+			reads += 1;
+			if (reads === (stage === "inspection" ? 1 : 2)) { entered.resolve(); await finish.promise; }
+			return result(snapshot(reads === 1 ? "before" : "after"));
+		} });
+		t.after(async () => { finish.resolve(); await f.close(); });
+		const controller = new AbortController();
+		const params = stage === "verification" ? (await ready(f)).params : undefined;
+		const pending = params ? act(f.session, params, controller.signal) : inspect(f.session, context, controller.signal);
+		const rejected = assert.rejects(pending);
+		await entered.promise;
+		controller.abort();
+		await rejected;
+		finish.resolve();
+		assert.equal(f.session.grant, null);
+		assert.equal(f.session.hadAction, stage === "verification");
+		assertQuarantined(f);
+		await assert.rejects(inspect(f.session, context));
+		if (params) await assert.rejects(act(f.session, params), /already dispatched/);
+		assert.deepEqual(f.calls.map((call) => call.name), stage === "inspection" ? ["get_window_state"] : ["get_window_state", "click", "get_window_state"]);
+	});
+}
+guardTest("source partition cancellation/pre-aborted-inspection sends no native request", async (t) => {
+	const f = await fixture();
+	t.after(() => f.close());
+	const controller = new AbortController();
+	controller.abort();
+	await assert.rejects(inspect(f.session, context, controller.signal));
+	assert.equal(f.calls.length, 0);
+	assert.equal(f.session.grant, null);
+	assert.equal(f.session.hadAction, false);
+	assertQuarantined(f);
+});
+for (const stage of ["inspection", "verification"] as const) {
+	guardTest(`source partition protocol-error/${stage} preserves failure boundary`, async (t) => {
+		let reads = 0;
+		const f = await fixture({ call: (name) => {
+			if (name === "click") return result({ path: "ax", verified: false, effect: "unverifiable" });
+			reads += 1;
+			if (reads === (stage === "inspection" ? 1 : 2)) throw new Error("synthetic-provider-private-body");
+			return result(snapshot());
+		} });
+		t.after(() => f.close());
+		const params = stage === "verification" ? (await ready(f)).params : undefined;
+		await assert.rejects(params ? act(f.session, params) : inspect(f.session, context));
+		assert.equal(f.session.grant, null);
+		assert.equal(f.session.hadAction, stage === "verification");
+		assertQuarantined(f);
+		await assert.rejects(inspect(f.session, context));
+		assert.equal(f.calls.length, stage === "inspection" ? 1 : 3);
+		// Exported helpers reject SDK errors; publicError redaction is private.
+	});
+}
+for (const partition of ["wrong elements type", "oversized element count"] as const) {
+	guardTest(`source partition response-bounds/${partition} fails closed through SDK`, async (t) => {
+		const raw = result(snapshot("before", partition === "wrong elements type" ? { elements: {} } : { element_count: 201 }));
+		const f = await fixture({ call: () => raw });
+		t.after(() => f.close());
+		await assert.rejects(inspect(f.session, context), /incomplete or degraded/);
+		assert.equal(f.session.grant, null);
+		assert.equal(f.session.hadAction, false);
+		assertQuarantined(f);
+		await assert.rejects(inspect(f.session, context));
+		assert.equal(f.calls.length, 1);
+	});
+}
+guardTest("source partition response-bounds/malformed-click-escalation never reaches verification", async (t) => {
+	const f = await fixture({ call: (name) => name === "click" ? result({ path: "ax", verified: false, effect: "unverifiable", escalation: [] }) : result(snapshot()) });
+	t.after(() => f.close());
+	const { params } = await ready(f);
+	await assert.rejects(act(f.session, params), /escalation metadata is malformed/);
+	assertQuarantined(f);
+	assert.equal(f.session.hadAction, true);
+	assert.equal(f.session.grant, null);
+	await assert.rejects(act(f.session, params), /already dispatched/);
+	assert.deepEqual(f.calls.map((call) => call.name), ["get_window_state", "click"]);
+});
+guardTest("source partition redaction/raw-snapshot strips provider fields and oversize observer values", async (t) => {
+	const state = snapshot("x".repeat(129), { provider_payload: "synthetic-provider-private-body" });
+	state.tree_markdown += "\n- [3] AXStaticText [id=synthetic-public]";
+	state.elements.push({ element_index: 3, role: "AXStaticText", label: "Public Status", value: "before" });
+	state.element_count = state.elements.length;
+	const f = await fixture({ call: () => result(state) });
+	t.after(() => f.close());
+	const output = await inspect(f.session, context);
+	assert.doesNotMatch(JSON.stringify(output), /synthetic-provider-private-body|synthetic-redacted-value|fx-cap/);
+	assert.ok(!JSON.stringify(output).includes("x".repeat(129)));
+	assert.equal(output.observers.length, 1);
+	assert.equal(output.observers[0].label, "Public Status");
+	assert.equal(containsExactPid(output, selectedWindow.pid), false);
+	assert.equal(f.session.hadAction, false);
+});
+for (const stage of ["pre-aborted", "in-flight"] as const) {
+	test(`source partition discovery/cancellation-${stage} uses SDK listTools without a guard`, async (t) => {
+		const entered = barrier();
+		const finish = barrier();
+		const f = await protocolFixture({ list: async () => { entered.resolve(); await finish.promise; return { tools: partialInventory }; } });
+		t.after(async () => { finish.resolve(); await f.close(); });
+		const controller = new AbortController();
+		if (stage === "pre-aborted") controller.abort();
+		const pending = discoverNativeContract(f.client, controller.signal);
+		const rejected = assert.rejects(pending);
+		if (stage === "in-flight") { await entered.promise; controller.abort(); }
+		await rejected;
+		finish.resolve();
+		assert.equal(f.cursors.length, stage === "pre-aborted" ? 0 : 1);
+		assert.equal(f.calls.length, 0);
+		assert.equal(f.binding.assertions, 0);
+	});
+}
+
 guardTest("real guard excludes a competing driver during a source read; clean guard close evidence permits reacquisition", async (t) => {
 	const entered = barrier();
 	const finish = barrier();
