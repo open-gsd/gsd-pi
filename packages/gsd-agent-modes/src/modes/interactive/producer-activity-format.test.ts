@@ -18,7 +18,7 @@ test("available async jobs are labelled live and show completeness", () => {
 			snapshot: { availability: "available", completeness: "complete", items: [{ id: "a", status: "running" }, { id: "b", status: "running" }], gaps: [] },
 		},
 	]);
-	assert.deepEqual(lines, [{ label: "async jobs", text: "2 running (live, complete)" }]);
+	assert.deepEqual(lines, [{ label: "async jobs", text: "2 running (snapshot, complete)", qualifier: "(snapshot, complete)", detail: "2 running" }]);
 });
 
 test("subagent runs are labelled stored, never live", () => {
@@ -29,7 +29,7 @@ test("subagent runs are labelled stored, never live", () => {
 			snapshot: { availability: "available", completeness: "partial", items: [{ status: "running" }], gaps: ["invalid-record"] },
 		},
 	]);
-	assert.deepEqual(lines, [{ label: "subagent runs", text: "1 running (stored, partial)" }]);
+	assert.deepEqual(lines, [{ label: "subagent runs", text: "1 running (stored, partial)", qualifier: "(stored, partial)", detail: "1 running" }]);
 	assert.ok(!lines[0]!.text.includes("live"));
 });
 
@@ -52,3 +52,15 @@ test("a failed job alongside a running job is not rendered like two running jobs
 	assert.ok(mixed[0]!.text.includes("1 failed"));
 	assert.ok(mixed[0]!.text.includes("1 running"));
 });
+
+// Defensive path: a status outside the enum is counted as unknown, never dropped.
+for (const [name, basis] of [
+	["async_jobs_snapshot", "snapshot"],
+	["subagent_runs_snapshot", "stored"],
+] as const) {
+	test(`${name} keeps an unexpected status in the unknown bucket`, () => {
+		const snapshot = { availability: "available", completeness: "complete", items: [{ status: "running" }, { status: "pending" }], gaps: [] };
+		const [line] = formatProducerFacets([{ name, status: "available", snapshot }]);
+		assert.equal(line!.text, `1 running, 1 unknown (${basis}, complete)`);
+	});
+}

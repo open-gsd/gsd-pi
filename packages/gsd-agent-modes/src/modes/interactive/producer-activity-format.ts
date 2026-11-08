@@ -1,4 +1,4 @@
-import type { NativeProducerRead } from "./producer-activity-read.ts";
+import { isProducerItemStatus, type NativeProducerRead } from "./producer-activity-read.js";
 
 /**
  * Native presentation of producer activity facets (#2936). Pure formatting.
@@ -10,6 +10,10 @@ import type { NativeProducerRead } from "./producer-activity-read.ts";
 export interface ActivityFacetLine {
 	label: string;
 	text: string;
+	/** Basis and completeness, e.g. "(stored, partial)". Must survive narrow widths. */
+	qualifier?: string;
+	/** Count summary, e.g. "1 running, 1 failed". The part that may be shortened. */
+	detail?: string;
 }
 
 export function formatProducerFacets(reads: readonly NativeProducerRead[]): ActivityFacetLine[] {
@@ -25,16 +29,22 @@ function formatOne(r: NativeProducerRead): ActivityFacetLine {
 	}
 	const items = Array.isArray(s.items) ? (s.items as Array<{ status?: unknown }>) : [];
 	const completeness = s.completeness === "partial" ? "partial" : "complete";
-	const basis = r.name === "subagent_runs_snapshot" ? "stored" : "live";
+	// Counts are a dated read, not a live stream: refreshes happen only at startup and
+	// owner transitions, so the qualifier says "snapshot" and the footer shows the time.
+	const basis = r.name === "subagent_runs_snapshot" ? "stored" : "snapshot";
 	// Lifecycle counts stay separate so a terminal failure is never hidden behind
 	// a running total. Per-status counts are taken from the snapshot items.
 	const counts = new Map<string, number>();
 	for (const item of items) {
-		const st = typeof item.status === "string" ? item.status : "unknown";
+		// Defensive: a status outside the producer's enum is counted as unknown, never dropped.
+		const st = isProducerItemStatus(r.name as never, item.status) ? (item.status as string) : "unknown";
 		counts.set(st, (counts.get(st) ?? 0) + 1);
 	}
 	const order = ["running", "completed", "failed", "cancelled", "succeeded", "interrupted", "queued", "unknown"];
+	// Every bucket is in `order`, so no count can be silently omitted from the display.
 	const parts = order.filter((k) => counts.has(k)).map((k) => `${counts.get(k)} ${k}`);
 	const detail = parts.length > 0 ? parts.join(", ") : `0 ${basis}`;
-	return { label, text: `${detail} (${basis}, ${completeness})` };
+	// The qualifier is the part that must survive narrow widths, so it leads the
+	// tail and the count is what gets shortened when space runs out.
+	return { label, text: `${detail} (${basis}, ${completeness})`, qualifier: `(${basis}, ${completeness})`, detail };
 }

@@ -84,3 +84,32 @@ test("malformed item fields are invalid-response, not counted", async () => {
 	assert.equal(r.status, "unavailable");
 	assert.equal((r.snapshot as { reason: string }).reason, "invalid-response");
 });
+
+// Regression (PR #3146 review): an unsupported status used to pass the reader and
+// format as "0 snapshot". It must now be an explicit invalid response.
+for (const [name, basis, item, bad] of [
+	["async_jobs_snapshot", "memory", { id: "job-1", label: "job" }, ["pending", "succeeded"]],
+	["subagent_runs_snapshot", "persisted", { runId: "run-1", children: [] }, ["pending", "completed"]],
+] as const) {
+	for (const status of bad) {
+		test(`${name} rejects unsupported status ${status}`, async () => {
+			const snapshot = { ...available, basis, items: [{ ...item, status }] };
+			const r = await readProducer(runnerWith(async () => snapshot), name, () => true);
+			assert.equal(r.status, "unavailable");
+			assert.equal((r.snapshot as { reason: string }).reason, "invalid-response");
+		});
+	}
+}
+
+test("subagent child statuses must also belong to the subagent enum", async () => {
+	for (const status of ["pending", "completed"]) {
+		const snapshot = {
+			...available,
+			basis: "persisted",
+			items: [{ runId: "run-1", status: "running", children: [{ index: 0, agent: "worker", status }] }],
+		};
+		const r = await readProducer(runnerWith(async () => snapshot), "subagent_runs_snapshot", () => true);
+		assert.equal(r.status, "unavailable");
+		assert.equal((r.snapshot as { reason: string }).reason, "invalid-response");
+	}
+});

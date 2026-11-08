@@ -1,11 +1,13 @@
 // Project/App: gsd-pi
 // File Purpose: Interactive terminal footer renderer for workspace, model, usage, context, and extension status.
 
-import { type Component, truncateToWidth } from "@gsd/pi-tui";
+import { type Component, truncateToWidth, visibleWidth } from "@gsd/pi-tui";
+import { producerFooterRows } from "../producer-footer-rows.js";
 import type { AgentSession } from "@gsd/agent-core";
 import type { ReadonlyFooterDataProvider } from "@gsd/pi-coding-agent/core/footer-data-provider.js";
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { providerAuthBadge, providerDisplayName } from "./model-selector.js";
+import type { ProducerActivityFooterCache } from "../producer-activity-footer-cache.js";
 import {
 	badge,
 	layoutFullWidthMinimalFooter,
@@ -101,6 +103,7 @@ export class FooterComponent implements Component {
 		private session: AgentSession,
 		private footerData: ReadonlyFooterDataProvider,
 		private readonly getGsdStatus?: () => GsdStatusWidgetState,
+		private readonly producerActivity?: ProducerActivityFooterCache,
 	) {}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -163,6 +166,9 @@ export class FooterComponent implements Component {
 			primaryStatus ? new Set([primaryStatus.key]) : new Set(),
 		);
 
+		// Producer activity facets (#2936): read synchronously from the cache only.
+		// Each facet stays a separate labelled part; there is no combined total.
+
 		let providerSuffix = "";
 		if (this.footerData.getAvailableProviderCount() > 1 && displayModel) {
 			const authMode = this.session.modelRegistry.getProviderAuthMode(displayModel.provider);
@@ -210,6 +216,11 @@ export class FooterComponent implements Component {
 			return truncateToWidth(styled, budget, "…");
 		});
 
-		return renderMinimalFooterLine(line, width);
+		const mainLines = renderMinimalFooterLine(line, width);
+		// Producer facets get their own bounded row so they never compete with, or
+		// get clipped by, the main status row. Each facet keeps its label and its
+		// stored/unavailable qualifier.
+		const facetRows = producerFooterRows(this.producerActivity?.snapshot(), width, { visibleWidth, truncateToWidth }, (t) => `as of ${new Date(t).toTimeString().slice(0, 5)}`).map((row) => theme.fg("dim", row));
+		return [...mainLines, ...facetRows];
 	}
 }

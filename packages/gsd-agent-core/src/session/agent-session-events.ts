@@ -18,8 +18,20 @@ export class AgentSessionEventsModule {
 	constructor(readonly host: AgentSessionHost) {}
 
 	emit(event: AgentSessionEvent): void {
+		// Owner-transition events are lifecycle pairs (starting/settled). A listener that
+		// throws must not stop delivery to the others, or a later settled never reaches
+		// the footer and its counter stays open. Isolate each listener.
+		const lifecycle = event.type === "owner_generation_transition";
 		for (const l of this.host._eventListeners) {
-			l(event);
+			if (!lifecycle) {
+				l(event);
+				continue;
+			}
+			try {
+				l(event);
+			} catch {
+				// Swallowed on purpose: one broken listener must not break the pair.
+			}
 		}
 	}
 

@@ -52,6 +52,19 @@ export async function readProducer(
 	return { name, status: "available", snapshot: raw };
 }
 
+/**
+ * Status values each producer may emit. Per producer on purpose: "succeeded" is not
+ * an async-job status and "completed" is not a subagent status.
+ */
+const PRODUCER_STATUSES: Record<(typeof PRODUCER_READ_NAMES)[number], readonly string[]> = {
+	async_jobs_snapshot: ["running", "completed", "failed", "cancelled"],
+	subagent_runs_snapshot: ["queued", "running", "succeeded", "failed", "interrupted"],
+};
+
+export function isProducerItemStatus(name: (typeof PRODUCER_READ_NAMES)[number], status: unknown): status is string {
+	return typeof status === "string" && PRODUCER_STATUSES[name].includes(status);
+}
+
 /** Structural check of the public envelope and the requested producer's item shape. Not a trust decision. */
 export function isSnapshotShape(v: unknown, name?: (typeof PRODUCER_READ_NAMES)[number]): boolean {
 	if (!v || typeof v !== "object") return false;
@@ -68,10 +81,16 @@ export function isSnapshotShape(v: unknown, name?: (typeof PRODUCER_READ_NAMES)[
 		for (const item of o.items) {
 			if (!item || typeof item !== "object") return false;
 			const it = item as Record<string, unknown>;
+			// An unknown status is an invalid response, not a silently dropped item.
+			if (!isProducerItemStatus(name, it.status)) return false;
 			if (name === "async_jobs_snapshot") {
-				if (typeof it.id !== "string" || typeof it.label !== "string" || typeof it.status !== "string") return false;
+				if (typeof it.id !== "string" || typeof it.label !== "string") return false;
 			} else {
-				if (typeof it.runId !== "string" || typeof it.status !== "string" || !Array.isArray(it.children)) return false;
+				if (typeof it.runId !== "string" || !Array.isArray(it.children)) return false;
+				for (const child of it.children) {
+					if (!child || typeof child !== "object") return false;
+					if (!isProducerItemStatus(name, (child as Record<string, unknown>).status)) return false;
+				}
 			}
 		}
 	}

@@ -31,6 +31,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
+import { ProducerActivityFooterCache } from "./producer-activity-footer-cache.js";
 import { ToolExecutionComponent } from "./components/tool-execution.js";
 import { setRailAnimationEnabled } from "./components/transcript-design.js";
 import { ContextualTips } from "@gsd/agent-core";
@@ -112,6 +113,9 @@ export class InteractiveMode {
 	private autocompleteProvider: CombinedAutocompleteProvider | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
+	private producerActivity: ProducerActivityFooterCache | undefined;
+	/** Owner transitions that have started but not yet settled (#2936, PR #3146 review). */
+	private activeOwnerTransitions = 0;
 	private footerDataProvider: FooterDataProvider;
 	private keybindings: KeybindingsManager;
 	private version: string;
@@ -230,6 +234,7 @@ export class InteractiveMode {
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as import("@gsd/pi-tui").Component);
 		this.footerDataProvider = new FooterDataProvider(process.cwd());
+		this.producerActivity = new ProducerActivityFooterCache();
 		this.footer = new FooterComponent(session, this.footerDataProvider, () => ({
 			override: this.settingsManager.getAdaptiveMode(),
 			activeToolCount: this.activeToolInvocations.size,
@@ -238,7 +243,7 @@ export class InteractiveMode {
 			cwd: this.gsdProgressState?.path ?? process.cwd(),
 			manuallyExpanded: this.gsdStatusExpanded,
 			gsdProgress: this.gsdProgressState,
-		}));
+		}), this.producerActivity);
 		this.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.toolOutputExpanded = this.settingsManager.getToolsExpanded();
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -287,6 +292,9 @@ export class InteractiveMode {
 		this.setupKeyHandlers();
 		this.setupEditorSubmitHandler();
 		await this.initExtensions();
+		// Producers initialize on session_start, so the one-shot refresh runs only
+		// after extensions are up. Its result is rendered when it applies.
+		void this.refreshProducerActivity();
 		this.renderInitialMessages();
 
 		this.ui.start();
@@ -392,8 +400,33 @@ export class InteractiveMode {
 	private subscribeToAgent(): void {
 		let eventQueue: Promise<void> = Promise.resolve();
 		this.unsubscribe = this.session.subscribe((event) => {
+			// Session-lifecycle invalidation (#2936) runs synchronously, before the
+			// event enters the async queue, so a stale view is dropped in time.
+			this.applyProducerActivityLifecycle(event);
 			eventQueue = eventQueue.then(() => this.handleEvent(event)).catch(() => {});
 		});
+	}
+
+	/**
+	 * One central boundary for producer activity (#2936), driven by the core's
+	 * owner_generation_transition event (starting/settled for new, switch, fork).
+	 * starting: drop the previous session view and invalidate in-flight reads.
+	 * settled: refresh from the current runner. settled runs in a finally block and
+	 * does not imply success; the refresh reads whatever the runner exposes now.
+	 */
+	private applyProducerActivityLifecycle(event: AgentSessionEvent): void {
+		if (event.type !== "owner_generation_transition") return;
+		if (event.phase === "starting") {
+			this.activeOwnerTransitions += 1;
+			this.resetProducerActivityForSessionChange();
+			return;
+		}
+		// An earlier transition's settled must not publish while a later transition is
+		// still pending. Refresh only once every outstanding transition has settled.
+		if (this.activeOwnerTransitions === 0) return;
+		this.activeOwnerTransitions -= 1;
+		if (this.activeOwnerTransitions !== 0) return;
+		void this.refreshProducerActivity();
 	}
 
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {
@@ -495,6 +528,20 @@ export class InteractiveMode {
 	private showLoadedResources(options?: Parameters<typeof resourceDisplay.showLoadedResources>[1]): void { resourceDisplay.showLoadedResources(this, options); }
 
 	private async initExtensions(): Promise<void> { return extensionSystem.initExtensions(this); }
+
+	/** Refresh producer activity facets and re-render when the result applies. */
+	private async refreshProducerActivity(): Promise<void> {
+		if (!this.producerActivity || this.activeOwnerTransitions !== 0) return;
+		const applied = await this.producerActivity.refresh(this.session.extensionRunner ?? null, Date.now());
+		// A refresh that finishes after shutdown must not re-render a stopped UI.
+		if (applied && !this.isShuttingDown) this.ui.requestRender();
+	}
+
+	/** Session transition: drop the previous session's producer view (#2936). */
+	resetProducerActivityForSessionChange(): void {
+		this.producerActivity?.reset();
+		this.ui.requestRender();
+	}
 	private getRegisteredToolDefinition(toolName: string) { return extensionSystem.getRegisteredToolDefinition(this, toolName); }
 	private formatWebSearchResult(content: unknown): string { return extensionSystem.formatWebSearchResult(this, content); }
 	private setupExtensionShortcuts(extensionRunner: ExtensionRunner): void { extensionSystem.setupExtensionShortcuts(this, extensionRunner); }
