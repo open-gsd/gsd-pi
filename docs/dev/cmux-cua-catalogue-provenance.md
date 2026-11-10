@@ -22,7 +22,7 @@ The envelope contains 38 tools because the deprecated alias is unregistered; the
 
 ## Envelope reproduction (source-only, no native execution)
 
-The reproduction reads only downloaded source files at the pinned revision. It does not execute the native binary and does not build locally. Run it from a directory containing the pinned source snapshot (`extract.py` and `verify-roster.py` from the snapshot's extraction tooling).
+The reproduction reads only downloaded source files at the pinned revision. It does not execute the native binary and does not build locally. Run it from a directory containing the pinned source snapshot and the helper scripts `extract.py` and `verify-roster.py` (currently unpublished; see the limit below).
 
 Exact command:
 
@@ -47,7 +47,7 @@ Expected output: `6ec22e2dd71ff5716905e491f85fdc20403bbe7e367d37a03234231b6aa8aa
 
 Tool selection: the macOS registry (`platform-macos/src/tools/mod.rs` `register_all`, plus `check_for_update`), with the unregistered `type_text_chars` alias excluded. Array order follows registration order. Entry conversion: each tool is emitted as `name`, `description`, `inputSchema`, `annotations` (four booleans), and `capabilities`.
 
-The extraction tooling itself is not yet published as an immutable artifact; a maintainer can reproduce it only from a source snapshot with those helper files. Treat that as a remaining limit.
+**Not independently reproducible yet.** The helper scripts `extract.py` and `verify-roster.py` are not published in this repository or upstream. A maintainer cannot run the command above from upstream alone, so the digest is recorded as source-derived provenance by the author only, not as a verifiable reproduction. Publishing those helpers as a versioned, reviewed artifact is a prerequisite before this digest can be treated as reproducible.
 
 - Output length: 73,248 bytes
 - SHA256: `6ec22e2dd71ff5716905e491f85fdc20403bbe7e367d37a03234231b6aa8aaf1`
