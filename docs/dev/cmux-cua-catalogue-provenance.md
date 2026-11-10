@@ -1,0 +1,36 @@
+# cmux-cua catalogue provenance (source-derived)
+
+Status: source-derived provenance only. This document does not accept a native or runtime catalogue, does not authorize installation, and does not change the runtime pin.
+
+## Pinned source
+
+- Repository: `manaflow-ai/cmux-cua`
+- Revision: `e0f738807dbff2f35fe67d7fbcc99c7082cffc23`
+- Producer: `crates/cmux-cua-core/src/tool.rs` (`tools_list` envelope, `schema_version` emitted at line 593 as the string `"1"`)
+
+## Counts (actual, not padded)
+
+| Measure | Count | Anchor |
+| --- | --- | --- |
+| ToolDef literal definitions | 39 | `crates/cmux-cua-core/src/*` and `platform-macos/src/tools/*` |
+| macOS platform registrations (non-Codex) | 37 | `platform-macos/src/tools/mod.rs:626-680` |
+| CLI advertised entries | 38 | `crates/cmux-cua/src/main.rs:154-172` |
+| Envelope tools in `tools/list` | 38 | `tool.rs:573-595` |
+| Unregistered deprecated alias | `type_text_chars` | `platform-macos/src/tools/mod.rs:670-677` |
+
+The envelope contains 38 tools because the deprecated alias is unregistered; the 39th literal is not advertised.
+
+## Envelope reproduction (source-only, no native execution)
+
+The reproduction reads only downloaded source files at the pinned revision. It does not execute the native binary and does not build locally.
+
+- Output length: 73,248 bytes
+- SHA256: `6ec22e2dd71ff5716905e491f85fdc20403bbe7e367d37a03234231b6aa8aaf1`
+- Encoding: sorted keys, compact UTF-8 JSON, no trailing newline, preserved tool-array order. This is not RFC 8785 and makes no claim about native transport byte formatting.
+
+## Limits
+
+- The digest proves source-derived content only. It is not runtime evidence.
+- The runtime/embedded host catalogue remains unknown; the existing runtime expectation is unchanged.
+- No local install, build, helper invocation, or native click/type/screenshot was performed.
+- `G03_RUNTIME_ADMISSION_ENABLED` remains literally `false`.
