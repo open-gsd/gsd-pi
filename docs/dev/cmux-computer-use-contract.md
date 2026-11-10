@@ -545,9 +545,11 @@ This section prepares the real-host checks that the evidence plan requires. It i
 - Offline suites are green on the exact source revision: `cmux-cua-admission` (9 tests) and `cmux-cua-revocation` (10 tests) at `0b212e054` or later.
 - `G03_RUNTIME_ADMISSION_ENABLED` is `false` and no `type_text` tool is registered on the revision under test.
 - A disposable macOS session is available, with a synthetic, non-secret text target. No real customer data is open.
-- The operator has approved one named run in writing. Each run uses a single checklist item.
+- The maintainer has approved one named run in writing. Each run uses a single checklist item.
 
 ### Checks to run, one at a time
+
+Each check's evidence manifest must include every field in [Manifest rules](#manifest-rules): ledger ID, criterion, owner and dependencies, proof class, outcome, source SHA with dirty and untracked scope, binary digests, OS, GSD, cmux and SDK versions, tool, UTC times, and durable evidence references.
 
 | Check | Gate | What is observed | What is recorded |
 | --- | --- | --- | --- |
