@@ -202,24 +202,33 @@ export function writeUnitRuntimeRecord(
   updates: Partial<AutoUnitRuntimeRecord> = {},
 ): AutoUnitRuntimeRecord {
   return storeRecord(basePath, unitType, unitId, (prev) => {
+    // A dispatch starts a new run (new startedAt). Re-dispatch is a new
+    // Attempt and must not inherit the timeout/recovery state of the run that
+    // already ended: an exhausted prior run would otherwise skip the successor
+    // Attempt's recovery immediately (#2322). Same-run updates still merge so
+    // progress, steering and terminal outcomes are preserved.
     const sameRun = prev?.startedAt === startedAt;
-    const updatesHarnessAbort = Object.prototype.hasOwnProperty.call(updates, "harnessAbort");
+    const hasOwn = (key: keyof AutoUnitRuntimeRecord): boolean =>
+      Object.prototype.hasOwnProperty.call(updates, key);
+    const updatesHarnessAbort = hasOwn("harnessAbort");
     return {
       version: 1,
       unitType,
       unitId,
       startedAt,
       updatedAt: Date.now(),
-      phase: updates.phase ?? prev?.phase ?? "dispatched",
-      wrapupWarningSent: updates.wrapupWarningSent ?? prev?.wrapupWarningSent ?? false,
-      continueHereFired: updates.continueHereFired ?? prev?.continueHereFired ?? false,
-      timeoutAt: updates.timeoutAt ?? prev?.timeoutAt ?? null,
-      lastProgressAt: updates.lastProgressAt ?? prev?.lastProgressAt ?? Date.now(),
-      progressCount: updates.progressCount ?? prev?.progressCount ?? 0,
-      lastProgressKind: updates.lastProgressKind ?? prev?.lastProgressKind ?? "dispatch",
-      recovery: updates.recovery ?? prev?.recovery,
-      recoveryAttempts: updates.recoveryAttempts ?? prev?.recoveryAttempts ?? 0,
-      lastRecoveryReason: updates.lastRecoveryReason ?? prev?.lastRecoveryReason,
+      phase: updates.phase ?? (sameRun ? prev?.phase ?? "dispatched" : "dispatched"),
+      wrapupWarningSent: updates.wrapupWarningSent ?? (sameRun ? prev?.wrapupWarningSent ?? false : false),
+      continueHereFired: updates.continueHereFired ?? (sameRun ? prev?.continueHereFired ?? false : false),
+      timeoutAt: hasOwn("timeoutAt") ? updates.timeoutAt ?? null : (sameRun ? prev?.timeoutAt ?? null : null),
+      lastProgressAt: updates.lastProgressAt ?? (sameRun ? prev?.lastProgressAt ?? startedAt : startedAt),
+      progressCount: updates.progressCount ?? (sameRun ? prev?.progressCount ?? 0 : 0),
+      lastProgressKind: updates.lastProgressKind ?? (sameRun ? prev?.lastProgressKind ?? "dispatch" : "dispatch"),
+      recovery: updates.recovery ?? (sameRun ? prev?.recovery : undefined),
+      recoveryAttempts: hasOwn("recoveryAttempts")
+        ? updates.recoveryAttempts ?? 0
+        : (sameRun ? prev?.recoveryAttempts ?? 0 : 0),
+      lastRecoveryReason: updates.lastRecoveryReason ?? (sameRun ? prev?.lastRecoveryReason : undefined),
       harnessAbort: updatesHarnessAbort
         ? updates.harnessAbort
         : (sameRun ? prev?.harnessAbort : undefined),

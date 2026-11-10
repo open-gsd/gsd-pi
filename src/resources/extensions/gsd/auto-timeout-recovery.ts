@@ -26,6 +26,7 @@ import { getInFlightToolCount } from "./auto-tool-tracking.js";
 import { parseUnitId } from "./unit-id.js";
 import { readLatestTaskAttempt } from "./task-execution-domain-operation.js";
 import { isDbAvailable } from "./gsd-db.js";
+import { getLatestForUnit } from "./db/unit-dispatches.js";
 import { resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
 
 export interface RecoveryContext {
@@ -54,13 +55,19 @@ export async function recoverTimedOutUnit(
   const { basePath, verbose, currentUnitStartedAt, unclaimedUnitBudgets } = rctx;
 
   const runtime = readUnitRuntimeRecord(basePath, unitType, unitId);
-  const recoveryAttempts = runtime?.recoveryAttempts ?? 0;
   const maxRecoveryAttempts = reason === "idle" ? 2 : 1;
 
   // ADR-048: the count is on the unit's dispatch row, so a restart keeps the
-  // backoff of the last process.
+  // backoff of the last process. A new dispatch row starts its own budget; the
+  // runtime record is not authoritative when a dispatch row exists, because it
+  // can still carry the exhausted counter of a previous Attempt (#2322).
   const recoveryBudget = { unitType, unitId, kind: "timeout-recovery" } as const;
   const attemptNumber = spendUnitBudget(unclaimedUnitBudgets, recoveryBudget);
+  const latestDispatch = isDbAvailable() ? getLatestForUnit(unitId) : null;
+  const hasDispatch = latestDispatch?.unit_type === unitType;
+  const recoveryAttempts = hasDispatch
+    ? Math.max(0, attemptNumber - 1)
+    : runtime?.recoveryAttempts ?? 0;
 
   if (attemptNumber > 1) {
     // Exponential backoff: 2^(n-1) seconds, capped at 30s
