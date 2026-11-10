@@ -428,11 +428,13 @@ for (const stage of ["inspection", "verification"] as const) {
 		} });
 		t.after(async () => { finish.resolve(); await f.close(); });
 		const controller = new AbortController();
+		const abortReason = new Error(`fixture-${stage}-abort`);
 		const params = stage === "verification" ? (await ready(f)).params : undefined;
 		const pending = params ? act(f.session, params, controller.signal) : inspect(f.session, context, controller.signal);
-		const rejected = assert.rejects(pending);
+		// The SDK may wrap signal.reason; a generic MCP timeout must not pass.
+		const rejected = assert.rejects(pending, new RegExp(abortReason.message));
 		await entered.promise;
-		controller.abort();
+		controller.abort(abortReason);
 		await rejected;
 		finish.resolve();
 		assert.equal(f.session.grant, null);
@@ -520,10 +522,11 @@ for (const stage of ["pre-aborted", "in-flight"] as const) {
 		const f = await protocolFixture({ list: async () => { entered.resolve(); await finish.promise; return { tools: partialInventory }; } });
 		t.after(async () => { finish.resolve(); await f.close(); });
 		const controller = new AbortController();
-		if (stage === "pre-aborted") controller.abort();
+		const abortReason = new Error(`fixture-discovery-${stage}-abort`);
+		if (stage === "pre-aborted") controller.abort(abortReason);
 		const pending = discoverNativeContract(f.client, controller.signal);
-		const rejected = assert.rejects(pending);
-		if (stage === "in-flight") { await entered.promise; controller.abort(); }
+		const rejected = assert.rejects(pending, new RegExp(abortReason.message));
+		if (stage === "in-flight") { await entered.promise; controller.abort(abortReason); }
 		await rejected;
 		finish.resolve();
 		assert.equal(f.cursors.length, stage === "pre-aborted" ? 0 : 1);
