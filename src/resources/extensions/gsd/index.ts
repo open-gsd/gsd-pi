@@ -22,6 +22,11 @@ export default async function registerExtension(pi: ExtensionAPI) {
   const { registerGSDCommand } = await import("./commands/index.js");
   registerGSDCommand(pi);
 
+  // Explicit read-only observer survives full bootstrap failures. Registration is lightweight;
+  // the SQLite inspection seam is loaded only when the tool/runtime read is invoked.
+  const { registerCutoverCoordinationRead } = await import("./cutover-coordination-runtime-read.js");
+  registerCutoverCoordinationRead(pi);
+
   if (typeof pi.registerRuntimeRead === "function") {
     const { readProjectBindingFromDbAsync, readProjectProgressFromDb, readProjectSnapshotFromDb } = await import("./mcp-bridge.js");
     pi.registerRuntimeRead("project_progress", async (input) => {

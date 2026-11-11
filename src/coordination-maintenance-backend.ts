@@ -157,3 +157,25 @@ export async function runCoordinationMaintenanceProtocol(
   }
   return exitCode;
 }
+
+/** Fixed root-only attended entry. No evidence or confirmation callback. */
+export async function runAttendedCoordinationMaintenanceBackend(projectDir: string): Promise<number> {
+  const cancelled = new AbortController();
+  const cancel = () => cancelled.abort();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, cancel);
+  try {
+    assertMaintenancePackageCompatibility();
+    const { createJiti } = await import("@mariozechner/jiti");
+    const jiti = createJiti(import.meta.url, { interopDefault: false, debug: false, fsCache: false });
+    const engine = await jiti.import(resolveBundledGsdExtensionModule(import.meta.url, "coordination-maintenance.ts")) as CoordinationMaintenanceModule;
+    cancelled.signal.throwIfAborted();
+    const result = await engine.attendSameMachineCoordinationMaintenance(projectDir);
+    await new Promise<void>((resolve, reject) => process.stdout.write(`${JSON.stringify({ result })}\n`, error => error ? reject(error) : resolve()));
+    return result.status === "committed" || result.status === "replayed" ? 0 : 1;
+  } catch {
+    process.stdout.write('{"result":{"status":"refused","code":"maintenance-unavailable"}}\n');
+    return 1;
+  } finally {
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.off(signal, cancel);
+  }
+}

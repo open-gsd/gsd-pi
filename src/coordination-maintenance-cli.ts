@@ -6,12 +6,12 @@ import { MAINTENANCE_LIMITS } from "./coordination-maintenance-limits.js";
 export { MAINTENANCE_LIMITS } from "./coordination-maintenance-limits.js";
 
 const COMMAND = "coordination-maintenance";
-const HELP = "Usage: gsd coordination-maintenance --project ABS --json\n";
-export function parseCoordinationMaintenanceArgs(args: readonly string[]): { projectDir: string } | "help" | null {
+const HELP = "Usage: gsd coordination-maintenance --project ABS --json\n       gsd coordination-maintenance --project ABS --attended-same-machine\nAttended intent requires fresh native terminal attestation; it is not approval.\n";
+export function parseCoordinationMaintenanceArgs(args: readonly string[]): { projectDir: string; attendedSameMachine?: true } | "help" | null {
   if (args.length === 2 && args[0] === COMMAND && args[1] === "--help") return "help";
-  if (args.length !== 4 || args[0] !== COMMAND || args[1] !== "--project" || args[3] !== "--json") return null;
+  if (args.length !== 4 || args[0] !== COMMAND || args[1] !== "--project" || (args[3] !== "--json" && args[3] !== "--attended-same-machine")) return null;
   const projectDir = args[2];
-  return projectDir && isAbsolute(projectDir) && !projectDir.includes("\0") ? { projectDir } : null;
+  return projectDir && isAbsolute(projectDir) && !projectDir.includes("\0") ? { projectDir, ...(args[3] === "--attended-same-machine" ? { attendedSameMachine: true as const } : {}) } : null;
 }
 
 /** Only the fixed package backend is executable; no public program/loader/SQL option. */
@@ -19,6 +19,10 @@ export async function runCoordinationMaintenanceCli(args: readonly string[]): Pr
   const parsed = parseCoordinationMaintenanceArgs(args);
   if (parsed === "help") { process.stdout.write(HELP); return 0; }
   if (!parsed) { process.stdout.write('{"requestId":null,"result":{"status":"refused","code":"invalid-arguments"}}\n'); return 2; }
+  if (parsed.attendedSameMachine) {
+    const { runAttendedMaintenanceFrontend } = await import("./coordination-maintenance-attended.js");
+    return runAttendedMaintenanceFrontend(parsed.projectDir);
+  }
   return await new Promise<number>(resolve => {
     let child: ChildProcess | undefined;
     let ready = false;

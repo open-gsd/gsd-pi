@@ -20,7 +20,10 @@ const hostWatchdogMs = MAINTENANCE_LIMITS.lifetimeMs + 3 * MAINTENANCE_LIMITS.cl
 
 const packageRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const repositoryRoot = packageRoot.endsWith("dist-test") ? dirname(packageRoot) : packageRoot;
-const packagedBootstrap = join(repositoryRoot, "dist/bootstrap.js");
+// Optional TEST HARNESS package copy, never a production admission/consent switch.
+const fixturePackage = process.env.W067_NATIVE_FIXTURE_PACKAGE;
+if (fixturePackage) assert.ok(realpathSync(fixturePackage).startsWith(realpathSync(tmpdir()) + "/w067-kernel-package-"));
+const packagedBootstrap = join(fixturePackage ?? repositoryRoot, "dist/bootstrap.js");
 const fixtureWorker = "native-integration-fixture-owner";
 type OwnedChild = { child: ChildProcessWithoutNullStreams; exited: Promise<number | null>; output: string; errors: string };
 
