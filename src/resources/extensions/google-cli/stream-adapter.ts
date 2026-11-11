@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { terminateProcessTree } from "@gsd/pi-coding-agent";
 import type {
 	Api,
 	AssistantMessage,
@@ -248,7 +249,7 @@ function runCli(plan: GoogleCliRunPlan, options?: SimpleStreamOptions): Promise<
 		};
 
 		const onAbort = () => {
-			child.kill("SIGTERM");
+			terminateProcessTree(child, "SIGTERM");
 			settle(() => reject(new Error("Request was aborted")));
 		};
 

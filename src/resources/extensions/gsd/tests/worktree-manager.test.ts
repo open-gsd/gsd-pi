@@ -207,6 +207,8 @@ test("stale worktree cleanup surfaces the lock error once retries are exhausted 
       assert.equal(error.code, GSD_GIT_ERROR);
       assert.equal(error.cause, cause);
       assert.match(error.message, /EBUSY/);
+      // A tool process left running in the worktree is a lasting holder (#3121).
+      assert.match(error.message, /leftover shell or tool process/);
       assert.doesNotMatch(error.message, /after \d+ attempts/);
       return true;
     },
