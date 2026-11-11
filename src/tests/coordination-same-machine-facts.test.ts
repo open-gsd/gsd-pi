@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   collectNativeSameMachineFacts, parseNativeBootSessionUuid, parseNativeBootTime,
   parseUtcPsStart, sameNativeMachineFacts, validateNativePidList, validatePreBootRecordTimes,
   type NativeSameMachineFacts,
-} from "../src/resources/extensions/gsd/coordination-same-machine-facts.ts";
+} from "../resources/extensions/gsd/coordination-same-machine-facts.ts";
 
 const boot = {
   currentHost: "fixture.invalid", bootSessionHash: "a".repeat(64),
@@ -116,7 +115,7 @@ test("comparison ignores observedAt only, not host/boot/PID/birth states", () =>
 });
 
 test("unsupported platform explicitly refused without native commands", () => {
-  const url = new URL("../src/resources/extensions/gsd/coordination-same-machine-facts.ts", import.meta.url).href;
+  const url = new URL("../resources/extensions/gsd/coordination-same-machine-facts.ts", import.meta.url).href;
   const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
     Object.defineProperty(process, 'platform', { value: 'linux' });
     const { collectNativeSameMachineFacts } = await import(${JSON.stringify(url)});
@@ -143,8 +142,8 @@ test("read-only own-PID/impossible-PID smoke or explicit unsupported refusal", (
 
 // Fault injection lives ONLY in an isolated test subprocess's Node builtins.
 // The production module exposes no observer, platform, clock or identity override.
-test("native failures, races and resource bounds fail closed with bounded codes", () => {
-  const url = new URL("../src/resources/extensions/gsd/coordination-same-machine-facts.ts", import.meta.url).href;
+test("native failures, races and resource bounds fail closed with bounded codes", { skip: process.platform !== "darwin" ? "requires Darwin native collector" : false }, () => {
+  const url = new URL("../resources/extensions/gsd/coordination-same-machine-facts.ts", import.meta.url).href;
   const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
     import assert from 'node:assert/strict';
     import cp from 'node:child_process';

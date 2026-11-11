@@ -15,6 +15,8 @@ import { createDbAdapter } from "../resources/extensions/gsd/db-adapter.ts";
 import { parseCoordinationMaintenanceArgs } from "../coordination-maintenance-cli.ts";
 
 function fixture(t: TestContext, peers = 2) {
+  if (NATIVE_SKIP) throw new Error(`native fixture refused: ${NATIVE_SKIP}`);
+
   const root = realpathSync(mkdtempSync(join(tmpdir(), "w067-attended-FIXTURE-")));
   mkdirSync(join(root, ".gsd"));
   const path = join(root, ".gsd", "gsd.db");
@@ -173,7 +175,7 @@ for (const [name, sql] of [
   ["active peer", "UPDATE workers SET status = 'active' WHERE worker_id = 'peer-0'"],
   ["dangling held lease", "PRAGMA foreign_keys = OFF; UPDATE milestone_leases SET worker_id = 'missing-fixture-owner'"],
   ["unexpired lease", "UPDATE milestone_leases SET expires_at = '2999-01-01T00:00:00.000Z'"],
-] as const) test(`complete-set collection refuses ${name} without filtering`, t => {
+] as const) test(`complete-set collection refuses ${name} without filtering`, { skip: NATIVE_SKIP }, t => {
   const f = fixture(t); f.raw.exec(sql); assert.throws(f.snapshot); assert.equal(f.released(), "held");
 });
 test("1025 workers refuse rather than truncate", { skip: NATIVE_SKIP }, t => { const f = fixture(t, 1024); assert.throws(f.snapshot); });
@@ -323,23 +325,23 @@ process.exitCode = excluded && result.status === 'committed' ? 0 : 1;
   assert.equal(existsSync(join(f.root, "ordinary-snapshot.db")), false);
   assert.equal(f.released(), "released"); assert.equal(f.workers(), f.initialWorkers);
 });
-for (const status of ["pending", "claimed", "running"]) test(`complete-set collection refuses ${status} dispatch`, t => {
+for (const status of ["pending", "claimed", "running"]) test(`complete-set collection refuses ${status} dispatch`, { skip: NATIVE_SKIP }, t => {
   const f = fixture(t);
   f.raw.prepare("INSERT INTO unit_dispatches (trace_id, worker_id, milestone_lease_token, milestone_id, unit_type, unit_id, status, started_at) VALUES ('fixture-trace', 'selected-fixture-owner', 3, 'M001', 'execute-task', 'M001/S01/T01', ?, ?)").run(status, f.stamp(1000));
   assert.throws(f.snapshot);
 });
-test("oversized worker text refuses before row materialization", t => {
+test("oversized worker text refuses before row materialization", { skip: NATIVE_SKIP }, t => {
   const f = fixture(t); f.raw.prepare("UPDATE workers SET host = ? WHERE worker_id = 'peer-0'").run("x".repeat(4097)); assert.throws(f.snapshot);
 });
 
-test("coarse process birth must have fully elapsed before collection START, not collection end", t => {
+test("coarse process birth must have fully elapsed before collection START, not collection end", { skip: NATIVE_SKIP }, t => {
   const f = fixture(t); const facts = collectNativeSameMachineFacts([f.pid, process.pid]);
   const present = facts.pids.find(row => row.state === "present")!;
   const initialObservation = present.startedUpperBoundMs!;
   assert.ok(facts.boot.observedAtMs >= initialObservation);
   assert.throws(() => maintenanceReviewProof(f.snapshot(), facts, initialObservation));
 });
-test("old public host cannot receive an attended grant or evidence in its options", t => {
+test("old public host cannot receive an attended grant or evidence in its options", { skip: NATIVE_SKIP }, t => {
   const f = fixture(t);
   for (const extra of [{ grant: {} }, { attendedSameMachine: true }, { confirmation: true }, { facts: collectNativeSameMachineFacts([f.pid]) }]) {
     const host = Reflect.apply(openCoordinationMaintenanceHost, undefined, [{ projectDir: f.root, ...extra }]);
@@ -364,7 +366,7 @@ if (process.argv[1]?.endsWith('coordination-maintenance-attended-worker.js')) {
   assert.equal(f.raw.prepare("SELECT COUNT(*) AS n FROM workflow_operations").get()!.n, 1);
 });
 
-test("native rechecks reject wall-clock regression and forward drift relative to monotonic time", t => {
+test("native rechecks reject wall-clock regression and forward drift relative to monotonic time", { skip: NATIVE_SKIP }, t => {
   const f = fixture(t); const facts = collectNativeSameMachineFacts([f.pid]);
   const next = structuredClone(facts);
   next.boot.observedAtMs += 2000;

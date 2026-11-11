@@ -20,7 +20,7 @@ for (const mode of ["startup", "import", "writer"]) test(`attended supervisor in
   const pidFile = join(root, "worker.pid"); const preload = join(root, "instrument.cjs");
   writeFileSync(preload, `
 const fs = require('node:fs');
-const isWorker = process.argv[1]?.endsWith('coordination-maintenance-attended-worker.ts');
+const isWorker = /coordination-maintenance-attended-worker\.(ts|js)$/.test(process.argv[1] ?? '');
 if (!isWorker) {
  const timer = global.setTimeout;
  global.setTimeout = (fn, ms, ...args) => {
