@@ -72,6 +72,9 @@ export function runAttendedMaintenanceFrontend(projectDir: string): Promise<numb
         } else if (reply?.type === "maintenance-attended-ready" && started && reply.token === token) ready = true;
         else if (reply?.type === "maintenance-attended-writing" && ready && !writing && !stopping) {
           writing = true;
+          // Review budget ends here. Keep only the write deadline supervising the writer,
+          // so the review timer cannot kill the worker mid-commit or drop its reply.
+          clearTimeout(total);
           writer = setTimeout(stop, ATTENDED_MAINTENANCE_LIMITS.writeMs);
         } else stop();
       });

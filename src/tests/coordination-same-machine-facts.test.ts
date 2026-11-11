@@ -142,7 +142,7 @@ test("read-only own-PID/impossible-PID smoke or explicit unsupported refusal", (
 
 // Fault injection lives ONLY in an isolated test subprocess's Node builtins.
 // The production module exposes no observer, platform, clock or identity override.
-test("native failures, races and resource bounds fail closed with bounded codes", { skip: process.platform !== "darwin" ? "requires Darwin native collector" : false }, () => {
+test("native failures, races and resource bounds fail closed with bounded codes", {}, () => {
   const url = new URL("../resources/extensions/gsd/coordination-same-machine-facts.ts", import.meta.url).href;
   const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
     import assert from 'node:assert/strict';
