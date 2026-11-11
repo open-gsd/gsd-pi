@@ -21,6 +21,42 @@ import * as client from "./ollama-client.js";
 import { discoverModels } from "./ollama-discovery.js";
 import { registerOllamaCommands } from "./ollama-commands.js";
 import { streamOllamaChat } from "./ollama-chat-provider.js";
+import { stalePriceSnapshotMessage } from "./cloud-prices.js";
+
+/**
+ * Observers for cost-reporting drift, fired by probeAndRegister so hosts
+ * can surface them through their own channels (TUI notify, worker stderr).
+ */
+export interface ProbeHooks {
+	/** Fires once per cloud-routed model that has no price entry. */
+	onUnpricedCloudModel?: (name: string) => void;
+}
+
+/** Cost-drift notices already emitted in this process (one-time per notice). */
+const emittedCostNotices = new Set<string>();
+
+/** Cloud models already reported as unpriced (one-time per model, not per render). */
+const emittedUnpricedModels = new Set<string>();
+
+/**
+ * Emit a cost-drift notice through the channel the session mode provides:
+ * TUI notify interactively, stderr in headless workers (the same forensics
+ * channel `.gsd/parallel/*.stderr.log` is collected from). One-time per
+ * notice per process — session switches and auto-mode session resets must
+ * not spam it.
+ */
+function emitCostNotice(
+	notice: string,
+	ctx: { hasUI?: boolean; ui?: { notify?: (message: string, type?: "warning" | "info" | "error" | "success") => void } },
+): void {
+	if (emittedCostNotices.has(notice)) return;
+	emittedCostNotices.add(notice);
+	if (ctx.hasUI) {
+		ctx.ui?.notify?.(notice, "warning");
+	} else {
+		process.stderr.write(`${notice}\n`);
+	}
+}
 
 let toolsPromise: Promise<void> | null = null;
 
@@ -50,7 +86,7 @@ let providerRegistered = false;
  * so a fake HTTP endpoint can drive the registration/unregistration paths.
  * Production callers always go through the session_start handler below.
  */
-export async function probeAndRegister(pi: ExtensionAPI): Promise<boolean> {
+export async function probeAndRegister(pi: ExtensionAPI, hooks?: ProbeHooks): Promise<boolean> {
 	const running = await client.isRunning();
 	if (!running) {
 		if (providerRegistered) {
@@ -69,6 +105,10 @@ export async function probeAndRegister(pi: ExtensionAPI): Promise<boolean> {
 			providerRegistered = false;
 		}
 		return false;
+	}
+
+	for (const model of models) {
+		if (model.unpricedCloud) hooks?.onUnpricedCloudModel?.(model.id);
 	}
 
 	const baseUrl = client.getOllamaHost();
@@ -130,16 +170,57 @@ export default function ollama(pi: ExtensionAPI) {
 			}
 		};
 
+		// Collect cost-reporting drift from the probe and surface it through
+		// the mode's channel: a $0 nobody can distinguish from "local and
+		// free" is the twin of the zero-cost bug the price table fixes.
+		const unpricedCloud: string[] = [];
+		const hooks: ProbeHooks = {
+			onUnpricedCloudModel: (name) => {
+				unpricedCloud.push(name);
+			},
+		};
+		const emitCostDriftNotices = (): void => {
+			// Report each unpriced cloud model exactly once per process —
+			// re-probes in a different /api/tags order or as a superset must
+			// not re-notice already-reported models. Sorted so the rendered
+			// key is order-stable.
+			const freshUnpriced = unpricedCloud.filter((name) => !emittedUnpricedModels.has(name));
+			if (freshUnpriced.length > 0) {
+				for (const name of freshUnpriced) emittedUnpricedModels.add(name);
+				emitCostNotice(
+					`[ollama] no price entry for cloud model(s) ${[...freshUnpriced].sort().join(", ")} — reporting $0; report it at github.com/open-gsd/gsd-pi/issues so it can be priced`,
+					ctx,
+				);
+			}
+			const stale = stalePriceSnapshotMessage();
+			if (stale) emitCostNotice(stale, ctx);
+		};
+
+		const safeEmitCostDriftNotices = (): void => {
+			try {
+				emitCostDriftNotices();
+			} catch (error) {
+				// A notice is advisory: a display-layer throw must never be
+				// mistaken for a registration failure (which would clear the
+				// footer status a successful probe just set).
+				debugOllama("cost-notice", error);
+			}
+		};
+
 		if (!ctx.hasUI) {
 			try {
-				await probeAndRegister(pi);
+				// Notices only when ollama is actually usable — a user with no
+				// daemon or an empty catalog must not receive price-drift
+				// noise at every boot.
+				if (await probeAndRegister(pi, hooks)) safeEmitCostDriftNotices();
 			} catch (error) {
 				debugOllama("headless", error);
 			}
 		} else {
-			probeAndRegister(pi)
+			probeAndRegister(pi, hooks)
 				.then((found) => {
 					ctx.ui.setStatus("ollama", found ? "Ollama" : undefined);
+					if (found) safeEmitCostDriftNotices();
 				})
 				.catch((error) => {
 					ctx.ui.setStatus("ollama", undefined);
