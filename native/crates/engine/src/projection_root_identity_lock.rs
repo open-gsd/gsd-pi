@@ -577,7 +577,13 @@ impl ProjectionRootIdentityLock {
                     && right_actual.as_deref() == Some(&right_identity)
                     && guard_actual.as_deref() == Some(&guard_identity)
                 {
-                    delete_windows_handle(guard_file.unwrap(), false)?;
+                    // Tree exchanges stage a directory placeholder (#2774).
+                    // Derive its kind from the identity-checked handle, not its path.
+                    let guard_file = guard_file.unwrap();
+                    let directory = windows_file_information(&guard_file)?.file_attributes
+                        & FILE_ATTRIBUTE_DIRECTORY
+                        != 0;
+                    delete_windows_handle(guard_file, directory)?;
                 } else if left_actual.as_deref() == Some(&left_identity)
                     && right_actual.as_deref() == Some(&right_identity)
                     && guard_actual.is_none()
