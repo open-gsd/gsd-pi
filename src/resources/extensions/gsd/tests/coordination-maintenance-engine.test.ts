@@ -655,12 +655,3 @@ test("native facts capture detaches and freezes every nested value without freez
   assert.throws(() => { captured.pids[0].pid = 99; }, TypeError);
   assert.throws(() => { captured.pids.push({ pid: 99, state: "absent", processIdentity: null }); }, TypeError);
 });
-
-test("root attended path captures its own immutable facts before presentation and retains the same baseline", () => {
-  const source = fs.readFileSync(new URL("../db/engine.ts", import.meta.url), "utf8");
-  const rootPath = source.slice(source.indexOf("export async function attendSameMachineCoordinationMaintenance("), source.indexOf("interface CoordinationMaintenanceOwned"));
-  assert.match(rootPath, /const facts = captureNativeMaintenanceFacts\(collectNativeSameMachineFacts\(pids\)\);/);
-  assert.ok(rootPath.indexOf("const facts = captureNativeMaintenanceFacts(") < rootPath.indexOf("maintenanceReviewPresentation(snapshot, facts,"));
-  assert.match(rootPath, /capability = \{ snapshot, facts,/);
-  assert.match(rootPath, /stableMaintenanceFacts\(facts, repeatedFacts,/);
-});

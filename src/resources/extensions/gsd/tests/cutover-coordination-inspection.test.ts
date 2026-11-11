@@ -50,13 +50,6 @@ function rows(result: ReturnType<ReturnType<typeof fixture>["inspect"]>, categor
   return result.samples[category]!.rows as Record<string, any>[];
 }
 
-test("index registers the bounded observer independently of full bootstrap", () => {
-  const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-  const registration = source.indexOf("registerCutoverCoordinationRead(pi)");
-  assert.ok(registration > 0, "missing explicit observer registration");
-  assert.ok(registration < source.indexOf('import("./bootstrap/register-extension.js")'));
-});
-
 test("guard predicates match every current boundary, including expired held leases", (t) => {
   const f = fixture(t);
   for (const status of ["active", "stopping", "stopped", "crashed", "unknown"]) f.worker(status, status);

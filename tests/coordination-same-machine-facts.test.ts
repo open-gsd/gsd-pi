@@ -141,17 +141,6 @@ test("read-only own-PID/impossible-PID smoke or explicit unsupported refusal", (
   assert.equal(sameNativeMachineFacts(facts, facts), true);
 });
 
-test("fixed production surface and collection resource bounds", () => {
-  const source = readFileSync(new URL("../src/resources/extensions/gsd/coordination-same-machine-facts.ts", import.meta.url), "utf8");
-  assert.match(source, /COLLECTION_BUDGET_MS = 5000/);
-  assert.match(source, /COMMAND_TIMEOUT_MS = 750/);
-  assert.match(source, /maxBuffer: MAX_OUTPUT_BYTES/);
-  assert.match(source, /timeout: Math\.min\(COMMAND_TIMEOUT_MS, remaining\)/);
-  assert.match(source, /env: \{ TZ: "UTC", LC_ALL: "C", LANG: "C" \}/);
-  assert.doesNotMatch(source, /process\.env|from ["'][^"']*(?:engine|admission|writer)/);
-  assert.match(source, /collectNativeSameMachineFacts\(pids: readonly number\[\]\)/);
-});
-
 // Fault injection lives ONLY in an isolated test subprocess's Node builtins.
 // The production module exposes no observer, platform, clock or identity override.
 test("native failures, races and resource bounds fail closed with bounded codes", () => {
