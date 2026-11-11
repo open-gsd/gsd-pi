@@ -1007,6 +1007,166 @@ describe("stream-adapter — parallel tool_use keeps its arguments when a siblin
 	});
 });
 
+describe("stream-adapter — parallel tool_use starting after the first result is not dropped (#3061)", () => {
+	// The boundary for the response's FIRST result nulls the builder; every
+	// later content_block_start in the same response finds no builder and no
+	// message_start recreates one, so the block is never created at all — the
+	// #2585 backfill has nothing to patch and the call (really executed)
+	// vanishes from the activity log and safety evidence. The issue's
+	// fast-batch trace: tool-1 and tool-2 are created live; tool-3 and tool-4
+	// start after boundaries and each gets its own complete `assistant`
+	// message carrying the full input.
+	function* droppedBatchScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		const boundary = (uuid: string, toolUseId: string, content: string) => ({
+			type: "user",
+			uuid,
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: false }],
+			},
+		});
+		const completeAssistant = (uuid: string, id: string, input: Record<string, unknown>) => ({
+			type: "assistant",
+			uuid,
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				id: `msg_${id}`,
+				role: "assistant",
+				model: "claude-sonnet-4-6",
+				content: [{ type: "tool_use", id, name: "mcp__gsd-workflow__gsd_exec", input }],
+				stop_reason: "tool_use",
+				usage: { input_tokens: 1, output_tokens: 1 },
+			},
+		});
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		// tool-1: created live, args complete, result lands fast
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-1", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"script\":\"pnpm test\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		// tool-2: created live, only its start streamed when tool-1's result lands
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+		yield completeAssistant("assistant-1", "tool-1", { script: "pnpm test" });
+		// -- boundary for tool-1 (builder folds + nulls) --
+		yield boundary("user-1", "tool-1", "exit 0");
+		// tool-3: starts with no builder → dropped entirely pre-fix
+		yield streamEvent({ type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "tool-3", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+		yield completeAssistant("assistant-2", "tool-2", { script: "pnpm verify" });
+		// -- boundary for tool-2 --
+		yield boundary("user-2", "tool-2", "exit 0");
+		// tool-4: also dropped pre-fix
+		yield streamEvent({ type: "content_block_start", index: 3, content_block: { type: "tool_use", id: "tool-4", name: "mcp__gsd-workflow__gsd_exec", input: {} } }, "p1");
+		yield completeAssistant("assistant-3", "tool-3", { script: "npx jest a.test.js b.test.js" });
+		// -- boundary for tool-3 (its result must complete the synthesized block) --
+		yield boundary("user-3", "tool-3", "exit 0");
+		yield completeAssistant("assistant-4", "tool-4", { script: "npx jest --maxWorkers=4 --silent" });
+		// -- boundary for tool-4 --
+		yield boundary("user-4", "tool-4", "exit 0");
+		yield makeSdkSuccessResult("done");
+	}
+
+	test("dropped tool_use blocks are synthesized from their complete assistant messages", async () => {
+		const externalCalls: string[] = [];
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Run all four." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: droppedBatchScenario,
+				onExternalToolCall: (toolCall: any) => { externalCalls.push(toolCall.id); },
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		const toolcallEndArgsById = new Map<string, Record<string, unknown>>();
+		for await (const event of stream) {
+			if (event.type === "toolcall_end") toolcallEndArgsById.set(event.toolCall.id, event.toolCall.arguments);
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		assert.ok(finalMessage, "stream completed with done");
+		// All four calls exist in the final message with their real inputs —
+		// pre-fix tool-3 and tool-4 were absent entirely (72/116 calls lost in
+		// the issue's field data).
+		const tools = finalMessage!.content.filter((block) => block.type === "toolCall") as any[];
+		assert.deepEqual(
+			tools.map((block) => [block.id, block.arguments]),
+			[
+				["tool-1", { script: "pnpm test" }],
+				["tool-2", { script: "pnpm verify" }],
+				["tool-3", { script: "npx jest a.test.js b.test.js" }],
+				["tool-4", { script: "npx jest --maxWorkers=4 --silent" }],
+			],
+		);
+		// Every synthesized block went through the execution-record path exactly
+		// once and later completed with its result attached.
+		for (const id of ["tool-1", "tool-2", "tool-3", "tool-4"]) {
+			assert.equal(externalCalls.filter((recorded) => recorded === id).length, 1, `${id} recorded exactly once`);
+		}
+		assert.deepEqual(toolcallEndArgsById.get("tool-3"), { script: "npx jest a.test.js b.test.js" });
+		assert.deepEqual(toolcallEndArgsById.get("tool-4"), { script: "npx jest --maxWorkers=4 --silent" });
+	});
+
+	test("subagent complete messages do not synthesize main-loop blocks", async () => {
+		function* subagentScenario(): Generator<any> {
+			const completeAssistant = {
+				type: "assistant",
+				uuid: "assistant-sub",
+				session_id: "session-1",
+				parent_tool_use_id: "subagent-1",
+				message: {
+					id: "msg_sub_1",
+					role: "assistant",
+					model: "claude-sonnet-4-6",
+					content: [{ type: "tool_use", id: "sub-tool-1", name: "Read", input: { path: "a.txt" } }],
+					stop_reason: "tool_use",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			};
+			yield completeAssistant;
+			yield makeSdkSuccessResult("done");
+		}
+		const externalCalls: string[] = [];
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Run." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: subagentScenario,
+				onExternalToolCall: (toolCall: any) => { externalCalls.push(toolCall.id); },
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		assert.ok(finalMessage, "stream completed with done");
+		assert.equal(
+			finalMessage!.content.some((block) => block.type === "toolCall" && (block as any).id === "sub-tool-1"),
+			false,
+			"subagent tool_use must not synthesize a main-loop block",
+		);
+		assert.equal(externalCalls.includes("sub-tool-1"), false);
+	});
+});
+
 describe("stream-adapter — full context prompt (#2859)", () => {
 	test("buildPromptFromContext includes all user and assistant messages, not just the last user message", () => {
 		const context: Context = {
