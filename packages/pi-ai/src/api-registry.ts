@@ -1,3 +1,4 @@
+import { assertModelRequestAllowed } from "./model-request-policy.js";
 import type {
 	Api,
 	AssistantMessageEventStream,
@@ -49,6 +50,7 @@ function wrapStream<TApi extends Api, TOptions extends StreamOptions>(
 	stream: StreamFunction<TApi, TOptions>,
 ): ApiStreamFunction {
 	return (model, context, options) => {
+		assertModelRequestAllowed(model);
 		if (model.api !== api) {
 			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
 		}
@@ -61,6 +63,7 @@ function wrapStreamSimple<TApi extends Api>(
 	streamSimple: StreamFunction<TApi, SimpleStreamOptions>,
 ): ApiStreamSimpleFunction {
 	return (model, context, options) => {
+		assertModelRequestAllowed(model);
 		if (model.api !== api) {
 			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
 		}

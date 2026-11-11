@@ -340,3 +340,14 @@ test("paid live-provider release tests require explicit opt-in", () => {
   assert.equal(paidSteps.length, 2);
   for (const step of paidSteps) assert.equal(step.if, "${{ inputs.run_live_tests }}");
 });
+
+test("production release stages open-gsd-openclaw version files", () => {
+  const steps = workflow.jobs["prod-release"].steps;
+  const commitRelease = steps.find((step) => step.name === "Commit and tag release");
+
+  assert.ok(commitRelease, "prod-release must create a release commit");
+  // integrations/openclaw is outside the packages/*/package.json glob, and its
+  // manifest is a second version surface synced by version-sync.cjs.
+  assert.match(commitRelease.run, /integrations\/openclaw\/package\.json/);
+  assert.match(commitRelease.run, /integrations\/openclaw\/openclaw\.plugin\.json/);
+});

@@ -5,6 +5,7 @@ import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import { Text } from "@gsd/pi-tui";
 import { SUMMARY_SAVE_CONTENT_MAX_LENGTH } from "@opengsd/contracts";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { getErrorMessage } from "../error-utils.js";
 import { piExecutionInvocation } from "../execution-invocation.js";
 import { incrementLegacyTelemetry } from "../legacy-telemetry.js";
@@ -3704,6 +3705,54 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	};
 
 	registerWorkflowTool(pi, decisionListTool);
+
+	// ─── gsd_project_init ────────────────────────────────────────────────────
+	//
+	// Write: minimal, idempotent, headless bootstrap for from-scratch projects —
+	// creates the .gsd state directory and workflow database so DB-backed tools
+	// can operate. Rich onboarding (git setup, mode, preferences) stays with the
+	// interactive init wizard.
+
+	const projectInitExecute = async (
+		_toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		try {
+			const { executeProjectInit } = await loadWorkflowExecutors();
+			return await executeProjectInit(params, resolveCtxCwd(_ctx));
+		} catch (err) {
+			return formatWorkflowToolLoadError(err);
+		}
+	};
+
+	const projectInitTool = {
+		name: "gsd_project_init",
+		label: "Initialize GSD Project State",
+		description:
+			"Initialize GSD workflow state for a project with no .gsd directory: " +
+			"creates .gsd/ and the workflow database so DB-backed planning tools can write. " +
+			"Minimal, idempotent, headless bootstrap; rich onboarding stays with /gsd init.",
+		promptSnippet:
+			"Bootstrap .gsd state for a from-scratch project before planning",
+		promptGuidelines: [
+			"Run gsd_project_init once for a project that has never used GSD; it is a no-op when state already exists.",
+			"Pass projectDir to target a specific project root; defaults to the session working directory.",
+		],
+		parameters: Type.Object({
+			projectDir: Type.Optional(
+				Type.String({
+					description:
+						"Project root to initialize. Defaults to the current working directory.",
+				}),
+			),
+		}),
+		execute: projectInitExecute,
+	};
+
+	registerWorkflowTool(pi, projectInitTool);
 
 	// ─── gsd_project_snapshot ────────────────────────────────────────────────
 	//

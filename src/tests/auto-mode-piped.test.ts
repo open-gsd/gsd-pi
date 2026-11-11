@@ -58,6 +58,8 @@ const modules = new Map([
   ['stub:pi-ai', \`
     export async function completeSimple() { return {} }
     export function getEnvApiKey() { return undefined }
+    export function getModelRequestPolicy() { return undefined }
+    export function assertModelSelectionAllowed() {}
     export function getProviderCapabilities() { return {} }
     export function isAnthropicApi() { return false }
     export function StringEnum() { return {} }

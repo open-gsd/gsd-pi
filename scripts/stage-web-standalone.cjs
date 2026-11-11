@@ -9,7 +9,11 @@ const {
   realpathSync,
   rmSync,
   statSync,
+  renameSync,
+  readFileSync,
+  writeFileSync,
 } = require('node:fs')
+const { createHash } = require('node:crypto')
 const { dirname, join, resolve } = require('node:path')
 
 const COPY_OPTIONS = {
@@ -18,16 +22,18 @@ const COPY_OPTIONS = {
   dereference: true,
 }
 
-function overlayNodePty(targetRoot, sourceNodePtyRoot) {
+function overlayNodePty(targetRoot, sourceNodePtyRoot, { sharedDependencies = false, distDir = '.next' } = {}) {
   if (!existsSync(sourceNodePtyRoot)) return []
 
   const hydrated = []
-  const directTarget = join(targetRoot, 'node_modules', 'node-pty')
-  mkdirSync(join(targetRoot, 'node_modules'), { recursive: true })
-  cpSync(sourceNodePtyRoot, directTarget, COPY_OPTIONS)
-  hydrated.push(directTarget)
+  if (!sharedDependencies) {
+    const directTarget = join(targetRoot, 'node_modules', 'node-pty')
+    mkdirSync(join(targetRoot, 'node_modules'), { recursive: true })
+    cpSync(sourceNodePtyRoot, directTarget, COPY_OPTIONS)
+    hydrated.push(directTarget)
+  }
 
-  const hashedNodeModulesRoot = join(targetRoot, '.next', 'node_modules')
+  const hashedNodeModulesRoot = join(targetRoot, distDir, 'node_modules')
   if (!existsSync(hashedNodeModulesRoot)) return hydrated
 
   for (const entry of readdirSync(hashedNodeModulesRoot, { withFileTypes: true })) {
@@ -176,46 +182,108 @@ function hoistPnpmVirtualStore(nodeModulesRoot) {
   return hoisted
 }
 
-function stageWebStandalone(root = resolve(__dirname, '..')) {
+const OPENCLAW_WEB_BASE_PATH = '/plugins/open-gsd-openclaw/web'
+const WEB_BUILD_METADATA = 'gsd-web-build.json'
+
+function dependencyHash(root) {
+  const hash = createHash('sha256')
+  for (const relative of ['pnpm-lock.yaml', 'web/package.json']) {
+    hash.update(relative)
+    hash.update(readFileSync(join(root, relative)))
+  }
+  return hash.digest('hex')
+}
+
+function readBuildMetadata(appRoot) {
+  try { return JSON.parse(readFileSync(join(appRoot, WEB_BUILD_METADATA), 'utf8')) } catch { return undefined }
+}
+
+function verifyOpenClawDependencies(root) {
+  const sharedRoot = join(root, 'dist', 'web', 'standalone')
+  const metadata = readBuildMetadata(sharedRoot)
+  if (!existsSync(join(sharedRoot, 'server.js')) || !existsSync(join(sharedRoot, 'node_modules'))
+    || metadata?.version !== 1 || metadata.basePath !== '' || metadata.dependencyHash !== dependencyHash(root)) {
+    throw new Error('Build the ordinary standalone host with `pnpm run build:web-host` before the OpenClaw variant; its shared dependencies are missing or stale.')
+  }
+}
+
+function stageWebStandalone(root = resolve(__dirname, '..'), { variant = 'standalone' } = {}) {
+  if (!['standalone', 'openclaw'].includes(variant)) throw new Error(`Unknown web host variant: ${variant}`)
+  const embedded = variant === 'openclaw'
+  const distDir = embedded ? '.next-openclaw' : '.next'
+  const basePath = embedded ? OPENCLAW_WEB_BASE_PATH : ''
   const webRoot = join(root, 'web')
-  const standaloneRoot = join(webRoot, '.next', 'standalone')
+  const standaloneRoot = join(webRoot, distDir, 'standalone')
   const standaloneAppRoot = join(standaloneRoot, 'web')
   const standaloneNodeModulesRoot = join(standaloneRoot, 'node_modules')
-  const staticRoot = join(webRoot, '.next', 'static')
+  const staticRoot = join(webRoot, distDir, 'static')
   const publicRoot = join(webRoot, 'public')
-  const distWebRoot = join(root, 'dist', 'web')
-  const distStandaloneRoot = join(distWebRoot, 'standalone')
+  const distWebRoot = embedded ? join(root, 'dist', 'web', 'standalone', 'openclaw') : join(root, 'dist', 'web')
+  const stagingWebRoot = join(root, 'dist', embedded ? '.web-openclaw-staging' : '.web-staging')
+  const distStandaloneRoot = embedded ? stagingWebRoot : join(stagingWebRoot, 'standalone')
   const sourceNodePtyRoot = join(webRoot, 'node_modules', 'node-pty')
 
   if (!existsSync(standaloneAppRoot)) {
-    console.error('[gsd] Web standalone build not found at web/.next/standalone/web. Run `npm --prefix web run build` first.')
-    process.exit(1)
+    throw new Error(`Web standalone build not found at web/${distDir}/standalone/web. Build the ${variant} host first.`)
   }
+  const compiled = JSON.parse(readFileSync(join(webRoot, distDir, 'required-server-files.json'), 'utf8'))
+  if ((compiled.config?.basePath ?? '') !== basePath) {
+    throw new Error(`Refusing to stage ${variant}: compiled basePath must be ${JSON.stringify(basePath)}. Next.js basePath cannot be changed at runtime.`)
+  }
+  if (embedded) verifyOpenClawDependencies(root)
+  const metadata = { version: 1, basePath, dependencyHash: dependencyHash(root) }
 
-  rmSync(distWebRoot, { recursive: true, force: true })
+  rmSync(stagingWebRoot, { recursive: true, force: true })
   mkdirSync(distStandaloneRoot, { recursive: true })
 
   cpSync(standaloneAppRoot, distStandaloneRoot, COPY_OPTIONS)
+  // Both variants trace the same application/dependency graph. Nested app
+  // node_modules links are redundant with the validated parent dependency tree.
+  if (embedded) rmSync(join(distStandaloneRoot, 'node_modules'), { recursive: true, force: true })
 
   let hoistedCount = 0
-  if (existsSync(standaloneNodeModulesRoot)) {
+  if (!embedded && existsSync(standaloneNodeModulesRoot)) {
     const distNodeModulesRoot = join(distStandaloneRoot, 'node_modules')
     cpSync(standaloneNodeModulesRoot, distNodeModulesRoot, COPY_OPTIONS)
     hoistedCount = hoistPnpmVirtualStore(distNodeModulesRoot)
   }
 
   if (existsSync(staticRoot)) {
-    mkdirSync(join(distStandaloneRoot, '.next'), { recursive: true })
-    cpSync(staticRoot, join(distStandaloneRoot, '.next', 'static'), COPY_OPTIONS)
+    mkdirSync(join(distStandaloneRoot, distDir), { recursive: true })
+    cpSync(staticRoot, join(distStandaloneRoot, distDir, 'static'), COPY_OPTIONS)
   }
 
   if (existsSync(publicRoot)) {
     cpSync(publicRoot, join(distStandaloneRoot, 'public'), COPY_OPTIONS)
   }
 
-  const hydratedTargets = overlayNodePty(distStandaloneRoot, sourceNodePtyRoot)
+  const hydratedTargets = overlayNodePty(distStandaloneRoot, sourceNodePtyRoot, { sharedDependencies: embedded, distDir })
+  writeFileSync(join(distStandaloneRoot, WEB_BUILD_METADATA), JSON.stringify(metadata) + '\n')
+  if (!embedded) {
+    const priorEmbedded = join(distWebRoot, 'standalone', 'openclaw')
+    const priorMetadata = readBuildMetadata(priorEmbedded)
+    // Retain an independently built variant only while its shared dependency
+    // generation is compatible. The subsequent variant build replaces its app.
+    if (priorMetadata?.version === 1 && priorMetadata.basePath === OPENCLAW_WEB_BASE_PATH && priorMetadata.dependencyHash === metadata.dependencyHash) {
+      cpSync(priorEmbedded, join(distStandaloneRoot, 'openclaw'), COPY_OPTIONS)
+    }
+  }
 
-  console.log(`[gsd] Staged web standalone host at ${distStandaloneRoot}`)
+  // Atomic swap: stage fully into .web-staging, then rename into place so a
+  // live daemon keeps serving open files from the old inode tree, and the
+  // previous generation is preserved as an instant rollback artifact.
+  const distWebPrevious = join(root, 'dist', embedded ? '.web-openclaw-previous' : '.web-previous')
+  rmSync(distWebPrevious, { recursive: true, force: true })
+  if (existsSync(distWebRoot)) renameSync(distWebRoot, distWebPrevious)
+  try {
+    renameSync(stagingWebRoot, distWebRoot)
+  } catch (error) {
+    if (existsSync(distWebPrevious) && !existsSync(distWebRoot)) {
+      renameSync(distWebPrevious, distWebRoot)
+    }
+    throw error
+  }
+  console.log('[gsd] Atomically swapped staged web host into ' + distWebRoot + (existsSync(distWebPrevious) ? ` (previous generation kept at ${distWebPrevious})` : ''))
   if (hoistedCount > 0) {
     console.log(`[gsd] Flattened ${hoistedCount} package(s) from the pnpm virtual store so they survive npm pack.`)
   }
@@ -232,6 +300,8 @@ module.exports = {
   removeSymlinksRecursively,
   overlayNodePty,
   stageWebStandalone,
+  verifyOpenClawDependencies,
+  OPENCLAW_WEB_BASE_PATH,
 }
 
 if (require.main === module) {

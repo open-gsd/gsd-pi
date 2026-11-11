@@ -25,6 +25,7 @@ import { useGSDWorkspaceState, buildProjectUrl } from "@/lib/gsd-workspace-store
 import { authFetch } from "@/lib/auth"
 import { FileContentViewer } from "@/components/gsd/file-content-viewer"
 import { ChatPane } from "@/components/gsd/chat-mode"
+import { embeddedApiFetch, embeddedModeActive } from "@/lib/embedded-gate"
 
 type RootMode = "gsd" | "project"
 
@@ -917,10 +918,12 @@ export function FilesView() {
     if (!deleteConfirm) return
     const { path, type } = deleteConfirm
     try {
-      const res = await fetch(
-        buildProjectUrl(`/api/files?root=${activeRoot}&path=${encodeURIComponent(path)}`, projectCwd),
-        { method: "DELETE" },
-      )
+      const res = embeddedModeActive()
+        ? await embeddedApiFetch(buildProjectUrl(`/api/files?root=${activeRoot}&path=${encodeURIComponent(path)}`, projectCwd), { method: "DELETE" })
+        : await fetch(
+            buildProjectUrl(`/api/files?root=${activeRoot}&path=${encodeURIComponent(path)}`, projectCwd),
+            { method: "DELETE" },
+          )
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         console.error("Delete failed:", data.error || res.statusText)

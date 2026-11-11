@@ -1,6 +1,7 @@
 packages:
   - 'packages/*'
   - 'extensions/*'
+  - 'integrations/openclaw'
   - 'web'
 
 autoInstallPeers: true
