@@ -13,7 +13,7 @@ import { openCoordinationMaintenanceHost } from "../coordination-maintenance.ts"
 import { databaseMaintenanceIntentPath } from "../database-maintenance-fence.ts";
 import { _getAdapter, closeDatabase, getDb, getDbOrNull, openDatabase, openExistingDatabase } from "../gsd-db.ts";
 import { _executeCoordinationMaintenanceDomainOperation, _setDomainOperationFaultForTest, executeDomainOperation } from "../db/domain-operation.ts";
-import { attendSameMachineCoordinationMaintenance, immediateTransaction, openIsolatedDatabase, snapshotDatabaseFile, openDatabaseByWorkspace, openDatabaseByScope } from "../db/engine.ts";
+import { attendSameMachineCoordinationMaintenance, immediateTransaction, openIsolatedDatabase, snapshotDatabaseFile, openDatabaseByWorkspace, openDatabaseByScope, probeDbWritable, refreshOpenDatabaseFromDisk } from "../db/engine.ts";
 import * as maintenanceReview from "../coordination-maintenance-review.ts";
 import type { NativeSameMachineFacts } from "../coordination-same-machine-facts.ts";
 import { _setStartupSchemaDetectionForTest } from "../db/engine.ts";
@@ -108,6 +108,14 @@ test("terminal stopped workers do not block maintenance while their recorded PID
   const sealId = prepare(f);
   assert.equal(f.host.apply({ sealId }).status, "committed");
   assert.equal(released(f), "released");
+});
+
+test("refresh and writable probe refuse during maintenance exclusion, not only when a database is open", (t) => {
+  const f = fixture(t);
+  assert.throws(() => refreshOpenDatabaseFromDisk(), /Generic database access is unavailable during coordination maintenance/);
+  assert.throws(() => probeDbWritable(), /Generic database access is unavailable during coordination maintenance/);
+  f.host.close();
+  assert.equal(getDbOrNull(), null);
 });
 
 test("openExistingDatabase cannot bypass maintenance exclusion for the same or another existing database", (t) => {

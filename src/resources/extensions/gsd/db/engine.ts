@@ -2724,6 +2724,7 @@ export function snapshotDatabaseFile(sourcePath: string, destinationPath: string
  * current on-disk database instead of continuing with a possibly stale handle.
  */
 export function refreshOpenDatabaseFromDisk(): boolean {
+  refuseCoordinationMaintenanceAccessor();
   if (!currentDb || !currentPath) return false;
   if (currentPath === ":memory:") return false;
   assertDatabaseReplacementFenceAllowsWrite();
@@ -2981,6 +2982,7 @@ export interface DbWritableProbeResult {
  * is idempotent, and the transaction is rolled back so nothing persists.
  */
 export function probeDbWritable(): DbWritableProbeResult {
+  refuseCoordinationMaintenanceAccessor();
   const db = currentDb;
   if (!db) return { ok: false, detail: "No database is open." };
   try {
