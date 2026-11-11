@@ -24,9 +24,9 @@ The envelope contains 38 tools because the deprecated alias is unregistered; the
 
 The reproduction reads only downloaded source files at the pinned revision. It does not execute the native binary and does not build locally. Run it from a directory containing the pinned source snapshot and the helper scripts `extract.py` and `verify-roster.py` (currently unpublished; see the limit below).
 
-Exact command:
+Reference command (NOT runnable as published: it requires the unpublished helper scripts `extract.py` and `verify-roster.py`, so it documents the author's procedure only and is not a reproduction a maintainer can execute):
 
-```bash
+```text
 python3 - <<'PY'
 from pathlib import Path
 import hashlib, json
@@ -43,7 +43,7 @@ print(hashlib.sha256(b).hexdigest(), len(b), 'tools', len(g['envelope']['tools']
 PY
 ```
 
-Expected output: `6ec22e2dd71ff5716905e491f85fdc20403bbe7e367d37a03234231b6aa8aaf1 73248 tools 38`.
+Recorded author output (not independently verified): `6ec22e2dd71ff5716905e491f85fdc20403bbe7e367d37a03234231b6aa8aaf1 73248 tools 38`.
 
 Tool selection: the macOS registry (`platform-macos/src/tools/mod.rs` `register_all`, plus `check_for_update`), with the unregistered `type_text_chars` alias excluded. Array order follows registration order. Entry conversion: each tool is emitted as `name`, `description`, `inputSchema`, `annotations` (four booleans), and `capabilities`.
 
