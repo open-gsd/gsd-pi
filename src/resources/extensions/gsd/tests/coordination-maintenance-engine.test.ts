@@ -13,7 +13,9 @@ import { openCoordinationMaintenanceHost } from "../coordination-maintenance.ts"
 import { databaseMaintenanceIntentPath } from "../database-maintenance-fence.ts";
 import { _getAdapter, closeDatabase, getDb, getDbOrNull, openDatabase, openExistingDatabase } from "../gsd-db.ts";
 import { _executeCoordinationMaintenanceDomainOperation, _setDomainOperationFaultForTest, executeDomainOperation } from "../db/domain-operation.ts";
-import { immediateTransaction } from "../db/engine.ts";
+import { attendSameMachineCoordinationMaintenance, immediateTransaction, openIsolatedDatabase, snapshotDatabaseFile, openDatabaseByWorkspace, openDatabaseByScope } from "../db/engine.ts";
+import * as maintenanceReview from "../coordination-maintenance-review.ts";
+import type { NativeSameMachineFacts } from "../coordination-same-machine-facts.ts";
 import { _setStartupSchemaDetectionForTest } from "../db/engine.ts";
 
 function fixture(
@@ -548,4 +550,117 @@ test("maintenance schema assessment cannot expose or mutate its private adapter"
     assert.equal(called, false);
     assert.equal(captured, undefined);
   } finally { _setStartupSchemaDetectionForTest(null); }
+});
+
+
+test("ordinary isolated opens deny maintenance before filesystem or path coercion", (t) => {
+  const f = fixture(t);
+  let isolated: ReturnType<typeof openIsolatedDatabase>;
+  t.after(() => isolated?.close());
+  assert.throws(() => { isolated = openIsolatedDatabase(f.path); }, /unavailable during coordination maintenance/);
+  let coerced = 0;
+  const hostile = { toString() { coerced++; throw new Error("path coercion"); } } as unknown as string;
+  assert.throws(() => openIsolatedDatabase(hostile), /unavailable during coordination maintenance/);
+  assert.equal(coerced, 0);
+});
+
+test("ordinary snapshots deny maintenance before output or destination coercion", (t) => {
+  const f = fixture(t);
+  const destination = join(f.root, "denied.db");
+  assert.throws(() => snapshotDatabaseFile(f.path, destination), /unavailable during coordination maintenance/);
+  assert.equal(existsSync(destination), false);
+  assert.equal(fs.readdirSync(f.root).some(name => name.includes(".snapshot-")), false);
+  let coerced = 0;
+  const hostile = { toString() { coerced++; throw new Error("path coercion"); } } as unknown as string;
+  assert.throws(() => snapshotDatabaseFile(hostile, destination), /unavailable during coordination maintenance/);
+  assert.throws(() => snapshotDatabaseFile(f.path, hostile), /unavailable during coordination maintenance/);
+  assert.equal(coerced, 0);
+});
+
+test("ordinary workspace openings deny maintenance before caller-owned property access", (t) => {
+  fixture(t);
+  let inspected = 0;
+  const hostile = new Proxy({}, { get() { inspected++; throw new Error("caller property access"); } });
+  assert.throws(() => openDatabaseByWorkspace(hostile as never), /unavailable during coordination maintenance/);
+  assert.throws(() => openDatabaseByScope(hostile as never), /unavailable during coordination maintenance/);
+  assert.equal(inspected, 0);
+});
+
+test("live isolated handles refuse attended admission before terminal or filesystem access", async (t) => {
+  const f = fixture(t);
+  f.host.close();
+  const isolated = openIsolatedDatabase(f.path);
+  assert.ok(isolated);
+  t.after(() => isolated.close());
+  const open = fs.openSync;
+  let opens = 0;
+  fs.openSync = (() => { opens++; throw new Error("unexpected native or filesystem open"); }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(await attendSameMachineCoordinationMaintenance(f.root), { status: "refused", reason: "unavailable" });
+    assert.equal(opens, 0);
+  } finally { fs.openSync = open; syncBuiltinESMExports(); }
+});
+
+test("closed isolated handles and failed opens allow ordinary access and release admission count", async (t) => {
+  const f = fixture(t);
+  f.host.close();
+  assert.equal(openIsolatedDatabase(join(f.root, "missing.db")), null);
+  assert.equal(existsSync(join(f.root, "missing.db")), false);
+  const isolated = openIsolatedDatabase(f.path);
+  assert.ok(isolated);
+  assert.equal(isolated.prepare("PRAGMA quick_check").get()?.quick_check, "ok");
+  isolated.close(); isolated.close();
+  const open = fs.openSync;
+  let opens = 0;
+  fs.openSync = (() => { opens++; throw new Error("test refuses all terminal access"); }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+  try {
+    const reply = await attendSameMachineCoordinationMaintenance(f.root);
+    assert.equal(reply.status, "refused");
+    assert.notEqual(reply.reason, "unavailable");
+    assert.equal(opens, process.platform === "darwin" ? 1 : 0);
+  } finally { fs.openSync = open; syncBuiltinESMExports(); }
+  const destination = join(f.root, "normal.db");
+  snapshotDatabaseFile(f.path, destination);
+  assert.ok(existsSync(destination));
+  assert.equal(fs.readdirSync(f.root).some(name => name.includes(".snapshot-")), false);
+  assert.equal(openExistingDatabase(destination), true);
+  closeDatabase();
+  assert.equal(openExistingDatabase(f.path), true);
+  closeDatabase();
+});
+
+test("native facts capture detaches and freezes every nested value without freezing collector input", () => {
+  const capture = (maintenanceReview as unknown as { captureNativeMaintenanceFacts: (facts: NativeSameMachineFacts) => NativeSameMachineFacts }).captureNativeMaintenanceFacts;
+  assert.equal(typeof capture, "function");
+  const input: NativeSameMachineFacts = {
+    boot: { currentHost: "fixture-host", bootSessionHash: "fixture-boot", bootLowerBoundMs: 1, bootUpperBoundMs: 2, observedAtMs: 3 },
+    pids: [{ pid: 123, state: "absent", processIdentity: null }, { pid: 456, state: "present", processIdentity: "fixture-identity", startedLowerBoundMs: 4, startedUpperBoundMs: 5 }],
+  };
+  const expected = structuredClone(input);
+  const captured = capture(input);
+  assert.notEqual(captured, input);
+  assert.notEqual(captured.boot, input.boot);
+  assert.notEqual(captured.pids, input.pids);
+  for (let i = 0; i < input.pids.length; i++) assert.notEqual(captured.pids[i], input.pids[i]);
+  for (const value of [captured, captured.boot, captured.pids, ...captured.pids]) assert.ok(Object.isFrozen(value));
+  for (const value of [input, input.boot, input.pids, ...input.pids]) assert.equal(Object.isFrozen(value), false);
+  input.boot.currentHost = "changed";
+  input.pids[0].state = "present";
+  input.pids[1].startedLowerBoundMs = 99;
+  input.pids.push({ pid: 789, state: "absent", processIdentity: null });
+  assert.deepEqual(captured, expected);
+  assert.throws(() => { captured.boot.observedAtMs = 99; }, TypeError);
+  assert.throws(() => { captured.pids[0].pid = 99; }, TypeError);
+  assert.throws(() => { captured.pids.push({ pid: 99, state: "absent", processIdentity: null }); }, TypeError);
+});
+
+test("root attended path captures its own immutable facts before presentation and retains the same baseline", () => {
+  const source = fs.readFileSync(new URL("../db/engine.ts", import.meta.url), "utf8");
+  const rootPath = source.slice(source.indexOf("export async function attendSameMachineCoordinationMaintenance("), source.indexOf("interface CoordinationMaintenanceOwned"));
+  assert.match(rootPath, /const facts = captureNativeMaintenanceFacts\(collectNativeSameMachineFacts\(pids\)\);/);
+  assert.ok(rootPath.indexOf("const facts = captureNativeMaintenanceFacts(") < rootPath.indexOf("maintenanceReviewPresentation(snapshot, facts,"));
+  assert.match(rootPath, /capability = \{ snapshot, facts,/);
+  assert.match(rootPath, /stableMaintenanceFacts\(facts, repeatedFacts,/);
 });

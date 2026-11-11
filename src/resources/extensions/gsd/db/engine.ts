@@ -12,12 +12,17 @@ import { createRequire } from "node:module";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { hostname } from "node:os";
+import { performance } from "node:perf_hooks";
+import { collectNativeSameMachineFacts, type NativeSameMachineFacts } from "../coordination-same-machine-facts.js";
+import { ATTENDED_POLICY, ATTENDED_REVIEW_MS, ATTENDED_CAPABILITY_MS, ATTENDED_WRITE_MS, collectMaintenanceReview, captureNativeMaintenanceFacts, maintenanceDigest, maintenanceReviewProof, maintenanceReviewPresentation, stableMaintenanceFacts, type MaintenanceReviewSnapshot } from "../coordination-maintenance-review.js";
+import { openMaintenanceTerminal } from "../coordination-maintenance-terminal.js";
 import type { CoordinationMaintenanceHost, CoordinationMaintenanceReply } from "../../../shared/coordination-maintenance-contract.js";
 import {
   _executeCoordinationMaintenanceDomainOperation,
   assertDomainOperationReceiptComponents,
   inspectDomainOperationReceipt,
   type DomainOperationRequest,
+  type DomainJsonValue,
   type CoordinationMaintenanceDomainOperationRequest,
 } from "./domain-operation.js";
 import {
@@ -36,7 +41,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 import { syncDirectoryEntry } from "@gsd/native/directory-sync";
 
@@ -139,6 +144,7 @@ import {
   captureSqliteOpenIdentity,
   correlateSqliteOpenIdentity,
   openSqliteReadOnly,
+  inspectSqliteReadOnlySnapshot,
   releaseSqliteOpenIdentityCapture,
   type SqliteFileIdentity,
 } from "../sqlite-readonly.js";
@@ -1971,6 +1977,7 @@ export function reopenDatabaseAfterReplacement(
   evidence: DatabaseReplacementReopenEvidence = {},
   boundary?: DatabaseReplacementBoundary,
 ): DatabaseReplacementReceiptCapability | null {
+  refuseCoordinationMaintenanceAccessor();
   const tokenState = _databaseReplacementTokenStates.get(token);
   if (!tokenState) {
     throw new GSDError(GSD_STALE_STATE, "gsd-db: Invalid or consumed database replacement token");
@@ -2158,6 +2165,7 @@ export function closeAllDatabases(): void {
  * @returns true if the connection is open and ready, false otherwise.
  */
 export function openDatabaseByWorkspace(workspace: GsdWorkspace): boolean {
+  refuseCoordinationMaintenanceAccessor();
   const key = workspace.identityKey;
   const dbPath = workspace.contract.projectDb;
 
@@ -2256,6 +2264,7 @@ export function openDatabaseByWorkspace(workspace: GsdWorkspace): boolean {
  * MilestoneScope. Thin delegation to openDatabaseByWorkspace().
  */
 export function openDatabaseByScope(scope: MilestoneScope): boolean {
+  refuseCoordinationMaintenanceAccessor();
   return openDatabaseByWorkspace(scope.workspace);
 }
 
@@ -2635,6 +2644,7 @@ export function closeDatabase(): void {
  * connection. Returns null if the connection cannot be opened.
  */
 export function openIsolatedDatabase(path: string): DbAdapter | null {
+  refuseCoordinationMaintenanceAccessor();
   let adapter: DbAdapter | undefined;
   try {
     if (databaseReplacementIntentExists(path)) return null;
@@ -2667,6 +2677,7 @@ export function openIsolatedDatabase(path: string): DbAdapter | null {
 
 /** Create a standalone SQLite snapshot that includes committed WAL frames. */
 export function snapshotDatabaseFile(sourcePath: string, destinationPath: string): void {
+  refuseCoordinationMaintenanceAccessor();
   const stagingPath = `${destinationPath}.snapshot-${randomUUID()}`;
   let source: DbAdapter | undefined;
   try {
@@ -2990,6 +3001,116 @@ export function probeDbWritable(): DbWritableProbeResult {
 }
 
 // This context is never installed as currentDb or admitted to an ordinary runtime.
+interface NativeAttendedCapability {
+  snapshot: MaintenanceReviewSnapshot;
+  facts: NativeSameMachineFacts;
+  initialObservationAtMs: number;
+  observationMonotonicMs: number;
+  sealId: string;
+  confirmation: string;
+  expires: number;
+  writeDeadline: number;
+}
+// There is deliberately no exported constructor, input option, or grant-taking facade.
+const nativeAttendedCapabilities = new WeakSet<NativeAttendedCapability>();
+
+function readNativeMaintenanceReview(projectDir: string): MaintenanceReviewSnapshot {
+  return inCoordinationMaintenance(() => {
+    const root = realpathSync(projectDir);
+    const path = resolve(root, ".gsd", "gsd.db");
+    const file = strictFileIdentity(path, "maintenance review database");
+    try {
+      const check = () => {
+        if (realpathSync(projectDir) !== root) throw new Error("maintenance root changed");
+        assertDatabaseReplacementFenceAllowsPath(path);
+        assertDatabaseMaintenanceAllowsReplacement(path);
+        assertDatabaseMaintenanceFenceAllowsWrite(path);
+        const current = strictFileIdentity(path, "maintenance review database");
+        try { if (!sameFileIdentity(file, current)) throw new Error("maintenance file changed"); }
+        finally { current.release?.(); }
+      };
+      check();
+      const snapshot = inspectSqliteReadOnlySnapshot(path, db => {
+        check();
+        if (assessStartupRepair(db, false).required || db.prepare("PRAGMA application_id").get()?.application_id !== GSD_APPLICATION_ID) throw new Error("maintenance schema refused");
+        const projectId = db.prepare("SELECT project_id FROM project_authority WHERE singleton = 1").get()?.project_id;
+        if (typeof projectId !== "string") throw new Error("maintenance binding refused");
+        const binding = maintenanceDigest([root, projectId, SCHEMA_VERSION, String(file.device), String(file.inode)]);
+        return collectMaintenanceReview(db, { root, projectId, binding, schemaVersion: SCHEMA_VERSION, applicationId: GSD_APPLICATION_ID });
+      });
+      check();
+      return snapshot;
+    } finally { file.release?.(); }
+  });
+}
+
+/** Root-only, self-observing native attended operation. Intent is not consent. */
+export async function attendSameMachineCoordinationMaintenance(projectDir: string): Promise<CoordinationMaintenanceReply> {
+  if (arguments.length !== 1 || typeof projectDir !== "string" || !isAbsolute(projectDir) || projectDir.includes("\0")) return { status: "refused", reason: "invalid-arguments" };
+  if (currentDb || _dbCache.asReadonlyMap().size || _isolatedDatabases.size || coordinationMaintenanceHosts || coordinationMaintenanceDepth) return { status: "refused", reason: "unavailable" };
+  const cancelled = new AbortController();
+  const cancel = () => cancelled.abort();
+  const started = performance.now();
+  const timer = setTimeout(cancel, ATTENDED_REVIEW_MS);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, cancel);
+  let terminal: ReturnType<typeof openMaintenanceTerminal> | undefined;
+  let reviewFilePin: number | undefined;
+  let host: CoordinationMaintenanceHost | undefined;
+  let capability: NativeAttendedCapability | undefined;
+  coordinationMaintenanceHosts++;
+  try {
+    terminal = openMaintenanceTerminal();
+    // Pin only the regular file's identity, NOT a database adapter or snapshot.
+    // Keeping this O_RDONLY descriptor prevents inode reuse during human review.
+    reviewFilePin = openSync(resolve(realpathSync(projectDir), ".gsd", "gsd.db"), constants.O_RDONLY | constants.O_NOFOLLOW);
+    const pinned = fstatSync(reviewFilePin, { bigint: true });
+    if (!pinned.isFile()) throw new Error("maintenance review file refused");
+    const snapshot = readNativeMaintenanceReview(projectDir);
+    if (snapshot.binding !== maintenanceDigest([snapshot.root, snapshot.projectId, SCHEMA_VERSION, String(pinned.dev), String(pinned.ino)])) throw new Error("maintenance review file changed");
+    const pids = [...new Set(snapshot.workers.map(row => Number(row.pid)))].sort((a, b) => a - b);
+    const initialObservationAtMs = Date.now();
+    const facts = captureNativeMaintenanceFacts(collectNativeSameMachineFacts(pids));
+    const observationMonotonicMs = performance.now();
+    const sealId = randomUUID();
+    const digest = maintenanceDigest(snapshot);
+    const lines = maintenanceReviewPresentation(snapshot, facts, sealId, initialObservationAtMs);
+    // The read-only adapter and its transaction are CLOSED before awaiting input.
+    const confirmation = await terminal.review(lines, sealId, digest, started + ATTENDED_REVIEW_MS, cancelled.signal);
+    terminal.close(); terminal = undefined;
+    cancelled.signal.throwIfAborted();
+    const confirmedAt = performance.now();
+    capability = { snapshot, facts, initialObservationAtMs, observationMonotonicMs, sealId, confirmation,
+      expires: Math.min(confirmedAt + ATTENDED_CAPABILITY_MS, started + ATTENDED_REVIEW_MS),
+      writeDeadline: Math.min(confirmedAt + ATTENDED_WRITE_MS, started + ATTENDED_REVIEW_MS) };
+    const repeated = readNativeMaintenanceReview(projectDir);
+    const repeatedFacts = collectNativeSameMachineFacts(pids);
+    if (maintenanceDigest(repeated) !== digest || !stableMaintenanceFacts(facts, repeatedFacts, observationMonotonicMs, performance.now())) throw new Error("maintenance review changed");
+    maintenanceReviewProof(repeated, repeatedFacts, initialObservationAtMs);
+    cancelled.signal.throwIfAborted();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    cancelled.signal.throwIfAborted();
+    nativeAttendedCapabilities.add(capability);
+    // Supervision only. This cannot attest or mint authority in another process.
+    process.send?.({ type: "maintenance-attended-writing" });
+    host = inCoordinationMaintenance(() => openOwnedCoordinationMaintenanceHost({ projectDir }, capability));
+    return host.apply({ sealId });
+  } catch (error) {
+    if (error instanceof AggregateError) throw error;
+    return { status: "refused", reason: "native-attestation-unavailable-or-changed" };
+  } finally {
+    if (capability) nativeAttendedCapabilities.delete(capability);
+    try { terminal?.close(); } finally {
+      try { host?.close(); } finally {
+        try { if (reviewFilePin !== undefined) closeSync(reviewFilePin); } finally {
+          coordinationMaintenanceHosts--;
+          clearTimeout(timer);
+          for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.off(signal, cancel);
+        }
+      }
+    }
+  }
+}
+
 interface CoordinationMaintenanceOwned {
   db: DbAdapter;
   rollback: DbAdapter;
@@ -3026,10 +3147,16 @@ export function _releaseOwnedCoordinationMaintenanceTarget(db: DbAdapter, reques
 
 /** Existing-file-only lifetime. No startup repair, admission, migration or adapter swap. */
 export function openCoordinationMaintenanceHost(options: { projectDir: string }): CoordinationMaintenanceHost {
+  // Async native review intentionally holds no database handle/maintenance claim.
+  // Its process-wide exclusion must also cover this ordinary maintenance accessor.
+  if (coordinationMaintenanceHosts > 0 || coordinationMaintenanceDepth > 0 || _coordinationMaintenance.getStore()) {
+    const unavailable = (): CoordinationMaintenanceReply => ({ status: "refused", reason: "unavailable" });
+    return Object.freeze({ prepare: unavailable, apply: unavailable, receipt: unavailable, close() {} });
+  }
   return inCoordinationMaintenance(() => openOwnedCoordinationMaintenanceHost(options));
 }
 
-function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): CoordinationMaintenanceHost {
+function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }, attended?: NativeAttendedCapability): CoordinationMaintenanceHost {
   let closed = false;
   let lifetimeHeld = false;
   let db: DbAdapter | undefined;
@@ -3079,7 +3206,7 @@ function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): 
     catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
   };
   const check = (): void => {
-    if (closed || !db || !rollback) fail();
+    if (closed || !db || !rollback || (attended && performance.now() >= attended.writeDeadline)) fail();
     assertDatabaseAdapterMatchesPath(db!, path);
     assertDatabaseReplacementFenceAllowsPath(path);
     assertDatabaseMaintenanceFenceAllowsWrite(path);
@@ -3109,22 +3236,34 @@ function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): 
       || Date.parse(String(row.expires_at)) > Date.now() || Date.parse(String(row.acquired_at)) > Date.parse(String(row.expires_at))
       || Date.parse(String(row.started_at)) > Date.parse(String(row.heartbeat_at))) fail();
   };
+  const validateAttended = (): void => {
+    if (!attended || performance.now() >= attended.expires || performance.now() >= attended.writeDeadline) return fail();
+    const snapshot = collectMaintenanceReview(db!, { root, projectId, binding, schemaVersion: SCHEMA_VERSION, applicationId: GSD_APPLICATION_ID });
+    if (digest(snapshot) !== digest(attended.snapshot)) return fail();
+    const facts = collectNativeSameMachineFacts([...new Set(snapshot.workers.map(row => Number(row.pid)))].sort((a, b) => a - b));
+    if (!stableMaintenanceFacts(attended.facts, facts, attended.observationMonotonicMs, performance.now())) return fail();
+    maintenanceReviewProof(snapshot, facts, attended.initialObservationAtMs);
+    if (performance.now() >= attended.expires) return fail();
+  };
   const release = (): void => {
     check();
     if (!selected || !selectedRequest) fail();
     const rows = workerAndLease();
     if (rows.length !== 1 || digest(rows[0]) !== digest(selected)) fail();
-    eligible(rows[0]);
-    const otherWorkers = db!.prepare(`SELECT pid AS owner_pid, host AS owner_host, project_root_realpath, status
-      FROM workers WHERE worker_id != ? AND status != 'stopped'`).all(selected!.worker_id);
-    const unprovableWorker = otherWorkers.some(row =>
-      (row.status !== "stopping" && row.status !== "crashed")
-      || row.owner_host !== hostname()
-      || row.project_root_realpath !== root
-      || !pidAbsent(row.owner_pid));
-    if (unprovableWorker
-      || db!.prepare("SELECT 1 FROM unit_dispatches WHERE status IN ('pending', 'claimed', 'running') LIMIT 1").get()
-      || db!.prepare("SELECT 1 FROM workflow_execution_attempts WHERE attempt_state IN ('claimed', 'running') LIMIT 1").get()) fail();
+    if (attended) validateAttended();
+    else {
+      eligible(rows[0]);
+      const otherWorkers = db!.prepare(`SELECT pid AS owner_pid, host AS owner_host, project_root_realpath, status
+        FROM workers WHERE worker_id != ? AND status != 'stopped'`).all(selected!.worker_id);
+      const unprovableWorker = otherWorkers.some(row =>
+        (row.status !== "stopping" && row.status !== "crashed")
+        || row.owner_host !== hostname()
+        || row.project_root_realpath !== root
+        || !pidAbsent(row.owner_pid));
+      if (unprovableWorker
+        || db!.prepare("SELECT 1 FROM unit_dispatches WHERE status IN ('pending', 'claimed', 'running') LIMIT 1").get()
+        || db!.prepare("SELECT 1 FROM workflow_execution_attempts WHERE attempt_state IN ('claimed', 'running') LIMIT 1").get()) fail();
+    }
     const changed = db!.prepare(`UPDATE milestone_leases SET status = 'released'
       WHERE milestone_id = ? AND worker_id = ? AND fencing_token = ? AND status = 'held'
         AND acquired_at = ? AND expires_at = ? RETURNING milestone_id`).all(
@@ -3181,6 +3320,31 @@ function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): 
   } catch {
     cleanup();
   }
+  if (attended && !closed) {
+    try {
+      if (!nativeAttendedCapabilities.has(attended) || attended.snapshot.root !== root || attended.snapshot.binding !== binding) fail();
+      withDatabaseMaintenanceOwner(path, () => {
+        check();
+        validateAttended();
+        const rows = workerAndLease();
+        if (rows.length !== 1) fail();
+        selected = rows[0];
+        const proof = maintenanceReviewProof(attended!.snapshot, attended!.facts, attended!.initialObservationAtMs);
+        const provenance = `native-maintenance:${digest([hostname(), process.pid, processStartIdentity(process.pid), randomUUID()])}`;
+        selectedSeal = attended!.sealId;
+        selectedRequest = {
+          operationType: "coordination.expired-lease.release", idempotencyKey: selectedSeal,
+          expectedRevision: attended!.snapshot.revision, expectedAuthorityEpoch: attended!.snapshot.epoch,
+          actorType: "system", actorId: provenance, sourceTransport: "native-coordination-maintenance",
+          payload: { binding, target: digest(selected), provenance, assurance: {
+            version: "native-attended-same-machine-v1", policy: ATTENDED_POLICY,
+            snapshot: digest(attended!.snapshot), workers: attended!.snapshot.workers.length, hosts: proof.hosts.length,
+            ...proof.counts, facts: digest([attended!.facts, attended!.initialObservationAtMs]), confirmation: attended!.confirmation,
+          } },
+        };
+      });
+    } catch { cleanup(); }
+  }
   const owned: CoordinationMaintenanceOwned = {
     get db() { if (!db) return fail(); return db; },
     get rollback() { if (!rollback) return fail(); return rollback; },
@@ -3216,9 +3380,20 @@ function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): 
       || typeof row.actor_id !== "string" || !/^native-maintenance:sha256:[a-f0-9]{64}$/.test(row.actor_id)) return fail();
     const event = db!.prepare("SELECT payload_json FROM workflow_domain_events WHERE operation_id = ? AND event_index = 0").get(receipt.operationId);
     const storedPayload: unknown = JSON.parse(String(event?.payload_json));
-    if (!exact(storedPayload, ["binding", "target", "provenance"]) || storedPayload.binding !== binding
-      || storedPayload.provenance !== row.actor_id || !/^sha256:[a-f0-9]{64}$/.test(String(storedPayload.target))) return fail();
-    const payload = { binding, target: String(storedPayload.target), provenance: String(storedPayload.provenance) };
+    const legacy = exact(storedPayload, ["binding", "target", "provenance"]);
+    if (!legacy && !exact(storedPayload, ["binding", "target", "provenance", "assurance"])) return fail();
+    const stored = storedPayload as Record<string, unknown>;
+    if (stored.binding !== binding || stored.provenance !== row.actor_id || !/^sha256:[a-f0-9]{64}$/.test(String(stored.target))) return fail();
+    if (!legacy) {
+      const assurance = stored.assurance;
+      if (!exact(assurance, ["version", "policy", "snapshot", "workers", "hosts", "legacyAbsent", "attestedAbsent", "attestedReused", "facts", "confirmation"])
+        || assurance.version !== "native-attended-same-machine-v1" || assurance.policy !== ATTENDED_POLICY
+        || ![assurance.snapshot, assurance.facts, assurance.confirmation].every(value => /^sha256:[a-f0-9]{64}$/.test(String(value)))
+        || ![assurance.workers, assurance.hosts, assurance.legacyAbsent, assurance.attestedAbsent, assurance.attestedReused].every(integer)
+        || Number(assurance.workers) < 1 || Number(assurance.workers) > 1024 || Number(assurance.hosts) < 1 || Number(assurance.hosts) > Number(assurance.workers)
+        || Number(assurance.legacyAbsent) + Number(assurance.attestedAbsent) + Number(assurance.attestedReused) !== assurance.workers) return fail();
+    }
+    const payload = { binding, target: String(stored.target), provenance: String(stored.provenance), ...(!legacy ? { assurance: stored.assurance as DomainJsonValue } : {}) };
     const request: DomainOperationRequest = {
       operationType: "coordination.expired-lease.release", idempotencyKey: sealId,
       expectedRevision: Number(row.expected_revision), expectedAuthorityEpoch: Number(row.expected_authority_epoch),
@@ -3264,10 +3439,13 @@ function openOwnedCoordinationMaintenanceHost(options: { projectDir: string }): 
       });
     },
     apply(input: unknown): CoordinationMaintenanceReply {
+      // Consume on ATTEMPT, including invalid input, drift, timeout and rollback.
+      if (attended && !nativeAttendedCapabilities.delete(attended)) return { status: "refused", reason: "unavailable" };
       input = snapshotInput(input);
       return run(() => {
         const seal = sealInput(input);
         if (!selectedRequest || selectedSeal !== seal) return fail();
+        if (attended) validateAttended();
         const result = _executeCoordinationMaintenanceDomainOperation(selectedRequest, db!, rollback!);
         lookup(seal);
         return { status: result.status, sealId: seal, operationId: result.operationId, resultingRevision: result.resultingRevision, resultingAuthorityEpoch: result.resultingAuthorityEpoch };

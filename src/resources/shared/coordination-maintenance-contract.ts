@@ -27,5 +27,6 @@ export interface CoordinationMaintenanceHostOptions {
 }
 
 export interface CoordinationMaintenanceModule {
+  attendSameMachineCoordinationMaintenance(projectDir: string): Promise<CoordinationMaintenanceReply>;
   openCoordinationMaintenanceHost(options: CoordinationMaintenanceHostOptions): CoordinationMaintenanceHost;
 }
