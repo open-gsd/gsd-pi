@@ -415,6 +415,9 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 						host.ui,
 					),
 			);
+			// A streamed component may still hold partial arguments. Dispatch args
+			// are authoritative; refresh the same component before its next render.
+			component.updateArgs(event.args);
 			if (created) {
 				rs.renderedSegments.push({ kind: "tool", contentIndex: Number.MAX_SAFE_INTEGER, component });
 			}

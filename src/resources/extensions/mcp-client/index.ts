@@ -635,6 +635,7 @@ export default function (pi: ExtensionAPI) {
 
 				return {
 					content: [{ type: "text", text: output.text }],
+					...(result.isError === true ? { isError: true } : {}),
 					details: {
 						server: params.server,
 						tool: params.tool,

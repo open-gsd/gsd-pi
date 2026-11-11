@@ -88,6 +88,99 @@ async function registeredExecDefinition(name: string): Promise<any> {
 
 describe("ToolExecutionComponent", () => {
 
+	for (const [label, failure] of Object.entries({
+		timed_out: { timed_out: true },
+		aborted: { aborted: true },
+		force_resolved: { force_resolved: true },
+		exit_code: { exit_code: -2 },
+		signal: { signal: "SIGTERM" },
+		combined: { timed_out: true, aborted: true, force_resolved: true },
+		isError: {},
+	})) {
+		test(`exec ${label} is a display failure without rewriting the result or renderer context`, async () => {
+			for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+				const registered = await registeredExecDefinition(toolName);
+				for (const historical of [false, true]) {
+					const args = Object.freeze({ runtime: "node", purpose: "Inspect failure" });
+					const details = Object.freeze({ exit_code: 0, signal: null, timed_out: false, duration_ms: 10, digest: "stdout tail", stderr_excerpt: "diagnostic tail", ...failure });
+					const result = Object.freeze({ content: Object.freeze([{ type: "text", text: "original content" }]), details, isError: label === "isError" });
+					const before = structuredClone(result);
+					const contexts: Array<{ resultIsError: boolean; contextIsError: boolean; args: unknown }> = [];
+					const definition = { ...registered, renderResult(value: any, options: any, theme: any, context: any) {
+						contexts.push({ resultIsError: value.isError, contextIsError: context.isError, args: context.args });
+						return registered.renderResult(value, options, theme, context);
+					} };
+					const component = new ToolExecutionComponent(toolName, args, {}, definition, { requestRender() {} } as any);
+					if (historical) component.markHistoricalNoResult();
+					contexts.length = 0;
+					component.updateResult(result as any);
+					for (const expanded of [false, true]) {
+						component.setExpanded(expanded);
+						assert.equal(component.getRollupPhase(), null);
+						for (const width of [40, 140]) {
+							const lines = component.render(width).map(stripAnsi);
+							const text = lines.join("\n");
+							assert.match(text, /failed/);
+							assert.doesNotMatch(text, /\bsuccess\b|output hidden/);
+							assert.equal(component.getDisplayedLineCount(width), lines.length);
+						}
+					}
+					for (const reason of ["", "offline"]) {
+						component.updateResult({ ...result, details: { ...details, run_not_recorded: reason } } as any);
+						component.setExpanded(false);
+						const text = stripAnsi(component.render(140).join("\n"));
+						assert.match(text, /failed/);
+						assert.match(text, /The command ran, but the host did not/);
+						assert.equal(component.getRollupPhase(), null);
+					}
+					// Check outside renderResult: the host catches renderer exceptions.
+					assert.ok(contexts.length > 0);
+					for (const context of contexts) {
+						assert.equal(context.resultIsError, result.isError);
+						assert.equal(context.contextIsError, result.isError);
+						assert.equal(context.args, args);
+					}
+					assert.deepEqual(result, before);
+				}
+			}
+		});
+	}
+
+	test("streamed exec metadata does not settle a pending card before the terminal result", () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const component = new ToolExecutionComponent(toolName, {}, {}, undefined, { requestRender() {} } as any);
+			const result = { content: [{ type: "text", text: "still streaming" }], isError: false, details: { timed_out: true, aborted: true, force_resolved: true, exit_code: 3, signal: "SIGTERM" } };
+			component.updateResult(result, true);
+			assert.match(stripAnsi(component.render(140).join("\n")), /running/);
+			assert.equal(component.getRollupPhase(), null);
+			component.updateResult(result);
+			assert.match(stripAnsi(component.render(140).join("\n")), /failed/);
+			assert.equal(result.isError, false);
+		}
+	});
+
+	test("only canonical exec results derive failure from well-typed metadata; stderr and arbitrary text stay successful", () => {
+		const metadata = [
+			undefined, null, "timeout", [], {},
+			{ timed_out: "true", aborted: 1, force_resolved: "false", exit_code: "1", signal: 9 },
+			{ timed_out: 1, aborted: "true", force_resolved: 1, exit_code: false, signal: false },
+			{ timed_out: false, aborted: false, force_resolved: false, exit_code: 0, signal: "" },
+			...[NaN, Infinity, -Infinity, null, undefined].map((exit_code) => ({ exit_code })),
+			{ exit_code: 0, signal: null, stderr_bytes: 12, stderr_excerpt: "timeout failed aborted", digest: "exit=1" },
+		];
+		for (const toolName of ["gsd_exec", "gsd_uat_exec", "other_tool", "mcp__server__gsd_exec"]) {
+			const cases = toolName === "gsd_exec" || toolName === "gsd_uat_exec" ? metadata : [{ operation: "gsd_exec", timed_out: true, aborted: true, force_resolved: true, exit_code: 7, signal: "SIGKILL" }];
+			for (const details of cases) {
+				const component = new ToolExecutionComponent(toolName, {}, {}, undefined, { requestRender() {} } as any);
+				component.updateResult({ content: [{ type: "text", text: "timeout failure exit=1 on stderr" }], isError: false, details });
+				const text = stripAnsi(component.render(140).join("\n"));
+				assert.match(text, /success/);
+				assert.ok(component.getRollupPhase());
+				assert.equal(component.getDisplayedLineCount(140), component.render(140).length);
+			}
+		}
+	});
+
 	test("collapsed successful Read shows a sanitized preview without mutating arguments or results", () => {
 		const args = { path: "docs/guide.md" };
 		const result = {

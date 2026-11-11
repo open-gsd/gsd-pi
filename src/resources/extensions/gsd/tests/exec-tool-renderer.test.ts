@@ -41,6 +41,62 @@ function renderText(component: any): string {
 	return component.render(200).join("\n");
 }
 
+for (const [label, failure, status] of [
+	["timeout", { timed_out: true }, /timeout/],
+	["abort", { aborted: true }, /aborted/],
+	["force resolution", { force_resolved: true }, /force-killed/],
+	["nonzero exit", { exit_code: 3 }, /exit 3/],
+	["signal", { signal: "SIGTERM" }, /SIGTERM/],
+	["combined flags", { timed_out: true, aborted: true, force_resolved: true }, /aborted\(force-killed\)/],
+	["stored error", { isError: true }, /exit 0/],
+] as const) {
+	test(`exec renderer selects the ${label} failure card without mutating stored success`, () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const tool = getTool(toolName);
+			for (const previews of [false, true]) {
+				for (const warning of [undefined, "", "offline"]) {
+					const details = Object.freeze({
+						...{ exit_code: 0, signal: null, timed_out: false, duration_ms: 9 },
+						...failure,
+						...(previews ? { digest: "stdout tail", stderr_excerpt: "actual diagnostic" } : {}),
+						...(warning !== undefined ? { run_not_recorded: warning } : {}),
+					});
+					const result = Object.freeze({ content: Object.freeze([{ type: "text", text: "original legacy body" }]), details, isError: "isError" in failure });
+					const before = structuredClone(result);
+					for (const expanded of [false, true]) {
+						for (const width of [40, 120]) {
+							const text = tool.renderResult(result, { expanded }, fakeTheme).render(width).join("\n");
+							assert.match(text, status);
+							assert.ok(text.includes(previews ? "actual diagnostic" : "original legacy body"));
+							if (warning !== undefined) {
+								assert.match(text, /not recorded/);
+								assert.ok(text.includes(warning || "reason unavailable"));
+							}
+						}
+					}
+					assert.deepEqual(result, before);
+				}
+			}
+		}
+	});
+}
+
+test("exec renderer ignores malformed failure metadata, stderr and failure-looking text", () => {
+	for (const details of [
+		undefined, null, [], {}, "timeout",
+		{ timed_out: "true", aborted: 1, force_resolved: "false", exit_code: "1", signal: 1 },
+		{ timed_out: false, aborted: false, force_resolved: false, exit_code: 0, signal: "" },
+		...[NaN, Infinity, -Infinity, null, undefined].map((exit_code) => ({ exit_code })),
+		{ exit_code: 0, signal: null, stderr_bytes: 12, stderr_excerpt: "diagnostic must not select failure", digest: "stdout" },
+	]) {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const result = { content: [{ type: "text", text: "timeout aborted exit=1 on stderr" }], isError: false, details };
+			const text = renderText(getTool(toolName).renderResult(result, {}, fakeTheme));
+			assert.doesNotMatch(text, /Status:|--- stderr diagnostics|diagnostic must not select failure/);
+		}
+	}
+});
+
 function makeExecResult(overrides: Partial<ExecSandboxResult> = {}): ExecSandboxResult {
 	return {
 		id: "exec-1",

@@ -66,6 +66,16 @@ function detailBoolean(record: Record<string, unknown> | null, key: string): boo
 	return record?.[key] === true;
 }
 
+// Presentation only, kept local to the extension boundary (the native host has
+// its own predicate). Do not promote this derived status into stored isError.
+function execDisplayFailure(record: Record<string, unknown> | null, details: Record<string, unknown> | null, isPartial: boolean): boolean {
+	if (record?.isError === true) return true;
+	if (isPartial) return false;
+	const exitCode = detailNumber(details, "exit_code");
+	return detailBoolean(details, "timed_out") || detailBoolean(details, "aborted") || detailBoolean(details, "force_resolved") ||
+		(exitCode !== undefined && exitCode !== 0) || detailString(details, "signal") !== undefined;
+}
+
 /** Strip terminal escapes (OSC/CSI/SGR) and control sequences; keep safe Unicode, \n and \t. */
 export function sanitizeExecDisplayText(text: string): string {
 	return stripAnsi(text.replace(VT_STRING_SEQUENCE, "").replace(OSC_SEQUENCE, "").replace(CSI_SEQUENCE, ""))
@@ -276,7 +286,7 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 		.filter((row): row is string => row !== undefined);
 	const expanded = asRecord(options)?.expanded === true;
 
-	if (record?.isError === true) {
+	if (execDisplayFailure(record, details, asRecord(options)?.isPartial === true)) {
 		// Original errors remain authoritative; warnings never fall inside preview caps.
 		// Structured failure card (issue #2927): previews are rebuilt from
 		// details so a long stdout digest cannot push the stderr diagnostics —
@@ -333,7 +343,11 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 		// execution failure): show it bounded, then retain recording warnings
 		// outside that preview budget.
 		const errorText = body.length > 0 ? boundedLines(body, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
-		const lines = [theme.fg("error", errorText)];
+		const status = execStatusText(details);
+		const lines = [
+			...(status ? [theme.fg("error", `Status: ${status}`)] : []),
+			theme.fg("error", errorText),
+		];
 		if (legacyWarning && context?.state?.gsdExecRecordingWarningInFrame !== true) {
 			lines.push(theme.fg("warning", legacyWarning));
 		}
