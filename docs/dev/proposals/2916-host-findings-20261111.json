@@ -1,0 +1,132 @@
+{
+  "kind": "Observed blockers and repair-plan input; NOT acceptance or operator signoff",
+  "testedSource": "a21924b9b6c77316d7185fb208b72dcdf990934b",
+  "installedPackageVersion": "1.23.0",
+  "installedRelevantFileSha256": {
+    "dist/bootstrap.js": "84827f63721b810ef72b5352409af440c34c13c70a6c9f100a4e45cbeebb44a2",
+    "node_modules/@gsd/agent-modes/dist/modes/interactive/interactive-mode.js": "7c28e68d03f6b82ca27d1fd3afce4164ee19937db91deebde0ec42d7cac902a6",
+    "node_modules/@gsd/agent-modes/dist/modes/rpc/rpc-mode.js": "6b33a83dca595598c9c7b7cc44bc745352c685b6172f3f283841195092275b8a"
+  },
+  "findings": {
+    "F1-inflight-arguments": {
+      "toolCallId": "exec2913-siblings-0-0",
+      "executedRuntime": "node",
+      "suppliedPurpose": "Observe sibling A while sibling B runs",
+      "running": {
+        "capture": "fixtures/runs/native-sibling-inspection-007/01-siblings-running.screen.txt",
+        "rawSha256": "4cba5b6ea2d89e43fd894e38d4dcc04c7a7d13f9611af0a390095e53202d1ceb",
+        "headers": [
+          "▸ EXEC (SANDBOXED) Run a Bash script                                                           running · 363ms",
+          "▸ EXEC (SANDBOXED) Observe sibling B stderr without failure                                    running · 359ms"
+        ]
+      },
+      "inflightInspection": {
+        "capture": "fixtures/runs/native-sibling-inspection-007/02-siblings-inflight-inspection.screen.txt",
+        "rawSha256": "7d91d0f92a8b0171e61ebdb425e9cdfc523f308e56df5cecbf08db875121f175",
+        "headers": [
+          "▸ EXEC (SANDBOXED) Run a Bash script                                         running · 803ms · ctrl+o collapse",
+          "▸ EXEC (SANDBOXED) Observe sibling B stderr without failure                  running · 799ms · ctrl+o collapse"
+        ]
+      },
+      "completed": {
+        "capture": "fixtures/runs/native-sibling-inspection-007/03-siblings-collapsed.screen.txt",
+        "rawSha256": "2dae24088c8be12187a702c0c9207e725153af19a213a3cbb38016cc44fd7858",
+        "headers": [
+          "▸ EXEC (SANDBOXED) Observe sibling A while sibling B runs         success · 4s · output hidden · ctrl+o expand",
+          "▸ EXEC (SANDBOXED) Observe sibling B stderr without failure       success · 3s · output hidden · ctrl+o expand"
+        ]
+      }
+    },
+    "F2-strong-failure-native-frame": [
+      {
+        "profile": "h09-timeout-flag",
+        "fixtureAuthenticity": "constructed replay metadata; not an execution at the patched metadata",
+        "fixtureSha256": "1bdd56de0e2aa0c476d1b3c6c0aa50692eb5a4f0d6970fda56dd56b1c99f1b70",
+        "isError": false,
+        "strongFlag": "timed_out",
+        "strongFlagValue": true,
+        "exit_code": 0,
+        "observed": {
+          "capture": "fixtures/runs/native-replay-matrix-010/09-h09-timeout-flag-collapsed.screen.txt",
+          "rawSha256": "f9ff874bd7050287d346b7ed692dc02a5eef1656ab65ff5c29f252f749e9ad66",
+          "headers": [
+            "▸ EXEC (SANDBOXED) Observe successful exec with stderr           success · 0ms · output hidden · ctrl+o expand"
+          ]
+        }
+      },
+      {
+        "profile": "h09-aborted-flag",
+        "fixtureAuthenticity": "constructed replay metadata; not an execution at the patched metadata",
+        "fixtureSha256": "53fd733fd80e91659edfaf705650170e05140454fdec17fccfc41663a8420f88",
+        "isError": false,
+        "strongFlag": "aborted",
+        "strongFlagValue": true,
+        "exit_code": 0,
+        "observed": {
+          "capture": "fixtures/runs/native-replay-matrix-010/11-h09-aborted-flag-collapsed.screen.txt",
+          "rawSha256": "f9ff874bd7050287d346b7ed692dc02a5eef1656ab65ff5c29f252f749e9ad66",
+          "headers": [
+            "▸ EXEC (SANDBOXED) Observe successful exec with stderr           success · 0ms · output hidden · ctrl+o expand"
+          ]
+        }
+      },
+      {
+        "profile": "h09-force-resolved-flag",
+        "fixtureAuthenticity": "constructed replay metadata; not an execution at the patched metadata",
+        "fixtureSha256": "759c25ac068d6aba749dc11960bc91107aaa831cf9b375db1b6d1fe396712107",
+        "isError": false,
+        "strongFlag": "force_resolved",
+        "strongFlagValue": true,
+        "exit_code": 0,
+        "observed": {
+          "capture": "fixtures/runs/native-replay-matrix-010/13-h09-force-resolved-flag-collapsed.screen.txt",
+          "rawSha256": "f9ff874bd7050287d346b7ed692dc02a5eef1656ab65ff5c29f252f749e9ad66",
+          "headers": [
+            "▸ EXEC (SANDBOXED) Observe successful exec with stderr           success · 0ms · output hidden · ctrl+o expand"
+          ]
+        }
+      }
+    ],
+    "F3-external-mcp-error-carrier": {
+      "eventCapture": "fixtures/runs/native-external-mcp-host-013/events-49969.jsonl",
+      "rawCaptureSha256": "ffeb413e56a49e90f21d98f6acd68c2d6cde4e02d829c7930166ae65a134d7a2",
+      "hostFlags": [
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "rawStatuses": [
+        {
+          "exit_code": 0,
+          "timed_out": false,
+          "signal": null,
+          "isErrorPresent": false
+        },
+        {
+          "exit_code": 7,
+          "timed_out": false,
+          "signal": null,
+          "isErrorPresent": true,
+          "isError": true
+        },
+        {
+          "exit_code": null,
+          "timed_out": true,
+          "signal": "SIGTERM",
+          "isErrorPresent": true,
+          "isError": true
+        }
+      ],
+      "actualTrustDialogCaptured": true,
+      "nativeHostHasUI": true
+    }
+  },
+  "limits": [
+    "Historical contradictory payloads are explicit controlled replay fixtures, not claimed production executions.",
+    "Original raw captures remain in the owned packet; this public projection includes exact original hashes and non-sensitive observation fields only.",
+    "CI/build evidence is preparation, not host acceptance.",
+    "No fix has been implemented or accepted by this artifact."
+  ]
+}
