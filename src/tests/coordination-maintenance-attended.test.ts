@@ -133,6 +133,13 @@ async function attendedFixture(f: ReturnType<typeof fixture>, mode = "confirm", 
   return JSON.parse(output) as { exitCode: number; output: string };
 }
 
+// Native PTY/fixture tests need an isolated package copy supplied by the proof runner
+// (proof/run-proof.mjs, W067_NATIVE_FIXTURE_PACKAGE). They are skipped in the generic
+// runner, where packageCopy() would otherwise refuse. The proof runner executes them.
+const NATIVE_SKIP = process.platform !== "darwin"
+  ? "native Darwin collector required (fixture drives real native facts)"
+  : process.env.W067_NATIVE_FIXTURE_PACKAGE ? false : "isolated fixture package required: run via proof/run-proof.mjs";
+
 test("intent is distinct; flags, JSON, extra callbacks and fabricated grants are not approval", async () => {
   assert.deepEqual(parseCoordinationMaintenanceArgs(["coordination-maintenance", "--project", "/tmp/fixture", "--attended-same-machine"]), { projectDir: "/tmp/fixture", attendedSameMachine: true });
   for (const extra of ["--yes", "--confirmed", "--grant", "--json"]) assert.equal(parseCoordinationMaintenanceArgs(["coordination-maintenance", "--project", "/tmp/fixture", "--attended-same-machine", extra]), null);
@@ -144,7 +151,7 @@ test("intent is distinct; flags, JSON, extra callbacks and fabricated grants are
   assert.equal((await Reflect.apply(attendSameMachineCoordinationMaintenance, undefined, [{ get projectDir() { called = true; return "/tmp/fixture"; } }])).status, "refused");
   assert.equal(called, false);
 });
-test("legacy hostname-mismatch route refuses; complete review includes every peer, including reused PID", t => {
+test("legacy hostname-mismatch route refuses; complete review includes every peer, including reused PID", { skip: NATIVE_SKIP }, t => {
   const f = fixture(t);
   const host = openCoordinationMaintenanceHost({ projectDir: f.root });
   try {
@@ -169,8 +176,8 @@ for (const [name, sql] of [
 ] as const) test(`complete-set collection refuses ${name} without filtering`, t => {
   const f = fixture(t); f.raw.exec(sql); assert.throws(f.snapshot); assert.equal(f.released(), "held");
 });
-test("1025 workers refuse rather than truncate", t => { const f = fixture(t, 1024); assert.throws(f.snapshot); });
-for (const name of ["postboot-heartbeat", "malformed-date", "reversed-times", "missing-pid", "coarse-birth-not-elapsed", "boot-race", "process-race"] as const) test(`proof refuses ${name}`, t => {
+test("1025 workers refuse rather than truncate", { skip: NATIVE_SKIP }, t => { const f = fixture(t, 1024); assert.throws(f.snapshot); });
+for (const name of ["postboot-heartbeat", "malformed-date", "reversed-times", "missing-pid", "coarse-birth-not-elapsed", "boot-race", "process-race"] as const) test(`proof refuses ${name}`, { skip: NATIVE_SKIP }, t => {
   const f = fixture(t); const snapshot = f.snapshot(); const facts = collectNativeSameMachineFacts([f.pid, process.pid]);
   const changed: NativeSameMachineFacts = structuredClone(facts);
   if (name === "postboot-heartbeat") snapshot.workers[0].last_heartbeat_at = new Date().toISOString();
@@ -186,11 +193,11 @@ test("presentation escapes control, bidi and non-ASCII bytes", () => {
   const line = maintenanceReviewLine({ host: "host\u001b[2J\u009b\u202e\n\r" });
   assert.match(line, /\\u001b/); assert.match(line, /\\u202e/); assert.doesNotMatch(line, /[^\x20-\x7e]/);
 });
-test("unattended root-only invocation cannot mutate or retain ordinary-accessor exclusion", async t => {
+test("unattended root-only invocation cannot mutate or retain ordinary-accessor exclusion", { skip: NATIVE_SKIP }, async t => {
   const f = fixture(t); assert.equal((await attendSameMachineCoordinationMaintenance(f.root)).status, "refused");
   assert.equal(f.released(), "held"); assert.equal(getDbOrNull(), null);
 });
-test("FIXTURE ONLY private PTY complete 324-worker set commits one release; verified receipt replays without new consent", { timeout: 90_000 }, async t => {
+test("FIXTURE ONLY private PTY complete 324-worker set commits one release; verified receipt replays without new consent", { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
   const f = fixture(t, 323); const before = f.snapshot(); const beforeTables = databaseRows(f.raw);
   const result = await attendedFixture(f);
   assert.equal(result.exitCode, 0, result.output);
@@ -216,19 +223,19 @@ test("FIXTURE ONLY private PTY complete 324-worker set commits one release; veri
   } finally { host.close(); }
   assert.equal(before.leases[0].status, "held");
 });
-for (const mode of ["cancel", "disconnect", "eof"]) test(`FIXTURE ONLY private PTY ${mode} leaves lease and ledger untouched`, { timeout: 90_000 }, async t => {
+for (const mode of ["cancel", "disconnect", "eof"]) test(`FIXTURE ONLY private PTY ${mode} leaves lease and ledger untouched`, { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
   const f = fixture(t); const result = await attendedFixture(f, mode);
   assert.notEqual(result.exitCode, 0); assert.equal(f.released(), "held"); assert.equal(f.workers(), f.initialWorkers);
   assert.equal(f.raw.prepare("SELECT COUNT(*) AS n FROM workflow_operations").get()!.n, 0);
 });
 
-for (const mode of ["dirty-heartbeat", "dirty-revision", "dirty-membership", "dirty-file"]) test(`FIXTURE ONLY PRE-ATTEST native recheck rejects ${mode} (mutation precedes confirmation)`, { timeout: 90_000 }, async t => {
+for (const mode of ["dirty-heartbeat", "dirty-revision", "dirty-membership", "dirty-file"]) test(`FIXTURE ONLY PRE-ATTEST native recheck rejects ${mode} (mutation precedes confirmation)`, { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
   const f = fixture(t); const result = await attendedFixture(f, mode);
   assert.notEqual(result.exitCode, 0, result.output); assert.equal(f.released(), "held");
   assert.equal(f.raw.prepare("SELECT COUNT(*) AS n FROM workflow_operations").get()!.n, 0);
 });
 
-for (const mode of ["boot-race", "process-race", "eperm", "expired-capability", "transaction-boot-race", "clock-race"]) test(`FIXTURE ONLY SYNTHETIC deadline/OS instrumentation: native apply refuses ${mode}`, { timeout: 90_000 }, async t => {
+for (const mode of ["boot-race", "process-race", "eperm", "expired-capability", "transaction-boot-race", "clock-race"]) test(`FIXTURE ONLY SYNTHETIC deadline/OS instrumentation: native apply refuses ${mode}`, { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
   const f = fixture(t);
   const preload = join(f.root, "fixture-instrument.cjs");
   writeFileSync(preload, `
@@ -273,7 +280,7 @@ if (process.argv[1]?.endsWith('coordination-maintenance-attended-worker.js')) {
   assert.equal(f.raw.prepare("SELECT COUNT(*) AS n FROM workflow_operations").get()!.n, 0);
 });
 
-test("FIXTURE ONLY failed native transaction rolls back; a new attempt requires a fresh native attestation", { timeout: 180_000 }, async t => {
+test("FIXTURE ONLY failed native transaction rolls back; a new attempt requires a fresh native attestation", { skip: NATIVE_SKIP, timeout: 180_000 }, async t => {
   const f = fixture(t);
   f.raw.exec("CREATE TRIGGER fixture_abort_outbox BEFORE INSERT ON workflow_outbox BEGIN SELECT RAISE(ABORT, 'fixture outbox refusal'); END");
   const first = await attendedFixture(f);
@@ -287,7 +294,7 @@ test("FIXTURE ONLY failed native transaction rolls back; a new attempt requires 
   assert.equal(second.exitCode, 0, second.output); assert.equal(f.released(), "released");
   assert.notEqual(/"sealId":"([a-f0-9-]{36})"/.exec(second.output)![1], seal);
 });
-test("FIXTURE ONLY ordinary access refuses throughout async root-only review; no writable review transaction", { timeout: 90_000 }, async t => {
+test("FIXTURE ONLY ordinary access refuses throughout async root-only review; no writable review transaction", { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
   const f = fixture(t); const entry = join(f.root, "direct-native-FIXTURE.mjs");
   writeFileSync(entry, `
 import { createRequire } from 'node:module';
@@ -341,7 +348,7 @@ test("old public host cannot receive an attended grant or evidence in its option
   assert.equal(f.released(), "held");
 });
 
-test("FIXTURE ONLY lost new commit reply reconciles a committed receipt, never blind retries", { timeout: 90_000 }, async t => {
+test("FIXTURE ONLY lost new commit reply reconciles a committed receipt, never blind retries", { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
   const f = fixture(t); const preload = join(f.root, "lost-reply-FIXTURE.cjs");
   writeFileSync(preload, `
 if (process.argv[1]?.endsWith('coordination-maintenance-attended-worker.js')) {
@@ -442,7 +449,7 @@ if (process.argv[1]?.endsWith('coordination-maintenance-attended-worker.js')) {
 }
 for (const phase of ["post-confirmation/pre-writer", "after-prepare/before-owned-apply"] as const) {
   for (const mutation of ["heartbeat", "revision", "membership", "file"] as const) {
-    test(`FIXTURE ONLY POST-ATTEST ${phase} ${mutation}: refusal has zero operation footprint`, { timeout: 90_000 }, async t => {
+    test(`FIXTURE ONLY POST-ATTEST ${phase} ${mutation}: refusal has zero operation footprint`, { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
       const f = fixture(t); const before = databaseRows(f.raw);
       const hook = temporalFixtureHook(f, phase, mutation);
       const result = await attendedFixture(f, "confirm", hook.preload);
@@ -469,7 +476,7 @@ for (const phase of ["post-confirmation/pre-writer", "after-prepare/before-owned
     });
   }
 }
-test("FIXTURE ONLY REAL 31-second private capability expiry within original writer budget", { timeout: 90_000 }, async t => {
+test("FIXTURE ONLY REAL 31-second private capability expiry within original writer budget", { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
   const f = fixture(t); const before = databaseRows(f.raw);
   const hook = temporalFixtureHook(f, "post-confirmation/pre-writer", "real-expiry");
   const result = await attendedFixture(f, "confirm", hook.preload);
@@ -557,11 +564,12 @@ function assertExactReleaseFootprint(before: Record<string, unknown>, after: Rec
   assert.deepEqual(after, expected, "only exact release SQL status column, revision/updated_at, and expected bookkeeping may change; all workers and every other row/column unchanged");
 }
 
-test("FIXTURE ONLY preheld isolated accessor denies native review without operation footprint", { timeout: 90_000 }, async t => {
+test("FIXTURE ONLY preheld isolated accessor denies native review without operation footprint", { skip: NATIVE_SKIP, timeout: 90_000 }, async t => {
   const f = fixture(t); const before = databaseRows(f.raw);
   const entry = join(f.root, "preheld-isolated-FIXTURE.mjs");
   writeFileSync(entry, `
 import { createRequire } from 'node:module';
+
 const require = createRequire(${JSON.stringify(join(packageCopy(), "package.json"))});
 const { createJiti } = require('@mariozechner/jiti');
 const jiti = createJiti(import.meta.url, { interopDefault: false, debug: false, fsCache: false });
