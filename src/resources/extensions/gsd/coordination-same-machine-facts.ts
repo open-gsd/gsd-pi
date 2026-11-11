@@ -37,8 +37,10 @@ type RefusalCode = "unsupported-platform" | "invalid-pids" | "invalid-boot" |
   "native-command-failed" | "collection-budget" | "unknown-pid" | "ambiguous-pid" | "inconsistent-facts";
 
 export class NativeSameMachineFactsError extends Error {
-  constructor(public readonly code: RefusalCode) {
+  readonly code: RefusalCode;
+  constructor(code: RefusalCode) {
     super(code); // Never expose native stderr, UUID, host or process details in errors.
+    this.code = code;
     this.name = "NativeSameMachineFactsError";
   }
 }
