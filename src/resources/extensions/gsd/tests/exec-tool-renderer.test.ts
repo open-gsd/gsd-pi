@@ -735,3 +735,32 @@ test("gsd_exec error fallback keeps the cause visible when long context wraps", 
 		assert.match(text, /CAUSE: spawn EACCES permission denied/, `wrapped cause must stay visible (expanded=${expanded})`);
 	}
 });
+
+test("gsd_exec structured stderr tail keeps the cause at the end of one long line", () => {
+	const tool = getTool("gsd_exec");
+	const cause = "ROOT_CAUSE_SINGLE_LINE_EACCES";
+	const longLine = "x".repeat(260) + cause;
+	const result = {
+		content: [{ type: "text" as const, text: "failed" }],
+		isError: true,
+		details: { timed_out: true, status: "timeout", stderr_excerpt: longLine, stderr_bytes: longLine.length },
+	};
+	for (const expanded of [false, true]) {
+		const text = tool.renderResult(result, { expanded }, fakeTheme).render(120).join("\n");
+		assert.match(text, new RegExp(cause), `single-line cause must stay visible (expanded=${expanded})`);
+	}
+});
+
+test("gsd_exec structured failure previews respect the visual-row cap", () => {
+	const tool = getTool("gsd_exec");
+	const lines = Array.from({ length: 8 }, (_, i) => `row ${i} ${"y".repeat(200)}`).join("\n");
+	const result = {
+		content: [{ type: "text" as const, text: "failed" }],
+		isError: true,
+		details: { timed_out: true, status: "timeout", stderr_excerpt: lines, stderr_bytes: lines.length },
+	};
+	// Each stderr row wraps to many visual rows at width 40; the card must not grow with the raw line count.
+	const rows = tool.renderResult(result, { expanded: false }, fakeTheme).render(40);
+	const rawLineCount = 8;
+	assert.ok(rows.length < rawLineCount * 6, `structured preview must stay bounded (rows=${rows.length})`);
+});

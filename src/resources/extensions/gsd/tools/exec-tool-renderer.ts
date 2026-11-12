@@ -214,7 +214,8 @@ function boundedHeadTailLines(text: string, maxLines: number): string {
  */
 function boundedTailLines(text: string, maxLines: number, lineChars = Number.POSITIVE_INFINITY): string {
 	const lines = text.split("\n");
-	const kept = lines.slice(-maxLines).map((line) => (line.length > lineChars ? `${line.slice(0, lineChars - 1)}…` : line));
+	// A long line keeps its END: the failure cause is the last characters of a single-line tail.
+	const kept = lines.slice(-maxLines).map((line) => (line.length > lineChars ? `…${line.slice(line.length - (lineChars - 1))}` : line));
 	const hidden = lines.length - maxLines;
 	const prefix = hidden > 0 ? `… (${hidden} more lines hidden)\n` : "";
 	return prefix + kept.join("\n");
@@ -353,6 +354,10 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 				lines.push(theme.fg("error", boundedTailLines(visibleStderr, DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
 			}
 			if (notRecordedRow) lines.push(notRecordedRow);
+			// Structured failures get the same visual-row cap as other previews, and the tail is kept.
+			// Cap each preview block, not the whole card: the status, stdout and stderr
+			// blocks must all stay visible (existing contracts), while every block is
+			// bounded to its own wrapped-row budget so one long line cannot flood the card.
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
