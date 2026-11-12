@@ -191,7 +191,7 @@ function cappedVisualRows(text: string, theme: ThemeLike, width: number, maxRows
 	const rows = new Text(contentLines.join("\n"), 0, 0).render(Math.max(1, width));
 	const markerRows = markerLine ? new Text(theme.fg("muted", markerLine), 0, 0).render(Math.max(1, width)) : [];
 	if (rows.length <= maxRows) {
-		const plain = rows.map((row) => theme.fg(color, row));
+		const plain = rows.map((row: string) => theme.fg(color, row));
 		return keepTail ? [...markerRows, ...plain] : [...plain, ...markerRows];
 	}
 	const marker = 1;
@@ -200,8 +200,8 @@ function cappedVisualRows(text: string, theme: ThemeLike, width: number, maxRows
 	const shown = keepTail ? rows.slice(rows.length - keep) : rows.slice(0, keep);
 	const note = new Text(theme.fg("muted", `… (${hidden} more visual rows hidden)`), 0, 0).render(Math.max(1, width));
 	return keepTail
-		? [...markerRows, ...note, ...shown.map((row) => theme.fg(color, row))]
-		: [...shown.map((row) => theme.fg(color, row)), ...note, ...markerRows];
+		? [...markerRows, ...note, ...shown.map((row: string) => theme.fg(color, row))]
+		: [...shown.map((row: string) => theme.fg(color, row)), ...note, ...markerRows];
 }
 
 /**

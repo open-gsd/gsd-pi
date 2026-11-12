@@ -777,12 +777,12 @@ test("gsd_exec structured stderr is visually capped per block at narrow width", 
 	const text = rows.join("\n");
 	// Block-level proof: the stderr block is capped to its own 6 visual rows (not the whole card),
 	// the heading stays with its block, and a visible elision marker reports the omitted rows.
-	const stderrBlockRows = rows.filter((row) => row.includes("z")).length;
+	const stderrBlockRows = rows.filter((row: string) => row.includes("z")).length;
 	assert.ok(stderrBlockRows <= 6, `stderr block must show at most 6 visual rows (got ${stderrBlockRows})`);
 	assert.match(text, /stderr \(tail\) — failure diagnostics:/);
 	assert.match(text, /more visual rows hidden/);
-	const headingIndex = rows.findIndex((row) => row.includes("stderr (tail) — failure diagnostics:"));
-	const firstStderrRow = rows.findIndex((row) => row.includes("z"));
+	const headingIndex = rows.findIndex((row: string) => row.includes("stderr (tail) — failure diagnostics:"));
+	const firstStderrRow = rows.findIndex((row: string) => row.includes("z"));
 	assert.ok(headingIndex >= 0 && firstStderrRow > headingIndex, "stderr heading must precede its block");
 });
 
