@@ -1913,3 +1913,32 @@ test('resume off with local ownership never adopts or clears a newer same-conver
   bridge.stop()
   await bridge.idle()
 })
+
+
+test('resume off with Vault on ends the live presence before the same-generation persisted cleanup clears it', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  // Publish our binding, then grant native approval so it becomes an automatic restore binding.
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  f.approveNative()
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const show = async () => (await f.options.transport(['surface', 'resume', 'show'])).resume_binding
+  assert.equal((await show())?.auto_resume, true, 'precondition: the owned binding is an automatic restore binding')
+  const endsBefore = f.feedCalls.filter(c => (c.event as { hook_event_name?: string }).hook_event_name === 'SessionEnd').length
+  const clearsBefore = f.clears.length
+  // Resume is switched off while Vault stays on; the cleanup clears the same generation.
+  f.setPreferences({ enabled: true, vault: true, resume: false })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const endsAfter = f.feedCalls.filter(c => (c.event as { hook_event_name?: string }).hook_event_name === 'SessionEnd').length
+  assert.ok(f.clears.length > clearsBefore, 'precondition: the owned automatic binding is cleared')
+  assert.equal(endsAfter - endsBefore, 1, 'the live presence must receive exactly one SessionEnd before its ownership is dropped')
+  bridge.stop()
+  await bridge.idle()
+})
