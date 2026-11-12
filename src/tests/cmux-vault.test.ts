@@ -1870,13 +1870,17 @@ test('a pending SessionEnd is retried on an ordinary refresh of the next session
   f.setSession(sessionB, 'session-b-refresh-id')
   bridge.update(f.manager, true, true)
   await bridge.idle()
+  // Record the attempts made before recovery; only attempts AFTER recovery prove a retry.
+  const endAttemptsBeforeRecovery = f.feedCalls.filter(c => (c.event as { hook_event_name?: string }).hook_event_name === 'SessionEnd').length
   // Transport recovers for SessionEnd. A plain refresh of B (no shutdown, no handoff) must flush A's end.
   f.failFeedFor('SessionEnd', false)
   f.setSession(sessionB, 'session-b-refresh-id')
   bridge.update(f.manager, true, true)
   await bridge.idle()
-  const ends = f.feedCalls.filter(c => (c.event as { hook_event_name?: string }).hook_event_name === 'SessionEnd')
-  assert.ok(ends.length >= 2, 'the failed end for A must be re-sent by an ordinary refresh of B, not only at shutdown')
+  const endAttemptsAfterRecovery = f.feedCalls.filter(c => (c.event as { hook_event_name?: string }).hook_event_name === 'SessionEnd').length
+  assert.ok(endAttemptsAfterRecovery > endAttemptsBeforeRecovery,
+    'an ordinary refresh after recovery must make a new SessionEnd attempt for A (not only at shutdown)')
   bridge.stop()
   await bridge.idle()
 })
+
