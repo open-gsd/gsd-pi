@@ -764,3 +764,39 @@ test("gsd_exec structured failure previews respect the visual-row cap", () => {
 	const rawLineCount = 8;
 	assert.ok(rows.length < rawLineCount * 6, `structured preview must stay bounded (rows=${rows.length})`);
 });
+
+test("gsd_exec structured stderr is visually capped per block at narrow width", () => {
+	const tool = getTool("gsd_exec");
+	const stderr = Array.from({ length: 8 }, (_, i) => `stderr ${i} ${"z".repeat(400)}`).join("\n");
+	const result = {
+		content: [{ type: "text" as const, text: "failed" }],
+		isError: true,
+		details: { timed_out: true, status: "timeout", stderr_excerpt: stderr, stderr_bytes: stderr.length },
+	};
+	const rows = tool.renderResult(result, { expanded: false }, fakeTheme).render(40);
+	const text = rows.join("\n");
+	// Block-level proof: the stderr block is capped to its own 6 visual rows (not the whole card),
+	// the heading stays with its block, and a visible elision marker reports the omitted rows.
+	const stderrBlockRows = rows.filter((row) => row.includes("z")).length;
+	assert.ok(stderrBlockRows <= 6, `stderr block must show at most 6 visual rows (got ${stderrBlockRows})`);
+	assert.match(text, /stderr \(tail\) — failure diagnostics:/);
+	assert.match(text, /more visual rows hidden/);
+	const headingIndex = rows.findIndex((row) => row.includes("stderr (tail) — failure diagnostics:"));
+	const firstStderrRow = rows.findIndex((row) => row.includes("z"));
+	assert.ok(headingIndex >= 0 && firstStderrRow > headingIndex, "stderr heading must precede its block");
+});
+
+test("gsd_exec structured stdout cannot consume the stderr cause budget", () => {
+	const tool = getTool("gsd_exec");
+	const stdout = Array.from({ length: 12 }, (_, i) => `stdout ${i} ${"s".repeat(300)}`).join("\n");
+	const stderr = `${"w".repeat(400)}\nROOT_CAUSE_LAST_LINE_EACCES`;
+	const result = {
+		content: [{ type: "text" as const, text: "failed" }],
+		isError: true,
+		details: { timed_out: true, status: "timeout", digest: stdout, stderr_excerpt: stderr, stderr_bytes: stderr.length },
+	};
+	for (const expanded of [false, true]) {
+		const text = tool.renderResult(result, { expanded }, fakeTheme).render(40).join("\n");
+		assert.match(text, /ROOT_CAUSE_LAST_LINE_EACCES/, `stderr cause must survive a long stdout (expanded=${expanded})`);
+	}
+});
