@@ -39,12 +39,13 @@ test('builder emits isolated, repeatable checkout code and resources without sta
   const packages = [];
   t.after(() => packages.forEach(root => rmSync(root, { recursive: true, force: true })));
   for (let n = 0; n < 2; n++) {
-    const root = buildNativeFixturePackage(source);
+    const root = buildNativeFixturePackage(source, { engineAddon: false });
     packages.push(root);
     assert.equal(dirname(root), realpathSync(tmpdir()));
     assert.match(root.split('/').at(-1), /^w067-kernel-package-/);
-    assert.ok(lstatSync(join(root, 'node_modules')).isSymbolicLink());
-    assert.equal(realpathSync(join(root, 'node_modules')), modules);
+    // Fixture-owned dependency directory: a real directory with per-dependency links.
+    assert.ok(lstatSync(join(root, 'node_modules')).isDirectory());
+    assert.ok(lstatSync(join(root, 'node_modules', 'typescript')).isSymbolicLink());
     assert.ok(!lstatSync(join(root, 'dist')).isSymbolicLink());
     assert.equal(existsSync(join(root, 'dist', 'resources', 'tests')), false);
     assert.equal(existsSync(join(root, 'dist', 'resources', 'hidden.test.js')), false);
@@ -61,10 +62,24 @@ test('builder treats skill templates as resources, not TypeScript programs', t =
   const source = sourceFixture(t);
   mkdirSync(join(source, 'src', 'resources', 'skills', 'example'), { recursive: true });
   writeFileSync(join(source, 'src', 'resources', 'skills', 'example', 'template.ts'), 'interface {{TemplateName}} {}');
-  const root = buildNativeFixturePackage(source);
+  const root = buildNativeFixturePackage(source, { engineAddon: false });
   t.after(() => rmSync(root, { recursive: true, force: true }));
   assert.equal(readFileSync(join(root, 'dist', 'resources', 'skills', 'example', 'template.ts'), 'utf8'), 'interface {{TemplateName}} {}');
   assert.equal(existsSync(join(root, 'dist', 'resources', 'skills', 'example', 'template.js')), false);
+});
+
+test('fixture never links workspace packages back into the checkout', t => {
+  const source = sourceFixture(t);
+  rmSync(join(source, 'node_modules'));
+  mkdirSync(join(source, 'node_modules'));
+  mkdirSync(join(source, 'packages', 'native'), { recursive: true });
+  mkdirSync(join(source, 'node_modules', '@gsd'), { recursive: true });
+  symlinkSync(join(source, 'packages', 'native'), join(source, 'node_modules', '@gsd', 'native'), 'dir');
+  symlinkSync(join(modules, 'typescript'), join(source, 'node_modules', 'typescript'), 'dir');
+  const root = buildNativeFixturePackage(source, { engineAddon: false });
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  assert.equal(existsSync(join(root, 'node_modules', '@gsd', 'native')), false, 'workspace link must not enter the fixture');
+  assert.ok(existsSync(join(root, 'node_modules', 'typescript')), 'external dependency must still be linked');
 });
 
 test('builder links the dependency root, not the pnpm compiler package node_modules', t => {
@@ -72,9 +87,10 @@ test('builder links the dependency root, not the pnpm compiler package node_modu
   rmSync(join(source, 'node_modules'));
   mkdirSync(join(source, 'node_modules'));
   symlinkSync(join(modules, 'typescript'), join(source, 'node_modules', 'typescript'), 'dir');
-  const root = buildNativeFixturePackage(source);
+  const root = buildNativeFixturePackage(source, { engineAddon: false });
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  assert.equal(realpathSync(join(root, 'node_modules')), realpathSync(join(source, 'node_modules')));
+  // The fixture links the external dependency's real package directory, not the source's link path.
+  assert.equal(realpathSync(join(root, 'node_modules', 'typescript')), realpathSync(join(modules, 'typescript')));
 });
 
 test('builder rejects source symlinks and removes partial packages', t => {
@@ -96,6 +112,30 @@ test('builder rejects source symlinks and removes partial packages', t => {
 test('builder requires emitted bootstrap and cleans up failures', t => {
   const source = sourceFixture(t);
   rmSync(join(source, 'src', 'bootstrap.ts'));
-  assert.throws(() => buildNativeFixturePackage(source), /did not produce dist\/bootstrap.js/);
+  assert.throws(() => buildNativeFixturePackage(source, { engineAddon: false }), /did not produce dist\/bootstrap.js/);
 });
 
+
+test('builder ships the engine addon and compiled @gsd/native as fixture-owned copies, never links', t => {
+  const root = buildNativeFixturePackage();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const addon = join(root, 'node_modules', '@opengsd', `engine-${process.platform}-${process.arch}`, 'gsd_engine.node');
+  assert.ok(existsSync(addon), 'engine addon must be copied into the fixture');
+  assert.ok(!lstatSync(addon).isSymbolicLink(), 'addon must be a real file, not a link');
+  const native = join(root, 'node_modules', '@gsd', 'native', 'dist', 'file-identity', 'index.js');
+  assert.ok(existsSync(native), 'compiled @gsd/native must exist inside the fixture');
+  assert.ok(!lstatSync(join(root, 'node_modules', '@gsd', 'native')).isSymbolicLink(), '@gsd/native must be a fixture-owned directory');
+});
+
+test('builder fails hard when no prebuilt engine addon exists', t => {
+  const source = sourceFixture(t);
+  // Replace the shared dependency link with an empty root: no pnpm store, so no addon.
+  rmSync(join(source, 'node_modules'));
+  mkdirSync(join(source, 'node_modules'));
+  // Keep the compiler so the failure is the missing addon, not a missing typescript.
+  symlinkSync(join(modules, 'typescript'), join(source, 'node_modules', 'typescript'), 'dir');
+  assert.throws(
+    () => buildNativeFixturePackage(source),
+    /No prebuilt @opengsd\/engine-.* addon found/,
+  );
+});
