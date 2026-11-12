@@ -53,6 +53,8 @@ async function fixture(t: test.TestContext) {
   const feedCalls: Record<string, unknown>[] = []
   let binding: Record<string, unknown> | null = null
   let capabilityFails = false
+  let feedFails = false
+  let preferences: { enabled: boolean; vault: boolean; resume?: boolean } = { enabled: true, vault: true }
   let clock = 100
   // Test-only native authority. Public publication cannot create a signature.
   const secret = 'mock-native-review-authority'
@@ -76,7 +78,7 @@ async function fixture(t: test.TestContext) {
     launcher: ['/absolute/node', '/absolute/gsd launcher.js'],
     pid: 123,
     env,
-    getPreferences: async (_cwd: string) => ({ enabled: true, vault: true }),
+    getPreferences: async (_cwd: string) => preferences,
     transport: async (args: string[]): Promise<Partial<ReturnType<typeof result>> & { methods?: string[]; accepted?: boolean }> => {
       allCalls.push(args)
       if (args[0] === 'rpc' && args[1] === 'system.capabilities') {
@@ -85,6 +87,7 @@ async function fixture(t: test.TestContext) {
       }
       if (args[0] === 'rpc') {
         feedCalls.push(JSON.parse(args[2]))
+        if (feedFails) throw new Error('feed.push transport failed')
         return { accepted: true }
       }
       if (args[2] === 'set') {
@@ -127,6 +130,8 @@ async function fixture(t: test.TestContext) {
     setBinding: (value: Record<string, unknown> | null) => { binding = value },
     setObservedBinding: (value: Record<string, unknown> | undefined) => { binding = value ?? null },
     failCapabilityDiscovery: () => { capabilityFails = true },
+    failFeed: (fail: boolean) => { feedFails = fail },
+    setPreferences: (value: { enabled: boolean; vault: boolean; resume?: boolean }) => { preferences = value },
     setSession: (file: string | undefined, sessionId = 'switched-id') => { path = file; id = sessionId },
     setBranch: (entries: typeof branch) => { branch = entries },
     metadata: async () => {
@@ -1787,4 +1792,59 @@ test('disabling resume while capability discovery fails still drops a persisted 
     'resume-off startup must clear the exact persisted auto_resume binding even if discovery fails')
   bridge.stop()
   await bridge.idle()
+})
+
+test('external clear ends old Vault presence before publishing another session', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const sessionAFile = f.manager.getSessionFile()
+  // cmux clears the binding outside GSD; assert the observed state is actually empty.
+  f.setObservedBinding(undefined)
+  const sessionB = join(f.root, 'session-b.jsonl')
+  await writeFile(sessionB, 'session b\n')
+  f.setSession(sessionB, 'session-b-id')
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const events = f.feedCalls.map(call => ({
+    event: (call.event as { hook_event_name: string }).hook_event_name,
+    session: (call.event as { session_id?: string }).session_id,
+  }))
+  // Exact sequence: A starts, A ends, then B starts. Anything else is a regression.
+  assert.deepEqual(events.map(e => e.event), ['SessionStart', 'SessionEnd', 'SessionStart'])
+  assert.equal(events[0].session, sessionAFile, 'first start must be session A')
+  assert.equal(events[1].session, sessionAFile, 'the end must name session A')
+  assert.equal(events[2].session, sessionB, 'the final start must be session B')
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('a failed SessionEnd keeps presence pending so a later cleanup can retry it', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  // cmux clears our binding; the next refresh sees it and must send SessionEnd. Delivery fails.
+  f.setObservedBinding(undefined)
+  f.failFeed(true)
+  const sessionB = join(f.root, 'session-b-pending.jsonl')
+  await writeFile(sessionB, 'session b\n')
+  f.setSession(sessionB, 'session-b-pending-id')
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  // Transport recovers: the next lifecycle step must retry the still-pending SessionEnd.
+  f.failFeed(false)
+  bridge.stop()
+  await bridge.idle()
+  const ends = f.feedCalls.filter(c => (c.event as { hook_event_name?: string }).hook_event_name === 'SessionEnd')
+  assert.ok(ends.length >= 2, 'a failed SessionEnd must be retried after transport recovers, not silently dropped')
 })
