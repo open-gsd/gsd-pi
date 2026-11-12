@@ -52,6 +52,7 @@ async function fixture(t: test.TestContext) {
   const clears: CmuxVaultClearRequest[] = []
   const feedCalls: Record<string, unknown>[] = []
   let binding: Record<string, unknown> | null = null
+  let capabilityFails = false
   let clock = 100
   // Test-only native authority. Public publication cannot create a signature.
   const secret = 'mock-native-review-authority'
@@ -79,6 +80,7 @@ async function fixture(t: test.TestContext) {
     transport: async (args: string[]): Promise<Partial<ReturnType<typeof result>> & { methods?: string[]; accepted?: boolean }> => {
       allCalls.push(args)
       if (args[0] === 'rpc' && args[1] === 'system.capabilities') {
+        if (capabilityFails) throw new Error('capability discovery failed')
         return { methods: ['surface.resume.conditional_set.v1'] }
       }
       if (args[0] === 'rpc') {
@@ -123,6 +125,8 @@ async function fixture(t: test.TestContext) {
       binding!.auto_resume = true
     },
     setBinding: (value: Record<string, unknown> | null) => { binding = value },
+    setObservedBinding: (value: Record<string, unknown> | undefined) => { binding = value ?? null },
+    failCapabilityDiscovery: () => { capabilityFails = true },
     setSession: (file: string | undefined, sessionId = 'switched-id') => { path = file; id = sessionId },
     setBranch: (entries: typeof branch) => { branch = entries },
     metadata: async () => {
@@ -1746,4 +1750,41 @@ test('set confirmation must retain the exact workspace and surface observed befo
   assert.deepEqual(f.clears, [])
   assert.deepEqual(f.feedCalls, [])
   await assert.rejects(readdir(join(f.home, 'cmux', 'vault')), { code: 'ENOENT' })
+})
+
+test('an external clear of an owned binding republishes on the next refresh', async t => {
+  const f = await fixture(t)
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+    getPreferences: async () => ({ enabled: true, vault: true, resume: true }),
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 1)
+  // Simulate cmux removing the binding outside GSD: show now reports nothing.
+  f.setObservedBinding?.(undefined)
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, 2,
+    'an empty show must drop the stale owned binding so publication can resume')
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('disabling resume while capability discovery fails still drops a persisted automatic binding', async t => {
+  const f = await fixture(t)
+  f.setBinding(automaticBinding(f))
+  f.failCapabilityDiscovery()
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+    getPreferences: async () => ({ enabled: true, vault: true, resume: false }),
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(f.clears.length, 1,
+    'resume-off startup must clear the exact persisted auto_resume binding even if discovery fails')
+  bridge.stop()
+  await bridge.idle()
 })

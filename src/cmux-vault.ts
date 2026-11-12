@@ -403,6 +403,12 @@ export class CmuxVaultBridge {
         // Retry only on a later lifecycle update, not by re-registering an unsafe
         // automatic binding or spinning until a guarded clear succeeds.
         if (!resumeEnabled && this.unsafeAutoResumeIdentity && !await this.clearAutomaticBinding()) continue
+        // Resume off: an exact persisted automatic binding must not survive, even when Vault
+        // stays on or capability discovery fails. Manual/foreign bindings are never adopted here.
+        if (!resumeEnabled && vaultEnabled && this.blockedAutoResumeIdentity !== identityKey) {
+          await this.clearPersistedAutomaticBinding(identity)
+          if (this.unsafeAutoResumeIdentity) continue
+        }
         if (!vaultEnabled && !resumeEnabled) {
           this.snapshots.clear()
           if (this.binding) await this.clear()
@@ -548,6 +554,12 @@ export class CmuxVaultBridge {
     const name = vaultEnabled ? vaultTitle(identity) : 'GSD session'
     const { result: observed, binding: previous } = resumeResult(await this.transport(['surface', 'resume', 'show', ...this.target]))
     let owned = this.binding
+    // An empty show on our own target means an external clear removed the binding. Drop the
+    // stale ownership and fall through to a guarded unbound publication in this same refresh.
+    if (owned && !previous && observed.workspace_id === owned.workspace && observed.surface_id === owned.surface) {
+      this.binding = undefined
+      owned = undefined
+    }
     if (owned) {
       if (observed.workspace_id !== owned.workspace || observed.surface_id !== owned.surface
         || !previous || previous.kind !== 'gsd' || previous.source !== owned.source
