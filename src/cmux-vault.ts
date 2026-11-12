@@ -660,6 +660,9 @@ export class CmuxVaultBridge {
     if (previousBinding && (previousBinding.path !== identity.path || !vaultEnabled)) {
       await this.endPresence(previousBinding)
     }
+    // Flush undelivered ends from earlier sessions before announcing new presence, so an
+    // ordinary refresh recovers a failed end without waiting for shutdown or a handoff.
+    await this.retryPendingEnds()
     if (vaultEnabled) await this.feed('SessionStart', currentBinding)
   }
 
