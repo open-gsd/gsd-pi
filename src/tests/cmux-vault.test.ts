@@ -54,6 +54,7 @@ async function fixture(t: test.TestContext) {
   let binding: Record<string, unknown> | null = null
   let capabilityFails = false
   let feedFails = false
+  let negativeShow = false
   let failEvent: string | undefined
   let preferences: { enabled: boolean; vault: boolean; resume?: boolean } = { enabled: true, vault: true }
   let clock = 100
@@ -106,6 +107,7 @@ async function fixture(t: test.TestContext) {
           command: option('--shell'), launch_command: null,
         }
       }
+      if (negativeShow && args[2] === 'show') return { ...result(), ok: false, resume_binding: null }
       return result()
     },
     clearBinding: async (params: CmuxVaultClearRequest) => {
@@ -133,6 +135,7 @@ async function fixture(t: test.TestContext) {
     setObservedBinding: (value: Record<string, unknown> | undefined) => { binding = value ?? null },
     failCapabilityDiscovery: () => { capabilityFails = true },
     failFeed: (fail: boolean) => { feedFails = fail },
+    setNegativeShow: (value: boolean) => { negativeShow = value },
     failFeedFor: (event: string, fail: boolean) => { failEvent = fail ? event : undefined },
     setPreferences: (value: { enabled: boolean; vault: boolean; resume?: boolean }) => { preferences = value },
     setSession: (file: string | undefined, sessionId = 'switched-id') => { path = file; id = sessionId },
@@ -1989,6 +1992,23 @@ test('a gated successor SessionStart is announced once the predecessor end is fi
   await bridge.idle()
   const startsForB = f.feedCalls.filter(c => (c.event as { hook_event_name?: string; session_id?: string }).hook_event_name === 'SessionStart' && (c.event as { session_id?: string }).session_id === sessionB).length
   assert.ok(startsForB >= 1, 'B must eventually be announced after A end is accepted')
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('a negative show response never authorizes --if-unbound, even with matching target and null binding', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  // cmux reports a failed show (ok:false) that still carries the target and a null binding.
+  f.setNegativeShow(true)
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const unboundSets = f.calls.filter(args => args[2] === 'set' && args.includes('--if-unbound'))
+  assert.equal(unboundSets.length, 0, 'a failed observation must not be treated as confirmed absence')
   bridge.stop()
   await bridge.idle()
 })
