@@ -60,7 +60,8 @@ function databaseRows(raw: DatabaseSync) {
   return JSON.parse(JSON.stringify(result)) as Record<string, unknown>;
 }
 function packageCopy(): string {
-  const root = realpathSync(process.env.W067_NATIVE_FIXTURE_PACKAGE ?? "missing-isolated-fixture-package");
+  assert.ok(process.env.W067_NATIVE_FIXTURE_PACKAGE, "run scripts/build-native-fixture-package.mjs and set W067_NATIVE_FIXTURE_PACKAGE");
+  const root = realpathSync(process.env.W067_NATIVE_FIXTURE_PACKAGE);
   assert.ok(root.startsWith(realpathSync(tmpdir()) + "/w067-kernel-package-"), "only isolated package copies are permitted");
   assert.ok(existsSync(join(root, "dist", "bootstrap.js")));
   return root;
@@ -135,12 +136,12 @@ async function attendedFixture(f: ReturnType<typeof fixture>, mode = "confirm", 
   return JSON.parse(output) as { exitCode: number; output: string };
 }
 
-// Native PTY/fixture tests need an isolated package copy supplied by the proof runner
-// (proof/run-proof.mjs, W067_NATIVE_FIXTURE_PACKAGE). They are skipped in the generic
-// runner, where packageCopy() would otherwise refuse. The proof runner executes them.
+// Native PTY/fixture tests use real Darwin boot/process facts. On macOS, build
+// the isolated package with scripts/build-native-fixture-package.mjs and export
+// its stdout as W067_NATIVE_FIXTURE_PACKAGE; missing setup must fail, not skip.
 const NATIVE_SKIP = process.platform !== "darwin"
   ? "native Darwin collector required (fixture drives real native facts)"
-  : process.env.W067_NATIVE_FIXTURE_PACKAGE ? false : "isolated fixture package required: run via proof/run-proof.mjs";
+  : false;
 
 test("intent is distinct; flags, JSON, extra callbacks and fabricated grants are not approval", async () => {
   assert.deepEqual(parseCoordinationMaintenanceArgs(["coordination-maintenance", "--project", "/tmp/fixture", "--attended-same-machine"]), { projectDir: "/tmp/fixture", attendedSameMachine: true });
