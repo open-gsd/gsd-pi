@@ -38,6 +38,10 @@ function linkExternalDependencies(source, target) {
   }
 }
 
+function lstatExists(path) {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
 // Platform engine addon: resolved from a published prebuilt package (plain file) rather
 // than compiled here. Copied, never linked, so fixture code cannot reach shared installs.
 function copyNativeEnginePackage(target, modules) {
@@ -56,6 +60,9 @@ function copyNativeEnginePackage(target, modules) {
   const source = candidates.find(dir => existsSync(join(dir, 'gsd_engine.node')));
   if (!source) throw new Error(`No prebuilt ${packageName} addon found; native fixture cannot be isolated`);
   const dest = join(target, '@opengsd', `engine-${platformTag}`);
+  // The dependency pass may have linked this exact entry into the shared store. Remove any
+  // existing link first, so the copy below is always a real directory we own.
+  if (existsSync(dest) || lstatExists(dest)) rmSync(dest, { recursive: true, force: true });
   mkdirSync(dest, { recursive: true });
   copyFileSync(join(source, 'package.json'), join(dest, 'package.json'));
   copyFileSync(join(source, 'gsd_engine.node'), join(dest, 'gsd_engine.node'));
@@ -87,7 +94,9 @@ function copyWorkspaceNative(target, sourceRoot) {
     compilerOptions: {
       target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: false,
       skipLibCheck: true, types: ['node'], rootDir: 'src', outDir: 'dist', declaration: false,
-      esModuleInterop: true, allowImportingTsExtensions: false, typeRoots: [],
+      esModuleInterop: true, allowImportingTsExtensions: false,
+      // Resolve @types from the fixture's own dependency directory only (never the checkout).
+      typeRoots: [join(target, '@types')],
     },
     include: ['src'],
   }, null, 2));
@@ -95,6 +104,10 @@ function copyWorkspaceNative(target, sourceRoot) {
   const result = spawnSync(process.execPath, [tscPath, '-p', join(dest, 'tsconfig.json')], {
     cwd: dest, encoding: 'utf8', timeout: 240_000, maxBuffer: 4 * 1024 * 1024,
   });
+  // Fail closed: a half-compiled @gsd/native must never be packaged as if it were complete.
+  if (result.status !== 0 || result.error) {
+    throw new Error(`@gsd/native fixture compile failed (${result.status ?? 'no status'}): ${result.error?.message ?? ''}${result.stdout}${result.stderr}`);
+  }
 }
 
 export function buildNativeFixturePackage(sourceRoot = checkout, { engineAddon = true } = {}) {

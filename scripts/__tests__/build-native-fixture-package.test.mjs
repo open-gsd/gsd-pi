@@ -139,3 +139,14 @@ test('builder fails hard when no prebuilt engine addon exists', t => {
     /No prebuilt @opengsd\/engine-.* addon found/,
   );
 });
+
+test('builder fails closed when the @gsd/native compile fails, never packaging partial output', { skip: process.platform !== 'darwin' ? 'engine addon is a darwin prebuilt' : false }, t => {
+  const source = sourceFixture(t);
+  // Plant a TypeScript error inside the workspace package source so the compile step fails.
+  const pkg = join(source, 'packages', 'native', 'src');
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(join(source, 'packages', 'native', 'package.json'), JSON.stringify({ name: '@gsd/native', type: 'module' }));
+  writeFileSync(join(pkg, 'index.ts'), 'export const broken: number = "not a number";');
+  writeFileSync(join(source, 'packages', 'native', 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true } }));
+  assert.throws(() => buildNativeFixturePackage(source), /@gsd\/native fixture compile failed/);
+});
