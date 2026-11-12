@@ -551,10 +551,15 @@ export class CmuxVaultBridge {
     // Local ownership is never replaced by a same-conversation generation we did not write.
     // A different generation here is another publisher's binding: leave it untouched.
     if (this.binding && (this.binding.updatedAt !== binding.updated_at || this.binding.workspace !== result.workspace_id || this.binding.surface !== result.surface_id)) return
-    this.binding = {
-      commandKey: this.commandKey(binding), source: binding.source as VaultBinding['source'],
-      path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
-      workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
+    // Same generation we already own: keep that live object, so its vaultEnabled presence is
+    // still ended by clearAutomaticBinding() before the binding is dropped. Replacing it with a
+    // fresh vaultEnabled:false copy silently discarded the obligation to send SessionEnd.
+    if (!this.binding) {
+      this.binding = {
+        commandKey: this.commandKey(binding), source: binding.source as VaultBinding['source'],
+        path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
+        workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
+      }
     }
     this.unsafeAutoResumeIdentity = JSON.stringify([identity.id, identity.path, identity.cwd])
     await this.clearAutomaticBinding()
