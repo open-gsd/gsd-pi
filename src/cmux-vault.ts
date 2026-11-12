@@ -548,6 +548,9 @@ export class CmuxVaultBridge {
     // No local ownership: adopt only this exact launch identity and generation.
     // A disabled bridge must not claim manual, foreign or other-session bindings.
     if (!binding || binding.auto_resume !== true || !this.matchesIdentity(identity, result, binding)) return
+    // Local ownership is never replaced by a same-conversation generation we did not write.
+    // A different generation here is another publisher's binding: leave it untouched.
+    if (this.binding && (this.binding.updatedAt !== binding.updated_at || this.binding.workspace !== result.workspace_id || this.binding.surface !== result.surface_id)) return
     this.binding = {
       commandKey: this.commandKey(binding), source: binding.source as VaultBinding['source'],
       path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
