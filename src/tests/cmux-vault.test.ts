@@ -54,6 +54,7 @@ async function fixture(t: test.TestContext) {
   let binding: Record<string, unknown> | null = null
   let capabilityFails = false
   let feedFails = false
+  let failEvent: string | undefined
   let preferences: { enabled: boolean; vault: boolean; resume?: boolean } = { enabled: true, vault: true }
   let clock = 100
   // Test-only native authority. Public publication cannot create a signature.
@@ -88,7 +89,7 @@ async function fixture(t: test.TestContext) {
       }
       if (args[0] === 'rpc') {
         feedCalls.push(JSON.parse(args[2]))
-        if (feedFails) throw new Error('feed.push transport failed')
+        if (feedFails || (failEvent && JSON.parse(args[2]).event.hook_event_name === failEvent)) throw new Error('feed.push transport failed')
         return { accepted: true }
       }
       if (args[2] === 'set') {
@@ -132,6 +133,7 @@ async function fixture(t: test.TestContext) {
     setObservedBinding: (value: Record<string, unknown> | undefined) => { binding = value ?? null },
     failCapabilityDiscovery: () => { capabilityFails = true },
     failFeed: (fail: boolean) => { feedFails = fail },
+    failFeedFor: (event: string, fail: boolean) => { failEvent = fail ? event : undefined },
     setPreferences: (value: { enabled: boolean; vault: boolean; resume?: boolean }) => { preferences = value },
     setSession: (file: string | undefined, sessionId = 'switched-id') => { path = file; id = sessionId },
     setBranch: (entries: typeof branch) => { branch = entries },
@@ -1848,4 +1850,33 @@ test('a failed SessionEnd keeps presence pending so a later cleanup can retry it
   await bridge.idle()
   const ends = f.feedCalls.filter(c => (c.event as { hook_event_name?: string }).hook_event_name === 'SessionEnd')
   assert.ok(ends.length >= 2, 'a failed SessionEnd must be retried after transport recovers, not silently dropped')
+})
+
+test('a pending SessionEnd is retried on an ordinary refresh of the next session, not only on shutdown', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  // A's SessionEnd must FAIL. The external clear makes the next publish end A; the transport
+  // is down for exactly that end, so it stays pending.
+  f.setObservedBinding(undefined)
+  f.failFeedFor('SessionEnd', true)
+  const sessionB = join(f.root, 'session-b-refresh.jsonl')
+  await writeFile(sessionB, 'session b\n')
+  f.setSession(sessionB, 'session-b-refresh-id')
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  // Transport recovers for SessionEnd. A plain refresh of B (no shutdown, no handoff) must flush A's end.
+  f.failFeedFor('SessionEnd', false)
+  f.setSession(sessionB, 'session-b-refresh-id')
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const ends = f.feedCalls.filter(c => (c.event as { hook_event_name?: string }).hook_event_name === 'SessionEnd')
+  assert.ok(ends.length >= 2, 'the failed end for A must be re-sent by an ordinary refresh of B, not only at shutdown')
+  bridge.stop()
+  await bridge.idle()
 })
