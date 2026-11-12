@@ -536,8 +536,12 @@ export class CmuxVaultBridge {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid capabilities')
       const result = raw as Record<string, unknown>
       if (result.ok === false) throw new Error('capability query failed')
-      if (Array.isArray(result.methods) && result.methods.every(value => typeof value === 'string')
-        && result.methods.includes('surface.resume.conditional_set.v1')) return true
+      // A methods list with non-string entries is a malformed response, not an explicit
+      // statement that conditional set is unsupported: report it as a query error.
+      if (Array.isArray(result.methods) && !result.methods.every(value => typeof value === 'string')) {
+        throw new Error('malformed capability methods')
+      }
+      if (Array.isArray(result.methods) && result.methods.includes('surface.resume.conditional_set.v1')) return true
       this.diagnose('unsupported-CAS (publication disabled)')
     } catch {
       this.diagnose('capability-query-error (publication disabled)')
