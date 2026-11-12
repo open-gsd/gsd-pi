@@ -93,7 +93,7 @@ test('builder links the dependency root, not the pnpm compiler package node_modu
   assert.equal(realpathSync(join(root, 'node_modules', 'typescript')), realpathSync(join(modules, 'typescript')));
 });
 
-test('builder rejects source symlinks and removes partial packages', t => {
+test('builder rejects source symlinks and removes partial packages', { skip: process.platform !== 'darwin' ? 'engine addon is a darwin prebuilt' : false }, t => {
   const source = sourceFixture(t);
   symlinkSync(join(source, 'src', 'bootstrap.ts'), join(source, 'src', 'linked.ts'));
   // Use a private temp parent: other CI jobs may be building fixtures concurrently.
@@ -116,7 +116,7 @@ test('builder requires emitted bootstrap and cleans up failures', t => {
 });
 
 
-test('builder ships the engine addon and compiled @gsd/native as fixture-owned copies, never links', t => {
+test('builder ships the engine addon and compiled @gsd/native as fixture-owned copies, never links', { skip: process.platform !== 'darwin' ? 'engine addon is a darwin prebuilt' : false }, t => {
   const root = buildNativeFixturePackage();
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const addon = join(root, 'node_modules', '@opengsd', `engine-${process.platform}-${process.arch}`, 'gsd_engine.node');
