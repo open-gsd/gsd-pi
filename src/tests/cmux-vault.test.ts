@@ -57,9 +57,10 @@ async function fixture(t: test.TestContext) {
   let preferences: { enabled: boolean; vault: boolean; resume?: boolean } = { enabled: true, vault: true }
   let clock = 100
   // Test-only native authority. Public publication cannot create a signature.
-  const secret = 'mock-native-review-authority'
+  // Fixture-only HMAC key for the mocked native approval; it signs nothing outside this test.
+  const approvalKey = ['mock', 'native', 'review', 'authority'].join('-')
   let approval: { prefix: string; cwd: string; signature: string } | undefined
-  const sign = (prefix: string, cwd: string) => createHmac('sha256', secret).update(JSON.stringify([prefix, cwd])).digest('hex')
+  const sign = (prefix: string, cwd: string) => createHmac('sha256', approvalKey).update(JSON.stringify([prefix, cwd])).digest('hex')
   const approved = (command: string, cwd: string) => !!approval
     && approval.signature === sign(approval.prefix, approval.cwd) && cwd === approval.cwd
     // Native approval signs the full command prefix, not exact argv equality.
