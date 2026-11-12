@@ -408,8 +408,10 @@ describe("ToolExecutionComponent", () => {
 			component.updateResult({ content: [{ type: "text", text: `${lookalike}\n${commandOutput}\n${footer}` }], isError: true });
 			component.setExpanded(expanded);
 			const output = component.render(120).map(stripAnsi).join("\n").replace(/\s+/g, " ");
-			assert.match(output, /intervening command output 0/);
-			assert.doesNotMatch(output, /intervening command output 39/);
+			// Head/tail split: the bounded preview keeps intervening output and the final cause-side line,
+			// and elides the middle. The exact head line is not a contract (it depends on the head budget).
+			assert.match(output, /intervening command output \d+/);
+			assert.match(output, /intervening command output 39/);
 			const visibleLines = output.match(/intervening command output \d+/g) ?? [];
 			assert.ok(visibleLines.length > 0 && visibleLines.length < 40, `expected bounded output, got ${visibleLines.length} lines`);
 			assert.match(output, /database offline/);
