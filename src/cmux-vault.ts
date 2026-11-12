@@ -239,6 +239,8 @@ interface VaultBinding {
 function resumeResult(value: unknown): { result: Record<string, unknown>, binding: Record<string, unknown> | null } {
   if (!value || typeof value !== 'object') throw new Error('invalid cmux result')
   const result = value as Record<string, unknown>
+  // An explicit failure is never a confirmed absence, even if it echoes the target and a null binding.
+  if (result.ok === false) throw new Error('cmux reported a failed resume observation')
   const binding = result.resume_binding
   if (binding !== null && (!binding || typeof binding !== 'object' || Array.isArray(binding))) {
     throw new Error('invalid cmux binding')
