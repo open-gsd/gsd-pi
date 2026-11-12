@@ -11,6 +11,7 @@ import {
 } from './resources/extensions/shared/gsd-session-metadata.js'
 
 export const CMUX_VAULT_TIMEOUT_MS = 1000
+export const CMUX_VAULT_MAX_PENDING_ENDS = 32
 export const CMUX_VAULT_MAX_PENDING_SESSIONS = 64
 // cmux's Unix socket convention is independent of the client's temporary directory.
 export const CMUX_VAULT_DEFAULT_SOCKET_PATH = '/tmp/cmux.sock'
@@ -298,6 +299,9 @@ export class CmuxVaultBridge {
   private shutdownRequested = false
   private running: Promise<void> | undefined
   private binding: VaultBinding | undefined
+  // SessionEnd events whose delivery failed. Kept separately from this.binding, which
+  // ownership changes can discard, so a later refresh or shutdown can retry them.
+  private pendingEnds: VaultBinding[] = []
   private stopped = false
   // Set only by stop() (shutdown). A null identity from update() means an unsaved
   // session and must still clear its binding; shutdown must keep the durable one.
@@ -457,9 +461,33 @@ export class CmuxVaultBridge {
   }
 
   private async endPresence(binding = this.binding): Promise<void> {
+    // Retry earlier undelivered ends first, so they never outlive a newer session.
+    await this.retryPendingEnds()
     if (!binding?.vaultEnabled) return
-    binding.vaultEnabled = false
-    await this.feed('SessionEnd', binding)
+    // Mark presence ended only once the end event is delivered. A failed send is queued
+    // so it is retried rather than silently lost.
+    if (await this.feed('SessionEnd', binding)) binding.vaultEnabled = false
+    else if (!this.pendingEnds.includes(binding)) this.enqueuePendingEnd(binding)
+  }
+
+  // Bounded: a permanently failing transport must not grow memory without limit.
+  // The oldest undelivered end is dropped first and reported, never retried forever.
+  private enqueuePendingEnd(binding: VaultBinding): void {
+    this.pendingEnds.push(binding)
+    while (this.pendingEnds.length > CMUX_VAULT_MAX_PENDING_ENDS) {
+      this.pendingEnds.shift()
+      this.diagnose('pending-end-dropped (transport keeps failing)')
+    }
+  }
+
+  private async retryPendingEnds(): Promise<void> {
+    const queued = this.pendingEnds
+    this.pendingEnds = []
+    for (const pending of queued) {
+      if (!pending.vaultEnabled) continue
+      if (await this.feed('SessionEnd', pending)) pending.vaultEnabled = false
+      else this.enqueuePendingEnd(pending)
+    }
   }
 
   private launchArguments(identity: VaultIdentity): string[] {
@@ -557,6 +585,8 @@ export class CmuxVaultBridge {
     // An empty show on our own target means an external clear removed the binding. Drop the
     // stale ownership and fall through to a guarded unbound publication in this same refresh.
     if (owned && !previous && observed.workspace_id === owned.workspace && observed.surface_id === owned.surface) {
+      // End the discarded conversation's live Vault presence before its ownership is dropped.
+      await this.endPresence(owned)
       this.binding = undefined
       owned = undefined
     }
@@ -659,7 +689,7 @@ export class CmuxVaultBridge {
     }
   }
 
-  private async feed(event: 'SessionStart' | 'SessionEnd', binding: VaultBinding): Promise<void> {
+  private async feed(event: 'SessionStart' | 'SessionEnd', binding: VaultBinding): Promise<boolean> {
     // Generic Feed ingress accepts custom sources. Omitting transcript_path
     // prevents its transcript resolver from reading the native GSD session.
     try {
@@ -671,7 +701,12 @@ export class CmuxVaultBridge {
         },
         wait_timeout_seconds: 0,
       })])
-    } catch { /* Older cmux may index metadata without supporting active presence. */ }
+      return true
+    } catch {
+      // Older cmux may index metadata without supporting active presence; a failed
+      // delivery is reported to the caller so a SessionEnd can stay pending for retry.
+      return false
+    }
   }
 }
 
