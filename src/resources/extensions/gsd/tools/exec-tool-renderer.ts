@@ -18,6 +18,7 @@ const DIGEST_PREVIEW_LINE_CHARS = 200;
 const LEGACY_FALLBACK_MAX_LINES = 12;
 /** Cap for error-content rendering on execution failures (timeouts, nonzero exits). */
 const ERROR_CONTENT_MAX_LINES = 20;
+const ERROR_CONTENT_COLLAPSED_LINES = 6;
 /** Exact historical footer emitted by exec-tool before recording warnings moved to details. */
 const LEGACY_RECORDING_FOOTER_MARKER = "\n--- warning ---\n";
 const LEGACY_RECORDING_FOOTER = /^--- warning ---\n(The command ran, but the host did not record this run: [\s\S]*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
@@ -175,20 +176,36 @@ function boundedLines(text: string, maxLines: number, lineChars = Number.POSITIV
 	return kept.join("\n") + suffix;
 }
 
-function previewCard(before: string[], preview: string, warnings: string[], theme: ThemeLike, expanded: boolean): Text {
+function previewCard(before: string[], preview: string, warnings: string[], theme: ThemeLike, expanded: boolean, keepTail = false): Text {
 	const card = new Text("", 0, 0);
 	card.render = (width: number): string[] => {
 		const columns = Math.max(1, width);
 		const rows = preview ? new Text(preview, 0, 0).render(columns) : [];
 		const limit = expanded ? 20 : 6;
+		// Error previews keep their visual tail: wrapped head context must not push the cause out of view.
+		const shown = keepTail && rows.length > limit ? [...rows.slice(0, 1), ...rows.slice(rows.length - (limit - 1))] : rows.slice(0, limit);
 		return [
 			...(before.length ? new Text(before.join("\n"), 0, 0).render(columns) : []),
-			...rows.slice(0, limit),
+			...shown,
 			...(rows.length > limit ? new Text(theme.fg("muted", "(preview rows hidden; open the full logs)"), 0, 0).render(columns) : []),
 			...(warnings.length ? new Text(warnings.join("\n"), 0, 0).render(columns) : []),
 		];
 	};
 	return card;
+}
+
+/**
+ * Keeps the first and last lines of an error body. The head carries the context,
+ * the tail usually carries the cause, so an elided middle must not hide either.
+ */
+function boundedHeadTailLines(text: string, maxLines: number): string {
+	const lines = text.split("\n");
+	if (lines.length <= maxLines) return text;
+	// Tail gets the larger share: the cause sits at the end. Head keeps context.
+	const head = Math.floor(maxLines / 3);
+	const tail = maxLines - head - 1;
+	const hidden = lines.length - head - tail;
+	return [...lines.slice(0, head), `… (${hidden} more lines hidden)`, ...lines.slice(lines.length - tail)].join("\n");
 }
 
 /**
@@ -342,7 +359,7 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 		// Content is the authoritative error text (validation, policy block,
 		// execution failure): show it bounded, then retain recording warnings
 		// outside that preview budget.
-		const errorText = body.length > 0 ? boundedLines(body, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
+		const errorText = body.length > 0 ? boundedHeadTailLines(body, expanded ? ERROR_CONTENT_MAX_LINES : ERROR_CONTENT_COLLAPSED_LINES) : "gsd_exec failed";
 		const status = execStatusText(details);
 		const lines = status ? [theme.fg("error", `Status: ${status}`)] : [];
 		const failureWarnings: string[] = [];
@@ -350,7 +367,7 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 			failureWarnings.push(theme.fg("warning", legacyWarning));
 		}
 		if (notRecordedRow) failureWarnings.push(notRecordedRow);
-		return previewCard(lines, theme.fg("error", errorText), failureWarnings, theme, expanded);
+		return previewCard(lines, theme.fg("error", errorText), failureWarnings, theme, expanded, true);
 	}
 
 	const lines: string[] = [];

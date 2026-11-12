@@ -705,3 +705,33 @@ test("gsd_exec renderResult never surfaces a stderr section on success rows", ()
 	assert.ok(!text.includes("failure diagnostics"), `success row gained a stderr section: ${text}`);
 	assert.ok(text.includes("ok"), `digest preview missing: ${text}`);
 });
+
+test("gsd_exec error fallback keeps the failure cause beyond the head of a long error", () => {
+	const tool = getTool("gsd_exec");
+	const lines = Array.from({ length: 60 }, (_, i) => `context line ${i}`);
+	lines[59] = "CAUSE: spawn EACCES permission denied";
+	const result = {
+		content: [{ type: "text" as const, text: lines.join("\n") }],
+		isError: true,
+		details: { timed_out: true },
+	};
+	for (const expanded of [false, true]) {
+		const text = tool.renderResult(result, { expanded }, fakeTheme).render(120).join("\n");
+		assert.match(text, /CAUSE: spawn EACCES permission denied/, `cause must stay visible (expanded=${expanded})`);
+	}
+});
+
+test("gsd_exec error fallback keeps the cause visible when long context wraps", () => {
+	const tool = getTool("gsd_exec");
+	const lines = Array.from({ length: 12 }, (_, i) => `context ${i} ${"x".repeat(240)}`);
+	lines.push("CAUSE: spawn EACCES permission denied");
+	const result = {
+		content: [{ type: "text" as const, text: lines.join("\n") }],
+		isError: true,
+		details: { timed_out: true },
+	};
+	for (const expanded of [false, true]) {
+		const text = tool.renderResult(result, { expanded }, fakeTheme).render(120).join("\n");
+		assert.match(text, /CAUSE: spawn EACCES permission denied/, `wrapped cause must stay visible (expanded=${expanded})`);
+	}
+});
