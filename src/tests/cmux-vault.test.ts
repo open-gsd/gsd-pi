@@ -1942,3 +1942,53 @@ test('resume off with Vault on ends the live presence before the same-generation
   bridge.stop()
   await bridge.idle()
 })
+
+test('a successor SessionStart is not announced while the predecessor SessionEnd is unaccepted', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  // Switch A to B while A's end cannot be delivered.
+  const sessionB = join(f.root, 'session-b-g1.jsonl')
+  await writeFile(sessionB, 'session b\n')
+  f.failFeedFor('SessionEnd', true)
+  f.setSession(sessionB, 'session-b-g1-id')
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const events = f.feedCalls.map(c => (c.event as { hook_event_name?: string }).hook_event_name)
+  const startsForB = f.feedCalls.filter(c => (c.event as { hook_event_name?: string; session_id?: string }).hook_event_name === 'SessionStart' && (c.event as { session_id?: string }).session_id === sessionB).length
+  assert.equal(events.includes('SessionEnd') && startsForB, 0,
+    'B must not be announced as live while A presence has not ended (events: ' + JSON.stringify(events) + ')')
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('a gated successor SessionStart is announced once the predecessor end is finally accepted', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const sessionB = join(f.root, 'session-b-g1-recover.jsonl')
+  await writeFile(sessionB, 'session b\n')
+  f.failFeedFor('SessionEnd', true)
+  f.setSession(sessionB, 'session-b-g1-recover-id')
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  // Transport recovers; a plain refresh of B must now end A and then announce B.
+  f.failFeedFor('SessionEnd', false)
+  f.setSession(sessionB, 'session-b-g1-recover-id')
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const startsForB = f.feedCalls.filter(c => (c.event as { hook_event_name?: string; session_id?: string }).hook_event_name === 'SessionStart' && (c.event as { session_id?: string }).session_id === sessionB).length
+  assert.ok(startsForB >= 1, 'B must eventually be announced after A end is accepted')
+  bridge.stop()
+  await bridge.idle()
+})
