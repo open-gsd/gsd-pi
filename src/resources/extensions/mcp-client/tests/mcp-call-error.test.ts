@@ -112,3 +112,28 @@ test("mcp_call retains only explicit true error carriers from SDK responses", as
 		rmSync(gsdHomeDir, { recursive: true, force: true });
 	}
 });
+
+test("mcp_call renderResult shows an error marker and bounded error preview while collapsed", async () => {
+	const tools = new Map<string, { renderResult: (...args: unknown[]) => { render(width: number): string[] } }>();
+	mcpClientExtension({
+		on() {},
+		registerTool(tool: { name: string }) {
+			tools.set(tool.name, tool as never);
+		},
+	} as never);
+	const tool = tools.get("mcp_call");
+	assert.ok(tool, "mcp_call must be registered");
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+	const longLine = "exit 7 ".repeat(200);
+	const result = {
+		content: [{ type: "text", text: `${longLine}\nsecond line\nthird line\nfourth line` }],
+		isError: true,
+		details: { server: "fixture", tool: "fail", charCount: 1400, truncated: false },
+	};
+	const rendered = tool.renderResult(result, { expanded: false }, theme).render(120).join("\n");
+	// The error marker replaces the success checkmark, and the diagnostic is visible without expanding.
+	assert.match(rendered, /✗ fixture\.fail/);
+	assert.doesNotMatch(rendered, /✓ fixture\.fail/);
+	assert.match(rendered, /exit 7/);
+	assert.ok(rendered.length < longLine.length, "collapsed error preview must be bounded");
+});

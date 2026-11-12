@@ -344,15 +344,13 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 		// outside that preview budget.
 		const errorText = body.length > 0 ? boundedLines(body, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
 		const status = execStatusText(details);
-		const lines = [
-			...(status ? [theme.fg("error", `Status: ${status}`)] : []),
-			theme.fg("error", errorText),
-		];
+		const lines = status ? [theme.fg("error", `Status: ${status}`)] : [];
+		const failureWarnings: string[] = [];
 		if (legacyWarning && context?.state?.gsdExecRecordingWarningInFrame !== true) {
-			lines.push(theme.fg("warning", legacyWarning));
+			failureWarnings.push(theme.fg("warning", legacyWarning));
 		}
-		if (notRecordedRow) lines.push(notRecordedRow);
-		return new Text(lines.join("\n"), 0, 0);
+		if (notRecordedRow) failureWarnings.push(notRecordedRow);
+		return previewCard(lines, theme.fg("error", errorText), failureWarnings, theme, expanded);
 	}
 
 	const lines: string[] = [];

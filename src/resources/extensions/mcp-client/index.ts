@@ -677,7 +677,7 @@ export default function (pi: ExtensionAPI) {
 				truncated: boolean;
 			} | undefined;
 
-			let text = theme.fg("success", `✓ ${d?.server}.${d?.tool}`);
+			let text = theme.fg(result.isError ? "error" : "success", `${result.isError ? "✗" : "✓"} ${d?.server}.${d?.tool}`);
 			text += theme.fg("dim", ` · ${(d?.charCount ?? 0).toLocaleString()} chars`);
 			if (d?.truncated) text += theme.fg("warning", " · truncated");
 
@@ -687,6 +687,11 @@ export default function (pi: ExtensionAPI) {
 					const preview = content.text.split("\n").slice(0, 15).join("\n");
 					text += "\n\n" + theme.fg("dim", preview);
 				}
+			} else if (result.isError) {
+				const content = result.content[0];
+				const errorText = content?.type === "text" && content.text ? content.text : "MCP tool call failed";
+				const preview = errorText.slice(0, 300).split("\n").slice(0, 3).join("\n");
+				text += `\n${theme.fg("error", `${preview}${preview.length < errorText.length ? "…" : ""}`)}`;
 			}
 
 			return new Text(text, 0, 0);

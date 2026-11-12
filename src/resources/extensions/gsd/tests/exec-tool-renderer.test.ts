@@ -367,6 +367,23 @@ test("gsd_exec renderResult parses only the terminal legacy footer and keeps out
 	assert.doesNotMatch(text, /intervening command output 9/);
 });
 
+test("gsd_exec legacy timeout fallback caps wrapped rows in collapsed view", () => {
+	const tool = getTool("gsd_exec");
+	const result = {
+		content: [{ type: "text" as const, text: "legacy output ".repeat(500) }],
+		isError: false,
+		details: { timed_out: true },
+	};
+
+	for (const width of [40, 120]) {
+		const rows = tool.renderResult(result, { expanded: false }, fakeTheme).render(width);
+		assert.match(rows[0], /timeout/);
+		assert.ok(rows.join("\n").includes("legacy output"));
+		// Six preview rows, plus the status and the potentially wrapped hidden-output hint.
+		assert.ok(rows.length <= 9, `collapsed timeout at width ${width} rendered ${rows.length} rows`);
+	}
+});
+
 test("gsd_exec renderResult keeps recorded output visible for historical rows that have details but no digest", () => {
 	const tool = getTool("gsd_exec");
 	// Pre-slice result shape: details already carried status/paths, the output
