@@ -3,6 +3,10 @@
 name: Native runner probe (macOS)
 
 on:
+  # push runs on the feature branch so the probe starts without changing the
+  # default branch (workflow_dispatch requires the workflow to exist on default).
+  push:
+    branches: [fix/w067-native-harness-ci-3161]
   workflow_dispatch:
 
 permissions:
