@@ -1884,3 +1884,32 @@ test('a pending SessionEnd is retried on an ordinary refresh of the next session
   await bridge.idle()
 })
 
+
+test('resume off with local ownership never adopts or clears a newer same-conversation generation', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  // Publish our own binding (generation N, the value cmux recorded for our set).
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  // Another publisher replaces the binding with a complete newer generation (999) for the same conversation.
+  // The successor must match the bridge's own shell identity exactly; only the generation differs.
+  const ownCommand = (bridge as unknown as { shellCommand(identity: { path: string; cwd: string; id: string }): string }).shellCommand({ path: f.manager.getSessionFile()!, cwd: f.cwd, id: f.manager.getSessionId() })
+  const successor: Record<string, unknown> = { kind: 'gsd', source: 'gsd', checkpoint_id: f.manager.getSessionFile(), cwd: f.cwd, updated_at: 999, auto_resume: true, command: ownCommand, launch_command: null, environment: null }
+  f.setBinding(successor)
+  const setsBefore = f.calls.length
+  // Resume is switched off while Vault stays on: a refresh must not write over the successor.
+  f.setPreferences({ enabled: true, vault: true, resume: false })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const newSets = f.calls.slice(setsBefore)
+  const ownedWriteAgainstSuccessor = newSets.some(args => args.includes('--if-checkpoint-id') && args[args.indexOf('--if-updated-at') + 1] === '999')
+  const clearedSuccessor = f.clears.some(c => c.expected_updated_at === 999)
+  assert.equal(clearedSuccessor, false, 'a newer same-conversation generation owned by another publisher must not be cleared')
+  assert.equal(ownedWriteAgainstSuccessor, false, 'the bridge must not adopt the successor generation as its own write target')
+  bridge.stop()
+  await bridge.idle()
+})
