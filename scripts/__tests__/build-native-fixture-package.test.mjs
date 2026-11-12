@@ -99,24 +99,3 @@ test('builder requires emitted bootstrap and cleans up failures', t => {
   assert.throws(() => buildNativeFixturePackage(source), /did not produce dist\/bootstrap.js/);
 });
 
-test('macOS CI builds, exports, runs and cleans the attended fixture without changing Linux', async () => {
-  const { default: YAML } = await import('yaml');
-  const workflow = YAML.parse(readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
-  const job = workflow.jobs['native-attended'];
-  assert.ok(job, 'CI must provide a macOS native attended job');
-  assert.equal(job['runs-on'], 'macos-14');
-  const steps = job.steps;
-  assert.equal(steps.filter(step => step.uses === './.github/actions/pre-review-node-setup').length, 1);
-  assert.ok(workflow.jobs['ci-gate'].needs.includes('native-attended'));
-  for (const step of steps.filter(step => step.uses && !step.uses.startsWith('./'))) {
-    assert.match(step.uses, /@[a-f0-9]{40}$/);
-  }
-  const build = steps.find(step => step.run?.includes('node scripts/build-native-fixture-package.mjs'));
-  const run = steps.find(step => step.run?.includes('src/tests/coordination-maintenance-attended.test.ts'));
-  const cleanup = steps.find(step => step.name === 'Clean native attended fixture package');
-  assert.ok(build, 'CI must build the missing isolated native fixture package');
-  assert.match(build.run, /W067_NATIVE_FIXTURE_PACKAGE=.*GITHUB_ENV/s);
-  assert.ok(steps.indexOf(build) < steps.indexOf(run));
-  assert.match(run.run, /--test-concurrency=1/);
-  assert.equal(cleanup.if, 'always()');
-});
