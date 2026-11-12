@@ -102,7 +102,7 @@ jobs:
           node --import tsx --test --test-concurrency=1 src/tests/coordination-maintenance-attended.test.ts \
             > native-attended.tap.log 2>&1
           rc=$?
-          cat native-attended.tap.log | tail -20
+          tail -20 native-attended.tap.log
           if [ "$rc" -ne 0 ]; then
             echo "::error::native attended fixtures failed (exit $rc)"
             exit "$rc"
@@ -118,7 +118,7 @@ jobs:
             echo "node=$(node --version)"
             echo "fixture=${{ steps.fixture.outputs.fixture }}"
           } > native-attended.provenance.txt
-          cat native-attended.provenance.txt
+          tail -n +1 native-attended.provenance.txt
 
       - name: Upload logs and provenance
         if: always()
