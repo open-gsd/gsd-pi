@@ -55,6 +55,7 @@ async function fixture(t: test.TestContext) {
   let capabilityFails = false
   let feedFails = false
   let negativeShow = false
+  let malformedCaps = false
   let failEvent: string | undefined
   let preferences: { enabled: boolean; vault: boolean; resume?: boolean } = { enabled: true, vault: true }
   let clock = 100
@@ -86,6 +87,7 @@ async function fixture(t: test.TestContext) {
       allCalls.push(args)
       if (args[0] === 'rpc' && args[1] === 'system.capabilities') {
         if (capabilityFails) throw new Error('capability discovery failed')
+        if (malformedCaps) return { methods: ['surface.resume.conditional_set.v1', null] }
         return { methods: ['surface.resume.conditional_set.v1'] }
       }
       if (args[0] === 'rpc') {
@@ -136,6 +138,7 @@ async function fixture(t: test.TestContext) {
     failCapabilityDiscovery: () => { capabilityFails = true },
     failFeed: (fail: boolean) => { feedFails = fail },
     setNegativeShow: (value: boolean) => { negativeShow = value },
+    setMalformedCapabilities: (value: boolean) => { malformedCaps = value },
     failFeedFor: (event: string, fail: boolean) => { failEvent = fail ? event : undefined },
     setPreferences: (value: { enabled: boolean; vault: boolean; resume?: boolean }) => { preferences = value },
     setSession: (file: string | undefined, sessionId = 'switched-id') => { path = file; id = sessionId },
@@ -2011,4 +2014,26 @@ test('a negative show response never authorizes --if-unbound, even with matching
   assert.equal(unboundSets.length, 0, 'a failed observation must not be treated as confirmed absence')
   bridge.stop()
   await bridge.idle()
+})
+
+test('a malformed capability methods list is reported as a query error, not as confirmed unsupported', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  f.setMalformedCapabilities(true)
+  const warnings: string[] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); }
+  t.after(() => { console.warn = originalWarn })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  bridge.stop()
+  await bridge.idle()
+  assert.ok(warnings.some(w => w.includes('capability-query-error')),
+    'a malformed capability payload must be reported as a query error (got: ' + JSON.stringify(warnings) + ')')
+  assert.ok(!warnings.some(w => w.includes('unsupported-CAS')),
+    'a malformed payload must not be reported as confirmed unsupported')
 })
