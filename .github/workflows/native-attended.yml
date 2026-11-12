@@ -68,7 +68,27 @@ jobs:
           fi
           echo "checkout HEAD verified: $actual"
 
-      - uses: ./.github/actions/pre-review-node-setup
+      # Inline equivalent of ./.github/actions/pre-review-node-setup. That shared
+      # composite pins actions/setup-node to a SHA that does not exist (see
+      # upstream commit d266717a4); it is used only by the proposal workflow, so it is
+      # left unchanged here. Same pnpm version, same security posture: NO pnpm cache,
+      # so an untrusted fork install cannot poison the merge-authority cache.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 10.12.1
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Install dependencies
+        shell: bash
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          GSD_SKIP_RTK_INSTALL: "1"
+          GSD_SKIP_DEP_REPAIR: "1"
+        run: pnpm install --frozen-lockfile
 
       - name: Build native package (dependency-first, before tests)
         shell: bash
