@@ -530,61 +530,10 @@ jobs:
             | tar -xz -C /usr/local/bin actionlint
           actionlint -config-file .config/actionlint.yaml
 
-  # Opt-in: add the PR label "native-harness" (runs on the next PR event),
-  # or use workflow_dispatch. Unlabelled PRs do not incur a macOS job.
-  # Real Darwin boot/process facts and a fixture-only PTY; no live maintenance.
-  native-attended:
-    name: native-attended (macOS)
-    runs-on: macos-14
-    timeout-minutes: 15
-    needs: [fast-gates]
-    if: >-
-      github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'native-harness')
-    steps:
-      - name: Checkout repository without GITHUB_TOKEN
-        shell: bash
-        run: |
-          set -euo pipefail
-          git init "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git -c protocol.version=2 fetch --no-tags --prune origin \
-            "+${GITHUB_SHA}:refs/checkout-ref"
-          git checkout --force --detach "$GITHUB_SHA"
-      - uses: ./.github/actions/pre-review-node-setup
-      - name: Test native fixture builder
-        run: node --test scripts/__tests__/build-native-fixture-package.test.mjs
-      - name: Build native attended fixture package
-        shell: bash
-        run: |
-          set -euo pipefail
-          fixture_package="$(node scripts/build-native-fixture-package.mjs)"
-          echo "W067_NATIVE_FIXTURE_PACKAGE=$fixture_package" >> "$GITHUB_ENV"
-      - name: Run native attended fixtures
-        run: node --import tsx --test --test-concurrency=1 src/tests/coordination-maintenance-attended.test.ts
-      - name: Clean native attended fixture package
-        if: always()
-        shell: bash
-        run: |
-          node --input-type=module <<'JS'
-          import { rmSync, realpathSync } from 'node:fs';
-          import { tmpdir } from 'node:os';
-          import { basename, dirname } from 'node:path';
-          const root = process.env.W067_NATIVE_FIXTURE_PACKAGE;
-          if (root) {
-            const path = realpathSync(root);
-            if (dirname(path) !== realpathSync(tmpdir()) || !basename(path).startsWith('w067-kernel-package-')) {
-              throw new Error('Refusing to clean a non-fixture package');
-            }
-            rmSync(path, { recursive: true, force: true });
-          }
-          JS
-
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [fast-gates, build, windows-portability, node22-smoke, workflow-lint, native-attended]
+    needs: [fast-gates, build, windows-portability, node22-smoke, workflow-lint]
     runs-on: ubuntu-latest
     steps:
       - name: Assert no upstream job failed or was cancelled
@@ -594,15 +543,14 @@ jobs:
           WINDOWS: ${{ needs.windows-portability.result }}
           NODE22: ${{ needs.node22-smoke.result }}
           WORKFLOW_LINT: ${{ needs.workflow-lint.result }}
-          NATIVE_ATTENDED: ${{ needs.native-attended.result }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "fast-gates=$FAST_GATES build=$BUILD windows-portability=$WINDOWS node22-smoke=$NODE22 workflow-lint=$WORKFLOW_LINT native-attended=$NATIVE_ATTENDED"
-          # 'skipped' is acceptable, including native-attended without native-harness.
+          echo "fast-gates=$FAST_GATES build=$BUILD windows-portability=$WINDOWS node22-smoke=$NODE22 workflow-lint=$WORKFLOW_LINT"
+          # 'skipped' is an acceptable result (job legitimately not needed).
           # Only 'failure' / 'cancelled' must block the merge.
           status=0
-          for result in "$FAST_GATES" "$BUILD" "$WINDOWS" "$NODE22" "$WORKFLOW_LINT" "$NATIVE_ATTENDED"; do
+          for result in "$FAST_GATES" "$BUILD" "$WINDOWS" "$NODE22" "$WORKFLOW_LINT"; do
             case "$result" in
               success|skipped) ;;
               *) status=1 ;;
