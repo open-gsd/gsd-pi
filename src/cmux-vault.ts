@@ -671,7 +671,9 @@ export class CmuxVaultBridge {
     // Flush undelivered ends from earlier sessions before announcing new presence, so an
     // ordinary refresh recovers a failed end without waiting for shutdown or a handoff.
     await this.retryPendingEnds()
-    if (vaultEnabled) await this.feed('SessionStart', currentBinding)
+    // Never announce a successor while a predecessor's SessionEnd is still unaccepted:
+    // that would leave two live presences. The next refresh announces B once A has ended.
+    if (vaultEnabled && this.pendingEnds.length === 0) await this.feed('SessionStart', currentBinding)
   }
 
   private async writeMetadata(identity: VaultIdentity): Promise<void> {
