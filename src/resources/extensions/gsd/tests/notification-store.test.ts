@@ -276,13 +276,13 @@ describe("notification-store", () => {
   test("occurrence: a failed append does not suppress a later retry (#3170 thread 3)", () => {
     initNotificationStore(tmp);
     const occ = { milestone: "M1", slice: "S1", uatAttempt: 7 };
-    // Make the first append fail by blocking the .gsd directory with a file.
-    rmSync(join(tmp, ".gsd"), { recursive: true, force: true });
-    writeFileSync(join(tmp, ".gsd"), "not a directory");
-    appendNotification("attempt", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
-    // Repair the workspace and retry the same occurrence.
-    rmSync(join(tmp, ".gsd"), { force: true });
+    // mkdir of .gsd succeeds, but the append itself fails: the log path is a directory.
     mkdirSync(join(tmp, ".gsd"), { recursive: true });
+    mkdirSync(join(tmp, ".gsd", "notifications.jsonl"));
+    appendNotification("attempt", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    assert.equal(readNotifications().length, 0, "the failed append must not persist an entry");
+    // Repair: the log path becomes a normal file again; retry the same occurrence.
+    rmSync(join(tmp, ".gsd", "notifications.jsonl"), { recursive: true, force: true });
     appendNotification("retry", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
     assert.equal(readNotifications().length, 1, "the retry must land after a failed append");
   });
