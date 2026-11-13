@@ -547,7 +547,11 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 			high: "HIGH",
 		});
 	}
-	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id)) {
+	if (
+		model.provider === "openai-codex" &&
+		supportsOpenAiXhigh(model.id) &&
+		!model.id.includes("gpt-6")
+	) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
 	if (

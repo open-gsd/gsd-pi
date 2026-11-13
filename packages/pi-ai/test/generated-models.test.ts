@@ -57,6 +57,22 @@ describe("Copilot GPT-6 generator routing", () => {
 	});
 });
 
+describe("openai-codex GPT-6 thinking mapping", () => {
+	test("does not apply the Copilot-scoped minimal->low mapping to openai-codex gpt-6 ids", () => {
+		const generator = readFileSync(join(import.meta.dirname, "../scripts/generate-models.ts"), "utf8");
+		// Evaluate the real openai-codex condition from the generator source, not a copy.
+		const rule = generator.match(/if \(\s*model\.provider === "openai-codex"[\s\S]*?\) \{/);
+		expect(rule).not.toBeNull();
+		const condition = rule![0].replace(/^if \(/, "").replace(/\) \{$/, "");
+		const supportsOpenAiXhigh = (id: string) =>
+			["gpt-5.2", "gpt-5.3", "gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6"].some((v) => id.includes(v));
+		const fires = (id: string) =>
+			runInNewContext(`(${condition})`, { model: { provider: "openai-codex", id }, supportsOpenAiXhigh });
+		expect(fires("gpt-6-astra")).toBe(false);
+		expect(fires("gpt-5.6-sol")).toBe(true);
+	});
+});
+
 describe("models.generated.ts", () => {
 	test("evaluates actual generator capability guards without network or absent-catalog fixtures", () => {
 		// allow-source-grep: parse and execute actual generator predicates to lock a latent provider-boundary bug before new catalog entries exist.
