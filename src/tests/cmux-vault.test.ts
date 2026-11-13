@@ -13,6 +13,7 @@ import {
 import {
   CmuxVaultBridge,
   CMUX_VAULT_MAX_PENDING_SESSIONS,
+  CMUX_VAULT_MAX_PENDING_ENDS,
   CMUX_VAULT_DEFAULT_SOCKET_PATH,
   clearCmuxVaultBinding,
   cmuxSurfaceOwnerEnabled,
@@ -2058,6 +2059,33 @@ test('a successor SessionStart stays blocked across repeated failed predecessor 
   }
   const startsForB = f.feedCalls.filter(c => (c.event as { hook_event_name?: string; session_id?: string }).hook_event_name === 'SessionStart' && (c.event as { session_id?: string }).session_id === sessionB).length
   assert.equal(startsForB, 0, 'B must stay unannounced while A end keeps failing across refreshes')
+  bridge.stop()
+  await bridge.idle()
+})
+
+test('undelivered SessionEnd retries are capped and the oldest is dropped with a diagnostic', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const warnings: string[] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => { warnings.push(String(args[0])) }
+  t.after(() => { console.warn = originalWarn })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  f.failFeedFor('SessionEnd', true)
+  // Each switch queues one undelivered end; exceed the cap by two.
+  for (let i = 0; i < CMUX_VAULT_MAX_PENDING_ENDS + 2; i++) {
+    const next = join(f.root, `session-cap-${i}.jsonl`)
+    await writeFile(next, `session ${i}\n`)
+    f.setSession(next, `session-cap-${i}-id`)
+    bridge.update(f.manager, true, true)
+    await bridge.idle()
+  }
+  const queued = (bridge as unknown as { pendingEnds: unknown[] }).pendingEnds.length
+  assert.ok(queued <= CMUX_VAULT_MAX_PENDING_ENDS, 'retained ends must never exceed the cap (queued=' + queued + ')')
+  assert.ok(warnings.some(w => w.includes('pending-end-dropped')), 'overflow must be diagnosed, not silent')
   bridge.stop()
   await bridge.idle()
 })
