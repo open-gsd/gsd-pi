@@ -904,6 +904,13 @@ function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
  * Raw sources — errorMessage and stderr — stay plain text, never reinterpreted
  * as Markdown.
  */
+/**
+ * Readable measure (display cells) for authored report prose in the background
+ * status view (#2931). A proposal value chosen against representative widths;
+ * not an accepted standard and not a user setting.
+ */
+const AUTHORED_PROSE_MEASURE = 88;
+
 function renderRunRecordReport(
 	record: NonNullable<ReturnType<SubagentRunStore["get"]>>,
 	theme: { fg: (color: any, text: string) => string },
@@ -922,7 +929,13 @@ function renderRunRecordReport(
 			// The authored source goes to the renderer unchanged (trim is only the
 			// emptiness check): leading indentation is meaningful markdown and must
 			// survive verbatim (#2928).
-			container.addChild(new Markdown(child.output, 0, 0, getMarkdownTheme()));
+			const authored = new Markdown(child.output, 0, 0, getMarkdownTheme());
+			// Readable measure for authored prose only (#2931). Code, tables and
+			// lists keep host width inside the component; the measure is a
+			// proposal value (88) chosen against representative widths, not a
+			// settled standard. Raw stderr/error paths never reach this branch.
+			authored.proseMeasure = AUTHORED_PROSE_MEASURE;
+			container.addChild(authored);
 		} else if (child.stderr) {
 			// Raw logs stay plain text — source, never reinterpreted as report
 			// markdown (#2928).
