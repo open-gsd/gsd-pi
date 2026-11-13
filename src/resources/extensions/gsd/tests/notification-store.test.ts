@@ -206,6 +206,65 @@ describe("notification-store", () => {
     assert.equal(entries[1].message, "same");
   });
 
+  test("occurrence identity: same occurrence dedups, a new occurrence is never suppressed (#2935)", (t) => {
+    initNotificationStore(tmp);
+    let now = 1_000;
+    t.mock.method(Date, "now", () => now);
+    const meta = (attempt: number) => ({
+      kind: "uat-needs-human",
+      scope: "M1/S1",
+      occurrence: { milestone: "M1", slice: "S1", uatAttempt: attempt },
+    });
+
+    // Same occurrence, rephrased text, inside the window: one row.
+    appendNotification("UAT needs human (first wording)", "warning", "notify", meta(1));
+    now += 1_000;
+    appendNotification("UAT needs human (rephrased)", "warning", "notify", meta(1));
+    // A new UAT attempt on the same slice, same kind and scope, inside the
+    // window: it is a different occurrence and must NOT be suppressed.
+    now += 1_000;
+    appendNotification("UAT needs human (attempt 2)", "warning", "notify", meta(2));
+
+    const entries = readNotifications();
+    assert.equal(entries.length, 2, "same occurrence dedups; new attempt is kept");
+  });
+
+  test("without occurrence identity, prose and time window dedup stays as before (#2935 compat)", (t) => {
+    initNotificationStore(tmp);
+    let now = 1_000;
+    t.mock.method(Date, "now", () => now);
+    appendNotification("same", "warning");
+    now += 1_000;
+    appendNotification("same", "warning");
+    assert.equal(readNotifications().length, 1);
+  });
+
+  test("occurrence dedup survives the 30 s window (not time-pruned) (#2935 review)", (t) => {
+    initNotificationStore(tmp);
+    let now = 1_000;
+    t.mock.method(Date, "now", () => now);
+    const occ = { milestone: "M1", slice: "S1", uatAttempt: 1 };
+    appendNotification("A", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    // Advance beyond the legacy window and churn the legacy map past its prune threshold.
+    now += 60_000;
+    for (let i = 0; i < 250; i++) {
+      appendNotification(`noise ${i}`, "info", "notify", { kind: "x", scope: `s${i}`, occurrence: { n: i } });
+    }
+    // Same occurrence again: must still collapse, because occurrence is not time-based.
+    appendNotification("A again", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    const aRows = readNotifications().filter((e) => e.message.startsWith("A"));
+    assert.equal(aRows.length, 1, "occurrence A must not be re-admitted after the window");
+  });
+
+  test("clearNotifications resets occurrence dedup so a cleared store can receive the same occurrence (#2935 review)", () => {
+    initNotificationStore(tmp);
+    const occ = { milestone: "M1", slice: "S1", uatAttempt: 1 };
+    appendNotification("first", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    clearNotifications();
+    appendNotification("after clear", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    assert.equal(readNotifications().length, 1, "store must not stay empty after clear");
+  });
+
   test("suppressPersistence is ref-counted", () => {
     initNotificationStore(tmp);
     suppressPersistence();

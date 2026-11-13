@@ -21,6 +21,13 @@ export type NotificationSource = "notify" | "workflow-logger";
 export interface NotificationMeta {
   kind?: string;
   scope?: string;
+  /**
+   * Stable occurrence identity supplied by an adopted producer (#2935). When
+   * present it is the ONLY dedup key: same occurrence collapses, a distinct
+   * occurrence with the same kind and scope is never suppressed, and the
+   * time window does not apply. Absent => prior behaviour unchanged.
+   */
+  occurrence?: Record<string, string | number>;
 }
 
 export interface NotificationEntry {
@@ -48,6 +55,14 @@ let _basePath: string | null = null;
 let _lineCount = 0;  // Hint for rotation — not authoritative for public API
 let _suppressCount = 0;
 let _recentMessageTimestamps = new Map<string, number>();
+/**
+ * Occurrence identities seen in this process (#2935). Deliberately separate from
+ * the 30-second TTL map: an occurrence is not a time window, so it must not be
+ * pruned by age. Bounded by a hard cap with FIFO eviction; eviction is the only
+ * forgetting rule and is documented, not time-based.
+ */
+const OCCURRENCE_CAP = 256;
+let _occurrenceSeen = new Set<string>();
 const _changeListeners = new Set<() => void>();
 
 // ─── Public API ─────────────────────────────────────────────────────────
@@ -59,6 +74,7 @@ const _changeListeners = new Set<() => void>();
 export function initNotificationStore(basePath: string): void {
   if (_basePath !== basePath) {
     _recentMessageTimestamps.clear();
+    _occurrenceSeen = new Set();
   }
   _basePath = basePath;
   // Seed line count hint for rotation — public counters read from disk
@@ -78,17 +94,33 @@ export function appendNotification(
   if (!_basePath) return;
   if (_suppressCount > 0) return;
   const persistedMessage = message.length > 500 ? message.slice(0, 500) + "…" : message;
-  // Structured identity (kind + scope) keys dedup when present, so a rephrased
-  // message of the same event still dedups; otherwise fall back to the prose.
-  const identity = meta?.kind ? `${meta.kind}:${meta.scope ?? ""}` : persistedMessage;
-  const dedupKey = `${_basePath}:${severity}:${source}:${identity}`;
-  const now = Date.now();
-  const lastSeen = _recentMessageTimestamps.get(dedupKey);
-  if (lastSeen !== undefined && now - lastSeen < DEDUP_WINDOW_MS) return;
-  _recentMessageTimestamps.set(dedupKey, now);
-  if (_recentMessageTimestamps.size > DEDUP_PRUNE_THRESHOLD) {
-    for (const [key, ts] of _recentMessageTimestamps) {
-      if (now - ts > DEDUP_WINDOW_MS) _recentMessageTimestamps.delete(key);
+  if (meta?.occurrence) {
+    // Adopted producer (#2935): dedup on the canonical occurrence tuple only.
+    // Canonical JSON with sorted keys, so no delimiter collisions. No time window.
+    const occKey = JSON.stringify(
+      Object.keys(meta.occurrence).sort().map((k) => [k, meta.occurrence?.[k]]),
+    );
+    const occDedupKey = `${_basePath}:${severity}:${source}:occ:${occKey}`;
+    if (_occurrenceSeen.has(occDedupKey)) return;
+    _occurrenceSeen.add(occDedupKey);
+    if (_occurrenceSeen.size > OCCURRENCE_CAP) {
+      // FIFO: a Set iterates in insertion order, so the first key is the oldest.
+      _occurrenceSeen.delete(_occurrenceSeen.values().next().value as string);
+    }
+    // Occurrence path is complete: the occurrence-keyed entry is persisted below
+    // by the shared entry-building code, so fall through to it without the
+    // time-window logic.
+  } else {
+    const identity = meta?.kind ? `${meta.kind}:${meta.scope ?? ""}` : persistedMessage;
+    const dedupKey = `${_basePath}:${severity}:${source}:${identity}`;
+    const now = Date.now();
+    const lastSeen = _recentMessageTimestamps.get(dedupKey);
+    if (lastSeen !== undefined && now - lastSeen < DEDUP_WINDOW_MS) return;
+    _recentMessageTimestamps.set(dedupKey, now);
+    if (_recentMessageTimestamps.size > DEDUP_PRUNE_THRESHOLD) {
+      for (const [key, ts] of _recentMessageTimestamps) {
+        if (now - ts > DEDUP_WINDOW_MS) _recentMessageTimestamps.delete(key);
+      }
     }
   }
 
@@ -174,6 +206,7 @@ export function clearNotifications(basePath?: string): void {
       _atomicWrite(bp, "");
     });
     _lineCount = 0;
+    _occurrenceSeen = new Set();
     _emitChange();
   } catch {
     // Non-fatal
@@ -240,6 +273,7 @@ export function _resetNotificationStore(): void {
   _lineCount = 0;
   _suppressCount = 0;
   _recentMessageTimestamps = new Map();
+  _occurrenceSeen = new Set();
   _changeListeners.clear();
 }
 
