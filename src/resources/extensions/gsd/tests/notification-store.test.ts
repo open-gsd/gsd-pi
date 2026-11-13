@@ -269,7 +269,7 @@ describe("notification-store", () => {
     initNotificationStore(tmp);
     const occ = { milestone: "M1", slice: "S1", uatAttempt: 1 };
     appendNotification("first", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
-    appendNotification("replayed", "info", "tool", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    appendNotification("replayed", "info", "workflow-logger", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
     assert.equal(readNotifications().length, 1, "severity/source must not split one occurrence");
   });
 
