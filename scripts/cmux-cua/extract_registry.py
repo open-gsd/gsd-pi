@@ -29,11 +29,18 @@ def main(root):
         "direct_registrations_in_macos_register_all": len(direct),
         "group_calls": groups,
         "group_bodies": {},
-        "type_text_chars_registered": "type_text_chars" in re.findall(r'name:\s*"([a-z_]+)"', mod.read_text(encoding="utf-8")),
+        "type_text_chars_registered": bool(re.search(r"registry\.register\(Box::new\(\s*type_text_chars::", mod.read_text(encoding="utf-8"))),
     }
+    unresolved = []
     for g in groups:
         m = re.search(r"fn " + g + r"\(&mut self\)\s*\{(.*?)\n    \}", core, re.S)
-        report["group_bodies"][g] = len(re.findall(r"\.register\(", m.group(1))) if m else None
+        if not m:
+            unresolved.append(g)
+            continue
+        report["group_bodies"][g] = len(re.findall(r"\.register\(", m.group(1)))
+    if unresolved:
+        print(json.dumps({"error": "unresolved helper body", "unresolved": unresolved, "root": str(root)}))
+        return 3
     report["total_registrations_static"] = report["direct_registrations_in_macos_register_all"] + sum(v or 0 for v in report["group_bodies"].values())
     print(json.dumps(report, indent=2))
     return 0
