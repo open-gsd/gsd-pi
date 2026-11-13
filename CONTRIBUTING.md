@@ -120,6 +120,12 @@ The native job uploads an artifact named `native-attended-<sha>` containing `nat
 
 - Proven on GitHub-hosted `macos-15` (arm64): the attended fixture suite passed 50/50 on run 43382401636. That job tested the pull-request merge candidate `6a5becebb…` (the PR head `f4f7ce51…` merged into its base), not the bare branch head. The artifact provenance records this SHA.
 - The earlier 50/50 run on head `0427ff56…` was the pre-gate version of the same suite.
+
+Three SHAs are distinct and must not be conflated:
+
+- **PR head**: the branch tip that was reviewed and tested as a branch (for example `f4f7ce51…`).
+- **Tested merge candidate**: the commit Actions checks out for a `pull_request` run, which is the PR head merged into the base (for example `6a5becebb…`). The provenance file records this value.
+- **Final merge commit**: the commit on the base branch after the merge (`aceb8068…` on `main`). It is produced by the merge method and is not the tested candidate.
 - Not proven: x86_64 (x64) execution in CI, and acceptance on a real attended operator host. The fixtures are automated integration tests, not operator confirmations.
 
 ### Native engine version lockstep
