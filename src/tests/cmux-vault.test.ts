@@ -1967,7 +1967,7 @@ test('a successor SessionStart is not announced while the predecessor SessionEnd
   await bridge.idle()
   const events = f.feedCalls.map(c => (c.event as { hook_event_name?: string }).hook_event_name)
   const startsForB = f.feedCalls.filter(c => (c.event as { hook_event_name?: string; session_id?: string }).hook_event_name === 'SessionStart' && (c.event as { session_id?: string }).session_id === sessionB).length
-  assert.equal(events.includes('SessionEnd') && startsForB, 0,
+  assert.equal(startsForB, 0,
     'B must not be announced as live while A presence has not ended (events: ' + JSON.stringify(events) + ')')
   bridge.stop()
   await bridge.idle()
@@ -2036,4 +2036,28 @@ test('a malformed capability methods list is reported as a query error, not as c
     'a malformed capability payload must be reported as a query error (got: ' + JSON.stringify(warnings) + ')')
   assert.ok(!warnings.some(w => w.includes('unsupported-CAS')),
     'a malformed payload must not be reported as confirmed unsupported')
+})
+
+test('a successor SessionStart stays blocked across repeated failed predecessor SessionEnd refreshes', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  const sessionB = join(f.root, 'session-b-g1-permanent.jsonl')
+  await writeFile(sessionB, 'session b\n')
+  f.failFeedFor('SessionEnd', true)
+  f.setSession(sessionB, 'session-b-g1-permanent-id')
+  // Two further ordinary refreshes while A's end keeps failing.
+  for (let i = 0; i < 2; i++) {
+    bridge.update(f.manager, true, true)
+    await bridge.idle()
+  }
+  const startsForB = f.feedCalls.filter(c => (c.event as { hook_event_name?: string; session_id?: string }).hook_event_name === 'SessionStart' && (c.event as { session_id?: string }).session_id === sessionB).length
+  assert.equal(startsForB, 0, 'B must stay unannounced while A end keeps failing across refreshes')
+  bridge.stop()
+  await bridge.idle()
 })
