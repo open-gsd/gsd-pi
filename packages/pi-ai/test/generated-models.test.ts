@@ -7,6 +7,7 @@ import { runInNewContext } from "node:vm";
 import * as ts from "typescript";
 import { describe, expect, test } from "vitest";
 import { applyCopilotGpt6ResponsesRouting } from "../scripts/copilot-gpt6-routing.ts";
+import { appliesCodexMinimalLow } from "../scripts/codex-thinking-mapping.ts";
 import { isModelsCatalog } from "../src/model-catalog.ts";
 import { MODELS } from "../src/models.generated.ts";
 import { calculateCost } from "../src/models.ts";
@@ -54,6 +55,17 @@ describe("Copilot GPT-6 generator routing", () => {
 		};
 		applyCopilotGpt6ResponsesRouting(model);
 		expect(model.compat).toBe(compat);
+	});
+});
+
+describe("openai-codex GPT-6 thinking mapping", () => {
+	test("applies minimal->low to openai-codex gpt-5.x and not to gpt-6", () => {
+		expect(appliesCodexMinimalLow("openai-codex", "gpt-6-astra")).toBe(false);
+		expect(appliesCodexMinimalLow("openai-codex", "gpt-5.6-sol")).toBe(true);
+	});
+	test("never applies the codex mapping to other providers", () => {
+		expect(appliesCodexMinimalLow("github-copilot", "gpt-5.6-sol")).toBe(false);
+		expect(appliesCodexMinimalLow("openai", "gpt-5.6-sol")).toBe(false);
 	});
 });
 

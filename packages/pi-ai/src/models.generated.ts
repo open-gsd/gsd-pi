@@ -11138,7 +11138,6 @@ export const MODELS = {
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
-			thinkingLevelMap: {"minimal":"low"},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
