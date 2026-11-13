@@ -3,6 +3,7 @@
 import { writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { appliesCodexMinimalLow } from "./codex-thinking-mapping.ts";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
@@ -547,11 +548,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 			high: "HIGH",
 		});
 	}
-	if (
-		model.provider === "openai-codex" &&
-		supportsOpenAiXhigh(model.id) &&
-		!model.id.includes("gpt-6")
-	) {
+	if (appliesCodexMinimalLow(model.provider, model.id)) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
 	if (
