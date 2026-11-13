@@ -1,14 +1,20 @@
-# Opt-in native attended fixture run on macOS.
+# Native attended fixture run on macOS (Apple Silicon, macos-15).
 #
-# Why a separate workflow: ci.yml's concurrency group cancels an older run of the
-# same PR when a newer one starts. A label event started a second pull_request run,
-# which cancelled the macOS job before any step ran (run 43146187147). This workflow
-# has its own concurrency group, so it is never superseded by ci.yml.
+# Called from ci.yml as a reusable workflow so ci-gate receives its real result.
+# The caller decides relevance (classifier output native-attended-changed); this
+# workflow has NO label precondition and NO independent pull_request trigger, so
+# it cannot run twice for one PR update.
+#
+# workflow_dispatch remains for manual reruns of an explicit full SHA.
 name: Native attended (macOS)
 
 on:
-  pull_request:
-    types: [labeled, synchronize, reopened]
+  workflow_call:
+    inputs:
+      source_sha:
+        description: "Full 40-char commit SHA under test (the CI candidate)"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       source_sha:
@@ -20,15 +26,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-attended-${{ github.event.pull_request.number || github.run_id }}
+  group: native-attended-${{ inputs.source_sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   native-attended:
-    # Opt-in: run for PRs that carry the label, or on manual dispatch.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'native-harness')
+    # No label precondition: the caller's classifier decides whether this runs.
     name: native-attended (macOS)
     runs-on: macos-15
     timeout-minutes: 30
@@ -37,11 +40,10 @@ jobs:
         id: sha
         shell: bash
         env:
-          INPUT_SHA: ${{ github.event.inputs.source_sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          INPUT_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          sha="${INPUT_SHA:-$PR_HEAD}"
+          sha="$INPUT_SHA"
           if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::tested SHA is not a full 40-char commit SHA: '$sha'"
             exit 1
