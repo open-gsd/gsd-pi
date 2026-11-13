@@ -1,0 +1,162 @@
+# Native attended fixture run on macOS (Apple Silicon, macos-15).
+#
+# Called from ci.yml as a reusable workflow so ci-gate receives its real result.
+# The caller decides relevance (classifier output native-attended-changed); this
+# workflow has NO label precondition and NO independent pull_request trigger, so
+# it cannot run twice for one PR update.
+#
+# workflow_dispatch remains for manual reruns of an explicit full SHA.
+name: Native attended (macOS)
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: "Full 40-char commit SHA under test (the CI candidate)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Full commit SHA to test (must be the PR head or a descendant)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-attended-${{ inputs.source_sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  native-attended:
+    # No label precondition: the caller's classifier decides whether this runs.
+    name: native-attended (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Resolve tested source SHA
+        id: sha
+        shell: bash
+        env:
+          INPUT_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          sha="$INPUT_SHA"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::tested SHA is not a full 40-char commit SHA: '$sha'"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Testing source SHA: $sha"
+
+      - name: Checkout tested SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.sha.outputs.sha }}
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        shell: bash
+        env:
+          EXPECTED: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::checkout HEAD $actual != expected $EXPECTED"
+            exit 1
+          fi
+          echo "checkout HEAD verified: $actual"
+
+      # Inline equivalent of ./.github/actions/pre-review-node-setup. That shared
+      # composite pins actions/setup-node to a SHA that does not exist (see
+      # upstream commit d266717a4); it is used only by the proposal workflow, so it is
+      # left unchanged here. Same pnpm version, same security posture: NO pnpm cache,
+      # so an untrusted fork install cannot poison the merge-authority cache.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 10.12.1
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Install dependencies
+        shell: bash
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          GSD_SKIP_RTK_INSTALL: "1"
+          GSD_SKIP_DEP_REPAIR: "1"
+        run: pnpm install --frozen-lockfile
+
+      - name: Build native package (dependency-first, before tests)
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm run build:native-pkg
+          test -f packages/native/dist/directory-sync/index.js
+
+      - name: Test native fixture builder
+        run: node --test scripts/__tests__/build-native-fixture-package.test.mjs
+
+      - name: Build native attended fixture package
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_package="$(node scripts/build-native-fixture-package.mjs)"
+          if [ ! -d "$fixture_package" ]; then
+            echo "::error::fixture package not created: $fixture_package"
+            exit 1
+          fi
+          echo "W067_NATIVE_FIXTURE_PACKAGE=$fixture_package" >> "$GITHUB_ENV"
+          echo "fixture=$fixture_package" >> "$GITHUB_OUTPUT"
+
+      - name: Run native attended fixtures
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Capture the real exit code. A failed or cancelled fixture run must fail
+          # this step; it is never converted into a skip or a pass.
+          node --import tsx --test --test-concurrency=1 src/tests/coordination-maintenance-attended.test.ts \
+            > native-attended.tap.log 2>&1
+          rc=$?
+          tail -20 native-attended.tap.log
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::native attended fixtures failed (exit $rc)"
+            exit "$rc"
+          fi
+
+      - name: Record provenance
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "source_sha=${{ steps.sha.outputs.sha }}"
+            echo "runner=$(uname -s) $(uname -m)"
+            echo "node=$(node --version)"
+            echo "fixture=${{ steps.fixture.outputs.fixture }}"
+          } > native-attended.provenance.txt
+          tail -n +1 native-attended.provenance.txt
+
+      - name: Upload logs and provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-attended-${{ steps.sha.outputs.sha }}
+          path: |
+            native-attended.tap.log
+            native-attended.provenance.txt
+          if-no-files-found: warn
+
+      - name: Clean native attended fixture package
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${W067_NATIVE_FIXTURE_PACKAGE:-}" ]; then
+            node -e 'require("fs").rmSync(process.argv[1],{recursive:true,force:true})' "$W067_NATIVE_FIXTURE_PACKAGE"
+          fi

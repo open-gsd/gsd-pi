@@ -12,6 +12,7 @@ const APPROVED_RUNNERS = new Set([
   "ubuntu-latest",
   "windows-latest",
   "macos-14",
+  "macos-15",
   "blacksmith-4vcpu-ubuntu-2404",
   "blacksmith-4vcpu-ubuntu-2404-arm",
   "blacksmith-4vcpu-windows-2025",

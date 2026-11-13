@@ -50,6 +50,13 @@ is_windows_e2e_file() {
   esac
 }
 
+is_native_attended_file() {
+  case "$1" in
+    src/resources/extensions/gsd/coordination-maintenance*.ts|src/resources/extensions/gsd/coordination-same-machine-facts.ts|src/resources/extensions/gsd/coordination-maintenance-*.ts|src/coordination-maintenance*.ts|src/resources/extensions/gsd/db/engine.ts|src/resources/extensions/gsd/db-adapter.ts|src/tests/coordination-maintenance-attended*.test.ts|scripts/build-native-fixture-package.mjs|scripts/__tests__/build-native-fixture-package.test.mjs|packages/native/*|native/*|.github/workflows/native-attended.yml) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 is_docker_file() {
   case "$1" in
     Dockerfile|docker/*|tests/e2e/docker/*|scripts/install.js|scripts/link-workspace-packages.cjs|scripts/prepack-resolve-workspace.cjs|scripts/postpack-restore-workspace.cjs|scripts/validate-pack.js|native/npm/*/package.json|pnpm-lock.yaml) return 0 ;;
@@ -62,6 +69,7 @@ WEB=""
 PORTABILITY=""
 WINDOWS_E2E=""
 DOCKER=""
+NATIVE_ATTENDED=""
 while IFS= read -r file; do
   [ -z "$file" ] && continue
   if is_core_file "$file"; then
@@ -78,6 +86,9 @@ while IFS= read -r file; do
   fi
   if is_docker_file "$file"; then
     DOCKER="${DOCKER}${file}"$'\n'
+  fi
+  if is_native_attended_file "$file"; then
+    NATIVE_ATTENDED="${NATIVE_ATTENDED}${file}"$'\n'
   fi
 done <<< "$FILES"
 
@@ -129,4 +140,11 @@ if [ -n "$DOCKER" ]; then
   echo "$DOCKER"
 else
   write_output "docker-changed" "false" "No Docker-relevant changes — skipping Docker e2e"
+fi
+
+if [ -n "$NATIVE_ATTENDED" ]; then
+  write_output "native-attended-changed" "true" "Native attended maintenance files changed:"
+  echo "$NATIVE_ATTENDED"
+else
+  write_output "native-attended-changed" "false" "No native attended maintenance changes — skipping macOS attended fixtures"
 fi

@@ -49,6 +49,7 @@ jobs:
       portability-changed: ${{ steps.classify.outputs.portability-changed }}
       windows-e2e-changed: ${{ steps.classify.outputs.windows-e2e-changed }}
       docker-changed: ${{ steps.classify.outputs.docker-changed }}
+      native-attended-changed: ${{ steps.classify.outputs.native-attended-changed }}
     steps:
       - name: Checkout repository without GITHUB_TOKEN
         shell: bash
@@ -530,10 +531,20 @@ jobs:
             | tar -xz -C /usr/local/bin actionlint
           actionlint -config-file .config/actionlint.yaml
 
+  # Native attended fixtures on macOS. Runs only when the classifier says a
+  # native-attended path changed. Its own workflow keeps a separate concurrency
+  # group and never cancels in progress. Result is gated in ci-gate below.
+  native-attended:
+    needs: fast-gates
+    if: needs.fast-gates.outputs.native-attended-changed == 'true'
+    uses: ./.github/workflows/native-attended.yml
+    with:
+      source_sha: ${{ github.sha }}
+
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [fast-gates, build, windows-portability, node22-smoke, workflow-lint]
+    needs: [fast-gates, build, windows-portability, node22-smoke, workflow-lint, native-attended]
     runs-on: ubuntu-latest
     steps:
       - name: Assert no upstream job failed or was cancelled
@@ -543,10 +554,12 @@ jobs:
           WINDOWS: ${{ needs.windows-portability.result }}
           NODE22: ${{ needs.node22-smoke.result }}
           WORKFLOW_LINT: ${{ needs.workflow-lint.result }}
+          NATIVE_ATTENDED: ${{ needs.native-attended.result }}
+          NATIVE_RELEVANT: ${{ needs.fast-gates.outputs.native-attended-changed }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "fast-gates=$FAST_GATES build=$BUILD windows-portability=$WINDOWS node22-smoke=$NODE22 workflow-lint=$WORKFLOW_LINT"
+          echo "fast-gates=$FAST_GATES build=$BUILD windows-portability=$WINDOWS node22-smoke=$NODE22 workflow-lint=$WORKFLOW_LINT native-attended=$NATIVE_ATTENDED native-relevant=$NATIVE_RELEVANT"
           # 'skipped' is an acceptable result (job legitimately not needed).
           # Only 'failure' / 'cancelled' must block the merge.
           status=0
@@ -556,8 +569,19 @@ jobs:
               *) status=1 ;;
             esac
           done
+          # Native attended is fail-closed. A skip is acceptable ONLY when the
+          # classifier explicitly said the change is not native-relevant. Any other
+          # classifier value (including empty or unknown) must have a real success.
+          case "$NATIVE_RELEVANT" in
+            true)
+              [ "$NATIVE_ATTENDED" = "success" ] || status=1 ;;
+            false)
+              case "$NATIVE_ATTENDED" in success|skipped) ;; *) status=1 ;; esac ;;
+            *)
+              status=1 ;;
+          esac
           if [ "$status" -ne 0 ]; then
-            echo "::error title=CI gate failed::One or more required CI jobs failed or were cancelled."
+            echo "::error title=CI gate failed::One or more required CI jobs failed or were cancelled, or native-attended result was not acceptable (relevant=$NATIVE_RELEVANT result=$NATIVE_ATTENDED)."
             exit 1
           fi
           echo "All required CI jobs passed (or were legitimately skipped)."
