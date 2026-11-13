@@ -265,6 +265,41 @@ describe("notification-store", () => {
     assert.equal(readNotifications().length, 1, "store must not stay empty after clear");
   });
 
+  test("occurrence: same occurrence with a different severity/source still collapses (#3170 thread 2)", () => {
+    initNotificationStore(tmp);
+    const occ = { milestone: "M1", slice: "S1", uatAttempt: 1 };
+    appendNotification("first", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    appendNotification("replayed", "info", "tool", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    assert.equal(readNotifications().length, 1, "severity/source must not split one occurrence");
+  });
+
+  test("occurrence: a failed append does not suppress a later retry (#3170 thread 3)", () => {
+    initNotificationStore(tmp);
+    const occ = { milestone: "M1", slice: "S1", uatAttempt: 7 };
+    // Make the first append fail by blocking the .gsd directory with a file.
+    rmSync(join(tmp, ".gsd"), { recursive: true, force: true });
+    writeFileSync(join(tmp, ".gsd"), "not a directory");
+    appendNotification("attempt", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    // Repair the workspace and retry the same occurrence.
+    rmSync(join(tmp, ".gsd"), { force: true });
+    mkdirSync(join(tmp, ".gsd"), { recursive: true });
+    appendNotification("retry", "warning", "notify", { kind: "uat-needs-human", scope: "M1/S1", occurrence: occ });
+    assert.equal(readNotifications().length, 1, "the retry must land after a failed append");
+  });
+
+  test("producer: UAT needs-human passes a per-attempt occurrence (#3170 thread 1)", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "../tools/workflow-tool-executors.ts"),
+      "utf-8",
+    );
+    // Slice the whole meta object from the kind literal to the next closing of the call.
+    const start = src.indexOf('kind: "uat-needs-human"');
+    assert.ok(start >= 0, "producer kind literal must exist");
+    const block = src.slice(start, src.indexOf("\n      );", start));
+    assert.match(block, /occurrence:\s*\{/, "producer must pass an occurrence");
+    assert.match(block, /uatAttempt:\s*run\.attempt/, "occurrence must carry the UAT attempt");
+  });
+
   test("suppressPersistence is ref-counted", () => {
     initNotificationStore(tmp);
     suppressPersistence();

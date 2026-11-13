@@ -93,6 +93,7 @@ export function appendNotification(
 ): void {
   if (!_basePath) return;
   if (_suppressCount > 0) return;
+  let occDedupKey: string | undefined;
   const persistedMessage = message.length > 500 ? message.slice(0, 500) + "…" : message;
   if (meta?.occurrence) {
     // Adopted producer (#2935): dedup on the canonical occurrence tuple only.
@@ -100,16 +101,9 @@ export function appendNotification(
     const occKey = JSON.stringify(
       Object.keys(meta.occurrence).sort().map((k) => [k, meta.occurrence?.[k]]),
     );
-    const occDedupKey = `${_basePath}:${severity}:${source}:occ:${occKey}`;
+    // Workspace-scoped only: severity and source are not part of occurrence identity.
+    occDedupKey = `${_basePath}:occ:${occKey}`;
     if (_occurrenceSeen.has(occDedupKey)) return;
-    _occurrenceSeen.add(occDedupKey);
-    if (_occurrenceSeen.size > OCCURRENCE_CAP) {
-      // FIFO: a Set iterates in insertion order, so the first key is the oldest.
-      _occurrenceSeen.delete(_occurrenceSeen.values().next().value as string);
-    }
-    // Occurrence path is complete: the occurrence-keyed entry is persisted below
-    // by the shared entry-building code, so fall through to it without the
-    // time-window logic.
   } else {
     const identity = meta?.kind ? `${meta.kind}:${meta.scope ?? ""}` : persistedMessage;
     const dedupKey = `${_basePath}:${severity}:${source}:${identity}`;
@@ -139,6 +133,15 @@ export function appendNotification(
     const dir = join(_basePath, ".gsd");
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, FILENAME), JSON.stringify(entry) + "\n", "utf-8");
+    // Admit the occurrence only after the write succeeded: a failed append must
+    // not suppress a later retry of the same occurrence.
+    if (occDedupKey !== undefined) {
+      _occurrenceSeen.add(occDedupKey);
+      if (_occurrenceSeen.size > OCCURRENCE_CAP) {
+        // FIFO: a Set iterates in insertion order, so the first key is the oldest.
+        _occurrenceSeen.delete(_occurrenceSeen.values().next().value as string);
+      }
+    }
     _lineCount++;
 
     // Rotate if hint suggests we're over limit
