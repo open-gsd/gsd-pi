@@ -85,10 +85,19 @@ export class Markdown implements Component {
 	/** GSD compat: limit rendered lines (0 = unlimited). */
 	maxLines = 0;
 
+	/**
+	 * Opt-in readable measure for authored prose paragraphs, in display cells.
+	 * 0 (default) keeps the host allocation: no behavior change for any caller
+	 * that does not set it. Code, tables, lists and blockquotes keep host width.
+	 * See docs/dev/proposals/2931-authored-prose-width.md (#2931).
+	 */
+	proseMeasure = 0;
+
 	// Cache for rendered output
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private cachedProseMeasure?: number;
 
 	constructor(
 		text: string,
@@ -122,7 +131,7 @@ export class Markdown implements Component {
 	 * passes during streaming — critical for pinned-zone row counting.
 	 */
 	getLineCount(width: number): number {
-		if (this.cachedLines && this.cachedWidth === width) {
+		if (this.cachedLines && this.cachedWidth === width && this.cachedProseMeasure === this.proseMeasure) {
 			return this.cachedLines.length;
 		}
 		// Width changed or cache miss — render and cache
@@ -138,7 +147,7 @@ export class Markdown implements Component {
 
 	render(width: number): string[] {
 		// Check cache
-		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
+		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width && this.cachedProseMeasure === this.proseMeasure) {
 			return this.cachedLines;
 		}
 
@@ -151,6 +160,7 @@ export class Markdown implements Component {
 			// Update cache
 			this.cachedText = this.text;
 			this.cachedWidth = width;
+			this.cachedProseMeasure = this.proseMeasure;
 			this.cachedLines = result;
 			return result;
 		}
@@ -163,27 +173,34 @@ export class Markdown implements Component {
 
 		// Convert tokens to styled terminal output
 		const renderedLines: string[] = [];
+		// Indexes of lines produced by top-level authored paragraphs (#2931). Only
+		// these take the opt-in readable measure; everything else keeps host width.
+		const proseLineIndexes = new Set<number>();
 
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
 			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type);
+			const isProse = token.type === "paragraph" && this.proseMeasure > 0;
 			for (const tokenLine of tokenLines) {
+				if (isProse && tokenLine !== "") proseLineIndexes.add(renderedLines.length);
 				renderedLines.push(tokenLine);
 			}
 		}
 
 		// Wrap lines (NO padding, NO background yet)
 		const wrappedLines: string[] = [];
-		for (const line of renderedLines) {
+		const proseWidth = this.proseMeasure > 0 ? Math.max(1, Math.min(contentWidth, this.proseMeasure)) : contentWidth;
+		renderedLines.forEach((line, index) => {
 			if (isImageLine(line)) {
 				wrappedLines.push(line);
 			} else {
-				for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
+				const lineWidth = proseLineIndexes.has(index) ? proseWidth : contentWidth;
+				for (const wrappedLine of wrapTextWithAnsi(line, lineWidth)) {
 					wrappedLines.push(wrappedLine);
 				}
 			}
-		}
+		});
 
 		// Add margins and background to each wrapped line
 		const leftMargin = " ".repeat(this.paddingX);
@@ -226,6 +243,7 @@ export class Markdown implements Component {
 		// Update cache
 		this.cachedText = this.text;
 		this.cachedWidth = width;
+		this.cachedProseMeasure = this.proseMeasure;
 		this.cachedLines = result;
 
 		return result.length > 0 ? result : [""];

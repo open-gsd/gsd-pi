@@ -1309,4 +1309,50 @@ bar`,
 			);
 		});
 	});
+
+	describe("Authored prose measure (#2931)", () => {
+		// Visible content width: strip ANSI and the trailing pad spaces the
+		// component adds to every line, so we measure the text itself.
+		const contentWidths = (lines: string[]) =>
+			lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\s+$/, "").length);
+		const longProse = "word ".repeat(60).trim();
+
+		it("keeps host-width rendering when no measure is set (default unchanged)", () => {
+			const markdown = new Markdown(longProse, 0, 0, defaultMarkdownTheme);
+			const widest = Math.max(...contentWidths(markdown.render(160)));
+			assert.ok(widest > 88, `default must keep host width, got widest=${widest}`);
+		});
+
+		it("caps authored paragraph prose at the readable measure", () => {
+			const markdown = new Markdown(longProse, 0, 0, defaultMarkdownTheme);
+			markdown.proseMeasure = 88;
+			const widths = contentWidths(markdown.render(160));
+			assert.ok(widths.length > 1, "long prose must wrap");
+			assert.ok(Math.max(...widths) <= 88, `prose must not exceed 88, got ${JSON.stringify(widths)}`);
+		});
+
+		it("falls back to host width when the host is narrower than the measure", () => {
+			const markdown = new Markdown(longProse, 0, 0, defaultMarkdownTheme);
+			markdown.proseMeasure = 88;
+			const widths = contentWidths(markdown.render(40));
+			assert.ok(Math.max(...widths) <= 40, `host width must still bound prose, got ${JSON.stringify(widths)}`);
+		});
+
+		it("keeps code blocks at host width even when the measure is set", () => {
+			const codeLine = "x".repeat(110);
+			const markdown = new Markdown("```\n" + codeLine + "\n```", 0, 0, defaultMarkdownTheme);
+			markdown.proseMeasure = 88;
+			const widest = Math.max(...contentWidths(markdown.render(160)));
+			assert.ok(widest > 88, `code must not take the prose measure, got widest=${widest}`);
+		});
+
+		it("recomputes when the measure changes on an otherwise identical render", () => {
+			const markdown = new Markdown(longProse, 0, 0, defaultMarkdownTheme);
+			const before = Math.max(...contentWidths(markdown.render(160)));
+			markdown.proseMeasure = 88;
+			const after = Math.max(...contentWidths(markdown.render(160)));
+			assert.ok(before > 88, "baseline must be wider than the measure");
+			assert.ok(after <= 88, `stale cache would keep ${before}, got ${after}`);
+		});
+	});
 });
