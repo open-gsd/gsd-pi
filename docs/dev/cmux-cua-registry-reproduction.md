@@ -1,32 +1,48 @@
 # cmux-cua registry reproduction (source-only, partial)
 
-This note documents what a source-only reproduction of the macOS cmux-cua tool registry can and cannot establish. It supersedes nothing: the historical catalogue digest recorded in `docs/dev/cmux-cua-catalogue-provenance.md` remains author-only and is not independently reproduced here.
+This note documents what the source-only extractor can and cannot establish for the macOS cmux-cua tool registry. The extractor is a **new implementation**. It is not a recovery of the original, unpublished helper scripts, and it is not evidence for the historical full envelope digest.
 
 ## Pinned source
 
 - Repository: `manaflow-ai/cmux-cua`
-- Revision: `e0f738807dbff2f35fe67d7fbcc99c7082cffc23` (verified: commit date 2026-10-01, subject "feat: allow configurable unrestricted get_app_state").
-- Files read: `libs/cmux-cua/rust/crates/platform-macos/src/tools/mod.rs`, `libs/cmux-cua/rust/crates/cmux-cua-core/src/tool.rs`.
+- Revision: `e0f738807dbff2f35fe67d7fbcc99c7082cffc23` (full SHA; commit date 2026-10-01).
+- Files read: `libs/cmux-cua/rust/crates/platform-macos/src/tools/mod.rs` and `libs/cmux-cua/rust/crates/cmux-cua-core/src/tool.rs`.
 
-## What the extractor establishes
+## Two different claims, kept separate
 
-`scripts/cmux-cua/extract_registry.py` reads those two files and counts static tool registrations. On the pinned revision it reports:
+| Claim | Value | Status |
+| --- | --- | --- |
+| Static registration sites in the macOS registry on the pinned revision | **37** (30 direct in `register_all`, 5 in `register_recording_tools`, 2 in `register_session_tools`) | Produced by this extractor on the pinned revision |
+| Historical catalogue envelope tool count (author-only digest `6ec22e2d...`, 73,248 bytes) | **38** | **Not reproduced** |
 
-| Source | Count |
-| --- | --- |
-| Direct `registry.register(...)` in macOS `register_all` | 30 |
-| `register_recording_tools` body | 5 |
-| `register_session_tools` body | 2 |
-| **Total static registrations** | **37** |
-| `type_text_chars` registered | no (intentional deprecated alias) |
+The 37 is a count of static registration sites. It is not a runtime count and not the envelope count. The difference from 38 is not explained by this extractor. It is documented, not forced to match.
 
-The total is a static count of registration sites. It is not a runtime count, and it is not the envelope tool count.
+The value 37 is computed from the source at run time. It is not a hard-coded expectation and must not be treated as one for future revisions.
 
-## What the extractor does NOT establish
+## What the extractor supports
 
-- **The historical digest `6ec22e2d...` (73,248 bytes, 38 tools) is not reproduced.** The envelope is built by `to_list_entry` in Rust, from `name`, `description`, `inputSchema`, `annotations` and `capabilities`. Those values are produced by code, not stored as static text. Byte-exact reproduction requires executing that Rust code or a faithful interpreter, which is a native build. This is out of scope for the source-only lane.
-- The static count (37) differs from the historical envelope count (38). The difference is not explained by this extractor and must not be forced to match.
-- No runtime behaviour, permission state, or live cmux-cua daemon was observed.
+It reads Rust source as text, after removing `//` and `/* */` comments:
+
+- `registry.register(Box::new(<path>::<Type>...))` calls inside the brace-balanced body of `pub fn register_all`.
+- Calls to `registry.register_<group>()` inside `register_all`, where the group body is found as a brace-balanced `fn <group>(...)` in `cmux-cua-core/src/tool.rs`, and counted by its `.register(` calls.
+- `type_text_chars` is reported as registered only if a real `registry.register(Box::new(type_text_chars::...))` call exists. A type reference (for example `let _: &type_text_chars::TypeTextCharsTool = ...`) does not count.
+
+## What the extractor does not support
+
+- Tool schemas, descriptions, annotations and capabilities. Those are built by Rust code in `to_list_entry` and are not static text. Byte-exact reconstruction of the envelope digest therefore needs either executing that code (a native build, outside this source-only lane) or a faithful interpreter of it. This extractor claims neither.
+- Dynamically built registrations (loops, conditionals, macros, or helper names it cannot resolve). Those are not counted. An unresolved group helper is an error, not a zero.
+- Runtime state, permissions, or any live cmux-cua daemon.
+
+## Failure behaviour (fail-closed)
+
+| Condition | Exit | Output |
+| --- | --- | --- |
+| Required source file missing | 2 | `error: source files not found` |
+| `register_all` body not found | 4 | `error: register_all body not found` |
+| No direct registrations in `register_all` | 4 | `error: no direct registrations found in register_all` |
+| A called group helper has no resolvable body | 3 | `error: unresolved helper body` |
+
+A structure the extractor does not recognise is never reported as a valid zero.
 
 ## Reproduce the source-only count
 
@@ -36,9 +52,9 @@ git -C /tmp/cmux-cua-src checkout e0f738807dbff2f35fe67d7fbcc99c7082cffc23
 python3 scripts/cmux-cua/extract_registry.py /tmp/cmux-cua-src/libs/cmux-cua/rust/crates
 ```
 
-Expected JSON contains `"total_registrations_static": 37`. Tests: `node --test scripts/__tests__/cmux-cua-registry-extractor.test.mjs`.
+Expected on the pinned revision: exit 0 and `"total_registrations_static": 37`. Tests: `node --test scripts/__tests__/cmux-cua-registry-extractor.test.mjs`.
 
 ## Limits
 
-- Source-only; no native execution, no build, no signing check.
-- Fixture tests cover valid input, missing sources, determinism and non-hardcoding. They do not prove the pinned revision's count beyond the single reproduction above.
+- Source-only. No native execution, no build, no signing or notarisation check.
+- Fixture tests cover valid input, missing sources, unrecognised structure, unresolved helpers, comment handling, type-reference handling and determinism. They do not prove the pinned count beyond the single reproduction above.
