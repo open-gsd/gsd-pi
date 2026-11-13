@@ -553,11 +553,11 @@ export default function (pi: ExtensionAPI) {
 		name: "mac_find",
 		label: "Find Elements",
 		description:
-			"Find UI elements in a macOS application's accessibility tree. Three modes:\n" +
-			"- 'search' (default): Find elements matching role/title/value/identifier criteria. Returns a numbered list of matches.\n" +
-			"- 'tree': Dump the full accessibility subtree as an indented tree. Use maxDepth/maxCount to bound output.\n" +
-			"- 'focused': Get the currently focused element in the app. No criteria needed.\n" +
-			"The 'app' param accepts an app name (e.g. 'Finder') or bundle ID (e.g. 'com.apple.Finder').",
+			"Find UI elements in a macOS application's accessibility tree. Modes:\n" +
+			"- 'search' (default): matches role/title/value/identifier; returns a numbered list.\n" +
+			"- 'tree': dumps the accessibility subtree as an indented tree (bound with maxDepth/maxCount).\n" +
+			"- 'focused': returns the focused element; no criteria needed.\n" +
+			"'app' accepts an app name (e.g. 'Finder') or bundle ID (e.g. 'com.apple.Finder').",
 		promptGuidelines: [
 			"Prefer for targeted element search — use role/title/value criteria to narrow results.",
 			"Use mode:focused to check the current focus target without search criteria.",

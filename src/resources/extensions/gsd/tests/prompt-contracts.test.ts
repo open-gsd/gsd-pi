@@ -282,12 +282,12 @@ test("system prompt hard rules forbid fabricating user responses", () => {
   assert.match(prompt, /ask_user_questions.*only valid structured user input/i);
 });
 
-test("system prompt requires reading before edit or overwrite", () => {
+test("system prompt delegates duplicated read-before-edit rules to base Guidelines (payload dedup)", () => {
   const prompt = readPrompt("system");
-  assert.match(prompt, /Read before edit or overwrite/i);
-  assert.match(prompt, /Before any write that creates or replaces a file/i);
-  assert.match(prompt, /confirm whether the path exists; if it does, `read` it first/i);
-  assert.match(prompt, /For truly new files, confirm the path does not already exist/i);
+  assert.match(prompt, /Reproduce before fix when possible/i);
+  assert.match(prompt, /work is not done until the relevant verification has passed/i);
+  assert.match(prompt, /base Guidelines already cover read-before-edit/i);
+  assert.ok(!/Before any write that creates or replaces a file/i.test(prompt), "duplicated bullet must not be repeated");
 });
 
 test("discuss prompt allows implementation questions when they materially matter", () => {
