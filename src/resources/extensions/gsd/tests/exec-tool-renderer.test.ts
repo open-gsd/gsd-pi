@@ -41,6 +41,62 @@ function renderText(component: any): string {
 	return component.render(200).join("\n");
 }
 
+for (const [label, failure, status] of [
+	["timeout", { timed_out: true }, /timeout/],
+	["abort", { aborted: true }, /aborted/],
+	["force resolution", { force_resolved: true }, /force-killed/],
+	["nonzero exit", { exit_code: 3 }, /exit 3/],
+	["signal", { signal: "SIGTERM" }, /SIGTERM/],
+	["combined flags", { timed_out: true, aborted: true, force_resolved: true }, /aborted\(force-killed\)/],
+	["stored error", { isError: true }, /exit 0/],
+] as const) {
+	test(`exec renderer selects the ${label} failure card without mutating stored success`, () => {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const tool = getTool(toolName);
+			for (const previews of [false, true]) {
+				for (const warning of [undefined, "", "offline"]) {
+					const details = Object.freeze({
+						...{ exit_code: 0, signal: null, timed_out: false, duration_ms: 9 },
+						...failure,
+						...(previews ? { digest: "stdout tail", stderr_excerpt: "actual diagnostic" } : {}),
+						...(warning !== undefined ? { run_not_recorded: warning } : {}),
+					});
+					const result = Object.freeze({ content: Object.freeze([{ type: "text", text: "original legacy body" }]), details, isError: "isError" in failure });
+					const before = structuredClone(result);
+					for (const expanded of [false, true]) {
+						for (const width of [40, 120]) {
+							const text = tool.renderResult(result, { expanded }, fakeTheme).render(width).join("\n");
+							assert.match(text, status);
+							assert.ok(text.includes(previews ? "actual diagnostic" : "original legacy body"));
+							if (warning !== undefined) {
+								assert.match(text, /not recorded/);
+								assert.ok(text.includes(warning || "reason unavailable"));
+							}
+						}
+					}
+					assert.deepEqual(result, before);
+				}
+			}
+		}
+	});
+}
+
+test("exec renderer ignores malformed failure metadata, stderr and failure-looking text", () => {
+	for (const details of [
+		undefined, null, [], {}, "timeout",
+		{ timed_out: "true", aborted: 1, force_resolved: "false", exit_code: "1", signal: 1 },
+		{ timed_out: false, aborted: false, force_resolved: false, exit_code: 0, signal: "" },
+		...[NaN, Infinity, -Infinity, null, undefined].map((exit_code) => ({ exit_code })),
+		{ exit_code: 0, signal: null, stderr_bytes: 12, stderr_excerpt: "diagnostic must not select failure", digest: "stdout" },
+	]) {
+		for (const toolName of ["gsd_exec", "gsd_uat_exec"]) {
+			const result = { content: [{ type: "text", text: "timeout aborted exit=1 on stderr" }], isError: false, details };
+			const text = renderText(getTool(toolName).renderResult(result, {}, fakeTheme));
+			assert.doesNotMatch(text, /Status:|--- stderr diagnostics|diagnostic must not select failure/);
+		}
+	}
+});
+
 function makeExecResult(overrides: Partial<ExecSandboxResult> = {}): ExecSandboxResult {
 	return {
 		id: "exec-1",
@@ -309,6 +365,23 @@ test("gsd_exec renderResult parses only the terminal legacy footer and keeps out
 	assert.match(text, /final database reason/);
 	assert.match(text, /intervening command output 0/);
 	assert.doesNotMatch(text, /intervening command output 9/);
+});
+
+test("gsd_exec legacy timeout fallback caps wrapped rows in collapsed view", () => {
+	const tool = getTool("gsd_exec");
+	const result = {
+		content: [{ type: "text" as const, text: "legacy output ".repeat(500) }],
+		isError: false,
+		details: { timed_out: true },
+	};
+
+	for (const width of [40, 120]) {
+		const rows = tool.renderResult(result, { expanded: false }, fakeTheme).render(width);
+		assert.match(rows[0], /timeout/);
+		assert.ok(rows.join("\n").includes("legacy output"));
+		// Six preview rows, plus the status and the potentially wrapped hidden-output hint.
+		assert.ok(rows.length <= 9, `collapsed timeout at width ${width} rendered ${rows.length} rows`);
+	}
 });
 
 test("gsd_exec renderResult keeps recorded output visible for historical rows that have details but no digest", () => {
@@ -631,4 +704,99 @@ test("gsd_exec renderResult never surfaces a stderr section on success rows", ()
 	const text = renderText(tool.renderResult(result, {}, fakeTheme));
 	assert.ok(!text.includes("failure diagnostics"), `success row gained a stderr section: ${text}`);
 	assert.ok(text.includes("ok"), `digest preview missing: ${text}`);
+});
+
+test("gsd_exec error fallback keeps the failure cause beyond the head of a long error", () => {
+	const tool = getTool("gsd_exec");
+	const lines = Array.from({ length: 60 }, (_, i) => `context line ${i}`);
+	lines[59] = "CAUSE: spawn EACCES permission denied";
+	const result = {
+		content: [{ type: "text" as const, text: lines.join("\n") }],
+		isError: true,
+		details: { timed_out: true },
+	};
+	for (const expanded of [false, true]) {
+		const text = tool.renderResult(result, { expanded }, fakeTheme).render(120).join("\n");
+		assert.match(text, /CAUSE: spawn EACCES permission denied/, `cause must stay visible (expanded=${expanded})`);
+	}
+});
+
+test("gsd_exec error fallback keeps the cause visible when long context wraps", () => {
+	const tool = getTool("gsd_exec");
+	const lines = Array.from({ length: 12 }, (_, i) => `context ${i} ${"x".repeat(240)}`);
+	lines.push("CAUSE: spawn EACCES permission denied");
+	const result = {
+		content: [{ type: "text" as const, text: lines.join("\n") }],
+		isError: true,
+		details: { timed_out: true },
+	};
+	for (const expanded of [false, true]) {
+		const text = tool.renderResult(result, { expanded }, fakeTheme).render(120).join("\n");
+		assert.match(text, /CAUSE: spawn EACCES permission denied/, `wrapped cause must stay visible (expanded=${expanded})`);
+	}
+});
+
+test("gsd_exec structured stderr tail keeps the cause at the end of one long line", () => {
+	const tool = getTool("gsd_exec");
+	const cause = "ROOT_CAUSE_SINGLE_LINE_EACCES";
+	const longLine = "x".repeat(260) + cause;
+	const result = {
+		content: [{ type: "text" as const, text: "failed" }],
+		isError: true,
+		details: { timed_out: true, status: "timeout", stderr_excerpt: longLine, stderr_bytes: longLine.length },
+	};
+	for (const expanded of [false, true]) {
+		const text = tool.renderResult(result, { expanded }, fakeTheme).render(120).join("\n");
+		assert.match(text, new RegExp(cause), `single-line cause must stay visible (expanded=${expanded})`);
+	}
+});
+
+test("gsd_exec structured failure previews respect the visual-row cap", () => {
+	const tool = getTool("gsd_exec");
+	const lines = Array.from({ length: 8 }, (_, i) => `row ${i} ${"y".repeat(200)}`).join("\n");
+	const result = {
+		content: [{ type: "text" as const, text: "failed" }],
+		isError: true,
+		details: { timed_out: true, status: "timeout", stderr_excerpt: lines, stderr_bytes: lines.length },
+	};
+	// Each stderr row wraps to many visual rows at width 40; the card must not grow with the raw line count.
+	const rows = tool.renderResult(result, { expanded: false }, fakeTheme).render(40);
+	const rawLineCount = 8;
+	assert.ok(rows.length < rawLineCount * 6, `structured preview must stay bounded (rows=${rows.length})`);
+});
+
+test("gsd_exec structured stderr is visually capped per block at narrow width", () => {
+	const tool = getTool("gsd_exec");
+	const stderr = Array.from({ length: 8 }, (_, i) => `stderr ${i} ${"z".repeat(400)}`).join("\n");
+	const result = {
+		content: [{ type: "text" as const, text: "failed" }],
+		isError: true,
+		details: { timed_out: true, status: "timeout", stderr_excerpt: stderr, stderr_bytes: stderr.length },
+	};
+	const rows = tool.renderResult(result, { expanded: false }, fakeTheme).render(40);
+	const text = rows.join("\n");
+	// Block-level proof: the stderr block is capped to its own 6 visual rows (not the whole card),
+	// the heading stays with its block, and a visible elision marker reports the omitted rows.
+	const stderrBlockRows = rows.filter((row: string) => row.includes("z")).length;
+	assert.ok(stderrBlockRows <= 6, `stderr block must show at most 6 visual rows (got ${stderrBlockRows})`);
+	assert.match(text, /stderr \(tail\) — failure diagnostics:/);
+	assert.match(text, /more visual rows hidden/);
+	const headingIndex = rows.findIndex((row: string) => row.includes("stderr (tail) — failure diagnostics:"));
+	const firstStderrRow = rows.findIndex((row: string) => row.includes("z"));
+	assert.ok(headingIndex >= 0 && firstStderrRow > headingIndex, "stderr heading must precede its block");
+});
+
+test("gsd_exec structured stdout cannot consume the stderr cause budget", () => {
+	const tool = getTool("gsd_exec");
+	const stdout = Array.from({ length: 12 }, (_, i) => `stdout ${i} ${"s".repeat(300)}`).join("\n");
+	const stderr = `${"w".repeat(400)}\nROOT_CAUSE_LAST_LINE_EACCES`;
+	const result = {
+		content: [{ type: "text" as const, text: "failed" }],
+		isError: true,
+		details: { timed_out: true, status: "timeout", digest: stdout, stderr_excerpt: stderr, stderr_bytes: stderr.length },
+	};
+	for (const expanded of [false, true]) {
+		const text = tool.renderResult(result, { expanded }, fakeTheme).render(40).join("\n");
+		assert.match(text, /ROOT_CAUSE_LAST_LINE_EACCES/, `stderr cause must survive a long stdout (expanded=${expanded})`);
+	}
 });

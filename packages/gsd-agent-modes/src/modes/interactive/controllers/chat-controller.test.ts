@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Container, TUI, Terminal } from "@gsd/pi-tui";
 
-import { startActivityIndicator, stopActivityIndicator } from "./chat-controller.js";
+import { handleAgentEvent, startActivityIndicator, stopActivityIndicator } from "./chat-controller.js";
+import stripAnsi from "strip-ansi";
 import { createStreamingRenderState } from "../streaming-render-state.js";
 import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
 
@@ -30,6 +31,7 @@ function makeTerminal(): Terminal {
 		clearFromCursor() {},
 		clearScreen() {},
 		setTitle() {},
+		setProgress() {},
 	};
 }
 
@@ -77,6 +79,70 @@ function makeActivityHost(
 		formatWebSearchResult() { return ""; },
 		...extra,
 	} as any;
+}
+
+// Dispatch must refresh the real components created by the streaming walker,
+// not just components registered directly by a test helper.
+for (const reverse of [false, true]) {
+	for (const explicitPurpose of [false, true]) {
+		test(`streamed sibling dispatch refreshes authoritative args (reverse=${reverse}, purpose=${explicitPurpose})`, async () => {
+			const ui = new TUI(makeTerminal());
+			ui.requestRender = () => {};
+			const host = makeActivityHost(new Container(), ui);
+			const partialArgs = Object.freeze({});
+			const argsA = Object.freeze({ runtime: "node", script: "console.log('A')", ...(explicitPurpose ? { purpose: "Observe sibling A" } : {}) });
+			const argsB = Object.freeze({ runtime: "node", script: "console.log('B')", purpose: "Observe sibling B" });
+			const argsUat = Object.freeze({ milestoneId: "M029", sliceId: "S01", checkId: "UAT-01", intent: "uat-runtime-check", runtime: "python" });
+			const argsRead = Object.freeze({ path: "guide.md", purpose: "Not an exec purpose" });
+			const blocks = [
+				{ type: "toolCall", id: "sibling-A", name: "gsd_exec", arguments: partialArgs },
+				{ type: "toolCall", id: "sibling-B", name: "gsd_exec", arguments: argsB },
+				{ type: "toolCall", id: "uat", name: "gsd_uat_exec", arguments: partialArgs },
+				{ type: "toolCall", id: "read", name: "read", arguments: partialArgs },
+			];
+			const snapshots = structuredClone([partialArgs, argsA, argsB, argsUat, argsRead, blocks]);
+			const send = (event: any) => handleAgentEvent(host, event);
+			try {
+				await send({ type: "message_start", message: { role: "assistant", content: [] } });
+				for (let count = 1; count <= blocks.length; count++) {
+					await send({ type: "message_update", message: { role: "assistant", content: blocks.slice(0, count) }, assistantMessageEvent: { type: "toolcall_delta", contentIndex: count - 1 } });
+				}
+				const components = blocks.map((block) => host.pendingTools.get(block.id));
+				assert.equal(new Set(components).size, blocks.length);
+				const segments = [...host.streamingRenderState.renderedSegments];
+				const order = reverse ? [1, 0, 3, 2] : [0, 1, 2, 3];
+				const args = [argsA, argsB, argsUat, argsRead];
+				for (const index of order) {
+					const block = blocks[index];
+					const event = { type: "tool_execution_start", toolCallId: block.id, toolName: block.name, args: args[index] };
+					await send(event);
+					await send(event); // Duplicate starts must not duplicate identity, rows or counts.
+					assert.equal(host.pendingTools.get(block.id), components[index]);
+				}
+				assert.deepEqual([...host.pendingTools.keys()], blocks.map((block) => block.id));
+				assert.deepEqual(host.activeToolInvocations, new Set(blocks.map((block) => block.id)));
+				assert.deepEqual(host.streamingRenderState.renderedSegments, segments);
+				const running = components.map((component) => stripAnsi(component.render(180).join("\n")));
+				assert.match(running[0], explicitPurpose ? /Observe sibling A/ : /Run a Node\.js script/);
+				assert.doesNotMatch(running[0], /Bash|Observe sibling B/);
+				assert.match(running[1], /Observe sibling B/);
+				assert.match(running[2], /M029\/S01\/UAT-01/);
+				assert.match(running[3], /guide\.md/);
+				assert.doesNotMatch(running[3], /Not an exec purpose/);
+				for (const text of running) assert.match(text, /running/);
+				let remaining = blocks.length;
+				for (const index of [...order].reverse()) {
+					await send({ type: "tool_execution_end", toolCallId: blocks[index].id, toolName: blocks[index].name, result: { content: [{ type: "text", text: "done" }] }, isError: false });
+					assert.equal(host.activeToolInvocations.size, --remaining);
+				}
+				assert.deepEqual([partialArgs, argsA, argsB, argsUat, argsRead, blocks], snapshots);
+			} finally {
+				stopActivityIndicator(host);
+				host.loadingAnimation?.stop();
+				for (const component of host.pendingTools.values()) component.markHistoricalNoResult();
+			}
+		});
+	}
 }
 
 // ── activity indicator tests ─────────────────────────────────────────

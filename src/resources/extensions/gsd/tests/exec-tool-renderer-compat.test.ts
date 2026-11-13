@@ -141,7 +141,8 @@ test("standalone error output retains a genuine historical recording warning", (
     const output = render(result, expanded, 40);
     const normalized = output.replace(/\s+/g, " ");
     assert.match(normalized, /error line 0/);
-    assert.doesNotMatch(normalized, /error line 39/);
+    // The head/tail split keeps the final error line (the cause) visible; the middle is elided.
+    assert.match(normalized, /error line 39/);
     assert.match(normalized, /database offline/);
     assert.match(normalized, /not verification or UAT evidence/);
     assert.match(normalized, /Do not run the command again only to get the output/);

@@ -959,12 +959,12 @@ export class ToolExecutionComponent extends Container {
 		if (this.hideComponent) return 0;
 		if (this.getExecRecordingWarning()) return this.render(width).length;
 		// Bash collapsed (non-error): renderCommandCard() → one row.
-		if (this.normalizedToolName === "bash" && !this.showExpandedBody() && !this.result?.isError) {
+		if (this.normalizedToolName === "bash" && !this.showExpandedBody() && !this.isDisplayFailure()) {
 			return 1;
 		}
 		const hasImages = this.result?.content?.some((block) => block.type === "image") ?? false;
 		// Other tools collapsed (non-error, no images): renderCompactToolStrip() → one row.
-		if (!this.showExpandedBody() && !this.result?.isError && !hasImages) {
+		if (!this.showExpandedBody() && !this.isDisplayFailure() && !hasImages) {
 			return this.getCompactReadPreview(width) ? 2 : 1;
 		}
 		return this.render(width).length;
@@ -976,10 +976,11 @@ export class ToolExecutionComponent extends Container {
 		}
 		const frameWidth = Math.max(20, width);
 		const contentWidth = Math.max(1, frameWidth);
+		const displayFailure = this.isDisplayFailure();
 		const frameTone: "pending" | "success" | "error" =
-			this.result?.isError ? "error" : this.isPartial || !this.result ? "pending" : "success";
+			displayFailure ? "error" : this.isPartial || !this.result ? "pending" : "success";
 		const elapsed = formatElapsed((this.endedAt ?? Date.now()) - this.startedAt);
-		const statusWord = this.isPartial || !this.result ? "running" : this.result.isError ? "failed" : "success";
+		const statusWord = this.isPartial || !this.result ? "running" : displayFailure ? "failed" : "success";
 		const frameStatus = `${statusWord} · ${elapsed}`;
 		const parsed = parseMcpToolName(this.toolName);
 		const frameLabel = parsed
@@ -998,7 +999,7 @@ export class ToolExecutionComponent extends Container {
 			? theme.fg("muted", theme.italic(truncateToWidth(purpose, purposeWidth, "…")))
 			: this.getCompactTarget();
 
-		if (this.normalizedToolName === "bash" && !this.showExpandedBody() && !this.result?.isError && !recordingWarning) {
+		if (this.normalizedToolName === "bash" && !this.showExpandedBody() && !displayFailure && !recordingWarning) {
 			const command = str(this.args?.command);
 			return renderCommandCard(command && command.length > 0 ? formatCommandPreview(command) : frameLabel, frameWidth, {
 				status: frameStatus,
@@ -1006,7 +1007,7 @@ export class ToolExecutionComponent extends Container {
 			});
 		}
 		const hasImages = this.result?.content?.some((block) => block.type === "image") ?? false;
-		if (!this.showExpandedBody() && !this.result?.isError && !hasImages && !recordingWarning) {
+		if (!this.showExpandedBody() && !displayFailure && !hasImages && !recordingWarning) {
 			const readPreview = this.getCompactReadPreview(frameWidth);
 			const rows = renderCompactToolStrip(frameLabel, displayTarget, frameWidth, {
 				status: frameStatus,
@@ -1050,8 +1051,20 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	// Presentation only: canonical exec metadata may strengthen a terminal
+	// failure, but must never rewrite the stored result or renderer context.
+	private isDisplayFailure(): boolean {
+		if (this.result?.isError) return true;
+		if (this.isPartial || (this.toolName !== "gsd_exec" && this.toolName !== "gsd_uat_exec")) return false;
+		const details = this.result?.details;
+		if (!details || typeof details !== "object") return false;
+		return details.timed_out === true || details.aborted === true || details.force_resolved === true ||
+			(typeof details.exit_code === "number" && Number.isFinite(details.exit_code) && details.exit_code !== 0) ||
+			(typeof details.signal === "string" && details.signal.length > 0);
+	}
+
 	private shouldRenderCompactSuccess(): boolean {
-		if (this.expanded || this.isPartial || !this.result || this.result.isError || this.getExecRecordingWarning()) return false;
+		if (this.expanded || this.isPartial || !this.result || this.isDisplayFailure() || this.getExecRecordingWarning()) return false;
 		const hasImages = this.result.content?.some((block) => block.type === "image") ?? false;
 		return !hasImages;
 	}

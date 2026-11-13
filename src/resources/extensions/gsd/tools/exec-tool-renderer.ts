@@ -18,6 +18,7 @@ const DIGEST_PREVIEW_LINE_CHARS = 200;
 const LEGACY_FALLBACK_MAX_LINES = 12;
 /** Cap for error-content rendering on execution failures (timeouts, nonzero exits). */
 const ERROR_CONTENT_MAX_LINES = 20;
+const ERROR_CONTENT_COLLAPSED_LINES = 6;
 /** Exact historical footer emitted by exec-tool before recording warnings moved to details. */
 const LEGACY_RECORDING_FOOTER_MARKER = "\n--- warning ---\n";
 const LEGACY_RECORDING_FOOTER = /^--- warning ---\n(The command ran, but the host did not record this run: [\s\S]*?\.\s+This run is not verification or UAT evidence\.\s+Do not run the command again only to get the output\.)$/;
@@ -64,6 +65,16 @@ function detailNumber(record: Record<string, unknown> | null, key: string): numb
 
 function detailBoolean(record: Record<string, unknown> | null, key: string): boolean {
 	return record?.[key] === true;
+}
+
+// Presentation only, kept local to the extension boundary (the native host has
+// its own predicate). Do not promote this derived status into stored isError.
+function execDisplayFailure(record: Record<string, unknown> | null, details: Record<string, unknown> | null, isPartial: boolean): boolean {
+	if (record?.isError === true) return true;
+	if (isPartial) return false;
+	const exitCode = detailNumber(details, "exit_code");
+	return detailBoolean(details, "timed_out") || detailBoolean(details, "aborted") || detailBoolean(details, "force_resolved") ||
+		(exitCode !== undefined && exitCode !== 0) || detailString(details, "signal") !== undefined;
 }
 
 /** Strip terminal escapes (OSC/CSI/SGR) and control sequences; keep safe Unicode, \n and \t. */
@@ -165,15 +176,78 @@ function boundedLines(text: string, maxLines: number, lineChars = Number.POSITIV
 	return kept.join("\n") + suffix;
 }
 
-function previewCard(before: string[], preview: string, warnings: string[], theme: ThemeLike, expanded: boolean): Text {
+/**
+ * Caps a preview block by its WRAPPED visual rows at the render width. Line-based
+ * bounders cannot see wrapping: one long line can still occupy hundreds of rows.
+ * keepTail keeps the final rows (stderr cause side); otherwise the head is kept.
+ * Elided rows are reported with an explicit marker that is itself counted in the budget.
+ */
+function cappedVisualRows(text: string, theme: ThemeLike, width: number, maxRows: number, keepTail: boolean, color: "toolOutput" | "error"): string[] {
+	// A line-elision marker (from the line budget) is kept outside the visual budget.
+	const lineMarker = /^… \(\d+ more lines hidden\)$/;
+	const textLines = text.split("\n");
+	const markerLine = textLines.find((line) => lineMarker.test(line));
+	const contentLines = textLines.filter((line) => !lineMarker.test(line));
+	const rows = new Text(contentLines.join("\n"), 0, 0).render(Math.max(1, width));
+	const markerRows = markerLine ? new Text(theme.fg("muted", markerLine), 0, 0).render(Math.max(1, width)) : [];
+	if (rows.length <= maxRows) {
+		const plain = rows.map((row: string) => theme.fg(color, row));
+		return keepTail ? [...markerRows, ...plain] : [...plain, ...markerRows];
+	}
+	const marker = 1;
+	const keep = Math.max(1, maxRows - marker);
+	const hidden = rows.length - keep;
+	const shown = keepTail ? rows.slice(rows.length - keep) : rows.slice(0, keep);
+	const note = new Text(theme.fg("muted", `… (${hidden} more visual rows hidden)`), 0, 0).render(Math.max(1, width));
+	return keepTail
+		? [...markerRows, ...note, ...shown.map((row: string) => theme.fg(color, row))]
+		: [...shown.map((row: string) => theme.fg(color, row)), ...note, ...markerRows];
+}
+
+/**
+ * Structured failure card: status/labels/warnings are unbounded (they are short
+ * and must stay visible); the stdout digest and the stderr tail are each capped
+ * by wrapped visual rows at the render width, independently of each other.
+ */
+function structuredCard(
+	before: string[],
+	digestText: string,
+	stderrText: string,
+	theme: ThemeLike,
+	expanded: boolean,
+	digestKeepsTail = false,
+	stderrHeading?: string,
+	notRecordedRow?: string,
+): Text {
+	const card = new Text("", 0, 0);
+	card.render = (width: number): string[] => {
+		const limit = expanded ? 20 : 6;
+		const columns = Math.max(1, width);
+		// Order: status/labels, then stdout block, then the stderr heading with its block,
+		// then the recording warning. Each heading stays adjacent to the block it labels.
+		const out: string[] = [...new Text(before.join("\n"), 0, 0).render(columns)];
+		if (digestText) out.push(...cappedVisualRows(digestText, theme, width, limit, digestKeepsTail, "toolOutput"));
+		if (stderrText) {
+			if (stderrHeading) out.push(...new Text(stderrHeading, 0, 0).render(columns));
+			out.push(...cappedVisualRows(stderrText, theme, width, limit, true, "error"));
+		}
+		if (notRecordedRow) out.push(...new Text(notRecordedRow, 0, 0).render(columns));
+		return out;
+	};
+	return card;
+}
+
+function previewCard(before: string[], preview: string, warnings: string[], theme: ThemeLike, expanded: boolean, keepTail = false): Text {
 	const card = new Text("", 0, 0);
 	card.render = (width: number): string[] => {
 		const columns = Math.max(1, width);
 		const rows = preview ? new Text(preview, 0, 0).render(columns) : [];
 		const limit = expanded ? 20 : 6;
+		// Error previews keep their visual tail: wrapped head context must not push the cause out of view.
+		const shown = keepTail && rows.length > limit ? [...rows.slice(0, 1), ...rows.slice(rows.length - (limit - 1))] : rows.slice(0, limit);
 		return [
 			...(before.length ? new Text(before.join("\n"), 0, 0).render(columns) : []),
-			...rows.slice(0, limit),
+			...shown,
 			...(rows.length > limit ? new Text(theme.fg("muted", "(preview rows hidden; open the full logs)"), 0, 0).render(columns) : []),
 			...(warnings.length ? new Text(warnings.join("\n"), 0, 0).render(columns) : []),
 		];
@@ -182,12 +256,27 @@ function previewCard(before: string[], preview: string, warnings: string[], them
 }
 
 /**
+ * Keeps the first and last lines of an error body. The head carries the context,
+ * the tail usually carries the cause, so an elided middle must not hide either.
+ */
+function boundedHeadTailLines(text: string, maxLines: number): string {
+	const lines = text.split("\n");
+	if (lines.length <= maxLines) return text;
+	// Tail gets the larger share: the cause sits at the end. Head keeps context.
+	const head = Math.floor(maxLines / 3);
+	const tail = maxLines - head - 1;
+	const hidden = lines.length - head - tail;
+	return [...lines.slice(0, head), `… (${hidden} more lines hidden)`, ...lines.slice(lines.length - tail)].join("\n");
+}
+
+/**
  * Like boundedLines, but keeps the LAST lines: the stderr preview is a tail,
  * so its final lines carry the actual failure cause and must survive elision.
  */
 function boundedTailLines(text: string, maxLines: number, lineChars = Number.POSITIVE_INFINITY): string {
 	const lines = text.split("\n");
-	const kept = lines.slice(-maxLines).map((line) => (line.length > lineChars ? `${line.slice(0, lineChars - 1)}…` : line));
+	// A long line keeps its END: the failure cause is the last characters of a single-line tail.
+	const kept = lines.slice(-maxLines).map((line) => (line.length > lineChars ? `…${line.slice(line.length - (lineChars - 1))}` : line));
 	const hidden = lines.length - maxLines;
 	const prefix = hidden > 0 ? `… (${hidden} more lines hidden)\n` : "";
 	return prefix + kept.join("\n");
@@ -276,7 +365,7 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 		.filter((row): row is string => row !== undefined);
 	const expanded = asRecord(options)?.expanded === true;
 
-	if (record?.isError === true) {
+	if (execDisplayFailure(record, details, asRecord(options)?.isPartial === true)) {
 		// Original errors remain authoritative; warnings never fall inside preview caps.
 		// Structured failure card (issue #2927): previews are rebuilt from
 		// details so a long stdout digest cannot push the stderr diagnostics —
@@ -288,57 +377,52 @@ export function renderExecResult(result: unknown, options: unknown, theme: Theme
 		const structuredDigest = detailString(details, "digest");
 		const stderrExcerpt = detailString(details, "stderr_excerpt");
 		if (structuredDigest !== undefined || stderrExcerpt !== undefined) {
-			const lines: string[] = [];
+			const before: string[] = [];
 			const id = detailString(details, "id");
 			const status = execStatusText(details);
 			if (id !== undefined || status !== undefined) {
-				lines.push(theme.fg("muted", `gsd_exec${id ? ` [${sanitizeExecDisplayText(id)}]` : ""}${status ? ` — ${status}` : ""}`));
+				before.push(theme.fg("muted", `gsd_exec${id ? ` [${sanitizeExecDisplayText(id)}]` : ""}${status ? ` — ${status}` : ""}`));
 			}
 			const stdoutRow = outputRow("stdout", details);
-			if (stdoutRow) lines.push(theme.fg("toolOutput", stdoutRow));
+			if (stdoutRow) before.push(theme.fg("toolOutput", stdoutRow));
 			const stderrRow = outputRow("stderr", details);
-			if (stderrRow) lines.push(theme.fg("toolOutput", stderrRow));
-			lines.push(theme.fg("muted", "output preview — tail of the run's captured output, not the full log:"));
-			// A stderr-only failure's digest is the labeled stderr tail ("[no
-			// stdout — tail of stderr]" marker + the tail): the marker is kept as
-			// its own line and the tail keeps its final lines, where the cause
-			// lives. A stdout tail keeps the head-keeping bounder used by the
-			// success card.
+			if (stderrRow) before.push(theme.fg("toolOutput", stderrRow));
+			before.push(theme.fg("muted", "output preview — tail of the run's captured output, not the full log:"));
+			// Digest: a stderr-only digest keeps its marker line unbounded and its
+			// stderr tail as the visual tail; a stdout digest keeps the head.
 			const rawDigest = structuredDigest ?? "";
+			let digestBody = "";
 			if (rawDigest.startsWith("[no stdout —")) {
 				const newlineIndex = rawDigest.indexOf("\n");
 				const marker = newlineIndex === -1 ? rawDigest : rawDigest.slice(0, newlineIndex);
 				const stderrTail = newlineIndex === -1 ? "" : rawDigest.slice(newlineIndex + 1);
-				lines.push(theme.fg("muted", sanitizeExecDisplayText(marker)));
-				const visibleTail = sanitizeExecDisplayText(stderrTail).trim();
-				if (visibleTail) {
-					lines.push(theme.fg("toolOutput", boundedTailLines(visibleTail, DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
-				}
+				before.push(theme.fg("muted", sanitizeExecDisplayText(marker)));
+				// Line budget first (keeps the tail and the line-elision marker), then the visual-row cap in structuredCard.
+				digestBody = boundedTailLines(sanitizeExecDisplayText(stderrTail).trim(), DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS);
 			} else {
-				lines.push(theme.fg("toolOutput", boundedLines(sanitizeExecDisplayText(rawDigest), DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
+				digestBody = boundedLines(sanitizeExecDisplayText(rawDigest).trim(), DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS);
 			}
-			// Whitespace- or escape-only stderr has no visible diagnostic — the
-			// panel would be blank, so it is skipped entirely (issue #2927).
+			// Whitespace- or escape-only stderr has no visible diagnostic (issue #2927).
 			const visibleStderr = stderrExcerpt !== undefined ? sanitizeExecDisplayText(stderrExcerpt).trim() : "";
-			if (visibleStderr) {
-				lines.push(theme.fg("error", "stderr (tail) — failure diagnostics:"));
-				// The excerpt is a tail: keep its final lines, where the cause lives.
-				lines.push(theme.fg("error", boundedTailLines(visibleStderr, DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS)));
-			}
-			if (notRecordedRow) lines.push(notRecordedRow);
-			return new Text(lines.join("\n"), 0, 0);
+			// Stderr excerpt: same line budget (tail + line-elision marker) before the visual cap.
+			const stderrBody = visibleStderr ? boundedTailLines(visibleStderr, DIGEST_PREVIEW_MAX_LINES, DIGEST_PREVIEW_LINE_CHARS) : "";
+			const stderrHeading = visibleStderr ? theme.fg("error", "stderr (tail) — failure diagnostics:") : undefined;
+			// A stderr-only digest is a failure tail: its final lines carry the cause, so keep the tail.
+			return structuredCard(before, digestBody, stderrBody, theme, expanded, rawDigest.startsWith("[no stdout —"), stderrHeading, notRecordedRow);
 		}
 
 		// Content is the authoritative error text (validation, policy block,
 		// execution failure): show it bounded, then retain recording warnings
 		// outside that preview budget.
-		const errorText = body.length > 0 ? boundedLines(body, ERROR_CONTENT_MAX_LINES) : "gsd_exec failed";
-		const lines = [theme.fg("error", errorText)];
+		const errorText = body.length > 0 ? boundedHeadTailLines(body, expanded ? ERROR_CONTENT_MAX_LINES : ERROR_CONTENT_COLLAPSED_LINES) : "gsd_exec failed";
+		const status = execStatusText(details);
+		const lines = status ? [theme.fg("error", `Status: ${status}`)] : [];
+		const failureWarnings: string[] = [];
 		if (legacyWarning && context?.state?.gsdExecRecordingWarningInFrame !== true) {
-			lines.push(theme.fg("warning", legacyWarning));
+			failureWarnings.push(theme.fg("warning", legacyWarning));
 		}
-		if (notRecordedRow) lines.push(notRecordedRow);
-		return new Text(lines.join("\n"), 0, 0);
+		if (notRecordedRow) failureWarnings.push(notRecordedRow);
+		return previewCard(lines, theme.fg("error", errorText), failureWarnings, theme, expanded, true);
 	}
 
 	const lines: string[] = [];
