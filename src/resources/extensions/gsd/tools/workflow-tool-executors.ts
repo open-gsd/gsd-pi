@@ -2471,7 +2471,16 @@ export async function executeUatResultSave(
         `UAT for ${run.params.milestoneId}/${run.params.sliceId} has NEEDS-HUMAN checks awaiting human validation`,
         "warning",
         "notify",
-        { kind: "uat-needs-human", scope: `${run.params.milestoneId}/${run.params.sliceId}` },
+        {
+          kind: "uat-needs-human",
+          scope: `${run.params.milestoneId}/${run.params.sliceId}`,
+          // Stable occurrence identity (#2935): one notification per UAT attempt.
+          occurrence: {
+            milestone: run.params.milestoneId,
+            slice: run.params.sliceId,
+            uatAttempt: run.attempt,
+          },
+        },
       );
     }
     return uatResultSaved(saved);
