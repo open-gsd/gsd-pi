@@ -72,6 +72,56 @@ gsd-pi runs on macOS, Linux, and Windows:
 - **Git hooks** are executed by Git's bundled shell, so they work from any terminal (CMD, PowerShell, Git Bash).
 - **Shell scripts** in `scripts/` use `#!/usr/bin/env bash`. On Windows, Git may convert these to CRLF line endings, which breaks the shebang. The repository's committed `.gitattributes` owns line-ending rules; if shell scripts need explicit protection, add `*.sh text eol=lf` there and include that change in your PR.
 
+### Native attended fixtures (macOS gate)
+
+The native attended maintenance fixtures run on a macOS arm64 runner and are a required input to `ci-gate`. This section records what the code does; the workflow and gate files are the authority.
+
+#### When the native tests run
+
+The `fast-gates` classifier (`scripts/ci-classify-changes.sh`) sets `native-attended-changed` to `true` when a changed file matches the native-attended path set. The matched paths are, exactly:
+
+- `src/resources/extensions/gsd/coordination-maintenance*.ts` and `src/resources/extensions/gsd/coordination-maintenance-*.ts`
+- `src/resources/extensions/gsd/coordination-same-machine-facts.ts`
+- `src/coordination-maintenance*.ts` (the attended runners, workers, backend, CLI, and limits)
+- `src/resources/extensions/gsd/db/engine.ts` and `src/resources/extensions/gsd/db-adapter.ts`
+- `src/tests/coordination-maintenance-attended*.test.ts`
+- `scripts/build-native-fixture-package.mjs` and `scripts/__tests__/build-native-fixture-package.test.mjs`
+- `packages/native/*`, `native/*`, and `.github/workflows/native-attended.yml`
+
+The classifier aggregates over all changed files, so one matching file is enough. Any change that matches none sets the output to `false`.
+
+#### When skipping is allowed
+
+| Classifier value | Native job result | `ci-gate` outcome |
+| --- | --- | --- |
+| `true` | `success` | pass |
+| `true` | `skipped`, `failure`, `cancelled`, or missing | block |
+| `false` | `success` or `skipped` | pass |
+| `false` | `failure`, `cancelled`, or missing | block |
+| empty or unknown | any | block (fail-closed) |
+
+"Pass" here refers only to the native condition. Other required jobs can still fail the overall gate. A skip is justified only when the classifier positively reports that no native-attended path changed. A label, an event type, or a classifier error is never a reason to skip.
+
+#### How the workflows connect
+
+`ci.yml` calls the reusable workflow `native-attended.yml` only when the classifier reports `true`, and passes `source_sha: ${{ github.sha }}`. The reusable workflow has no `pull_request` trigger and no label precondition, so it runs at most once per CI invocation. `ci-gate` lists the native job in `needs` and applies the table above.
+
+#### Which events are covered
+
+- `pull_request` and `push`: the classifier diffs against the PR base SHA or the pushed `before` SHA.
+- `merge_group`: `ci.yml` declares it bare. The classifier has no PR base and no push `before`, so it diffs against `CI_DIFF_REF` (default `origin/main`). If that diff command fails, the classifier silently falls back to `git diff HEAD~1`, so relevance is then judged against the previous commit rather than `main`.
+- `workflow_dispatch`: `native-attended.yml` can be run directly with an explicit full 40-character `source_sha`.
+
+#### Where logs and provenance are
+
+The native job uploads an artifact named `native-attended-<sha>` containing `native-attended.tap.log` and `native-attended.provenance.txt`. The provenance file records the tested SHA, runner OS and architecture, and Node version. The `ci-gate` job log prints `native-attended=<result> native-relevant=<value>`.
+
+#### What is and is not proven
+
+- Proven on GitHub-hosted `macos-15` (arm64): the attended fixture suite passed 50/50 on run 43382401636. That job tested the pull-request merge candidate `6a5becebb…` (the PR head `f4f7ce51…` merged into its base), not the bare branch head. The artifact provenance records this SHA.
+- The earlier 50/50 run on head `0427ff56…` was the pre-gate version of the same suite.
+- Not proven: x86_64 (x64) execution in CI, and acceptance on a real attended operator host. The fixtures are automated integration tests, not operator confirmations.
+
 ### Native engine version lockstep
 
 Production installs load the native engine from the `@opengsd/engine-*` platform packages, pinned to an exact version in the root `package.json` `optionalDependencies`. Version bumps are release-time only: the release workflow runs `node scripts/bump-version.mjs <version>` and then publishes the `@opengsd/engine-*` binaries. **PRs must not bump version surfaces** (`package.json`, `native/Cargo.toml`, `native/npm/*/package.json`, workspace packages) — pinning an engine version that is not yet on npm breaks `pnpm install --frozen-lockfile` in CI and for every contributor.
