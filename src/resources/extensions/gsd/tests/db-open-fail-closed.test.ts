@@ -520,8 +520,11 @@ test("a state-directory move whose source cleanup fails still succeeds with the 
   chmodSync(join(from, "locked"), 0o500);
   try {
     assert.doesNotThrow(() => moveStateDirectory(from, to));
+    // Guard against a silent pass: the source cleanup failure must really have happened.
+    assert.equal(existsSync(join(from, "locked", "entry")), true, "source cleanup must have failed");
   } finally {
-    chmodSync(join(from, "locked"), 0o700);
+    // Only restore modes that exist: when source cleanup succeeds, `from/locked` is gone.
+    if (existsSync(join(from, "locked"))) chmodSync(join(from, "locked"), 0o700);
     // cpSync preserves the read-only mode in the copy too. Restore it only
     // after exercising the production cleanup failure so afterEach can unlink it.
     if (existsSync(join(to, "locked"))) chmodSync(join(to, "locked"), 0o700);
