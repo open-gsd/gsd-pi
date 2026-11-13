@@ -15,14 +15,16 @@ Status: source-derived provenance only. This document does not accept a native o
 | ToolDef literal definitions | 39 | `crates/cmux-cua-core/src/*` and `platform-macos/src/tools/*` |
 | macOS platform registrations (non-Codex) | 37 | `platform-macos/src/tools/mod.rs:626-680` |
 | CLI advertised entries | 38 | `crates/cmux-cua/src/main.rs:154-172` |
-| Envelope tools in `tools/list` | 38 | `tool.rs:573-595` |
+| Envelope tools in `tools/list` (author claim, NOT reproduced) | 38 | `tool.rs:573-595` (author reading) |
 | Unregistered deprecated alias | `type_text_chars` | `platform-macos/src/tools/mod.rs:670-677` |
 
-The envelope contains 38 tools because the deprecated alias is unregistered; the 39th literal is not advertised.
+Author claim, not independently reproduced: the envelope is reported as 38 tools. The source-only extractor (`scripts/cmux-cua/extract_registry.py`) counts 37 static registration sites on the same pinned revision; the difference is not explained by it and is not forced to match.
 
 ## Envelope reproduction (source-only, no native execution)
 
 The reproduction reads only downloaded source files at the pinned revision. It does not execute the native binary and does not build locally. Run it from a directory containing the pinned source snapshot and the helper scripts `extract.py` and `verify-roster.py` (currently unpublished; see the limit below).
+
+> **Executable procedure (added with the source-only extractor):** the procedure below is the author's reference only. For a runnable source-only count on the pinned revision, use `scripts/cmux-cua/extract_registry.py` and see [`cmux-cua-registry-reproduction.md`](cmux-cua-registry-reproduction.md). That script is a new implementation, not a recovery of the unpublished helpers, and it reports 37 static registration sites. It does not reproduce the 38-tool envelope digest below.
 
 Reference command (NOT runnable as published: it requires the unpublished helper scripts `extract.py` and `verify-roster.py`, so it documents the author's procedure only and is not a reproduction a maintainer can execute):
 
