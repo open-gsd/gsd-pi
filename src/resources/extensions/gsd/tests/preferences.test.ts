@@ -2302,6 +2302,17 @@ test("codebase preferences reject invalid types", () => {
   assert.ok(result.errors.some(e => e.includes("collapse_threshold must be a positive")));
 });
 
+test("codebase preferences validate inject mode (inline/lazy)", () => {
+  const inline = validatePreferences({ codebase: { inject: "inline" } });
+  assert.equal(inline.errors.length, 0);
+  assert.equal(inline.preferences.codebase?.inject, "inline");
+  const lazy = validatePreferences({ codebase: { inject: "lazy" } });
+  assert.equal(lazy.errors.length, 0);
+  assert.equal(lazy.preferences.codebase?.inject, "lazy");
+  const bad = validatePreferences({ codebase: { inject: "always" } } as any);
+  assert.ok(bad.errors.some(e => e.includes("codebase.inject")));
+});
+
 test("codebase preferences warn on unknown keys", () => {
   const result = validatePreferences({
     codebase: {
