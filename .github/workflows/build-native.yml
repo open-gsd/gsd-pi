@@ -78,7 +78,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        uses: Swatinem/rust-cache@f4371d1ec7179bfbd04a82a81e3b3af7f720750f # v2
         with:
           shared-key: native-${{ matrix.platform }}
           workspaces: |
@@ -144,7 +144,7 @@ jobs:
       # "Path Validation Error: Path(s) specified for caching do(es) not exist",
       # even though every publish step succeeded. The publish job's single install
       # gains little from caching, so drop it for reliability.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"

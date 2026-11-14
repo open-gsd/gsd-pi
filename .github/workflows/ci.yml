@@ -89,7 +89,7 @@ jobs:
           version: 10.12.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -148,7 +148,7 @@ jobs:
           version: 10.12.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -174,7 +174,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache Rust build (native addon)
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        uses: Swatinem/rust-cache@f4371d1ec7179bfbd04a82a81e3b3af7f720750f # v2
         with:
           shared-key: native-linux-x64-gnu
           workspaces: native -> target
@@ -334,7 +334,7 @@ jobs:
           version: 10.12.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -357,7 +357,7 @@ jobs:
 
       - name: Cache Rust build (native addon)
         if: needs.fast-gates.outputs.portability-changed == 'true'
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        uses: Swatinem/rust-cache@f4371d1ec7179bfbd04a82a81e3b3af7f720750f # v2
         with:
           shared-key: native-win32-x64-msvc
           workspaces: native -> target
@@ -466,7 +466,7 @@ jobs:
           version: 10.12.1
 
       - name: Setup Node.js 22 (engines floor)
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '22.19.0'
           cache: 'pnpm'
