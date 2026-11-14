@@ -167,9 +167,40 @@ export function releaseVerificationRetry(unitType: string, unitId: string): void
 // failure. The comparison below is read-time: it works for rows written before
 // this fix and after a process restart, and it keeps the historical row.
 
-/** Canonical identity of a Verify command: surrounding space and run spacing do not matter. */
+/**
+ * Canonical identity of a Verify command. Whitespace outside quotes is
+ * insignificant; whitespace inside quotes is part of the argument and must be
+ * preserved (a quoted regex with two spaces is not the same contract as one
+ * with one). Quoting style is otherwise preserved, so a textually different
+ * command is treated as a new contract.
+ */
 export function normalizeVerifyContract(command: string): string {
-  return command.trim().replace(/\s+/g, " ");
+  let out = "";
+  let quote: "'" | "\"" | null = null;
+  let escaped = false;
+  let pendingSpace = false;
+  for (const ch of command.trim()) {
+    if (quote) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+      pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace && out.length > 0) out += " ";
+    pendingSpace = false;
+    out += ch;
+    if (ch === "'" || ch === "\"") quote = ch;
+  }
+  return out;
 }
 
 const NON_VERIFICATION_SIGNATURE_PREFIXES = [

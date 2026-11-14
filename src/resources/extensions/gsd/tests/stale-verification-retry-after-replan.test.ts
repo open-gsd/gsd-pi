@@ -497,3 +497,21 @@ test("#3089: a retry table predating the contract column keeps its rows and gain
   storeVerificationRetry(VERIFY_A, 1);
   assert.equal(readStoredUnitRetry("execute-task", UNIT_ID)?.verifyContract, VERIFY_A);
 });
+
+test("#3089: whitespace inside a quoted argument is part of the contract", async (t) => {
+  const fixture = makeBase();
+  t.after(fixture.cleanup);
+
+  const spaced = 'node --test "a  b"';
+  seedVerify(spaced);
+  claimTestDispatch(fixture.base, {
+    milestoneId: MID, sliceId: SID, taskId: TID, unitType: "execute-task", unitId: UNIT_ID,
+  });
+  storeVerificationRetry(spaced, 1);
+
+  await replan(fixture.base, 'node --test "a b"');
+
+  const prompt = await executeTaskPrompt(fixture.base);
+  assert.ok(!prompt.includes(DEFECTIVE_VERIFY_GUIDANCE));
+  assert.ok(prompt.includes("PREVIOUS FAILURE SUPERSEDED"));
+});
