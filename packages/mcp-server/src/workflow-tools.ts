@@ -3327,7 +3327,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_save_decision",
-    "Alias for gsd_decision_save. Record a project decision to the GSD database and regenerate DECISIONS.md.",
+    "Alias for gsd_decision_save (same behavior).",
     decisionSaveParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_save_decision", "gsd_decision_save");
@@ -3462,7 +3462,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_update_requirement",
-    "Alias for gsd_requirement_update. Update an existing requirement in the GSD database and regenerate REQUIREMENTS.md.",
+    "Alias for gsd_requirement_update (same behavior).",
     requirementUpdateParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_update_requirement", "gsd_requirement_update");
@@ -3500,7 +3500,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_save_requirement",
-    "Alias for gsd_requirement_save. Record a new requirement to the GSD database and regenerate REQUIREMENTS.md.",
+    "Alias for gsd_requirement_save (same behavior).",
     requirementSaveParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_save_requirement", "gsd_requirement_save");
@@ -3654,7 +3654,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_generate_milestone_id",
-    "Alias for gsd_milestone_generate_id. Generate the next milestone ID for a new GSD milestone.",
+    "Alias for gsd_milestone_generate_id (same behavior).",
     milestoneGenerateIdParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_generate_milestone_id", "gsd_milestone_generate_id");
@@ -3686,7 +3686,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_milestone_plan",
-    "Alias for gsd_plan_milestone. Write milestone planning state to the GSD database and render ROADMAP.md from DB.",
+    "Alias for gsd_plan_milestone (same behavior).",
     planMilestoneParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_milestone_plan", "gsd_plan_milestone");
@@ -3725,7 +3725,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_slice_plan",
-    "Alias for gsd_plan_slice. Write slice/task planning state to the GSD database and render plan artifacts from DB.",
+    "Alias for gsd_plan_slice (same behavior).",
     planSliceParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_slice_plan", "gsd_plan_slice");
@@ -3770,7 +3770,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_task_plan",
-    "Alias for gsd_plan_task. Write task planning state to the GSD database and render the slice PLAN from DB.",
+    "Alias for gsd_plan_task (same behavior).",
     planTaskParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_task_plan", "gsd_plan_task");
@@ -3810,7 +3810,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_slice_replan",
-    "Alias for gsd_replan_slice. Replan a slice after a blocker is discovered.",
+    "Alias for gsd_replan_slice (same behavior).",
     replanSliceParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_slice_replan", "gsd_replan_slice");
@@ -3881,7 +3881,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_complete_slice",
-    "Alias for gsd_slice_complete. Commit evidence-backed Slice completion in SQLite, then refresh readable projections.",
+    "Alias for gsd_slice_complete (same behavior).",
     sliceCompleteParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_complete_slice", "gsd_slice_complete");
@@ -3924,7 +3924,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_milestone_complete",
-    "Alias for gsd_complete_milestone. Commit validated Milestone completion atomically, then render its readable SUMMARY projection.",
+    "Alias for gsd_complete_milestone (same behavior).",
     completeMilestoneParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_milestone_complete", "gsd_complete_milestone");
@@ -3953,7 +3953,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_milestone_validate",
-    "Alias for gsd_validate_milestone. Validate a milestone and render VALIDATION.md.",
+    "Alias for gsd_validate_milestone (same behavior).",
     validateMilestoneParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_milestone_validate", "gsd_validate_milestone");
@@ -3996,7 +3996,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_roadmap_reassess",
-    "Alias for gsd_reassess_roadmap. Reassess a roadmap after slice completion.",
+    "Alias for gsd_reassess_roadmap (same behavior).",
     reassessRoadmapParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_roadmap_reassess", "gsd_reassess_roadmap");
@@ -4092,7 +4092,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_save_summary",
-    "Alias for gsd_summary_save. Save a GSD summary/research/context/assessment artifact to the database and disk.",
+    "Alias for gsd_summary_save (same behavior).",
     summarySaveParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_save_summary", "gsd_summary_save");
@@ -4136,7 +4136,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_complete_task",
-    "Alias for gsd_task_complete. Record a Task result and advance canonical host verification/recovery or legacy completion.",
+    "Alias for gsd_task_complete (same behavior).",
     taskCompleteParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_complete_task", "gsd_task_complete");
@@ -4167,7 +4167,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_reopen_task",
-    "Alias for gsd_task_reopen. Reset a completed task back to pending so it can be re-done.",
+    "Alias for gsd_task_reopen (same behavior).",
     taskReopenParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_reopen_task", "gsd_task_reopen");
@@ -4228,7 +4228,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_reopen_slice",
-    "Alias for gsd_slice_reopen. Reopen a terminal Slice and all Tasks atomically in SQLite while preserving immutable history and enforcing downstream guards.",
+    "Alias for gsd_slice_reopen (same behavior).",
     sliceReopenParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_reopen_slice", "gsd_slice_reopen");
@@ -4259,7 +4259,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_reopen_milestone",
-    "Alias for gsd_milestone_reopen. Reopen a terminal Milestone hierarchy atomically, then refresh readable projections. Pass keepCompleted=true to unlock without resetting completed work.",
+    "Alias for gsd_milestone_reopen (same behavior).",
     milestoneReopenParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_reopen_milestone", "gsd_milestone_reopen");

@@ -535,6 +535,13 @@ export interface CodebaseMapPreferences {
   max_files?: number;
   /** Files-per-directory threshold before collapsing to a summary line. Default: 20. */
   collapse_threshold?: number;
+  /**
+   * How the map rides each request: "inline" (default) injects the map block into the
+   * cached system-prompt prefix; "lazy" replaces the block with a stable pointer line
+   * (fetch via /gsd codebase or read .gsd/CODEBASE.md) to shrink the prefix payload.
+   * Default: "inline".
+   */
+  inject?: "inline" | "lazy";
 }
 
 /** Per-model MCP server allow/block lists for a single model prefix. */

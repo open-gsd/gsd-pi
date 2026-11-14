@@ -175,6 +175,12 @@ Diagnostics record the file path, scope (global/project), severity (error/warnin
   - Planning tools consume repository IDs through `targetRepositories`: `gsd_plan_slice.targetRepositories` sets a slice-wide default, and `gsd_plan_task.targetRepositories` records the repositories an individual task touches. Values must be declared IDs or the implicit `project`; omit these fields in single-repo projects.
   - In parent mode with declared child repositories, `/gsd codebase generate` and automatic `.gsd/CODEBASE.md` refreshes enumerate `project` plus each child repository, render repo-labeled sections, and store repository IDs in map metadata.
 
+- `codebase`: configures the codebase map generator (`/gsd codebase`) and how the map rides requests. Keys:
+  - `exclude_patterns`: array of strings — additional directory/file patterns to exclude (e.g. `["docs/", "fixtures/"]`). Merged with built-in defaults.
+  - `max_files`: number — max files to include in the map. Default: 500.
+  - `collapse_threshold`: number — files-per-directory threshold before collapsing to a summary line. Default: 20.
+  - `inject`: `"inline"` or `"lazy"` — `"inline"` (default) injects the `[PROJECT CODEBASE]` block into the cached system-prompt prefix; `"lazy"` replaces the block with a stable one-line pointer (fetch via `/gsd codebase stats` or `read .gsd/CODEBASE.md`) to shrink the per-request prefix payload. Default: `"inline"`.
+
 - `runtime.contract`: nominates a project-local runtime contract. When omitted, GSD discovers `script/local-runtime/AGENT.md`, `README.md`, and the first available `runtime.mjs`, `runtime.js`, `runtime.ts`, or `runtime.sh`. Keys:
   - `path`: optional contract directory relative to the active project or worktree root. Default: `script/local-runtime`.
   - `entry`: optional canonical entry point relative to the contract directory. When set, the nominated file must exist and validate.
