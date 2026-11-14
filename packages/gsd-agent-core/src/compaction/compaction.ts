@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@gsd/pi-agent-core";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@gsd/pi-ai";
+import type { AssistantMessage, CacheRetention, Context, Model, SimpleStreamOptions, Usage } from "@gsd/pi-ai";
 import { completeSimple } from "@gsd/pi-ai";
 import {
 	convertToLlm,
@@ -620,6 +620,45 @@ export function chunkMessages(messages: AgentMessage[], maxChunkTokens: number):
 	return chunks;
 }
 
+/**
+ * Cache affinity for the summarization request (cache-aware compaction).
+ *
+ * When the provider declares prompt-cache support, the summarization request
+ * reuses the session's exact system prompt so the cached system segment is read
+ * instead of re-prefilled (the summarization system prompt alone was a fresh
+ * ~120-token prefix every call -> cacheRead=0, measured in=80K+ per turn).
+ * The directive moves into the user message in that mode; behavioral semantics
+ * are unchanged.
+ */
+export interface SummarizationCacheAffinity {
+	/** The session's current system prompt, byte-identical to the last request. */
+	systemPrompt: string;
+	/** Session id for provider cache routing (affinity headers). */
+	sessionId?: string;
+	/** Session cache retention setting; "none" disables cache-aware mode. */
+	cacheRetention?: CacheRetention;
+}
+
+/** Whether the provider declares prompt-cache support for prefix reuse. */
+function providerSupportsPrefixCache(model: Model<any>): boolean {
+	const compat = model.compat as Record<string, unknown> | undefined;
+	if (model.api === "anthropic-messages") return true;
+	if (model.api === "openai-responses") return compat?.sendSessionIdHeader !== false;
+	if (model.api === "openai-completions") {
+		return compat?.cacheControlFormat === "anthropic" || compat?.sendSessionAffinityHeaders === true;
+	}
+	return false;
+}
+
+/** Resolve cache-aware mode: gated on provider capability + retention setting. */
+function resolveCacheAware(
+	model: Model<any>,
+	cacheAffinity: SummarizationCacheAffinity | undefined,
+): SummarizationCacheAffinity | undefined {
+	if (!cacheAffinity || cacheAffinity.cacheRetention === "none") return undefined;
+	return providerSupportsPrefixCache(model) ? cacheAffinity : undefined;
+}
+
 function createSummarizationOptions(
 	model: Model<any>,
 	maxTokens: number,
@@ -627,12 +666,17 @@ function createSummarizationOptions(
 	headers: Record<string, string> | undefined,
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
+	cacheAware?: SummarizationCacheAffinity,
 ): SimpleStreamOptions {
 	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers };
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		// Summarization is a mechanical template-fill; extended reasoning adds
 		// cost, not quality. Cap at "low" regardless of session thinking level.
 		options.reasoning = "low";
+	}
+	if (cacheAware) {
+		if (cacheAware.sessionId) options.sessionId = cacheAware.sessionId;
+		if (cacheAware.cacheRetention) options.cacheRetention = cacheAware.cacheRetention;
 	}
 	return options;
 }
@@ -665,6 +709,7 @@ function buildSummarizationPrompt(
 	messages: AgentMessage[],
 	customInstructions: string | undefined,
 	previousSummary: string | undefined,
+	cacheAware: boolean,
 ): string {
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (customInstructions) {
@@ -673,7 +718,10 @@ function buildSummarizationPrompt(
 
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	// Cache-aware mode sends the session system prompt; the summarization
+	// directive lives in the user message instead of the system prompt.
+	let promptText = cacheAware ? `${SUMMARIZATION_SYSTEM_PROMPT}\n\n` : "";
+	promptText += `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (previousSummary) {
 		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 	}
@@ -688,8 +736,9 @@ async function summarizeOnce(
 	previousSummary: string | undefined,
 	streamFn: StreamFn | undefined,
 	completeFn: SummaryCompleteFn | undefined,
+	cacheAware: SummarizationCacheAffinity | undefined,
 ): Promise<string> {
-	const promptText = buildSummarizationPrompt(messages, customInstructions, previousSummary);
+	const promptText = buildSummarizationPrompt(messages, customInstructions, previousSummary, cacheAware !== undefined);
 	const summarizationMessages = [
 		{
 			role: "user" as const,
@@ -700,7 +749,7 @@ async function summarizeOnce(
 
 	const response = await completeSummarization(
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
+		{ systemPrompt: cacheAware ? cacheAware.systemPrompt : SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		options,
 		streamFn,
 		completeFn,
@@ -729,6 +778,7 @@ export async function generateSummary(
 	thinkingLevel?: ThinkingLevel | SummaryCompleteFn,
 	streamFn?: StreamFn,
 	completeFn?: SummaryCompleteFn,
+	cacheAffinity?: SummarizationCacheAffinity,
 ): Promise<string> {
 	if (typeof previousSummary === "function") {
 		completeFn = previousSummary as SummaryCompleteFn;
@@ -744,7 +794,8 @@ export async function generateSummary(
 		Math.floor(0.8 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	);
-	const completionOptions = createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel);
+	const cacheAware = resolveCacheAware(model, cacheAffinity);
+	const completionOptions = createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel, cacheAware);
 	const chunkBudget = Math.max(1, model.contextWindow - reserveTokens - maxTokens);
 	const chunks = chunkMessages(currentMessages, chunkBudget);
 
@@ -757,6 +808,7 @@ export async function generateSummary(
 			previousSummary,
 			streamFn,
 			completeFn,
+			cacheAware,
 		);
 	}
 
@@ -790,6 +842,7 @@ export async function generateSummary(
 			summaryBeforeChunk,
 			streamFn,
 			completeFn,
+			cacheAware,
 		);
 
 		// A tiny chunk legitimately yields a short summary — retrying won't help.
@@ -806,6 +859,7 @@ export async function generateSummary(
 				summaryBeforeChunk,
 				streamFn,
 				completeFn,
+				cacheAware,
 			);
 		}
 
@@ -965,6 +1019,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel | SummaryCompleteFn,
 	streamFn?: StreamFn,
 	completeFn?: SummaryCompleteFn,
+	cacheAffinity?: SummarizationCacheAffinity,
 ): Promise<CompactionResult> {
 	if (typeof signal === "function") {
 		completeFn = signal as SummaryCompleteFn;
@@ -1009,6 +1064,7 @@ export async function compact(
 						thinkingLevel,
 						streamFn,
 						completeFn,
+						cacheAffinity,
 					)
 				: Promise.resolve("No prior history."),
 			generateTurnPrefixSummary(
@@ -1021,6 +1077,7 @@ export async function compact(
 				thinkingLevel,
 				streamFn,
 				completeFn,
+				cacheAffinity,
 			),
 		]);
 		// Merge into single summary
@@ -1039,6 +1096,7 @@ export async function compact(
 			thinkingLevel,
 			streamFn,
 			completeFn,
+			cacheAffinity,
 		);
 	}
 
@@ -1075,14 +1133,16 @@ async function generateTurnPrefixSummary(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	completeFn?: SummaryCompleteFn,
+	cacheAffinity?: SummarizationCacheAffinity,
 ): Promise<string> {
+	const cacheAware = resolveCacheAware(model, cacheAffinity);
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const promptText = `${cacheAware ? `${SUMMARIZATION_SYSTEM_PROMPT}\n\n` : ""}<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages = [
 		{
 			role: "user" as const,
@@ -1093,8 +1153,8 @@ async function generateTurnPrefixSummary(
 
 	const response = await completeSummarization(
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
+		{ systemPrompt: cacheAware ? cacheAware.systemPrompt : SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
+		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel, cacheAware),
 		streamFn,
 		completeFn,
 	);
