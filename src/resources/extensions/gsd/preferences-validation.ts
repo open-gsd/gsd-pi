@@ -1814,7 +1814,15 @@ export function validatePreferences(preferences: GSDPreferences): {
         }
       }
 
-      const knownCbKeys = new Set(["exclude_patterns", "max_files", "collapse_threshold"]);
+      if (cb.inject !== undefined) {
+        if (cb.inject === "inline" || cb.inject === "lazy") {
+          validCb.inject = cb.inject;
+        } else {
+          errors.push("codebase.inject must be \"inline\" or \"lazy\"");
+        }
+      }
+
+      const knownCbKeys = new Set(["exclude_patterns", "max_files", "collapse_threshold", "inject"]);
       for (const key of Object.keys(cb)) {
         if (!knownCbKeys.has(key)) {
           warnings.push(`unknown codebase key "${key}" — ignored`);

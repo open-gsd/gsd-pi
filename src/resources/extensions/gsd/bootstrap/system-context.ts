@@ -408,10 +408,16 @@ export async function buildBeforeAgentStartResult(
       if (rawContent) {
         // Cap injection size to ~2 000 tokens to avoid bloating every request.
         // Full map is always available at .gsd/CODEBASE.md.
-        const content = rawContent.length > DEFAULT_CODEBASE_MAX_CHARS
-          ? rawContent.slice(0, DEFAULT_CODEBASE_MAX_CHARS) + "\n\n*(truncated — see .gsd/CODEBASE.md for full map)*"
-          : rawContent;
-        codebaseBlock = `\n\n[PROJECT CODEBASE — File structure and descriptions (auto-refreshed when GSD detects tracked file changes; use /gsd codebase stats for status)]\n\n${content}`;
+        // Lazy mode: omit the map from the cached prefix; a stable pointer line keeps the
+        // prefix byte-stable regardless of refreshes and shrinks the payload (#feature: lazy CODEBASE).
+        if (loadedPreferences?.preferences?.codebase?.inject === "lazy") {
+          codebaseBlock = `\n\n[PROJECT CODEBASE — map omitted (codebase.inject: lazy). Run /gsd codebase stats for status, or read .gsd/CODEBASE.md when file structure is needed]`;
+        } else {
+          const content = rawContent.length > DEFAULT_CODEBASE_MAX_CHARS
+            ? rawContent.slice(0, DEFAULT_CODEBASE_MAX_CHARS) + "\n\n*(truncated — see .gsd/CODEBASE.md for full map)*"
+            : rawContent;
+          codebaseBlock = `\n\n[PROJECT CODEBASE — File structure and descriptions (auto-refreshed when GSD detects tracked file changes; use /gsd codebase stats for status)]\n\n${content}`;
+        }
       }
     } catch (e) {
       logWarning("bootstrap", `CODEBASE file read failed: ${(e as Error).message}`);

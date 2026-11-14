@@ -135,3 +135,6 @@ com[1-9].*
 lpt[1-9]
 lpt[1-9].*
 dist/
+
+# ── GSD baseline (auto-generated) ──
+.claude/settings.local.json
