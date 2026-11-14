@@ -617,22 +617,24 @@ export function resetDispatchBudgetsInScope(scopeUnitId: string, kind: string): 
 /** Store the retry decision that the close-out of the dispatch row's unit made. */
 export function setDispatchRetry(
   dispatchId: number,
-  retry: { failureContext: string; signature?: string; attempt: number },
+  retry: { failureContext: string; signature?: string; attempt: number; verifyContract?: string },
 ): void {
   transaction(() => {
     _getAdapter()!.prepare(
-      `INSERT INTO unit_dispatch_retries (dispatch_id, failure_context, signature, attempt, created_at)
-       VALUES (:dispatch_id, :failure_context, :signature, :attempt, :created_at)
+      `INSERT INTO unit_dispatch_retries (dispatch_id, failure_context, signature, attempt, verify_contract, created_at)
+       VALUES (:dispatch_id, :failure_context, :signature, :attempt, :verify_contract, :created_at)
        ON CONFLICT (dispatch_id) DO UPDATE SET
          failure_context = excluded.failure_context,
          signature = excluded.signature,
          attempt = excluded.attempt,
+         verify_contract = excluded.verify_contract,
          created_at = excluded.created_at`,
     ).run({
       ":dispatch_id": dispatchId,
       ":failure_context": retry.failureContext,
       ":signature": retry.signature ?? null,
       ":attempt": retry.attempt,
+      ":verify_contract": retry.verifyContract ?? null,
       ":created_at": new Date().toISOString(),
     });
   });

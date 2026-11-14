@@ -44,12 +44,14 @@ interface StoredRetryRow {
   failure_context: string;
   signature: string | null;
   attempt: number;
+  verify_contract: string | null;
 }
 
 const STORED_RETRY = `SELECT dispatch.unit_id AS unit_id,
             retry.failure_context AS failure_context,
             retry.signature AS signature,
-            retry.attempt AS attempt
+            retry.attempt AS attempt,
+            retry.verify_contract AS verify_contract
      FROM unit_dispatch_retries retry
      JOIN unit_dispatches dispatch ON dispatch.id = retry.dispatch_id`;
 
@@ -60,6 +62,7 @@ function toRetry(row: StoredRetryRow | undefined): PendingVerificationRetry | nu
     failureContext: row.failure_context,
     ...(row.signature ? { signature: row.signature } : {}),
     attempt: row.attempt,
+    ...(row.verify_contract ? { verifyContract: row.verify_contract } : {}),
   };
 }
 
@@ -153,6 +156,76 @@ export function releaseUnitRetry(unitType: string, unitId: string): void {
  */
 export function releaseVerificationRetry(unitType: string, unitId: string): void {
   if (isDbAvailable()) deleteUnitVerificationRetries(unitType, unitId);
+}
+
+// ── Verification contract identity (#3089) ─────────────────────────────────
+//
+// A verification retry is evidence about a specific Verify contract. The
+// dispatch row is keyed by unit, not by contract, so a replan that replaces
+// `tasks.verify` leaves the old retry on an earlier dispatch row. The retry is
+// still useful evidence, but it must not be presented as the current gate
+// failure. The comparison below is read-time: it works for rows written before
+// this fix and after a process restart, and it keeps the historical row.
+
+/** Canonical identity of a Verify command: surrounding space and run spacing do not matter. */
+export function normalizeVerifyContract(command: string): string {
+  return command.trim().replace(/\s+/g, " ");
+}
+
+const NON_VERIFICATION_SIGNATURE_PREFIXES = [
+  "pre-execution:",
+  "git-commit:",
+  "closeout-refusal:",
+];
+
+/** Commands named by a failure signature (`<command>#<exit code>` per line). */
+function commandsFromFailureSignature(signature: string | undefined): string[] {
+  if (!signature) return [];
+  if (NON_VERIFICATION_SIGNATURE_PREFIXES.some((prefix) => signature.startsWith(prefix))) return [];
+  const commands: string[] = [];
+  for (const line of signature.split("\n")) {
+    const match = /^(.*)#(\d+)$/.exec(line.trim());
+    if (match) commands.push(match[1].trim());
+  }
+  return commands;
+}
+
+/** Commands named by the rendered verification failure context. */
+function commandsFromFailureContext(failureContext: string): string[] {
+  const commands: string[] = [];
+  const heading = /^### ❌ `([^`]+)` \(exit code \d+\)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = heading.exec(failureContext)) !== null) commands.push(match[1]);
+  return commands;
+}
+
+/**
+ * The Verify command(s) a stored verification retry failed against. New rows
+ * carry the contract explicitly; legacy rows derive it from the recorded
+ * failure signature/context. Non-verification retries return no command.
+ */
+export function verificationFailureCommands(retry: PendingVerificationRetry): string[] {
+  if (retry.verifyContract) return [retry.verifyContract];
+  const fromSignature = commandsFromFailureSignature(retry.signature);
+  if (fromSignature.length > 0) return fromSignature;
+  return commandsFromFailureContext(retry.failureContext);
+}
+
+/**
+ * True when the stored retry belongs to a Verify contract that the Task no
+ * longer has. It must not be shown as a current failure, and it must not carry
+ * defective-Verify guidance. When the contract cannot be determined (an
+ * artifact retry, a legacy row with no command), the retry is preserved.
+ */
+export function isVerificationRetrySuperseded(
+  retry: PendingVerificationRetry | null | undefined,
+  currentVerify: string | null | undefined,
+): boolean {
+  if (!retry || !currentVerify?.trim()) return false;
+  const recorded = verificationFailureCommands(retry);
+  if (recorded.length === 0) return false;
+  const current = normalizeVerifyContract(currentVerify);
+  return !recorded.some((command) => normalizeVerifyContract(command) === current);
 }
 
 /**

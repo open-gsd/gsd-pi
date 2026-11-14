@@ -27,7 +27,7 @@ import { isDbAvailable, getTask, getGateResults } from "../gsd-db.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import { getLatestForUnit } from "../db/unit-dispatches.js";
 import { readUnitBudget, resetUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.js";
-import { readStoredUnitRetry } from "../db/unit-dispatch-retries.js";
+import { isVerificationRetrySuperseded, readStoredUnitRetry } from "../db/unit-dispatch-retries.js";
 import { markWorkerStopping } from "../db/auto-workers.js";
 import { releaseMilestoneLease } from "../db/milestone-leases.js";
 import type { MinimalModelRegistry } from "../context-budget.js";
@@ -129,6 +129,19 @@ function observeTaskPlan(s: AutoSession, unitType: string, unitId: string): void
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logWarning("prompt", `failed to preload source observations for ${unitId}: ${message}`);
+  }
+}
+
+/** The Verify contract a Task currently owns, or null when it cannot be read. */
+export function resolveCurrentTaskVerify(unitType: string, unitId: string): string | null {
+  if (unitType !== "execute-task" || !isDbAvailable()) return null;
+  const { milestone, slice, task } = parseUnitId(unitId);
+  if (!milestone || !slice || !task) return null;
+  try {
+    const verify = getTask(milestone, slice, task)?.verify?.trim();
+    return verify ? verify : null;
+  } catch {
+    return null;
   }
 }
 
@@ -290,7 +303,16 @@ export async function runUnitPhase(
   // of the unit (ADR-048) when a restart lost the session.
   const sessionRetry = s.pendingVerificationRetry?.unitId === unitId ? s.pendingVerificationRetry : null;
   if (sessionRetry) s.pendingVerificationRetry = null;
-  const retryCtx = sessionRetry ?? readStoredUnitRetry(unitType, unitId);
+  const storedRetry = sessionRetry ?? readStoredUnitRetry(unitType, unitId);
+  const currentVerify = resolveCurrentTaskVerify(unitType, unitId);
+  // #3089: a retry belongs to the Verify contract it failed against. If a
+  // replan replaced `tasks.verify`, the recorded failure is historical evidence,
+  // not the current gate result. Keep the row for audit; do not carry its
+  // defective-Verify guidance into the next attempt.
+  const retrySuperseded = storedRetry
+    ? isVerificationRetrySuperseded(storedRetry, currentVerify)
+    : false;
+  const retryCtx = storedRetry && !retrySuperseded ? storedRetry : null;
   if (retryCtx) {
     const capped =
       retryCtx.failureContext.length > MAX_RECOVERY_CHARS
@@ -298,6 +320,19 @@ export async function runUnitPhase(
           "\n\n[...failure context truncated]"
         : retryCtx.failureContext;
     finalPrompt = `**VERIFICATION FAILED — AUTO-FIX ATTEMPT ${retryCtx.attempt}**\n\nThe verification gate ran after your previous attempt and found failures. Fix these issues before completing the task.${unitType === "execute-task" ? DEFECTIVE_VERIFY_GUIDANCE : ""}\n\n${capped}\n\n---\n\n${finalPrompt}`;
+  } else if (retrySuperseded && storedRetry) {
+    const capped =
+      storedRetry.failureContext.length > MAX_RECOVERY_CHARS
+        ? storedRetry.failureContext.slice(0, MAX_RECOVERY_CHARS) +
+          "\n\n[...failure context truncated]"
+        : storedRetry.failureContext;
+    finalPrompt = `**VERIFICATION CONTRACT CHANGED — PREVIOUS FAILURE SUPERSEDED**\n\n` +
+      `A verification command failed before this Task was replanned. The Task no longer owns that command, ` +
+      `so its failure is historical evidence only and is not the current gate result. The host gate will run ` +
+      `the current Verify contract:\n\n\`${currentVerify}\`\n\n` +
+      `Do not report the superseded command as a defective Verify, and do not call \`gsd_task_complete\` with ` +
+      `\`blockerDiscovered: true\` for it. Re-run the current contract and complete the Task on its result.\n\n` +
+      `### Superseded failure (historical)\n\n${capped}\n\n---\n\n${finalPrompt}`;
   }
 
   if (s.pendingCrashRecovery) {

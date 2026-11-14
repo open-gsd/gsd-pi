@@ -41,8 +41,10 @@ import {
   getRoadmapAssessmentForSlice,
   getScopedArtifact,
   getSlice,
+  getTask,
   isDbAvailable,
 } from "./gsd-db.js";
+import { normalizeVerifyContract } from "./db/unit-dispatch-retries.js";
 import { readListedMilestoneIds, readMilestoneSlices, readSliceTasks, type TaskRead } from "./db/lifecycle-read.js";
 import {
   readMilestoneCloseoutAuthorization,
@@ -188,10 +190,23 @@ function renderBlockingReworkFindingsBlock(mid: string, sid: string, tid: string
   return lines.join("\n").trim();
 }
 
+/** The Verify command named by a recovery rationale, when it records a host verification failure. */
+function recoveryVerificationCommand(recovery: PendingTaskRecoveryContext): string | null {
+  const match = /check (.+?) observed exit \d+/.exec(recovery.rationale ?? "");
+  return match ? match[1].trim() : null;
+}
+
 export function renderTaskRecoveryDispatchContext(
   recovery: PendingTaskRecoveryContext,
+  opts?: { currentVerify?: string | null },
 ): string {
   const isAuthorizedContinuation = recovery.resumeAuthorized === true;
+  const recordedVerify = recoveryVerificationCommand(recovery);
+  const contractSuperseded = Boolean(
+    recordedVerify &&
+    opts?.currentVerify?.trim() &&
+    normalizeVerifyContract(recordedVerify) !== normalizeVerifyContract(opts?.currentVerify ?? ""),
+  );
   let executionContract: string;
   switch (recovery.action) {
     case "retry":
@@ -227,6 +242,14 @@ export function renderTaskRecoveryDispatchContext(
       : `**Confirmed context:** ${recovery.checkpoint.confirmedContext}`,
     `**Unresolved:** ${recovery.checkpoint.unresolvedSummary}`,
     `**Suggested next action:** ${recovery.checkpoint.suggestedNextAction}`,
+    ...(contractSuperseded
+      ? [
+          "",
+          `**Verification contract status:** superseded — the recorded failure names a command the Task no longer owns. ` +
+            `The current Verify contract is \`${opts!.currentVerify}\`. Treat the recorded check as historical evidence, ` +
+            "not as the current gate result, and do not report it as defective.",
+        ]
+      : []),
     "",
     "### Durable Evidence",
     "",
@@ -3011,7 +3034,10 @@ export async function buildExecuteTaskPrompt(
     ? readPendingTaskRecoveryContext({ milestoneId: mid, sliceId: sid, taskId: tid })
     : null;
   if (recoveryContext) {
-    const recoveryBlock = renderTaskRecoveryDispatchContext(recoveryContext);
+    const currentTaskVerify = isDbAvailable() ? getTask(mid, sid, tid)?.verify ?? null : null;
+    const recoveryBlock = renderTaskRecoveryDispatchContext(recoveryContext, {
+      currentVerify: currentTaskVerify,
+    });
     phaseAnchorSection = phaseAnchorSection
       ? `${recoveryBlock}\n\n---\n\n${phaseAnchorSection}`
       : recoveryBlock;

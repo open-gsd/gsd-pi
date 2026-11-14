@@ -5,6 +5,8 @@ import {
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
 import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
+import { resetDispatchBudgetsInScope } from "../db/unit-dispatches.js";
+import { normalizeVerifyContract } from "../db/unit-dispatch-retries.js";
 import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
 import { readSlice, readTask } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
@@ -148,6 +150,7 @@ export async function handleReplanTask(
   );
 
   let operationStatus: "committed" | "replayed";
+  let previousVerify: string | null = null;
   try {
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.task.replan",
@@ -200,6 +203,7 @@ export async function handleReplanTask(
         if (task.done) {
           throw new PlanningGuardError(`cannot replan completed task ${params.taskId} — use gsd_task_reopen first`);
         }
+        previousVerify = task.verify ?? "";
         const lifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "task",
           milestoneId: params.milestoneId,
@@ -252,7 +256,18 @@ export async function handleReplanTask(
   }
 
   // A re-planned unit gets its verification retries again (ADR-048).
-  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}/${params.taskId}`);
+  const unitId = `${params.milestoneId}/${params.sliceId}/${params.taskId}`;
+  releaseExhaustedUnits(unitId);
+  // #3089: verification retry budget is evidence about a contract. A replan
+  // that replaces the Verify command starts a new contract, so the old
+  // contract's retry count must not bound the new one. The old retry rows stay
+  // for audit; the prompt builder marks them superseded.
+  if (
+    previousVerify !== null &&
+    normalizeVerifyContract(previousVerify) !== normalizeVerifyContract(params.verify)
+  ) {
+    resetDispatchBudgetsInScope(unitId, "verification");
+  }
 
   // The replan is committed. A failed render must not fail the tool: its
   // Projection Work stays pending and the Projection Worker renders it again.
