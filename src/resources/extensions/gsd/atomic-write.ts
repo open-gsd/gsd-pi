@@ -1,5 +1,5 @@
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, renameSync, unlinkSync, mkdirSync, promises as fs } from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { acquireProjectionRootIdentityLock, isProjectionRootIdentityLockAvailable, type ProjectionRootIdentityLock } from "@gsd/native/file-identity";
 import { syncDirectoryEntry } from "@gsd/native/directory-sync";
@@ -10,8 +10,10 @@ import {
   beginManagedProjectionMutation,
   commitManagedProjectionMutation,
   createManagedProjectionDirectorySync,
+  isExhaustedTransientProjectionSharingError,
   removeLegacyProjectionTreeSync,
   retainManagedProjectionMutation,
+  type ManagedProjectionMutation,
 } from "./managed-projection-history.js";
 import { classifyGsdLogicalPath } from "./projection-path-policy.js";
 import { preserveManagedProjectionBeforeMutation } from "./projection-mutation-guard.js";
@@ -267,13 +269,83 @@ const DEFAULT_SYNC_OPS: AtomicWriteSyncOps = {
 };
 
 /**
+ * Windows exchange-exhaustion degradation (#2355 family): the native projection
+ * root lock's Windows retry budget (~75 ms) ran out renaming a node inside the
+ * managed root, and the same failure returns deterministically — so every
+ * retry of the same operation wedges forever. The designed fail-closed retention
+ * makes compaction snapshot writes (and any managed render) never converge,
+ * which wedges the session permanently. When an operation exhausts with a
+ * transient sharing violation, degrade this single write to the plain-fs atomic
+ * write path: the native staging is abandoned (journal + staging removed), the
+ * content lands through tmp+rename like the lock-free fallback. Plain-fs path
+ * renames are not affected by the lock's held root handle (kernel rename only
+ * checks handle share bits on the source/target nodes, measured via the
+ * rename-contention matrix), so the degradation converges while the wedge
+ * shape persists. Journal registration of the logical path is skipped: a
+ * degraded write trades identity-index registration for session liveness.
+ */
+function abandonManagedMutationSync(mutation: ManagedProjectionMutation | null): void {
+  if (mutation === null) return;
+  try {
+    abortManagedProjectionMutation(mutation);
+  } catch {
+    // Best-effort: the journal removal may itself hit the wedge shape.
+  }
+  for (const path of mutationStagingPaths(mutation)) {
+    try {
+      rmSync(path, { force: true });
+    } catch {
+      // Best-effort staging cleanup.
+    }
+  }
+}
+
+async function abandonManagedMutationAsync(mutation: ManagedProjectionMutation | null): Promise<void> {
+  if (mutation === null) return;
+  try {
+    abortManagedProjectionMutation(mutation);
+  } catch {
+    // Best-effort: the journal removal may itself hit the wedge shape.
+  }
+  for (const path of mutationStagingPaths(mutation)) {
+    try {
+      await fs.rm(path, { force: true });
+    } catch {
+      // Best-effort staging cleanup.
+    }
+  }
+}
+
+function mutationStagingPaths(mutation: ManagedProjectionMutation): string[] {
+  const candidates = [
+    mutation.journalPath,
+    mutation.temporaryPath,
+    mutation.replacementPath,
+    mutation.quarantinePath,
+    mutation.exchangeGuardPath,
+  ].filter((path): path is string => typeof path === "string" && path.length > 0);
+  // journalPath is absolute; the staging paths are logical relative to the
+  // projection root (.gsd), while targetRoot is the project root.
+  return candidates.map(path => isAbsolute(path) ? path : join(mutation.targetRoot, ".gsd", path));
+}
+
+/**
  * Atomically writes content to a file by writing to a temp file first,
  * then renaming. Prevents partial/corrupt files on crash.
  */
 export function atomicWriteSync(filePath: string, content: string, encoding: BufferEncoding = "utf-8"): void {
   withProjectionMutationSync(filePath, () => {
     preserveManagedProjectionBeforeMutation(filePath, Buffer.from(content, encoding));
-    const mutation = beginManagedProjectionMutation(filePath, "write", content, encoding);
+    let mutation: ManagedProjectionMutation | null;
+    try {
+      mutation = beginManagedProjectionMutation(filePath, "write", content, encoding);
+    } catch (error) {
+      if (isExhaustedTransientProjectionSharingError(error)) {
+        atomicWriteSyncWithOps(filePath, content, encoding, DEFAULT_SYNC_OPS);
+        return;
+      }
+      throw error;
+    }
     let managedApplyStarted = false;
     try {
       managedMutationBoundaryForTest?.("before-write", filePath);
@@ -282,12 +354,17 @@ export function atomicWriteSync(filePath: string, content: string, encoding: Buf
         atomicWriteSyncWithOps(filePath, content, encoding, DEFAULT_SYNC_OPS);
       }
       managedMutationBoundaryForTest?.("after-write", filePath);
+      commitManagedProjectionMutation(mutation);
     } catch (error) {
+      if (managedApplyStarted && isExhaustedTransientProjectionSharingError(error)) {
+        abandonManagedMutationSync(mutation);
+        atomicWriteSyncWithOps(filePath, content, encoding, DEFAULT_SYNC_OPS);
+        return;
+      }
       if (managedApplyStarted) retainManagedProjectionMutation(mutation);
       else abortManagedProjectionMutation(mutation);
       throw error;
     }
-    commitManagedProjectionMutation(mutation);
   });
 }
 
@@ -302,7 +379,16 @@ export function atomicWriteBufferSync(filePath: string, content: Buffer): void {
 export async function atomicWriteAsync(filePath: string, content: string, encoding: BufferEncoding = "utf-8"): Promise<void> {
   return withProjectionMutation(filePath, async () => {
     preserveManagedProjectionBeforeMutation(filePath, Buffer.from(content, encoding));
-    const mutation = beginManagedProjectionMutation(filePath, "write", content, encoding);
+    let mutation: ManagedProjectionMutation | null;
+    try {
+      mutation = beginManagedProjectionMutation(filePath, "write", content, encoding);
+    } catch (error) {
+      if (isExhaustedTransientProjectionSharingError(error)) {
+        await atomicWriteAsyncWithOps(filePath, content, encoding, DEFAULT_ASYNC_OPS);
+        return;
+      }
+      throw error;
+    }
     let managedApplyStarted = false;
     try {
       managedMutationBoundaryForTest?.("before-write", filePath);
@@ -311,30 +397,49 @@ export async function atomicWriteAsync(filePath: string, content: string, encodi
         await atomicWriteAsyncWithOps(filePath, content, encoding, DEFAULT_ASYNC_OPS);
       }
       managedMutationBoundaryForTest?.("after-write", filePath);
+      commitManagedProjectionMutation(mutation);
     } catch (error) {
+      if (managedApplyStarted && isExhaustedTransientProjectionSharingError(error)) {
+        await abandonManagedMutationAsync(mutation);
+        await atomicWriteAsyncWithOps(filePath, content, encoding, DEFAULT_ASYNC_OPS);
+        return;
+      }
       if (managedApplyStarted) retainManagedProjectionMutation(mutation);
       else abortManagedProjectionMutation(mutation);
       throw error;
     }
-    commitManagedProjectionMutation(mutation);
   });
 }
 
 export function removeProjectionFileSync(filePath: string): void {
   withProjectionMutationSync(filePath, () => {
     preserveManagedProjectionBeforeMutation(filePath, null);
-    const mutation = beginManagedProjectionMutation(filePath, "remove", null, null);
+    let mutation: ManagedProjectionMutation | null;
+    try {
+      mutation = beginManagedProjectionMutation(filePath, "remove", null, null);
+    } catch (error) {
+      if (isExhaustedTransientProjectionSharingError(error)) {
+        if (existsSync(filePath)) unlinkSync(filePath);
+        return;
+      }
+      throw error;
+    }
     let managedApplyStarted = false;
     try {
       managedApplyStarted = mutation !== null;
       if (!applyManagedProjectionMutation(mutation) && existsSync(filePath)) unlinkSync(filePath);
       managedMutationBoundaryForTest?.("after-remove", filePath);
+      commitManagedProjectionMutation(mutation);
     } catch (error) {
+      if (managedApplyStarted && isExhaustedTransientProjectionSharingError(error)) {
+        abandonManagedMutationSync(mutation);
+        if (existsSync(filePath)) unlinkSync(filePath);
+        return;
+      }
       if (managedApplyStarted) retainManagedProjectionMutation(mutation);
       else abortManagedProjectionMutation(mutation);
       throw error;
     }
-    commitManagedProjectionMutation(mutation);
   });
 }
 
@@ -367,19 +472,33 @@ export function moveProjectionFileToQuarantineSync(filePath: string, quarantineD
 
 export function removeProjectionTreeSync(directoryPath: string): void {
   withProjectionMutationSync(directoryPath, () => {
-    const mutation = beginManagedProjectionMutation(directoryPath, "remove-tree", null, null);
+    let mutation: ManagedProjectionMutation | null;
+    try {
+      mutation = beginManagedProjectionMutation(directoryPath, "remove-tree", null, null);
+    } catch (error) {
+      if (isExhaustedTransientProjectionSharingError(error)) {
+        rmSync(directoryPath, { recursive: true, force: true });
+        return;
+      }
+      throw error;
+    }
     let managedApplyStarted = false;
     try {
       managedApplyStarted = mutation !== null;
       if (!applyManagedProjectionMutation(mutation)) {
         removeProjectionTreeWithoutDatabaseSync(directoryPath);
       }
+      commitManagedProjectionMutation(mutation);
     } catch (error) {
+      if (managedApplyStarted && isExhaustedTransientProjectionSharingError(error)) {
+        abandonManagedMutationSync(mutation);
+        rmSync(directoryPath, { recursive: true, force: true });
+        return;
+      }
       if (managedApplyStarted) retainManagedProjectionMutation(mutation);
       else abortManagedProjectionMutation(mutation);
       throw error;
     }
-    commitManagedProjectionMutation(mutation);
   });
 }
 
@@ -638,8 +757,16 @@ export function copyProjectionFileSync(sourcePath: string, filePath: string, ove
 
 export function createProjectionDirectorySync(directoryPath: string): void {
   withProjectionMutationSync(directoryPath, () => {
-    if (!createManagedProjectionDirectorySync(directoryPath)) {
-      mkdirSync(directoryPath, { recursive: true });
+    try {
+      if (!createManagedProjectionDirectorySync(directoryPath)) {
+        mkdirSync(directoryPath, { recursive: true });
+      }
+    } catch (error) {
+      if (isExhaustedTransientProjectionSharingError(error)) {
+        mkdirSync(directoryPath, { recursive: true });
+        return;
+      }
+      throw error;
     }
   });
 }
