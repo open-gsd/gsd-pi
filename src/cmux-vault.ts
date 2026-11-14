@@ -11,13 +11,14 @@ import {
 } from './resources/extensions/shared/gsd-session-metadata.js'
 
 export const CMUX_VAULT_TIMEOUT_MS = 1000
+export const CMUX_VAULT_MAX_PENDING_ENDS = 32
 export const CMUX_VAULT_MAX_PENDING_SESSIONS = 64
 // cmux's Unix socket convention is independent of the client's temporary directory.
 export const CMUX_VAULT_DEFAULT_SOCKET_PATH = '/tmp/cmux.sock'
 
 export type CmuxVaultTransport = (args: string[]) => Promise<unknown>
 
-/** The public CLI quotes trailing argv itself; never pass a shell command. */
+/** Pass literal CLI arguments; only the explicitly quoted --shell payload is shell code. */
 export const runCmuxVaultCommand: CmuxVaultTransport = (args) => new Promise((resolve, reject) => {
   execFile('cmux', ['--json', '--id-format', 'both', ...args], {
     timeout: CMUX_VAULT_TIMEOUT_MS,
@@ -38,7 +39,7 @@ export interface CmuxVaultClearRequest {
   workspace_id: string
   surface_id: string
   checkpoint_id: string
-  source: 'agent-hook'
+  source: 'gsd' | 'agent-hook'
   expected_updated_at: number
 }
 
@@ -225,6 +226,8 @@ export interface CmuxVaultOptions {
 }
 
 interface VaultBinding {
+  commandKey: string
+  source: 'gsd' | 'agent-hook'
   path: string
   cwd: string
   updatedAt: number
@@ -236,6 +239,8 @@ interface VaultBinding {
 function resumeResult(value: unknown): { result: Record<string, unknown>, binding: Record<string, unknown> | null } {
   if (!value || typeof value !== 'object') throw new Error('invalid cmux result')
   const result = value as Record<string, unknown>
+  // An explicit failure is never a confirmed absence, even if it echoes the target and a null binding.
+  if (result.ok === false) throw new Error('cmux reported a failed resume observation')
   const binding = result.resume_binding
   if (binding !== null && (!binding || typeof binding !== 'object' || Array.isArray(binding))) {
     throw new Error('invalid cmux binding')
@@ -296,12 +301,24 @@ export class CmuxVaultBridge {
   private shutdownRequested = false
   private running: Promise<void> | undefined
   private binding: VaultBinding | undefined
+  // SessionEnd events whose delivery failed. Kept separately from this.binding, which
+  // ownership changes can discard, so a later refresh or shutdown can retry them.
+  private pendingEnds: VaultBinding[] = []
   private stopped = false
   // Set only by stop() (shutdown). A null identity from update() means an unsaved
   // session and must still clear its binding; shutdown must keep the durable one.
   private injected: Promise<boolean> | undefined
   private lastIdentity: string | undefined
   private blockedAutoResumeIdentity: string | undefined
+  private diagnostics = new Set<string>()
+
+  private diagnose(code: string): void {
+    if (this.diagnostics.has(code)) return
+    this.diagnostics.add(code)
+    // Native errors may contain commands, environment or transcript data.
+    console.warn(`[gsd/cmux] ${code}`)
+  }
+
   private unsafeAutoResumeIdentity: string | undefined
   private readonly snapshots = new Map<string, VaultIdentity>()
 
@@ -319,10 +336,11 @@ export class CmuxVaultBridge {
       const cwd = manager.getCwd()
       const id = manager.getSessionId()
       const context = sessionContext(manager)
-      const key = JSON.stringify([id, path, cwd, context])
+      const key = JSON.stringify([id, path, cwd, context, this.options.home, this.options.launcher])
       if (!refresh && this.lastIdentity === key) return
       this.lastIdentity = key
-      this.pending = path && isAbsolute(path) && isAbsolute(cwd) && id ? { id, path, cwd, ...context } : null
+      this.pending = path && isAbsolute(path) && isAbsolute(cwd) && id
+        && [path, cwd, id, this.options.home, ...this.options.launcher].every(value => !value.includes('\0')) ? { id, path, cwd, ...context } : null
       if (this.pending) {
         this.snapshots.set(this.pending.path, this.pending)
         if (this.snapshots.size > CMUX_VAULT_MAX_PENDING_SESSIONS) {
@@ -391,6 +409,12 @@ export class CmuxVaultBridge {
         // Retry only on a later lifecycle update, not by re-registering an unsafe
         // automatic binding or spinning until a guarded clear succeeds.
         if (!resumeEnabled && this.unsafeAutoResumeIdentity && !await this.clearAutomaticBinding()) continue
+        // Resume off: an exact persisted automatic binding must not survive, even when Vault
+        // stays on or capability discovery fails. Manual/foreign bindings are never adopted here.
+        if (!resumeEnabled && vaultEnabled && this.blockedAutoResumeIdentity !== identityKey) {
+          await this.clearPersistedAutomaticBinding(identity)
+          if (this.unsafeAutoResumeIdentity) continue
+        }
         if (!vaultEnabled && !resumeEnabled) {
           this.snapshots.clear()
           if (this.binding) await this.clear()
@@ -406,7 +430,10 @@ export class CmuxVaultBridge {
           continue
         }
         await this.publish(identity, vaultEnabled, resumeEnabled)
-      } catch { /* Missing CLI, old protocol, stale socket and I/O failures are optional. */ }
+      } catch {
+        this.lastIdentity = undefined
+        this.diagnose('publication-error (no unguarded fallback)')
+      }
     }
   }
 
@@ -416,7 +443,7 @@ export class CmuxVaultBridge {
       workspace_id: this.binding.workspace,
       surface_id: this.binding.surface,
       checkpoint_id: this.binding.path,
-      source: 'agent-hook',
+      source: this.binding.source,
       expected_updated_at: this.binding.updatedAt,
     }
     const result = await (this.options.clearBinding
@@ -436,9 +463,33 @@ export class CmuxVaultBridge {
   }
 
   private async endPresence(binding = this.binding): Promise<void> {
+    // Retry earlier undelivered ends first, so they never outlive a newer session.
+    await this.retryPendingEnds()
     if (!binding?.vaultEnabled) return
-    binding.vaultEnabled = false
-    await this.feed('SessionEnd', binding)
+    // Mark presence ended only once the end event is delivered. A failed send is queued
+    // so it is retried rather than silently lost.
+    if (await this.feed('SessionEnd', binding)) binding.vaultEnabled = false
+    else if (!this.pendingEnds.includes(binding)) this.enqueuePendingEnd(binding)
+  }
+
+  // Bounded: a permanently failing transport must not grow memory without limit.
+  // The oldest undelivered end is dropped first and reported, never retried forever.
+  private enqueuePendingEnd(binding: VaultBinding): void {
+    this.pendingEnds.push(binding)
+    while (this.pendingEnds.length > CMUX_VAULT_MAX_PENDING_ENDS) {
+      this.pendingEnds.shift()
+      this.diagnose('pending-end-dropped (transport keeps failing)')
+    }
+  }
+
+  private async retryPendingEnds(): Promise<void> {
+    const queued = this.pendingEnds
+    this.pendingEnds = []
+    for (const pending of queued) {
+      if (!pending.vaultEnabled) continue
+      if (await this.feed('SessionEnd', pending)) pending.vaultEnabled = false
+      else this.enqueuePendingEnd(pending)
+    }
   }
 
   private launchArguments(identity: VaultIdentity): string[] {
@@ -448,15 +499,54 @@ export class CmuxVaultBridge {
     ]
   }
 
+  private commandKey(binding: Record<string, unknown>): string {
+    return JSON.stringify([binding.command, binding.launch_command, binding.environment])
+  }
+
+  private shellCommand(identity: VaultIdentity): string {
+    return this.launchArguments(identity).map(value => `'${value.replace(/'/g, `'"'"'`)}'`).join(' ')
+  }
+
+  private matchesTarget(result: Record<string, unknown>): boolean {
+    return typeof result.workspace_id === 'string' && !!result.workspace_id
+      && typeof result.surface_id === 'string' && !!result.surface_id
+      && (this.env.CMUX_WORKSPACE_ID === result.workspace_id || this.env.CMUX_WORKSPACE_ID === result.workspace_ref)
+      && (this.env.CMUX_SURFACE_ID === result.surface_id || this.env.CMUX_SURFACE_ID === result.surface_ref)
+  }
+
   private matchesIdentity(
     identity: VaultIdentity, result: Record<string, unknown>, binding: Record<string, unknown> | null,
   ): boolean {
-    const launch = binding?.launch_command as { arguments?: unknown } | null
-    return binding?.kind === 'gsd' && binding.source === 'agent-hook'
+    const launch = binding?.launch_command as Record<string, unknown> | null
+    const commandMatches = binding?.source === 'gsd'
+      ? binding.command === this.shellCommand(identity) && binding.launch_command == null && binding.environment == null
+      : binding?.source === 'agent-hook'
+        && binding.command === this.launchArguments(identity).map(value => `'${value.replace(/'/g, "'\\''")}'`).join(' ')
+        && launch?.executable_path === 'env' && launch.working_directory === identity.cwd
+        && launch.environment == null && binding.environment == null
+        && JSON.stringify(launch?.arguments) === JSON.stringify(this.launchArguments(identity))
+    return this.matchesTarget(result) && binding?.kind === 'gsd' && commandMatches
       && binding.checkpoint_id === identity.path && binding.cwd === identity.cwd
       && typeof binding.updated_at === 'number' && Number.isFinite(binding.updated_at)
-      && typeof result.workspace_id === 'string' && typeof result.surface_id === 'string'
-      && JSON.stringify(launch?.arguments) === JSON.stringify(this.launchArguments(identity))
+  }
+
+  private async supportsConditionalSet(): Promise<boolean> {
+    try {
+      const raw = await this.transport(['rpc', 'system.capabilities', '{}'])
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid capabilities')
+      const result = raw as Record<string, unknown>
+      if (result.ok === false) throw new Error('capability query failed')
+      // A methods list with non-string entries is a malformed response, not an explicit
+      // statement that conditional set is unsupported: report it as a query error.
+      if (Array.isArray(result.methods) && !result.methods.every(value => typeof value === 'string')) {
+        throw new Error('malformed capability methods')
+      }
+      if (Array.isArray(result.methods) && result.methods.includes('surface.resume.conditional_set.v1')) return true
+      this.diagnose('unsupported-CAS (publication disabled)')
+    } catch {
+      this.diagnose('capability-query-error (publication disabled)')
+    }
+    return false
   }
 
   private async clearPersistedAutomaticBinding(identity: VaultIdentity): Promise<void> {
@@ -464,9 +554,18 @@ export class CmuxVaultBridge {
     // No local ownership: adopt only this exact launch identity and generation.
     // A disabled bridge must not claim manual, foreign or other-session bindings.
     if (!binding || binding.auto_resume !== true || !this.matchesIdentity(identity, result, binding)) return
-    this.binding = {
-      path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
-      workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
+    // Local ownership is never replaced by a same-conversation generation we did not write.
+    // A different generation here is another publisher's binding: leave it untouched.
+    if (this.binding && (this.binding.updatedAt !== binding.updated_at || this.binding.workspace !== result.workspace_id || this.binding.surface !== result.surface_id)) return
+    // Same generation we already own: keep that live object, so its vaultEnabled presence is
+    // still ended by clearAutomaticBinding() before the binding is dropped. Replacing it with a
+    // fresh vaultEnabled:false copy silently discarded the obligation to send SessionEnd.
+    if (!this.binding) {
+      this.binding = {
+        commandKey: this.commandKey(binding), source: binding.source as VaultBinding['source'],
+        path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
+        workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
+      }
     }
     this.unsafeAutoResumeIdentity = JSON.stringify([identity.id, identity.path, identity.cwd])
     await this.clearAutomaticBinding()
@@ -479,11 +578,11 @@ export class CmuxVaultBridge {
       cleared = await this.clear()
     } catch (error) {
       this.lastIdentity = undefined
-      console.warn('[gsd/cmux] Automatic restore is disabled, but clearing the GSD binding failed; a later lifecycle update will retry.')
+      this.diagnose('automatic-resume-cleanup-error')
       throw error
     }
     if (!cleared) {
-      console.warn('[gsd/cmux] Automatic restore is disabled, but cmux changed the GSD binding before it could be cleared.')
+      this.diagnose('automatic-resume-cleanup-conflict')
       return false
     }
     this.blockedAutoResumeIdentity = this.unsafeAutoResumeIdentity
@@ -493,36 +592,49 @@ export class CmuxVaultBridge {
   }
 
   private async publish(identity: VaultIdentity, vaultEnabled: boolean, resumeEnabled: boolean): Promise<void> {
-    const argv = this.launchArguments(identity)
+    if (!await this.supportsConditionalSet()) return
     const name = vaultEnabled ? vaultTitle(identity) : 'GSD session'
-    const observed = resumeResult(await this.transport(['surface', 'resume', 'show', ...this.target]))
-    if (observed.binding) {
-      const previous = observed.binding
-      if (previous.kind !== 'gsd' || previous.source !== 'agent-hook') return
-      if (this.binding) {
-        if (previous.checkpoint_id !== this.binding.path || previous.updated_at !== this.binding.updatedAt) return
-      } else {
-        // A relaunch may adopt its own exact binding, never another agent/session.
-        const launch = previous.launch_command as { arguments?: unknown } | null
-        // Only this exact session may adopt a relaunch's binding. A predecessor's
-        // binding is never taken over: a live owner cannot be distinguished from an
-        // ended one from the session file alone (see #3014 handoff note).
-        const ownExact = previous.checkpoint_id === identity.path
-          && JSON.stringify(launch?.arguments) === JSON.stringify(argv)
-        if (!ownExact) return
-      }
+    const { result: observed, binding: previous } = resumeResult(await this.transport(['surface', 'resume', 'show', ...this.target]))
+    let owned = this.binding
+    // An empty show on our own target means an external clear removed the binding. Drop the
+    // stale ownership and fall through to a guarded unbound publication in this same refresh.
+    if (owned && !previous && observed.workspace_id === owned.workspace && observed.surface_id === owned.surface) {
+      // End the discarded conversation's live Vault presence before its ownership is dropped.
+      await this.endPresence(owned)
+      this.binding = undefined
+      owned = undefined
     }
+    if (owned) {
+      if (observed.workspace_id !== owned.workspace || observed.surface_id !== owned.surface
+        || !previous || previous.kind !== 'gsd' || previous.source !== owned.source
+        || previous.checkpoint_id !== owned.path || previous.cwd !== owned.cwd
+        || previous.updated_at !== owned.updatedAt || this.commandKey(previous) !== owned.commandKey) return
+    } else if (previous) {
+      // A predecessor is never ours; only this exact session's payload may migrate.
+      if (!this.matchesIdentity(identity, observed, previous)) return
+      owned = {
+        commandKey: this.commandKey(previous), source: previous.source as VaultBinding['source'],
+        path: identity.path,
+        updatedAt: previous.updated_at as number, cwd: identity.cwd,
+        workspace: observed.workspace_id as string, surface: observed.surface_id as string, vaultEnabled,
+      }
+    } else if (!this.matchesTarget(observed)) return
+    const expectation = owned
+      ? ['--if-checkpoint-id', owned.path, '--if-source', owned.source, '--if-updated-at', String(owned.updatedAt)]
+      : ['--if-unbound']
     const { result, binding } = resumeResult(await this.transport([
       'surface', 'resume', 'set', ...this.target,
       '--name', name, '--kind', 'gsd', '--checkpoint-id', identity.path,
-      '--source', 'agent-hook', '--cwd', identity.cwd, '--',
-      ...argv,
+      '--source', 'gsd', '--cwd', identity.cwd, ...expectation, '--shell', this.shellCommand(identity),
     ]))
-    const bindingMatchesRequest = this.matchesIdentity(identity, result, binding)
+    const bindingMatchesRequest = binding?.source === 'gsd'
+      && result.workspace_id === observed.workspace_id && result.surface_id === observed.surface_id
+      && this.matchesIdentity(identity, result, binding)
     if (binding && bindingMatchesRequest && binding.auto_resume === true && !resumeEnabled) {
       await this.endPresence()
       this.binding = {
-        path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
+        commandKey: this.commandKey(binding), source: binding.source as VaultBinding['source'],
+      path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
         workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
       }
       this.unsafeAutoResumeIdentity = JSON.stringify([identity.id, identity.path, identity.cwd])
@@ -538,12 +650,14 @@ export class CmuxVaultBridge {
     }
     const previousBinding = this.binding
     const currentBinding: VaultBinding = {
+      commandKey: this.commandKey(binding), source: 'gsd',
       path: identity.path, updatedAt: binding.updated_at as number,
       cwd: identity.cwd,
       workspace: result.workspace_id as string, surface: result.surface_id as string,
       vaultEnabled,
     }
     this.binding = currentBinding
+    if (!binding.auto_resume) this.diagnose('approval-needed (native Review Approval required for automatic restore)')
     // Surface updates may coalesce across auto's rapid session handoffs. Keep
     // the latest metadata per native file, not just the latest surface target.
     const snapshots = new Map(this.snapshots)
@@ -560,7 +674,12 @@ export class CmuxVaultBridge {
     if (previousBinding && (previousBinding.path !== identity.path || !vaultEnabled)) {
       await this.endPresence(previousBinding)
     }
-    if (vaultEnabled) await this.feed('SessionStart', currentBinding)
+    // Flush undelivered ends from earlier sessions before announcing new presence, so an
+    // ordinary refresh recovers a failed end without waiting for shutdown or a handoff.
+    await this.retryPendingEnds()
+    // Never announce a successor while a predecessor's SessionEnd is still unaccepted:
+    // that would leave two live presences. The next refresh announces B once A has ended.
+    if (vaultEnabled && this.pendingEnds.length === 0) await this.feed('SessionStart', currentBinding)
   }
 
   private async writeMetadata(identity: VaultIdentity): Promise<void> {
@@ -589,7 +708,7 @@ export class CmuxVaultBridge {
     }
   }
 
-  private async feed(event: 'SessionStart' | 'SessionEnd', binding: VaultBinding): Promise<void> {
+  private async feed(event: 'SessionStart' | 'SessionEnd', binding: VaultBinding): Promise<boolean> {
     // Generic Feed ingress accepts custom sources. Omitting transcript_path
     // prevents its transcript resolver from reading the native GSD session.
     try {
@@ -601,7 +720,12 @@ export class CmuxVaultBridge {
         },
         wait_timeout_seconds: 0,
       })])
-    } catch { /* Older cmux may index metadata without supporting active presence. */ }
+      return true
+    } catch {
+      // Older cmux may index metadata without supporting active presence; a failed
+      // delivery is reported to the caller so a SessionEnd can stay pending for retry.
+      return false
+    }
   }
 }
 
