@@ -6,6 +6,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@gsd/pi-agent-core";
+import { terminateProcessTree } from "@gsd/pi-coding-agent/utils/terminate-process-tree.js";
 import type { ImageContent } from "@gsd/pi-ai";
 import type { SessionStats } from "@gsd/agent-core";
 import type { BashResult } from "@gsd/agent-core";
@@ -150,12 +151,12 @@ export class RpcClient {
 			this.process.stderr?.removeListener("data", this._stderrHandler);
 			this._stderrHandler = undefined;
 		}
-		this.process.kill("SIGTERM");
+		terminateProcessTree(this.process, "SIGTERM");
 
 		// Wait for process to exit
 		await new Promise<void>((resolve) => {
 			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
+				if (this.process) terminateProcessTree(this.process, "SIGKILL");
 				resolve();
 			}, 5000); // match shutdown()'s grace so a cooperative SIGTERM handler can finish
 
@@ -464,7 +465,7 @@ export class RpcClient {
 		if (this.process) {
 			await new Promise<void>((resolve) => {
 				const timeout = setTimeout(() => {
-					this.process?.kill("SIGKILL");
+					if (this.process) terminateProcessTree(this.process, "SIGKILL");
 					resolve();
 				}, 5000);
 				this.process?.on("exit", () => {

@@ -8,6 +8,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
+import { stopChildProcessTree } from "./process-tree.js";
 import type {
 	BashResult,
 	CompactionResult,
@@ -161,12 +162,12 @@ export class RpcClient {
 			this.process.stderr?.removeListener("data", this._stderrHandler);
 			this._stderrHandler = undefined;
 		}
-		this.process.kill("SIGTERM");
+		stopChildProcessTree(this.process, "SIGTERM");
 
 		// Wait for process to exit
 		await new Promise<void>((resolve) => {
 			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
+				if (this.process) stopChildProcessTree(this.process, "SIGKILL");
 				resolve();
 			}, 5000); // match shutdown()'s grace so a cooperative SIGTERM handler can finish
 
@@ -566,7 +567,7 @@ export class RpcClient {
 		if (this.process) {
 			await new Promise<void>((resolve) => {
 				const timeout = setTimeout(() => {
-					this.process?.kill("SIGKILL");
+					if (this.process) stopChildProcessTree(this.process, "SIGKILL");
 					resolve();
 				}, 5000);
 				this.process?.on("exit", () => {

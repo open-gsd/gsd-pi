@@ -43,6 +43,7 @@ import {
   analyzeParallelEligibility,
   type ParallelCandidates,
 } from "./parallel-eligibility.js";
+import { terminateProcessTree } from "@gsd/pi-coding-agent";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning } from "./workflow-logger.js";
 import { resolveUokFlags } from "./uok/flags.js";
@@ -883,9 +884,9 @@ export async function stopParallel(
     if (worker.pid > 0) {
       try {
         if (worker.process) {
-          worker.process.kill("SIGTERM");
+          terminateProcessTree(worker.process, "SIGTERM");
         } else if (worker.pid !== process.pid) {
-          process.kill(worker.pid, "SIGTERM");
+          terminateProcessTree(worker.pid, "SIGTERM");
         }
       } catch (e) { logWarning("parallel", `process.kill SIGTERM failed for pid ${worker.pid}: ${(e as Error).message}`); }
     }
@@ -899,9 +900,9 @@ export async function stopParallel(
     if (!exitedAfterTerm && worker.pid > 0) {
       try {
         if (worker.process) {
-          worker.process.kill("SIGKILL");
+          terminateProcessTree(worker.process, "SIGKILL");
         } else if (worker.pid !== process.pid) {
-          process.kill(worker.pid, "SIGKILL");
+          terminateProcessTree(worker.pid, "SIGKILL");
         }
       } catch (e) { logWarning("parallel", `process.kill SIGKILL failed for pid ${worker.pid}: ${(e as Error).message}`); }
       await waitForWorkerExit(worker, 250);

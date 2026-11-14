@@ -284,6 +284,11 @@ export {
 	HARD_DEADLINE_MS,
 } from "./utils/shell.js";
 export {
+	type TerminableChild,
+	type TerminateProcessTreeOptions,
+	terminateProcessTree,
+} from "./utils/terminate-process-tree.js";
+export {
 	SAFE_COMMAND_PREFIXES,
 	getAllowedCommandPrefixes,
 	setAllowedCommandPrefixes,

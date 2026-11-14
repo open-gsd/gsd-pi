@@ -11,6 +11,7 @@ import { resolveTypeStrippingFlag, resolveSubprocessModule, buildSubprocessPrefi
 import { safePackageRootFromImportUrl } from "./safe-import-meta-resolve.ts";
 
 import type { AgentSessionEvent } from "@gsd/agent-core";
+import { terminateProcessTree } from "@gsd/pi-coding-agent/utils/terminate-process-tree.js";
 import type {
   ProjectProgressReadMetadata,
   RpcCommand,
@@ -948,7 +949,7 @@ async function terminateRpcChild(child: SpawnedRpcChild): Promise<void> {
       const onExit = () => finish();
       const sendSignal = (signal: NodeJS.Signals) => {
         try {
-          const delivered = child.kill(signal);
+          const delivered = terminateProcessTree(child, signal);
           if (!delivered) {
             if (child.exitCode !== null || child.signalCode !== null) {
               finish();
