@@ -22,7 +22,7 @@ import {
 	calculateContextTokens,
 	type CompactionPreparation,
 } from "./compaction.js";
-import { estimateSerializedTokens } from "./utils.js";
+import { estimateSerializedTokens, SUMMARIZATION_SYSTEM_PROMPT } from "./utils.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1077,5 +1077,98 @@ describe("findCutPoint — tool-heavy turn fallback (#3064)", () => {
 		const cutEntry = sessionEntries[result.firstKeptEntryIndex] as TestEntry;
 		assert.equal(cutEntry.message.role, "user");
 		assert.equal(result.isSplitTurn, false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cache-aware summarization requests (cache-aware compaction)
+// ---------------------------------------------------------------------------
+
+describe("(#3173) cache-aware summarization requests", () => {
+	const SESSION_PROMPT = "You are a coding agent with a very long session prompt.";
+
+	function makeModelWithApi(api: string, compat?: Record<string, unknown>): Model<any> {
+		return { ...makeModel(200_000), api, compat } as Model<any>;
+	}
+
+	function captureComplete() {
+		const seen: { context?: any; options?: any } = {};
+		const mockComplete = mock.fn(async (_model: any, context: any, options: any) => {
+			seen.context = context;
+			seen.options = options;
+			return makeFakeResponse(
+				"## Done\n- Real summary well over one hundred characters long so the degenerate check passes cleanly here.",
+			);
+		});
+		return { seen, mockComplete };
+	}
+
+	async function runGenerate(model: Model<any>, affinity?: { systemPrompt: string; sessionId?: string; cacheRetention?: "none" | "short" | "long" }) {
+		const { seen, mockComplete } = captureComplete();
+		await generateSummary(
+			[makeUserMessage(10)],
+			model,
+			16_384,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			mockComplete,
+			affinity,
+		);
+		return seen;
+	}
+
+	it("reuses the session system prompt on anthropic-messages providers", async () => {
+		const seen = await runGenerate(makeModel(200_000), {
+			systemPrompt: SESSION_PROMPT,
+			sessionId: "sess-1",
+			cacheRetention: "long",
+		});
+		assert.equal(seen.context.systemPrompt, SESSION_PROMPT);
+		assert.ok(seen.context.messages[0].content[0].text.includes("Do NOT continue the conversation"));
+		assert.equal(seen.options.sessionId, "sess-1");
+		assert.equal(seen.options.cacheRetention, "long");
+	});
+
+	it("keeps the plain request when the provider declares no cache support", async () => {
+		const seen = await runGenerate(makeModelWithApi("openai-completions"), {
+			systemPrompt: SESSION_PROMPT,
+			sessionId: "sess-1",
+		});
+		assert.equal(seen.context.systemPrompt, SUMMARIZATION_SYSTEM_PROMPT);
+		assert.ok(!seen.context.messages[0].content[0].text.includes("Do NOT continue the conversation"));
+		assert.equal(seen.options.sessionId, undefined);
+	});
+
+	it("honors explicit Anthropic-style cache declarations on openai-completions", async () => {
+		const seen = await runGenerate(makeModelWithApi("openai-completions", { cacheControlFormat: "anthropic" }), {
+			systemPrompt: SESSION_PROMPT,
+			sessionId: "sess-1",
+		});
+		assert.equal(seen.context.systemPrompt, SESSION_PROMPT);
+		assert.equal(seen.options.sessionId, "sess-1");
+	});
+
+	it("openai-responses defaults to cache-aware unless the flag opts out", async () => {
+		const seenDefault = await runGenerate(makeModelWithApi("openai-responses"), { systemPrompt: SESSION_PROMPT });
+		assert.equal(seenDefault.context.systemPrompt, SESSION_PROMPT);
+		const seenOptOut = await runGenerate(makeModelWithApi("openai-responses", { sendSessionIdHeader: false }), {
+			systemPrompt: SESSION_PROMPT,
+		});
+		assert.equal(seenOptOut.context.systemPrompt, SUMMARIZATION_SYSTEM_PROMPT);
+	});
+
+	it("falls back to the plain request when cache retention is none", async () => {
+		const seen = await runGenerate(makeModel(200_000), {
+			systemPrompt: SESSION_PROMPT,
+			sessionId: "sess-1",
+			cacheRetention: "none",
+		});
+		assert.equal(seen.context.systemPrompt, SUMMARIZATION_SYSTEM_PROMPT);
+		assert.equal(seen.options.sessionId, undefined);
 	});
 });

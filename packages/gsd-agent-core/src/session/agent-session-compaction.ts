@@ -104,6 +104,12 @@ export class AgentSessionCompactionModule {
 					this.host._compactionAbortController.signal,
 					this.host.thinkingLevel,
 					this.host.agent.streamFn,
+					undefined,
+					{
+						systemPrompt: this.host.agent.state.systemPrompt,
+						sessionId: this.host.agent.sessionId,
+						cacheRetention: this.host.agent.cacheRetention,
+					},
 				);
 				summary = result.summary;
 				firstKeptEntryId = result.firstKeptEntryId;
@@ -358,6 +364,12 @@ export class AgentSessionCompactionModule {
 					this.host._autoCompactionAbortController.signal,
 					this.host.thinkingLevel,
 					this.host.agent.streamFn,
+					undefined,
+					{
+						systemPrompt: this.host.agent.state.systemPrompt,
+						sessionId: this.host.agent.sessionId,
+						cacheRetention: this.host.agent.cacheRetention,
+					},
 				);
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
