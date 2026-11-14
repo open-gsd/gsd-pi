@@ -14,7 +14,7 @@ import { buildBeforeAgentStartResult, _flushDeferredContextMaintenanceForTest } 
 import { closeDatabase, isDbAvailable } from "../gsd-db.ts";
 import { invalidateStateCache } from "../state.ts";
 
-async function startResult(base: string, preferencesMarkdown: string): Promise<{ systemPrompt: string }> {
+async function startResult(base: string, preferencesMarkdown: string): Promise<NonNullable<Awaited<ReturnType<typeof buildBeforeAgentStartResult>>>> {
   const originalCwd = process.cwd();
   const originalGsdHome = process.env.GSD_HOME;
   const gsdDir = join(base, ".gsd");
@@ -31,6 +31,7 @@ async function startResult(base: string, preferencesMarkdown: string): Promise<{
   try {
     const ctx = { projectRoot: base, ui: { notify: () => undefined } } as unknown as ExtensionContext;
     const result = await buildBeforeAgentStartResult({ prompt: "ping", systemPrompt: "BASE" }, ctx);
+    if (!result) throw new Error("expected buildBeforeAgentStartResult to return a result for a valid GSD session context");
     await _flushDeferredContextMaintenanceForTest(base);
     return result;
   } finally {
