@@ -95,7 +95,7 @@ jobs:
         with:
           version: 10.12.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -210,7 +210,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
       - name: Authenticate original publication without publishing
@@ -258,7 +258,7 @@ jobs:
         with:
           version: 10.12.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -407,7 +407,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        uses: Swatinem/rust-cache@f4371d1ec7179bfbd04a82a81e3b3af7f720750f # v2
         with:
           shared-key: native-${{ matrix.platform }}
           workspaces: |
@@ -487,7 +487,7 @@ jobs:
         with:
           version: 10.12.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -864,7 +864,7 @@ jobs:
         run: node scripts/release-discord-summary.cjs --tag "v${RELEASE_VERSION}" --post --allow-missing-webhook
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
