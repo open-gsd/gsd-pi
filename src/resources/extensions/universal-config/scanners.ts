@@ -523,10 +523,9 @@ async function scanCodex(projectRoot: string, home: string, tool: ToolInfo): Pro
           source: source(tool, tomlPath, level),
         });
       }
-    } catch (error) {
-      warnings.push(
-        `Failed to parse Codex TOML config at ${tomlPath}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    } catch {
+      // TOML parser messages include source excerpts that may contain credentials.
+      warnings.push(`Failed to parse Codex TOML config at ${tomlPath}: invalid TOML`);
     }
   }
 

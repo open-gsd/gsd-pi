@@ -337,6 +337,26 @@ describe("Codex scanner", () => {
       cleanup();
     }
   });
+
+  test("does not expose malformed TOML contents and still discovers valid project servers", async () => {
+    const { testRoot, testHome, cleanup } = makeTempDirs();
+    try {
+      const privateValue = "private-fixture-value";
+      const configPath = join(testHome, ".codex/config.toml");
+      writeText(configPath, `[mcp_servers.private.env]\nCREDENTIAL = "${privateValue}" trailing\n`);
+      writeText(join(testRoot, ".codex/config.toml"), "[mcp_servers.valid]\ncommand = 'node'\n");
+
+      const { items, warnings } = await SCANNERS.codex(testRoot, testHome, getTool("codex"));
+      assert.deepEqual(items.filter((item) => item.type === "mcp-server").map((item) => item.name), ["valid"]);
+      assert.equal(warnings.length, 1);
+      assert.ok(warnings[0]!.includes(configPath));
+      assert.ok(!warnings[0]!.includes(privateValue));
+      assert.ok(!warnings[0]!.includes("CREDENTIAL"));
+      assert.ok(!warnings[0]!.includes("[mcp_servers.private.env]"));
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 // ── Cline ─────────────────────────────────────────────────────────────────────
