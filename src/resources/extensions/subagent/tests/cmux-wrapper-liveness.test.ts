@@ -1,7 +1,7 @@
 // gsd-pi + Cmux-split wrapper liveness (#2652).
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -52,11 +52,13 @@ function makeFakeCmuxClient(surface: FakeSurface, onScript: (script: string) => 
 	} as unknown as CmuxClient;
 }
 
-/** The inner script publishes its wrapper pid first: `printf '%s' "$$" > '<path>'; cd ...`. */
-function pidPathFromScript(script: string): string {
-	// shellEscape wraps every token in '\''…'\'' (escaped single quotes).
-	const match = script.match(/ > '\\''([^']*)'\\''; cd /);
-	assert.ok(match, `wrapper script must publish its pid, got: ${script}`);
+/** The file-backed script publishes its wrapper pid first: `printf '%s' "$$" > '<path>'; cd ...`. */
+function pidPathFromScript(command: string): string {
+	const launchPath = command.match(/^bash -l '([^']*)'$/);
+	assert.ok(launchPath, `wrapper bootstrap must invoke its script file, got: ${command}`);
+	const script = readFileSync(launchPath[1]!, "utf-8");
+	const match = script.match(/^printf '%s' "\$\$" > '([^']*)'; cd /);
+	assert.ok(match, `wrapper script must publish its pid first, got: ${script}`);
 	return match[1]!;
 }
 

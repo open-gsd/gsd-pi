@@ -1396,7 +1396,11 @@ export async function runSingleAgentInCmuxSplit(
 			`printf '%s' "$status" > ${bashPath(exitPath)}`,
 		].join("; ");
 
-		const sent = await cmuxClient.sendSurface(cmuxSurfaceId, `bash -lc ${shellEscape(innerScript)}`);
+		// Keep the terminal input bounded: tasks and launch env can exceed its
+		// line limit even when sendSurface acknowledges the transport write.
+		const launchScriptPath = path.join(tmpOutputDir, "launch.sh");
+		fs.writeFileSync(launchScriptPath, innerScript, { mode: 0o600 });
+		const sent = await cmuxClient.sendSurface(cmuxSurfaceId, `bash -l ${bashPath(launchScriptPath)}`);
 		if (!sent) {
 			return runSingleAgent(defaultCwd, agents, agentName, task, cwd, step, signal, onUpdate, makeDetails, options);
 		}
