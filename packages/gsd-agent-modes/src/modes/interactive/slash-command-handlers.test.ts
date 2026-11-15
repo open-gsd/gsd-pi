@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Container } from "@gsd/pi-tui";
 import { SettingsManager } from "@gsd/pi-coding-agent/core/settings-manager.js";
+import { BUILTIN_SLASH_COMMANDS } from "@gsd/pi-coding-agent/core/slash-commands.js";
 import { dispatchSlashCommand, type SlashCommandContext } from "./slash-command-handlers.js";
 
 function makeContext(settingsManager = SettingsManager.inMemory()): SlashCommandContext {
@@ -63,6 +64,12 @@ function makeContext(settingsManager = SettingsManager.inMemory()): SlashCommand
 		_testRenders: string[];
 	};
 }
+
+describe("builtin slash commands", () => {
+	it("includes /thinking so autocomplete and command recognition can discover it", () => {
+		assert.ok(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "thinking"));
+	});
+});
 
 describe("dispatchSlashCommand /tui", () => {
 	it("persists /tui mode validation to terminal adaptive mode", async () => {
