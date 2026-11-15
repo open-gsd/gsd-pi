@@ -11,6 +11,7 @@ import { readClipboardImage } from "@gsd/pi-coding-agent/utils/clipboard-image.j
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import type { InteractiveModeDelegateHost } from "./interactive-mode-delegate-host.js";
 import { MIME_BY_EXT, matchesImageSignature } from "./interactive-mode-class-constants.js";
+import { dispatchSlashCommand } from "./slash-command-handlers.js";
 
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -386,6 +387,14 @@ export function handleCtrlZ(host: InteractiveModeDelegateHost): void {
 export async function handleFollowUp(host: InteractiveModeDelegateHost): Promise<void> {
 		const text = (host.editor.getExpandedText?.() ?? host.editor.getText()).trim();
 		if (!text) return;
+
+		if (text === "/thinking" || text.startsWith("/thinking ")) {
+			await dispatchSlashCommand(text, host.getSlashCommandContext());
+			host.editor.addToHistory?.(text);
+			host.editor.setText("");
+			host.pendingImages.length = 0;
+			return;
+		}
 
 		if (text.startsWith("/") && !host.isKnownSlashCommand(text)) {
 			const command = text.split(/\s/)[0];
