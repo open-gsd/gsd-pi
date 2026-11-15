@@ -23,6 +23,7 @@ const gsdExtension = await import("../../resources/extensions/gsd/index.ts")
 const EXPECTED_BUILTIN_OUTCOMES = new Map<string, "rpc" | "surface" | "reject">([
   ["settings", "surface"],
   ["model", "surface"],
+  ["thinking", "surface"],
   ["scoped-models", "reject"],
   ["export", "surface"],
   ["import", "reject"],
