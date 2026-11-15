@@ -298,14 +298,41 @@ describe("Codex scanner", () => {
     }
   });
 
-  test("warns about TOML config", async () => {
+  test("discovers MCP servers from user and project TOML config", async () => {
     const { testRoot, testHome, cleanup } = makeTempDirs();
     try {
-      writeText(join(testHome, ".codex/config.toml"), "[mcp_servers.test]\ncommand = 'node'");
+      writeText(
+        join(testHome, ".codex/config.toml"),
+        "[mcp_servers.test]\ncommand = 'node'\nargs = ['server.js']\n",
+      );
+      writeText(join(testRoot, ".codex/config.toml"), "[mcp_servers.remote]\nurl = 'https://example.test/mcp'\n");
 
-      const { warnings } = await SCANNERS.codex(testRoot, testHome, getTool("codex"));
-      assert.ok(warnings.length > 0);
-      assert.ok(warnings[0]!.includes("TOML"));
+      const { items, warnings } = await SCANNERS.codex(testRoot, testHome, getTool("codex"));
+      const servers = items.filter((item) => item.type === "mcp-server");
+      assert.equal(servers.length, 2);
+      assert.deepEqual(warnings, []);
+      assert.deepEqual(
+        servers.map((server) => server.type === "mcp-server" && [server.name, server.transport, server.source.level]),
+        [
+          ["test", "stdio", "user"],
+          ["remote", "http", "project"],
+        ],
+      );
+      assert.equal(servers[0]!.type === "mcp-server" ? servers[0]!.args?.[0] : undefined, "server.js");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("warns when Codex TOML config is invalid", async () => {
+    const { testRoot, testHome, cleanup } = makeTempDirs();
+    try {
+      writeText(join(testHome, ".codex/config.toml"), "mcp_servers = [");
+
+      const { items, warnings } = await SCANNERS.codex(testRoot, testHome, getTool("codex"));
+      assert.equal(items.filter((item) => item.type === "mcp-server").length, 0);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0]!, /Failed to parse Codex TOML config/);
     } finally {
       cleanup();
     }
