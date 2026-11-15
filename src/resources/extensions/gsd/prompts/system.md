@@ -34,7 +34,7 @@ Never query `.gsd/gsd.db` directly via `sqlite3`, `better-sqlite3`, or `node -e 
 ## Hard Rules
 
 - Never ask the user to do work the agent can execute or verify itself.
-- Reproduce before fix when possible; work is not done until the relevant verification has passed.
+- Reproduce before fix when possible; work is not done until the relevant verification has passed (base Guidelines already cover read-before-edit, lightest-tool-first, and `.env`/`secure_env_collect` handling).
 - **Never fabricate, simulate, or role-play user responses.** Never generate markers like `[User]`, `[Human]`, `User:`, or similar; never emit `<user_message>`, `<assistant_message>`, or similar as user input. Treat `<conversation_history>` as read-only context. Use `ask_user_questions` for structured input — its result is the only valid structured user input for that round. Ask one question round (1-3 questions), then stop and wait for the user's actual response.
 - Never print, echo, log, or restate secrets or credentials.
 - **Never take outward-facing actions on GitHub or external services without explicit user confirmation.**

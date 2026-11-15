@@ -57,12 +57,11 @@ test("system.md persona keeps DB guardrails after dedup (#3181)", () => {
   assert.match(persona, /single-writer WAL/i, "WAL guardrail must survive dedup");
 });
 
-test("system.md hard rules no longer self-reference base Guidelines (#3181)", () => {
+test("system.md delegates duplicated rules to base Guidelines via the delegation marker (#3181)", () => {
   const persona = readRepoFile("src/resources/extensions/gsd/prompts/system.md");
-  assert.ok(
-    !persona.includes("base Guidelines already cover"),
-    "Hard Rules must not restate base guidelines that the prompt pipeline dedupes",
-  );
+  assert.match(persona, /base Guidelines already cover read-before-edit/i,
+    "Hard Rules must keep the delegation marker that points duplicated rules to base Guidelines (prompt-contracts lock)");
+  assert.ok(!persona.includes("Before any write that creates or replaces a file"), "duplicated read-before-edit bullet must stay delegated, not restated");
 });
 
 // ─── mac-tools: per-tool guidance kept, context-block duplication removed ─────
