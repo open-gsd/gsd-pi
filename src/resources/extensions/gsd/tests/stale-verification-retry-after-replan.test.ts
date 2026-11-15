@@ -13,6 +13,7 @@ import type { LoopDeps } from "../auto/loop-deps.ts";
 import type { IterationContext, IterationData, LoopState } from "../auto/types.ts";
 import { AutoSession } from "../auto/session.ts";
 import { DEFECTIVE_VERIFY_GUIDANCE, runUnitPhase } from "../auto/unit-phase.ts";
+import { renderTaskRecoveryDispatchContext } from "../auto-prompts.ts";
 import { WorktreeStateProjection } from "../worktree-state-projection.ts";
 import { SourceObservationStore } from "../source-observations.ts";
 import { readUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
@@ -514,4 +515,133 @@ test("#3089: whitespace inside a quoted argument is part of the contract", async
   const prompt = await executeTaskPrompt(fixture.base);
   assert.ok(!prompt.includes(DEFECTIVE_VERIFY_GUIDANCE));
   assert.ok(prompt.includes("PREVIOUS FAILURE SUPERSEDED"));
+});
+
+test("#3089: a legacy multi-command Verify keeps its retry when only one advertised command failed", async (t) => {
+  const fixture = makeBase();
+  t.after(fixture.cleanup);
+
+  const multi = "node --test a.test.ts\nnode --test b.test.ts";
+  seedVerify(multi);
+  claimTestDispatch(fixture.base, {
+    milestoneId: MID, sliceId: SID, taskId: TID, unitType: "execute-task", unitId: UNIT_ID,
+  });
+
+  // Persisted before the fix: the signature names only the failed check, not
+  // the whole Task Verify field.
+  storeUnitRetry("execute-task", {
+    unitId: UNIT_ID,
+    failureContext:
+      "## Verification Failures\n\n### ❌ `node --test b.test.ts` (exit code 1)\n```stderr\nfailed\n```",
+    signature: "node --test b.test.ts#1",
+    attempt: 1,
+  });
+
+  const prompt = await executeTaskPrompt(fixture.base);
+  assert.ok(prompt.includes("VERIFICATION FAILED — AUTO-FIX ATTEMPT 1"));
+  assert.ok(prompt.includes(DEFECTIVE_VERIFY_GUIDANCE));
+});
+
+test("#3089: timeout rationales annotate the superseded durable recovery block", () => {
+  const recovery = {
+    recoveryActionId: "action-timeout",
+    attemptId: "attempt-timeout",
+    resultId: "result-timeout",
+    failureKind: "verification-failed",
+    summary: "Host verification failed",
+    evidence: { verdict: "fail" },
+    rationale:
+      "Host verification fail: check node --test a.test.ts observed timeout after 120000ms (exit 2), " +
+      "expected exit 0 / pass. Evidence: db://host-verification/attempt-timeout.",
+    replanCompleted: false,
+    checkpoint: {
+      checkpointId: "checkpoint-timeout",
+      confirmedContext: "Host verification failed",
+      unresolvedSummary: "verification-failed",
+      evidenceSummary: "{}",
+      suggestedNextAction: "recover",
+    },
+    action: "remediate",
+  } as const;
+
+  const block = renderTaskRecoveryDispatchContext(recovery as any, {
+    currentVerify: VERIFY_B,
+  });
+  assert.match(block, /\*\*Verification contract status:\*\* superseded/);
+  assert.ok(block.includes(VERIFY_B));
+  assert.ok(block.includes("not as the current gate result, and do not report it as defective"));
+});
+
+test("#3089: escaped-space Verify contracts remain distinct after whitespace collapse", async (t) => {
+  const fixture = makeBase();
+  t.after(fixture.cleanup);
+
+  const escapedOld = "node --test a\\  b.test.ts";
+  const escapedNew = "node --test a\\ b.test.ts";
+  seedVerify(escapedOld);
+  claimTestDispatch(fixture.base, {
+    milestoneId: MID, sliceId: SID, taskId: TID, unitType: "execute-task", unitId: UNIT_ID,
+  });
+  storeVerificationRetry(escapedOld, 1);
+
+  await replan(fixture.base, escapedNew);
+
+  const prompt = await executeTaskPrompt(fixture.base);
+  assert.ok(!prompt.includes(DEFECTIVE_VERIFY_GUIDANCE));
+  assert.ok(prompt.includes("PREVIOUS FAILURE SUPERSEDED"));
+});
+
+test("#3089: receipt replay after a contract change leaves the reset budget durable", async (t) => {
+  const fixture = makeBase();
+  t.after(fixture.cleanup);
+
+  seedVerify(VERIFY_A);
+  claimTestDispatch(fixture.base, {
+    milestoneId: MID, sliceId: SID, taskId: TID, unitType: "execute-task", unitId: UNIT_ID,
+  });
+  storeVerificationRetry(VERIFY_A, 1);
+
+  const budgetRef = { unitType: "execute-task", unitId: UNIT_ID, kind: "verification" } as const;
+  spendUnitBudget(new AutoSession().unclaimedUnitBudgets, budgetRef);
+
+  const invocation = internalPlanningInvocation();
+  const params = replanParams(VERIFY_B);
+  const first = await handleReplanTask(params, fixture.base, invocation);
+  assert.ok(!("error" in first), `first replan failed: ${"error" in first ? first.error : ""}`);
+  const second = await handleReplanTask(params, fixture.base, invocation);
+  assert.ok(!("error" in second), `replayed replan failed: ${"error" in second ? second.error : ""}`);
+
+  assert.equal(
+    readUnitBudget(new AutoSession().unclaimedUnitBudgets, budgetRef),
+    0,
+    "the contract reset is durable whether the receipt is replayed or not",
+  );
+});
+
+test("#3089: a multiline quoted command in a recovery rationale matches the same current contract", () => {
+  const command = `node --eval "console.log('a
+b')"`;
+  const recovery = {
+    recoveryActionId: "action-multiline",
+    attemptId: "attempt-multiline",
+    resultId: "result-multiline",
+    failureKind: "verification-failed",
+    summary: "Host verification failed",
+    evidence: { verdict: "fail" },
+    rationale: `Host verification fail: check ${command} observed exit 1, expected exit 0 / pass. Evidence: db://host-verification/attempt-multiline.`,
+    replanCompleted: false,
+    checkpoint: {
+      checkpointId: "checkpoint-multiline",
+      confirmedContext: "Host verification failed",
+      unresolvedSummary: "verification-failed",
+      evidenceSummary: "{}",
+      suggestedNextAction: "recover",
+    },
+    action: "remediate",
+  } as const;
+
+  const block = renderTaskRecoveryDispatchContext(recovery as any, {
+    currentVerify: command,
+  });
+  assert.ok(!block.includes("Verification contract status:"));
 });

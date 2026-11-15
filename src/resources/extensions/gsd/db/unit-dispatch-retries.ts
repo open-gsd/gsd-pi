@@ -32,6 +32,7 @@
 
 import { _getAdapter, isDbAvailable } from "../gsd-db.js";
 import type { PendingVerificationRetry } from "../auto/session.js";
+import { runnableTaskPlanCommands } from "../verification-gate.js";
 import {
   deleteUnitCommitRepairRetries,
   deleteUnitDispatchRetries,
@@ -168,39 +169,29 @@ export function releaseVerificationRetry(unitType: string, unitId: string): void
 // this fix and after a process restart, and it keeps the historical row.
 
 /**
- * Canonical identity of a Verify command. Whitespace outside quotes is
- * insignificant; whitespace inside quotes is part of the argument and must be
- * preserved (a quoted regex with two spaces is not the same contract as one
- * with one). Quoting style is otherwise preserved, so a textually different
- * command is treated as a new contract.
+ * The commands the host gate will actually run for a Task Verify field.
+ * Kept behind this helper so contract comparison uses the gate's own splitter
+ * rather than a second, drifting parser.
  */
-export function normalizeVerifyContract(command: string): string {
-  let out = "";
-  let quote: "'" | "\"" | null = null;
-  let escaped = false;
-  let pendingSpace = false;
-  for (const ch of command.trim()) {
-    if (quote) {
-      out += ch;
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === quote) {
-        quote = null;
-      }
-      continue;
-    }
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
-      pendingSpace = true;
-      continue;
-    }
-    if (pendingSpace && out.length > 0) out += " ";
-    pendingSpace = false;
-    out += ch;
-    if (ch === "'" || ch === "\"") quote = ch;
-  }
-  return out;
+function currentRunnableCommands(currentVerify: string): string[] {
+  return runnableTaskPlanCommands(currentVerify).map((command) => command.trim()).filter(Boolean);
+}
+
+/**
+ * A recorded verification command is obsolete when it is not one of the
+ * commands the Task's current Verify contract runs. Unknown/synthetic
+ * evidence is preserved: if the current field has no runnable commands, the
+ * comparison cannot prove replacement and must not suppress the retry.
+ */
+export function isVerifyCommandSuperseded(
+  recordedCommand: string | null | undefined,
+  currentVerify: string | null | undefined,
+): boolean {
+  const recorded = recordedCommand?.trim();
+  if (!recorded || !currentVerify?.trim()) return false;
+  const currentCommands = currentRunnableCommands(currentVerify);
+  if (currentCommands.length === 0) return false;
+  return !currentCommands.some((command) => command === recorded);
 }
 
 const NON_VERIFICATION_SIGNATURE_PREFIXES = [
@@ -215,7 +206,7 @@ function commandsFromFailureSignature(signature: string | undefined): string[] {
   if (NON_VERIFICATION_SIGNATURE_PREFIXES.some((prefix) => signature.startsWith(prefix))) return [];
   const commands: string[] = [];
   for (const line of signature.split("\n")) {
-    const match = /^(.*)#(\d+)$/.exec(line.trim());
+    const match = /^(.*)#(-?\d+)$/.exec(line.trim());
     if (match) commands.push(match[1].trim());
   }
   return commands;
@@ -224,9 +215,9 @@ function commandsFromFailureSignature(signature: string | undefined): string[] {
 /** Commands named by the rendered verification failure context. */
 function commandsFromFailureContext(failureContext: string): string[] {
   const commands: string[] = [];
-  const heading = /^### ❌ `([^`]+)` \(exit code \d+\)$/gm;
+  const heading = /^### ❌ `([^`]+)` \(exit code -?\d+\)$/gm;
   let match: RegExpExecArray | null;
-  while ((match = heading.exec(failureContext)) !== null) commands.push(match[1]);
+  while ((match = heading.exec(failureContext)) !== null) commands.push(match[1].trim());
   return commands;
 }
 
@@ -234,29 +225,39 @@ function commandsFromFailureContext(failureContext: string): string[] {
  * The Verify command(s) a stored verification retry failed against. New rows
  * carry the contract explicitly; legacy rows derive it from the recorded
  * failure signature/context. Non-verification retries return no command.
+ * Signature and context are combined because a multiline command can make a
+ * single signature line ambiguous, while the rendered context keeps its
+ * heading block.
  */
 export function verificationFailureCommands(retry: PendingVerificationRetry): string[] {
-  if (retry.verifyContract) return [retry.verifyContract];
-  const fromSignature = commandsFromFailureSignature(retry.signature);
-  if (fromSignature.length > 0) return fromSignature;
-  return commandsFromFailureContext(retry.failureContext);
+  if (retry.verifyContract?.trim()) return [retry.verifyContract.trim()];
+  const commands = [
+    ...commandsFromFailureSignature(retry.signature),
+    ...commandsFromFailureContext(retry.failureContext),
+  ];
+  return [...new Set(commands.filter(Boolean))];
 }
 
 /**
  * True when the stored retry belongs to a Verify contract that the Task no
- * longer has. It must not be shown as a current failure, and it must not carry
- * defective-Verify guidance. When the contract cannot be determined (an
- * artifact retry, a legacy row with no command), the retry is preserved.
+ * longer has. Explicit contracts compare as a whole field: a replan that
+ * changes the field starts a new contract even if an old command still
+ * appears inside it. Legacy signatures name individual checks, so they are
+ * compared against the gate's runnable commands; an unchanged multi-command
+ * contract with one failed check keeps its legitimate retry. When the
+ * contract cannot be determined, the retry is preserved.
  */
 export function isVerificationRetrySuperseded(
   retry: PendingVerificationRetry | null | undefined,
   currentVerify: string | null | undefined,
 ): boolean {
   if (!retry || !currentVerify?.trim()) return false;
+  if (retry.verifyContract?.trim()) {
+    return retry.verifyContract.trim() !== currentVerify.trim();
+  }
   const recorded = verificationFailureCommands(retry);
   if (recorded.length === 0) return false;
-  const current = normalizeVerifyContract(currentVerify);
-  return !recorded.some((command) => normalizeVerifyContract(command) === current);
+  return recorded.every((command) => isVerifyCommandSuperseded(command, currentVerify));
 }
 
 /**

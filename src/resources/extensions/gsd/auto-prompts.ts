@@ -44,7 +44,7 @@ import {
   getTask,
   isDbAvailable,
 } from "./gsd-db.js";
-import { normalizeVerifyContract } from "./db/unit-dispatch-retries.js";
+import { isVerifyCommandSuperseded } from "./db/unit-dispatch-retries.js";
 import { readListedMilestoneIds, readMilestoneSlices, readSliceTasks, type TaskRead } from "./db/lifecycle-read.js";
 import {
   readMilestoneCloseoutAuthorization,
@@ -190,9 +190,16 @@ function renderBlockingReworkFindingsBlock(mid: string, sid: string, tid: string
   return lines.join("\n").trim();
 }
 
-/** The Verify command named by a recovery rationale, when it records a host verification failure. */
+/**
+ * The Verify command named by a recovery rationale, when it records a host
+ * verification failure. The host uses two observation forms:
+ *   check <cmd> observed exit <code>
+ *   check <cmd> observed timeout after <ms>ms (exit <code>)
+ * The command can contain quoted newlines, so match across lines.
+ */
 function recoveryVerificationCommand(recovery: PendingTaskRecoveryContext): string | null {
-  const match = /check (.+?) observed exit \d+/.exec(recovery.rationale ?? "");
+  const match = /check ([\s\S]+?) observed (?:exit -?\d+|timeout after \d+ms \(exit -?\d+\))/i
+    .exec(recovery.rationale ?? "");
   return match ? match[1].trim() : null;
 }
 
@@ -205,7 +212,7 @@ export function renderTaskRecoveryDispatchContext(
   const contractSuperseded = Boolean(
     recordedVerify &&
     opts?.currentVerify?.trim() &&
-    normalizeVerifyContract(recordedVerify) !== normalizeVerifyContract(opts?.currentVerify ?? ""),
+    isVerifyCommandSuperseded(recordedVerify, opts.currentVerify),
   );
   let executionContract: string;
   switch (recovery.action) {
