@@ -95,6 +95,8 @@ export function isValidationBlockAllowedCommand(trimmed: string): boolean {
   // Inspecting/clearing a Blocker is not validation acceptance or new work.
   // Do not bootstrap a database before that handler's read-only review/consent.
   if (name === "blocker") return true;
+  // Read-only attention overview (#2932): metadata-only, never bootstraps a database.
+  if (name === "attention") return true;
   if (name === "dispatch") {
     return VALIDATION_SAFE_DISPATCH_COMMANDS.has(subcommand ?? "");
   }

@@ -3,10 +3,10 @@
 import { formatShortcut } from "./files.js";
 import { supportsCtrlAltShortcuts } from "../shared/terminal.js";
 
-export type GSDShortcutId = "dashboard" | "notifications" | "parallel";
+export type GSDShortcutId = "dashboard" | "notifications" | "parallel" | "attention";
 
 type GSDShortcutDef = {
-  key: "g" | "n" | "p";
+  key: "g" | "n" | "p" | "a";
   action: string;
   command: string;
   /** Whether the Alt fallback is registered (false when it would shadow an app meta-arrow alias). */
@@ -24,6 +24,12 @@ export const GSD_SHORTCUTS: Record<GSDShortcutId, GSDShortcutDef> = {
     key: "n",
     action: "Open notification history",
     command: "/gsd notifications",
+    hasFallback: true,
+  },
+  attention: {
+    key: "a",
+    action: "Open attention overview (read-only)",
+    command: "/gsd attention",
     hasFallback: true,
   },
   parallel: {

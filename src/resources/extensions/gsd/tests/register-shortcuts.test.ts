@@ -69,13 +69,15 @@ test("dashboard shortcut resolves the project root instead of the current worktr
 
   assert.ok(customCalls > 0, "shortcut opens the dashboard overlay when project root is resolved");
   assert.equal(notices.length, 0, "shortcut does not fall back to the missing-.gsd warning");
-  assert.equal(shortcuts.length, 5, "all GSD shortcuts are still registered");
+  assert.equal(shortcuts.length, 7, "all GSD shortcuts are still registered (incl. read-only attention overview)");
   const keys = shortcuts.map((shortcut) => shortcut.key);
   assert.ok(keys.includes("ctrl+alt+g"), "primary dashboard shortcut is registered");
   assert.ok(keys.includes("alt+g"), "fallback dashboard shortcut is registered (legacy ESC-prefix reachable)");
   assert.ok(keys.includes("ctrl+alt+n"), "primary notifications shortcut is registered");
   assert.ok(keys.includes("alt+n"), "fallback notifications shortcut is registered (legacy ESC-prefix reachable)");
   assert.ok(keys.includes("ctrl+alt+p"), "primary parallel shortcut is registered");
+  assert.ok(keys.includes("ctrl+alt+a"), "primary attention overview shortcut is registered");
+  assert.ok(keys.includes("alt+a"), "fallback attention overview shortcut is registered");
   // No Alt+P fallback — legacy ESC+P aliases to alt+up (app.models.reorderUp)
   assert.ok(!keys.includes("alt+p"), "parallel fallback must not be registered (shadows alt+up ESC alias)");
 });

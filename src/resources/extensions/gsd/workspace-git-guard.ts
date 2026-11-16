@@ -34,6 +34,8 @@ export async function getWorkspaceGitBlockMessageForBase(
   // Even allowlisted commands normally run healing/preparation below. Blocker
   // control must return before that path: inspection/decline cannot open a DB.
   if (attemptedCommand.trim().split(/\s+/, 1)[0] === "blocker") return null;
+  // Read-only attention overview (#2932): returns before any Git healing or DB preparation.
+  if (attemptedCommand.trim().split(/\s+/, 1)[0] === "attention") return null;
   if (isWorkspaceGitAllowedCommand(attemptedCommand)) {
     // Doctor decides in its handler if the run may create the database.
     const ready = await ensureWorkspaceGitReady(base, {

@@ -2,7 +2,7 @@
 // File Purpose: Handles operational /gsd subcommands.
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
-import { isBlockerCommand } from "../blocker-routing.js";
+import { isAttentionCommand, isBlockerCommand } from "../blocker-routing.js";
 import { enableDebug } from "../../debug-logger.js";
 import { dispatchDirectPhase } from "../../auto-direct-dispatch.js";
 import { handleConfig } from "../../commands-config.js";
@@ -178,6 +178,17 @@ export async function handleOpsCommand(trimmed: string, ctx: ExtensionCommandCon
   if (isBlockerCommand(trimmed)) {
     const { handleBlocker } = await import("../../commands-blocker.js");
     await handleBlocker(trimmed.replace(/^blocker\s*/, "").trim(), ctx, projectRoot());
+    return true;
+  }
+  // Read-only native attention overview (#2932). Never a generic blocker navigator.
+  if (isAttentionCommand(trimmed)) {
+    const rest = trimmed.replace(/^attention\s*/, "").trim();
+    if (rest !== "") {
+      ctx.ui.notify("Usage: /gsd attention  (read-only overview; no arguments)", "warning");
+      return true;
+    }
+    const { showAttentionOverlay } = await import("../../attention-overview.js");
+    await showAttentionOverlay(ctx, projectRoot());
     return true;
   }
   if (trimmed === "uat-answer" || trimmed.startsWith("uat-answer ")) {

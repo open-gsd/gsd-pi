@@ -144,6 +144,8 @@ export function isUnmergedMilestoneAllowedCommand(trimmed: string): boolean {
   // Blocker control never starts work or moves Git; its own handler requires
   // existing authority and native consent before a clear-only mutation.
   if (name === "blocker") return true;
+  // Read-only attention overview (#2932): metadata-only, never bootstraps a database.
+  if (name === "attention") return true;
   if (name === "dispatch") {
     return subcommand === "complete" || subcommand === "complete-milestone";
   }
