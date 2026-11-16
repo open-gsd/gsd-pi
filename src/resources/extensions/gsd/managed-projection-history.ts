@@ -9,6 +9,7 @@ import {
   realpathSync,
   renameSync,
   rmdirSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -66,6 +67,13 @@ let unboundEvidenceGuardFaultForTest: (() => void) | null = null;
 let unboundEvidenceRemovalFaultForTest: (() => void) | null = null;
 let unboundEvidenceAcknowledgementFaultForTest: (() => void) | null = null;
 let unboundEvidenceExchangeFaultForTest: ((invoke: () => void) => void) | null = null;
+// Boundary hook for the managed projection-root operation body, used to force
+// an exhausted transient sharing violation at the native boundary so the
+// degradation contract (plain-fs fallback on os-error-32 exhaustion) can be
+// exercised without a real Windows Defender contention. Fires only inside
+// withManagedProjectionRoot, never on the atomic-write begin/apply/commit
+// channel, so the atomic-write degradation tests stay independent.
+let managedProjectionRootBoundaryForTest: ((boundary: "operation") => void) | null = null;
 
 export function _setManagedProjectionApplyFaultForTest(fault: (() => void) | null): void {
   managedProjectionApplyFaultForTest = fault;
@@ -107,6 +115,14 @@ export function _setUnboundEvidenceExchangeFaultForTest(
   fault: ((invoke: () => void) => void) | null,
 ): void {
   unboundEvidenceExchangeFaultForTest = fault;
+}
+
+// Forces the managed projection-root operation body to throw at its native
+// boundary, so the degraded-on-exhaustion fallbacks can be exercised locally.
+export function _setManagedProjectionRootBoundaryForTest(
+  fault: ((boundary: "operation") => void) | null,
+): void {
+  managedProjectionRootBoundaryForTest = fault;
 }
 
 interface PersistedManagedProjectionMutation {
@@ -412,6 +428,7 @@ function withManagedProjectionRoot<T>(
   const run = (): T => {
     const handle = openManagedProjectionRootWithRetry(() => open(targetRoot));
     try {
+      managedProjectionRootBoundaryForTest?.("operation");
       return operation(handle);
     } finally {
       handle.close();
@@ -709,6 +726,120 @@ function writeFallbackUnboundProjectionEvidence(
   } catch (error) {
     try { unlinkSync(temporary); } catch {}
     throw error;
+  }
+}
+
+// Plain-fs counterpart of recordManagedProjectionLogicalPath's native
+// writeFile, mirroring the atomic-write degradation contract (#2355 family):
+// when the native projection-root rename exhausts its Windows retry budget
+// with a transient sharing violation (Defender holds the freshly created
+// staging node without FILE_SHARE_DELETE, os error 32), the journaled history
+// write is abandoned and the control file lands through a fresh-name
+// tmp+rename. The native handle is already closed by withManagedProjectionRoot
+// before this runs, and a fresh tmp name is never the node Defender already
+// scanned, so the kernel rename converges while the native wedge persists.
+function writeFallbackManagedProjectionPaths(path: string, paths: string[]): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.tmp-${randomUUID()}`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify([...paths].sort(), null, 2)}\n`, { flag: "wx" });
+    renameSync(temporary, path);
+  } catch (error) {
+    try { unlinkSync(temporary); } catch {}
+    throw error;
+  }
+}
+
+function appendFallbackManagedProjectionPath(targetRoot: string, logicalPath: string): void {
+  const path = historyPath(targetRoot);
+  const paths = new Set(readFallbackManagedProjectionPaths(path));
+  if (paths.has(logicalPath)) return;
+  paths.add(logicalPath);
+  writeFallbackManagedProjectionPaths(path, [...paths]);
+}
+
+// Degraded counterpart of removeManagedProjectionTreeExactSync. The exact
+// native identity is not reproducible in plain-fs mode (Windows native
+// identity is `{volume}:{id}`, Node's lstat identity is `{dev}:{ino}`), so the
+// degraded removal trades the exact-identity guarantee for session liveness,
+// matching the atomic-write degradation contract: it still refuses a symlink
+// and a non-directory, so a wrong-kind occupant never gets recursively wiped.
+function removeFallbackProjectionTreeExact(targetRoot: string, logicalPath: string): void {
+  const path = fallbackProjectionPath(targetRoot, logicalPath);
+  if (!existsSync(path)) return;
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) throw new Error("managed projection removal target is a symbolic link");
+  if (!stat.isDirectory()) throw new Error("managed projection removal target is not a directory");
+  rmSync(path, { recursive: true, force: true });
+}
+
+// Degraded counterpart of shelterManagedProjectionTreeSync. The receipt is
+// marked `degraded` so restoreManagedProjectionTreeSync reuses the plain-fs
+// rename-back path instead of a native exact restore that could not bind the
+// fallback identity. The content digest is computed with the fallback digest
+// so the sheltered tree stays verifiable across the degraded round trip.
+function shelterFallbackProjectionTree(
+  targetRoot: string,
+  source: string,
+  shelter: string,
+): ManagedProjectionTreeShelterReceipt {
+  const sourcePath = fallbackProjectionPath(targetRoot, source);
+  const shelterPath = fallbackProjectionPath(targetRoot, shelter);
+  if (existsSync(shelterPath)) throw new Error("managed projection shelter target already exists");
+  const contentDigest = fallbackProjectionContentDigest(sourcePath, "tree");
+  const identity = fallbackProjectionIdentity(sourcePath);
+  const shelterParent = dirname(shelterPath);
+  if (shelterParent !== gsdProjectionRoot(targetRoot)) mkdirSync(shelterParent, { recursive: true });
+  renameSync(sourcePath, shelterPath);
+  return Object.freeze({ targetRoot, sourcePath: source, shelterPath: shelter, identity, contentDigest, degraded: true });
+}
+
+// Degraded counterpart of restoreManagedProjectionTreeSync: rename the
+// sheltered tree back to its source. Identity/digest verification is skipped
+// because the receipt may carry a fallback identity from a degraded shelter;
+// the rename is exact by construction (the shelter is the only node we moved).
+function restoreFallbackProjectionTree(receipt: ManagedProjectionTreeShelterReceipt): void {
+  const sourcePath = fallbackProjectionPath(receipt.targetRoot, receipt.sourcePath);
+  const shelterPath = fallbackProjectionPath(receipt.targetRoot, receipt.shelterPath);
+  if (!existsSync(shelterPath)) return;
+  const sourceParent = dirname(sourcePath);
+  if (sourceParent !== gsdProjectionRoot(receipt.targetRoot) && !existsSync(sourceParent)) {
+    mkdirSync(sourceParent, { recursive: true });
+  }
+  renameSync(shelterPath, sourcePath);
+}
+
+// Degraded counterpart of removeLegacyProjectionTreeSync. Keeps the same
+// fail-closed guards the native path runs (unresolved conflict evidence and a
+// database appearing mid-cleanup), then recursively removes the managed tree.
+function removeFallbackLegacyProjectionTree(targetRoot: string, logicalPath: string): void {
+  const conflict = readFallbackUnboundProjectionEvidence(targetRoot)
+    .find((entry) => evidenceConflictsWithPath(entry, logicalPath));
+  if (conflict) {
+    throw new Error(
+      `managed projection target has unresolved recovery evidence: ${conflict.logicalPath} at ${conflict.evidencePath}; review it with /gsd doctor`,
+    );
+  }
+  if (existsSync(join(gsdProjectionRoot(targetRoot), "gsd.db")) && existsSync(join(targetRoot, ".gsd", "gsd.db"))) {
+    throw new Error("database authority appeared during orphan cleanup");
+  }
+  const path = fallbackProjectionPath(targetRoot, logicalPath);
+  if (!existsSync(path)) return;
+  rmSync(path, { recursive: true, force: true });
+}
+
+// Runs a managed projection-root operation and, when it exhausts with a
+// transient sharing violation, degrades to a plain-fs fallback (#2355 family).
+// Structural rejections (#2648) and any other failure stay fail-closed and are
+// rethrown; the native handle is already closed by withManagedProjectionRoot
+// before the fallback runs, so the fallback's kernel rename succeeds while the
+// native wedge persists.
+function withProjectionDegradation<T>(operation: () => T, degrade: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    if (!isExhaustedTransientProjectionSharingError(error)) throw error;
+    return degrade();
   }
 }
 
@@ -2073,10 +2204,13 @@ export function loadManagedProjectionPaths(targetRoot: string): string[] {
     return withProjectionMutationSync(path, () => readFallbackManagedProjectionPaths(path));
   }
   const path = historyPath(targetRoot);
-  return withProjectionMutationSync(path, () => withManagedProjectionRoot(targetRoot, (handle) => {
-    recoverManagedProjectionMutations(targetRoot, handle);
-    return readManagedProjectionPaths(handle);
-  }));
+  return withProjectionDegradation(
+    () => withProjectionMutationSync(path, () => withManagedProjectionRoot(targetRoot, (handle) => {
+      recoverManagedProjectionMutations(targetRoot, handle);
+      return readManagedProjectionPaths(handle);
+    })),
+    () => withProjectionMutationSync(path, () => readFallbackManagedProjectionPaths(path)),
+  );
 }
 
 export interface ProjectionRootStructuralFinding {
@@ -3061,24 +3195,27 @@ export function previewUnboundProjectionEvidenceResolution(
   if (!isProjectionRootIdentityLockAvailable()) {
     return previewUnboundProjectionEvidenceResolutionLockFree(targetRoot, evidenceId, action);
   }
-  return withProjectionMutationSync(historyPath(targetRoot), () => withManagedProjectionRoot(targetRoot, handle => {
-    recoverManagedProjectionMutations(targetRoot, handle);
-    recoverEvidenceResolutions(handle);
-    const evidence = findEvidence(readUnboundProjectionEvidence(handle), evidenceId);
-    if (!evidence || !handle.pathExists(evidence.evidencePath)) {
-      throw new Error("unbound projection evidence is unavailable");
-    }
-    const currentIdentity = handle.pathIdentity(evidence.evidencePath);
-    const contentDigest = projectionContentDigest(handle, evidence.evidencePath, evidence.scope);
-    const destinationPath = evidenceDestination(evidence, action);
-    return {
-      ...evidence,
-      contentDigest,
-      currentIdentity,
-      destinationPath,
-      consent: evidenceConsent(evidence, action, currentIdentity, contentDigest, destinationPath),
-    };
-  }));
+  return withProjectionDegradation(
+    () => withProjectionMutationSync(historyPath(targetRoot), () => withManagedProjectionRoot(targetRoot, handle => {
+      recoverManagedProjectionMutations(targetRoot, handle);
+      recoverEvidenceResolutions(handle);
+      const evidence = findEvidence(readUnboundProjectionEvidence(handle), evidenceId);
+      if (!evidence || !handle.pathExists(evidence.evidencePath)) {
+        throw new Error("unbound projection evidence is unavailable");
+      }
+      const currentIdentity = handle.pathIdentity(evidence.evidencePath);
+      const contentDigest = projectionContentDigest(handle, evidence.evidencePath, evidence.scope);
+      const destinationPath = evidenceDestination(evidence, action);
+      return {
+        ...evidence,
+        contentDigest,
+        currentIdentity,
+        destinationPath,
+        consent: evidenceConsent(evidence, action, currentIdentity, contentDigest, destinationPath),
+      };
+    })),
+    () => previewUnboundProjectionEvidenceResolutionLockFree(targetRoot, evidenceId, action),
+  );
 }
 
 // Stale native-control descriptors left behind by a degraded resolution would
@@ -3374,64 +3511,79 @@ export function resolveUnboundProjectionEvidence(
     resolveUnboundProjectionEvidencePlainFs(targetRoot, evidenceId, action, consent);
     return;
   }
-  withProjectionMutationSync(historyPath(targetRoot), () => withManagedProjectionRoot(targetRoot, handle => {
-    recoverManagedProjectionMutations(targetRoot, handle);
-    recoverEvidenceResolutions(handle);
-    const entries = readUnboundProjectionEvidence(handle);
-    const evidence = findEvidence(entries, evidenceId);
-    if (!evidence || !handle.pathExists(evidence.evidencePath)) {
-      throw new Error("unbound projection evidence is unavailable");
-    }
-    const currentIdentity = handle.pathIdentity(evidence.evidencePath);
-    const contentDigest = projectionContentDigest(handle, evidence.evidencePath, evidence.scope);
-    const destinationPath = evidenceDestination(evidence, action);
-    const { guardPath, stagingPath, exchangePath } = evidenceResolutionPaths(
-      evidence.evidenceId,
-      evidence.evidencePath,
-      destinationPath,
-    );
-    if (consent !== evidenceConsent(evidence, action, currentIdentity, contentDigest, destinationPath)) {
-      throw new Error("unbound projection evidence consent does not match the reviewed content");
-    }
-    const resolving: UnboundProjectionEvidence = {
-      ...evidence,
-      evidenceIdentity: currentIdentity,
-      contentDigest,
-      transition: "resolving",
-      resolution: {
-        action,
-        currentIdentity,
-        contentDigest,
+  withProjectionDegradation(
+    () => withProjectionMutationSync(historyPath(targetRoot), () => withManagedProjectionRoot(targetRoot, handle => {
+      recoverManagedProjectionMutations(targetRoot, handle);
+      recoverEvidenceResolutions(handle);
+      const entries = readUnboundProjectionEvidence(handle);
+      const evidence = findEvidence(entries, evidenceId);
+      if (!evidence || !handle.pathExists(evidence.evidencePath)) {
+        throw new Error("unbound projection evidence is unavailable");
+      }
+      const currentIdentity = handle.pathIdentity(evidence.evidencePath);
+      const contentDigest = projectionContentDigest(handle, evidence.evidencePath, evidence.scope);
+      const destinationPath = evidenceDestination(evidence, action);
+      const { guardPath, stagingPath, exchangePath } = evidenceResolutionPaths(
+        evidence.evidenceId,
+        evidence.evidencePath,
         destinationPath,
-        guardPath,
-        stagingPath,
-        exchangePath,
-        guardIdentity: null,
-        stagingIdentity: null,
-        exchangeIdentity: null,
-        phase: "prepared",
-      },
-    };
-    writeUnboundProjectionEvidence(handle, entries.map(entry => entry.evidenceId === evidence.evidenceId ? resolving : entry));
-    applyEvidenceResolution(handle, resolving);
-    unboundEvidenceResolutionFaultForTest?.();
-    writeUnboundProjectionEvidence(
-      handle,
-      readUnboundProjectionEvidence(handle).filter(entry => entry.evidenceId !== evidence.evidenceId),
-    );
-    if (evidence.origin === "native-control") removeNativeEvidenceDescriptor(handle, evidence.evidencePath);
-  }));
+      );
+      if (consent !== evidenceConsent(evidence, action, currentIdentity, contentDigest, destinationPath)) {
+        throw new Error("unbound projection evidence consent does not match the reviewed content");
+      }
+      const resolving: UnboundProjectionEvidence = {
+        ...evidence,
+        evidenceIdentity: currentIdentity,
+        contentDigest,
+        transition: "resolving",
+        resolution: {
+          action,
+          currentIdentity,
+          contentDigest,
+          destinationPath,
+          guardPath,
+          stagingPath,
+          exchangePath,
+          guardIdentity: null,
+          stagingIdentity: null,
+          exchangeIdentity: null,
+          phase: "prepared",
+        },
+      };
+      writeUnboundProjectionEvidence(handle, entries.map(entry => entry.evidenceId === evidence.evidenceId ? resolving : entry));
+      applyEvidenceResolution(handle, resolving);
+      unboundEvidenceResolutionFaultForTest?.();
+      writeUnboundProjectionEvidence(
+        handle,
+        readUnboundProjectionEvidence(handle).filter(entry => entry.evidenceId !== evidence.evidenceId),
+      );
+      if (evidence.origin === "native-control") removeNativeEvidenceDescriptor(handle, evidence.evidencePath);
+    })),
+    // Degraded on exhaustion (#2355 / #2883 family): the doctor lists the
+    // resolution commands with a lock-free consent whose identity format is
+    // Node's `{dev}:{ino}`, and the plain-fs resolver re-validates that consent
+    // against the on-disk evidence before acting. So the caller's consent is
+    // passed straight through, exactly as the lock-absent branch does: a
+    // reviewed consent settles the row, an unreviewed one stays fail-closed.
+    // A native resolve that failed mid-protocol leaves a `prepared` marker with
+    // null identities or a `deleting` marker on disk; the plain-fs reader treats
+    // both as an abandoned attempt (#2819) and finishes the record in place.
+    () => resolveUnboundProjectionEvidencePlainFs(targetRoot, evidenceId, action, consent),
+  );
 }
 
 export function recordManagedProjectionPath(targetRoot: string, filePath: string): void {
   const logicalPath = logicalProjectionPath(targetRoot, filePath);
   const path = historyPath(targetRoot);
-  withProjectionMutationSync(path, () => {
-    withManagedProjectionRoot(targetRoot, (handle) => {
-      recoverManagedProjectionMutations(targetRoot, handle);
-      recordManagedProjectionLogicalPath(handle, logicalPath);
-    });
-  });
+  withProjectionDegradation(
+    () => withProjectionMutationSync(path, () => {
+      withManagedProjectionRoot(targetRoot, (handle) => {
+        recoverManagedProjectionMutations(targetRoot, handle);
+        recordManagedProjectionLogicalPath(handle, logicalPath);
+      });
+    }),
+    () => appendFallbackManagedProjectionPath(targetRoot, logicalPath),
+  );
 }
 
 function managedProjectionTarget(filePath: string): { targetRoot: string; logicalPath: string } | null {
@@ -3675,6 +3827,10 @@ export interface ManagedProjectionTreeShelterReceipt {
   readonly shelterPath: string;
   readonly identity: string;
   readonly contentDigest: string;
+  /** Set when the shelter was produced by the plain-fs degradation path; the
+   *  matching restore then uses the plain-fs rename-back instead of a native
+   *  exact restore (the fallback identity format differs from native). */
+  readonly degraded?: boolean;
 }
 
 /** Atomically move a managed projection tree into a private shelter. */
@@ -3685,48 +3841,61 @@ export function shelterManagedProjectionTreeSync(
 ): ManagedProjectionTreeShelterReceipt {
   const source = logicalProjectionPath(targetRoot, sourcePath);
   const shelter = logicalProjectionPath(targetRoot, shelterPath);
-  return withManagedProjectionRoot(targetRoot, (handle) => {
-    if (handle.pathExists(shelter)) throw new Error("managed projection shelter target already exists");
-    const shelterParent = dirname(shelter).replaceAll("\\", "/");
-    if (shelterParent !== ".") handle.createDirectory(shelterParent);
-    const contentDigest = projectionContentDigest(handle, source, "tree");
-    const identity = handle.quarantineTree(source, shelter);
-    return Object.freeze({ targetRoot, sourcePath: source, shelterPath: shelter, identity, contentDigest });
-  });
+  return withProjectionDegradation(
+    () => withManagedProjectionRoot(targetRoot, (handle) => {
+      if (handle.pathExists(shelter)) throw new Error("managed projection shelter target already exists");
+      const shelterParent = dirname(shelter).replaceAll("\\", "/");
+      if (shelterParent !== ".") handle.createDirectory(shelterParent);
+      const contentDigest = projectionContentDigest(handle, source, "tree");
+      const identity = handle.quarantineTree(source, shelter);
+      return Object.freeze({ targetRoot, sourcePath: source, shelterPath: shelter, identity, contentDigest });
+    }),
+    () => shelterFallbackProjectionTree(targetRoot, source, shelter),
+  );
 }
 
 /** Restore only the exact tree identity previously moved into a shelter. */
 export function restoreManagedProjectionTreeSync(receipt: ManagedProjectionTreeShelterReceipt): void {
-  withManagedProjectionRoot(receipt.targetRoot, (handle) => {
-    const sourceParent = dirname(receipt.sourcePath).replaceAll("\\", "/");
-    if (sourceParent !== "." && !handle.pathExists(sourceParent)) {
-      handle.createDirectory(sourceParent);
-    }
-    handle.restoreQuarantinedTreeExact(
-      receipt.shelterPath,
-      receipt.sourcePath,
-      receipt.identity,
-      receipt.contentDigest,
-    );
-    const shelterParent = dirname(receipt.shelterPath).replaceAll("\\", "/");
-    if (shelterParent !== "." && handle.listDirectory(shelterParent).length === 0) {
-      handle.removeDirectory(shelterParent);
-    }
-  });
+  if (receipt.degraded) {
+    restoreFallbackProjectionTree(receipt);
+    return;
+  }
+  withProjectionDegradation(
+    () => withManagedProjectionRoot(receipt.targetRoot, (handle) => {
+      const sourceParent = dirname(receipt.sourcePath).replaceAll("\\", "/");
+      if (sourceParent !== "." && !handle.pathExists(sourceParent)) {
+        handle.createDirectory(sourceParent);
+      }
+      handle.restoreQuarantinedTreeExact(
+        receipt.shelterPath,
+        receipt.sourcePath,
+        receipt.identity,
+        receipt.contentDigest,
+      );
+      const shelterParent = dirname(receipt.shelterPath).replaceAll("\\", "/");
+      if (shelterParent !== "." && handle.listDirectory(shelterParent).length === 0) {
+        handle.removeDirectory(shelterParent);
+      }
+    }),
+    () => restoreFallbackProjectionTree(receipt),
+  );
 }
 
 /** Remove an explicitly authorized tree only while its identity and content remain exact. */
 export function removeManagedProjectionTreeExactSync(targetRoot: string, directoryPath: string): void {
   const logicalPath = logicalProjectionPath(targetRoot, directoryPath);
-  withManagedProjectionRoot(targetRoot, (handle) => {
-    if (!handle.pathExists(logicalPath)) return;
-    if (handle.pathKind(logicalPath) !== "directory") {
-      throw new Error("managed projection removal target is not a directory");
-    }
-    const identity = handle.pathIdentity(logicalPath);
-    const contentDigest = projectionContentDigest(handle, logicalPath, "tree");
-    handle.removeFileViaGuardExact(logicalPath, identity, logicalPath, true, contentDigest, true);
-  });
+  withProjectionDegradation(
+    () => withManagedProjectionRoot(targetRoot, (handle) => {
+      if (!handle.pathExists(logicalPath)) return;
+      if (handle.pathKind(logicalPath) !== "directory") {
+        throw new Error("managed projection removal target is not a directory");
+      }
+      const identity = handle.pathIdentity(logicalPath);
+      const contentDigest = projectionContentDigest(handle, logicalPath, "tree");
+      handle.removeFileViaGuardExact(logicalPath, identity, logicalPath, true, contentDigest, true);
+    }),
+    () => removeFallbackProjectionTreeExact(targetRoot, logicalPath),
+  );
 }
 
 export function removeLegacyProjectionTreeSync(targetRoot: string, directoryPath: string): void {
@@ -3734,7 +3903,8 @@ export function removeLegacyProjectionTreeSync(targetRoot: string, directoryPath
   if (classifyGsdLogicalPath(logicalPath) !== "managed") {
     throw new Error("legacy projection cleanup target is not managed");
   }
-  withProjectionMutationSync(historyPath(targetRoot), () => withManagedProjectionRoot(targetRoot, handle => {
+  withProjectionDegradation(
+    () => withProjectionMutationSync(historyPath(targetRoot), () => withManagedProjectionRoot(targetRoot, handle => {
     recoverManagedProjectionMutations(targetRoot, handle);
     recoverEvidenceResolutions(handle);
     const conflict = readUnboundProjectionEvidence(handle)
@@ -3773,5 +3943,7 @@ export function removeLegacyProjectionTreeSync(targetRoot: string, directoryPath
     persistMutation(handle, mutation);
     applyLegacyCleanupMutation(handle, mutation);
     handle.removeFile(`${JOURNAL_LOGICAL_ROOT}/${id}.json`);
-  }));
+  })),
+    () => removeFallbackLegacyProjectionTree(targetRoot, logicalPath),
+  );
 }
