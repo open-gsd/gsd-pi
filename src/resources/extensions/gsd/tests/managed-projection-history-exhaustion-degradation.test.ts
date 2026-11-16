@@ -109,7 +109,7 @@ test("exhausted shelter degrades to plain-fs rename and marks the receipt degrad
   writeFileSync(join(source, "ROADMAP.md"), "content\n");
   const shelterPath = join(rootPath, "shelter", "M001");
   exhaustedBoundary();
-  let receipt;
+  let receipt: ReturnType<typeof shelterManagedProjectionTreeSync> | undefined;
   runIgnoringFenceReleaseNoise(() => {
     receipt = shelterManagedProjectionTreeSync(base, source, shelterPath);
   });
