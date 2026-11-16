@@ -37,9 +37,13 @@ export function formatDiscoveryForTool(result: DiscoveryResult): string {
       for (const item of byType["mcp-server"]) {
         if (item.type !== "mcp-server") continue;
         const transport = item.transport ?? (item.url ? "http" : item.command ? "stdio" : "unknown");
+        // Endpoint details (command arguments, URLs, query and user-info) may carry
+        // credentials, so model-visible text describes the endpoint without rendering it.
         const detail = item.command
-          ? `${item.command}${item.args?.length ? ` ${item.args.join(" ")}` : ""}`
-          : item.url ?? "no endpoint";
+          ? "stdio command configured; arguments omitted"
+          : item.url
+            ? "remote endpoint configured; URL omitted"
+            : "no endpoint";
         lines.push(`    - ${item.name} [${transport}] ${detail} (${item.source.level})`);
       }
     }

@@ -8,7 +8,9 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { discoverAllConfigs } from "../discovery.ts";
+import { formatDiscoveryForCommand, formatDiscoveryForTool } from "../format.ts";
 
 function mkdirp(path: string) {
   mkdirSync(path, { recursive: true });
@@ -112,6 +114,73 @@ describe("discoverAllConfigs", () => {
       assert.equal(result.summary.claudeSkills, 0);
       assert.equal(result.summary.claudePlugins, 0);
       assert.equal(result.summary.totalItems, 5);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("Codex TOML discovery privacy boundary", () => {
+  test("model-visible tool and command text omit endpoint values while raw internal config is preserved", async () => {
+    const { testRoot, testHome, cleanup } = makeTempDirs();
+    try {
+      // Non-production sentinels generated at runtime: unique per run, never stored as literals.
+      const argSecret = `arg-${randomUUID()}`;
+      const positionalSecret = `pos-${randomUUID()}`;
+      const querySecret = `qry-${randomUUID()}`;
+      const userinfoSecret = `usr-${randomUUID()}`;
+      const envSecret = `env-${randomUUID()}`;
+      const commandSecret = `cmd-${randomUUID()}`;
+      writeText(
+        join(testHome, ".codex/config.toml"),
+        [
+          "[mcp_servers.stdio]",
+          `command = '${commandSecret}'`,
+          `args = ['server.js', '--token', '${argSecret}', '${positionalSecret}']`,
+          "[mcp_servers.stdio.env]",
+          `VALUE = '${envSecret}'`,
+          "[mcp_servers.basic]",
+          `url = 'https://review:${userinfoSecret}@example.test/mcp'`,
+          "",
+        ].join("\n"),
+      );
+      writeText(
+        join(testRoot, ".codex/config.toml"),
+        `[mcp_servers.remote]\nurl = 'https://example.test/mcp?session=${querySecret}'\n`,
+      );
+
+      const result = await discoverAllConfigs(testRoot, testHome);
+      const text = formatDiscoveryForTool(result);
+      const commandText = formatDiscoveryForCommand(result).join("\n");
+      const secrets = [argSecret, positionalSecret, querySecret, userinfoSecret, envSecret, commandSecret];
+
+      for (const secret of secrets) {
+        assert.ok(!text.includes(secret), "model-visible tool text must not contain endpoint values");
+        assert.ok(!commandText.includes(secret), "/configs summary must not contain endpoint values");
+      }
+
+      // Exact metadata: names, transports, source scopes, and counts.
+      assert.ok(text.includes("3 MCP server(s)"));
+      assert.ok(text.includes("- stdio [stdio] stdio command configured; arguments omitted (user)"));
+      assert.ok(text.includes("- basic [http] remote endpoint configured; URL omitted (user)"));
+      assert.ok(text.includes("- remote [http] remote endpoint configured; URL omitted (project)"));
+      assert.ok(commandText.includes("MCP: stdio (user)"));
+      assert.ok(commandText.includes("MCP: remote (project)"));
+
+      // Raw internal discovery data (used by explicit config import) is unchanged.
+      const stdio = result.allItems.find((i) => i.type === "mcp-server" && i.name === "stdio");
+      assert.ok(stdio && stdio.type === "mcp-server");
+      assert.equal(stdio.command, commandSecret);
+      assert.deepEqual(stdio.args, ["server.js", "--token", argSecret, positionalSecret]);
+      assert.equal(stdio.env?.VALUE, envSecret);
+      assert.equal(stdio.source.level, "user");
+      const basic = result.allItems.find((i) => i.type === "mcp-server" && i.name === "basic");
+      assert.ok(basic && basic.type === "mcp-server");
+      assert.equal(basic.url, `https://review:${userinfoSecret}@example.test/mcp`);
+      const remote = result.allItems.find((i) => i.type === "mcp-server" && i.name === "remote");
+      assert.ok(remote && remote.type === "mcp-server");
+      assert.equal(remote.url, `https://example.test/mcp?session=${querySecret}`);
+      assert.equal(remote.source.level, "project");
     } finally {
       cleanup();
     }

@@ -11,6 +11,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
+import { parse as parseToml } from "smol-toml";
 import type {
   ConfigSource,
   ConfigLevel,
@@ -483,14 +484,48 @@ async function scanCodex(projectRoot: string, home: string, tool: ToolInfo): Pro
     });
   }
 
-  // Codex uses TOML for MCP config — we parse only the JSON subset
-  // (TOML parsing would require a dependency; skip for now, log warning)
   for (const { path: tomlPath, level } of [
     { path: join(home, ".codex/config.toml"), level: "user" as ConfigLevel },
     { path: join(projectRoot, ".codex/config.toml"), level: "project" as ConfigLevel },
   ]) {
-    if (await fileExists(tomlPath)) {
-      warnings.push(`Found ${tomlPath} (TOML config) — MCP server parsing from TOML not yet supported`);
+    const content = await readTextFile(tomlPath);
+    if (content === null) continue;
+
+    try {
+      const config = parseToml(content) as Record<string, unknown>;
+      const mcpServers = config.mcp_servers;
+      if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) continue;
+
+      for (const [name, server] of Object.entries(mcpServers)) {
+        if (!server || typeof server !== "object" || Array.isArray(server)) continue;
+        const definition = server as Record<string, unknown>;
+        const command = typeof definition.command === "string" ? definition.command : undefined;
+        const url = typeof definition.url === "string" ? definition.url : undefined;
+        const args =
+          Array.isArray(definition.args) && definition.args.every((arg) => typeof arg === "string")
+            ? definition.args
+            : undefined;
+        const env =
+          definition.env && typeof definition.env === "object" && !Array.isArray(definition.env)
+            ? Object.fromEntries(
+                Object.entries(definition.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+              )
+            : undefined;
+
+        items.push({
+          type: "mcp-server",
+          name,
+          command,
+          args,
+          env,
+          url,
+          transport: url ? "http" : command ? "stdio" : undefined,
+          source: source(tool, tomlPath, level),
+        });
+      }
+    } catch {
+      // TOML parser messages include source excerpts that may contain credentials.
+      warnings.push(`Failed to parse Codex TOML config at ${tomlPath}: invalid TOML`);
     }
   }
 

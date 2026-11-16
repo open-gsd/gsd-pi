@@ -132,8 +132,9 @@ describe("cmux CUA consent and inspection invalidation", () => {
 });
 
 describe("cmux CUA pinned contract", () => {
-	test("server identity, tool count, required names, and uniqueness are enforced", () => {
+	test("server identity, required names, metadata and uniqueness remain enforced", () => {
 		const requiredNames = ["check_permissions", "click", "end_session", "get_window_state", "list_apps", "list_windows", "start_session"];
+		// Synthetic metadata, not a canonical native catalogue or native proof.
 		const tools = [...requiredNames, ...Array.from({ length: 32 }, (_, index) => `fixture-${index}`)].map((name) => ({
 			name,
 			description: "fixture metadata",
@@ -142,11 +143,27 @@ describe("cmux CUA pinned contract", () => {
 		assert.doesNotThrow(() => validateNativeToolInventory("cmux-cua", "0.7.1", tools));
 		assert.throws(() => validateNativeToolInventory("other-server", "0.7.1", tools), /pinned source/);
 		assert.throws(() => validateNativeToolInventory("cmux-cua", "0.7.2", tools), /pinned source/);
-		assert.throws(() => validateNativeToolInventory("cmux-cua", "0.7.1", tools.slice(0, -1)), /pinned source/);
-		assert.throws(() => validateNativeToolInventory("cmux-cua", "0.7.1", tools.filter((tool) => tool.name !== "click").concat({ ...tools[38], name: "fixture-extra" })), /pinned native CUA tool is missing/);
+		assert.throws(() => validateNativeToolInventory("cmux-cua", "0.7.1", tools.filter((tool) => tool.name !== "click")), /pinned native CUA tool is missing/);
 		const duplicate = [...tools];
 		duplicate[38] = { ...duplicate[38], name: "click" };
 		assert.throws(() => validateNativeToolInventory("cmux-cua", "0.7.1", duplicate), /malformed/);
+		for (const malformed of [null, { ...tools[0], name: 42 }, { ...tools[0], description: 42 }, { ...tools[0], inputSchema: null }, { ...tools[0], inputSchema: [] }, { ...tools[0], annotations: [] }]) {
+			assert.throws(() => validateNativeToolInventory("cmux-cua", "0.7.1", [malformed, ...tools.slice(1)]), /malformed/);
+		}
+	});
+
+	test("count differences are diagnostics, including a compatible extra tool", () => {
+		const requiredNames = ["check_permissions", "click", "end_session", "get_window_state", "list_apps", "list_windows", "start_session"];
+		const tools = [...requiredNames, ...Array.from({ length: 32 }, (_, index) => `fixture-${index}`)].map((name) => ({
+			name, description: "Synthetic protocol metadata", inputSchema: { type: "object", properties: {} },
+		}));
+		for (const inventory of [tools.slice(0, -1), [...tools, { name: "type_text", description: "Additional synthetic tool, not authorized", inputSchema: { type: "object", properties: {} } }]]) {
+			assert.deepEqual(validateNativeToolInventory("cmux-cua", "0.7.1", inventory), {
+				pinnedSourceCommit: "e0f738807dbff2f35fe67d7fbcc99c7082cffc23",
+				staticSourceToolCount: 37,
+				discoveredToolCount: inventory.length,
+			});
+		}
 	});
 
 	test("start session accepts only fresh, invocation-prefixed active sessions", () => {

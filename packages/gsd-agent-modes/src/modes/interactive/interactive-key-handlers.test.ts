@@ -8,6 +8,7 @@ import { Container } from "@gsd/pi-tui";
 
 import {
 	handleCtrlC,
+	handleFollowUp,
 	handlePastedImagePath,
 	setupKeyHandlers,
 	shutdown,
@@ -76,6 +77,48 @@ function makeHost(extra: Record<string, unknown> = {}): any {
 }
 
 // ── handleCtrlC ──────────────────────────────────────────────────────
+
+for (const state of ["isStreaming", "isCompacting"] as const) {
+	for (const level of ["high", "invalid"]) {
+		test(`handleFollowUp: /thinking ${level} is dispatched, not queued, during ${state}`, async () => {
+			let editorText = `/thinking ${level}`;
+			const history: string[] = [];
+			const statuses: string[] = [];
+			const selectedLevels: string[] = [];
+			const host = makeHost({
+				editor: {
+					getText: () => editorText,
+					setText: (text: string) => { editorText = text; },
+					addToHistory: (text: string) => history.push(text),
+				},
+				pendingImages: [{ type: "image", data: "fixture", mimeType: "image/png" }],
+				isKnownSlashCommand: () => true,
+				isExtensionCommand: () => false,
+				queueCompactionMessage: () => assert.fail("thinking must not enter the compaction queue"),
+			});
+			host.session[state] = true;
+			host.session.prompt = () => assert.fail("thinking must not be sent as prompt text");
+			host.getSlashCommandContext = () => ({
+				session: {
+					supportsThinking: () => true,
+					getAvailableThinkingLevels: () => ["off", "high"],
+					setThinkingLevel: (value: string) => selectedLevels.push(value),
+				},
+				invalidateFooter() {},
+				updateEditorBorderColor() {},
+				showStatus: (message: string) => statuses.push(message),
+			});
+
+			await handleFollowUp(host);
+
+			assert.deepEqual(selectedLevels, level === "high" ? ["high"] : []);
+			assert.match(statuses[0], level === "high" ? /Thinking level: high/ : /Invalid thinking level/);
+			assert.equal(editorText, "");
+			assert.deepEqual(history, [`/thinking ${level}`]);
+			assert.deepEqual(host.pendingImages, []);
+		});
+	}
+}
 
 test("handleCtrlC: first tap clears editor and records timestamp", () => {
 	const host = makeHost();
