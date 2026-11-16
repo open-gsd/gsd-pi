@@ -9,10 +9,10 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
 import { createDesktopOwnershipManager } from "../../shared/desktop-ownership.ts";
-import registerCmuxCua, { act, discoverNativeContract, inspect, type ConnectedCuaSession } from "../index.ts";
+import registerCmuxCua, { act, cmuxCuaActionParameters, discoverNativeContract, inspect, type ConnectedCuaSession } from "../index.ts";
 
-// Real required names, NOT invented padding to reach 39. Without a canonical full
-// inventory/schema fixture, supported-version acceptance remains explicitly open.
+// Real required names with synthetic protocol metadata, not padding to a count.
+// Fixture acceptance is not a canonical source/native catalogue/schema receipt.
 const partialInventory = ["check_permissions", "click", "end_session", "get_window_state", "list_apps", "list_windows", "start_session"].map((name) => ({
 	name, description: "Synthetic protocol metadata", inputSchema: { type: "object" as const, properties: {} },
 }));
@@ -174,7 +174,9 @@ test("protocol fixture stays guard-free across the deterministic platform qualif
 	const f = await protocolFixture();
 	t.after(() => f.close());
 	assert.deepEqual(Object.keys(f).sort(), ["binding", "calls", "client", "close", "cursors", "server"]);
-	await assert.rejects(discoverNativeContract(f.client), /identity\/version/);
+	assert.deepEqual(await discoverNativeContract(f.client), {
+		pinnedSourceCommit: "e0f738807dbff2f35fe67d7fbcc99c7082cffc23", staticSourceToolCount: 37, discoveredToolCount: partialInventory.length,
+	});
 	assert.deepEqual(f.calls, []);
 });
 test("real SDK protocol cancellation remains guard-free and never replays", async (t) => {
@@ -196,21 +198,67 @@ test("real SDK protocol cancellation remains guard-free and never replays", asyn
 	assert.equal(f.calls.length, 1);
 	assert.equal(f.calls[0].name, "get_window_state");
 });
-test("real SDK discovery paginates the partial supported-version contract without inventing tools", async (t) => {
+test("real SDK discovery completes bounded pagination and returns count diagnostics", async (t) => {
 	const f = await protocolFixture({ list: (cursor) => cursor ? { tools: partialInventory.slice(3) } : { tools: partialInventory.slice(0, 3), nextCursor: "synthetic-page-2" } });
 	t.after(() => f.close());
 	assert.deepEqual(f.client.getServerVersion(), { name: "cmux-cua", version: "0.7.1" });
-	await assert.rejects(discoverNativeContract(f.client), /identity\/version/);
+	assert.deepEqual(await discoverNativeContract(f.client), {
+		pinnedSourceCommit: "e0f738807dbff2f35fe67d7fbcc99c7082cffc23", staticSourceToolCount: 37, discoveredToolCount: partialInventory.length,
+	});
 	assert.deepEqual(f.cursors, [undefined, "synthetic-page-2"]);
+	assert.deepEqual(f.calls, []);
+});
+
+test("compatible extra metadata is neither exposed nor authorized by discovery", async (t) => {
+	const extra = { name: "type_text", description: "Additional synthetic tool, not permitted", inputSchema: { type: "object" as const, properties: {} } };
+	const f = await protocolFixture({ list: (cursor) => cursor ? { tools: [extra] } : { tools: partialInventory, nextCursor: "extra-page" } });
+	t.after(() => f.close());
+	assert.deepEqual(await discoverNativeContract(f.client), {
+		pinnedSourceCommit: "e0f738807dbff2f35fe67d7fbcc99c7082cffc23", staticSourceToolCount: 37, discoveredToolCount: partialInventory.length + 1,
+	});
+	assert.deepEqual(f.cursors, [undefined, "extra-page"]);
+	assert.deepEqual(f.calls, []);
+	assert.equal(f.binding.assertions, 0);
+	// These runtime schema keywords are not properties of the exported TypeBox types.
+	assert.deepEqual(Reflect.get(cmuxCuaActionParameters.properties.operation, "enum"), ["click"]);
+	assert.equal(Reflect.get(cmuxCuaActionParameters, "additionalProperties"), false);
+	let apiAccesses = 0;
+	registerCmuxCua(new Proxy({}, { get() { apiAccesses += 1; throw new Error("discovery must not open runtime admission"); } }) as ExtensionAPI);
+	assert.equal(apiAccesses, 0);
+});
+
+test("discovery accepts completion at the eight-page boundary without dispatch", async (t) => {
+	const f = await protocolFixture({ list: (cursor) => {
+		const page = Number(cursor ?? 0);
+		return { tools: page === 0 ? partialInventory : [], ...(page < 7 ? { nextCursor: String(page + 1) } : {}) };
+	} });
+	t.after(() => f.close());
+	const diagnostics = await discoverNativeContract(f.client);
+	assert.equal(diagnostics.discoveredToolCount, partialInventory.length);
+	assert.equal(f.cursors.length, 8);
+	assert.deepEqual(f.calls, []);
+});
+
+test("required tools on an early page do not permit incomplete pagination", async (t) => {
+	const f = await protocolFixture({ list: (cursor) => ({ tools: cursor ? [] : partialInventory, nextCursor: String(Number(cursor ?? 0) + 1) }) });
+	t.after(() => f.close());
+	await assert.rejects(discoverNativeContract(f.client), /pagination exceeded/);
+	assert.equal(f.cursors.length, 8);
 	assert.deepEqual(f.calls, []);
 });
 for (const [label, options, expected] of [
 	["wrong version", { version: "0.0.0" }, /identity\/version/],
 	["wrong server", { name: "synthetic-other-server" }, /identity\/version/],
-	["missing tools", { list: () => ({ tools: [] }) }, /identity\/version/],
+	["missing tools", { list: () => ({ tools: [] }) }, /pinned native CUA tool is missing/],
+	["missing required tool despite compatible count", { list: () => ({ tools: partialInventory.filter((tool) => tool.name !== "click") }) }, /pinned native CUA tool is missing/],
 	["malformed tools", { list: () => ({ tools: [{ name: "click", inputSchema: "invalid" }] }) }, /invalid|expected|object/i],
+	["malformed late metadata", { list: (cursor: string | undefined) => cursor ? { tools: [{ name: "extra", description: 42, inputSchema: {} }] } : { tools: partialInventory, nextCursor: "late-page" } }, /invalid|expected|string/i],
 	["duplicate real names", { list: () => ({ tools: Array.from({ length: 39 }, () => partialInventory[1]) }) }, /malformed/],
+	["duplicate across pages", { list: (cursor: string | undefined) => cursor ? { tools: [partialInventory[1]] } : { tools: partialInventory, nextCursor: "duplicate-page" } }, /malformed/],
+	["empty cursor", { list: () => ({ tools: partialInventory, nextCursor: "" }) }, /cursor is malformed/],
+	["invalid cursor type", { list: () => ({ tools: partialInventory, nextCursor: 42 }) }, /invalid|expected|string/i],
 	["repeated cursor", { list: () => ({ tools: [], nextCursor: "same" }) }, /cursor repeated/],
+	["cyclic cursors", { list: (cursor: string | undefined) => ({ tools: [], nextCursor: cursor === "page-a" ? "page-b" : "page-a" }) }, /cursor repeated/],
 	["pagination limit", { list: (cursor: string | undefined) => ({ tools: [], nextCursor: String(Number(cursor ?? 0) + 1) }) }, /pagination exceeded/],
 ] as const) {
 	test(`real SDK discovery rejects ${label}`, async (t) => {

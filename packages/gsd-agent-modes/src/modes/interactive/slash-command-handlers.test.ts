@@ -2,8 +2,9 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Container } from "@gsd/pi-tui";
+import { CombinedAutocompleteProvider, Container } from "@gsd/pi-tui";
 import { SettingsManager } from "@gsd/pi-coding-agent/core/settings-manager.js";
+import { setupAutocomplete } from "./interactive-autocomplete.js";
 import { dispatchSlashCommand, type SlashCommandContext } from "./slash-command-handlers.js";
 
 function makeContext(settingsManager = SettingsManager.inMemory()): SlashCommandContext {
@@ -63,6 +64,31 @@ function makeContext(settingsManager = SettingsManager.inMemory()): SlashCommand
 		_testRenders: string[];
 	};
 }
+
+describe("builtin slash commands", () => {
+	it("completes /thin to /thinking and offers thinking-level arguments", async () => {
+		let provider: CombinedAutocompleteProvider | undefined;
+		const editor = {
+			setAutocompleteProvider(value: CombinedAutocompleteProvider) { provider = value; },
+		};
+		setupAutocomplete({
+			session: { promptTemplates: [], scopedModels: [], extensionRunner: null },
+			settingsManager: {
+				getEnableSkillCommands: () => false,
+				getRespectGitignoreInPicker: () => true,
+			},
+			skillCommands: new Map(),
+			defaultEditor: editor,
+			editor,
+		});
+		assert.ok(provider);
+		const options = { signal: new AbortController().signal };
+		const commands = await provider.getSuggestions(["/thin"], 0, 5, options);
+		assert.ok(commands?.items.some((item) => item.value === "thinking"));
+		const levels = await provider.getSuggestions(["/thinking h"], 0, 11, options);
+		assert.deepEqual(levels?.items.map((item) => item.value), ["high"]);
+	});
+});
 
 describe("dispatchSlashCommand /tui", () => {
 	it("persists /tui mode validation to terminal adaptive mode", async () => {

@@ -30,7 +30,9 @@ import {
 
 const SERVER_NAME = "cmux-cua";
 const SERVER_VERSION = "0.7.1";
-const SERVER_TOOL_COUNT = 39;
+// Pinned source: 30 direct + 5 recording + 2 session registrations. This is
+// source-only diagnostic context, not a required runtime inventory size.
+const STATIC_SOURCE_TOOL_COUNT = 37;
 const PINNED_SOURCE_COMMIT = "e0f738807dbff2f35fe67d7fbcc99c7082cffc23";
 // No archived metadata hash is accepted as endpoint-authentication evidence.
 // G-03 must establish the live endpoint binding before runtime admission opens.
@@ -186,8 +188,14 @@ function safeText(value: unknown, maximum: number): value is string {
 	return !/\b(?:\d[ -]*?){13,19}\b/u.test(value);
 }
 
-export function validateNativeToolInventory(serverName: unknown, serverVersion: unknown, tools: readonly unknown[]): void {
-	if (serverName !== SERVER_NAME || serverVersion !== SERVER_VERSION || tools.length !== SERVER_TOOL_COUNT) {
+export interface NativeContractDiagnostics {
+	readonly pinnedSourceCommit: string;
+	readonly staticSourceToolCount: number;
+	readonly discoveredToolCount: number;
+}
+
+export function validateNativeToolInventory(serverName: unknown, serverVersion: unknown, tools: readonly unknown[]): NativeContractDiagnostics {
+	if (serverName !== SERVER_NAME || serverVersion !== SERVER_VERSION) {
 		throw new Error(`cmux CUA server identity/version does not match pinned source ${PINNED_SOURCE_COMMIT}`);
 	}
 	const names = new Set<string>();
@@ -200,6 +208,7 @@ export function validateNativeToolInventory(serverName: unknown, serverVersion: 
 	for (const name of REQUIRED_NATIVE_TOOLS) {
 		if (!names.has(name)) throw new Error("pinned native CUA tool is missing");
 	}
+	return { pinnedSourceCommit: PINNED_SOURCE_COMMIT, staticSourceToolCount: STATIC_SOURCE_TOOL_COUNT, discoveredToolCount: tools.length };
 }
 
 function parseMcpEnvelope(value: unknown): NativeEnvelope {
@@ -559,22 +568,25 @@ export function beginInspection(session: { grant: unknown; hadAction: boolean })
 
 async function listAllTools(client: Client, signal?: AbortSignal): Promise<unknown[]> {
 	const tools: unknown[] = [];
+	const seenCursors = new Set<string>();
 	let cursor: string | undefined;
 	for (let pageIndex = 0; pageIndex < 8; pageIndex += 1) {
 		const page = await client.listTools(cursor ? { cursor } : {}, { signal, timeout: MCP_CALL_TIMEOUT_MS });
 		if (!Array.isArray(page.tools)) throw new Error("cmux CUA tools/list result is malformed");
 		tools.push(...page.tools);
-		if (!page.nextCursor) return tools;
-		if (page.nextCursor === cursor) throw new Error("cmux CUA tools/list cursor repeated");
+		if (page.nextCursor === undefined) return tools;
+		if (typeof page.nextCursor !== "string" || page.nextCursor.length === 0) throw new Error("cmux CUA tools/list cursor is malformed");
+		if (seenCursors.has(page.nextCursor)) throw new Error("cmux CUA tools/list cursor repeated");
+		seenCursors.add(page.nextCursor);
 		cursor = page.nextCursor;
 	}
 	throw new Error("cmux CUA tools/list pagination exceeded the limit");
 }
 
-export async function discoverNativeContract(client: Client, signal?: AbortSignal): Promise<void> {
+export async function discoverNativeContract(client: Client, signal?: AbortSignal): Promise<NativeContractDiagnostics> {
 	const server = client.getServerVersion();
 	const tools = await listAllTools(client, signal);
-	validateNativeToolInventory(server?.name, server?.version, tools);
+	return validateNativeToolInventory(server?.name, server?.version, tools);
 }
 
 async function runNativeRead<T>(session: ConnectedCuaSession, name: string, args: Record<string, unknown>, signal: AbortSignal | undefined, decode: (value: unknown) => T): Promise<T> {
