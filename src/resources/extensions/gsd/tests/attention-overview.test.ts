@@ -309,7 +309,9 @@ test("open auto-pause is shown in its own namespace with no workflow blocker row
 		const state = controller.state();
 		const pause = state.items.find((i) => i.namespace === "auto-pause");
 		assert.ok(pause, "open user_request pause is listed in auto-pause");
-		assert.equal(pause!.classification, "user_request", "pause keeps its own vocabulary");
+		assert.equal(pause!.classification, "unclassified", "an independent pause has no verified owner");
+		assert.equal(pause!.owner, "unknown", "pause kind alone never assigns an owner");
+		assert.equal(pause!.details.kind, "user_request", "pause keeps its own vocabulary in details");
 		assert.equal(pause!.destination.kind, "details-only", "pause is never an inspect-blocker target");
 		assert.equal(state.allClear, false, "an open pause is never all-clear");
 		assert.equal(sha(ws.contract.projectDb), before, "reading a pause mutates nothing");

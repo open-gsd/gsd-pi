@@ -130,9 +130,10 @@ export class AttentionOverlayController {
 				announcements.push(item.identity);
 			}
 		}
-		const selected = Math.min(this.current.selected, Math.max(0, view.items.length - 1));
 		const previousId = this.current.items[this.current.selected]?.identity;
-		const sameIdentity = view.items[selected]?.identity === previousId;
+		const preservedIndex = previousId === undefined ? -1 : view.items.findIndex((item) => item.identity === previousId);
+		const sameIdentity = preservedIndex !== -1;
+		const selected = sameIdentity ? preservedIndex : Math.min(this.current.selected, Math.max(0, view.items.length - 1));
 		this.current = {
 			...this.current,
 			status: "ready",
@@ -140,6 +141,7 @@ export class AttentionOverlayController {
 			coverage: view.coverage,
 			allClear: view.allClear,
 			selected,
+			detailsOpen: sameIdentity && this.current.detailsOpen,
 			detailScroll: sameIdentity ? this.current.detailScroll : 0,
 			announcements,
 			notice: "",

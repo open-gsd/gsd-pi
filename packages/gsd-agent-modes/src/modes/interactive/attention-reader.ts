@@ -43,11 +43,59 @@ const WORKFLOW_SQL = `SELECT blocker_id AS blockerId, blocker_kind AS blockerKin
  * workflow blocker row, so pauses are read directly, never inferred from links.
  * Columns from db-auto-pause-schema.ts.
  */
-const PAUSE_SQL = `SELECT CAST(id AS TEXT) AS blockerId, blocker_kind AS blockerKind,
-  'user' AS resolutionOwner, COALESCE(pause_reason, '') AS description,
+// p.* allows old schemas without the optional blocker_id column to retain pauses.
+const PAUSE_SQL = `SELECT p.*, CAST(id AS TEXT) AS blockerId, blocker_kind AS blockerKind,
+  'unknown' AS resolutionOwner, COALESCE(pause_reason, '') AS description,
   '' AS requestedAction, paused_at AS openedAt
-  FROM auto_pauses WHERE closed_at IS NULL
+  FROM auto_pauses p WHERE closed_at IS NULL
   ORDER BY paused_at, id LIMIT :limit`;
+
+// Ownership is provenance, not resolution eligibility. In particular external owners
+// are legitimate, while the native openPauseBlockerRow producer may record user for
+// the same kind. Require the explicit link and its current same-project lifecycle;
+// the supported unit shapes mirror the existing pause lifecycle lookup contract.
+const PAUSE_OWNER_SQL = `SELECT CAST(p.id AS TEXT) AS pauseId, MIN(b.resolution_owner) AS resolutionOwner
+  FROM auto_pauses p
+  JOIN workflow_blockers b ON b.blocker_id = p.blocker_id
+  JOIN workflow_item_lifecycles l ON l.lifecycle_id = b.lifecycle_id
+  JOIN project_authority a ON a.singleton = 1
+    AND b.project_id = a.project_id AND l.project_id = a.project_id
+  WHERE p.closed_at IS NULL AND b.blocker_status = 'open'
+    AND b.blocker_kind = p.blocker_kind AND b.resolution_owner IN ('user', 'external')
+    AND b.blocker_kind IN ('missing_authority', 'missing_access', 'external_dependency',
+      'consent', 'ambiguous_intent', 'subjective_uat', 'user_limit')
+    AND (SELECT COUNT(*) FROM workflow_blockers candidate WHERE candidate.blocker_id = p.blocker_id) = 1
+    AND (SELECT COUNT(*) FROM workflow_item_lifecycles candidate WHERE candidate.lifecycle_id = b.lifecycle_id) = 1
+    AND l.lifecycle_status IN ('pending', 'ready', 'in_progress', 'paused')
+    AND l.milestone_id = p.milestone_id
+    AND (
+      (l.item_kind = 'task' AND p.unit_type IN ('execute-task', 'replan-task')
+        AND p.unit_id = l.milestone_id || '/' || l.slice_id || '/' || l.task_id)
+      OR (l.item_kind = 'slice' AND p.unit_type IN (
+        'complete-slice', 'discuss-slice', 'plan-slice', 'research-slice', 'refine-slice',
+        'replan-slice', 'run-uat', 'reassess-roadmap', 'rewrite-docs')
+        AND p.unit_id = l.milestone_id || '/' || l.slice_id)
+      OR (l.item_kind = 'milestone' AND p.unit_type IN (
+        'complete-milestone', 'research-milestone', 'plan-milestone', 'discuss-milestone',
+        'validate-milestone', 'rewrite-docs') AND p.unit_id = l.milestone_id)
+    )
+    AND (SELECT COUNT(*) FROM auto_pauses linked
+      WHERE linked.blocker_id = p.blocker_id AND linked.closed_at IS NULL) = 1
+  GROUP BY p.id HAVING COUNT(*) = 1
+  ORDER BY p.paused_at, p.id LIMIT :limit`;
+
+/** Missing optional association support is unknown ownership, not a lost pause. */
+function supportsPauseOwners(query: ReadRows): boolean {
+	const columns = {
+		auto_pauses: ["blocker_id", "milestone_id", "unit_type", "unit_id"],
+		workflow_blockers: ["blocker_id", "project_id", "lifecycle_id", "blocker_kind", "resolution_owner", "blocker_status"],
+		workflow_item_lifecycles: ["lifecycle_id", "project_id", "item_kind", "milestone_id", "slice_id", "task_id", "lifecycle_status"],
+	};
+	return Object.entries(columns).every(([table, required]) => {
+		const present = new Set(query(`PRAGMA table_info(${table})`).map((row) => row["name"]));
+		return required.every((column) => present.has(column));
+	});
+}
 
 /** Open questions only; `answered`/`withdrawn` are not attention. Columns from db-conversation-foundation-schema.ts. */
 const QUESTION_SQL = `SELECT question_id AS id, question_text AS description, created_at AS createdAt
@@ -81,15 +129,36 @@ export function createAttentionReader(input: AttentionReaderInput) {
 					const projectKey = authority["project_id"];
 
 					const sourceFrom = (namespace: Namespace, sql: string): AttentionSource => {
-						const rows = query(sql.replace(":limit", String(limit + 1)));
-						const truncated = rows.length > limit;
-						return {
-							namespace,
-							status: "available",
-							completeness: truncated ? "partial" : "complete",
-							rows: truncated ? rows.slice(0, limit) : rows,
-							...(truncated ? { reason: "truncated" } : {}),
-						};
+						try {
+							let rows = query(sql.replace(":limit", String(limit + 1)));
+							const truncated = rows.length > limit;
+							const reasons = truncated ? ["truncated"] : [];
+							if (namespace === "interaction") {
+								reasons.push("durable workflow questions read; live native prompts unread");
+							}
+							if (namespace === "auto-pause") {
+								const owners = new Map<unknown, unknown>();
+								if (rows.some((row) => typeof row["blocker_id"] === "string" && row["blocker_id"])) {
+									if (supportsPauseOwners(query)) {
+										for (const owner of query(PAUSE_OWNER_SQL.replace(":limit", String(limit + 1)))) {
+											owners.set(owner["pauseId"], owner["resolutionOwner"]);
+										}
+									} else reasons.push("pause owner association unavailable");
+								}
+								rows = rows.map((row) => ({ ...row, resolutionOwner: owners.get(row["blockerId"]) ?? "unknown" }));
+							}
+							return {
+								namespace,
+								status: "available",
+								completeness: reasons.length ? "partial" : "complete",
+								rows: truncated ? rows.slice(0, limit) : rows,
+								...(reasons.length ? { reason: reasons.join("; ") } : {}),
+							};
+						} catch {
+							// Query-local failure only. The outer seam still owns open/config,
+							// transaction and cleanup failure for the entire snapshot.
+							return unavailable(namespace, "namespace query failed");
+						}
 					};
 
 					return {
@@ -102,7 +171,7 @@ export function createAttentionReader(input: AttentionReaderInput) {
 					};
 				});
 			} catch (error) {
-				// Any failure is explicit unavailability; never an empty complete view.
+				// Snapshot-wide failure discards every result; never an empty complete view.
 				const reason = error instanceof Error ? error.message : "read-failed";
 				return {
 					projectKey: null,

@@ -91,7 +91,7 @@ export class AttentionOverlayComponent implements Component {
 		const fullTop: string[] = [];
 		if (s.coverage.length > 0) {
 			for (const w of wrapText("Coverage: " + s.coverage
-				.map((c) => `${c.namespace} ${c.status}/${c.completeness}`).join(", "), width)) fullTop.push(w);
+				.map((c) => `${c.namespace} ${c.status}/${c.completeness}${c.reason ? ` (${c.reason})` : ""}`).join(", "), width)) fullTop.push(w);
 		}
 		if (incomplete) {
 			for (const w of wrapText("Coverage incomplete: not all sources were read. Not all-clear.", width)) fullTop.push(w);
