@@ -2063,7 +2063,73 @@ test('a successor SessionStart stays blocked across repeated failed predecessor 
   await bridge.idle()
 })
 
-test('undelivered SessionEnd retries are capped and the oldest is dropped with a diagnostic', async t => {
+for (const acceptedEarlier of [false, true]) {
+  test(`failed same-session starts ${acceptedEarlier ? 'retain an earlier accepted' : 'do not invent'} presence obligation`, async t => {
+    const f = await fixture(t)
+    f.setPreferences({ enabled: true, vault: true, resume: true })
+    const bridge = new CmuxVaultBridge({
+      ...f.options,
+      env: { ...f.env, GSD_CMUX_VAULT: undefined },
+    })
+    if (acceptedEarlier) {
+      bridge.update(f.manager, true, true)
+      await bridge.idle()
+      assert.deepEqual(presenceEvents(f), ['SessionStart'])
+    }
+    f.failFeedFor('SessionStart', true)
+    for (let i = 0; i < 2; i++) {
+      bridge.update(f.manager, true, true)
+      await bridge.idle()
+    }
+    const cleanupIndex = f.feedCalls.length
+    f.failFeedFor('SessionStart', false)
+    bridge.stop()
+    await bridge.idle()
+    assert.deepEqual(presenceEvents(f).slice(cleanupIndex), acceptedEarlier ? ['SessionEnd'] : [],
+      'shutdown ends only a presence whose start was accepted, even after failed same-session refreshes')
+  })
+}
+
+test('resume off with Vault on retries an accepted presence end after guarded clear on an ordinary refresh', async t => {
+  const f = await fixture(t)
+  f.setPreferences({ enabled: true, vault: true, resume: true })
+  const bridge = new CmuxVaultBridge({
+    ...f.options,
+    env: { ...f.env, GSD_CMUX_VAULT: undefined },
+  })
+  const sessionA = f.manager.getSessionFile()
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.deepEqual(presenceEvents(f), ['SessionStart'], 'A must actually start before cleanup')
+  f.approveNative()
+  f.setPreferences({ enabled: true, vault: true, resume: false })
+  f.failFeedFor('SessionEnd', true)
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.equal(f.clears.length, 1, 'the exact automatic binding must be guarded-cleared')
+  assert.equal(f.clears[0].checkpoint_id, sessionA)
+  assert.equal(f.clears[0].expected_updated_at, 101)
+  assert.ok(presenceEvents(f).includes('SessionEnd'), 'A end must have failed before recovery')
+  const recoveryIndex = f.feedCalls.length
+  const setsBeforeRecovery = f.calls.filter(args => args[2] === 'set').length
+
+  f.failFeedFor('SessionEnd', false)
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.deepEqual(f.feedCalls.slice(recoveryIndex).map(call => call.event), [{
+    session_id: sessionA, hook_event_name: 'SessionEnd', _source: 'gsd',
+    workspace_id: 'workspace-uuid', surface_id: 'surface-uuid', cwd: f.cwd, _ppid: 123,
+  }], 'a plain refresh must deliver A end even though automatic publication remains blocked')
+  assert.equal(f.calls.filter(args => args[2] === 'set').length, setsBeforeRecovery,
+    'recovery must not register another binding')
+  assert.equal(presenceEvents(f).filter(event => event === 'SessionStart').length, 1)
+  assert.equal(f.clears.length, 1)
+  bridge.stop()
+  await bridge.idle()
+  assert.equal(f.feedCalls.length, recoveryIndex + 1, 'shutdown must not duplicate the recovered end')
+})
+
+test('blocked successor handoffs beyond the pending end cap retain only the accepted predecessor end', async t => {
   const f = await fixture(t)
   f.setPreferences({ enabled: true, vault: true, resume: true })
   const warnings: string[] = []
@@ -2074,18 +2140,40 @@ test('undelivered SessionEnd retries are capped and the oldest is dropped with a
     ...f.options,
     env: { ...f.env, GSD_CMUX_VAULT: undefined },
   })
+  const sessionA = f.manager.getSessionFile()
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.deepEqual(presenceEvents(f), ['SessionStart'], 'A must have an accepted start')
   f.failFeedFor('SessionEnd', true)
-  // Each switch queues one undelivered end; exceed the cap by two.
+  let currentSession = ''
   for (let i = 0; i < CMUX_VAULT_MAX_PENDING_ENDS + 2; i++) {
-    const next = join(f.root, `session-cap-${i}.jsonl`)
-    await writeFile(next, `session ${i}\n`)
-    f.setSession(next, `session-cap-${i}-id`)
+    currentSession = join(f.root, `session-cap-${i}.jsonl`)
+    await writeFile(currentSession, `session ${i}\n`)
+    f.setSession(currentSession, `session-cap-${i}-id`)
     bridge.update(f.manager, true, true)
     await bridge.idle()
   }
   const queued = (bridge as unknown as { pendingEnds: unknown[] }).pendingEnds.length
   assert.ok(queued <= CMUX_VAULT_MAX_PENDING_ENDS, 'retained ends must never exceed the cap (queued=' + queued + ')')
-  assert.ok(warnings.some(w => w.includes('pending-end-dropped')), 'overflow must be diagnosed, not silent')
+  const attemptedEnds = f.feedCalls.filter(call =>
+    (call.event as { hook_event_name: string }).hook_event_name === 'SessionEnd')
+  assert.ok(attemptedEnds.length > CMUX_VAULT_MAX_PENDING_ENDS, 'A end must stay failed across every handoff')
+  assert.deepEqual([...new Set(attemptedEnds.map(call => (call.event as { session_id: string }).session_id))],
+    [sessionA], 'unannounced successors must not create phantom ends that evict A')
+  assert.equal(queued, 1, 'only A has an accepted start and an undelivered end')
+  assert.equal(presenceEvents(f).filter(event => event === 'SessionStart').length, 1,
+    'no successor may start before A end is accepted')
+  assert.ok(!warnings.some(w => w.includes('pending-end-dropped')), 'blocked handoffs must not overflow real obligations')
+
+  const recoveryIndex = f.feedCalls.length
+  f.failFeedFor('SessionEnd', false)
+  bridge.update(f.manager, true, true)
+  await bridge.idle()
+  assert.deepEqual(f.feedCalls.slice(recoveryIndex).map(call => {
+    const event = call.event as { hook_event_name: string; session_id: string }
+    return [event.hook_event_name, event.session_id]
+  }), [['SessionEnd', sessionA], ['SessionStart', currentSession]],
+  'recovery must end A before announcing only the current successor')
   bridge.stop()
   await bridge.idle()
 })

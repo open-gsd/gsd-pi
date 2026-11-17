@@ -233,7 +233,8 @@ interface VaultBinding {
   updatedAt: number
   workspace: string
   surface: string
-  vaultEnabled: boolean
+  // True only while a successfully delivered SessionStart still needs SessionEnd.
+  presenceStarted: boolean
 }
 
 function resumeResult(value: unknown): { result: Record<string, unknown>, binding: Record<string, unknown> | null } {
@@ -389,6 +390,9 @@ export class CmuxVaultBridge {
       const identity = this.pending
       this.pending = undefined
       try {
+        // Cleanup survives ownership removal and resume-disabled early returns.
+        // Retry only when an ordinary lifecycle update gives the drain more work.
+        await this.retryPendingEnds()
         if (!identity) {
           // Unsaved session: end presence and clear, since there is no file to resume.
           await this.endPresence()
@@ -465,10 +469,10 @@ export class CmuxVaultBridge {
   private async endPresence(binding = this.binding): Promise<void> {
     // Retry earlier undelivered ends first, so they never outlive a newer session.
     await this.retryPendingEnds()
-    if (!binding?.vaultEnabled) return
+    if (!binding?.presenceStarted) return
     // Mark presence ended only once the end event is delivered. A failed send is queued
     // so it is retried rather than silently lost.
-    if (await this.feed('SessionEnd', binding)) binding.vaultEnabled = false
+    if (await this.feed('SessionEnd', binding)) binding.presenceStarted = false
     else if (!this.pendingEnds.includes(binding)) this.enqueuePendingEnd(binding)
   }
 
@@ -486,8 +490,8 @@ export class CmuxVaultBridge {
     const queued = this.pendingEnds
     this.pendingEnds = []
     for (const pending of queued) {
-      if (!pending.vaultEnabled) continue
-      if (await this.feed('SessionEnd', pending)) pending.vaultEnabled = false
+      if (!pending.presenceStarted) continue
+      if (await this.feed('SessionEnd', pending)) pending.presenceStarted = false
       else this.enqueuePendingEnd(pending)
     }
   }
@@ -557,14 +561,13 @@ export class CmuxVaultBridge {
     // Local ownership is never replaced by a same-conversation generation we did not write.
     // A different generation here is another publisher's binding: leave it untouched.
     if (this.binding && (this.binding.updatedAt !== binding.updated_at || this.binding.workspace !== result.workspace_id || this.binding.surface !== result.surface_id)) return
-    // Same generation we already own: keep that live object, so its vaultEnabled presence is
-    // still ended by clearAutomaticBinding() before the binding is dropped. Replacing it with a
-    // fresh vaultEnabled:false copy silently discarded the obligation to send SessionEnd.
+    // Same generation we already own: keep its accepted presence obligation until
+    // clearAutomaticBinding() delivers the end or queues it before dropping ownership.
     if (!this.binding) {
       this.binding = {
         commandKey: this.commandKey(binding), source: binding.source as VaultBinding['source'],
         path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
-        workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
+        workspace: result.workspace_id as string, surface: result.surface_id as string, presenceStarted: false,
       }
     }
     this.unsafeAutoResumeIdentity = JSON.stringify([identity.id, identity.path, identity.cwd])
@@ -616,7 +619,7 @@ export class CmuxVaultBridge {
         commandKey: this.commandKey(previous), source: previous.source as VaultBinding['source'],
         path: identity.path,
         updatedAt: previous.updated_at as number, cwd: identity.cwd,
-        workspace: observed.workspace_id as string, surface: observed.surface_id as string, vaultEnabled,
+        workspace: observed.workspace_id as string, surface: observed.surface_id as string, presenceStarted: false,
       }
     } else if (!this.matchesTarget(observed)) return
     const expectation = owned
@@ -635,7 +638,7 @@ export class CmuxVaultBridge {
       this.binding = {
         commandKey: this.commandKey(binding), source: binding.source as VaultBinding['source'],
       path: identity.path, updatedAt: binding.updated_at as number, cwd: identity.cwd,
-        workspace: result.workspace_id as string, surface: result.surface_id as string, vaultEnabled: false,
+        workspace: result.workspace_id as string, surface: result.surface_id as string, presenceStarted: false,
       }
       this.unsafeAutoResumeIdentity = JSON.stringify([identity.id, identity.path, identity.cwd])
       if (!await this.clearAutomaticBinding()) {
@@ -654,7 +657,10 @@ export class CmuxVaultBridge {
       path: identity.path, updatedAt: binding.updated_at as number,
       cwd: identity.cwd,
       workspace: result.workspace_id as string, surface: result.surface_id as string,
-      vaultEnabled,
+      // A same-session refresh must retain an earlier accepted start, even if this
+      // refresh fails. An already queued end owns its obligation independently.
+      presenceStarted: vaultEnabled && previousBinding?.presenceStarted === true
+        && previousBinding.path === identity.path && !this.pendingEnds.includes(previousBinding),
     }
     this.binding = currentBinding
     if (!binding.auto_resume) this.diagnose('approval-needed (native Review Approval required for automatic restore)')
@@ -679,7 +685,9 @@ export class CmuxVaultBridge {
     await this.retryPendingEnds()
     // Never announce a successor while a predecessor's SessionEnd is still unaccepted:
     // that would leave two live presences. The next refresh announces B once A has ended.
-    if (vaultEnabled && this.pendingEnds.length === 0) await this.feed('SessionStart', currentBinding)
+    if (vaultEnabled && this.pendingEnds.length === 0 && await this.feed('SessionStart', currentBinding)) {
+      currentBinding.presenceStarted = true
+    }
   }
 
   private async writeMetadata(identity: VaultIdentity): Promise<void> {
