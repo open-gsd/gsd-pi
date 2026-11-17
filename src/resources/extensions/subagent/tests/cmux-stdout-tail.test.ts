@@ -5,7 +5,7 @@
 // tail — every record is processed exactly once.
 
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -69,10 +69,13 @@ async function runTailScenario(
 	const client = {
 		createSplit: async () => "surface-under-test",
 		sendSurface: async (_surfaceId: string, command: string) => {
+			const launchPath = command.match(/^bash -l '([^']*)'$/);
+			assert.ok(launchPath, `wrapper bootstrap must invoke its script file, got: ${command}`);
+			const script = readFileSync(launchPath[1]!, "utf-8");
 			paths = {
-				pidPath: pidPathFromScript(command),
-				stdoutPath: stdoutPathFromScript(command),
-				exitPath: exitPathFor(pidPathFromScript(command)),
+				pidPath: pidPathFromScript(script),
+				stdoutPath: stdoutPathFromScript(script),
+				exitPath: exitPathFor(pidPathFromScript(script)),
 			};
 			void simulate(paths, { updates, banked }).catch((err) => {
 				simulateError = err;
@@ -117,16 +120,16 @@ async function runTailScenario(
 	return { result, paths: paths!, banked, updates };
 }
 
-/** The inner script publishes its wrapper pid first: `printf '%s' "$$" > '<path>'; cd ...`. */
+/** The file-backed script publishes its wrapper pid first: `printf '%s' "$$" > '<path>'; cd ...`. */
 function pidPathFromScript(script: string): string {
-	const match = script.match(/ > '\\''([^']*)'\\''; cd /);
-	assert.ok(match, `wrapper script must publish its pid, got: ${script}`);
+	const match = script.match(/^printf '%s' "\$\$" > '([^']*)'; cd /);
+	assert.ok(match, `wrapper script must publish its pid first, got: ${script}`);
 	return match[1]!;
 }
 
 /** The piped tee target: `... | tee '<stdoutPath>'`. */
 function stdoutPathFromScript(script: string): string {
-	const match = script.match(/\| tee '\\''([^']*)'\\''/);
+	const match = script.match(/\| tee '([^']*)'/);
 	assert.ok(match, `wrapper script must tee stdout, got: ${script}`);
 	return match[1]!;
 }
