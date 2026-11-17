@@ -24,7 +24,7 @@ async function capture<T extends Api>(
 ): Promise<Record<string, unknown>> {
   let payload: Record<string, unknown> | undefined;
   const result = await stream(model, context, {
-    apiKey: "diagnostic-placeholder",
+    apiKey: "test-key",
     reasoning,
     onPayload(value) {
       assert.ok(value && typeof value === "object" && !Array.isArray(value));
