@@ -795,13 +795,39 @@ function shelterFallbackProjectionTree(
 }
 
 // Degraded counterpart of restoreManagedProjectionTreeSync: rename the
-// sheltered tree back to its source. Identity/digest verification is skipped
-// because the receipt may carry a fallback identity from a degraded shelter;
-// the rename is exact by construction (the shelter is the only node we moved).
+// sheltered tree back to its source, but only after re-validating the values
+// recorded in the receipt. The shelter is the node we moved, so its fallback
+// identity and content digest must still match; a tree edited or replaced
+// while the merge ran is NOT restored as if it were the original. On any
+// mismatch we leave the shelter intact (fail-closed, surfaced by /gsd doctor)
+// rather than clobbering. A native receipt cannot be verified here because
+// plain-fs cannot reproduce native identity ({volume}:{id}) or digest ordering
+// (handle.listDirectory vs sorted readdir), so native restore that falls back
+// here stays fail-closed instead of doing a blind rename.
 function restoreFallbackProjectionTree(receipt: ManagedProjectionTreeShelterReceipt): void {
   const sourcePath = fallbackProjectionPath(receipt.targetRoot, receipt.sourcePath);
   const shelterPath = fallbackProjectionPath(receipt.targetRoot, receipt.shelterPath);
   if (!existsSync(shelterPath)) return;
+  if (!receipt.degraded) {
+    throw new Error(
+      "degraded projection restore cannot verify a native shelter receipt; leaving the shelter intact",
+    );
+  }
+  const stat = lstatSync(shelterPath);
+  if (stat.isSymbolicLink()) throw new Error("degraded projection restore shelter is a symbolic link");
+  if (!stat.isDirectory()) throw new Error("degraded projection restore shelter is not a directory");
+  // A plain-fs rename rewrites the reported {dev}:{ino}, so the recorded
+  // identity is not comparable across the shelter round trip; the content
+  // digest is the comparable snapshot that proves the sheltered tree is still
+  // byte-exact. Identity is left for native exact restore, where it is stable.
+  if (fallbackProjectionContentDigest(shelterPath, "tree") !== receipt.contentDigest) {
+    throw new Error("degraded projection restore content digest mismatch");
+  }
+  // If a concurrent writer recreated the source path while the merge ran, do
+  // not overwrite it: leave the shelter intact for /gsd doctor to reconcile.
+  if (existsSync(sourcePath)) {
+    throw new Error("degraded projection restore: source path reappeared; shelter left intact");
+  }
   const sourceParent = dirname(sourcePath);
   if (sourceParent !== gsdProjectionRoot(receipt.targetRoot) && !existsSync(sourceParent)) {
     mkdirSync(sourceParent, { recursive: true });

@@ -171,3 +171,78 @@ test("exhausted resolve-evidence degrades to the lock-free resolution", () => {
   ) as unknown[];
   assert.equal(remaining.length, 0, "record retired after degraded resolve");
 });
+
+test("native shelter receipt restored on exhaustion stays fail-closed (no blind rename)", () => {
+  const rootPath = setupRoot();
+  const shelterPath = join(rootPath, "shelter", "M001");
+  mkdirSync(shelterPath, { recursive: true });
+  writeFileSync(join(shelterPath, "ROADMAP.md"), "native\n");
+  // A native receipt ({volume}:{id} identity, native digest) cannot be
+  // verified by the plain-fs fallback, so the fallback restore must leave the
+  // shelter intact instead of renaming an unverified tree back.
+  const nativeReceipt = Object.freeze({
+    targetRoot: base,
+    sourcePath: "milestones/M001",
+    shelterPath: "shelter/M001",
+    identity: "C:\\volume:123",
+    contentDigest: "sha256:native",
+    degraded: false,
+  });
+  exhaustedBoundary();
+  assert.throws(
+    () => runIgnoringFenceReleaseNoise(() => restoreManagedProjectionTreeSync(nativeReceipt)),
+    /cannot verify a native shelter receipt/,
+    "native receipt routed to the fallback stays fail-closed",
+  );
+  assert.ok(existsSync(join(shelterPath, "ROADMAP.md")), "shelter left intact on fail-closed restore");
+  assert.ok(!existsSync(join(rootPath, "milestones", "M001")), "source not clobbered");
+});
+
+test("degraded restore fails closed on content digest mismatch, shelter intact", () => {
+  const rootPath = setupRoot();
+  const shelterPath = join(rootPath, "shelter", "M001");
+  mkdirSync(shelterPath, { recursive: true });
+  writeFileSync(join(shelterPath, "ROADMAP.md"), "tampered after shelter\n");
+  // Receipt recorded a digest that no longer matches the shelter contents.
+  const degradedReceipt = Object.freeze({
+    targetRoot: base,
+    sourcePath: "milestones/M001",
+    shelterPath: "shelter/M001",
+    identity: "2:1",
+    contentDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    degraded: true,
+  });
+  _setManagedProjectionRootBoundaryForTest(null);
+  assert.throws(
+    () => restoreManagedProjectionTreeSync(degradedReceipt),
+    /content digest mismatch/,
+    "edited tree is not restored as the original",
+  );
+  assert.ok(existsSync(join(shelterPath, "ROADMAP.md")), "shelter left intact on mismatch");
+  assert.ok(!existsSync(join(rootPath, "milestones", "M001")), "source not restored");
+});
+
+test("degraded restore fails closed when a concurrent writer recreated the source", () => {
+  const rootPath = setupRoot();
+  const source = join(rootPath, "milestones", "M001");
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, "ROADMAP.md"), "content\n");
+  const shelterPath = join(rootPath, "shelter", "M001");
+  exhaustedBoundary();
+  let receipt: ReturnType<typeof shelterManagedProjectionTreeSync> | undefined;
+  runIgnoringFenceReleaseNoise(() => {
+    receipt = shelterManagedProjectionTreeSync(base, source, shelterPath);
+  });
+  assert.ok(receipt?.degraded);
+  _setManagedProjectionRootBoundaryForTest(null);
+  // A concurrent writer recreates the source path while the merge runs.
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, "NEW.md"), "written during merge\n");
+  assert.throws(
+    () => restoreManagedProjectionTreeSync(receipt!),
+    /source path reappeared; shelter left intact/,
+    "restore does not overwrite a third-party occupant",
+  );
+  assert.ok(existsSync(join(source, "NEW.md")), "third-party occupant preserved");
+  assert.ok(existsSync(join(shelterPath, "ROADMAP.md")), "shelter preserved for /gsd doctor");
+});
