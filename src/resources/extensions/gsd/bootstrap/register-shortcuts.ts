@@ -95,6 +95,21 @@ export function registerShortcuts(pi: ExtensionAPI): void {
     handler: openNotificationsOverlay,
   });
 
+  const openAttentionOverlay = async (ctx: ExtensionContext) => {
+    const { showAttentionOverlay } = await import("../attention-overview.js");
+    await showAttentionOverlay(ctx, await getProjectRoot());
+  };
+
+  pi.registerShortcut(Key.ctrlAlt(GSD_SHORTCUTS.attention.key), {
+    description: shortcutDesc(GSD_SHORTCUTS.attention.action, GSD_SHORTCUTS.attention.command),
+    handler: openAttentionOverlay,
+  });
+
+  pi.registerShortcut(Key.alt(GSD_SHORTCUTS.attention.key), {
+    description: shortcutDesc(`${GSD_SHORTCUTS.attention.action} (fallback)`, GSD_SHORTCUTS.attention.command),
+    handler: openAttentionOverlay,
+  });
+
   pi.registerShortcut(Key.ctrlAlt(GSD_SHORTCUTS.parallel.key), {
     description: shortcutDesc(GSD_SHORTCUTS.parallel.action, GSD_SHORTCUTS.parallel.command),
     handler: openParallelOverlay,

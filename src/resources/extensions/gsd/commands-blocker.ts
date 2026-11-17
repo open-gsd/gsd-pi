@@ -62,7 +62,7 @@ function describe(snapshot: Snapshot): string {
  * responses nor custom()'s return value grant approval.
  */
 export async function approveInNativeTerminal(
-  ctx: ExtensionCommandContext,
+  ctx: Pick<ExtensionCommandContext, "ui">,
   review: string,
   title = "Clear this auto-pause blocker only?",
   footer = "Press y to approve, n or Escape to cancel. Nothing resumes or dispatches.",
@@ -88,7 +88,7 @@ export async function approveInNativeTerminal(
 }
 
 export async function handleBlocker(
-  args: string, ctx: ExtensionCommandContext, basePath: string,
+  args: string, ctx: Pick<ExtensionCommandContext, "cwd" | "ui">, basePath: string,
 ): Promise<void> {
   const parts = args.trim().split(/\s+/);
   const [action, blockerId, disposition, ...reasonParts] = parts;

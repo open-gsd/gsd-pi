@@ -70,3 +70,8 @@ export {
 	type ThemeColor,
 	stopThemeWatcher,
 } from "@gsd/pi-coding-agent/theme/theme.js";
+
+// Native attention overview (#2932). Read-only: no mutation, approval or RPC authority.
+export { AttentionOverlayController, type AttentionReader, type AttentionState } from "./modes/interactive/attention-overlay.js";
+export { AttentionOverlayComponent, OVERLAY_MAX_HEIGHT_FRACTION, type AttentionKeybindings } from "./modes/interactive/attention-overlay-component.js";
+export { createAttentionReader, type ReadSeam, type ReadRows, type AttentionSnapshotRead } from "./modes/interactive/attention-reader.js";

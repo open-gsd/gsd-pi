@@ -19,7 +19,7 @@ export interface GsdCommandDefinition {
 type CompletionMap = Record<string, readonly GsdCommandDefinition[]>;
 
 export const GSD_COMMAND_DESCRIPTION =
-  "GSD — Git Ship Done: /gsd help|start|templates|next|auto|stop|pause|status|widget|visualize|brief|report|queue|quick|discuss|capture|triage|dispatch|history|undo|undo-task|reset-slice|rate|skip|export|cleanup|closeout|recover|rebuild|db|blocker|model|mode|prefs|config|keys|hooks|run-hook|skill-health|doctor|debug|logs|forensics|changelog|migrate|remote|steer|knowledge|memory|new-milestone|new-project|parallel|cmux|park|unpark|discard|init|setup|onboarding|inspect|extensions|update|upgrade|fast|mcp|rethink|workflow|codebase|notifications|ship|do|usage|context|session-report|backlog|pr-branch|add-tests|scan|language|worktree|eval-review";
+  "GSD — Git Ship Done: /gsd help|start|templates|next|auto|stop|pause|status|widget|visualize|brief|report|queue|quick|discuss|capture|triage|dispatch|history|undo|undo-task|reset-slice|rate|skip|export|cleanup|closeout|recover|rebuild|db|blocker|attention|model|mode|prefs|config|keys|hooks|run-hook|skill-health|doctor|debug|logs|forensics|changelog|migrate|remote|steer|knowledge|memory|new-milestone|new-project|parallel|cmux|park|unpark|discard|init|setup|onboarding|inspect|extensions|update|upgrade|fast|mcp|rethink|workflow|codebase|notifications|ship|do|usage|context|session-report|backlog|pr-branch|add-tests|scan|language|worktree|eval-review";
 
 export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "help", desc: "Categorized command reference with descriptions" },
@@ -40,6 +40,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "dispatch", desc: "Dispatch a specific phase directly" },
   { cmd: "uat-answer", desc: "Answer an open subjective UAT question (accept or reject); only you can record it" },
   { cmd: "blocker", desc: "Inspect an auto-pause blocker, or resolve it with human terminal evidence (clear only; no resume)" },
+  { cmd: "attention", desc: "Open the read-only attention overview (blockers, pauses, open questions); no approval or resolution" },
   { cmd: "history", desc: "View execution history" },
   { cmd: "undo", desc: "Revert last completed unit" },
   { cmd: "undo-task", desc: "Reset a specific task's completion state (DB + markdown)" },
