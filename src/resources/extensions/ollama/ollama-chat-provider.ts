@@ -25,6 +25,7 @@ import {
 	type Tool,
 	type ToolCall,
 	type Usage,
+	calculateCost,
 	EventStream,
 } from "@gsd/pi-ai";
 import { chat } from "./ollama-client.js";
@@ -181,7 +182,7 @@ export function streamOllamaChat(
 					if (thinkParser) processChunks(thinkParser.flush());
 					endBlock();
 
-					output.usage = buildUsage(chunk);
+					output.usage = buildUsage(model, chunk);
 					output.inferenceMetrics = extractMetrics(chunk);
 					// Preserve "toolUse" if tool calls were processed
 					if (output.stopReason !== "toolUse") {
@@ -420,17 +421,26 @@ function mapStopReason(doneReason?: string): StopReason {
 	}
 }
 
-function buildUsage(chunk: OllamaChatResponse): Usage {
+function buildUsage(model: Model<Api>, chunk: OllamaChatResponse): Usage {
 	const input = chunk.prompt_eval_count ?? 0;
 	const outputTokens = chunk.eval_count ?? 0;
-	return {
+	const usage: Usage = {
 		input,
 		output: outputTokens,
+		// The native /api/chat reports no cache token counts, so cache
+		// fields stay zero — cached-input discounts cannot be priced from
+		// this API. eval_count includes thinking tokens, which ollama
+		// bills as output, so the output mapping is billing-correct.
 		cacheRead: 0,
 		cacheWrite: 0,
 		totalTokens: input + outputTokens,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
+	// Same contract as every pi-ai provider (anthropic, google, openai-*,
+	// mistral, bedrock): rates travel on the model, cost is derived per
+	// response.
+	calculateCost(model, usage);
+	return usage;
 }
 
 function extractMetrics(chunk: OllamaChatResponse): InferenceMetrics | undefined {
