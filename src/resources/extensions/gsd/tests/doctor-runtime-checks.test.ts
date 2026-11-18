@@ -926,8 +926,8 @@ test(
     );
     assert.throws(
       () => resolveUnboundProjectionEvidence(dir, retainedRows[0]!.evidenceId, "discard", "not-reviewed"),
-      (error: unknown) => (error as Error).message === exhaustion,
-      "the native resolve lane keeps failing loud while the wedge holds",
+      (error: unknown) => /consent does not match/u.test((error as Error).message),
+      "the degraded resolve lane stays fail-closed on an unreviewed consent while the wedge holds",
     );
 
     // A later pass with publication healthy again: the idempotent replay
