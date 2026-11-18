@@ -268,7 +268,7 @@ test("interactive session notifies (once) about unpriced cloud models", async ()
 	assert.equal(notifyCalls.length, 1, "interactive unpriced-model notice must be one-time per process");
 });
 
-test("headless session writes unpriced cloud models to stderr (worker forensics channel)", async () => {
+test("headless session writes unpriced cloud models to stderr (worker forensics channel)", async (t) => {
 	// Distinct unpriced model so the process-level once-set from the
 	// interactive test cannot swallow this emission.
 	tagCatalog = ["glm-5.3-flash:cloud", "brand-new-model:cloud"];
@@ -283,12 +283,12 @@ test("headless session writes unpriced cloud models to stderr (worker forensics 
 		stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
 		return true;
 	}) as typeof process.stderr.write;
-	try {
-		// hasUI: false identifies headless (ctx installs no UI bridge).
-		await handlers[0]({}, { hasUI: false, ui: undefined });
-	} finally {
+	t.after(() => {
 		process.stderr.write = originalWrite;
-	}
+	});
+
+	// hasUI: false identifies headless (ctx installs no UI bridge).
+	await handlers[0]({}, { hasUI: false, ui: undefined });
 
 	const stderr = stderrChunks.join("");
 	assert.ok(
@@ -299,7 +299,7 @@ test("headless session writes unpriced cloud models to stderr (worker forensics 
 	assert.equal(stderr.includes("glm-5.3-flash"), false);
 });
 
-test("no cost notices when the daemon has no models (non-ollama users stay noise-free)", async () => {
+test("no cost notices when the daemon has no models (non-ollama users stay noise-free)", async (t) => {
 	tagCatalog = [];
 
 	const { pi, calls } = makeMockPi();
@@ -312,11 +312,11 @@ test("no cost notices when the daemon has no models (non-ollama users stay noise
 		stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
 		return true;
 	}) as typeof process.stderr.write;
-	try {
-		await handlers[0]({}, { hasUI: false, ui: undefined });
-	} finally {
+	t.after(() => {
 		process.stderr.write = originalWrite;
-	}
+	});
+
+	await handlers[0]({}, { hasUI: false, ui: undefined });
 
 	// Scope the assertion to cost notices — unrelated stderr output from
 	// the extension is not this test's subject.
