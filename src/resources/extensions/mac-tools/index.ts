@@ -334,7 +334,6 @@ export default function (pi: ExtensionAPI) {
 			"Returns { accessibilityEnabled, screenRecordingEnabled }. Accessibility is required for UI automation; " +
 			"Screen Recording is required for mac_screenshot. Both are granted in System Settings > Privacy & Security.",
 		promptGuidelines: [
-			"Run this first if any mac tool returns a permission error.",
 		],
 		parameters: Type.Object({}),
 
@@ -559,9 +558,7 @@ export default function (pi: ExtensionAPI) {
 			"- 'focused': returns the focused element; no criteria needed.\n" +
 			"'app' accepts an app name (e.g. 'Finder') or bundle ID (e.g. 'com.apple.Finder').",
 		promptGuidelines: [
-			"Prefer for targeted element search — use role/title/value criteria to narrow results.",
 			"Use mode:focused to check the current focus target without search criteria.",
-			"Use mac_get_tree instead of mode:tree when you just need to understand app structure.",
 		],
 		parameters: Type.Object({
 			app: Type.String({ description: "Application name or bundle identifier" }),
@@ -691,8 +688,6 @@ export default function (pi: ExtensionAPI) {
 			"Each line: `role \"title\" [value]` with 2-space indent per depth level. " +
 			"Omits title/value when nil or empty.",
 		promptGuidelines: [
-			"Use for understanding app UI structure — start with low limits and increase if needed.",
-			"Prefer mac_find search mode when you know what you're looking for.",
 			"Check the truncation note to know if the tree was cut short.",
 		],
 		parameters: Type.Object({
@@ -748,8 +743,6 @@ export default function (pi: ExtensionAPI) {
 			"Finds the first element matching the given criteria (role, title, value, identifier) and clicks it. " +
 			"At least one criterion is required. Returns the clicked element's attributes.",
 		promptGuidelines: [
-			"Verify the click worked by reading the resulting state with mac_find or mac_read.",
-			"Use mac_find first to discover the right role/title/value criteria before clicking.",
 		],
 		parameters: Type.Object({
 			app: Type.String({ description: "Application name or bundle identifier" }),
@@ -805,7 +798,6 @@ export default function (pi: ExtensionAPI) {
 			"Returns the actual value after setting (read-back verification). " +
 			"At least one criterion is required.",
 		promptGuidelines: [
-			"Read back the value after typing to verify — the return value includes actual content.",
 			"Target text fields/areas by role (AXTextArea, AXTextField) for reliability.",
 		],
 		parameters: Type.Object({
@@ -864,9 +856,7 @@ export default function (pi: ExtensionAPI) {
 			"Returns the screenshot as an image content block for visual analysis, alongside text metadata " +
 			"(dimensions and format). Requires Screen Recording permission — use mac_check_permissions to verify.",
 		promptGuidelines: [
-			"Use for visual verification when accessibility attributes aren't sufficient.",
 			"Prefer nominal resolution unless retina detail is needed — retina doubles payload size.",
-			"Requires Screen Recording permission — run mac_check_permissions first if screenshot fails.",
 		],
 		parameters: Type.Object({
 			windowId: Type.Number({ description: "Window ID from mac_list_windows output" }),
@@ -915,7 +905,6 @@ export default function (pi: ExtensionAPI) {
 			"AXValue subtypes (CGPoint, CGSize, CGRect, CFRange) are automatically unpacked to structured dicts. " +
 			"Use 'attribute' for a single attribute or 'attributes' for multiple. At least one search criterion is required.",
 		promptGuidelines: [
-			"Use to verify state after actions — read AXValue to confirm text was typed, AXEnabled to check if a button is active.",
 		],
 		parameters: Type.Object({
 			app: Type.String({ description: "Application name or bundle identifier" }),
