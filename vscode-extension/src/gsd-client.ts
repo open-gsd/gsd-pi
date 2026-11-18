@@ -15,6 +15,7 @@ import type {
 	ThinkingLevel,
 } from "@opengsd/contracts" with { "resolution-mode": "import" };
 import { buildGsdClientSpawnPlan } from "./gsd-client-spawn.js";
+import { stopChildProcessTree } from "./process-tree.js";
 
 /**
  * Mirrors the RPC command/response protocol from the GSD agent.
@@ -224,11 +225,11 @@ export class GsdClient implements vscode.Disposable {
 		this.rejectAllPending("GSD client stopped. Restart the agent and retry.");
 		this._onConnectionChange.fire(false);
 		if (!proc) return;
-		proc.kill("SIGTERM");
+		stopChildProcessTree(proc, "SIGTERM");
 
 		await new Promise<void>((resolve) => {
 			const timeout = setTimeout(() => {
-				proc.kill("SIGKILL");
+				stopChildProcessTree(proc, "SIGKILL");
 				resolve();
 			}, 2000);
 			proc.on("exit", () => {

@@ -472,7 +472,7 @@ function throwStaleWorktreeRemovalError(wtPath: string, error: unknown): never {
   if (code === "EPERM" || code === "EBUSY") {
     throw new GSDError(
       GSD_GIT_ERROR,
-      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path and retry.`,
+      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path, and end any leftover shell or tool process (for example bash, cmd, python) whose working directory is inside it, then retry.`,
       { cause: error as Error },
     );
   }

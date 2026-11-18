@@ -40,6 +40,7 @@ import {
   removeSessionStatus,
 } from "./session-status-io.js";
 import { hasFileConflict } from "./slice-parallel-conflict.js";
+import { terminateProcessTree } from "@gsd/pi-coding-agent";
 import { getErrorMessage } from "./error-utils.js";
 import { selectConflictFreeBatch } from "./uok/execution-graph.js";
 
@@ -615,9 +616,9 @@ export function stopSliceParallel(): void {
   for (const worker of sliceState.workers.values()) {
     try {
       if (worker.process) {
-        worker.process.kill("SIGTERM");
+        terminateProcessTree(worker.process, "SIGTERM");
       } else if (worker.state === "running" && isRecoveredSliceWorkerAlive(worker)) {
-        process.kill(worker.pid, "SIGTERM");
+        terminateProcessTree(worker.pid, "SIGTERM");
       }
     } catch { /* already dead */ }
     worker.cleanup?.();

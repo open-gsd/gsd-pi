@@ -20,7 +20,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@gsd/pi-agent-core";
 import type { Message } from "@gsd/pi-ai";
 import { StringEnum, Type } from "@gsd/pi-ai";
-import { type ExtensionAPI, getMarkdownTheme } from "@gsd/pi-coding-agent";
+import { type ExtensionAPI, getMarkdownTheme, terminateProcessTree } from "@gsd/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@gsd/pi-tui";
 import { formatTokenCount } from "../shared/mod.js";
 import { getCurrentPhase } from "../shared/gsd-phase-state.js";
@@ -100,7 +100,7 @@ async function stopLiveSubagents(): Promise<void> {
 
 	for (const proc of active) {
 		try {
-			proc.kill("SIGTERM");
+			terminateProcessTree(proc, "SIGTERM");
 		} catch {
 			/* ignore */
 		}
@@ -123,7 +123,7 @@ async function stopLiveSubagents(): Promise<void> {
 	for (const proc of active) {
 		if (proc.exitCode === null) {
 			try {
-				proc.kill("SIGKILL");
+				terminateProcessTree(proc, "SIGKILL");
 			} catch {
 				/* ignore */
 			}
@@ -1199,9 +1199,9 @@ async function runSingleAgent(
 			if (signal) {
 				const killProc = () => {
 					wasAborted = true;
-					proc.kill("SIGTERM");
+					terminateProcessTree(proc, "SIGTERM");
 					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
+						if (!proc.killed) terminateProcessTree(proc, "SIGKILL");
 					}, 5000);
 				};
 				if (signal.aborted) killProc();

@@ -19,7 +19,7 @@ import type {
   ExtensionCommandContext,
   SessionMessageEntry,
 } from "@gsd/pi-coding-agent";
-import { setBeforeAgentStartContext } from "@gsd/pi-coding-agent";
+import { setBeforeAgentStartContext, terminateProcessTree } from "@gsd/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 
 import { GSD_AUTO_MODE, recordAutoMode } from "../shared/gsd-session-metadata.js";
@@ -1177,7 +1177,7 @@ export function stopAutoRemote(projectRoot: string): {
 
   // Send SIGTERM — the auto-mode process has a handler that clears the lock and exits
   try {
-    process.kill(lock.pid, "SIGTERM");
+    terminateProcessTree(lock.pid, "SIGTERM");
     return { found: true, pid: lock.pid };
   } catch (err) {
     return { found: false, error: (err as Error).message };
@@ -1214,7 +1214,7 @@ export function forceStopAutoRemote(projectRoot: string): {
   }
 
   try {
-    process.kill(lock.pid, "SIGTERM");
+    terminateProcessTree(lock.pid, "SIGTERM");
     // Poll for graceful exit before escalating. Synchronous sleep keeps this
     // function sync for its callers (Atomics.wait times out with no notify).
     const deadline = Date.now() + FORCE_STOP_GRACE_MS;
@@ -1223,7 +1223,7 @@ export function forceStopAutoRemote(projectRoot: string): {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, FORCE_STOP_POLL_MS);
     }
     if (isLockProcessAlive(lock)) {
-      process.kill(lock.pid, "SIGKILL");
+      terminateProcessTree(lock.pid, "SIGKILL");
       // #2532: clearLock now only retires verifiably-dead holders, and a
       // SIGKILLed pid can stay observable through kernel teardown (or, in
       // tests, via mocked liveness). The stop decision was made above, so
