@@ -182,12 +182,18 @@ function verificationFailureSummary(
 function recordDurableVerificationRetry(
   session: AutoSession,
   failureContext: string,
+  verifyContract?: string,
 ): VerificationResult {
   const unit = session.currentUnit;
   if (!unit) throw new Error("Task verification retry requires a current unit");
   if (session.pendingVerificationRetry?.unitId === unit.id) return "retry";
   const attempt = spendUnitBudget(session.unclaimedUnitBudgets, verificationBudget(unit.type, unit.id));
-  setVerificationRetry(session, unit.type, { unitId: unit.id, failureContext, attempt });
+  setVerificationRetry(session, unit.type, {
+    unitId: unit.id,
+    failureContext,
+    attempt,
+    ...(verifyContract ? { verifyContract } : {}),
+  });
   return "retry";
 }
 
@@ -941,7 +947,7 @@ export async function runPostUnitVerification(
         }),
       }, "verification-drift", recordAbort);
       if (recovery === "abort") return "abort";
-      return recordDurableVerificationRetry(s, failureContext);
+      return recordDurableVerificationRetry(s, failureContext, taskPlanVerify);
     }
     let result: VerificationGateResult;
     if (unresolvedExplicitTargets) {
@@ -1472,6 +1478,7 @@ export async function runPostUnitVerification(
         failureContext,
         ...(failureSignature ? { signature: failureSignature } : {}),
         attempt: nextAttempt,
+        ...(taskPlanVerify ? { verifyContract: taskPlanVerify } : {}),
       });
       const failedCmds = result.checks
         .filter((c) => c.exitCode !== 0)

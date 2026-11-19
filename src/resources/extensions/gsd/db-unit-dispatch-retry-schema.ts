@@ -8,7 +8,9 @@ export function hasUnitDispatchRetrySchema(db: DbAdapter): boolean {
   const table = db.prepare(
     "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'unit_dispatch_retries'",
   ).get();
-  return table != null && columnExists(db, "unit_dispatch_retries", "signature");
+  return table != null
+    && columnExists(db, "unit_dispatch_retries", "signature")
+    && columnExists(db, "unit_dispatch_retries", "verify_contract");
 }
 
 /**
@@ -24,6 +26,7 @@ export function createUnitDispatchRetrySchema(db: DbAdapter): void {
       attempt INTEGER NOT NULL CHECK (attempt >= 1),
       created_at TEXT NOT NULL,
       signature TEXT,
+      verify_contract TEXT,
       FOREIGN KEY (dispatch_id) REFERENCES unit_dispatches(id)
     )
   `);
@@ -33,5 +36,14 @@ export function createUnitDispatchRetrySchema(db: DbAdapter): void {
     "unit_dispatch_retries",
     "signature",
     "ALTER TABLE unit_dispatch_retries ADD COLUMN signature TEXT",
+  );
+  // A database that got the table before a retry was tied to its Verify
+  // contract. Existing rows stay NULL so their historical failure context is
+  // preserved; readers derive the contract from the recorded failure instead.
+  ensureColumn(
+    db,
+    "unit_dispatch_retries",
+    "verify_contract",
+    "ALTER TABLE unit_dispatch_retries ADD COLUMN verify_contract TEXT",
   );
 }
