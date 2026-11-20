@@ -184,7 +184,7 @@
     "discord.js": "^14.26.4",
     "extract-zip": "^2.0.1",
     "get-east-asian-width": "^1.6.0",
-    "glob": "^13.0.1",
+    "glob": "^14.0.2",
     "highlight.js": "^10.7.3",
     "hosted-git-info": "^9.0.2",
     "http-proxy-agent": "^7.0.2",
