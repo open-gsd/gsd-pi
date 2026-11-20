@@ -300,6 +300,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `observation_mask_turns`: number — keep this many recent turns verbatim (1-50). Default: `8`.
   - `compaction_threshold_percent`: number — show a soft context warning at this fraction of the context window (0.5-0.95). Lower values warn earlier so operators can compact manually before drift accumulates. Default: `0.60`.
   - `tool_result_max_chars`: number — max chars per tool result in GSD sessions (200-10000). Default: `800`.
+  - `superseded_injections`: `"keep"` | `"drop"` — keep (default) leaves older GSD context-injection messages in the provider payload so the KV prefix cache stays byte-stable and the whole history is reused; memory blocks unchanged between turns are skipped upstream (content-addressed reinjection), so identical blocks never accumulate. `drop` restores the legacy filter that removes all but the latest injection — saves input tokens but re-prefills from the first removed injection offset. Compaction re-roots the history either way.
 
 - `auto_visualize`: boolean — show a visualizer hint after each milestone completion in auto-mode. Default: `false`.
 

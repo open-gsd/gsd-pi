@@ -1109,6 +1109,10 @@ export function validatePreferences(preferences: GSDPreferences): {
         if (typeof chars === "number" && chars >= 200 && chars <= 10000) validCm.tool_result_max_chars = chars;
         else errors.push("context_management.tool_result_max_chars must be a number between 200 and 10000");
       }
+      if (cm.superseded_injections !== undefined) {
+        if (cm.superseded_injections === "keep" || cm.superseded_injections === "drop") validCm.superseded_injections = cm.superseded_injections;
+        else errors.push("context_management.superseded_injections must be 'keep' or 'drop'");
+      }
 
       if (Object.keys(validCm).length > 0) {
         validated.context_management = validCm as any;
