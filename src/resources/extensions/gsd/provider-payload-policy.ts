@@ -101,7 +101,10 @@ function applyContextInjectionFilter(
   // is never re-injected, so nothing accumulates in the payload; the
   // compaction pass already re-roots the history when it summarizes.
   // `superseded_injections: "drop"` restores the legacy token-saving filter
-  // for sessions without KV prefix caching (e.g. stateless API providers).
+  // for endpoints without active prefix caching (aggregator routes without
+  // cache-aware routing, cache-disabled deployments) or sessions whose memory
+  // block changes every turn — stateless HTTP transport still serves a
+  // server-side prefix cache (OpenAI/Gemini implicit, Anthropic breakpoints).
   if (config?.superseded_injections !== "drop") return;
   if (Array.isArray(payload.messages)) {
     payload.messages = filterSupersededContextInjections(payload.messages as MessagePayload);

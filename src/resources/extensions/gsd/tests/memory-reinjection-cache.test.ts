@@ -4,12 +4,18 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   memoryBlockContentHash,
   resetMemoryReinjectionState,
   shouldSkipMemoryReinjection,
 } from "../bootstrap/system-context.ts";
+import { registerHooks } from "../bootstrap/register-hooks.ts";
+import { closeDatabase } from "../gsd-db.ts";
+import { invalidateAllCaches } from "../cache.ts";
+import { cleanup, makeTempRepo } from "./test-utils.ts";
 import { applyProviderPayloadPolicy } from "../provider-payload-policy.js";
 import { GSD_CONTEXT_MESSAGE_SENTINEL } from "../constants.js";
 import type { ProviderPayloadPolicyDeps } from "../provider-payload-policy.js";
@@ -68,4 +74,40 @@ test("superseded_injections: drop restores the legacy filter", () => {
   applyProviderPayloadPolicy({ payload, deps: policyDeps({ superseded_injections: "drop" }) });
   assert.equal(payload.messages.length, 2, "drop must remove the superseded injection");
   assert.ok(String((payload.messages[1] as { content: { text: string }[] }).content[0].text).includes("second injection"));
+});
+
+test("session_before_compact clears reinjection hashes when compaction proceeds", async (t) => {
+  const project = realpathSync(makeTempRepo("gsd-memory-compact-"));
+  const previousCwd = process.cwd();
+  const previousGsdHome = process.env.GSD_HOME;
+  process.env.GSD_HOME = join(project, "home");
+  mkdirSync(process.env.GSD_HOME, { recursive: true });
+  process.chdir(project);
+
+  t.after(() => {
+    process.chdir(previousCwd);
+    if (previousGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = previousGsdHome;
+    resetMemoryReinjectionState();
+    closeDatabase();
+    invalidateAllCaches();
+    cleanup(project);
+  });
+
+  const handlers = new Map<string, Function>();
+  registerHooks({ on(event: string, handler: Function) { handlers.set(event, handler); } } as any, []);
+  const compact = handlers.get("session_before_compact")!;
+
+  const key = "compact-session";
+  assert.equal(shouldSkipMemoryReinjection(key, "memory block"), false);
+  assert.equal(shouldSkipMemoryReinjection(key, "memory block"), true);
+
+  const result = await compact(
+    { preparation: { messagesToSummarize: [{ role: "user", content: "hello" }], turnPrefixMessages: [] } },
+    { cwd: project, ui: { notify() {}, setWidget() {} } },
+  );
+  assert.notEqual(result?.cancel, true, "compaction must proceed without active GSD state");
+
+  // Compaction re-roots history; the next turn must re-inject even an unchanged block.
+  assert.equal(shouldSkipMemoryReinjection(key, "memory block"), false);
 });

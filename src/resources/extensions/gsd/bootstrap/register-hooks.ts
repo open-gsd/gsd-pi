@@ -1669,6 +1669,15 @@ export function registerHooks(
         "warning",
       );
     }
+    // Compaction is proceeding (no cancel above): history re-roots into a
+    // summary, so the last injected memory block may no longer be in the
+    // payload. Drop the per-session reinjection hashes so the next
+    // before_agent_start re-injects the block even if its content is
+    // unchanged (PR #3202 content-addressed skip). Placed before the
+    // milestone/slice early-return below so it runs on every compaction.
+    const { resetMemoryReinjectionState } = await import("./system-context.js");
+    resetMemoryReinjectionState();
+
     const { ensureDbOpen } = await import("./dynamic-tools.js");
     await ensureDbOpen(basePath);
     const state = await deriveGsdState(basePath);
