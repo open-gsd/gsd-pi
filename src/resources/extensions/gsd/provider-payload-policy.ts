@@ -84,12 +84,28 @@ function applyContextManagement(
   deps: ProviderPayloadPolicyDeps,
 ): void {
   const config = deps.loadContextManagementConfig();
-  applyContextInjectionFilter(payload);
+  applyContextInjectionFilter(payload, config);
   applyObservationBudget(payload, config, deps.isAutoActive());
   applyDisplayTruncation(payload, config);
 }
 
-function applyContextInjectionFilter(payload: Record<string, unknown>): void {
+function applyContextInjectionFilter(
+  payload: Record<string, unknown>,
+  config: ContextManagementConfig | undefined,
+): void {
+  // Default: keep superseded context injections (#cache-stability).
+  // Removal retroactively rewrites payload positions, so the provider KV
+  // prefix cache diverges at the first removed injection (~system/tool
+  // offset) and re-prefills the whole history for a small block change.
+  // With content-addressed reinjection upstream, an unchanged memory block
+  // is never re-injected, so nothing accumulates in the payload; the
+  // compaction pass already re-roots the history when it summarizes.
+  // `superseded_injections: "drop"` restores the legacy token-saving filter
+  // for endpoints without active prefix caching (aggregator routes without
+  // cache-aware routing, cache-disabled deployments) or sessions whose memory
+  // block changes every turn — stateless HTTP transport still serves a
+  // server-side prefix cache (OpenAI/Gemini implicit, Anthropic breakpoints).
+  if (config?.superseded_injections !== "drop") return;
   if (Array.isArray(payload.messages)) {
     payload.messages = filterSupersededContextInjections(payload.messages as MessagePayload);
   }

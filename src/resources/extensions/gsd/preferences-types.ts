@@ -27,6 +27,15 @@ export interface ContextManagementConfig {
   observation_mask_turns?: number;        // default: 8, range: 1-50
   compaction_threshold_percent?: number;  // default: 0.60, range: 0.5-0.95
   tool_result_max_chars?: number;         // default: 800, range: 200-10000
+  /**
+   * Superseded context-injection handling. Default: "keep" (#cache-stability):
+   * older memory/guided/forensics injection messages stay in the payload, so
+   * the provider KV prefix cache stays byte-stable and the whole history is
+   * reused. "drop" restores the legacy filter that removes all but the latest
+   * injection — saves input tokens but diverges the prefix cache at the first
+   * removed injection. Compaction re-roots the history either way.
+   */
+  superseded_injections?: "keep" | "drop";
 }
 
 /**

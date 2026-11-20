@@ -1,5 +1,6 @@
 // Project/App: gsd-pi
 // File Purpose: System prompt and hidden context bootstrap for GSD sessions.
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -222,6 +223,47 @@ function getContextSessionPart(ctx: ExtensionContext): string {
   return "process";
 }
 
+/**
+ * Content-addressed memory reinjection (#cache-stability).
+ *
+ * `loadMemoryBlock` renders the always-on critical set plus prompt-relevant
+ * hits; when the DB ranking/content is unchanged the rendered block is
+ * byte-identical to the previous turn's injection. Re-injecting an identical
+ * block adds a new context message and, together with the provider payload
+ * policy's superseded-injection filter, retroactively rewrites older payload
+ * positions — the provider KV prefix cache then diverges at the first removed
+ * injection (~system/tool offset) and re-prefills the whole history. Skipping
+ * an identical block keeps the previous injection as the payload's last
+ * context message, so the prefix stays byte-stable and the engine reuses it.
+ *
+ * Session-scoped: one hash per session key (session id / session file /
+ * process), mirroring `getContextMaintenanceKey` scoping. State is in-memory
+ * only; a process restart re-injects once (the engine's cache is cold then).
+ */
+const memoryReinjectionHashes = new Map<string, string>();
+
+export function memoryBlockContentHash(memoryBlock: string): string {
+  return createHash("sha256").update(memoryBlock.trim()).digest("hex");
+}
+
+/**
+ * Returns true when `blockHash` equals the block last injected for this
+ * session, so the injection should be skipped. Otherwise records the hash and
+ * returns false (the block will be injected and becomes the session's last
+ * injected content).
+ */
+export function shouldSkipMemoryReinjection(sessionKey: string, blockHash: string): boolean {
+  const last = memoryReinjectionHashes.get(sessionKey);
+  if (last === blockHash) return true;
+  memoryReinjectionHashes.set(sessionKey, blockHash);
+  return false;
+}
+
+/** Test-only: clears the session-scoped reinjection state. */
+export function resetMemoryReinjectionState(): void {
+  memoryReinjectionHashes.clear();
+}
+
 async function runDecisionsMemoryBackfill(ctx: ExtensionContext): Promise<void> {
   // ADR-013 step 5: opportunistic decisions->memories backfill. Idempotent
   // and best-effort — first run absorbs the existing decisions table into
@@ -427,9 +469,19 @@ export async function buildBeforeAgentStartResult(
   warnDeprecatedAgentInstructions(basePath);
 
   const injection = await buildGuidedExecuteContextInjection(event.prompt, basePath);
-  const memoryBlock = await loadMemoryBlock(event.prompt ?? "", {
+  const loadedMemoryBlock = await loadMemoryBlock(event.prompt ?? "", {
     includePromptRelevant: !(injection && isLowEntropyResumePrompt(event.prompt ?? "")),
   });
+  // Content-addressed reinjection: an identical block would duplicate the
+  // previous injection message and (with superseded-injection filtering)
+  // retroactively rewrite payload positions — invalidating the provider KV
+  // prefix cache at the first removed injection. Skip the identical block: the
+  // previous injection stays as the payload's last context message, so the
+  // prefix remains byte-stable and the engine's cache is reused.
+  const memoryBlock = loadedMemoryBlock.trim()
+    && shouldSkipMemoryReinjection(`memory:${getContextSessionPart(ctx)}`, memoryBlockContentHash(loadedMemoryBlock))
+    ? ""
+    : loadedMemoryBlock;
 
   // Re-inject forensics context on follow-up turns (#2941)
   const forensicsInjection = !injection ? buildForensicsContextInjection(basePath, event.prompt) : null;
