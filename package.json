@@ -191,7 +191,7 @@
     "https-proxy-agent": "^7.0.6",
     "ignore": "^7.0.5",
     "marked": "^15.0.12",
-    "minimatch": "^10.2.3",
+    "minimatch": "^11.0.1",
     "openai": "^6.26.0",
     "partial-json": "^0.1.7",
     "picomatch": "^4.0.3",
