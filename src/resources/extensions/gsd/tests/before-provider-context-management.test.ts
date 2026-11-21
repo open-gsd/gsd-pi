@@ -144,18 +144,46 @@ test("successful shell result clears source context before provider injection", 
   assert.doesNotMatch(payload.messages[0].content[0].text, /Source Context Block/);
 });
 
-test("before_provider_request keeps only the latest GSD context injection across a 5-turn session", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "gsd-before-provider-injections-"));
+function fiveTurnMessages(): any[] {
+  const sentinel = "[GSD Context Injection]";
+  const contextInjection = (turn: number) => ({
+    role: "user",
+    content: [{ type: "text", text: `${sentinel}\n[MEMORY] turn=${turn}` }],
+  });
+  return [
+    { role: "user", content: [{ type: "text", text: "turn 1" }] },
+    contextInjection(1),
+    { role: "assistant", content: [{ type: "text", text: "r1" }] },
+    { role: "user", content: [{ type: "text", text: "turn 2" }] },
+    contextInjection(2),
+    { role: "assistant", content: [{ type: "text", text: "r2" }] },
+    { role: "user", content: [{ type: "text", text: "turn 3" }] },
+    contextInjection(3),
+    { role: "assistant", content: [{ type: "text", text: "r3" }] },
+    { role: "user", content: [{ type: "text", text: "turn 4" }] },
+    contextInjection(4),
+    { role: "assistant", content: [{ type: "text", text: "r4" }] },
+    { role: "user", content: [{ type: "text", text: "turn 5" }] },
+    contextInjection(5),
+  ];
+}
+
+function setupSession(dir: string): { project: string; gsdHome: string } {
   const gsdHome = join(dir, "home");
   const project = join(dir, "project");
-  const previousCwd = process.cwd();
-  const previousGsdHome = process.env.GSD_HOME;
-
   mkdirSync(join(project, ".gsd"), { recursive: true });
   mkdirSync(gsdHome, { recursive: true });
   process.env.GSD_HOME = gsdHome;
   process.chdir(project);
   _setAutoActiveForTest(false);
+  return { project, gsdHome };
+}
+
+test("before_provider_request keeps all GSD context injections by default (append-only prefix-cache stability)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-before-provider-injections-keep-"));
+  const previousCwd = process.cwd();
+  const previousGsdHome = process.env.GSD_HOME;
+  setupSession(dir);
 
   t.after(() => {
     _setAutoActiveForTest(false);
@@ -165,32 +193,46 @@ test("before_provider_request keeps only the latest GSD context injection across
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const beforeProviderRequest = requireHook(createHookHandlers(), "before_provider_request");
-
   const sentinel = "[GSD Context Injection]";
-  const contextInjection = (turn: number) => ({
-    role: "user",
-    content: [{ type: "text", text: `${sentinel}\n[MEMORY] turn=${turn}` }],
+  const beforeProviderRequest = requireHook(createHookHandlers(), "before_provider_request");
+  const payload = { messages: fiveTurnMessages() };
+
+  await beforeProviderRequest({ payload });
+
+  const survivors = (payload.messages as any[]).filter((m) => (m.content?.[0]?.text ?? "").startsWith(sentinel));
+  assert.equal(survivors.length, 5);
+  assert.match(survivors[0].content[0].text, /turn=1/);
+  assert.match(survivors[survivors.length - 1].content[0].text, /turn=5/);
+});
+
+test("before_provider_request with superseded_injections: drop keeps only the latest GSD context injection", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-before-provider-injections-drop-"));
+  const previousCwd = process.cwd();
+  const previousGsdHome = process.env.GSD_HOME;
+  const { project } = setupSession(dir);
+  writeFileSync(
+    join(project, ".gsd", "PREFERENCES.md"),
+    [
+      "---",
+      "version: 1",
+      "context_management:",
+      "  superseded_injections: drop",
+      "---",
+      "",
+    ].join("\n"),
+  );
+
+  t.after(() => {
+    _setAutoActiveForTest(false);
+    process.chdir(previousCwd);
+    if (previousGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = previousGsdHome;
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  const payload = {
-    messages: [
-      { role: "user", content: [{ type: "text", text: "turn 1" }] },
-      contextInjection(1),
-      { role: "assistant", content: [{ type: "text", text: "r1" }] },
-      { role: "user", content: [{ type: "text", text: "turn 2" }] },
-      contextInjection(2),
-      { role: "assistant", content: [{ type: "text", text: "r2" }] },
-      { role: "user", content: [{ type: "text", text: "turn 3" }] },
-      contextInjection(3),
-      { role: "assistant", content: [{ type: "text", text: "r3" }] },
-      { role: "user", content: [{ type: "text", text: "turn 4" }] },
-      contextInjection(4),
-      { role: "assistant", content: [{ type: "text", text: "r4" }] },
-      { role: "user", content: [{ type: "text", text: "turn 5" }] },
-      contextInjection(5),
-    ],
-  };
+  const sentinel = "[GSD Context Injection]";
+  const beforeProviderRequest = requireHook(createHookHandlers(), "before_provider_request");
+  const payload = { messages: fiveTurnMessages() };
 
   await beforeProviderRequest({ payload });
 
