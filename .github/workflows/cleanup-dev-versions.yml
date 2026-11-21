@@ -13,7 +13,7 @@ jobs:
     name: Remove stale -dev versions
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
