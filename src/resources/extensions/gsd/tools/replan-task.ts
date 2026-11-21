@@ -5,6 +5,7 @@ import {
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
 import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
+import { resetDispatchBudgetsInScope } from "../db/unit-dispatches.js";
 import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
 import { readSlice, readTask } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
@@ -148,6 +149,7 @@ export async function handleReplanTask(
   );
 
   let operationStatus: "committed" | "replayed";
+  const unitId = `${params.milestoneId}/${params.sliceId}/${params.taskId}`;
   try {
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.task.replan",
@@ -200,6 +202,7 @@ export async function handleReplanTask(
         if (task.done) {
           throw new PlanningGuardError(`cannot replan completed task ${params.taskId} — use gsd_task_reopen first`);
         }
+        const previousVerify = task.verify ?? "";
         const lifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "task",
           milestoneId: params.milestoneId,
@@ -243,6 +246,13 @@ export async function handleReplanTask(
           summary: replanSummary(params),
           previousArtifactPath: params.reworkBriefRef ?? null,
         });
+        // #3089: a replacement Verify starts a new contract. Reset its retry
+        // budget in the same transaction as the plan mutation, so a process
+        // crash cannot leave the replacement with the old contract's count and
+        // an idempotent receipt replay cannot skip the reset.
+        if (previousVerify.trim() !== params.verify.trim()) {
+          resetDispatchBudgetsInScope(unitId, "verification");
+        }
       },
     });
     operationStatus = receipt.status;
@@ -252,7 +262,7 @@ export async function handleReplanTask(
   }
 
   // A re-planned unit gets its verification retries again (ADR-048).
-  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}/${params.taskId}`);
+  releaseExhaustedUnits(unitId);
 
   // The replan is committed. A failed render must not fail the tool: its
   // Projection Work stays pending and the Projection Worker renders it again.

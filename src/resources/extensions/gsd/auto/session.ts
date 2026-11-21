@@ -58,6 +58,13 @@ export interface PendingVerificationRetry {
   failureContext: string;
   signature?: string;
   attempt: number;
+  /**
+   * Normalized identity of the Verify contract that produced this failure.
+   * Verification retry state belongs to a contract, not only to a Task: a
+   * replan that replaces `tasks.verify` supersedes the recorded failure.
+   * Absent on legacy rows and on non-verification retries.
+   */
+  verifyContract?: string;
 }
 
 export interface PendingOrchestrationDispatch {
