@@ -116,9 +116,14 @@ export default function ollama(pi: ExtensionAPI) {
 			await registerOllamaTools(pi);
 		}
 
-		// In headless/auto mode, await the probe so the fallback resolver can
-		// see Ollama before the first LLM call (#3531 race condition).
-		// In interactive mode, keep it async for fast startup.
+		// Await the probe in every no-human-in-the-loop session. ctx.hasUI is
+		// true in RPC-mode workers (they install a UI bridge to forward
+		// notifications as NDJSON), so absence-of-UI alone cannot identify
+		// headless; GSD_HEADLESS=1 is set on every headless RPC child by
+		// src/headless.ts and merged into its env. Keying on the marker keeps
+		// parallel workers from racing their own registration (empty-registry
+		// auto-start snapshot, model-policy deny). In interactive mode, keep
+		// it async for fast startup.
 		// Surface probe failures under GSD_DEBUG so users can diagnose silent
 		// "Ollama is missing from /model" reports without patching dist/. The
 		// probe still soft-fails (registration is best-effort) — we just stop
@@ -130,7 +135,8 @@ export default function ollama(pi: ExtensionAPI) {
 			}
 		};
 
-		if (!ctx.hasUI) {
+		const isHeadless = !ctx.hasUI || process.env.GSD_HEADLESS === "1";
+		if (isHeadless) {
 			try {
 				await probeAndRegister(pi);
 			} catch (error) {
