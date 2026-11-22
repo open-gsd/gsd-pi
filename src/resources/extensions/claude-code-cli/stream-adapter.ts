@@ -125,6 +125,7 @@ interface ClaudeCodeStreamOptions extends SimpleStreamOptions {
 	onExternalToolCall?: (toolCall: ToolCall) => Promise<void> | void;
 	onExternalToolResult?: (event: { toolCall: ToolCall; result: ExternalToolResultPayload }) => Promise<void> | void;
 	_findConcurrentClaudeCodeProcessesForTest?: (cwd: string) => ConcurrentClaudeCodeProcess[];
+	_concurrentProcessSettleMsForTest?: number;
 	_sdkQueryForTest?: (args: {
 		prompt: string | AsyncIterable<unknown>;
 		options?: Record<string, unknown>;
@@ -161,6 +162,14 @@ export interface ConcurrentClaudeCodeProcess {
 }
 
 const warnedConcurrentClaudeCodeCwds = new Set<string>();
+/**
+ * How long a process found by the concurrency scan gets to exit before it counts
+ * as concurrent. Each turn closes its CLI's input and the next turn starts without
+ * waiting for the exit, which takes about 0.6 s, so the previous turn's own CLI is
+ * routinely still there. One kept alive by a background task stays past this.
+ */
+const CONCURRENT_PROCESS_SETTLE_MS = 3_000;
+const CONCURRENT_PROCESS_POLL_MS = 100;
 
 function hasArgValue(argv: string[], flag: string, value: string): boolean {
 	return argv.some((arg, index) =>
@@ -993,13 +1002,32 @@ export function pushWorkflowMcpReadinessProgressEvent(input: {
 	stream.push({ type: "text_delta", contentIndex, delta });
 }
 
-function emitConcurrentClaudeCodeProcessWarning(input: {
+/** The processes of `found` still running after the settle window; none once the turn is aborted. */
+async function settleConcurrentClaudeCodeProcesses(input: {
+	found: ConcurrentClaudeCodeProcess[];
+	rescan: () => ConcurrentClaudeCodeProcess[];
+	settleMs: number;
+	signal: AbortSignal | undefined;
+}): Promise<ConcurrentClaudeCodeProcess[]> {
+	const deadline = Date.now() + input.settleMs;
+	let remaining = input.found;
+	while (remaining.length > 0 && Date.now() < deadline && !input.signal?.aborted) {
+		await new Promise((resolve) => setTimeout(resolve, Math.min(CONCURRENT_PROCESS_POLL_MS, input.settleMs)));
+		const alive = new Set(input.rescan().map((processInfo) => processInfo.pid));
+		remaining = remaining.filter((processInfo) => alive.has(processInfo.pid));
+	}
+	return input.signal?.aborted ? [] : remaining;
+}
+
+async function emitConcurrentClaudeCodeProcessWarning(input: {
 	cwd: string;
 	stream: Pick<AssistantMessageEventStream, "push">;
 	partial: AssistantMessage;
 	uiContext: ExtensionUIContext | undefined;
 	findProcesses: (cwd: string) => ConcurrentClaudeCodeProcess[];
-}): void {
+	settleMs: number;
+	signal: AbortSignal | undefined;
+}): Promise<void> {
 	let resolvedCwd: string;
 	try {
 		resolvedCwd = realpathSync(input.cwd);
@@ -1008,7 +1036,15 @@ function emitConcurrentClaudeCodeProcessWarning(input: {
 	}
 	if (warnedConcurrentClaudeCodeCwds.has(resolvedCwd)) return;
 
-	const processes = input.findProcesses(input.cwd);
+	const found = input.findProcesses(input.cwd);
+	if (found.length === 0) return;
+
+	const processes = await settleConcurrentClaudeCodeProcesses({
+		found,
+		rescan: () => input.findProcesses(input.cwd),
+		settleMs: input.settleMs,
+		signal: input.signal,
+	});
 	if (processes.length === 0) return;
 
 	warnedConcurrentClaudeCodeCwds.add(resolvedCwd);
@@ -2886,12 +2922,14 @@ async function pumpSdkMessages(
 			claudeOptions?._findConcurrentClaudeCodeProcessesForTest
 			?? (sdkQueryForTest ? undefined : findConcurrentClaudeCodeProcesses);
 		if (findConcurrentClaudeCodeProcessesForCwd) {
-			emitConcurrentClaudeCodeProcessWarning({
+			await emitConcurrentClaudeCodeProcessWarning({
 				cwd,
 				stream,
 				partial: initialPartial,
 				uiContext,
 				findProcesses: findConcurrentClaudeCodeProcessesForCwd,
+				settleMs: claudeOptions?._concurrentProcessSettleMsForTest ?? CONCURRENT_PROCESS_SETTLE_MS,
+				signal: options?.signal,
 			});
 		}
 		const readinessProgressState: WorkflowMcpReadinessProgressState = {};
