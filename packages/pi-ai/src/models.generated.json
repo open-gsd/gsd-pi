@@ -30880,10 +30880,7 @@
         "cacheWrite": 0
       },
       "contextWindow": 272000,
-      "maxTokens": 128000,
-      "thinkingLevelMap": {
-        "minimal": "low"
-      }
+      "maxTokens": 128000
     }
   },
   "google-vertex": {
