@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { terminateProcessTree } from "@gsd/pi-coding-agent";
 import type {
 	Api,
 	AssistantMessage,
@@ -223,7 +224,7 @@ function runCursorAgent(
 			fn();
 		};
 		const onAbort = () => {
-			child.kill("SIGTERM");
+			terminateProcessTree(child, "SIGTERM");
 			settle(() => reject(new Error("Request was aborted")));
 		};
 
@@ -240,7 +241,7 @@ function runCursorAgent(
 			try {
 				emitCompleteLines(chunk, pendingStdout, onLine);
 			} catch (error) {
-				child.kill("SIGTERM");
+				terminateProcessTree(child, "SIGTERM");
 				settle(() => reject(error));
 			}
 		});

@@ -29,6 +29,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { PartialMessageBuilder, ZERO_USAGE, mapUsage } from "./partial-builder.js";
 import { createLegacySkillGuardHook, isLegacySkillGuardDisabled } from "./legacy-skill-guard.js";
+import { createTreeTerminatingClaudeCodeSpawn } from "./windows-process-spawn.js";
 import { PROJECTION_WRITE_GUARD_MATCHER, projectionWriteGuardHook } from "./projection-write-guard.js";
 import {
 	attachExternalResultsToToolBlocks,
@@ -2414,6 +2415,9 @@ export function buildSdkOptions(
 	modelMetadata?: ClaudeCodeModelMetadata,
 ): Record<string, unknown> {
 	const { reasoning, cwd, gsdPhase, env: extraEnv, stderr: extraStderr, hooks: extraHooks, ...sdkExtraOptions } = extraOptions;
+	const sdkStderr = typeof extraStderr === "function"
+		? extraStderr as (data: string) => void
+		: logClaudeCodeSdkStderr;
 	const sdkCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
 	// Claude Code runs in the milestone worktree for file/shell work, but workflow MCP
 	// config (.mcp.json) and server discovery live at the project root.
@@ -2641,11 +2645,16 @@ export function buildSdkOptions(
 		) ? ["context-1m-2025-08-07"] : [],
 		...(thinkingConfig ?? {}),
 		...(effort ? { effort } : {}),
+		// The SDK's own spawn stops the CLI with a kill that, on Windows, leaves
+		// its Bash-tool processes holding the worktree (#3121).
+		...(process.platform === "win32"
+			? { spawnClaudeCodeProcess: createTreeTerminatingClaudeCodeSpawn({ stderr: sdkStderr }) }
+			: {}),
 		...sdkExtraOptions,
 		env: withClaudeCodePrintBgWaitCeiling(
 			isRecord(extraEnv) ? { ...process.env, ...extraEnv as NodeJS.ProcessEnv } : process.env,
 		),
-		stderr: typeof extraStderr === "function" ? extraStderr : logClaudeCodeSdkStderr,
+		stderr: sdkStderr,
 	};
 }
 
