@@ -28,10 +28,10 @@ on:
       registry_verification_timeout_ms:
         description: "Bounded wait for registry validation/visibility after a new publication"
         required: false
-        default: "1200000"
+        default: "2400000"
         type: choice
         options:
-          - "1200000"
+          - "2400000"
           - "7200000"
       run_live_tests:
         description: "Opt in to paid live-provider release tests"
@@ -62,7 +62,7 @@ env:
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
   NPM_CONFIG_LOGLEVEL: "error"
-  NPM_PUBLISH_VERIFY_TIMEOUT_MS: ${{ inputs.registry_verification_timeout_ms || '1200000' }}
+  NPM_PUBLISH_VERIFY_TIMEOUT_MS: ${{ inputs.registry_verification_timeout_ms || '2400000' }}
 
 jobs:
   prerelease-publish:

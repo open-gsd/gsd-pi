@@ -40,7 +40,7 @@ function fixture(t, options = {}) {
     }
     throw new Error(`Unexpected npm command: ${args}`);
   };
-  return { calls, waits, logs, run: () => publishPackage({ directory: dir, version: '1.2.3', tag: 'latest', npm, now: () => elapsed, verificationTimeoutMs: options.timeoutMs ?? 1_200_000, wait: async ms => { waits.push(ms); elapsed += ms; }, log: line => logs.push(line) }) };
+  return { calls, waits, logs, run: () => publishPackage({ directory: dir, version: '1.2.3', tag: 'latest', npm, now: () => elapsed, verificationTimeoutMs: options.timeoutMs ?? 2_400_000, wait: async ms => { waits.push(ms); elapsed += ms; }, log: line => logs.push(line) }) };
 }
 
 test('same version and latest tag cannot conceal a different artifact', async (t) => {
