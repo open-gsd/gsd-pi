@@ -42,7 +42,7 @@ function packedFile(output, directory, name, version) {
 
 export async function publishPackage({ directory, version, tag = 'latest', npm = runNpm,
   wait = (ms) => new Promise(r => setTimeout(r, ms)), log = console.log,
-  now = () => performance.now(), verificationTimeoutMs = Number(process.env.NPM_PUBLISH_VERIFY_TIMEOUT_MS ?? 1_200_000) }) {
+  now = () => performance.now(), verificationTimeoutMs = Number(process.env.NPM_PUBLISH_VERIFY_TIMEOUT_MS ?? 2_400_000) }) {
   if (!Number.isSafeInteger(verificationTimeoutMs) || verificationTimeoutMs <= 0) {
     throw new Error('NPM_PUBLISH_VERIFY_TIMEOUT_MS must be a positive integer timeout in milliseconds');
   }
