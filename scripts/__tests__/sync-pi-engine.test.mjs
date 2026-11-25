@@ -75,3 +75,29 @@ test('in-process sync keeps .gsd and writes the overlay bytes', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('savedPackage supplies .gsd when the destination has no manifest', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-sync-saved-'))
+  try {
+    const upstream = join(root, 'upstream')
+    const dest = join(root, 'dest')
+    mkdirSync(upstream, { recursive: true })
+    writeFileSync(join(upstream, 'package.json'), JSON.stringify({
+      name: '@earendil-works/pi-ai',
+      piConfig: { configDir: '.pi' },
+    }))
+    syncDestination({
+      upstreamRoot: upstream,
+      destRoot: dest,
+      overlayRoot: root,
+      files: [],
+      gsdName: '@gsd/pi-ai',
+      savedPackage: { piConfig: { name: 'gsd', configDir: '.gsd' }, gsd: { linkable: true } },
+    })
+    const merged = JSON.parse(readFileSync(join(dest, 'package.json'), 'utf8'))
+    assert.equal(merged.name, '@gsd/pi-ai')
+    assert.equal(merged.piConfig.configDir, '.gsd')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

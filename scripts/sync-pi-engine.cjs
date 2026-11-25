@@ -35,10 +35,12 @@ function isOutsideRepo(dest) {
   return rel.startsWith('..') || isAbsolute(rel)
 }
 
-function syncDestination({ upstreamRoot, destRoot, overlayRoot, files, gsdName }) {
-  const saved = existsSync(join(destRoot, 'package.json'))
-    ? JSON.parse(readFileSync(join(destRoot, 'package.json'), 'utf8'))
-    : null
+function syncDestination({ upstreamRoot, destRoot, overlayRoot, files, gsdName, savedPackage }) {
+  const saved = savedPackage !== undefined
+    ? savedPackage
+    : (existsSync(join(destRoot, 'package.json'))
+      ? JSON.parse(readFileSync(join(destRoot, 'package.json'), 'utf8'))
+      : null)
   rmSync(destRoot, { recursive: true, force: true })
   mkdirSync(destRoot, { recursive: true })
   cpSync(upstreamRoot, destRoot, { recursive: true })
@@ -86,12 +88,17 @@ function main() {
       .filter((file) => file === targetPath || file.startsWith(`${targetPath}/`))
       .map((file) => (file === targetPath ? '' : file.slice(targetPath.length + 1)))
       .filter(Boolean)
+    const repoPkgPath = join(ROOT, targetPath, 'package.json')
+    const savedPackage = existsSync(repoPkgPath)
+      ? JSON.parse(readFileSync(repoPkgPath, 'utf8'))
+      : null
     syncDestination({
       upstreamRoot: join(ROOT, '.cache', 'pi-upstream', upstreamPath),
       destRoot: join(destRoot, targetPath),
       overlayRoot: join(overlayRoot, targetPath),
       files: pkgFiles,
       gsdName: config.gsdPackageNames?.[upstreamPath],
+      savedPackage,
     })
   }
   process.stderr.write(`Synced ${ref} into ${destRoot}. Seam scripts were not run.\n`)
