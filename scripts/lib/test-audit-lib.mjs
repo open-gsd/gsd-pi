@@ -46,9 +46,10 @@ export const INTEGRATION_EXTENSION_GLOBS = new Set([
 
 export const SOURCE_ROOTS = ['src', 'packages', 'scripts', 'web', 'vscode-extension'];
 
-// Archived material is kept for provenance only: nothing imports it and no
-// runner executes it, so it must not register as live test or source surface.
-export const ARCHIVED_PATH_PREFIXES = ['scripts/archive/'];
+// Archived material and the Pi overlay snapshot are kept for provenance only:
+// nothing imports them from these paths and no runner executes them, so they
+// must not register as live test or source surface.
+export const ARCHIVED_PATH_PREFIXES = ['scripts/archive/', 'scripts/pi-overlay/'];
 
 export const AUXILIARY_TEST_SCRIPTS = new Set([
   'test:browser-tools',

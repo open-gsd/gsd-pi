@@ -40,6 +40,7 @@ test("audit:test-matrix excludes archived scripts from test and source inventory
   const root = mkdtempSync(join(tmpdir(), "audit-test-matrix-archive-"));
   mkdirSync(join(root, "scripts/__tests__"), { recursive: true });
   mkdirSync(join(root, "scripts/archive/__tests__"), { recursive: true });
+  mkdirSync(join(root, "scripts/pi-overlay/packages/pi-ai/test"), { recursive: true });
   writeFileSync(join(root, "scripts/live.mjs"), "export const live = true;\n");
   writeFileSync(
     join(root, "scripts/__tests__/live.test.mjs"),
@@ -49,6 +50,10 @@ test("audit:test-matrix excludes archived scripts from test and source inventory
   writeFileSync(
     join(root, "scripts/archive/__tests__/retired.test.cjs"),
     "const test = require('node:test');\ntest('retired', () => {});\n",
+  );
+  writeFileSync(
+    join(root, "scripts/pi-overlay/packages/pi-ai/test/copied.test.ts"),
+    "import { test } from 'node:test';\ntest('copied', () => {});\n",
   );
 
   assert.deepEqual(collectTestFiles(root), ["scripts/__tests__/live.test.mjs"]);
