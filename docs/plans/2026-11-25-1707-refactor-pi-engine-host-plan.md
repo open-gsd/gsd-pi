@@ -119,7 +119,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 - Modify: `scripts/vendor-pi.cjs`
 - Modify: `scripts/vendor-pi-deps.cjs`
 - Modify: `scripts/vendor-pi-coding-agent-core.cjs`
-- Test: `scripts/tests/vendor-pi-preserve.test.mjs`
+- Test: `scripts/__tests__/vendor-pi-preserve.test.mjs`
 
 **Approach:**
 - Export pure helpers from `scripts/vendor-pi.cjs` and call `main` only when the file is the process entry.
@@ -137,7 +137,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 - A temporary git repo whose `HEAD` is not the requested ref makes the cache check throw or return a non-zero result, and does not require network.
 - A temporary git repo whose `HEAD` equals the requested ref passes the cache check.
 
-**Verification:** `node --test scripts/tests/vendor-pi-preserve.test.mjs` passes. `git diff --name-only` does not list `packages/pi-*/src` or `packages/pi-*/test`.
+**Verification:** `node --test scripts/__tests__/vendor-pi-preserve.test.mjs` passes. `git diff --name-only` does not list `packages/pi-*/src` or `packages/pi-*/test`.
 
 ### U2. Store the overlay outside the generated tree
 
@@ -151,7 +151,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 - Create: `scripts/pi-overlay/` mirroring the repo-relative paths in `patchAllowlist`
 - Create: `scripts/check-pi-overlay-snapshot.cjs`
 - Modify: `scripts/pi-upstream.json` to add `overlayDir` with value `scripts/pi-overlay`
-- Test: `scripts/tests/pi-overlay-snapshot.test.mjs`
+- Test: `scripts/__tests__/pi-overlay-snapshot.test.mjs`
 
 **Approach:**
 - Before copying, edit `patchAllowlist`: drop `packages/pi-coding-agent/src/agent-core.d.ts` because that file is absent, and replace `packages/pi-coding-agent/src/core/bash-interceptor.ts` with `packages/pi-coding-agent/src/core/tools/bash-interceptor.ts`.
@@ -169,7 +169,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 - A fixture allowlist entry with no snapshot file fails.
 - Against the real repo, `node scripts/check-pi-overlay-snapshot.cjs` exits 0 after the copies land.
 
-**Verification:** `node --test scripts/tests/pi-overlay-snapshot.test.mjs` and `node scripts/check-pi-overlay-snapshot.cjs` pass.
+**Verification:** `node --test scripts/__tests__/pi-overlay-snapshot.test.mjs` and `node scripts/check-pi-overlay-snapshot.cjs` pass.
 
 ### U3. Add a sync command that reapplies the overlay on a temporary tree
 
@@ -182,7 +182,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 **Files:**
 - Create: `scripts/sync-pi-engine.cjs`
 - Modify: `package.json` script `sync:pi-engine`
-- Test: `scripts/tests/sync-pi-engine.test.mjs`
+- Test: `scripts/__tests__/sync-pi-engine.test.mjs`
 
 **Approach:**
 - The command refuses to run unless `--dest` is an absolute path outside the repo, or `--dry-run` is set. Default invocation without those flags exits non-zero. This stops a casual run from wiping `packages/pi-*`.
@@ -197,7 +197,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 - `--dry-run` exits 0 and does not create `.cache/pi-upstream` when it is absent. Skip this assertion if the cache already exists; assert only that `packages/pi-coding-agent/package.json` bytes are unchanged.
 - A temporary destination whose `package.json` has `configDir` `.gsd`, after the in-process merge used by the command, still has `configDir` `.gsd` and contains the overlay file's bytes.
 
-**Verification:** `node --test scripts/tests/sync-pi-engine.test.mjs` passes. `packages/pi-coding-agent/package.json` `piConfig.configDir` remains `.gsd`.
+**Verification:** `node --test scripts/__tests__/sync-pi-engine.test.mjs` passes. `packages/pi-coding-agent/package.json` `piConfig.configDir` remains `.gsd`.
 
 ### U4. Gate the overlay snapshot and the patch allowlist
 
@@ -209,7 +209,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 
 **Files:**
 - Modify: `scripts/ci-fast-gates.sh`
-- Test: `scripts/tests/pi-overlay-snapshot.test.mjs` already covers the checker. No new test file.
+- Test: `scripts/__tests__/pi-overlay-snapshot.test.mjs` already covers the checker. No new test file.
 
 **Approach:**
 - After the existing `pnpm run verify:pi-boundary` line, run `node scripts/check-pi-overlay-snapshot.cjs` and `VERIFY_PI_PATCHES_BRANCH=1 pnpm run verify:pi-patches`. The fast gate script already knows the pull-request base. Pass that base as `VERIFY_PI_PATCHES_BASE` when the variable is set, so a clean CI checkout diffs the branch against the base instead of an empty working tree.
@@ -234,7 +234,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 **Files:**
 - Create: `docs/dev/pi-overlay-triage.md`
 - Create: `scripts/check-pi-overlay-triage.cjs`
-- Test: `scripts/tests/pi-overlay-triage.test.mjs`
+- Test: `scripts/__tests__/pi-overlay-triage.test.mjs`
 
 **Approach:**
 - The doc is a table with columns `path`, `purpose`, `disposition`, `blocks leaf facade`.
@@ -250,7 +250,7 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 - A table that names both paths passes even if dispositions differ.
 - `node scripts/check-pi-overlay-triage.cjs` passes on the real doc.
 
-**Verification:** `node --test scripts/tests/pi-overlay-triage.test.mjs` and `node scripts/check-pi-overlay-triage.cjs` pass.
+**Verification:** `node --test scripts/__tests__/pi-overlay-triage.test.mjs` and `node scripts/check-pi-overlay-triage.cjs` pass.
 
 ### U6. Point the runbook at the safe commands
 
@@ -279,11 +279,11 @@ U1 before U2. U2 before U3. U4 after U2, and it does not wait on U3. U5 after U2
 
 Run after the units that introduce them:
 
-- `node --test scripts/tests/vendor-pi-preserve.test.mjs`
-- `node --test scripts/tests/pi-overlay-snapshot.test.mjs`
+- `node --test scripts/__tests__/vendor-pi-preserve.test.mjs`
+- `node --test scripts/__tests__/pi-overlay-snapshot.test.mjs`
 - `node scripts/check-pi-overlay-snapshot.cjs`
-- `node --test scripts/tests/sync-pi-engine.test.mjs`
-- `node --test scripts/tests/pi-overlay-triage.test.mjs`
+- `node --test scripts/__tests__/sync-pi-engine.test.mjs`
+- `node --test scripts/__tests__/pi-overlay-triage.test.mjs`
 - `node scripts/check-pi-overlay-triage.cjs`
 - `pnpm run verify:pi-patches`
 - `pnpm run verify:pi-boundary`
