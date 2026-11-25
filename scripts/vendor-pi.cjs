@@ -48,32 +48,50 @@ function ensureUpstreamCheckout(repoUrl, ref) {
   if (!existsSync(CACHE_DIR)) {
     mkdirSync(dirname(CACHE_DIR), { recursive: true })
     run('git', ['clone', '--depth', '1', '--branch', ref, '--', repoUrl, CACHE_DIR], REPO_ROOT)
-    return
+  } else {
+    run('git', ['fetch', '--depth', '1', 'origin', 'tag', ref], CACHE_DIR)
+    run('git', ['checkout', '--detach', ref], CACHE_DIR)
   }
-
-  run('git', ['fetch', '--depth', '1', 'origin'], CACHE_DIR)
-  run('git', ['checkout', ref], CACHE_DIR)
-  run('git', ['pull', '--depth', '1', 'origin'], CACHE_DIR)
+  assertCacheAtRef(CACHE_DIR, ref)
 }
 
-function preserveGsdPackageJson(targetDir, upstreamPkgJson) {
-  const gsdPkgPath = join(targetDir, 'package.json')
-  let gsdFields = {}
-  if (existsSync(gsdPkgPath)) {
-    const existing = JSON.parse(readFileSync(gsdPkgPath, 'utf8'))
-    gsdFields = {
-      name: existing.name,
-      version: existing.version,
-      description: existing.description,
-      gsd: existing.gsd,
-      piConfig: existing.piConfig,
-    }
+function captureGsdFields(existing) {
+  if (!existing || typeof existing !== 'object') return {}
+  const fields = {}
+  for (const key of ['name', 'version', 'description', 'gsd', 'piConfig']) {
+    if (existing[key] !== undefined) fields[key] = existing[key]
   }
+  return fields
+}
 
-  const merged = { ...upstreamPkgJson, ...gsdFields }
-  // Drop upstream-only publish fields that would confuse GSD packaging
+function mergeUpstreamPackage(upstreamPkg, savedFields, gsdName) {
+  const merged = { ...upstreamPkg, ...captureGsdFields(savedFields) }
   delete merged.publishConfig
+  if (gsdName) merged.name = gsdName
   return merged
+}
+
+function readPackageJson(dir) {
+  const pkgPath = join(dir, 'package.json')
+  if (!existsSync(pkgPath)) return null
+  return JSON.parse(readFileSync(pkgPath, 'utf8'))
+}
+
+function assertCacheAtRef(cacheDir, ref) {
+  if (!existsSync(cacheDir)) {
+    throw new Error(`Upstream cache missing at ${cacheDir} for ref ${ref}`)
+  }
+  const head = runCapture('git', ['rev-parse', 'HEAD'], cacheDir)
+  let expected
+  try {
+    expected = runCapture('git', ['rev-parse', '--verify', `${ref}^{commit}`], cacheDir)
+  } catch {
+    throw new Error(`Ref ${ref} is not in the upstream cache at ${cacheDir}`)
+  }
+  if (head !== expected) {
+    throw new Error(`Upstream cache HEAD ${head} does not match ${ref} (${expected})`)
+  }
+  return head
 }
 
 function copyPackage(upstreamSubdir, targetSubdir, gsdPackageName, dryRun) {
@@ -88,12 +106,12 @@ function copyPackage(upstreamSubdir, targetSubdir, gsdPackageName, dryRun) {
 
   if (dryRun) return
 
+  const savedFields = captureGsdFields(readPackageJson(dest))
   rmSync(dest, { recursive: true, force: true })
   cpSync(src, dest, { recursive: true })
 
   const upstreamPkg = JSON.parse(readFileSync(join(dest, 'package.json'), 'utf8'))
-  const merged = preserveGsdPackageJson(dest, upstreamPkg)
-  if (gsdPackageName) merged.name = gsdPackageName
+  const merged = mergeUpstreamPackage(upstreamPkg, savedFields, gsdPackageName)
   writeFileSync(join(dest, 'package.json'), JSON.stringify(merged, null, 2) + '\n')
 }
 
@@ -126,4 +144,12 @@ function main() {
   process.stderr.write('Done. Run npm run build and fix errors in @gsd/agent-core and @gsd/agent-modes only.\n')
 }
 
-main()
+module.exports = {
+  captureGsdFields,
+  mergeUpstreamPackage,
+  assertCacheAtRef,
+}
+
+if (require.main === module) {
+  main()
+}
