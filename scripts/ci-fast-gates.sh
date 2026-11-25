@@ -59,6 +59,16 @@ node scripts/audit-test-matrix.mjs --strict
 echo "── pi boundary ──"
 pnpm run verify:pi-boundary
 
+echo "── pi overlay snapshot ──"
+node scripts/check-pi-overlay-snapshot.cjs
+
+echo "── pi patch allowlist ──"
+if [ -n "${PR_BASE_SHA:-}" ]; then
+  VERIFY_PI_PATCHES_BRANCH=1 VERIFY_PI_PATCHES_BASE="$PR_BASE_SHA" pnpm run verify:pi-patches
+else
+  VERIFY_PI_PATCHES_BRANCH=1 pnpm run verify:pi-patches
+fi
+
 echo "── actionlint (workflow static analysis) ──"
 # Enforced as a blocking job in CI (ci.yml workflow-lint). Locally it runs
 # only when the binary is installed so the gate stays dependency-free.
