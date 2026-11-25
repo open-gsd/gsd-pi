@@ -14760,7 +14760,7 @@
     "gpt-6.1-terra": {
       "id": "gpt-6.1-terra",
       "name": "GPT-6.1 Terra",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "provider": "github-copilot",
       "baseUrl": "https://api.individual.githubcopilot.com",
       "reasoning": true,
@@ -14774,7 +14774,7 @@
         "cacheRead": 0.05,
         "cacheWrite": 1.25
       },
-      "contextWindow": 1050000,
+      "contextWindow": 400000,
       "maxTokens": 128000,
       "headers": {
         "User-Agent": "GitHubCopilotChat/0.35.0",
@@ -14782,14 +14782,11 @@
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
       },
-      "compat": {
-        "supportsStore": false,
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
-      },
       "thinkingLevelMap": {
+        "off": null,
         "minimal": "low",
-        "xhigh": "xhigh"
+        "xhigh": "xhigh",
+        "max": "max"
       }
     },
     "claude-sonnet-5": {

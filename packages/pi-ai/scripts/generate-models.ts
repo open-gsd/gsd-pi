@@ -84,7 +84,7 @@ const COPILOT_RESPONSES_ONLY_MODEL_IDS = new Set([
 
 /**
  * Copilot's served context/output windows for the responses-only families,
- * from the live /models capabilities.limits (verified 2026-10-07). models.dev
+ * from the live /models capabilities.limits (see #3198 for Terra). models.dev
  * reports the platform-native windows (e.g. 1.05M context for gpt-6), but
  * Copilot rejects requests beyond its served window, so the served limits win.
  */
@@ -96,6 +96,7 @@ const COPILOT_LIVE_SERVING_LIMITS: Record<
 	"gpt-6-luna": { contextWindow: 400000, maxTokens: 128000 },
 	"gpt-6-sol": { contextWindow: 400000, maxTokens: 128000 },
 	"gpt-6.1-sol": { contextWindow: 400000, maxTokens: 128000 },
+	"gpt-6.1-terra": { contextWindow: 400000, maxTokens: 128000 },
 	"grok-4.5": { contextWindow: 328000, maxTokens: 128000 },
 	"grok-4.6": { contextWindow: 328000, maxTokens: 128000 },
 	"grok-4.7": { contextWindow: 328000, maxTokens: 128000 },
@@ -253,12 +254,13 @@ function isGpt56Variant(modelId: string): boolean {
 }
 
 // GPT-6 family members whose live reasoning-effort ladder includes "max"
-// (verified against the Copilot /models catalog 2026-10-07).
+// (verified against the Copilot /models catalog; see #3198 for Terra).
 function isGpt6MaxVariant(modelId: string): boolean {
 	return (
 		modelId === "gpt-6-luna" ||
 		modelId === "gpt-6-sol" ||
 		modelId === "gpt-6.1-sol" ||
+		modelId === "gpt-6.1-terra" ||
 		modelId === "gpt-6-astra"
 	);
 }
