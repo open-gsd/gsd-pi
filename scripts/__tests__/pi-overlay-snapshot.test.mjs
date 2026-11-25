@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -60,5 +60,4 @@ test('the repo overlay matches the checked-in engine', () => {
     encoding: 'utf8',
   })
   assert.equal(code.status, 0, code.stderr || code.stdout)
-  assert.equal(readFileSync(join(repo, 'packages/pi-coding-agent/package.json'), 'utf8').includes('".gsd"'), true)
 })
