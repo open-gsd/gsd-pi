@@ -148,7 +148,7 @@ export function resolve(specifier, context, nextResolve) {
     const subpath = specifier.replace(/^@[^/]+\/pi-coding-agent\//, "").replace(/\.js$/, ".ts");
     specifier = new URL(`packages/pi-coding-agent/src/${subpath}`, ROOT).href;
   } else if (specifier === "@earendil-works/pi-ai/oauth" || specifier === "@gsd/pi-ai/oauth") {
-    specifier = new URL("packages/pi-ai/src/utils/oauth/index.ts", ROOT).href;
+    specifier = new URL("packages/pi-ai/src/oauth.ts", ROOT).href;
   } else if (
     specifier === "@earendil-works/pi-ai" ||
     specifier === "@gsd/pi-ai" ||

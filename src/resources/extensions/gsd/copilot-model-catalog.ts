@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 
 import { type Api, getModels, getSupportedThinkingLevels, type Model, type ModelThinkingLevel } from "@gsd/pi-ai";
 
-/** Copilot client-identity headers the /models endpoint's policy enforcement expects — mirrors COPILOT_HEADERS in packages/pi-ai/src/utils/oauth/github-copilot.ts. */
+/** Copilot client-identity headers the /models endpoint's policy enforcement expects — mirrors COPILOT_HEADERS in packages/pi-ai/src/auth/oauth/github-copilot.ts. */
 const COPILOT_MODELS_REQUEST_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   "User-Agent": "GitHubCopilotChat/0.35.0",
   "Editor-Version": "vscode/1.107.0",

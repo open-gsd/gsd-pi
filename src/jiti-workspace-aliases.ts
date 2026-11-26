@@ -27,7 +27,7 @@ export function getJitiWorkspaceAliases(
   };
 
   const piAi = pkg("pi-ai", "index.ts");
-  const piAiOauth = pkg("pi-ai", "utils", "oauth", "index.ts");
+  const piAiOauth = pkg("pi-ai", "oauth.ts");
   const piAgentCore = pkg("pi-agent-core", "index.ts");
   const piTui = pkg("pi-tui", "index.ts");
   const piCodingAgent = pkg("pi-coding-agent", "index.ts");

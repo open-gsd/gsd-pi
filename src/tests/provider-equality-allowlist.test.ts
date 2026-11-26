@@ -81,16 +81,16 @@ const ALLOWED_FILES: Record<string, string> = {
   // GitHub Copilot transport-specific request/auth transforms.
   "packages/pi-ai/src/models.ts":
     "github-copilot-only suppression of ignored Completions effort controls; other transports retain their existing controls",
-  "packages/pi-ai/src/utils/oauth/github-copilot.ts":
+  "packages/pi-ai/src/auth/oauth/github-copilot.ts":
     "github-copilot OAuth-specific model shaping",
   "packages/pi-ai/src/providers/anthropic.ts":
     "github-copilot-specific header injection on Anthropic transport",
-  "packages/pi-ai/src/providers/openai-responses.ts":
+  "packages/pi-ai/src/api/openai-responses.ts":
     "github-copilot-specific header injection",
 
   // Transport-specific model-ID quirks (OpenRouter Anthropic IDs, OpenAI
   // custom-model-ID length cap, Copilot-specific headers).
-  "packages/pi-ai/src/providers/openai-completions.ts":
+  "packages/pi-ai/src/api/openai-completions.ts":
     "transport-specific model-ID and header handling",
 
   // Model-registry canonical-provider tiebreakers (prefer plain `anthropic` /
