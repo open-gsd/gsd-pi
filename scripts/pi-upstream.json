@@ -83,6 +83,7 @@
     "packages/pi-coding-agent/src/core/mcp-servers.ts",
     "packages/pi-coding-agent/src/core/model-discovery.ts",
     "packages/pi-coding-agent/src/core/model-registry.ts",
+    "packages/pi-coding-agent/src/core/provider-readiness.ts",
     "packages/pi-coding-agent/src/core/model-resolver.ts",
     "packages/pi-coding-agent/src/core/models-json-writer.ts",
     "packages/pi-coding-agent/src/core/package-commands.ts",

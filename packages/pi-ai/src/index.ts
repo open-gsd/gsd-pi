@@ -54,7 +54,7 @@ export {
 } from "./utils/normalize-tool-arguments.js";
 export { normalizeToolResultContent } from "./tool-result-content.js";
 export type { OAuthProviderInterface, OAuthProviderId } from "./oauth-gsd-compat.js";
-export { getOAuthProviders } from "./oauth-gsd-compat.js";
+export { getOAuthProvider, getOAuthProviders } from "./oauth-gsd-compat.js";
 export { hasXmlParameterTags, hasYamlBulletLists, repairToolJson } from "./utils/repair-tool-json.js";
 export {
 	isAnthropicApi,

@@ -15,3 +15,7 @@ export interface OAuthProviderInterface {
 export function getOAuthProviders(): OAuthProviderInterface[] {
 	return [];
 }
+
+export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | undefined {
+	return getOAuthProviders().find((provider) => provider.id === id);
+}

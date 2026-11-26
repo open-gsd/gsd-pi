@@ -29,9 +29,20 @@ import type { AuthStorage } from "./auth-storage.js";
 import type { DiscoveryResult } from "./model-discovery.js";
 import type { ModelRuntime } from "./model-runtime.js";
 import { isLocalModel } from "./local-model-check.js";
-export type ProviderAuthMode = "apiKey" | "oauth" | "none" | "externalCli";
 import type { AuthStatus, ProviderConfigInput } from "./provider-composer.js";
 import type { VirtualModelDefinition } from "./virtual-models.js";
+import {
+	getDisabledModelProviders,
+	isProviderRequestReady as checkProviderRequestReady,
+	type ProviderAuthMode,
+	type ProviderReadinessConfig,
+	setDisabledModelProviders as applyDisabledModelProviders,
+	settleProviderReadiness as settleRegisteredProviderReadiness,
+} from "./provider-readiness.js";
+
+export type { ProviderAuthMode } from "./provider-readiness.js";
+
+type GsdProviderConfigInput = ProviderConfigInput & Partial<ProviderReadinessConfig>;
 
 export type { ProviderConfigInput } from "./provider-composer.js";
 export type ResolvedRequestAuth =
@@ -53,6 +64,8 @@ export class ModelRegistry {
 	private readonly runtime: ModelRuntime;
 	private readonly storedAuthStorage?: AuthStorage;
 	private readonly storedModelsJsonPath?: string;
+	private readonly registeredProviders = new Map<string, ProviderReadinessConfig>();
+	private readonly providerRequestConfigs = new Map<string, { apiKey?: string }>();
 	private disabledModelProviders = new Set<string>();
 
 	constructor(runtime: ModelRuntime, authStorage?: AuthStorage, modelsJsonPath?: string) {
@@ -99,7 +112,12 @@ export class ModelRegistry {
 	}
 
 	setDisabledModelProviders(providers: string[]): void {
-		this.disabledModelProviders = new Set(providers);
+		applyDisabledModelProviders(this._readinessDeps(), providers);
+		this.disabledModelProviders = this._readinessDeps().disabledModelProviders;
+	}
+
+	getDisabledModelProviders(): string[] {
+		return getDisabledModelProviders(this._readinessDeps());
 	}
 
 	async discoverModels(_providers?: string[]): Promise<DiscoveryResult[]> {
@@ -147,7 +165,7 @@ export class ModelRegistry {
 	}
 
 	getAvailable(): Model<Api>[] {
-		return [...this.runtime.getAvailableSnapshot()];
+		return this.getAll().filter((model) => this.isProviderRequestReady(model.provider));
 	}
 
 	find(provider: string, modelId: string): Model<Api> | undefined {
@@ -295,10 +313,14 @@ export class ModelRegistry {
 	}
 
 	registerProvider(provider: Provider): void;
-	registerProvider(providerName: string, config: ProviderConfigInput): void;
-	registerProvider(providerOrName: Provider | string, config?: ProviderConfigInput): void {
+	registerProvider(providerName: string, config: GsdProviderConfigInput): void;
+	registerProvider(providerOrName: Provider | string, config?: GsdProviderConfigInput): void {
 		if (typeof providerOrName === "string") {
 			if (!config) throw new Error("Provider config is required when registering by name");
+			this.upsertRegisteredProvider(providerOrName, config);
+			if (config.apiKey) {
+				this.providerRequestConfigs.set(providerOrName, { apiKey: config.apiKey });
+			}
 			this.runtime.registerProvider(providerOrName, config);
 			return;
 		}
@@ -306,15 +328,49 @@ export class ModelRegistry {
 	}
 
 	isProviderRequestReady(provider: string): boolean {
-		return this.runtime.hasConfiguredAuth(provider);
+		return checkProviderRequestReady(this._readinessDeps(), provider, (providerId) => {
+			if (this.runtime.hasConfiguredAuth(providerId)) return true;
+			return this.runtime.getProviderAuthStatus(providerId).configured;
+		});
 	}
 
-	settleProviderReadiness(): Promise<void> {
-		return this.runtime.refresh().then(() => undefined);
+	settleProviderReadiness(provider?: string): Promise<void> {
+		return settleRegisteredProviderReadiness(this._readinessDeps(), provider);
 	}
 
 	unregisterProvider(providerName: string): void {
+		this.registeredProviders.delete(providerName);
+		this.providerRequestConfigs.delete(providerName);
 		this.runtime.unregisterProvider(providerName);
+	}
+
+	private upsertRegisteredProvider(providerName: string, config: GsdProviderConfigInput): void {
+		const existing = this.registeredProviders.get(providerName);
+		if (!existing) {
+			this.registeredProviders.set(providerName, this.readinessConfigFromProvider(config));
+			return;
+		}
+		const next = { ...existing, ...this.readinessConfigFromProvider(config) };
+		this.registeredProviders.set(providerName, next);
+	}
+
+	private readinessConfigFromProvider(config: GsdProviderConfigInput): ProviderReadinessConfig {
+		return {
+			authMode: config.authMode,
+			isReady: config.isReady,
+			settleReadiness: config.settleReadiness,
+			apiKey: config.apiKey,
+			oauth: config.oauth,
+		};
+	}
+
+	private _readinessDeps() {
+		return {
+			authStorage: this.authStorage,
+			registeredProviders: this.registeredProviders,
+			providerRequestConfigs: this.providerRequestConfigs,
+			disabledModelProviders: this.disabledModelProviders,
+		};
 	}
 
 	registerVirtualModel(definition: VirtualModelDefinition): void {

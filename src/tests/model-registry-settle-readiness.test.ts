@@ -80,14 +80,14 @@ function createSettings(provider: string, model: string) {
 }
 
 describe("ModelRegistry.settleProviderReadiness", () => {
-	function createRegistry(t: { after: (fn: () => void) => void }): ModelRegistry {
+	async function createRegistry(t: { after: (fn: () => void) => void }): Promise<ModelRegistry> {
 		const dir = mkdtempSync(join(tmpdir(), "gsd-settle-readiness-"));
 		t.after(() => rmSync(dir, { recursive: true, force: true }));
-		return new ModelRegistry(createAuthStorage(), join(dir, "models.json"));
+		return ModelRegistry.create(createAuthStorage(), join(dir, "models.json"));
 	}
 
 	test("a cold provider is not ready until its async probe has settled", async (t) => {
-		const registry = createRegistry(t);
+		const registry = await createRegistry(t);
 		const cli = makeCachedCliProvider(true);
 		registerCliProvider(registry, "fake-cli", cli);
 
@@ -101,7 +101,7 @@ describe("ModelRegistry.settleProviderReadiness", () => {
 	});
 
 	test("startup validation keeps a saved external-CLI default once readiness has settled", async (t) => {
-		const registry = createRegistry(t);
+		const registry = await createRegistry(t);
 		registerCliProvider(registry, "fake-cli", makeCachedCliProvider(true));
 		registerCliProvider(registry, "always-ready", { isReady: () => true });
 
@@ -119,7 +119,7 @@ describe("ModelRegistry.settleProviderReadiness", () => {
 	});
 
 	test("settles only the named provider when one is given", async (t) => {
-		const registry = createRegistry(t);
+		const registry = await createRegistry(t);
 		const first = makeCachedCliProvider(true);
 		const second = makeCachedCliProvider(true);
 		registerCliProvider(registry, "first-cli", first);
@@ -134,7 +134,7 @@ describe("ModelRegistry.settleProviderReadiness", () => {
 	});
 
 	test("skips disabled providers and tolerates a rejecting probe", async (t) => {
-		const registry = createRegistry(t);
+		const registry = await createRegistry(t);
 		const disabled = makeCachedCliProvider(true);
 		const healthy = makeCachedCliProvider(true);
 		registerCliProvider(registry, "disabled-cli", disabled);

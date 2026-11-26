@@ -20,7 +20,7 @@ function createAuthStorage(): any {
   };
 }
 
-test("parseModels registers custom providers in registeredProviders (#3531)", () => {
+test("parseModels registers custom providers in registeredProviders (#3531)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "gsd-model-registry-"));
   const modelsJsonPath = join(dir, "models.json");
   writeFileSync(
@@ -37,7 +37,7 @@ test("parseModels registers custom providers in registeredProviders (#3531)", ()
     }),
   );
 
-  const registry = new ModelRegistry(createAuthStorage(), modelsJsonPath);
+  const registry = await ModelRegistry.create(createAuthStorage(), modelsJsonPath);
 
   assert.equal(registry.isProviderRequestReady("custom-provider"), true);
   assert.equal(registry.find("custom-provider", "custom-model")?.baseUrl, "https://example.invalid/v1");
