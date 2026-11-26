@@ -636,6 +636,8 @@ export interface AssistantMessage {
 	stopReason: StopReason;
 	deferred?: DeferredHandle;
 	errorMessage?: string;
+	/** GSD compat: optional retry hint from rate-limit / 429 responses (e2e fake + providers). */
+	retryAfterMs?: number;
 	rawStopReason?: string;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.

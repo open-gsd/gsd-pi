@@ -31,19 +31,35 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { ApiProvider } from "../api-registry.js";
 import type {
 	AssistantMessage,
-	Context,
+	Message,
 	Model,
 	SimpleStreamOptions,
+	StreamFunction,
 	StreamOptions,
+	Tool,
 	ToolCall,
 	UserMessage,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
+import { getCurrentSystemPrompt, getCurrentTools } from "../utils/transcript.js";
 
 export const FAKE_API = "fake" as const;
+
+/** Stream pair used by ModelRuntime / createProvider (compat ApiProvider shape). */
+export interface FakeApiProvider {
+	api: typeof FAKE_API;
+	stream: StreamFunction<typeof FAKE_API, StreamOptions>;
+	streamSimple: StreamFunction<typeof FAKE_API, SimpleStreamOptions>;
+}
+
+/** Accept raw Context or normalized TranscriptContext (messages-only). */
+type FakeRequestContext = {
+	messages: Message[];
+	systemPrompt?: string;
+	tools?: Tool[];
+};
 
 interface ExpectFields {
 	modelId?: string;
@@ -87,7 +103,7 @@ function parseTranscript(path: string): TranscriptTurn[] {
 	return turns;
 }
 
-function lastUserMessage(ctx: Context): UserMessage | undefined {
+function lastUserMessage(ctx: FakeRequestContext): UserMessage | undefined {
 	for (let i = ctx.messages.length - 1; i >= 0; i--) {
 		const m = ctx.messages[i];
 		if (m.role === "user") return m;
@@ -103,9 +119,20 @@ function userText(m: UserMessage): string {
 		.join("\n");
 }
 
-function checkExpectations(model: Model<typeof FAKE_API>, ctx: Context, turn: TranscriptTurn): void {
+function requestSystemPrompt(ctx: FakeRequestContext): string {
+	if (typeof ctx.systemPrompt === "string" && ctx.systemPrompt.length > 0) return ctx.systemPrompt;
+	return getCurrentSystemPrompt(ctx.messages);
+}
+
+function requestTools(ctx: FakeRequestContext): Tool[] {
+	if (ctx.tools && ctx.tools.length > 0) return ctx.tools;
+	return getCurrentTools(ctx.messages);
+}
+
+function checkExpectations(model: Model<typeof FAKE_API>, ctx: FakeRequestContext, turn: TranscriptTurn): void {
 	const e = turn.expect;
 	if (!e) return;
+	const tools = requestTools(ctx);
 	const fail = (msg: string): never => {
 		// Surface mismatch with enough context to debug, then throw.
 		const detail = {
@@ -113,7 +140,7 @@ function checkExpectations(model: Model<typeof FAKE_API>, ctx: Context, turn: Tr
 			modelId: model.id,
 			messageCount: ctx.messages.length,
 			lastUserText: lastUserMessage(ctx) ? userText(lastUserMessage(ctx)!).slice(0, 200) : null,
-			toolNames: ctx.tools?.map((t) => t.name) ?? [],
+			toolNames: tools.map((t) => t.name),
 		};
 		throw new Error(`fake-llm: turn ${turn.turn} expectation mismatch: ${msg}\n  actual: ${JSON.stringify(detail)}`);
 	};
@@ -133,13 +160,13 @@ function checkExpectations(model: Model<typeof FAKE_API>, ctx: Context, turn: Tr
 		}
 	}
 	if (e.systemContains && e.systemContains.length > 0) {
-		const sys = ctx.systemPrompt ?? "";
+		const sys = requestSystemPrompt(ctx);
 		for (const needle of e.systemContains) {
 			if (!sys.includes(needle)) fail(`expected systemPrompt to contain "${needle}"`);
 		}
 	}
 	if (e.toolNames) {
-		const actual = (ctx.tools ?? []).map((t) => t.name).sort();
+		const actual = tools.map((t) => t.name).sort();
 		const expected = [...e.toolNames].sort();
 		if (actual.length !== expected.length || actual.some((n, i) => n !== expected[i])) {
 			fail(`expected toolNames=${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
@@ -200,7 +227,7 @@ function buildAssistantMessage(
  * advances the turn cursor by one. Caller is responsible for ensuring the
  * transcript has enough turns.
  */
-export function createFakeProvider(opts: { transcriptPath: string }): ApiProvider<typeof FAKE_API> {
+export function createFakeProvider(opts: { transcriptPath: string }): FakeApiProvider {
 	const transcript = parseTranscript(opts.transcriptPath);
 	let cursor = 0;
 
@@ -238,7 +265,7 @@ export function createFakeProvider(opts: { transcriptPath: string }): ApiProvide
 
 	function streamTurn(
 		model: Model<typeof FAKE_API>,
-		ctx: Context,
+		ctx: FakeRequestContext,
 		signal?: AbortSignal,
 	): AssistantMessageEventStream {
 		const stream = new AssistantMessageEventStream();
@@ -411,9 +438,9 @@ export function createFakeProvider(opts: { transcriptPath: string }): ApiProvide
 
 	return {
 		api: FAKE_API,
-		stream: ((model: Model<typeof FAKE_API>, ctx: Context, opts?: StreamOptions) =>
-			streamTurn(model, ctx, opts?.signal)) as ApiProvider<typeof FAKE_API>["stream"],
-		streamSimple: ((model: Model<typeof FAKE_API>, ctx: Context, opts?: SimpleStreamOptions) =>
-			streamTurn(model, ctx, opts?.signal)) as ApiProvider<typeof FAKE_API>["streamSimple"],
+		stream: ((model: Model<typeof FAKE_API>, ctx: FakeRequestContext, opts?: StreamOptions) =>
+			streamTurn(model, ctx, opts?.signal)) as FakeApiProvider["stream"],
+		streamSimple: ((model: Model<typeof FAKE_API>, ctx: FakeRequestContext, opts?: SimpleStreamOptions) =>
+			streamTurn(model, ctx, opts?.signal)) as FakeApiProvider["streamSimple"],
 	};
 }

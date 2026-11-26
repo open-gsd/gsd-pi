@@ -26,7 +26,6 @@
     "**/*.d.ts",
     "src/**/*.d.ts",
     "src/**/*.test.ts",
-    "src/providers/fake.ts",
     "src/utils/tests/**"
   ]
 }

@@ -25,6 +25,8 @@ import type {
 	Provider,
 	ProviderHeaders,
 } from "@gsd/pi-ai";
+import { registerApiProvider } from "@gsd/pi-ai/compat";
+import { gsdFakeInstall } from "@gsd/pi-ai/providers/gsd-fake";
 import type { AuthStorage } from "./auth-storage.js";
 import type { DiscoveryResult } from "./model-discovery.js";
 import type { ModelRuntime } from "./model-runtime.js";
@@ -98,7 +100,9 @@ export class ModelRegistry {
 			modelsPath: resolvedModelsPath,
 			allowModelNetwork: false,
 		});
-		return new ModelRegistry(runtime, authStorage, resolvedModelsPath);
+		const registry = new ModelRegistry(runtime, authStorage, resolvedModelsPath);
+		await registry.ensureFakeProviderIfEnabled();
+		return registry;
 	}
 
 	static async inMemory(authStorage: import("./auth-storage.js").AuthStorage): Promise<ModelRegistry> {
@@ -108,7 +112,24 @@ export class ModelRegistry {
 			modelsPath: null,
 			allowModelNetwork: false,
 		});
-		return new ModelRegistry(runtime, authStorage, undefined);
+		const registry = new ModelRegistry(runtime, authStorage, undefined);
+		await registry.ensureFakeProviderIfEnabled();
+		return registry;
+	}
+
+	/**
+	 * E2E-only: when `GSD_FAKE_LLM_TRANSCRIPT` is set, register the deterministic
+	 * JSONL-replay provider (ModelRuntime catalog + compat api-registry) so
+	 * `gsd-fake-model` is request-ready and AgentSession streamSimple resolves api `"fake"`.
+	 */
+	private async ensureFakeProviderIfEnabled(): Promise<void> {
+		const installed = gsdFakeInstall();
+		if (!installed) return;
+		// Shared streams: ModelRuntime catalog + compat api-registry must share one cursor.
+		registerApiProvider(installed.streams, "gsd-fake");
+		this.runtime.registerNativeProvider(installed.provider);
+		this.registeredProviders.set("gsd-fake", { authMode: "none", isReady: () => true });
+		await this.runtime.refresh({ allowNetwork: false });
 	}
 
 	setDisabledModelProviders(providers: string[]): void {

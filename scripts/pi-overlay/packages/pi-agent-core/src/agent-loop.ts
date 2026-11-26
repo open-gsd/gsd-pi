@@ -34,6 +34,18 @@ import type {
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
+/** Cap consecutive turns where every tool call fails preparation (schema / not-found). */
+export const MAX_CONSECUTIVE_VALIDATION_FAILURES = 3;
+
+const ZERO_USAGE = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+} as const;
+
 /**
  * Request identity of agent loops: pi-ai's defaults with provider attribution to pi. `AgentLoopConfig.identity`
  * overrides it field by field.
@@ -181,6 +193,7 @@ async function runLoop(
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	let explicitContinuation = false;
+	let consecutiveAllToolErrorTurns = 0;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -284,6 +297,47 @@ async function runLoop(
 					currentContext.messages.push(result);
 					newMessages.push(result);
 				}
+
+				const allToolsFailed = toolResults.length > 0 && toolResults.every((result) => result.isError);
+				if (allToolsFailed) {
+					consecutiveAllToolErrorTurns++;
+				} else {
+					consecutiveAllToolErrorTurns = 0;
+				}
+
+				if (consecutiveAllToolErrorTurns >= MAX_CONSECUTIVE_VALIDATION_FAILURES) {
+					const stopMessage: AssistantMessage = {
+						role: "assistant",
+						content: [
+							{
+								type: "text",
+								text: `Agent stopped: ${consecutiveAllToolErrorTurns} consecutive turns with all tool calls failing. This usually means the model is repeatedly sending arguments that do not match the tool schema.`,
+							},
+						],
+						api: config.model.api,
+						provider: config.model.provider,
+						model: config.model.id,
+						usage: { ...ZERO_USAGE, cost: { ...ZERO_USAGE.cost } },
+						stopReason: "error",
+						errorMessage: "Schema overload: consecutive tool validation failures exceeded cap",
+						timestamp: Date.now(),
+					};
+					lastCompletedTurn = {
+						message,
+						toolResults,
+						context: currentContext,
+						newMessages,
+					};
+					await config.finishTurn?.(lastCompletedTurn, signal);
+					await emit({ type: "turn_end", message, toolResults });
+					await emit({ type: "message_start", message: stopMessage });
+					await emit({ type: "message_end", message: stopMessage });
+					newMessages.push(stopMessage);
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+			} else {
+				consecutiveAllToolErrorTurns = 0;
 			}
 
 			lastCompletedTurn = {

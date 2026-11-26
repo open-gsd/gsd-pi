@@ -72,6 +72,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-ai/src/providers/data/zai.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/fake.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/faux.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/gsd-fake.ts` | keep-overlay | E2E fake provider factory for GSD_FAKE_LLM_TRANSCRIPT | no |
 | `packages/pi-ai/src/providers/model-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/provider-capabilities.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/schema-builders.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |

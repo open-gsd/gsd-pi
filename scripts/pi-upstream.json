@@ -53,6 +53,7 @@
     "packages/pi-ai/src/providers/data/**",
     "packages/pi-ai/src/providers/fake.ts",
     "packages/pi-ai/src/providers/faux.ts",
+    "packages/pi-ai/src/providers/gsd-fake.ts",
     "packages/pi-ai/src/providers/model-schema.ts",
     "packages/pi-ai/src/providers/provider-capabilities.ts",
     "packages/pi-ai/src/providers/schema-builders.ts",
