@@ -15,6 +15,7 @@ test("aliases resolve to source .ts entries in the monorepo layout", () => {
 
   assert.equal(aliases["@gsd/pi-ai"], "/pkg/packages/pi-ai/src/index.ts")
   assert.equal(aliases["@gsd/pi-ai/oauth"], "/pkg/packages/pi-ai/src/oauth.ts")
+  assert.equal(aliases["@gsd/pi-ai/compat"], "/pkg/packages/pi-ai/src/compat.ts")
   assert.equal(aliases["@gsd/pi-coding-agent"], "/pkg/packages/pi-coding-agent/src/index.ts")
   assert.equal(aliases["@gsd/native/directory-sync"], "/pkg/packages/native/src/directory-sync/index.ts")
   assert.equal(aliases["@gsd/native/file-identity"], "/pkg/packages/native/src/file-identity/index.ts")
@@ -26,6 +27,7 @@ test("aliases fall back to compiled dist .js when src is absent (published tarba
 
   assert.equal(aliases["@gsd/pi-ai"], "/pkg/packages/pi-ai/dist/index.js")
   assert.equal(aliases["@gsd/pi-ai/oauth"], "/pkg/packages/pi-ai/dist/oauth.js")
+  assert.equal(aliases["@gsd/pi-ai/compat"], "/pkg/packages/pi-ai/dist/compat.js")
   assert.equal(aliases["@gsd/pi-coding-agent"], "/pkg/packages/pi-coding-agent/dist/index.js")
   assert.equal(aliases["@gsd/native/directory-sync"], "/pkg/packages/native/dist/directory-sync/index.js")
   assert.equal(aliases["@gsd/native/file-identity"], "/pkg/packages/native/dist/file-identity/index.js")

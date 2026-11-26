@@ -7,6 +7,28 @@ const require = createRequire(import.meta.url);
 
 const ROOT = new URL("../../../../../", import.meta.url);
 
+/**
+ * Resolve a workspace package export subpath to a concrete source file.
+ * Bare subpaths like `compat` must prefer `compat.ts` over a same-named directory
+ * (Node rejects directory imports for ESM).
+ */
+function resolveWorkspaceSrc(packageDir, rawSubpath) {
+  const subpath = rawSubpath.replace(/\.js$/, ".ts");
+  const candidates = subpath.endsWith(".ts")
+    ? [subpath, subpath.replace(/\.ts$/, "/index.ts")]
+    : [`${subpath}.ts`, `${subpath}/index.ts`, subpath];
+  for (const candidate of candidates) {
+    const url = new URL(`packages/${packageDir}/src/${candidate}`, ROOT);
+    if (existsSync(fileURLToPath(url))) {
+      return url.href;
+    }
+  }
+  return new URL(
+    `packages/${packageDir}/src/${subpath.endsWith(".ts") ? subpath : `${subpath}.ts`}`,
+    ROOT,
+  ).href;
+}
+
 // Fresh worktrees often run focused tests before workspace packages are built.
 // Node then surfaces a bare ERR_MODULE_NOT_FOUND for the missing dist output.
 // These helpers attribute that failure to the workspace package and name the
@@ -145,8 +167,8 @@ export function resolve(specifier, context, nextResolve) {
   } else if (specifier === "@gsd/pi-coding-agent" || specifier === "@earendil-works/pi-coding-agent") {
     specifier = new URL("packages/pi-coding-agent/src/index.ts", ROOT).href;
   } else if (specifier.startsWith("@gsd/pi-coding-agent/") || specifier.startsWith("@earendil-works/pi-coding-agent/")) {
-    const subpath = specifier.replace(/^@[^/]+\/pi-coding-agent\//, "").replace(/\.js$/, ".ts");
-    specifier = new URL(`packages/pi-coding-agent/src/${subpath}`, ROOT).href;
+    const subpath = specifier.replace(/^@[^/]+\/pi-coding-agent\//, "");
+    specifier = resolveWorkspaceSrc("pi-coding-agent", subpath);
   } else if (specifier === "@earendil-works/pi-ai/oauth" || specifier === "@gsd/pi-ai/oauth") {
     specifier = new URL("packages/pi-ai/src/oauth.ts", ROOT).href;
   } else if (
@@ -157,28 +179,28 @@ export function resolve(specifier, context, nextResolve) {
   ) {
     specifier = new URL("packages/pi-ai/src/index.ts", ROOT).href;
   } else if (specifier.startsWith("@earendil-works/pi-ai/") || specifier.startsWith("@gsd/pi-ai/")) {
-    const subpath = specifier.replace(/^@[^/]+\/pi-ai\//, "").replace(/\.js$/, ".ts");
-    specifier = new URL(`packages/pi-ai/src/${subpath}`, ROOT).href;
+    const subpath = specifier.replace(/^@[^/]+\/pi-ai\//, "");
+    specifier = resolveWorkspaceSrc("pi-ai", subpath);
   } else if (specifier === "@earendil-works/pi-tui" || specifier === "@gsd/pi-tui") {
     specifier = new URL("packages/pi-tui/src/index.ts", ROOT).href;
   } else if (specifier.startsWith("@earendil-works/pi-tui/") || specifier.startsWith("@gsd/pi-tui/")) {
-    const subpath = specifier.replace(/^@[^/]+\/pi-tui\//, "").replace(/\.js$/, ".ts");
-    specifier = new URL(`packages/pi-tui/src/${subpath}`, ROOT).href;
+    const subpath = specifier.replace(/^@[^/]+\/pi-tui\//, "");
+    specifier = resolveWorkspaceSrc("pi-tui", subpath);
   } else if (specifier === "@earendil-works/pi-agent-core" || specifier === "@gsd/pi-agent-core") {
     specifier = new URL("packages/pi-agent-core/src/index.ts", ROOT).href;
   } else if (specifier.startsWith("@earendil-works/pi-agent-core/") || specifier.startsWith("@gsd/pi-agent-core/")) {
-    const subpath = specifier.replace(/^@[^/]+\/pi-agent-core\//, "").replace(/\.js$/, ".ts");
-    specifier = new URL(`packages/pi-agent-core/src/${subpath}`, ROOT).href;
+    const subpath = specifier.replace(/^@[^/]+\/pi-agent-core\//, "");
+    specifier = resolveWorkspaceSrc("pi-agent-core", subpath);
   } else if (specifier === "@gsd/agent-core") {
     specifier = new URL("packages/gsd-agent-core/src/index.ts", ROOT).href;
   } else if (specifier.startsWith("@gsd/agent-core/")) {
-    const subpath = specifier.replace(/^@gsd\/agent-core\//, "").replace(/\.js$/, ".ts");
-    specifier = new URL(`packages/gsd-agent-core/src/${subpath}`, ROOT).href;
+    const subpath = specifier.replace(/^@gsd\/agent-core\//, "");
+    specifier = resolveWorkspaceSrc("gsd-agent-core", subpath);
   } else if (specifier === "@opengsd/contracts" || specifier === "@opengsd/contracts/dist/index.js") {
     specifier = new URL("packages/contracts/src/index.ts", ROOT).href;
   } else if (specifier.startsWith("@opengsd/contracts/")) {
-    const subpath = specifier.replace(/^@opengsd\/contracts\//, "").replace(/\.js$/, ".ts");
-    specifier = new URL(`packages/contracts/src/${subpath}`, ROOT).href;
+    const subpath = specifier.replace(/^@opengsd\/contracts\//, "");
+    specifier = resolveWorkspaceSrc("contracts", subpath);
   } else if (specifier === "@gsd/native") {
     specifier = new URL("packages/native/src/index.ts", ROOT).href;
   } else if (specifier.startsWith("@gsd/native/")) {

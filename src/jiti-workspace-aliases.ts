@@ -28,6 +28,7 @@ export function getJitiWorkspaceAliases(
 
   const piAi = pkg("pi-ai", "index.ts");
   const piAiOauth = pkg("pi-ai", "oauth.ts");
+  const piAiCompat = pkg("pi-ai", "compat.ts");
   const piAgentCore = pkg("pi-agent-core", "index.ts");
   const piTui = pkg("pi-tui", "index.ts");
   const piCodingAgent = pkg("pi-coding-agent", "index.ts");
@@ -38,6 +39,7 @@ export function getJitiWorkspaceAliases(
   const aliases: Record<string, string> = {
     "@gsd/pi-ai": piAi,
     "@gsd/pi-ai/oauth": piAiOauth,
+    "@gsd/pi-ai/compat": piAiCompat,
     "@gsd/pi-agent-core": piAgentCore,
     "@gsd/pi-tui": piTui,
     "@gsd/pi-coding-agent": piCodingAgent,
@@ -46,6 +48,7 @@ export function getJitiWorkspaceAliases(
     "@gsd/native": native,
     "@earendil-works/pi-ai": piAi,
     "@earendil-works/pi-ai/oauth": piAiOauth,
+    "@earendil-works/pi-ai/compat": piAiCompat,
     "@earendil-works/pi-agent-core": piAgentCore,
     "@earendil-works/pi-tui": piTui,
     "@earendil-works/pi-coding-agent": piCodingAgent,

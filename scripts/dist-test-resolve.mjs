@@ -42,6 +42,7 @@ const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const WORKSPACE_ENTRIES = {
   'pi-coding-agent': new URL('../dist-test/packages/pi-coding-agent/src/index.js', import.meta.url).href,
   'pi-ai/oauth':     new URL('../dist-test/packages/pi-ai/src/oauth.js', import.meta.url).href,
+  'pi-ai/compat':    new URL('../dist-test/packages/pi-ai/src/compat.js', import.meta.url).href,
   'pi-ai':           new URL('../dist-test/packages/pi-ai/src/index.js', import.meta.url).href,
   'pi-agent-core':   new URL('../dist-test/packages/pi-agent-core/src/index.js', import.meta.url).href,
   'pi-tui':          new URL('../dist-test/packages/pi-tui/src/index.js', import.meta.url).href,
@@ -55,6 +56,7 @@ const WORKSPACE_SCOPES = ['@gsd', '@earendil-works', '@mariozechner', '@opengsd'
 const BUILT_PACKAGE_ENTRIES = {
   'pi-coding-agent': new URL('../packages/pi-coding-agent/dist/index.js', import.meta.url).href,
   'pi-ai/oauth':     new URL('../packages/pi-ai/dist/oauth.js', import.meta.url).href,
+  'pi-ai/compat':    new URL('../packages/pi-ai/dist/compat.js', import.meta.url).href,
   'pi-ai':           new URL('../packages/pi-ai/dist/index.js', import.meta.url).href,
   'pi-agent-core':   new URL('../packages/pi-agent-core/dist/index.js', import.meta.url).href,
   'pi-tui':          new URL('../packages/pi-tui/dist/index.js', import.meta.url).href,
