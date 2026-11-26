@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -73,6 +73,57 @@ test('in-process sync keeps .gsd and writes the overlay bytes', () => {
     assert.equal(readFileSync(join(dest, rel), 'utf8'), 'overlay\n')
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dest inside the repo exits non-zero and leaves the manifest alone', () => {
+  const before = readFileSync(pkgPath)
+  const result = runCli(['--dest', join(repo, 'packages', 'pi-coding-agent')])
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /outside the repo/)
+  assert.equal(readFileSync(pkgPath).equals(before), true)
+})
+
+test('an external dest uses the override checkout and does not touch the repo manifest', () => {
+  const upstream = mkdtempSync(join(tmpdir(), 'pi-upstream-override-'))
+  const dest = mkdtempSync(join(tmpdir(), 'pi-sync-dest-'))
+  const before = readFileSync(pkgPath)
+  try {
+    const git = (args) => execFileSync('git', args, { cwd: upstream })
+    git(['init'])
+    git(['config', 'user.email', 'pi-sync@example.com'])
+    git(['config', 'user.name', 'pi-sync'])
+    for (const dir of ['packages/agent', 'packages/ai', 'packages/tui', 'packages/coding-agent']) {
+      mkdirSync(join(upstream, dir), { recursive: true })
+      writeFileSync(join(upstream, dir, 'package.json'), JSON.stringify({
+        name: '@earendil-works/placeholder',
+        piConfig: { configDir: '.pi' },
+        publishConfig: { access: 'public' },
+      }))
+      writeFileSync(join(upstream, dir, 'marker.txt'), 'upstream\n')
+    }
+    git(['add', '.'])
+    git(['commit', '-m', 'pin'])
+    git(['tag', 'v0.75.5'])
+    const result = spawnSync(process.execPath, ['scripts/sync-pi-engine.cjs', '--dest', dest], {
+      cwd: repo,
+      encoding: 'utf8',
+      env: { ...process.env, GSD_PI_UPSTREAM_ROOT: upstream },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const aiPath = join(dest, 'packages', 'pi-ai', 'package.json')
+    const codingPath = join(dest, 'packages', 'pi-coding-agent', 'package.json')
+    const ai = JSON.parse(readFileSync(aiPath, 'utf8'))
+    const coding = JSON.parse(readFileSync(codingPath, 'utf8'))
+    assert.equal(ai.name, '@gsd/pi-ai')
+    assert.equal(coding.name, '@gsd/pi-coding-agent')
+    assert.equal(coding.piConfig.configDir, '.gsd')
+    assert.equal(coding.publishConfig, undefined)
+    assert.equal(existsSync(join(dest, 'packages/pi-ai/src/providers/fake.ts')), true)
+    assert.equal(readFileSync(pkgPath).equals(before), true)
+  } finally {
+    rmSync(upstream, { recursive: true, force: true })
+    rmSync(dest, { recursive: true, force: true })
   }
 })
 

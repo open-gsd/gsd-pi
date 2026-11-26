@@ -9,11 +9,16 @@
  * Usage:
  *   node scripts/sync-pi-engine.cjs --dry-run
  *   node scripts/sync-pi-engine.cjs --dest /absolute/path/outside/this/repo
+ *
+ * When .cache/pi-upstream is not the pinned tag, --dest clones that tag into
+ * a temporary directory. It never writes packages/pi-*.
  */
 'use strict'
 
-const { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require('fs')
-const { isAbsolute, join, relative, resolve, sep } = require('path')
+const { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('fs')
+const { execFileSync } = require('child_process')
+const { tmpdir } = require('os')
+const { isAbsolute, join, relative, resolve } = require('path')
 const { captureGsdFields, mergeUpstreamPackage, assertCacheAtRef } = require('./vendor-pi.cjs')
 const { loadOverlayFiles } = require('./check-pi-overlay-snapshot.cjs')
 
@@ -33,6 +38,24 @@ function isOutsideRepo(dest) {
   const resolved = resolve(dest)
   const rel = relative(ROOT, resolved)
   return rel.startsWith('..') || isAbsolute(rel)
+}
+
+function selectUpstreamRoot(ref, repository) {
+  const override = process.env.GSD_PI_UPSTREAM_ROOT
+  if (override) {
+    assertCacheAtRef(override, ref)
+    return override
+  }
+  const cache = join(ROOT, '.cache', 'pi-upstream')
+  try {
+    assertCacheAtRef(cache, ref)
+    return cache
+  } catch {
+    const checkout = mkdtempSync(join(tmpdir(), 'pi-upstream-'))
+    execFileSync('git', ['clone', '--depth', '1', '--branch', ref, '--', repository, checkout], { stdio: 'inherit' })
+    assertCacheAtRef(checkout, ref)
+    return checkout
+  }
 }
 
 function syncDestination({ upstreamRoot, destRoot, overlayRoot, files, gsdName, savedPackage }) {
@@ -80,7 +103,7 @@ function main() {
   }
 
   const ref = config.pinnedRef
-  assertCacheAtRef(join(ROOT, '.cache', 'pi-upstream'), ref)
+  const upstreamRoot = selectUpstreamRoot(ref, config.repository)
   const destRoot = resolve(opts.dest)
   const overlayRoot = join(ROOT, config.overlayDir || 'scripts/pi-overlay')
   for (const [upstreamPath, targetPath] of Object.entries(config.packageMap)) {
@@ -93,7 +116,7 @@ function main() {
       ? JSON.parse(readFileSync(repoPkgPath, 'utf8'))
       : null
     syncDestination({
-      upstreamRoot: join(ROOT, '.cache', 'pi-upstream', upstreamPath),
+      upstreamRoot: join(upstreamRoot, upstreamPath),
       destRoot: join(destRoot, targetPath),
       overlayRoot: join(overlayRoot, targetPath),
       files: pkgFiles,
@@ -104,6 +127,6 @@ function main() {
   process.stderr.write(`Synced ${ref} into ${destRoot}. Seam scripts were not run.\n`)
 }
 
-module.exports = { syncDestination, isOutsideRepo, parseArgs }
+module.exports = { syncDestination, isOutsideRepo, parseArgs, selectUpstreamRoot }
 
 if (require.main === module) main()
