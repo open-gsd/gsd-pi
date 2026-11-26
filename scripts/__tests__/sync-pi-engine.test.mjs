@@ -7,7 +7,7 @@ import test from 'node:test'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
-const { syncDestination } = require('../sync-pi-engine.cjs')
+const { syncDestination, applyPostVendorDeletes } = require('../sync-pi-engine.cjs')
 const repo = join(import.meta.dirname, '..', '..')
 const pkgPath = join(repo, 'packages/pi-coding-agent/package.json')
 
@@ -102,6 +102,9 @@ test('an external dest uses the override checkout and does not touch the repo ma
       }))
       writeFileSync(join(upstream, dir, 'marker.txt'), 'upstream\n')
     }
+    mkdirSync(join(upstream, 'packages/coding-agent/src/modes'), { recursive: true })
+    writeFileSync(join(upstream, 'packages/coding-agent/src/modes/leftover.ts'), 'x\n')
+    writeFileSync(join(upstream, 'packages/coding-agent/src/keep.ts'), 'keep\n')
     git(['add', '.'])
     git(['commit', '-m', 'pin'])
     git(['tag', 'v0.75.5'])
@@ -119,11 +122,30 @@ test('an external dest uses the override checkout and does not touch the repo ma
     assert.equal(coding.name, '@gsd/pi-coding-agent')
     assert.equal(coding.piConfig.configDir, '.gsd')
     assert.equal(coding.publishConfig, undefined)
-    assert.equal(existsSync(join(dest, 'packages/pi-ai/src/providers/fake.ts')), true)
+    assert.equal(existsSync(join(dest, 'packages', 'pi-ai', 'src', 'providers', 'fake.ts')), true)
+    assert.equal(existsSync(join(dest, 'packages', 'pi-coding-agent', 'src', 'modes')), false)
+    assert.equal(existsSync(join(dest, 'packages', 'pi-coding-agent', 'src', 'keep.ts')), true)
     assert.equal(readFileSync(pkgPath).equals(before), true)
   } finally {
     rmSync(upstream, { recursive: true, force: true })
     rmSync(dest, { recursive: true, force: true })
+  }
+})
+
+test('post-vendor deletes remove seam paths only under the given src root', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-seam-delete-'))
+  try {
+    const src = join(root, 'src')
+    mkdirSync(join(src, 'modes'), { recursive: true })
+    writeFileSync(join(src, 'modes', 'x.ts'), 'x\n')
+    writeFileSync(join(src, 'cli.ts'), 'cli\n')
+    writeFileSync(join(src, 'keep.ts'), 'keep\n')
+    applyPostVendorDeletes(src, ['modes', 'cli.ts'])
+    assert.equal(existsSync(join(src, 'modes')), false)
+    assert.equal(existsSync(join(src, 'cli.ts')), false)
+    assert.equal(existsSync(join(src, 'keep.ts')), true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

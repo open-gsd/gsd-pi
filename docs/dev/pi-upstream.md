@@ -64,7 +64,7 @@ Safe inspection does not write `packages/pi-*`:
 node scripts/sync-pi-engine.cjs --dry-run
 ```
 
-A real copy is opt-in and must use an absolute `--dest` outside this repo. The command uses `.cache/pi-upstream` when that checkout is `v0.75.5`. Otherwise it clones that tag into a temporary directory. It then copies the four packages and reapplies `scripts/pi-overlay/`. It does not run `scripts/apply-seam.cjs` or `scripts/apply-gsd-pi-package-json.cjs`, and it does not write `packages/pi-*`.
+A real copy is opt-in and must use an absolute `--dest` outside this repo. The command uses `.cache/pi-upstream` when that checkout is `v0.75.5`. Otherwise it clones that tag into a temporary directory. It then copies the four packages, reapplies `scripts/pi-overlay/`, and deletes the seam paths listed in `scripts/pi-seam.json` from the external coding-agent tree. It does not run `scripts/apply-seam.cjs` or `scripts/apply-gsd-pi-package-json.cjs`, and it does not write `packages/pi-*`.
 
 `scripts/vendor-pi.cjs`, `scripts/vendor-pi-deps.cjs`, and `scripts/vendor-pi-coding-agent-core.cjs` are not the upgrade path. Do not run them when the cache was fetched at a tag other than v0.75.5. A mismatched cache exits non-zero before copying.
 

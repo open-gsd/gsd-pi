@@ -3,8 +3,9 @@
  * sync-pi-engine.cjs — copy a pinned Pi tree onto an external destination and
  * reapply the stored overlay plus the saved package identity.
  *
- * Seam deletes and import rewrites stay on scripts/apply-seam.cjs. This
- * command does not invoke apply-seam.cjs or apply-gsd-pi-package-json.cjs.
+ * Seam import rewrites stay on scripts/apply-seam.cjs. This command does not
+ * invoke that script. It does delete the post-vendor paths from an external
+ * pi-coding-agent tree after the overlay is copied.
  *
  * Usage:
  *   node scripts/sync-pi-engine.cjs --dry-run
@@ -40,6 +41,12 @@ function isOutsideRepo(dest) {
   return rel.startsWith('..') || isAbsolute(rel)
 }
 
+function applyPostVendorDeletes(srcRoot, rels) {
+  for (const rel of rels) {
+    const target = join(srcRoot, rel)
+    if (existsSync(target)) rmSync(target, { recursive: true, force: true })
+  }
+}
 function selectUpstreamRoot(ref, repository) {
   const override = process.env.GSD_PI_UPSTREAM_ROOT
   if (override) {
@@ -123,10 +130,14 @@ function main() {
       gsdName: config.gsdPackageNames?.[upstreamPath],
       savedPackage,
     })
+    if (targetPath === 'packages/pi-coding-agent') {
+      const seam = JSON.parse(readFileSync(join(__dirname, 'pi-seam.json'), 'utf8'))
+      applyPostVendorDeletes(join(destRoot, targetPath, 'src'), seam.postVendorDeletes || [])
+    }
   }
-  process.stderr.write(`Synced ${ref} into ${destRoot}. Seam scripts were not run.\n`)
+  process.stderr.write(`Synced ${ref} into ${destRoot}. Import rewrites were not run.\n`)
 }
 
-module.exports = { syncDestination, isOutsideRepo, parseArgs, selectUpstreamRoot }
+module.exports = { syncDestination, isOutsideRepo, parseArgs, selectUpstreamRoot, applyPostVendorDeletes }
 
 if (require.main === module) main()
