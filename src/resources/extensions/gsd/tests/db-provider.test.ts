@@ -309,7 +309,7 @@ describe("db-provider", () => {
     assert.equal(loader.getProviderName(), null);
     assert.equal(deps.stderr.length, 1);
     assert.match(deps.stderr[0], /No SQLite provider available/);
-    assert.match(deps.stderr[0], /Node >= 22\.18\.0/);
+    assert.match(deps.stderr[0], /Node >= 22\.19\.0/);
     assert.doesNotMatch(deps.stderr[0], /better-sqlite3/);
   });
 });
