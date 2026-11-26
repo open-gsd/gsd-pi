@@ -274,6 +274,31 @@ function normalizeLiveReasoningLevels(record: Record<string, unknown>): LiveReas
   };
 }
 
+function copilotStaticThinkingAliases(
+  staticModel: Model<Api> | undefined,
+): Partial<Record<CopilotThinkingLevel, string | null>> {
+  if (!staticModel || staticModel.provider !== "github-copilot") return {};
+  if (/mai[- ]code[- ]1\.1[- ]flash/i.test(staticModel.id)) {
+    return { minimal: "low", xhigh: "high" };
+  }
+  return {};
+}
+
+function reasoningSourceMap(
+  api: Api | undefined,
+  staticModel: Model<Api> | undefined,
+): Model<Api>["thinkingLevelMap"] | undefined {
+  if (!staticModel || (api !== undefined && staticModel.api !== api)) return undefined;
+  const staticMap = staticModel.thinkingLevelMap;
+  const implicit = copilotStaticThinkingAliases(staticModel);
+  const merged = {
+    ...(api === "anthropic-messages" ? { minimal: "low" as const } : {}),
+    ...staticMap,
+    ...implicit,
+  };
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 function createThinkingLevelMap(
   supportedLevels: readonly ModelThinkingLevel[],
   sourceMap?: Model<Api>["thinkingLevelMap"],
@@ -281,7 +306,16 @@ function createThinkingLevelMap(
   const supported = new Set(supportedLevels);
   const map: NonNullable<Model<Api>["thinkingLevelMap"]> = {};
   for (const level of THINKING_LEVELS) {
-    map[level] = supported.has(level) ? sourceMap?.[level] ?? level : null;
+    if (!supported.has(level)) {
+      map[level] = null;
+      continue;
+    }
+    if (!sourceMap || !(level in sourceMap)) {
+      map[level] = level;
+      continue;
+    }
+    const mapped = sourceMap[level];
+    map[level] = mapped === null ? level : mapped;
   }
   return map;
 }
@@ -582,12 +616,12 @@ function normalizeGitHubCopilotModel(
     && (liveReasoningEffortSupport === true || liveReasoningLevels.levels.length > 0);
   const staticReasoningEffortCompatible = endpoints.api !== "openai-completions"
     || (isOpenAICompletionsModel(staticModel) && staticModel.compat?.supportsReasoningEffort === true);
-  const staticReasoningLevels = staticModel && staticReasoningEffortCompatible
+  const staticReasoningLevels = staticModel
+    && staticReasoningEffortCompatible
+    && (endpoints.api !== "openai-completions" || liveReasoningLevels.present)
     ? getSupportedThinkingLevels(staticModel)
     : [];
-  const sourceMap = endpoints.api === "anthropic-messages"
-    ? { minimal: "low", ...(staticModel?.api === endpoints.api ? staticModel.thinkingLevelMap : {}) }
-    : staticModel?.api === endpoints.api ? staticModel?.thinkingLevelMap : undefined;
+  const sourceMap = reasoningSourceMap(endpoints.api, staticModel);
   const staticReasoningLevelMap = staticReasoningEffortCompatible ? sourceMap : undefined;
   const usableLiveReasoningLevels = (endpoints.api === "openai-completions" && !reasoningEffortCompatible)
     || (endpoints.api === "anthropic-messages"

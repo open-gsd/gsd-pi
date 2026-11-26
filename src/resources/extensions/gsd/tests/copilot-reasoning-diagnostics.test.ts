@@ -84,34 +84,42 @@ test("offline reasoning diagnostics preserve working paths and correct the chara
     assertModelApi(model, "openai-responses");
     assert.deepEqual((await capture(streamSimpleOpenAIResponses, model, "xhigh")).reasoning, { effort: "xhigh", summary: "auto" });
   });
-  await t.test("Opus (Completions) disabled effort controls clamp to off", async () => {
-    // gpt-6-astra and gpt-6.1-sol now route via Responses in the reviewed catalog (fork5);
-    // this fixture exercises the same Completions-disabled-effort behavior with a model
-    // that is actually dispatched through openai-completions (claude-opus-5).
-    const model = getModel("github-copilot", "claude-opus-5" as never) as Model<"openai-completions">;
-    assert.deepEqual(getSupportedThinkingLevels(model), ["off"]);
+  await t.test("Completions models without effort compat omit reasoning_effort on the wire", async () => {
+    const model = synthesizeCopilotOverlayEntry(record("gemini-3.8-flash", {
+      supported_endpoints: ["/embeddings"],
+      supported_reasoning_efforts: ["high"],
+    }));
+    assertModelApi(model, "openai-completions");
+    assert.equal(model.compat?.supportsReasoningEffort, false);
+    assert.deepEqual(getSupportedThinkingLevels(model), []);
     assert.equal(clampThinkingLevel(model, "xhigh"), "off");
     assert.equal((await capture(streamSimpleOpenAICompletions, model, "xhigh")).reasoning_effort, undefined);
   });
-  await t.test("Sonnet (Completions) disabled effort does not reach the wire", async () => {
-    // Same rationale: claude-sonnet-5 is genuinely Completions-routed with reasoning
-    // effort disabled, replacing the stale gpt-6.1-sol fixture (now Responses-routed).
+  await t.test("Completions effort metadata does not reach the wire without compatible endpoints", async () => {
     for (const effort of ["low", "high"] as const) {
-      const model = getModel("github-copilot", "claude-sonnet-5") as unknown as Model<"openai-completions">;
+      const model = synthesizeCopilotOverlayEntry(record("kimi-k3", {
+        supported_endpoints: ["/embeddings"],
+        supported_reasoning_efforts: [effort],
+      }));
+      assertModelApi(model, "openai-completions");
       assert.equal((await capture(streamSimpleOpenAICompletions, model, effort)).reasoning_effort, undefined);
     }
   });
   await t.test("explicit custom compatibility still transmits xhigh", async () => {
-    const model = getModel("github-copilot", "claude-opus-5" as never) as Model<"openai-completions">;
+    const staticModel = getModel("github-copilot", "kimi-k3") as Model<"openai-completions">;
     assert.equal((await capture(streamSimpleOpenAICompletions, {
-      ...model, thinkingLevelMap: { xhigh: "xhigh" },
-      compat: { ...model.compat, supportsReasoningEffort: true },
+      ...staticModel,
+      thinkingLevelMap: { xhigh: "xhigh" },
+      compat: { ...staticModel.compat, supportsReasoningEffort: true },
     }, "xhigh")).reasoning_effort, "xhigh");
   });
-  await t.test("Fable disabled effort does not advertise xhigh", async () => {
-    const model = getModel("github-copilot", "claude-fable-5") as unknown as Model<"openai-completions">;
-    assert.deepEqual(getSupportedThinkingLevels(model), ["off"]);
-    assert.equal((await capture(streamSimpleOpenAICompletions, model, "xhigh")).reasoning_effort, undefined);
+  await t.test("Claude Fable uses adaptive Anthropic effort, not Completions reasoning_effort", async () => {
+    const model = getModel("github-copilot", "claude-fable-5");
+    assertModelApi(model, "anthropic-messages");
+    assert.ok(getSupportedThinkingLevels(model).includes("xhigh"));
+    const payload = await capture(streamSimpleAnthropic, model, "xhigh");
+    assert.equal((payload.output_config as Record<string, unknown>)?.effort, "xhigh");
+    assert.equal(payload.reasoning_effort, undefined);
   });
   await t.test("camelCase effort metadata is recognized", () => {
     assert.deepEqual(record("diagnostic-camel-case", { supportedReasoningEfforts: ["low", "xhigh"] }).execution.reasoningLevels, ["low", "xhigh"]);

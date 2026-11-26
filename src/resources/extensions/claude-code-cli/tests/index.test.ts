@@ -289,7 +289,7 @@ test("real catalog thinking metadata reaches curated entries (#2830)", () => {
 
 	const opus46 = merged.find((model) => model.id === "claude-opus-4-6");
 	assert.ok(opus46, "curated opus-4-6 must be present");
-	assert.deepEqual(opus46.thinkingLevelMap, { xhigh: "max" }, "Opus 4.6 maps xhigh to max effort");
+	assert.equal(opus46.thinkingLevelMap, undefined, "v1.6.1 anthropic catalog no longer carries an xhigh alias for Opus 4.6");
 
 	const sonnet5 = merged.find((model) => model.id === "claude-sonnet-5");
 	assert.ok(sonnet5, "curated sonnet-5 must be present");

@@ -144,6 +144,81 @@ export const CLAUDE_CODE_MODELS: ClaudeCodeModelDefinition[] = [
 // itself and GSD should surface one entry per release line.
 const CATALOG_MODEL_PATTERN = /^claude-(opus|sonnet|fable|haiku)-\d+(-\d{1,2})?$/;
 
+function isClaude55StrictRequestModel(modelId: string): boolean {
+	return (
+		modelId.includes("sonnet-5-5")
+		|| modelId.includes("sonnet-5.5")
+		|| modelId.includes("opus-5-5")
+		|| modelId.includes("opus-5.5")
+		|| modelId.includes("fable-5-1")
+		|| modelId.includes("fable-5.1")
+	);
+}
+
+function isFable5BaseModel(modelId: string): boolean {
+	return (
+		(modelId.includes("fable-5") || modelId.includes("fable.5"))
+		&& !modelId.includes("fable-5-1")
+		&& !modelId.includes("fable-5.1")
+	);
+}
+
+/**
+ * v1.6.1 pi-ai catalogs expose granular Anthropic compat flags; the Claude Code
+ * stream adapter still keys off the legacy strictRequestParams umbrella (#2437).
+ */
+function normalizeCatalogCompat(
+	compat: ClaudeCodeModelDefinition["compat"] | undefined,
+	modelId: string,
+): ClaudeCodeModelDefinition["compat"] | undefined {
+	if (!compat && !isClaude55StrictRequestModel(modelId)) return undefined;
+	const normalized = { ...(compat ?? {}) };
+	if (
+		normalized.strictRequestParams !== true
+		&& !isFable5BaseModel(modelId)
+		&& isClaude55StrictRequestModel(modelId)
+	) {
+		normalized.strictRequestParams = true;
+	}
+	return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+const CLAUDE_CODE_COMPAT_KEYS = new Set([
+	"forceAdaptiveThinking",
+	"strictRequestParams",
+	"thinkingOffMode",
+	"rejectsTemperature",
+]);
+
+function toClaudeCodeCompat(
+	compat: ClaudeCodeModelDefinition["compat"] | undefined,
+	modelId: string,
+): ClaudeCodeModelDefinition["compat"] | undefined {
+	const normalized = normalizeCatalogCompat(compat, modelId);
+	if (!normalized) return undefined;
+	const out: NonNullable<ClaudeCodeModelDefinition["compat"]> = {};
+	for (const [key, value] of Object.entries(normalized)) {
+		if (CLAUDE_CODE_COMPAT_KEYS.has(key)) {
+			(out as Record<string, unknown>)[key] = value;
+		}
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Inherit effort maps that matter to Claude Code: aliases and explicit xhigh tiers. */
+function catalogThinkingLevelOverrides(
+	map: Record<string, string | null>,
+): Record<string, string | null> {
+	const out: Record<string, string | null> = {};
+	for (const [level, mapped] of Object.entries(map)) {
+		if (mapped === null) continue;
+		if (mapped !== level || level === "xhigh") {
+			out[level] = mapped;
+		}
+	}
+	return out;
+}
+
 function loadAnthropicCatalogModels(): ClaudeCodeModelDefinition[] {
 	return getModels("anthropic") as unknown as ClaudeCodeModelDefinition[];
 }
@@ -170,12 +245,20 @@ export function buildClaudeCodeModelList(
 		if (!CATALOG_MODEL_PATTERN.test(entry.id)) continue;
 		const curated = merged.get(entry.id);
 		if (curated) {
+			const catalogMap = entry.thinkingLevelMap
+				? catalogThinkingLevelOverrides(entry.thinkingLevelMap)
+				: {};
+			const thinkingLevelMap = {
+				...catalogMap,
+				...(curated.thinkingLevelMap ?? {}),
+			};
 			merged.set(entry.id, {
 				...curated,
-				...(entry.compat ? { compat: { ...entry.compat, ...curated.compat } } : {}),
-				...(entry.thinkingLevelMap
-					? { thinkingLevelMap: { ...entry.thinkingLevelMap, ...curated.thinkingLevelMap } }
-					: {}),
+				compat: toClaudeCodeCompat(
+					{ ...entry.compat, ...curated.compat },
+					entry.id,
+				),
+				...(Object.keys(thinkingLevelMap).length > 0 ? { thinkingLevelMap } : {}),
 			});
 			continue;
 		}
@@ -187,8 +270,12 @@ export function buildClaudeCodeModelList(
 			cost: ZERO_COST,
 			contextWindow: entry.contextWindow,
 			maxTokens: entry.maxTokens,
-			...(entry.compat ? { compat: entry.compat } : {}),
-			...(entry.thinkingLevelMap ? { thinkingLevelMap: entry.thinkingLevelMap } : {}),
+			...(entry.compat || isClaude55StrictRequestModel(entry.id)
+				? { compat: toClaudeCodeCompat(entry.compat, entry.id) }
+				: {}),
+			...(entry.thinkingLevelMap
+				? { thinkingLevelMap: catalogThinkingLevelOverrides(entry.thinkingLevelMap) }
+				: {}),
 		});
 	}
 	return [...merged.values()];

@@ -7,7 +7,7 @@ import test, { describe } from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-import type { Api, Model } from "@gsd/pi-ai";
+import { getModels, type Api, type Model } from "@gsd/pi-ai";
 
 import type { ClassificationResult } from "../complexity-classifier.js";
 import { getLegacyTelemetry, resetLegacyTelemetry } from "../legacy-telemetry.js";
@@ -1691,9 +1691,7 @@ describe("model-router registry keys", () => {
   });
 
   test("all bundled GitHub Copilot chat models have router tier and capability profiles", () => {
-    const catalogPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..", "packages", "pi-ai", "src", "models.generated.json");
-    const catalog = JSON.parse(readFileSync(catalogPath, "utf8"))["github-copilot"] as Record<string, Model<Api>>;
-    const missing = Object.values(catalog)
+    const missing = getModels("github-copilot")
       .filter((model) => model.api === "openai-completions" || model.api === "openai-responses" || model.api === "anthropic-messages")
       .map((model) => canonicalizeModelId(model.id))
       .filter((modelId) => MODEL_CAPABILITY_TIER[modelId] === undefined || MODEL_CAPABILITY_PROFILES[modelId] === undefined)
