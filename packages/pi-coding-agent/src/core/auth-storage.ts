@@ -28,6 +28,46 @@ export type AuthCredential = Credential;
 
 type AuthStorageData = Record<string, Credential | Credential[]>;
 
+function asCredentialList(entry: Credential | Credential[] | undefined): Credential[] {
+	if (!entry) return [];
+	return Array.isArray(entry) ? entry : [entry];
+}
+
+function primaryCredential(entry: Credential | Credential[] | undefined): Credential | undefined {
+	return asCredentialList(entry)[0];
+}
+
+function resolveStoredCredential(credential: Credential): Credential {
+	if (credential.type !== "api_key" || credential.key === undefined || isCommandConfigValue(credential.key)) {
+		return credential;
+	}
+	return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+}
+
+function isValidStoredCredential(value: unknown): value is Credential {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const credential = value as Record<string, unknown>;
+	if (credential.type === "api_key") {
+		const validKey = credential.key === undefined || typeof credential.key === "string";
+		const validEnv =
+			credential.env === undefined ||
+			(typeof credential.env === "object" &&
+				credential.env !== null &&
+				!Array.isArray(credential.env) &&
+				Object.values(credential.env).every((entry) => typeof entry === "string"));
+		return validKey && validEnv;
+	}
+	if (credential.type === "oauth") {
+		return (
+			typeof credential.access === "string" &&
+			typeof credential.refresh === "string" &&
+			typeof credential.expires === "number" &&
+			Number.isFinite(credential.expires)
+		);
+	}
+	return false;
+}
+
 // On Windows, a just-removed lock directory can stay "delete pending" while another process
 // (antivirus, indexer, another pi checking the lock) still has it open. mkdir then fails with
 // EPERM until that handle closes. Retry this briefly so real permission errors still fail fast.
@@ -240,29 +280,10 @@ export class ReadOnlyAuthStorage implements CredentialStore {
 			throw new Error("Invalid auth.json: expected an object");
 		}
 		for (const [providerId, credential] of Object.entries(parsed)) {
-			if (typeof credential !== "object" || credential === null || Array.isArray(credential)) {
+			const entries = Array.isArray(credential) ? credential : [credential];
+			if (entries.length === 0 || !entries.every(isValidStoredCredential)) {
 				throw new Error(`Invalid auth.json credential for provider "${providerId}"`);
 			}
-			const value = credential as Record<string, unknown>;
-			if (value.type === "api_key") {
-				const validKey = value.key === undefined || typeof value.key === "string";
-				const validEnv =
-					value.env === undefined ||
-					(typeof value.env === "object" &&
-						value.env !== null &&
-						!Array.isArray(value.env) &&
-						Object.values(value.env).every((entry) => typeof entry === "string"));
-				if (validKey && validEnv) continue;
-			} else if (
-				value.type === "oauth" &&
-				typeof value.access === "string" &&
-				typeof value.refresh === "string" &&
-				typeof value.expires === "number" &&
-				Number.isFinite(value.expires)
-			) {
-				continue;
-			}
-			throw new Error(`Invalid auth.json credential for provider "${providerId}"`);
 		}
 
 		this.data = parsed as AuthStorageData;
@@ -271,21 +292,20 @@ export class ReadOnlyAuthStorage implements CredentialStore {
 
 	async read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
 		options?.signal?.throwIfAborted();
-		const credential = this.load()[providerId];
+		const credential = primaryCredential(this.load()[providerId]);
 		options?.signal?.throwIfAborted();
 		if (!credential) return undefined;
-		if (credential.type !== "api_key" || !credential.key || isCommandConfigValue(credential.key)) {
-			return structuredClone(credential);
-		}
-		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+		return structuredClone(resolveStoredCredential(credential));
 	}
 
 	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
 		options?.signal?.throwIfAborted();
-		const credentials = Object.entries(this.load()).map(([providerId, credential]) => ({
-			providerId,
-			type: credential.type,
-		}));
+		const credentials = Object.entries(this.load()).flatMap(([providerId, entry]) =>
+			asCredentialList(entry).map((credential) => ({
+				providerId,
+				type: credential.type,
+			})),
+		);
 		options?.signal?.throwIfAborted();
 		return credentials;
 	}
@@ -455,11 +475,10 @@ export class AuthStorage implements CredentialStore {
 	}
 
 	async read(provider: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
-		const credential = (await this.readLatestData(options))[provider];
+		const credential = primaryCredential((await this.readLatestData(options))[provider]);
 		options?.signal?.throwIfAborted();
-		if (credential?.type !== "api_key") return credential;
-		if (credential.key === undefined) return credential;
-		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+		if (!credential) return undefined;
+		return resolveStoredCredential(credential);
 	}
 
 	async modify(
@@ -472,11 +491,12 @@ export class AuthStorage implements CredentialStore {
 		let written: Credential | undefined;
 		const result = await this.storage.withLockAsync(async (content) => {
 			const currentData = this.parseStorageData(content);
-			const next = await fn(currentData[provider]);
+			const current = primaryCredential(currentData[provider]);
+			const next = await fn(current);
 			if (next === undefined) {
 				latestData = currentData;
 				revision = this.authPath ? getFileRevision(this.authPath) : undefined;
-				return { result: currentData[provider] };
+				return { result: current };
 			}
 
 			const merged: AuthStorageData = { ...currentData, [provider]: next };
@@ -516,15 +536,19 @@ export class AuthStorage implements CredentialStore {
 	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
 		const entries = Object.entries(await this.readLatestData(options));
 		options?.signal?.throwIfAborted();
-		return entries.map(([providerId, credential]) => ({ providerId, type: credential.type }));
+		return entries.flatMap(([providerId, entry]) =>
+			asCredentialList(entry).map((credential) => ({ providerId, type: credential.type })),
+		);
 	}
 
 	/** GSD: sync credential listing from the in-memory cache. */
 	listSync(): readonly CredentialInfo[] {
-		return Object.entries(this.readState.data).map(([providerId, credential]) => ({
-			providerId,
-			type: credential.type,
-		}));
+		return Object.entries(this.readState.data).flatMap(([providerId, entry]) =>
+			asCredentialList(entry).map((credential) => ({
+				providerId,
+				type: credential.type,
+			})),
+		);
 	}
 
 	/** GSD: sync provider ids with stored credentials (main-compat `list()`). */
@@ -567,10 +591,7 @@ export class AuthStorage implements CredentialStore {
 	}
 	/** GSD: credentials for a provider (supports round-robin multi-key entries). */
 	getCredentialsForProvider(provider: string): Credential[] {
-		const entry = this.readState.data[provider];
-		if (!entry) return [];
-		if (Array.isArray(entry)) return entry;
-		return [entry];
+		return asCredentialList(this.readState.data[provider]);
 	}
 
 	/** GSD: alias for hasAuth. */
@@ -608,7 +629,7 @@ export function readStoredCredential(
 ): Credential | undefined {
 	try {
 		const data = JSON.parse(stripBom(readFileSync(normalizePath(authPath), "utf-8"))) as AuthStorageData;
-		return data[providerId];
+		return primaryCredential(data[providerId]);
 	} catch {
 		return undefined;
 	}
