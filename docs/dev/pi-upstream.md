@@ -110,6 +110,7 @@ Every row must have a matching entry in `scripts/pi-upstream.json` → `patchAll
 | TUI terminal | `packages/pi-tui/src/terminal.ts` | Non-TTY / isTTY guards for GSD tests |
 | TUI main screen | `packages/pi-tui/src/tui-main-screen.ts` | GSD differential main-screen render |
 | TUI alignment | `packages/pi-tui/src/tui-main-screen-alignment.ts` | Shrink/seam helpers for differential render |
+| OAuth providers list | `packages/pi-ai/src/oauth-gsd-compat.ts` | Restore built-in OAuth provider listing for GSD login UI |
 | Env API key vars | `packages/pi-ai/src/env-api-keys.ts` | Export `getApiKeyEnvVars` for GSD auth selector UI |
 | Tool argument normalization tests | `packages/pi-ai/src/utils/tests/normalize-tool-arguments.test.ts` | Regression coverage for shared validation/transcript argument normalization |
 | **Claude tool schemas** | `packages/pi-ai/src/providers/google-shared.ts` | Cloud Code Assist / Claude `input_schema` sanitization (`toClaudeInputSchemaRoot`, `normalizeClaudeToolSchemaForGoogle`) |
