@@ -56,30 +56,21 @@ Smoke tests exercise CLI `--help` and `--version` only; they do not require API 
 
 ## Upgrade workflow
 
-1. **Ensure seam is green** — run verification commands above on current pin before touching upstream.
-2. **Vendor upstream** (does not touch GSD packages):
+`pinnedRef` stays **v0.75.5** until a follow-on plan. Do not move it in order to inspect upstream.
 
-   ```bash
-   node scripts/vendor-pi.cjs --ref vX.Y.Z
-   ```
+Safe inspection does not write `packages/pi-*`:
 
-   Or stepwise:
+```bash
+node scripts/sync-pi-engine.cjs --dry-run
+```
 
-   ```bash
-   node scripts/vendor-pi-deps.cjs --ref vX.Y.Z          # pi-ai, pi-agent-core, pi-tui
-   node scripts/vendor-pi-coding-agent-core.cjs --ref vX.Y.Z
-   node scripts/apply-seam.cjs                           # post-vendor deletes, import rewrites, boundary verify
-   ```
+A real copy is opt-in and must use an absolute `--dest` outside this repo. `--ref <tag>` selects that tag; omit it and the command uses `pinnedRef`. The command uses `.cache/pi-upstream` when that checkout is the selected ref. Otherwise it clones that tag into a temporary directory. It then copies the four packages and reapplies `scripts/pi-overlay/`. For any tag other than the pin, the conflict paths and `session-cwd.ts` stay on the upstream versions. `scripts/pi-161-ports.cjs` reapplies the behaviors listed in `docs/dev/pi-v161-remaining.md`. It deletes the seam paths listed in `scripts/pi-seam.json` from the external coding-agent tree and rewrites that tree's seam imports. It does not run `scripts/apply-seam.cjs` against this repo, and it does not write `packages/pi-*`.
 
-   Seam config: `scripts/pi-seam.json` (forbidden paths, protected files, import rewrites, theme/tool fixes).
-3. **Reconcile GSD shims** — re-apply every path in `patchAllowlist`. Prefer **incremental shims** over restoring entire pre-vendor GSD files (HEAD restore of `model-registry.ts` / `settings-manager.ts` broke v0.75.5 compat in Phase 2).
-4. **Normalize package.json** — preserve `@gsd/pi-*` names, `gsd.linkable`, workspace `tsc` build scripts, and subpath exports (`./*` → `./dist/*`).
-5. **Fix import extensions** — GSD uses Node16 `.js` suffix imports; upstream may use `.ts` for `tsgo`. Bulk-fix or adopt upstream `tsconfig.build.json` if switching compilers.
-6. **Merge dependency deltas** — upstream may rename packages (`typebox` vs `@sinclair/typebox`). Merge without dropping `@gsd/native` shims.
-7. **Build GSD layers** — errors should surface in `@gsd/agent-core` and `@gsd/agent-modes`, not in vendored pi-* except documented shims.
-8. **Session event migration** (pi ≥ 0.65): use `session_start` + `reason` instead of deprecated `session_switch` / `session_fork` / `session_directory`.
-9. **Update pin** in `scripts/pi-upstream.json` and note manual patches in this file.
-10. **Verify** — full verification block above (+ optional live Cloud Code Assist smoke — see execution plan “Golden C”).
+`scripts/vendor-pi.cjs`, `scripts/vendor-pi-deps.cjs`, and `scripts/vendor-pi-coding-agent-core.cjs` are not the upgrade path. Do not run them when the cache was fetched at a tag other than v0.75.5. A mismatched cache exits non-zero before copying.
+
+File-by-file disposition for the overlay is [pi-overlay-triage.md](./pi-overlay-triage.md). The plan is [../plans/2026-11-25-1707-refactor-pi-engine-host-plan.md](../plans/2026-11-25-1707-refactor-pi-engine-host-plan.md).
+
+Seam config remains `scripts/pi-seam.json`. Prefer incremental shims over restoring entire pre-vendor files (`model-registry.ts` and `settings-manager.ts` broke v0.75.5 compat when restored whole in Phase 2).
 
 ## GSD patches that must survive vendoring
 
