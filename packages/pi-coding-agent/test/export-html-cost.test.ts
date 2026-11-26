@@ -15,6 +15,7 @@ type ExportStats = {
 describe("export HTML cost", () => {
 	it("uses recorded totals while falling back to component sums for old sessions", () => {
 		// Regression test for #9980: provider-reported totals may differ from catalog-estimated components.
+		// allow-source-grep: export-html template.js is loaded as a string fixture for HTML rendering tests
 		const templateJs = readFileSync(new URL("../src/core/export-html/template.js", import.meta.url), "utf-8");
 		const functionStart = templateJs.indexOf("function computeStats(entryList)");
 		const functionEnd = templateJs.indexOf("const globalStats = computeStats(entries);");

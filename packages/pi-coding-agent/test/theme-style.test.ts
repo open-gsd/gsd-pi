@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { colorToHex, okhslColor, styleText } from "@gsd/pi-tui";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadThemeFromPath, setTerminalColors } from "../src/modes/interactive/theme/theme.js";
+import { loadThemeFromPath, setTerminalColors } from "../src/theme/theme.js";
 
 const tempDirs: string[] = [];
 
@@ -17,7 +17,8 @@ type ThemeFile = {
 /** Load a copy of a built-in theme, modified by `edit`. */
 function loadTheme(base: "dark" | "light", edit: (theme: ThemeFile) => void = () => {}) {
 	const themeJson = JSON.parse(
-		readFileSync(new URL(`../src/modes/interactive/theme/${base}.json`, import.meta.url), "utf8"),
+		// allow-source-grep: theme JSON is fixture data for schema/export tests, not executable source
+		readFileSync(new URL(`../src/theme/${base}.json`, import.meta.url), "utf8"),
 	) as ThemeFile;
 	edit(themeJson);
 	const dir = mkdtempSync(join(tmpdir(), "pi-theme-style-"));

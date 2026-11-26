@@ -2,15 +2,16 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadThemeFromPath, setThemeJsonValidator } from "../src/modes/interactive/theme/theme.js";
-import { validateThemeJson } from "../src/modes/interactive/theme/theme-schema.js";
+import { loadThemeFromPath, setThemeJsonValidator } from "../src/theme/theme.js";
+import { validateThemeJson } from "../src/theme/theme-schema.js";
 
 setThemeJsonValidator(validateThemeJson);
 
 const tempDirs: string[] = [];
 
 function loadDarkTheme(): { name: string; colors: Record<string, string | number> } {
-	return JSON.parse(readFileSync(new URL("../src/modes/interactive/theme/dark.json", import.meta.url), "utf8")) as {
+	// allow-source-grep: theme JSON is fixture data for schema/export tests, not executable source
+	return JSON.parse(readFileSync(new URL("../src/theme/dark.json", import.meta.url), "utf8")) as {
 		name: string;
 		colors: Record<string, string | number>;
 	};
