@@ -78,20 +78,19 @@ const ALLOWED_FILES: Record<string, string> = {
   "packages/gsd-agent-modes/src/modes/interactive/components/assistant-message.ts":
     "claude-code-specific message rendering",
 
-  // GitHub Copilot transport-specific request/auth transforms.
-  "packages/pi-ai/src/models.ts":
-    "github-copilot-only suppression of ignored Completions effort controls; other transports retain their existing controls",
-  "packages/pi-ai/src/auth/oauth/github-copilot.ts":
-    "github-copilot OAuth-specific model shaping",
-  "packages/pi-ai/src/providers/anthropic.ts":
-    "github-copilot-specific header injection on Anthropic transport",
+  // Transport-specific request/auth transforms and catalog shaping.
   "packages/pi-ai/src/api/openai-responses.ts":
     "github-copilot-specific header injection",
-
-  // Transport-specific model-ID quirks (OpenRouter Anthropic IDs, OpenAI
-  // custom-model-ID length cap, Copilot-specific headers).
   "packages/pi-ai/src/api/openai-completions.ts":
     "transport-specific model-ID and header handling",
+  "packages/pi-ai/src/api/anthropic-messages.ts":
+    "openrouter/github-copilot transport-specific Anthropic request shaping",
+  "packages/pi-ai/src/utils/identity.ts":
+    "transport/host identity helpers for openrouter, nvidia, and opencode",
+  "packages/pi-ai/src/utils/openrouter-cost.ts":
+    "openrouter-only cost accounting gate",
+  "packages/pi-ai/catalog/families/deepseek.ts":
+    "DeepSeek catalog family branches on serving transport (openrouter/azure/native)",
 
   // Model-registry canonical-provider tiebreakers (prefer plain `anthropic` /
   // `claude-code` when multiple transports serve the same model).
