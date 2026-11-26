@@ -35,6 +35,14 @@ test('dry-run exits 0 and leaves the coding-agent manifest alone', () => {
   assert.match(readFileSync(pkgPath, 'utf8'), /"configDir": "\.gsd"/)
 })
 
+test('dry-run --ref prints that ref without requiring it to exist', () => {
+  const before = readFileSync(pkgPath)
+  const result = runCli(['--dry-run', '--ref', 'v1.2.3'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /v1\.2\.3/)
+  assert.equal(readFileSync(pkgPath).equals(before), true)
+})
+
 test('in-process sync keeps .gsd and writes the overlay bytes', () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-sync-'))
   try {
@@ -126,6 +134,36 @@ test('an external dest uses the override checkout and does not touch the repo ma
     assert.equal(existsSync(join(dest, 'packages', 'pi-coding-agent', 'src', 'modes')), false)
     assert.equal(existsSync(join(dest, 'packages', 'pi-coding-agent', 'src', 'keep.ts')), true)
     assert.equal(readFileSync(pkgPath).equals(before), true)
+  } finally {
+    rmSync(upstream, { recursive: true, force: true })
+    rmSync(dest, { recursive: true, force: true })
+  }
+})
+
+test('--ref that is not the fixture tag exits non-zero and leaves the manifest alone', () => {
+  const upstream = mkdtempSync(join(tmpdir(), 'pi-upstream-badref-'))
+  const dest = mkdtempSync(join(tmpdir(), 'pi-sync-badref-dest-'))
+  const before = readFileSync(pkgPath)
+  try {
+    const git = (args) => execFileSync('git', args, { cwd: upstream })
+    git(['init'])
+    git(['config', 'user.email', 'pi-sync@example.com'])
+    git(['config', 'user.name', 'pi-sync'])
+    for (const dir of ['packages/agent', 'packages/ai', 'packages/tui', 'packages/coding-agent']) {
+      mkdirSync(join(upstream, dir), { recursive: true })
+      writeFileSync(join(upstream, dir, 'package.json'), '{}\n')
+    }
+    git(['add', '.'])
+    git(['commit', '-m', 'pin'])
+    git(['tag', 'v0.75.5'])
+    const result = spawnSync(process.execPath, ['scripts/sync-pi-engine.cjs', '--dest', dest, '--ref', 'v9.9.9'], {
+      cwd: repo,
+      encoding: 'utf8',
+      env: { ...process.env, GSD_PI_UPSTREAM_ROOT: upstream },
+    })
+    assert.notEqual(result.status, 0)
+    const after = readFileSync(pkgPath)
+    assert.equal(after.equals(before), true)
   } finally {
     rmSync(upstream, { recursive: true, force: true })
     rmSync(dest, { recursive: true, force: true })

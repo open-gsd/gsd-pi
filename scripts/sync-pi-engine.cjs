@@ -8,11 +8,12 @@
  * post-vendor paths and rewrites the seam import map from pi-seam.json.
  *
  * Usage:
- *   node scripts/sync-pi-engine.cjs --dry-run
- *   node scripts/sync-pi-engine.cjs --dest /absolute/path/outside/this/repo
+ *   node scripts/sync-pi-engine.cjs --dry-run [--ref <tag>]
+ *   node scripts/sync-pi-engine.cjs --dest /absolute/path/outside/this/repo [--ref <tag>]
  *
- * When .cache/pi-upstream is not the pinned tag, --dest clones that tag into
- * a temporary directory. It never writes packages/pi-*.
+ * Omit --ref and the command stays on pinnedRef. When .cache/pi-upstream is
+ * not the selected tag, --dest clones that tag into a temporary directory.
+ * It never writes packages/pi-*.
  */
 'use strict'
 
@@ -26,10 +27,11 @@ const { loadOverlayFiles } = require('./check-pi-overlay-snapshot.cjs')
 const ROOT = join(__dirname, '..')
 
 function parseArgs(argv) {
-  const opts = { dryRun: false, dest: null }
+  const opts = { dryRun: false, dest: null, ref: null }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--dry-run') opts.dryRun = true
     else if (argv[i] === '--dest' && argv[i + 1]) opts.dest = argv[++i]
+    else if (argv[i] === '--ref' && argv[i + 1]) opts.ref = argv[++i]
   }
   return opts
 }
@@ -127,9 +129,10 @@ function main() {
 
   const config = JSON.parse(readFileSync(join(__dirname, 'pi-upstream.json'), 'utf8'))
   const { files } = loadOverlayFiles(ROOT)
+  const ref = opts.ref || config.pinnedRef
 
   if (opts.dryRun) {
-    process.stdout.write(`pin ${config.pinnedRef}\n`)
+    process.stdout.write(`pin ${ref}\n`)
     process.stdout.write(`overlay files ${files.length}\n`)
     process.stdout.write('seam scripts/pi-seam.json\n')
     return
@@ -140,7 +143,6 @@ function main() {
     process.exit(1)
   }
 
-  const ref = config.pinnedRef
   const upstreamRoot = selectUpstreamRoot(ref, config.repository)
   const destRoot = resolve(opts.dest)
   const overlayRoot = join(ROOT, config.overlayDir || 'scripts/pi-overlay')
