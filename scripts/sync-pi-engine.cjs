@@ -4,8 +4,8 @@
  * reapply the stored overlay plus the saved package identity.
  *
  * Seam import rewrites stay on scripts/apply-seam.cjs. This command does not
- * invoke that script. It does delete the post-vendor paths from an external
- * pi-coding-agent tree after the overlay is copied.
+ * invoke that script. On the external coding-agent tree it deletes the
+ * post-vendor paths and rewrites the seam import map from pi-seam.json.
  *
  * Usage:
  *   node scripts/sync-pi-engine.cjs --dry-run
@@ -16,7 +16,7 @@
  */
 'use strict'
 
-const { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('fs')
+const { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } = require('fs')
 const { execFileSync } = require('child_process')
 const { tmpdir } = require('os')
 const { isAbsolute, join, relative, resolve } = require('path')
@@ -39,6 +39,37 @@ function isOutsideRepo(dest) {
   const resolved = resolve(dest)
   const rel = relative(ROOT, resolved)
   return rel.startsWith('..') || isAbsolute(rel)
+}
+
+function walkTs(dir, fn) {
+  if (!existsSync(dir)) return
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === 'dist') continue
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) walkTs(full, fn)
+    else if (entry.name.endsWith('.ts')) fn(full)
+  }
+}
+
+function applySeamImportRewrites(srcRoot, seam) {
+  const replacements = [
+    ...Object.entries(seam.importRewrites?.agentCore || {}),
+    ...Object.entries(seam.importRewrites?.agentModes || {}),
+  ]
+  walkTs(srcRoot, (file) => {
+    let content = readFileSync(file, 'utf8')
+    const original = content
+    for (const [from, to] of replacements) {
+      content = content.replaceAll(`from "${from}"`, `from "${to}"`)
+    }
+    for (const fix of seam.piInternalPathFixes || []) {
+      content = content.replaceAll(`from "${fix.from}`, `from "${fix.to}`)
+    }
+    if (seam.toolComponentImportFix) {
+      content = content.replaceAll(seam.toolComponentImportFix.from, seam.toolComponentImportFix.to)
+    }
+    if (content !== original) writeFileSync(file, content)
+  })
 }
 
 function applyPostVendorDeletes(srcRoot, rels) {
@@ -133,11 +164,19 @@ function main() {
     if (targetPath === 'packages/pi-coding-agent') {
       const seam = JSON.parse(readFileSync(join(__dirname, 'pi-seam.json'), 'utf8'))
       applyPostVendorDeletes(join(destRoot, targetPath, 'src'), seam.postVendorDeletes || [])
+      applySeamImportRewrites(join(destRoot, targetPath, 'src'), seam)
     }
   }
-  process.stderr.write(`Synced ${ref} into ${destRoot}. Import rewrites were not run.\n`)
+  process.stderr.write(`Synced ${ref} into ${destRoot}. Repo packages were not modified.\n`)
 }
 
-module.exports = { syncDestination, isOutsideRepo, parseArgs, selectUpstreamRoot, applyPostVendorDeletes }
+module.exports = {
+  syncDestination,
+  isOutsideRepo,
+  parseArgs,
+  selectUpstreamRoot,
+  applyPostVendorDeletes,
+  applySeamImportRewrites,
+}
 
 if (require.main === module) main()

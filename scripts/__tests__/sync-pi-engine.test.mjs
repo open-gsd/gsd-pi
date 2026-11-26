@@ -7,7 +7,7 @@ import test from 'node:test'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
-const { syncDestination, applyPostVendorDeletes } = require('../sync-pi-engine.cjs')
+const { syncDestination, applyPostVendorDeletes, applySeamImportRewrites } = require('../sync-pi-engine.cjs')
 const repo = join(import.meta.dirname, '..', '..')
 const pkgPath = join(repo, 'packages/pi-coding-agent/package.json')
 
@@ -144,6 +144,21 @@ test('post-vendor deletes remove seam paths only under the given src root', () =
     assert.equal(existsSync(join(src, 'modes')), false)
     assert.equal(existsSync(join(src, 'cli.ts')), false)
     assert.equal(existsSync(join(src, 'keep.ts')), true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('seam import rewrites retarget agent-session imports on the given tree', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-seam-import-'))
+  try {
+    const src = join(root, 'src', 'core')
+    mkdirSync(src, { recursive: true })
+    const file = join(src, 'example.ts')
+    writeFileSync(file, 'import { Session } from "./agent-session.js"\n')
+    const seam = JSON.parse(readFileSync(join(repo, 'scripts', 'pi-seam.json'), 'utf8'))
+    applySeamImportRewrites(join(root, 'src'), seam)
+    assert.match(readFileSync(file, 'utf8'), /from "@gsd\/agent-core"/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
