@@ -81,6 +81,7 @@ Every row must have a matching entry in `scripts/pi-upstream.json` → `patchAll
 | Clean seam | `packages/gsd-agent-core`, `packages/gsd-agent-modes` | Session, SDK, modes, CLI |
 | Type seam | `packages/pi-coding-agent/src/core/gsd-seam-types.ts` | Avoid compile-time pi ↔ agent-core cycle |
 | Session types | `packages/pi-coding-agent/src/core/extension-session-types.ts` | Re-export session types from `@gsd/agent-core` |
+| External usage accounting | `packages/pi-coding-agent/src/core/session-manager.ts` | `addExternalUsage`, durable `external-usage` custom entries, `getUsageTotals({ includeExternalUsage })` (#2821, #2836) |
 | Ambient shim | `packages/pi-coding-agent/src/agent-core.d.ts` | Extension types without package dep |
 | Extension loader | `packages/pi-coding-agent/src/core/extensions/loader.ts` | `@gsd/agent-*`, `@earendil-works/*` aliases |
 | GSD core files | `model-discovery.ts`, `discovery-cache.ts`, `models-json-writer.ts`, `package-commands.ts`, `local-model-check.ts`, `capability-patches.ts`, `bash-interceptor.ts`, `constants.ts` | Provider discovery, offline mode, capability patches |
