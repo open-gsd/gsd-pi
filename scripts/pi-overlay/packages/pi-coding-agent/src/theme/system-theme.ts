@@ -125,6 +125,20 @@ const TOKEN_FAMILIES: Record<ThemeToken, FamilyName> = {
 	thinkingHigh: "thinkingViolet",
 	thinkingXhigh: "thinkingMagenta",
 	thinkingMax: "thinkingRed",
+
+	assistantMessageText: "neutral",
+	surfaceTitle: "violet",
+	surfaceAccent: "violet",
+	surfaceMuted: "neutral",
+	surfaceBorder: "neutral",
+	toolRunning: "yellow",
+	toolMuted: "neutral",
+	toolSuccess: "green",
+	toolError: "red",
+	modeWorkflow: "violet",
+	modeValidation: "yellow",
+	modeDebug: "neutral",
+	modeCompact: "neutral",
 };
 
 /** Palette slots for tokens that would otherwise share a hue with a similar token. */

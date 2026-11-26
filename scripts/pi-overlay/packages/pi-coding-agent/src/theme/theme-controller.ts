@@ -1,5 +1,5 @@
 import type { RgbColor, TerminalColors, TUI } from "@gsd/pi-tui";
-import type { SettingsManager } from "../../../core/settings-manager.js";
+import type { SettingsManager } from "../core/settings-manager.js";
 import {
 	getTerminalTheme,
 	initTheme,

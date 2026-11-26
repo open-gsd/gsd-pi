@@ -98,6 +98,23 @@ export const THEME_TOKENS = defineThemeTokens({
 		fallback: "thinkingXhigh",
 	},
 	bashMode: { slot: "foreground", description: "Editor border color in bash mode" },
+	assistantMessageText: {
+		slot: "foreground",
+		description: "Assistant message body text",
+		fallback: "text",
+	},
+	surfaceTitle: { slot: "foreground", description: "Surface panel title", fallback: "accent" },
+	surfaceAccent: { slot: "foreground", description: "Surface accent emphasis", fallback: "accent" },
+	surfaceMuted: { slot: "foreground", description: "Muted surface labels", fallback: "muted" },
+	surfaceBorder: { slot: "foreground", description: "Surface divider lines", fallback: "borderMuted" },
+	toolRunning: { slot: "foreground", description: "Active tool emphasis", fallback: "warning" },
+	toolMuted: { slot: "foreground", description: "Inactive tool emphasis", fallback: "muted" },
+	toolSuccess: { slot: "foreground", description: "Successful tool emphasis", fallback: "success" },
+	toolError: { slot: "foreground", description: "Failed tool emphasis", fallback: "error" },
+	modeWorkflow: { slot: "foreground", description: "GSD workflow mode emphasis", fallback: "accent" },
+	modeValidation: { slot: "foreground", description: "GSD validation mode emphasis", fallback: "warning" },
+	modeDebug: { slot: "foreground", description: "GSD debug mode emphasis", fallback: "muted" },
+	modeCompact: { slot: "foreground", description: "GSD compact mode emphasis", fallback: "dim" },
 });
 
 export type ThemeToken = keyof typeof THEME_TOKENS;

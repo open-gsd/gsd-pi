@@ -25,6 +25,8 @@ import type {
 	Provider,
 	ProviderHeaders,
 } from "@gsd/pi-ai";
+import type { AuthStorage } from "./auth-storage.js";
+import type { DiscoveryResult } from "./model-discovery.js";
 import type { ModelRuntime } from "./model-runtime.js";
 import { isLocalModel } from "./local-model-check.js";
 export type ProviderAuthMode = "apiKey" | "oauth" | "none" | "externalCli";
@@ -49,20 +51,41 @@ export { clearApiKeyCache } from "./provider-composer.js";
  */
 export class ModelRegistry {
 	private readonly runtime: ModelRuntime;
+	private readonly storedAuthStorage?: AuthStorage;
+	private readonly storedModelsJsonPath?: string;
+	private disabledModelProviders = new Set<string>();
 
-	constructor(runtime: ModelRuntime) {
+	constructor(runtime: ModelRuntime, authStorage?: AuthStorage, modelsJsonPath?: string) {
 		this.runtime = runtime;
+		this.storedAuthStorage = authStorage;
+		this.storedModelsJsonPath = modelsJsonPath;
+	}
+
+	get authStorage(): AuthStorage {
+		if (this.storedAuthStorage) return this.storedAuthStorage;
+		throw new Error("ModelRegistry has no AuthStorage reference");
+	}
+
+	get modelsJsonPath(): string | undefined {
+		return this.storedModelsJsonPath;
+	}
+
+	/** Underlying async runtime for model resolution helpers (e.g. findInitialModel). */
+	getModelRuntime(): ModelRuntime {
+		return this.runtime;
 	}
 
 	/** Host-compatible factory: AuthStorage + models.json path → ModelRuntime facade. */
 	static async create(authStorage: import("./auth-storage.js").AuthStorage, modelsJsonPath?: string): Promise<ModelRegistry> {
 		const { ModelRuntime } = await import("./model-runtime.js");
+		const resolvedModelsPath =
+			modelsJsonPath === undefined ? undefined : modelsJsonPath;
 		const runtime = await ModelRuntime.create({
 			credentials: authStorage,
-			modelsPath: modelsJsonPath === undefined ? undefined : modelsJsonPath,
+			modelsPath: resolvedModelsPath,
 			allowModelNetwork: false,
 		});
-		return new ModelRegistry(runtime);
+		return new ModelRegistry(runtime, authStorage, resolvedModelsPath);
 	}
 
 	static async inMemory(authStorage: import("./auth-storage.js").AuthStorage): Promise<ModelRegistry> {
@@ -72,7 +95,27 @@ export class ModelRegistry {
 			modelsPath: null,
 			allowModelNetwork: false,
 		});
-		return new ModelRegistry(runtime);
+		return new ModelRegistry(runtime, authStorage, undefined);
+	}
+
+	setDisabledModelProviders(providers: string[]): void {
+		this.disabledModelProviders = new Set(providers);
+	}
+
+	async discoverModels(_providers?: string[]): Promise<DiscoveryResult[]> {
+		return [];
+	}
+
+	getAllWithDiscovered(): Model<Api>[] {
+		return this.getAll();
+	}
+
+	isDiscovered(model: Model<Api>): boolean;
+	isDiscovered(provider: string, modelId: string): boolean;
+	isDiscovered(modelOrProvider: Model<Api> | string, modelId?: string): boolean {
+		void modelOrProvider;
+		void modelId;
+		return false;
 	}
 
 	getProviderAuthMode(provider: string): ProviderAuthMode {

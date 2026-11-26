@@ -1,0 +1,1 @@
+export { shortenPath } from "../core/tools/render-utils.js";

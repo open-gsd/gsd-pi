@@ -23,11 +23,11 @@ import {
 	type TextAttributes,
 } from "@gsd/pi-tui";
 import chalk from "chalk";
-import { getCustomThemesDir, getThemesDir } from "../../../config.js";
-import type { SourceInfo } from "../../../core/source-info.js";
-import { closeWatcher, watchWithErrorHandler } from "../../../utils/fs-watch.js";
-import { getHighlightLanguageCount, highlight, supportsLanguage } from "../../../utils/syntax-highlight.js";
-import { stripBom } from "../../../utils/text.js";
+import { getCustomThemesDir, getThemesDir } from "../config.js";
+import type { SourceInfo } from "../core/source-info.js";
+import { closeWatcher, watchWithErrorHandler } from "../utils/fs-watch.js";
+import { getHighlightLanguageCount, highlight, supportsLanguage } from "../utils/syntax-highlight.js";
+import { stripBom } from "../utils/text.js";
 import { generateSystemThemeColors, SYSTEM_THEME_NAME, terminalAppearance } from "./system-theme.js";
 import {
 	type ResolvedThemeColorValues,
@@ -732,8 +732,13 @@ export function setThemeInstance(themeInstance: Theme): void {
 	}
 }
 
-export function onThemeChange(callback: () => void): void {
+export function onThemeChange(callback: () => void): () => void {
 	onThemeChangeCallback = callback;
+	return () => {
+		if (onThemeChangeCallback === callback) {
+			onThemeChangeCallback = undefined;
+		}
+	};
 }
 
 function startThemeWatcher(): void {

@@ -57,14 +57,17 @@ import type {
 	TUI,
 } from "@gsd/pi-tui";
 import type { Static, TSchema } from "typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.js";
-import type { BashResult } from "@gsd/agent-core";
+import type { Theme } from "../../theme/theme.js";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.js";
-import type { CompactionPreparation, CompactionResult } from "@gsd/agent-core";
+import type {
+	BashResult,
+	CompactionPreparation,
+	CompactionResult,
+} from "../gsd-seam-types.js";
 import type { EventBus } from "../event-bus.js";
 import type { ExecOptions, ExecResult } from "../exec.js";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.js";
-import type { KeybindingsManager } from "@gsd/agent-core";
+import type { KeybindingsManager } from "../keybindings.js";
 import type { McpServerConfig, McpServerRegistry, RegisteredMcpServer } from "../mcp-servers.js";
 import type { CustomMessage } from "../messages.js";
 import type { ModelRegistry } from "../model-registry.js";
@@ -82,7 +85,7 @@ import type {
 import type { Settings } from "../settings-manager.js";
 import type { SlashCommandInfo } from "../slash-commands.js";
 import type { SourceInfo } from "../source-info.js";
-import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "@gsd/agent-core";
+import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.js";
 import type { BashOperations } from "../tools/bash.js";
 import type { EditToolDetails } from "../tools/edit.js";
 import type {
@@ -104,9 +107,9 @@ import type {
 import type { ModelRoute, ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.js";
 
 export type { ExecOptions, ExecResult } from "../exec.js";
-export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "@gsd/agent-core";
+export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.js";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
-export type { AppKeybinding, KeybindingsManager } from "@gsd/agent-core";
+export type { AppKeybinding, KeybindingsManager } from "../keybindings.js";
 
 // ============================================================================
 // UI Context
@@ -116,6 +119,10 @@ export type { AppKeybinding, KeybindingsManager } from "@gsd/agent-core";
 export interface ExtensionUIDialogOptions {
 	/** AbortSignal to programmatically dismiss the dialog. */
 	signal?: AbortSignal;
+	/** When true, `select()` may return multiple values (GSD host). */
+	allowMultiple?: boolean;
+	/** Masked input for `input()` dialogs (GSD host). */
+	secure?: boolean;
 	/** Timeout in milliseconds. Dialog auto-dismisses with live countdown display. */
 	timeout?: number;
 	/**
@@ -177,7 +184,13 @@ export interface ExtensionUIContext {
 	input(title: string, placeholder?: string, opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
 	/** Show a notification to the user. */
-	notify(message: string, type?: "info" | "warning" | "error"): void;
+	notify(message: string, type?: "info" | "warning" | "error" | "success"): void;
+
+	/** GSD progress widget control for workflow extensions. */
+	setGsdProgress?(
+		state: import("./extension-upstream-types.js").GsdProgressState | undefined,
+		dispose?: () => void,
+	): void;
 
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
@@ -186,7 +199,7 @@ export interface ExtensionUIContext {
 	setStatus(key: string, text: string | undefined): void;
 
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
-	setWorkingMessage(message?: string): void;
+	setWorkingMessage(message?: string | null): void;
 
 	/** Show or hide the built-in interactive working loader row during streaming. */
 	setWorkingVisible(visible: boolean): void;
@@ -1733,6 +1746,9 @@ export interface ExtensionAPI {
 	/** Register a custom command. */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
 
+	/** GSD: register a named runtime read handler for RPC/interactive dashboards. */
+	registerRuntimeRead?(name: string, handler: RuntimeReadHandler): void;
+
 	/** Register a keyboard shortcut. */
 	registerShortcut(
 		shortcut: KeyId,
@@ -2318,6 +2334,8 @@ export interface ExtensionCommandContextActions {
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	) => Promise<{ cancelled: boolean }>;
 	reload: () => Promise<void>;
+	/** GSD host: list all configured tools from the active session. */
+	getAllTools?: () => ToolInfo[];
 }
 
 /**
@@ -2341,9 +2359,12 @@ export interface Extension {
 	markdownTransformer?: MarkdownTransformerRegistration;
 	entryRenderers?: Map<string, EntryRenderer>;
 	commands: Map<string, RegisteredCommand>;
+	runtimeReads: Map<string, RuntimeReadHandler>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 }
+
+export type RuntimeReadHandler = (input: unknown) => Promise<unknown>;
 
 /** Result of loading extensions. */
 export interface LoadExtensionsResult {

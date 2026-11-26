@@ -296,6 +296,10 @@ export class SettingsManager {
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 	private settingsPaths: SettingsPaths;
+	/** GSD: session-only compaction threshold override (percent of context window). */
+	private compactionThresholdOverride?: number;
+	/** GSD: edit tool mode for interactive sessions. */
+	private editMode: "standard" | "hashline" = "standard";
 
 	private constructor(
 		storage: SettingsStorage,
@@ -882,6 +886,28 @@ export class SettingsManager {
 		};
 	}
 
+	getToolsExpanded(): boolean {
+		return this.settings.terminal?.toolsExpanded ?? true;
+	}
+
+	setToolsExpanded(expanded: boolean): void {
+		if (!this.globalSettings.terminal) this.globalSettings.terminal = {};
+		this.globalSettings.terminal.toolsExpanded = expanded;
+		this.markModified("terminal", "toolsExpanded");
+		this.save();
+	}
+
+	getToolRailAnimation(): boolean {
+		return this.settings.terminal?.toolRailAnimation ?? true;
+	}
+
+	setToolRailAnimation(enabled: boolean): void {
+		if (!this.globalSettings.terminal) this.globalSettings.terminal = {};
+		this.globalSettings.terminal.toolRailAnimation = enabled;
+		this.markModified("terminal", "toolRailAnimation");
+		this.save();
+	}
+
 	getSessionShareDestination(): SessionShareDestination {
 		const destination = this.settings.sessionShareDestination;
 		return destination === "gist" || destination === "radius"
@@ -949,12 +975,31 @@ export class SettingsManager {
 		enabled: boolean;
 		reserveTokens: number;
 		keepRecentTokens: number;
+		thresholdPercent?: number;
 	} {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(model),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(model),
+			...(this.compactionThresholdOverride !== undefined
+				? { thresholdPercent: this.compactionThresholdOverride }
+				: {}),
 		};
+	}
+
+	/** GSD: in-memory compaction threshold override for the current process. */
+	setCompactionThresholdOverride(percent: number | undefined): void {
+		this.compactionThresholdOverride = percent;
+	}
+
+	/** GSD: current edit tool presentation mode. */
+	getEditMode(): "standard" | "hashline" {
+		return this.editMode;
+	}
+
+	/** GSD: set edit tool presentation mode. */
+	setEditMode(mode: "standard" | "hashline"): void {
+		this.editMode = mode;
 	}
 
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {

@@ -1,14 +1,14 @@
 import type { GenerateContentParameters } from "@google/genai";
 import { describe, expect, it } from "vitest";
-import { streamSimple as streamSimpleGoogle } from "../src/api/google-generative-ai.ts";
+import { streamSimple as streamSimpleGoogle } from "../src/api/google-generative-ai.js";
 import {
 	convertTools,
 	resolveGoogleFunctionCallingMode,
 	supportsGoogleStrictToolSampling,
-} from "../src/api/google-shared.ts";
-import { streamSimple as streamSimpleVertex } from "../src/api/google-vertex.ts";
-import type { GoogleCompat, Model, Tool } from "../src/types.ts";
-import { normalizeContext } from "../src/utils/transcript.ts";
+} from "../src/api/google-shared.js";
+import { streamSimple as streamSimpleVertex } from "../src/api/google-vertex.js";
+import type { GoogleCompat, Model, Tool } from "../src/types.js";
+import { normalizeContext } from "../src/utils/transcript.js";
 
 function googleModel(id: string, compat?: GoogleCompat): Model<"google-generative-ai"> {
 	return {

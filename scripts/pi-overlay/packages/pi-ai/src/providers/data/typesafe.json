@@ -1,0 +1,1 @@
+{"typesafe-system-one":{"classifier:jev-latest":{"type":"classifier","id":"jev-latest","name":"Jev","api":"typesafe-system-one","provider":"typesafe","baseUrl":"https://api.typesafe.ai/v1/","input":["text","image"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":64000,"compat":{"imageInput":"assets","sendImageOptInHeader":true}}}}

@@ -194,7 +194,7 @@ type ActiveRun = {
  * `Agent` owns the current transcript, emits lifecycle events, executes tools,
  * and exposes queueing APIs for steering and follow-up messages.
  */
-type AgentAbortOrigin = "user" | "timeout" | "error" | "extension" | "programmatic";
+export type AgentAbortOrigin = "user" | "timeout" | "error" | "extension" | "programmatic";
 const AGENT_ABORT_ORIGINS: readonly AgentAbortOrigin[] = ["user", "timeout", "error", "extension", "programmatic"];
 function abortOriginFromReason(signal: AbortSignal | undefined): AgentAbortOrigin | undefined {
 	if (!signal?.aborted) return undefined;
@@ -640,8 +640,15 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
+		let listenerEvent: AgentEvent = event;
+		if (event.type === "agent_end" && !event.abortOrigin && signal.aborted) {
+			const abortOrigin = abortOriginFromReason(signal);
+			if (abortOrigin) {
+				listenerEvent = { ...event, abortOrigin };
+			}
+		}
 		for (const listener of this.listeners) {
-			await listener(event, signal);
+			await listener(listenerEvent, signal);
 		}
 	}
 }

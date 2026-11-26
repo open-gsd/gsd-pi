@@ -113,6 +113,8 @@ const TerminalSettingsSchema = Type.Object({
 			{ description: "Adaptive TUI density override." },
 		),
 	),
+	toolsExpanded: Type.Optional(Type.Boolean({ description: "Expand tool output blocks by default in the TUI." })),
+	toolRailAnimation: Type.Optional(Type.Boolean({ description: "Animate the tool status rail in the TUI." })),
 	trueColor: Type.Optional(Type.Union([Type.Boolean(), Type.Literal("auto")])),
 });
 

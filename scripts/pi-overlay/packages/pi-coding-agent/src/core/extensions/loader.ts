@@ -112,24 +112,12 @@ function getAliases(): Record<string, string> {
 		"@gsd/pi-agent-core": piAgentCoreEntry,
 		"@gsd/pi-tui": piTuiEntry,
 		"@gsd/pi-ai": piAiCompatEntry,
+		"@gsd/pi-ai/providers/all": piAiProvidersEntry,
+		"@gsd/pi-ai/compat": piAiCompatEntry,
+		"@gsd/pi-ai/models": piAiModelsEntry,
+		"@gsd/pi-ai/oauth": piAiOauthEntry,
 		"@gsd/agent-core": agentCoreEntry,
 		"@gsd/agent-modes": resolveWorkspaceOrImport("gsd-agent-modes/dist/index.js", "@gsd/agent-modes"),
-		"@gsd/pi-coding-agent": piCodingAgentEntry,
-		"@gsd/pi-agent-core": piAgentCoreEntry,
-		"@gsd/pi-tui": piTuiEntry,
-		"@gsd/pi-ai/providers/all": piAiProvidersEntry,
-		"@gsd/pi-ai/compat": piAiCompatEntry,
-		"@gsd/pi-ai/models": piAiModelsEntry,
-		"@gsd/pi-ai/oauth": piAiOauthEntry,
-		"@gsd/pi-ai": piAiCompatEntry,
-		"@gsd/pi-coding-agent": piCodingAgentEntry,
-		"@gsd/pi-agent-core": piAgentCoreEntry,
-		"@gsd/pi-tui": piTuiEntry,
-		"@gsd/pi-ai/providers/all": piAiProvidersEntry,
-		"@gsd/pi-ai/compat": piAiCompatEntry,
-		"@gsd/pi-ai/models": piAiModelsEntry,
-		"@gsd/pi-ai/oauth": piAiOauthEntry,
-		"@gsd/pi-ai": piAiCompatEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
 		"typebox/value": typeboxValueEntry,
@@ -336,6 +324,11 @@ function createExtensionAPI(
 				sourceInfo: extension.sourceInfo,
 				...options,
 			});
+		},
+
+		registerRuntimeRead(name: string, handler: import("./types.js").RuntimeReadHandler): void {
+			assertActive();
+			extension.runtimeReads.set(name, handler);
 		},
 
 		registerShortcut(
@@ -643,6 +636,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		messageRenderers: new Map(),
 		entryRenderers: new Map(),
 		commands: new Map(),
+		runtimeReads: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
 	};

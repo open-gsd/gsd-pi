@@ -391,6 +391,8 @@ export interface AgentState {
 	readonly systemPrompt: string;
 	/** Active model used for future turns. */
 	model: Model<any>;
+	/** GSD: effective model during multi-model routing (footer display). */
+	activeInferenceModel?: Model<any>;
 	/** Requested reasoning level for future turns. */
 	thinkingLevel: ThinkingLevel;
 	/**
