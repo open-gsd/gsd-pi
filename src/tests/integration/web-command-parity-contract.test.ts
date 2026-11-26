@@ -50,10 +50,12 @@ const EXPECTED_BUILTIN_OUTCOMES = new Map<string, "rpc" | "surface" | "reject">(
 const BUILTIN_DESCRIPTIONS = new Map(BUILTIN_SLASH_COMMANDS.map((command) => [command.name, command.description]))
 const DEFERRED_BROWSER_REJECTS = [
   "share",
+  "bug",
   "copy",
   "changelog",
   "hotkeys",
   "tree",
+  "trust",
   "import",
   "clone",
   "reload",

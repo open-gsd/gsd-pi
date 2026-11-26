@@ -21,7 +21,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-ai/src/host-compat.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/models/fake-model.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
-| `packages/pi-ai/src/oauth-gsd-compat.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/oauth-gsd-compat.ts` | keep-overlay | Descriptor-only OAuth catalog for onboarding/login availability (xAI + peers); login via ModelRuntime | no |
 | `packages/pi-ai/src/oauth.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/api-family.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/compat-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
