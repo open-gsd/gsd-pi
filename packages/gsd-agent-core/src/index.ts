@@ -38,6 +38,10 @@ export type { CompactionPreparation } from "./compaction/compaction.js";
 export { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 export { buildSystemPrompt, type BuildSystemPromptOptions } from "./system-prompt.js";
 export {
+	normalizeBuildSystemPromptOptions,
+	type NormalizedBuildSystemPromptOptions,
+} from "@gsd/pi-coding-agent/core/system-prompt.js";
+export {
 	type AppAction,
 	type AppKeybinding,
 	KeybindingsManager,
