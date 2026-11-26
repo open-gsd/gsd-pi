@@ -102,6 +102,9 @@ Every row must have a matching entry in `scripts/pi-upstream.json` → `patchAll
 | Shell helpers | `packages/pi-coding-agent/src/utils/shell.ts` | Process-tree kill + command sanitize |
 | Provider display names | `packages/pi-coding-agent/src/core/provider-display-names.ts` | Built-in provider label map for interactive auth selectors |
 | Slash commands list | `packages/pi-coding-agent/src/core/slash-commands.ts` | Browser-safe builtin list (no `config.ts` / Node fs import) |
+| Codex responses stream | `packages/pi-ai/src/api/openai-codex-responses.ts` | GSD-friendly nested Codex error formatting |
+| Provider readiness | `packages/pi-coding-agent/src/core/provider-readiness.ts` | External-CLI settleReadiness / isReady policy |
+| Bash tool | `packages/pi-coding-agent/src/core/tools/bash.ts` | GSD timeout_ms schema and session env guards |
 | Env API key vars | `packages/pi-ai/src/env-api-keys.ts` | Export `getApiKeyEnvVars` for GSD auth selector UI |
 | Tool argument normalization tests | `packages/pi-ai/src/utils/tests/normalize-tool-arguments.test.ts` | Regression coverage for shared validation/transcript argument normalization |
 | **Claude tool schemas** | `packages/pi-ai/src/providers/google-shared.ts` | Cloud Code Assist / Claude `input_schema` sanitization (`toClaudeInputSchemaRoot`, `normalizeClaudeToolSchemaForGoogle`) |

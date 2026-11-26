@@ -13,6 +13,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-ai/src/api/claude-tool-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/api/google-shared.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/api/mistral-conversations.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/api/openai-codex-responses.ts` | keep-overlay | Codex stream error formatting for GSD diagnostics | no |
 | `packages/pi-ai/src/auth/oauth/github-copilot.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/env-api-keys.ts` | keep-overlay | export getApiKeyEnvVars for GSD auth selectors | no |
 | `packages/pi-ai/src/gsd-compat-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -114,6 +115,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/core/package-commands.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/package-manager.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/provider-display-names.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/provider-readiness.ts` | keep-overlay | GSD external-CLI settleReadiness / isReady policy | no |
 | `packages/pi-coding-agent/src/core/radius-mcp.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/resolve-config-value.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/session-cwd.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -125,6 +127,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/core/slash-commands.ts` | keep-overlay | browser-safe builtin command list (no config/fs import) | no |
 | `packages/pi-coding-agent/src/core/system-prompt.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/tools/bash-interceptor.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/tools/bash.ts` | keep-overlay | GSD timeout_ms schema and session env guards | no |
 | `packages/pi-coding-agent/src/core/tools/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/tools/read.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/tools/render-utils.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
