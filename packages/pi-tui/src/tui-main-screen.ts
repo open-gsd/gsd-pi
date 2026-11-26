@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.js";
-import { type TUI, TuiBase, type TuiStopOptions } from "./tui.js";
-import { truncateToWidth, visibleWidth } from "./utils.js";
+import { SEGMENT_RESET, type TUI, TuiBase, type TuiStopOptions } from "./tui.js";
+import { keepsFlushedTop, overlapMatches, seamRowInNewFrame, windowMultiplicitiesBacked } from "./tui-main-screen-alignment.js";
+import { normalizeTerminalOutput, truncateToWidth, visibleWidth } from "./utils.js";
 
 /** OSC 133 prompt markers at the start of a rendered line. Fullscreen uses them for prompt navigation. */
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
@@ -137,6 +138,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private flushedLineCount = 0;
 	private flushedAtWidth = 0;
 	private flushedAtHeight = 0;
+	private forcedRenderBaseLines?: string[];
+	private forcedRenderBaseViewportTop?: number;
+	private _shrinkDebounceActive = false;
+	private _lastRenderedComponents: string[] | null = null;
+	private _lastFrameHadOverlays = false;
+	private baseContentLineCount = 0;
 
 	captureRenderState(): TuiMainScreenRenderState {
 		return {
@@ -172,6 +179,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.flushedLineCount = 0;
 		this.flushedAtWidth = 0;
 		this.flushedAtHeight = 0;
+		this.forcedRenderBaseLines = undefined;
+		this.forcedRenderBaseViewportTop = undefined;
+		this._lastRenderedComponents = null;
+		this._lastFrameHadOverlays = false;
+		this._shrinkDebounceActive = false;
+		this.baseContentLineCount = 0;
 	}
 
 	protected override beforeTerminalStop(options: TuiStopOptions): void {
@@ -253,42 +266,171 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return this.deleteKittyImages(ids);
 	}
 
+	private writeRenderBuffer(buffer: string): void {
+		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
+		output.append(buffer);
+		output.flush();
+	}
+
+	private commitRenderedLines(newLines: string[]): void {
+		this.previousLines = newLines;
+		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+	}
+
+
 	protected doRender(): void {
 		if (this.stopped) return;
+		const redrawLogDirectory = process.env.PI_TUI_DEBUG_REDRAW === "1" ? this.logDirectory : undefined;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
-		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
-		const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;
-		const previousBufferLength = this.previousHeight > 0 ? this.previousViewportTop + this.previousHeight : height;
-		let prevViewportTop = heightChanged ? Math.max(0, previousBufferLength - height) : this.previousViewportTop;
-		let viewportTop = prevViewportTop;
+		const getViewportTop = (lineCount: number): number => lineCount - height;
+		let viewportTop = getViewportTop(this.maxLinesRendered);
+		let prevViewportTop = this.previousViewportTop;
 		let hardwareCursorRow = this.hardwareCursorRow;
 		const computeLineDiff = (targetRow: number): number => {
 			const currentScreenRow = hardwareCursorRow - prevViewportTop;
 			const targetScreenRow = targetRow - viewportTop;
 			return targetScreenRow - currentScreenRow;
 		};
+		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
+		const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;
 
 		// Render all components to get new lines
-		// Resolve fake cursors before compositing so overlays and line slicing see plain SGR codes
-		// Drop OSC 133 markers: the terminal reads 133;A as a new shell prompt, which ends program status (OSC 7501)
 		let newLines = this.resolveFakeCursors(this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, "")));
+
+		// A kept-flushed-top commit (#2541) leaves the physical screen top above
+		// the bottom-aligned position, with blank rows at the bottom. Pad the
+		// frame with trailing blanks so the bottom-aligned invariant
+		// (length - height == screen top) keeps holding for every consumer —
+		// overlay compositing, cursor extraction, mouse mapping, differential
+		// math — while the freed rows persist. Only small overlaps stay
+		// retained (larger shrinks refill the screen, #613); the overlap lines
+		// above the new viewport top must still match the committed frame
+		// (overlapMatches, #2582) — lines further up are in scrollback and no
+		// path repaints them, so a change there must not drop the retention —
+		// else it is stale and the next repaint re-anchors naturally. A forced
+		// render has no committed frame to compare against (previousLines is
+		// reset), so it never pads here — the kept-top writer handles that
+		// path.
+		// Docked (reserveSpace) overlays add their rows after this padding, so the
+		// frame is not shorter than the retained top; padding too would count them
+		// twice.
+		const retainedTop = this.previousViewportTop;
+		if (
+			!this.hasDockedOverlay() &&
+			retainedTop > 0 &&
+			retainedTop <= this.flushedLineCount &&
+			this.flushedAtWidth === width &&
+			this.flushedAtHeight === height &&
+			newLines.length < retainedTop + height &&
+			retainedTop + height - newLines.length <= Math.floor(height / 2) &&
+			this.previousLines.length >= retainedTop
+		) {
+			// Committed lines carry the segment-reset suffix (applyLineResets),
+			// so compare the new lines in the same committed form. Window-value
+			// multiplicities are checked alongside: pinning the retained layout
+			// over a shift masked by repetition would route the differential's
+			// clean repaint from the retained mark and abandon rows the
+			// scrollback cannot back (windowMultiplicitiesBacked).
+			const committedLines = this.previousLines;
+			const newCommittedAt = (i: number): string => {
+				const line = newLines[i];
+				return isImageLine(line) ? line : normalizeTerminalOutput(line) + SEGMENT_RESET;
+			};
+			const prefixMatches =
+				overlapMatches(newLines.length - height, retainedTop, (i) => {
+					return committedLines[i] === newCommittedAt(i);
+				}, (i) => newLines[i]) &&
+				windowMultiplicitiesBacked(
+					committedLines,
+					newCommittedAt,
+					newLines.length - height,
+					retainedTop,
+				);
+			if (prefixMatches) {
+				newLines = [
+					...newLines,
+					...Array.from({ length: retainedTop + height - newLines.length }, () => ""),
+				];
+			}
+		}
+
+		if (
+			newLines === this._lastRenderedComponents &&
+			!this.hasOverlayEntries &&
+			!this._lastFrameHadOverlays &&
+			!widthChanged &&
+			!heightChanged
+		) {
+			return;
+		}
+		this._lastRenderedComponents = newLines;
+		this._lastFrameHadOverlays = this.hasOverlayEntries;
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
 			newLines = this.compositeOverlays(newLines, width, height);
-		}
+		} else {
+			}
+		this.baseContentLineCount = newLines.length;
 
 		// Extract cursor position before applying line resets (marker must be found first)
-		const cursorPos = this.extractCursorPosition(newLines, height);
+		let cursorPos = this.extractCursorPosition(newLines, height);
 
 		newLines = this.applyLineResets(newLines);
 
-		const getViewportTop = (lineCount: number): number => lineCount - height;
+		// A shrunken frame shifts the positional meaning of the flushed mark:
+		// deletions move content up, so lines the mark claims are flushed may
+		// now sit at other indices. Demote the mark to the viewport top — the
+		// only boundary still plausible for the new layout — so later clean
+		// repaints cannot skip content that took its place (#2415). A forced
+		// render that keeps the retained top (#2541) never demotes here: its
+		// previousLines were reset, so the shrink condition is false.
+		const forcedRender = this.previousLines.length === 0;
+		const forcedRenderBaseLines = this.forcedRenderBaseLines;
+		this.forcedRenderBaseLines = undefined;
+		// requestRender(true) wipes previousViewportTop alongside the frame;
+		// the physical screen top it discarded is what the kept-top path needs.
+		const forcedBaseTop = this.forcedRenderBaseViewportTop;
+		this.forcedRenderBaseViewportTop = undefined;
+		const keptTop = forcedBaseTop ?? 0;
+		const alignedKeptTop =
+			forcedRender && this.flushedAtWidth === width && this.flushedAtHeight === height
+				? keepsFlushedTop(this.hasOverlayEntries, this.flushedLineCount, forcedRenderBaseLines, newLines, height, keptTop)
+				: null;
+		// The mark before the shrink demotion below: the tall→tall shrink path
+		// verifies its retained top against it (keepsFlushedTop).
+		const flushedBeforeShrink = this.flushedLineCount;
+		if (newLines.length < this.previousLines.length) {
+			this.flushedLineCount = Math.min(this.flushedLineCount, Math.max(0, newLines.length - height));
+		}
+		// The committed frame and its physical screen top: every clean repaint
+		// starts no lower than where the old screen-top row went (see
+		// seamRowInNewFrame). Computed once, on first use.
+		const seamBase = forcedRender ? forcedRenderBaseLines : this.previousLines;
+		const seamTop = forcedRender ? keptTop : prevViewportTop;
+		let seamRow: number | null | undefined;
+		const shiftedSeamRow = (): number | null => {
+			if (seamRow === undefined) {
+				seamRow =
+					seamBase && seamBase.length > 0 && this.flushedAtWidth === width && this.flushedAtHeight === height
+						? seamRowInNewFrame(seamBase, newLines, seamTop)
+						: null;
+			}
+			return seamRow;
+		};
 
-		const commitFrame = (maxLines: "set" | "grow" | "keep", nextHardwareCursorRow?: number): void => {
+		// Shared epilogue for every frame-writing path: record the frame the
+		// terminal now shows and reposition the hardware cursor. Every writer
+		// must land here so the commit bookkeeping has one home.
+		// maxLines: "set" resets the working-area high-water mark to the frame
+		// length (clean repaints), "grow" only raises it (differential appends),
+		// "keep" leaves it alone (pure deletions). hardwareCursorRow defaults to
+		// the end of the content; the differential path overrides it with the row
+		// its partial repaint actually left the cursor on.
+		const commitFrame = (maxLines: "set" | "grow" | "keep", hardwareCursorRow?: number): void => {
 			this.cursorRow = Math.max(0, newLines.length - 1);
-			this.hardwareCursorRow = nextHardwareCursorRow ?? this.cursorRow;
+			this.hardwareCursorRow = hardwareCursorRow ?? this.cursorRow;
 			if (maxLines === "set") {
 				this.maxLinesRendered = newLines.length;
 			} else if (maxLines === "grow") {
@@ -296,63 +438,89 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			this.previousViewportTop = getViewportTop(this.maxLinesRendered);
 			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousLines = newLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			this.commitRenderedLines(newLines);
 			this.previousWidth = width;
 			this.previousHeight = height;
 		};
 
-		// Helper to clear scrollback and viewport and render all new lines
+		// Clear the viewport and repaint. A clean repaint (clear === true) may
+		// only skip lines that were already flushed into scrollback: \x1b[2K
+		// cannot reach scrollback, so rewriting the already-flushed prefix would
+		// re-commit it as duplicates (#2307). Where that flushed prefix ends is
+		// tracked by flushedLineCount — enforced here via firstLine, not assumed
+		// (#2415). Anything from firstLine down is written below; if that region
+		// is taller than the screen the overflow scrolls the never-flushed part
+		// into scrollback instead of erasing it. The pristine first render
+		// (clear === false) keeps the unbounded write — it is what seeds
+		// scrollback with the transcript.
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
-			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-			output.append("\x1b[?2026h");
-			output.append(this.deleteKittyImages(this.previousKittyImageIds));
-			const firstLine = clear ? Math.min(this.flushedLineCount, Math.max(0, newLines.length - height)) : 0;
+			let buffer = "\x1b[?2026h";
+			// Delete every Kitty placement from the previous frame before repainting.
+			// \x1b[2J cleared graphics on Ghostty (but NOT on upstream Kitty), and the
+			// no-clear branch never erases graphics at all — so an unconditional
+			// delete of the prior frame's image ids is the only terminal-agnostic way
+			// to stop placements from lingering/stacking across a full repaint. We use
+			// previousKittyImageIds (not previousLines) because a forced full render
+			// resets previousLines to [] before we get here, but the GPU placements
+			// from the prior frame are still on screen and must be cleared. Any image
+			// still in the rewritten lines is re-emitted below and replaces its
+			// (now-deleted) prior placement via its stable id.
+			buffer += this.deleteKittyImages(this.previousKittyImageIds);
+			let firstLine = clear ? Math.min(this.flushedLineCount, Math.max(0, newLines.length - height)) : 0;
+			// Rows deleted above the screen top moved the on-screen rows up, past
+			// the index the mark still names: start at the old screen-top row so
+			// it is repainted rather than erased (#3020).
+			const seam = firstLine > 0 ? shiftedSeamRow() : null;
+			if (seam !== null && seam < firstLine) {
+				firstLine = seam;
+			}
 			const startRow = Math.max(1, height - Math.max(1, newLines.length - firstLine) + 1);
 			if (clear) {
-				output.append("\x1b[1;1H");
+				// Erase line-by-line instead of \x1b[2J: 2J erases the screen in
+				// place without scrolling, destroying lines that were never written
+				// to the terminal (#2415). Same visible result — the rows above the
+				// rewritten region are cleared first, each written row carries its
+				// own \x1b[2K, and the rows below are cleared after — but an
+				// oversized region scrolls naturally instead of being erased.
+				buffer += "\x1b[1;1H";
 				for (let row = 1; row < startRow; row++) {
-					output.append("\x1b[2K\r\n");
+					buffer += "\x1b[2K\r\n";
 				}
 			} else if (startRow > 1) {
-				output.append(`\x1b[${startRow};1H`);
+				buffer += `\x1b[${startRow};1H`;
 			}
 			for (let i = firstLine; i < newLines.length; i++) {
-				if (i > firstLine) output.append("\r\n");
-				if (clear) output.append("\x1b[2K");
+				if (i > firstLine) buffer += "\r\n";
+				if (clear) buffer += "\x1b[2K";
 				let line = newLines[i];
-				const isImage = isImageLine(line);
-				const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i) : 1;
-				if (imageReservedRows > 1 && imageReservedRows <= height) {
-					for (let row = 1; row < imageReservedRows; row++) {
-						output.append("\r\n");
-					}
-					output.append(`\x1b[${imageReservedRows - 1}A`);
-					output.append(line);
-					output.append(`\x1b[${imageReservedRows - 1}B`);
-					i += imageReservedRows - 1;
-					continue;
-				}
-				if (!isImage && visibleWidth(line) > width) {
+				if (!isImageLine(line) && visibleWidth(line) > width) {
 					line = truncateToWidth(line, width);
 				}
-				output.append(line);
+				buffer += line;
 			}
 			if (clear) {
+				// Clear any rows left below the rewritten region (content shorter
+				// than the screen). \r pins column 1 and \x1b[1B parks on the
+				// bottom row without scrolling, so this never pushes rows into
+				// scrollback and never leaves a partial erasure behind.
 				for (let row = startRow + (newLines.length - firstLine); row <= height; row++) {
-					output.append("\r\x1b[1B\x1b[2K");
+					buffer += "\r\x1b[1B\x1b[2K";
 				}
 			}
-			output.append("\x1b[?2026l");
-			output.flush();
+			buffer += "\x1b[?2026l";
+			this.writeRenderBuffer(buffer);
+			// Everything from firstLine down has now been written; when the region
+			// overflowed the screen, its top scrolled into scrollback, so the
+			// flushed high-water advances to the new viewport top — established
+			// against the current dimensions.
 			this.flushedLineCount = Math.max(this.flushedLineCount, newLines.length - height);
 			this.flushedAtWidth = width;
 			this.flushedAtHeight = height;
 			commitFrame(clear ? "set" : "grow");
 		};
 
-		const redrawLogDirectory = process.env.PI_TUI_DEBUG_REDRAW === "1" ? this.logDirectory : undefined;
+		const debugRedraw = redrawLogDirectory !== undefined;
 		const logRedraw = (reason: string): void => {
 			if (redrawLogDirectory === undefined) return;
 			const logPath = path.join(redrawLogDirectory, "pi-tui-debug.log");
@@ -361,36 +529,204 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			fs.appendFileSync(logPath, msg);
 		};
 
-		// First render - just output everything without clearing (assumes clean screen)
+		// Repaint with the flushed prefix as the screen top (#2541): the frame
+		// shrank but the scrollback prefix is untouched, so the viewport is
+		// drawn from the committed physical screen top down (or, when the
+		// shrink deleted overlap rows, from the deletion-aligned top,
+		// #2635) and the freed rows are left blank at the bottom — the same
+		// end state the pure-deletion path leaves. Later appends fill them
+		// in; nothing already in scrollback is re-committed. The TUI owns the
+		// whole screen here (the frame once overflowed it).
+		const repaintFromFlushedTop = (top: number): void => {
+			let buffer = "\x1b[?2026h";
+			// This full-screen repaint clears rows with \x1b[2K only; delete the
+			// prior frame's Kitty placements so displaced images don't linger.
+			buffer += this.deleteKittyImages(this.previousKittyImageIds);
+			buffer += "\x1b[1;1H";
+			for (let row = 0; row < height; row++) {
+				if (row > 0) buffer += "\r\n";
+				buffer += "\x1b[2K";
+				let line = newLines[top + row] ?? "";
+				if (!isImageLine(line) && visibleWidth(line) > width) {
+					line = truncateToWidth(line, width);
+				}
+				buffer += line;
+			}
+			buffer += "\x1b[?2026l";
+			this.writeRenderBuffer(buffer);
+			// The flushed mark must never claim rows the physical screen still
+			// shows. A deletion-aligned repaint (#2635) starts below the old
+			// kept top, so the mark demotes to the new screen top — an
+			// optimistic mark would let a later clean repaint skip the
+			// screen-top row and destroy it without it ever reaching
+			// scrollback. For the unaligned keep-top (top == keptTop) the mark
+			// already sits at the screen top, so the demotion is a no-op.
+			this.flushedLineCount = Math.min(this.flushedLineCount, top);
+			// Commit the frame padded with the freed rows so the bottom-aligned
+			// invariant (length - height == screen top) keeps holding for every
+			// consumer while the blanks persist (#2541).
+			newLines = [...newLines, ...Array.from({ length: top + height - newLines.length }, () => "")];
+			this.baseContentLineCount = newLines.length;
+			// A cursor marker above the retained top is not on screen; positioning
+			// the hardware cursor there would record an unreachable row (the
+			// movement clamps at the screen top) and mis-aim later writes.
+			if (cursorPos && cursorPos.row < top) {
+				cursorPos = null;
+			}
+			this._shrinkDebounceActive = false;
+			commitFrame("set", top + height - 1);
+		};
+
+		const repaintBottomAnchoredShortBlock = (): void => {
+			const startRow = Math.max(1, height - Math.max(1, newLines.length) + 1);
+			let buffer = "\x1b[?2026h";
+			// Same rationale as fullRender: this path repaints whole lines with
+			// \x1b[2K, which does not remove Kitty graphics. Delete the prior frame's
+			// placements so re-emitted images replace rather than stack.
+			buffer += this.deleteKittyImages(this.previousKittyImageIds);
+			buffer += `\x1b[${startRow};1H`;
+			for (let i = 0; i < newLines.length; i++) {
+				if (i > 0) buffer += "\r\n";
+				buffer += "\x1b[2K";
+				let line = newLines[i];
+				if (!isImageLine(line) && visibleWidth(line) > width) {
+					line = truncateToWidth(line, width);
+				}
+				buffer += line;
+			}
+			buffer += "\x1b[?2026l";
+			this.writeRenderBuffer(buffer);
+			commitFrame("grow");
+		};
+
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
 			logRedraw("first render");
 			fullRender(false);
 			return;
 		}
 
-		// Width changes always need a full re-render because wrapping changes.
-		if (widthChanged) {
-			logRedraw(`terminal width changed (${this.previousWidth} -> ${width})`);
+		if (alignedKeptTop !== null) {
+			logRedraw(
+				`shrink keeps flushed top (${alignedKeptTop}${alignedKeptTop !== keptTop ? `, aligned from ${keptTop}` : ""}) instead of re-emitting scrollback`,
+			);
+			repaintFromFlushedTop(alignedKeptTop);
+			return;
+		}
+
+		if (widthChanged || heightChanged) {
+			// A resize re-anchors what the terminal holds: a width change re-wraps
+			// the transcript, and a height change moves the viewport/scrollback
+			// boundary itself (scrollback gives lines back on grow and takes more
+			// on shrink). A mark established under other dimensions no longer
+			// identifies flushed lines — invalidate it and repaint from the first
+			// line, loss-free at the cost of re-committing a bounded duplicate of
+			// the visible region (#2415). Forced renders reach this branch through
+			// the -1 sentinels without touching flushedAt*, so a forced repaint
+			// with no real resize behind it stays viewport-bounded and
+			// duplicate-free (#2307).
+			if (this.flushedAtWidth !== width || this.flushedAtHeight !== height) {
+				this.flushedLineCount = 0;
+			}
+			logRedraw(`terminal size changed (${this.previousWidth}x${this.previousHeight} -> ${width}x${height})`);
 			fullRender(true);
 			return;
 		}
 
-		// Height changes normally need a full re-render to keep the visible viewport aligned,
-		// but Termux changes height when the software keyboard shows or hides.
-		// In that environment, a full redraw causes the entire history to replay on every toggle.
-		if (heightChanged && !isTermuxSession()) {
-			logRedraw(`terminal height changed (${this.previousHeight} -> ${height})`);
+		if (
+			newLines.length < this.previousLines.length &&
+			(newLines.length <= height || this.previousLines.length <= height)
+		) {
+			logRedraw(`bottom-anchored short block shrunk (${this.previousLines.length} -> ${newLines.length})`);
 			fullRender(true);
 			return;
 		}
 
-		// Content shrunk below the working area and no overlays - re-render to clear empty rows
-		// (overlays need the padding, so only do this when no overlays are active)
-		// Configurable via setClearOnShrink()
+		if (
+			this.previousLines.length > height &&
+			newLines.length > height &&
+			newLines.length < this.previousLines.length &&
+			!this.hasOverlayEntries
+		) {
+			// A shrink that also moved rows above the physical screen top fails the
+			// padding check at the top of doRender (the overlap no longer matches by
+			// index), e.g. a tool card straddling the seam folding into its one-row
+			// phase summary mid-turn. Realigning to the new viewport top would then
+			// repaint scrollback rows a second time. The forced-repaint alignment
+			// applies unchanged: the committed frame is the base, the physical top
+			// the seam (#3000). When the overlap still matches by index the realign
+			// is exact — keep it (a below-seam deletion with a visible-region edit,
+			// which keepsFlushedTop's above-screen model would mis-anchor).
+			let overlapMatchesByIndex = true;
+			for (let i = newLines.length - height; i < Math.min(prevViewportTop, newLines.length); i++) {
+				if (this.previousLines[i] !== newLines[i]) {
+					overlapMatchesByIndex = false;
+					break;
+				}
+			}
+			const alignedTop =
+				overlapMatchesByIndex ||
+				this.flushedAtWidth !== width ||
+				this.flushedAtHeight !== height
+					? null
+					: keepsFlushedTop(this.hasOverlayEntries, this.flushedLineCount, this.previousLines, newLines, height, prevViewportTop, flushedBeforeShrink);
+			if (alignedTop !== null) {
+				logRedraw(`tall→tall shrink keeps flushed top (${alignedTop}, retained ${prevViewportTop}) instead of re-emitting scrollback`);
+				// Rows above the aligned top are verified scrollback; the repaint
+				// demotes the mark to that top, not to the shrunken viewport top.
+				this.flushedLineCount = flushedBeforeShrink;
+				repaintFromFlushedTop(alignedTop);
+				return;
+			}
+			// More rows went above the screen top than the frame lost: the old
+			// screen-top row now sits above the new viewport top, and an in-place
+			// realign would erase it. A clean repaint from it scrolls the rows up
+			// to the new viewport top into scrollback instead (#3020).
+			const seam = shiftedSeamRow();
+			if (seam !== null && seam < getViewportTop(newLines.length)) {
+				logRedraw(`tall→tall shrink moved the screen top above the viewport (${seam}) — clean repaint from it`);
+				fullRender(true);
+				return;
+			}
+			logRedraw(`tall→tall shrink viewport realign (${this.previousLines.length} -> ${newLines.length})`);
+			const newViewportTop = getViewportTop(newLines.length);
+			const currentScreenRow = Math.max(0, hardwareCursorRow - prevViewportTop);
+			let buffer = "\x1b[?2026h";
+			// This viewport repaint also clears lines with \x1b[2K only; delete prior
+			// Kitty placements so images displaced by the realign don't linger/stack.
+			buffer += this.deleteKittyImages(this.previousKittyImageIds);
+			if (currentScreenRow > 0) {
+				buffer += `\x1b[${currentScreenRow}A`;
+			}
+			buffer += "\r";
+			for (let i = 0; i < height; i++) {
+				const idx = newViewportTop + i;
+				if (i > 0) buffer += "\r\n";
+				buffer += "\x1b[2K";
+				let line = newLines[idx] ?? "";
+				if (!isImageLine(line) && visibleWidth(line) > width) {
+					line = truncateToWidth(line, width);
+				}
+				buffer += line;
+			}
+			buffer += "\x1b[?2026l";
+			this.writeRenderBuffer(buffer);
+			commitFrame("set");
+			this._shrinkDebounceActive = false;
+			return;
+		}
+
 		if (this.getClearOnShrink() && newLines.length < this.maxLinesRendered && !this.hasOverlayEntries) {
-			logRedraw(`clearOnShrink (maxLinesRendered=${this.maxLinesRendered})`);
-			fullRender(true);
-			return;
+			if (!this._shrinkDebounceActive) {
+				this._shrinkDebounceActive = true;
+				logRedraw(`clearOnShrink deferred (maxLinesRendered=${this.maxLinesRendered})`);
+			} else {
+				this._shrinkDebounceActive = false;
+				logRedraw(`clearOnShrink committed (maxLinesRendered=${this.maxLinesRendered})`);
+				fullRender(true);
+				return;
+			}
+		} else {
+			this._shrinkDebounceActive = false;
 		}
 
 		// Find first and last changed lines
@@ -416,37 +752,33 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			lastChanged = newLines.length - 1;
 		}
 		if (firstChanged !== -1) {
-			const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines);
-			firstChanged = expandedRange.firstChanged;
-			lastChanged = expandedRange.lastChanged;
+			lastChanged = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines).lastChanged
 		}
 		const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;
 
 		// No changes - but still need to update hardware cursor position if it moved
 		if (firstChanged === -1) {
 			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousViewportTop = prevViewportTop;
+			this.previousViewportTop = getViewportTop(this.maxLinesRendered);
 			this.previousHeight = height;
+			return;
+		}
+
+		if (appendedLines && this.previousLines.length <= height && newLines.length <= height) {
+			repaintBottomAnchoredShortBlock();
 			return;
 		}
 
 		// All changes are in deleted lines (nothing to render, just clear)
 		if (firstChanged >= newLines.length) {
 			if (this.previousLines.length > newLines.length) {
-				const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-				output.append("\x1b[?2026h");
-				output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
+				let buffer = "\x1b[?2026h";
 				// Move to end of new content (clamp to 0 for empty content)
 				const targetRow = Math.max(0, newLines.length - 1);
-				if (targetRow < prevViewportTop) {
-					logRedraw(`deleted lines moved viewport up (${targetRow} < ${prevViewportTop})`);
-					fullRender(true);
-					return;
-				}
 				const lineDiff = computeLineDiff(targetRow);
-				if (lineDiff > 0) output.append(`\x1b[${lineDiff}B`);
-				else if (lineDiff < 0) output.append(`\x1b[${-lineDiff}A`);
-				output.append("\r");
+				if (lineDiff > 0) buffer += `\x1b[${lineDiff}B`;
+				else if (lineDiff < 0) buffer += `\x1b[${-lineDiff}A`;
+				buffer += "\r";
 				// Clear extra lines without scrolling
 				const extraLines = this.previousLines.length - newLines.length;
 				if (extraLines > height) {
@@ -454,55 +786,67 @@ export class TuiMainScreen extends TuiBase implements TUI {
 					fullRender(true);
 					return;
 				}
-				const clearStartOffset = newLines.length === 0 ? 0 : 1;
-				if (extraLines > 0 && clearStartOffset > 0) {
-					output.append(`\x1b[${clearStartOffset}B`);
+				if (extraLines > 0) {
+					buffer += "\x1b[1B";
 				}
 				for (let i = 0; i < extraLines; i++) {
-					output.append("\r\x1b[2K");
-					if (i < extraLines - 1) output.append("\x1b[1B");
+					buffer += "\r\x1b[2K";
+					if (i < extraLines - 1) buffer += "\x1b[1B";
 				}
-				const moveBack = Math.max(0, extraLines - 1 + clearStartOffset);
-				if (moveBack > 0) {
-					output.append(`\x1b[${moveBack}A`);
+				if (extraLines > 0) {
+					buffer += `\x1b[${extraLines}A`;
 				}
-				output.append("\x1b[?2026l");
-				output.flush();
-				this.cursorRow = targetRow;
-				this.hardwareCursorRow = targetRow;
+				buffer += "\x1b[?2026l";
+				this.writeRenderBuffer(buffer);
 			}
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousLines = newLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
-			this.previousWidth = width;
-			this.previousHeight = height;
-			this.previousViewportTop = prevViewportTop;
+			// This path never scrolls and keeps the working area, so the screen top stays at
+			// prevViewportTop while the shrink demotion lowered the mark to newLines.length - height.
+			// Every row above both the screen top and the first change is unchanged and already in
+			// scrollback: the mark may claim it (see the differential epilogue below).
+			this.flushedLineCount = Math.max(this.flushedLineCount, Math.min(firstChanged, prevViewportTop));
+			commitFrame("keep");
 			return;
 		}
 
-		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
-		if (firstChanged < prevViewportTop) {
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+		const previousContentViewportTop = prevViewportTop;
+		if (firstChanged < previousContentViewportTop) {
+			// A mid-buffer reflow (for example markdown code-fence borders or prose word-wrap)
+			// shifted a line across the scrollback/viewport boundary. Clamping would leave
+			// the displaced line frozen in scrollback and re-emit it in the live region,
+			// producing a verbatim duplicate. Fall back to a clean repaint; the repaint is
+			// viewport-bounded (see fullRender), so it never re-commits the flushed prefix.
+			// The physical screen top (previousViewportTop, not
+			// previousLines.length - height) is the boundary that matters: a
+			// kept-flushed-top shrink (#2541) leaves blank rows at the bottom, so
+			// the two differ and the length-based estimate would aim the cursor
+			// above the screen.
+			logRedraw(
+				`firstChanged < viewportTop (${firstChanged} < ${previousContentViewportTop}) — full repaint to avoid duplicate`,
+			);
 			fullRender(true);
 			return;
 		}
 
-		// Render from first changed line to end
-		// Keep updates wrapped in synchronized output while writing bounded chunks.
-		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-		output.append("\x1b[?2026h"); // Begin synchronized output
-		output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
+		let buffer = "\x1b[?2026h";
+		// Free any Kitty image placements that lived on the changed lines before we
+		// repaint them. Kitty/Ghostty placements are GPU-side graphics that text
+		// erasure (\x1b[2K) does NOT remove; without an explicit delete the old
+		// placement lingers while the redraw adds a new one, stacking copies over
+		// the chat and footer. Stable placement ids (see encodeKitty) make the
+		// common in-place redraw replace rather than stack, but a line whose image
+		// is being replaced by different content (or a different image id) still
+		// needs the prior id explicitly deleted.
+		buffer += this.deleteChangedKittyImages(firstChanged, lastChanged);
 		const prevViewportBottom = prevViewportTop + height - 1;
 		const moveTargetRow = appendStart ? firstChanged - 1 : firstChanged;
 		if (moveTargetRow > prevViewportBottom) {
 			const currentScreenRow = Math.max(0, Math.min(height - 1, hardwareCursorRow - prevViewportTop));
 			const moveToBottom = height - 1 - currentScreenRow;
 			if (moveToBottom > 0) {
-				output.append(`\x1b[${moveToBottom}B`);
+				buffer += `\x1b[${moveToBottom}B`;
 			}
 			const scroll = moveTargetRow - prevViewportBottom;
-			output.append("\r\n".repeat(scroll));
+			buffer += "\r\n".repeat(scroll);
 			prevViewportTop += scroll;
 			viewportTop += scroll;
 			hardwareCursorRow = moveTargetRow;
@@ -511,103 +855,51 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Move cursor to first changed line (use hardwareCursorRow for actual position)
 		const lineDiff = computeLineDiff(moveTargetRow);
 		if (lineDiff > 0) {
-			output.append(`\x1b[${lineDiff}B`); // Move down
+			buffer += `\x1b[${lineDiff}B`; // Move down
 		} else if (lineDiff < 0) {
-			output.append(`\x1b[${-lineDiff}A`); // Move up
+			buffer += `\x1b[${-lineDiff}A`; // Move up
 		}
 
-		output.append(appendStart ? "\r\n" : "\r"); // Move to column 0
+		buffer += appendStart ? "\r\n" : "\r"; // Move to column 0
 
 		// Only render changed lines (firstChanged to lastChanged), not all lines to end
 		// This reduces flicker when only a single line changes (e.g., spinner animation)
 		const renderEnd = Math.min(lastChanged, newLines.length - 1);
 		for (let i = firstChanged; i <= renderEnd; i++) {
-			if (i > firstChanged) output.append("\r\n");
-			const line = newLines[i];
+			if (i > firstChanged) buffer += "\r\n";
+			buffer += "\x1b[2K"; // Clear current line
+			let line = newLines[i];
 			const isImage = isImageLine(line);
-			const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i, renderEnd) : 1;
-			if (imageReservedRows > 1) {
-				const imageStartScreenRow = i - viewportTop;
-				if (imageStartScreenRow < 0 || imageStartScreenRow + imageReservedRows > height) {
-					logRedraw(
-						`kitty image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`,
-					);
-					fullRender(true);
-					return;
-				}
-
-				output.append("\x1b[2K");
-				for (let row = 1; row < imageReservedRows; row++) {
-					output.append("\r\n\x1b[2K");
-				}
-				output.append(`\x1b[${imageReservedRows - 1}A`);
-				output.append(line);
-				output.append(`\x1b[${imageReservedRows - 1}B`);
-				i += imageReservedRows - 1;
-				continue;
-			}
-
-			output.append("\x1b[2K"); // Clear current line
 			if (!isImage && visibleWidth(line) > width) {
-				// Log all lines to crash file for debugging
-				const crashLogPath = path.join(this.logDirectory ?? os.tmpdir(), "pi-tui-crash.log");
-				const crashData = [
-					`Crash at ${new Date().toISOString()}`,
-					`Terminal width: ${width}`,
-					`Line ${i} visible width: ${visibleWidth(line)}`,
-					"",
-					"=== All rendered lines ===",
-					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
-					"",
-				].join("\n");
-				// A failed write (full or unwritable temp dir) must not hide the width error or skip `stop()`.
-				let crashLogStatus = `Debug log written to: ${crashLogPath}`;
-				try {
-					fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
-					fs.writeFileSync(crashLogPath, crashData);
-				} catch (error) {
-					crashLogStatus = `Could not write debug log to ${crashLogPath}: ${error instanceof Error ? error.message : String(error)}`;
-				}
-
-				// Clean up terminal state before throwing
-				this.stop();
-
-				const errorMsg = [
-					`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
-					"",
-					"This is likely caused by a custom TUI component not truncating its output.",
-					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
-					"",
-					crashLogStatus,
-				].join("\n");
-				throw new Error(errorMsg);
+				line = truncateToWidth(line, width);
 			}
-			output.append(line);
+			buffer += line;
 		}
 
 		// Track where cursor ended up after rendering
 		let finalCursorRow = renderEnd;
 
-		// If we had more lines before, clear them and move cursor back
 		if (this.previousLines.length > newLines.length) {
-			// Move to end of new content first if we stopped before it
-			if (renderEnd < newLines.length - 1) {
-				const moveDown = newLines.length - 1 - renderEnd;
-				output.append(`\x1b[${moveDown}B`);
-				finalCursorRow = newLines.length - 1;
+			const renderEndScreenRow = renderEnd - viewportTop;
+			const ghostLinesVisible = renderEndScreenRow < height - 1;
+			if (ghostLinesVisible) {
+				if (renderEnd < newLines.length - 1) {
+					const moveDown = newLines.length - 1 - renderEnd;
+					buffer += `\x1b[${moveDown}B`;
+					finalCursorRow = newLines.length - 1;
+				}
+				const extraLines = this.previousLines.length - newLines.length;
+				for (let i = newLines.length; i < this.previousLines.length; i++) {
+					buffer += "\r\n\x1b[2K";
+				}
+				buffer += `\x1b[${extraLines}A`;
 			}
-			const extraLines = this.previousLines.length - newLines.length;
-			for (let i = newLines.length; i < this.previousLines.length; i++) {
-				output.append("\r\n\x1b[2K");
-			}
-			// Move cursor back to end of new content
-			output.append(`\x1b[${extraLines}A`);
 		}
 
-		output.append("\x1b[?2026l"); // End synchronized output
+		buffer += "\x1b[?2026l";
 
 		if (process.env.PI_TUI_DEBUG === "1") {
-			const debugDir = "/tmp/tui";
+			const debugDir = path.join(os.tmpdir(), "tui");
 			fs.mkdirSync(debugDir, { recursive: true });
 			const debugPath = path.join(debugDir, `render-${Date.now()}-${Math.random().toString(36).slice(2)}.log`);
 			const debugData = [
@@ -630,29 +922,32 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				JSON.stringify(this.previousLines, null, 2),
 				"",
 				"=== buffer ===",
-				`[${output.length} chars written in bounded chunks]`,
+				JSON.stringify(buffer),
 			].join("\n");
 			fs.writeFileSync(debugPath, debugData);
+			
 		}
 
-		output.flush();
+		// Write entire buffer at once
+		this.writeRenderBuffer(buffer);
 
-		// Track cursor position for next render
-		// cursorRow tracks end of content (for viewport calculation)
-		// hardwareCursorRow tracks actual terminal cursor position (for movement)
-		this.cursorRow = Math.max(0, newLines.length - 1);
-		this.hardwareCursorRow = finalCursorRow;
-		// Track terminal's working area (grows but doesn't shrink unless cleared)
-		this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
-		this.previousViewportTop = Math.max(prevViewportTop, finalCursorRow - height + 1);
+		// Writing down to finalCursorRow scrolled every line above the new
+		// viewport top past the bottom row, so the flushed high-water advances
+		// with the cursor (no-op when the frame never reached the bottom row) —
+		// established against the current dimensions.
+		this.flushedLineCount = Math.max(this.flushedLineCount, finalCursorRow - height + 1);
+		// A shrink drawn here (a docked overlay is open, so the tall→tall path was skipped) clears
+		// the freed rows in place and keeps the working area: the screen top stays at prevViewportTop
+		// although the shrink demotion lowered the mark to newLines.length - height. The differential
+		// only runs when firstChanged >= the screen top, so every row above the screen top is
+		// unchanged and already in scrollback, and the mark may claim it. Left demoted, the next tall
+		// shrink (the overlay closing, the loader going) rejects the kept top as "top > flushed" and
+		// its realign repaints from newLines.length - height, re-emitting the rows in between.
+		this.flushedLineCount = Math.max(this.flushedLineCount, Math.min(firstChanged, prevViewportTop));
+		this.flushedAtWidth = width;
+		this.flushedAtHeight = height;
 
-		// Position hardware cursor for IME
-		this.positionHardwareCursor(cursorPos, newLines.length);
-
-		this.previousLines = newLines;
-		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
-		this.previousWidth = width;
-		this.previousHeight = height;
+		commitFrame("grow", finalCursorRow);
 	}
 
 	/**

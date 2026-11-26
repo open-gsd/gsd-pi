@@ -478,7 +478,8 @@ export class Container implements Component {
 /**
  * TUI - Main class for managing terminal UI with differential rendering
  */
-const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
+/** Suffix appended to committed terminal lines for differential rendering. */
+export const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
 
 /** Composite overlay content into a terminal line at a fixed column. */
 export function compositeTuiLine(
@@ -644,6 +645,11 @@ export abstract class TuiBase extends Container implements TUI {
 
 	get hasOverlayEntries(): boolean {
 		return this.overlayStack.length > 0;
+	}
+
+	/** True when a visible overlay is docked below the content (reserveSpace). */
+	protected hasDockedOverlay(): boolean {
+		return this.overlayStack.some((o) => o.options?.reserveSpace && this.isOverlayVisible(o));
 	}
 	private overlayFocusRestore: OverlayFocusRestoreState = { status: "inactive" };
 
