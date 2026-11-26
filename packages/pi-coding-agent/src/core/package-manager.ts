@@ -634,7 +634,13 @@ function resolveExtensionEntries(dir: string): string[] | null {
 	const packageJsonPath = join(dir, "package.json");
 	if (existsSync(packageJsonPath)) {
 		const manifest = readPiManifest(packageJsonPath);
-		if (manifest?.extensions?.length) {
+		// An explicit `pi` manifest owns discovery for this package. Empty or missing
+		// `extensions` means "library, not an extension" (e.g. cmux) — do not fall
+		// through to index.ts/index.js, which would load a non-factory module.
+		if (manifest) {
+			if (!manifest.extensions?.length) {
+				return [];
+			}
 			const entries: string[] = [];
 			for (const extPath of manifest.extensions) {
 				const resolvedExtPath = resolve(dir, extPath);
@@ -642,9 +648,7 @@ function resolveExtensionEntries(dir: string): string[] | null {
 					entries.push(resolvedExtPath);
 				}
 			}
-			if (entries.length > 0) {
-				return entries;
-			}
+			return entries;
 		}
 	}
 
