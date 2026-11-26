@@ -439,10 +439,10 @@ export function getThemesDir(): string {
 	if (isBunBinary) {
 		return join(getPackageDir(), "theme");
 	}
-	// Theme is in theme/ relative to src/ or dist/
+	// Theme is in theme/ relative to src/ or dist/ (v1.6.1 layout; not modes/interactive/theme).
 	const packageDir = getPackageDir();
 	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "modes", "interactive", "theme");
+	return join(packageDir, srcOrDist, "theme");
 }
 
 /**
