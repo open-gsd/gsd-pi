@@ -3,7 +3,7 @@
  */
 
 export type { ApiKeyCredential, Credential as AuthCredential, OAuthCredential } from "./auth/types.js";
-export { getEnvApiKey } from "./env-api-keys.js";
+export { getApiKeyEnvVars, getEnvApiKey } from "./env-api-keys.js";
 export { getProviderCapabilities, type ProviderCapabilities } from "./providers/provider-capabilities.js";
 export type { Models, Provider } from "./models.js";
 export { getModel, getModels, getProviders } from "./compat.js";

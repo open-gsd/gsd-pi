@@ -14,6 +14,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-ai/src/api/google-shared.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/api/mistral-conversations.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/auth/oauth/github-copilot.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/env-api-keys.ts` | keep-overlay | export getApiKeyEnvVars for GSD auth selectors | no |
 | `packages/pi-ai/src/gsd-compat-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/gsd-models-catalog.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/host-compat.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |

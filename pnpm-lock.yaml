@@ -31,6 +31,9 @@ importers:
       '@aws-sdk/client-bedrock-runtime':
         specifier: ^3.983.0
         version: 3.1048.0
+      '@aws-sdk/credential-provider-node':
+        specifier: 3.972.82
+        version: 3.972.82
       '@clack/prompts':
         specifier: ^1.1.0
         version: 1.4.0
@@ -61,6 +64,9 @@ importers:
       ajv:
         specifier: ^8.17.1
         version: 8.20.0
+      brace-expansion:
+        specifier: 5.0.12
+        version: 5.0.12
       chalk:
         specifier: ^5.6.2
         version: 5.6.2
@@ -97,9 +103,18 @@ importers:
       ignore:
         specifier: ^7.0.5
         version: 7.0.5
+      jiti:
+        specifier: 2.7.0
+        version: 2.7.0
+      lovely-mermaid:
+        specifier: 0.3.3
+        version: 0.3.3
       marked:
         specifier: ^15.0.12
         version: 15.0.12
+      marked-cjk-friendly:
+        specifier: 0.1.2
+        version: 0.1.2(marked@15.0.12)
       minimatch:
         specifier: ^10.2.3
         version: 10.2.5
@@ -118,6 +133,12 @@ importers:
       proper-lockfile:
         specifier: ^4.1.2
         version: 4.1.2
+      quickjs-wasi:
+        specifier: 3.6.2
+        version: 3.6.2
+      semver:
+        specifier: 7.8.5
+        version: 7.8.5
       sharp:
         specifier: ^0.35.4
         version: 0.35.4(@types/node@24.12.4)
@@ -161,9 +182,6 @@ importers:
       esbuild:
         specifier: ^0.28.1
         version: 0.28.1
-      jiti:
-        specifier: ^2.7.0
-        version: 2.7.0
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -6969,9 +6987,9 @@ snapshots:
 
   '@aws-sdk/signature-v4-multi-region@3.996.29':
     dependencies:
-      '@aws-sdk/types': 3.973.9
+      '@aws-sdk/types': 3.975.1
       '@smithy/signature-v4': 5.4.5
-      '@smithy/types': 4.14.2
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/signature-v4-multi-region@3.996.52':
@@ -10515,7 +10533,7 @@ snapshots:
       eslint: 9.39.4(jiti@2.7.0)
       eslint-import-resolver-node: 0.3.10
       eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0))
+      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-jsx-a11y: 6.10.2(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-react: 7.37.5(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-react-hooks: 7.1.1(eslint@9.39.4(jiti@2.7.0))
@@ -10548,7 +10566,7 @@ snapshots:
       tinyglobby: 0.2.17
       unrs-resolver: 1.12.2
     optionalDependencies:
-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0))
+      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
     transitivePeerDependencies:
       - supports-color
 
@@ -10563,7 +10581,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0)):
+  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.60.0(eslint@9.39.4(jiti@2.7.0))(typescript@5.7.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.9
@@ -11526,6 +11544,10 @@ snapshots:
       semver: 7.8.5
 
   markdown-table@3.0.4: {}
+
+  marked-cjk-friendly@0.1.2(marked@15.0.12):
+    dependencies:
+      marked: 15.0.12
 
   marked-cjk-friendly@0.1.2(marked@18.0.11):
     dependencies:

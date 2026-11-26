@@ -39,6 +39,7 @@
     "packages/pi-ai/src/api/google-shared.ts",
     "packages/pi-ai/src/api/mistral-conversations.ts",
     "packages/pi-ai/src/auth/oauth/github-copilot.ts",
+    "packages/pi-ai/src/env-api-keys.ts",
     "packages/pi-ai/src/gsd-compat-types.ts",
     "packages/pi-ai/src/gsd-models-catalog.ts",
     "packages/pi-ai/src/host-compat.ts",

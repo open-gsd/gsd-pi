@@ -70,7 +70,7 @@ function hasVertexAdcCredentials(env?: ProviderEnv): boolean {
 	return cachedVertexAdcCredentialsExists;
 }
 
-function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
+export function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 	if (provider === "github-copilot") {
 		return ["COPILOT_GITHUB_TOKEN"];
 	}
