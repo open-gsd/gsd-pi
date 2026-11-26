@@ -23,6 +23,12 @@ const { tmpdir } = require('os')
 const { isAbsolute, join, relative, resolve } = require('path')
 const { captureGsdFields, mergeUpstreamPackage, assertCacheAtRef } = require('./vendor-pi.cjs')
 const { loadOverlayFiles } = require('./check-pi-overlay-snapshot.cjs')
+const {
+  BLOCK_OVERLAY_ON_UNPINNED,
+  portAnthropicOAuthBreakpoint,
+  portAgentCacheRetention,
+  portLoaderAliases,
+} = require('./pi-161-ports.cjs')
 
 const ROOT = join(__dirname, '..')
 
@@ -74,12 +80,26 @@ function applySeamImportRewrites(srcRoot, seam) {
   })
 }
 
+function applyUnpinnedPorts(destRoot) {
+  const targets = [
+    ['packages/pi-ai/src/api/anthropic-messages.ts', portAnthropicOAuthBreakpoint],
+    ['packages/pi-agent-core/src/agent.ts', portAgentCacheRetention],
+    ['packages/pi-coding-agent/src/core/extensions/loader.ts', portLoaderAliases],
+  ]
+  for (const [rel, port] of targets) {
+    const file = join(destRoot, rel)
+    if (!existsSync(file)) continue
+    const result = port(readFileSync(file, 'utf8'))
+    if (result.applied) writeFileSync(file, result.content)
+  }
+}
 function applyPostVendorDeletes(srcRoot, rels) {
   for (const rel of rels) {
     const target = join(srcRoot, rel)
     if (existsSync(target)) rmSync(target, { recursive: true, force: true })
   }
 }
+
 function selectUpstreamRoot(ref, repository) {
   const override = process.env.GSD_PI_UPSTREAM_ROOT
   if (override) {
@@ -130,10 +150,13 @@ function main() {
   const config = JSON.parse(readFileSync(join(__dirname, 'pi-upstream.json'), 'utf8'))
   const { files } = loadOverlayFiles(ROOT)
   const ref = opts.ref || config.pinnedRef
+  const overlayFiles = ref === config.pinnedRef
+    ? files
+    : files.filter((file) => !BLOCK_OVERLAY_ON_UNPINNED.includes(file))
 
   if (opts.dryRun) {
     process.stdout.write(`pin ${ref}\n`)
-    process.stdout.write(`overlay files ${files.length}\n`)
+    process.stdout.write(`overlay files ${overlayFiles.length}\n`)
     process.stdout.write('seam scripts/pi-seam.json\n')
     return
   }
@@ -147,7 +170,7 @@ function main() {
   const destRoot = resolve(opts.dest)
   const overlayRoot = join(ROOT, config.overlayDir || 'scripts/pi-overlay')
   for (const [upstreamPath, targetPath] of Object.entries(config.packageMap)) {
-    const pkgFiles = files
+    const pkgFiles = overlayFiles
       .filter((file) => file === targetPath || file.startsWith(`${targetPath}/`))
       .map((file) => (file === targetPath ? '' : file.slice(targetPath.length + 1)))
       .filter(Boolean)
@@ -169,6 +192,7 @@ function main() {
       applySeamImportRewrites(join(destRoot, targetPath, 'src'), seam)
     }
   }
+  if (ref !== config.pinnedRef) applyUnpinnedPorts(destRoot)
   process.stderr.write(`Synced ${ref} into ${destRoot}. Repo packages were not modified.\n`)
 }
 
