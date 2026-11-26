@@ -61,6 +61,9 @@
     }
   },
   "scripts": {
+    "generate-models": "node scripts/generate-models.ts",
+    "generate-image-models": "node scripts/generate-image-models.ts",
+    "generate": "pnpm run generate-models && pnpm run generate-image-models",
     "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false"
   },
   "dependencies": {
