@@ -65,7 +65,7 @@ function createDeps(overrides: Partial<SqliteProviderDeps> = {}): SqliteProvider
       return { DatabaseSync: FakeNodeDatabase };
     },
     suppressSqliteWarning(): void {},
-    nodeVersion: "22.18.0",
+    nodeVersion: "22.19.0",
     writeStderr(message: string): void {
       stderr.push(message);
     },

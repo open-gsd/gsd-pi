@@ -434,7 +434,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Validate the strictest declared workspace engines floor (currently ">=22.18.0").
+  # Validate the strictest declared workspace engines floor (currently ">=22.19.0").
   # The main build/test lanes run on Node 24, so without this lane the supported
   # minor (22.x) is never exercised. Cheap: reuse the build artifacts and just run
   # the smoke suite against the built binary on Node 22.
@@ -468,7 +468,8 @@ jobs:
       - name: Setup Node.js 22 (engines floor)
         uses: actions/setup-node@v7
         with:
-          node-version: '22.18.0'
+          # undici@8 (pi-coding-agent) requires >=22.19.0
+          node-version: '22.19.0'
           cache: 'pnpm'
 
       - name: Install dependencies

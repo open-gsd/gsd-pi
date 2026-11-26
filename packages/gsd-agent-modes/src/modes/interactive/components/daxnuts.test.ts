@@ -3,10 +3,11 @@
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import type { TUI } from "@gsd/pi-tui";
+import { resetCapabilitiesCache, setCapabilityOverrides } from "@gsd/pi-tui";
 import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { DaxnutsComponent } from "./daxnuts.js";
 
-const ENV_KEYS = ["COLORTERM", "WT_SESSION", "TERM_PROGRAM", "TERM"] as const;
+const ENV_KEYS = ["COLORTERM", "WT_SESSION", "TERM_PROGRAM", "TERM", "PI_TRUE_COLOR"] as const;
 let savedEnv: Record<(typeof ENV_KEYS)[number], string | undefined>;
 
 function saveEnv(): void {
@@ -25,6 +26,8 @@ function restoreEnv(): void {
 			process.env[key] = value;
 		}
 	}
+	setCapabilityOverrides({});
+	resetCapabilitiesCache();
 }
 
 describe("DaxnutsComponent", () => {
@@ -42,8 +45,13 @@ describe("DaxnutsComponent", () => {
 	it("uses xterm-256 color sequences in limited-color terminals", () => {
 		delete process.env.COLORTERM;
 		delete process.env.WT_SESSION;
+		delete process.env.PI_TRUE_COLOR;
 		process.env.TERM_PROGRAM = "Apple_Terminal";
 		process.env.TERM = "xterm-256color";
+		// Force 256-color mode: Windows consoles default to truecolor in v1.6.1
+		// detection, which would otherwise make this env simulation a no-op on CI.
+		setCapabilityOverrides({ trueColor: false });
+		resetCapabilitiesCache();
 		initTheme("dark", false);
 
 		const component = new DaxnutsComponent({ requestRender() {} } as TUI);
