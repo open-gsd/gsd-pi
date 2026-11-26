@@ -201,7 +201,7 @@
     "lovely-mermaid": "0.3.3",
     "marked": "^15.0.12",
     "marked-cjk-friendly": "0.1.2",
-    "minimatch": "^10.2.3",
+    "minimatch": "^11.0.1",
     "openai": "^6.26.0",
     "partial-json": "^0.1.7",
     "picomatch": "^4.0.3",
