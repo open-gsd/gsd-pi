@@ -23,12 +23,7 @@ const { tmpdir } = require('os')
 const { isAbsolute, join, relative, resolve } = require('path')
 const { captureGsdFields, mergeUpstreamPackage, assertCacheAtRef } = require('./vendor-pi.cjs')
 const { loadOverlayFiles } = require('./check-pi-overlay-snapshot.cjs')
-const {
-  BLOCK_OVERLAY_ON_UNPINNED,
-  portAnthropicOAuthBreakpoint,
-  portAgentCacheRetention,
-  portLoaderAliases,
-} = require('./pi-161-ports.cjs')
+const { BLOCK_OVERLAY_ON_UNPINNED, applyPi161Ports } = require('./pi-161-ports.cjs')
 
 const ROOT = join(__dirname, '..')
 
@@ -81,17 +76,8 @@ function applySeamImportRewrites(srcRoot, seam) {
 }
 
 function applyUnpinnedPorts(destRoot) {
-  const targets = [
-    ['packages/pi-ai/src/api/anthropic-messages.ts', portAnthropicOAuthBreakpoint],
-    ['packages/pi-agent-core/src/agent.ts', portAgentCacheRetention],
-    ['packages/pi-coding-agent/src/core/extensions/loader.ts', portLoaderAliases],
-  ]
-  for (const [rel, port] of targets) {
-    const file = join(destRoot, rel)
-    if (!existsSync(file)) continue
-    const result = port(readFileSync(file, 'utf8'))
-    if (result.applied) writeFileSync(file, result.content)
-  }
+  const config = JSON.parse(readFileSync(join(__dirname, 'pi-upstream.json'), 'utf8'))
+  applyPi161Ports(destRoot, join(ROOT, config.overlayDir || 'scripts/pi-overlay'), require('fs'), require('path'))
 }
 function applyPostVendorDeletes(srcRoot, rels) {
   for (const rel of rels) {
