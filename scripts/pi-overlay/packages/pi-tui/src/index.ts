@@ -1,5 +1,8 @@
 // Core TUI interfaces and classes
 
+import { TuiMainScreen } from "./tui-main-screen.js";
+import type { TUI as TuiContract } from "./tui.js";
+
 export { Marked, type Token, type Tokens } from "marked";
 // Autocomplete support
 export {
@@ -10,7 +13,11 @@ export {
 	type SlashCommand,
 } from "./autocomplete.js";
 export type { EditorAction } from "./editor-keybindings.js";
-export { getEditorKeybindings } from "./editor-keybindings.js";
+export {
+	EditorKeybindingsManager,
+	getEditorKeybindings,
+	setEditorKeybindings,
+} from "./editor-keybindings.js";
 // Colors and styling
 export {
 	backgroundAnsi,
@@ -173,7 +180,6 @@ export {
 	type OverlayUnfocusOptions,
 	renderFakeCursor,
 	type SizeValue,
-	type TUI,
 	type TuiInputListener,
 	type TuiInputListenerResult,
 	type TuiMode,
@@ -186,6 +192,10 @@ export {
 } from "./tui.js";
 export { TuiAltScreen, type TuiAltScreenOptions } from "./tui-alt-screen.js";
 export { TuiMainScreen, type TuiMainScreenRenderState } from "./tui-main-screen.js";
+// Host-compat: historical `TUI` value was the main-screen class (now TuiMainScreen).
+// Local type+value dual binding — re-export aliases collide under this TS config.
+export type TUI = TuiContract;
+export const TUI = TuiMainScreen;
 // Utilities
 export {
 	getOsc8LinkAtColumn,
