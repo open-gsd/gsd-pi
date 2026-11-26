@@ -7,7 +7,7 @@ on:
   # Risk comment on open/reopen; synchronize is handled by fast-gates + build in ci.yml.
   pull_request_target:
     types: [opened, reopened]
-    10|
+
 permissions:
   contents: read
   pull-requests: write
