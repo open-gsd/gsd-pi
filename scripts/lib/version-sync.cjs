@@ -13,7 +13,11 @@ const RELEASE_WORKSPACE_PACKAGE_DIRS = [
   "packages/native",
   "packages/pi-agent-core",
   "packages/pi-ai",
+  "packages/pi-codemode",
   "packages/pi-coding-agent",
+  "packages/pi-mcp",
+  "packages/pi-schema",
+  "packages/pi-telemetry",
   "packages/pi-tui",
   "packages/rpc-client",
 ];
@@ -36,7 +40,11 @@ const INTERNAL_PACKAGE_NAMES = new Set([
   "@gsd/native",
   "@gsd/pi-agent-core",
   "@gsd/pi-ai",
+  "@gsd/pi-codemode",
   "@gsd/pi-coding-agent",
+  "@gsd/pi-mcp",
+  "@gsd/pi-schema",
+  "@gsd/pi-telemetry",
   "@gsd/pi-tui",
 ]);
 
