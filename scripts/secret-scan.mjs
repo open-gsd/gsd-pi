@@ -120,13 +120,30 @@ function loadIgnorePatterns() {
     .filter((line) => line && !line.startsWith('#'));
 }
 
+function fileMatchesIgnore(file, ignoreFile) {
+  // Exact match, or shell-style globs (e.g. packages/pi-ai/test/*).
+  if (ignoreFile === file) return true;
+  if (!/[?*[]/.test(ignoreFile)) return false;
+  const escaped = ignoreFile
+    .replace(/[.+^${}()|\\]/g, '\\$&')
+    .replace(/\*\*/g, '<<GLOBSTAR>>')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replace(/<<GLOBSTAR>>/g, '.*');
+  try {
+    return new RegExp(`^${escaped}$`).test(file);
+  } catch {
+    return false;
+  }
+}
+
 function isIgnored(file, lineContent, ignorePatterns) {
   return ignorePatterns.some((pattern) => {
     const splitIndex = pattern.indexOf(':');
     if (splitIndex > 0) {
       const ignoreFile = pattern.slice(0, splitIndex);
       const ignoreRegex = pattern.slice(splitIndex + 1);
-      if (file !== ignoreFile) return false;
+      if (!fileMatchesIgnore(file, ignoreFile)) return false;
       try {
         return new RegExp(ignoreRegex, 'i').test(lineContent);
       } catch {

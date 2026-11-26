@@ -356,7 +356,11 @@ function renderGitHubSummary(report) {
     lines.push('');
   }
 
-  if (systemsPerFile.size > 0) {
+  const totalListed = systemsPerFile.size + unmatchedFiles.length;
+  // Huge engine syncs exceed ARG_MAX / GITHUB_OUTPUT when the full file table
+  // is embedded in workflow env. Keep the breakdown for normal PRs only.
+  const MAX_GITHUB_FILE_ROWS = 200;
+  if (totalListed > 0 && totalListed <= MAX_GITHUB_FILE_ROWS) {
     lines.push('<details>');
     lines.push('<summary>File Breakdown</summary>');
     lines.push('');
@@ -371,6 +375,18 @@ function renderGitHubSummary(report) {
         lines.push(`| ⚪ | \`${escapeCell(file)}\` | *(unclassified)* |`);
       }
     }
+    lines.push('');
+    lines.push('</details>');
+    lines.push('');
+  } else if (totalListed > MAX_GITHUB_FILE_ROWS) {
+    lines.push(`<details>`);
+    lines.push(`<summary>File Breakdown omitted (${totalListed} files)</summary>`);
+    lines.push('');
+    lines.push(`Too many changed files to list inline. Re-run locally:`);
+    lines.push('');
+    lines.push('```bash');
+    lines.push('node scripts/pr-risk-check.mjs --base main');
+    lines.push('```');
     lines.push('');
     lines.push('</details>');
     lines.push('');
