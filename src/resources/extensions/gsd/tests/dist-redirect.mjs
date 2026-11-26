@@ -251,12 +251,14 @@ export function resolve(specifier, context, nextResolve) {
     const srcSpec = specifier.replace(/\.js$/, '.ts');
     specifier = new URL(srcSpec, srcParent).href;
   }
-  // 3. Redirect packages/*/src/ relative .js → .ts for strip-types
+  // 3. Redirect repo/package src relative .js → .ts for strip-types.
+  // ROOT must be the monorepo root (not dist-test/) so both `src/...` and
+  // `packages/*/src/...` parents qualify.
   else if (specifier.endsWith('.js') && (specifier.startsWith('./') || specifier.startsWith('../'))) {
     if (
       context.parentURL &&
+      context.parentURL.startsWith(ROOT.href) &&
       !context.parentURL.includes('/node_modules/') &&
-      context.parentURL.includes('/packages/') &&
       context.parentURL.includes('/src/')
     ) {
       if (specifier.includes('/dist/')) {
