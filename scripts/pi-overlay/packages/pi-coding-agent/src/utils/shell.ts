@@ -1,0 +1,370 @@
+import { accessSync, constants } from "node:fs";
+import { delimiter, join, win32 } from "node:path";
+import { spawn, spawnSync } from "child_process";
+import { getBinDir } from "../config.js";
+
+export interface ShellConfig {
+	shell: string;
+	args: string[];
+	commandTransport?: "argv" | "stdin";
+}
+
+// Keep in sync with packages/durable/src/env/node.ts.
+function isLegacyWslBashPath(path: string): boolean {
+	const normalized = win32.normalize(path).toLowerCase();
+	const systemRoot = process.env.SystemRoot;
+	if (systemRoot) {
+		if (!/^[a-z]:[\\/]/i.test(systemRoot)) return false;
+		return ["System32", "Sysnative"].some(
+			(directory) => normalized === win32.join(systemRoot, directory, "bash.exe").toLowerCase(),
+		);
+	}
+	// Fall back to conventional launcher paths only when the Windows directory is unknown.
+	return /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/.test(normalized);
+}
+
+function getBashShellConfig(shell: string): ShellConfig {
+	return isLegacyWslBashPath(shell) ? { shell, args: ["-s"], commandTransport: "stdin" } : { shell, args: ["-c"] };
+}
+
+// Matches harness-v2's pathExists (packages/durable/src/env/node.ts).
+// On Unix this is identical to existsSync() (both are access(F_OK)), just
+// spelled with try/catch. On Windows we explicitly avoid existsSync(): its
+// extra stat check rejects runnable Store aliases (nodejs/node#36790).
+function shellPathExists(path: string): boolean {
+	try {
+		accessSync(path, constants.F_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function findExecutableOnPath(executable: string): string | null {
+	if (process.platform === "win32") {
+		// Windows: use 'where' and check the returned path.
+		try {
+			const result = spawnSync("where", [executable], {
+				encoding: "utf-8",
+				timeout: 5000,
+				windowsHide: true,
+			});
+			if (result.status === 0 && result.stdout) {
+				const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
+				if (firstMatch && shellPathExists(firstMatch)) {
+					return firstMatch;
+				}
+			}
+		} catch {
+			// Ignore errors
+		}
+		return null;
+	}
+
+	// Unix: Use 'which' and trust its output (handles Termux and special filesystems)
+	try {
+		const result = spawnSync("which", [executable], { encoding: "utf-8", timeout: 5000 });
+		if (result.status === 0 && result.stdout) {
+			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
+			if (firstMatch) {
+				return firstMatch;
+			}
+		}
+	} catch {
+		// Ignore errors
+	}
+	return null;
+}
+
+// Keep in sync with packages/durable/src/env/node.ts.
+// Git for Windows reports its POSIX shell as `<root>/usr/bin/sh.exe`.
+const GIT_FOR_WINDOWS_SHELL_SUFFIX = win32.join("usr", "bin", "sh.exe");
+
+/**
+ * Find Git Bash of the Git for Windows installation whose git.exe is on PATH. Git itself reports
+ * where it is installed (`git var GIT_SHELL_PATH`, Git 2.47+), so this works for any install
+ * directory and any PATH layout (`cmd`, `bin`, `mingw64\bin`, `ucrt64\bin`, package-manager shims).
+ * It returns `<root>\bin\bash.exe`, not the shell Git reports: that launcher sets up MSYSTEM and
+ * PATH, without which `usr\bin\bash.exe` cannot find tools like `ls`.
+ */
+function findGitBashOfGitOnPath(): string | null {
+	const git = findExecutableOnPath("git.exe");
+	if (!git) return null;
+	const result = spawnSync(git, ["var", "GIT_SHELL_PATH"], { encoding: "utf-8", timeout: 5000, windowsHide: true });
+	if (result.status !== 0) return null;
+	const gitShell = win32.normalize(result.stdout.trim());
+	if (!gitShell.toLowerCase().endsWith(`\\${GIT_FOR_WINDOWS_SHELL_SUFFIX}`)) return null;
+	const bash = win32.join(gitShell.slice(0, -GIT_FOR_WINDOWS_SHELL_SUFFIX.length), "bin", "bash.exe");
+	return shellPathExists(bash) ? bash : null;
+}
+
+/**
+ * Resolve shell configuration based on platform and an optional explicit shell path.
+ * Resolution order:
+ * 1. User-specified shellPath
+ * 2. On Windows: Git Bash in known locations, then Git Bash of git on PATH, then bash on PATH
+ * 3. On Unix: /bin/bash, then bash on PATH, then fallback to sh
+ */
+export function getShellConfig(customShellPath?: string): ShellConfig {
+	// 1. Check user-specified shell path
+	if (customShellPath) {
+		if (shellPathExists(customShellPath)) {
+			return getBashShellConfig(customShellPath);
+		}
+		throw new Error(`Custom shell path not found: ${customShellPath}`);
+	}
+
+	if (process.platform === "win32") {
+		// 2. Try Git Bash in known locations
+		const paths: string[] = [];
+		const programFiles = process.env.ProgramFiles;
+		if (programFiles) {
+			paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
+		}
+		const programFilesX86 = process.env["ProgramFiles(x86)"];
+		if (programFilesX86) {
+			paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
+		}
+
+		for (const path of paths) {
+			if (shellPathExists(path)) {
+				return getBashShellConfig(path);
+			}
+		}
+
+		// 3. Git Bash installed elsewhere, found through git on PATH. This must precede the generic
+		// bash.exe lookup, which usually finds the WSL launcher in System32 first.
+		const gitBash = findGitBashOfGitOnPath();
+		if (gitBash) {
+			return getBashShellConfig(gitBash);
+		}
+
+		// 4. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
+		const bashOnPath = findExecutableOnPath("bash.exe");
+		if (bashOnPath) {
+			return getBashShellConfig(bashOnPath);
+		}
+
+		throw new Error(
+			`No bash shell found. Options:\n` +
+				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
+				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
+				"  3. Set shellPath in settings.json\n\n" +
+				`Searched Git Bash in:\n${paths.map((p) => `  ${p}`).join("\n")}\n` +
+				"  the Git for Windows installation of git.exe on PATH",
+		);
+	}
+
+	// Unix: try /bin/bash, then bash on PATH, then fallback to sh
+	if (shellPathExists("/bin/bash")) {
+		return getBashShellConfig("/bin/bash");
+	}
+
+	const bashOnPath = findExecutableOnPath("bash");
+	if (bashOnPath) {
+		return getBashShellConfig(bashOnPath);
+	}
+
+	return { shell: "sh", args: ["-c"] };
+}
+
+export const POWERSHELL_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"] as const;
+
+/** Resolve PowerShell on Windows, preferring PowerShell 7 when available. */
+export function getPowerShellConfig(): ShellConfig {
+	if (process.platform !== "win32") {
+		throw new Error("The powershell tool is only available on Windows.");
+	}
+
+	let shell = findExecutableOnPath("pwsh.exe");
+	// Installation directories may be on any drive and need not be on PATH.
+	const programFiles = process.env.ProgramFiles;
+	if (!shell && programFiles) {
+		const pwsh7 = win32.join(programFiles, "PowerShell", "7", "pwsh.exe");
+		if (shellPathExists(pwsh7)) shell = pwsh7;
+	}
+
+	shell ??= findExecutableOnPath("powershell.exe");
+	const systemRoot = process.env.SystemRoot;
+	if (!shell && systemRoot) {
+		const windowsPowerShell = win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+		if (shellPathExists(windowsPowerShell)) shell = windowsPowerShell;
+	}
+
+	if (!shell) {
+		throw new Error("No PowerShell executable found. Install PowerShell or add powershell.exe/pwsh.exe to PATH.");
+	}
+
+	return { shell, args: [...POWERSHELL_ARGS] };
+}
+
+export function getShellEnv(): NodeJS.ProcessEnv {
+	const binDir = getBinDir();
+	const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+	const currentPath = process.env[pathKey] ?? "";
+	const pathEntries = currentPath.split(delimiter).filter(Boolean);
+	const hasBinDir = pathEntries.includes(binDir);
+	const updatedPath = hasBinDir ? currentPath : [binDir, currentPath].filter(Boolean).join(delimiter);
+
+	return {
+		...process.env,
+		[pathKey]: updatedPath,
+	};
+}
+
+/** GSD compat: normalize Windows NUL redirects for bash compatibility. */
+export function sanitizeCommand(command: string): string {
+	if (process.platform !== "win32") return command;
+
+	const isDigit = (char: string | undefined): boolean => Boolean(char && char >= "0" && char <= "9");
+	const isBoundary = (char: string | undefined): boolean =>
+		char === undefined ||
+		char === " " ||
+		char === "\t" ||
+		char === ";" ||
+		char === "|" ||
+		char === "&" ||
+		char === ")";
+
+	let output = "";
+	for (let index = 0; index < command.length; ) {
+		let cursor = index;
+		while (isDigit(command[cursor])) {
+			cursor++;
+		}
+		if (command[cursor] !== ">") {
+			output += command[index]!;
+			index++;
+			continue;
+		}
+
+		cursor++;
+		if (command[cursor] === ">") {
+			cursor++;
+		}
+
+		const redirectToken = command.slice(index, cursor);
+		let valueStart = cursor;
+		while (command[valueStart] === " ") {
+			valueStart++;
+		}
+
+		const value = command.slice(valueStart, valueStart + 3);
+		if (value.toLowerCase() === "nul" && isBoundary(command[valueStart + 3])) {
+			output += `${redirectToken} /dev/null`;
+			index = valueStart + 3;
+			continue;
+		}
+
+		output += command[index]!;
+		index++;
+	}
+
+	return output;
+}
+
+/**
+ * Sanitize binary output for display/storage.
+ * Removes characters that crash string-width or cause display issues:
+ * - Control characters (except tab, newline, carriage return)
+ * - Unicode interlinear annotation characters U+FFF9..U+FFFB (crash string-width due to a bug)
+ */
+export function sanitizeBinaryOutput(str: string): string {
+	// All removed characters are single UTF-16 code units, so surrogate pairs are never split.
+	return str.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFF9-\uFFFB]/g, "");
+}
+
+/**
+ * Detached child processes must be tracked so they can be killed on parent
+ * shutdown signals (SIGHUP/SIGTERM).
+ */
+const trackedDetachedChildPids = new Set<number>();
+
+export function trackDetachedChildPid(pid: number): void {
+	trackedDetachedChildPids.add(pid);
+}
+
+export function untrackDetachedChildPid(pid: number): void {
+	trackedDetachedChildPids.delete(pid);
+}
+
+/** Kill every tracked shell process tree. On Windows this blocks until taskkill finishes. */
+export function killTrackedDetachedChildren(): void {
+	if (trackedDetachedChildPids.size === 0) return;
+	if (process.platform === "win32") {
+		// Callers exit right after this. Exiting kills the shell (libuv's job object), and taskkill /T
+		// then no longer finds the shell's descendants, so wait for taskkill. windowsHide gives it its own
+		// console, so a console close (SIGHUP) does not end it too.
+		const pidArgs = [...trackedDetachedChildPids].flatMap((pid) => ["/PID", String(pid)]);
+		spawnSync(getTaskkillPath(), ["/F", "/T", ...pidArgs], {
+			stdio: "ignore",
+			timeout: 2000,
+			windowsHide: true,
+		});
+	} else {
+		for (const pid of trackedDetachedChildPids) {
+			killProcessTree(pid);
+		}
+	}
+	trackedDetachedChildPids.clear();
+}
+
+// Use the trusted System32 executable so cleanup does not depend on PATH.
+function getTaskkillPath(): string {
+	return join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe");
+}
+
+/**
+ * Grace period (ms) between SIGTERM and SIGKILL.
+ * Canonical source for the graceful-kill timing ladder — imported by async_bash
+ * and GSD exec-sandbox kill paths.
+ */
+export const SIGKILL_GRACE_MS = 5_000;
+/** Hard deadline (ms) after SIGKILL to force-resolve the job promise. */
+export const HARD_DEADLINE_MS = 3_000;
+
+/**
+ * Kill a process and all its children (cross-platform).
+ *
+ * Returns immediately; the SIGKILL escalation fires asynchronously after `graceMs`.
+ * On Windows: force-terminate with taskkill /F /T (grace ignored).
+ * On Unix: SIGTERM → grace → SIGKILL.
+ */
+export function killProcessTree(pid: number, opts?: { graceMs?: number }): void {
+	if (process.platform === "win32") {
+		try {
+			const child = spawn(getTaskkillPath(), ["/F", "/T", "/PID", String(pid)], {
+				stdio: "ignore",
+				detached: true,
+				windowsHide: true,
+			});
+			// A failed spawn emits "error" asynchronously; consume it to avoid crashing Node.
+			child.once("error", () => {});
+		} catch {
+			// Ignore errors if taskkill fails.
+		}
+		return;
+	}
+
+	try {
+		process.kill(-pid, "SIGTERM");
+	} catch {
+		try {
+			process.kill(pid, "SIGTERM");
+		} catch {
+			return;
+		}
+	}
+	const t = setTimeout(() => {
+		try {
+			process.kill(-pid, "SIGKILL");
+		} catch {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {
+				// Process already dead
+			}
+		}
+	}, opts?.graceMs ?? SIGKILL_GRACE_MS);
+	if (typeof t === "object" && "unref" in t) t.unref();
+}

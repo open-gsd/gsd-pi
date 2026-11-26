@@ -82,7 +82,12 @@ function messageToText(message: Message): string {
 		return `Assistant:\n${text}`;
 	}
 
-	return `Tool result (${message.toolName}):\n${textBlocks(message.content)}`;
+	if (message.role === "toolResult") {
+		const content = typeof message.content === "string" ? message.content : textBlocks(message.content);
+		return `Tool result (${message.toolName}):\n${content}`;
+	}
+
+	return `System:\n${typeof message.content === "string" ? message.content : textBlocks(message.content)}`;
 }
 
 export function buildCursorPrompt(context: Context): string {

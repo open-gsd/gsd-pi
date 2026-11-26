@@ -90,6 +90,15 @@ Every row must have a matching entry in `scripts/pi-upstream.json` → `patchAll
 | Interactive stream dedup | `packages/gsd-agent-modes/src/modes/interactive/controllers/chat-controller.ts`, `packages/gsd-agent-modes/src/modes/interactive/components/chat-turn-connect.ts` | Reconcile mismatched tool IDs across event streams |
 | pi-tui shims | `style.ts`, `editor-keybindings.ts`, `Container.detachChildren`, `Markdown.maxLines`, `Input.secure`, `Image.getDimensions` | GSD interactive mode compat |
 | pi-ai shims | `ServerToolUse` / `WebSearchResult` types, `server_tool_use` event, `supportsXhigh()` | GSD content blocks + thinking level |
+| Host-compat barrels | `packages/pi-ai/src/host-compat.ts`, `packages/pi-coding-agent/src/host-compat.ts` | Re-export GSD surfaces trimmed from v1.6.1 package roots |
+| Models catalog helpers | `packages/pi-ai/src/gsd-models-catalog.ts` | Catalog overlay type guards for host registration |
+| Moonshot tool schema | `packages/pi-ai/src/utils/moonshot-tool-schema.ts` | Sanitize tool schemas for Moonshot providers |
+| GitHub Copilot OAuth URL | `packages/pi-ai/src/auth/oauth/github-copilot.ts` | Host helper for Copilot base URL |
+| API-family predicates | `packages/pi-ai/src/providers/api-family.ts` | `isAnthropicApi` / `isOpenAIApi` / `isGeminiApi` / `isBedrockApi` (ADR-012) |
+| Tool JSON repair | `packages/pi-ai/src/utils/repair-tool-json.ts` | `hasXmlParameterTags` / `repairToolJson` for CLI stream adapters |
+| Config value helpers | `packages/pi-coding-agent/src/core/resolve-config-value.ts` | Allowed command prefix resolution |
+| Skills loader | `packages/pi-coding-agent/src/core/skills.ts` | Host skill discovery re-exports |
+| Shell helpers | `packages/pi-coding-agent/src/utils/shell.ts` | Process-tree kill + command sanitize |
 | Tool argument normalization tests | `packages/pi-ai/src/utils/tests/normalize-tool-arguments.test.ts` | Regression coverage for shared validation/transcript argument normalization |
 | **Claude tool schemas** | `packages/pi-ai/src/providers/google-shared.ts` | Cloud Code Assist / Claude `input_schema` sanitization (`toClaudeInputSchemaRoot`, `normalizeClaudeToolSchemaForGoogle`) |
 | **Claude schema tests** | `packages/pi-ai/test/google-shared-convert-tools.test.ts`, `src/resources/extensions/gsd/tests/claude-tool-schema-golden.test.ts` | Golden B regression |

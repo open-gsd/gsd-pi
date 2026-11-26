@@ -4,9 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { getModels, getSupportedThinkingLevels } from "../../../../../packages/pi-ai/src/models.js";
-import { streamSimpleOpenAICompletions } from "../../../../../packages/pi-ai/src/providers/openai-completions.js";
-import type { Api, Model } from "../../../../../packages/pi-ai/src/types.js";
+import { getModels, getSupportedThinkingLevels, normalizeContext, streamSimpleOpenAICompletions } from "@gsd/pi-ai";
+import type { Api, Model } from "@gsd/pi-ai";
 import {
   applyLastKnownGood,
   computeCatalogRegistrationCandidates,
@@ -62,7 +61,7 @@ async function captureCompletionsPayload(
   let payload: unknown;
   const result = await streamSimpleOpenAICompletions(
     model,
-    { systemPrompt: "", messages: [{ role: "user", content: "hello", timestamp: Date.now() }] },
+    normalizeContext({ systemPrompt: "", messages: [{ role: "user", content: "hello", timestamp: Date.now() }] }),
     {
       apiKey: "test-key",
       reasoning,

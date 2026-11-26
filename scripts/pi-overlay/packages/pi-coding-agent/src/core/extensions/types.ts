@@ -71,6 +71,7 @@ import type {
 	SessionForkEvent,
 	SessionSwitchEvent,
 	StopEvent,
+	ToolCompatibility,
 	ToolFormatValidationErrorEvent,
 	ToolFormatValidationErrorEventResult,
 	ToolPreparationErrorsTurnEvent,
@@ -394,6 +395,11 @@ export interface ExtensionContext {
 	mode: ExtensionMode;
 	/** Whether dialog-capable UI is available (true in TUI and RPC modes) */
 	hasUI: boolean;
+	/**
+	 * True only when the local interactive TUI owns the desktop session.
+	 * Gates CUA / mac-tools admission; false for RPC, print, and headless.
+	 */
+	isLocalInteractiveDesktop: boolean;
 	/** Current working directory */
 	cwd: string;
 	/** Session manager (read-only) */
@@ -662,6 +668,9 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	constrainedSampling?: false | ConstrainedSamplingConfig;
 	/** Controls whether ToolExecutionComponent renders the standard colored shell or the tool renders its own framing. */
 	renderShell?: "default" | "self";
+
+	/** Provider compatibility metadata (ADR-005). Omit for universally compatible tools. */
+	compatibility?: ToolCompatibility;
 
 	/** Optional compatibility shim to prepare raw tool call arguments before schema validation. Must return an object conforming to TParams. */
 	prepareArguments?: (args: unknown) => Static<TParams>;
@@ -1838,7 +1847,7 @@ export interface ExtensionAPI {
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-	): void;
+	): Promise<void>;
 
 	/**
 	 * Send a user message to the agent. Always triggers a turn.
@@ -2084,9 +2093,11 @@ export interface ProviderConfig {
 	/** Display name for the provider in UI. */
 	name?: string;
 	/** GSD compat: how auth is presented for this provider. */
-	authMode?: "apiKey" | "oauth" | "none";
+	authMode?: "apiKey" | "oauth" | "externalCli" | "none";
 	/** GSD compat: readiness probe used by host registration. */
 	isReady?: () => boolean;
+	/** GSD compat: async settle hook for external-CLI / probe-based readiness. */
+	settleReadiness?: () => Promise<unknown>;
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
 	/** API key literal, env interpolation ($ENV_VAR or ${ENV_VAR}), or leading !command. Required when defining models (unless oauth provided). */
@@ -2261,7 +2272,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-) => void;
+) => void | Promise<void>;
 
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],

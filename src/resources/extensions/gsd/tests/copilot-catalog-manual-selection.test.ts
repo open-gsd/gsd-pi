@@ -22,7 +22,7 @@ import { AuthStorage, ModelRegistry } from "@gsd/pi-coding-agent";
 
 import { MODEL_CAPABILITY_TIER } from "../model-router.js";
 
-test("a github-copilot model absent from MODEL_CAPABILITY_TIER is still genuinely selectable via models.json", (t) => {
+test("a github-copilot model absent from MODEL_CAPABILITY_TIER is still genuinely selectable via models.json", async (t) => {
   // Any id that is guaranteed not to already be a GSD capability-tier entry
   // or a real Copilot catalog id.
   const unprofiledModelId = "copilot-hypothetical-preview-not-in-tier-table";
@@ -62,7 +62,7 @@ test("a github-copilot model absent from MODEL_CAPABILITY_TIER is still genuinel
   );
 
   const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-  const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+  const registry = await ModelRegistry.create(authStorage, modelsJsonPath);
 
   assert.equal(registry.getError(), undefined, "manually adding the model must not produce a config error");
 

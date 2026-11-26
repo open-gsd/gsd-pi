@@ -55,6 +55,13 @@ export {
 export { normalizeToolResultContent } from "./tool-result-content.js";
 export type { OAuthProviderInterface, OAuthProviderId } from "./oauth-gsd-compat.js";
 export { getOAuthProviders } from "./oauth-gsd-compat.js";
+export { hasXmlParameterTags, hasYamlBulletLists, repairToolJson } from "./utils/repair-tool-json.js";
+export {
+	isAnthropicApi,
+	isBedrockApi,
+	isGeminiApi,
+	isOpenAIApi,
+} from "./providers/api-family.js";
 
 // GSD host compatibility: re-export the most-used compat stream helpers from the
 // package root so existing `@gsd/pi-ai` imports keep resolving after the v1.6.1 split.

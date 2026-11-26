@@ -78,6 +78,8 @@ export interface Skill {
 	baseDir: string;
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
+	/** GSD compat: legacy source label used by host skill tests. */
+	source?: string;
 }
 
 export interface LoadSkillsResult {

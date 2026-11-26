@@ -400,6 +400,8 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
+	/** GSD: true when the local interactive TUI owns desktop admission. */
+	private localInteractiveDesktop = false;
 
 	constructor(
 		extensions: Extension[],
@@ -937,6 +939,10 @@ export class ExtensionRunner {
 			get hasUI() {
 				runner.assertActive();
 				return runner.hasUI();
+			},
+			get isLocalInteractiveDesktop() {
+				runner.assertActive();
+				return runner.localInteractiveDesktop;
 			},
 			get cwd() {
 				runner.assertActive();
@@ -1608,8 +1614,8 @@ export class ExtensionRunner {
 	}
 
 	/** GSD: track whether the interactive TUI is active (extension admission). */
-	setLocalInteractiveDesktop(_enabled: boolean): void {
-		// Host-specific; no upstream behavior.
+	setLocalInteractiveDesktop(isLocalInteractiveDesktop: boolean): void {
+		this.localInteractiveDesktop = isLocalInteractiveDesktop && this.hasUI();
 	}
 
 	/** GSD: extension hooks for model routing — no-op when unhandled. */

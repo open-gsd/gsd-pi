@@ -61,8 +61,12 @@ export function estimateMessageTokens(message: Message): number {
 			chars += block.text.length;
 		} else if (block.type === "thinking") {
 			chars += block.thinking.length;
-		} else {
+		} else if (block.type === "toolCall") {
 			chars += block.name.length + safeJsonStringify(block.arguments).length;
+		} else if (block.type === "serverToolUse") {
+			chars += block.name.length + safeJsonStringify(block.input).length;
+		} else {
+			chars += block.toolUseId.length + safeJsonStringify(block.content).length;
 		}
 	}
 	return Math.ceil(chars / CHARS_PER_TOKEN);

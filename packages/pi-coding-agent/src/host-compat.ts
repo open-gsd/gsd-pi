@@ -21,7 +21,13 @@ export { createBashTool } from "./core/tools/bash.js";
 export { createEditTool } from "./core/tools/edit.js";
 export { createReadTool } from "./core/tools/read.js";
 export { createWriteTool } from "./core/tools/write.js";
-export { getToolCompatibility } from "./core/tools/tool-compatibility-registry.js";
+export {
+	getAllToolCompatibility,
+	getToolCompatibility,
+	registerMcpToolCompatibility,
+	registerToolCompatibility,
+	resetToolCompatibilityRegistry,
+} from "./core/tools/tool-compatibility-registry.js";
 export { getLoadedSkills, loadSkills } from "./core/skills.js";
 export { getSkillDirectories } from "./core/skill-directories.js";
 export {

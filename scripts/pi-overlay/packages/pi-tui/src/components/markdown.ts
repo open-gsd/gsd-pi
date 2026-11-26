@@ -313,6 +313,11 @@ interface RenderedBlock {
 
 export class Markdown implements Component {
 	maxLines?: number;
+	/**
+	 * Opt-in readable measure for authored prose paragraphs, in display cells.
+	 * 0 (default) keeps the host allocation. See #2931.
+	 */
+	proseMeasure = 0;
 	private text: string;
 	private paddingX: number; // Left/right padding
 	private paddingY: number; // Top/bottom padding
@@ -325,6 +330,7 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private cachedProseMeasure?: number;
 	// Parsed tokens depend only on the source, so they survive theme and width invalidation. Held weakly: a token tree is
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
@@ -377,7 +383,12 @@ export class Markdown implements Component {
 
 	render(width: number): readonly string[] {
 		// Check cache
-		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
+		if (
+			this.cachedLines &&
+			this.cachedText === this.text &&
+			this.cachedWidth === width &&
+			this.cachedProseMeasure === this.proseMeasure
+		) {
 			return this.cachedLines;
 		}
 
@@ -392,6 +403,7 @@ export class Markdown implements Component {
 			// Update cache
 			this.cachedText = this.text;
 			this.cachedWidth = width;
+			this.cachedProseMeasure = this.proseMeasure;
 			this.cachedLines = result;
 			return result;
 		}
@@ -446,6 +458,7 @@ export class Markdown implements Component {
 		// Update cache
 		this.cachedText = this.text;
 		this.cachedWidth = width;
+		this.cachedProseMeasure = this.proseMeasure;
 		this.cachedLines = result;
 
 		return result.length > 0 ? result : [""];

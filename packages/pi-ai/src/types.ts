@@ -28,6 +28,7 @@ import type {
 	ThinkingLevel,
 	ThinkingLevelMap,
 } from "./providers/model-schema.js";
+import type { ExternalToolResult, ServerToolUse, WebSearchResult } from "./gsd-compat-types.js";
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.js";
 import type { AssistantMessageEventStream } from "./utils/event-stream.js";
 import type { ClientIdentity } from "./utils/identity.js";
@@ -389,6 +390,8 @@ export type ProviderImagesOptions = ImagesOptions & Record<string, unknown>;
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
+	/** Workspace root for providers that spawn local processes (GSD host compat). */
+	cwd?: string;
 	/** Provider-neutral tool selection for simple requests. When omitted, adapters use provider-specific behavior. */
 	toolChoice?: ToolChoice;
 	reasoning?: ThinkingLevel;
@@ -459,7 +462,8 @@ export interface ToolCall {
 	type: "toolCall";
 	id: string;
 	name: string;
-	arguments: JsonObject;
+	/** GSD host compat: extensions historically pass Record<string, unknown>/any. */
+	arguments: JsonObject | Record<string, any>;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 	/** OpenAI Responses namespace for calls to dynamically loaded or namespaced tools. */
 	namespace?: string;
@@ -468,6 +472,8 @@ export interface ToolCall {
 	 * Describes the problem and includes the text the model sent; tool argument validation fails with it.
 	 */
 	argumentsError?: string;
+	/** Result from an externally executed tool (e.g. Claude Code SDK). Skips local dispatch. */
+	externalResult?: ExternalToolResult;
 }
 
 export interface Usage {
@@ -483,6 +489,13 @@ export interface Usage {
 	 * providers that expose a reasoning breakdown; left undefined by providers that don't.
 	 */
 	reasoning?: number;
+	/**
+	 * Live prompt-side context of the final per-call API response, set only by
+	 * adapters whose terminal usage is cumulative across an internal loop
+	 * (claude-code). Consumers that approximate live context should prefer this
+	 * when it is present and > 0.
+	 */
+	liveContextTokens?: number;
 	totalTokens: number;
 	cost: {
 		/** Catalog-derived input cost. */
@@ -607,7 +620,7 @@ export interface ModelRouting {
 
 export interface AssistantMessage {
 	role: "assistant";
-	content: (TextContent | ThinkingContent | ToolCall)[];
+	content: (TextContent | ThinkingContent | ToolCall | ServerToolUse | WebSearchResult)[];
 	modelRouting?: ModelRouting;
 	api: Api;
 	provider: ProviderId;
@@ -853,16 +866,24 @@ export type TranscriptContext = {
  */
 export type AssistantMessageEvent =
 	| { type: "start"; partial: AssistantMessage }
-	| { type: "text_start"; contentIndex: number; partial: AssistantMessage }
-	| { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-	| { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
-	| { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
-	| { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-	| { type: "thinking_end"; contentIndex: number; content: string; partial: AssistantMessage }
-	| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
-	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
-	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
-	| { type: "server_tool_use"; contentIndex: number; partial: AssistantMessage }
+	// `partial` is optional for GSD host/extension emitters that predate the v1.6.1
+	// required-partial protocol; upstream providers still always supply it.
+	| { type: "text_start"; contentIndex: number; partial?: AssistantMessage }
+	| { type: "text_delta"; contentIndex: number; delta: string; partial?: AssistantMessage }
+	| { type: "text_end"; contentIndex: number; content: string; partial?: AssistantMessage }
+	| { type: "thinking_start"; contentIndex: number; partial?: AssistantMessage }
+	| { type: "thinking_delta"; contentIndex: number; delta: string; partial?: AssistantMessage }
+	| { type: "thinking_end"; contentIndex: number; content: string; partial?: AssistantMessage }
+	| { type: "toolcall_start"; contentIndex: number; partial?: AssistantMessage }
+	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial?: AssistantMessage }
+	| {
+			type: "toolcall_end";
+			contentIndex: number;
+			toolCall: ToolCall;
+			partial?: AssistantMessage;
+			malformedArguments?: boolean;
+	  }
+	| { type: "server_tool_use"; contentIndex: number; partial?: AssistantMessage }
 	| {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse" | "deferred">;

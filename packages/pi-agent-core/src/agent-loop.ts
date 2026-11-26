@@ -444,9 +444,13 @@ async function streamAssistantResponse(
 			case "toolcall_start":
 			case "toolcall_delta":
 			case "toolcall_end":
+			case "server_tool_use":
 				if (partialMessage) {
-					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
+					// GSD host/extension emitters may omit `partial`; keep the last known snapshot.
+					if (event.partial) {
+						partialMessage = event.partial;
+						context.messages[context.messages.length - 1] = partialMessage;
+					}
 					await emit({
 						type: "message_update",
 						assistantMessageEvent: event,
