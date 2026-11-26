@@ -563,7 +563,12 @@ export class AuthStorage implements CredentialStore {
 
 	/** GSD host synchronous credential removal. */
 	remove(provider: string): void {
-		void this.delete(provider);
+		this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			delete currentData[provider];
+			this.updateReadState(currentData, this.authPath ? getFileRevision(this.authPath) : undefined);
+			return { result: undefined, next: JSON.stringify(currentData, null, 2) };
+		});
 	}
 
 	hasAuth(provider: string): boolean {
@@ -571,6 +576,11 @@ export class AuthStorage implements CredentialStore {
 	}
 
 	set(provider: string, credential: Credential): void {
+		const merged: AuthStorageData = { ...this.readState.data, [provider]: credential };
+		this.updateReadState(merged, this.readState.revision);
+		if (credential.type === "api_key" && credential.key) {
+			clearConfigValueCacheEntry(credential.key);
+		}
 		void this.modify(provider, async () => credential);
 	}
 

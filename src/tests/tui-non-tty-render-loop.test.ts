@@ -11,7 +11,7 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { ProcessTerminal } from "@gsd/pi-tui";
-import { TUI } from "@gsd/pi-tui";
+import { TuiMainScreen } from "@gsd/pi-tui";
 import type { Terminal } from "@gsd/pi-tui";
 
 /**
@@ -80,7 +80,7 @@ describe("TUI non-TTY render loop guard (issue #3095)", () => {
 
   it("TUI.start() must not render when terminal.isTTY is false", async () => {
     const terminal = new MockNonTTYTerminal();
-    const tui = new TUI(terminal);
+    const tui = new TuiMainScreen(terminal);
 
     tui.start();
 
@@ -102,7 +102,7 @@ describe("TUI non-TTY render loop guard (issue #3095)", () => {
 
   it("TUI.start() renders normally when terminal.isTTY is true", async () => {
     const terminal = new MockTTYTerminal();
-    const tui = new TUI(terminal);
+    const tui = new TuiMainScreen(terminal);
 
     tui.start();
 
@@ -120,7 +120,7 @@ describe("TUI non-TTY render loop guard (issue #3095)", () => {
 
   it("requestRender() must be a no-op when terminal.isTTY is false", async () => {
     const terminal = new MockNonTTYTerminal();
-    const tui = new TUI(terminal);
+    const tui = new TuiMainScreen(terminal);
 
     tui.start();
 

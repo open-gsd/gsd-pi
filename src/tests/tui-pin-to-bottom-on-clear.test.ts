@@ -15,7 +15,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { TUI, CURSOR_MARKER, type Component, type Terminal } from "@gsd/pi-tui";
+import { TuiMainScreen, CURSOR_MARKER, type Component, type Terminal } from "@gsd/pi-tui";
 
 class ResizableMockTerminal implements Terminal {
   public writtenData: string[] = [];
@@ -74,7 +74,7 @@ class StaticLinesComponent implements Component {
 describe("TUI pin-to-bottom on clear", () => {
   it("anchors short first renders to the terminal bottom", () => {
     const terminal = new ResizableMockTerminal(20);
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     const component = new StaticLinesComponent(["line 1", "line 2", "line 3"]);
     tui.addChild(component);
 
@@ -94,7 +94,7 @@ describe("TUI pin-to-bottom on clear", () => {
 
   it("appends short auto-mode frames without feeding blank rows downward", () => {
     const terminal = new ResizableMockTerminal(20);
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     const component = new StaticLinesComponent(["line 1", "line 2", "line 3"]);
     tui.addChild(component);
     (tui as any).doRender();
@@ -125,7 +125,7 @@ describe("TUI pin-to-bottom on clear", () => {
 
   it("anchors a short block to the terminal bottom when a height change triggers fullRender(clear)", () => {
     const terminal = new ResizableMockTerminal(24);
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     // Three-line block; terminal is 24 rows tall after resize.
     const component = new StaticLinesComponent(["line 1", "line 2", "line 3"]);
     tui.addChild(component);
@@ -174,7 +174,7 @@ describe("TUI pin-to-bottom on clear", () => {
 
   it("falls back to row 1 when the block is taller than the viewport", () => {
     const terminal = new ResizableMockTerminal(24);
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     // 30-line block > 20-row viewport.
     const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
     const component = new StaticLinesComponent(lines);
@@ -211,7 +211,7 @@ describe("TUI pin-to-bottom on clear", () => {
     // mechanism available at the time; the fix replaces that mechanism with an
     // in-place viewport repaint that preserves both intents.
     const terminal = new ResizableMockTerminal(20);
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     const lines = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
     const component = new StaticLinesComponent(lines);
     tui.addChild(component);
@@ -262,7 +262,7 @@ describe("TUI pin-to-bottom on clear", () => {
     // terminal the 20→10 literal scenario flows through the short-block
     // full-render path instead, which is by design and would emit \x1b[2J.
     const terminal = new ResizableMockTerminal(20);
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     const lines = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
     const component = new StaticLinesComponent(lines);
     tui.addChild(component);
@@ -314,7 +314,7 @@ describe("TUI pin-to-bottom on clear", () => {
     // same-length edit reaches the differential path (no line count change →
     // early-exit doesn't fire).
     const terminal = new ResizableMockTerminal(20);
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     const component = new StaticLinesComponent(["line 1", "line 2", "line 3"]);
     tui.addChild(component);
     (tui as any).doRender();
@@ -346,7 +346,7 @@ describe("TUI pin-to-bottom on clear", () => {
     // content is short (negative previousViewportTop) and a CURSOR_MARKER is
     // embedded in a non-final line.
     const terminal = new ResizableMockTerminal(20);
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     // Marker on middle line; block is 3 lines on a 20-row terminal.
     const component = new StaticLinesComponent([
       "line 1",

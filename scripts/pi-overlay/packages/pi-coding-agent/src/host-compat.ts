@@ -31,9 +31,11 @@ export {
 export { getLoadedSkills, loadSkills } from "./core/skills.js";
 export { getSkillDirectories } from "./core/skill-directories.js";
 export {
+	SAFE_COMMAND_PREFIXES,
 	getAllowedCommandPrefixes,
 	setAllowedCommandPrefixes,
 } from "./core/resolve-config-value.js";
+export { getAliases } from "./core/extensions/loader.js";
 export {
 	getBeforeAgentStartContext,
 	setBeforeAgentStartContext,

@@ -92,6 +92,8 @@
     "packages/pi-coding-agent/src/core/provider-display-names.ts",
     "packages/pi-coding-agent/src/core/radius-mcp.ts",
     "packages/pi-coding-agent/src/core/resolve-config-value.ts",
+    "packages/pi-coding-agent/src/core/resource-loader.ts",
+    "packages/pi-coding-agent/src/core/extension-discovery.ts",
     "packages/pi-coding-agent/src/core/session-manager.ts",
     "packages/pi-coding-agent/src/core/settings-diagnostics.ts",
     "packages/pi-coding-agent/src/core/settings-manager.ts",
@@ -138,7 +140,9 @@
     "packages/pi-tui/src/gsd-layout.ts",
     "packages/pi-tui/src/index.ts",
     "packages/pi-tui/src/style.ts",
-    "packages/pi-tui/src/tui.ts"
+    "packages/pi-tui/src/tui.ts",
+    "packages/pi-tui/src/terminal.ts",
+    "packages/pi-tui/src/tui-main-screen.ts"
   ],
   "legacyScopes": [
     "@mariozechner"

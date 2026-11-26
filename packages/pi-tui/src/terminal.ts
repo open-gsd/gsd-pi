@@ -84,6 +84,9 @@ export function normalizeAppleTerminalInput(data: string, isAppleTerminal: boole
  * Minimal terminal interface for TUI
  */
 export interface Terminal {
+	// Whether the terminal is interactive (false for piped/RPC bridge stdout).
+	readonly isTTY: boolean;
+
 	// Start the terminal with input and resize handlers
 	start(onInput: (data: string) => void, onResize: () => void): void;
 
@@ -162,6 +165,8 @@ export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
  * Real terminal using process.stdin/stdout
  */
 export class ProcessTerminal implements Terminal {
+	readonly isTTY = Boolean(process.stdout.isTTY);
+
 	private wasRaw = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
@@ -207,6 +212,10 @@ export class ProcessTerminal implements Terminal {
 	start(onInput: (data: string) => void, onResize: () => void): void {
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
+
+		if (!this.isTTY) {
+			return;
+		}
 
 		// Save previous state and enable raw mode
 		this.wasRaw = process.stdin.isRaw || false;

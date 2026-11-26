@@ -1058,6 +1058,9 @@ export abstract class TuiBase extends Container implements TUI {
 
 	start(): void {
 		this.stopped = false;
+		if (!this.terminal.isTTY) {
+			return;
+		}
 		process.off("exit", this.exitRestoreHandler);
 		process.on("exit", this.exitRestoreHandler);
 		this.ownsTerminal = true;
@@ -1158,6 +1161,9 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	requestRender(force = false): void {
+		if (!this.terminal.isTTY) {
+			return;
+		}
 		if (force) {
 			this.resetRenderState();
 			this.requestImmediateRender();

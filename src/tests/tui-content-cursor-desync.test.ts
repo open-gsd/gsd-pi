@@ -11,7 +11,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { CURSOR_MARKER, TUI, type Component, type Terminal } from "@gsd/pi-tui";
+import { CURSOR_MARKER, TuiMainScreen, type Component, type Terminal } from "@gsd/pi-tui";
 
 class MockTTYTerminal implements Terminal {
   public writtenData: string[] = [];
@@ -64,7 +64,7 @@ class DynamicLinesComponent implements Component {
 describe("TUI cursor tracking regression (#3764)", () => {
   it("does not produce spurious cursor jumps when content changes after IME positioning", () => {
     const terminal = new MockTTYTerminal();
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     const component = new DynamicLinesComponent([
       "header",
       `input: hello${CURSOR_MARKER}`,
@@ -107,7 +107,7 @@ describe("TUI cursor tracking regression (#3764)", () => {
     // Simulates /gsd prefs: editor with CURSOR_MARKER is replaced by
     // a selector component (no CURSOR_MARKER) that has different line count.
     const terminal = new MockTTYTerminal();
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
 
     // Initial state: chat + editor with cursor marker (typical idle state)
     const chatLines = Array.from({ length: 15 }, (_, i) => `chat line ${i}`);
@@ -194,7 +194,7 @@ describe("TUI cursor tracking regression (#3764)", () => {
     // After dismissing a selector, the editor returns with CURSOR_MARKER.
     // The cursor must move to the new marker position without corruption.
     const terminal = new MockTTYTerminal();
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
 
     const chatLines = Array.from({ length: 10 }, (_, i) => `chat ${i}`);
     const component = new DynamicLinesComponent([
@@ -231,7 +231,7 @@ describe("TUI cursor tracking regression (#3764)", () => {
   it("handles input component swap (prefs wizard text input)", () => {
     // Simulates /gsd prefs input step: selector replaced by text input with cursor
     const terminal = new MockTTYTerminal();
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
 
     const chatLines = Array.from({ length: 8 }, (_, i) => `msg ${i}`);
     const component = new DynamicLinesComponent([
@@ -281,7 +281,7 @@ describe("TUI cursor tracking regression (#3764)", () => {
 
   it("hardwareCursorRow tracks actual terminal position through IME and shrink", () => {
     const terminal = new MockTTYTerminal();
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     const component = new DynamicLinesComponent([
       "line 1",
       `line 2${CURSOR_MARKER}`,

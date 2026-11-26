@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.js";
 import { type TUI, TuiBase, type TuiStopOptions } from "./tui.js";
-import { visibleWidth } from "./utils.js";
+import { truncateToWidth, visibleWidth } from "./utils.js";
 
 /** OSC 133 prompt markers at the start of a rendered line. Fullscreen uses them for prompt navigation. */
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
@@ -134,6 +134,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private hardwareCursorRow = 0;
 	private maxLinesRendered = 0;
 	private previousViewportTop = 0;
+	private flushedLineCount = 0;
+	private flushedAtWidth = 0;
+	private flushedAtHeight = 0;
 
 	captureRenderState(): TuiMainScreenRenderState {
 		return {
@@ -166,6 +169,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.hardwareCursorRow = 0;
 		this.maxLinesRendered = 0;
 		this.previousViewportTop = 0;
+		this.flushedLineCount = 0;
+		this.flushedAtWidth = 0;
+		this.flushedAtHeight = 0;
 	}
 
 	protected override beforeTerminalStop(options: TuiStopOptions): void {
@@ -278,18 +284,44 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		newLines = this.applyLineResets(newLines);
 
+		const getViewportTop = (lineCount: number): number => lineCount - height;
+
+		const commitFrame = (maxLines: "set" | "grow" | "keep", nextHardwareCursorRow?: number): void => {
+			this.cursorRow = Math.max(0, newLines.length - 1);
+			this.hardwareCursorRow = nextHardwareCursorRow ?? this.cursorRow;
+			if (maxLines === "set") {
+				this.maxLinesRendered = newLines.length;
+			} else if (maxLines === "grow") {
+				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
+			}
+			this.previousViewportTop = getViewportTop(this.maxLinesRendered);
+			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.previousLines = newLines;
+			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			this.previousWidth = width;
+			this.previousHeight = height;
+		};
+
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
 			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-			output.append("\x1b[?2026h"); // Begin synchronized output
+			output.append("\x1b[?2026h");
+			output.append(this.deleteKittyImages(this.previousKittyImageIds));
+			const firstLine = clear ? Math.min(this.flushedLineCount, Math.max(0, newLines.length - height)) : 0;
+			const startRow = Math.max(1, height - Math.max(1, newLines.length - firstLine) + 1);
 			if (clear) {
-				output.append(this.deleteKittyImages(this.previousKittyImageIds));
-				output.append("\x1b[2J\x1b[H\x1b[3J"); // Clear screen, home, then clear scrollback
+				output.append("\x1b[1;1H");
+				for (let row = 1; row < startRow; row++) {
+					output.append("\x1b[2K\r\n");
+				}
+			} else if (startRow > 1) {
+				output.append(`\x1b[${startRow};1H`);
 			}
-			for (let i = 0; i < newLines.length; i++) {
-				if (i > 0) output.append("\r\n");
-				const line = newLines[i];
+			for (let i = firstLine; i < newLines.length; i++) {
+				if (i > firstLine) output.append("\r\n");
+				if (clear) output.append("\x1b[2K");
+				let line = newLines[i];
 				const isImage = isImageLine(line);
 				const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
@@ -302,25 +334,22 @@ export class TuiMainScreen extends TuiBase implements TUI {
 					i += imageReservedRows - 1;
 					continue;
 				}
+				if (!isImage && visibleWidth(line) > width) {
+					line = truncateToWidth(line, width);
+				}
 				output.append(line);
 			}
-			output.append("\x1b[?2026l"); // End synchronized output
-			output.flush();
-			this.cursorRow = Math.max(0, newLines.length - 1);
-			this.hardwareCursorRow = this.cursorRow;
-			// Reset max lines when clearing, otherwise track growth
 			if (clear) {
-				this.maxLinesRendered = newLines.length;
-			} else {
-				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
+				for (let row = startRow + (newLines.length - firstLine); row <= height; row++) {
+					output.append("\r\x1b[1B\x1b[2K");
+				}
 			}
-			const bufferLength = Math.max(height, newLines.length);
-			this.previousViewportTop = Math.max(0, bufferLength - height);
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousLines = newLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
-			this.previousWidth = width;
-			this.previousHeight = height;
+			output.append("\x1b[?2026l");
+			output.flush();
+			this.flushedLineCount = Math.max(this.flushedLineCount, newLines.length - height);
+			this.flushedAtWidth = width;
+			this.flushedAtHeight = height;
+			commitFrame(clear ? "set" : "grow");
 		};
 
 		const redrawLogDirectory = process.env.PI_TUI_DEBUG_REDRAW === "1" ? this.logDirectory : undefined;

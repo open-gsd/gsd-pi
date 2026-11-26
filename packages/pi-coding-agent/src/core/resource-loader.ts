@@ -326,6 +326,8 @@ export interface DefaultResourceLoaderOptions {
 	noContextFiles?: boolean;
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
+	/** GSD host: reshape extension paths (merge installed dirs, registry filter, sort) before load. */
+	extensionPathsTransform?: (paths: string[]) => { paths: string[]; diagnostics?: string[] };
 	extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
 	skillsOverride?: (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => {
 		skills: Skill[];
@@ -366,6 +368,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private noContextFiles: boolean;
 	private systemPromptSource?: string;
 	private appendSystemPromptSource?: string[];
+	private extensionPathsTransform?: (paths: string[]) => { paths: string[]; diagnostics?: string[] };
 	private extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
 	private skillsOverride?: (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => {
 		skills: Skill[];
@@ -434,6 +437,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.noContextFiles = options.noContextFiles ?? false;
 		this.systemPromptSource = options.systemPrompt;
 		this.appendSystemPromptSource = options.appendSystemPrompt;
+		this.extensionPathsTransform = options.extensionPathsTransform;
 		this.extensionsOverride = options.extensionsOverride;
 		this.skillsOverride = options.skillsOverride;
 		this.promptsOverride = options.promptsOverride;
@@ -614,7 +618,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const cliEnabledPrompts = getEnabledPaths(cliExtensionPaths.prompts);
 		const cliEnabledThemes = getEnabledPaths(cliExtensionPaths.themes);
 
-		const extensionPaths = (
+		let extensionPaths = (
 			this.noExtensions ? cliEnabledExtensions : this.mergePaths(cliEnabledExtensions, enabledExtensions)
 		).filter(
 			(path) =>
@@ -622,9 +626,22 @@ export class DefaultResourceLoader implements ResourceLoader {
 				!this.disabledBuiltinExtensions.has(path.slice(BUILTIN_PATH_PREFIX.length)),
 		);
 
+		const transformDiagnostics: string[] = [];
+		if (this.extensionPathsTransform) {
+			const transformed = this.extensionPathsTransform(extensionPaths);
+			extensionPaths = transformed.paths;
+			if (transformed.diagnostics?.length) {
+				transformDiagnostics.push(...transformed.diagnostics);
+			}
+		}
+
 		const packageWarnings = collectExtensionPackageWarnings(extensionPaths, metadataByPath);
 		const extensionsResult = await this.loadFinalExtensionSet(extensionPaths, preTrustExtensions);
-		mergeExtensionWarnings(extensionsResult, [...installWarnings, ...packageWarnings]);
+		mergeExtensionWarnings(extensionsResult, [
+			...installWarnings,
+			...packageWarnings,
+			...transformDiagnostics.map((message) => ({ path: "", warning: message })),
+		]);
 		for (const p of this.additionalExtensionPaths) {
 			if (isLocalPath(p)) {
 				const resolved = this.resolveResourcePath(p);
