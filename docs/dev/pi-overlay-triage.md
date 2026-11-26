@@ -121,6 +121,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/core/settings-manager.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/settings-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/skills.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/slash-commands.ts` | keep-overlay | browser-safe builtin command list (no config/fs import) | no |
 | `packages/pi-coding-agent/src/core/system-prompt.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/tools/bash-interceptor.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/tools/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |

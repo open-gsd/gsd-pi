@@ -94,6 +94,7 @@
     "packages/pi-coding-agent/src/core/settings-manager.ts",
     "packages/pi-coding-agent/src/core/settings-schema.ts",
     "packages/pi-coding-agent/src/core/skills.ts",
+    "packages/pi-coding-agent/src/core/slash-commands.ts",
     "packages/pi-coding-agent/src/core/tools/bash-interceptor.ts",
     "packages/pi-coding-agent/src/core/tools/index.ts",
     "packages/pi-coding-agent/src/core/tools/read.ts",

@@ -1,5 +1,7 @@
-import { APP_NAME } from "../config.js";
 import type { SourceInfo } from "./source-info.js";
+
+/** Browser-safe label — avoid importing config.ts (Node fs/child_process) into client bundles. */
+const BUILTIN_APP_NAME = "pi";
 
 export type SlashCommandSource = "extension" | "prompt" | "skill";
 
@@ -40,5 +42,5 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "compact", description: "Manually compact the session context" },
 	{ name: "resume", description: "Resume another session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
-	{ name: "quit", description: `Quit ${APP_NAME}` },
+	{ name: "quit", description: `Quit ${BUILTIN_APP_NAME}` },
 ];
