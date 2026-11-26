@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { complete } from "../src/stream.ts";
-import type { Api, Context, Model, StreamOptions } from "../src/types.ts";
-import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { complete, getModel } from "../src/compat.js";
+import type { Api, Context, Model, StreamOptions } from "../src/types.js";
+import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
+import { resolveApiKey } from "./oauth.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
@@ -79,7 +78,7 @@ describe("responseId E2E Tests", () => {
 	});
 
 	describe.skipIf(!hasAzureOpenAICredentials())("Azure OpenAI Responses Provider", () => {
-		const llm = getModel("azure-openai-responses", "gpt-4o-mini");
+		const llm = getModel("azure", "gpt-4o-mini");
 		const azureDeploymentName = resolveAzureDeploymentName(llm.id);
 		const azureOptions = azureDeploymentName ? { azureDeploymentName } : {};
 
@@ -89,7 +88,7 @@ describe("responseId E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider", () => {
-		const llm = getModel("mistral", "devstral-medium-latest");
+		const llm = getModel("mistral", "mistral-medium-latest");
 
 		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
 			await expectResponseId(llm);
@@ -114,7 +113,7 @@ describe("responseId E2E Tests", () => {
 
 	describe("OpenAI Codex Provider", () => {
 		it.skipIf(!openaiCodexToken)("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
-			const llm = getModel("openai-codex", "gpt-5.5");
+			const llm = getModel("openai-codex", "gpt-6.1-sol");
 			await expectResponseId(llm, { apiKey: openaiCodexToken });
 		});
 	});

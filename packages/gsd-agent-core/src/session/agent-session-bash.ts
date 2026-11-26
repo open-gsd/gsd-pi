@@ -22,7 +22,7 @@ export class AgentSessionBashModule {
 			const result = await executeBashWithOperations(
 				resolvedCommand,
 				this.host.sessionManager.getCwd(),
-				options?.operations ?? createLocalBashOperations({ shellPath, loginShell: options?.loginShell }),
+				options?.operations ?? createLocalBashOperations({ shellPath }),
 				{
 					onChunk,
 					signal: this.host._bashAbortController.signal,

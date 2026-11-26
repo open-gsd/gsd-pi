@@ -2,7 +2,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { CURSOR_MARKER, TUI, type Component, type Terminal } from "@gsd/pi-tui";
+import { CURSOR_MARKER, TuiMainScreen, type Component, type Terminal } from "@gsd/pi-tui";
 
 class MockTTYTerminal implements Terminal {
   public writtenData: string[] = [];
@@ -55,7 +55,7 @@ class DynamicLinesComponent implements Component {
 describe("TUI autocomplete shrink clearing (#3721)", () => {
   it("clears deleted autocomplete rows relative to the actual hardware cursor row", () => {
     const terminal = new MockTTYTerminal();
-    const tui = new TUI(terminal, false);
+    const tui = new TuiMainScreen(terminal, false);
     const component = new DynamicLinesComponent([
       "top border",
       `prompt${CURSOR_MARKER}`,

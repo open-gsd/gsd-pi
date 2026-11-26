@@ -8,18 +8,11 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 			return;
 		}
 
-		// Remove the abort listener on normal resolution so a long-lived signal
-		// reused across repeated sleeps (retry/backoff loops) doesn't accumulate
-		// listeners until it's finally aborted.
-		const onAbort = () => {
+		const timeout = setTimeout(resolve, ms);
+
+		signal?.addEventListener("abort", () => {
 			clearTimeout(timeout);
 			reject(new Error("Aborted"));
-		};
-		const timeout = setTimeout(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, ms);
-
-		signal?.addEventListener("abort", onAbort, { once: true });
+		});
 	});
 }

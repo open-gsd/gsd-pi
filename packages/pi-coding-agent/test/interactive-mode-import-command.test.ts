@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { SessionImportFileNotFoundError } from "../src/core/agent-session-runtime.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { SessionImportFileNotFoundError } from "../src/core/agent-session-runtime.js";
+import type { MissingSessionCwdChoice } from "../src/core/session-cwd.js";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 type PathCommand = "/export" | "/import";
 
@@ -10,8 +11,7 @@ type InteractiveModePrototype = {
 };
 
 type ImportCommandContext = {
-	loadingAnimation?: { stop: () => void };
-	statusContainer: { clear: () => void };
+	clearStatusIndicator: () => void;
 	runtimeHost: { importFromJsonl: (inputPath: string, cwdOverride?: string) => Promise<{ cancelled: boolean }> };
 	showError: (message: string) => void;
 	showStatus: (message: string) => void;
@@ -19,7 +19,7 @@ type ImportCommandContext = {
 	handleRuntimeSessionChange: () => Promise<void>;
 	renderCurrentSessionState: () => void;
 	handleFatalRuntimeError: (prefix: string, error: unknown) => Promise<never>;
-	promptForMissingSessionCwd: (error: unknown) => Promise<string | undefined>;
+	promptForMissingSessionCwd: (error: unknown) => Promise<MissingSessionCwdChoice | undefined>;
 	getPathCommandArgument: (text: string, command: PathCommand) => string | undefined;
 };
 
@@ -58,7 +58,7 @@ describe("InteractiveMode /import parsing", () => {
 		const showError = vi.fn();
 
 		const context: ImportCommandContext = {
-			statusContainer: { clear: vi.fn() },
+			clearStatusIndicator: vi.fn(),
 			runtimeHost: { importFromJsonl },
 			showError,
 			showStatus,
@@ -90,7 +90,7 @@ describe("InteractiveMode /import parsing", () => {
 		const showError = vi.fn();
 
 		const context: ImportCommandContext = {
-			statusContainer: { clear: vi.fn() },
+			clearStatusIndicator: vi.fn(),
 			runtimeHost: { importFromJsonl },
 			showError,
 			showStatus,
@@ -123,7 +123,7 @@ describe("InteractiveMode /import parsing", () => {
 		});
 
 		const context: ImportCommandContext = {
-			statusContainer: { clear: vi.fn() },
+			clearStatusIndicator: vi.fn(),
 			runtimeHost: { importFromJsonl },
 			showError,
 			showStatus,

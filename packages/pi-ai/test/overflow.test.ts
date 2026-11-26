@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { AssistantMessage } from "../src/types.ts";
-import { isContextOverflow } from "../src/utils/overflow.ts";
+import type { AssistantMessage } from "../src/types.js";
+import { isContextOverflow, isRecoverableLength } from "../src/utils/overflow.js";
 
-function createErrorMessage(errorMessage: string): AssistantMessage {
+function createErrorMessage(errorMessage: string, provider = "ollama"): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
 		api: "openai-completions",
-		provider: "ollama",
+		provider,
 		model: "qwen3.5:35b",
 		usage: {
 			input: 0,
@@ -30,9 +30,72 @@ function createErrorMessage(errorMessage: string): AssistantMessage {
 }
 
 describe("isContextOverflow", () => {
+	// The 413 pattern is provider-agnostic, so a single Copilot-prefixed string and a single
+	// non-Copilot string cover both branches of the regex; the bare forms cover the raw SDK output.
+	it.each([
+		'github-copilot API error (413): {"message":"failed to parse request","code":""}', // formatProviderError prefix
+		"custom-provider API error (413): Payload Too Large", // any provider, not just Copilot
+		'413 {"error":{"message":"failed to parse request","code":""}}', // raw SDK error
+		'413: {"code":"plugin_request_too_large","message":"request too large"}', // status alone indicates overflow
+		"413", // bare status at end of string
+	])("detects provider-independent request-size overflow: %s", (errorMessage) => {
+		// The request can exceed the byte limit even with zero usage and a large token window.
+		expect(isContextOverflow(createErrorMessage(errorMessage), 1_000_000)).toBe(true);
+		expect(isContextOverflow(createErrorMessage(errorMessage))).toBe(true);
+	});
+
+	// Regression for #12343: request_too_large must be a complete error code, not part of another identifier.
+	it.each([
+		"request_too_large",
+		'400 {"error":{"type":"request_too_large","message":"Request exceeds the maximum size"}}',
+		"Anthropic error: REQUEST_TOO_LARGE",
+	])("detects a complete request-size error code: %s", (errorMessage) => {
+		expect(isContextOverflow(createErrorMessage(errorMessage))).toBe(true);
+	});
+
+	it.each([
+		'400 {"code":"plugin_request_too_large","message":"plugin input rejected"}',
+		"400 invalid_request_error: my_plugin_request_too_large_flag was set",
+		"Unknown error code xrequest_too_large",
+		"Unknown error code request_too_large2",
+		"Unknown error code request_too_large_flag",
+	])("does not match request-size error codes inside longer identifiers: %s", (errorMessage) => {
+		// Regression for #12343.
+		expect(isContextOverflow(createErrorMessage(errorMessage), 200000)).toBe(false);
+	});
+
+	it.each([
+		'github-copilot API error (400): {"message":"failed to parse request","code":""}', // other status, same body
+		"custom-provider API error (429): Too many requests",
+		'github-copilot API error (400): {"message":"failed to parse request: invalid value 413"}', // 413 in the body only
+		"custom-provider API error (400): upstream mentioned OpenAI API error (413): invalid input", // 413 not at start
+		"custom-provider API error (4130): invalid input", // 413 is a prefix, not the status
+		"4130 failed to parse request", // bare 4130 is not 413
+	])("does not mistake unrelated errors for request-size overflow: %s", (errorMessage) => {
+		expect(isContextOverflow(createErrorMessage(errorMessage))).toBe(false);
+	});
+
+	it("limits HTTP-status matching to failed responses", () => {
+		const message = createErrorMessage('OpenAI API error (413): {"message":"failed to parse request"}');
+		expect(isContextOverflow({ ...message, stopReason: "aborted" })).toBe(false);
+		expect(isContextOverflow({ ...message, stopReason: "stop" })).toBe(false);
+	});
+
 	it("detects explicit Ollama prompt-too-long errors", () => {
 		const message = createErrorMessage("400 `prompt too long; exceeded max context length by 100918 tokens`");
 		expect(isContextOverflow(message, 32768)).toBe(true);
+	});
+
+	it("detects z.ai prompt-too-long errors", () => {
+		// Regression for #9805.
+		const message = createErrorMessage('400 {"code":"1261","message":"Prompt too long"}', "zai");
+		expect(isContextOverflow(message, 1048576)).toBe(true);
+	});
+
+	it("detects z.ai CN endpoint prompt-exceeds-max-length errors", () => {
+		// Regression for #10208.
+		const message = createErrorMessage('400 {"code":"1261","message":"Prompt exceeds max length"}', "zai");
+		expect(isContextOverflow(message, 1048576)).toBe(true);
 	});
 
 	it("detects Together AI context length errors", () => {
@@ -49,9 +112,51 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(message, 131072)).toBe(true);
 	});
 
+	it("detects LiteLLM pre-call ContextWindowExceededError", () => {
+		// Regression for #11492.
+		const message = createErrorMessage(
+			'400: {"message":"litellm.ContextWindowExceededError: litellm.BadRequestError: litellm._pre_call_checks: Context Window exceeded for given call. No models have context window large enough for this call.\nModel=Qwen3.8-Flash-Next, Max Input Tokens=262144, Got=265262\nmodel=Qwen3.8-Flash-Next. context_window_fallbacks=None. fallbacks=[]."}',
+		);
+		expect(isContextOverflow(message, 262144)).toBe(true);
+	});
+
+	it("detects OpenAI-compatible parenthesized maximum context length errors", () => {
+		const message = createErrorMessage(
+			"Error: 400 Input length (265330) exceeds model's maximum context length (262144).",
+		);
+		expect(isContextOverflow(message, 262144)).toBe(true);
+	});
+
+	it("detects OpenRouter Poolside maximum allowed input length errors", () => {
+		const message = createErrorMessage(
+			"Provider returned error: Input length 131393 exceeds the maximum allowed input length of 131040 tokens.",
+		);
+		expect(isContextOverflow(message, 131072)).toBe(true);
+	});
+
+	it("detects DS4 configured context size errors", () => {
+		const message = createErrorMessage(
+			"400 Prompt has 256468 tokens, but the configured context size is 256000 tokens",
+		);
+		expect(isContextOverflow(message, 256000)).toBe(true);
+
+		const commaMessage = createErrorMessage(
+			"Prompt has 5,958,968 tokens, but the configured context size is 256,000 tokens",
+		);
+		expect(isContextOverflow(commaMessage, 256000)).toBe(true);
+	});
+
 	it("does not treat generic non-overflow Ollama errors as overflow", () => {
 		const message = createErrorMessage("500 `model runner crashed unexpectedly`");
 		expect(isContextOverflow(message, 32768)).toBe(false);
+	});
+
+	it("only treats bodyless 400 errors as overflow for Cerebras", () => {
+		// Regression for #9482. HTTP 413 is a request-size error for every provider,
+		// but a bodyless HTTP 400 is only known to indicate overflow for Cerebras.
+		const errorMessage = "400 status code (no body)";
+		expect(isContextOverflow(createErrorMessage(errorMessage, "cerebras"), 131072)).toBe(true);
+		expect(isContextOverflow(createErrorMessage(errorMessage, "opencode-go"), 1000000)).toBe(false);
 	});
 
 	it("does not treat Bedrock throttling 'Too many tokens' as overflow", () => {
@@ -76,19 +181,28 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
 
-	function createLengthStopMessage(input: number, cacheRead: number, output: number): AssistantMessage {
+	function createLengthStopMessage(options: {
+		input: number;
+		cacheRead: number;
+		output: number;
+		cacheWrite?: number;
+		api?: AssistantMessage["api"];
+		provider?: string;
+		model?: string;
+	}): AssistantMessage {
+		const cacheWrite = options.cacheWrite ?? 0;
 		return {
 			role: "assistant",
 			content: [],
-			api: "openai-completions",
-			provider: "xiaomi",
-			model: "mimo-v2.5-pro",
+			api: options.api ?? "openai-completions",
+			provider: options.provider ?? "test-provider",
+			model: options.model ?? "test-model",
 			usage: {
-				input,
-				output,
-				cacheRead,
-				cacheWrite: 0,
-				totalTokens: input + cacheRead + output,
+				input: options.input,
+				output: options.output,
+				cacheRead: options.cacheRead,
+				cacheWrite,
+				totalTokens: options.input + options.cacheRead + cacheWrite + options.output,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "length",
@@ -97,105 +211,46 @@ describe("isContextOverflow", () => {
 	}
 
 	it("detects Xiaomi-style overflow (length stop with zero output and filled context)", () => {
-		const message = createLengthStopMessage(58, 1048512, 0);
+		const message = createLengthStopMessage({
+			input: 58,
+			cacheRead: 1048512,
+			output: 0,
+			provider: "xiaomi",
+			model: "mimo-v2.6-pro",
+		});
 		expect(isContextOverflow(message, 1048576)).toBe(true);
 	});
 
-	it("does not treat normal length stops with output as overflow", () => {
-		const message = createLengthStopMessage(1000, 0, 4096);
+	it("treats a length stop below the desired output limit as recoverable", () => {
+		const message = createLengthStopMessage({
+			input: 3,
+			cacheRead: 253584,
+			cacheWrite: 25554,
+			output: 16,
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.6-sol",
+		});
+		expect(isRecoverableLength(message, 128000)).toBe(true);
+	});
+
+	it("does not recover a length stop that reached the desired output limit", () => {
+		const message = createLengthStopMessage({ input: 4062, cacheRead: 0, output: 1024 });
+		expect(isRecoverableLength(message, 1024)).toBe(false);
+	});
+
+	it("treats zero-output length stops as recoverable without context metadata", () => {
+		const message = createLengthStopMessage({ input: 100, cacheRead: 0, output: 0 });
+		expect(isRecoverableLength(message, 128000)).toBe(true);
+	});
+
+	it("does not treat normal length stops with output as context overflow", () => {
+		const message = createLengthStopMessage({ input: 1000, cacheRead: 0, output: 4096 });
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
 
-	it("does not treat length stops far below context as overflow", () => {
-		const message = createLengthStopMessage(100, 0, 0);
+	it("does not treat zero-output length stops far below context as context overflow", () => {
+		const message = createLengthStopMessage({ input: 100, cacheRead: 0, output: 0 });
 		expect(isContextOverflow(message, 200000)).toBe(false);
-	});
-
-	function createStopMessage(
-		usage: AssistantMessage["usage"],
-		provider: string,
-	): AssistantMessage {
-		return {
-			role: "assistant",
-			content: [],
-			api: "anthropic-messages",
-			provider,
-			model: "test-model",
-			usage,
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-	}
-
-	it("does not treat claude-code cumulative usage as overflow when live per-call context is attached (#2358)", () => {
-		// One turn with 4 internal API calls, each re-reading ~51k from cache:
-		// the SDK's terminal result.usage is cumulative, so input + cacheRead
-		// = 204,240 crosses the 200k window while the live end-of-turn context
-		// (last main-loop assistant event) is ~52k = 26% of the window. The
-		// adapter attaches that per-call value as liveContextTokens and Case 2
-		// must prefer it over the cumulative sum.
-		const message = createStopMessage(
-			{
-				input: 240,
-				output: 800,
-				cacheRead: 204_000,
-				cacheWrite: 5_200,
-				totalTokens: 6_240,
-				liveContextTokens: 52_440,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			"claude-code",
-		);
-		expect(isContextOverflow(message, 200000)).toBe(false);
-	});
-
-	it("still reports overflow when the attached live context exceeds the window", () => {
-		const message = createStopMessage(
-			{
-				input: 240,
-				output: 800,
-				cacheRead: 204_000,
-				cacheWrite: 5_200,
-				totalTokens: 6_240,
-				liveContextTokens: 204_500,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			"claude-code",
-		);
-		expect(isContextOverflow(message, 200000)).toBe(true);
-	});
-
-	it("treats a zero liveContextTokens as absent and falls back to input+cacheRead", () => {
-		const message = createStopMessage(
-			{
-				input: 240,
-				output: 800,
-				cacheRead: 204_000,
-				cacheWrite: 5_200,
-				totalTokens: 6_240,
-				liveContextTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			"claude-code",
-		);
-		expect(isContextOverflow(message, 200000)).toBe(true);
-	});
-
-	it("still detects silent overflow from input+cacheRead when no live context is attached (z.ai zero-totalTokens)", () => {
-		// z.ai accepts overflow silently and reports no meaningful totalTokens;
-		// no adapter attaches liveContextTokens here, so the legacy
-		// input + cacheRead check must keep firing.
-		const message = createStopMessage(
-			{
-				input: 240_000,
-				output: 800,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			"zai",
-		);
-		expect(isContextOverflow(message, 200000)).toBe(true);
 	});
 });

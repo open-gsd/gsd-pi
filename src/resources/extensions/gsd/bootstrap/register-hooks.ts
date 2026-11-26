@@ -1419,7 +1419,8 @@ export function registerHooks(
 
     const beforeAgentBasePath = contextBasePath(ctx);
     const pendingApprovalGate = getPendingGate(beforeAgentBasePath);
-    if (pendingApprovalGate && isExplicitApprovalResponse(event.prompt, pendingApprovalGate)) {
+    const approvalPrompt = "prompt" in event ? event.prompt : "";
+    if (pendingApprovalGate && isExplicitApprovalResponse(approvalPrompt, pendingApprovalGate)) {
       // Host adapter explicitly: the ambient write-gate exports env-sniff the
       // adapter per call and are reserved for the MCP child's import surface.
       hostWriteGateAdapter.markApprovalGateVerified(pendingApprovalGate, beforeAgentBasePath);
@@ -1456,7 +1457,13 @@ export function registerHooks(
 
     // GSD's own context injection (existing behavior — unchanged).
     const { buildBeforeAgentStartResult } = await import("./system-context.js");
-    const gsdResult = await buildBeforeAgentStartResult({ ...event, systemPrompt }, ctx);
+    const gsdResult = await buildBeforeAgentStartResult(
+      {
+        prompt: "prompt" in event ? event.prompt : "",
+        systemPrompt,
+      },
+      ctx,
+    );
 
     // Refresh the snapshot used by ecosystem getPhase()/getActiveUnit().
     // deriveState has its own ~100ms cache so this is cheap on repeat calls.

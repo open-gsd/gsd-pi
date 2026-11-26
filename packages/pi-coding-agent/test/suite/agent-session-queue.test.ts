@@ -1,9 +1,13 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@gsd/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall } from "@gsd/pi-ai";
+import type { ExtensionAPI, InputEvent } from "@gsd/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
+import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
+
+// Image processing omits images it cannot decode, so the fixture must be a real PNG.
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 async function createWaitingHarness(
 	options: {
@@ -153,6 +157,54 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["start", "after current run"]);
 		expect(assistantSeenBeforeFollowUp).toContain("");
 		expect(getAssistantTexts(harness)).toContain("follow-up response");
+	});
+
+	// Regression test for #8718.
+	it("runs direct steering and follow-up messages through input handlers", async () => {
+		const inputEvents: Array<Pick<InputEvent, "text" | "source" | "streamingBehavior">> = [];
+		const waiting = await createWaitingHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", (event) => {
+						inputEvents.push({
+							text: event.text,
+							source: event.source,
+							streamingBehavior: event.streamingBehavior,
+						});
+						if (event.text.startsWith("handle")) return { action: "handled" };
+						return { action: "transform", text: `transformed: ${event.text}` };
+					});
+				},
+			],
+		});
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("steered"),
+			fauxAssistantMessage("followed up"),
+		]);
+
+		await waitForToolStart;
+		inputEvents.length = 0;
+		try {
+			await harness.session.steer("steer me", undefined, { source: "rpc" });
+			await harness.session.steer("handle steer", undefined, { source: "rpc" });
+			await harness.session.followUp("follow me", undefined, { source: "rpc" });
+			await harness.session.followUp("handle follow", undefined, { source: "rpc" });
+
+			expect(inputEvents).toEqual([
+				{ text: "steer me", source: "rpc", streamingBehavior: "steer" },
+				{ text: "handle steer", source: "rpc", streamingBehavior: "steer" },
+				{ text: "follow me", source: "rpc", streamingBehavior: "followUp" },
+				{ text: "handle follow", source: "rpc", streamingBehavior: "followUp" },
+			]);
+			expect(harness.session.getSteeringMessages()).toEqual(["transformed: steer me"]);
+			expect(harness.session.getFollowUpMessages()).toEqual(["transformed: follow me"]);
+		} finally {
+			releaseToolExecution();
+		}
+		await promptPromise;
 	});
 
 	it("delivers multiple steering messages in order in one-at-a-time mode", async () => {
@@ -350,7 +402,12 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.prompt("normal prompt");
 
 		expect(sawCustomMessage).toBe(true);
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"system",
+			"user",
+			"custom",
+			"assistant",
+		]);
 	});
 
 	it("updates pendingMessageCount and removes queued text before message_start is emitted", async () => {
@@ -381,6 +438,35 @@ describe("AgentSession queue characterization", () => {
 		await promptPromise;
 
 		expect(countsAtQueuedMessageStart).toEqual([0]);
+		expect(harness.session.pendingMessageCount).toBe(0);
+	});
+
+	it("removes an image-only steering message after delivery", async () => {
+		const waiting = await createWaitingHarness();
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		let sawImage = false;
+
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			(context) => {
+				const user = [...context.messages].reverse().find((message) => message.role === "user");
+				sawImage =
+					user?.role === "user" &&
+					typeof user.content !== "string" &&
+					user.content.some((part) => part.type === "image");
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		await waitForToolStart;
+		await harness.session.steer("", [{ type: "image", mimeType: "image/png", data: TINY_PNG_BASE64 }]);
+		expect(harness.session.pendingMessageCount).toBe(1);
+		releaseToolExecution();
+		await promptPromise;
+
+		expect(sawImage).toBe(true);
+		expect(harness.session.agent.hasQueuedMessages()).toBe(false);
 		expect(harness.session.pendingMessageCount).toBe(0);
 	});
 
@@ -418,5 +504,28 @@ describe("AgentSession queue characterization", () => {
 		await expect(harness.session.followUp("/testcmd queued")).rejects.toThrow(
 			'Extension command "/testcmd" cannot be queued. Use prompt() or execute the command when not streaming.',
 		);
+	});
+
+	it("delivers follow-ups queued during agent_end", async () => {
+		let sent = false;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi: ExtensionAPI) => {
+					pi.on("agent_end", async () => {
+						if (sent) return;
+						sent = true;
+						pi.sendUserMessage("conflict report", { deliverAs: "followUp" });
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		harness.setResponses([fauxAssistantMessage("reply"), fauxAssistantMessage("follow-up reply")]);
+
+		await harness.session.prompt("hello");
+		await harness.session.agent.waitForIdle();
+
+		expect(getUserTexts(harness)).toEqual(["hello", "conflict report"]);
 	});
 });

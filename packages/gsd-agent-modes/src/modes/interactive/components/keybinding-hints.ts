@@ -2,7 +2,13 @@
  * Utilities for formatting keybinding hints in the UI.
  */
 
-import { type EditorAction, getEditorKeybindings, type KeyId } from "@gsd/pi-tui";
+import {
+	type EditorAction,
+	getEditorKeybindings,
+	getKeybindings,
+	type Keybinding,
+	type KeyId,
+} from "@gsd/pi-tui";
 import type { AppAction, KeybindingsManager } from "@gsd/agent-core";
 import { theme } from "@gsd/pi-coding-agent/theme/theme.js";
 
@@ -27,11 +33,26 @@ function formatKeys(keys: KeyId[]): string {
 	return keys.map(formatKeyForDisplay).join("/");
 }
 
+function isDottedKeybinding(action: string): action is Keybinding {
+	return action.includes(".");
+}
+
 /**
  * Get display string for an editor action.
  */
 export function editorKey(action: EditorAction): string {
 	return formatKeys(getEditorKeybindings().getKeys(action));
+}
+
+/**
+ * Get display string for a global/app keybinding id (e.g. "app.tools.expand").
+ * Also accepts legacy EditorAction names used by GSD interactive components.
+ */
+export function keyText(keybinding: Keybinding | EditorAction | string): string {
+	if (isDottedKeybinding(keybinding)) {
+		return formatKeys(getKeybindings().getKeys(keybinding));
+	}
+	return editorKey(keybinding as EditorAction);
 }
 
 /**
@@ -43,14 +64,14 @@ export function appKey(keybindings: KeybindingsManager, action: AppAction): stri
 
 /**
  * Format a keybinding hint with consistent styling: dim key, muted description.
- * Looks up the key from editor keybindings automatically.
+ * Accepts dotted Keybinding ids (upstream v1.6.1) or legacy EditorAction names.
  *
- * @param action - Editor action name (e.g., "selectConfirm", "expandTools")
+ * @param action - Keybinding id (e.g. "app.tools.expand") or editor action (e.g. "expandTools")
  * @param description - Description text (e.g., "to expand", "cancel")
  * @returns Formatted string with dim key and muted description
  */
-export function keyHint(action: EditorAction, description: string): string {
-	return theme.fg("dim", editorKey(action)) + theme.fg("muted", ` ${description}`);
+export function keyHint(action: Keybinding | EditorAction | string, description: string): string {
+	return theme.fg("dim", keyText(action)) + theme.fg("muted", ` ${description}`);
 }
 
 /**

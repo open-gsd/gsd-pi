@@ -1,5 +1,5 @@
 /**
- * Provider readiness policy extracted from ModelRegistry.
+ * Provider readiness policy extracted from ModelRegistry (GSD host compat).
  */
 
 import { getOAuthProviders } from "@gsd/pi-ai/oauth";
@@ -41,8 +41,6 @@ export function getProviderAuthMode(deps: ProviderReadinessDeps, provider: strin
 		if (config.apiKey) return "apiKey";
 		return "apiKey";
 	}
-	// Built-in OAuth providers (openai-codex, github-copilot, …) are not
-	// registered via registerProvider(), but still authenticate via OAuth.
 	if (getOAuthProviders().some((oauthProvider) => oauthProvider.id === provider)) {
 		return "oauth";
 	}
@@ -63,13 +61,6 @@ export function getDisabledModelProviders(deps: ProviderReadinessDeps): string[]
 	return Array.from(deps.disabledModelProviders);
 }
 
-/**
- * Wait until the cached `isReady()` answers are current — for one provider, or
- * for every registered provider when `provider` is omitted. Never blocks the
- * event loop. Use before acting on readiness in a way that is hard to undo
- * (persisted default-model rewrites, activating a provider, dispatching a
- * unit); plain listings can keep using the cached answer.
- */
 export async function settleProviderReadiness(deps: ProviderReadinessDeps, provider?: string): Promise<void> {
 	const pending: Promise<unknown>[] = [];
 	for (const [name, config] of deps.registeredProviders) {
@@ -85,11 +76,16 @@ export async function settleProviderReadiness(deps: ProviderReadinessDeps, provi
 	await Promise.allSettled(pending);
 }
 
-export function isProviderRequestReady(deps: ProviderReadinessDeps, provider: string): boolean {
+export function isProviderRequestReady(
+	deps: ProviderReadinessDeps,
+	provider: string,
+	fallback?: (providerId: string) => boolean,
+): boolean {
 	if (deps.disabledModelProviders.has(provider.trim().toLowerCase())) return false;
 	const config = deps.registeredProviders.get(provider);
 	if (config?.isReady) return config.isReady();
 	const authMode = getProviderAuthMode(deps, provider);
 	if (authMode === "externalCli" || authMode === "none") return true;
-	return deps.authStorage.hasAuth(provider) || deps.providerRequestConfigs.has(provider);
+	if (deps.authStorage.hasAuth(provider) || deps.providerRequestConfigs.has(provider)) return true;
+	return fallback?.(provider) ?? false;
 }

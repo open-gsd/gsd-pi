@@ -47,6 +47,21 @@ const ALLOWLIST = new Set([
   join(ROOT, 'packages/pi-coding-agent/src/tests/path-display.test.ts'),
   join(ROOT, 'packages/pi-coding-agent/src/tests/harness.test.ts'),
   join(ROOT, 'packages/pi-coding-agent/src/tests/utilities.test.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/bug-report.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/index.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/settings-diagnostics.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/tools/renderers/bash.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/tools/renderers/edit.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/tools/renderers/find.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/tools/renderers/grep.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/tools/renderers/ls.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/tools/renderers/read.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/core/tools/renderers/write.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/extensions/codemode/renderer.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/extensions/llama/ui.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/extensions/mcp/tools.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/extensions/mcp/ui.ts'),
+  join(ROOT, 'packages/pi-coding-agent/src/types/host-shims.d.ts'),
 ])
 
 function walk(dir, fn) {

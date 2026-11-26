@@ -26,22 +26,47 @@
  * SOFTWARE.
  */
 
-function ansiRegex({ onlyFirst = false }: { onlyFirst?: boolean } = {}): RegExp {
-	// Valid string terminator sequences are BEL, ESC\, and 0x9c
-	const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
+// Valid string terminator sequences are BEL, ESC\, and 0x9c
+const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
 
-	// OSC sequences only: ESC ] ... ST (non-greedy until the first ST)
-	const osc = `(?:\\u001B\\][\\s\\S]*?${ST})`;
+// OSC sequences: ESC ] ... ST
+const OSC_START = "\\u001B\\]";
 
-	// CSI and related: ESC/C1, optional intermediates, optional params (supports ; and :) then final byte
-	const csi = "[\\u001B\\u009B][[\\]()#;?]*(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]";
+// CSI and related: ESC/C1, optional intermediates, optional params (supports ; and :), then final byte.
+// A private prefix (<, =, >) is accepted only right after a real CSI introducer (ESC [ or 0x9B), so
+// ESC[<35;59;1M (SGR mouse report) is stripped whole. After a bare ESC these bytes stay final bytes:
+// ESC = and ESC > (keypad modes) must not swallow the digits of the text that follows.
+const CSI_START = "(?:(?:\\u001B\\[|\\u009B)[<=>]|[\\u001B\\u009B][[\\]()#;?]*)(?:\\d{1,4}(?:[;:]\\d{0,4})*)?";
+const CSI_FINAL = "[\\dA-PR-TZcf-nq-uy=><~]";
 
-	const pattern = `${osc}|${csi}`;
+// Complete sequences. OSC is non-greedy until the first ST.
+const ansiRegex = new RegExp(`(?:${OSC_START}[\\s\\S]*?${ST})|${CSI_START}${CSI_FINAL}`, "g");
 
-	return new RegExp(pattern, onlyFirst ? undefined : "g");
+// Unfinished sequence at the end of the text: OSC without its ST (a trailing ESC may start ESC\),
+// or CSI without its final byte.
+const unfinishedAnsiAtEndRegex = new RegExp(
+	`(?:${OSC_START}(?:[^\\u0007\\u009C\\u001B]|\\u001B(?!\\\\))*|${CSI_START})$`,
+);
+
+// Longest unfinished sequence held back while streaming. Longer ones are processed as-is.
+const MAX_PENDING_ANSI_LENGTH = 256;
+
+/**
+ * Split streamed text into a part that is safe to pass to stripAnsi now and a trailing
+ * unfinished escape sequence that should be prepended to the next chunk.
+ */
+export function splitIncompleteAnsiSuffix(value: string): { complete: string; pending: string } {
+	if (!value.includes("\u001B") && !value.includes("\u009B")) {
+		return { complete: value, pending: "" };
+	}
+	const windowStart = Math.max(0, value.length - MAX_PENDING_ANSI_LENGTH);
+	const match = unfinishedAnsiAtEndRegex.exec(value.slice(windowStart));
+	if (!match) {
+		return { complete: value, pending: "" };
+	}
+	const splitAt = windowStart + match.index;
+	return { complete: value.slice(0, splitAt), pending: value.slice(splitAt) };
 }
-
-const regex = ansiRegex();
 
 export function stripAnsi(value: string): string {
 	if (typeof value !== "string") {
@@ -56,5 +81,5 @@ export function stripAnsi(value: string): string {
 	// Even though the regex is global, we don't need to reset the `.lastIndex`
 	// because unlike `.exec()` and `.test()`, `.replace()` does it automatically
 	// and doing it manually has a performance penalty.
-	return value.replace(regex, "");
+	return value.replace(ansiRegex, "");
 }

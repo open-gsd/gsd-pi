@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { SelectList } from "../src/components/select-list.ts";
-import { visibleWidth } from "../src/utils.ts";
+import { SelectList } from "../src/components/select-list.js";
+import { visibleWidth } from "../src/utils.js";
 
 const testTheme = {
 	selectedPrefix: (text: string) => text,
@@ -112,5 +112,20 @@ describe("SelectList", () => {
 
 		assert.ok(rendered[0].includes("…"));
 		assert.equal(visibleIndexOf(rendered[0], "first"), visibleIndexOf(rendered[1], "second"));
+	});
+
+	it("moves by one visible page with selection page keys (#7629)", () => {
+		const items = Array.from({ length: 12 }, (_, index) => ({ value: `item-${index}`, label: `Item ${index}` }));
+		const list = new SelectList(items, 5, testTheme);
+		const selections: string[] = [];
+		list.onSelectionChange = (item) => selections.push(item.value);
+
+		for (const key of ["\x1b[6~", "\x1b[6~", "\x1b[6~", "\x1b[6~", "\x1b[5~"]) list.handleInput(key);
+
+		assert.deepStrictEqual(selections, ["item-5", "item-10", "item-11", "item-6"]);
+
+		list.setFilter("no match");
+		list.handleInput("\x1b[6~");
+		assert.deepStrictEqual(selections, ["item-5", "item-10", "item-11", "item-6"]);
 	});
 });

@@ -1,10 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { homedir } from "os";
 import { join, resolve } from "path";
 import { describe, expect, it } from "vitest";
-import type { ResourceDiagnostic } from "../src/core/diagnostics.ts";
-import { formatSkillsForPrompt, loadSkills, loadSkillsFromDir, type Skill } from "../src/core/skills.ts";
-import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
+import type { ResourceDiagnostic } from "../src/core/diagnostics.js";
+import { formatSkillsForPrompt, loadSkills, loadSkillsFromDir, type Skill } from "../src/core/skills.js";
+import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 
 const fixturesDir = resolve(__dirname, "fixtures/skills");
 const collisionFixturesDir = resolve(__dirname, "fixtures/skills-collision");
@@ -389,97 +388,6 @@ describe("skills", () => {
 			});
 			expect(withTilde.length).toBe(withoutTilde.length);
 		});
-
-		it("should omit gsd-core skills while retaining other installed skills", () => {
-			const tempRoot = mkdtempSync(join(tmpdir(), "gsd-core-skills-"));
-			const gsdCorePackageRoot = join(tempRoot, "gsd-core-package");
-			const gsdCoreInstallRoot = join(tempRoot, "gsd-core-install");
-			const otherInstallRoot = join(tempRoot, "other-install");
-
-			try {
-				mkdirSync(join(gsdCorePackageRoot, "skills", "gsd-plan-phase"), { recursive: true });
-				mkdirSync(join(gsdCorePackageRoot, "skills", "unrelated-skill"), { recursive: true });
-				writeFileSync(
-					join(gsdCorePackageRoot, "package.json"),
-					JSON.stringify({ name: "@opengsd/gsd-core" }),
-				);
-				mkdirSync(join(gsdCoreInstallRoot, "skills", "gsd-review"), { recursive: true });
-				writeFileSync(
-					join(gsdCoreInstallRoot, "gsd-file-manifest.json"),
-					JSON.stringify({ files: { "skills/gsd-review/SKILL.md": "checksum" } }),
-				);
-				mkdirSync(join(otherInstallRoot, "skills", "gsd-custom"), { recursive: true });
-				writeFileSync(
-					join(gsdCorePackageRoot, "skills", "gsd-plan-phase", "SKILL.md"),
-					"---\nname: gsd-plan-phase\ndescription: GSD Core plan skill.\n---\n",
-				);
-				writeFileSync(
-					join(gsdCorePackageRoot, "skills", "unrelated-skill", "SKILL.md"),
-					"---\nname: unrelated-skill\ndescription: Unrelated installed skill.\n---\n",
-				);
-				writeFileSync(
-					join(gsdCoreInstallRoot, "skills", "gsd-review", "SKILL.md"),
-					"---\nname: gsd-review\ndescription: Installed GSD Core review skill.\n---\n",
-				);
-				writeFileSync(
-					join(otherInstallRoot, "skills", "gsd-custom", "SKILL.md"),
-					"---\nname: gsd-custom\ndescription: Non-gsd-core skill.\n---\n",
-				);
-
-				const { skills } = loadSkills({
-					agentDir: emptyAgentDir,
-					cwd: emptyCwd,
-					skillPaths: [
-						join(gsdCorePackageRoot, "skills"),
-						join(gsdCoreInstallRoot, "skills"),
-						join(otherInstallRoot, "skills"),
-					],
-					includeDefaults: false,
-				});
-
-				expect(skills.map((skill) => skill.name).sort()).toEqual(["gsd-custom", "unrelated-skill"]);
-			} finally {
-				rmSync(tempRoot, { recursive: true, force: true });
-			}
-		});
-
-		it("should omit symlinked gsd-core skills while retaining unrelated symlinked skills", () => {
-			const tempRoot = mkdtempSync(join(tmpdir(), "gsd-core-symlinked-skills-"));
-			const gsdCoreRoot = join(tempRoot, "gsd-core");
-			const otherRoot = join(tempRoot, "other");
-			const linkedSkillsRoot = join(tempRoot, "linked-skills");
-			const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
-
-			try {
-				const gsdCoreSkill = join(gsdCoreRoot, "skills", "gsd-plan-phase");
-				const otherSkill = join(otherRoot, "skills", "gsd-custom");
-				mkdirSync(gsdCoreSkill, { recursive: true });
-				mkdirSync(otherSkill, { recursive: true });
-				mkdirSync(linkedSkillsRoot);
-				writeFileSync(join(gsdCoreRoot, "package.json"), JSON.stringify({ name: "@opengsd/gsd-core" }));
-				writeFileSync(
-					join(gsdCoreSkill, "SKILL.md"),
-					"---\nname: gsd-plan-phase\ndescription: Symlinked GSD Core skill.\n---\n",
-				);
-				writeFileSync(
-					join(otherSkill, "SKILL.md"),
-					"---\nname: gsd-custom\ndescription: Unrelated symlinked skill.\n---\n",
-				);
-				symlinkSync(gsdCoreSkill, join(linkedSkillsRoot, "gsd-plan-phase"), directoryLinkType);
-				symlinkSync(otherSkill, join(linkedSkillsRoot, "gsd-custom"), directoryLinkType);
-
-				const { skills } = loadSkills({
-					agentDir: emptyAgentDir,
-					cwd: emptyCwd,
-					skillPaths: [linkedSkillsRoot],
-					includeDefaults: false,
-				});
-
-				expect(skills.map((skill) => skill.name)).toEqual(["gsd-custom"]);
-			} finally {
-				rmSync(tempRoot, { recursive: true, force: true });
-			}
-		});
 	});
 
 	describe("collision handling", () => {
@@ -519,47 +427,6 @@ describe("skills", () => {
 			expect(skillMap.get("calendar")?.sourceInfo.source).toBe("first");
 			expect(collisionWarnings).toHaveLength(1);
 			expect(collisionWarnings[0].message).toContain("name collision");
-		});
-
-		it("should keep the first loaded path on name collision (project before bundled)", () => {
-			const emptyAgentDir = resolve(__dirname, "fixtures/empty-agent");
-			const emptyCwd = resolve(__dirname, "fixtures/empty-cwd");
-			const projectPath = join(collisionFixturesDir, "first");
-			const bundledPath = join(collisionFixturesDir, "second");
-
-			const { skills, diagnostics } = loadSkills({
-				agentDir: emptyAgentDir,
-				cwd: emptyCwd,
-				skillPaths: [projectPath, bundledPath],
-				includeDefaults: false,
-			});
-
-			expect(skills).toHaveLength(1);
-			expect(skills[0].filePath).toContain("first");
-			expect(diagnostics.some((d: ResourceDiagnostic) => d.type === "collision")).toBe(true);
-		});
-
-		it("bundled GSD skill wins over a same-named Claude skill (load-order precedence)", () => {
-			// The taxonomy enumerates gsd-user (bundled) before claude-user, so
-			// PackageManager passes bundled paths before Claude paths and
-			// first-loaded-wins collision resolution keeps bundled. This test
-			// pins that contract at the loader boundary by passing them in
-			// taxonomy order: [bundled, claude].
-			const emptyAgentDir = resolve(__dirname, "fixtures/empty-agent");
-			const emptyCwd = resolve(__dirname, "fixtures/empty-cwd");
-			const bundledPath = join(collisionFixturesDir, "first");
-			const claudePath = join(collisionFixturesDir, "second");
-
-			const { skills, diagnostics } = loadSkills({
-				agentDir: emptyAgentDir,
-				cwd: emptyCwd,
-				skillPaths: [bundledPath, claudePath],
-				includeDefaults: false,
-			});
-
-			expect(skills).toHaveLength(1);
-			expect(skills[0].filePath).toContain("first");
-			expect(diagnostics.some((d: ResourceDiagnostic) => d.type === "collision")).toBe(true);
 		});
 	});
 });

@@ -1,40 +1,74 @@
-# Terminal Setup
+# Configure your terminal
 
-Pi uses the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) for reliable modifier key detection. Most modern terminals support this protocol, but some require configuration.
+Most modern terminals work with Pi without additional setup. Use this page when modified keys, scrolling, links, images, colors, or input-method editor (IME) positioning do not behave as expected.
 
-## Kitty, iTerm2
+Pi uses extended-key protocols so terminals can distinguish combinations such as `Shift+Enter` and `Alt+Enter` from plain `Enter`. Terminal proxies, multiplexers, and built-in IDE terminals can change or discard that information.
 
-Work out of the box.
+## Troubleshooting
+
+| Symptom | Start here |
+|---|---|
+| `Shift+Enter` submits instead of inserting a line | Your terminal's section below; for tmux, see [Run Pi in tmux](tmux.md) |
+| `Alt+Enter` does not queue a follow-up | [WezTerm](#wezterm), [Alacritty](#alacritty), or [Windows Terminal](#windows-terminal) |
+| Fullscreen scrolling is unusually slow | [iTerm2](#iterm2) |
+| Links work but show no hover preview | [Ghostty](#ghostty) |
+| Inline images or colors are not detected | [Override detected capabilities](#override-detected-capabilities) |
+| An IME candidate window appears in the wrong place | [WezTerm](#wezterm) or [IntelliJ IDEA](#intellij-idea-integrated-terminal) |
+| Modified keys fail only inside tmux | [Run Pi in tmux](tmux.md) |
+
+Use `/hotkeys` to inspect Pi's active shortcuts. See [Keybindings](keybindings.md) to change them.
+
+## Kitty
+
+Kitty supports the required keyboard protocol without additional configuration.
+
+## iTerm2
+
+Regular terminal mode works without additional configuration.
+
+### Fix slow fullscreen scrolling
+
+In fullscreen mode, Pi owns the viewport, so iTerm2 sends mouse-wheel reports instead of scrolling native terminal history. Fast trackpad gestures can then move only about one line at a time.
+
+To change this behavior:
+
+1. Open **iTerm2 > Settings > Advanced**.
+2. Search for **Trackpad scrolls fast?**.
+3. Set it to **No**.
+
+This is an iTerm2-wide setting and can also change native trackpad scrolling. The underlying behavior is tracked in [iTerm2 issue 9619](https://gitlab.com/gnachman/iterm2/-/work_items/9619).
+
+## Apple Terminal
+
+Pi enables enhanced key reporting when available. If Terminal.app still sends plain Return or `ESC` + Return for `Shift+Enter`, Pi uses a local macOS modifier fallback and treats it as `Shift+Enter`. `ESC` + Return without Shift held remains `Alt+Enter`.
+
+The fallback works only when Pi runs on the same Mac as Terminal.app. It cannot inspect the local modifier state when Pi runs on another machine over SSH.
 
 ## Ghostty
 
-Add to your Ghostty config (`~/Library/Application Support/com.mitchellh.ghostty/config` on macOS, `~/.config/ghostty/config` on Linux):
+Add this mapping to Ghostty's configuration if `Alt+Backspace` does not work:
 
-```
+```text
 keybind = alt+backspace=text:\x1b\x7f
 ```
 
-Older Claude Code versions may have added this Ghostty mapping:
+The configuration file is `~/Library/Application Support/com.mitchellh.ghostty/config` on macOS and `~/.config/ghostty/config` on Linux.
 
-```
+Older Claude Code configurations may contain:
+
+```text
 keybind = shift+enter=text:\n
 ```
 
-That mapping sends a raw linefeed byte. Inside pi, that is indistinguishable from `Ctrl+J`, so tmux and pi no longer see a real `shift+enter` key event.
+This sends a raw linefeed, which Pi cannot distinguish from `Ctrl+J`. Remove the mapping if an older Claude Code installation is the only reason you added it. Pi already binds `Ctrl+J` as a newline alternative, so the mapping may appear to work while still preventing Pi and tmux from receiving a real `Shift+Enter` event.
 
-If Claude Code 2.x or newer is the only reason you added that mapping, you can remove it, unless you want to use Claude Code in tmux, where it still requires that Ghostty mapping.
+### Open links in fullscreen mode
 
-If you want `Shift+Enter` to keep working in tmux via that remap, add `ctrl+j` to your pi `newLine` keybinding in `~/.pi/agent/keybindings.json`:
-
-```json
-{
-  "newLine": ["shift+enter", "ctrl+j"]
-}
-```
+Links remain clickable in fullscreen mode, but Ghostty does not show its normal hover underline or URL preview while Pi captures mouse input. Hold `Shift+Command` on macOS or `Shift+Ctrl` on Linux to use Ghostty's native link handling.
 
 ## WezTerm
 
-Create `~/.wezterm.lua`:
+WezTerm normally reports `Shift+Enter` through xterm extended keys. To enable the Kitty keyboard protocol explicitly, create `~/.wezterm.lua`:
 
 ```lua
 local wezterm = require 'wezterm'
@@ -43,15 +77,62 @@ config.enable_kitty_keyboard = true
 return config
 ```
 
-## VS Code (Integrated Terminal)
+### Forward Alt+Enter on macOS
 
-`keybindings.json` locations:
+WezTerm binds `Option+Enter` to fullscreen by default on macOS. To use it for Pi's follow-up queue, add this entry to your `config.keys` table:
 
-- macOS: `~/Library/Application Support/Code/User/keybindings.json`
-- Linux: `~/.config/Code/User/keybindings.json`
-- Windows: `%APPDATA%\\Code\\User\\keybindings.json`
+```lua
+{
+  key = 'Enter',
+  mods = 'ALT',
+  action = wezterm.action.SendString('\x1b[13;3u'),
+}
+```
 
-Add to `keybindings.json` to enable `Shift+Enter` for multi-line input:
+A complete minimal configuration is:
+
+```lua
+local wezterm = require 'wezterm'
+local config = wezterm.config_builder()
+config.keys = {
+  {
+    key = 'Enter',
+    mods = 'ALT',
+    action = wezterm.action.SendString('\x1b[13;3u'),
+  },
+}
+return config
+```
+
+### Position an IME candidate window in WSL
+
+If CJK IME candidates do not follow Pi's text cursor in WSL, show the hardware cursor:
+
+```bash
+export PI_HARDWARE_CURSOR=1
+pi
+```
+
+You can instead set `showHardwareCursor` to `true` in Pi settings.
+
+## Alacritty
+
+Alacritty normally reports `Shift+Enter`. On macOS, `Option+Enter` can arrive as plain `Enter`. Add this to `~/.config/alacritty/alacritty.toml` to forward it to Pi:
+
+```toml
+[[keyboard.bindings]]
+key = "Enter"
+mods = "Alt"
+chars = "\u001b[13;3u"
+```
+
+Restart Alacritty after changing the file.
+
+## VS Code integrated terminal
+
+VS Code 1.109.5 and newer enable the Kitty keyboard protocol in the integrated terminal by default.
+
+For an older version, add a `Shift+Enter` terminal binding to `keybindings.json`:
 
 ```json
 {
@@ -62,47 +143,93 @@ Add to `keybindings.json` to enable `Shift+Enter` for multi-line input:
 }
 ```
 
-## Windows Terminal
+The user `keybindings.json` file is normally located at:
 
-Add to `settings.json` (Ctrl+Shift+, or Settings → Open JSON file) to forward the modified Enter keys pi uses:
+- macOS: `~/Library/Application Support/Code/User/keybindings.json`
+- Linux: `~/.config/Code/User/keybindings.json`
+- Windows: `%APPDATA%\\Code\\User\\keybindings.json`
+
+## Zed integrated terminal
+
+Add these bindings to Zed's `keymap.json`:
 
 ```json
 {
-  "actions": [
-    {
-      "command": { "action": "sendInput", "input": "\u001b[13;2u" },
-      "keys": "shift+enter"
-    },
-    {
-      "command": { "action": "sendInput", "input": "\u001b[13;3u" },
-      "keys": "alt+enter"
-    }
-  ]
+  "context": "Terminal",
+  "bindings": {
+    "shift-enter": ["terminal::SendText", "\u001b[13;2u"],
+    "ctrl--": ["terminal::SendText", "\u001b[45;5u"],
+    "ctrl-alt-]": ["terminal::SendText", "\u001b[93;7u"]
+  }
 }
 ```
 
-- `Shift+Enter` inserts a new line.
-- Windows Terminal binds `Alt+Enter` to fullscreen by default. That prevents pi from receiving `Alt+Enter` for follow-up queueing.
-- Remapping `Alt+Enter` to `sendInput` forwards the real key chord to pi instead.
+## Windows Terminal
 
-If you already have an `actions` array, add the objects to it. If the old fullscreen behavior persists, fully close and reopen Windows Terminal.
+Windows Terminal uses Pi's Windows and WSL shortcut defaults. See [Keybindings](keybindings.md) for the complete list.
 
-## xfce4-terminal, terminator
+### Forward Shift+Enter
 
-These terminals have limited escape sequence support. Modified Enter keys like `Ctrl+Enter` and `Shift+Enter` cannot be distinguished from plain `Enter`, preventing custom keybindings such as `submit: ["ctrl+enter"]` from working.
+When Pi runs natively on Windows, it checks the local Shift key state and treats plain Return or `ESC` + Return as `Shift+Enter` while Shift is held. This fallback does not work in WSL or over SSH. If `Shift+Enter` still submits, forward it explicitly.
 
-For the best experience, use a terminal that supports the Kitty keyboard protocol:
+Open Windows Terminal's `settings.json` with `Ctrl+Shift+,` or **Settings > Open JSON file**. Add this object to its `actions` array:
 
-- [Kitty](https://sw.kovidgoyal.net/kitty/)
-- [Ghostty](https://ghostty.org/)
-- [WezTerm](https://wezfurlong.org/wezterm/)
-- [iTerm2](https://iterm2.com/)
-- [Alacritty](https://github.com/alacritty/alacritty) (requires compilation with Kitty protocol support)
+```json
+{
+  "command": { "action": "sendInput", "input": "\u001b[13;2u" },
+  "keys": "shift+enter"
+}
+```
 
-## IntelliJ IDEA (Integrated Terminal)
+Fully close and reopen Windows Terminal, then verify that `Shift+Enter` inserts a new line in Pi.
 
-The built-in terminal has limited escape sequence support. Shift+Enter cannot be distinguished from Enter in IntelliJ's terminal.
+### Use Alt+Enter for follow-ups
 
-If you want the hardware cursor visible, set `PI_HARDWARE_CURSOR=1` before running pi (disabled by default for compatibility).
+Windows Terminal binds `Alt+Enter` to fullscreen by default. Pi therefore uses `Ctrl+Q` for follow-ups on Windows and WSL.
 
-Consider using a dedicated terminal emulator for the best experience.
+To use `Alt+Enter` instead, configure Windows Terminal to forward the key and bind `app.message.followUp` to `alt+enter` in Pi's `keybindings.json`. See [Keybindings](keybindings.md#assign-keybindings).
+
+## xfce4-terminal and Terminator
+
+These terminals cannot reliably distinguish modified Enter keys from plain `Enter`. Custom bindings such as `Ctrl+Enter` or `Shift+Enter` therefore may not work.
+
+Use a terminal with modern extended-key support when you need those shortcuts, such as Kitty, Ghostty, WezTerm, iTerm2, Windows Terminal, or a compatible Alacritty build.
+
+## IntelliJ IDEA integrated terminal
+
+IntelliJ IDEA's built-in terminal cannot reliably distinguish `Shift+Enter` from plain `Enter`. Use `Ctrl+J` for a newline or run Pi in a terminal with modern extended-key support.
+
+If an IME candidate window does not follow the text cursor, show the hardware cursor:
+
+```bash
+export PI_HARDWARE_CURSOR=1
+pi
+```
+
+## Override detected capabilities
+
+Pi automatically detects OSC 8 hyperlinks, inline image protocols, and truecolor support. A terminal proxy or multiplexer can make that detection inaccurate.
+
+| Capability | Environment variable | Setting |
+|---|---|---|
+| Hyperlinks | `PI_HYPERLINKS=1\|0\|auto` | `terminal.hyperlinks: true\|false\|"auto"` |
+| Inline images | `PI_IMAGE_PROTOCOL=kitty\|iterm2\|none\|auto` | `terminal.images: "kitty"\|"iterm2"\|false\|"auto"` |
+| Truecolor | `PI_TRUE_COLOR=1\|0\|auto` | `terminal.trueColor: true\|false\|"auto"` |
+
+Settings take precedence over environment variables. An unset value or `auto` preserves automatic detection.
+
+Only force a capability supported by the complete terminal path. Unsupported escape sequences can corrupt rendering. See [Environment Variables](environment-variables.md#pi-process-configuration) and [Settings](settings.md) for the canonical value definitions.
+
+## Program status
+
+Pi reports its state with the [Program Status Protocol (OSC 7501)](https://www.superlogical.com/rex/docs/build/program-status), so terminals and agent dashboards can show whether it is working, waiting for you, done, or failed:
+
+| State | When |
+|---|---|
+| `working` | An agent run or compaction is in progress. The message is the session name. |
+| `blocked` | An extension dialog or login waits for you. The message is the dialog title. |
+| `done` | A run finished. The message is the session name. |
+| `error` | A run ended with an error that is not retried. The message is the first line of the error. |
+| `idle` | Pi started, or you cancelled the run. |
+
+Reports never contain prompts or model output. Pi sends them only after the terminal answers the protocol's support query; tmux and screen do not forward them. Set `PI_PROGRAM_STATUS=1` to send reports without asking, or `PI_PROGRAM_STATUS=0` to turn them off.

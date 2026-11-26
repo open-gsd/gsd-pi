@@ -1,9 +1,9 @@
-import { setKeybindings } from "@earendil-works/pi-tui";
+import { setKeybindings } from "@gsd/pi-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type { SessionInfo } from "../src/core/session-manager.ts";
-import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { KeybindingsManager } from "../src/core/keybindings.js";
+import type { SessionInfo } from "../src/core/session-manager.js";
+import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 async function flushPromises(): Promise<void> {
 	await new Promise<void>((resolve) => {
@@ -107,5 +107,38 @@ describe("session selector rename", () => {
 
 		expect(renameSession).toHaveBeenCalledTimes(1);
 		expect(renameSession).toHaveBeenCalledWith(sessions[0]!.path, "XOld");
+	});
+
+	it("keeps the renamed session selected when the reload starts with another session", async () => {
+		const sessions = [1, 2, 3, 4, 5].map((i) => makeSession({ id: `s${i}`, modified: new Date(10_000 - i * 1000) }));
+		let loads = 0;
+		const keybindings = new KeybindingsManager();
+		const selector = new SessionSelectorComponent(
+			async (onProgress) => {
+				// On reload, the first partial list holds only the file that finished loading first
+				if (loads++ > 0) onProgress?.(1, sessions.length, [sessions[4]!]);
+				return sessions;
+			},
+			async () => [],
+			() => {},
+			() => {},
+			() => {},
+			() => {},
+			{ renameSession: async () => {}, showRenameHint: true, keybindings },
+		);
+		await flushPromises();
+
+		const list = selector.getSessionList();
+		list.handleInput("\x1b[B");
+		list.handleInput("\x1b[B");
+		expect(list.getSelectedSessionPath()).toBe(sessions[2]!.path);
+
+		list.handleInput(CTRL_R);
+		selector.handleInput("X");
+		selector.handleInput("\r");
+		await flushPromises();
+
+		expect(loads).toBe(2);
+		expect(selector.getSessionList().getSelectedSessionPath()).toBe(sessions[2]!.path);
 	});
 });

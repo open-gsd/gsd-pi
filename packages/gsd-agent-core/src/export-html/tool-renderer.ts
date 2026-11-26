@@ -92,6 +92,10 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 			expanded,
 			showImages: false,
 			isError,
+			durationMs: undefined,
+			outputPad: 0,
+			keyText: () => "",
+			keyHint: (_keybinding, description) => description,
 		};
 	};
 
@@ -110,7 +114,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					createRenderContext(toolCallId, renderedCallComponents.get(toolCallId), false, true, false),
 				);
 				renderedCallComponents.set(toolCallId, component);
-				const lines = component.render(width);
+				const lines = [...component.render(width)];
 				return ansiLinesToHtml(lines);
 			} catch {
 				// On error, return undefined so HTML export can fall back to structured result rendering
@@ -147,7 +151,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					createRenderContext(toolCallId, renderedResultComponents.get(toolCallId), false, false, isError),
 				);
 				renderedResultComponents.set(toolCallId, collapsedComponent);
-				const collapsed = ansiLinesToHtml(trimRenderedResultLines(collapsedComponent.render(width)));
+				const collapsed = ansiLinesToHtml(trimRenderedResultLines([...collapsedComponent.render(width)]));
 
 				// Render expanded
 				const expandedComponent = toolDef.renderResult(
@@ -157,7 +161,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					createRenderContext(toolCallId, renderedResultComponents.get(toolCallId), true, false, isError),
 				);
 				renderedResultComponents.set(toolCallId, expandedComponent);
-				const expanded = ansiLinesToHtml(trimRenderedResultLines(expandedComponent.render(width)));
+				const expanded = ansiLinesToHtml(trimRenderedResultLines([...expandedComponent.render(width)]));
 
 				return {
 					...(collapsed && collapsed !== expanded ? { collapsed } : {}),

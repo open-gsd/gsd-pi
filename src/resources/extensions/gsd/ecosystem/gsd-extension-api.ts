@@ -143,106 +143,60 @@ export function _resetSnapshot(): void {
 // ─── Wrapper factory ────────────────────────────────────────────────────
 
 /**
- * Build a GSDExtensionAPI by manually delegating every ExtensionAPI method
- * to the underlying pi instance, except `on("before_agent_start", ...)`
+ * Build a GSDExtensionAPI that forwards to `pi`, except `on("before_agent_start")`
  * which is captured into `sharedHandlers` for GSD-owned dispatch.
  *
- * Uses `satisfies GSDExtensionAPI` (NOT `as`) so TypeScript catches drift
- * when pi adds new ExtensionAPI methods.
+ * Proxy forwarding keeps the wrapper current as ExtensionAPI grows on the pin.
  */
 export function createGSDExtensionAPI(
   pi: ExtensionAPI,
   sharedHandlers: GSDEcosystemBeforeAgentStartHandler[],
 ): GSDExtensionAPI {
-  const wrapper = {
-    // ── Event subscription (single intercept point) ────────────────────
-    on(event: any, handler: any): void {
-      if (event === "before_agent_start") {
-        sharedHandlers.push(handler as GSDEcosystemBeforeAgentStartHandler);
-        return;
-      }
-      (pi.on as (e: any, h: any) => void)(event, handler);
-    },
-
-    // ── Event emission ─────────────────────────────────────────────────
-    emitBeforeModelSelect: (...args: Parameters<ExtensionAPI["emitBeforeModelSelect"]>) =>
-      pi.emitBeforeModelSelect(...args),
-    emitAdjustToolSet: (...args: Parameters<ExtensionAPI["emitAdjustToolSet"]>) =>
-      pi.emitAdjustToolSet(...args),
-    emitExtensionEvent: (...args: Parameters<ExtensionAPI["emitExtensionEvent"]>) =>
-      pi.emitExtensionEvent(...args),
-
-    // ── Tool / command / shortcut / flag registration ──────────────────
-    registerTool: ((tool: any) => pi.registerTool(tool)) as ExtensionAPI["registerTool"],
-    registerCommand: (...args: Parameters<ExtensionAPI["registerCommand"]>) =>
-      pi.registerCommand(...args),
-    registerBeforeInstall: (...args: Parameters<ExtensionAPI["registerBeforeInstall"]>) =>
-      pi.registerBeforeInstall(...args),
-    registerAfterInstall: (...args: Parameters<ExtensionAPI["registerAfterInstall"]>) =>
-      pi.registerAfterInstall(...args),
-    registerBeforeRemove: (...args: Parameters<ExtensionAPI["registerBeforeRemove"]>) =>
-      pi.registerBeforeRemove(...args),
-    registerAfterRemove: (...args: Parameters<ExtensionAPI["registerAfterRemove"]>) =>
-      pi.registerAfterRemove(...args),
-    registerShortcut: (...args: Parameters<ExtensionAPI["registerShortcut"]>) =>
-      pi.registerShortcut(...args),
-    registerFlag: (...args: Parameters<ExtensionAPI["registerFlag"]>) =>
-      pi.registerFlag(...args),
-    getFlag: (...args: Parameters<ExtensionAPI["getFlag"]>) => pi.getFlag(...args),
-
-    // ── Message rendering ──────────────────────────────────────────────
-    registerMessageRenderer: ((customType: string, renderer: any) =>
-      pi.registerMessageRenderer(customType, renderer)) as ExtensionAPI["registerMessageRenderer"],
-
-    // ── Actions ────────────────────────────────────────────────────────
-    sendMessage: ((message: any, options?: any) =>
-      pi.sendMessage(message, options)) as ExtensionAPI["sendMessage"],
-    sendUserMessage: (...args: Parameters<ExtensionAPI["sendUserMessage"]>) =>
-      pi.sendUserMessage(...args),
-    retryLastTurn: () => pi.retryLastTurn(),
-    appendEntry: ((customType: string, data?: any) =>
-      pi.appendEntry(customType, data)) as ExtensionAPI["appendEntry"],
-
-    // ── Session metadata ───────────────────────────────────────────────
-    setSessionName: (...args: Parameters<ExtensionAPI["setSessionName"]>) =>
-      pi.setSessionName(...args),
-    getSessionName: () => pi.getSessionName(),
-    setLabel: (...args: Parameters<ExtensionAPI["setLabel"]>) => pi.setLabel(...args),
-    exec: (...args: Parameters<ExtensionAPI["exec"]>) => pi.exec(...args),
-    getActiveTools: () => pi.getActiveTools(),
-    getAllTools: () => pi.getAllTools(),
-    setActiveTools: (...args: Parameters<ExtensionAPI["setActiveTools"]>) =>
-      pi.setActiveTools(...args),
-    getVisibleSkills: () => pi.getVisibleSkills(),
-    setVisibleSkills: (...args: Parameters<ExtensionAPI["setVisibleSkills"]>) =>
-      pi.setVisibleSkills(...args),
-    getCommands: () => pi.getCommands(),
-  registerRuntimeRead: (...args: Parameters<ExtensionAPI["registerRuntimeRead"]>) =>
-    pi.registerRuntimeRead(...args),
-
-    // ── Model & thinking ───────────────────────────────────────────────
-    setModel: (...args: Parameters<ExtensionAPI["setModel"]>) => pi.setModel(...args),
-    getThinkingLevel: () => pi.getThinkingLevel(),
-    setThinkingLevel: (...args: Parameters<ExtensionAPI["setThinkingLevel"]>) =>
-      pi.setThinkingLevel(...args),
-
-    // ── Provider registration ──────────────────────────────────────────
-    registerProvider: (...args: Parameters<ExtensionAPI["registerProvider"]>) =>
-      pi.registerProvider(...args),
-    unregisterProvider: (...args: Parameters<ExtensionAPI["unregisterProvider"]>) =>
-      pi.unregisterProvider(...args),
-
-    // ── Shared event bus (passthrough property) ────────────────────────
-    events: pi.events,
-
-    // ── GSD-specific additions ─────────────────────────────────────────
+  const gsdExtras = {
     getPhase: (): Phase | null => _snapshot.phase,
     getActiveUnit: (): GSDActiveUnit | null => _snapshot.activeUnit,
     getProjectSnapshot: async (basePath: string): Promise<DbProjectSnapshot | null> => {
       const { readProjectSnapshotFromDb } = await import("../state/project-snapshot.js");
       return readProjectSnapshotFromDb(basePath, { preserveGlobalDbHandle: true });
     },
-  } satisfies GSDExtensionAPI;
+  };
 
-  return wrapper;
+  const on: ExtensionAPI["on"] = ((event: any, handler: any) => {
+    if (event === "before_agent_start") {
+      sharedHandlers.push(handler as GSDEcosystemBeforeAgentStartHandler);
+      return () => {
+        const index = sharedHandlers.indexOf(handler as GSDEcosystemBeforeAgentStartHandler);
+        if (index >= 0) sharedHandlers.splice(index, 1);
+      };
+    }
+    return (pi.on as (e: any, h: any) => () => void)(event, handler);
+  }) as ExtensionAPI["on"];
+
+  return new Proxy(pi as object, {
+    get(target, prop, receiver) {
+      if (prop === "on") return on;
+      if (prop in gsdExtras) {
+        return gsdExtras[prop as keyof typeof gsdExtras];
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    ownKeys(target) {
+      const keys = new Set<string | symbol>(Reflect.ownKeys(target));
+      for (const key of Object.keys(gsdExtras)) {
+        keys.add(key);
+      }
+      return [...keys];
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      if (prop in gsdExtras) {
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: false,
+        };
+      }
+      return Reflect.getOwnPropertyDescriptor(target, prop);
+    },
+  }) as GSDExtensionAPI;
 }

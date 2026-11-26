@@ -1,8 +1,9 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { getCellDimensions, resetCapabilitiesCache, setCellDimensions } from "../src/terminal-image.ts";
-import { type Component, TUI } from "../src/tui.ts";
-import { VirtualTerminal } from "../src/tests/virtual-terminal.ts";
+import { getCellDimensions, resetCapabilitiesCache, setCellDimensions } from "../src/terminal-image.js";
+import type { Component, TUI } from "../src/tui.js";
+import { TuiMainScreen } from "../src/tui-main-screen.js";
+import { VirtualTerminal } from "./virtual-terminal.js";
 
 class InputRecorder implements Component {
 	readonly inputs: string[] = [];
@@ -45,7 +46,7 @@ describe("TUI cell size responses", () => {
 	it("forwards bare escape even when a cell size query was sent at startup", () => {
 		withImageTerminal(() => {
 			const terminal = new VirtualTerminal(80, 24);
-			const tui = new TUI(terminal);
+			const tui: TUI = new TuiMainScreen(terminal);
 			const recorder = new InputRecorder();
 
 			tui.setFocus(recorder);
@@ -63,7 +64,7 @@ describe("TUI cell size responses", () => {
 			setCellDimensions({ widthPx: 9, heightPx: 18 });
 
 			const terminal = new VirtualTerminal(80, 24);
-			const tui = new TUI(terminal);
+			const tui: TUI = new TuiMainScreen(terminal);
 			const recorder = new InputRecorder();
 
 			tui.setFocus(recorder);
@@ -72,31 +73,6 @@ describe("TUI cell size responses", () => {
 			terminal.sendInput("\x1b[6;20;10t");
 			assert.deepStrictEqual(recorder.inputs, []);
 			assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 });
-
-			terminal.sendInput("q");
-			assert.deepStrictEqual(recorder.inputs, ["q"]);
-			tui.stop();
-		});
-	});
-
-	it("consumes the iTerm2 OSC 1337 ReportCellSize reply (iTerm2 ignores CSI 16t)", () => {
-		// iTerm2 does not answer CSI 16t; its only cell-size mechanism is the
-		// proprietary OSC 1337;ReportCellSize reply. pi must consume it and adopt
-		// the reported (point) cell size so inline images size with the right
-		// cell aspect. height=17.50, width=8.00, scale=2.0 → rounded 8x18.
-		withImageTerminal(() => {
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-
-			const terminal = new VirtualTerminal(80, 24);
-			const tui = new TUI(terminal);
-			const recorder = new InputRecorder();
-
-			tui.setFocus(recorder);
-			tui.start();
-
-			terminal.sendInput("\x1b]1337;ReportCellSize=17.50;8.00;2.0\x07");
-			assert.deepStrictEqual(recorder.inputs, []);
-			assert.deepStrictEqual(getCellDimensions(), { widthPx: 8, heightPx: 18 });
 
 			terminal.sendInput("q");
 			assert.deepStrictEqual(recorder.inputs, ["q"]);

@@ -1,262 +1,87 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@gsd/pi-tui";
-import { Compile } from "typebox/compile";
-import type { TLocalizedValidationError } from "typebox/error";
-import chalk from "chalk";
+import type { ThinkingLevel } from "@gsd/pi-agent-core";
 import {
-	highlightCode as nativeHighlightCode,
-	supportsLanguage,
-	type HighlightColors,
-} from "@gsd/native";
-import { getCustomThemesDir } from "../config.js";
-import { ThemeJsonSchema, type ColorValue, type ThemeJson } from "./theme-schema.js";
-import { builtinThemes } from "./themes.js";
+	backgroundAnsi,
+	type Color,
+	colorToHex,
+	colorToOklch,
+	type EditorTheme,
+	foregroundAnsi,
+	getTerminalColorMode,
+	indexedColor,
+	type MarkdownTheme,
+	mixColors,
+	parseColor,
+	type RgbColor,
+	rgbColor,
+	type SelectListTheme,
+	type SettingsListTheme,
+	styleTextWithAnsi,
+	type TerminalColorMode,
+	type TerminalColors,
+	type TextAttributes,
+} from "@gsd/pi-tui";
+import chalk from "chalk";
+import { getCustomThemesDir, getThemesDir } from "../config.js";
+import type { SourceInfo } from "../core/source-info.js";
+import { closeWatcher, watchWithErrorHandler } from "../utils/fs-watch.js";
+import { getHighlightLanguageCount, highlight, supportsLanguage } from "../utils/syntax-highlight.js";
+import { stripBom } from "../utils/text.js";
+import { generateSystemThemeColors, SYSTEM_THEME_NAME, terminalAppearance } from "./system-theme.js";
+import {
+	type ResolvedThemeColorValues,
+	THEME_TOKENS,
+	type ThemeBg,
+	type ThemeColor,
+	type ThemeColorValues,
+	type ThemeToken,
+} from "./theme-tokens.js";
 
-// Issue #453: native preview highlighting can wedge the entire interactive
-// session after a successful file tool. Keep the safer plain-text path as the
-// default and allow native highlighting only as an explicit opt-in.
-const NATIVE_TUI_HIGHLIGHT_ENABLED = process.env.GSD_ENABLE_NATIVE_TUI_HIGHLIGHT === "1";
+export { SYSTEM_THEME_NAME } from "./system-theme.js";
 
 // ============================================================================
 // Types & Schema
 // ============================================================================
 
-const validateThemeJson = Compile(ThemeJsonSchema);
+/** The schema that validates this shape lives in `theme-schema.ts`; importing the type is free. */
+import type { ThemeColorValue as ColorValue, ValidatedThemeJson as ThemeJson } from "./theme-schema.js";
 
-function formatThemeValidationPath(error: TLocalizedValidationError): string {
-	return error.instancePath.replace(/^\//, "").replace(/\//g, ".") || "root";
+export type { ValidatedThemeJson as ThemeJson } from "./theme-schema.js";
+export type { ThemeBg, ThemeColor, ThemeToken } from "./theme-tokens.js";
+
+/**
+ * Tokens are only accepted in their own slot, because "" (terminal default) means the default foreground
+ * or background depending on the slot. Use `theme.colors[token]` to use a token's color in the other slot.
+ */
+export interface ThemeStyle extends TextAttributes {
+	fg?: ThemeColor | Color;
+	bg?: ThemeBg | Color;
 }
 
-export type ThemeColor =
-	| "accent"
-	| "border"
-	| "borderAccent"
-	| "borderMuted"
-	| "success"
-	| "error"
-	| "warning"
-	| "muted"
-	| "dim"
-	| "text"
-	| "thinkingText"
-	| "userMessageText"
-	| "assistantMessageText"
-	| "customMessageText"
-	| "customMessageLabel"
-	| "toolTitle"
-	| "toolOutput"
-	| "mdHeading"
-	| "mdLink"
-	| "mdLinkUrl"
-	| "mdCode"
-	| "mdCodeBlock"
-	| "mdCodeBlockBorder"
-	| "mdQuote"
-	| "mdQuoteBorder"
-	| "mdHr"
-	| "mdListBullet"
-	| "toolDiffAdded"
-	| "toolDiffRemoved"
-	| "toolDiffContext"
-	| "syntaxComment"
-	| "syntaxKeyword"
-	| "syntaxFunction"
-	| "syntaxVariable"
-	| "syntaxString"
-	| "syntaxNumber"
-	| "syntaxType"
-	| "syntaxOperator"
-	| "syntaxPunctuation"
-	| "thinkingOff"
-	| "thinkingMinimal"
-	| "thinkingLow"
-	| "thinkingMedium"
-	| "thinkingHigh"
-	| "thinkingXhigh"
-	| "bashMode"
-	| "surfaceBorder"
-	| "surfaceMuted"
-	| "surfaceTitle"
-	| "surfaceAccent"
-	| "toolRunning"
-	| "toolSuccess"
-	| "toolError"
-	| "toolMuted"
-	| "modeWorkflow"
-	| "modeValidation"
-	| "modeDebug"
-	| "modeCompact";
+export type ThemeJsonValidator = (label: string, json: unknown) => ThemeJson;
 
-export type ThemeBg =
-	| "selectedBg"
-	| "userMessageBg"
-	| "customMessageBg"
-	| "toolPendingBg"
-	| "toolSuccessBg"
-	| "toolErrorBg";
+let themeJsonValidator: ThemeJsonValidator | undefined;
 
-type ColorMode = "truecolor" | "256color";
+/**
+ * Install full theme validation. Without it, documents are accepted as-is, which is what built-in
+ * themes already do: validating user-authored JSON needs typebox, and a presentation that only uses
+ * built-in themes should not pay ~17 MB of module graph for it.
+ */
+export function setThemeJsonValidator(validator: ThemeJsonValidator): void {
+	themeJsonValidator = validator;
+}
 
 // ============================================================================
 // Color Utilities
 // ============================================================================
-
-function detectColorMode(): ColorMode {
-	const colorterm = process.env.COLORTERM;
-	if (colorterm === "truecolor" || colorterm === "24bit") {
-		return "truecolor";
-	}
-	// Windows Terminal supports truecolor
-	if (process.env.WT_SESSION) {
-		return "truecolor";
-	}
-	const term = process.env.TERM || "";
-	// Fall back to 256color for truly limited terminals
-	if (term === "dumb" || term === "" || term === "linux") {
-		return "256color";
-	}
-	// Terminal.app also doesn't support truecolor
-	if (process.env.TERM_PROGRAM === "Apple_Terminal") {
-		return "256color";
-	}
-	// GNU screen doesn't support truecolor unless explicitly opted in via COLORTERM=truecolor.
-	// TERM under screen is typically "screen", "screen-256color", or "screen.xterm-256color".
-	if (term === "screen" || term.startsWith("screen-") || term.startsWith("screen.")) {
-		return "256color";
-	}
-	// Assume truecolor for everything else - virtually all modern terminals support it
-	return "truecolor";
-}
-
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-	const cleaned = hex.replace("#", "");
-	if (cleaned.length !== 6) {
-		throw new Error(`Invalid hex color: ${hex}`);
-	}
-	const r = parseInt(cleaned.substring(0, 2), 16);
-	const g = parseInt(cleaned.substring(2, 4), 16);
-	const b = parseInt(cleaned.substring(4, 6), 16);
-	if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
-		throw new Error(`Invalid hex color: ${hex}`);
-	}
-	return { r, g, b };
-}
-
-// The 6x6x6 color cube channel values (indices 0-5)
-const CUBE_VALUES = [0, 95, 135, 175, 215, 255];
-
-// Grayscale ramp values (indices 232-255, 24 grays from 8 to 238)
-const GRAY_VALUES = Array.from({ length: 24 }, (_, i) => 8 + i * 10);
-
-function findClosestCubeIndex(value: number): number {
-	let minDist = Infinity;
-	let minIdx = 0;
-	for (let i = 0; i < CUBE_VALUES.length; i++) {
-		const dist = Math.abs(value - CUBE_VALUES[i]);
-		if (dist < minDist) {
-			minDist = dist;
-			minIdx = i;
-		}
-	}
-	return minIdx;
-}
-
-function findClosestGrayIndex(gray: number): number {
-	let minDist = Infinity;
-	let minIdx = 0;
-	for (let i = 0; i < GRAY_VALUES.length; i++) {
-		const dist = Math.abs(gray - GRAY_VALUES[i]);
-		if (dist < minDist) {
-			minDist = dist;
-			minIdx = i;
-		}
-	}
-	return minIdx;
-}
-
-function colorDistance(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number): number {
-	// Weighted Euclidean distance (human eye is more sensitive to green)
-	const dr = r1 - r2;
-	const dg = g1 - g2;
-	const db = b1 - b2;
-	return dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114;
-}
-
-function rgbTo256(r: number, g: number, b: number): number {
-	// Find closest color in the 6x6x6 cube
-	const rIdx = findClosestCubeIndex(r);
-	const gIdx = findClosestCubeIndex(g);
-	const bIdx = findClosestCubeIndex(b);
-	const cubeR = CUBE_VALUES[rIdx];
-	const cubeG = CUBE_VALUES[gIdx];
-	const cubeB = CUBE_VALUES[bIdx];
-	const cubeIndex = 16 + 36 * rIdx + 6 * gIdx + bIdx;
-	const cubeDist = colorDistance(r, g, b, cubeR, cubeG, cubeB);
-
-	// Find closest grayscale
-	const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-	const grayIdx = findClosestGrayIndex(gray);
-	const grayValue = GRAY_VALUES[grayIdx];
-	const grayIndex = 232 + grayIdx;
-	const grayDist = colorDistance(r, g, b, grayValue, grayValue, grayValue);
-
-	// Check if color has noticeable saturation (hue matters)
-	// If max-min spread is significant, prefer cube to preserve tint
-	const maxC = Math.max(r, g, b);
-	const minC = Math.min(r, g, b);
-	const spread = maxC - minC;
-
-	// Only consider grayscale if color is nearly neutral (spread < 10)
-	// AND grayscale is actually closer
-	if (spread < 10 && grayDist < cubeDist) {
-		return grayIndex;
-	}
-
-	return cubeIndex;
-}
-
-function hexTo256(hex: string): number {
-	const { r, g, b } = hexToRgb(hex);
-	return rgbTo256(r, g, b);
-}
-
-function fgAnsi(color: string | number, mode: ColorMode): string {
-	if (color === "") return "\x1b[39m";
-	if (typeof color === "number") return `\x1b[38;5;${color}m`;
-	if (color.startsWith("#")) {
-		if (mode === "truecolor") {
-			const { r, g, b } = hexToRgb(color);
-			return `\x1b[38;2;${r};${g};${b}m`;
-		} else {
-			const index = hexTo256(color);
-			return `\x1b[38;5;${index}m`;
-		}
-	}
-	throw new Error(`Invalid color value: ${color}`);
-}
-
-function bgAnsi(color: string | number, mode: ColorMode): string {
-	if (color === "") return "\x1b[49m";
-	if (typeof color === "number") return `\x1b[48;5;${color}m`;
-	if (color.startsWith("#")) {
-		if (mode === "truecolor") {
-			const { r, g, b } = hexToRgb(color);
-			return `\x1b[48;2;${r};${g};${b}m`;
-		} else {
-			const index = hexTo256(color);
-			return `\x1b[48;5;${index}m`;
-		}
-	}
-	throw new Error(`Invalid color value: ${color}`);
-}
 
 function resolveVarRefs(
 	value: ColorValue,
 	vars: Record<string, ColorValue>,
 	visited = new Set<string>(),
 ): string | number {
-	if (typeof value === "number" || value === "" || value.startsWith("#")) {
+	if (typeof value === "number" || value === "" || value.startsWith("#") || /^ok(lch|hsl)\(/i.test(value)) {
 		return value;
 	}
 	if (visited.has(value)) {
@@ -280,6 +105,79 @@ function resolveThemeColors<T extends Record<string, ColorValue>>(
 	return resolved as Record<keyof T, string | number>;
 }
 
+function withThemeTokenFallbacks<Value>(values: ThemeColorValues<Value>): ResolvedThemeColorValues<Value> {
+	const resolved = { ...values } as Partial<ResolvedThemeColorValues<Value>>;
+	for (const [rawName, descriptor] of Object.entries(THEME_TOKENS)) {
+		if (!("fallback" in descriptor)) continue;
+		const name = rawName as ThemeToken;
+		if (resolved[name] !== undefined) continue;
+		const fallback = descriptor.fallback as ThemeToken;
+		const fallbackValue = resolved[fallback];
+		if (fallbackValue === undefined) {
+			throw new Error(`Theme token ${rawName} has unresolved fallback ${descriptor.fallback}`);
+		}
+		resolved[name] = fallbackValue;
+	}
+	return resolved as ResolvedThemeColorValues<Value>;
+}
+
+// ============================================================================
+// Appearance & Terminal Default Colors
+// ============================================================================
+
+/** The background a theme is designed for. */
+export type ThemeAppearance = TerminalTheme;
+
+// The terminal's reported colors. Replaced (never mutated) on update, so themes can cache resolved colors
+// by identity.
+let terminalColors: TerminalColors = {};
+// While the terminal color query is in flight, the system theme renders in grayscale.
+let terminalColorsPending = false;
+// The terminal's last light/dark report (mode 2031). Only used while it has not reported a background.
+let terminalColorScheme: TerminalTheme | undefined;
+
+/**
+ * Record the terminal's reported colors. Themes use the default colors for tokens set to "" (terminal
+ * default); the system theme is generated from all of them. Ends the pending state.
+ */
+export function setTerminalColors(colors: TerminalColors): void {
+	terminalColors = { ...colors };
+	terminalColorsPending = false;
+}
+
+/** Record the terminal's light/dark report, the fallback for terminals that do not report their background. */
+export function setTerminalColorScheme(scheme: TerminalTheme | undefined): void {
+	terminalColorScheme = scheme;
+}
+
+/** Render the system theme in grayscale until `setTerminalColors()` reports the terminal's colors. */
+export function markTerminalColorsPending(): void {
+	terminalColorsPending = true;
+}
+
+/** Assumed terminal default colors when the terminal does not report them. */
+const GUESSED_DEFAULT_COLORS: Record<ThemeAppearance, { foreground: Color; background: Color }> = {
+	dark: { foreground: parseColor("#e5e5e7"), background: parseColor("#000000") },
+	light: { foreground: parseColor("#000000"), background: parseColor("#ffffff") },
+};
+
+function averageLightness(colors: Color[]): number | undefined {
+	// Palette colors 0-15 follow the user's terminal palette, so they say nothing about the theme.
+	const fixed = colors.filter((color) => color.kind !== "indexed" || color.index >= 16);
+	if (fixed.length === 0) return undefined;
+	return fixed.reduce((sum, color) => sum + colorToOklch(color).l, 0) / fixed.length;
+}
+
+/** Detect the background a theme is designed for from the lightness of its own colors. */
+function detectAppearance(foregrounds: Color[], backgrounds: Color[]): ThemeAppearance | undefined {
+	const fg = averageLightness(foregrounds);
+	const bg = averageLightness(backgrounds);
+	if (fg !== undefined && bg !== undefined) return bg < fg ? "dark" : "light";
+	if (bg !== undefined) return bg < 0.5 ? "dark" : "light";
+	if (fg !== undefined) return fg > 0.5 ? "dark" : "light";
+	return undefined;
+}
+
 // ============================================================================
 // Theme Class
 // ============================================================================
@@ -287,40 +185,130 @@ function resolveThemeColors<T extends Record<string, ColorValue>>(
 export class Theme {
 	readonly name?: string;
 	readonly sourcePath?: string;
-	sourceInfo?: import("../core/source-info.js").SourceInfo;
-	private fgColors: Map<ThemeColor, string>;
-	private bgColors: Map<ThemeBg, string>;
-	private mode: ColorMode;
+	sourceInfo?: SourceInfo;
+	private mode: TerminalColorMode;
+	// Precomputed escape sequences keep fg()/bg() on the render hot path to a lookup and concat.
+	private readonly fgAnsi = new Map<ThemeColor, string>();
+	private readonly bgAnsi = new Map<ThemeBg, string>();
+	// Tokens set to "" have no color of their own; `colors` fills them from the terminal defaults.
+	private readonly concreteColors: Partial<Record<ThemeToken, Color>> = {};
+	private readonly defaultForegroundTokens: ThemeToken[] = [];
+	private readonly defaultBackgroundTokens: ThemeToken[] = [];
+	// Foreground tokens rendered faint (SGR 2) on top of their color.
+	private readonly dimTokens: ReadonlySet<ThemeColor>;
+	private readonly ownAppearance: ThemeAppearance | undefined;
+	private resolvedColors: { terminal: TerminalColors; colors: Readonly<Record<ThemeToken, Color>> } | undefined;
 
 	constructor(
-		fgColors: Record<ThemeColor, string | number>,
-		bgColors: Record<ThemeBg, string | number>,
-		mode: ColorMode,
-		options: { name?: string; sourcePath?: string } = {},
+		fgColors: Pick<ThemeColorValues<string | number>, ThemeColor>,
+		bgColors: Pick<ThemeColorValues<string | number>, ThemeBg>,
+		mode: TerminalColorMode,
+		options: {
+			name?: string;
+			sourcePath?: string;
+			sourceInfo?: SourceInfo;
+			appearance?: ThemeAppearance;
+			/** Foreground tokens to render faint (SGR 2). */
+			dim?: readonly ThemeColor[];
+		} = {},
 	) {
 		this.name = options.name;
 		this.sourcePath = options.sourcePath;
+		this.sourceInfo = options.sourceInfo;
 		this.mode = mode;
-		this.fgColors = new Map();
-		for (const [key, value] of Object.entries(fgColors) as [ThemeColor, string | number][]) {
-			this.fgColors.set(key, fgAnsi(value, mode));
+		this.dimTokens = new Set(options.dim);
+		const { fgColors: foregrounds, bgColors: backgrounds } = splitThemeColors(
+			withThemeTokenFallbacks({ ...fgColors, ...bgColors }),
+		);
+		const concreteForegrounds: Color[] = [];
+		const concreteBackgrounds: Color[] = [];
+		// Returns the escape sequence for the token's own slot.
+		const addToken = (token: ThemeToken, value: string | number, isBackground: boolean): string => {
+			if (value === "") {
+				(isBackground ? this.defaultBackgroundTokens : this.defaultForegroundTokens).push(token);
+				return isBackground ? "\x1b[49m" : "\x1b[39m";
+			}
+			const color = parseColor(value);
+			this.concreteColors[token] = color;
+			(isBackground ? concreteBackgrounds : concreteForegrounds).push(color);
+			return isBackground ? backgroundAnsi(color, mode) : foregroundAnsi(color, mode);
+		};
+		for (const [token, value] of Object.entries(foregrounds) as [ThemeColor, string | number][]) {
+			this.fgAnsi.set(token, addToken(token, value, false));
 		}
-		this.bgColors = new Map();
-		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
-			this.bgColors.set(key, bgAnsi(value, mode));
+		for (const [token, value] of Object.entries(backgrounds) as [ThemeBg, string | number][]) {
+			this.bgAnsi.set(token, addToken(token, value, true));
 		}
+		this.ownAppearance = options.appearance ?? detectAppearance(concreteForegrounds, concreteBackgrounds);
+	}
+
+	/**
+	 * The background the theme is designed for: declared in the theme JSON, detected from its colors,
+	 * or, for themes without usable colors, the terminal's appearance.
+	 */
+	get appearance(): ThemeAppearance {
+		return this.ownAppearance ?? getTerminalTheme();
+	}
+
+	/**
+	 * Concrete colors for all tokens. Tokens set to "" (terminal default) use the terminal's reported
+	 * default colors, or a guess based on `appearance` when the terminal did not report them. Faint
+	 * tokens are approximated by mixing their color toward the background.
+	 */
+	get colors(): Readonly<Record<ThemeToken, Color>> {
+		const terminal = terminalColors;
+		if (this.resolvedColors?.terminal !== terminal) {
+			const guess = GUESSED_DEFAULT_COLORS[this.appearance];
+			const toColor = (rgb: RgbColor | undefined, fallback: Color) =>
+				rgb ? rgbColor(rgb.r, rgb.g, rgb.b) : fallback;
+			const foreground = toColor(terminal.foreground, guess.foreground);
+			const background = toColor(terminal.background, guess.background);
+			const colors = { ...this.concreteColors };
+			for (const token of this.defaultForegroundTokens) colors[token] = foreground;
+			for (const token of this.defaultBackgroundTokens) colors[token] = background;
+			for (const token of this.dimTokens) {
+				const color = colors[token];
+				if (color) colors[token] = mixColors(color, background, 0.4);
+			}
+			this.resolvedColors = { terminal, colors: Object.freeze(colors as Record<ThemeToken, Color>) };
+		}
+		return this.resolvedColors.colors;
+	}
+
+	style(text: string, options: ThemeStyle): string {
+		const { fg, bg } = options;
+		if (typeof fg === "string" && this.dimTokens.has(fg)) options = { ...options, dim: true };
+		return styleTextWithAnsi(
+			text,
+			fg === undefined
+				? undefined
+				: typeof fg === "string"
+					? this.tokenAnsi(this.fgAnsi, fg)
+					: foregroundAnsi(fg, this.mode),
+			bg === undefined
+				? undefined
+				: typeof bg === "string"
+					? this.tokenAnsi(this.bgAnsi, bg)
+					: backgroundAnsi(bg, this.mode),
+			options,
+		);
 	}
 
 	fg(color: ThemeColor, text: string): string {
-		const ansi = this.fgColors.get(color);
-		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
+		const ansi = this.tokenAnsi(this.fgAnsi, color);
+		if (this.dimTokens.has(color)) return `${ansi}\x1b[2m${text}\x1b[22;39m`;
+		return `${ansi}${text}\x1b[39m`;
 	}
 
 	bg(color: ThemeBg, text: string): string {
-		const ansi = this.bgColors.get(color);
-		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
-		return `${ansi}${text}\x1b[49m`; // Reset only background color
+		const ansi = this.tokenAnsi(this.bgAnsi, color);
+		return `${ansi}${text}\x1b[49m`;
+	}
+
+	private tokenAnsi<T extends ThemeToken>(ansi: Map<T, string>, token: T): string {
+		const value = ansi.get(token);
+		if (value === undefined) throw new Error(`Unknown theme color: ${token}`);
+		return value;
 	}
 
 	bold(text: string): string {
@@ -343,23 +331,21 @@ export class Theme {
 		return chalk.strikethrough(text);
 	}
 
+	/** Opening escape sequence for a foreground token. Faint tokens include SGR 2, which `\x1b[22m` closes. */
 	getFgAnsi(color: ThemeColor): string {
-		const ansi = this.fgColors.get(color);
-		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-		return ansi;
+		const ansi = this.tokenAnsi(this.fgAnsi, color);
+		return this.dimTokens.has(color) ? `${ansi}\x1b[2m` : ansi;
 	}
 
 	getBgAnsi(color: ThemeBg): string {
-		const ansi = this.bgColors.get(color);
-		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
-		return ansi;
+		return this.tokenAnsi(this.bgAnsi, color);
 	}
 
-	getColorMode(): ColorMode {
+	getColorMode(): TerminalColorMode {
 		return this.mode;
 	}
 
-	getThinkingBorderColor(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"): (str: string) => string {
+	getThinkingBorderColor(level: ThinkingLevel): (str: string) => string {
 		// Map thinking levels to dedicated theme colors
 		switch (level) {
 			case "off":
@@ -373,8 +359,9 @@ export class Theme {
 			case "high":
 				return (str: string) => this.fg("thinkingHigh", str);
 			case "xhigh":
-			case "max":
 				return (str: string) => this.fg("thinkingXhigh", str);
+			case "max":
+				return (str: string) => this.fg("thinkingMax", str);
 			default:
 				return (str: string) => this.fg("thinkingOff", str);
 		}
@@ -389,43 +376,23 @@ export class Theme {
 // Theme Loading
 // ============================================================================
 
-function getBuiltinThemes(): Record<string, ThemeJson> {
-	return builtinThemes;
-}
+let BUILTIN_THEMES: Record<string, ThemeJson> | undefined;
 
-function withSemanticColorDefaults(colors: ThemeJson["colors"]): ThemeJson["colors"] {
-	return {
-		...colors,
-		surfaceBorder: colors.surfaceBorder ?? colors.border,
-		surfaceMuted: colors.surfaceMuted ?? colors.borderMuted,
-		surfaceTitle: colors.surfaceTitle ?? colors.toolTitle,
-		surfaceAccent: colors.surfaceAccent ?? colors.borderAccent,
-		toolRunning: colors.toolRunning ?? colors.warning,
-		toolSuccess: colors.toolSuccess ?? colors.success,
-		toolError: colors.toolError ?? colors.error,
-		toolMuted: colors.toolMuted ?? colors.muted,
-		modeWorkflow: colors.modeWorkflow ?? colors.accent,
-		modeValidation: colors.modeValidation ?? colors.warning,
-		modeDebug: colors.modeDebug ?? colors.error,
-		modeCompact: colors.modeCompact ?? colors.muted,
-	};
+function getBuiltinThemes(): Record<string, ThemeJson> {
+	if (!BUILTIN_THEMES) {
+		const themesDir = getThemesDir();
+		const darkPath = path.join(themesDir, "dark.json");
+		const lightPath = path.join(themesDir, "light.json");
+		BUILTIN_THEMES = {
+			dark: JSON.parse(stripBom(fs.readFileSync(darkPath, "utf-8"))) as ThemeJson,
+			light: JSON.parse(stripBom(fs.readFileSync(lightPath, "utf-8"))) as ThemeJson,
+		};
+	}
+	return BUILTIN_THEMES;
 }
 
 export function getAvailableThemes(): string[] {
-	const themes = new Set<string>(Object.keys(getBuiltinThemes()));
-	const customThemesDir = getCustomThemesDir();
-	if (fs.existsSync(customThemesDir)) {
-		const files = fs.readdirSync(customThemesDir);
-		for (const file of files) {
-			if (file.endsWith(".json")) {
-				themes.add(file.slice(0, -5));
-			}
-		}
-	}
-	for (const name of registeredThemes.keys()) {
-		themes.add(name);
-	}
-	return Array.from(themes).sort();
+	return getAvailableThemesWithPaths().map(({ name }) => name);
 }
 
 export interface ThemeInfo {
@@ -434,73 +401,83 @@ export interface ThemeInfo {
 }
 
 export function getAvailableThemesWithPaths(): ThemeInfo[] {
-	const customThemesDir = getCustomThemesDir();
+	const themesDir = getThemesDir();
 	const result: ThemeInfo[] = [];
+	const seen = new Set<string>();
+	const addTheme = (themeInfo: ThemeInfo) => {
+		if (seen.has(themeInfo.name)) {
+			return;
+		}
+		seen.add(themeInfo.name);
+		result.push(themeInfo);
+	};
 
-	// Built-in themes (embedded in code, no file path)
+	// Built-in themes. The system theme is generated, so it has no file.
+	addTheme({ name: SYSTEM_THEME_NAME, path: undefined });
 	for (const name of Object.keys(getBuiltinThemes())) {
-		result.push({ name, path: undefined });
+		addTheme({ name, path: path.join(themesDir, `${name}.json`) });
 	}
 
 	// Custom themes
-	if (fs.existsSync(customThemesDir)) {
-		for (const file of fs.readdirSync(customThemesDir)) {
-			if (file.endsWith(".json")) {
-				const name = file.slice(0, -5);
-				if (!result.some((t) => t.name === name)) {
-					result.push({ name, path: path.join(customThemesDir, file) });
-				}
-			}
-		}
+	for (const themeInfo of getCustomThemeInfos()) {
+		addTheme(themeInfo);
 	}
 
 	for (const [name, theme] of registeredThemes.entries()) {
-		if (!result.some((t) => t.name === name)) {
-			result.push({ name, path: theme.sourcePath });
-		}
+		addTheme({ name, path: theme.sourcePath });
 	}
 
-	return result.sort((a, b) => a.name.localeCompare(b.name));
+	// The system theme comes first: it is the default and adapts to every terminal.
+	return result.sort((a, b) =>
+		a.name === SYSTEM_THEME_NAME ? -1 : b.name === SYSTEM_THEME_NAME ? 1 : a.name.localeCompare(b.name),
+	);
+}
+
+function getCustomThemeInfos(): ThemeInfo[] {
+	const customThemesDir = getCustomThemesDir();
+	const result: ThemeInfo[] = [];
+	if (!fs.existsSync(customThemesDir)) {
+		return result;
+	}
+
+	for (const file of fs.readdirSync(customThemesDir)) {
+		if (!file.endsWith(".json")) {
+			continue;
+		}
+		const themePath = path.join(customThemesDir, file);
+		try {
+			const customTheme = loadThemeFromPath(themePath);
+			if (customTheme.name) {
+				result.push({ name: customTheme.name, path: themePath });
+			}
+		} catch {
+			// Invalid themes are ignored here; the resource loader reports them
+			// during normal startup/reload.
+		}
+	}
+	return result;
+}
+
+function assertThemeNameIsValid(name: string): void {
+	if (name.includes("/")) {
+		throw new Error(
+			`Invalid theme name "${name}": theme names cannot contain "/" because it is reserved for automatic light/dark theme settings.`,
+		);
+	}
 }
 
 function parseThemeJson(label: string, json: unknown): ThemeJson {
-	if (!validateThemeJson.Check(json)) {
-		const errors = validateThemeJson.Errors(json);
-		const missingColors: string[] = [];
-		const otherErrors: string[] = [];
-
-		for (const error of errors) {
-			const path = formatThemeValidationPath(error);
-			// Check for missing required color properties
-			const match = path.match(/^colors\.(\w+)$/);
-			if (match && error.keyword === "required") {
-				missingColors.push(match[1]);
-			} else {
-				otherErrors.push(`  - ${path}: ${error.message}`);
-			}
-		}
-
-		let errorMessage = `Invalid theme "${label}":\n`;
-		if (missingColors.length > 0) {
-			errorMessage += "\nMissing required color tokens:\n";
-			errorMessage += missingColors.map((c) => `  - ${c}`).join("\n");
-			errorMessage += '\n\nPlease add these colors to your theme\'s "colors" object.';
-			errorMessage += "\nSee the built-in dark/light themes for reference values.";
-		}
-		if (otherErrors.length > 0) {
-			errorMessage += `\n\nOther errors:\n${otherErrors.join("\n")}`;
-		}
-
-		throw new Error(errorMessage);
+	if (themeJsonValidator) return themeJsonValidator(label, json);
+	if (typeof json !== "object" || json === null || !("colors" in json)) {
+		throw new Error(`Invalid theme "${label}": expected an object with a "colors" map.`);
 	}
-
 	return json as ThemeJson;
 }
 
 function parseThemeJsonContent(label: string, content: string): ThemeJson {
 	let json: unknown;
 	try {
-		json = JSON.parse(content);
+		json = JSON.parse(stripBom(content));
 	} catch (error) {
 		throw new Error(`Failed to parse theme ${label}: ${error}`);
 	}
@@ -529,39 +506,57 @@ function loadThemeJson(name: string): ThemeJson {
 	return parseThemeJsonContent(name, content);
 }
 
-function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string): Theme {
-	const colorMode = mode ?? detectColorMode();
-	const resolvedColors = resolveThemeColors(withSemanticColorDefaults(themeJson.colors), themeJson.vars);
-	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
-	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
-	const bgColorKeys: Set<string> = new Set([
-		"selectedBg",
-		"userMessageBg",
-		"customMessageBg",
-		"toolPendingBg",
-		"toolSuccessBg",
-		"toolErrorBg",
-	]);
-	for (const [key, value] of Object.entries(resolvedColors)) {
-		if (bgColorKeys.has(key)) {
+function splitThemeColors(colors: ResolvedThemeColorValues<string | number>): {
+	fgColors: Record<ThemeColor, string | number>;
+	bgColors: Record<ThemeBg, string | number>;
+} {
+	const fgColors = {} as Record<ThemeColor, string | number>;
+	const bgColors = {} as Record<ThemeBg, string | number>;
+	for (const [key, value] of Object.entries(colors)) {
+		if (THEME_TOKENS[key as ThemeToken].slot === "background") {
 			bgColors[key as ThemeBg] = value;
 		} else {
 			fgColors[key as ThemeColor] = value;
 		}
 	}
+	return { fgColors, bgColors };
+}
+
+function createTheme(themeJson: ThemeJson, mode?: TerminalColorMode, sourcePath?: string): Theme {
+	const colorMode = mode ?? getTerminalColorMode();
+	const resolvedColors = withThemeTokenFallbacks(resolveThemeColors(themeJson.colors, themeJson.vars));
+	const { fgColors, bgColors } = splitThemeColors(resolvedColors);
 	return new Theme(fgColors, bgColors, colorMode, {
 		name: themeJson.name,
 		sourcePath,
+		appearance: themeJson.appearance,
 	});
 }
 
-export function loadThemeFromPath(themePath: string, mode?: ColorMode): Theme {
+/** Generate the system theme from the terminal's reported colors (grayscale while they are pending). */
+function createSystemTheme(mode?: TerminalColorMode): Theme {
+	const generated = generateSystemThemeColors({
+		...terminalColors,
+		saturation: terminalColorsPending ? 0 : 1,
+		appearanceHint: getTerminalTheme(),
+	});
+	const { fgColors, bgColors } = splitThemeColors(withThemeTokenFallbacks(generated.colors));
+	return new Theme(fgColors, bgColors, mode ?? getTerminalColorMode(), {
+		name: SYSTEM_THEME_NAME,
+		appearance: generated.appearance,
+		dim: generated.dim,
+	});
+}
+
+export function loadThemeFromPath(themePath: string, mode?: TerminalColorMode): Theme {
 	const content = fs.readFileSync(themePath, "utf-8");
 	const themeJson = parseThemeJsonContent(themePath, content);
 	return createTheme(themeJson, mode, themePath);
 }
 
-function loadTheme(name: string, mode?: ColorMode): Theme {
+function loadTheme(name: string, mode?: TerminalColorMode): Theme {
+	// The system theme name is reserved: it takes precedence over custom themes of the same name.
+	if (name === SYSTEM_THEME_NAME) return createSystemTheme(mode);
 	const registeredTheme = registeredThemes.get(name);
 	if (registeredTheme) {
 		return registeredTheme;
@@ -578,34 +573,83 @@ export function getThemeByName(name: string): Theme | undefined {
 	}
 }
 
-function detectTerminalBackground(): "dark" | "light" {
-	const colorfgbg = process.env.COLORFGBG || "";
-	if (colorfgbg) {
-		const parts = colorfgbg.split(";");
-		if (parts.length >= 2) {
-			const bg = parseInt(parts[1], 10);
-			if (!Number.isNaN(bg)) {
-				const result = bg < 8 ? "dark" : "light";
-				return result;
-			}
-		}
+export type TerminalTheme = "dark" | "light";
+
+export function parseAutoThemeSetting(
+	themeSetting: string | undefined,
+): { lightTheme: string; darkTheme: string } | undefined {
+	if (!themeSetting) return undefined;
+	const slashIndex = themeSetting.indexOf("/");
+	if (slashIndex === -1 || themeSetting.indexOf("/", slashIndex + 1) !== -1) {
+		return undefined;
 	}
-	return "dark";
+
+	const lightTheme = themeSetting.slice(0, slashIndex).trim();
+	const darkTheme = themeSetting.slice(slashIndex + 1).trim();
+	if (!lightTheme || !darkTheme) {
+		return undefined;
+	}
+	return { lightTheme, darkTheme };
 }
 
-function getDefaultTheme(): string {
-	return detectTerminalBackground();
+export function resolveThemeSetting(
+	themeSetting: string | undefined,
+	terminalTheme: TerminalTheme,
+): string | undefined {
+	const autoTheme = parseAutoThemeSetting(themeSetting);
+	if (autoTheme) {
+		return terminalTheme === "light" ? autoTheme.lightTheme : autoTheme.darkTheme;
+	}
+	if (themeSetting?.includes("/")) return undefined;
+	if (typeof themeSetting === "string") return themeSetting;
+	return undefined;
+}
+
+/**
+ * Dark or light from the `COLORFGBG` environment variable some terminals set, or undefined without a
+ * usable background index. The value is `fg;bg` or `fg;xpm;bg` (rxvt), where a field is an ANSI color
+ * index or `default` when the color is not in the palette. The index refers to the terminal's own palette,
+ * whose colors are unknown here, so it is classified by index like Vim does: 0-6 and 8 (bright black, e.g.
+ * Solarized Dark's background) are dark, 7 and 9-15 are light.
+ */
+export function detectColorFgBgTheme(env: NodeJS.ProcessEnv = process.env): TerminalTheme | undefined {
+	const bg = env.COLORFGBG?.split(";").at(-1)?.trim();
+	if (!bg || !/^\d{1,2}$/.test(bg)) return undefined;
+	const index = Number(bg);
+	if (index > 15) return undefined;
+	return index <= 6 || index === 8 ? "dark" : "light";
+}
+
+/**
+ * Whether the terminal is dark or light. The background it renders decides, classified the same way the
+ * system theme does. Without a reported background: the terminal's light/dark report, then COLORFGBG,
+ * then dark.
+ */
+export function detectTerminalTheme(
+	colors: TerminalColors = {},
+	reportedScheme?: TerminalTheme,
+	env: NodeJS.ProcessEnv = process.env,
+): TerminalTheme {
+	const { background, foreground } = colors;
+	if (background) return terminalAppearance(background, foreground);
+	return reportedScheme ?? detectColorFgBgTheme(env) ?? "dark";
+}
+
+/** Whether the terminal is dark or light, from everything it reported so far. See `detectTerminalTheme()`. */
+export function getTerminalTheme(): TerminalTheme {
+	return detectTerminalTheme(terminalColors, terminalColorScheme);
 }
 
 // ============================================================================
 // Global Theme Instance
 // ============================================================================
 
-// Use globalThis to share theme across module loaders (tsx + jiti in dev mode)
+// Use globalThis to share theme across module loaders (node + jiti in dev mode)
 const THEME_KEY = Symbol.for("@gsd/pi-coding-agent:theme");
+const THEME_KEY_OLD = Symbol.for("@gsd/pi-coding-agent:theme");
 
 // Export theme as a getter that reads from globalThis
-// This ensures all module instances (tsx, jiti) see the same theme
+// This ensures all module instances (node, jiti) see the same theme
 export const theme: Theme = new Proxy({} as Theme, {
 	get(_target, prop) {
 		const t = (globalThis as Record<symbol, Theme>)[THEME_KEY];
@@ -614,26 +658,34 @@ export const theme: Theme = new Proxy({} as Theme, {
 	},
 });
 
+/** The theme instance behind the `theme` proxy, whose own identity never changes. */
+function getGlobalTheme(): Theme | undefined {
+	return (globalThis as Record<symbol, Theme | undefined>)[THEME_KEY];
+}
+
 function setGlobalTheme(t: Theme): void {
 	(globalThis as Record<symbol, Theme>)[THEME_KEY] = t;
+	(globalThis as Record<symbol, Theme>)[THEME_KEY_OLD] = t;
 }
 
 let currentThemeName: string | undefined;
 let themeWatcher: fs.FSWatcher | undefined;
-const onThemeChangeCallbacks = new Set<() => void>();
+let themeReloadTimer: NodeJS.Timeout | undefined;
+let onThemeChangeCallback: (() => void) | undefined;
 const registeredThemes = new Map<string, Theme>();
 
 export function setRegisteredThemes(themes: Theme[]): void {
 	registeredThemes.clear();
 	for (const theme of themes) {
 		if (theme.name) {
+			assertThemeNameIsValid(theme.name);
 			registeredThemes.set(theme.name, theme);
 		}
 	}
 }
 
 export function initTheme(themeName?: string, enableWatcher: boolean = false): void {
-	const name = themeName ?? getDefaultTheme();
+	const name = themeName ?? SYSTEM_THEME_NAME;
 	currentThemeName = name;
 	try {
 		setGlobalTheme(loadTheme(name));
@@ -641,9 +693,9 @@ export function initTheme(themeName?: string, enableWatcher: boolean = false): v
 			startThemeWatcher();
 		}
 	} catch (_error) {
-		// Theme is invalid - fall back to dark theme silently
-		currentThemeName = "dark";
-		setGlobalTheme(loadTheme("dark"));
+		// Theme is invalid - fall back to the system theme silently
+		currentThemeName = SYSTEM_THEME_NAME;
+		setGlobalTheme(loadTheme(SYSTEM_THEME_NAME));
 		// Don't start watcher for fallback theme
 	}
 }
@@ -655,12 +707,14 @@ export function setTheme(name: string, enableWatcher: boolean = false): { succes
 		if (enableWatcher) {
 			startThemeWatcher();
 		}
-		onThemeChangeCallbacks.forEach(cb => cb());
+		if (onThemeChangeCallback) {
+			onThemeChangeCallback();
+		}
 		return { success: true };
 	} catch (error) {
-		// Theme is invalid - fall back to dark theme
-		currentThemeName = "dark";
-		setGlobalTheme(loadTheme("dark"));
+		// Theme is invalid - fall back to the system theme
+		currentThemeName = SYSTEM_THEME_NAME;
+		setGlobalTheme(loadTheme(SYSTEM_THEME_NAME));
 		// Don't start watcher for fallback theme
 		return {
 			success: false,
@@ -673,73 +727,105 @@ export function setThemeInstance(themeInstance: Theme): void {
 	setGlobalTheme(themeInstance);
 	currentThemeName = "<in-memory>";
 	stopThemeWatcher(); // Can't watch a direct instance
-	onThemeChangeCallbacks.forEach(cb => cb());
+	if (onThemeChangeCallback) {
+		onThemeChangeCallback();
+	}
 }
 
 export function onThemeChange(callback: () => void): () => void {
-	onThemeChangeCallbacks.add(callback);
-	return () => { onThemeChangeCallbacks.delete(callback); };
+	onThemeChangeCallback = callback;
+	return () => {
+		if (onThemeChangeCallback === callback) {
+			onThemeChangeCallback = undefined;
+		}
+	};
 }
 
 function startThemeWatcher(): void {
-	// Stop existing watcher if any
-	if (themeWatcher) {
-		themeWatcher.close();
-		themeWatcher = undefined;
-	}
+	stopThemeWatcher();
 
 	// Only watch if it's a custom theme (not built-in)
-	if (!currentThemeName || currentThemeName === "dark" || currentThemeName === "light") {
+	if (
+		!currentThemeName ||
+		currentThemeName === "dark" ||
+		currentThemeName === "light" ||
+		currentThemeName === SYSTEM_THEME_NAME
+	) {
 		return;
 	}
 
 	const customThemesDir = getCustomThemesDir();
-	const themeFile = path.join(customThemesDir, `${currentThemeName}.json`);
+	const watchedThemeName = currentThemeName;
+	const watchedFileName = `${watchedThemeName}.json`;
+	const themeFile = path.join(customThemesDir, watchedFileName);
 
 	// Only watch if the file exists
 	if (!fs.existsSync(themeFile)) {
 		return;
 	}
 
-	try {
-		themeWatcher = fs.watch(themeFile, (eventType) => {
-			if (eventType === "change") {
-				// Debounce rapid changes
-				setTimeout(() => {
-					try {
-						// Reload the theme
-						setGlobalTheme(loadTheme(currentThemeName!));
-						// Notify callbacks (to invalidate UI)
-						onThemeChangeCallbacks.forEach(cb => cb());
-					} catch (_error) {
-						// Ignore errors (file might be in invalid state while being edited)
-					}
-				}, 100);
-			} else if (eventType === "rename") {
-				// File was deleted or renamed - fall back to default theme
-				setTimeout(() => {
-					if (!fs.existsSync(themeFile)) {
-						currentThemeName = "dark";
-						setGlobalTheme(loadTheme("dark"));
-						if (themeWatcher) {
-							themeWatcher.close();
-							themeWatcher = undefined;
-						}
-						onThemeChangeCallbacks.forEach(cb => cb());
-					}
-				}, 100);
+	const scheduleReload = () => {
+		if (themeReloadTimer) {
+			clearTimeout(themeReloadTimer);
+		}
+		themeReloadTimer = setTimeout(() => {
+			themeReloadTimer = undefined;
+
+			// Ignore stale timers after switching themes or stopping the watcher
+			if (currentThemeName !== watchedThemeName) {
+				return;
 			}
-		});
-	} catch (_error) {
-		// Ignore errors starting watcher
-	}
+
+			// Keep the last successfully loaded theme active if the file is temporarily missing
+			if (!fs.existsSync(themeFile)) {
+				return;
+			}
+
+			try {
+				// Reload the theme from disk and refresh the registry cache
+				const reloadedTheme = loadThemeFromPath(themeFile);
+				registeredThemes.set(watchedThemeName, reloadedTheme);
+				setGlobalTheme(reloadedTheme);
+				// Notify callback (to invalidate UI)
+				if (onThemeChangeCallback) {
+					onThemeChangeCallback();
+				}
+			} catch (_error) {
+				// Ignore errors (file might be in invalid state while being edited)
+			}
+		}, 100);
+	};
+
+	themeWatcher =
+		watchWithErrorHandler(
+			customThemesDir,
+			(_eventType, filename) => {
+				if (currentThemeName !== watchedThemeName) {
+					return;
+				}
+				if (!filename) {
+					scheduleReload();
+					return;
+				}
+				if (filename !== watchedFileName) {
+					return;
+				}
+				scheduleReload();
+			},
+			() => {
+				closeWatcher(themeWatcher);
+				themeWatcher = undefined;
+			},
+		) ?? undefined;
 }
 
 export function stopThemeWatcher(): void {
-	if (themeWatcher) {
-		themeWatcher.close();
-		themeWatcher = undefined;
+	if (themeReloadTimer) {
+		clearTimeout(themeReloadTimer);
+		themeReloadTimer = undefined;
 	}
+	closeWatcher(themeWatcher);
+	themeWatcher = undefined;
 }
 
 // ============================================================================
@@ -747,76 +833,19 @@ export function stopThemeWatcher(): void {
 // ============================================================================
 
 /**
- * Convert a 256-color index to hex string.
- * Indices 0-15: basic colors (approximate)
- * Indices 16-231: 6x6x6 color cube
- * Indices 232-255: grayscale ramp
- */
-function ansi256ToHex(index: number): string {
-	// Basic colors (0-15) - approximate common terminal values
-	const basicColors = [
-		"#000000",
-		"#800000",
-		"#008000",
-		"#808000",
-		"#000080",
-		"#800080",
-		"#008080",
-		"#c0c0c0",
-		"#808080",
-		"#ff0000",
-		"#00ff00",
-		"#ffff00",
-		"#0000ff",
-		"#ff00ff",
-		"#00ffff",
-		"#ffffff",
-	];
-	if (index < 16) {
-		return basicColors[index];
-	}
-
-	// Color cube (16-231): 6x6x6 = 216 colors
-	if (index < 232) {
-		const cubeIndex = index - 16;
-		const r = Math.floor(cubeIndex / 36);
-		const g = Math.floor((cubeIndex % 36) / 6);
-		const b = cubeIndex % 6;
-		const toHex = (n: number) => (n === 0 ? 0 : 55 + n * 40).toString(16).padStart(2, "0");
-		return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-	}
-
-	// Grayscale (232-255): 24 shades
-	const gray = 8 + (index - 232) * 10;
-	const grayHex = gray.toString(16).padStart(2, "0");
-	return `#${grayHex}${grayHex}${grayHex}`;
-}
-
-/**
  * Get resolved theme colors as CSS-compatible hex strings.
  * Used by HTML export to generate CSS custom properties.
  */
 export function getResolvedThemeColors(themeName?: string): Record<string, string> {
-	const name = themeName ?? currentThemeName ?? getDefaultTheme();
-	const isLight = name === "light";
-	const themeJson = loadThemeJson(name);
-	const resolved = resolveThemeColors(themeJson.colors, themeJson.vars);
+	const colors = loadTheme(themeName ?? currentThemeName ?? SYSTEM_THEME_NAME).colors;
+	return Object.fromEntries(Object.entries(colors).map(([token, color]) => [token, colorToHex(color)]));
+}
 
-	// Default text color for empty values (terminal uses default fg color)
-	const defaultText = isLight ? "#000000" : "#e5e5e7";
-
-	const cssColors: Record<string, string> = {};
-	for (const [key, value] of Object.entries(resolved)) {
-		if (typeof value === "number") {
-			cssColors[key] = ansi256ToHex(value);
-		} else if (value === "") {
-			// Empty means default terminal color - use sensible fallback for HTML
-			cssColors[key] = defaultText;
-		} else {
-			cssColors[key] = value;
-		}
-	}
-	return cssColors;
+/**
+ * Check if a theme is a "light" theme (for CSS that needs light/dark variants).
+ */
+export function isLightTheme(themeName?: string): boolean {
+	return loadTheme(themeName ?? currentThemeName ?? SYSTEM_THEME_NAME).appearance === "light";
 }
 
 /**
@@ -828,23 +857,22 @@ export function getThemeExportColors(themeName?: string): {
 	cardBg?: string;
 	infoBg?: string;
 } {
-	const name = themeName ?? currentThemeName ?? getDefaultTheme();
+	const name = themeName ?? currentThemeName ?? SYSTEM_THEME_NAME;
+	if (name === SYSTEM_THEME_NAME) return {};
 	try {
 		const themeJson = loadThemeJson(name);
 		const exportSection = themeJson.export;
 		if (!exportSection) return {};
 
 		const vars = themeJson.vars ?? {};
-		const resolve = (value: string | number | undefined): string | undefined => {
+		// Export colors end up in CSS, which understands hex and oklch() values directly but not okhsl().
+		const resolve = (value: ColorValue | undefined): string | undefined => {
 			if (value === undefined) return undefined;
-			if (typeof value === "number") return ansi256ToHex(value);
-			if (value.startsWith("$")) {
-				const resolved = vars[value];
-				if (resolved === undefined) return undefined;
-				if (typeof resolved === "number") return ansi256ToHex(resolved);
-				return resolved;
-			}
-			return value;
+			const resolved = resolveVarRefs(value, vars);
+			if (typeof resolved === "number") return colorToHex(indexedColor(resolved));
+			if (resolved === "") return undefined;
+			if (/^okhsl\(/i.test(resolved)) return colorToHex(parseColor(resolved));
+			return resolved;
 		};
 
 		return {
@@ -861,163 +889,49 @@ export function getThemeExportColors(themeName?: string): {
 // TUI Helpers
 // ============================================================================
 
-let cachedHighlightColorsFor: Theme | undefined;
-let cachedHighlightColors: HighlightColors | undefined;
+type CliHighlightTheme = Record<string, (s: string) => string>;
 
-function buildHighlightColors(t: Theme): HighlightColors {
+let cachedHighlightThemeFor: Theme | undefined;
+let cachedCliHighlightTheme: CliHighlightTheme | undefined;
+
+function buildCliHighlightTheme(t: Theme): CliHighlightTheme {
 	return {
-		comment: t.getFgAnsi("syntaxComment"),
-		keyword: t.getFgAnsi("syntaxKeyword"),
-		function: t.getFgAnsi("syntaxFunction"),
-		variable: t.getFgAnsi("syntaxVariable"),
-		string: t.getFgAnsi("syntaxString"),
-		number: t.getFgAnsi("syntaxNumber"),
-		type: t.getFgAnsi("syntaxType"),
-		operator: t.getFgAnsi("syntaxOperator"),
-		punctuation: t.getFgAnsi("syntaxPunctuation"),
+		default: (s: string) => t.fg("text", s),
+		keyword: (s: string) => t.fg("syntaxKeyword", s),
+		built_in: (s: string) => t.fg("syntaxType", s),
+		literal: (s: string) => t.fg("syntaxNumber", s),
+		number: (s: string) => t.fg("syntaxNumber", s),
+		regexp: (s: string) => t.fg("syntaxString", s),
+		string: (s: string) => t.fg("syntaxString", s),
+		subst: (s: string) => t.fg("text", s),
+		comment: (s: string) => t.fg("syntaxComment", s),
+		doctag: (s: string) => t.fg("syntaxComment", s),
+		meta: (s: string) => t.fg("muted", s),
+		function: (s: string) => t.fg("syntaxFunction", s),
+		title: (s: string) => t.fg("syntaxFunction", s),
+		class: (s: string) => t.fg("syntaxType", s),
+		type: (s: string) => t.fg("syntaxType", s),
+		tag: (s: string) => t.fg("syntaxPunctuation", s),
+		name: (s: string) => t.fg("syntaxKeyword", s),
+		attr: (s: string) => t.fg("syntaxVariable", s),
+		variable: (s: string) => t.fg("syntaxVariable", s),
+		params: (s: string) => t.fg("syntaxVariable", s),
+		operator: (s: string) => t.fg("syntaxOperator", s),
+		punctuation: (s: string) => t.fg("syntaxPunctuation", s),
+		emphasis: (s: string) => t.italic(s),
+		strong: (s: string) => t.bold(s),
+		link: (s: string) => t.underline(s),
+		addition: (s: string) => t.fg("toolDiffAdded", s),
+		deletion: (s: string) => t.fg("toolDiffRemoved", s),
 	};
 }
 
-function getHighlightColors(t: Theme): HighlightColors {
-	if (cachedHighlightColorsFor !== t || !cachedHighlightColors) {
-		cachedHighlightColorsFor = t;
-		cachedHighlightColors = buildHighlightColors(t);
+function getCliHighlightTheme(t: Theme): CliHighlightTheme {
+	if (cachedHighlightThemeFor !== t || !cachedCliHighlightTheme) {
+		cachedHighlightThemeFor = t;
+		cachedCliHighlightTheme = buildCliHighlightTheme(t);
 	}
-	return cachedHighlightColors;
-}
-
-const LIGHTWEIGHT_KEYWORDS = new Set([
-	"as",
-	"async",
-	"await",
-	"break",
-	"case",
-	"catch",
-	"class",
-	"const",
-	"continue",
-	"default",
-	"def",
-	"else",
-	"enum",
-	"export",
-	"extends",
-	"false",
-	"fn",
-	"for",
-	"from",
-	"function",
-	"if",
-	"import",
-	"in",
-	"interface",
-	"let",
-	"match",
-	"new",
-	"null",
-	"return",
-	"struct",
-	"switch",
-	"throw",
-	"true",
-	"try",
-	"type",
-	"undefined",
-	"use",
-	"var",
-	"while",
-]);
-
-// charCode classifiers for lightweightHighlightLine. Every class the highlighter
-// uses is ASCII, so a charCode comparison is exactly equivalent to the original
-// /[A-Za-z_$]/, /[A-Za-z0-9_$]/, /\d/ and /[\d._]/ tests — but allocation-free.
-// This function is the single hottest node on the tool-output / diff render path
-// (live CPU profile), and the per-character RegExp.test() calls dominated it, so
-// the same charCode technique used for graphemeWidth applies here.
-function isIdentStartCode(c: number): boolean {
-	// A-Z (65-90), a-z (97-122), _ (95), $ (36)
-	return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 36;
-}
-function isIdentPartCode(c: number): boolean {
-	// identifier-start plus 0-9 (48-57)
-	return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 36;
-}
-function isNumStartCode(c: number): boolean {
-	// 0-9 (48-57)
-	return c >= 48 && c <= 57;
-}
-function isNumPartCode(c: number): boolean {
-	// 0-9 (48-57), . (46), _ (95)
-	return (c >= 48 && c <= 57) || c === 46 || c === 95;
-}
-
-function lightweightHighlightLine(line: string): string {
-	let out = "";
-	let i = 0;
-	const len = line.length;
-	while (i < len) {
-		const code = line.charCodeAt(i);
-		// `//` line comment
-		if (code === 47 /* / */ && line.charCodeAt(i + 1) === 47) {
-			out += theme.fg("syntaxComment", line.slice(i));
-			break;
-		}
-		// `#` line comment
-		if (code === 35 /* # */) {
-			out += theme.fg("syntaxComment", line.slice(i));
-			break;
-		}
-		// string literal: " ' `
-		if (code === 34 || code === 39 || code === 96) {
-			const quote = code;
-			let j = i + 1;
-			while (j < len) {
-				const cj = line.charCodeAt(j);
-				if (cj === 92 /* \ */) {
-					if (j + 1 >= len) {
-						j = len;
-						break;
-					}
-					j += 2;
-					continue;
-				}
-				if (cj === quote) {
-					j++;
-					break;
-				}
-				j++;
-			}
-			out += theme.fg("syntaxString", line.slice(i, j));
-			i = j;
-			continue;
-		}
-		// identifier / keyword
-		if (isIdentStartCode(code)) {
-			let j = i + 1;
-			while (j < len && isIdentPartCode(line.charCodeAt(j))) j++;
-			const word = line.slice(i, j);
-			out += LIGHTWEIGHT_KEYWORDS.has(word)
-				? theme.fg("syntaxKeyword", word)
-				: word;
-			i = j;
-			continue;
-		}
-		// number
-		if (isNumStartCode(code)) {
-			let j = i + 1;
-			while (j < len && isNumPartCode(line.charCodeAt(j))) j++;
-			out += theme.fg("syntaxNumber", line.slice(i, j));
-			i = j;
-			continue;
-		}
-		out += line[i];
-		i++;
-	}
-	return out;
-}
-
-function lightweightHighlightCode(code: string): string[] {
-	return code.split("\n").map(lightweightHighlightLine);
+	return cachedCliHighlightTheme;
 }
 
 /**
@@ -1025,15 +939,57 @@ function lightweightHighlightCode(code: string): string[] {
  * Returns array of highlighted lines.
  */
 export function highlightCode(code: string, lang?: string): string[] {
-	if (!NATIVE_TUI_HIGHLIGHT_ENABLED) {
-		return lang ? lightweightHighlightCode(code) : code.split("\n");
+	// Validate language before highlighting to avoid stderr spam from cli-highlight
+	const validLang = lang && supportsLanguage(lang) ? lang : undefined;
+	// Skip highlighting when no valid language is specified. cli-highlight's
+	// auto-detection is unreliable and can misidentify prose as AppleScript,
+	// LiveCodeServer, etc., coloring random English words as keywords.
+	if (!validLang) {
+		return code.split("\n").map((line) => theme.fg("mdCodeBlock", line));
 	}
-
-	const validLang = lang && supportsLanguage(lang) ? lang : null;
+	const opts = {
+		language: validLang,
+		ignoreIllegals: true,
+		theme: getCliHighlightTheme(theme),
+	};
 	try {
-		return nativeHighlightCode(code, validLang, getHighlightColors(theme)).split("\n");
+		return highlight(code, opts).split("\n");
 	} catch {
-		return code.split("\n");
+		return code.split("\n").map((line) => theme.fg("mdCodeBlock", line));
+	}
+}
+
+/**
+ * Highlights code for one owner, such as a tool row, and reuses the last result while the code, the language, the
+ * theme and the registered grammars stay the same. Each owner keeps its own highlighter, so cached results live as long
+ * as the code they show instead of in a process-wide cache.
+ */
+export class CodeHighlighter {
+	private last?: {
+		code: string;
+		lang: string | undefined;
+		theme: Theme | undefined;
+		languageCount: number;
+		lines: readonly string[];
+	};
+
+	/** Like {@link highlightCode}. The result is shared with later calls, so callers must not modify it. */
+	highlight(code: string, lang: string | undefined): readonly string[] {
+		// Renderers cannot tell a theme change from any other redraw, so the highlighter checks what its result depends on.
+		const currentTheme = getGlobalTheme();
+		const languageCount = getHighlightLanguageCount();
+		const last = this.last;
+		if (
+			last?.code === code &&
+			last.lang === lang &&
+			last.theme === currentTheme &&
+			last.languageCount === languageCount
+		) {
+			return last.lines;
+		}
+		const lines = highlightCode(code, lang);
+		this.last = { code, lang, theme: currentTheme, languageCount, lines };
+		return lines;
 	}
 }
 
@@ -1058,6 +1014,10 @@ export function getLanguageFromPath(filePath: string): string | undefined {
 		java: "java",
 		kt: "kotlin",
 		swift: "swift",
+		dart: "dart",
+		groovy: "groovy",
+		gradle: "groovy",
+		nix: "nix",
 		c: "c",
 		h: "c",
 		cpp: "cpp",
@@ -1123,19 +1083,8 @@ export function getMarkdownTheme(): MarkdownTheme {
 		bold: (text: string) => theme.bold(text),
 		italic: (text: string) => theme.italic(text),
 		underline: (text: string) => theme.underline(text),
-		strikethrough: (text: string) => chalk.strikethrough(text),
-		highlightCode: (code: string, lang?: string): string[] => {
-			if (!NATIVE_TUI_HIGHLIGHT_ENABLED) {
-				return code.split("\n").map((line) => theme.fg("mdCodeBlock", line));
-			}
-
-			const validLang = lang && supportsLanguage(lang) ? lang : null;
-			try {
-				return nativeHighlightCode(code, validLang, getHighlightColors(theme)).split("\n");
-			} catch {
-				return code.split("\n").map((line) => theme.fg("mdCodeBlock", line));
-			}
-		},
+		strikethrough: (text: string) => theme.strikethrough(text),
+		highlightCode,
 	};
 }
 
@@ -1156,7 +1105,7 @@ export function getEditorTheme(): EditorTheme {
 	};
 }
 
-export function getSettingsListTheme(): import("@gsd/pi-tui").SettingsListTheme {
+export function getSettingsListTheme(): SettingsListTheme {
 	return {
 		label: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : text),
 		value: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : theme.fg("muted", text)),

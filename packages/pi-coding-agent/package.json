@@ -1,6 +1,6 @@
 {
   "name": "@gsd/pi-coding-agent",
-  "version": "1.23.0",
+  "version": "1.0.2",
   "description": "Coding agent CLI (vendored from earendil-works/pi)",
   "type": "module",
   "gsd": {
@@ -29,47 +29,44 @@
     }
   },
   "scripts": {
-    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false && node scripts/copy-assets.cjs",
-    "copy-assets": "node scripts/copy-assets.cjs"
+    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false && pnpm run copy-assets",
+    "copy-assets": "node -e \"const {cpSync,mkdirSync,existsSync,readdirSync}=require('fs');const {join}=require('path');const src=join('src','theme');const dest=join('dist','theme');mkdirSync(dest,{recursive:true});if(existsSync(src))for(const f of readdirSync(src))if(f.endsWith('.json'))cpSync(join(src,f),join(dest,f));\""
   },
   "dependencies": {
-    "@gsd/agent-core": "workspace:*",
-    "@gsd/native": "workspace:*",
-    "@gsd/pi-agent-core": "workspace:*",
-    "@gsd/pi-ai": "workspace:*",
-    "@gsd/pi-tui": "workspace:*",
-    "@mariozechner/jiti": "^2.6.2",
     "@silvia-odwyer/photon-node": "0.3.4",
-    "@sinclair/typebox": "^0.34.41",
-    "chalk": "5.6.2",
+    "brace-expansion": "5.0.12",
+    "chalk": "6.0.0",
     "cross-spawn": "7.0.6",
     "diff": "8.0.4",
-    "glob": "13.0.6",
     "highlight.js": "10.7.3",
     "hosted-git-info": "9.0.3",
-    "ignore": "7.0.5",
-    "marked": "^15.0.12",
-    "minimatch": "10.2.5",
+    "ignore": "7.0.8",
+    "jiti": "2.7.0",
+    "lovely-mermaid": "0.3.3",
+    "minimatch": "11.0.3",
     "proper-lockfile": "4.1.2",
-    "sql.js": "^1.14.1",
-    "strip-ansi": "^7.1.0",
-    "typebox": "1.1.38",
-    "undici": "7.29.1",
-    "yaml": "2.9.0"
+    "quickjs-wasi": "3.6.2",
+    "semver": "7.8.5",
+    "typebox": "1.3.27",
+    "undici": "8.12.4",
+    "yaml": "2.9.0",
+    "@gsd/native": "workspace:*",
+    "@gsd/agent-modes": "workspace:*",
+    "@gsd/agent-core": "workspace:*",
+    "@gsd/pi-agent-core": "workspace:*",
+    "@gsd/pi-ai": "workspace:*",
+    "@gsd/pi-codemode": "workspace:*",
+    "@gsd/pi-mcp": "workspace:*",
+    "@gsd/pi-tui": "workspace:*",
+    "@sinclair/typebox": "^0.34.41"
   },
   "devDependencies": {
     "@types/cross-spawn": "6.0.6",
-    "@types/diff": "7.0.2",
     "@types/hosted-git-info": "3.0.5",
-    "@types/ms": "2.1.0",
-    "@types/node": "24.12.4",
+    "@types/node": "22.19.19",
     "@types/proper-lockfile": "4.1.4",
-    "@types/sql.js": "^1.4.9",
-    "shx": "0.4.0",
-    "typescript": "5.9.3",
-    "vitest": "4.1.11"
-  },
-  "optionalDependencies": {
-    "@mariozechner/clipboard": "0.3.6"
+    "@types/semver": "7.7.1",
+    "marked": "18.0.11",
+    "vitest": "4.1.12"
   }
 }

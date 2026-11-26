@@ -1,3 +1,4 @@
+import { createInMemoryModelRegistry, getModelRuntime } from "./model-runtime-test-utils.js";
 /**
  * Test harness for AgentSession runtime testing.
  *
@@ -10,34 +11,34 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Agent } from "@earendil-works/pi-agent-core";
+import type { AgentTool } from "@gsd/pi-agent-core";
+import { Agent } from "@gsd/pi-agent-core";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
-	Context,
+	JsonObject,
 	Model,
 	SimpleStreamOptions,
 	StopReason,
 	TextContent,
 	ThinkingContent,
 	ToolCall,
+	TranscriptContext,
 	Usage,
-} from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { AgentSession, type AgentSessionEvent } from "@gsd/agent-core";
-import { AuthStorage } from "../src/core/auth-storage.ts";
-import { ModelRegistry } from "../src/core/model-registry.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
-import type { Settings } from "../src/core/settings-manager.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
-import type { ExtensionFactory, ResourceLoader } from "../src/index.ts";
+} from "@gsd/pi-ai";
+import { createAssistantMessageEventStream } from "@gsd/pi-ai";
+import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import type { Settings } from "../src/core/settings-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
+import type { InlineExtension, ResourceLoader } from "../src/index.js";
 import {
 	type CreateTestExtensionsResultInput,
 	createTestExtensionsResult,
 	createTestResourceLoader,
-} from "./utilities.ts";
+} from "./utilities.js";
 
 // ============================================================================
 // Faux model
@@ -68,7 +69,7 @@ export interface FauxResponse {
 	/** Text content blocks. String shorthand becomes a single text block. */
 	text?: string;
 	/** Tool calls to include in the response. */
-	toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown> }>;
+	toolCalls?: Array<{ id?: string; name: string; args: JsonObject }>;
 	/** Thinking content. */
 	thinking?: string;
 	/** Stop reason. Defaults to "stop", or "toolUse" if toolCalls are present, or "error" if error is set. */
@@ -184,10 +185,8 @@ function chunkString(text: string): string[] {
  * intermediate delta events for each content block.
  */
 function streamWithDeltas(stream: AssistantMessageEventStream, message: AssistantMessage): void {
-	const isError = message.stopReason === "error" || message.stopReason === "aborted";
-
 	// Build partial progressively as we stream content blocks
-	const partial: AssistantMessage = { ...message, content: [] };
+	const partial: AssistantMessage = { ...message, content: [], stopReason: "pending" };
 	stream.push({ type: "start", partial: { ...partial } });
 
 	for (let i = 0; i < message.content.length; i++) {
@@ -243,20 +242,29 @@ function streamWithDeltas(stream: AssistantMessageEventStream, message: Assistan
 		}
 	}
 
-	if (isError) {
-		stream.push({ type: "error", reason: message.stopReason as "error" | "aborted", error: message });
-	} else {
-		stream.push({ type: "done", reason: message.stopReason as "stop" | "length" | "toolUse", message });
+	if (message.stopReason === "pending") {
+		const error: AssistantMessage = {
+			...message,
+			stopReason: "error",
+			errorMessage: "Faux response ended without a stop reason",
+		};
+		stream.push({ type: "error", reason: "error", error });
+		return;
 	}
+	if (message.stopReason === "error" || message.stopReason === "aborted") {
+		stream.push({ type: "error", reason: message.stopReason, error: message });
+		return;
+	}
+	stream.push({ type: "done", reason: message.stopReason, message });
 }
 
 function makeEvent(
 	type: "text_delta" | "thinking_delta" | "toolcall_delta",
 	contentIndex: number,
 	delta: string,
-	
+	partial: AssistantMessage,
 ): AssistantMessageEvent {
-	return { type, contentIndex, delta };
+	return { type, contentIndex, delta, partial: { ...partial } };
 }
 
 // ============================================================================
@@ -267,7 +275,7 @@ export interface FauxStreamFnState {
 	/** Number of times the stream function has been called. */
 	callCount: number;
 	/** The context passed to each call, in order. */
-	contexts: Context[];
+	contexts: TranscriptContext[];
 }
 
 /**
@@ -279,7 +287,11 @@ export interface FauxStreamFnState {
  * Returns the stream function and a state object for inspection.
  */
 export function createFauxStreamFn(responses: FauxResponseInput[]): {
-	streamFn: (model: Model<any>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
+	streamFn: (
+		model: Model<any>,
+		context: TranscriptContext,
+		options?: SimpleStreamOptions,
+	) => AssistantMessageEventStream;
 	state: FauxStreamFnState;
 } {
 	if (responses.length === 0) {
@@ -288,7 +300,7 @@ export function createFauxStreamFn(responses: FauxResponseInput[]): {
 
 	const state: FauxStreamFnState = { callCount: 0, contexts: [] };
 
-	const streamFn = (_model: Model<any>, context: Context, _options?: SimpleStreamOptions) => {
+	const streamFn = (_model: Model<any>, context: TranscriptContext, _options?: SimpleStreamOptions) => {
 		const index = state.callCount % responses.length;
 		state.callCount++;
 		state.contexts.push(context);
@@ -335,7 +347,7 @@ export interface HarnessOptions {
 	/** Optional resource loader override. */
 	resourceLoader?: ResourceLoader;
 	/** Inline extensions to load into the session resource loader. */
-	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
+	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 }
 
 export interface Harness {
@@ -361,11 +373,11 @@ function createTempDir(): string {
 	return tempDir;
 }
 
-function createHarnessWithResourceLoader(
+async function createHarnessWithResourceLoader(
 	options: HarnessOptions,
 	resourceLoader: ResourceLoader,
 	tempDir: string,
-): Harness {
+): Promise<Harness> {
 	const baseModel = options.model ?? fauxModel;
 	const model: Model<any> = options.contextWindow ? { ...baseModel, contextWindow: options.contextWindow } : baseModel;
 
@@ -378,7 +390,7 @@ function createHarnessWithResourceLoader(
 			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
 			tools: options.tools ?? [],
 		},
-		streamFn,
+		streamFn: streamFn,
 	});
 
 	const sessionManager = SessionManager.inMemory();
@@ -388,16 +400,34 @@ function createHarnessWithResourceLoader(
 		settingsManager.applyOverrides(options.settings);
 	}
 
-	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-	authStorage.setRuntimeApiKey(model.provider, "faux-key");
-	const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+	const authStorage = AuthStorage.inMemory({
+		[model.provider]: { type: "api_key", key: "faux-key" },
+	});
+	const modelRegistry = await createInMemoryModelRegistry(authStorage);
+	modelRegistry.registerProvider(model.provider, {
+		baseUrl: model.baseUrl,
+		api: model.api,
+		models: [
+			{
+				id: model.id,
+				name: model.name,
+				api: model.api,
+				reasoning: model.reasoning,
+				input: model.input,
+				cost: model.cost,
+				contextWindow: model.contextWindow,
+				maxTokens: model.maxTokens,
+				baseUrl: model.baseUrl,
+			},
+		],
+	});
 
 	const session = new AgentSession({
 		agent,
 		sessionManager,
 		settingsManager,
 		cwd: tempDir,
-		modelRegistry,
+		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: options.baseToolsOverride,
 	});
@@ -429,18 +459,18 @@ function createHarnessWithResourceLoader(
 	};
 }
 
-export function createHarness(options: HarnessOptions = {}): Harness {
+export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	if (options.extensionFactories?.length) {
 		throw new Error("createHarness does not support extensionFactories. Use createHarnessWithExtensions().");
 	}
 
 	const tempDir = createTempDir();
-	return createHarnessWithResourceLoader(options, options.resourceLoader ?? createTestResourceLoader(), tempDir);
+	return await createHarnessWithResourceLoader(options, options.resourceLoader ?? createTestResourceLoader(), tempDir);
 }
 
 export async function createHarnessWithExtensions(options: HarnessOptions = {}): Promise<Harness> {
 	const tempDir = createTempDir();
 	const extensionsResult = await createTestExtensionsResult(options.extensionFactories ?? [], tempDir);
 	const resourceLoader = options.resourceLoader ?? createTestResourceLoader({ extensionsResult });
-	return createHarnessWithResourceLoader(options, resourceLoader, tempDir);
+	return await createHarnessWithResourceLoader(options, resourceLoader, tempDir);
 }

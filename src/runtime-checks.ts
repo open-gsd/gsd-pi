@@ -9,7 +9,7 @@ import { delimiter, join } from 'path'
  * `engines.node` in package.json — see test
  * `loader MIN_NODE_VERSION matches package.json engines field`.
  */
-export const MIN_NODE_VERSION = '22.18.0'
+export const MIN_NODE_VERSION = '22.19.0'
 export const MIN_NODE_MAJOR = Number(MIN_NODE_VERSION.split('.')[0])
 
 function parseNodeVersion(version: string): [number, number, number] {

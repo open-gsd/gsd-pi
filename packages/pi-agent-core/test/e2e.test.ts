@@ -7,12 +7,13 @@ import {
 	fauxToolCall,
 	type Model,
 	registerFauxProvider,
+	streamSimple,
 	type ToolResultMessage,
 	type UserMessage,
-} from "@earendil-works/pi-ai";
+} from "@gsd/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
-import { Agent, type AgentEvent } from "../src/index.ts";
-import { calculateTool } from "./utils/calculate.ts";
+import { Agent, type AgentEvent } from "../src/index.js";
+import { calculateTool } from "./utils/calculate.js";
 
 const registrations: FauxProviderRegistration[] = [];
 
@@ -37,6 +38,7 @@ afterEach(() => {
 
 async function basicPrompt(model: Model<string>) {
 	const agent = new Agent({
+		streamFn: streamSimple,
 		initialState: {
 			systemPrompt: "You are a helpful assistant. Keep your responses concise.",
 			model,
@@ -48,17 +50,19 @@ async function basicPrompt(model: Model<string>) {
 	await agent.prompt("What is 2+2? Answer with just the number.");
 
 	expect(agent.state.isStreaming).toBe(false);
-	expect(agent.state.messages.length).toBe(2);
-	expect(agent.state.messages[0].role).toBe("user");
-	expect(agent.state.messages[1].role).toBe("assistant");
+	expect(agent.state.messages.length).toBe(3);
+	expect(agent.state.messages[0].role).toBe("system");
+	expect(agent.state.messages[1].role).toBe("user");
+	expect(agent.state.messages[2].role).toBe("assistant");
 
-	const assistantMessage = agent.state.messages[1];
+	const assistantMessage = agent.state.messages[2];
 	if (assistantMessage.role !== "assistant") throw new Error("Expected assistant message");
 	expect(getTextContent(assistantMessage)).toContain("4");
 }
 
 async function toolExecution(model: Model<string>) {
 	const agent = new Agent({
+		streamFn: streamSimple,
 		initialState: {
 			systemPrompt: "You are a helpful assistant. Always use the calculator tool for math.",
 			model,
@@ -98,6 +102,7 @@ async function toolExecution(model: Model<string>) {
 
 async function abortExecution(model: Model<string>) {
 	const agent = new Agent({
+		streamFn: streamSimple,
 		initialState: {
 			systemPrompt: "You are a helpful assistant.",
 			model,
@@ -125,6 +130,7 @@ async function abortExecution(model: Model<string>) {
 
 async function stateUpdates(model: Model<string>) {
 	const agent = new Agent({
+		streamFn: streamSimple,
 		initialState: {
 			systemPrompt: "You are a helpful assistant.",
 			model,
@@ -152,11 +158,12 @@ async function stateUpdates(model: Model<string>) {
 	expect(events.indexOf("message_end")).toBeLessThan(events.lastIndexOf("agent_end"));
 
 	expect(agent.state.isStreaming).toBe(false);
-	expect(agent.state.messages.length).toBe(2);
+	expect(agent.state.messages.length).toBe(3);
 }
 
 async function multiTurnConversation(model: Model<string>) {
 	const agent = new Agent({
+		streamFn: streamSimple,
 		initialState: {
 			systemPrompt: "You are a helpful assistant.",
 			model,
@@ -166,12 +173,12 @@ async function multiTurnConversation(model: Model<string>) {
 	});
 
 	await agent.prompt("My name is Alice.");
-	expect(agent.state.messages.length).toBe(2);
+	expect(agent.state.messages.length).toBe(3);
 
 	await agent.prompt("What is my name?");
-	expect(agent.state.messages.length).toBe(4);
+	expect(agent.state.messages.length).toBe(5);
 
-	const lastMessage = agent.state.messages[3];
+	const lastMessage = agent.state.messages[4];
 	if (lastMessage.role !== "assistant") throw new Error("Expected assistant message");
 	expect(getTextContent(lastMessage).toLowerCase()).toContain("alice");
 }
@@ -238,6 +245,7 @@ describe("Agent integration with faux provider", () => {
 		faux.setResponses([fauxAssistantMessage([fauxThinking("step by step"), fauxText("4")])]);
 
 		const agent = new Agent({
+			streamFn: streamSimple,
 			initialState: {
 				systemPrompt: "You are a helpful assistant.",
 				model: faux.getModel(),
@@ -248,7 +256,7 @@ describe("Agent integration with faux provider", () => {
 
 		await agent.prompt("What is 2+2?");
 
-		const assistantMessage = agent.state.messages[1];
+		const assistantMessage = agent.state.messages[2];
 		if (assistantMessage?.role !== "assistant") throw new Error("Expected assistant message");
 		expect(assistantMessage.content).toEqual([
 			{ type: "thinking", thinking: "step by step" },
@@ -262,6 +270,7 @@ describe("Agent.continue() with faux provider", () => {
 		it("throws when no messages in context", async () => {
 			const faux = createFauxRegistration();
 			const agent = new Agent({
+				streamFn: streamSimple,
 				initialState: {
 					systemPrompt: "Test",
 					model: faux.getModel(),
@@ -275,6 +284,7 @@ describe("Agent.continue() with faux provider", () => {
 			const faux = createFauxRegistration();
 			const model = faux.getModel();
 			const agent = new Agent({
+				streamFn: streamSimple,
 				initialState: {
 					systemPrompt: "Test",
 					model,
@@ -309,6 +319,7 @@ describe("Agent.continue() with faux provider", () => {
 			const faux = createFauxRegistration();
 			faux.setResponses([fauxAssistantMessage("HELLO WORLD")]);
 			const agent = new Agent({
+				streamFn: streamSimple,
 				initialState: {
 					systemPrompt: "You are a helpful assistant. Follow instructions exactly.",
 					model: faux.getModel(),
@@ -343,6 +354,7 @@ describe("Agent.continue() with faux provider", () => {
 			const model = faux.getModel();
 			faux.setResponses([fauxAssistantMessage("The answer is 8.")]);
 			const agent = new Agent({
+				streamFn: streamSimple,
 				initialState: {
 					systemPrompt:
 						"You are a helpful assistant. After getting a calculation result, state the answer clearly.",

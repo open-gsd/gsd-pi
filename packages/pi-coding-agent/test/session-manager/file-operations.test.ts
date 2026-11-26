@@ -1,9 +1,24 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { constants as bufferConstants } from "buffer";
+import {
+	appendFileSync,
+	chmodSync,
+	closeSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+	writeSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AssistantMessage, BashExecutionMessage } from "../../src/core/messages.ts";
-import { CURRENT_SESSION_VERSION, findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
+import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.js";
+
+const HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -16,6 +31,19 @@ describe("loadEntriesFromFile", () => {
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
+
+	function writeSessionHeader(file: string, cwd: string, id: string, prefix = ""): void {
+		writeFileSync(
+			file,
+			`${prefix}${JSON.stringify({
+				type: "session",
+				version: 3,
+				id,
+				timestamp: "2025-01-01T00:00:00Z",
+				cwd,
+			})}\n`,
+		);
+	}
 
 	it("returns empty array for non-existent file", () => {
 		const entries = loadEntriesFromFile(join(tempDir, "nonexistent.jsonl"));
@@ -63,6 +91,102 @@ describe("loadEntriesFromFile", () => {
 		);
 		const entries = loadEntriesFromFile(file);
 		expect(entries).toHaveLength(2);
+	});
+
+	it("adds a newline after an unterminated valid record", () => {
+		const file = join(tempDir, "unterminated.jsonl");
+		const content =
+			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}';
+		writeFileSync(file, content);
+
+		expect(loadEntriesFromFile(file)).toHaveLength(2);
+		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
+	});
+
+	it("adds a newline after an unterminated malformed final fragment", () => {
+		const file = join(tempDir, "malformed-tail.jsonl");
+		const content =
+			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' + '{"type":"message"';
+		writeFileSync(file, content);
+
+		expect(loadEntriesFromFile(file)).toHaveLength(1);
+		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
+	});
+
+	it("does not modify an unterminated non-session file", () => {
+		const file = join(tempDir, "invalid.jsonl");
+		const content = '{"type":"message","id":"1"}';
+		writeFileSync(file, content);
+
+		expect(loadEntriesFromFile(file)).toEqual([]);
+		expect(readFileSync(file, "utf8")).toBe(content);
+	});
+
+	it.each([
+		["leading blank lines", "\n  \n", "leading-blank"],
+		["leading malformed lines", "not json\n{broken json\n", "leading-malformed"],
+		["a multi-buffer header", "", "a".repeat(8192)],
+	])("reads cwd from a session with %s", (_description, prefix, sessionId) => {
+		const file = join(tempDir, "header.jsonl");
+		const storedCwd = join(tempDir, "stored-project");
+		writeSessionHeader(file, storedCwd, sessionId, prefix);
+
+		const sessionManager = SessionManager.open(file, tempDir);
+		expect(sessionManager.getSessionId()).toBe(sessionId);
+		expect(sessionManager.getCwd()).toBe(storedCwd);
+	});
+
+	it("opens compatible sessions beyond the discovery scan limit", () => {
+		const storedCwd = join(tempDir, "stored-project");
+		const overrideCwd = join(tempDir, "override-project");
+		const cases = [
+			{ name: "large-header", id: "a".repeat(HEADER_SCAN_LIMIT_BYTES + 1), prefix: "" },
+			{
+				name: "large-prefix",
+				id: "large-prefix",
+				prefix: `${"x".repeat(HEADER_SCAN_LIMIT_BYTES + 1)}\n`,
+			},
+		];
+
+		for (const { name, id, prefix } of cases) {
+			const file = join(tempDir, `${name}.jsonl`);
+			writeSessionHeader(file, storedCwd, id, prefix);
+			for (const cwdOverride of [undefined, overrideCwd]) {
+				const sessionManager = SessionManager.open(file, tempDir, cwdOverride);
+				expect(sessionManager.getSessionId()).toBe(id);
+				expect(sessionManager.getCwd()).toBe(cwdOverride ?? storedCwd);
+			}
+		}
+	});
+
+	it("opens session files larger than Node's max string length", () => {
+		const file = join(tempDir, "large.jsonl");
+		writeFileSync(
+			file,
+			'{"type":"session","version":3,"id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n',
+		);
+
+		const fd = openSync(file, "r+");
+		try {
+			const newline = Buffer.from("\n");
+			const stride = 16 * 1024 * 1024;
+			for (let offset = stride; offset <= bufferConstants.MAX_STRING_LENGTH + stride; offset += stride) {
+				writeSync(fd, newline, 0, newline.length, offset);
+			}
+		} finally {
+			closeSync(fd);
+		}
+
+		appendFileSync(
+			file,
+			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n',
+		);
+
+		const sessionManager = SessionManager.open(file, tempDir);
+		expect(sessionManager.getSessionId()).toBe("abc");
+		expect(sessionManager.getEntries()).toHaveLength(1);
+		expect(sessionManager.buildSessionContext().messages).toEqual([{ role: "user", content: "hi", timestamp: 1 }]);
 	});
 });
 
@@ -125,6 +249,111 @@ describe("findMostRecentSession", () => {
 
 		expect(findMostRecentSession(tempDir)).toBe(valid);
 	});
+
+	it("skips oversized corrupt files and returns a valid session", () => {
+		const invalid = join(tempDir, "oversized.jsonl");
+		const valid = join(tempDir, "valid.jsonl");
+		writeFileSync(invalid, "x".repeat(HEADER_SCAN_LIMIT_BYTES + 1));
+		writeFileSync(valid, '{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
+
+		expect(findMostRecentSession(tempDir)).toBe(valid);
+	});
+
+	it("filters most recent session by cwd", async () => {
+		const projectA = join(tempDir, "project-a");
+		const projectB = join(tempDir, "project-b");
+		const fileA = join(tempDir, "a.jsonl");
+		const fileB = join(tempDir, "b.jsonl");
+
+		writeFileSync(
+			fileA,
+			`${JSON.stringify({ type: "session", id: "a", timestamp: "2025-01-01T00:00:00Z", cwd: projectA })}\n`,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		writeFileSync(
+			fileB,
+			`${JSON.stringify({ type: "session", id: "b", timestamp: "2025-01-01T00:00:00Z", cwd: projectB })}\n`,
+		);
+
+		expect(findMostRecentSession(tempDir, projectA)).toBe(fileA);
+		expect(findMostRecentSession(tempDir, projectB)).toBe(fileB);
+	});
+});
+
+describe("SessionManager custom flat session directory", () => {
+	let tempDir: string;
+	let projectA: string;
+	let projectB: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
+		projectA = join(tempDir, "project-a");
+		projectB = join(tempDir, "project-b");
+		mkdirSync(projectA, { recursive: true });
+		mkdirSync(projectB, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function createPersistedSession(cwd: string, label: string): string {
+		const session = SessionManager.create(cwd, tempDir);
+		session.appendMessage({ role: "user", content: label, timestamp: Date.now() });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: `reply to ${label}` }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) {
+			throw new Error("Expected persisted session file");
+		}
+		return sessionFile;
+	}
+
+	it("scopes current-folder APIs by cwd while listing all flat sessions", async () => {
+		const sessionA = createPersistedSession(projectA, "from A");
+		await new Promise((r) => setTimeout(r, 10));
+		const sessionB = createPersistedSession(projectB, "from B");
+
+		const currentA = await SessionManager.list(projectA, tempDir);
+		expect(currentA.map((session) => session.path)).toEqual([sessionA]);
+
+		const all = await SessionManager.listAll(tempDir);
+		expect(new Set(all.map((session) => session.path))).toEqual(new Set([sessionA, sessionB]));
+
+		const continuedA = SessionManager.continueRecent(projectA, tempDir);
+		expect(continuedA.getSessionFile()).toBe(sessionA);
+	});
+
+	it("rejects a cancelled session listing", async () => {
+		createPersistedSession(projectA, "from A");
+		createPersistedSession(projectB, "from B");
+		const controller = new AbortController();
+		const listing = SessionManager.listAll(
+			tempDir,
+			(_loaded, _total, partialSessions) => {
+				if (partialSessions) controller.abort();
+			},
+			controller.signal,
+		);
+
+		await expect(listing).rejects.toMatchObject({ name: "AbortError" });
+		await expect(SessionManager.listAll(undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+	});
 });
 
 describe("SessionManager.setSessionFile with corrupted files", () => {
@@ -159,28 +388,27 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		expect(header.id).toBe(sm.getSessionId());
 	});
 
-	it("truncates and rewrites file without valid header", () => {
+	it("throws and preserves non-empty file without valid header", () => {
 		const noHeaderFile = join(tempDir, "no-header.jsonl");
-		// File with messages but no session header (corrupted state)
-		writeFileSync(
-			noHeaderFile,
-			'{"type":"message","id":"abc","parentId":"orphaned","timestamp":"2025-01-01T00:00:00Z","message":{"role":"assistant","content":"test"}}\n',
+		const originalContent =
+			'{"type":"message","id":"abc","parentId":"orphaned","timestamp":"2025-01-01T00:00:00Z","message":{"role":"assistant","content":"test"}}\n';
+		writeFileSync(noHeaderFile, originalContent);
+
+		expect(() => SessionManager.open(noHeaderFile, tempDir)).toThrow(
+			`Session file is not a valid pi session: ${noHeaderFile}`,
 		);
+		expect(readFileSync(noHeaderFile, "utf-8")).toBe(originalContent);
+	});
 
-		const sm = SessionManager.open(noHeaderFile, tempDir);
+	it("throws and preserves non-session JSONL files", () => {
+		const nonSessionFile = join(tempDir, "not-a-session.log");
+		const originalContent = '{"type":"event","data":"not a session"}\n';
+		writeFileSync(nonSessionFile, originalContent);
 
-		// Should have created a new session with valid header
-		expect(sm.getSessionId()).toBeTruthy();
-		expect(sm.getHeader()).toBeTruthy();
-		expect(sm.getHeader()?.type).toBe("session");
-
-		// File should now contain only a valid header (old content truncated)
-		const content = readFileSync(noHeaderFile, "utf-8");
-		const lines = content.trim().split("\n").filter(Boolean);
-		expect(lines.length).toBe(1);
-		const header = JSON.parse(lines[0]);
-		expect(header.type).toBe("session");
-		expect(header.id).toBe(sm.getSessionId());
+		expect(() => SessionManager.open(nonSessionFile, tempDir)).toThrow(
+			`Session file is not a valid pi session: ${nonSessionFile}`,
+		);
+		expect(readFileSync(nonSessionFile, "utf-8")).toBe(originalContent);
 	});
 
 	it("preserves explicit session file path when recovering from corrupted file", () => {
@@ -193,306 +421,124 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		expect(sm.getSessionFile()).toBe(explicitPath);
 	});
 
-	it("subsequent loads of recovered file work correctly", () => {
-		const corruptedFile = join(tempDir, "corrupted.jsonl");
-		writeFileSync(corruptedFile, "garbage content\n");
+	it("subsequent loads of initialized empty file work correctly", () => {
+		const emptyFile = join(tempDir, "empty.jsonl");
+		writeFileSync(emptyFile, "");
 
-		// First open recovers the file
-		const sm1 = SessionManager.open(corruptedFile, tempDir);
+		const sm1 = SessionManager.open(emptyFile, tempDir);
 		const sessionId = sm1.getSessionId();
 
-		// Second open should load the recovered file successfully
-		const sm2 = SessionManager.open(corruptedFile, tempDir);
+		const sm2 = SessionManager.open(emptyFile, tempDir);
 		expect(sm2.getSessionId()).toBe(sessionId);
 		expect(sm2.getHeader()?.type).toBe("session");
 	});
 });
 
-describe("SessionManager.openExisting", () => {
+describe("SessionManager session file creation", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `session-exact-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "pi-session-persist-"));
 	});
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	function sessionHeader(id: string, cwd: string, version = CURRENT_SESSION_VERSION): string {
-		return JSON.stringify({
-			type: "session",
-			version: version === 1 ? undefined : version,
-			id,
-			timestamp: "2026-11-03T00:00:00.000Z",
-			cwd,
-		});
-	}
+	it("does not create a file for a session with only setup entries", () => {
+		const session = SessionManager.create(tempDir, tempDir);
+		session.appendModelChange("anthropic", "claude-sonnet-4-5");
+		session.appendThinkingLevelChange("off");
 
-	function expectRejectedSwitchUnchanged(
-		file: string,
-		options: { expectedSessionId: string; expectedCwd: string },
-		error: RegExp,
-	): void {
-		const currentFile = join(tempDir, "current.jsonl");
-		const assistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "persist current session" }],
-			api: "openai-completions",
-			provider: "openai",
-			model: "test",
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: 2,
-		} satisfies AssistantMessage;
-		writeFileSync(currentFile, [
-			sessionHeader("session-current", tempDir),
-			JSON.stringify({
-				type: "message",
-				id: "current-assistant",
-				parentId: null,
-				timestamp: "2026-11-03T00:00:01.000Z",
-				message: assistantMessage,
-			}),
-		].join("\n") + "\n");
-		const current = SessionManager.openExisting(currentFile, {
-			expectedSessionId: "session-current",
-			expectedCwd: tempDir,
-		});
-		current.addExternalUsage("child", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.1 });
-		const snapshot = () => ({
-			file: current.getSessionFile(),
-			id: current.getSessionId(),
-			cwd: current.getCwd(),
-			header: current.getHeader(),
-			entries: current.getEntries(),
-			leafId: current.getLeafId(),
-			branch: current.getBranch(),
-			usage: current.getUsageTotals({ includeExternalUsage: true }),
-		});
-		const before = snapshot();
-		const original = readFileSync(currentFile, "utf8");
-
-		expect(() => current.setSessionFile(file, options)).toThrow(error);
-		expect(snapshot()).toEqual(before);
-		expect(readFileSync(currentFile, "utf8")).toBe(original);
-
-		// The same reporter must remain valid after validation rejects a session switch.
-		const usageBeforeReport = current.getUsageTotals({ includeExternalUsage: true });
-		current.addExternalUsage("child", { input: 14, output: 7, cacheRead: 2, cacheWrite: 0, cost: 0.2 });
-		const usageAfterReport = current.getUsageTotals({ includeExternalUsage: true });
-		expect(usageAfterReport).toEqual({
-			input: usageBeforeReport.input + 4,
-			output: usageBeforeReport.output + 2,
-			cacheRead: usageBeforeReport.cacheRead + 2,
-			cacheWrite: usageBeforeReport.cacheWrite,
-			cost: usageBeforeReport.cost + 0.1,
-		});
-
-		// A later write must still target the original session, not the rejected file.
-		current.appendMessage({ role: "user", content: "after rejected switch", timestamp: 3 });
-		expect(loadEntriesFromFile(currentFile).at(-1)).toMatchObject({
-			type: "message", message: { role: "user", content: "after rejected switch" },
-		});
-		expect(() => SessionManager.openExisting(currentFile, {
-			expectedSessionId: "session-current",
-			expectedCwd: tempDir,
-		})).not.toThrow();
-	}
-
-	it("opens the exact existing file only when identity and cwd match", () => {
-		const file = join(tempDir, "chosen session.jsonl");
-		const otherFile = join(tempDir, "other session.jsonl");
-		const id = "session-chosen";
-		writeFileSync(file, `${sessionHeader(id, tempDir)}\n`);
-		writeFileSync(otherFile, `${sessionHeader("session-other", tempDir)}\n`);
-
-		const session = SessionManager.openExisting(file, {
-			expectedSessionId: id,
-			expectedCwd: tempDir,
-		});
-
-		expect(session.getSessionFile()).toBe(file);
-		expect(session.getSessionId()).toBe(id);
-		expect(session.getCwd()).toBe(tempDir);
+		expect(existsSync(session.getSessionFile()!)).toBe(false);
 	});
 
-	it.each([2, CURRENT_SESSION_VERSION])("rejects duplicate IDs and parent cycles in v%i before migration", (version) => {
-		const cases: Array<[string, Array<[string, string | null]>, RegExp]> = [
-			["self-cycle", [["a", "a"], ["leaf", null]], /parent cycle/],
-			["multi-entry-cycle", [["a", "b"], ["b", "c"], ["c", "a"], ["leaf", null]], /parent cycle/],
-			["duplicate-id", [["a", null], ["a", null]], /duplicate entry ID/],
-		];
-		for (const [name, links, error] of cases) {
-			const file = join(tempDir, `${name}-v${version}.jsonl`);
-			const sessionDir = join(tempDir, `${name}-sessions`);
-			const options = { expectedSessionId: "session-chosen", expectedCwd: tempDir };
-			const original = [
-				sessionHeader(options.expectedSessionId, tempDir, version),
-				...links.map(([id, parentId]) => JSON.stringify({
-					type: "custom", id, parentId, timestamp: "2026-11-03T00:00:00.000Z", customType: "fixture",
-				})),
-			].join("\n");
-			writeFileSync(file, original);
+	// #10000: the first prompt must survive a first turn that never produces an assistant message
+	it("creates the file when the first user message is appended", () => {
+		const session = SessionManager.create(tempDir, tempDir);
+		session.appendModelChange("anthropic", "claude-sonnet-4-5");
+		session.appendMessage(userMsg("first question"));
 
-			expect(() => SessionManager.openExisting(file, { ...options, sessionDir })).toThrow(error);
-			expectRejectedSwitchUnchanged(file, options, error);
-			expect(existsSync(sessionDir)).toBe(false);
-			expect(readFileSync(file, "utf8")).toBe(original);
+		const file = session.getSessionFile()!;
+		expect(readSessionFileRoles(file)).toEqual(["session", "model_change", "user"]);
+		expect(SessionManager.open(file, tempDir).buildSessionContext().messages).toHaveLength(1);
+	});
+
+	it("appends later entries to the file without rewriting earlier ones", () => {
+		const session = SessionManager.create(tempDir, tempDir);
+		session.appendMessage(userMsg("first question"));
+		session.appendCustomEntry("preset-state", { name: "plan" });
+		session.appendMessage(assistantMsg("first answer"));
+
+		expect(readSessionFileRoles(session.getSessionFile()!)).toEqual(["session", "user", "custom", "assistant"]);
+	});
+
+	// #10166, #10661, #11460: a failed write must not leave later entries pointing to a missing parent
+	it("does not keep an entry in memory when writing it fails", () => {
+		const session = SessionManager.create(tempDir, tempDir);
+		const firstId = session.appendMessage(userMsg("first question"));
+		const file = session.getSessionFile()!;
+
+		chmodSync(file, 0o444);
+		expect(() => session.appendMessage(assistantMsg("lost answer"))).toThrow();
+		expect(session.getLeafId()).toBe(firstId);
+		expect(session.getEntries().map((entry) => entry.id)).toEqual([firstId]);
+
+		chmodSync(file, 0o644);
+		const secondId = session.appendMessage(assistantMsg("second answer"));
+		expect(session.getEntry(secondId)?.parentId).toBe(firstId);
+
+		const reopened = SessionManager.open(file, tempDir);
+		expect(reopened.getBranch().map((entry) => entry.id)).toEqual([firstId, secondId]);
+	});
+
+	it("does not keep an entry in memory when creating the file fails", () => {
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(sessionDir);
+		const session = SessionManager.create(tempDir, sessionDir);
+		const modelChangeId = session.appendModelChange("anthropic", "claude-sonnet-4-5");
+
+		chmodSync(sessionDir, 0o555);
+		try {
+			expect(() => session.appendMessage(userMsg("first question"))).toThrow();
+		} finally {
+			chmodSync(sessionDir, 0o755);
 		}
+		expect(session.getLeafId()).toBe(modelChangeId);
+		expect(session.getEntries().map((entry) => entry.id)).toEqual([modelChangeId]);
+
+		session.appendMessage(userMsg("second question"));
+		expect(readSessionFileRoles(session.getSessionFile()!)).toEqual(["session", "model_change", "user"]);
+	});
+});
+
+describe("SessionManager listing abort", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "session-list-abort-"));
 	});
 
-	it("accepts forward parent references and branches sharing an ancestor", () => {
-		const file = join(tempDir, "forward-parents.jsonl");
-		const links: Array<[string, string | null]> = [["left", "root"], ["root", null], ["right", "root"]];
-		const original = [
-			sessionHeader("session-chosen", tempDir),
-			...links.map(([id, parentId]) => JSON.stringify({
-				type: "custom", id, parentId, timestamp: "2026-11-03T00:00:00.000Z", customType: "fixture",
-			})),
-		].join("\n");
-		writeFileSync(file, original);
-
-		const session = SessionManager.openExisting(file, {
-			expectedSessionId: "session-chosen", expectedCwd: tempDir,
-		});
-		expect(session.getBranch("left").map((entry) => entry.id)).toEqual(["root", "left"]);
-		expect(session.getBranch().map((entry) => entry.id)).toEqual(["root", "right"]);
-		expect(readFileSync(file, "utf8")).toBe(original);
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it.each([1, 2, CURRENT_SESSION_VERSION])("opens native bashExecution messages and preserves v%i migration", (version) => {
-		for (const exitCode of [0, undefined]) {
-			const file = join(tempDir, `bash-v${version}-${exitCode ?? "cancelled"}.jsonl`);
-			const bashMessage = {
-				role: "bashExecution",
-				command: "printf hello",
-				output: "hello",
-				exitCode,
-				cancelled: exitCode === undefined,
-				truncated: true,
-				fullOutputPath: join(tempDir, "bash-output.txt"),
-				excludeFromContext: true,
-				timestamp: 2,
-			} satisfies BashExecutionMessage;
-			const noteMessage = {
-				role: version < 3 ? "hookMessage" : "custom",
-				customType: "fixture", content: "note", display: true, timestamp: 1,
-			};
-			writeFileSync(file, [
-				sessionHeader("session-chosen", tempDir, version),
-				JSON.stringify({
-					type: "message", timestamp: "2026-11-03T00:00:00.000Z", message: noteMessage,
-					...(version >= 2 ? { id: "note", parentId: null } : {}),
-				}),
-				JSON.stringify({
-					type: "message", timestamp: "2026-11-03T00:00:01.000Z", message: bashMessage,
-					...(version >= 2 ? { id: "bash", parentId: "note" } : {}),
-				}),
-			].join("\n"));
-
-			const session = SessionManager.openExisting(file, {
-				expectedSessionId: "session-chosen", expectedCwd: tempDir,
-			});
-			const branch = session.getBranch();
-			expect(session.getSessionFile()).toBe(file);
-			expect(session.getHeader()?.version).toBe(CURRENT_SESSION_VERSION);
-			expect(branch.map((entry) => entry.type === "message" ? entry.message : undefined)).toEqual([
-				{ ...noteMessage, role: "custom" }, bashMessage,
-			]);
-			expect(branch[0].id).toBeTruthy();
-			expect(branch[0].parentId).toBeNull();
-			expect(branch[1].id).toBeTruthy();
-			expect(branch[1].id).not.toBe(branch[0].id);
-			expect(branch[1].parentId).toBe(branch[0].id);
-			if (version >= 2) expect(branch.map((entry) => entry.id)).toEqual(["note", "bash"]);
-			expect(loadEntriesFromFile(file)).toEqual([session.getHeader(), ...session.getEntries()]);
+	// #11956
+	it("does not crash when aborted after a file that is not a session was skipped", async () => {
+		// Larger than one 64 KB stream chunk, so the file is still being read when the listing skips it.
+		writeFileSync(join(tempDir, "other.jsonl"), `{"type":"other"}\n${"x".repeat(1024 * 1024)}\n`);
+		const controller = new AbortController();
+		const uncaught: unknown[] = [];
+		const onUncaught = (error: unknown) => uncaught.push(error);
+		process.on("uncaughtException", onUncaught);
+		try {
+			expect(await SessionManager.listAll(tempDir, undefined, controller.signal)).toEqual([]);
+			// The session picker aborts its loads when it closes, after files were skipped.
+			controller.abort();
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		} finally {
+			process.off("uncaughtException", onUncaught);
 		}
-	});
-
-	it("does not create or rewrite missing or corrupt session files", () => {
-		const legacyHeader = JSON.stringify({
-			type: "session", id: "session-chosen", cwd: tempDir, timestamp: "2026-11-03T00:00:00.000Z",
-		});
-		const cases: Array<[string, string | undefined]> = [
-			["missing", undefined],
-			["empty", ""],
-			["invalid-header", JSON.stringify({ type: "message", id: "orphan" })],
-			["malformed-entry", `${sessionHeader("session-chosen", tempDir)}\n{invalid json}`],
-			["unknown-entry", `${legacyHeader}\n${JSON.stringify({ type: "future_entry", id: "entry", parentId: null, timestamp: "2026-11-03T00:00:00.000Z" })}`],
-			["corrupt-message", `${legacyHeader}\n${JSON.stringify({
-				type: "message", id: "entry", parentId: null, timestamp: "2026-11-03T00:00:00.000Z",
-			})}`],
-			["corrupt-message-content", `${legacyHeader}\n${JSON.stringify({
-				type: "message", id: "entry", parentId: null, timestamp: "2026-11-03T00:00:00.000Z",
-				message: { role: "user", content: null },
-			})}`],
-			["corrupt-bash-message", `${legacyHeader}\n${JSON.stringify({
-				type: "message", timestamp: "2026-11-03T00:00:00.000Z",
-				message: { role: "bashExecution", content: "not a native bash message" },
-			})}`],
-			["corrupt-bash-exit-code", `${legacyHeader}\n${JSON.stringify({
-				type: "message", timestamp: "2026-11-03T00:00:00.000Z",
-				message: {
-					role: "bashExecution", command: "printf hello", output: "hello", exitCode: null,
-					cancelled: true, truncated: false, timestamp: 1,
-				},
-			})}`],
-			["future-version", JSON.stringify({
-				type: "session", version: CURRENT_SESSION_VERSION + 1, id: "session-chosen",
-				cwd: tempDir, timestamp: "2026-11-03T00:00:00.000Z",
-			})],
-		];
-
-		for (const [name, original] of cases) {
-			const file = join(tempDir, `${name}.jsonl`);
-			const sessionDir = join(tempDir, `${name}-sessions`);
-			if (original !== undefined) writeFileSync(file, original);
-
-			expect(() => SessionManager.openExisting(file, {
-				expectedSessionId: "session-chosen",
-				expectedCwd: tempDir,
-				sessionDir,
-			})).toThrow(/Cannot resume exact GSD session/);
-			expectRejectedSwitchUnchanged(file, {
-				expectedSessionId: "session-chosen", expectedCwd: tempDir,
-			}, /Cannot resume exact GSD session/);
-			expect(existsSync(sessionDir)).toBe(false);
-			if (original === undefined) {
-				expect(existsSync(file)).toBe(false);
-			} else {
-				expect(readFileSync(file, "utf8")).toBe(original);
-			}
-		}
-	});
-
-	it("rejects a replaced identity or mismatched cwd without rewriting the file", () => {
-		const file = join(tempDir, "replaced.jsonl");
-		const original = `${sessionHeader("session-other", tempDir)}\n`;
-		writeFileSync(file, original);
-
-		expect(() => SessionManager.openExisting(file, {
-			expectedSessionId: "session-chosen",
-			expectedCwd: tempDir,
-		})).toThrow(/session identity did not match/);
-		expect(() => SessionManager.openExisting(file, {
-			expectedSessionId: "session-other",
-			expectedCwd: join(tempDir, "elsewhere"),
-		})).toThrow(/working directory did not match/);
-		expectRejectedSwitchUnchanged(file, {
-			expectedSessionId: "session-chosen", expectedCwd: tempDir,
-		}, /session identity did not match/);
-		expectRejectedSwitchUnchanged(file, {
-			expectedSessionId: "session-other", expectedCwd: join(tempDir, "elsewhere"),
-		}, /working directory did not match/);
-		expect(readFileSync(file, "utf8")).toBe(original);
+		expect(uncaught).toEqual([]);
 	});
 });

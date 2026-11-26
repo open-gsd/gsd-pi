@@ -3,8 +3,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { convertToPng } from "../src/utils/image-convert.ts";
-import { formatDimensionNote, resizeImage } from "../src/utils/image-resize.ts";
+import { convertToPng, loadPngTranscoder } from "../src/utils/image-convert.js";
+import { formatDimensionNote, resizeImage } from "../src/utils/image-resize.js";
+import { resizeImageInProcess } from "../src/utils/image-resize-core.js";
+import { loadPhoton } from "../src/utils/photon.js";
 
 // Small 2x2 red PNG image (base64) - generated with ImageMagick
 const TINY_PNG =
@@ -14,6 +16,9 @@ const TINY_PNG =
 const TINY_JPEG =
 	"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAACAAIDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAVAQEBAAAAAAAAAAAAAAAAAAAGCf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AD3VTB3/2Q==";
 
+const TINY_JPEG_2X1 =
+	"/9j/4AAQSkZJRgABAgAAAQABAAD/wAARCAABAAIDAREAAhEBAxEB/9sAQwADAgIDAgIDAwMDBAMDBAUIBQUEBAUKBwcGCAwKDAwLCgsLDQ4SEA0OEQ4LCxAWEBETFBUVFQwPFxgWFBgSFBUU/9sAQwEDBAQFBAUJBQUJFA0LDRQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD4H8Q/8h/Uv+vmX/0M1/o1wJ/ySWU/9g1D/wBNRMOM/wDkp8z/AOv9b/05I//Z";
+
 // 100x100 gray PNG
 const MEDIUM_PNG_100x100 =
 	"iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAAAAABVicqIAAAAAmJLR0QA/4ePzL8AAAAHdElNRQfqAQ4AMzkN2iH/AAAAP0lEQVRo3u3NQQEAAAQEMASXXYrz2gqst/Lm4ZBIJBKJRCKRSCQSiUQikUgkEolEIpFIJBKJRCKRSCQSiSTsAP1cAUZeKtreAAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDI2LTAxLTE0VDAwOjUxOjU3KzAwOjAw6crMeAAAACV0RVh0ZGF0ZTptb2RpZnkAMjAyNi0wMS0xNFQwMDo1MTo1NyswMDowMJiXdMQAAAAodEVYdGRhdGU6dGltZXN0YW1wADIwMjYtMDEtMTRUMDA6NTE6NTcrMDA6MDDPglUbAAAAAElFTkSuQmCC";
@@ -22,8 +27,54 @@ const MEDIUM_PNG_100x100 =
 const LARGE_PNG_200x200 =
 	"iVBORw0KGgoAAAANSUhEUgAAAMgAAADIEAIAAAByquWKAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGYktHRP///////wlY99wAAAAHdElNRQfqAQ4AMzqU03BFAAAEEElEQVR42u3dvWqUURSF4XXMRAyIhSAWQvwnWtjaWusFx9bW1kKD/wELESxEiBjDjJdwysOC57mCXW32+zGcGbtdACpsdi+T8Xz1GABzm91xMl6sHgNgblzcT/Y+rh4DYG6cv0/2H64eA2BOEgI1fHQHaoyzbXIwVo8BMCcJgRqSEKgxft9Lrn5aPQbA3Ph1klw7Wj0GwJwkBGpYWECN8fMiub63egyAORcWUMPCAmqMH3eTG59XjwEwN76/S24+Wj0GwJwkBGpYWECN8e1fcmuzegyAORcWUMPCAmqM09vJ4dfVYwDMjS9vkzuPV48BMCcJgRqeSAZqjA/nyYP91WMAzElCoIYkBGqMk8Pk6HT1GABzm+3L5JIkBApIQqCGj+5AjfHmb/Lk8uoxAOYkIVBDEgI1LCygxmZ7nFyShEABFxZQw8ICaozXf5KnV1aPATDnwgJqWFhADQsLqOFnDUANFxZQw8ICaoxXZ8mzg9VjAMy5sIAaFhZQw3tYQA1/QgHUkIRADUkI1JCEQA1JCNSQhEANFxZQwzcsoIYkBGpIQqCGJARqSEKghiQEalhYQA1/QgHUcGEBNSwsoIYkBGq4sIAaFhZQw8ICaviGBdRwYQE1LCyghiQEariwgBoWFlDDe1hADS+OAjUkIVBDEgI1JCFQQxICNSQhUMOFBdTwDQuoIQmBGpIQqCEJgRqSEKghCYEaFhZQw4ujQA0XFlDDwgJqSEKghgsLqGFhATUsLKCGb1hADRcWUMPCAmpIQqCGCwuoYWEBNbyHBdTw4ihQQxICNSQhUEMSAjUkIVBDEgI1XFhADd+wgBqSEKghCYEakhCoIQmBGpIQqGFhATW8OArUcGEBNSwsoIYkBGq4sIAaFhZQw8ICaviGBdRwYQE1LCyghiQEariwgBoWFlDDe1hADS+OAjUkIVBDEgI1JCFQQxICNSQhUMOFBdTwDQuoIQmBGpIQqCEJgRqSEKghCYEa49lB8ups9RgAc14cBWpIQqCGhQXUkIRADRcWUMPCAmqMp1eS139WjwEw5xsWUEMSAjUsLKCGJARquLCAGhYWUGM8uZy8+bt6DIA5L44CNSQhUMMTyUCNcXSanByuHgNgThICNSQhUGM82E8+nK8eA2DOzxqAGpIQqDHuPE6+vF09BsDcOPyanN5ePQbAnCQEavgdFlBj3Nok3/6tHgNgzoujQA1JCNQYNx8l39+tHgNgbtz4nPy4u3oMgDlJCNSwsIAa4/pe8vNi9RgAc37WANSQhECNce0o+XWyegyAuXH1U/L73uoxAOYkIVDDwgJqjIORnG1XjwEw508ogBqSEKgx9h8m5+9XjwEwN/Y+Jhf3V48BMCcJgRpjPE+2x6vHAJgbSbLbrR4DYO4/GqiSgXN+ksgAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDEtMTRUMDA6NTE6NTcrMDA6MDDpysx4AAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTAxLTE0VDAwOjUxOjU3KzAwOjAwmJd0xAAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wMS0xNFQwMDo1MTo1NyswMDowMM+CVRsAAAAASUVORK5CYII=";
 
+/** Photo-like JPEG: smooth gradients with light deterministic noise, so PNG compresses it poorly. */
+async function photoLikeJpeg(width: number, height: number): Promise<Uint8Array> {
+	const photon = await loadPhoton();
+	if (!photon) throw new Error("Photon not available");
+	const pixels = new Uint8Array(width * height * 4);
+	let seed = 1;
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+			const noise = seed % 6;
+			const i = (y * width + x) * 4;
+			pixels[i] = ((x / width) * 200 + noise) | 0;
+			pixels[i + 1] = ((y / height) * 200 + noise) | 0;
+			pixels[i + 2] = (128 + Math.sin(x / 30) * 60 + noise) | 0;
+			pixels[i + 3] = 255;
+		}
+	}
+	const image = new photon.PhotonImage(pixels, width, height);
+	try {
+		return image.get_bytes_jpeg(85);
+	} finally {
+		image.free();
+	}
+}
+
 function imageBytes(base64Data: string): Uint8Array {
 	return Buffer.from(base64Data, "base64");
+}
+
+function app1Segment(payload: Uint8Array): Buffer {
+	const segment = Buffer.alloc(payload.length + 4);
+	segment[0] = 0xff;
+	segment[1] = 0xe1;
+	segment.writeUInt16BE(payload.length + 2, 2);
+	segment.set(payload, 4);
+	return segment;
+}
+
+function jpegWithXmpBeforeOrientation(): string {
+	const jpeg = Buffer.from(TINY_JPEG_2X1, "base64");
+	const xmp = app1Segment(Buffer.from('http://ns.adobe.com/xap/1.0/\0<x:xmpmeta xmlns:x="adobe:ns:meta/"/>'));
+	const orientation6 = app1Segment(
+		Buffer.concat([
+			Buffer.from("Exif\0\0"),
+			Buffer.from("49492a0008000000010012010300010000000600000000000000", "hex"),
+		]),
+	);
+	return Buffer.concat([jpeg.subarray(0, 2), xmp, orientation6, jpeg.subarray(2)]).toString("base64");
 }
 
 describe("convertToPng", () => {
@@ -47,6 +98,23 @@ describe("convertToPng", () => {
 		expect(buffer[2]).toBe(0x4e); // 'N'
 		expect(buffer[3]).toBe(0x47); // 'G'
 	});
+
+	it("should apply EXIF orientation after an XMP APP1 segment", async () => {
+		const result = await convertToPng(jpegWithXmpBeforeOrientation(), "image/jpeg");
+
+		expect(result).not.toBeNull();
+		const png = Buffer.from(result!.data, "base64");
+		expect(png.readUInt32BE(16)).toBe(1);
+		expect(png.readUInt32BE(20)).toBe(2);
+	});
+});
+
+// Issue #10292: pi-tui uses this transcoder to show non-PNG images on Kitty-protocol terminals.
+it("loadPngTranscoder converts synchronously to oriented PNG data", async () => {
+	const transcoder = (await loadPngTranscoder())!;
+	const png = Buffer.from(transcoder(jpegWithXmpBeforeOrientation(), "image/jpeg")!, "base64");
+	expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1, 2]);
+	expect(transcoder(Buffer.from("not an image").toString("base64"), "image/jpeg")).toBeNull();
 });
 
 describe("resizeImage", () => {
@@ -123,6 +191,18 @@ describe("resizeImage", () => {
 		});
 
 		expect(result).toBeNull();
+	});
+
+	// Regression test for #11551: PNG was returned whenever it fit, even when JPEG was much smaller.
+	it("should pick JPEG over a larger PNG when resizing a photo", async () => {
+		const input = await photoLikeJpeg(1200, 800);
+		const result = await resizeImageInProcess(input, "image/jpeg", { maxWidth: 1000, maxHeight: 1000 });
+
+		expect(result).not.toBeNull();
+		expect(result!.wasResized).toBe(true);
+		expect(result!.mimeType).toBe("image/jpeg");
+		expect(result!.width).toBe(1000);
+		expect(result!.data.length).toBeLessThan(Math.ceil(input.byteLength / 3) * 4 * 2);
 	});
 
 	it("should handle JPEG input", async () => {

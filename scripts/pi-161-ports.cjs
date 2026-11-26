@@ -74,13 +74,16 @@ function portAgentCacheRetention(content) {
   if (!next.includes('public latencyMark?:')) {
     const withLatency = next.replace(
       '\tpublic cacheRetention?: CacheRetention;\n',
-      '\tpublic cacheRetention?: CacheRetention;\n\t/** Host timing sink. The v1.6.1 loop does not call this yet. */\n\tpublic latencyMark?: (phase: string, data?: Record<string, unknown>) => void;\n',
+      '\tpublic cacheRetention?: CacheRetention;\n\t/** Host timing sink. */\n\tpublic latencyMark?: (phase: string, data?: Record<string, unknown>) => void;\n',
     ).replace(
       '\tcacheRetention?: CacheRetention;\n\tthinkingBudgets?: ThinkingBudgets;',
       '\tcacheRetention?: CacheRetention;\n\tlatencyMark?: (phase: string, data?: Record<string, unknown>) => void;\n\tthinkingBudgets?: ThinkingBudgets;',
     ).replace(
       'this.cacheRetention = runtimeOptions.cacheRetention;\n',
       'this.cacheRetention = runtimeOptions.cacheRetention;\n\t\tthis.latencyMark = runtimeOptions.latencyMark;\n',
+    ).replace(
+      'cacheRetention: this.cacheRetention,\n',
+      'cacheRetention: this.cacheRetention,\n\t\t\tlatencyMark: this.latencyMark,\n',
     )
     applied = applied || withLatency !== next
     next = withLatency
@@ -383,13 +386,14 @@ function portThemeHighlight(content, overlayTheme) {
 }
 
 function portModelRegistryReadiness(content) {
-  if (content.includes('isProviderRequestReady(')) return { content, applied: false }
-  const anchor = '\tunregisterProvider(providerName: string): void {'
-  if (!content.includes(anchor)) return { content, applied: false }
-  return {
-    content: content.replace(
-      anchor,
-      `\tisProviderRequestReady(provider: string): boolean {
+  let next = content
+  let applied = false
+  if (!next.includes('isProviderRequestReady(')) {
+    const anchor = '\tunregisterProvider(providerName: string): void {'
+    if (next.includes(anchor)) {
+      next = next.replace(
+        anchor,
+        `\tisProviderRequestReady(provider: string): boolean {
 \t\treturn this.runtime.hasConfiguredAuth(provider);
 \t}
 
@@ -398,12 +402,102 @@ function portModelRegistryReadiness(content) {
 \t}
 
 \tunregisterProvider(providerName: string): void {`,
+      )
+      applied = true
+    }
+  }
+  if (!next.includes('static async create(')) {
+    const ctor = 'constructor(runtime: ModelRuntime) {\n\t\tthis.runtime = runtime;\n\t}'
+    if (next.includes(ctor)) {
+      next = next.replace(
+        ctor,
+        `${ctor}
+
+\t/** Host-compatible factory: AuthStorage + models.json path → ModelRuntime facade. */
+\tstatic async create(authStorage: import("./auth-storage.ts").AuthStorage, modelsJsonPath?: string): Promise<ModelRegistry> {
+\t\tconst { ModelRuntime } = await import("./model-runtime.ts");
+\t\tconst runtime = await ModelRuntime.create({
+\t\t\tcredentials: authStorage,
+\t\t\tmodelsPath: modelsJsonPath === undefined ? undefined : modelsJsonPath,
+\t\t\tallowModelNetwork: false,
+\t\t});
+\t\treturn new ModelRegistry(runtime);
+\t}
+
+\tstatic async inMemory(authStorage: import("./auth-storage.ts").AuthStorage): Promise<ModelRegistry> {
+\t\tconst { ModelRuntime } = await import("./model-runtime.ts");
+\t\tconst runtime = await ModelRuntime.create({
+\t\t\tcredentials: authStorage,
+\t\t\tmodelsPath: null,
+\t\t\tallowModelNetwork: false,
+\t\t});
+\t\treturn new ModelRegistry(runtime);
+\t}
+
+\tgetProviderAuthMode(provider: string): ProviderAuthMode {
+\t\tif (provider === "gsd-fake") return "none";
+\t\tif (this.runtime.isUsingOAuth(provider)) return "oauth";
+\t\tif (this.runtime.hasConfiguredAuth(provider)) return "apiKey";
+\t\treturn "none";
+\t}
+
+\tisAllLocalChain(): boolean {
+\t\tconst models = this.getAll();
+\t\tif (models.length === 0) return false;
+\t\treturn models.every((model) => isLocalModel(model));
+\t}
+
+\tstatic isLocalModel = isLocalModel;`,
+      )
+      applied = true
+    }
+  }
+  if (applied && !next.includes('from "./local-model-check.ts"') && !next.includes("from './local-model-check.ts'")) {
+    next = next.replace(
+      'import type { ModelRuntime } from "./model-runtime.ts";',
+      'import type { ModelRuntime } from "./model-runtime.ts";\nimport { isLocalModel } from "./local-model-check.ts";\nexport type ProviderAuthMode = "apiKey" | "oauth" | "none" | "externalCli";',
+    )
+  }
+  return { content: next, applied }
+}
+
+function portAgentLoopLatency(content) {
+  if (content.includes('agent_loop.first_stream_activity')) return { content, applied: false }
+  const anchor = 'for await (const event of response) {\n\t\tswitch (event.type) {'
+  if (!content.includes(anchor)) return { content, applied: false }
+  let next = content.replace(
+    anchor,
+    `let sawStreamActivity = false;
+\tfor await (const event of response) {
+\t\tif (!sawStreamActivity) {
+\t\t\tsawStreamActivity = true;
+\t\t\tconfig.latencyMark?.("agent_loop.first_stream_activity", { eventType: event.type });
+\t\t}
+\t\tswitch (event.type) {`,
+  )
+  if (!next.includes('latencyMark?:')) {
+    // AgentLoopConfig is in types.ts; stamp an optional field on the local config usage via declaration merge is hard.
+    // Pass-through works once AgentLoopConfig / createLoopConfig carry latencyMark.
+  }
+  return { content: next, applied: next !== content }
+}
+
+function portAgentLoopConfigType(content) {
+  if (content.includes('latencyMark?:')) return { content, applied: false }
+  const anchor = 'export interface AgentLoopConfig extends SimpleStreamOptions {'
+  if (!content.includes(anchor)) return { content, applied: false }
+  return {
+    content: content.replace(
+      anchor,
+      `export interface AgentLoopConfig extends SimpleStreamOptions {
+\t/** Optional host timing sink (GSD). */
+\tlatencyMark?: (phase: string, data?: Record<string, unknown>) => void;`,
     ),
     applied: true,
   }
 }
 
-const THEME_SHIM = 'export * from "../modes/interactive/theme/theme.ts";\n'
+const THEME_SHIM = 'export * from "./theme.ts";\n'
 const EXTENSION_SHIM = `export type { Extension, ExtensionEvent, ExtensionHandler } from "./types.ts";
 
 export type GsdProgressWidgetMode = "min" | "small" | "full";
@@ -445,7 +539,12 @@ function applyPi161Ports(destRoot, overlayRoot, fs, path) {
   }
   run('packages/pi-ai/src/api/anthropic-messages.ts', portAnthropicOAuthBreakpoint)
   run('packages/pi-agent-core/src/agent.ts', portAgentCacheRetention)
-  run('packages/pi-agent-core/src/types.ts', portAgentAbortEvent)
+  run('packages/pi-agent-core/src/types.ts', (content) => {
+    const abort = portAgentAbortEvent(content)
+    const loop = portAgentLoopConfigType(abort.content)
+    return { content: loop.content, applied: abort.applied || loop.applied }
+  })
+  run('packages/pi-agent-core/src/agent-loop.ts', portAgentLoopLatency)
   run('packages/pi-coding-agent/src/core/extensions/loader.ts', portLoaderAliases)
   run('packages/pi-coding-agent/src/core/settings-schema.ts', portSettingsSchema)
   run('packages/pi-coding-agent/src/core/settings-manager.ts', portSettingsManager)
@@ -454,8 +553,7 @@ function applyPi161Ports(destRoot, overlayRoot, fs, path) {
   const claudeModule = buildClaudeSchemaModule(googleOverlay)
   if (claudeModule) write('packages/pi-ai/src/api/claude-tool-schema.ts', claudeModule)
   run('packages/pi-ai/src/api/google-shared.ts', (content) => portGoogleShared(content, googleOverlay))
-  run('packages/pi-coding-agent/src/modes/interactive/theme/theme.ts', (content) => portThemeHighlight(content, overlay('packages/pi-coding-agent/src/theme/theme.ts')))
-  write('packages/pi-coding-agent/src/theme/theme.ts', THEME_SHIM)
+  run('packages/pi-coding-agent/src/theme/theme.ts', (content) => portThemeHighlight(content, overlay('packages/pi-coding-agent/src/theme/theme.ts')))
   write('packages/pi-coding-agent/src/core/extensions/extension-upstream-types.ts', EXTENSION_SHIM)
   return applied
 }
@@ -473,6 +571,8 @@ module.exports = {
   portSettingsManager,
   portThemeHighlight,
   portModelRegistryReadiness,
+  portAgentLoopLatency,
+  portAgentLoopConfigType,
   buildClaudeSchemaModule,
   applyPi161Ports,
 }

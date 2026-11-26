@@ -1,7 +1,6 @@
 import { fuzzyFilter } from "../fuzzy.js";
-import { getKeybindings } from "../keybindings.js";
-import type { MouseEvent } from "../mouse.js";
-import type { Component } from "../tui.js";
+import { getKeybindings, getSelectPageIndex } from "../keybindings.js";
+import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../tui.js";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.js";
 import { Input } from "./input.js";
 
@@ -16,8 +15,12 @@ export interface SettingItem {
 	currentValue: string;
 	/** If provided, Enter/Space cycles through these values */
 	values?: string[];
-	/** If provided, Enter opens this submenu. Receives current value and done callback. */
-	submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
+	/** If provided, Enter opens this submenu. Receives current value and done callback.
+	 *  done() accepts an optional selectedValue and an optional navigateTo id to move the cursor after close. */
+	submenu?: (
+		currentValue: string,
+		done: (selectedValue?: string, options?: { navigateTo?: string }) => void,
+	) => Component;
 }
 
 export interface SettingsListTheme {
@@ -33,10 +36,12 @@ export interface SettingsListOptions {
 }
 
 export class SettingsList implements Component {
+	readonly capturesViewportInput: boolean = true;
 	private items: SettingItem[];
 	private filteredItems: SettingItem[];
 	private theme: SettingsListTheme;
 	private selectedIndex = 0;
+	private mousePressedIndex: number | undefined;
 	private maxVisible: number;
 	private onChange: (id: string, newValue: string) => void;
 	private onCancel: () => void;
@@ -46,13 +51,7 @@ export class SettingsList implements Component {
 	// Submenu state
 	private submenuComponent: Component | null = null;
 	private submenuItemIndex: number | null = null;
-
-	// Layout of the most recently rendered main list, used to map a clicked row
-	// back to an item: items start at row `itemRowStart` and there are
-	// `viewItemCount` of them, beginning at item index `viewStartIndex`.
-	private itemRowStart = 0;
-	private viewStartIndex = 0;
-	private viewItemCount = 0;
+	private navigateAfterClose: string | null = null;
 
 	constructor(
 		items: SettingItem[],
@@ -82,11 +81,20 @@ export class SettingsList implements Component {
 		}
 	}
 
+	/** Move selection to the item with the given id (no-op if not found). */
+	selectItem(id: string): void {
+		const items = this.searchEnabled ? this.filteredItems : this.items;
+		const index = items.findIndex((i) => i.id === id);
+		if (index !== -1) {
+			this.selectedIndex = index;
+		}
+	}
+
 	invalidate(): void {
 		this.submenuComponent?.invalidate?.();
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		// If submenu is active, render it instead
 		if (this.submenuComponent) {
 			return this.submenuComponent.render(width);
@@ -97,11 +105,6 @@ export class SettingsList implements Component {
 
 	private renderMainList(width: number): string[] {
 		const lines: string[] = [];
-
-		// Reset click-mapping state; updated below once items are laid out.
-		this.itemRowStart = 0;
-		this.viewStartIndex = 0;
-		this.viewItemCount = 0;
 
 		if (this.searchEnabled && this.searchInput) {
 			lines.push(...this.searchInput.render(width));
@@ -116,7 +119,7 @@ export class SettingsList implements Component {
 			return lines;
 		}
 
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		const displayItems = this.getDisplayItems();
 		if (displayItems.length === 0) {
 			lines.push(truncateToWidth(this.theme.hint("  No matching settings"), width));
 			this.addHintLine(lines, width);
@@ -124,19 +127,10 @@ export class SettingsList implements Component {
 		}
 
 		// Calculate visible range with scrolling
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.maxVisible, displayItems.length);
-
-		// Record where items begin and the visible window for mouse hit-testing.
-		this.itemRowStart = lines.length;
-		this.viewStartIndex = startIndex;
-		this.viewItemCount = endIndex - startIndex;
+		const { startIndex, endIndex } = this.getVisibleRange(displayItems);
 
 		// Calculate max label width for alignment
-		const maxLabelWidth = Math.min(30, Math.max(...this.items.map((item) => visibleWidth(item.label))));
+		const maxLabelWidth = Math.min(36, Math.max(...this.items.map((item) => visibleWidth(item.label))));
 
 		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {
@@ -183,6 +177,49 @@ export class SettingsList implements Component {
 		return lines;
 	}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (this.submenuComponent) {
+			const result = this.submenuComponent.handleMouse?.(event);
+			return result ? { ...result, focus: true } : undefined;
+		}
+
+		if (this.searchEnabled && this.searchInput) {
+			if (event.y === 0) {
+				const result = this.searchInput.handleMouse?.(event);
+				return result ? { ...result, focus: true } : undefined;
+			}
+			if (event.y === 1) return undefined;
+		}
+
+		const displayItems = this.getDisplayItems();
+		if (displayItems.length === 0) return undefined;
+		if (event.type === "wheel" && event.wheelDelta) {
+			const delta = event.wheelDelta < 0 ? -1 : 1;
+			const previousIndex = this.selectedIndex;
+			this.selectedIndex = Math.max(0, Math.min(displayItems.length - 1, this.selectedIndex + delta));
+			return { handled: true, render: this.selectedIndex !== previousIndex };
+		}
+		// Hover must not change selection: the visible range is centered on it.
+		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
+
+		const rowOffset = this.searchEnabled ? 2 : 0;
+		const { startIndex, endIndex } = this.getVisibleRange(displayItems);
+		const itemIndex = startIndex + event.y - rowOffset;
+		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
+		if (event.type === "press") {
+			this.mousePressedIndex = itemIndex;
+			this.selectedIndex = itemIndex;
+			return { handled: true, focus: true };
+		}
+		if (event.type === "click") {
+			this.selectedIndex = this.mousePressedIndex ?? itemIndex;
+			this.mousePressedIndex = undefined;
+			this.activateItem();
+			return { handled: true };
+		}
+		return undefined;
+	}
+
 	handleInput(data: string): void {
 		// If submenu is active, delegate all input to it
 		// The submenu's onCancel (triggered by escape) will call done() which closes it
@@ -193,72 +230,65 @@ export class SettingsList implements Component {
 
 		// Main list input handling
 		const kb = getKeybindings();
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
+		const displayItems = this.getDisplayItems();
+		const pageIndex = getSelectPageIndex(kb, data, this.selectedIndex, displayItems.length, this.maxVisible);
 		if (kb.matches(data, "tui.select.up")) {
 			if (displayItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
 		} else if (kb.matches(data, "tui.select.down")) {
 			if (displayItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === displayItems.length - 1 ? 0 : this.selectedIndex + 1;
-		} else if (kb.matches(data, "tui.select.confirm") || data === " ") {
+		} else if (pageIndex !== undefined) {
+			if (displayItems.length === 0) return;
+			this.selectedIndex = pageIndex;
+		} else if (
+			kb.matches(data, "tui.select.confirm") ||
+			(data === " " && (!this.searchEnabled || this.searchInput?.getValue().length === 0))
+		) {
 			this.activateItem();
 		} else if (kb.matches(data, "tui.select.cancel")) {
 			this.onCancel();
 		} else if (this.searchEnabled && this.searchInput) {
-			const sanitized = data.replace(/ /g, "");
-			if (!sanitized) {
-				return;
-			}
-			this.searchInput.handleInput(sanitized);
-			this.applyFilter(this.searchInput.getValue());
+			// Cursor keys leave the query as it is and must not move the selection.
+			const previousQuery = this.searchInput.getValue();
+			this.searchInput.handleInput(data);
+			const query = this.searchInput.getValue();
+			if (query !== previousQuery) this.applyFilter(query);
 		}
 	}
 
-	handleMouse(event: MouseEvent): void {
-		// Submenu owns the full overlay area; forward with unchanged coordinates
-		// (render() returns the submenu's lines directly, so there is no offset).
-		if (this.submenuComponent) {
-			this.submenuComponent.handleMouse?.(event);
-			return;
-		}
+	private getDisplayItems(): SettingItem[] {
+		return this.searchEnabled ? this.filteredItems : this.items;
+	}
 
-		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
-		if (displayItems.length === 0) return;
-
-		// Wheel moves the selection (with wrap, matching arrow-key behavior).
-		if (event.button === "wheel-up") {
-			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
-			return;
-		}
-		if (event.button === "wheel-down") {
-			this.selectedIndex = this.selectedIndex === displayItems.length - 1 ? 0 : this.selectedIndex + 1;
-			return;
-		}
-
-		// Left click on a visible row selects and activates that item.
-		if (event.type === "press" && event.button === "left") {
-			const itemRow = event.y - this.itemRowStart;
-			if (itemRow >= 0 && itemRow < this.viewItemCount) {
-				this.selectedIndex = this.viewStartIndex + itemRow;
-				this.activateItem();
-			}
-		}
+	private getVisibleRange(displayItems: readonly SettingItem[]): { startIndex: number; endIndex: number } {
+		const startIndex = Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
+		);
+		return { startIndex, endIndex: Math.min(startIndex + this.maxVisible, displayItems.length) };
 	}
 
 	private activateItem(): void {
-		const item = this.searchEnabled ? this.filteredItems[this.selectedIndex] : this.items[this.selectedIndex];
+		const item = this.getDisplayItems()[this.selectedIndex];
 		if (!item) return;
 
 		if (item.submenu) {
 			// Open submenu, passing current value so it can pre-select correctly
 			this.submenuItemIndex = this.selectedIndex;
-			this.submenuComponent = item.submenu(item.currentValue, (selectedValue?: string) => {
-				if (selectedValue !== undefined) {
-					item.currentValue = selectedValue;
-					this.onChange(item.id, selectedValue);
-				}
-				this.closeSubmenu();
-			});
+			this.submenuComponent = item.submenu(
+				item.currentValue,
+				(selectedValue?: string, options?: { navigateTo?: string }) => {
+					if (selectedValue !== undefined) {
+						item.currentValue = selectedValue;
+						this.onChange(item.id, selectedValue);
+					}
+					if (options?.navigateTo) {
+						this.navigateAfterClose = options.navigateTo;
+					}
+					this.closeSubmenu();
+				},
+			);
 		} else if (item.values && item.values.length > 0) {
 			// Cycle through values
 			const currentIndex = item.values.indexOf(item.currentValue);
@@ -271,8 +301,15 @@ export class SettingsList implements Component {
 
 	private closeSubmenu(): void {
 		this.submenuComponent = null;
-		// Restore selection to the item that opened the submenu
-		if (this.submenuItemIndex !== null) {
+		if (this.navigateAfterClose !== null) {
+			const id = this.navigateAfterClose;
+			this.navigateAfterClose = null;
+			this.submenuItemIndex = null;
+			this.selectItem(id);
+			// Open the target item's submenu automatically
+			this.activateItem();
+		} else if (this.submenuItemIndex !== null) {
+			// Restore selection to the item that opened the submenu
 			this.selectedIndex = this.submenuItemIndex;
 			this.submenuItemIndex = null;
 		}

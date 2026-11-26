@@ -2,7 +2,7 @@ import { readFileSync } from "fs";
 import { describe, expect, it } from "vitest";
 
 describe("export HTML skill block rendering", () => {
-	// allow-source-grep: template.js is a browser asset validated as emitted source.
+	// allow-source-grep: export-html template.js is loaded as a string fixture for HTML rendering tests
 	const templateJs = readFileSync(new URL("../src/core/export-html/template.js", import.meta.url), "utf-8");
 
 	it("strips skill wrapper XML from user message rendering", () => {

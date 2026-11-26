@@ -1,15 +1,14 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { complete } from "../src/stream.ts";
-import type { Api, Context, Model, StreamOptions, Tool } from "../src/types.ts";
+import { complete, getModel } from "../src/compat.js";
+import type { Api, Context, Model, StreamOptions, Tool } from "../src/types.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
-import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
-import { hasBedrockCredentials } from "./bedrock-utils.ts";
-import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
+import { hasBedrockCredentials } from "./bedrock-utils.js";
+import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
+import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([
@@ -126,7 +125,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!hasAzureOpenAICredentials())("Azure OpenAI Responses Provider", () => {
-		const model = getModel("azure-openai-responses", "gpt-4o-mini");
+		const model = getModel("azure", "gpt-4o-mini");
 		const azureDeploymentName = resolveAzureDeploymentName(model.id);
 		const azureOptions = azureDeploymentName ? { azureDeploymentName } : {};
 
@@ -144,7 +143,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.XAI_API_KEY)("xAI Provider", () => {
-		const model = getModel("xai", "grok-3-fast");
+		const model = getModel("xai", "grok-4.3");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -192,7 +191,15 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.TOGETHER_API_KEY)("Together AI Provider", () => {
-		const model = getModel("together", "moonshotai/Kimi-K2.6");
+		const model = getModel("together", "moonshotai/Kimi-K3");
+
+		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testToolCallWithoutResult(model, { reasoningEffort: "high" });
+		});
+	});
+
+	describe.skipIf(!process.env.BASETEN_API_KEY)("Baseten Provider", () => {
+		const model = getModel("baseten", "zai-org/GLM-5.2");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model, { reasoningEffort: "high" });
@@ -200,7 +207,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider", () => {
-		const model = getModel("zai", "glm-4.5-air");
+		const model = getModel("zai", "glm-5.2");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -208,7 +215,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider", () => {
-		const model = getModel("mistral", "devstral-medium-latest");
+		const model = getModel("mistral", "mistral-medium-latest");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -216,7 +223,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.MINIMAX_API_KEY)("MiniMax Provider", () => {
-		const model = getModel("minimax", "MiniMax-M3.1-Flash");
+		const model = getModel("minimax", "MiniMax-M2.7");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -224,7 +231,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing) Provider", () => {
-		const model = getModel("xiaomi", "mimo-v2.5-pro");
+		const model = getModel("xiaomi", "mimo-v2.6-pro");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -232,7 +239,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)("Xiaomi MiMo Token Plan (CN) Provider", () => {
-		const model = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
+		const model = getModel("xiaomi-token-plan-cn", "mimo-v2.6-pro");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -240,7 +247,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)("Xiaomi MiMo Token Plan (AMS) Provider", () => {
-		const model = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
+		const model = getModel("xiaomi-token-plan-ams", "mimo-v2.6-pro");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -248,7 +255,39 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)("Xiaomi MiMo Token Plan (SGP) Provider", () => {
-		const model = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
+		const model = getModel("xiaomi-token-plan-sgp", "mimo-v2.6-pro");
+
+		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testToolCallWithoutResult(model);
+		});
+	});
+
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_API_KEY)("Qwen Token Plan Provider", () => {
+		const model = getModel("qwen-token-plan", "qwen3.7-max");
+
+		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testToolCallWithoutResult(model);
+		});
+	});
+
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_API_KEY)("Qwen Token Plan Individual Provider", () => {
+		const model = getModel("qwen-token-plan-individual", "qwen3.8-max");
+
+		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testToolCallWithoutResult(model);
+		});
+	});
+
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_CN_API_KEY)("Qwen Token Plan (CN) Provider", () => {
+		const model = getModel("qwen-token-plan-cn", "qwen3.7-max");
+
+		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testToolCallWithoutResult(model);
+		});
+	});
+
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_CN_API_KEY)("Qwen Token Plan Individual (CN) Provider", () => {
+		const model = getModel("qwen-token-plan-individual-cn", "qwen3.8-max");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -256,7 +295,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider", () => {
-		const model = getModel("kimi-coding", "kimi-k2-thinking");
+		const model = getModel("kimi-coding", "kimi-for-coding");
 
 		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testToolCallWithoutResult(model);
@@ -297,10 +336,10 @@ describe("Tool Call Without Result Tests", () => {
 
 	describe("GitHub Copilot Provider", () => {
 		it.skipIf(!githubCopilotToken)(
-			"gpt-4o - should filter out tool calls without corresponding tool results",
+			"claude-haiku-4.5 - should filter out tool calls without corresponding tool results",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const model = getModel("github-copilot", "gpt-4o");
+				const model = getModel("github-copilot", "claude-haiku-4.5");
 				await testToolCallWithoutResult(model, { apiKey: githubCopilotToken });
 			},
 		);
@@ -317,10 +356,10 @@ describe("Tool Call Without Result Tests", () => {
 
 	describe("OpenAI Codex Provider", () => {
 		it.skipIf(!openaiCodexToken)(
-			"gpt-5.5 - should filter out tool calls without corresponding tool results",
+			"gpt-6.1-sol - should filter out tool calls without corresponding tool results",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const model = getModel("openai-codex", "gpt-5.5");
+				const model = getModel("openai-codex", "gpt-6.1-sol");
 				await testToolCallWithoutResult(model, { apiKey: openaiCodexToken });
 			},
 		);

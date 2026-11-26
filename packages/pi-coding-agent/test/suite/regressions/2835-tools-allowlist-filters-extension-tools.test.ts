@@ -1,13 +1,13 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@gsd/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
-import { createAgentSession } from "../../../src/core/sdk.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
-import { SettingsManager } from "../../../src/core/settings-manager.ts";
+import { DefaultResourceLoader } from "../../../src/core/resource-loader.js";
+import { createAgentSession } from "../../../src/core/sdk.js";
+import { SessionManager } from "../../../src/core/session-manager.js";
+import { SettingsManager } from "../../../src/core/settings-manager.js";
 
 describe("regression #2835: tool allowlists filter extension tools", () => {
 	let tempDir: string;
@@ -87,7 +87,7 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 
 		expect(session.getAllTools()).toEqual([]);
 		expect(session.getActiveToolNames()).toEqual([]);
-		expect(session.systemPrompt).toContain("Available tools:\n(none)");
+		expect(session.systemPrompt).toContain("<tools>\n(none)\n");
 		expect(session.systemPrompt).not.toContain("dynamic_tool");
 		session.dispose();
 	});

@@ -468,6 +468,7 @@ jobs:
       - name: Setup Node.js 22 (engines floor)
         uses: actions/setup-node@v7
         with:
+          # undici@8 (pi-coding-agent) requires >=22.19.0
           node-version: '22.19.0'
           cache: 'pnpm'
 

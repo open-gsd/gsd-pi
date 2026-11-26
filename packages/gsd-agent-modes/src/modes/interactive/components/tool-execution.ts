@@ -21,7 +21,7 @@ import {
 import stripAnsi from "strip-ansi";
 import type { ToolDefinition, ToolRenderContext } from "@gsd/pi-coding-agent/core/extensions/types.js";
 import { computeEditDiff, type EditDiffError, type EditDiffResult } from "@gsd/pi-coding-agent/core/tools/edit-diff.js";
-import { allTools } from "@gsd/pi-coding-agent/core/tools/index.js";
+import { allToolNames, type ToolName } from "@gsd/pi-coding-agent/core/tools/index.js";
 import { getReadTuiMaxDisplayLines } from "@gsd/pi-coding-agent/core/tools/read.js";
 import { getDisplayReason } from "@gsd/pi-coding-agent/core/tools/render-utils.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@gsd/pi-coding-agent/core/tools/truncate.js";
@@ -531,6 +531,10 @@ export class ToolExecutionComponent extends Container {
 			expanded: this.expanded,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
+			durationMs: (this.result as { durationMs?: number } | undefined)?.durationMs,
+			outputPad: 0,
+			keyText: (id) => id,
+			keyHint: (id, description) => `${id} ${description}`,
 		};
 	}
 
@@ -590,7 +594,8 @@ export class ToolExecutionComponent extends Container {
 	 */
 	private shouldUseBuiltInRenderer(): boolean {
 		const normalizedToolName = this.normalizedToolName;
-		const isBuiltInName = normalizedToolName in allTools;
+		// allTools is a ToolName[] after v1.6.1; membership lives on allToolNames.
+		const isBuiltInName = allToolNames.has(normalizedToolName as ToolName);
 		const hasCustomRenderers = this.toolDefinition?.renderCall || this.toolDefinition?.renderResult;
 		return isBuiltInName && !hasCustomRenderers;
 	}

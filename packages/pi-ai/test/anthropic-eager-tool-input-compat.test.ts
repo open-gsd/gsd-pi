@@ -2,8 +2,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { streamAnthropic } from "../src/providers/anthropic.ts";
-import type { Context, Model, Tool } from "../src/types.ts";
+import { stream as streamAnthropic } from "../src/api/anthropic-messages.js";
+import type { Context, Model, Tool } from "../src/types.js";
+import { normalizeContext } from "../src/utils/transcript.js";
 
 interface CapturedRequest {
 	headers: IncomingMessage["headers"];
@@ -12,8 +13,8 @@ interface CapturedRequest {
 
 function createModel(baseUrl: string, compat?: Model<"anthropic-messages">["compat"]): Model<"anthropic-messages"> {
 	return {
-		id: "claude-opus-4-7",
-		name: "Claude Opus 4.7",
+		id: "claude-opus-4-8",
+		name: "Claude Opus 4.8",
 		api: "anthropic-messages",
 		provider: "test-anthropic",
 		baseUrl,
@@ -70,10 +71,14 @@ async function captureAnthropicRequest(
 	const address = server.address() as AddressInfo;
 
 	try {
-		const stream = streamAnthropic(createModel(`http://127.0.0.1:${address.port}`, compat), context, {
-			apiKey: "test-key",
-			cacheRetention: "none",
-		});
+		const stream = streamAnthropic(
+			createModel(`http://127.0.0.1:${address.port}`, compat),
+			normalizeContext(context),
+			{
+				apiKey: "test-key",
+				cacheRetention: "none",
+			},
+		);
 
 		for await (const event of stream) {
 			if (event.type === "done" || event.type === "error") break;

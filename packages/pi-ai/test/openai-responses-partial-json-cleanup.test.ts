@@ -1,8 +1,8 @@
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { describe, expect, it, vi } from "vitest";
-import { processResponsesStream } from "../src/providers/openai-responses-shared.ts";
-import type { AssistantMessage, AssistantMessageEvent, Model } from "../src/types.ts";
-import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
+import { processResponsesStream } from "../src/api/openai-responses-shared.js";
+import type { AssistantMessage, AssistantMessageEvent, Model } from "../src/types.js";
+import { AssistantMessageEventStream } from "../src/utils/event-stream.js";
 
 function createOutput(model: Model<"openai-responses">): AssistantMessage {
 	return {
@@ -19,7 +19,7 @@ function createOutput(model: Model<"openai-responses">): AssistantMessage {
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "stop",
+		stopReason: "pending",
 		timestamp: Date.now(),
 	};
 }
@@ -56,6 +56,11 @@ async function* createFunctionCallEvents(argumentsJson: string): AsyncIterable<R
 			name: "edit",
 			arguments: argumentsJson,
 		},
+	} as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		sequence_number: 5,
+		response: { id: "resp_test", status: "completed" },
 	} as ResponseStreamEvent;
 }
 
@@ -97,5 +102,31 @@ describe("openai responses partialJson cleanup", () => {
 		}
 		expect(toolCallEnd.toolCall).toBe(persistedToolCall);
 		expect("partialJson" in toolCallEnd.toolCall).toBe(false);
+	});
+
+	// #10897
+	it("marks malformed final arguments instead of keeping the parsed prefix", async () => {
+		const model: Model<"openai-responses"> = {
+			id: "gpt-5-mini",
+			name: "GPT-5 Mini",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+		const argumentsJson = '{"path":"README.md","content":"updated","mode":.5}';
+
+		await processResponsesStream(createFunctionCallEvents(argumentsJson), output, stream, model);
+
+		const toolCall = output.content[0];
+		if (!toolCall || toolCall.type !== "toolCall") throw new Error("Expected toolCall block");
+		expect(toolCall.arguments).toEqual({});
+		expect(toolCall.argumentsError?.endsWith(`Received arguments:\n${argumentsJson}`)).toBe(true);
 	});
 });

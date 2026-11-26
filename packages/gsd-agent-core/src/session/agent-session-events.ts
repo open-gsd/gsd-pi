@@ -1,16 +1,19 @@
 import type { AgentEvent, AgentMessage } from "@gsd/pi-agent-core";
-import type { AssistantMessage, Message, TextContent } from "@gsd/pi-ai";
+import type { AssistantMessage, Message, TextContent, ToolResultMessage } from "@gsd/pi-ai";
 import { cleanupSessionResources } from "@gsd/pi-ai";
 import type {
+	AgentActivityOutcome,
 	MessageEndEvent,
 	MessageStartEvent,
 	MessageUpdateEvent,
+	SessionBoundaryDraft,
 	ToolExecutionEndEvent,
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
-	TurnEndEvent,
 	TurnStartEvent,
 } from "@gsd/pi-coding-agent/core/extensions/index.js";
+import { convertToLlm } from "@gsd/pi-coding-agent/core/messages.js";
+import { buildSessionProjection } from "@gsd/pi-coding-agent/core/session-manager.js";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-types.js";
 import type { AgentSessionHost } from "./agent-session-host.js";
 
@@ -153,6 +156,52 @@ export class AgentSessionEventsModule {
 		return undefined;
 	}
 
+	private turnOutcome(message: AgentMessage): AgentActivityOutcome {
+		if (message.role !== "assistant") {
+			return "completed";
+		}
+		const assistant = message as AssistantMessage;
+		if (assistant.stopReason === "error") return "error";
+		if (assistant.stopReason === "aborted") return "aborted";
+		return "completed";
+	}
+
+	private findAssistantEntryId(message: AgentMessage): string | undefined {
+		const branch = this.host.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "message" && entry.message === message) {
+				return entry.id;
+			}
+			if (entry.type === "message" && entry.message.role === "assistant" && message.role === "assistant") {
+				return entry.id;
+			}
+		}
+		return undefined;
+	}
+
+	private findToolResultEntryIds(toolResults: ToolResultMessage[]): string[] {
+		if (toolResults.length === 0) {
+			return [];
+		}
+		const ids: string[] = [];
+		const pending = new Set(toolResults.map((result) => result.toolCallId));
+		const branch = this.host.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0 && pending.size > 0; i--) {
+			const entry = branch[i];
+			if (entry.type !== "message" || entry.message.role !== "toolResult") {
+				continue;
+			}
+			const toolCallId = (entry.message as ToolResultMessage).toolCallId;
+			if (!pending.has(toolCallId)) {
+				continue;
+			}
+			pending.delete(toolCallId);
+			ids.unshift(entry.id);
+		}
+		return ids;
+	}
+
 	replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
 		// Agent-core stores the finalized message object in its state before emitting message_end.
 		// SessionManager persistence happens later in _handleAgentEvent() with event.message.
@@ -188,13 +237,34 @@ export class AgentSessionEventsModule {
 			};
 			await this.host._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "turn_end") {
-			const extensionEvent: TurnEndEvent = {
-				type: "turn_end",
-				turnIndex: this.host._turnIndex,
-				message: event.message,
-				toolResults: event.toolResults,
+			const messageEntryId = this.findAssistantEntryId(event.message) ?? this.host.sessionManager.getLeafId() ?? "";
+			const toolResultEntryIds = this.findToolResultEntryIds(event.toolResults);
+			const outcome = this.turnOutcome(event.message);
+			const buildBoundaryContext = (entries: SessionBoundaryDraft[]) => {
+				const projection = buildSessionProjection(
+					this.host.sessionManager.getEntries(),
+					this.host.sessionManager.getLeafId(),
+				);
+				return {
+					contextEntries: projection.entries,
+					contextMessages: projection.messages,
+					llmMessages: convertToLlm(projection.messages),
+					pendingMessages: [],
+					canContinue: entries.length > 0,
+				};
 			};
-			await this.host._extensionRunner.emit(extensionEvent);
+			await this.host._extensionRunner.emitBoundary(
+				{
+					type: "turn_end",
+					turnIndex: this.host._turnIndex,
+					message: event.message,
+					toolResults: event.toolResults,
+					messageEntryId,
+					toolResultEntryIds,
+					outcome,
+				},
+				buildBoundaryContext,
+			);
 			this.host._turnIndex++;
 		} else if (event.type === "message_start") {
 			const extensionEvent: MessageStartEvent = {

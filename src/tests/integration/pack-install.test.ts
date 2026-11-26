@@ -253,7 +253,8 @@ test("tarball installs and gsd binary resolves", async (t) => {
         assert.equal(actual, join(sdkRoot, name), name + " must resolve inside the installed SDK");
       }
       assert.notEqual(getReadmePath(), join(installedRoot, "README.md"));
-      assert.match(readFileSync(getReadmePath(), "utf-8"), /\[docs\/sdk\.md\]\(docs\/sdk\.md\)/);
+      // Upstream v1.6.1 README links the SDK docs as [Pi TypeScript SDK](docs/sdk.md).
+      assert.match(readFileSync(getReadmePath(), "utf-8"), /docs\/sdk\.md/);
       assert.doesNotThrow(() => readFileSync(join(getDocsPath(), "sdk.md")), "readable SDK docs");
       assert.doesNotThrow(() => readdirSync(join(getExamplesPath(), "sdk")), "readable SDK examples");
     `;

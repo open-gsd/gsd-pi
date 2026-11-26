@@ -7,15 +7,14 @@
  * OpenAI Responses API generates IDs in format: {call_id}|{id}
  * where {id} can be 400+ chars with special characters (+, /, =).
  *
- * Regression test for: https://github.com/earendil-works/pi-mono/issues/1022
+ * Regression test for: https://github.com/earendil-works/pi/issues/1022
  */
 
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { completeSimple, getEnvApiKey } from "../src/stream.ts";
-import type { AssistantMessage, Message, Tool, ToolResultMessage } from "../src/types.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { completeSimple, getEnvApiKey, getModel } from "../src/compat.js";
+import type { AssistantMessage, Message, Tool, ToolResultMessage } from "../src/types.js";
+import { resolveApiKey } from "./oauth.js";
 
 // Resolve API keys
 const copilotToken = await resolveApiKey("github-copilot");
@@ -36,9 +35,9 @@ const echoTool: Tool<typeof echoToolSchema> = {
 /**
  * Test 1: Live cross-provider handoff
  *
- * 1. Use github-copilot gpt-5.2-codex to generate a tool call
- * 2. Switch to openrouter openai/gpt-5.2-codex and complete
- * 3. Switch to openai-codex gpt-5.5 and complete
+ * 1. Use github-copilot gpt-6-luna to generate a tool call
+ * 2. Switch to openrouter openai/gpt-5.5 and complete
+ * 3. Switch to openai-codex gpt-6.1-sol and complete
  *
  * Both should succeed without "call_id too long" errors.
  */
@@ -46,8 +45,8 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 	it.skipIf(!copilotToken || !openrouterKey)(
 		"github-copilot -> openrouter should normalize pipe-separated IDs",
 		async () => {
-			const copilotModel = getModel("github-copilot", "gpt-5.2-codex");
-			const openrouterModel = getModel("openrouter", "openai/gpt-5.2-codex");
+			const copilotModel = getModel("github-copilot", "gpt-6-luna");
+			const openrouterModel = getModel("openrouter", "openai/gpt-5.5");
 
 			// Step 1: Generate tool call with github-copilot
 			const userMessage: Message = {
@@ -116,8 +115,8 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 	it.skipIf(!copilotToken || !codexToken)(
 		"github-copilot -> openai-codex should normalize pipe-separated IDs",
 		async () => {
-			const copilotModel = getModel("github-copilot", "gpt-5.2-codex");
-			const codexModel = getModel("openai-codex", "gpt-5.5");
+			const copilotModel = getModel("github-copilot", "gpt-6-luna");
+			const codexModel = getModel("openai-codex", "gpt-6.1-sol");
 
 			// Step 1: Generate tool call with github-copilot
 			const userMessage: Message = {
@@ -240,7 +239,7 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 	it.skipIf(!openrouterKey)(
 		"openrouter should handle prefilled context with long pipe-separated IDs",
 		async () => {
-			const model = getModel("openrouter", "openai/gpt-5.2-codex");
+			const model = getModel("openrouter", "openai/gpt-5.5");
 			const messages = buildPrefilledMessages();
 
 			const response = await completeSimple(
@@ -266,7 +265,7 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 	it.skipIf(!codexToken)(
 		"openai-codex should handle prefilled context with long pipe-separated IDs",
 		async () => {
-			const model = getModel("openai-codex", "gpt-5.5");
+			const model = getModel("openai-codex", "gpt-6.1-sol");
 			const messages = buildPrefilledMessages();
 
 			const response = await completeSimple(

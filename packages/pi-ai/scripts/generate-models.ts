@@ -8,7 +8,7 @@ import {
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
-} from "../src/providers/cloudflare.ts";
+} from "../src/api/cloudflare.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,

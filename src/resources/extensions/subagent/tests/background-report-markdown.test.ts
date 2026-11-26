@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { initTheme } from "@gsd/pi-coding-agent";
+import { stripAnsi } from "@gsd/pi-coding-agent/utils/ansi.js";
 
 import subagentExtension from "../index.js";
 import { type SubagentRunRecord, SubagentRunStore, createInitialRunRecord } from "../run-store.js";
@@ -34,7 +35,7 @@ function registerSubagentTool() {
 }
 
 function renderComponent(component: { render: (width: number) => string[] }): string {
-	return component.render(400).join("\n");
+	return stripAnsi(component.render(400).join("\n"));
 }
 
 const AUTHORED_REPORT = "# Survey\n\n- finding one\n- finding two\n\n```js\nconst x = 1;\n```";

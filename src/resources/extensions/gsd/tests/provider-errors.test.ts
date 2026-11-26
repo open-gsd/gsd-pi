@@ -35,10 +35,7 @@ import { clearGuidedUnitContext, getGuidedUnitContext, setGuidedUnitContext } fr
 import { initNotificationStore, readNotifications, _resetNotificationStore } from "../notification-store.ts";
 import { installNotifyInterceptor } from "../bootstrap/notify-interceptor.ts";
 import { extractTrace } from "../session-forensics.ts";
-// Zero-import module — imported by path rather than through the package
-// barrel to avoid pulling the full AgentSession / @gsd/pi-ai dep graph into
-// this unit test (see #4837).
-import { streamOpenAICodexResponses } from "../../../../../packages/pi-ai/src/providers/openai-codex-responses.ts";
+import { streamOpenAICodexResponses } from "@gsd/pi-ai";
 
 // ── classifyError ────────────────────────────────────────────────────────────
 

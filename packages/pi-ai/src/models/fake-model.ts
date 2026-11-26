@@ -1,9 +1,10 @@
 /**
  * gsd-pi fake model — paired with the fake LLM provider for e2e tests.
  *
- * Only registered when `GSD_FAKE_LLM_TRANSCRIPT` env var is set, via the
- * conditional branch in models/index.ts. The model is invisible to normal
- * users; it shows up in `--list-models` only inside e2e test subprocesses.
+ * Only registered when `GSD_FAKE_LLM_TRANSCRIPT` env var is set, via
+ * `gsdFakeInstall()` / ModelRegistry.ensureFakeProviderIfEnabled(). The model
+ * is invisible to normal users; it shows up in `--list-models` only inside e2e
+ * test subprocesses.
  */
 
 import type { Model } from "../types.js";

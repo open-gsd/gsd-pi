@@ -3,25 +3,39 @@
  */
 
 import assert from "node:assert";
-import { describe, it } from "node:test";
-import { Image } from "../src/components/image.ts";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import { Image, setImageTranscoder } from "../src/components/image.js";
 import {
+	cropKittyImageLine,
 	deleteAllKittyImages,
+	deleteAllKittyPlacements,
 	deleteKittyImage,
 	detectCapabilities,
+	encodeITerm2,
 	encodeKitty,
+	getCapabilities,
+	getKittyImageMetadata,
+	getKittyImagePlacement,
+	getKittyImagePlacementRows,
 	hyperlink,
+	imageFallback,
 	isImageLine,
-	parseCellSizeResponse,
+	registerKittyImageMetadata,
 	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,
+	setCapabilityOverrides,
 	setCellDimensions,
-} from "../src/terminal-image.ts";
+} from "../src/terminal-image.js";
+import { visibleWidth } from "../src/utils.js";
 
 const ENV_KEYS = [
 	"TERM",
 	"TERM_PROGRAM",
+	"ORCA_IMAGE_PROTOCOL",
+	"TERMINAL_EMULATOR",
 	"COLORTERM",
 	"TMUX",
 	"KITTY_WINDOW_ID",
@@ -29,10 +43,16 @@ const ENV_KEYS = [
 	"WEZTERM_PANE",
 	"ITERM_SESSION_ID",
 	"WT_SESSION",
+	"ALACRITTY_WINDOW_ID",
 	"CMUX_WORKSPACE_ID",
+	"WARP_SESSION_ID",
+	"WARP_TERMINAL_SESSION_UUID",
+	"PI_HYPERLINKS",
+	"PI_IMAGE_PROTOCOL",
+	"PI_TRUE_COLOR",
 ] as const;
 
-function withEnv(overrides: Record<string, string | undefined>, fn: () => void): void {
+function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {
 	const saved: Record<string, string | undefined> = {};
 	for (const key of ENV_KEYS) {
 		saved[key] = process.env[key];
@@ -43,7 +63,7 @@ function withEnv(overrides: Record<string, string | undefined>, fn: () => void):
 			if (v === undefined) delete process.env[k];
 			else process.env[k] = v;
 		}
-		fn();
+		return fn();
 	} finally {
 		for (const key of ENV_KEYS) {
 			if (saved[key] === undefined) delete process.env[key];
@@ -207,19 +227,87 @@ describe("detectCapabilities", () => {
 		});
 	});
 
-	it("forces hyperlinks: false under tmux even if outer terminal supports OSC 8", () => {
+	it("applies environment overrides", () => {
+		assert.deepStrictEqual(
+			withEnv({ PI_HYPERLINKS: "1", PI_IMAGE_PROTOCOL: "kitty", PI_TRUE_COLOR: "1" }, () => detectCapabilities()),
+			{ images: "kitty", trueColor: true, hyperlinks: true },
+		);
+		assert.deepStrictEqual(
+			withEnv({ TERM_PROGRAM: "iterm.app", PI_HYPERLINKS: "0", PI_IMAGE_PROTOCOL: "none", PI_TRUE_COLOR: "0" }, () =>
+				detectCapabilities(),
+			),
+			{ images: null, trueColor: false, hyperlinks: false },
+		);
+	});
+
+	it("preserves auto-detection for auto environment overrides", () => {
+		assert.deepStrictEqual(
+			withEnv(
+				{
+					TERM_PROGRAM: "ghostty",
+					PI_HYPERLINKS: "auto",
+					PI_IMAGE_PROTOCOL: "auto",
+					PI_TRUE_COLOR: "auto",
+				},
+				() => detectCapabilities(),
+			),
+			{ images: "kitty", trueColor: true, hyperlinks: true },
+		);
+	});
+
+	it("applies and clears programmatic overrides", () => {
+		withEnv({ PI_HYPERLINKS: "1", PI_IMAGE_PROTOCOL: "kitty", PI_TRUE_COLOR: "1" }, () => {
+			setCapabilityOverrides({ images: null, trueColor: false, hyperlinks: false });
+			try {
+				assert.deepStrictEqual(getCapabilities(), { images: null, trueColor: false, hyperlinks: false });
+				setCapabilityOverrides({});
+				assert.deepStrictEqual(getCapabilities(), { images: "kitty", trueColor: true, hyperlinks: true });
+			} finally {
+				setCapabilityOverrides({});
+				resetCapabilitiesCache();
+			}
+		});
+	});
+
+	it("bypasses the tmux probe when hyperlinks are overridden", () => {
+		let probed = false;
+		const caps = withEnv(
+			{ TMUX: "/tmp/tmux-1000/default,1234,0", PI_HYPERLINKS: "1", PI_IMAGE_PROTOCOL: "kitty" },
+			() =>
+				detectCapabilities(() => {
+					probed = true;
+					return false;
+				}),
+		);
+		assert.strictEqual(probed, false);
+		assert.strictEqual(caps.hyperlinks, true);
+		assert.strictEqual(caps.images, "kitty");
+	});
+
+	it("enables hyperlinks under tmux when the client forwards them", () => {
 		withEnv({ TMUX: "/tmp/tmux-1000/default,1234,0", TERM_PROGRAM: "ghostty" }, () => {
-			const caps = detectCapabilities();
+			const caps = detectCapabilities(() => true);
+			assert.strictEqual(caps.hyperlinks, true);
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("disables hyperlinks under tmux when the client does not forward them", () => {
+		withEnv({ TMUX: "/tmp/tmux-1000/default,1234,0", TERM_PROGRAM: "ghostty" }, () => {
+			const caps = detectCapabilities(() => false);
 			assert.strictEqual(caps.hyperlinks, false);
 			assert.strictEqual(caps.images, null);
 		});
 	});
 
-	it("forces hyperlinks: false when TERM starts with 'tmux'", () => {
+	it("checks tmux capability when TERM starts with 'tmux'", () => {
 		withEnv({ TERM: "tmux-256color", TERM_PROGRAM: "iterm.app" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, false);
+			const caps = detectCapabilities(() => true);
+			assert.strictEqual(caps.hyperlinks, true);
 			assert.strictEqual(caps.images, null);
+
+			const caps2 = detectCapabilities(() => false);
+			assert.strictEqual(caps2.hyperlinks, false);
 		});
 	});
 
@@ -228,6 +316,48 @@ describe("detectCapabilities", () => {
 			const caps = detectCapabilities();
 			assert.strictEqual(caps.hyperlinks, false);
 			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	// #10573
+	it("enables hyperlinks and Kitty images for Herdr", () => {
+		withEnv({ TERM_PROGRAM: "herdr", TERM: "xterm-256color", COLORTERM: "truecolor", KITTY_WINDOW_ID: "1" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.hyperlinks, true);
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+		});
+		withEnv({ TERM_PROGRAM: "herdr", PI_HYPERLINKS: "0" }, () => {
+			assert.strictEqual(detectCapabilities().hyperlinks, false);
+		});
+	});
+
+	// #11131
+	it("enables hyperlinks without images for Rex", () => {
+		withEnv({ TERM_PROGRAM: "rex", TERM: "xterm-256color", KITTY_WINDOW_ID: "1" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.hyperlinks, true);
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+		});
+		withEnv({ TERM_PROGRAM: "rex", PI_HYPERLINKS: "0" }, () => {
+			assert.strictEqual(detectCapabilities().hyperlinks, false);
+		});
+	});
+
+	it("keeps images disabled for Orca without an image capability signal", () => {
+		withEnv({ TERM_PROGRAM: "Orca" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("enables images and hyperlinks for Orca advertising Kitty support", () => {
+		withEnv({ TERM_PROGRAM: "Orca", ORCA_IMAGE_PROTOCOL: "kitty" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
 		});
 	});
 
@@ -260,6 +390,48 @@ describe("detectCapabilities", () => {
 		});
 	});
 
+	it("enables images and hyperlinks for Warp via TERM_PROGRAM", () => {
+		withEnv({ TERM_PROGRAM: "WarpTerminal" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("enables images and hyperlinks for Warp via WARP_SESSION_ID", () => {
+		withEnv({ WARP_SESSION_ID: "some-session-id" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("enables images and hyperlinks for Warp via WARP_TERMINAL_SESSION_UUID", () => {
+		withEnv({ WARP_TERMINAL_SESSION_UUID: "d0e1a2e5-7ca7-44cd-9037-ac7222011161" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("disables images for Warp inside tmux", () => {
+		withEnv(
+			{
+				TERM_PROGRAM: "WarpTerminal",
+				TMUX: "/tmp/tmux-1000/default,1234,0",
+				TERM: "tmux-256color",
+			},
+			() => {
+				const caps = detectCapabilities(() => true);
+				assert.strictEqual(caps.images, null);
+				assert.strictEqual(caps.hyperlinks, true);
+			},
+		);
+	});
+
 	it("enables hyperlinks for iTerm2", () => {
 		withEnv({ TERM_PROGRAM: "iterm.app" }, () => {
 			const caps = detectCapabilities();
@@ -274,16 +446,42 @@ describe("detectCapabilities", () => {
 		});
 	});
 
-	it("detects truecolor for Windows Terminal outside multiplexers", () => {
+	it("enables hyperlinks for Alacritty without TERM_PROGRAM", () => {
+		withEnv({ TERM: "alacritty", COLORTERM: "truecolor" }, () => {
+			assert.deepStrictEqual(detectCapabilities(), { images: null, trueColor: true, hyperlinks: true });
+		});
+		withEnv({ TERM: "xterm-256color", COLORTERM: "truecolor", ALACRITTY_WINDOW_ID: "1" }, () => {
+			assert.deepStrictEqual(detectCapabilities(), { images: null, trueColor: true, hyperlinks: true });
+		});
+	});
+
+	it("enables Alacritty capabilities for Zed", () => {
+		withEnv({ TERM_PROGRAM: "zed" }, () => {
+			assert.deepStrictEqual(detectCapabilities(), { images: null, trueColor: true, hyperlinks: true });
+		});
+	});
+
+	it("enables truecolor and hyperlinks for Windows Terminal outside multiplexers", () => {
 		withEnv({ WT_SESSION: "session", TERM: "xterm-256color" }, () => {
 			const caps = detectCapabilities();
 			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("enables truecolor without hyperlinks for JetBrains terminal", () => {
+		withEnv({ TERMINAL_EMULATOR: "JetBrains-JediTerm", TERM: "xterm-256color" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, false);
+			assert.strictEqual(caps.images, null);
 		});
 	});
 
 	it("does not inherit Windows Terminal truecolor through tmux", () => {
 		withEnv({ WT_SESSION: "session", TMUX: "/tmp/tmux-1000/default,1234,0", TERM: "tmux-256color" }, () => {
-			const caps = detectCapabilities();
+			const caps = detectCapabilities(() => false);
 			assert.strictEqual(caps.trueColor, false);
 			assert.strictEqual(caps.hyperlinks, false);
 			assert.strictEqual(caps.images, null);
@@ -292,11 +490,24 @@ describe("detectCapabilities", () => {
 
 	it("trusts explicit truecolor hints through tmux", () => {
 		withEnv({ COLORTERM: "truecolor", TMUX: "/tmp/tmux-1000/default,1234,0", TERM: "tmux-256color" }, () => {
-			const caps = detectCapabilities();
+			const caps = detectCapabilities(() => false);
 			assert.strictEqual(caps.trueColor, true);
 			assert.strictEqual(caps.hyperlinks, false);
 			assert.strictEqual(caps.images, null);
 		});
+	});
+
+	it("detects truecolor from direct-color TERM values", () => {
+		withEnv({ TERM: "xterm-direct" }, () => {
+			assert.strictEqual(detectCapabilities(() => false).trueColor, true);
+		});
+	});
+});
+
+describe("iTerm2 image encoding", () => {
+	it("includes the decoded payload size in OSC 1337 metadata", () => {
+		const sequence = encodeITerm2("AAAA", { width: 2, height: "auto" });
+		assert.strictEqual(sequence, "\x1b]1337;File=inline=1;size=3;width=2;height=auto:AAAA\x07");
 	});
 });
 
@@ -306,53 +517,15 @@ describe("Kitty image cursor movement", () => {
 		assert.ok(sequence.startsWith("\x1b_Ga=T,f=100,q=2,C=1,c=2,r=2;"));
 	});
 
+	it("reads explicit placement rows without registered metadata", () => {
+		const sequence = encodeKitty("AAAA", { columns: 2, rows: 3, moveCursor: false });
+		assert.strictEqual(getKittyImagePlacementRows(sequence), 3);
+	});
+
 	it("suppresses Kitty replies for delete commands", () => {
 		assert.strictEqual(deleteKittyImage(42), "\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
 		assert.strictEqual(deleteAllKittyImages(), "\x1b_Ga=d,d=A,q=2\x1b\\");
-	});
-
-	it("pins a stable placement id when an image id is given (anti-stacking)", () => {
-		// Without a placement id, kitty/Ghostty append a NEW placement for every
-		// re-emission of the same image (spec: "p=0 for multiple put commands with
-		// the same image id results in multiple placements"), which stacks copies
-		// over the chat and footer. A stable p= makes re-emission replace in place.
-		const seq = encodeKitty("AAAA", { columns: 2, rows: 2, imageId: 42, moveCursor: false });
-		assert.ok(seq.includes("i=42"), "image id present");
-		assert.ok(/(?:^|,)p=1(?:,|;)/.test(seq), `expected a stable p= in ${JSON.stringify(seq)}`);
-	});
-
-	it("re-emits the same (image id, placement id) across renders so it replaces", () => {
-		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		try {
-			const image = new Image(
-				"AAAA",
-				"image/png",
-				{ fallbackColor: (value) => value },
-				{ maxWidthCells: 2 },
-				{ widthPx: 20, heightPx: 20 },
-			);
-			const seqOf = (lines: string[]) => lines.find((l) => l.includes("\x1b_G")) ?? "";
-			const idOf = (s: string) => s.match(/\x1b_G[^;]*?i=(\d+)/)?.[1];
-			const pOf = (s: string) => s.match(/\x1b_G[^;]*?p=(\d+)/)?.[1];
-
-			const first = seqOf(image.render(12));
-			image.invalidate();
-			const second = seqOf(image.render(12));
-
-			assert.ok(idOf(first), "first render has an image id");
-			assert.strictEqual(idOf(first), idOf(second), "image id is stable across renders");
-			assert.ok(pOf(first), "placement id present");
-			assert.strictEqual(pOf(first), pOf(second), "placement id is stable across renders");
-		} finally {
-			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-		}
-	});
-
-	it("omits the placement id when there is no image id (spec: p ignored for id=0)", () => {
-		const seq = encodeKitty("AAAA", { columns: 2, rows: 2 });
-		assert.ok(!seq.includes("p="), `expected no p= without an image id in ${JSON.stringify(seq)}`);
+		assert.strictEqual(deleteAllKittyPlacements(), "\x1b_Ga=d,d=a,q=2\x1b\\");
 	});
 
 	it("preserves renderImage's default terminal-side cursor movement", () => {
@@ -381,6 +554,50 @@ describe("Kitty image cursor movement", () => {
 			resetCapabilitiesCache();
 			setCellDimensions({ widthPx: 9, heightPx: 18 });
 		}
+	});
+
+	it("registers metadata and crops a partially visible placement", () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const result = renderImage(
+				"AAAA",
+				{ widthPx: 100, heightPx: 100 },
+				{ maxWidthCells: 3, imageId: 42, moveCursor: false },
+			);
+			assert.ok(result);
+			assert.deepStrictEqual(getKittyImageMetadata(result.sequence), {
+				imageId: 42,
+				columns: 3,
+				rows: 3,
+				widthPx: 100,
+				heightPx: 100,
+			});
+			assert.ok(cropKittyImageLine(result.sequence, 2, 1).includes("y=66,h=34,r=1"));
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("creates placement-only commands for uploaded and cropped images", () => {
+		registerKittyImageMetadata({ imageId: 42, columns: 3, rows: 3, widthPx: 100, heightPx: 100 });
+		const transmission = encodeKitty("A".repeat(8192), {
+			columns: 3,
+			rows: 3,
+			imageId: 42,
+			moveCursor: false,
+		});
+		const line = `left ${cropKittyImageLine(transmission, 2, 1)} right`;
+		const placement = getKittyImagePlacement(line);
+		assert.ok(placement);
+		assert.strictEqual(getKittyImagePlacementRows(line), 1);
+		assert.strictEqual(placement.transmissionBytes, line.length - "left ".length - " right".length);
+		assert.strictEqual(placement.estimatedDecodedBytes, 100 * 100 * 4);
+		assert.strictEqual(placement.rows, 1);
+		assert.strictEqual(placement.sequence, "\x1b_Ga=p,q=2,C=1,c=3,i=42,y=66,h=34,r=1\x1b\\");
+		assert.strictEqual(placement.replacementLine, `left ${placement.sequence} right`);
+		assert.ok(!placement.replacementLine.includes("AAAA"));
 	});
 
 	it("honors maxHeightCells by reducing rendered width", () => {
@@ -441,112 +658,287 @@ describe("Kitty image cursor movement", () => {
 			setCellDimensions({ widthPx: 9, heightPx: 18 });
 		}
 	});
+
+	it("truncates long image fallback lines to render width", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+		try {
+			const longPath = join(
+				homedir(),
+				"images",
+				`${"generated-image-with-a-very-long-absolute-path".repeat(4)}.png`,
+			);
+			const width = 40;
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (value) => `\x1b[33m${value}\x1b[0m` },
+				{ filename: longPath },
+				{ widthPx: 1280, heightPx: 720 },
+			);
+			const lines = image.render(width);
+			assert.strictEqual(lines.length, 1);
+			assert.ok(
+				visibleWidth(lines[0]) <= width,
+				`fallback line wider than ${width}: visible=${visibleWidth(lines[0])} raw=${JSON.stringify(lines[0])}`,
+			);
+			assert.ok(lines[0].includes("..."), "expected ellipsis when truncating long fallback path");
+			assert.ok(lines[0].includes("~"), "expected home-shortened path in fallback");
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
 });
 
-describe("iTerm2 image sizing", () => {
-	it("bounds height to the reserved rows instead of auto", () => {
-		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
-		setCellDimensions({ widthPx: 10, heightPx: 20 });
-		try {
-			// Tall image: 100x1000px. In a 10-wide box the aspect fit yields few
-			// columns and a bounded number of rows — height must equal those rows,
-			// never "auto" (which would overflow the reserved lines).
-			const result = renderImage("AAAA", { widthPx: 100, heightPx: 1000 }, { maxWidthCells: 10, maxHeightCells: 8 });
-			assert.ok(result);
-			assert.ok(!result.sequence.includes("height=auto"), "must not use height=auto");
-			assert.ok(result.sequence.includes(`height=${result.rows}`), `expected height=${result.rows} in ${result.sequence}`);
-			assert.ok(result.rows <= 8, "rows must respect maxHeightCells");
-		} finally {
-			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-		}
+// #8938: reduce Kitty placement distortion without shrinking iTerm2 reservations.
+describe("image cell sizing", () => {
+	afterEach(() => {
+		resetCapabilitiesCache();
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
 	});
 
-	it("keeps width and height in cell units matching the reserved box", () => {
-		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
-		// Square cells so a square image maps to a square cell box.
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		try {
-			// Square 20x20px image in a 2-cell-wide box => 2x2 cells.
-			const result = renderImage("AAAA", { widthPx: 20, heightPx: 20 }, { maxWidthCells: 2 });
-			assert.ok(result);
-			assert.strictEqual(result.rows, 2);
-			assert.ok(result.sequence.includes("width=2"));
-			assert.ok(result.sequence.includes("height=2"));
-			assert.ok(result.sequence.startsWith("\x1b]1337;File="));
-		} finally {
-			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-		}
-	});
+	describe("Kitty", () => {
+		beforeEach(() => {
+			setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		});
 
-	it("Image component reserves exactly `rows` lines for an iTerm2 image", () => {
-		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
-		setCellDimensions({ widthPx: 10, heightPx: 20 });
-		try {
+		it("reserves at least one Kitty row for thin images", () => {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+			const result = renderImage("AAAA", { widthPx: 1200, heightPx: 12 }, { maxWidthCells: 60 });
+			assert.ok(result);
+			assert.strictEqual(result.rows, 1);
+			assert.ok(result.sequence.includes(",c=60,r=1;"));
+		});
+
+		it("keeps Kitty placement, reserved lines, and cropping metadata consistent across width changes", () => {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
 			const image = new Image(
 				"AAAA",
 				"image/png",
 				{ fallbackColor: (value) => value },
-				{ maxWidthCells: 10 },
-				{ widthPx: 10, heightPx: 100 },
+				{ maxWidthCells: 60, imageId: 8938 },
+				{ widthPx: 615, heightPx: 86 },
 			);
-			const lines = image.render(12);
-			// Last line carries the image sequence; the rest are blank padding so
-			// the TUI accounts for the full height. Total lines === reserved rows.
-			const seqLine = lines[lines.length - 1];
-			assert.ok(seqLine.includes("\x1b]1337;File="));
-			assert.ok(!seqLine.includes("height=auto"));
-			for (let i = 0; i < lines.length - 1; i++) {
-				assert.strictEqual(lines[i], "");
+			const lines = image.render(62);
+			assert.strictEqual(lines.length, 4);
+			assert.deepStrictEqual(lines.slice(1), ["", "", ""]);
+			assert.ok(lines[0].includes(",c=60,r=4,i=8938;"));
+			assert.deepStrictEqual(getKittyImageMetadata(lines[0]), {
+				imageId: 8938,
+				columns: 60,
+				rows: 4,
+				widthPx: 615,
+				heightPx: 86,
+			});
+			const cropped = cropKittyImageLine(lines[0], 1, 2);
+			assert.strictEqual(
+				getKittyImagePlacement(cropped)?.sequence,
+				"\x1b_Ga=p,q=2,C=1,c=60,i=8938,y=21,h=44,r=2\x1b\\",
+			);
+
+			const narrowerLines = image.render(32);
+			assert.strictEqual(narrowerLines.length, 2);
+			assert.ok(narrowerLines[0].includes(",c=30,r=2,i=8938;"));
+			assert.strictEqual(getKittyImageMetadata(narrowerLines[0])?.rows, 2);
+		});
+
+		it("keeps the ceiling placement when rounding down would increase distortion", () => {
+			setCellDimensions({ widthPx: 15, heightPx: 28 });
+			const result = renderImage("AAAA", { widthPx: 615, heightPx: 86 }, { maxWidthCells: 60 });
+			assert.ok(result);
+			assert.strictEqual(result.rows, 5);
+			assert.ok(result.sequence.includes(",c=60,r=5;"));
+		});
+
+		it("keeps height-limited Kitty columns, reservations, and crop metadata consistent", () => {
+			setCellDimensions({ widthPx: 14, heightPx: 28 });
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (value) => value },
+				{ maxWidthCells: 30, imageId: 8938 },
+				{ widthPx: 400, heightPx: 900 },
+			);
+			const lines = image.render(32);
+			assert.strictEqual(lines.length, 15);
+			assert.ok(lines[0].includes(",c=13,r=15,i=8938;"));
+			assert.deepStrictEqual(getKittyImageMetadata(lines[0]), {
+				imageId: 8938,
+				columns: 13,
+				rows: 15,
+				widthPx: 400,
+				heightPx: 900,
+			});
+			assert.strictEqual(
+				getKittyImagePlacement(cropKittyImageLine(lines[0], 1, 2))?.sequence,
+				"\x1b_Ga=p,q=2,C=1,c=13,i=8938,y=60,h=120,r=2\x1b\\",
+			);
+			const narrowerLines = image.render(22);
+			assert.strictEqual(narrowerLines.length, 10);
+			assert.ok(narrowerLines[0].includes(",c=9,r=10,i=8938;"));
+		});
+
+		it("chooses thin Kitty widths by proportions while keeping at least one column", () => {
+			setCellDimensions({ widthPx: 1, heightPx: 1 });
+			for (const [widthPx, columns] of [
+				[1, 1],
+				[140, 1],
+				[149, 2],
+			]) {
+				const result = renderImage("AAAA", { widthPx, heightPx: 1000 }, { maxWidthCells: 30, maxHeightCells: 10 });
+				assert.ok(result);
+				assert.strictEqual(result.columns, columns);
+				assert.strictEqual(result.rows, 10);
+				assert.ok(result.sequence.includes(`,c=${columns},r=10;`));
 			}
+		});
+	});
+
+	describe("iTerm2", () => {
+		beforeEach(() => {
+			setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
+		});
+
+		it("keeps iTerm2's ceiling width when height-limited", () => {
+			setCellDimensions({ widthPx: 14, heightPx: 28 });
+			const result = renderImage("AAAA", { widthPx: 400, heightPx: 900 }, { maxWidthCells: 30, maxHeightCells: 15 });
+			assert.ok(result);
+			assert.strictEqual(result.columns, 14);
+			assert.strictEqual(result.rows, 15);
+			assert.strictEqual(result.sequence, "\x1b]1337;File=inline=1;size=3;width=14;height=auto:AAAA\x07");
+		});
+
+		it("keeps iTerm2's ceiling-based reserved lines and cursor offset", () => {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (value) => value },
+				{ maxWidthCells: 60 },
+				{ widthPx: 615, heightPx: 86 },
+			);
+			assert.deepStrictEqual(image.render(62), [
+				"",
+				"",
+				"",
+				"",
+				"\x1b[4A\x1b]1337;File=inline=1;size=3;width=60;height=auto:AAAA\x07",
+			]);
+		});
+	});
+});
+
+describe("imageFallback", () => {
+	it("shortens home-prefixed absolute paths without hyperlinks", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+		try {
+			const abs = join(homedir(), ".pi", "agent", "shot.png");
+			const result = imageFallback("image/png", { widthPx: 1280, heightPx: 720 }, abs);
+			assert.strictEqual(result, "[Image: ~/.pi/agent/shot.png [image/png] 1280x720]");
 		} finally {
 			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("wraps shortened absolute paths in OSC 8 file links when hyperlinks are enabled", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		try {
+			const abs = join(homedir(), ".pi", "agent", "shot.png");
+			const result = imageFallback("image/png", { widthPx: 10, heightPx: 10 }, abs);
+			assert.ok(result.includes("\x1b]8;;file://"), "expected OSC 8 file link");
+			assert.ok(
+				result.includes(abs.replaceAll("\\", "/")) || result.includes(abs),
+				"file URL should target absolute path",
+			);
+			// Visible text must use ~/... not the expanded home path.
+			const visible = result.replace(/\x1b\]8;;.*?\x1b\\/g, "");
+			assert.strictEqual(visible, "[Image: ~/.pi/agent/shot.png [image/png] 10x10]");
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("leaves bare basenames unchanged and does not hyperlink them", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+		try {
+			const result = imageFallback("image/png", { widthPx: 1, heightPx: 1 }, "clankolas.png");
+			assert.strictEqual(result, "[Image: clankolas.png [image/png] 1x1]");
+			assert.ok(!result.includes("\x1b]8;"), "basename must not be hyperlinked");
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("omits filename segment when not provided", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+		try {
+			assert.strictEqual(imageFallback("image/png", { widthPx: 8, heightPx: 6 }), "[Image: [image/png] 8x6]");
+		} finally {
+			resetCapabilitiesCache();
 		}
 	});
 });
 
-describe("parseCellSizeResponse", () => {
-	// pi queries the terminal for its cell pixel size to size inline images. Two
-	// reply formats exist: the xterm CSI 16t reply, and iTerm2's proprietary
-	// OSC 1337;ReportCellSize reply. iTerm2 does NOT answer CSI 16t at all (its
-	// only cell-size mechanism is ReportCellSize), so without parsing the OSC
-	// reply pi falls back to a default cell size on iTerm2 and inline images are
-	// sized with the wrong cell aspect.
-	it("parses the xterm CSI 16t reply (CSI 6 ; height ; width t)", () => {
-		assert.deepStrictEqual(parseCellSizeResponse("\x1b[6;34;15t"), { widthPx: 15, heightPx: 34 });
+// Kitty only accepts PNG (f=100); non-PNG images must be transcoded (#10292)
+describe("Image transcoding", () => {
+	const jpeg = Buffer.from("jpeg").toString("base64");
+	// Minimal PNG header (signature + IHDR) for a 40x10 image. Enough for getPngDimensions.
+	const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000280000000a", "hex").toString("base64");
+	let calls: string[];
+	const render = (data: string, mimeType: string) =>
+		new Image(data, mimeType, { fallbackColor: (value) => value }, {}, { widthPx: 20, heightPx: 20 }).render(20);
+	const transcode = (data: string) => {
+		calls.push(data);
+		return data === jpeg ? png : null;
+	};
+
+	beforeEach(() => {
+		calls = [];
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
 	});
 
-	it("parses the iTerm2 ReportCellSize reply (height ; width)", () => {
-		// OSC 1337 ; ReportCellSize=[height];[width] ST  (ST = BEL here)
-		assert.deepStrictEqual(parseCellSizeResponse("\x1b]1337;ReportCellSize=17.50;8.00\x07"), {
-			widthPx: 8,
-			heightPx: 18, // 17.50 rounds to 18
-		});
+	afterEach(() => {
+		setImageTranscoder(undefined);
+		resetCapabilitiesCache();
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
 	});
 
-	it("parses the iTerm2 ReportCellSize reply with a retina scale factor", () => {
-		// OSC 1337 ; ReportCellSize=[height];[width];[scale] ST — scale gives
-		// physical-pixels-per-point; the points size is what we want for cell math.
-		assert.deepStrictEqual(parseCellSizeResponse("\x1b]1337;ReportCellSize=17.50;8.00;2.0\x07"), {
-			widthPx: 8,
-			heightPx: 18,
-		});
+	it("sends converted PNG data sized from the PNG", () => {
+		setImageTranscoder(transcode);
+		const lines = render(jpeg, "image/jpeg");
+		assert.ok(lines[0].includes("f=100") && lines[0].includes(`;${png}\x1b\\`));
+		// 40x10 PNG at 18 columns: 5 rows, not the 18 rows of the 20x20 source dimensions.
+		assert.strictEqual(lines.length, 5);
 	});
 
-	it("parses the iTerm2 ReportCellSize reply terminated by ST (ESC \\\\)", () => {
-		assert.deepStrictEqual(parseCellSizeResponse("\x1b]1337;ReportCellSize=20;10\x1b\\"), {
-			widthPx: 10,
-			heightPx: 20,
-		});
+	it("renders a text fallback until a working transcoder is registered", () => {
+		const image = new Image(jpeg, "image/jpeg", { fallbackColor: (value) => value });
+		assert.match(image.render(80)[0], /^\[Image: \[image\/jpeg\]/);
+		setImageTranscoder(() => null);
+		image.invalidate();
+		assert.match(image.render(80)[0], /^\[Image: \[image\/jpeg\]/);
+		setImageTranscoder(transcode);
+		image.invalidate();
+		assert.ok(image.render(80)[0].includes("\x1b_G"));
 	});
 
-	it("returns null for unrelated input and rejects non-positive sizes", () => {
-		assert.strictEqual(parseCellSizeResponse("\x1b[I"), null);
-		assert.strictEqual(parseCellSizeResponse("hello"), null);
-		assert.strictEqual(parseCellSizeResponse("\x1b[6;0;0t"), null);
-		assert.strictEqual(parseCellSizeResponse("\x1b]1337;ReportCellSize=0;0\x07"), null);
+	it("converts each image once", () => {
+		setImageTranscoder(transcode);
+		const image = new Image(jpeg, "image/jpeg", { fallbackColor: (value) => value });
+		image.render(80);
+		render(jpeg, "image/jpeg"); // New instance hits the shared cache.
+		for (let i = 0; i < 40; i++) render(`other-${i}`, "image/jpeg"); // Evicts the shared entry.
+		image.invalidate();
+		image.render(40); // Instance keeps its own PNG.
+		assert.strictEqual(calls.filter((data) => data === jpeg).length, 1);
+	});
+
+	it("does not convert PNG data or iTerm2 output", () => {
+		setImageTranscoder(transcode);
+		assert.ok(render(png, "image/png")[0].includes(`;${png}\x1b\\`));
+		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
+		assert.ok(render(jpeg, "image/jpeg").at(-1)?.endsWith(`:${jpeg}\x07`));
+		assert.deepStrictEqual(calls, []);
 	});
 });
 

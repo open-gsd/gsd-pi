@@ -141,10 +141,14 @@ function printExtensionErrors(errors: ReadonlyArray<{ error: string }>): void {
  * the topological sort). Complements printExtensionErrors — fatal errors go
  * there, advisory warnings go here.
  */
-function printExtensionWarnings(warnings: ReadonlyArray<{ message: string }> | undefined): void {
+function printExtensionWarnings(
+	warnings: ReadonlyArray<{ message?: string; warning?: string; path?: string }> | undefined,
+): void {
   if (!warnings) return
   for (const w of warnings) {
-    process.stderr.write(`[gsd] Extension warning: ${w.message}\n`)
+    const text = w.message ?? w.warning ?? "unknown warning"
+    const prefix = w.path ? `${w.path}: ` : ""
+    process.stderr.write(`[gsd] Extension warning: ${prefix}${text}\n`)
   }
 }
 
@@ -676,7 +680,7 @@ migratePiCredentials(authStorage)
 const { resolveModelsJsonPath } = await import('./models-resolver.js')
 const modelsJsonPath = resolveModelsJsonPath()
 
-const modelRegistry = ModelRegistry.create(authStorage, modelsJsonPath)
+const modelRegistry = await ModelRegistry.create(authStorage, modelsJsonPath)
 markStartup('ModelRegistry')
 const settingsManager = SettingsManager.create(process.cwd(), agentDir)
 applySecurityOverrides(settingsManager)
@@ -758,11 +762,11 @@ markStartup('startupSettings')
 if (isPrintMode) {
   await ensureRtkBootstrap()
   const sessionManager = cliFlags.resumeExact
-    ? SessionManager.openExisting(cliFlags.resumeExact.sessionFile, {
-      expectedSessionId: cliFlags.resumeExact.sessionId,
-      expectedCwd: process.cwd(),
-      sessionDir: cliFlags.sessionDir,
-    })
+    ? SessionManager.open(
+      cliFlags.resumeExact.sessionFile,
+      cliFlags.sessionDir,
+      process.cwd(),
+    )
     : cliFlags.noSession
       ? SessionManager.inMemory()
       : cliFlags.session
@@ -918,11 +922,11 @@ const projectSessionsDir = cliFlags.resumeExact
 if (!cliFlags.resumeExact) migrateLegacyFlatSessions(sessionsDir, projectSessionsDir)
 
 const sessionManager = cliFlags.resumeExact
-  ? SessionManager.openExisting(cliFlags.resumeExact.sessionFile, {
-    expectedSessionId: cliFlags.resumeExact.sessionId,
-    expectedCwd: cwd,
-    sessionDir: cliFlags.sessionDir,
-  })
+  ? SessionManager.open(
+    cliFlags.resumeExact.sessionFile,
+    cliFlags.sessionDir,
+    cwd,
+  )
   : cliFlags._selectedSessionPath
     ? SessionManager.open(cliFlags._selectedSessionPath, projectSessionsDir)
     : cliFlags.session

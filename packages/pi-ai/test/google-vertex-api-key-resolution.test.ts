@@ -45,14 +45,16 @@ vi.mock("@google/genai", () => {
 	};
 });
 
-import { getModel } from "../src/models.ts";
-import { streamGoogleVertex } from "../src/providers/google-vertex.ts";
-import type { Context, Model } from "../src/types.ts";
+import { stream as streamGoogleVertex } from "../src/api/google-vertex.js";
+import { getModel, normalizeContext } from "../src/compat.js";
+import type { Model } from "../src/types.js";
+import { formatUserAgent } from "../src/utils/identity.js";
 
+const PI_USER_AGENT = formatUserAgent();
 const model = getModel("google-vertex", "gemini-3-flash-preview");
-const context: Context = {
+const context = normalizeContext({
 	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
-};
+});
 
 const originalGoogleCloudApiKey = process.env.GOOGLE_CLOUD_API_KEY;
 
@@ -154,7 +156,26 @@ describe("google-vertex api key resolution", () => {
 		await stream.result();
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
-		expect(googleGenAiMock.constructorCalls[0]?.httpOptions).toBeUndefined();
+		expect(googleGenAiMock.constructorCalls[0]?.httpOptions).toEqual({
+			fetch: globalThis.fetch,
+			headers: { "User-Agent": PI_USER_AGENT },
+		});
+	});
+
+	it("lets explicit headers override the default User-Agent", async () => {
+		const stream = streamGoogleVertex(model, context, {
+			project: "test-project",
+			location: "us-central1",
+			headers: { "User-Agent": "custom-agent" },
+		});
+
+		await stream.result();
+
+		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
+		expect(googleGenAiMock.constructorCalls[0]?.httpOptions).toEqual({
+			fetch: globalThis.fetch,
+			headers: { "User-Agent": "custom-agent" },
+		});
 	});
 
 	it("forwards custom baseUrl to the ADC client", async () => {

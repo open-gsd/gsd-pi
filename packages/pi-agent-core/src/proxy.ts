@@ -3,32 +3,18 @@
  * The server manages auth and proxies requests to LLM providers.
  */
 
-// Internal import for JSON parsing utility
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
-	type Context,
-	EventStream,
+	type AssistantMessageEventStream,
+	createAssistantMessageEventStream,
 	type Model,
-	parseStreamingJson,
 	type SimpleStreamOptions,
 	type StopReason,
 	type ToolCall,
+	ToolCallArgumentsStream,
+	type TranscriptContext,
 } from "@gsd/pi-ai";
-
-// Create stream class matching ProxyMessageEventStream
-class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
 
 /**
  * Proxy event types - server sends these with partial field stripped to reduce bandwidth.
@@ -43,26 +29,30 @@ export type ProxyAssistantMessageEvent =
 	| { type: "thinking_end"; contentIndex: number; contentSignature?: string }
 	| { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string }
-	| { type: "toolcall_end"; contentIndex: number }
+	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall }
 	| {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
 			usage: AssistantMessage["usage"];
+			providerThinkingLevel?: string;
 	  }
 	| {
 			type: "error";
 			reason: Extract<StopReason, "aborted" | "error">;
 			errorMessage?: string;
 			usage: AssistantMessage["usage"];
+			providerThinkingLevel?: string;
 	  };
 
 type ProxySerializableStreamOptions = Pick<
 	SimpleStreamOptions,
 	| "temperature"
+	| "samplingParams"
 	| "maxTokens"
 	| "reasoning"
 	| "cacheRetention"
 	| "sessionId"
+	| "disableContinuation"
 	| "headers"
 	| "metadata"
 	| "transport"
@@ -101,10 +91,12 @@ export interface ProxyStreamOptions extends ProxySerializableStreamOptions {
 function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializableStreamOptions {
 	return {
 		temperature: options.temperature,
+		samplingParams: options.samplingParams,
 		maxTokens: options.maxTokens,
 		reasoning: options.reasoning,
 		cacheRetention: options.cacheRetention,
 		sessionId: options.sessionId,
+		disableContinuation: options.disableContinuation,
 		headers: options.headers,
 		metadata: options.metadata,
 		transport: options.transport,
@@ -113,14 +105,18 @@ function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializabl
 	};
 }
 
-export function streamProxy(model: Model<any>, context: Context, options: ProxyStreamOptions): ProxyMessageEventStream {
-	const stream = new ProxyMessageEventStream();
+export function streamProxy(
+	model: Model<any>,
+	context: TranscriptContext,
+	options: ProxyStreamOptions,
+): AssistantMessageEventStream {
+	const stream = createAssistantMessageEventStream();
 
 	(async () => {
 		// Initialize the partial message that we'll build up from events
 		const partial: AssistantMessage = {
 			role: "assistant",
-			stopReason: "stop",
+			stopReason: "pending",
 			content: [],
 			api: model.api,
 			provider: model.provider,
@@ -179,6 +175,21 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			reader = response.body!.getReader();
 			const decoder = new TextDecoder();
 			let buffer = "";
+			let sawTerminalEvent = false;
+			// Argument streams of open tool calls by content index, kept off the content blocks.
+			const toolArguments = new Map<number, ToolCallArgumentsStream>();
+
+			const processLine = (line: string): void => {
+				if (!line.startsWith("data: ")) return;
+				const data = line.slice(6).trim();
+				if (!data) return;
+				const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
+				const event = processProxyEvent(proxyEvent, partial, toolArguments);
+				if (event) {
+					if (event.type === "done" || event.type === "error") sawTerminalEvent = true;
+					stream.push(event);
+				}
+			};
 
 			while (true) {
 				const { done, value } = await reader.read();
@@ -188,26 +199,38 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 					throw new Error("Request aborted by user");
 				}
 
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split("\n");
+				// Split only the new text, so a long line arriving in many chunks is not rescanned per chunk.
+				const lines = decoder.decode(value, { stream: true }).split("\n");
+				lines[0] = buffer + lines[0];
 				buffer = lines.pop() || "";
 
 				for (const line of lines) {
-					if (line.startsWith("data: ")) {
-						const data = line.slice(6).trim();
-						if (data) {
-							const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
-							const event = processProxyEvent(proxyEvent, partial);
-							if (event) {
-								stream.push(event);
-							}
-						}
-					}
+					processLine(line);
 				}
 			}
 
 			if (options.signal?.aborted) {
 				throw new Error("Request aborted by user");
+			}
+
+			// The final event may not be newline-terminated; flush the decoder and
+			// process whatever is left in the buffer.
+			buffer += decoder.decode();
+			if (buffer) {
+				processLine(buffer);
+			}
+
+			if (!sawTerminalEvent) {
+				// A clean EOF without a done/error event means the server dropped the
+				// response mid-stream. Surface it as an error instead of leaving
+				// consumers waiting on a result that never arrives.
+				partial.stopReason = "error";
+				partial.errorMessage = "Connection closed by proxy server before the response completed";
+				stream.push({
+					type: "error",
+					reason: "error",
+					error: partial,
+				});
 			}
 
 			stream.end();
@@ -238,6 +261,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 function processProxyEvent(
 	proxyEvent: ProxyAssistantMessageEvent,
 	partial: AssistantMessage,
+	toolArguments: Map<number, ToolCallArgumentsStream>,
 ): AssistantMessageEvent | undefined {
 	switch (proxyEvent.type) {
 		case "start":
@@ -245,7 +269,7 @@ function processProxyEvent(
 
 		case "text_start":
 			partial.content[proxyEvent.contentIndex] = { type: "text", text: "" };
-			return { type: "text_start", contentIndex: proxyEvent.contentIndex };
+			return { type: "text_start", contentIndex: proxyEvent.contentIndex, partial };
 
 		case "text_delta": {
 			const content = partial.content[proxyEvent.contentIndex];
@@ -255,6 +279,7 @@ function processProxyEvent(
 					type: "text_delta",
 					contentIndex: proxyEvent.contentIndex,
 					delta: proxyEvent.delta,
+					partial,
 				};
 			}
 			throw new Error("Received text_delta for non-text content");
@@ -268,6 +293,7 @@ function processProxyEvent(
 					type: "text_end",
 					contentIndex: proxyEvent.contentIndex,
 					content: content.text,
+					partial,
 				};
 			}
 			throw new Error("Received text_end for non-text content");
@@ -275,7 +301,7 @@ function processProxyEvent(
 
 		case "thinking_start":
 			partial.content[proxyEvent.contentIndex] = { type: "thinking", thinking: "" };
-			return { type: "thinking_start", contentIndex: proxyEvent.contentIndex };
+			return { type: "thinking_start", contentIndex: proxyEvent.contentIndex, partial };
 
 		case "thinking_delta": {
 			const content = partial.content[proxyEvent.contentIndex];
@@ -285,6 +311,7 @@ function processProxyEvent(
 					type: "thinking_delta",
 					contentIndex: proxyEvent.contentIndex,
 					delta: proxyEvent.delta,
+					partial,
 				};
 			}
 			throw new Error("Received thinking_delta for non-thinking content");
@@ -298,6 +325,7 @@ function processProxyEvent(
 					type: "thinking_end",
 					contentIndex: proxyEvent.contentIndex,
 					content: content.thinking,
+					partial,
 				};
 			}
 			throw new Error("Received thinking_end for non-thinking content");
@@ -309,20 +337,21 @@ function processProxyEvent(
 				id: proxyEvent.id,
 				name: proxyEvent.toolName,
 				arguments: {},
-				partialJson: "",
-			} satisfies ToolCall & { partialJson: string } as ToolCall;
-			return { type: "toolcall_start", contentIndex: proxyEvent.contentIndex };
+			};
+			toolArguments.set(proxyEvent.contentIndex, new ToolCallArgumentsStream());
+			return { type: "toolcall_start", contentIndex: proxyEvent.contentIndex, partial };
 
 		case "toolcall_delta": {
 			const content = partial.content[proxyEvent.contentIndex];
-			if (content?.type === "toolCall") {
-				(content as any).partialJson += proxyEvent.delta;
-				content.arguments = parseStreamingJson((content as any).partialJson) || {};
-				partial.content[proxyEvent.contentIndex] = { ...content }; // Trigger reactivity
+			const args = toolArguments.get(proxyEvent.contentIndex);
+			if (content?.type === "toolCall" && args !== undefined) {
+				// A new block object, so reactive consumers see the change.
+				partial.content[proxyEvent.contentIndex] = { ...content, arguments: args.append(proxyEvent.delta) };
 				return {
 					type: "toolcall_delta",
 					contentIndex: proxyEvent.contentIndex,
 					delta: proxyEvent.delta,
+					partial,
 				};
 			}
 			throw new Error("Received toolcall_delta for non-toolCall content");
@@ -331,11 +360,13 @@ function processProxyEvent(
 		case "toolcall_end": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
-				delete (content as any).partialJson;
+				Object.assign(content, proxyEvent.toolCall);
+				toolArguments.delete(proxyEvent.contentIndex);
 				return {
 					type: "toolcall_end",
 					contentIndex: proxyEvent.contentIndex,
 					toolCall: content,
+					partial,
 				};
 			}
 			return undefined;
@@ -344,12 +375,18 @@ function processProxyEvent(
 		case "done":
 			partial.stopReason = proxyEvent.reason;
 			partial.usage = proxyEvent.usage;
+			if (proxyEvent.providerThinkingLevel !== undefined) {
+				partial.providerThinkingLevel = proxyEvent.providerThinkingLevel;
+			}
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
 		case "error":
 			partial.stopReason = proxyEvent.reason;
 			partial.errorMessage = proxyEvent.errorMessage;
 			partial.usage = proxyEvent.usage;
+			if (proxyEvent.providerThinkingLevel !== undefined) {
+				partial.providerThinkingLevel = proxyEvent.providerThinkingLevel;
+			}
 			return { type: "error", reason: proxyEvent.reason, error: partial };
 
 		default: {

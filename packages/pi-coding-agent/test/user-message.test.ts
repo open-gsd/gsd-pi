@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
-import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { UserMessageComponent } from "../src/modes/interactive/components/user-message.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { stripAnsi } from "../src/utils/ansi.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -21,5 +22,67 @@ describe("UserMessageComponent", () => {
 		expect(lines[1]).toContain("hello");
 		expect(lines[2].startsWith(OSC133_ZONE_END + OSC133_ZONE_FINAL)).toBe(true);
 		expect(lines[2].endsWith(BG_RESET)).toBe(true);
+	});
+
+	// #9549: container output is reused across frames, so markers must not be added to it in place.
+	test("adds OSC 133 zone markers once across repeated renders", () => {
+		initTheme("dark");
+
+		const component = new UserMessageComponent("hello");
+		const first = component.render(20);
+		const second = component.render(20);
+
+		expect(second).toBe(first);
+		expect(second[0]!.split(OSC133_ZONE_START)).toHaveLength(2);
+		expect(second[2]!.split(OSC133_ZONE_END)).toHaveLength(2);
+	});
+
+	test("chains Markdown transformers with user message context", () => {
+		initTheme("dark");
+		const calls: string[] = [];
+		const component = new UserMessageComponent("The input is $x^2$.", undefined, 1, [
+			(markdown, context) => {
+				calls.push("formula");
+				expect(context).toEqual({ messageType: "user", isStreaming: false, availableWidth: 78 });
+				return markdown.replace("$x^2$", "x²");
+			},
+			(markdown) => {
+				calls.push("suffix");
+				return `${markdown} Done.`;
+			},
+		]);
+
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("The input is x². Done.");
+		expect(calls).toEqual(["formula", "suffix"]);
+	});
+
+	test("reapplies Markdown transformers when invalidated", () => {
+		initTheme("dark");
+		let suffix = "before";
+		const component = new UserMessageComponent("Message", undefined, 1, [(markdown) => `${markdown} ${suffix}`]);
+
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("Message before");
+
+		suffix = "after";
+		component.invalidate();
+
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("Message after");
+	});
+
+	test("passes persisted entry identity in transformer context; live leaves it undefined", () => {
+		initTheme("dark");
+		const captured: Array<{ messageId?: string; timestamp?: string }> = [];
+		const capture = (_markdown: string, context: { messageId?: string; timestamp?: string }) => {
+			captured.push({ messageId: context.messageId, timestamp: context.timestamp });
+			return _markdown;
+		};
+
+		new UserMessageComponent("restored", undefined, 1, [capture], "entry-abc", "2025-01-15T10:30:00.000Z").render(80);
+		new UserMessageComponent("live", undefined, 1, [capture]).render(80);
+
+		expect(captured).toEqual([
+			{ messageId: "entry-abc", timestamp: "2025-01-15T10:30:00.000Z" },
+			{ messageId: undefined, timestamp: undefined },
+		]);
 	});
 });

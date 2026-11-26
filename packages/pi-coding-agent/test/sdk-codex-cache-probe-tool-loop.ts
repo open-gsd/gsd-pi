@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * Manual SDK probe for OpenAI Codex prompt caching through the tool loop.
  *
@@ -11,6 +12,7 @@ import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
+import { normalizeContext } from "@gsd/pi-ai";
 import {
 	type Api,
 	type AssistantMessage,
@@ -19,20 +21,20 @@ import {
 	getModel,
 	type Model,
 	type SimpleStreamOptions,
-	Type,
-} from "@earendil-works/pi-ai";
+} from "@gsd/pi-ai/compat";
+import { Type } from "typebox";
 import {
 	getOpenAICodexWebSocketDebugStats,
-	streamSimpleOpenAICodexResponses,
-} from "../../ai/src/providers/openai-codex-responses.ts";
-import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
-import type { ToolDefinition } from "../src/core/extensions/types.ts";
-import { ModelRegistry } from "../src/core/model-registry.ts";
-import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import { createAgentSession } from "../src/core/sdk.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+	streamSimple as streamSimpleOpenAICodexResponses,
+} from "../../ai/src/api/openai-codex-responses.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { createExtensionRuntime } from "../src/core/extensions/loader.js";
+import type { ToolDefinition } from "../src/core/extensions/types.js";
+import type { ResourceLoader } from "../src/core/resource-loader.js";
+import { createAgentSession } from "../src/core/sdk.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
+import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.js";
 
 type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
@@ -134,7 +136,7 @@ Options:
 
 Notes:
   - Uses createAgentSession() from the coding-agent SDK
-  - Provider/model fixed to openai-codex/gpt-5.5
+  - Provider/model fixed to openai-codex/gpt-6.1-sol
   - Thinking level fixed to low
   - Activates exactly one deterministic custom tool
   - Prompts are intentionally > 1024 tokens and explicitly describe the test
@@ -178,7 +180,9 @@ function createMinimalResourceLoader(systemPrompt: string): ResourceLoader {
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
 		getSystemPrompt: () => systemPrompt,
+		getSystemPromptSource: () => undefined,
 		getAppendSystemPrompt: () => [],
+		getAppendSystemPromptSources: () => [],
 		extendResources: () => {},
 		reload: async () => {},
 	};
@@ -275,11 +279,11 @@ async function main(): Promise<void> {
 	mkdirSync(dirname(args.sessionPath), { recursive: true });
 
 	const authStorage = AuthStorage.create();
-	const modelRegistry = ModelRegistry.create(authStorage);
+	const modelRegistry = await createModelRegistry(authStorage);
 
-	const model = getModel("openai-codex", "gpt-5.5");
+	const model = getModel("openai-codex", "gpt-6.1-sol");
 	if (!model) {
-		throw new Error("Model openai-codex/gpt-5.5 not found");
+		throw new Error("Model openai-codex/gpt-6.1-sol not found");
 	}
 	const baseModel = { ...model, maxTokens: args.maxTokens };
 	const streamSimpleOpenAICodexResponsesForRegistry = (
@@ -287,7 +291,11 @@ async function main(): Promise<void> {
 		context: Context,
 		options?: SimpleStreamOptions,
 	): AssistantMessageEventStream =>
-		streamSimpleOpenAICodexResponses(registryModel as Model<"openai-codex-responses">, context, options);
+		streamSimpleOpenAICodexResponses(
+			registryModel as Model<"openai-codex-responses">,
+			normalizeContext(context),
+			options,
+		);
 	modelRegistry.registerProvider("openai-codex", {
 		api: "openai-codex-responses",
 		baseUrl: baseModel.baseUrl,
@@ -296,6 +304,7 @@ async function main(): Promise<void> {
 		models: [baseModel],
 	});
 
+	const modelRuntime = getModelRuntime(modelRegistry);
 	const settingsManager = SettingsManager.inMemory({
 		compaction: { enabled: false },
 		retry: { enabled: false },
@@ -315,8 +324,7 @@ async function main(): Promise<void> {
 		resourceLoader,
 		sessionManager: SessionManager.open(args.sessionPath),
 		settingsManager,
-		authStorage,
-		modelRegistry,
+		modelRuntime,
 	});
 
 	session.setActiveToolsByName(["deterministic_probe"]);
@@ -326,7 +334,7 @@ async function main(): Promise<void> {
 	const turnElapsedMs: number[] = [];
 	let previousCacheRead: number | null = null;
 
-	console.log(`provider openai-codex, model gpt-5.5`);
+	console.log(`provider openai-codex, model gpt-6.1-sol`);
 	console.log(`session ${session.sessionFile}`);
 	console.log(`turns ${args.turns}, transport ${args.transport}, reasoning low, maxTokens ${args.maxTokens}`);
 	console.log("");

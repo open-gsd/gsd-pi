@@ -40,10 +40,10 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Container, Key, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+import type { Api, Model } from "@gsd/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
+import { CONFIG_DIR_NAME, DynamicBorder, getAgentDir } from "@gsd/pi-coding-agent";
+import { Container, Key, type SelectItem, SelectList, Text } from "@gsd/pi-tui";
 
 // Preset configuration
 interface Preset {
@@ -69,7 +69,7 @@ interface PresetsConfig {
  */
 function loadPresets(cwd: string): PresetsConfig {
 	const globalPath = join(getAgentDir(), "presets.json");
-	const projectPath = join(cwd, ".pi", "presets.json");
+	const projectPath = join(cwd, CONFIG_DIR_NAME, "presets.json");
 
 	let globalPresets: PresetsConfig = {};
 	let projectPresets: PresetsConfig = {};
@@ -200,7 +200,10 @@ export default function presetExtension(pi: ExtensionAPI) {
 		const presetNames = Object.keys(presets);
 
 		if (presetNames.length === 0) {
-			ctx.ui.notify("No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json", "warning");
+			ctx.ui.notify(
+				`No presets defined. Add presets to ${join(getAgentDir(), "presets.json")} or ${join(ctx.cwd, CONFIG_DIR_NAME, "presets.json")}`,
+				"warning",
+			);
 			return;
 		}
 
@@ -249,6 +252,8 @@ export default function presetExtension(pi: ExtensionAPI) {
 			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
 			return {
+				// Let PageUp/PageDown page the list instead of scrolling the fullscreen transcript.
+				capturesViewportInput: selectList.capturesViewportInput,
 				render(width: number) {
 					return container.render(width);
 				},
@@ -308,7 +313,10 @@ export default function presetExtension(pi: ExtensionAPI) {
 	async function cyclePreset(ctx: ExtensionContext): Promise<void> {
 		const presetNames = getPresetOrder();
 		if (presetNames.length === 0) {
-			ctx.ui.notify("No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json", "warning");
+			ctx.ui.notify(
+				`No presets defined. Add presets to ${join(getAgentDir(), "presets.json")} or ${join(ctx.cwd, CONFIG_DIR_NAME, "presets.json")}`,
+				"warning",
+			);
 			return;
 		}
 

@@ -3,9 +3,9 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager,
-} from "@earendil-works/pi-coding-agent";
-import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+} from "@gsd/pi-coding-agent";
+import type { Component, EditorTheme, TUI } from "@gsd/pi-tui";
+import { truncateToWidth, visibleWidth } from "@gsd/pi-tui";
 
 function fitBorder(
 	left: string,
@@ -92,7 +92,7 @@ export default function (pi: ExtensionAPI) {
 		activeTui?.requestRender();
 	});
 
-	pi.on("agent_end", () => {
+	pi.on("agent_settled", () => {
 		isWorking = false;
 		stopSpinner();
 		activeTui?.requestRender();

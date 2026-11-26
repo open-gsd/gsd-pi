@@ -14,9 +14,9 @@ function parseNodeVersion(version) {
 }
 
 const runtimeChecksFallback = {
-  MIN_NODE_VERSION: '22.18.0',
+  MIN_NODE_VERSION: '22.19.0',
   MIN_NODE_MAJOR: 22,
-  checkNodeVersion(versionString, min = '22.18.0') {
+  checkNodeVersion(versionString, min = '22.19.0') {
     const actual = parseNodeVersion(versionString)
     const minimum = parseNodeVersion(min)
     for (let index = 0; index < minimum.length; index += 1) {

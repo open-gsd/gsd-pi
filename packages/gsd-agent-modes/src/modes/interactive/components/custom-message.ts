@@ -48,7 +48,16 @@ export class CustomMessageComponent extends CollapsibleMessageComponent {
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
 			try {
-				const component = this.customRenderer(this.message, { expanded: this.expanded }, theme);
+				const component = this.customRenderer(
+					this.message,
+					{
+						expanded: this.expanded,
+						outputPad: 0,
+						keyText: () => "",
+						keyHint: (_id, description) => description,
+					},
+					theme,
+				);
 				if (component) {
 					// Custom renderer provides its own styled component
 					this.customComponent = component;

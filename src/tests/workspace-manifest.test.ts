@@ -29,10 +29,10 @@ const manifestModulePath = join(projectRoot, "scripts", "lib", "workspace-manife
 const verifyScriptPath = join(projectRoot, "scripts", "verify-workspace-coverage.cjs");
 
 describe("workspace manifest (live project)", () => {
-	test("returns all ten linkable packages with consistent scope/name", () => {
+	test("returns all fourteen linkable packages with consistent scope/name", () => {
 		const manifest = require(manifestModulePath);
 		const packages = manifest.getLinkablePackages();
-		assert.equal(packages.length, 10, "expected exactly 10 linkable packages");
+		assert.equal(packages.length, 14, "expected exactly 14 linkable packages");
 
 		const names = packages.map((p: { packageName: string }) => p.packageName).sort();
 		assert.deepEqual(names, [
@@ -41,7 +41,11 @@ describe("workspace manifest (live project)", () => {
 			"@gsd/native",
 			"@gsd/pi-agent-core",
 			"@gsd/pi-ai",
+			"@gsd/pi-codemode",
 			"@gsd/pi-coding-agent",
+			"@gsd/pi-mcp",
+			"@gsd/pi-schema",
+			"@gsd/pi-telemetry",
 			"@gsd/pi-tui",
 			"@opengsd/contracts",
 			"@opengsd/mcp-server",

@@ -1,0 +1,39 @@
+{
+  "name": "@gsd/pi-schema",
+  "version": "1.0.2",
+  "description": "JSON Schema validation (vendored from earendil-works/pi)",
+  "type": "module",
+  "gsd": {
+    "linkable": true,
+    "scope": "@gsd",
+    "name": "pi-schema"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./formats": {
+      "types": "./dist/formats/index.d.ts",
+      "import": "./dist/formats/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.41"
+  },
+  "devDependencies": {
+    "@cfworker/json-schema": "4.1.1",
+    "@oh-my-pi/omptype": "18.13.3",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "ata-validator": "1.61.3",
+    "typebox": "1.3.27",
+    "vitest": "4.1.12",
+    "zod": "4.6.7"
+  }
+}

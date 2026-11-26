@@ -42,7 +42,8 @@
     "modes",
     "cli",
     "cli.ts",
-    "main.ts"
+    "main.ts",
+    "core/bash-executor.ts"
   ],
   "importRewrites": {
     "agentCore": {
@@ -77,11 +78,26 @@
     }
   },
   "piInternalPathFixes": [
-    { "from": "../../pi-coding-agent/src/core/", "to": "./" },
-    { "from": "../../pi-coding-agent/src/utils/", "to": "../utils/" },
-    { "from": "../../pi-coding-agent/src/config.js", "to": "../config.js" },
-    { "from": "../../pi-coding-agent/src/theme/", "to": "../theme/" },
-    { "from": "../../pi-coding-agent/src/migrations.js", "to": "../migrations.js" }
+    {
+      "from": "../../pi-coding-agent/src/core/",
+      "to": "./"
+    },
+    {
+      "from": "../../pi-coding-agent/src/utils/",
+      "to": "../utils/"
+    },
+    {
+      "from": "../../pi-coding-agent/src/config.js",
+      "to": "../config.js"
+    },
+    {
+      "from": "../../pi-coding-agent/src/theme/",
+      "to": "../theme/"
+    },
+    {
+      "from": "../../pi-coding-agent/src/migrations.js",
+      "to": "../migrations.js"
+    }
   ],
   "localPiShimImports": {
     "FallbackResolver": "./fallback-resolver.js",
@@ -105,10 +121,40 @@
     "from": "../../modes/interactive/components/",
     "to": "@gsd/agent-modes/modes/interactive/components/"
   },
+  "toolComponentImportFixes": [
+    {
+      "from": "../../../modes/interactive/components/",
+      "to": "@gsd/agent-modes/modes/interactive/components/"
+    },
+    {
+      "from": "../../modes/interactive/components/",
+      "to": "@gsd/agent-modes/modes/interactive/components/"
+    },
+    {
+      "from": "../modes/interactive/components/",
+      "to": "@gsd/agent-modes/modes/interactive/components/"
+    },
+    {
+      "from": "../@gsd/agent-modes/modes/interactive/components/",
+      "to": "@gsd/agent-modes/modes/interactive/components/"
+    }
+  ],
   "themePathFixes": [
-    { "from": "@earendil-works/pi-tui", "to": "@gsd/pi-tui" },
-    { "from": "../../../config.js", "to": "../config.js" },
-    { "from": "../../../core/", "to": "../core/" },
-    { "from": "../../../utils/", "to": "../utils/" }
+    {
+      "from": "@earendil-works/pi-tui",
+      "to": "@gsd/pi-tui"
+    },
+    {
+      "from": "../../../config.js",
+      "to": "../config.js"
+    },
+    {
+      "from": "../../../core/",
+      "to": "../core/"
+    },
+    {
+      "from": "../../../utils/",
+      "to": "../utils/"
+    }
   ]
 }

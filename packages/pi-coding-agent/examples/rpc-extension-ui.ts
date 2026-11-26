@@ -5,7 +5,7 @@
  * Demonstrates how to build a custom UI on top of the RPC protocol,
  * including handling extension UI requests (select, confirm, input, editor).
  *
- * Usage: npx tsx examples/rpc-extension-ui.ts
+ * Usage: node examples/rpc-extension-ui.ts
  *
  * Slash commands:
  *   /select  - demo select dialog
@@ -16,9 +16,18 @@
 
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
-import * as readline from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { type Component, Container, Input, matchesKey, ProcessTerminal, SelectList, TUI } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	Input,
+	matchesKey,
+	ProcessTerminal,
+	SelectList,
+	type TUI,
+	TuiMainScreen,
+} from "@gsd/pi-tui";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -249,7 +258,7 @@ async function main() {
 
 	const agent = spawn(
 		"node",
-		[cliPath, "--mode", "rpc", "--no-session", "--no-extension", "--extension", extensionPath],
+		[cliPath, "--mode", "rpc", "--no-session", "--no-extensions", "--extension", extensionPath],
 		{ stdio: ["pipe", "pipe", "pipe"] },
 	);
 
@@ -267,7 +276,7 @@ async function main() {
 	// -- TUI setup --
 
 	const terminal = new ProcessTerminal();
-	const tui = new TUI(terminal);
+	const tui: TUI = new TuiMainScreen(terminal);
 
 	const outputLog = new OutputLog();
 	const loadingIndicator = new LoadingIndicator();
@@ -509,9 +518,7 @@ async function main() {
 
 	// -- Process agent stdout --
 
-	const stdoutRl = readline.createInterface({ input: agent.stdout!, terminal: false });
-
-	stdoutRl.on("line", (line) => {
+	function handleAgentLine(line: string): void {
 		let data: Record<string, unknown>;
 		try {
 			data = JSON.parse(line);
@@ -567,12 +574,35 @@ async function main() {
 			return;
 		}
 
-		if (data.type === "agent_end") {
+		if (data.type === "agent_settled") {
 			isStreaming = false;
 			hideLoading();
 			outputLog.append("");
 			tui.requestRender();
 			return;
+		}
+	}
+
+	const stdoutDecoder = new StringDecoder("utf8");
+	let stdoutBuffer = "";
+
+	agent.stdout!.on("data", (chunk: Buffer) => {
+		const text = stdoutDecoder.write(chunk);
+		// Only the new text is scanned, so a long line arriving in many chunks is not rescanned per chunk.
+		let start = 0;
+		for (let newlineIndex = text.indexOf("\n"); newlineIndex !== -1; newlineIndex = text.indexOf("\n", start)) {
+			const line = stdoutBuffer + text.slice(start, newlineIndex);
+			stdoutBuffer = "";
+			start = newlineIndex + 1;
+			handleAgentLine(line.endsWith("\r") ? line.slice(0, -1) : line);
+		}
+		stdoutBuffer += text.slice(start);
+	});
+
+	agent.stdout!.on("end", () => {
+		stdoutBuffer += stdoutDecoder.end();
+		if (stdoutBuffer.length > 0) {
+			handleAgentLine(stdoutBuffer.endsWith("\r") ? stdoutBuffer.slice(0, -1) : stdoutBuffer);
 		}
 	});
 

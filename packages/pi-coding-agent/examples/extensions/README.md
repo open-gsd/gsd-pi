@@ -19,10 +19,13 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `permission-gate.ts` | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.) |
+| `project-trust.ts` | Demonstrates the `project_trust` event for user/global and CLI extensions |
 | `protected-paths.ts` | Blocks writes to protected paths (.env, .git/, node_modules/) |
 | `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, fork) |
 | `dirty-repo-guard.ts` | Prevents session changes with uncommitted git changes |
-| `sandbox/` | OS-level sandboxing using `@anthropic-ai/sandbox-runtime` with per-project config |
+| `gondolin/` | Route built-in tools and `!` commands into a Gondolin micro-VM |
+
+For isolation setup and limitations, see [Run Pi in an isolated environment](../../docs/containerization.md).
 
 ### Custom Tools
 
@@ -75,6 +78,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `reload-runtime.ts` | Adds `/reload-runtime` and `reload_runtime` tool showing safe reload flow |
 | `interactive-shell.ts` | Run interactive commands (vim, htop) with full terminal via `user_bash` hook |
 | `inline-bash.ts` | Expands `!{command}` patterns in prompts via `input` event transformation |
+| `input-transform-streaming.ts` | Skips expensive input preprocessing for mid-stream steering via `streamingBehavior` |
 
 ### Git Integration
 
@@ -109,6 +113,8 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `message-renderer.ts` | Custom message rendering with colors and expandable details via `registerMessageRenderer` |
+| `entry-renderer.ts` | TUI-only session entry rendering via `appendEntry` and `registerEntryRenderer` |
+| `debug-provider.ts` | Toggle raw provider stream capture with `/debug-provider` and inspect each assistant message in a TUI-only session entry |
 | `event-bus.ts` | Inter-extension communication via `pi.events` |
 
 ### Session Metadata
@@ -124,6 +130,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 |-----------|-------------|
 | `custom-provider-anthropic/` | Custom Anthropic provider with OAuth support and custom streaming implementation |
 | `custom-provider-gitlab-duo/` | GitLab Duo provider using pi-ai's built-in Anthropic/OpenAI streaming via proxy |
+| `jev-router.ts` | Virtual model via `registerVirtualModel` that plans on Codex Sol or Terra (picked by the Jev classifier) and switches to Luna after the first edit |
 
 ### External Dependencies
 
@@ -157,7 +164,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       name: Type.String({ description: "Name to greet" }),
     }),
-    async execute(toolCallId, params, onUpdate, ctx, signal) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       return {
         content: [{ type: "text", text: `Hello, ${params.name}!` }],
         details: {},
@@ -178,7 +185,6 @@ export default function (pi: ExtensionAPI) {
 ## Key Patterns
 
 **Use StringEnum for string parameters** (required for Google API compatibility):
-
 ```typescript
 import { StringEnum } from "@earendil-works/pi-ai";
 
@@ -190,7 +196,6 @@ action: Type.Union([Type.Literal("list"), Type.Literal("add")])
 ```
 
 **State persistence via details:**
-
 ```typescript
 // Store state in tool result details for proper forking support
 return {

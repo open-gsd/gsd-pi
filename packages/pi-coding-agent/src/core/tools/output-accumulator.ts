@@ -1,7 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { open } from "node:fs/promises";
+import { createOutputFileStream, type OutputFileResult, type OutputFileStream } from "../../utils/output-files.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.js";
 
 export interface OutputAccumulatorOptions {
@@ -13,12 +11,14 @@ export interface OutputAccumulatorOptions {
 export interface OutputSnapshot {
 	content: string;
 	truncation: TruncationResult;
-	fullOutputPath?: string;
+	/** Set once the full output goes to a file. While output streams in, `saved` means the file is being written. */
+	fullOutputFile?: OutputFileResult;
 }
 
-function defaultTempFilePath(prefix: string): string {
-	const id = randomBytes(8).toString("hex");
-	return join(tmpdir(), `${prefix}-${id}.log`);
+export interface FullOutput {
+	content: string;
+	/** Whether `content` omits part of the output. */
+	truncated: boolean;
 }
 
 function byteLength(text: string): number {
@@ -51,8 +51,7 @@ export class OutputAccumulator {
 	private hasOpenLine = false;
 	private finished = false;
 
-	private tempFilePath: string | undefined;
-	private tempFileStream: WriteStream | undefined;
+	private tempFile: OutputFileStream | undefined;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
@@ -69,9 +68,8 @@ export class OutputAccumulator {
 		this.totalRawBytes += data.length;
 		this.appendDecodedText(this.decoder.decode(data, { stream: true }));
 
-		if (this.tempFileStream || this.shouldUseTempFile()) {
-			this.ensureTempFile();
-			this.tempFileStream?.write(data);
+		if (this.tempFile || this.shouldUseTempFile()) {
+			this.ensureTempFile().write(data);
 		} else if (data.length > 0) {
 			this.rawChunks.push(data);
 		}
@@ -89,7 +87,7 @@ export class OutputAccumulator {
 	}
 
 	snapshot(options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
-		const tailTruncation = truncateTail(this.getSnapshotText(), {
+		const tailTruncation = truncateTail(this.getRetainedText(), {
 			maxLines: this.maxLines,
 			maxBytes: this.maxBytes,
 		});
@@ -111,34 +109,52 @@ export class OutputAccumulator {
 			this.ensureTempFile();
 		}
 
-		return {
-			content: truncation.content,
-			truncation,
-			fullOutputPath: this.tempFilePath,
-		};
+		return { content: truncation.content, truncation, fullOutputFile: this.tempFile?.result };
 	}
 
+	/** Flush and close the temp file. Never rejects: a failed file shows up as `failed` in later snapshots. */
 	async closeTempFile(): Promise<void> {
-		if (!this.tempFileStream) {
-			return;
+		await this.tempFile?.close();
+	}
+
+	/**
+	 * The complete output, for callers that can take more than the display snapshot. Call after
+	 * `finish()` and `closeTempFile()`. Output longer than `maxBytes` raw bytes keeps its first and
+	 * last `maxBytes / 2` bytes around an omission marker. When the temp file could not be saved, only
+	 * the retained tail is left: up to its last `maxBytes` bytes, behind the same marker when output is
+	 * missing.
+	 */
+	async readFullOutput(maxBytes: number): Promise<FullOutput> {
+		const fullOutputFile = this.tempFile?.result;
+		if (!fullOutputFile) {
+			return { content: new TextDecoder().decode(Buffer.concat(this.rawChunks)), truncated: false };
 		}
-
-		const stream = this.tempFileStream;
-		this.tempFileStream = undefined;
-
-		await new Promise<void>((resolve, reject) => {
-			const onError = (error: Error) => {
-				stream.off("finish", onFinish);
-				reject(error);
-			};
-			const onFinish = () => {
-				stream.off("error", onError);
-				resolve();
-			};
-			stream.once("error", onError);
-			stream.once("finish", onFinish);
-			stream.end();
-		});
+		if (fullOutputFile.kind === "failed") {
+			return this.readRetainedOutput(maxBytes);
+		}
+		const file = await open(fullOutputFile.path, "r");
+		try {
+			const size = (await file.stat()).size;
+			if (size <= maxBytes) {
+				return { content: new TextDecoder().decode(await file.readFile()), truncated: false };
+			}
+			const headBytes = Math.floor(maxBytes / 2);
+			const tailBytes = maxBytes - headBytes;
+			const head = Buffer.alloc(headBytes);
+			const tail = Buffer.alloc(tailBytes);
+			await file.read(head, 0, headBytes, 0);
+			await file.read(tail, 0, tailBytes, size - tailBytes);
+			// Cut at character boundaries: streaming decode holds back an incomplete trailing sequence,
+			// and the tail skips leading continuation bytes.
+			const headText = new TextDecoder().decode(head, { stream: true });
+			let tailStart = 0;
+			while (tailStart < tail.length && (tail[tailStart] & 0xc0) === 0x80) tailStart++;
+			const tailText = new TextDecoder().decode(tail.subarray(tailStart));
+			const omitted = size - headBytes - tailBytes;
+			return { content: `${headText}\n\n[... ${omitted} bytes omitted ...]\n\n${tailText}`, truncated: true };
+		} finally {
+			await file.close();
+		}
 	}
 
 	getLastLineBytes(): number {
@@ -193,6 +209,32 @@ export class OutputAccumulator {
 		this.tailBytes = byteLength(this.tailText);
 	}
 
+	/**
+	 * The retained tail, for display and as the fallback of `readFullOutput()`. Clipping drops the partial
+	 * first line of the tail. When the tail is only the end of one over-long line (plus blank lines),
+	 * nothing is left, so it keeps the end of that line instead.
+	 */
+	private getRetainedText(): string {
+		const clippedText = this.getSnapshotText();
+		return clippedText.trim().length === 0 ? this.tailText : clippedText;
+	}
+
+	/** The retained tail within `maxBytes`, marked as truncated only when output is missing. */
+	private readRetainedOutput(maxBytes: number): FullOutput {
+		let bytes = Buffer.from(this.getRetainedText(), "utf-8");
+		if (bytes.length > maxBytes) {
+			let start = bytes.length - maxBytes;
+			while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+			bytes = bytes.subarray(start);
+		}
+		const tail = bytes.toString("utf-8");
+		const omitted = this.totalDecodedBytes - bytes.length;
+		if (omitted === 0) {
+			return { content: tail, truncated: false };
+		}
+		return { content: `[... ${omitted} bytes omitted ...]\n\n${tail}`, truncated: true };
+	}
+
 	private getSnapshotText(): string {
 		if (this.tailStartsAtLineBoundary) {
 			return this.tailText;
@@ -208,15 +250,16 @@ export class OutputAccumulator {
 		);
 	}
 
-	private ensureTempFile(): void {
-		if (this.tempFilePath) {
-			return;
+	private ensureTempFile(): OutputFileStream {
+		if (this.tempFile) {
+			return this.tempFile;
 		}
-		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
-		this.tempFileStream = createWriteStream(this.tempFilePath);
+		const tempFile = createOutputFileStream(this.tempFilePrefix, ".log");
+		this.tempFile = tempFile;
 		for (const chunk of this.rawChunks) {
-			this.tempFileStream.write(chunk);
+			tempFile.write(chunk);
 		}
 		this.rawChunks = [];
+		return tempFile;
 	}
 }

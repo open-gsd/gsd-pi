@@ -1,0 +1,87 @@
+import type { Model } from "../../src/types.ts";
+import { addMissing, defineProvider, mergeCompat, mergeThinking, modelsDevModels, withInputLimits } from "../define.ts";
+import {
+	CLAUDE_55_THINKING_LEVELS,
+	enableClaudeMidConvoEffort,
+	supportsClaudeMidConvoEffort,
+	supportsClaudeMidConvoSystemMessages,
+} from "../families/anthropic.ts";
+
+// Models the API may fall back to, with the price the caller is billed.
+const ALLOWED_FALLBACK_MODELS: Record<string, string[]> = {
+	"claude-fable-5": ["claude-opus-4-8", "claude-opus-5"],
+	"claude-fable-5-2": ["claude-opus-4-8", "claude-opus-5"],
+	"claude-opus-5": ["claude-opus-4-8"],
+};
+
+const MODELS_WITH_1M_CONTEXT = new Set(["claude-opus-4-6", "claude-sonnet-4-6"]);
+const MODELS_55 = new Set(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+
+// Released 2026-11-09; models.dev does not list it for Anthropic yet.
+// https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2
+const CLAUDE_FABLE_5_2: Model<"anthropic-messages"> = {
+	id: "claude-fable-5-2",
+	name: "Claude Fable 5.2",
+	api: "anthropic-messages",
+	baseUrl: "https://api.anthropic.com",
+	provider: "anthropic",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 },
+	contextWindow: 1000000,
+	maxTokens: 128000,
+	// Without a models.dev entry the shared rule cannot tell; Fable rejects `thinking: {type: "disabled"}`.
+	thinkingLevelMap: { off: null },
+};
+
+export default defineProvider({
+	id: "anthropic",
+	models: (ctx) =>
+		addMissing(
+			modelsDevModels(ctx, "anthropic", {
+				api: "anthropic-messages",
+				baseUrl: "https://api.anthropic.com",
+				map: (model) => {
+					if (MODELS_55.has(model.id)) mergeThinking(model, CLAUDE_55_THINKING_LEVELS);
+					if (MODELS_WITH_1M_CONTEXT.has(model.id)) model.contextWindow = 1000000;
+					return model;
+				},
+			}),
+			[CLAUDE_FABLE_5_2],
+		),
+	finalize: (model) => {
+		if (model.api !== "anthropic-messages") return;
+		const messagesModel = model as Model<"anthropic-messages">;
+		if (supportsClaudeMidConvoEffort(model.id)) enableClaudeMidConvoEffort(messagesModel);
+		if (supportsClaudeMidConvoSystemMessages(model.id)) {
+			mergeCompat(messagesModel, { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true });
+		}
+		mergeCompat(messagesModel, { supportsStrictTools: true });
+		// Ephemeral entries have a hard five-minute lifetime; `ttl: "1h"` extends
+		// it to one hour. Only direct Anthropic is annotated so cache warming does
+		// not assume equivalent behavior through proxies.
+		// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+		model.promptCache = { short: 300, long: 3600 };
+		withInputLimits(model, {
+			maxRequestBytes: 32 * 1024 * 1024,
+			images: { maxPerRequest: model.contextWindow === 200000 ? 100 : 600 },
+		});
+	},
+	finalizeAll: (models) => {
+		const modelsById = new Map(models.map((model) => [model.id, model as Model<"anthropic-messages">]));
+		for (const [modelId, fallbackModelIds] of Object.entries(ALLOWED_FALLBACK_MODELS)) {
+			const model = modelsById.get(modelId);
+			if (!model) continue;
+			const compatibleFallbackModelIds = model.compat?.supportsMidConvoEffort
+				? fallbackModelIds.filter(supportsClaudeMidConvoEffort)
+				: fallbackModelIds;
+			const allowedFallbackModels = compatibleFallbackModelIds.flatMap((fallbackModelId) => {
+				const fallbackModel = modelsById.get(fallbackModelId);
+				return fallbackModel
+					? [{ provider: fallbackModel.provider, model: fallbackModel.id, cost: fallbackModel.cost }]
+					: [];
+			});
+			if (allowedFallbackModels.length > 0) mergeCompat(model, { allowedFallbackModels });
+		}
+	},
+});

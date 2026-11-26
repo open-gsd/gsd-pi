@@ -1,0 +1,37 @@
+{
+  "name": "@gsd/pi-telemetry",
+  "version": "1.0.2",
+  "description": "Telemetry helpers (vendored from earendil-works/pi)",
+  "type": "module",
+  "gsd": {
+    "linkable": true,
+    "scope": "@gsd",
+    "name": "pi-telemetry"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./render": {
+      "types": "./dist/render.d.ts",
+      "import": "./dist/render.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.41"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "vitest": "4.1.12"
+  }
+}

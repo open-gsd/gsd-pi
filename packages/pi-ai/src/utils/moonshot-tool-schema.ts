@@ -1,3 +1,4 @@
+import { toClaudeInputSchemaRoot } from "../api/claude-tool-schema.js";
 import type { Model } from "../types.js";
 
 const FORBIDDEN_UNION_KEY_RE = /\b(anyOf|oneOf|allOf)\b/;
@@ -37,4 +38,10 @@ export function collectForbiddenUnionSchemaPaths(value: unknown, path = "$"): st
 	return violations;
 }
 
-export { sanitizeSchemaForMoonshot } from "../providers/google-shared.js";
+/**
+ * Moonshot/Kimi tool schemas require Claude-style object roots (`type` on parents).
+ * Reuses the Claude deep sanitizer from the pin.
+ */
+export function sanitizeSchemaForMoonshot(schema: unknown): Record<string, unknown> {
+	return toClaudeInputSchemaRoot(schema);
+}

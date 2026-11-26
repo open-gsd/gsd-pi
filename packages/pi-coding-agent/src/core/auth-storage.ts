@@ -1,71 +1,113 @@
 /**
- * Credential storage for API keys and OAuth tokens.
- * Handles loading, saving, and refreshing credentials from auth.json.
- *
- * Uses file locking to prevent race conditions when multiple pi instances
- * try to refresh tokens simultaneously.
+ * CredentialStore implementation backed by auth.json.
+ * Provider auth orchestration belongs to ModelRuntime and pi-ai Models.
  */
 
-import {
-	findEnvKeys,
-	getEnvApiKey,
-	type OAuthCredentials,
-	type OAuthLoginCallbacks,
-	type OAuthProviderId,
+import type {
+	ApiKeyCredential,
+	AuthOperationOptions,
+	Credential,
+	CredentialInfo,
+	CredentialStore,
+	OAuthCredential,
 } from "@gsd/pi-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@gsd/pi-ai/oauth";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { getOAuthProviders, type OAuthLoginCallbacks, type OAuthProviderInterface } from "@gsd/pi-ai/oauth";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
+import { setTimeout as sleep } from "timers/promises";
 import { getAgentDir } from "../config.js";
-import { normalizePath } from "../utils/paths.js";
-import { resolveConfigValue } from "./resolve-config-value.js";
+import { raceWithAbortSignal } from "../utils/abort.js";
+import { getFileRevision, normalizePath } from "../utils/paths.js";
+import { stripBom } from "../utils/text.js";
+import { clearConfigValueCacheEntry, isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.js";
 
-export type ApiKeyCredential = {
-	type: "api_key";
-	key: string;
-};
+/** GSD host aliases for credential shapes. */
+export type { ApiKeyCredential, OAuthCredential };
+export type AuthCredential = Credential;
 
-export type OAuthCredential = {
-	type: "oauth";
-} & OAuthCredentials;
+type AuthStorageData = Record<string, Credential | Credential[]>;
 
-export type AuthCredential = ApiKeyCredential | OAuthCredential;
+function asCredentialList(entry: Credential | Credential[] | undefined): Credential[] {
+	if (!entry) return [];
+	return Array.isArray(entry) ? entry : [entry];
+}
 
-export type AuthStorageData = Record<string, AuthCredential | AuthCredential[]>;
+function primaryCredential(entry: Credential | Credential[] | undefined): Credential | undefined {
+	return asCredentialList(entry)[0];
+}
 
-export type AuthStatus = {
-	configured: boolean;
-	source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
-	label?: string;
-};
+function resolveStoredCredential(credential: Credential): Credential {
+	if (credential.type !== "api_key" || credential.key === undefined || isCommandConfigValue(credential.key)) {
+		return credential;
+	}
+	return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+}
+
+function isValidStoredCredential(value: unknown): value is Credential {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const credential = value as Record<string, unknown>;
+	if (credential.type === "api_key") {
+		const validKey = credential.key === undefined || typeof credential.key === "string";
+		const validEnv =
+			credential.env === undefined ||
+			(typeof credential.env === "object" &&
+				credential.env !== null &&
+				!Array.isArray(credential.env) &&
+				Object.values(credential.env).every((entry) => typeof entry === "string"));
+		return validKey && validEnv;
+	}
+	if (credential.type === "oauth") {
+		return (
+			typeof credential.access === "string" &&
+			typeof credential.refresh === "string" &&
+			typeof credential.expires === "number" &&
+			Number.isFinite(credential.expires)
+		);
+	}
+	return false;
+}
+
+// On Windows, a just-removed lock directory can stay "delete pending" while another process
+// (antivirus, indexer, another pi checking the lock) still has it open. mkdir then fails with
+// EPERM until that handle closes. Retry this briefly so real permission errors still fail fast.
+const MAX_EPERM_RETRIES = 5;
+
+function getRetryableLockErrorCode(error: unknown): "ELOCKED" | "EPERM" | undefined {
+	const code = error instanceof Error && "code" in error ? error.code : undefined;
+	if (code === "ELOCKED") return code;
+	if (code === "EPERM" && process.platform === "win32") return code;
+	return undefined;
+}
 
 type LockResult<T> = {
 	result: T;
 	next?: string;
 };
 
-type ResolvedApiKey = {
-	apiKey: string;
-	isOAuth: boolean;
+// The mode applies only on creation so administrator-managed modes and ACLs remain intact.
+const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
+
+type AuthFileReload = {
+	controller: AbortController;
+	promise: Promise<AuthStorageData>;
+	readers: number;
 };
 
-type RefreshedOAuthApiKey = {
-	apiKey: string;
-	newCredentials: OAuthCredentials;
+type AuthFileReadState = {
+	data: AuthStorageData;
+	revision?: string;
+	reload?: AuthFileReload;
 };
 
-function isUsableApiKeyCredential(credential: AuthCredential): credential is ApiKeyCredential {
-	return credential.type === "api_key" && credential.key.trim().length > 0;
-}
-
-function isUsableStoredCredential(credential: AuthCredential): boolean {
-	return credential.type === "oauth" || isUsableApiKeyCredential(credential);
-}
+let sharedAuthFileReadState: { authPath: string; readState: AuthFileReadState } | undefined;
 
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
-	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
+	withLockAsync<T>(
+		fn: (current: string | undefined) => Promise<LockResult<T>>,
+		options?: AuthOperationOptions,
+	): Promise<T>;
 }
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
@@ -84,36 +126,25 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 	private ensureFileExists(): void {
 		if (!existsSync(this.authPath)) {
-			writeFileSync(this.authPath, "{}", "utf-8");
-			chmodSync(this.authPath, 0o600);
+			writeFileSync(this.authPath, "{}", AUTH_FILE_WRITE_OPTIONS);
 		}
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
 		const maxAttempts = 10;
 		const delayMs = 20;
-		let lastError: unknown;
-
-		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		for (let attempt = 1; ; attempt++) {
 			try {
-				return lockfile.lockSync(path, { realpath: false });
+				// Lock the resolved file so symlinked aliases of auth.json share one lock (#11655).
+				return lockfile.lockSync(path);
 			} catch (error) {
-				const code =
-					typeof error === "object" && error !== null && "code" in error
-						? String((error as { code?: unknown }).code)
-						: undefined;
-				if (code !== "ELOCKED" || attempt === maxAttempts) {
-					throw error;
-				}
-				lastError = error;
+				if (!getRetryableLockErrorCode(error) || attempt === maxAttempts) throw error;
 				const start = Date.now();
 				while (Date.now() - start < delayMs) {
 					// Sleep synchronously to avoid changing callers to async.
 				}
 			}
 		}
-
-		throw (lastError as Error) ?? new Error("Failed to acquire auth storage lock");
 	}
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
@@ -126,8 +157,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, "utf-8");
-				chmodSync(this.authPath, 0o600);
+				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
 			}
 			return result;
 		} finally {
@@ -137,7 +167,52 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		}
 	}
 
-	async withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
+	private async acquireLockAsync(
+		signal: AbortSignal | undefined,
+		onCompromised: (error: Error) => void,
+	): Promise<() => Promise<void>> {
+		const staleMs = 30_000;
+		const maxDelayMs = 2_000;
+		const deadline = Date.now() + staleMs;
+		let retry = 0;
+		let epermRetries = 0;
+		while (true) {
+			signal?.throwIfAborted();
+			let release: (() => Promise<void>) | undefined;
+			try {
+				// Lock the resolved file so symlinked aliases of auth.json share one lock (#11655).
+				release = await lockfile.lock(this.authPath, {
+					retries: 0,
+					stale: staleMs,
+					onCompromised,
+				});
+			} catch (error) {
+				signal?.throwIfAborted();
+				const code = getRetryableLockErrorCode(error);
+				const remainingMs = deadline - Date.now();
+				if (!code || remainingMs <= 0) throw error;
+				// The 30s deadline is for waiting on another holder; cap EPERM retries separately.
+				if (code === "EPERM" && ++epermRetries > MAX_EPERM_RETRIES) throw error;
+				const baseDelayMs = Math.min(10 * 2 ** retry, maxDelayMs / 2);
+				retry++;
+				const delayMs = Math.min(Math.round(baseDelayMs * (1 + Math.random())), remainingMs);
+				if (signal) await sleep(delayMs, undefined, { signal });
+				else await sleep(delayMs);
+				continue;
+			}
+			if (signal?.aborted) {
+				await release();
+				signal.throwIfAborted();
+			}
+			return release;
+		}
+	}
+
+	async withLockAsync<T>(
+		fn: (current: string | undefined) => Promise<LockResult<T>>,
+		options?: AuthOperationOptions,
+	): Promise<T> {
+		options?.signal?.throwIfAborted();
 		this.ensureParentDir();
 		this.ensureFileExists();
 
@@ -151,28 +226,19 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		};
 
 		try {
-			release = await lockfile.lock(this.authPath, {
-				retries: {
-					retries: 10,
-					factor: 2,
-					minTimeout: 100,
-					maxTimeout: 10000,
-					randomize: true,
-				},
-				stale: 30000,
-				onCompromised: (err) => {
-					lockCompromised = true;
-					lockCompromisedError = err;
-				},
+			release = await this.acquireLockAsync(options?.signal, (error) => {
+				lockCompromised = true;
+				lockCompromisedError = error;
 			});
 
 			throwIfCompromised();
+			options?.signal?.throwIfAborted();
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = await fn(current);
 			throwIfCompromised();
+			options?.signal?.throwIfAborted();
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, "utf-8");
-				chmodSync(this.authPath, 0o600);
+				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
 			}
 			throwIfCompromised();
 			return result;
@@ -188,8 +254,78 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	}
 }
 
+export class ReadOnlyAuthStorage implements CredentialStore {
+	private readonly authPath: string;
+	private data: AuthStorageData | undefined;
+
+	constructor(authPath: string = join(getAgentDir(), "auth.json")) {
+		this.authPath = normalizePath(authPath);
+	}
+
+	private load(): AuthStorageData {
+		if (this.data) return this.data;
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(stripBom(readFileSync(this.authPath, "utf-8")));
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				this.data = {};
+				return this.data;
+			}
+			throw new Error(`Failed to read auth.json: ${error instanceof Error ? error.message : String(error)}`);
+		}
+
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new Error("Invalid auth.json: expected an object");
+		}
+		for (const [providerId, credential] of Object.entries(parsed)) {
+			const entries = Array.isArray(credential) ? credential : [credential];
+			if (entries.length === 0 || !entries.every(isValidStoredCredential)) {
+				throw new Error(`Invalid auth.json credential for provider "${providerId}"`);
+			}
+		}
+
+		this.data = parsed as AuthStorageData;
+		return this.data;
+	}
+
+	async read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
+		options?.signal?.throwIfAborted();
+		const credential = primaryCredential(this.load()[providerId]);
+		options?.signal?.throwIfAborted();
+		if (!credential) return undefined;
+		return structuredClone(resolveStoredCredential(credential));
+	}
+
+	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
+		options?.signal?.throwIfAborted();
+		const credentials = Object.entries(this.load()).flatMap(([providerId, entry]) =>
+			asCredentialList(entry).map((credential) => ({
+				providerId,
+				type: credential.type,
+			})),
+		);
+		options?.signal?.throwIfAborted();
+		return credentials;
+	}
+
+	async modify(
+		_providerId: string,
+		_fn: (current: Credential | undefined) => Promise<Credential | undefined>,
+		_options?: AuthOperationOptions,
+	): Promise<Credential | undefined> {
+		throw new Error("Read-only credential storage cannot modify auth.json");
+	}
+
+	async delete(_providerId: string, _options?: AuthOperationOptions): Promise<void> {
+		throw new Error("Read-only credential storage cannot modify auth.json");
+	}
+}
+
 export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	private value: string | undefined;
+	private asyncChain: Promise<unknown> = Promise.resolve();
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		const { result, next } = fn(this.value);
@@ -199,33 +335,54 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 		return result;
 	}
 
-	async withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
-		const { result, next } = await fn(this.value);
-		if (next !== undefined) {
-			this.value = next;
-		}
-		return result;
+	withLockAsync<T>(
+		fn: (current: string | undefined) => Promise<LockResult<T>>,
+		options?: AuthOperationOptions,
+	): Promise<T> {
+		const previous = this.asyncChain;
+		const operation = (async () => {
+			await previous.catch(() => {});
+			options?.signal?.throwIfAborted();
+			const { result, next } = await fn(this.value);
+			options?.signal?.throwIfAborted();
+			if (next !== undefined) {
+				this.value = next;
+			}
+			return result;
+		})();
+		this.asyncChain = operation.catch(() => {});
+		return raceWithAbortSignal(operation, options?.signal);
 	}
 }
 
 /**
  * Credential storage backed by a JSON file.
  */
-export class AuthStorage {
-	private data: AuthStorageData = {};
-	private runtimeOverrides: Map<string, string> = new Map();
-	private fallbackResolver?: (provider: string) => string | undefined;
-	private loadError: Error | null = null;
-	private errors: Error[] = [];
+export class AuthStorage implements CredentialStore {
 	private storage: AuthStorageBackend;
+	private authPath: string | undefined;
+	private readState: AuthFileReadState;
+	/** GSD: provider-level backoff for cross-provider fallback (in-memory). */
+	private readonly exhaustedProviders = new Set<string>();
 
-	private constructor(storage: AuthStorageBackend) {
+	private constructor(storage: AuthStorageBackend, authPath?: string) {
 		this.storage = storage;
+		this.authPath = authPath;
+		this.readState =
+			authPath && sharedAuthFileReadState?.authPath === authPath ? sharedAuthFileReadState.readState : { data: {} };
+		if (authPath && !sharedAuthFileReadState) {
+			sharedAuthFileReadState = { authPath, readState: this.readState };
+		}
+		if (authPath) {
+			const revision = getFileRevision(authPath);
+			if (revision !== undefined && revision === this.readState.revision) return;
+		}
 		this.reload();
 	}
 
-	static create(authPath?: string): AuthStorage {
-		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")));
+	static create(authPath: string = join(getAgentDir(), "auth.json")): AuthStorage {
+		const normalizedAuthPath = normalizePath(authPath);
+		return new AuthStorage(new FileAuthStorageBackend(normalizedAuthPath), normalizedAuthPath);
 	}
 
 	static fromStorage(storage: AuthStorageBackend): AuthStorage {
@@ -238,46 +395,16 @@ export class AuthStorage {
 		return AuthStorage.fromStorage(storage);
 	}
 
-	/**
-	 * Set a runtime API key override (not persisted to disk).
-	 * Used for CLI --api-key flag.
-	 */
-	setRuntimeApiKey(provider: string, apiKey: string): void {
-		this.runtimeOverrides.set(provider, apiKey);
-	}
-
-	/**
-	 * Remove a runtime API key override.
-	 */
-	removeRuntimeApiKey(provider: string): void {
-		this.runtimeOverrides.delete(provider);
-	}
-
-	/**
-	 * Set a fallback resolver for API keys not found in auth.json or env vars.
-	 * Used for custom provider keys from models.json.
-	 */
-	setFallbackResolver(resolver: (provider: string) => string | undefined): void {
-		this.fallbackResolver = resolver;
-	}
-
-	private recordError(error: unknown): void {
-		const normalizedError = error instanceof Error ? error : new Error(String(error));
-		this.errors.push(normalizedError);
-	}
-
 	private parseStorageData(content: string | undefined): AuthStorageData {
 		if (!content) {
 			return {};
 		}
-		return JSON.parse(content) as AuthStorageData;
+		return JSON.parse(stripBom(content)) as AuthStorageData;
 	}
 
-	getCredentialsForProvider(provider: string): AuthCredential[] {
-		const entry = this.data[provider];
-		if (!entry) return [];
-		if (Array.isArray(entry)) return entry;
-		return [entry];
+	private updateReadState(data: AuthStorageData, revision?: string): void {
+		this.readState.data = data;
+		this.readState.revision = revision;
 	}
 
 	/**
@@ -285,333 +412,238 @@ export class AuthStorage {
 	 */
 	reload(): void {
 		let content: string | undefined;
+		let revision: string | undefined;
 		try {
 			this.storage.withLock((current) => {
 				content = current;
+				revision = this.authPath ? getFileRevision(this.authPath) : undefined;
 				return { result: undefined };
 			});
-			this.data = this.parseStorageData(content);
-			this.loadError = null;
-		} catch (error) {
-			this.loadError = error as Error;
-			this.recordError(error);
+			this.updateReadState(this.parseStorageData(content), revision);
+		} catch {
+			// Preserve the last valid in-memory snapshot.
 		}
 	}
 
-	private persistProviderChange(
-		provider: string,
-		credential: AuthCredential | AuthCredential[] | undefined,
-	): void {
-		if (this.loadError) {
-			return;
+	private async reloadFromStorageAsync(options?: AuthOperationOptions): Promise<AuthStorageData> {
+		return this.storage.withLockAsync(async (content) => {
+			const currentData = this.parseStorageData(content);
+			const revision = this.authPath ? getFileRevision(this.authPath) : undefined;
+			this.updateReadState(currentData, revision);
+			return { result: currentData };
+		}, options);
+	}
+
+	private async readLatestData(options?: AuthOperationOptions): Promise<AuthStorageData> {
+		options?.signal?.throwIfAborted();
+		if (!this.authPath) {
+			const reload = this.reloadFromStorageAsync(options);
+			return options?.signal ? reload : reload.catch(() => this.readState.data);
+		}
+		const revision = getFileRevision(this.authPath);
+		if (revision !== undefined && revision === this.readState.revision) return this.readState.data;
+		if (!this.readState.reload) {
+			const controller = new AbortController();
+			const reload: AuthFileReload = {
+				controller,
+				promise: this.reloadFromStorageAsync({ signal: controller.signal }),
+				readers: 0,
+			};
+			this.readState.reload = reload;
+			void reload.promise.then(
+				() => {
+					if (this.readState.reload === reload) this.readState.reload = undefined;
+				},
+				() => {
+					if (this.readState.reload === reload) this.readState.reload = undefined;
+				},
+			);
 		}
 
+		const reload = this.readState.reload;
+		reload.readers++;
 		try {
-			this.storage.withLock((current) => {
-				const currentData = this.parseStorageData(current);
-				const merged: AuthStorageData = { ...currentData };
-				if (credential) {
-					merged[provider] = credential;
-				} else {
-					delete merged[provider];
-				}
-				return { result: undefined, next: JSON.stringify(merged, null, 2) };
-			});
-		} catch (error) {
-			this.recordError(error);
+			const result = raceWithAbortSignal(reload.promise, options?.signal);
+			return options?.signal ? await result : await result.catch(() => this.readState.data);
+		} finally {
+			reload.readers--;
+			if (reload.readers === 0 && this.readState.reload === reload) {
+				this.readState.reload = undefined;
+				reload.controller.abort();
+			}
 		}
 	}
 
-	/**
-	 * Get credential for a provider.
-	 */
-	get(provider: string): AuthCredential | undefined {
+	async read(provider: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
+		const credential = primaryCredential((await this.readLatestData(options))[provider]);
+		options?.signal?.throwIfAborted();
+		if (!credential) return undefined;
+		return resolveStoredCredential(credential);
+	}
+
+	async modify(
+		provider: string,
+		fn: (current: Credential | undefined) => Promise<Credential | undefined>,
+		options?: AuthOperationOptions,
+	): Promise<Credential | undefined> {
+		let latestData = this.readState.data;
+		let revision: string | undefined;
+		let written: Credential | undefined;
+		const result = await this.storage.withLockAsync(async (content) => {
+			const currentData = this.parseStorageData(content);
+			const current = primaryCredential(currentData[provider]);
+			const next = await fn(current);
+			if (next === undefined) {
+				latestData = currentData;
+				revision = this.authPath ? getFileRevision(this.authPath) : undefined;
+				return { result: current };
+			}
+
+			const merged: AuthStorageData = { ...currentData, [provider]: next };
+			latestData = merged;
+			written = next;
+			return { result: next, next: JSON.stringify(merged, null, 2) };
+		}, options);
+		this.updateReadState(latestData, revision);
+		// Command results are cached for the process. Saving a `!command` key, even the same one, runs it
+		// again, so signing in to a secrets manager and saving the key again recovers from a failure.
+		if (written?.type === "api_key" && written.key) clearConfigValueCacheEntry(written.key);
+		return result;
+	}
+
+	async delete(provider: string, options?: AuthOperationOptions): Promise<void> {
+		let latestData = this.readState.data;
+		await this.storage.withLockAsync(async (content) => {
+			const currentData = this.parseStorageData(content);
+			delete currentData[provider];
+			latestData = currentData;
+			return { result: undefined, next: JSON.stringify(currentData, null, 2) };
+		}, options);
+		this.updateReadState(latestData);
+	}
+
+	/** GSD: mark a provider unavailable after quota/rate exhaustion. */
+	markProviderExhausted(provider: string, _errorType?: string): void {
+		this.exhaustedProviders.add(provider);
+	}
+
+	/** GSD: whether fallback routing may use this provider. */
+	isProviderAvailable(provider: string): boolean {
+		return !this.exhaustedProviders.has(provider);
+	}
+
+	/** List credential metadata without resolving configured key values. */
+	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
+		const entries = Object.entries(await this.readLatestData(options));
+		options?.signal?.throwIfAborted();
+		return entries.flatMap(([providerId, entry]) =>
+			asCredentialList(entry).map((credential) => ({ providerId, type: credential.type })),
+		);
+	}
+
+	/** GSD: sync credential listing from the in-memory cache. */
+	listSync(): readonly CredentialInfo[] {
+		return Object.entries(this.readState.data).flatMap(([providerId, entry]) =>
+			asCredentialList(entry).map((credential) => ({
+				providerId,
+				type: credential.type,
+			})),
+		);
+	}
+
+	/** GSD: sync provider ids with stored credentials (main-compat `list()`). */
+	listProviders(): string[] {
+		return Object.keys(this.readState.data);
+	}
+
+	/** GSD host synchronous credential read from the in-memory cache. */
+	get(provider: string): Credential | undefined {
 		return this.getCredentialsForProvider(provider)[0];
 	}
 
-	/**
-	 * Set credential for a provider.
-	 */
-	set(provider: string, credential: AuthCredential): void {
-		this.data[provider] = credential;
-		this.persistProviderChange(provider, credential);
-	}
-
-	/**
-	 * Remove credential for a provider.
-	 */
+	/** GSD host synchronous credential removal. */
 	remove(provider: string): void {
-		delete this.data[provider];
-		this.persistProviderChange(provider, undefined);
+		this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			delete currentData[provider];
+			this.updateReadState(currentData, this.authPath ? getFileRevision(this.authPath) : undefined);
+			return { result: undefined, next: JSON.stringify(currentData, null, 2) };
+		});
 	}
 
-	/**
-	 * List all providers with credentials.
-	 */
-	list(): string[] {
-		return Object.keys(this.data);
-	}
-
-	/**
-	 * Check if credentials exist for a provider in auth.json.
-	 */
-	has(provider: string): boolean {
-		return this.getCredentialsForProvider(provider).length > 0;
-	}
-
-	/**
-	 * Check if any form of auth is configured for a provider.
-	 * Unlike getApiKey(), this doesn't refresh OAuth tokens.
-	 */
 	hasAuth(provider: string): boolean {
-		if (this.runtimeOverrides.has(provider)) return true;
-		if (this.getCredentialsForProvider(provider).some(isUsableStoredCredential)) return true;
-		if (getEnvApiKey(provider)) return true;
-		if (this.fallbackResolver?.(provider)) return true;
-		return false;
+		return this.get(provider) !== undefined;
 	}
 
-	private providerBackoff = new Map<string, number>();
-
-	isProviderAvailable(provider: string): boolean {
-		const expiresAt = this.providerBackoff.get(provider);
-		if (expiresAt === undefined) return true;
-		if (Date.now() >= expiresAt) {
-			this.providerBackoff.delete(provider);
-			return true;
+	set(provider: string, credential: Credential): void {
+		this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			const merged: AuthStorageData = { ...currentData, [provider]: credential };
+			this.updateReadState(merged, this.authPath ? getFileRevision(this.authPath) : undefined);
+			return { result: undefined, next: JSON.stringify(merged, null, 2) };
+		});
+		if (credential.type === "api_key" && credential.key) {
+			clearConfigValueCacheEntry(credential.key);
 		}
-		return false;
 	}
 
-	markProviderExhausted(provider: string, _errorType?: string): void {
-		this.providerBackoff.set(provider, Date.now() + 60_000);
+	setRuntimeApiKey(provider: string, apiKey: string): void {
+		void this.modify(provider, async () => ({ type: "api_key", key: apiKey }));
 	}
 
+	getOAuthProviders(): OAuthProviderInterface[] {
+		return getOAuthProviders();
+	}
+
+	async login(_providerId: string, _callbacks?: OAuthLoginCallbacks): Promise<void> {
+		throw new Error("OAuth login is handled through ModelRuntime in pi v1.6.1");
+	}
+
+	async logout(providerId: string): Promise<void> {
+		await this.delete(providerId);
+	}
+	/** GSD: credentials for a provider (supports round-robin multi-key entries). */
+	getCredentialsForProvider(provider: string): Credential[] {
+		return asCredentialList(this.readState.data[provider]);
+	}
+
+	/** GSD: alias for hasAuth. */
+	has(provider: string): boolean {
+		return this.hasAuth(provider);
+	}
+
+	/** GSD: whether every credential for the provider is in backoff. */
 	areAllCredentialsBackedOff(provider: string): boolean {
 		return !this.isProviderAvailable(provider);
 	}
 
+	/** GSD: remaining backoff ms (0 when available). */
 	getProviderBackoffRemaining(provider: string): number {
-		const expiresAt = this.providerBackoff.get(provider);
-		if (expiresAt === undefined) return 0;
-		return Math.max(0, expiresAt - Date.now());
+		return this.isProviderAvailable(provider) ? 0 : 60_000;
 	}
 
-	/**
-	 * Return auth status without exposing credential values or refreshing tokens.
-	 */
-	getAuthStatus(provider: string): AuthStatus {
-		if (this.getCredentialsForProvider(provider).some(isUsableStoredCredential)) {
-			return { configured: true, source: "stored" };
-		}
-
-		if (this.runtimeOverrides.has(provider)) {
-			return { configured: false, source: "runtime", label: "--api-key" };
-		}
-
-		const envKeys = findEnvKeys(provider);
-		if (envKeys?.[0]) {
-			return { configured: false, source: "environment", label: envKeys[0] };
-		}
-
-		if (this.fallbackResolver?.(provider)) {
-			return { configured: false, source: "fallback", label: "custom provider config" };
-		}
-
-		return { configured: false };
-	}
-
-	/**
-	 * Get all credentials (for passing to getOAuthApiKey).
-	 */
-	getAll(): AuthStorageData {
-		return { ...this.data };
-	}
-
-	drainErrors(): Error[] {
-		const drained = [...this.errors];
-		this.errors = [];
-		return drained;
-	}
-
-	/**
-	 * Login to an OAuth provider.
-	 */
-	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
-		const provider = getOAuthProvider(providerId);
-		if (!provider) {
-			throw new Error(`Unknown OAuth provider: ${providerId}`);
-		}
-
-		const credentials = await provider.login(callbacks);
-		this.set(providerId, { type: "oauth", ...credentials });
-	}
-
-	/**
-	 * Logout from a provider.
-	 */
-	logout(provider: string): void {
-		this.remove(provider);
-	}
-
-	/**
-	 * Refresh OAuth token with backend locking to prevent race conditions.
-	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
-	 */
-	private async refreshOAuthTokenWithLock(
-		providerId: OAuthProviderId,
-	): Promise<RefreshedOAuthApiKey | null> {
-		const provider = getOAuthProvider(providerId);
-		if (!provider) {
-			return null;
-		}
-
-		const result = await this.storage.withLockAsync<RefreshedOAuthApiKey | null>(async (current) => {
-			const currentData = this.parseStorageData(current);
-			this.data = currentData;
-			this.loadError = null;
-
-			const entry = currentData[providerId];
-			const oauthEntry = Array.isArray(entry)
-				? entry.find((candidate) => candidate.type === "oauth")
-				: entry?.type === "oauth"
-					? entry
-					: undefined;
-			if (!oauthEntry || oauthEntry.type !== "oauth") {
-				return { result: null };
-			}
-
-			if (Date.now() < oauthEntry.expires) {
-				return { result: { apiKey: provider.getApiKey(oauthEntry), newCredentials: oauthEntry } };
-			}
-
-			const oauthCreds: Record<string, OAuthCredentials> = {};
-			for (const [key, value] of Object.entries(currentData)) {
-				const entries = Array.isArray(value) ? value : value ? [value] : [];
-				for (const candidate of entries) {
-					if (candidate.type === "oauth") {
-						oauthCreds[key] = candidate;
-					}
-				}
-			}
-
-			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
-			if (!refreshed) {
-				return { result: null };
-			}
-
-			const merged: AuthStorageData = {
-				...currentData,
-				[providerId]: { type: "oauth", ...refreshed.newCredentials },
-			};
-			this.data = merged;
-			this.loadError = null;
-			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
-		});
-
-		return result;
-	}
-
-	/**
-	 * Get API key for a provider.
-	 * Priority:
-	 * 1. Runtime override (CLI --api-key)
-	 * 2. OAuth token from auth.json (when provider supports OAuth login)
-	 * 3. API key from auth.json (including fallback when OAuth refresh fails)
-	 * 4. Environment variable
-	 * 5. Fallback resolver (models.json custom providers)
-	 */
-	async getApiKeyWithOAuthState(
-		providerId: string,
-		options?: { includeFallback?: boolean },
-	): Promise<ResolvedApiKey | undefined> {
-		// Runtime override takes highest priority
-		const runtimeKey = this.runtimeOverrides.get(providerId);
-		if (runtimeKey) {
-			return { apiKey: runtimeKey, isOAuth: false };
-		}
-
-		const creds = this.getCredentialsForProvider(providerId);
-		const apiKeyCredential = creds.find(isUsableApiKeyCredential);
-		const oauthCredential = creds.find((entry) => entry.type === "oauth");
-		// Prefer OAuth for providers that support subscription login (anthropic,
-		// github-copilot, openai-codex). Users often have both OAuth and a stale
-		// API key on disk; subscription auth should win unless --api-key overrides.
-		const cred =
-			oauthCredential && getOAuthProvider(providerId)
-				? oauthCredential
-				: (apiKeyCredential ?? oauthCredential);
-
-		if (cred?.type === "api_key") {
-			const apiKey = resolveConfigValue(cred.key);
-			return apiKey ? { apiKey, isOAuth: false } : undefined;
-		}
-
-		if (cred?.type === "oauth") {
-			const provider = getOAuthProvider(providerId);
-			if (!provider) {
-				// Unknown OAuth provider, can't get API key
-				return undefined;
-			}
-
-			const resolveStoredApiKey = (): string | undefined =>
-				apiKeyCredential ? resolveConfigValue(apiKeyCredential.key) : undefined;
-
-			// Check if token needs refresh
-			const needsRefresh = Date.now() >= cred.expires;
-
-			if (needsRefresh) {
-				// Use locked refresh to prevent race conditions
-				try {
-					const result = await this.refreshOAuthTokenWithLock(providerId);
-					if (result) {
-						return { apiKey: result.apiKey, isOAuth: true };
-					}
-				} catch (error) {
-					this.recordError(error);
-				}
-
-				// Refresh failed or returned nothing - re-read file to check if another instance succeeded
-				this.reload();
-				const updatedCred = this.getCredentialsForProvider(providerId).find(
-					(entry) => entry.type === "oauth",
-				);
-
-				if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
-					return { apiKey: provider.getApiKey(updatedCred), isOAuth: true };
-				}
-
-				const storedApiKey = resolveStoredApiKey();
-				if (storedApiKey) {
-					return { apiKey: storedApiKey, isOAuth: false };
-				}
-			} else {
-				// Token not expired, use current access token
-				return { apiKey: provider.getApiKey(cred), isOAuth: true };
-			}
-		}
-
-		// Fall back to environment variable
-		const envKey = getEnvApiKey(providerId);
-		if (envKey) return { apiKey: envKey, isOAuth: false };
-
-		// Fall back to custom resolver (e.g., models.json custom providers)
-		if (options?.includeFallback !== false) {
-			const apiKey = this.fallbackResolver?.(providerId);
-			return apiKey ? { apiKey, isOAuth: false } : undefined;
-		}
-
+	/** GSD: resolve a usable API key without OAuth refresh. */
+	async getApiKey(providerId: string, _options?: { includeFallback?: boolean }): Promise<string | undefined> {
+		const cred = this.get(providerId);
+		if (!cred) return undefined;
+		if (cred.type === "api_key") return cred.key;
 		return undefined;
 	}
+}
 
-	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
-		return (await this.getApiKeyWithOAuthState(providerId, options))?.apiKey;
-	}
 
-	/**
-	 * Get all registered OAuth providers
-	 */
-	getOAuthProviders() {
-		return getOAuthProviders();
+/**
+ * One-off synchronous read of a stored credential from an auth.json file,
+ * without instantiating a store or resolving configured key values.
+ */
+export function readStoredCredential(
+	providerId: string,
+	authPath: string = join(getAgentDir(), "auth.json"),
+): Credential | undefined {
+	try {
+		const data = JSON.parse(stripBom(readFileSync(normalizePath(authPath), "utf-8"))) as AuthStorageData;
+		return primaryCredential(data[providerId]);
+	} catch {
+		return undefined;
 	}
 }

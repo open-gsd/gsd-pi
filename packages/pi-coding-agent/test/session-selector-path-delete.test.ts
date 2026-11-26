@@ -1,12 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setKeybindings } from "@earendil-works/pi-tui";
+import { setKeybindings } from "@gsd/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type { SessionInfo } from "../src/core/session-manager.ts";
-import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { KeybindingsManager } from "../src/core/keybindings.js";
+import type { SessionInfo } from "../src/core/session-manager.js";
+import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 type Deferred<T> = {
 	promise: Promise<T>;
@@ -218,13 +218,15 @@ describe("session selector path/delete interactions", () => {
 
 	it("does not start redundant All loads when toggling scopes while All is already loading", async () => {
 		const currentSessions = [makeSession({ id: "current" })];
+		const allSessions = [makeSession({ id: "all" })];
 		const allDeferred = createDeferred<SessionInfo[]>();
 		let allLoadCalls = 0;
 
 		const selector = new SessionSelectorComponent(
 			async () => currentSessions,
-			async () => {
+			async (onProgress) => {
 				allLoadCalls++;
+				onProgress?.(1, 2, allSessions);
 				return allDeferred.promise;
 			},
 			() => {},
@@ -241,8 +243,10 @@ describe("session selector path/delete interactions", () => {
 		list.handleInput("\t"); // current -> all again while load pending
 
 		expect(allLoadCalls).toBe(1);
+		expect(selector.getSessionList().getSelectedSessionPath()).toBe(allSessions[0]!.path);
+		expect(selector.render(120).join("\n")).toContain("Loading");
 
-		allDeferred.resolve([makeSession({ id: "all" })]);
+		allDeferred.resolve(allSessions);
 		await flushPromises();
 	});
 
@@ -282,6 +286,45 @@ describe("session selector path/delete interactions", () => {
 		expect(output).toContain("└─ Child");
 	});
 
+	it("sorts threaded sessions by latest activity in their subtree", async () => {
+		const parentOne = makeSession({
+			id: "parent-one",
+			name: "Parent one",
+			modified: new Date("2026-01-02T00:00:00.000Z"),
+		});
+		const parentTwo = makeSession({
+			id: "parent-two",
+			name: "Parent two",
+			modified: new Date("2026-01-01T00:00:00.000Z"),
+		});
+		const childTwo = makeSession({
+			id: "child-two",
+			name: "Child two",
+			parentSessionPath: parentTwo.path,
+			modified: new Date("2026-01-03T00:00:00.000Z"),
+		});
+
+		const selector = new SessionSelectorComponent(
+			async () => [parentOne, parentTwo, childTwo],
+			async () => [],
+			() => {},
+			() => {},
+			() => {},
+			() => {},
+			{ keybindings },
+		);
+		await flushPromises();
+
+		const output = stripAnsi(selector.render(120).join("\n"));
+		const parentTwoIndex = output.indexOf("Parent two");
+		const childTwoIndex = output.indexOf("└─ Child two");
+		const parentOneIndex = output.indexOf("Parent one");
+
+		expect(parentTwoIndex).toBeGreaterThanOrEqual(0);
+		expect(childTwoIndex).toBeGreaterThan(parentTwoIndex);
+		expect(parentOneIndex).toBeGreaterThan(childTwoIndex);
+	});
+
 	it("treats the current session as active across symlink aliases", async () => {
 		const paths = createSymlinkedSessionPaths();
 		tempDirs.push(paths.baseDir);
@@ -311,5 +354,47 @@ describe("session selector path/delete interactions", () => {
 
 		expect(confirmationChanges).toEqual([]);
 		expect(errorMessage).toBe("Cannot delete the currently active session");
+	});
+
+	it("keeps the next session selected when a progressive reload after delete starts with another session", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-session-selector-"));
+		tempDirs.push(dir);
+		const sessions = [1, 2, 3, 4, 5].map((i) => {
+			const path = join(dir, `s${i}.jsonl`);
+			writeFileSync(path, "session\n");
+			return makeSession({ id: `s${i}`, path, modified: new Date(10_000 - i * 1000) });
+		});
+
+		const selector = new SessionSelectorComponent(
+			async (onProgress) => {
+				const remaining = sessions.filter((session) => existsSync(session.path));
+				// The first partial list holds only the file that finished loading first, here the oldest
+				onProgress?.(1, remaining.length, [remaining[remaining.length - 1]!]);
+				onProgress?.(remaining.length, remaining.length, remaining);
+				return remaining;
+			},
+			async () => [],
+			() => {},
+			() => {},
+			() => {},
+			() => {},
+			{ keybindings },
+		);
+		await flushPromises();
+
+		const list = selector.getSessionList();
+		list.handleInput("\x1b[B");
+		list.handleInput("\x1b[A");
+		expect(list.getSelectedSessionPath()).toBe(sessions[0]!.path);
+
+		list.handleInput(CTRL_D);
+		list.handleInput("\r");
+		for (let i = 0; i < 10 && existsSync(sessions[0]!.path); i++) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		await flushPromises();
+
+		expect(existsSync(sessions[0]!.path)).toBe(false);
+		expect(list.getSelectedSessionPath()).toBe(sessions[1]!.path);
 	});
 });

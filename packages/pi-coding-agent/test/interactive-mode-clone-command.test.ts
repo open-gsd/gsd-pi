@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 type CloneCommandContext = {
 	sessionManager: { getLeafId: () => string | null };
@@ -41,7 +41,7 @@ describe("InteractiveMode /clone", () => {
 		await interactiveModePrototype.handleCloneCommand.call(context);
 
 		expect(fork).toHaveBeenCalledWith("leaf-123", { position: "at" });
-		expect(renderCurrentSessionState).toHaveBeenCalled();
+		expect(renderCurrentSessionState).not.toHaveBeenCalled();
 		expect(setText).toHaveBeenCalledWith("");
 		expect(showStatus).toHaveBeenCalledWith("Cloned to new session");
 		expect(showError).not.toHaveBeenCalled();

@@ -339,7 +339,7 @@ describe('ensure-db-open', () => {
       '20.11.1',
     );
 
-    assert.match(message, />= 22\.18\.0/);
+    assert.match(message, />= 22\.19\.0/);
     assert.match(message, /current: v20\.11\.1/);
   });
 

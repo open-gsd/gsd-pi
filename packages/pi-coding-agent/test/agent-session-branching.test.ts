@@ -10,19 +10,19 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@gsd/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AgentSession } from "@gsd/agent-core";
+import type { AgentSession } from "../src/core/agent-session.js";
 import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
-import { AuthStorage } from "../src/core/auth-storage.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
-import { API_KEY } from "./utilities.ts";
+} from "../src/core/agent-session-runtime.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import { API_KEY } from "./utilities.js";
 
 describe.skipIf(!API_KEY)("AgentSession forking", () => {
 	let session: AgentSession;
@@ -48,7 +48,7 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		sessionManager = noSession ? SessionManager.inMemory(tempDir) : SessionManager.create(tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		authStorage.setRuntimeApiKey("anthropic", API_KEY!);
+		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: API_KEY! }));
 
 		const servicesOptions = {
 			agentDir: tempDir,

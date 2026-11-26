@@ -1,7 +1,7 @@
-import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent } from "@gsd/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SessionShutdownEvent } from "../src/index.ts";
-import { runPrintMode } from "../src/modes/print-mode.ts";
+import type { SessionShutdownEvent } from "../src/index.js";
+import { runPrintMode } from "../src/modes/print-mode.js";
 
 type EmitEvent = SessionShutdownEvent;
 
@@ -12,7 +12,7 @@ type FakeExtensionRunner = {
 
 type FakeSession = {
 	sessionManager: { getHeader: () => object | undefined };
-	agent: { waitForIdle: () => Promise<void> };
+	agent: { waitForIdle: () => Promise<void>; subscribe: ReturnType<typeof vi.fn> };
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
 	bindExtensions: ReturnType<typeof vi.fn>;
@@ -65,7 +65,7 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 
 	const session: FakeSession = {
 		sessionManager: { getHeader: () => undefined },
-		agent: { waitForIdle: async () => {} },
+		agent: { waitForIdle: async () => {}, subscribe: vi.fn(() => () => {}) },
 		state,
 		extensionRunner,
 		bindExtensions: vi.fn(async () => {}),
@@ -138,5 +138,90 @@ describe("runPrintMode", () => {
 		expect(errorSpy).toHaveBeenCalledWith("provider failure");
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+	});
+
+	// #10799
+	it("warns on stderr and returns non-zero when the response was truncated", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ stopReason: "length" }));
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+		});
+
+		expect(exitCode).toBe(1);
+		expect(errorSpy).toHaveBeenCalled();
+	});
+
+	// A signal during the final disposal used to hit no handler and kill pi mid-dispose.
+	it("waits for the final disposal when SIGTERM arrives during it, and exits on a repeated SIGTERM", async () => {
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		let finishDispose = () => {};
+		runtimeHost.dispose.mockImplementation(
+			() =>
+				new Promise<void>((resolve) => {
+					finishDispose = resolve;
+				}),
+		);
+		const listenersBefore = process.listenerCount("SIGTERM");
+
+		const run = runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "Say done",
+		});
+		await vi.waitFor(() => expect(runtimeHost.dispose).toHaveBeenCalledTimes(1));
+		expect(process.listenerCount("SIGTERM")).toBe(listenersBefore + 1);
+
+		process.emit("SIGTERM");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(exitSpy).not.toHaveBeenCalled();
+		expect(runtimeHost.dispose).toHaveBeenCalledTimes(1);
+
+		process.emit("SIGTERM");
+		expect(exitSpy).toHaveBeenCalledWith(143);
+
+		finishDispose();
+		await run;
+		expect(process.listenerCount("SIGTERM")).toBe(listenersBefore);
+	});
+
+	// Windows emits SIGHUP when the console window is closed. pi used to listen for it only on POSIX,
+	// so closing the window skipped session_shutdown and left the bash tool's processes running.
+	it("disposes and exits on SIGHUP on Windows", async () => {
+		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+		Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+		try {
+			const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+			const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+			let finishPrompt = () => {};
+			runtimeHost.session.prompt.mockImplementation(
+				() =>
+					new Promise<void>((resolve) => {
+						finishPrompt = resolve;
+					}),
+			);
+			const listenersBefore = process.listenerCount("SIGHUP");
+
+			const run = runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode: "text",
+				initialMessage: "Say done",
+			});
+			await vi.waitFor(() => expect(runtimeHost.session.prompt).toHaveBeenCalledTimes(1));
+			expect(process.listenerCount("SIGHUP")).toBe(listenersBefore + 1);
+
+			process.emit("SIGHUP");
+			await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(129));
+			expect(runtimeHost.session.extensionRunner.emit).toHaveBeenCalledWith({
+				type: "session_shutdown",
+				reason: "quit",
+			});
+
+			finishPrompt();
+			await run;
+			expect(process.listenerCount("SIGHUP")).toBe(listenersBefore);
+		} finally {
+			if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+		}
 	});
 });

@@ -4,9 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { getModels, getSupportedThinkingLevels } from "../../../../../packages/pi-ai/src/models.js";
-import { streamSimpleOpenAICompletions } from "../../../../../packages/pi-ai/src/providers/openai-completions.js";
-import type { Api, Model } from "../../../../../packages/pi-ai/src/types.js";
+import { getModels, getSupportedThinkingLevels, normalizeContext, streamSimpleOpenAICompletions } from "@gsd/pi-ai";
+import type { Api, Model } from "@gsd/pi-ai";
 import {
   applyLastKnownGood,
   computeCatalogRegistrationCandidates,
@@ -62,7 +61,7 @@ async function captureCompletionsPayload(
   let payload: unknown;
   const result = await streamSimpleOpenAICompletions(
     model,
-    { systemPrompt: "", messages: [{ role: "user", content: "hello", timestamp: Date.now() }] },
+    normalizeContext({ systemPrompt: "", messages: [{ role: "user", content: "hello", timestamp: Date.now() }] }),
     {
       apiKey: "test-key",
       reasoning,
@@ -497,11 +496,11 @@ test("conflicting live effort aliases are intersected instead of broadened", () 
   assert.deepEqual(record.execution.reasoningLevels, ["low"]);
 });
 
-test("a static Completions model stays disabled without live evidence but accepts matching live evidence", async () => {
+test("a static Completions model inherits bundled effort metadata and accepts matching live evidence", async () => {
   const staticModel = getModels("github-copilot").find(
-    (model) => isCompletionsModel(model) && model.compat?.supportsReasoningEffort === false,
+    (model) => isCompletionsModel(model) && model.compat?.supportsReasoningEffort === true,
   );
-  assert.ok(staticModel, "fixture requires a bundled Completions model with effort compatibility disabled");
+  assert.ok(staticModel, "fixture requires a bundled Completions model with reasoning effort support");
   assertCompletionsModel(staticModel);
 
   const fallback = synthesizeCopilotOverlayEntry(normalizedRecord(staticModel.id, {
@@ -510,15 +509,6 @@ test("a static Completions model stays disabled without live evidence but accept
   assertCompletionsModel(fallback);
   assert.equal(fallback.compat?.supportsReasoningEffort, false);
   assert.deepEqual(getSupportedThinkingLevels(fallback), []);
-  assert.deepEqual(fallback.thinkingLevelMap, {
-    off: null,
-    minimal: null,
-    low: null,
-    medium: null,
-    high: null,
-    xhigh: null,
-    max: null,
-  });
 
   const live = synthesizeCopilotOverlayEntry(normalizedRecord(staticModel.id, {
     supported_endpoints: ["/chat/completions"],
@@ -533,14 +523,14 @@ test("a static Completions model stays disabled without live evidence but accept
 });
 
 test("unknown-only live endpoints do not enable static Completions effort compatibility", async () => {
-  // gpt-6-astra is now statically Responses-routed (catalog fix 173645ec); use
-  // claude-opus-5, which is genuinely Completions-routed, to exercise the same
-  // unknown-live-endpoint-evidence scenario this fixture was written for.
+  const fixtureId = getModels("github-copilot").find((model) => isCompletionsModel(model))?.id;
+  assert.ok(fixtureId, "fixture requires a bundled Completions-routed Copilot model");
+
   for (const evidence of [
     { supported_reasoning_efforts: ["high"] },
     { capabilities: { supports: { reasoning_effort: true } } },
   ]) {
-    const record = normalizedRecord("claude-opus-5", {
+    const record = normalizedRecord(fixtureId, {
       supported_endpoints: ["/embeddings"],
       ...evidence,
     });
@@ -553,7 +543,7 @@ test("unknown-only live endpoints do not enable static Completions effort compat
     assert.equal((await captureCompletionsPayload(model, "high")).reasoning_effort, undefined);
   }
 
-  const recognized = normalizedRecord("claude-opus-5", {
+  const recognized = normalizedRecord(fixtureId, {
     supported_endpoints: ["/embeddings", "/chat/completions"],
     supported_reasoning_efforts: ["high"],
   });
@@ -571,7 +561,12 @@ test("static fallback preserves mapped aliases and explicitly disables unsupport
   );
   assert.ok(staticModel, "fixture requires a static Copilot model with a thinking-level alias");
 
-  const record = normalizedRecord(staticModel.id);
+  const staticEndpoints = staticModel.api === "anthropic-messages"
+    ? ["/v1/messages"]
+    : staticModel.api === "openai-completions"
+      ? ["/chat/completions"]
+      : ["/responses"];
+  const record = normalizedRecord(staticModel.id, { supported_endpoints: staticEndpoints });
   for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const) {
     const supported = getSupportedThinkingLevels(staticModel).includes(level);
     assert.equal(

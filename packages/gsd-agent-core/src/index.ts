@@ -1,3 +1,9 @@
+import { setDefaultStreamFn } from "@gsd/pi-agent-core";
+import { streamSimple } from "@gsd/pi-ai";
+
+// Host-compat: Pi v1.6.1 Agent requires a default streamFn (main defaulted to streamSimple).
+setDefaultStreamFn(streamSimple);
+
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -37,6 +43,10 @@ export {
 export type { CompactionPreparation } from "./compaction/compaction.js";
 export { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 export { buildSystemPrompt, type BuildSystemPromptOptions } from "./system-prompt.js";
+export {
+	normalizeBuildSystemPromptOptions,
+	type NormalizedBuildSystemPromptOptions,
+} from "@gsd/pi-coding-agent/core/system-prompt.js";
 export {
 	type AppAction,
 	type AppKeybinding,

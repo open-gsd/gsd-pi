@@ -149,7 +149,7 @@ test("RPC v2 message_update/message_end expose only assistant text from cursor-a
 	const prompt: AgentMessage = { role: "user", content: "Say hi.", timestamp: Date.now() };
 	const stream = agentLoop(
 		[prompt],
-		{ systemPrompt: "Be concise.", messages: [] },
+		{ messages: [] },
 		{ model, convertToLlm: (messages) => messages as Message[] },
 		undefined,
 		(_model, llmContext) =>
@@ -425,7 +425,7 @@ test("cursor lifecycle envelope executes gsd_task_complete through the host agen
 	const prompt: AgentMessage = { role: "user", content: "Implement T03.", timestamp: Date.now() };
 	const stream = agentLoop(
 		[prompt],
-		{ systemPrompt: "Complete the task.", messages: [], tools: [completionTool as any] },
+		{ messages: [], tools: [completionTool as any] },
 		{ model, convertToLlm: (messages) => messages as Message[] },
 		undefined,
 		(_model, llmContext) => streamViaCursorAgent(model, llmContext, {

@@ -1,27 +1,57 @@
-import type { AgentTool } from "@gsd/pi-agent-core";
-import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
+import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@gsd/pi-agent-core";
+import type { Static, TSchema } from "typebox";
+import type { ExtensionToolContext, ToolDefinition } from "../extensions/types.js";
+
+/**
+ * An `AgentTool` with a TypeBox parameter schema whose `execute` and `prepareArguments` are typed by TypeBox's
+ * `Static`, as the built-in tools are (pi-agent-core types `params` through pi-schema, which maps only the common
+ * TypeBox kinds). Spreads into a `ToolDefinition` of the same schema.
+ */
+export type TypeBoxAgentTool<TParams extends TSchema = TSchema, TDetails = any> = Omit<
+	AgentTool<TParams, TDetails>,
+	"prepareArguments" | "execute"
+> & {
+	prepareArguments?: (args: unknown) => Static<TParams>;
+	execute: (
+		toolCallId: string,
+		params: Static<TParams>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TDetails>,
+	) => Promise<AgentToolResult<TDetails>>;
+};
+
+/** Creates the context for one tool call. */
+export type ToolContextFactory = (toolCallId: string, signal: AbortSignal | undefined) => ExtensionToolContext;
 
 /** Wrap a ToolDefinition into an AgentTool for the core runtime. */
 export function wrapToolDefinition<TDetails = unknown>(
 	definition: ToolDefinition<any, TDetails>,
-	ctxFactory?: () => ExtensionContext,
+	ctxFactory?: ToolContextFactory,
 ): AgentTool<any, TDetails> {
 	return {
 		name: definition.name,
 		label: definition.label,
 		description: definition.description,
 		parameters: definition.parameters,
+		outputSchema: definition.outputSchema,
+		constrainedSampling: definition.constrainedSampling,
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
-		execute: (toolCallId, params, signal, onUpdate) =>
-			definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
+		execute: (toolCallId, params, signal, onUpdate, ctx?: ExtensionToolContext) =>
+			definition.execute(
+				toolCallId,
+				params,
+				signal,
+				onUpdate,
+				ctx ?? (ctxFactory?.(toolCallId, signal) as ExtensionToolContext),
+			),
 	};
 }
 
 /** Wrap multiple ToolDefinitions into AgentTools for the core runtime. */
 export function wrapToolDefinitions(
 	definitions: ToolDefinition<any, any>[],
-	ctxFactory?: () => ExtensionContext,
+	ctxFactory?: ToolContextFactory,
 ): AgentTool<any>[] {
 	return definitions.map((definition) => wrapToolDefinition(definition, ctxFactory));
 }
@@ -38,6 +68,8 @@ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDef
 		label: tool.label,
 		description: tool.description,
 		parameters: tool.parameters as any,
+		outputSchema: tool.outputSchema,
+		constrainedSampling: tool.constrainedSampling,
 		prepareArguments: tool.prepareArguments,
 		executionMode: tool.executionMode,
 		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),

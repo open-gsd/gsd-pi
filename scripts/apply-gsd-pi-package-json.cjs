@@ -21,8 +21,20 @@ const GSD_BASE = {
     description: 'Unified LLM API (vendored from earendil-works/pi)',
     exports: {
       '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+      './models': { types: './dist/models.d.ts', import: './dist/models.js' },
+      './session-resources': { types: './dist/session-resources.d.ts', import: './dist/session-resources.js' },
+      './compat': { types: './dist/compat.d.ts', import: './dist/compat.js' },
+      './providers/*': { types: './dist/providers/*.d.ts', import: './dist/providers/*.js' },
+      './api/*': { types: './dist/api/*.d.ts', import: './dist/api/*.js' },
+      './utils/*': { types: './dist/utils/*.d.ts', import: './dist/utils/*.js' },
       './oauth': { types: './dist/oauth.d.ts', import: './dist/oauth.js' },
-      './bedrock-provider': { types: './bedrock-provider.d.ts', import: './bedrock-provider.js' },
+      './bedrock-provider': { types: './dist/bedrock-provider.d.ts', import: './dist/bedrock-provider.js' },
+      './bun-oauth': { types: './dist/bun-oauth.d.ts', import: './dist/bun-oauth.js' },
+      './lazy-bedrock-provider': {
+        types: './dist/lazy-bedrock-provider.d.ts',
+        import: './dist/lazy-bedrock-provider.js',
+      },
+      './lazy-oauth': { types: './dist/lazy-oauth.d.ts', import: './dist/lazy-oauth.js' },
     },
     build: 'node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false',
   },
@@ -43,8 +55,53 @@ const GSD_BASE = {
       './hooks': { types: './dist/core/hooks/index.d.ts', import: './dist/core/hooks/index.js' },
     },
     build: 'node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false && pnpm run copy-assets',
-    extraScripts: { 'copy-assets': 'node scripts/copy-assets.cjs' },
+    extraScripts: {
+      'copy-assets':
+        "node -e \"const {cpSync,mkdirSync,existsSync,readdirSync}=require('fs');const {join}=require('path');const src=join('src','theme');const dest=join('dist','theme');mkdirSync(dest,{recursive:true});if(existsSync(src))for(const f of readdirSync(src))if(f.endsWith('.json'))cpSync(join(src,f),join(dest,f));\"",
+    },
     piConfig: { name: 'gsd', configDir: '.gsd' },
+  },
+  'pi-schema': {
+    name: '@gsd/pi-schema',
+    description: 'JSON Schema validation (vendored from earendil-works/pi)',
+    exports: {
+      '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+      './formats': { types: './dist/formats/index.d.ts', import: './dist/formats/index.js' },
+    },
+    build: 'node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false',
+  },
+  'pi-telemetry': {
+    name: '@gsd/pi-telemetry',
+    description: 'Telemetry helpers (vendored from earendil-works/pi)',
+    exports: {
+      '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+      './render': { types: './dist/render.d.ts', import: './dist/render.js' },
+      './testing': { types: './dist/testing/index.d.ts', import: './dist/testing/index.js' },
+    },
+    build: 'node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false',
+  },
+  'pi-mcp': {
+    name: '@gsd/pi-mcp',
+    description: 'MCP helpers (vendored from earendil-works/pi)',
+    exports: {
+      '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+      './oauth': { types: './dist/oauth/index.d.ts', import: './dist/oauth/index.js' },
+      './testing': { types: './dist/testing/index.d.ts', import: './dist/testing/index.js' },
+    },
+    build: 'node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false',
+  },
+  'pi-codemode': {
+    name: '@gsd/pi-codemode',
+    description: 'Codemode helpers (vendored from earendil-works/pi)',
+    exports: {
+      '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+      './declarations': { types: './dist/declarations.d.ts', import: './dist/declarations.js' },
+      './source': { types: './dist/source.d.ts', import: './dist/source.js' },
+      './portable': { types: './dist/portable.d.ts', import: './dist/portable.js' },
+      './cloudflare': { types: './dist/cloudflare.d.ts', import: './dist/cloudflare.js' },
+      './worker': { types: './dist/runtime/worker.d.ts', import: './dist/runtime/worker.js' },
+    },
+    build: 'node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false',
   },
 }
 
@@ -53,6 +110,10 @@ const UPSTREAM_MAP = {
   'pi-ai': 'packages/ai',
   'pi-tui': 'packages/tui',
   'pi-coding-agent': 'packages/coding-agent',
+  'pi-schema': 'packages/schema',
+  'pi-telemetry': 'packages/telemetry',
+  'pi-mcp': 'packages/mcp',
+  'pi-codemode': 'packages/codemode',
 }
 
 for (const dir of Object.keys(GSD_BASE)) {
@@ -101,16 +162,19 @@ for (const dir of Object.keys(GSD_BASE)) {
 
   if (dir === 'pi-coding-agent') {
     delete merged.dependencies['@opengsd/contracts']
+    // Host seam: interactive UI + session live outside the vendored package.
+    merged.dependencies['@gsd/agent-modes'] = 'workspace:*'
+    merged.dependencies['@gsd/agent-core'] = 'workspace:*'
   }
 
   for (const key of Object.keys(merged.dependencies || {})) {
     if (key.startsWith('@earendil-works/')) {
       const local = key.replace('@earendil-works/', '@gsd/')
-      merged.dependencies[local] = '^1.0.2'
+      merged.dependencies[local] = 'workspace:*'
       delete merged.dependencies[key]
     }
-    if (key.startsWith('@gsd/pi-') && /^\^?0\./.test(String(merged.dependencies[key]))) {
-      merged.dependencies[key] = '^1.0.2'
+    if (key.startsWith('@gsd/pi-')) {
+      merged.dependencies[key] = 'workspace:*'
     }
   }
 

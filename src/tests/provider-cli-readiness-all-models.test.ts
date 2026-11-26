@@ -157,7 +157,7 @@ describe("external-CLI provider readiness for every model", () => {
 		return registry.getAvailable().filter((model) => model.provider === providerId).map((model) => model.id);
 	}
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		// Record every child process: synchronous ones are forbidden outright,
 		// asynchronous ones are counted so "one probe for all models" is checkable.
 		syncSpawns = [];
@@ -195,7 +195,7 @@ describe("external-CLI provider readiness for every model", () => {
 		clearGoogleCliReadinessCache();
 
 		// Load the real extensions into a real registry, as startup does.
-		registry = new ModelRegistry(createAuthStorage(), join(fixtureDir, "models.json"));
+		registry = await ModelRegistry.create(createAuthStorage(), join(fixtureDir, "models.json"));
 		const pi = {
 			on() {},
 			registerProvider: (name: string, config: Parameters<ModelRegistry["registerProvider"]>[1]) =>

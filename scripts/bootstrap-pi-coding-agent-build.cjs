@@ -28,7 +28,9 @@ const SHIMS = [
 	"blob-store.ts",
 	"artifact-manager.ts",
 	"lifecycle-hooks.ts",
-	"system-prompt.ts",
+	// system-prompt stays on the v1.6.1 coding-agent implementation (Normalized*
+	// APIs). gsd-agent-core still owns joinDocPaths/buildSystemPrompt for host
+	// paths; do not overwrite the pin file during bootstrap.
 	"extension-session-types.ts",
 ];
 

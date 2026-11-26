@@ -1,0 +1,437 @@
+import { getEventListeners } from "node:events";
+import { describe, expect, it, vi } from "vitest";
+import { fauxAssistantMessage } from "../src/providers/faux.js";
+import { isRetryableAssistantError, type RetryPolicy, retryAssistantCall, retryDelayMs } from "../src/utils/retry.js";
+
+const openAIExplicitRetryMessage =
+	"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_******** in your message.";
+const bedrockExplicitRetryMessage =
+	'{"message":"The system encountered an unexpected error during processing. Try your request again."}';
+const nvidiaNIMResourceExhaustedMessage = "ResourceExhausted: Worker local total request limit reached (288/48)";
+const bunFetchSocketClosedMessage =
+	"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+const openAIResponsesEarlyEofMessage = "OpenAI Responses stream ended before a terminal response event";
+const wrappedDnsLookupError =
+	"The pending stream has been canceled (caused by: getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com)";
+const azurePeakLoadError =
+	"The system is currently experiencing high demand and cannot process your request. Your request exceeds the maximum usage size allowed during peak load. For improved capacity reliability, consider switching to Provisioned Throughput.";
+const codexConnectionLimitError =
+	"Codex error: Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.";
+
+describe("provider retry classification", () => {
+	// Regression for #12124: the Codex WebSocket lifetime limit is recoverable on a fresh connection.
+	it.each([codexConnectionLimitError, "Codex error: websocket_connection_limit_reached"])(
+		"matches the Codex websocket connection lifetime limit: %s",
+		(errorMessage) => {
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+		},
+	);
+
+	it("does not match a generic connection limit", () => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "connection limit reached" }),
+			),
+		).toBe(false);
+	});
+
+	it("matches explicit provider retry guidance", () => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: openAIExplicitRetryMessage }),
+			),
+		).toBe(true);
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: bedrockExplicitRetryMessage }),
+			),
+		).toBe(true);
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: nvidiaNIMResourceExhaustedMessage }),
+			),
+		).toBe(true);
+	});
+
+	it("matches Bun fetch socket drop wording", () => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: bunFetchSocketClosedMessage }),
+			),
+		).toBe(true);
+	});
+
+	it("matches upstream request buffer exhaustion wording", () => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Error: exceeded request buffer limit while retrying upstream",
+				}),
+			),
+		).toBe(true);
+	});
+
+	it.each([
+		wrappedDnsLookupError,
+		"connect ENOTFOUND api.example.com",
+		"EAI_AGAIN api.example.com",
+		"getaddrinfo failed for api.example.com",
+	])("matches DNS transport failure wording: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each([
+		// Regression for #12128: bare Node socket error codes.
+		"read ECONNRESET",
+		"connect ETIMEDOUT 140.82.113.3:443",
+		"write EPIPE",
+		"connect ECONNREFUSED 127.0.0.1:443",
+		"ECONNABORTED",
+		"Connection reset by peer",
+	])("matches Node socket error codes: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each(["Invalid value EXECONNRESET", "Unknown field ETIMEDOUTX", "Invalid key ERR_EPIPE_ID"])(
+		"does not match socket error codes inside longer identifiers: %s",
+		(errorMessage) => {
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+		},
+	);
+
+	it.each(["The pending stream has been canceled", "The pending stream has been canceled (caused by: socket closed)"])(
+		"matches HTTP/2 pending stream cancellation: %s",
+		(errorMessage) => {
+			// Regression for #10379.
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+		},
+	);
+
+	it.each([
+		// Regression for #10965 (provider unknown, no status code in the message).
+		"The service is temporarily unavailable. Please retry later.",
+		// Bedrock ServiceUnavailableException as formatted by formatBedrockError.
+		"Service unavailable: The service is temporarily unavailable.",
+	])("matches service unavailable wording: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each([
+		// Regression for #10996: node-fetch errors from the google-vertex OAuth token refresh.
+		"request to https://oauth2.googleapis.com/token failed, reason:",
+		"request to https://oauth2.googleapis.com/token failed, reason: connect ECONNREFUSED 127.0.0.1:9",
+	])("matches node-fetch request failure wording: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each([
+		// Regression for #10920: gateway upstream failures sent as `response.failed` error codes.
+		"unknown: Unable to forward upstream stream",
+		"upstream_error: Upstream request failed",
+		"upstream_stream_read_error: Upstream response stream was interrupted",
+		"Upstream HTTP/2 stream failed",
+	])("matches gateway upstream failure wording: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it("matches gateway wording for a stream cut short mid-reply", () => {
+		// Regression for #11879.
+		const errorMessage = "Claude Code's stream from Anthropic was cut short after the reply had begun";
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each([
+		// Regression for #12227: gateway mid-stream `event: error` frames without a status code.
+		"The provider is temporarily unavailable. Retry shortly.",
+		"The upstream provider is temporarily unavailable. Try again shortly.",
+		"The provider ended the response before it was complete.",
+		"The connection to the provider was reset. Retry shortly.",
+		"The provider reported a failure while generating the response.",
+	])("matches gateway provider failure wording: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each(["Provider unavailable for this model", "The provider is unavailable in your region"])(
+		"does not match lasting provider unavailable wording: %s",
+		(errorMessage) => {
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+		},
+	);
+
+	it("matches gateway wording for a closed connection", () => {
+		// Regression for #12064.
+		const errorMessage = '{"type":"error","error":{"type":"api_error","message":"Connection closed."}}';
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each([
+		"Your request rate increased too quickly",
+		"Request rate increased too quickly. To ensure system stability, please adjust your client logic to scale requests more smoothly over time.",
+	])("matches request-rate throttle wording: %s", (errorMessage) => {
+		// Regression for #12240 and #2952.
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it("matches OpenAI Responses streams that end before terminal events", () => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: openAIResponsesEarlyEofMessage }),
+			),
+		).toBe(true);
+	});
+
+	it("matches Azure peak-load capacity errors", () => {
+		// Regression for #9669.
+		expect(
+			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: azurePeakLoadError })),
+		).toBe(true);
+	});
+
+	it("keeps provider limit errors non-retryable", () => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 quota exceeded" }),
+			),
+		).toBe(false);
+	});
+
+	it("keeps the ChatGPT subscription usage limit non-retryable", () => {
+		const errorMessage =
+			'OpenAI API error (429): {"code":"subscription_sharing_usage_limit_exceeded","message":"Usage limit reached."}';
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
+	it("keeps the ChatGPT Business workspace usage limit non-retryable", () => {
+		const errorMessage =
+			'OpenAI API error (429): {"code":"subscription_sharing_workplace_individual_usage_limit_exceeded","message":"Usage limit reached."}';
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
+	it.each([
+		"subscription_sharing_usage_unavailable: Usage cannot be checked.",
+		"subscription_sharing_user_unavailable: User cannot be loaded.",
+	])("retries temporary ChatGPT subscription errors: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it("classifies assistant error messages", () => {
+		expect(
+			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })),
+		).toBe(true);
+		// Regression for #9627.
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "520 status code (no body)" }),
+			),
+		).toBe(true);
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "524 status code (no body)" }),
+			),
+		).toBe(true);
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "525 <!DOCTYPE html><title>SSL handshake failed</title>",
+				}),
+			),
+		).toBe(true);
+		expect(isRetryableAssistantError(fauxAssistantMessage("not an error"))).toBe(false);
+	});
+
+	it.each([
+		// Regression for #11057: status codes inside ids or other numbers are not status codes.
+		'401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":"req_011CU503xyz"}',
+		"400 image exceeds 5 MB maximum: 5316784 bytes > 5242880 bytes",
+	])("does not match status codes inside ids or longer numbers: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
+	it.each([
+		"Unable to process request. Repeat the request later.",
+		"waited 73.4s in queue, reaching this model's admission ceiling of 60s; retry after the hinted delay",
+		'{"type":"error","error":{"details":null,"type":"api_error","message":"Unable to complete this request right now. Please try again."},"request_id":"req_011CgfE1bTgPTDsor4TsApFv"}',
+		"Provider finish_reason: error",
+		"Provider returned an empty response",
+		"Upstream error from Relace: The model stopped before completing the response.",
+	])("retries temporary provider failures: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each([
+		// A cancellation, usually the user's.
+		"The operation was aborted",
+		// Only Anthropic's internal error is retried, not other error types.
+		'{"type":"error","error":{"type":"invalid_request_error","message":"messages: at least one message is required"}}',
+		// A refusal ends the stream with a finish reason other than `error`.
+		"Provider finish_reason: content_filter",
+		// The quota exclusions are checked before the retryable patterns.
+		'{"type":"error","error":{"type":"api_error","message":"Monthly quota exceeded"}}',
+	])("does not retry: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+});
+
+describe("retryDelayMs", () => {
+	it("caps agent retry delay", () => {
+		// Regression for #8826.
+		expect(retryDelayMs({ baseDelayMs: 2000 }, 6)).toBe(60000);
+		expect(retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 5000 }, 5)).toBe(5000);
+		expect(retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 0 }, 5)).toBe(0);
+	});
+});
+
+describe("retryAssistantCall", () => {
+	const disabled: RetryPolicy = { enabled: false, maxRetries: 3, baseDelayMs: 0 };
+	const enabled: RetryPolicy = { enabled: true, maxRetries: 3, baseDelayMs: 0 };
+
+	it("returns a successful response immediately without retrying", async () => {
+		const produce = vi.fn(async () => fauxAssistantMessage("ok"));
+		const res = await retryAssistantCall(produce, enabled, undefined);
+		expect(res.content).toEqual([{ type: "text", text: "ok" }]);
+		expect(produce).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not retry an aborted message", async () => {
+		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "aborted" }));
+		const onRetryScheduled = vi.fn();
+		const res = await retryAssistantCall(produce, enabled, undefined, { onRetryScheduled });
+		expect(res.stopReason).toBe("aborted");
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(onRetryScheduled).not.toHaveBeenCalled();
+	});
+
+	it("does not retry a non-retryable error (quota/billing)", async () => {
+		const produce = vi.fn(async () =>
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "insufficient_quota" }),
+		);
+		const onRetryScheduled = vi.fn();
+		const onRetryFinished = vi.fn();
+		const res = await retryAssistantCall(produce, enabled, undefined, { onRetryScheduled, onRetryFinished });
+		expect(res.stopReason).toBe("error");
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(onRetryScheduled).not.toHaveBeenCalled();
+		expect(onRetryFinished).not.toHaveBeenCalled();
+	});
+
+	it("retries a transient error up to maxRetries then returns the final error", async () => {
+		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
+		const onRetryScheduled = vi.fn();
+		const onRetryFinished = vi.fn();
+		const res = await retryAssistantCall(produce, enabled, undefined, { onRetryScheduled, onRetryFinished });
+		expect(res.stopReason).toBe("error");
+		expect(produce).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
+		expect(onRetryScheduled).toHaveBeenCalledTimes(3);
+		expect(onRetryFinished).toHaveBeenCalledWith(false, 3, "terminated");
+	});
+
+	it("reports capped retry delays", async () => {
+		// Regression for #8826.
+		let n = 0;
+		const policy: RetryPolicy = { enabled: true, maxRetries: 4, baseDelayMs: 10, maxAgentDelayMs: 15 };
+		const produce = vi.fn(async () => {
+			n++;
+			return n < 5
+				? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
+				: fauxAssistantMessage("recovered");
+		});
+		const onRetryScheduled = vi.fn();
+
+		await retryAssistantCall(produce, policy, undefined, { onRetryScheduled });
+
+		expect(onRetryScheduled.mock.calls.map((call) => call[2])).toEqual([10, 15, 15, 15]);
+	});
+
+	// Regression for #10506.
+	it("stops retrying once a call succeeds and removes backoff abort listeners", async () => {
+		const controller = new AbortController();
+		let n = 0;
+		const produce = vi.fn(async () => {
+			n++;
+			return n < 4
+				? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
+				: fauxAssistantMessage("recovered");
+		});
+		const onRetryFinished = vi.fn();
+		const res = await retryAssistantCall(produce, enabled, controller.signal, { onRetryFinished });
+		expect(res.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(produce).toHaveBeenCalledTimes(4);
+		expect(onRetryFinished).toHaveBeenCalledWith(true, 3);
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+	});
+
+	it("reports an aborted retried call as unsuccessful", async () => {
+		let n = 0;
+		const produce = vi.fn(async () => {
+			n++;
+			return n === 1
+				? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
+				: fauxAssistantMessage("", { stopReason: "aborted" });
+		});
+		const onRetryFinished = vi.fn();
+		const res = await retryAssistantCall(produce, enabled, undefined, { onRetryFinished });
+		expect(res.stopReason).toBe("aborted");
+		expect(produce).toHaveBeenCalledTimes(2);
+		expect(onRetryFinished).toHaveBeenCalledWith(false, 1);
+	});
+
+	it("does not retry when policy is disabled", async () => {
+		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
+		const onRetryScheduled = vi.fn();
+		const onRetryFinished = vi.fn();
+		const res = await retryAssistantCall(produce, disabled, undefined, { onRetryScheduled, onRetryFinished });
+		expect(res.stopReason).toBe("error");
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(onRetryScheduled).not.toHaveBeenCalled();
+		expect(onRetryFinished).not.toHaveBeenCalled();
+	});
+
+	it("emits onRetryAttemptStart after backoff before each retried call", async () => {
+		const events: string[] = [];
+		let n = 0;
+		const produce = vi.fn(async () => {
+			events.push(`produce:${n}`);
+			n++;
+			return n < 3
+				? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
+				: fauxAssistantMessage("recovered");
+		});
+		const onRetryScheduled = vi.fn((attempt: number) => {
+			events.push(`retry:${attempt}`);
+		});
+		const onRetryAttemptStart = vi.fn(() => {
+			events.push("attempt-start");
+		});
+		const res = await retryAssistantCall(produce, enabled, undefined, { onRetryScheduled, onRetryAttemptStart });
+		expect(res.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(onRetryScheduled).toHaveBeenCalledTimes(2);
+		expect(onRetryAttemptStart).toHaveBeenCalledTimes(2);
+		expect(events).toEqual([
+			"produce:0",
+			"retry:1",
+			"attempt-start",
+			"produce:1",
+			"retry:2",
+			"attempt-start",
+			"produce:2",
+		]);
+	});
+
+	it("aborts backoff sleep via signal, returns an aborted message, and emits onRetryFinished(false)", async () => {
+		const controller = new AbortController();
+		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
+		const policy: RetryPolicy = { enabled: true, maxRetries: 5, baseDelayMs: 10_000 };
+		const onRetryFinished = vi.fn();
+		const p = retryAssistantCall(produce, policy, controller.signal, { onRetryFinished });
+		// Let one error call resolve and the first backoff sleep start, then abort.
+		await vi.waitFor(() => expect(produce).toHaveBeenCalled());
+		controller.abort();
+		const res = await p;
+		expect(res.stopReason).toBe("aborted");
+		expect(res.errorMessage).toBeUndefined();
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(onRetryFinished).toHaveBeenCalledWith(false, 1, "terminated");
+	});
+});

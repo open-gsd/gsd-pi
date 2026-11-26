@@ -1,8 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2024",
-    "module": "Node16",
-    "lib": ["ES2024"],
+    "module": "NodeNext",
+    "lib": [
+      "ES2024"
+    ],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -13,16 +15,35 @@
     "sourceMap": true,
     "inlineSources": true,
     "inlineSourceMap": false,
-    "moduleResolution": "Node16",
+    "moduleResolution": "NodeNext",
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": false,
+    "allowImportingTsExtensions": true,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
     "useDefineForClassFields": false,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    "rewriteRelativeImportExtensions": true,
+    "noImplicitAny": false
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts", "src/bun/**"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/types/**/*.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "src/bun/**",
+    "src/**/*.test.ts",
+    "src/package-manager-cli.ts",
+    "src/rpc-entry.ts",
+    "src/cli.ts",
+    "src/main.ts",
+    "src/modes/**"
+  ]
 }

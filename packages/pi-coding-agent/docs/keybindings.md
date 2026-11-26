@@ -1,16 +1,36 @@
-# Keybindings
+# Keybindings Reference
 
-All keyboard shortcuts can be customized via `~/.pi/agent/keybindings.json`. Each action can be bound to one or more keys.
+Pi exposes named actions, such as `app.session.new`, that can be assigned keybindings. You can change default assignments or bind unassigned actions in Pi's [user configuration](configuration.md#agent-directory).
 
-The config file uses the same namespaced keybinding ids that pi uses internally and that extension authors use in `keyHint()` and injected `keybindings` managers.
+Run `/hotkeys` to see the active shortcuts for the main editor and application.
 
-Older configs using pre-namespaced ids such as `cursorUp` or `expandTools` are migrated automatically to the namespaced ids on startup.
+## Assign keybindings
 
-After editing `keybindings.json`, run `/reload` in pi to apply the changes without restarting the session.
+Create `<agent-dir>/keybindings.json`. The agent directory defaults to `~/.pi/agent` and is described in [Agent directory](configuration.md#agent-directory).
 
-## Key Format
+Map each action identifier to one key or a list of keys:
 
-`modifier+key` where modifiers are `ctrl`, `shift`, `alt` (combinable) and keys are:
+```json
+{
+  "$schema": "https://pi.dev/schemas/keybindings.schema.json",
+  "app.session.new": "ctrl+shift+n",
+  "app.session.tree": ["ctrl+shift+t", "alt+shift+t"]
+}
+```
+
+A configured value replaces the default for that action. Use an empty list to disable an action's keybindings:
+
+```json
+{
+  "tui.altScreen.pageUp": []
+}
+```
+
+After editing the file, run `/reload` to apply the changes to the active session.
+
+## Key syntax
+
+Write a key as `modifier+key`. Modifiers are `ctrl`, `shift`, `alt`, and `super`. You can combine modifiers. Valid keys are:
 
 - **Letters:** `a-z`
 - **Digits:** `0-9`
@@ -18,16 +38,22 @@ After editing `keybindings.json`, run `/reload` in pi to apply the changes witho
 - **Function:** `f1`-`f12`
 - **Symbols:** `` ` ``, `-`, `=`, `[`, `]`, `\`, `;`, `'`, `,`, `.`, `/`, `!`, `@`, `#`, `$`, `%`, `^`, `&`, `*`, `(`, `)`, `_`, `+`, `|`, `~`, `{`, `}`, `:`, `<`, `>`, `?`
 
-Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1`, etc.
+Examples: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `super+k`, `ctrl+super+k`, and `ctrl+1`.
 
-## All Actions
+`super` bindings require a terminal that reports the modifier separately, typically through the Kitty keyboard protocol. They may not work in terminals without that support.
 
-### TUI Editor Cursor Movement
+## Actions
+
+### Terminal UI
+
+#### Cursor movement
 
 | Keybinding id | Default | Description |
-|--------|---------|-------------|
-| `tui.editor.cursorUp` | `up` | Move cursor up |
-| `tui.editor.cursorDown` | `down` | Move cursor down |
+|---|---|---|
+| `tui.editor.cursorUp` | `up` | Move cursor up, browsing older history at the top |
+| `tui.editor.cursorDown` | `down` | Move cursor down, browsing newer history at the bottom |
+| `tui.editor.historyPrevious` | None | Select the previous prompt history entry |
+| `tui.editor.historyNext` | None | Select the next prompt history entry |
 | `tui.editor.cursorLeft` | `left`, `ctrl+b` | Move cursor left |
 | `tui.editor.cursorRight` | `right`, `ctrl+f` | Move cursor right |
 | `tui.editor.cursorWordLeft` | `alt+left`, `ctrl+left`, `alt+b` | Move cursor word left |
@@ -36,40 +62,32 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `tui.editor.cursorLineEnd` | `end`, `ctrl+e` | Move to line end |
 | `tui.editor.jumpForward` | `ctrl+]` | Jump forward to character |
 | `tui.editor.jumpBackward` | `ctrl+alt+]` | Jump backward to character |
-| `tui.editor.pageUp` | `pageUp` | Scroll up by page |
-| `tui.editor.pageDown` | `pageDown` | Scroll down by page |
+| `tui.editor.pageUp` | `pageUp`, `ctrl+pageUp` | Scroll up by page |
+| `tui.editor.pageDown` | `pageDown`, `ctrl+pageDown` | Scroll down by page |
 
-### TUI Editor Deletion
+The dedicated history actions browse prompt history regardless of cursor position and take precedence over application actions using the same key.
+
+#### Text editing
 
 | Keybinding id | Default | Description |
-|--------|---------|-------------|
+|---|---|---|
 | `tui.editor.deleteCharBackward` | `backspace` | Delete character backward |
 | `tui.editor.deleteCharForward` | `delete`, `ctrl+d` | Delete character forward |
 | `tui.editor.deleteWordBackward` | `ctrl+w`, `alt+backspace` | Delete word backward |
 | `tui.editor.deleteWordForward` | `alt+d`, `alt+delete` | Delete word forward |
 | `tui.editor.deleteToLineStart` | `ctrl+u` | Delete to line start |
 | `tui.editor.deleteToLineEnd` | `ctrl+k` | Delete to line end |
-
-### TUI Input
-
-| Keybinding id | Default | Description |
-|--------|---------|-------------|
-| `tui.input.newLine` | `shift+enter` | Insert new line |
-| `tui.input.submit` | `enter` | Submit input |
-| `tui.input.tab` | `tab` | Tab / autocomplete |
-
-### TUI Kill Ring
-
-| Keybinding id | Default | Description |
-|--------|---------|-------------|
 | `tui.editor.yank` | `ctrl+y` | Paste most recently deleted text |
 | `tui.editor.yankPop` | `alt+y` | Cycle through deleted text after yank |
-| `tui.editor.undo` | `ctrl+-` | Undo last edit |
+| `tui.editor.undo` | `ctrl+-` (`ctrl+z` on Windows; `alt+z` on WSL) | Undo last edit |
 
-### TUI Clipboard and Selection
+#### Input and selection
 
 | Keybinding id | Default | Description |
-|--------|---------|-------------|
+|---|---|---|
+| `tui.input.newLine` | `shift+enter`, `ctrl+j` | Insert new line |
+| `tui.input.submit` | `enter` | Submit input |
+| `tui.input.tab` | `tab` | Tab or autocomplete |
 | `tui.input.copy` | `ctrl+c` | Copy selection |
 | `tui.select.up` | `up` | Move selection up |
 | `tui.select.down` | `down` | Move selection down |
@@ -78,25 +96,48 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `tui.select.confirm` | `enter` | Confirm selection |
 | `tui.select.cancel` | `escape`, `ctrl+c` | Cancel selection |
 
+#### Fullscreen
+
+In fullscreen mode, these actions control the transcript and take precedence over editor actions using the same key. While an overlay or a scrollable list such as autocomplete, `/settings`, or the model selector has focus, the scrolling and prompt-jump actions go to it instead of the transcript, so `tui.select.pageUp` and `tui.select.pageDown` move the list selection. Transcript search actions keep working.
+
+| Keybinding id | Default | Description |
+|---|---|---|
+| `tui.altScreen.pageUp` | `pageUp` | Scroll the transcript up by one page |
+| `tui.altScreen.pageDown` | `pageDown` | Scroll the transcript down by one page |
+| `tui.altScreen.halfPageUp` | None | Scroll the transcript up by half a page |
+| `tui.altScreen.halfPageDown` | None | Scroll the transcript down by half a page |
+| `tui.altScreen.lineUp` | None | Scroll the transcript up by one line |
+| `tui.altScreen.lineDown` | None | Scroll the transcript down by one line |
+| `tui.altScreen.previousPrompt` | `ctrl+shift+up`, `ctrl+up` (`ctrl+up` only on Windows and WSL) | Jump to the previous marked message |
+| `tui.altScreen.nextPrompt` | `ctrl+shift+down`, `ctrl+down` (`ctrl+down` only on Windows and WSL) | Jump to the next marked message |
+| `tui.altScreen.search` | `ctrl+shift+f` (`ctrl+f` on Windows and WSL) | Search the rendered transcript |
+| `tui.altScreen.searchNext` | `enter`, `ctrl+g` | Select the next search match while searching |
+| `tui.altScreen.searchPrevious` | `shift+enter`, `ctrl+shift+g` | Select the previous search match while searching |
+| `tui.altScreen.searchClose` | `escape` | Close transcript search |
+| `tui.altScreen.top` | `ctrl+home` | Scroll to the beginning of the transcript |
+| `tui.altScreen.bottom` | `ctrl+end` | Scroll to the transcript end and follow new output |
+
 ### Application
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.interrupt` | `escape` | Cancel / abort |
-| `app.clear` | `ctrl+c` | Clear editor |
+| `app.clear` | `ctrl+c` | Clear editor (first) / exit (second) |
 | `app.exit` | `ctrl+d` | Exit (when editor empty) |
-| `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |
-| `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
-| `app.clipboard.pasteImage` | `ctrl+v` (`alt+v` on Windows) | Paste image from clipboard |
+| `app.suspend` | `ctrl+z` (None on Windows) | Suspend to background |
+| `app.editor.external` | `ctrl+g` | Open in external editor (`externalEditor`, `$VISUAL`, `$EDITOR`, Notepad on Windows, or `nano` elsewhere) |
+| `app.clipboard.pasteImage` | `ctrl+v` (`alt+v`, `ctrl+v` on Windows and WSL) | Paste files on macOS, images, or text from clipboard |
+
+On native Windows, `app.suspend` has no default because Windows terminals do not support Unix job control. If you assign it manually, Pi shows a status message instead of suspending. WSL uses the normal `ctrl+z` and `fg` behavior.
 
 ### Sessions
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.session.new` | *(none)* | Start a new session (`/new`) |
-| `app.session.tree` | *(none)* | Open session tree navigator (`/tree`) |
-| `app.session.fork` | *(none)* | Fork current session (`/fork`) |
-| `app.session.resume` | *(none)* | Open session resume picker (`/resume`) |
+| `app.session.new` | None | Start a new session (`/new`) |
+| `app.session.tree` | None | Open session tree navigator (`/tree`) |
+| `app.session.fork` | None | Fork current session (`/fork`) |
+| `app.session.resume` | None | Open session resume picker (`/resume`) |
 | `app.session.togglePath` | `ctrl+p` | Toggle path display |
 | `app.session.toggleSort` | `ctrl+s` | Toggle sort mode |
 | `app.session.toggleNamedFilter` | `ctrl+n` | Toggle named-only filter |
@@ -110,8 +151,10 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 |--------|---------|-------------|
 | `app.model.select` | `ctrl+l` | Open model selector |
 | `app.model.cycleForward` | `ctrl+p` | Cycle to next model |
-| `app.model.cycleBackward` | `shift+ctrl+p` | Cycle to previous model |
+| `app.model.cycleBackward` | `shift+ctrl+p` (`alt+p` on Windows and WSL) | Cycle to previous model |
+| `app.models.save` | `ctrl+s` | Save the selected default model or scoped model configuration to settings |
 | `app.thinking.cycle` | `shift+tab` | Cycle thinking level |
+| `app.thinking.save` | `ctrl+s` | Save current thinking level to settings |
 | `app.thinking.toggle` | `ctrl+t` | Collapse or expand thinking blocks |
 
 ### Display and Message Queue
@@ -119,8 +162,9 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
-| `app.message.followUp` | `alt+enter` | Queue follow-up message |
-| `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
+| `app.message.copy` | `ctrl+x` | Copy the selected message in `/tree`; in fullscreen mode, copy the active selection when `fullscreenCopyOnSelect` is `false`; otherwise copy the last assistant message. On OAuth sign-in screens, copy the sign-in URL |
+| `app.message.followUp` | `alt+enter` (`ctrl+q` on Windows and WSL) | Queue follow-up message |
+| `app.message.dequeue` | `alt+up` (`alt+q` on Windows and WSL) | Restore queued messages to editor |
 
 ### Tree Navigation
 
@@ -144,54 +188,8 @@ Used inside the scoped models selector (opened via `/scoped-models`).
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.models.save` | `ctrl+s` | Save current model selection to settings |
 | `app.models.enableAll` | `ctrl+a` | Enable all models (or all matching the current search) |
 | `app.models.clearAll` | `ctrl+x` | Clear all models (or all matching the current search) |
 | `app.models.toggleProvider` | `ctrl+p` | Toggle all models for the current provider |
 | `app.models.reorderUp` | `alt+up` | Move the selected model up in the cycle order |
 | `app.models.reorderDown` | `alt+down` | Move the selected model down in the cycle order |
-
-## Custom Configuration
-
-Create `~/.pi/agent/keybindings.json`:
-
-```json
-{
-  "tui.editor.cursorUp": ["up", "ctrl+p"],
-  "tui.editor.cursorDown": ["down", "ctrl+n"],
-  "tui.editor.deleteWordBackward": ["ctrl+w", "alt+backspace"]
-}
-```
-
-Each action can have a single key or an array of keys. User config overrides defaults.
-
-On native Windows, `app.suspend` has no default binding because Windows terminals do not support Unix job control. If you bind it manually, pi shows a status message instead of suspending. In WSL, the normal Linux `ctrl+z`/`fg` behavior still applies.
-
-### Emacs Example
-
-```json
-{
-  "tui.editor.cursorUp": ["up", "ctrl+p"],
-  "tui.editor.cursorDown": ["down", "ctrl+n"],
-  "tui.editor.cursorLeft": ["left", "ctrl+b"],
-  "tui.editor.cursorRight": ["right", "ctrl+f"],
-  "tui.editor.cursorWordLeft": ["alt+left", "alt+b"],
-  "tui.editor.cursorWordRight": ["alt+right", "alt+f"],
-  "tui.editor.deleteCharForward": ["delete", "ctrl+d"],
-  "tui.editor.deleteCharBackward": ["backspace", "ctrl+h"],
-  "tui.input.newLine": ["shift+enter", "ctrl+j"]
-}
-```
-
-### Vim Example
-
-```json
-{
-  "tui.editor.cursorUp": ["up", "alt+k"],
-  "tui.editor.cursorDown": ["down", "alt+j"],
-  "tui.editor.cursorLeft": ["left", "alt+h"],
-  "tui.editor.cursorRight": ["right", "alt+l"],
-  "tui.editor.cursorWordLeft": ["alt+left", "alt+b"],
-  "tui.editor.cursorWordRight": ["alt+right", "alt+w"]
-}
-```

@@ -1,14 +1,21 @@
+import type { generateImages as generateImagesOpenRouterFunction } from "../../api/openrouter-images.js";
 import { registerImagesApiProvider } from "../../images-api-registry.js";
-import type { AssistantImages, ImagesContext, ImagesFunction, ImagesModel, ImagesOptions } from "../../types.js";
-import type { generateImagesOpenRouter as generateImagesOpenRouterFunction } from "./openrouter.js";
+import type {
+	AssistantImages,
+	ImageApi,
+	ImageModel,
+	ImagesContext,
+	ImagesFunction,
+	ImagesOptions,
+} from "../../types.js";
 
 interface OpenRouterImagesProviderModule {
-	generateImagesOpenRouter: typeof generateImagesOpenRouterFunction;
+	generateImages: typeof generateImagesOpenRouterFunction;
 }
 
 let openRouterImagesProviderModulePromise: Promise<OpenRouterImagesProviderModule> | undefined;
 
-function createLazyLoadErrorImages(model: ImagesModel<"openrouter-images">, error: unknown): AssistantImages {
+function createLazyLoadErrorImages(model: ImageModel<ImageApi>, error: unknown): AssistantImages {
 	return {
 		api: model.api,
 		provider: model.provider,
@@ -21,20 +28,20 @@ function createLazyLoadErrorImages(model: ImagesModel<"openrouter-images">, erro
 }
 
 function loadOpenRouterImagesProviderModule(): Promise<OpenRouterImagesProviderModule> {
-	openRouterImagesProviderModulePromise ||= import("./openrouter.js").then(
+	openRouterImagesProviderModulePromise ||= import("../../api/openrouter-images.js").then(
 		(module) => module as OpenRouterImagesProviderModule,
 	);
 	return openRouterImagesProviderModulePromise;
 }
 
-export const generateImagesOpenRouter: ImagesFunction<"openrouter-images", ImagesOptions> = async (
-	model: ImagesModel<"openrouter-images">,
+export const generateImagesOpenRouter: ImagesFunction<ImagesOptions> = async (
+	model: ImageModel<ImageApi>,
 	context: ImagesContext,
 	options?: ImagesOptions,
 ) => {
 	try {
 		const module = await loadOpenRouterImagesProviderModule();
-		return await module.generateImagesOpenRouter(model, context, options);
+		return await module.generateImages(model, context, options);
 	} catch (error) {
 		return createLazyLoadErrorImages(model, error);
 	}

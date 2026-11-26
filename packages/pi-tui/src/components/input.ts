@@ -1,15 +1,29 @@
 import { getKeybindings } from "../keybindings.js";
 import { decodeKittyPrintable } from "../keys.js";
 import { KillRing } from "../kill-ring.js";
-import { type Component, CURSOR_MARKER, type Focusable } from "../tui.js";
+import {
+	type Component,
+	CURSOR_MARKER,
+	type Focusable,
+	renderFakeCursor,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "../tui.js";
 import { UndoStack } from "../undo-stack.js";
-import { getSegmenter, isPunctuationChar, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.js";
+import { getGraphemeSegmenter, isWhitespaceChar, sliceByColumn, truncateToWidth, visibleWidth } from "../utils.js";
+import { findWordBackward, findWordForward } from "../word-navigation.js";
 
-const segmenter = getSegmenter();
+const segmenter = getGraphemeSegmenter();
 
 interface InputState {
 	value: string;
 	cursor: number;
+}
+
+export interface InputOptions {
+	prompt?: string;
+	placeholder?: string;
+	placeholderStyle?: (text: string) => string;
 }
 
 /**
@@ -18,12 +32,13 @@ interface InputState {
 export class Input implements Component, Focusable {
 	private value: string = "";
 	private cursor: number = 0; // Cursor position in the value
+	private readonly prompt: string;
+	private placeholder: string;
+	secure?: boolean;
+	private readonly placeholderStyle: (text: string) => string;
+	private renderedStartColumn = 0;
 	public onSubmit?: (value: string) => void;
 	public onEscape?: () => void;
-	/** Mask input (password fields). GSD compat. */
-	secure = false;
-	/** Placeholder text shown when empty. GSD compat. */
-	placeholder = "";
 
 	/** Focusable interface - set by TUI when focus changes */
 	focused: boolean = false;
@@ -38,6 +53,16 @@ export class Input implements Component, Focusable {
 
 	// Undo support
 	private undoStack = new UndoStack<InputState>();
+
+	setPlaceholder(value: string): void {
+		this.placeholder = value;
+	}
+
+	constructor(options: InputOptions = {}) {
+		this.prompt = options.prompt ?? "> ";
+		this.placeholder = options.placeholder ?? "";
+		this.placeholderStyle = options.placeholderStyle ?? ((text) => text);
+	}
 
 	getValue(): string {
 		return this.value;
@@ -101,7 +126,7 @@ export class Input implements Component, Focusable {
 		}
 
 		// Submit
-		if (kb.matches(data, "tui.input.submit")) {
+		if (kb.matches(data, "tui.input.submit") || data === "\n") {
 			if (this.onSubmit) this.onSubmit(this.value);
 			return;
 		}
@@ -211,6 +236,24 @@ export class Input implements Component, Focusable {
 		if (!hasControlChars) {
 			this.insertCharacter(data);
 		}
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type !== "press" || event.button !== "left" || event.y !== 0) return undefined;
+		const visibleColumn = Math.max(0, event.x - 2);
+		const targetColumn = this.renderedStartColumn + visibleColumn;
+		let currentColumn = 0;
+		this.cursor = this.value.length;
+		for (const grapheme of segmenter.segment(this.value)) {
+			const nextColumn = currentColumn + visibleWidth(grapheme.segment);
+			if (targetColumn < nextColumn) {
+				this.cursor = grapheme.index;
+				break;
+			}
+			currentColumn = nextColumn;
+		}
+		this.lastAction = null;
+		return { handled: true, focus: true };
 	}
 
 	private insertCharacter(char: string): void {
@@ -328,7 +371,7 @@ export class Input implements Component, Focusable {
 		// Delete the previously yanked text (still at end of ring before rotation)
 		const prevText = this.killRing.peek() || "";
 		this.value = this.value.slice(0, this.cursor - prevText.length) + this.value.slice(this.cursor);
-		this.cursor = Math.max(0, this.cursor - prevText.length);
+		this.cursor -= prevText.length;
 
 		// Rotate and insert new entry
 		this.killRing.rotate();
@@ -351,72 +394,15 @@ export class Input implements Component, Focusable {
 	}
 
 	private moveWordBackwards(): void {
-		if (this.cursor === 0) {
-			return;
-		}
-
+		if (this.cursor === 0) return;
 		this.lastAction = null;
-		const textBeforeCursor = this.value.slice(0, this.cursor);
-		const graphemes = [...segmenter.segment(textBeforeCursor)];
-
-		// Skip trailing whitespace
-		while (graphemes.length > 0 && isWhitespaceChar(graphemes[graphemes.length - 1]?.segment || "")) {
-			this.cursor -= graphemes.pop()?.segment.length || 0;
-		}
-
-		if (graphemes.length > 0) {
-			const lastGrapheme = graphemes[graphemes.length - 1]?.segment || "";
-			if (isPunctuationChar(lastGrapheme)) {
-				// Skip punctuation run
-				while (graphemes.length > 0 && isPunctuationChar(graphemes[graphemes.length - 1]?.segment || "")) {
-					this.cursor -= graphemes.pop()?.segment.length || 0;
-				}
-			} else {
-				// Skip word run
-				while (
-					graphemes.length > 0 &&
-					!isWhitespaceChar(graphemes[graphemes.length - 1]?.segment || "") &&
-					!isPunctuationChar(graphemes[graphemes.length - 1]?.segment || "")
-				) {
-					this.cursor -= graphemes.pop()?.segment.length || 0;
-				}
-			}
-		}
+		this.cursor = findWordBackward(this.value, this.cursor);
 	}
 
 	private moveWordForwards(): void {
-		if (this.cursor >= this.value.length) {
-			return;
-		}
-
+		if (this.cursor >= this.value.length) return;
 		this.lastAction = null;
-		const textAfterCursor = this.value.slice(this.cursor);
-		const segments = segmenter.segment(textAfterCursor);
-		const iterator = segments[Symbol.iterator]();
-		let next = iterator.next();
-
-		// Skip leading whitespace
-		while (!next.done && isWhitespaceChar(next.value.segment)) {
-			this.cursor += next.value.segment.length;
-			next = iterator.next();
-		}
-
-		if (!next.done) {
-			const firstGrapheme = next.value.segment;
-			if (isPunctuationChar(firstGrapheme)) {
-				// Skip punctuation run
-				while (!next.done && isPunctuationChar(next.value.segment)) {
-					this.cursor += next.value.segment.length;
-					next = iterator.next();
-				}
-			} else {
-				// Skip word run
-				while (!next.done && !isWhitespaceChar(next.value.segment) && !isPunctuationChar(next.value.segment)) {
-					this.cursor += next.value.segment.length;
-					next = iterator.next();
-				}
-			}
-		}
+		this.cursor = findWordForward(this.value, this.cursor);
 	}
 
 	private handlePaste(pastedText: string): void {
@@ -437,15 +423,27 @@ export class Input implements Component, Focusable {
 
 	render(width: number): string[] {
 		// Calculate visible window
-		const prompt = "> ";
-		const availableWidth = width - prompt.length;
+		const availableWidth = width - visibleWidth(this.prompt);
 
 		if (availableWidth <= 0) {
-			return [prompt];
+			return [truncateToWidth(this.prompt, width, "")];
+		}
+
+		if (this.value.length === 0 && this.placeholder) {
+			const placeholder = truncateToWidth(this.placeholder, availableWidth, "");
+			const graphemes = [...segmenter.segment(placeholder)];
+			const atCursor = graphemes[0]?.segment ?? " ";
+			const afterCursor = placeholder.slice(atCursor.length);
+			const marker = this.focused ? CURSOR_MARKER : "";
+			const cursorChar = renderFakeCursor(this.placeholderStyle(atCursor));
+			const textWithCursor = marker + cursorChar + this.placeholderStyle(afterCursor);
+			const padding = " ".repeat(Math.max(0, availableWidth - visibleWidth(textWithCursor)));
+			return [this.prompt + textWithCursor + padding];
 		}
 
 		let visibleText = "";
 		let cursorDisplay = this.cursor;
+		this.renderedStartColumn = 0;
 		const totalWidth = visibleWidth(this.value);
 
 		if (totalWidth < availableWidth) {
@@ -472,6 +470,7 @@ export class Input implements Component, Focusable {
 					startCol = Math.max(0, cursorCol - halfWidth);
 				}
 
+				this.renderedStartColumn = startCol;
 				visibleText = sliceByColumn(this.value, startCol, scrollWidth, true);
 				const beforeCursor = sliceByColumn(this.value, startCol, Math.max(0, cursorCol - startCol), true);
 				cursorDisplay = beforeCursor.length;
@@ -493,14 +492,14 @@ export class Input implements Component, Focusable {
 		// Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
 		const marker = this.focused ? CURSOR_MARKER : "";
 
-		// Use inverse video to show cursor
-		const cursorChar = `\x1b[7m${atCursor}\x1b[27m`; // ESC[7m = reverse video, ESC[27m = normal
+		// TUI draws the fake cursor in reverse video, or omits it when the hardware cursor is shown
+		const cursorChar = renderFakeCursor(atCursor);
 		const textWithCursor = beforeCursor + marker + cursorChar + afterCursor;
 
 		// Calculate visual width
 		const visualLength = visibleWidth(textWithCursor);
 		const padding = " ".repeat(Math.max(0, availableWidth - visualLength));
-		const line = prompt + textWithCursor + padding;
+		const line = this.prompt + textWithCursor + padding;
 
 		return [line];
 	}

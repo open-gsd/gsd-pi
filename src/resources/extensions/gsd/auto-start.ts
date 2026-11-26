@@ -1793,7 +1793,7 @@ export async function bootstrapAutoSession(
       const errorDetail = dbStatus.lastError ? ` (${dbStatus.lastError.message})` : "";
       const providerHint = dbStatus.provider
         ? ` Provider: ${dbStatus.provider}.`
-        : " No SQLite provider available — check Node >= 22.18 with node:sqlite enabled.";
+        : " No SQLite provider available — check Node >= 22.19 with node:sqlite enabled.";
       ctx.ui.notify(
         `SQLite database exists but failed to open: ${gsdDbPath}. ${phaseHint}${errorDetail}.${providerHint}`,
         "error",

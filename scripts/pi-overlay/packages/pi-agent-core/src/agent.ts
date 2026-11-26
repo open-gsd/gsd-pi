@@ -1,22 +1,25 @@
 import {
-	type CacheRetention,
+	type ClientIdentity,
+	createInitialSystemMessage,
+	getCurrentSystemMessage,
+	getCurrentSystemPrompt,
 	type ImageContent,
 	type Message,
 	type Model,
 	type SimpleStreamOptions,
-	streamSimple,
 	type TextContent,
 	type ThinkingBudgets,
+	type CacheRetention,
 	type Transport,
+	toToolDeclaration,
 } from "@gsd/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
-import { abortOriginFromSignal, type AgentAbortOrigin } from "./types.js";
+import { getDefaultStreamFn } from "./stream-fn.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
 	AgentContext,
 	AgentEvent,
-	AgentLatencyMarkSink,
 	AgentLoopConfig,
 	AgentLoopTurnUpdate,
 	AgentMessage,
@@ -24,6 +27,9 @@ import type {
 	AgentTool,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
+	FinishTurn,
+	PrepareNextTurnContext,
+	PrepareRequest,
 	QueueMode,
 	StreamFn,
 	ToolExecutionMode,
@@ -33,7 +39,11 @@ export type { QueueMode } from "./types.js";
 
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
-		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+		(message) =>
+			message.role === "system" ||
+			message.role === "user" ||
+			message.role === "assistant" ||
+			message.role === "toolResult",
 	);
 }
 
@@ -66,14 +76,21 @@ type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "
 	errorMessage?: string;
 };
 
-function createMutableAgentState(
-	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>,
-): MutableAgentState {
+/** Initial state for {@link Agent}. `systemPrompt` and `tools` become the leading system message unless `messages` already starts with one. */
+export type AgentInitialState = Partial<
+	Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">
+>;
+
+function createMutableAgentState(initialState?: AgentInitialState): MutableAgentState {
 	let tools = initialState?.tools?.slice() ?? [];
 	let messages = initialState?.messages?.slice() ?? [];
+	const initialMessage = createInitialSystemMessage(initialState?.systemPrompt, tools.map(toToolDeclaration));
+	if (messages[0]?.role !== "system" && initialMessage) messages.unshift(initialMessage);
 
 	return {
-		systemPrompt: initialState?.systemPrompt ?? "",
+		get systemPrompt() {
+			return getCurrentSystemPrompt(messages);
+		},
 		model: initialState?.model ?? DEFAULT_MODEL,
 		thinkingLevel: initialState?.thinkingLevel ?? "off",
 		get tools() {
@@ -97,29 +114,40 @@ function createMutableAgentState(
 
 /** Options for constructing an {@link Agent}. */
 export interface AgentOptions {
-	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
+	initialState?: AgentInitialState;
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	/** Optional when a host has installed {@link setDefaultStreamFn}. */
 	streamFn?: StreamFn;
-	/** @internal Diagnostic hook for low-level turn latency marks. */
-	latencyMark?: AgentLatencyMarkSink;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
+	onProviderStreamEvent?: SimpleStreamOptions["onProviderStreamEvent"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	finishTurn?: FinishTurn;
+	prepareRequest?: PrepareRequest;
 	prepareNextTurn?: (
+		signal?: AbortSignal,
+	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	prepareNextTurnWithContext?: (
+		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
+	cacheRetention?: CacheRetention;
+	latencyMark?: (phase: string, data?: Record<string, unknown>) => void;
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
-	/** Prompt cache retention preference forwarded to the stream function. Default: "short". */
-	cacheRetention?: CacheRetention;
+	/**
+	 * How requests identify the app to providers, merged field by field over `DEFAULT_AGENT_IDENTITY`
+	 * (`{ attribution: PI_ATTRIBUTION }`). Pass `{ attribution: null }` to send no attribution headers.
+	 */
+	identity?: ClientIdentity;
 }
 
 class PendingMessageQueue {
@@ -138,19 +166,16 @@ class PendingMessageQueue {
 		return this.messages.length > 0;
 	}
 
-	drain(): AgentMessage[] {
-		if (this.mode === "all") {
-			const drained = this.messages.slice();
-			this.messages = [];
-			return drained;
-		}
-
+	peek(): AgentMessage[] {
+		if (this.mode === "all") return this.messages.slice();
 		const first = this.messages[0];
-		if (!first) {
-			return [];
-		}
-		this.messages = this.messages.slice(1);
-		return [first];
+		return first ? [first] : [];
+	}
+
+	drain(): AgentMessage[] {
+		const drained = this.peek();
+		this.messages = this.messages.slice(drained.length);
+		return drained;
 	}
 
 	clear(): void {
@@ -170,6 +195,14 @@ type ActiveRun = {
  * `Agent` owns the current transcript, emits lifecycle events, executes tools,
  * and exposes queueing APIs for steering and follow-up messages.
  */
+export type AgentAbortOrigin = "user" | "timeout" | "error" | "extension" | "programmatic";
+const AGENT_ABORT_ORIGINS: readonly AgentAbortOrigin[] = ["user", "timeout", "error", "extension", "programmatic"];
+function abortOriginFromReason(signal: AbortSignal | undefined): AgentAbortOrigin | undefined {
+	if (!signal?.aborted) return undefined;
+	const reason: unknown = signal.reason;
+	return typeof reason === "string" && AGENT_ABORT_ORIGINS.includes(reason as AgentAbortOrigin) ? reason as AgentAbortOrigin : undefined;
+}
+
 export class Agent {
 	private _state: MutableAgentState;
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
@@ -178,12 +211,18 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	public streamFn: StreamFn;
-	/** @internal Diagnostic hook for low-level turn latency marks. */
-	public latencyMark?: AgentLatencyMarkSink;
+	public streamFunction: StreamFn;
+	/** Host-compat alias for {@link streamFunction} (pre-v1.6.1 property name). */
+	get streamFn(): StreamFn {
+		return this.streamFunction;
+	}
+	set streamFn(fn: StreamFn) {
+		this.streamFunction = fn;
+	}
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
+	public onProviderStreamEvent?: SimpleStreamOptions["onProviderStreamEvent"];
 	public beforeToolCall?: (
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
@@ -192,12 +231,22 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	public finishTurn?: FinishTurn;
+	public prepareRequest?: PrepareRequest;
 	public prepareNextTurn?: (
+		signal?: AbortSignal,
+	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	public prepareNextTurnWithContext?: (
+		context: PrepareNextTurnContext,
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
+	/** Prompt cache retention forwarded to the stream function. */
+	public cacheRetention?: CacheRetention;
+	/** Host timing sink. */
+	public latencyMark?: (phase: string, data?: Record<string, unknown>) => void;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
 	public thinkingBudgets?: ThinkingBudgets;
 	/** Preferred transport forwarded to the stream function. */
@@ -206,29 +255,36 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
-	/** Prompt cache retention preference forwarded to the stream function. */
-	public cacheRetention?: CacheRetention;
+	/** Request identity forwarded to the stream function, over `DEFAULT_AGENT_IDENTITY`. */
+	public identity?: ClientIdentity;
 
-	constructor(options: AgentOptions = {}) {
-		this._state = createMutableAgentState(options.initialState);
-		this.convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
-		this.transformContext = options.transformContext;
-		this.streamFn = options.streamFn ?? streamSimple;
-		this.latencyMark = options.latencyMark;
-		this.getApiKey = options.getApiKey;
-		this.onPayload = options.onPayload;
-		this.onResponse = options.onResponse;
-		this.beforeToolCall = options.beforeToolCall;
-		this.afterToolCall = options.afterToolCall;
-		this.prepareNextTurn = options.prepareNextTurn;
-		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
-		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
-		this.sessionId = options.sessionId;
-		this.thinkingBudgets = options.thinkingBudgets;
-		this.transport = options.transport ?? "auto";
-		this.maxRetryDelayMs = options.maxRetryDelayMs;
-		this.toolExecution = options.toolExecution ?? "parallel";
-		this.cacheRetention = options.cacheRetention;
+	constructor(options: AgentOptions) {
+		// Older compiled consumers may omit options or streamFn even though the current API requires them.
+		const runtimeOptions: Partial<AgentOptions> = options ?? {};
+		this._state = createMutableAgentState(runtimeOptions.initialState);
+		this.convertToLlm = runtimeOptions.convertToLlm ?? defaultConvertToLlm;
+		this.transformContext = runtimeOptions.transformContext;
+		this.streamFunction = runtimeOptions.streamFn ?? getDefaultStreamFn();
+		this.getApiKey = runtimeOptions.getApiKey;
+		this.onPayload = runtimeOptions.onPayload;
+		this.onResponse = runtimeOptions.onResponse;
+		this.onProviderStreamEvent = runtimeOptions.onProviderStreamEvent;
+		this.beforeToolCall = runtimeOptions.beforeToolCall;
+		this.afterToolCall = runtimeOptions.afterToolCall;
+		this.finishTurn = runtimeOptions.finishTurn;
+		this.prepareRequest = runtimeOptions.prepareRequest;
+		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
+		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
+		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
+		this.followUpQueue = new PendingMessageQueue(runtimeOptions.followUpMode ?? "one-at-a-time");
+		this.sessionId = runtimeOptions.sessionId;
+		this.cacheRetention = runtimeOptions.cacheRetention;
+		this.latencyMark = runtimeOptions.latencyMark;
+		this.thinkingBudgets = runtimeOptions.thinkingBudgets;
+		this.transport = runtimeOptions.transport ?? "auto";
+		this.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs;
+		this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
+		this.identity = runtimeOptions.identity;
 	}
 
 	/**
@@ -304,19 +360,19 @@ export class Agent {
 		return this.steeringQueue.hasItems() || this.followUpQueue.hasItems();
 	}
 
+	/** Preview the messages selected for the next turn without consuming them. */
+	peekQueuedMessages(): AgentMessage[] {
+		const steering = this.steeringQueue.peek();
+		return steering.length > 0 ? steering : this.followUpQueue.peek();
+	}
+
 	/** Active abort signal for the current run, if any. */
 	get signal(): AbortSignal | undefined {
 		return this.activeRun?.abortController.signal;
 	}
 
-	/**
-	 * Abort the current run, if one is active.
-	 *
-	 * An optional origin is forwarded as the abort signal's reason and surfaces
-	 * on the terminal `agent_end` event as `abortOrigin` so consumers can
-	 * classify the end (e.g. timeout kills).
-	 */
-	abort(origin?: AgentAbortOrigin): void {
+	/** Abort the current run, if one is active. */
+	abort(origin?: "user" | "timeout" | "error" | "extension" | "programmatic"): void {
 		this.activeRun?.abortController.abort(origin);
 	}
 
@@ -329,9 +385,14 @@ export class Agent {
 		return this.activeRun?.promise ?? Promise.resolve();
 	}
 
-	/** Clear transcript state, runtime state, and queued messages. */
+	/** Clear conversation state and queues while retaining the replayed prompt/tool baseline. */
 	reset(): void {
-		this._state.messages = [];
+		if (this.activeRun) {
+			throw new Error("Agent is already processing. Wait for completion before resetting.");
+		}
+
+		const baseline = getCurrentSystemMessage(this._state.messages);
+		this._state.messages = baseline ? [baseline] : [];
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
@@ -360,7 +421,7 @@ export class Agent {
 		}
 
 		const lastMessage = this._state.messages[this._state.messages.length - 1];
-		if (!lastMessage) {
+		if (!lastMessage || this._state.messages.every((message) => message.role === "system")) {
 			throw new Error("No messages to continue from");
 		}
 
@@ -413,7 +474,7 @@ export class Agent {
 				this.createLoopConfig(options),
 				(event) => this.processEvents(event),
 				signal,
-				this.streamFn,
+				this.streamFunction,
 			);
 		});
 	}
@@ -425,14 +486,13 @@ export class Agent {
 				this.createLoopConfig(),
 				(event) => this.processEvents(event),
 				signal,
-				this.streamFn,
+				this.streamFunction,
 			);
 		});
 	}
 
 	private createContextSnapshot(): AgentContext {
 		return {
-			systemPrompt: this._state.systemPrompt,
 			messages: this._state.messages.slice(),
 			tools: this._state.tools.slice(),
 		};
@@ -444,19 +504,31 @@ export class Agent {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
 			sessionId: this.sessionId,
+			cacheRetention: this.cacheRetention,
+			latencyMark: this.latencyMark,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
+			onProviderStreamEvent: this.onProviderStreamEvent,
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
-			cacheRetention: this.cacheRetention,
+			identity: this.identity,
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
-			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
+			finishTurn: this.finishTurn,
+			prepareRequest: this.prepareRequest,
+			prepareNextTurn:
+				this.prepareNextTurnWithContext || this.prepareNextTurn
+					? async (context) => {
+							if (this.prepareNextTurnWithContext) {
+								return await this.prepareNextTurnWithContext(context, this.signal);
+							}
+							return await this.prepareNextTurn?.(this.signal);
+						}
+					: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
-			latencyMark: this.latencyMark,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {
@@ -506,10 +578,10 @@ export class Agent {
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
-		const abortOrigin = aborted ? abortOriginFromSignal(this.activeRun?.abortController.signal) : "error";
 		await this.processEvents({ type: "message_start", message: failureMessage });
 		await this.processEvents({ type: "message_end", message: failureMessage });
 		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
+		const abortOrigin = aborted ? abortOriginFromReason(this.activeRun?.abortController.signal) : "error";
 		await this.processEvents({
 			type: "agent_end",
 			messages: [failureMessage],
@@ -576,8 +648,15 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
+		let listenerEvent: AgentEvent = event;
+		if (event.type === "agent_end" && !event.abortOrigin && signal.aborted) {
+			const abortOrigin = abortOriginFromReason(signal);
+			if (abortOrigin) {
+				listenerEvent = { ...event, abortOrigin };
+			}
+		}
 		for (const listener of this.listeners) {
-			await listener(event, signal);
+			await listener(listenerEvent, signal);
 		}
 	}
 }

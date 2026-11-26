@@ -80,7 +80,6 @@ export function getSearchProviderPreference(authPath?: string): SearchProviderPr
  */
 export function setSearchProviderPreference(pref: SearchProviderPreference, authPath?: string): void {
   const auth = AuthStorage.create(authPath ?? authFilePath())
-  auth.remove(PREFERENCE_KEY)
   auth.set(PREFERENCE_KEY, { type: 'api_key', key: pref })
 }
 

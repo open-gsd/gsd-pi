@@ -218,7 +218,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const authPath = options.agentDir ? join(agentDir, "auth.json") : undefined;
 	const modelsPath = options.agentDir ? join(agentDir, "models.json") : undefined;
 	const authStorage = options.authStorage ?? AuthStorage.create(authPath);
-	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
+	const modelRegistry = options.modelRegistry ?? (await ModelRegistry.create(authStorage, modelsPath));
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
@@ -256,7 +256,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			defaultProvider: settingsManager.getDefaultProvider(),
 			defaultModelId: settingsManager.getDefaultModel(),
 			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
-			modelRegistry,
+			modelRuntime: modelRegistry.getModelRuntime(),
 		});
 		model = result.model;
 		if (!model) {
@@ -362,7 +362,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				attributionHeaders || auth.headers || options?.headers
 					? { ...attributionHeaders, ...auth.headers, ...options?.headers }
 					: undefined;
-			const requestModel = auth.headers ? { ...model, headers: { ...model.headers, ...auth.headers } } : model;
+			const mergedHeaders = auth.headers
+				? Object.fromEntries(
+						Object.entries({ ...model.headers, ...auth.headers }).filter(([, value]) => value != null),
+					)
+				: undefined;
+			const requestModel =
+				mergedHeaders && Object.keys(mergedHeaders).length > 0
+					? { ...model, headers: mergedHeaders as Record<string, string> }
+					: model;
 			return streamSimple(requestModel, context, {
 				...options,
 				apiKey: auth.apiKey,
@@ -381,7 +389,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// provider/api (e.g. native web_search injection). Without this the
 			// before_provider_request event carries no model and provider-shape
 			// detection silently fails.
-			return runner.emitBeforeProviderRequest(payload, model);
+			return runner.emitBeforeProviderRequest(payload);
 		},
 		onResponse: async (response, _model) => {
 			const runner = extensionRunnerRef.current;

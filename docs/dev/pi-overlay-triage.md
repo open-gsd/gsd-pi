@@ -1,53 +1,205 @@
 # Pi overlay triage
 
-Disposition for every file in the overlay set (`scripts/pi-upstream.json` `patchAllowlist`, after the path corrections, plus `scripts/pi-seam.json` `protectedPiCoreFiles`).
-This table does not delete or move any file. A follow-on plan uses it to decide what can become an npm facade.
+Disposition of every allowlisted overlay file after the v1.6.1 pin.
 
-`blocks leaf facade` is `yes` when the file changes `pi-ai`, `pi-tui`, or `pi-agent-core` behavior that a re-export of the published package would lose.
-
-| path | purpose | disposition | blocks leaf facade |
+| Path | Disposition | Why | Upstream PR? |
 | --- | --- | --- | --- |
-| `packages/pi-agent-core/src/agent.ts` | Threads cacheRetention into the agent loop | keep-overlay | yes |
-| `packages/pi-agent-core/test/agent.test.ts` | Regression test for an overlay delta | keep-overlay | no |
-| `packages/pi-ai/src/models/fake-model.ts` | Local fake model used by provider tests | keep-overlay | yes |
-| `packages/pi-ai/src/providers/anthropic.ts` | Drops a wasted OAuth cache breakpoint | keep-overlay | yes |
-| `packages/pi-ai/src/providers/fake.ts` | Provider behavior that a published pi-ai re-export would drop | keep-overlay | yes |
-| `packages/pi-ai/src/providers/google-shared.ts` | Claude tool schema sanitization for Cloud Code Assist | keep-overlay | yes |
-| `packages/pi-ai/src/providers/mistral.ts` | Provider behavior that a published pi-ai re-export would drop | keep-overlay | yes |
-| `packages/pi-ai/src/providers/provider-capabilities.ts` | Provider behavior that a published pi-ai re-export would drop | keep-overlay | yes |
-| `packages/pi-ai/src/utils/tests/normalize-tool-arguments.test.ts` | Regression test for an overlay delta | keep-overlay | no |
-| `packages/pi-ai/test/cache-retention.test.ts` | Regression test for an overlay delta | keep-overlay | no |
-| `packages/pi-ai/test/google-shared-convert-tools.test.ts` | Regression test for an overlay delta | keep-overlay | no |
-| `packages/pi-coding-agent/scripts/copy-assets.cjs` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/artifact-manager.ts` | Re-export of @gsd/agent-core kept on the coding-agent path for extensions | move-to-host | no |
-| `packages/pi-coding-agent/src/core/blob-store.ts` | Re-export of @gsd/agent-core kept on the coding-agent path for extensions | move-to-host | no |
-| `packages/pi-coding-agent/src/core/capability-patches.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/constants.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/db-snapshot.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/discovery-cache.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/extension-session-types.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/extensions/extension-upstream-types.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/extensions/loader.ts` | Extension loader aliases for @gsd and legacy pi package names | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/extensions/types.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/fallback-resolver.ts` | Re-export of @gsd/agent-core kept on the coding-agent path for extensions | move-to-host | no |
-| `packages/pi-coding-agent/src/core/gsd-extension-types.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/gsd-seam-types.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/keybindings.ts` | Re-export of @gsd/agent-core kept on the coding-agent path for extensions | move-to-host | no |
-| `packages/pi-coding-agent/src/core/lifecycle-hooks.ts` | Re-export of @gsd/agent-core kept on the coding-agent path for extensions | move-to-host | no |
-| `packages/pi-coding-agent/src/core/local-model-check.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/model-discovery.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/model-registry.ts` | Model discovery and GSD auth modes | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/models-json-writer.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/package-commands.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/session-cwd.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/settings-manager.ts` | GSD settings shims including adaptive TUI and cacheRetention | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/system-prompt.ts` | Re-export of @gsd/agent-core kept on the coding-agent path for extensions | move-to-host | no |
-| `packages/pi-coding-agent/src/core/tools/bash-interceptor.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/core/tools/tool-compatibility-registry.ts` | GSD delta that must be reapplied after generation | keep-overlay | no |
-| `packages/pi-coding-agent/src/theme/theme-highlight.test.ts` | Regression test for an overlay delta | keep-overlay | no |
-| `packages/pi-coding-agent/src/theme/theme-schema.ts` | Shared theme assets, including the native highlight import | keep-overlay | no |
-| `packages/pi-coding-agent/src/theme/theme.ts` | Shared theme assets, including the native highlight import | keep-overlay | no |
-| `packages/pi-coding-agent/src/theme/themes.ts` | Shared theme assets, including the native highlight import | keep-overlay | no |
-| `packages/pi-coding-agent/test/settings-manager.test.ts` | Regression test for an overlay delta | keep-overlay | no |
-| `packages/pi-tui/src/editor-keybindings.ts` | Editor keybinding compat used by interactive mode | keep-overlay | yes |
-| `packages/pi-tui/src/style.ts` | GSD terminal style primitives, including native truncation | keep-overlay | yes |
+| `packages/pi-agent-core/src/agent-loop.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-agent-core/src/agent.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-agent-core/src/types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-agent-core/test/agent.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/api/anthropic-messages.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/api/bedrock-converse-stream.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/api/claude-tool-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/api/google-shared.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/api/mistral-conversations.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/api/openai-codex-responses.ts` | keep-overlay | Codex stream error formatting for GSD diagnostics | no |
+| `packages/pi-ai/src/auth/oauth/github-copilot.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/env-api-keys.ts` | keep-overlay | export getApiKeyEnvVars for GSD auth selectors | no |
+| `packages/pi-ai/src/gsd-compat-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/gsd-models-catalog.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/host-compat.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/models/fake-model.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/oauth-gsd-compat.ts` | keep-overlay | Descriptor-only OAuth catalog for onboarding/login availability (xAI + peers); login via ModelRuntime | no |
+| `packages/pi-ai/src/oauth.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/api-family.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/compat-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/**` | keep-overlay | GSD host overlay for v1.6.1 pin | no |
+| `packages/pi-ai/src/providers/data/.manifest.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/amazon-bedrock.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/ant-ling.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/anthropic.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/azure.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/baseten.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/cerebras.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/cloudflare-ai-gateway.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/cloudflare-workers-ai.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/deepseek.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/fireworks.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/github-copilot.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/google-vertex.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/google.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/groq.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/huggingface.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/kimi-coding.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/meta.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/minimax-cn.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/minimax.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/mistral.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/moonshotai-cn.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/moonshotai.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/nvidia.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/openai-codex.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/openai.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/opencode-go.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/opencode.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/openrouter.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/qwen-token-plan-cn.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/qwen-token-plan-individual-cn.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/qwen-token-plan-individual.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/qwen-token-plan.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/radius.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/together.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/typesafe.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/vercel-ai-gateway.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/xai.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/xiaomi-token-plan-ams.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/xiaomi-token-plan-cn.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/xiaomi-token-plan-sgp.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/xiaomi.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/zai-coding-cn.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/zai.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/fake.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/faux.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/gsd-fake.ts` | keep-overlay | E2E fake provider factory for GSD_FAKE_LLM_TRANSCRIPT | no |
+| `packages/pi-ai/src/providers/model-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/provider-capabilities.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/schema-builders.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/telemetry.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/utils/estimate.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/utils/moonshot-tool-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/utils/normalize-tool-result-content.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/utils/repair-tool-json.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/utils/string-enum.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/utils/tests/normalize-tool-arguments.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/utils/validation.ts` | keep-overlay | Call normalizeToolArguments before schema validation | no |
+| `packages/pi-ai/test/cache-retention.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/test/google-shared-convert-tools.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/config.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/artifact-manager.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/auth-storage.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/blob-store.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/bug-report.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/capability-patches.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/constants.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/db-snapshot.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/discovery-cache.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/extension-discovery.ts` | keep-overlay | GSD getAliases host export for extension loader | no |
+| `packages/pi-coding-agent/src/core/extension-session-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/extensions/extension-upstream-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/extensions/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/extensions/loader.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/extensions/runner.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/extensions/types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/extensions/virtual-modules.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/fallback-resolver.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/gsd-extension-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/gsd-seam-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/keybindings.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/lifecycle-hooks.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/local-model-check.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/mcp-servers.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/messages.ts` | keep-overlay | GSD handoff-briefing compaction summary wrap | no |
+| `packages/pi-coding-agent/src/core/model-discovery.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/model-registry.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/model-resolver.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/models-json-writer.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/package-commands.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/package-manager.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/provider-display-names.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/provider-readiness.ts` | keep-overlay | GSD external-CLI settleReadiness / isReady policy | no |
+| `packages/pi-coding-agent/src/core/radius-mcp.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/resolve-config-value.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/resource-loader.ts` | keep-overlay | Restore extensionPathsTransform for installed extensions | no |
+| `packages/pi-coding-agent/src/core/session-cwd.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/session-manager.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/settings-diagnostics.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/settings-manager.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/settings-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/skills.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/slash-commands.ts` | keep-overlay | browser-safe builtin command list (no config/fs import) | no |
+| `packages/pi-coding-agent/src/core/system-prompt.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/tools/bash-interceptor.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/tools/bash.ts` | keep-overlay | GSD timeout_ms schema and session env guards | no |
+| `packages/pi-coding-agent/src/core/tools/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/tools/read.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/tools/render-utils.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/tools/tool-compatibility-registry.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/experimental/source-resolver.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/codemode/**` | keep-overlay | GSD host overlay for v1.6.1 pin | no |
+| `packages/pi-coding-agent/src/extensions/codemode/execute.lazy.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/codemode/execute.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/codemode/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/codemode/renderer.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/codemode/tool.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/codemode/worker.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/llama/ui.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/**` | keep-overlay | GSD host overlay for v1.6.1 pin | no |
+| `packages/pi-coding-agent/src/extensions/mcp/cli.lazy.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/cli.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/config.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/log.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/oauth.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/resources.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/runtime.lazy.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/runtime.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/tools.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/ui.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/tool-search/tool.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/host-compat.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/theme/**` | keep-overlay | GSD host overlay for v1.6.1 pin | no |
+| `packages/pi-coding-agent/src/theme/dark.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/theme/light.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/theme/system-theme.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/theme/theme-controller.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/theme/theme-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/theme/theme-tokens.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/theme/theme.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/types/highlight-js.d.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/types/host-shims.d.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/utils/shell.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/utils/shorten-path.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/bash-close-hang-windows.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/bash-executor-truncation.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/config-schemas.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/export-html-cost.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/export-html-skill-block.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/export-html-system-messages.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/export-html-xss.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/max-thinking.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/output-file-failures.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/scrollbar-theme.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/settings-manager.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/theme-export.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/theme-picker.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/theme-style.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/test/tools.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/autocomplete.ts` | keep-overlay | GSD setRespectGitignore host compat on CombinedAutocompleteProvider | no |
+| `packages/pi-tui/src/components/image.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/components/input.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/components/markdown.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/components/stack.ts` | keep-overlay | Clear stack entries when detachChildren runs | no |
+| `packages/pi-tui/src/editor-keybindings.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/gsd-layout.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/style.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/terminal.ts` | keep-overlay | GSD isTTY / non-TTY terminal guards | no |
+| `packages/pi-tui/src/tui-main-screen-alignment.ts` | keep-overlay | GSD shrink/seam alignment helpers for differential render | no |
+| `packages/pi-tui/src/tui-main-screen.ts` | keep-overlay | GSD differential main-screen render port | no |
+| `packages/pi-tui/src/tui.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+

@@ -1,23 +1,24 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@gsd/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
-import { AuthStorage } from "../src/core/auth-storage.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+} from "../src/core/agent-session-runtime.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { ModelRuntime } from "../src/core/model-runtime.js";
+import { SessionManager } from "../src/core/session-manager.js";
 import type {
 	ExtensionFactory,
 	SessionBeforeForkEvent,
 	SessionBeforeSwitchEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
-} from "../src/index.ts";
+} from "../src/index.js";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -42,11 +43,33 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three")]);
 
 		const authStorage = AuthStorage.inMemory();
-		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
+		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
+		const modelRuntime = await ModelRuntime.create({
+			credentials: authStorage,
+			modelsPath: join(tempDir, "models.json"),
+		});
+		const model = faux.getModel();
+		modelRuntime.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			api: model.api,
+			models: [
+				{
+					id: model.id,
+					name: model.name,
+					api: model.api,
+					reasoning: model.reasoning,
+					input: model.input,
+					cost: model.cost,
+					contextWindow: model.contextWindow,
+					maxTokens: model.maxTokens,
+					baseUrl: model.baseUrl,
+				},
+			],
+		});
 
 		const runtimeOptions = {
 			agentDir: tempDir,
-			authStorage,
+			modelRuntime,
 			model: faux.getModel(),
 			resourceLoaderOptions: {
 				extensionFactories: [extensionFactory],
@@ -181,6 +204,26 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		);
 		runtimeHost.setBeforeSessionInvalidate(undefined);
 		runtimeHost.setRebindSession(undefined);
+	});
+
+	it("emits session_start after reload when extensions were bound without bindings", async () => {
+		const events: RecordedSessionEvent[] = [];
+		const { runtimeHost } = await createRuntimeHost((pi) => {
+			pi.on("session_shutdown", (event) => {
+				events.push(event);
+			});
+			pi.on("session_start", (event) => {
+				events.push(event);
+			});
+		});
+		events.length = 0;
+
+		await runtimeHost.session.reload();
+
+		expect(events).toEqual([
+			{ type: "session_shutdown", reason: "reload" },
+			{ type: "session_start", reason: "reload" },
+		]);
 	});
 
 	it("emits session_before_fork and session_start and honors cancellation", async () => {

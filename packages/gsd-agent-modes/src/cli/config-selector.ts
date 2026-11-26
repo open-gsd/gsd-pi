@@ -2,7 +2,7 @@
  * TUI config selector for `pi config` command
  */
 
-import { ProcessTerminal, TUI } from "@gsd/pi-tui";
+import { ProcessTerminal, TuiMainScreen } from "@gsd/pi-tui";
 import type { ResolvedPaths } from "@gsd/pi-coding-agent/core/package-manager.js";
 import type { SettingsManager } from "@gsd/pi-coding-agent/core/settings-manager.js";
 import { ConfigSelectorComponent } from "../modes/interactive/components/config-selector.js";
@@ -21,7 +21,7 @@ export async function selectConfig(options: ConfigSelectorOptions): Promise<void
 	initTheme(options.settingsManager.getTheme(), true);
 
 	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal());
+		const ui = new TuiMainScreen(new ProcessTerminal());
 		let resolved = false;
 
 		const selector = new ConfigSelectorComponent(

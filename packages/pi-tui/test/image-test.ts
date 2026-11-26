@@ -1,10 +1,11 @@
 import { readFileSync } from "fs";
-import { Image } from "../src/components/image.ts";
-import { Spacer } from "../src/components/spacer.ts";
-import { Text } from "../src/components/text.ts";
-import { ProcessTerminal } from "../src/terminal.ts";
-import { getCapabilities, getImageDimensions } from "../src/terminal-image.ts";
-import { TUI } from "../src/tui.ts";
+import { Image } from "../src/components/image.js";
+import { Spacer } from "../src/components/spacer.js";
+import { Text } from "../src/components/text.js";
+import { ProcessTerminal } from "../src/terminal.js";
+import { getCapabilities, getImageDimensions } from "../src/terminal-image.js";
+import type { TUI } from "../src/tui.js";
+import { TuiMainScreen } from "../src/tui-main-screen.js";
 
 const testImagePath = process.argv[2] || "/tmp/test-image.png";
 
@@ -16,7 +17,7 @@ try {
 	imageBuffer = readFileSync(testImagePath);
 } catch (_e) {
 	console.error(`Failed to load image: ${testImagePath}`);
-	console.error("Usage: npx tsx test/image-test.ts [path-to-image.png]");
+	console.error("Usage: node test/image-test.ts [path-to-image.png]");
 	process.exit(1);
 }
 
@@ -27,7 +28,7 @@ console.log("Image dimensions:", dims);
 console.log("");
 
 const terminal = new ProcessTerminal();
-const tui = new TUI(terminal);
+const tui: TUI = new TuiMainScreen(terminal);
 
 tui.addChild(new Text("Image Rendering Test", 1, 1));
 tui.addChild(new Spacer(1));

@@ -1,11 +1,12 @@
-import chalk from "chalk";
 import { type SpawnSyncReturns, spawnSync } from "child_process";
 import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "fs";
 import { arch, platform } from "os";
 import { join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
-import { APP_NAME, getBinDir } from "../config.js";
+import { getBinDir, VERSION } from "../config.js";
+import { fetchWithRetry } from "./management-http.js";
+import { getPiUserAgent } from "./pi-user-agent.js";
 
 const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
@@ -23,7 +24,19 @@ interface ToolConfig {
 	binaryName: string; // Name of the binary inside the archive
 	systemBinaryNames?: string[]; // Alternative system command names to try before downloading
 	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
-	getAssetName: (version: string, plat: string, architecture: string) => string | null;
+	getAssetName: (version: string, target: string) => string;
+}
+
+// Map Node's platform/arch to the release target suffix shared by fd and ripgrep.
+// Only x64 and arm64 are mapped. Other architectures (e.g. ARM32 `arm`, `ia32`)
+// must not fall back to x86-64 binaries (#11209).
+function getReleaseTarget(plat: string, architecture: string): string | undefined {
+	const archStr = architecture === "arm64" ? "aarch64" : architecture === "x64" ? "x86_64" : undefined;
+	if (!archStr) return undefined;
+	if (plat === "darwin") return `${archStr}-apple-darwin.tar.gz`;
+	if (plat === "linux") return `${archStr}-unknown-linux-musl.tar.gz`;
+	if (plat === "win32") return `${archStr}-pc-windows-msvc.zip`;
+	return undefined;
 }
 
 const TOOLS: Record<string, ToolConfig> = {
@@ -33,40 +46,14 @@ const TOOLS: Record<string, ToolConfig> = {
 		binaryName: "fd",
 		systemBinaryNames: ["fd", "fdfind"],
 		tagPrefix: "v",
-		getAssetName: (version, plat, architecture) => {
-			if (plat === "darwin") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `fd-v${version}-${archStr}-apple-darwin.tar.gz`;
-			} else if (plat === "linux") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `fd-v${version}-${archStr}-unknown-linux-gnu.tar.gz`;
-			} else if (plat === "win32") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `fd-v${version}-${archStr}-pc-windows-msvc.zip`;
-			}
-			return null;
-		},
+		getAssetName: (version, target) => `fd-v${version}-${target}`,
 	},
 	rg: {
 		name: "ripgrep",
 		repo: "BurntSushi/ripgrep",
 		binaryName: "rg",
 		tagPrefix: "",
-		getAssetName: (version, plat, architecture) => {
-			if (plat === "darwin") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `ripgrep-${version}-${archStr}-apple-darwin.tar.gz`;
-			} else if (plat === "linux") {
-				if (architecture === "arm64") {
-					return `ripgrep-${version}-aarch64-unknown-linux-gnu.tar.gz`;
-				}
-				return `ripgrep-${version}-x86_64-unknown-linux-musl.tar.gz`;
-			} else if (plat === "win32") {
-				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
-				return `ripgrep-${version}-${archStr}-pc-windows-msvc.zip`;
-			}
-			return null;
-		},
+		getAssetName: (version, target) => `ripgrep-${version}-${target}`,
 	},
 };
 
@@ -103,29 +90,48 @@ export function getToolPath(tool: "fd" | "rg"): string | null {
 	return null;
 }
 
-// Fetch latest release version from GitHub
-async function getLatestVersion(repo: string): Promise<string> {
-	const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-		headers: { "User-Agent": `${APP_NAME}-coding-agent` },
-		signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
-	});
+// Resolve the latest release version from the release page redirect.
+// The api.github.com releases endpoint counts against the anonymous API
+// quota (60 requests/hour per IP), which is permanently exhausted behind
+// shared egress IPs such as corporate proxies and CI runners. The web
+// endpoint answers with a redirect to the tagged release at no quota cost
+// and lives on the same origin as the binary download itself.
+export async function getLatestVersion(repo: string): Promise<string> {
+	const response = await fetchWithRetry(
+		`https://github.com/${repo}/releases/latest`,
+		{
+			headers: { "User-Agent": getPiUserAgent(VERSION) },
+			redirect: "manual",
+		},
+		{ timeoutMs: NETWORK_TIMEOUT_MS },
+	);
 
-	if (!response.ok) {
-		throw new Error(`GitHub API error: ${response.status}`);
+	// Only the status and headers matter here. Discard the body so the
+	// connection can be reused.
+	try {
+		await response.body?.cancel();
+	} catch {
+		// Discarding the body is best-effort.
 	}
 
-	const data = (await response.json()) as { tag_name: string };
-	return data.tag_name.replace(/^v/, "");
+	const location = response.status >= 300 && response.status < 400 ? response.headers.get("location") : null;
+	if (!location) {
+		throw new Error(`Failed to resolve latest ${repo} release: HTTP ${response.status} without redirect`);
+	}
+
+	const tag = new URL(location, "https://github.com").pathname.split("/").pop();
+	if (!tag || !location.includes("/releases/tag/")) {
+		throw new Error(`Failed to resolve latest ${repo} release: unexpected redirect to ${location}`);
+	}
+	return decodeURIComponent(tag).replace(/^v/, "");
 }
 
 // Download a file from URL
 async function downloadFile(url: string, dest: string): Promise<void> {
-	const response = await fetch(url, {
-		signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-	});
+	const response = await fetchWithRetry(url, undefined, { timeoutMs: DOWNLOAD_TIMEOUT_MS });
 
 	if (!response.ok) {
-		throw new Error(`Failed to download: ${response.status}`);
+		throw new Error(`Download failed with HTTP ${response.status}: ${url}`);
 	}
 
 	if (!response.body) {
@@ -189,7 +195,7 @@ function extractTarGzArchive(archivePath: string, extractDir: string, assetName:
 }
 
 function getWindowsTarCommand(): string {
-	const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+	const systemRoot = process.env.SystemRoot;
 	if (systemRoot) {
 		const systemTar = join(systemRoot, "System32", "tar.exe");
 		if (existsSync(systemTar)) {
@@ -244,18 +250,15 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 
 	const plat = platform();
 	const architecture = arch();
-
-	// Get latest version
-	let version = await getLatestVersion(config.repo);
-	if (tool === "fd" && plat === "darwin" && architecture === "x64") {
-		version = "10.3.0";
-	}
-
-	// Get asset name for this platform
-	const assetName = config.getAssetName(version, plat, architecture);
-	if (!assetName) {
+	const target = getReleaseTarget(plat, architecture);
+	if (!target) {
 		throw new Error(`Unsupported platform: ${plat}/${architecture}`);
 	}
+
+	// fd is pinned on darwin/x64, so skip the version lookup there.
+	const version =
+		tool === "fd" && plat === "darwin" && architecture === "x64" ? "10.3.0" : await getLatestVersion(config.repo);
+	const assetName = config.getAssetName(version, target);
 
 	// Create tools directory
 	mkdirSync(TOOLS_DIR, { recursive: true });
@@ -321,9 +324,20 @@ const TERMUX_PACKAGES: Record<string, string> = {
 	rg: "ripgrep",
 };
 
-// Ensure a tool is available, downloading if necessary
-// Returns the path to the tool, or null if unavailable
-export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Promise<string | undefined> {
+export interface ToolStatus {
+	type: "info" | "warning";
+	message: string;
+}
+
+/**
+ * Ensure a tool is available, downloading if necessary.
+ * Reports progress through `onStatus`; status messages are otherwise silent.
+ * Returns the tool path, or undefined if unavailable.
+ */
+export async function ensureTool(
+	tool: "fd" | "rg",
+	onStatus?: (status: ToolStatus) => void,
+): Promise<string | undefined> {
 	const existingPath = getToolPath(tool);
 	if (existingPath) {
 		return existingPath;
@@ -333,9 +347,7 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 	if (!config) return undefined;
 
 	if (isOfflineModeEnabled()) {
-		if (!silent) {
-			console.log(chalk.yellow(`${config.name} not found. Offline mode enabled, skipping download.`));
-		}
+		onStatus?.({ type: "warning", message: `${config.name} not found. Offline mode enabled, skipping download.` });
 		return undefined;
 	}
 
@@ -343,27 +355,43 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 	// Users must install via pkg.
 	if (platform() === "android") {
 		const pkgName = TERMUX_PACKAGES[tool] ?? tool;
-		if (!silent) {
-			console.log(chalk.yellow(`${config.name} not found. Install with: pkg install ${pkgName}`));
-		}
+		onStatus?.({ type: "warning", message: `${config.name} not found. Install with: pkg install ${pkgName}` });
+		return undefined;
+	}
+
+	// Prebuilt downloads only exist for the targets mapped in getReleaseTarget.
+	if (!getReleaseTarget(platform(), arch())) {
+		onStatus?.({
+			type: "warning",
+			message: `${config.name} not found. Automatic download is not supported on ${platform()}/${arch()}. Install ${config.name} with your system package manager.`,
+		});
 		return undefined;
 	}
 
 	// Tool not found - download it
-	if (!silent) {
-		console.log(chalk.dim(`${config.name} not found. Downloading...`));
-	}
+	onStatus?.({ type: "info", message: `${config.name} not found. Downloading...` });
 
 	try {
 		const path = await downloadTool(tool);
-		if (!silent) {
-			console.log(chalk.dim(`${config.name} installed to ${path}`));
-		}
+		onStatus?.({ type: "info", message: `${config.name} installed to ${path}` });
 		return path;
 	} catch (e) {
-		if (!silent) {
-			console.log(chalk.yellow(`Failed to download ${config.name}: ${e instanceof Error ? e.message : e}`));
+		// Include the error cause chain: fetch failures surface as a bare
+		// "fetch failed" TypeError with the actionable detail (DNS, TLS,
+		// timeout) hidden in the cause. Depth-capped to guard against
+		// circular cause chains.
+		const messages: string[] = [];
+		for (
+			let current: unknown = e, depth = 0;
+			current instanceof Error && depth < 5;
+			current = current.cause, depth++
+		) {
+			if (!messages.includes(current.message)) messages.push(current.message);
 		}
+		onStatus?.({
+			type: "warning",
+			message: `Failed to download ${config.name}: ${messages.length > 0 ? messages.join(": ") : String(e)}`,
+		});
 		return undefined;
 	}
 }

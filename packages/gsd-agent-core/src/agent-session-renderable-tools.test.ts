@@ -19,7 +19,7 @@ let testDir: string;
 async function createSession() {
 	const agentDir = join(testDir, "agent-home");
 	const authStorage = AuthStorage.inMemory({});
-	const modelRegistry = new ModelRegistry(authStorage, join(agentDir, "models.json"));
+	const modelRegistry = await ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 	const settingsManager = SettingsManager.inMemory();
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: testDir,
@@ -32,7 +32,12 @@ async function createSession() {
 	await resourceLoader.reload();
 
 	return new AgentSession({
-		agent: new Agent(),
+		agent: new Agent({
+			streamFn: () =>
+				(async function* () {
+					/* noop stream for tool-definition lookup tests */
+				})(),
+		}),
 		sessionManager: SessionManager.inMemory(testDir),
 		settingsManager,
 		cwd: testDir,

@@ -1,5 +1,5 @@
 export { main } from "./main.js";
-export { parseArgs, type Args, printHelp } from "./cli/args.js";
+export { parseArgs, type Args, printHelp, isValidThinkingLevel } from "./cli/args.js";
 export { InteractiveMode, type InteractiveModeOptions } from "./modes/interactive/interactive-mode.js";
 export { type PrintModeOptions, runPrintMode } from "./modes/print-mode.js";
 export { runRpcMode } from "./modes/rpc/rpc-mode.js";

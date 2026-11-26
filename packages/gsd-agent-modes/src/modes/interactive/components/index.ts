@@ -15,7 +15,7 @@ export { ExtensionEditorComponent } from "./extension-editor.js";
 export { ExtensionInputComponent } from "./extension-input.js";
 export { ExtensionSelectorComponent, SEPARATOR_PREFIX } from "./extension-selector.js";
 export { FooterComponent } from "./footer.js";
-export { appKey, appKeyHint, editorKey, keyHint, rawKeyHint } from "./keybinding-hints.js";
+export { appKey, appKeyHint, editorKey, keyHint, keyText, rawKeyHint } from "./keybinding-hints.js";
 export { LoginDialogComponent } from "./login-dialog.js";
 export { ModelSelectorComponent } from "./model-selector.js";
 export { OAuthSelectorComponent } from "./oauth-selector.js";
@@ -31,4 +31,9 @@ export { ToolExecutionComponent, type ToolExecutionOptions } from "./tool-execut
 export { TreeSelectorComponent } from "./tree-selector.js";
 export { UserMessageComponent } from "./user-message.js";
 export { UserMessageSelectorComponent } from "./user-message-selector.js";
-export { truncateToVisualLines, type VisualTruncateResult } from "./visual-truncate.js";
+export {
+	truncateToVisualLines,
+	VisualLinePreview,
+	type VisualLinePreviewOptions,
+	type VisualTruncateResult,
+} from "./visual-truncate.js";

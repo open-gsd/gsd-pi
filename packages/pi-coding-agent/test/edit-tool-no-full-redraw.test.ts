@@ -1,12 +1,12 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Container, type Terminal, Text, TUI } from "@earendil-works/pi-tui";
+import { Container, type Terminal, Text, type TUI, TuiMainScreen } from "@gsd/pi-tui";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { createEditToolDefinition } from "../src/core/tools/edit.ts";
-import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.ts";
-import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { createEditToolDefinition } from "../src/core/tools/edit.js";
+import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.js";
+import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 class FakeTerminal implements Terminal {
 	columns = 80;
@@ -28,6 +28,7 @@ class FakeTerminal implements Terminal {
 	clearScreen(): void {}
 	setTitle(_title: string): void {}
 	setProgress(_active: boolean): void {}
+	setProgramStatus(): void {}
 
 	get fullClearCount(): number {
 		return this.writes.filter((write) => write.includes("\x1b[2J\x1b[H\x1b[3J")).length;
@@ -94,7 +95,7 @@ describe("edit tool TUI rendering", () => {
 		}
 
 		const terminal = new FakeTerminal();
-		const tui = new TUI(terminal);
+		const tui: TUI = new TuiMainScreen(terminal);
 		const root = new Container();
 		for (let i = 0; i < 200; i++) {
 			root.addChild(new Text(`history ${i}`, 0, 0));
@@ -168,7 +169,7 @@ describe("edit tool TUI rendering", () => {
 		await rm(filePath, { force: true });
 
 		const terminal = new FakeTerminal();
-		const tui = new TUI(terminal);
+		const tui: TUI = new TuiMainScreen(terminal);
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-call-replay",
@@ -205,7 +206,7 @@ describe("edit tool TUI rendering", () => {
 		await writeFile(filePath, "line 0\nline 1\n", "utf8");
 
 		const terminal = new FakeTerminal();
-		const tui = new TUI(terminal);
+		const tui: TUI = new TuiMainScreen(terminal);
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-call-2",

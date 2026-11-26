@@ -1,0 +1,215 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createRadiusOAuth } from "../src/auth/oauth/radius.js";
+import type { AuthEvent, ProviderAuthInteraction } from "../src/auth/types.js";
+
+const GATEWAY = "https://radius.example";
+const nativeFetch = globalThis.fetch;
+
+function jsonResponse(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { "content-type": "application/json" },
+	});
+}
+
+function requestUrl(input: unknown): string {
+	if (typeof input === "string") return input;
+	if (input instanceof URL) return input.toString();
+	if (input instanceof Request) return input.url;
+	throw new Error(`Unsupported request input: ${String(input)}`);
+}
+
+function interaction(loginMethod: "browser" | "device-code", events: AuthEvent[] = []): ProviderAuthInteraction {
+	return {
+		signal: new AbortController().signal,
+		prompt: async () => loginMethod,
+		notify: (event) => events.push(event),
+	};
+}
+
+describe("Radius OAuth", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+		vi.useRealTimers();
+	});
+
+	it("uses gateway endpoints directly for device login", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-07-24T00:00:00Z"));
+		const events: AuthEvent[] = [];
+		const urls: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown, init?: RequestInit) => {
+				const url = requestUrl(input);
+				urls.push(url);
+				const form = new URLSearchParams(String(init?.body));
+				if (url === `${GATEWAY}/v1/oauth/device`) {
+					expect(form.get("client_id")).toBe("pi-gateway");
+					expect(form.get("scope")).toBe("gateway offline_access");
+					return jsonResponse({
+						device_code: "device-code",
+						user_code: "ABCD-1234",
+						verification_uri: "https://radius-ui.example/pair",
+						expires_in: 600,
+						interval: 5,
+					});
+				}
+				if (url === `${GATEWAY}/v1/oauth/token`) {
+					expect(form.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:device_code");
+					expect(form.get("client_id")).toBe("pi-gateway");
+					expect(form.get("device_code")).toBe("device-code");
+					return jsonResponse({
+						access_token: "access-token",
+						refresh_token: "refresh-token",
+						expires_in: 3600,
+						scope: "gateway offline_access",
+					});
+				}
+				throw new Error(`Unexpected request: ${url}`);
+			}),
+		);
+
+		const oauth = createRadiusOAuth({ name: "Radius", gateway: GATEWAY });
+		await expect(oauth.login(interaction("device-code", events))).resolves.toEqual({
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 3600 * 1000 - 60_000,
+			scope: "gateway offline_access",
+		});
+		expect(events).toEqual([
+			{
+				type: "device_code",
+				userCode: "ABCD-1234",
+				verificationUri: "https://radius-ui.example/pair",
+				intervalSeconds: 5,
+				expiresInSeconds: 600,
+			},
+		]);
+		expect(urls).toEqual([`${GATEWAY}/v1/oauth/device`, `${GATEWAY}/v1/oauth/token`]);
+	});
+
+	it("refreshes directly through the gateway without discovery", async () => {
+		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+			expect(requestUrl(input)).toBe(`${GATEWAY}/v1/oauth/token`);
+			const form = new URLSearchParams(String(init?.body));
+			expect(form.get("grant_type")).toBe("refresh_token");
+			expect(form.get("client_id")).toBe("pi-gateway");
+			expect(form.get("refresh_token")).toBe("old-refresh");
+			return jsonResponse({
+				access_token: "new-access",
+				refresh_token: "new-refresh",
+				expires_in: 3600,
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const oauth = createRadiusOAuth({ name: "Radius", gateway: GATEWAY });
+		await expect(
+			oauth.refresh(
+				{ type: "oauth", access: "old-access", refresh: "old-refresh", expires: 0 },
+				new AbortController().signal,
+			),
+		).resolves.toMatchObject({ access: "new-access", refresh: "new-refresh" });
+		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
+	it("discovers only the interactive browser authorization endpoint", async () => {
+		const fetchMock = vi.fn(async (input: unknown) => {
+			expect(requestUrl(input)).toBe(`${GATEWAY}/v1/oauth`);
+			return jsonResponse({ issuer: "https://radius-ui.example" });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const oauth = createRadiusOAuth({ name: "Radius", gateway: GATEWAY });
+		await expect(oauth.login(interaction("browser"))).rejects.toThrow(`Invalid Radius OAuth config from ${GATEWAY}`);
+		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
+	it("rejects an authorization endpoint that is not an http(s) URL", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => jsonResponse({ authorizationEndpoint: "file:///Users/victim/Downloads/payload.app" })),
+		);
+		const events: AuthEvent[] = [];
+
+		const oauth = createRadiusOAuth({ name: "Radius", gateway: GATEWAY });
+		await expect(oauth.login(interaction("browser", events))).rejects.toThrow(
+			`Invalid Radius OAuth config from ${GATEWAY}`,
+		);
+		expect(events).toEqual([]);
+	});
+
+	it("rejects a device verification URI that is not an http(s) URL", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				jsonResponse({
+					device_code: "device-code",
+					user_code: "ABCD-1234",
+					verification_uri: "file:///Users/victim/Downloads/payload.app",
+					expires_in: 600,
+				}),
+			),
+		);
+		const events: AuthEvent[] = [];
+
+		const oauth = createRadiusOAuth({ name: "Radius", gateway: GATEWAY });
+		await expect(oauth.login(interaction("device-code", events))).rejects.toThrow("Untrusted verification_uri");
+		expect(events).toEqual([]);
+	});
+
+	it("exchanges the browser callback code before showing the sign-in page", async () => {
+		let tokenStatus = 400;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown, init?: RequestInit) => {
+				const url = requestUrl(input);
+				if (url === `${GATEWAY}/v1/oauth`) return jsonResponse({ authorizationEndpoint: `${GATEWAY}/authorize` });
+				if (url === `${GATEWAY}/v1/oauth/token`) {
+					const body = new URLSearchParams(String(init?.body));
+					expect(body.get("code")).toBe("browser-code");
+					return tokenStatus === 200
+						? jsonResponse({ access_token: "access", refresh_token: "refresh", expires_in: 3600 })
+						: jsonResponse({ error: "invalid_grant", error_description: "code expired" }, tokenStatus);
+				}
+				return nativeFetch(url, init);
+			}),
+		);
+
+		const oauth = createRadiusOAuth({ name: "Radius", gateway: GATEWAY });
+		const login = async () => {
+			let callbackPage: Promise<Response> | undefined;
+			const result = oauth.login({
+				...interaction("browser"),
+				notify: (event) => {
+					if (event.type !== "auth_url") return;
+					const authorize = new URL(event.url);
+					const callback = new URL(authorize.searchParams.get("redirect_uri") ?? "");
+					callback.searchParams.set("code", "browser-code");
+					callback.searchParams.set("state", authorize.searchParams.get("state") ?? "");
+					callbackPage = nativeFetch(callback);
+				},
+			});
+			const outcome = await result.then(
+				(credential) => ({ credential }),
+				(error: Error) => ({ error }),
+			);
+			const response = await callbackPage;
+			return { ...outcome, status: response?.status, page: await response?.text() };
+		};
+
+		const failed = await login();
+		expect("error" in failed && failed.error.message).toContain("invalid_grant: code expired");
+		expect(failed.status).toBe(502);
+		expect(failed.page).toContain("code expired");
+
+		tokenStatus = 200;
+		const succeeded = await login();
+		expect("credential" in succeeded && succeeded.credential.access).toBe("access");
+		expect(succeeded.status).toBe(200);
+		expect(succeeded.page).toContain("Signed in to Radius.");
+	});
+});

@@ -28,6 +28,7 @@ const EXPECTED_BUILTIN_OUTCOMES = new Map<string, "rpc" | "surface" | "reject">(
   ["export", "surface"],
   ["import", "reject"],
   ["share", "reject"],
+  ["bug", "reject"],
   ["copy", "reject"],
   ["name", "surface"],
   ["session", "surface"],
@@ -36,6 +37,7 @@ const EXPECTED_BUILTIN_OUTCOMES = new Map<string, "rpc" | "surface" | "reject">(
   ["fork", "surface"],
   ["clone", "reject"],
   ["tree", "reject"],
+  ["trust", "reject"],
   ["login", "surface"],
   ["logout", "surface"],
   ["new", "rpc"],
@@ -48,10 +50,12 @@ const EXPECTED_BUILTIN_OUTCOMES = new Map<string, "rpc" | "surface" | "reject">(
 const BUILTIN_DESCRIPTIONS = new Map(BUILTIN_SLASH_COMMANDS.map((command) => [command.name, command.description]))
 const DEFERRED_BROWSER_REJECTS = [
   "share",
+  "bug",
   "copy",
   "changelog",
   "hotkeys",
   "tree",
+  "trust",
   "import",
   "clone",
   "reload",

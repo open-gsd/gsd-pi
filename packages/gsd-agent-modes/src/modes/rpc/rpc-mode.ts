@@ -292,7 +292,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		for (const [key, widget] of widgetState.entries()) {
 			ui.setWidget(key, widget.content as any, widget.options);
 		}
-		ui.setWorkingMessage(workingMessageState);
+		ui.setWorkingMessage(workingMessageState ?? undefined);
 		if (titleState) {
 			ui.setTitle(titleState);
 		}
@@ -382,8 +382,18 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 	 */
 	const createExtensionUIContext = (): ExtensionUIContext => ({
 		select: (title, options, opts) =>
-			createDialogPromise(opts, undefined, { method: "select", title, options, timeout: opts?.timeout, allowMultiple: opts?.allowMultiple }, (r) =>
-				"cancelled" in r && r.cancelled ? undefined : "values" in r ? r.values : "value" in r ? r.value : undefined,
+			createDialogPromise(
+				opts,
+				undefined,
+				{ method: "select", title, options, timeout: opts?.timeout, allowMultiple: opts?.allowMultiple },
+				(r) =>
+					"cancelled" in r && r.cancelled
+						? undefined
+						: "values" in r
+							? (r.values?.[0] as string | undefined)
+							: "value" in r
+								? (r.value as string | undefined)
+								: undefined,
 			),
 
 		confirm: (title, message, opts) =>
@@ -443,7 +453,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			workingMessageState = message;
 			emitExtensionUiSnapshot();
 			void withEmbeddedUiContext((ui) => {
-				ui.setWorkingMessage(message);
+				ui.setWorkingMessage(message ?? undefined);
 			});
 		},
 
@@ -1007,7 +1017,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 						name: template.name,
 						description: template.description,
 						source: "prompt",
-						location: template.source as RpcSlashCommand["location"],
+						location: template.sourceInfo.scope as RpcSlashCommand["location"],
 						path: template.filePath,
 					});
 				}
@@ -1018,7 +1028,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 						name: `skill:${skill.name}`,
 						description: skill.description,
 						source: "skill",
-						location: skill.source as RpcSlashCommand["location"],
+						location: skill.sourceInfo.scope as RpcSlashCommand["location"],
 						path: skill.filePath,
 					});
 				}

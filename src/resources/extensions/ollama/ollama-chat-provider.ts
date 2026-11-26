@@ -85,10 +85,10 @@ export function streamOllamaChat(
 				currentBlockType = type;
 				if (type === "text") {
 					output.content.push({ type: "text", text: "" });
-					stream.push({ type: "text_start", contentIndex });
+					stream.push({ type: "text_start", contentIndex, partial: output });
 				} else {
 					output.content.push({ type: "thinking", thinking: "" });
-					stream.push({ type: "thinking_start", contentIndex });
+					stream.push({ type: "thinking_start", contentIndex, partial: output });
 				}
 			}
 
@@ -96,10 +96,10 @@ export function streamOllamaChat(
 				if (currentBlockType === null) return;
 				if (currentBlockType === "text") {
 					const block = output.content[contentIndex] as TextContent;
-					stream.push({ type: "text_end", contentIndex, content: block.text });
+					stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });
 				} else {
 					const block = output.content[contentIndex] as ThinkingContent;
-					stream.push({ type: "thinking_end", contentIndex, content: block.thinking });
+					stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 				}
 				currentBlockType = null;
 			}
@@ -112,10 +112,10 @@ export function streamOllamaChat(
 				}
 				if (type === "text") {
 					(output.content[contentIndex] as TextContent).text += text;
-					stream.push({ type: "text_delta", contentIndex, delta: text });
+					stream.push({ type: "text_delta", contentIndex, delta: text, partial: output });
 				} else {
 					(output.content[contentIndex] as ThinkingContent).thinking += text;
-					stream.push({ type: "thinking_delta", contentIndex, delta: text });
+					stream.push({ type: "thinking_delta", contentIndex, delta: text, partial: output });
 				}
 			}
 
@@ -133,20 +133,22 @@ export function streamOllamaChat(
 						type: "toolCall",
 						id: `ollama_tc_${responseNonce}_${contentIndex}`,
 						name: tc.function.name,
-						arguments: tc.function.arguments,
+						arguments: tc.function.arguments as ToolCall["arguments"],
 					};
 					output.content.push(toolCall);
-					stream.push({ type: "toolcall_start", contentIndex });
+					stream.push({ type: "toolcall_start", contentIndex, partial: output });
 					// Emit a delta with the serialized arguments (convention: start/delta/end)
 					stream.push({
 						type: "toolcall_delta",
 						contentIndex,
 						delta: JSON.stringify(tc.function.arguments),
+						partial: output,
 					});
 					stream.push({
 						type: "toolcall_end",
 						contentIndex,
 						toolCall,
+						partial: output,
 					});
 				}
 				output.stopReason = "toolUse";
@@ -182,7 +184,7 @@ export function streamOllamaChat(
 					endBlock();
 
 					output.usage = buildUsage(chunk);
-					output.inferenceMetrics = extractMetrics(chunk);
+					(output as AssistantMessage & { inferenceMetrics?: ReturnType<typeof extractMetrics> }).inferenceMetrics = extractMetrics(chunk);
 					// Preserve "toolUse" if tool calls were processed
 					if (output.stopReason !== "toolUse") {
 						output.stopReason = mapStopReason(chunk.done_reason);
@@ -232,7 +234,7 @@ export function buildRequest(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): OllamaChatRequest {
-	const ollamaOpts = (model.providerOptions ?? {}) as OllamaChatOptions;
+	const ollamaOpts = ((model as Model<Api> & { providerOptions?: OllamaChatOptions }).providerOptions ?? {}) as OllamaChatOptions;
 
 	const request: OllamaChatRequest = {
 		model: model.id,

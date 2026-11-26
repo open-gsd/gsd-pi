@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { convertTools } from "../../../../../packages/pi-ai/src/providers/google-shared.ts";
+import { convertTools } from "../../../../../packages/pi-ai/src/api/google-shared.ts";
 import { registerDbTools } from "../bootstrap/db-tools.ts";
 import { registerExecTools } from "../bootstrap/exec-tools.ts";
 import { registerJournalTools } from "../bootstrap/journal-tools.ts";

@@ -1,24 +1,27 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@gsd/pi-ai/compat";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../src/core/agent-session-runtime.ts";
-import { AuthStorage } from "../../src/core/auth-storage.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
+} from "../../src/core/agent-session-runtime.js";
+import { AuthStorage } from "../../src/core/auth-storage.js";
+import { MissingSessionCwdError } from "../../src/core/session-cwd.js";
+import { SessionManager } from "../../src/core/session-manager.js";
 import type {
+	AgentToolResult,
 	ExtensionAPI,
 	ExtensionFactory,
 	SessionBeforeForkEvent,
 	SessionBeforeSwitchEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
-} from "../../src/index.ts";
+} from "../../src/index.js";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -52,7 +55,7 @@ describe("AgentSessionRuntime characterization", () => {
 		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three")]);
 
 		const authStorage = AuthStorage.inMemory();
-		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
+		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
 
 		const runtimeOptions = {
 			agentDir: tempDir,
@@ -159,6 +162,114 @@ describe("AgentSessionRuntime characterization", () => {
 			throw new Error("missing persisted assistant message");
 		}
 		expect(persistedAssistant.usage.cost.total).toBe(0.123);
+	});
+
+	it("settles the active response before session replacement", async () => {
+		let toolStarted!: () => void;
+		const toolStartedPromise = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.registerTool({
+				name: "block",
+				label: "Block",
+				description: "Blocks until aborted",
+				parameters: Type.Object({}),
+				execute: (_toolCallId, _params, signal) =>
+					new Promise<AgentToolResult<unknown>>((resolve) => {
+						toolStarted();
+						signal?.addEventListener("abort", () =>
+							resolve({ content: [{ type: "text", text: "tool aborted" }], details: {} }),
+						);
+					}),
+			});
+		});
+
+		await runtime.session.prompt("hello");
+		const firstSessionFile = runtime.session.sessionFile!;
+		await runtime.newSession();
+		await runtime.session.bindExtensions({});
+
+		faux.setResponses([fauxAssistantMessage(fauxToolCall("block", {}), { stopReason: "toolUse" })]);
+		const outgoingSession = runtime.session;
+		const promptPromise = outgoingSession.prompt("start blocking tool");
+		await toolStartedPromise;
+
+		const switchResult = await runtime.switchSession(firstSessionFile);
+		await promptPromise;
+
+		expect(switchResult.cancelled).toBe(false);
+		expect(runtime.session.sessionFile).toBe(firstSessionFile);
+		// The outgoing session settled before replacement: the interrupted tool
+		// call has a persisted tool result instead of dangling forever.
+		const outgoingEntries = SessionManager.open(outgoingSession.sessionFile!)
+			.getEntries()
+			.filter((entry) => entry.type === "message");
+		expect(outgoingEntries.map((entry) => entry.message.role)).toEqual([
+			"system",
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+		]);
+	});
+
+	// #11060
+	it("leaves no copy behind when an import fails on a missing session cwd", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		const sessionDir = runtime.session.sessionManager.getSessionDir();
+		const importPath = join(tempDir, "import", "orphan.jsonl");
+		mkdirSync(join(tempDir, "import"), { recursive: true });
+		writeFileSync(
+			importPath,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "orphan",
+				timestamp: new Date().toISOString(),
+				cwd: join(tempDir, "renamed-away"),
+			})}\n`,
+		);
+
+		await expect(runtime.importFromJsonl(importPath)).rejects.toBeInstanceOf(MissingSessionCwdError);
+		expect(existsSync(join(sessionDir, "orphan.jsonl"))).toBe(false);
+
+		await runtime.importFromJsonl(importPath, tempDir);
+		expect(runtime.session.sessionFile).toBe(join(sessionDir, "orphan.jsonl"));
+		expect(existsSync(join(sessionDir, "orphan-1.jsonl"))).toBe(false);
+	});
+
+	it("preserves an existing session when importing a file with the same name", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		const sessionDir = runtime.session.sessionManager.getSessionDir();
+		const importDir = join(tempDir, "import");
+		const filename = "collision.jsonl";
+		const storedPath = join(sessionDir, filename);
+		const importPath = join(importDir, filename);
+		const storedSession = `${JSON.stringify({
+			type: "session",
+			version: 3,
+			id: "stored",
+			timestamp: new Date().toISOString(),
+			cwd: tempDir,
+		})}\n`;
+		const importedSession = `${JSON.stringify({
+			type: "session",
+			version: 3,
+			id: "imported",
+			timestamp: new Date().toISOString(),
+			cwd: tempDir,
+		})}\n`;
+		mkdirSync(sessionDir, { recursive: true });
+		mkdirSync(importDir, { recursive: true });
+		writeFileSync(storedPath, storedSession);
+		writeFileSync(importPath, importedSession);
+
+		await runtime.importFromJsonl(importPath);
+
+		expect(readFileSync(storedPath, "utf8")).toBe(storedSession);
+		expect(runtime.session.sessionFile).not.toBe(storedPath);
+		expect(readFileSync(runtime.session.sessionFile!, "utf8")).toContain('"id":"imported"');
 	});
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {
@@ -290,6 +401,19 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(events).toEqual([{ type: "session_before_fork", entryId: "missing-entry", position: "at" }]);
 	});
 
+	it("reports why an unflushed session cannot be forked", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const sessionFile = runtime.session.sessionFile;
+		const leafId = runtime.session.sessionManager.getLeafId();
+		expect(sessionFile).toBeDefined();
+		expect(existsSync(sessionFile!)).toBe(false);
+		expect(leafId).toBeTruthy();
+
+		await expect(runtime.fork(leafId!, { position: "at" })).rejects.toThrow(
+			"This session has not been saved yet. Send a message before cloning or forking it.",
+		);
+	});
+
 	it("duplicates the current active branch when forking at the current position", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		await runtime.session.prompt("hello");
@@ -343,7 +467,7 @@ describe("AgentSessionRuntime characterization", () => {
 		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three")]);
 
 		const authStorage = AuthStorage.inMemory();
-		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
+		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
 
 		const runtimeOptions = {
 			agentDir: tempDir,
@@ -454,7 +578,7 @@ describe("AgentSessionRuntime characterization", () => {
 		mkdirSync(secondDir, { recursive: true });
 		const { runtime, faux, tempDir } = await createRuntimeForTest(() => {}, { cwd: firstDir });
 		const otherAuthStorage = AuthStorage.inMemory();
-		otherAuthStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
+		await otherAuthStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
 		const otherRuntimeOptions = {
 			agentDir: tempDir,
 			authStorage: otherAuthStorage,
@@ -527,7 +651,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const otherDir = join(tempDir, "other");
 		mkdirSync(otherDir, { recursive: true });
 		const otherAuthStorage = AuthStorage.inMemory();
-		otherAuthStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
+		await otherAuthStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
 		const otherRuntimeOptions = {
 			agentDir: tempDir,
 			authStorage: otherAuthStorage,

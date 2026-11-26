@@ -1,7 +1,7 @@
 {
   "name": "@gsd/pi-agent-core",
-  "version": "1.23.0",
-  "description": "General-purpose agent with transport abstraction, state management, and attachment support",
+  "version": "1.0.2",
+  "description": "General-purpose agent core (vendored from earendil-works/pi)",
   "type": "module",
   "gsd": {
     "linkable": true,
@@ -14,52 +14,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./node": {
-      "types": "./dist/node.d.ts",
-      "import": "./dist/node.js"
-    },
-    "./package.json": "./package.json"
+    }
   },
-  "files": [
-    "dist",
-    "README.md"
-  ],
   "scripts": {
-    "clean": "node ../../scripts/clean-package-dist.cjs",
-    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false",
-    "test": "vitest --run",
-    "test:harness": "vitest --run --config vitest.harness.config.ts",
-    "coverage:harness": "vitest --run --config vitest.harness.config.ts --coverage",
-    "prepublishOnly": "pnpm run clean && pnpm run build"
+    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.75.5",
-    "ignore": "7.0.5",
-    "typebox": "1.1.38",
-    "yaml": "2.9.0"
-  },
-  "keywords": [
-    "ai",
-    "agent",
-    "llm",
-    "transport",
-    "state-management"
-  ],
-  "author": "Mario Zechner",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/earendil-works/pi-mono.git",
-    "directory": "packages/agent"
-  },
-  "engines": {
-    "node": ">=22.19.0"
+    "@gsd/pi-ai": "workspace:*",
+    "@gsd/pi-schema": "workspace:*",
+    "@sinclair/typebox": "^0.34.41"
   },
   "devDependencies": {
-    "@types/node": "24.12.4",
-    "@vitest/coverage-v8": "3.2.4",
-    "typescript": "5.9.3",
-    "vitest": "4.1.11"
+    "@types/node": "22.19.19",
+    "vitest": "4.1.12"
   }
 }

@@ -723,7 +723,7 @@ try {
       [
         '--input-type=module',
         '-e',
-        `await import(${JSON.stringify('file://' + join(globalRoot, 'node_modules', '@gsd', 'pi-ai', 'dist', 'providers', 'openai-responses.js').replace(/\\/g, '/'))});`,
+        `await import(${JSON.stringify('file://' + join(globalRoot, 'node_modules', '@gsd', 'pi-ai', 'dist', 'api', 'openai-responses.js').replace(/\\/g, '/'))});`,
       ],
       {
         cwd: globalPrefix,
