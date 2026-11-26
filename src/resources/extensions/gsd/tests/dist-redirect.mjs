@@ -1,11 +1,38 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const require = createRequire(import.meta.url);
 
-const ROOT = new URL("../../../../../", import.meta.url);
+/**
+ * Resolve the monorepo root even when this loader is executed from the
+ * compiled copy under dist-test/src/... (five `..` segments land on dist-test/).
+ */
+function resolveRepoRoot(fromUrl) {
+  let dir = dirname(fileURLToPath(fromUrl));
+  for (let i = 0; i < 12; i++) {
+    const pkgJson = join(dir, "package.json");
+    if (existsSync(pkgJson)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgJson, "utf8"));
+        if (pkg?.name === "@opengsd/gsd-pi" && existsSync(join(dir, "packages"))) {
+          const rooted = dir.endsWith(sep) ? dir : `${dir}${sep}`;
+          return pathToFileURL(rooted).href;
+        }
+      } catch {
+        // keep walking
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Legacy fallback for callers that still expect five-up from src/.../tests/
+  return new URL("../../../../../", fromUrl).href;
+}
+
+const ROOT = new URL(resolveRepoRoot(import.meta.url));
 
 /**
  * Resolve a workspace package export subpath to a concrete source file.
@@ -209,10 +236,14 @@ export function resolve(specifier, context, nextResolve) {
     specifier = new URL(`packages/native/src/${subpath}/index.ts`, ROOT).href;
   }
   // 2. Broken/partial dist artifacts (e.g. jiti CJS) may still import ./foo.ts — map to src/.
+  // Only the packages whose load() hook remaps dist→src need this; applying it to every
+  // packages/*/dist file (e.g. new pi-telemetry/schema/codemode) forces source loads that
+  // then fail on NodeNext `.js` specifiers unless the .ts rewrite below also fires.
   else if (
     context.parentURL &&
-    context.parentURL.includes('/packages/') &&
-    context.parentURL.includes('/dist/') &&
+    /\/packages\/(?:pi-ai|pi-coding-agent|pi-agent-core|pi-tui|gsd-agent-core)\/dist\//.test(
+      context.parentURL,
+    ) &&
     (specifier.startsWith('./') || specifier.startsWith('../')) &&
     (specifier.endsWith('.ts') || specifier.endsWith('.js'))
   ) {
@@ -224,8 +255,8 @@ export function resolve(specifier, context, nextResolve) {
   else if (specifier.endsWith('.js') && (specifier.startsWith('./') || specifier.startsWith('../'))) {
     if (
       context.parentURL &&
-      context.parentURL.startsWith(ROOT.href) &&
       !context.parentURL.includes('/node_modules/') &&
+      context.parentURL.includes('/packages/') &&
       context.parentURL.includes('/src/')
     ) {
       if (specifier.includes('/dist/')) {
