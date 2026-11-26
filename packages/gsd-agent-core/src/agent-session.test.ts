@@ -49,7 +49,7 @@ describe("AgentSessionExtensionsModule", () => {
       _sessionStartEvent: { type: "session_start", reason: "startup" },
       repairPlaceholderModel: async () => {},
       agent: {
-        streamFn: (_model: unknown, _context: unknown, options?: Record<string, unknown>) => {
+        streamFunction: (_model: unknown, _context: unknown, options?: Record<string, unknown>) => {
           received = options;
           return { type: "stream" } as any;
         },
@@ -432,13 +432,17 @@ describe("AgentSessionModelModule — repairPlaceholderModel (#2782)", () => {
     const userPick = { provider: "anthropic", id: "user-pick" };
     const ollamaModel = { provider: "ollama", id: "llama3" };
     const { host, events } = makeRepairHost(ollamaModel);
-    // The settings default is not registered yet; while getAvailable is
-    // awaited, the user selects a different model.
+    // The settings default is not registered yet; while the runtime lookup
+    // awaits, the user selects a different model.
     host.modelRegistry.find = () => undefined;
-    host.modelRegistry.getAvailable = () => {
-      host.model = userPick;
-      return [ollamaModel];
-    };
+    host.modelRegistry.getModelRuntime = () => ({
+      getModel: () => undefined,
+      hasConfiguredAuth: () => false,
+      getAvailableSnapshot: () => {
+        host.model = userPick;
+        return [ollamaModel];
+      },
+    });
 
     await new AgentSessionModelModule(host as any).repairPlaceholderModel();
 

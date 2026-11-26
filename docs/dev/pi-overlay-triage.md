@@ -110,6 +110,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/core/lifecycle-hooks.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/local-model-check.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/mcp-servers.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/messages.ts` | keep-overlay | GSD handoff-briefing compaction summary wrap | no |
 | `packages/pi-coding-agent/src/core/model-discovery.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/model-registry.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/model-resolver.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |

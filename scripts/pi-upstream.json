@@ -83,6 +83,7 @@
     "packages/pi-coding-agent/src/core/index.ts",
     "packages/pi-coding-agent/src/core/local-model-check.ts",
     "packages/pi-coding-agent/src/core/mcp-servers.ts",
+    "packages/pi-coding-agent/src/core/messages.ts",
     "packages/pi-coding-agent/src/core/model-discovery.ts",
     "packages/pi-coding-agent/src/core/model-registry.ts",
     "packages/pi-coding-agent/src/core/model-resolver.ts",

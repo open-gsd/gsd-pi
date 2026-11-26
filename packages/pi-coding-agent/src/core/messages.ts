@@ -8,13 +8,13 @@
 import type { AgentMessage } from "@gsd/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@gsd/pi-ai";
 
-export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
+export const COMPACTION_SUMMARY_PREFIX = `The conversation before this point was compacted. The following is a handoff briefing — treat it as authoritative working state. Continue from the "Next Action" section. Do not re-derive decisions or re-read files already listed as processed.
 
-<summary>
+<briefing>
 `;
 
 export const COMPACTION_SUMMARY_SUFFIX = `
-</summary>`;
+</briefing>`;
 
 export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this conversation came back from:
 

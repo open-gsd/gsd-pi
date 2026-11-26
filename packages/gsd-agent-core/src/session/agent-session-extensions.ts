@@ -62,6 +62,8 @@ export class AgentSessionExtensionsModule {
 		if (extensionUiStreamBridgedAgents.has(agent)) return;
 
 		const baseStreamFn = agent.streamFunction;
+		if (typeof baseStreamFn !== "function") return;
+
 		agent.streamFunction = (model, context, options) =>
 			baseStreamFn(model, context, {
 				...options,

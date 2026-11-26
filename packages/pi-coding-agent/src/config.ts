@@ -465,24 +465,60 @@ export function getPackageJsonPath(): string {
 	return join(getPackageDir(), "package.json");
 }
 
+/**
+ * This package's own root (directory holding its package.json), walking up from
+ * this module's compiled location.
+ *
+ * Unlike getPackageDir(), this deliberately ignores PI_PACKAGE_DIR. That env
+ * var points at the host distribution's branding shim (e.g. gsd's pkg/:
+ * dist/ + package.json only), which carries piConfig branding but none of the
+ * bundled documentation. README.md, docs/, examples/, and CHANGELOG.md always
+ * ship with this package, so documentation paths must resolve from the real
+ * package root (#2809).
+ */
+let _cachedSelfPackageDir: string | undefined;
+
+function getSelfPackageDir(): string {
+	if (_cachedSelfPackageDir !== undefined) return _cachedSelfPackageDir;
+	if (isBunBinary) {
+		// Bun binary: docs ship beside the executable. import.meta.url is a
+		// virtual $bunfs path that cannot be walked on the real filesystem.
+		return (_cachedSelfPackageDir = dirname(process.execPath));
+	}
+	let dir = __dirname;
+	while (dir !== dirname(dir)) {
+		if (existsSync(join(dir, "package.json"))) {
+			const parent = dirname(dir);
+			// build:binary places Bun's metadata inside dist/. Node still needs the
+			// package root so its dist-relative asset paths do not become dist/dist/.
+			if (basename(dir) === "dist" && existsSync(join(parent, "package.json"))) {
+				return (_cachedSelfPackageDir = parent);
+			}
+			return (_cachedSelfPackageDir = dir);
+		}
+		dir = dirname(dir);
+	}
+	return (_cachedSelfPackageDir = __dirname);
+}
+
 /** Get path to README.md */
 export function getReadmePath(): string {
-	return resolve(join(getPackageDir(), "README.md"));
+	return resolve(join(getSelfPackageDir(), "README.md"));
 }
 
 /** Get path to docs directory */
 export function getDocsPath(): string {
-	return resolve(join(getPackageDir(), "docs"));
+	return resolve(join(getSelfPackageDir(), "docs"));
 }
 
 /** Get path to examples directory */
 export function getExamplesPath(): string {
-	return resolve(join(getPackageDir(), "examples"));
+	return resolve(join(getSelfPackageDir(), "examples"));
 }
 
 /** Get path to CHANGELOG.md */
 export function getChangelogPath(): string {
-	return resolve(join(getPackageDir(), "CHANGELOG.md"));
+	return resolve(join(getSelfPackageDir(), "CHANGELOG.md"));
 }
 
 /**

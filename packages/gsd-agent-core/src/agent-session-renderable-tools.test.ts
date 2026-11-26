@@ -32,7 +32,12 @@ async function createSession() {
 	await resourceLoader.reload();
 
 	return new AgentSession({
-		agent: new Agent(),
+		agent: new Agent({
+			streamFn: () =>
+				(async function* () {
+					/* noop stream for tool-definition lookup tests */
+				})(),
+		}),
 		sessionManager: SessionManager.inMemory(testDir),
 		settingsManager,
 		cwd: testDir,

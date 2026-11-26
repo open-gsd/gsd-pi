@@ -26,8 +26,8 @@ describe("buildApiKeyLoginPrompt", () => {
 		assert.equal(prompt.placeholder, undefined);
 	});
 
-	test("uses plain Anthropic naming when browser OAuth is blocked into API-key login", () => {
-		const modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory());
+	test("uses plain Anthropic naming when browser OAuth is blocked into API-key login", async () => {
+		const modelRegistry = await ModelRegistry.inMemory(AuthStorage.inMemory());
 		const host = { session: { modelRegistry } };
 		const providers = buildLoginProviderOptions(host as never);
 		const anthropic = providers.find((provider) => provider.id === "anthropic");

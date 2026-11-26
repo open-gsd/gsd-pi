@@ -117,7 +117,8 @@ export interface AgentOptions {
 	initialState?: AgentInitialState;
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	streamFn: StreamFn;
+	/** Optional when a host has installed {@link setDefaultStreamFn}. */
+	streamFn?: StreamFn;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
