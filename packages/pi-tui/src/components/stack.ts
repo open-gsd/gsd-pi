@@ -69,6 +69,12 @@ export abstract class Stack extends Container {
 		this.entries.length = 0;
 	}
 
+	override detachChildren(): Component[] {
+		const detached = super.detachChildren();
+		this.entries.length = 0;
+		return detached;
+	}
+
 	[LAYOUT_NODE](): StackLayoutNode {
 		return {
 			type: this.layoutType,

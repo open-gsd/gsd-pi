@@ -94,7 +94,7 @@ export function setupAutocomplete(host: InteractiveModeDelegateHost): void {
 		process.cwd(),
 		fdPath,
 	);
-	host.autocompleteProvider.setRespectGitignore(host.settingsManager.getRespectGitignoreInPicker());
+	host.autocompleteProvider.setRespectGitignore?.(host.settingsManager.getRespectGitignoreInPicker());
 	host.defaultEditor.setAutocompleteProvider(host.autocompleteProvider);
 	if (host.editor !== host.defaultEditor) {
 		host.editor.setAutocompleteProvider?.(host.autocompleteProvider);

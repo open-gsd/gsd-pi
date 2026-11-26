@@ -452,6 +452,13 @@ export class Container implements Component {
 		this.children = [];
 	}
 
+	/** GSD compat: detach all children without destroying them. */
+	detachChildren(): Component[] {
+		const detached = this.children;
+		this.children = [];
+		return detached;
+	}
+
 	invalidate(): void {
 		for (const child of this.children) {
 			child.invalidate?.();

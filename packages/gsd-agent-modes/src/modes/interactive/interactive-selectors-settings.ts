@@ -210,7 +210,7 @@ export function showSettingsSelector(host: InteractiveModeDelegateHost): void {
 					},
 					onRespectGitignoreInPickerChange: (enabled) => {
 						host.settingsManager.setRespectGitignoreInPicker(enabled);
-						host.autocompleteProvider?.setRespectGitignore(enabled);
+						host.autocompleteProvider?.setRespectGitignore?.(enabled);
 					},
 					onTimestampFormatChange: (format) => {
 						host.settingsManager.setTimestampFormat(format);

@@ -1,6 +1,7 @@
 import { type CoercingValidator, compile } from "@gsd/pi-schema";
 import { formats } from "@gsd/pi-schema/formats";
 import type { Tool, ToolCall } from "../types.js";
+import { normalizeToolArguments } from "./normalize-tool-arguments.js";
 
 // One compiled validator per schema object: tool schemas are long-lived, so the WeakMap drops entries with their tools.
 const validatorCache = new WeakMap<object, CoercingValidator>();
@@ -56,7 +57,10 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 		throw new Error(`Invalid arguments for tool "${toolCall.name}": ${toolCall.argumentsError}`);
 	}
 	// A copy, so tools that modify their arguments never modify the tool call in the transcript.
-	const result = getValidator(tool.parameters).parse(structuredClone(toolCall.arguments));
+	// Normalize common LLM/Cursor argument aliases before schema validation (GSD host seam).
+	const args = structuredClone(toolCall.arguments);
+	normalizeToolArguments(toolCall.name, args);
+	const result = getValidator(tool.parameters).parse(args);
 	if (result.ok) {
 		return result.value;
 	}

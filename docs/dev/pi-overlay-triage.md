@@ -83,6 +83,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-ai/src/utils/repair-tool-json.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/utils/string-enum.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/utils/tests/normalize-tool-arguments.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/utils/validation.ts` | keep-overlay | Call normalizeToolArguments before schema validation | no |
 | `packages/pi-ai/test/cache-retention.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/test/google-shared-convert-tools.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/config.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -187,9 +188,11 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/test/theme-picker.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/test/theme-style.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/test/tools.test.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/autocomplete.ts` | keep-overlay | GSD setRespectGitignore host compat on CombinedAutocompleteProvider | no |
 | `packages/pi-tui/src/components/image.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-tui/src/components/input.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-tui/src/components/markdown.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/components/stack.ts` | keep-overlay | Clear stack entries when detachChildren runs | no |
 | `packages/pi-tui/src/editor-keybindings.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-tui/src/gsd-layout.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-tui/src/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |

@@ -294,6 +294,9 @@ export interface AutocompleteProvider {
 
 	// Check if file completion should trigger for explicit Tab completion
 	shouldTriggerFileCompletion?(lines: string[], cursorLine: number, cursorCol: number): boolean;
+
+	/** GSD: toggle whether file suggestions respect .gitignore (no-op when fd already ignores). */
+	setRespectGitignore?(value: boolean): void;
 }
 
 // Combined provider that handles both slash commands and file paths
@@ -306,6 +309,10 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		this.commands = commands;
 		this.basePath = basePath;
 		this.fdPath = fdPath;
+	}
+
+	setRespectGitignore(_value: boolean): void {
+		// GSD compat: upstream file picker ignores gitignore via fd flags instead.
 	}
 
 	async getSuggestions(
