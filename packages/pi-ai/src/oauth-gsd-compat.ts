@@ -1,5 +1,4 @@
 import type { OAuthCredentials } from "./auth/types.js";
-import { anthropicOAuth } from "./auth/oauth/anthropic.js";
 
 export type OAuthProviderId = string;
 
@@ -12,21 +11,58 @@ export interface OAuthProviderInterface {
 	getApiKey(credentials: OAuthCredentials): string;
 }
 
+function unsupportedLogin(providerId: string): never {
+	throw new Error(`OAuth login for "${providerId}" is handled through ModelRuntime in pi v1.6.1`);
+}
+
+function unsupportedRefresh(providerId: string): never {
+	throw new Error(`OAuth refresh for "${providerId}" is handled through ModelRuntime in pi v1.6.1`);
+}
+
 /**
- * Built-in OAuth providers surfaced to AuthStorage / login selectors.
+ * Built-in OAuth providers for AuthStorage / onboarding / login selectors.
  *
- * Browser OAuth for Anthropic is blocked in GSD interactive login and falls
- * back to API-key login with plain "Anthropic" naming; the registry still
- * needs the OAuth entry so blocked-provider detection works.
+ * Keep this list descriptor-only (no Node OAuth flow imports) so browser and
+ * Next bundles can read provider availability without pulling callback servers.
+ * Interactive OAuth login itself goes through ModelRuntime.
  */
 const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	{
 		id: "anthropic",
-		name: anthropicOAuth.name,
+		name: "Anthropic (Claude Pro/Max)",
 		usesCallbackServer: true,
-		login: (callbacks) => anthropicOAuth.login(callbacks as never),
-		refreshToken: (credentials, signal) =>
-			anthropicOAuth.refresh(credentials as never, signal ?? AbortSignal.timeout(60_000)),
+		login: async () => unsupportedLogin("anthropic"),
+		refreshToken: async () => unsupportedRefresh("anthropic"),
+		getApiKey: (credentials) => credentials.access,
+	},
+	{
+		id: "github-copilot",
+		name: "GitHub Copilot",
+		login: async () => unsupportedLogin("github-copilot"),
+		refreshToken: async () => unsupportedRefresh("github-copilot"),
+		getApiKey: (credentials) => credentials.access,
+	},
+	{
+		id: "openai-codex",
+		name: "OpenAI (ChatGPT Plus/Pro)",
+		usesCallbackServer: true,
+		login: async () => unsupportedLogin("openai-codex"),
+		refreshToken: async () => unsupportedRefresh("openai-codex"),
+		getApiKey: (credentials) => credentials.access,
+	},
+	{
+		id: "xai",
+		name: "xAI (Grok/X subscription)",
+		usesCallbackServer: true,
+		login: async () => unsupportedLogin("xai"),
+		refreshToken: async () => unsupportedRefresh("xai"),
+		getApiKey: (credentials) => credentials.access,
+	},
+	{
+		id: "kimi-coding",
+		name: "Kimi Code (subscription)",
+		login: async () => unsupportedLogin("kimi-coding"),
+		refreshToken: async () => unsupportedRefresh("kimi-coding"),
 		getApiKey: (credentials) => credentials.access,
 	},
 ];
@@ -45,4 +81,13 @@ export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | 
 
 export function registerOAuthProvider(provider: OAuthProviderInterface): void {
 	oauthProviderRegistry.set(provider.id, provider);
+}
+
+export function unregisterOAuthProvider(id: string): void {
+	const builtIn = BUILT_IN_OAUTH_PROVIDERS.find((provider) => provider.id === id);
+	if (builtIn) {
+		oauthProviderRegistry.set(id, builtIn);
+		return;
+	}
+	oauthProviderRegistry.delete(id);
 }
